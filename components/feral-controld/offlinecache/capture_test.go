@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,8 +70,12 @@ func setupCaptureWithMaxDiskBytes(t *testing.T, maxDiskBytes int64) *captureTest
 		Body:       io.NopCloser(strings.NewReader(targetsBody)),
 	}, nil).Times(1)
 
+	// One mock for both client roles: these tests stub every HTTP call
+	// directly, so the trusted/untrusted split NewCapturer enforces in
+	// production is not what they are exercising. The wiring itself is
+	// pinned by TestCapturer_CDPDiscoveryClientIsNotTheGuardedOne.
 	capturer := offlinecache.NewCapturer(
-		mockDownloader, mockDialer, mockHTTP, store,
+		mockDownloader, mockDialer, mockHTTP, mockHTTP, publicResolver{}, store,
 		wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), maxDiskBytes, logger,
 	)
 
@@ -83,8 +88,10 @@ func setupCaptureWithMaxDiskBytes(t *testing.T, maxDiskBytes int64) *captureTest
 // domainEnableCallCount is how many outbound CDP calls capture.go always
 // issues, in order, before the observation window begins: Network.enable,
 // Page.enable, resetTargetState's Network.clearBrowserCache and
-// Storage.clearDataForOrigin, then Page.navigate.
-const domainEnableCallCount = 5
+// Storage.clearDataForOrigin, then Fetch.enable and Target.setAutoAttach
+// (the capture-side source guard and its extension to child targets — see
+// attachSourceGuard and enableGuardedAutoAttach), then Page.navigate.
+const domainEnableCallCount = 7
 
 // answerDomainEnables drains and acks every call capture.go always
 // issues before the observation window begins (see
@@ -150,6 +157,10 @@ func TestCapturer_Capture_SingleResource(t *testing.T) {
 			"requestId": "req-1",
 			"response": map[string]interface{}{
 				"url": "https://example.com/index.html", "status": 200, "mimeType": "text/html",
+				// Lowercased, as an HTTP/2 origin sends it — headerValue
+				// matches case-insensitively so the declaration is found
+				// on either transport.
+				"headers": map[string]interface{}{"content-type": "text/html; charset=utf-8"},
 			},
 		})
 		h.drainAndAckRemaining(t)
@@ -159,21 +170,24 @@ func TestCapturer_Capture_SingleResource(t *testing.T) {
 	rec, err := h.capturer.Capture(context.Background(), item, 300)
 	require.NoError(t, err)
 
-	assert.Equal(t, "item-1", rec.ItemID)
+	assert.Equal(t, item, rec.Item, "the record carries the item verbatim; its Source is the record's identity")
 	assert.Equal(t, "https://example.com/index.html", rec.Entry)
 	assert.True(t, rec.Coverage.Complete)
 	require.Len(t, rec.Resources, 1)
 	res := rec.Resources[0]
 	assert.Equal(t, "https://example.com/index.html", res.URL)
 	assert.Equal(t, 200, res.Status)
-	assert.Equal(t, "text/html", res.ContentType)
+	assert.Equal(t, "text/html; charset=utf-8", res.ContentType,
+		"the ORIGIN's declaration is stored verbatim, parameters included — not Chromium's bare sniffed mimeType")
+	assert.Empty(t, res.SniffedContentType,
+		"and the sniffed guess is not stored beside a real declaration, which would only bloat the record")
 	require.NotEmpty(t, res.SHA256)
 
 	blob, err := h.store.ReadBlob(res.SHA256)
 	require.NoError(t, err)
 	assert.Equal(t, "<html>art</html>", string(blob))
 
-	saved, err := h.store.LoadItem("item-1")
+	saved, err := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 	require.NoError(t, err)
 	assert.Equal(t, rec.Resources, saved.Resources)
 }
@@ -410,6 +424,11 @@ func TestCapturer_Capture_PostCaptureOriginStorageClearFailureIsBestEffort(t *te
 		})
 		require.NoError(t, err)
 		h.conn.pushReply(reply)
+		// Capture now navigates the page to about:blank before
+		// detaching (see stopPageBeforeDetach), so the peer must
+		// keep answering after this scenario's scripted calls —
+		// a real browser would.
+		h.conn.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
@@ -420,7 +439,7 @@ func TestCapturer_Capture_PostCaptureOriginStorageClearFailureIsBestEffort(t *te
 	assert.Equal(t, "https://example.com/index.html", rec.Resources[0].URL)
 	assert.True(t, rec.Coverage.Complete)
 
-	saved, err := h.store.LoadItem("item-1")
+	saved, err := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 	require.NoError(t, err, "the record must still be persisted despite the best-effort cleanup failure")
 	assert.Equal(t, rec.Resources, saved.Resources)
 }
@@ -460,11 +479,28 @@ func TestCapturer_Capture_ClearsBrowserCacheAndOriginStorageBeforeNavigate(t *te
 					"must scope the clear to the item's own origin, not the whole host or a bare domain")
 				assert.Equal(t, "all", params["storageTypes"])
 			case 4:
+				assert.Equal(t, "Fetch.enable", msg["method"],
+					"the source guard must be armed before navigation, or the page's first request is unchecked")
+			case 5:
+				assert.Equal(t, "Target.setAutoAttach", msg["method"],
+					"child targets (OOPIFs, workers) must be covered before navigation too")
+				params, ok := msg["params"].(map[string]interface{})
+				require.True(t, ok)
+				assert.Equal(t, true, params["waitForDebuggerOnStart"],
+					"a child must be paused until the guard is armed on it")
+				assert.NotContains(t, params, "filter",
+					"no target-type filter: a worker can dial, so a security boundary cannot skip it")
+			case 6:
 				assert.Equal(t, "Page.navigate", msg["method"],
 					"the cache/storage reset must complete before navigation starts")
 			}
 			h.ackEmpty(t, msg)
 		}
+		// Capture now navigates the page to about:blank before
+		// detaching (see stopPageBeforeDetach), so the peer must
+		// keep answering after this scenario's scripted calls —
+		// a real browser would.
+		h.conn.drainAndAckRemaining(t)
 	}()
 
 	_, err := h.capturer.Capture(context.Background(), item, 50)
@@ -499,15 +535,136 @@ func TestCapturer_Capture_UnparsableSourceSkipsOriginClearButStillClearsCache(t 
 
 		// No Storage.clearDataForOrigin call: "not-a-valid-origin-url"
 		// has no scheme/host, so requestOrigin fails and resetTargetState
-		// skips straight to letting Page.navigate itself surface the bad
-		// URL.
+		// skips straight to arming the guard and letting Page.navigate
+		// itself surface the bad URL.
+		msg = h.conn.nextOutbound(t)
+		assert.Equal(t, "Fetch.enable", msg["method"])
+		h.ackEmpty(t, msg)
+
+		msg = h.conn.nextOutbound(t)
+		assert.Equal(t, "Target.setAutoAttach", msg["method"])
+		h.ackEmpty(t, msg)
+
 		msg = h.conn.nextOutbound(t)
 		assert.Equal(t, "Page.navigate", msg["method"])
 		h.ackEmpty(t, msg)
+		// Capture now navigates the page to about:blank before
+		// detaching (see stopPageBeforeDetach), so the peer must
+		// keep answering after this scenario's scripted calls —
+		// a real browser would.
+		h.conn.drainAndAckRemaining(t)
 	}()
 
 	_, err := h.capturer.Capture(context.Background(), item, 50)
 	require.NoError(t, err)
+}
+
+// TestCapturer_Capture_HeaderlessResponseKeepsSniffOutOfDeclaredContentType
+// is the regression test for the wrong-viewport failure observed on
+// FF1-191TYKPB: a Feral File CDN preview served its styles.css with NO
+// Content-Type header at all. Chromium tolerates that live and sniffs,
+// but capture used to record the SNIFFED verdict (text/plain) as though
+// the origin had declared it, and replay then asserted that header back
+// — which Chromium's standards-mode CSS loader rejects outright. The
+// stylesheet parsed to zero rules and the artwork's <model-viewer>
+// collapsed to its intrinsic 300x150 box in the corner of a 4K screen,
+// offline only.
+//
+// The declaration and the guess must therefore land in different fields:
+// only the (absent) declaration is replayable.
+func TestCapturer_Capture_HeaderlessResponseKeepsSniffOutOfDeclaredContentType(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	h.mockHTTP.EXPECT().
+		NewRequest(http.MethodGet, "https://cdn.example.com/preview/styles.css", nil).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			return http.NewRequest(method, url, body)
+		}).Times(1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("body { margin: 0; width: 100vw; }")),
+	}, nil).Times(1)
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://cdn.example.com/preview/styles.css"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-1",
+			"response": map[string]interface{}{
+				"url": "https://cdn.example.com/preview/styles.css", "status": 200,
+				// What the device actually saw: a sniffed mimeType, and
+				// a header block carrying everything BUT a Content-Type.
+				"mimeType": "text/plain",
+				"headers":  map[string]interface{}{"Content-Length": "33"},
+			},
+		})
+		h.drainAndAckRemaining(t)
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://cdn.example.com/preview/styles.css"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	require.Len(t, rec.Resources, 1)
+	res := rec.Resources[0]
+	assert.Empty(t, res.ContentType,
+		"the origin declared none, so the record must claim none — replay asserting a sniffed text/plain is what broke the stylesheet")
+	assert.Equal(t, "text/plain", res.SniffedContentType,
+		"the sniffed guess is still kept, but only where the HEAD content-type probe can reach it")
+}
+
+// TestCapturer_Capture_DuplicateContentTypeHeaderKeepsOnlyTheFirstValue
+// pins the hardening that came with reading the declared type off the
+// raw CDP header map: CDP joins a header sent more than once into one
+// "\n"-separated value, and this value is persisted and re-emitted as a
+// response header by replay. An embedded newline there is at best a
+// Fetch.fulfillRequest Chromium rejects — leaving the paused request
+// stalled forever, hanging the artwork offline — and at worst a
+// header-splitting primitive, from a value an untrusted playlist source
+// controls.
+func TestCapturer_Capture_DuplicateContentTypeHeaderKeepsOnlyTheFirstValue(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	h.mockHTTP.EXPECT().
+		NewRequest(http.MethodGet, "https://example.com/index.html", nil).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			return http.NewRequest(method, url, body)
+		}).Times(1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("<html>art</html>")),
+	}, nil).Times(1)
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://example.com/index.html"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-1",
+			"response": map[string]interface{}{
+				"url": "https://example.com/index.html", "status": 200, "mimeType": "text/html",
+				"headers": map[string]interface{}{
+					"content-type": "text/html\nX-Injected: evil",
+				},
+			},
+		})
+		h.drainAndAckRemaining(t)
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	require.Len(t, rec.Resources, 1)
+	assert.Equal(t, "text/html", rec.Resources[0].ContentType,
+		"only the first value survives; a duplicated Content-Type is the origin contradicting itself, not adding to itself")
 }
 
 // TestCapturer_Capture_FiltersResponseHeadersToReplayableAllowlist pins
@@ -909,6 +1066,11 @@ func TestCapturer_Capture_LoadingFailedMarksIncomplete(t *testing.T) {
 			"requestId": "req-1",
 			"errorText": "net::ERR_CONNECTION_RESET",
 		})
+		// Capture now navigates the page to about:blank before
+		// detaching (see stopPageBeforeDetach), so the peer must
+		// keep answering after this scenario's scripted calls —
+		// a real browser would.
+		h.conn.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-broken", Source: "https://example.com/broken.js"}
@@ -938,6 +1100,11 @@ func TestCapturer_Capture_UnresolvedRequestAtDeadlineMarksIncomplete(t *testing.
 		// Deliberately never send responseReceived/loadingFailed for
 		// req-1: this reproduces a resource whose outcome the page
 		// never observed before the capture window closed.
+		// Capture now navigates the page to about:blank before
+		// detaching (see stopPageBeforeDetach), so the peer must
+		// keep answering after this scenario's scripted calls —
+		// a real browser would.
+		h.conn.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-hang", Source: "https://example.com/index.html"}
@@ -1004,6 +1171,11 @@ func TestCapturer_Capture_CSPBlockedReason(t *testing.T) {
 			"errorText":     "net::ERR_BLOCKED_BY_CSP",
 			"blockedReason": "csp",
 		})
+		// Capture now navigates the page to about:blank before
+		// detaching (see stopPageBeforeDetach), so the peer must
+		// keep answering after this scenario's scripted calls —
+		// a real browser would.
+		h.conn.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-csp", Source: "https://example.com/index.html"}
@@ -1063,7 +1235,7 @@ func TestCapturer_Capture_IgnoresBlobAndDataURLs(t *testing.T) {
 
 func TestCapturer_Capture_RequiresIDAndSource(t *testing.T) {
 	store, _ := newTestStore(t)
-	capturer := offlinecache.NewCapturer(nil, nil, nil, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
+	capturer := offlinecache.NewCapturer(nil, nil, nil, nil, publicResolver{}, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
 
 	_, err := capturer.Capture(context.Background(), dp1playlist.PlaylistItem{}, 0)
 	assert.Error(t, err)
@@ -1077,7 +1249,7 @@ func TestCapturer_Capture_AcquireFails(t *testing.T) {
 	mockDownloader.EXPECT().Acquire(gomock.Any()).Return("", assertError("busy")).Times(1)
 
 	store, _ := newTestStore(t)
-	capturer := offlinecache.NewCapturer(mockDownloader, nil, nil, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
+	capturer := offlinecache.NewCapturer(mockDownloader, nil, nil, nil, publicResolver{}, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
 	_, err := capturer.Capture(context.Background(), item, 0)
@@ -1124,6 +1296,11 @@ func TestCapturer_Capture_ParentCancellationAfterNavigateAbortsWithoutSaving(t *
 			// win deterministically and defeat the point of this
 			// test — see the racecheck this was validated against).
 			cancel()
+			// Capture now navigates the page to about:blank before
+			// detaching (see stopPageBeforeDetach), so the peer must
+			// keep answering after this scenario's scripted calls —
+			// a real browser would.
+			h.conn.drainAndAckRemaining(t)
 		}()
 
 		// A large window ensures navCtx's own deadline is never what
@@ -1134,7 +1311,7 @@ func TestCapturer_Capture_ParentCancellationAfterNavigateAbortsWithoutSaving(t *
 		assert.Nil(t, rec, "iteration %d: a canceled capture must not return a record", i)
 		assert.ErrorIs(t, err, context.Canceled, "iteration %d", i)
 
-		_, loadErr := h.store.LoadItem("item-cancel")
+		_, loadErr := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 		assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound,
 			"iteration %d: a canceled capture must not save a partial/incomplete ItemRecord", i)
 
@@ -1150,7 +1327,7 @@ func TestCapturer_Close_DelegatesToDownloader(t *testing.T) {
 	mockDownloader.EXPECT().Close().Return(nil).Times(1)
 
 	store, _ := newTestStore(t)
-	capturer := offlinecache.NewCapturer(mockDownloader, nil, nil, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
+	capturer := offlinecache.NewCapturer(mockDownloader, nil, nil, nil, publicResolver{}, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
 
 	assert.NoError(t, capturer.Close())
 }
@@ -1173,4 +1350,57 @@ func TestCapturer_Capture_UsesDefaultWindowWhenUnset(t *testing.T) {
 	// return the context's deadline error rather than a default-window
 	// completion — this proves 0 did not silently become "no window".
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+// TestCapturer_Capture_StopsThePageBeforeDetaching pins the fix for a
+// hole that made the whole capture-side guard time-limited rather than
+// absolute.
+//
+// Closing the CDP session removes Fetch interception, but nothing removed
+// the PAGE: downloader.Release only schedules an idle teardown of the
+// browser (30s by default). So between session close and that teardown,
+// the untrusted artwork kept executing with no guard at all — and reaching
+// loopback from there needed nothing but a timer:
+//
+//	setTimeout(() => fetch('http://127.0.0.1:1111/api/cast'), 25000)
+//
+// No DNS control, no infrastructure, so this was never covered by the
+// accepted rebinding residual. Capture must therefore navigate the target
+// away while interception is still armed, which discards the page's
+// timers and its pending requests together.
+func TestCapturer_Capture_StopsThePageBeforeDetaching(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	var navigations []string
+	var mu sync.Mutex
+	go func() {
+		for {
+			msg, ok := h.conn.nextOutboundOK()
+			if !ok {
+				return
+			}
+			if msg["method"] == "Page.navigate" {
+				params, _ := msg["params"].(map[string]interface{})
+				url, _ := params["url"].(string)
+				mu.Lock()
+				navigations = append(navigations, url)
+				mu.Unlock()
+			}
+			h.ackEmpty(t, msg)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	_, _ = h.capturer.Capture(ctx, item, 50)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, navigations, "capture never navigated at all")
+	assert.Equal(t, item.Source, navigations[0], "the artwork is loaded first")
+	assert.Equal(t, "about:blank", navigations[len(navigations)-1],
+		"the page must be navigated away BEFORE the session (and its Fetch interception) is dropped, "+
+			"or the artwork keeps running unguarded until the idle teardown")
 }

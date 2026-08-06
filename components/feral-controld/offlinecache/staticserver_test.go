@@ -63,6 +63,35 @@ func TestStaticServer_ServesBlobWithContentType(t *testing.T) {
 	assert.Equal(t, "large asset payload", string(body))
 }
 
+// TestStaticServer_ServesBlobWithoutContentTypeWhenOriginDeclaredNone is
+// this path's half of the declared-vs-sniffed split (see
+// Resource.ContentType): no "ct" means the captured origin declared no
+// Content-Type, and the large-asset fallback must reproduce that absence
+// as faithfully as replay's inline fulfill does. http.ServeContent
+// otherwise fills one in by sniffing the body — blobs are named by hash,
+// so there is no extension for it to prefer first — reintroducing the
+// invented declaration on assets over largeAssetThreshold.
+func TestStaticServer_ServesBlobWithoutContentTypeWhenOriginDeclaredNone(t *testing.T) {
+	store, _ := newTestStore(t)
+	hash := writeBlobString(t, store, "body { margin: 0; width: 100vw; }")
+
+	server := offlinecache.NewStaticServer("127.0.0.1:8082", store, wrapper.NewOS(), zaptest.NewLogger(t))
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/blobs/" + hash)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Empty(t, resp.Header.Get("Content-Type"),
+		"ServeContent's own sniff must stay suppressed, or Chromium receives a declaration the origin never made")
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "body { margin: 0; width: 100vw; }", string(body))
+}
+
 // TestStaticServer_ServesBlobWithCORSHeaders is the regression test for
 // the large-asset replay path's CORS gap: a cross-origin resource served
 // through this loopback fallback (see staticServer's doc) must still

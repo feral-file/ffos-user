@@ -163,6 +163,8 @@ Current success response:
 Current error cases:
 
 - Invalid JSON shape under `request` causes command failure.
+- Missing or blank `clientDevice.device_id` causes command failure.
+- A staged factory reset rejects the claim — see the shared rule under [`factoryReset`](#factoryreset).
 - State persistence failure causes command failure.
 - `primaryAddress` is accepted but not currently used by the executor.
 
@@ -217,6 +219,7 @@ Current success response example:
   "type": "RPC",
   "messageID": "msg-status-1",
   "message": {
+    "contract": "2",
     "screenRotation": "normal",
     "connectedWifi": "Studio WiFi",
     "installedVersion": "1.2.3",
@@ -233,6 +236,33 @@ Current success response example:
 }
 ```
 
+`contract` is always `"2"` on this firmware (equal to the hub's
+`/api/v2/status` contract — one firmware gate, two transports): it lets the
+app identify a v2 frame over the relayer when mDNS is unavailable. Its
+PRESENCE is the capability
+signal — old firmware's reply simply lacks the key.
+
+The reply additionally carries the additive `network` health object — the
+same diagnosis the on-screen
+narration shows, also served on the hub status routes:
+
+```json
+"network": {
+  "state": "offline_retrying",
+  "reason": "joined-no-internet",
+  "ssid": "Studio WiFi",
+  "link": "wifi",
+  "internet": false
+}
+```
+
+(`deferred` is `omitempty`: it appears only while true.)
+
+`link` ∈ `wifi`/`ethernet`/`none`/`unknown` from the machine's cached probe
+evidence (a status poll never runs a probe); `deferred` tells the app its own
+control-plane contact is holding a pending setup-mode raise down, so it should
+surface the pairing/`startWifiSetup` action instead of waiting.
+
 Current error cases:
 
 - Status collection dependencies may fail; unavailable fields are usually
@@ -240,6 +270,58 @@ Current error cases:
 - A hard status collection error causes command failure.
 
 Current relayer error response: none standardized; command failure is logged.
+
+### startWifiSetup
+
+Purpose: put the frame into its existing SoftAP setup mode on the app's
+request, so a user can re-configure Wi-Fi.
+Reachable over the relayer and the LAN hub `POST /api/cast` like every
+device-control command. Ships with the initial v2 release, so the v2 gate
+(mDNS TXT `api=2` + `/api/v2/status` → `contract:"2"`, or the relayer
+`contract` above) is the capability gate.
+
+Example:
+
+```json
+{
+  "messageID": "msg-wifisetup-1",
+  "message": {
+    "command": "startWifiSetup",
+    "request": {}
+  }
+}
+```
+
+Current success response example (produced before the raise is queued, so it
+normally wins the race by a wide margin — the raise is seconds of `nmcli` work
+— but it is NOT synchronized against the transport, and raising the AP severs
+the station link that carries the reply, so the app must treat a send timeout
+as success):
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-wifisetup-1",
+  "message": { "ok": true, "ssid": "FF1-8EVTK3RE" }
+}
+```
+
+Rejections are normal replies, not transport errors:
+
+```json
+{ "ok": false, "code": "wired_link_active", "message": "…" }
+```
+
+| Code | When |
+|---|---|
+| `wired_link_active` | a live ethernet link, or the wire probe errored or is unavailable (fail closed) |
+| `busy` | the provisioning machine is in `joining` or `starting` |
+| `unavailable` | the provisioning seam is not wired (test/partial builds) |
+
+Acceptance queues the raise on the provisioning loop: the standard entry
+sequence runs there, and the session is bounded by the `user-requested` row of
+the AP session policy (30 minutes, portal-activity deferral, 2h cap — see
+`setup-flow.md`). Everything after the raise is the unchanged out-of-box flow.
 
 ### deviceMetrics
 
@@ -259,7 +341,32 @@ Example:
 ```
 
 Current success response: the latest metrics object, or `null`/empty if no
-metrics have been received yet.
+metrics have been received yet. controld forwards `feral-sys-monitord`'s
+payload **verbatim** — this document does not restate that daemon's schema,
+and the field names are its `snake_case`, not the `camelCase` used
+elsewhere here. Note the units are not uniform across that payload, so read
+`components/feral-sys-monitord/metric/metric.go` before consuming a field
+rather than inferring from a neighbouring one.
+
+One group is called out because `getOfflineCacheStatus` invites a direct
+comparison with it. `disk` describes the **device root filesystem**:
+
+```json
+"disk": {
+  "total_capacity": 121387538,
+  "used_capacity": 74047216,
+  "available_capacity": 41155284
+}
+```
+
+Those are **KiB** floats, straight from `df -k /`. `getOfflineCacheStatus`'
+`diskUsed`/`diskLimit` are **bytes**, and they scope to the cache directory
+and its policy budget rather than to the whole filesystem — so the two are a
+factor of 1024 apart *and* describe different things. A client showing both must convert
+and must keep them as separate quantities. Values persist from the last
+successful probe, so a failed read leaves the previous figures in place
+rather than zeroing or removing them; all-zero means no successful read
+since boot.
 
 Current error cases:
 
@@ -828,7 +935,7 @@ Current relayer error response: none standardized; command failure is logged.
 
 ### factoryReset
 
-Purpose: execute factory reset. Handled in-process by `feral-controld`: it clears the persisted relayer topic, narrates `factory_reset`, and starts `set-factory-boot.service` (which stages a one-shot boot into the pristine factory snapshot and reboots, abandoning the running subvolume).
+Purpose: execute factory reset. Handled in-process by `feral-controld`: it clears the persisted claim (relayer topic and `ConnectedDevice`), narrates `factory_reset`, and starts `set-factory-boot.service` (which stages a one-shot boot into the pristine factory snapshot and reboots, abandoning the running subvolume). The live relayer session stays open, so this command's ack is deliverable — see [`architecture.md`](architecture.md) for why closing it was removed.
 
 Example:
 
@@ -847,6 +954,8 @@ Current success response: `{"ok": true}`.
 Current error cases:
 
 - Starting `set-factory-boot.service` fails.
+
+**While a reset is staged, the command surface closes.** Every command except read-only reporting (`getDeviceStatus`, `deviceMetrics`, `ddcPanelStatus`) is rejected with `factory reset in progress: <command> is not accepted`, including a repeat `factoryReset`. The reset clears the claim so a rolled-back candidate boot comes up unclaimed, and any write behind it — a new claim, an SSH key, a toggle sentinel, a competing update one-shot — would survive that rollback and undo the reset. The closure normally ends when the device reboots; it is also lifted if the reset unit fails to start, or by a watchdog if no reboot follows (a clean `systemctl start` does not prove the reset was staged — the unit is `Type=simple`).
 
 Current relayer error response: none standardized; command failure is logged.
 
@@ -1462,6 +1571,33 @@ silently queuing a download nothing will ever process. As with the
 feature-disabled case, this is not retryable by the client; it clears only
 on a daemon restart (or after the underlying startup failure is fixed).
 
+**Item identity on the wire is the item's `source` URL, never its DP-1
+`id`.** The DP-1 core schema makes `id` optional (only `source` is
+required) and specifies it as UUID v4 — a random identifier — so a
+conforming playlist may omit it or change it between resolutions, and
+nothing durable can key on it. In the field, items materialized from a
+`dynamicQuery` (including address-based playlists) have been observed
+arriving with fresh ids on each resolution, which is what orphaned
+records keyed the old way. Every
+command and notification below identifies an item by the exact,
+byte-for-byte `source` string as it appears in the resolved playlist (no
+URL normalization — `https://a/x` and `https://a/x/` are distinct).
+Items sharing a `source` share ONE cache entry, within and across
+playlists: downloading one downloads them all, and clearing one clears
+them all (no refcounting, by design).
+
+This **replaced** an earlier `itemId`/`itemIds` shape for these same five
+commands and the notification. `docs/api-design.md`'s current-v1 posture
+(rule 2) forbids renaming a wire field without a version bump or a
+coordinated release that updates every caller; this rename satisfies it
+because the offline-cache command family had never shipped in any release
+when it changed — it has no `RELEASES.md` entry and no tag contains it —
+so there was no fielded caller to strand, and the coordinated mobile
+release introduces the first one already speaking `source`. A stale
+client is failed closed rather than silently misread: `itemIds` is
+rejected by name (see `getOfflineCacheStatus`), and the other commands
+reject a request with no `source` as a non-retryable `invalid_request`.
+
 All five commands use the explicit RPC ok/error shape from
 ["Response Shape Recommendation for New Inbound Commands"](#response-shape-recommendation-for-new-inbound-commands)
 below. Downloads are asynchronous: the command ACKs `queued` immediately and
@@ -1470,22 +1606,23 @@ per-item progress arrives later over the `offline_cache_status` notification.
 Common error codes across this command family:
 
 - `disabled`: offline caching is not enabled.
-- `invalid_request`: a required field (`itemId`, `playlistId`) is missing,
+- `invalid_request`: a required field (`source`, `playlistId`) is missing,
   neither `playlistUrl` nor `dp1_call` was supplied, or — for
   `getOfflineCacheStatus` only — an argument is the wrong type or out of
   range (see that command's own section).
 - `resolve_failed`: DP1 playlist resolution failed (bad URL, fetch failure,
   malformed `dp1_call`); `retryable: true`.
-- `not_found`: the requested `itemId` was not found in the resolved
-  playlist (`downloadPlaylistItem`), the item being *cleared* is entirely
-  unknown to the device — neither cached nor queued nor otherwise tracked
+- `not_found`: the requested `source` was not found (byte-for-byte) among
+  the resolved playlist's items' `source` fields (`downloadPlaylistItem`),
+  the source being *cleared* is entirely unknown to the device — neither
+  cached nor queued nor otherwise tracked
   (`clearPlaylistItemCache`; see that command for why a clear that cancels
   a still-queued download is a success instead) — or the playlist being
   cleared is not cached (`clearPlaylistCache`, which is unaffected by that
   distinction: `downloadPlaylist` writes the playlist record before queuing
   any item, so a cached playlist always has a record).
   `getOfflineCacheStatus` never returns `not_found` for an unrecognized
-  `itemId` — it always answers `ok: true` with that item reported as
+  `source` — it always answers `ok: true` with that item reported as
   `state: "not_cached"` (see below), since querying an item that simply
   has no cache yet is not itself an error condition.
 - `unsupported_media`: the item's source classifies as HLS/DASH manifest streaming
@@ -1509,7 +1646,7 @@ Example:
     "command": "downloadPlaylistItem",
     "request": {
       "playlistUrl": "https://gallery.example/dp1/feed.json",
-      "itemId": "work-1"
+      "source": "https://cdn.example.com/work-1/index.html"
     }
   }
 }
@@ -1524,12 +1661,13 @@ Success response:
 {
   "ok": true,
   "status": "queued",
-  "itemId": "work-1"
+  "source": "https://cdn.example.com/work-1/index.html"
 }
 ```
 
-Error cases: `invalid_request` (missing `itemId`), `resolve_failed`,
-`not_found` (itemId not in the resolved playlist), `unsupported_media`,
+Error cases: `invalid_request` (missing `source`), `resolve_failed`,
+`not_found` (`source` not in the resolved playlist — matched
+byte-for-byte, no URL normalization), `unsupported_media`,
 `busy`, `offline_cache_error`.
 
 `busy` here (retryable) covers a `clearPlaylistItemCache`/
@@ -1541,6 +1679,16 @@ nothing was queued, and this command reports that rather than answering
 the clear has settled and it queues normally. No `offline_cache_status`
 notification is emitted for an item in this case, so a client must not
 wait on one.
+
+`status: "not_queued_inline"` (with `ok: true`) is the same principle for
+a different cause: the item's `source` is a `data:` URI, so its bytes
+already travel inside the playlist body and there is nothing to download.
+The request is accepted and the item IS available offline — but no work
+was queued, and **no `offline_cache_status` notification will ever be
+emitted for it**, so a client must not wait on one. This is reported
+distinctly rather than as `"queued"` precisely because a client cannot
+otherwise tell the difference between "in progress" and "already done,
+nothing coming".
 
 When the request was resolved via `playlistUrl` (not `dp1_call`) and the
 item is queued successfully, `feral-controld` also best-effort indexes the
@@ -1584,12 +1732,29 @@ Success response:
 ```
 
 `total` is every item in the resolved playlist; `queuedCount` is how many
-were actually queued for offline capture — every class except HLS/DASH manifest
+distinct sources were actually queued for offline capture — duplicate
+sources within one playlist are one cache entry and count once — every class except HLS/DASH manifest
 streaming (software via headless Chromium, media/unknown via direct HTTP
-download; see `docs/offline-artwork-capture.md` §3.3). An item classified as
-HLS/DASH manifest streaming (or missing an `id`/`source`) is simply excluded from
-`queuedCount` with `ok: true` — that is the normal, successful shape for
-a playlist with few or no cacheable items. If classification itself fails
+download; see `docs/offline-artwork-capture.md` §3.3).
+
+Four kinds of item are excluded from `queuedCount` **successfully** —
+`ok: true`, no error, nothing wrong. This is the normal shape for a
+playlist with few or no cacheable items, and none of them should be
+treated by a controller as a failure to retry:
+
+- an item classified as HLS/DASH manifest **streaming**;
+- an item **missing a `source`**;
+- an **inline `data:` item** (`ClassInline`). Its bytes are already in
+  the playlist body, so there is nothing to fetch and nothing is queued.
+  It is already available offline — excluded because the work is
+  unnecessary, not because it was refused. The single-item command
+  reports this case distinctly as `status: "not_queued_inline"`;
+- an item whose `source` **exceeds the 2048-byte limit**
+  (`MaxSourceURLBytes`). A source is retained as the cache key and
+  re-emitted in status and notifications, so it is bounded at admission;
+  see `docs/offline-artwork-capture.md` §9. Such an item is skipped
+  rather than counted as a classification failure, so one oversized
+  source cannot make a whole playlist look like classification is down. If classification itself fails
 (e.g. a transient network error reaching the classify target) for every
 eligible item so nothing could be queued at all, this command instead
 fails with `offline_cache_error` rather than returning that same
@@ -1600,14 +1765,23 @@ controller. A classify failure for only *some* items still returns
 successfully; the skipped item(s) are logged server-side but not
 individually reported here.
 
-Classification of the playlist's items is **time-bounded** (10s total,
-run concurrently) so this command acknowledges promptly regardless of
-item count. Each item needs a network probe to classify, so an
-unbounded serial pass over a large playlist of unreachable sources could
-otherwise hold the command far past the LAN hub's own 30s response
-deadline. An item not classified before that bound is treated exactly
-like a classification failure: logged, skipped, and absent from
-`queuedCount`. Re-issuing the command retries those items.
+Classification of the playlist's items is **time-bounded**, and by TWO
+nested bounds doing different jobs — a single shared budget would either
+starve a large playlist or let one dead host hold the whole command:
+
+- **10s per item** (`classifyItemTimeout`). This is what actually decides
+  each item's outcome: one unreachable source costs that item and nothing
+  else. Items are classified concurrently, so this is not a serial sum.
+- **25s for the whole phase** (`classifyPhaseCeiling`). A backstop, not
+  the normal limit — it exists so that a pathological playlist still
+  acknowledges inside the LAN hub's 30s response deadline. Reaching it
+  truncates the phase.
+
+An item not classified before whichever bound it meets first is treated
+exactly like a classification failure: logged, skipped, and absent from
+`queuedCount`. Re-issuing the command retries those items — and because
+the per-item bound is independent, a retry after a transient failure at
+one host is not penalized by how slow the rest of the playlist was.
 
 An item excluded because a concurrent clear won the race (see
 `downloadPlaylistItem`'s `busy` case) is likewise absent from
@@ -1650,7 +1824,7 @@ Example:
   "message": {
     "command": "clearPlaylistItemCache",
     "request": {
-      "itemId": "work-1"
+      "source": "https://cdn.example.com/work-1/index.html"
     }
   }
 }
@@ -1661,12 +1835,16 @@ Success response:
 ```json
 {
   "ok": true,
-  "itemId": "work-1"
+  "source": "https://cdn.example.com/work-1/index.html"
 }
 ```
 
+Because cache entries are per-source, this clears the cached artifact for
+EVERY playlist item — in any playlist — whose `source` matches, not just
+the one the caller had in mind.
+
 A clear that finds no cached record but *does* cancel a still-queued
-download for `itemId` — including a first-time download that has not
+download for `source` — including a first-time download that has not
 captured anything yet — is also a success, not a `not_found`: work really
 was canceled, and the item ends up `not_cached` either way.
 
@@ -1676,9 +1854,9 @@ notification, so a connected controller does not have to poll
 `getOfflineCacheStatus` to learn the item is gone. An item that was already
 `not_cached` produces no notification — nothing transitioned.
 
-Error cases: `invalid_request` (missing `itemId`), `not_found` (the device
-has no cached record, queued download, or other tracked state for `itemId`
-— nothing to clear), `busy` (retryable — `itemId` is the one item currently
+Error cases: `invalid_request` (missing `source`), `not_found` (the device
+has no cached record, queued download, or other tracked state for `source`
+— nothing to clear), `busy` (retryable — `source` is the one item currently
 mid-capture; retry once its in-flight download finishes, typically within a
 few seconds up to the configured capture window), `offline_cache_error`.
 
@@ -1710,6 +1888,11 @@ Success response:
 }
 ```
 
+Member items are cleared **by source**: a source this playlist shares
+with another cached playlist becomes `not_cached` for that playlist too
+(cache entries are shared per-source with no refcount — by design).
+Duplicate sources within the playlist settle, and notify, once.
+
 As with `clearPlaylistItemCache`, each member item this command settles at
 `not_cached` is pushed as its own `offline_cache_status` notification.
 Member items that were already `not_cached`, and any whose deletion failed
@@ -1739,29 +1922,36 @@ Example (specific items):
   "message": {
     "command": "getOfflineCacheStatus",
     "request": {
-      "itemIds": ["work-1", "work-2"]
+      "sources": ["https://cdn.example.com/work-1/index.html", "https://cdn.example.com/work-2.mp4"]
     }
   }
 }
 ```
 
-Omitting `itemIds` (or passing an empty array) reports on every item this
+Omitting `sources` (or passing an empty array) reports on every item this
 process currently knows about, on disk and in flight.
 
 Request fields, all optional:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `itemIds` | string[] | Restrict the report to these items. Omitted or `[]` means every known item. At most **1024** ids per request. |
-| `limit` | integer | Cap on how many entries `items` carries. Omitted, `0`, or above the cap is clamped to **1000**, which is also the maximum. |
-| `cursor` | string | The `nextCursor` from the previous page. Omitted means the first page. |
-| `totalsOnly` | boolean | Return `totals`/`diskUsed` with an empty `items`, for a summary view. Cannot be combined with `cursor`. |
+| `sources` | string[] | Restrict the report to the items with these source URLs. Omitted or `[]` means every known item. At most **1024** sources per request. |
+| `limit` | integer | Cap on how many entries `items` carries. Omitted, `0`, or above the cap is clamped to **1000**, which is also the maximum. (A value above 2^20 is rejected as `invalid_request` rather than clamped — an overflow guard, far above any meaningful page size.) |
+| `cursor` | string | The `nextCursor` from the previous page — an opaque token, not a source URL. Omitted means the first page. |
+| `totalsOnly` | boolean | Return the summary block (`totals`/`diskUsed`/`diskLimit`) with an empty `items`, for a summary view. Cannot be combined with `cursor`. |
 
 Unlike the other commands in this family, these arguments are validated
-strictly: a wrong type (for example `"itemIds": "work-1"` instead of an
-array) is rejected with `invalid_request` rather than ignored, because
+strictly: a wrong type (for example `"sources": "https://…"` instead of
+an array) is rejected with `invalid_request` rather than ignored, because
 every one of these fields decides how much work the device does and how
 large the response gets.
+
+The pre-source-keying `itemIds` key is rejected **by name** for the same
+reason, rather than ignored as an unrecognized field: an absent filter
+means "report on every known item", so silently dropping `itemIds` would
+widen a stale client's two-item query into a whole-store scan. The
+rejection is deliberately narrow — only this one known-legacy key —
+so genuinely additive future fields stay safe to introduce.
 
 Success response:
 
@@ -1770,14 +1960,14 @@ Success response:
   "ok": true,
   "items": [
     {
-      "itemId": "work-1",
+      "source": "https://cdn.example.com/work-1/index.html",
       "state": "ready",
       "percent": 100,
       "bytes": 4213456,
       "coverageComplete": true
     },
     {
-      "itemId": "work-2",
+      "source": "https://cdn.example.com/work-2.mp4",
       "state": "partial",
       "percent": 100,
       "bytes": 189234,
@@ -1791,31 +1981,124 @@ Success response:
     "downloading": 0,
     "failed": 0
   },
-  "diskUsed": 4402690
+  "diskUsed": 5219840,
+  "diskLimit": 10737418240
 }
 ```
 
-`items` is always ordered by `itemId` — including when `itemIds` was
-given, so the response order does not follow the request order, and
-duplicate ids collapse to one entry.
+Both `coverageComplete` and `bytes` are **omitted when they would be
+`false`/`0`** (the example above shows them spelled out for readability;
+on the wire a `coverageComplete: false` entry simply has no
+`coverageComplete` key). Clients must read a missing `coverageComplete`
+as `false` and a missing `bytes` as `0`.
+
+`items` is always ordered by the source's internal cache key
+(`sha256(source)` — fixed-length and stable, the same value `nextCursor`
+carries), NOT lexicographically by URL and not in the order given in
+`sources`; duplicate sources collapse to one entry. Clients match entries
+to their own playlist items by the `source` field.
 
 **Paging.** `items` never carries more than 1000 entries. When more
-remain, the response adds `"truncated": true` and `"nextCursor": "<last
-itemId in items>"`; pass that value back as `cursor` for the next page,
-and repeat until `nextCursor` is absent. Both fields are absent on the
-last page, so a client can treat "no `nextCursor`" as "that was
-everything". Because paging is by sort order rather than by position, a
-cursor stays valid even if the item it names is cleared or evicted
-between pages.
+remain, the response adds `"truncated": true` and `"nextCursor":
+"<opaque key of the last entry>"`; pass that value back as `cursor` for
+the next page, and repeat until `nextCursor` is absent. Both fields are
+absent on the last page, so a client can treat "no `nextCursor`" as
+"that was everything". Because paging is by sort order rather than by
+position, a cursor stays valid even if the item it names is cleared or
+evicted between pages.
 
-`totals` and `diskUsed` describe the **whole requested set**, not the
-current page, and for that reason are returned **only on the first page**
-(a request with no `cursor`). Deriving them costs one on-disk read per
-item in the set, so recomputing them for every page would make walking a
-large cache cost far more than it needs to. A continuation page omits
-both fields; carry forward what the first page reported. Use
-`totalsOnly: true` when the summary is all you need — it skips the
-per-item disk measurements and the response body entirely.
+`totals`, `diskUsed`, and `diskLimit` form the **summary block**, returned
+**only on the first page** (a request with no `cursor`). Deriving `totals`
+and `diskUsed` costs one on-disk read per item in the set, so recomputing
+them for every page would make walking a large cache cost far more than it
+needs to. `diskLimit` is a constant the daemon already holds and costs
+nothing, but it rides the same gate because a ceiling is not renderable
+without the usage measured against it. A continuation page omits all
+three; carry forward what the first page reported. Use `totalsOnly: true`
+when the summary is all you need — it skips the per-item disk measurements
+and the response body entirely.
+
+`totals` counts the **whole requested set**, not the current page.
+`diskUsed` is different: it measures the **whole store** — committed blobs,
+item records, playlist bodies, and the by-url index — and is *not* narrowed
+by a `sources` filter. A filtered request still reports total cache usage,
+not the usage of the items it asked about.
+
+It is the **committed** footprint, not everything occupying the cache
+directory: partially-written `.tmp` files are excluded by design, since a
+mid-write file is not yet cache content. Two visible consequences. A
+download in flight consumes disk that `diskUsed` does not report until it
+lands — and a single artwork can be gigabyte-scale, so a gauge can sit
+still while the device is demonstrably busy and free space is falling. And
+if the daemon is killed mid-write (SIGKILL, power loss), the orphaned
+temporary is reclaimed only by the sweep on the **next daemon start** —
+neither GC nor eviction reclaims it — so until then it occupies space that
+neither `diskUsed` nor the budget below accounts for.
+So `diskUsed` does not equal the sum of `items[].bytes`, in either
+direction: it counts metadata no item reports, while blobs shared between
+items are counted once in `diskUsed` but reported by each item that
+references them. Use `diskUsed` for a total; never add up per-item bytes
+to get one.
+
+`diskUsed` reads **`0` if the device failed to measure the store** (a
+transient I/O error; the device logs a warning locally). The field is
+still present, so a `0` is not distinguishable on the wire from a genuinely
+empty cache. Do not present a lone `0` as authoritative "cache is empty"
+if other fields — a nonzero `totals.ready`, say — contradict it.
+
+**Cache size and eviction.** `diskLimit` is the cache's byte budget: the device's
+`offlineCache.maxDiskBytes`, or 10 GiB when the operator left it unset.
+It is why cached items are evicted at all. Both it and `diskUsed` are in
+**bytes** — note the `deviceMetrics` command reports device filesystem
+figures in KiB, so the two cannot be mixed without conversion.
+
+**The ratio is not bounded to 0..100%, in either direction.** Render
+`diskUsed / diskLimit` as a proportion by all means, but clamp it, and do
+not label any fixed percentage "full":
+
+- *It usually rests below the budget.* The device reclaims room **ahead of**
+  each download, evicting oldest-captured items until a headroom margin is
+  free, so a busy cache typically settles below `diskLimit` and climbs back
+  toward it as each download lands. A gauge that only reads "full at
+  `diskLimit`" will rarely look full. Items are therefore evicted — and
+  eviction notifications sent — while `diskUsed` still shows room left.
+- *It can also exceed the budget.* Eviction runs only on the download path,
+  so lowering `offlineCache.maxDiskBytes` on a device that already holds a
+  larger cache leaves `diskUsed` above `diskLimit` until the next download
+  runs. Playlist metadata is also counted in `diskUsed` but bounded by
+  count rather than bytes, and no eviction can reclaim it.
+
+For user-facing copy: "removed to make room for newer downloads" is honest
+at any fill level; "evicted because the cache is full" is not.
+
+The current headroom margin is one eighth of the budget (a 10 GiB budget
+starts reclaiming past ~8.75 GiB). That figure is **illustrative, not
+contractual** — it is a device-side tuning constant that may change
+without a contract revision, so do not hardcode it or derive a threshold
+from it.
+
+`diskLimit` is **not** bounded by the device's actual free disk space, and
+is a different quantity from the device filesystem usage `deviceMetrics`
+reports. It is a policy budget, not reserved space: on a device with less
+free space than the budget, downloads can start failing while `diskUsed`
+is still well under `diskLimit`. A client showing both device storage and
+cache usage must present them as two separate quantities, never as parts
+of one total.
+
+**On a first-page response, an absent `diskLimit` means there is no
+ceiling** — the cache is unlimited and no *item* is ever evicted (playlist
+metadata is still pruned by count). Do not confuse this with its absence
+on a continuation page, which means only "carry forward what the first
+page reported". No supported configuration produces the unlimited case
+today (`offlineCache.maxDiskBytes <= 0` means "use the 10 GiB default"),
+but handle it anyway: render it as "no limit", never as `0`, and never by
+substituting the 10 GiB default, which an operator may have overridden.
+`diskUsed` is still reported.
+
+To keep a live gauge current, re-poll with `totalsOnly: true` — the
+`offline_cache_status` notifications below carry per-item state only, never
+the summary block, so an eviction or a completed download moves `diskUsed`
+with nothing on the wire to say so.
 
 `state` is one of `not_cached`, `queued`, `downloading`, `ready`, `partial`,
 `failed`, `broken_online`. `percent` is coarse (`0` or `100`): capture is a
@@ -1872,7 +2155,7 @@ one. The untruncated text stays in the device's on-disk record for
 support/debugging.
 
 Error cases: `invalid_request` (an argument of the wrong type, more than
-1024 `itemIds`, a negative or non-integral `limit`, an empty `cursor`, or
+1024 `sources`, a negative or non-integral `limit`, an empty `cursor`, or
 `totalsOnly` combined with `cursor`), `offline_cache_error`.
 
 ### offline_cache_status notification
@@ -1900,7 +2183,7 @@ to local hub WebSocket clients.
   "notification_type": "offline_cache_status",
   "persist_record_count": 1,
   "message": {
-    "itemId": "work-1",
+    "source": "https://cdn.example.com/work-1/index.html",
     "state": "ready",
     "percent": 100,
     "bytes": 4213456,
@@ -1917,7 +2200,7 @@ one notification at a time by a dedicated worker that performs the relayer
 send and then the hub-WS send for each.
 
 **Successive states of the same item coalesce while queued.** The queue
-holds at most one pending notification per `itemId` — the latest state
+holds at most one pending notification per `source` — the latest state
 that item has reached — so an item may go straight from `queued` to
 `ready` on the wire with no `downloading` in between, and may appear only
 once for a whole burst of transitions. Clients must therefore treat each
@@ -1994,7 +2277,7 @@ Clients that need a definitive current state should still poll
 been delivered.
 
 This notification is attempt-level, not cache-level: it reports the
-outcome of one specific capture attempt for `itemId`, which is not always
+outcome of one specific capture attempt for `source`, which is not always
 the same thing as whether that item is currently playable offline. The
 one case where they diverge: re-downloading an item that already has a
 successful cached copy (`downloadPlaylistItem` on an already-`ready` item)
@@ -2003,7 +2286,7 @@ the attempt, but the earlier successful capture's blobs and record on
 disk were never touched by the failed attempt, so a `getOfflineCacheStatus`
 call made right after (or the next `offline_cache_status` notification for
 an unrelated event) will still report `ready`/`partial` for that same
-`itemId` — the old cached copy remains valid and playable offline the
+`source` — the old cached copy remains valid and playable offline the
 entire time. Clients should treat this notification as "this attempt's
 result", and use `getOfflineCacheStatus` as the source of truth for
 "is this item currently cached" when the two might disagree.

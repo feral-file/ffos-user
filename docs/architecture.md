@@ -21,17 +21,23 @@ The v2 target preserves these service boundaries:
   routes the common command model to existing executors. Protocol encoding,
   retained state, authentication, and authorization belong in focused boundary
   packages; command policy must not be hidden in transport handlers.
-- `feral-setupd` remains the owner of setup and recovery UX, including the
-  recovery SoftAP. Reset preparation, physical confirmation, local erasure,
-  and setup-state transitions cross the service boundary only through a
-  versioned D-Bus contract.
+- `feral-controld` also owns setup and recovery UX, including the recovery
+  SoftAP: reset preparation, physical confirmation, local erasure, and
+  setup-state transitions no longer cross a service boundary at all, so the
+  versioned D-Bus contract the v2 draft specified for them is moot — the
+  coordination is in-process (see "The setupd merge" below).
 - For reset, `feral-controld` owns external command admission, protocol-visible
   confirmation state, the broker authorization barrier, runtime-identity
-  rotation, controller-authority bootstrap, and final protocol status.
-  `feral-setupd` owns the on-device confirmation UX and local reset execution.
-  Neither service writes the other's state, and reset cannot report completion
-  before the broker-barrier, identity-registry, and authority-registration ACKs
-  plus durable local authority activation and cleanup finish.
+  rotation, controller-authority bootstrap, and final protocol status — plus
+  the on-device confirmation UX and local reset execution the draft had split
+  out to `feral-setupd`. The ordering constraint survives the merge and is
+  what actually matters: reset cannot report completion before the
+  broker-barrier, identity-registry, and authority-registration ACKs plus
+  durable local authority activation and cleanup finish.
+
+> The setup/recovery bullet above previously assigned that ownership to
+> `feral-setupd`, copied from the v2 draft written before that daemon was
+> merged into `feral-controld` (see "The setupd merge" below).
 
 The current relayer, Mint pairing handoff, optional port-1111 Hub, and
 `GetRelayerTopicID` exist only behind migration compatibility gates. They are
@@ -94,7 +100,7 @@ Rules for each boundary:
 
 - `feral-sys-monitord` is a **publisher only**. It must not make recovery decisions, reboot the system, or call other services. Callers pull from it via RPC or subscribe to its signals.
 - `feral-watchdog` is the **single owner of recovery policy**. It decides when to restart Chromium, clean disk pressure, or reboot. Raw telemetry collection does not belong here; that belongs in `feral-sys-monitord`.
-- `feral-controld` is the **connectivity, command orchestration, and device-setup hub**. Since the setupd merge it deliberately owns first-run provisioning and recovery as well as runtime command routing. It remains the highest-risk service for architectural sprawl: keep the setup domain (`softap`, `portal`, `provisioning`, `wifictl`, `otagate`, `setupui`) and the runtime domain (`relayer`, `commandrouter`, `devicectl`, `cdp`, `hub`) as legible sub-packages, and do not let unrelated device policy that belongs in `feral-watchdog` leak in.
+- `feral-controld` is the **connectivity, command orchestration, and device-setup hub**. Since the setupd merge it deliberately owns first-run provisioning and recovery as well as runtime command routing — including the network dead-end **escape policy** (AP session bounds, the recheck cadence, the setup-incomplete episode, teardown narration invariants), whose canonical rules live in `setup-flow.md`. It remains the highest-risk service for architectural sprawl: keep the setup domain (`softap`, `portal`, `provisioning`, `wifictl`, `otagate`, `setupui`) and the runtime domain (`relayer`, `commandrouter`, `devicectl`, `cdp`, `hub`) as legible sub-packages, and do not let unrelated device policy that belongs in `feral-watchdog` leak in.
 - `player-wrapper-ui` is a **thin process starter**. It contains no business logic. Parameters come from command-line arguments. State and control live in daemons, not in this wrapper.
 
 ---
@@ -170,7 +176,7 @@ Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0
 
 - **Manifest-gated.** `setupui` reads the player capability manifest at `/opt/feral/feral-player/ffos-player-contract.json` and only narrates if `contracts.setupDisplay` (version `1`) is present. An older player yields a permanent no-narration fallback; there is no separate setup page.
 - **Fire-and-forget.** Pushes never block, never return a fatal error, and never panic. A burst collapses to at most one trailing send; the last state is re-pushed on CDP reconnect.
-- **Namespace-extensible.** New narration states can be added without breaking older players (e.g. `factory_reset` is an extension state outside the contract's required set), which is what keeps the v2 pairing-approval overlay additive.
+- **Namespace-extensible.** New narration states can be added without breaking older players (e.g. `factory_reset` is an extension state outside the contract's required set), which is what keeps the v2 pairing-approval overlay additive. One deliberate exception to "older players safely render nothing": `connecting` (the provisioned-device offline narration) must never silently disappear — it is the only thing between a relocated offline device and a black screen — so `setupui` re-checks the manifest's state list at send time (re-read every resolution, never latched: the bundle is OTA-replaced under a running controld) and downgrades it to `join_failed` on players that predate it. See `docs/setup-flow.md` for the narration semantics.
 - **Navigation-aware.** The narration worker registers with `playersession.Session` as an overlay owner (so a recovery navigation never erases live narration) and parks queued sends while `NavigationPending()` is true, delivering once the new generation's document handler is confirmed installed rather than evaluating into a document mid-teardown.
 
 ### Local device control: LAN hub (port 1111)
@@ -248,7 +254,13 @@ The device uses a two-version (v1 and v2) btrfs snapshot system. Agents must not
 - The btrfs default subvolume (`@snapshots/@`) is only changed **after** a successful boot from a candidate subvolume. Candidates boot exactly once via `bootctl set-oneshot`.
 - The marker file `var/lib/factory_reset/support_v2_root_snapshot` inside a snapshot distinguishes v2 from v1 layout. Both layouts must remain supported in the rollback initcpio hook.
 
-Factory reset is a security-relevant special case: `feral-controld` starts `set-factory-boot.service` (via `systemctl`) which stages a one-shot boot into the pristine factory snapshot and reboots. It **abandons** the running subvolume rather than wiping it. Because the persisted relayer topic survives on the old subvolume until the reboot completes, `controld` clears the topic in-process at reset time (`clearPersistedRelayerTopic`) to close the window where a resold or interrupted device could remain commandable on the old topic.
+Factory reset is a security-relevant special case: `feral-controld` starts `set-factory-boot.service` (via `systemctl`) which stages a one-shot boot into the pristine factory snapshot and reboots. It **abandons** the running subvolume rather than wiping it — and per the one-shot rule above, the btrfs default is left pointing at `@snapshots/@`, so a candidate that fails to boot silently returns the device to the running subvolume with the reset never having happened. `controld` therefore clears the persisted claim in-process at reset time (`clearPersistedClaim` — relayer topic AND `ConnectedDevice`), so a rollback (or a failed unit start) cannot leave a resold device commandable on the old topic. On the success path that write is redundant: the state file lives inside the root subvolume, which the candidate boot discards wholesale.
+
+That clear also **arms** what it needs held off, because it is what flips the device unclaimed while the process keeps running: the auto-claim flow (which repaints "finalizing" and then the claim QR over the `factory_reset` narration), and every inbound command whose effect is written under the root subvolume and would therefore survive a rollback — `connect` re-persisting `ConnectedDevice`, `sshAccess` writing `authorized_keys`, the analytics/beta toggles writing state sentinels, and `updateToLatestVersion` arming a competing `bootctl` one-shot that can displace the reset's own. `controld` therefore latches `resetStaged` for the reset's duration: the auto-claim flow is suppressed, and the command surface closes down to read-only reporting. That closure is enforced in `commandrouter.Process` rather than in `devicectl` — it is the one dispatch point every transport (relayer mediator, LAN hub, OOM recovery) and every command family (device control, mint pairing, offline cache, player) passes through, and a guard inside `devicectl.Execute` would silently miss three of those four families.
+
+The latch is released on the two paths where the reboot provably is not coming: the unit failing to start, and a **stuck-reset watchdog**. The watchdog is not optional — `set-factory-boot.service` is `Type=simple`, so `systemctl start` returns as soon as `factory_reset.sh` is spawned and says nothing about whether the reset was staged; that script can still exit non-zero (it runs under `set -euo pipefail`) before reaching `bootctl set-oneshot`. Without the release, a device would sit unclaimed, refusing commands, behind a "do not power off" panel until it was power-cycled. Still being alive when the timeout elapses IS the "no reboot completed" signal — the same detection-free design as the OTA gate's post-ladder watchdog. It cannot distinguish "never staged" from "shutdown itself is hanging past the timeout", but the process is being killed either way, so a release on that path is moot.
+
+The trigger for the claim-QR repaint is any relayer reconnect: with the topic cleared, a reconnect draws a fresh one, and that empty→set assignment edge fires the mediator's topic observer. Both the relayer's own read-loop reconnect and the mediator's sysmetrics reconcile reach it, so the guard is on the flow, not on any one reconnect path. For the same reason the LIVE relayer session is deliberately **not** closed at reset time: closing it forced exactly that reconnect (it was the most reliable way to trip the repaint), and it made the command's own ack undeliverable. The accepted trade is that the former owner's established WebSocket stays connected until the reboot lands; what it can still reach through it is the read-only allowlist above.
 
 ### Service state files
 

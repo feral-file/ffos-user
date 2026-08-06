@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -119,8 +120,7 @@ func TestMediaCapturer_Capture_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, rec)
 
-	assert.Equal(t, "item-1", rec.ItemID)
-	assert.Equal(t, item, rec.Item)
+	assert.Equal(t, item, rec.Item, "the record carries the item verbatim; its Source is the record's identity")
 	assert.Equal(t, item.Source, rec.Entry)
 	assert.True(t, rec.Coverage.Complete)
 	require.Len(t, rec.Resources, 1)
@@ -129,6 +129,8 @@ func TestMediaCapturer_Capture_Success(t *testing.T) {
 	assert.Equal(t, item.Source, res.URL, "the resource must be keyed on the ORIGINAL source URL, never a resolved redirect target")
 	assert.Equal(t, http.StatusOK, res.Status)
 	assert.Equal(t, "video/mp4", res.ContentType)
+	assert.Empty(t, res.SniffedContentType,
+		"nothing to sniff for beside a real declaration — see Resource.SniffedContentType")
 	assert.Equal(t, sha256Hex(body), res.SHA256)
 	assert.Equal(t, map[string]string{"Access-Control-Allow-Origin": "*"}, res.Headers,
 		"only the CORS allowlist must survive; Set-Cookie must never be persisted")
@@ -137,9 +139,129 @@ func TestMediaCapturer_Capture_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, body, string(blob))
 
-	saved, err := h.store.LoadItem("item-1")
+	saved, err := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 	require.NoError(t, err)
 	assert.Equal(t, rec.Resources, saved.Resources, "Capture must have persisted the record via SaveItem, not just returned it")
+}
+
+// TestMediaCapturer_Capture_SniffsContentTypeOnlyWhenOriginDeclaredNone
+// covers this path's half of the declared-vs-sniffed split (see
+// Resource.SniffedContentType). It matters most HERE precisely because
+// an empty Content-Type classifies as ClassUnknown, and ClassUnknown
+// routes to this browser-free capturer — so without a sniff of its own,
+// a headerless media origin would be the one case with no fallback at
+// all for ff-player's HEAD content-type probe, silently demoting an
+// extensionless <img>/<video>/<audio> to extension inference.
+//
+// The unrecognized case is the other half of the contract:
+// http.DetectContentType answers application/octet-stream when it cannot
+// tell, and recording that would replace "no answer" with a confident
+// non-answer — which the player reads as authoritative and stops
+// inferring from.
+func TestMediaCapturer_Capture_SniffsContentTypeOnlyWhenOriginDeclaredNone(t *testing.T) {
+	// A one-pixel GIF: real magic bytes, so DetectContentType recognizes
+	// it the same way Chromium would have on the browser path.
+	const gifBody = "GIF89a\x01\x00\x01\x00\x00\xff\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x00;"
+	tests := []struct {
+		name     string
+		body     string
+		expected string
+	}{
+		{
+			name:     "recognizable bytes give the probe an answer",
+			body:     gifBody,
+			expected: "image/gif",
+		},
+		{
+			name: "unrecognizable bytes record nothing rather than octet-stream",
+			// Deliberately not text and not any known signature.
+			body:     "\x00\x01\x02\x03\x04\x05\x06\x07",
+			expected: "",
+		},
+		{
+			// The TEXT-side catch-all, symmetric to octet-stream:
+			// net/http's sniff table ends in a signature matching any
+			// printable bytes. A headerless SVG without an XML prolog
+			// hits it, and so does a headerless .gltf manifest — both
+			// ClassUnknown items that route here — so reporting
+			// text/plain would demote exactly the sources this path
+			// exists to serve.
+			name:     "text catch-all records nothing either",
+			body:     `<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>`,
+			expected: "",
+		},
+		{
+			name:     "a real signature past the text catch-all still answers",
+			body:     `<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>`,
+			expected: "text/xml; charset=utf-8",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := setupMediaCapture(t)
+			defer h.ctrl.Finish()
+
+			item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://cdn.example.com/previews/6bcc9b62"}
+			h.expectGET(t, item.Source, newMediaResponse(http.StatusOK, "", tt.body, nil))
+
+			rec, err := h.capturer.Capture(context.Background(), item)
+			require.NoError(t, err)
+			require.Len(t, rec.Resources, 1)
+
+			res := rec.Resources[0]
+			assert.Empty(t, res.ContentType,
+				"the origin declared nothing, and a sniff must never be promoted into the field replay serves")
+			assert.Equal(t, tt.expected, res.SniffedContentType)
+			// The sniffing wrapper sits in the streaming path; pin that it
+			// passes every byte through untouched rather than consuming
+			// the window it retains.
+			blob, err := h.store.ReadBlob(res.SHA256)
+			require.NoError(t, err)
+			assert.Equal(t, tt.body, string(blob))
+		})
+	}
+}
+
+// TestMediaCapturer_Capture_SniffsAcrossChunkedReadsWithoutTruncatingBody
+// exercises bodySniffer's retention clamp, which the table above cannot:
+// those bodies are smaller than one sniff window and arrive in a single
+// Read, so neither the partial fill nor the accumulation across reads is
+// touched. A clamp bug here would not merely mis-sniff — the sniffer sits
+// in the streaming path every byte of a gigabyte-scale asset flows
+// through, so it could silently truncate or corrupt the stored blob.
+func TestMediaCapturer_Capture_SniffsAcrossChunkedReadsWithoutTruncatingBody(t *testing.T) {
+	h := setupMediaCapture(t)
+	defer h.ctrl.Finish()
+
+	// Well past one 512-byte window, so the retained head fills mid-body
+	// and every later read must pass through with nothing retained.
+	body := "GIF89a" + strings.Repeat("payload-", 4096)
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://cdn.example.com/previews/chunked"}
+	req, err := http.NewRequest(http.MethodGet, item.Source, nil)
+	require.NoError(t, err)
+	h.mockHTTP.EXPECT().NewRequest(http.MethodGet, item.Source, nil).Return(req, nil).Times(1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		// One byte per Read: the most adversarial chunking for an
+		// accumulate-until-full buffer.
+		Body: io.NopCloser(iotest.OneByteReader(strings.NewReader(body))),
+	}, nil).Times(1)
+
+	rec, err := h.capturer.Capture(context.Background(), item)
+	require.NoError(t, err)
+	require.Len(t, rec.Resources, 1)
+
+	res := rec.Resources[0]
+	assert.Equal(t, "image/gif", res.SniffedContentType,
+		"the signature arrives in the first bytes and must survive being fed one at a time")
+	assert.Equal(t, sha256Hex(body), res.SHA256)
+
+	blob, err := h.store.ReadBlob(res.SHA256)
+	require.NoError(t, err)
+	assert.Equal(t, body, string(blob), "every byte must pass through the sniffer untouched, window or no window")
 }
 
 // TestMediaCapturer_Capture_SendsOriginHeader is the regression test for
@@ -269,7 +391,7 @@ func TestMediaCapturer_Capture_GLTFManifest(t *testing.T) {
 			assert.Equal(t, tc.wantComplete, rec.Coverage.Complete)
 			assert.Equal(t, tc.wantReason, rec.Coverage.Reason)
 
-			saved, err := h.store.LoadItem("item-1")
+			saved, err := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 			require.NoError(t, err)
 			assert.Equal(t, rec.Coverage, saved.Coverage, "the persisted record must carry the same coverage verdict")
 		})
@@ -306,7 +428,7 @@ func TestMediaCapturer_Capture_NonSuccessStatusReturnsError(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, rec)
 
-	_, loadErr := h.store.LoadItem("item-1")
+	_, loadErr := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound, "a failed fetch must never leave a saved record behind")
 }
 
@@ -374,7 +496,7 @@ func TestMediaCapturer_Capture_RejectsBodyLargerThanRemainingBudget(t *testing.T
 	assert.Error(t, err)
 	assert.Nil(t, rec)
 
-	_, loadErr := h.store.LoadItem("item-1")
+	_, loadErr := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound, "a rejected oversized fetch must never leave a saved record behind")
 }
 
@@ -458,7 +580,7 @@ func TestMediaCapturer_Capture_SlowBodyOutlivesAWholeRequestTimeout(t *testing.T
 		rec, err := capturer.Capture(context.Background(), item(srv))
 		require.Error(t, err, "this is the pre-fix behavior being pinned, not a desired outcome")
 		assert.Nil(t, rec)
-		_, loadErr := store.LoadItem("item-1")
+		_, loadErr := store.LoadItem(offlinecache.SourceKey(item(srv).Source))
 		assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound)
 	})
 
@@ -503,7 +625,7 @@ func TestMediaCapturer_Capture_TimeoutFreeClientStillHonorsCancellation(t *testi
 	require.Error(t, err)
 	assert.Nil(t, rec)
 	assert.Less(t, elapsed, 5*time.Second, "cancellation must abort the transfer promptly, not wait out the download ceiling")
-	_, loadErr := store.LoadItem("item-1")
+	_, loadErr := store.LoadItem(offlinecache.SourceKey(srv.URL + "/video.mp4"))
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound, "a canceled download must leave no record behind")
 }
 
@@ -522,6 +644,6 @@ func TestMediaCapturer_Capture_TimeoutFreeClientStillEnforcesDiskLimit(t *testin
 	assert.Nil(t, rec)
 	assert.Greater(t, len(payload), 128)
 
-	_, loadErr := store.LoadItem("item-1")
+	_, loadErr := store.LoadItem(offlinecache.SourceKey(srv.URL + "/video.mp4"))
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound)
 }

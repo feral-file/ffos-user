@@ -302,6 +302,20 @@ func (mr *MockExecCmdMockRecorder) Output() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Output", reflect.TypeOf((*MockExecCmd)(nil).Output))
 }
 
+// Pid mocks base method.
+func (m *MockExecCmd) Pid() int {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Pid")
+	ret0, _ := ret[0].(int)
+	return ret0
+}
+
+// Pid indicates an expected call of Pid.
+func (mr *MockExecCmdMockRecorder) Pid() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Pid", reflect.TypeOf((*MockExecCmd)(nil).Pid))
+}
+
 // Run mocks base method.
 func (m *MockExecCmd) Run() error {
 	m.ctrl.T.Helper()

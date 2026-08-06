@@ -590,11 +590,11 @@ func (r *refresher) syncReplayScopeLocked(playlist *dp1.Playlist) {
 	if playlist == nil {
 		return
 	}
-	itemIDs := make([]string, 0, len(playlist.Items))
+	sources := make([]string, 0, len(playlist.Items))
 	for _, item := range playlist.Items {
-		itemIDs = append(itemIDs, item.ID)
+		sources = append(sources, item.Source)
 	}
-	if syncErr := r.kioskReplay.SyncPlaylist(r.context, itemIDs); syncErr != nil {
+	if syncErr := r.kioskReplay.SyncPlaylist(r.context, sources); syncErr != nil {
 		r.logger.Warn("offline cache: failed to sync kiosk replay scope during refresh", zap.Error(syncErr))
 	}
 	// Announce this authoritative scope change (under the lock) so a
@@ -766,9 +766,9 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 		return
 	}
 
-	itemIDs := make([]string, 0, len(playlist.Items))
+	sources := make([]string, 0, len(playlist.Items))
 	for _, item := range playlist.Items {
-		itemIDs = append(itemIDs, item.ID)
+		sources = append(sources, item.Source)
 	}
 	// Serialize this scope resync against any concurrent displayPlaylist/
 	// refresher sync+send (see KioskReplay.LockPlayback's doc). Acquired
@@ -788,7 +788,7 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 	if r.kioskReplay.PlaybackGeneration() != genBeforeResolve {
 		return
 	}
-	if syncErr := r.kioskReplay.SyncPlaylist(r.context, itemIDs); syncErr != nil {
+	if syncErr := r.kioskReplay.SyncPlaylist(r.context, sources); syncErr != nil {
 		r.logger.Warn("offline cache: failed to sync kiosk replay scope after refresh failure", zap.Error(syncErr))
 	}
 }

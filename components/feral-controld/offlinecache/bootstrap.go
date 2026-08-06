@@ -2,6 +2,7 @@ package offlinecache
 
 import (
 	"fmt"
+	"net"
 	go_url "net/url"
 	"runtime"
 	"strconv"
@@ -79,18 +80,24 @@ type Options struct {
 	// gate cannot cover.
 	HeadlessLimits HeadlessLimits
 	// HeadlessLimitsWarning is non-empty when OptionsFromConfig had to
-	// correct an internally inconsistent HeadlessLimits (see
-	// alignHeadlessLimits). Bootstrap logs it; carried as data so the
-	// mapping stays a pure, testable function.
+	// correct an internally inconsistent HeadlessLimits, or found one it
+	// deliberately does NOT correct but that will not apply as written
+	// (see alignHeadlessLimits, which covers both cases). Bootstrap logs
+	// it; carried as data so the mapping stays a pure, testable function.
 	HeadlessLimitsWarning string
+	// ResourceGateWarning is non-empty when the resource-gate config
+	// carries a setting that no longer does anything. Kept as its own
+	// named field rather than folded into a generic slice for the same
+	// reason HeadlessLimitsWarning is: the name says which subsystem is
+	// complaining. A third one is the signal to generalize.
+	ResourceGateWarning string
 }
 
 // ResourceGateOptions is the fully-defaulted admission-gate slice of
 // Options, mirroring the parent struct's convention.
 type ResourceGateOptions struct {
-	Enabled  bool
-	Policy   AdmissionPolicy
-	MaxDefer time.Duration
+	Enabled bool
+	Policy  AdmissionPolicy
 }
 
 // OptionsFromConfig fills Options from cfg (nil is treated as "feature
@@ -117,7 +124,6 @@ func OptionsFromConfig(cfg *config.OfflineCacheConfig, kioskCDPEndpoint string) 
 				MetricsStaleAfter:          DefaultMetricsStaleAfter,
 				MemorySafetyCeilingPercent: DefaultMemorySafetyCeilingPercent,
 			},
-			MaxDefer: DefaultAdmissionMaxDefer,
 		},
 		HeadlessLimits: defaultHeadlessLimits(),
 	}
@@ -176,7 +182,14 @@ func OptionsFromConfig(cfg *config.OfflineCacheConfig, kioskCDPEndpoint string) 
 			opts.ResourceGate.Policy.MetricsStaleAfter = time.Duration(rg.MetricsStaleAfterSeconds) * time.Second
 		}
 		if rg.MaxDeferSeconds > 0 {
-			opts.ResourceGate.MaxDefer = time.Duration(rg.MaxDeferSeconds) * time.Second
+			// Honoring this silently is exactly the class of quiet
+			// inertness this package now refuses to ship: the operator
+			// asked for a deferral deadline and there is no longer any
+			// such thing (see dequeueAdmitted — a deferred download waits
+			// for the device instead of failing on a timer).
+			opts.ResourceGateWarning = fmt.Sprintf(
+				"offlineCache.resourceGate.maxDeferSeconds (%d) is no longer honored: a deferred download now waits for the device to recover instead of failing on a deadline, so downloads are never dropped from the queue except by an explicit clear",
+				rg.MaxDeferSeconds)
 		}
 	}
 	if hl := cfg.HeadlessLimits; hl != nil {
@@ -221,12 +234,24 @@ func finalizeOptions(opts Options) Options {
 // caller logs (this function stays pure so OptionsFromConfig's tests can
 // assert the mapping).
 func alignHeadlessLimits(l HeadlessLimits) (HeadlessLimits, string) {
-	if !l.Enabled || l.CPUQuotaPercent <= 0 {
+	if !l.Enabled {
 		return l, ""
 	}
 	allowed := countAllowedCPUs(l.AllowedCPUs)
-	if allowed <= 0 {
-		return l, "" // no cpuset pin: the quota alone governs
+	// A spec that is present but unparseable is a CONFIGURED pin that will
+	// silently apply nowhere — the same class of quiet inertness this whole
+	// area exists to make loud. It is easy to hit by accident because
+	// systemd's AllowedCPUs= accepts whitespace-separated forms that
+	// taskset -c rejects, so an operator can copy a legal systemd value
+	// straight into config and lose the pin without a word. Reported here
+	// rather than left to a Bool field on a later Info line.
+	if allowed <= 0 && strings.TrimSpace(l.AllowedCPUs) != "" {
+		return l, fmt.Sprintf(
+			"offlineCache.headlessLimits.allowedCpus %q is not a CPU list taskset can apply (systemd accepts whitespace-separated forms that taskset -c rejects); the capture chromium will run WITHOUT a cpu pin",
+			l.AllowedCPUs)
+	}
+	if l.CPUQuotaPercent <= 0 || allowed <= 0 {
+		return l, "" // no pin: the quota alone governs
 	}
 	if maxQuota := allowed * 100; l.CPUQuotaPercent > maxQuota {
 		warning := fmt.Sprintf(
@@ -238,35 +263,57 @@ func alignHeadlessLimits(l HeadlessLimits) (HeadlessLimits, string) {
 	return l, ""
 }
 
-// countAllowedCPUs counts the CPUs in a systemd AllowedCPUs list
-// ("0-3", "0,2,4", "0-3,8-11"). Returns 0 for an empty or unparseable
-// spec, which callers treat as "no pin" rather than guessing.
+// maxPlausibleCPUID bounds a CPU id in an AllowedCPUs/taskset list. Well
+// above any machine this ships on, and it keeps a hostile or fat-fingered
+// "0-9999999999" from materializing a set large enough to matter.
+const maxPlausibleCPUID = 4095
+
+// countAllowedCPUs reports how many DISTINCT CPUs a systemd AllowedCPUs /
+// `taskset -c` list selects, or 0 when the spec is one taskset cannot
+// apply. Callers treat 0 as "no pin" (see alignHeadlessLimits and
+// captureWrapperArgv).
+//
+// DISTINCT, not the sum of segment widths. taskset accepts overlapping and
+// repeated segments and simply unions them — verified: `0-3,2-5` pins six
+// CPUs (0-5), not eight, and `0,0,1` pins two, not three. Summing widths
+// overstates what the pin can deliver, which would let alignHeadlessLimits
+// admit a CPUQuota above it; the quota then silently stops being a limit,
+// which is the exact failure that clamp exists to prevent.
+//
+// Empty segments are MALFORMED, not skippable: `taskset -c "0-3,,4"` is
+// rejected outright, so counting it as five would hand the spawn a spec
+// that cannot exec — and the whole wrapper would then fall back, costing
+// the pin. Returning 0 routes it to the configured-but-unusable warning
+// instead.
 func countAllowedCPUs(spec string) int {
 	if strings.TrimSpace(spec) == "" {
 		return 0
 	}
-	total := 0
+	cpus := make(map[int]struct{})
 	for part := range strings.SplitSeq(spec, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
-			continue
+			return 0
 		}
 		lo, hi, isRange := strings.Cut(part, "-")
 		start, err := strconv.Atoi(strings.TrimSpace(lo))
-		if err != nil {
+		if err != nil || start < 0 {
 			return 0
 		}
-		if !isRange {
-			total++
-			continue
+		end := start
+		if isRange {
+			if end, err = strconv.Atoi(strings.TrimSpace(hi)); err != nil || end < start {
+				return 0
+			}
 		}
-		end, err := strconv.Atoi(strings.TrimSpace(hi))
-		if err != nil || end < start {
+		if end > maxPlausibleCPUID {
 			return 0
 		}
-		total += end - start + 1
+		for id := start; id <= end; id++ {
+			cpus[id] = struct{}{}
+		}
 	}
-	return total
+	return len(cpus)
 }
 
 // defaultHeadlessLimits derives the CPU pin and the CPU quota TOGETHER so
@@ -280,6 +327,12 @@ func countAllowedCPUs(spec string) int {
 // artwork's code does; a CPUQuota alone still lets short bursts light up
 // every core's boost clocks, which is the spike that can brown out the
 // whole device. On the 16-thread target this yields "0-3" @ 300%.
+//
+// That hazard is not theoretical: an FF1 hard-reset the instant a capture
+// started, with the pin turning out to be applying nowhere. Whether the
+// draw was the mechanism is unproven, but the pin is the defense either
+// way — and it is therefore enforced by taskset rather than by the systemd
+// AllowedCPUs= property, which is inert here (see captureWrapperArgv).
 func defaultHeadlessLimits() HeadlessLimits {
 	total := runtime.NumCPU()
 	pinned := max(2, total/4)
@@ -355,8 +408,22 @@ func Bootstrap(
 	if opts.HeadlessLimitsWarning != "" {
 		logger.Warn("offline cache: " + opts.HeadlessLimitsWarning)
 	}
+	if opts.ResourceGateWarning != "" {
+		logger.Warn("offline cache: " + opts.ResourceGateWarning)
+	}
 	store := NewStore(opts.RootDir, osWrapper, jsonWrapper, logger)
-	classifier := NewClassifier(httpClient)
+	// net.DefaultResolver honors the system resolver configuration
+	// (systemd-resolved on this device), so the guard's view of a name
+	// matches what the capture paths will actually dial moments later —
+	// a private resolver here would make the check answer a different
+	// question than the one that matters. See ErrUnsafeSource.
+	// The probe client is GUARDED, not the daemon-wide httpClient: the
+	// URL it fetches is untrusted playlist input, and a pre-flight check
+	// on that URL alone is bypassed by a single 302 (see ErrUnsafeSource).
+	// The guard enforces the same reserved-address policy in DialContext,
+	// so every redirect hop and every re-resolution is checked too.
+	classifier := NewClassifier(
+		newGuardedHTTPClient(net.DefaultResolver, wrapper.HTTPClientTimeout), net.DefaultResolver)
 	headlessDebugPort := safeHeadlessDebugPort(opts.HeadlessDebugPort, opts.KioskCDPEndpoint, logger)
 	downloader := NewDownloader(
 		opts.HeadlessBinaryPath, opts.HeadlessUserDataDir, headlessDebugPort,
@@ -383,9 +450,18 @@ func Bootstrap(
 	// mediaDownloadTimeout and captureFinalizeWindowDefault — which is
 	// the contract NewHTTPClientWithoutTimeout's own doc requires of
 	// every caller.
-	bodyClient := wrapper.NewHTTPClientWithoutTimeout()
+	// Guarded for the same reason as the probe client above, and with no
+	// whole-request timeout for the reason this comment block describes.
+	bodyClient := newGuardedHTTPClient(net.DefaultResolver, 0)
 
-	capturer := NewCapturer(downloader, dialer, bodyClient, store, jsonWrapper, ioWrapper, clockWrapper, opts.MaxDiskBytes, logger)
+	// Two clients, opposite trust properties — see NewCapturer's doc.
+	// cdpDiscoveryClient reaches our OWN capture Chromium on loopback, so
+	// it must be the plain client: handing the guarded one to a loopback
+	// DevTools endpoint refuses every software capture before navigation.
+	// It keeps the 30s timeout, which suits a small /json targets list
+	// and bounds a wedged local browser.
+	cdpDiscoveryClient := wrapper.NewHTTPClient()
+	capturer := NewCapturer(downloader, dialer, cdpDiscoveryClient, bodyClient, net.DefaultResolver, store, jsonWrapper, ioWrapper, clockWrapper, opts.MaxDiskBytes, logger)
 	// mediaCapturer needs no Downloader/dialer — it downloads a
 	// non-software item's single-file source directly over HTTP, never
 	// spinning up the headless Chromium capturer/downloader owns (see
@@ -400,7 +476,7 @@ func Bootstrap(
 	// treats as "no prompt recovery wired", not as a startup failure.
 	scopeLost, _ := replayer.(ScopeLostRegistrar)
 	notifier := NewNotifier(relayerClient, wsHandler, logger)
-	admissionOpts := AdmissionOptions{Clock: clockWrapper, MaxDefer: opts.ResourceGate.MaxDefer}
+	admissionOpts := AdmissionOptions{Clock: clockWrapper}
 	var sysMetricsSink func(raw []byte)
 	if opts.ResourceGate.Enabled {
 		gate := NewAdmissionGate(opts.ResourceGate.Policy, clockWrapper, jsonWrapper, logger)

@@ -63,6 +63,22 @@ classifies as `ClassStreaming` — the only class `DownloadItem`/
 byte-for-byte content a one-shot download or a static blob-store replay
 could faithfully serve (§3.3, §8).
 
+Two source shapes never reach a network probe at all:
+
+- An RFC 2397 **`data:` URI** is `ClassInline`. Its media type is parsed
+  straight out of the URI (a bounded scan for the metadata-terminating
+  comma — the payload is never decoded), and the item is then *skipped*
+  rather than queued: its bytes already travel inside the playlist body
+  that `SavePlaylist` persists, so the player reads them back offline
+  from the playlist record itself and there is nothing to fetch. This is
+  a legitimate exclusion, not a failure — it does not count toward
+  `classifyFailed` and does not fail the command. Handing one to
+  `http.Client` (which cannot dial `data:`) is what previously made every
+  inline cover image a permanent, unretryable classification failure.
+- A source that is **not safe to dial** is rejected with
+  `ErrUnsafeSource` before any probe, download, or `Page.navigate` — see
+  §9.
+
 ## 2. Pipeline overview
 
 ```
@@ -84,7 +100,7 @@ Discover  →  Capture  →  Store  →  Replay
   straight into the blob store — no browser process at all. See §3.3.
 - **Store**: `store.go` content-addresses the bytes (sha256) into a shared
   blob store, deduplicated across items/playlists, plus one
-  `items/<itemId>.json` record per edition — shared unchanged by both
+  `items/<sha256(item.source)>.json` record per source — shared unchanged by both
   capture paths above.
 - **Replay**: `replay.go` intercepts `Fetch.requestPaused` on the kiosk
   Chromium (`:9222`) and fulfills from the local blob store or a loopback
@@ -141,15 +157,65 @@ STARTING queued jobs while the device is under pressure:
   (93) − softwareThermalHeadroomC (18)`, and that 18°C is sized to cover
   the heat a capture bounded by `headlessLimits` can add. Latching
   hysteresis (resume = block − 5 units) prevents flapping at the metrics
-  cadence, and `maxDeferSeconds` defaults to an hour so a queued download
-  can wait out a single hot-running artwork's display slot rather than
-  fail midway through it.
-- **Deferral is not an error**: the gate only delays the head-of-queue pop
-  (`dequeueAdmitted`), strictly FIFO — no skip-ahead. A deferred item
-  stays `queued` on the wire (no new state in the app contract), remains
-  clearable without `busy`, and in-flight captures are never aborted. A
-  head deferred past `maxDeferSeconds` (default 60 min) fails with a
-  visible reason; re-issuing the download is the established retry path.
+  cadence.
+
+  > **Calibration warning — the derivation is not self-evidently
+  > well-sized.** It reserves an 18°C berth beneath the watchdog, but on
+  > the FF1 target `k10temp` measures **77.8–79.2°C during normal WebGL
+  > playback** (40/40 samples over two minutes above the 75°C block line,
+  > 0/40 below the 70°C resume line). The berth therefore exceeds the
+  > ~13.8°C of headroom the hardware actually has, and the software bucket
+  > is not "defer under pressure" but "never admit" outside a cold-boot
+  > window. Combined with the no-deadline policy above, that means software
+  > captures queue forever. **This number, not the queue policy, is where
+  > the intended behavior lives** — resizing it (or scheduling captures for
+  > genuinely idle windows instead of gating on temperature) is the open
+  > work, and it needs the thermal delta of one pinned capture measured
+  > before picking a value.
+- **Deferral is not an error**: a deferred item stays `queued` on the wire
+  (no new state in the app contract), remains clearable without `busy`,
+  and in-flight captures are never aborted.
+- **Selection is skip-scan, not head-only** (`dequeueAdmitted`). The gate's
+  verdict depends only on a job's CLASS, and the two classes are gated very
+  differently — software strictly on temperature, media permissively. Under
+  the original head-only pop, one thermally deferred software job blocked
+  media downloads behind it in the shared FIFO that the gate would have
+  admitted instantly. The worker now takes the first job the gate currently
+  admits, so a hot device keeps draining media work while its software jobs
+  wait. FIFO order is preserved **within** each class, which is the only
+  ordering anything depends on; only cross-class overtaking is intended.
+- **Deferral never drops a job, for any class.** A job leaves the queue
+  only by being processed or by an explicit clear — never on a timer.
+  Caching an artwork is optional, deferrable work; keeping the panel stable
+  is not, so a device under pressure postpones downloads rather than
+  turning them into client-visible errors it had no way to avoid.
+
+  This replaced a `maxDeferSeconds` bound that failed a job deferred too
+  long. Its justification was that "the FIFO cannot be wedged forever
+  behind one item on a persistently hot device" — which skip-scan answers
+  directly: nothing is wedged, so nothing has to be failed to unwedge it.
+  The config key is still accepted but **inert**, and setting it logs a
+  warning saying so rather than being quietly ignored.
+
+  What is unbounded is the WAIT, not any resource: the queue is
+  memory-only, capped by `maxQueueLen` (4096) with `enqueue` idempotent per
+  source, and dropped on restart. Saturating it would take thousands of
+  *distinct* permanently-deferred sources, so `ErrQueueFull` is the
+  theoretical backstop, not the realistic outcome. Starvation is not the
+  mirror risk either: software is not waiting behind media, it is waiting
+  on temperature, and media draining meanwhile costs it nothing.
+
+  **Known gap — the software path can be silently non-functional.** The
+  realistic consequence is that `queued` persists indefinitely with the
+  cause visible only in the daemon log, where it is indistinguishable from
+  healthy in-progress work. On a device whose steady-state temperature sits
+  above the software block threshold (see the calibration warning above),
+  software captures never start *and* never fail. The daemon log is not
+  reachable from the mobile app, so today there is no supported way for a
+  client or a field engineer to tell "deferred" from "wedged". Surfacing
+  the deferral reason on the status payload — an additive field, not a new
+  state — is what closes this, and it is a correctness gap rather than
+  polish.
 - **Fail-open**: no sysmetrics for `metricsStaleAfterSeconds` (default
   15s), or nonsensical readings (zero capacity/temperature), admit
   unconditionally — absence of metrics is not evidence of pressure,
@@ -166,10 +232,12 @@ gate cannot: a capture already in flight is never aborted and can run for
 up to the 30-minute transfer ceiling. `downloader.go` therefore wraps the
 capture Chromium spawn in a transient systemd scope (`systemd-run --user
 --scope`, a runtime invocation — deliberately NOT unit-file properties,
-which would drag this onto the full-image rail):
+which would drag this onto the full-image rail) **plus an argv wrapper**
+(`env -u DBUS_SESSION_BUS_ADDRESS taskset -c <cpus>`). Both halves are
+load-bearing; see "Why the scope alone does not hold" below.
 
 - `CPUQuota` (default 300%) caps total cycles — bounding the heat and
-  scheduling pressure an in-flight capture can generate; `AllowedCPUs`
+  scheduling pressure an in-flight capture can generate; the CPU pin
   (default: first quarter of the machine's logical CPUs, "0-3" on the
   16-thread target) additionally pins it so short bursts cannot light up
   every core's boost clocks (a quota alone still allows that); `MemoryMax`
@@ -183,10 +251,90 @@ which would drag this onto the full-image rail):
   profile lock. A scope also survives a crashed daemon by design, so the
   first spawn of each daemon run sweeps stale `feral-offline-capture-*`
   scopes before probing.
-- Scope support is probed once (`systemd-run ... /bin/true`); on failure
-  (no session bus, missing binary) the downloader logs one warning and
-  degrades to the plain uncapped spawn — a broken environment slows
-  nothing and blocks nothing, it just loses the cap.
+- Support is probed once, against the **exact spawn shape** a real capture
+  uses (scope properties *and* argv wrapper, running `/bin/true`). The two
+  capabilities are probed **independently** and then composed — a combined
+  probe cannot say which half failed, so a broken wrapper would surrender
+  the scope with it and blame systemd in the log while systemd was fine.
+  The resulting matrix, each cell logging what is left:
+
+  | available | in force |
+  |---|---|
+  | scope + pinned wrapper | quota, memory ceiling, CPU pin |
+  | scope + env-only wrapper | quota, memory ceiling |
+  | scope, no wrapper | quota and memory ceiling *until Chromium escapes* |
+  | pinned wrapper only | CPU pin |
+  | neither | nothing (pre-limits behavior) |
+
+  A broken environment slows nothing and blocks nothing. The third row is
+  the one cell where the `resource limits active` line reads more
+  optimistically than reality: with `env` itself unusable there is nothing
+  stopping the escape, so the cgroup limits hold only until Chromium
+  re-parents. The containment check below corrects the record on that very
+  spawn.
+
+#### Why the scope alone does not hold
+
+An FF1 hard-reset at the instant a capture started, with the cap nominally
+enabled. Neither limit was actually in force, for two independent reasons
+— either alone is enough to void the protection:
+
+1. **Chromium escapes the scope.** Given a reachable user session bus,
+   Chromium moves its own browser process into a transient
+   `app-org.chromium.Chromium-<pid>.scope` under `app.slice` at startup —
+   a sibling of ours with every property at its default (`CPUQuota=
+   infinity`, `MemoryMax=infinity`). Everything set on our scope is
+   silently voided. `env -u DBUS_SESSION_BUS_ADDRESS` denies the bus;
+   headless capture has no other use for it.
+2. **`AllowedCPUs=` writes nowhere.** systemd accepts and reports the
+   property, but applying it needs the `cpuset` controller delegated to
+   the user manager. On the FF1 only `cpu`, `memory` and `pids` are
+   (`user@.service` `DelegateControllers`), so no `cpuset.cpus` file is
+   ever created and the pin lands nowhere. `taskset` sets CPU *affinity*
+   instead — a plain process attribute that children inherit and that a
+   cgroup migration does not reset, so the pin survives even an escape
+   that voids everything else.
+
+The pin is the limit that matters most, because it is the one that bounds
+package power draw — and an unpinned SwiftShader capture lighting up all 16
+threads was the load in flight when the device reset. Whether that draw was
+the mechanism is the leading hypothesis, not a proven fact (see **Open:**
+below); the pin is the cheapest defense against it either way, which is why
+the matrix above drops it last rather than first. Note that this is a
+property of the matrix, not an ordering: the scope and the wrapper are
+probed independently, so neither is ever surrendered to buy the other.
+
+Two guards keep this from silently regressing. The probe exercises the
+real shape (the previous `/bin/true`-only probe passed happily while both
+limits were inert, then logged that they were "active"). And every scoped
+spawn checks containment directly: `systemd-run --scope` creates the unit
+and then **execs in place**, so the PID `Start()` returned is the capture
+Chromium's own browser process, and `/proc/<pid>/cgroup` must name the unit
+we spawned it into. An escape moves that process to another cgroup but
+never changes its PID, so the check is exact — and it warns loudly instead
+of reporting limits that enforce nothing.
+
+One trap worth naming, since the CPU spec crosses two parsers: systemd's
+`AllowedCPUs=` accepts whitespace-separated lists (`"0 1 2 3"`) that
+`taskset -c` rejects outright. Handing such a spec to taskset would make
+every spawn fail to exec and drop capture to a bare, fully uncapped
+Chromium — strictly worse than not pinning. The wrapper therefore gates the
+taskset element on `countAllowedCPUs`, the same parser `alignHeadlessLimits`
+uses, so the two always agree about what a CPU list is.
+
+**Open:** whether the default pin (4 CPUs @ 300%) is actually *sufficient*
+to prevent the brownout is unmeasured. Nothing was capped during the field
+reset, so it yields no data on real draw; the fix restores the intended
+protection without proving the protection is enough. If a reset recurs with
+the pin verifiably applied, the lever is a tighter pin (`0-1`) via
+`offlineCache.headlessLimits` — a config change, no rebuild.
+
+Delegating `cpuset` to the user manager would make `AllowedCPUs=` real and
+would also cap the escaped scope, but it is a system-level unit change —
+the full-image rail — so it is deliberately *not* part of this
+package-rail fix. The `--property=AllowedCPUs=` is still passed: it costs
+nothing, documents intent where an operator looks first, and becomes the
+enforcement the day that delegation lands.
 
 **The gate and the cap are one system, not two knobs.** Three couplings
 keep them from drifting into a combination that only works on one device:
@@ -214,12 +362,13 @@ keep them from drifting into a combination that only works on one device:
    revisiting the berth is the amendment hazard to watch.
 
 **Not** attempted: telling Chromium how many CPUs to assume. There is no
-reliable flag for it, and whether Chromium's thread-pool sizing observes a
-cpuset at all is glibc-version dependent. `AllowedCPUs` is enforced by the
-kernel regardless of how many threads Chromium spawns, so the worst case
-is some extra mostly-idle threads — cheap, and not a heat or correctness
-problem. Speculative flags (`--renderer-process-limit`, `--single-process`)
-were rejected as capture-fidelity risks for no bounded gain.
+reliable flag for it, and whether Chromium's thread-pool sizing observes
+its CPU restriction at all is glibc-version dependent. The pin is enforced
+by the kernel regardless of how many threads Chromium spawns, so the worst
+case is some extra mostly-idle threads — cheap, and not a heat or
+correctness problem. Speculative flags (`--renderer-process-limit`,
+`--single-process`) were rejected as capture-fidelity risks for no bounded
+gain.
 
 ---
 
@@ -237,11 +386,16 @@ parsing; it always runs the code and observes.
 
 ### 3.2 CDP `Network` domain — the chosen capture mechanism
 
-`capture.go` enables the CDP `Network` and `Page` domains (not `Fetch` —
-`Fetch` interception is what *replay* uses, §6) and observes
+`capture.go` enables the CDP `Network` and `Page` domains and observes
 `Network.requestWillBeSent`/`responseReceived`/`loadingFailed` for a
 bounded capture window (`offlineCache.captureWindowMs`) after navigating to
 the item's `source`. For each distinct URL:
+
+> `Fetch` is enabled on the capture session too, but for a different
+> purpose than replay's: capture uses it only to **police** where the page
+> may connect (§9's capture-side source guard), never to fulfill a request
+> from cache. Discovery of which URLs were requested still comes from the
+> `Network` events described here.
 
 - **Found on a successful (2xx) response, captured via `GET`/`HEAD`** →
   fetch the exact bytes via an out-of-band `http.Client` request using
@@ -500,9 +654,15 @@ answer the second time around.
 - **One fetch, one resource.** Unlike `capture.go`'s open-ended
   dependency discovery, a `ClassMedia`/`ClassUnknown` item has exactly
   one thing to cache: `item.Source` itself. `MediaCapturer.Capture` issues
-  a single `GET` via the shared `httpClient` (redirects followed
-  transparently — `http.Client`'s default behavior, never handled
-  manually here) and streams the response body straight into
+  a single `GET` via `bodyClient` — NOT the shared daemon `httpClient`.
+  Two boundaries ride on that distinction: `bodyClient` is **guarded**
+  (§9 — the reserved-address policy is enforced in its `DialContext`, so
+  every redirect hop and re-resolution is checked, and it carries no
+  proxy), and it has **no whole-request timeout**, because the 30s one on
+  the shared client would kill any artwork transfer slower than that.
+  Redirects are still followed transparently, but each hop is now
+  policed rather than merely followed. The response body streams straight
+  into
   `store.WriteBlob`, exactly like `capture.go`'s `fetchAndStoreBody` does,
   so a gigabyte-scale video is never buffered whole in memory here
   either.
@@ -557,10 +717,10 @@ answer the second time around.
   multi-resource case), and `service.process`'s post-capture
   `enforceDiskLimit` eviction runs unchanged afterward for both paths.
 - **Needs no `Downloader`/dialer at all** — `bootstrap.go` wires
-  `NewMediaCapturer` with just the shared `httpClient`, `store`, clock,
-  and `maxDiskBytes`; there is no second Chromium process, no CDP
-  session, and no `downloader.go` single-job-slot contention for this
-  path.
+  `NewMediaCapturer` with the guarded, untimed `bodyClient` (see above and
+  §9), `store`, clock, and `maxDiskBytes`; there is no second Chromium
+  process, no CDP session, and no `downloader.go` single-job-slot
+  contention for this path.
 
 ## 4. Validated edge cases
 
@@ -774,6 +934,74 @@ just a status code. Recording it as incomplete rather than silently
 promising `Coverage.Complete=true` keeps that promise honest; replay
 treats it the same honest-miss way described above.
 
+### 4.8 A sniffed MIME type is not a declared one
+
+CDP's `Network.responseReceived` reports `response.mimeType`, which is
+Chromium's *sniffed* verdict, not the header the origin sent. Where an
+origin declares nothing, Chromium sniffs a type anyway and reports it
+there — so recording `mimeType` as `Resource.contentType` (capture's
+original behavior) turns "the server said nothing" into "the server said
+`text/plain`", and replay then asserts that invented declaration back to
+the browser.
+
+That is strictly worse than asserting nothing, because Chromium's
+MIME enforcement distinguishes the two. Its standards-mode CSS loader
+*tolerates* a stylesheet with no `Content-Type` but *rejects* one with a
+non-CSS type. Observed on FF1-191TYKPB: a Feral File CDN preview served
+`styles.css` with no `Content-Type` at all, and the artwork rendered
+correctly online but, offline, its stylesheet parsed to zero rules and
+its `<model-viewer>` collapsed to the element's intrinsic 300×150 box in
+the corner of a 4K screen. Injecting the same cached bytes as a real
+`<style>` element restored the full 3840×2160 layout — the bytes were
+never the problem, only the asserted type. The same latent hazard applies
+to scripts, which Chromium MIME-checks whenever the response carries
+`X-Content-Type-Options: nosniff`.
+
+Capture therefore reads the origin's own `Content-Type` out of the raw
+CDP header map (`headerValue`, before `filterReplayableHeaders` drops it)
+and stores exactly that in `Resource.contentType`, empty included; every
+replay path that carries bytes — the inline `Fetch.fulfillRequest` and
+the static server's large-asset fallback alike — emits the header only
+when it is non-empty, so an origin that declared nothing replays as
+nothing and Chromium sniffs just as it did live. The static-server path
+needs one extra step for this: `http.ServeContent` invents a type of its
+own when the header is absent, so `handleBlob` sets `Content-Type` to an
+explicit `nil` to suppress it.
+
+The sniffed value is still worth keeping, in its own
+`Resource.sniffedContentType` field, persisted only when the origin
+declared nothing. Its single consumer is the HEAD content-type probe
+(`fulfillHeadFromGet` answering ff-player's `getContentTypeFromURL`, see
+§6), which selects the native `<img>`/`<video>`/`<audio>` renderer for an
+extensionless media URL: dropping the guess outright would silently
+demote those items to extension inference. A sniffed type is a good
+answer to "what is this, roughly?" and a bad answer to "what did the
+server say?" — the two fields exist to keep those questions apart, and
+only the probe may fall back from one to the other.
+
+The direct-download path (`mediacapture.go`) has no browser to sniff for
+it, so it fills the same field itself from the leading bytes of the
+response (`bodySniffer`, `http.DetectContentType`) when the origin
+declared nothing — otherwise the gap would land exactly where it hurts
+most, since an empty `Content-Type` classifies as `ClassUnknown` and
+`ClassUnknown` routes to that very path. It records nothing when the
+bytes sniff to either of `DetectContentType`'s two catch-alls — one per
+branch of its binary/text split, `application/octet-stream` and
+`text/plain; charset=utf-8` — since neither is a positive
+identification: a confident non-answer is worse than silence for a field
+whose consumer stops falling back to extension inference the moment it
+gets one. The text catch-all matters as much as the binary one here, and
+for the same items: a headerless SVG without an XML prolog and a
+headerless `.gltf` manifest both land on it.
+
+Existing on-disk records keep whatever type they were captured with.
+They are re-captured — and thereby fixed — the next time the controller
+issues `downloadPlaylist` for them, since `enqueue` skips only items
+already queued or downloading, never ones already cached. Nothing in the
+daemon re-captures on its own, though: `displayPlaylist` and the
+periodic playlist refresh both only index, so shipping this package
+alone does not repair a fielded device's existing records.
+
 ---
 
 ## 5. On-disk format (simplified, no redundancy)
@@ -782,33 +1010,134 @@ Root: `offlineCache.rootDir` (default
 `/home/feralfile/.cache/offline-artworks/`).
 
 Design rule: **keep only what replay and status reporting need; derive
-everything else.** Three directories, one essential record per item:
+everything else.** Three directories, one essential record per SOURCE:
 
 ```
 offline-artworks/
-  blobs/<sha256>                      # shared content-addressed bytes (the ONLY place binary payloads live)
-  items/<itemId>.json                 # the ONE per-item record (ItemRecord in types.go)
-  playlists/<playlistId>.json         # resolved DP-1 playlist (see note below), stored only for whole-playlist downloads
-  playlists/by-url/<sha256(url)>.json  # {"playlistId": "..."} pointer, only when DownloadPlaylist was given a sourceURL
+  blobs/<sha256>                          # shared content-addressed bytes (the ONLY place binary payloads live)
+  items/<sha256(item.source)>.json        # the ONE per-source record (ItemRecord in types.go)
+  playlists/<playlistId>.json             # resolved DP-1 playlist (see note below), stored only for whole-playlist downloads
+  playlists/by-url/<sha256(url)>.json     # {"playlistId": "..."} pointer, only when DownloadPlaylist was given a sourceURL
 ```
 
-`items/<itemId>.json` (`ItemRecord`, see `types.go`):
+**An item's cache identity is its `source` URL, never its DP-1 `id`**
+(`SourceKey` in `types.go`: `hex(sha256(source))` over the exact byte
+string, no normalization).
+
+The argument is the spec, not any particular resolver's behavior: the
+DP-1 core schema makes `id` **optional** (only `source` is required) and
+defines it as a UUID v4 — a random identifier derived from nothing about
+the artwork — so a conforming playlist may omit it or change it freely.
+Nothing durable may key on a field with that contract. `source` is the
+one field that is simultaneously mandatory in DP-1, what capture actually
+navigates to/downloads, and what replay matches paused requests against,
+so keying on it makes the storage identity and the lookup identity the
+same thing.
+
+Observed instability is the symptom that surfaced this, not the
+justification. Items materialized from the spec `dynamicQuery` profile
+carry whatever id the remote resolver returned (`dp1-go` mints none), and
+in the field those ids arrived fresh on each resolution — orphaning
+id-keyed records, so replay scope missed, status lied `not_cached`, and
+re-downloads stormed. Do **not** generalize that to "dynamic playlists
+always regenerate ids": the legacy `dynamicQueries`/FFIndexer path in
+`dp1.go` mints a deterministic UUIDv5 over (contract, chain,
+tokenNumber). That is an implementation detail of one resolver rather
+than a contract — and the spec above is why neither behavior may be
+relied on.
+
+**The trade-off, stated plainly: `source` is mutable where an id may not
+be.** An FFIndexer-resolved item's source is the token's
+`animation_url`/`image_url`, so a CDN migration or a re-rendered preview
+changes it and orphans the cached record, costing a re-download. That is
+the correct outcome rather than a regression — the captured bytes are
+keyed to the exact URL replay will request, so a record under the old URL
+cannot serve the new one — but it is a real cost. Recovering "same
+artwork, new source" would need a separate provenance-based alias
+(`chain:contract:tokenId`), deliberately not built here; it is not
+something a change to this key could provide. Hashing is deliberately byte-exact: replay
+also matches exact URLs, so a "normalized" key could claim a cache hit
+for bytes captured under a different URL, the one direction that serves
+wrong content; under-normalization merely costs a duplicate capture for
+trivially different spellings. The hex name also keeps arbitrary-length,
+externally-controlled URL strings out of filenames — the same convention
+`playlists/by-url/` already uses.
+
+**The record is per-source, not per-playlist-item.** Items sharing a
+`source` — within one playlist or across playlists — converge on one
+record and therefore one status entry, with their blobs shared.
+
+How far up the pipeline that dedup reaches depends on the scope, and the
+distinction is worth stating precisely rather than claiming more than
+holds:
+
+- **Within one `downloadPlaylist` call**, a repeated source costs one
+  classify probe and one capture: `classifyPlaylistItems` dedups by
+  source key before probing (first occurrence wins, playlist order
+  preserved).
+- **Across separate requests**, each call classifies independently — two
+  concurrent `downloadPlaylist`/`downloadPlaylistItem` requests naming
+  the same source do issue two probes, since classification happens
+  before either can observe the other's queued state. The duplicate
+  probe is a bounded, accepted cost (one `HEAD`, or a small ranged `GET`
+  fallback); coalescing it would need an in-flight-classify registry with
+  its own synchronization on a path whose real dedup — the capture — is
+  already correct. **They converge to a single capture precisely when the
+  second `enqueue` still observes the first job as `queued`/
+  `downloading`**: that check and the `queue.push` are one critical
+  section, so the loser returns `enqueueAlreadyQueued` and schedules
+  nothing. That is the common case, since classification is bounded by
+  `classifyItemTimeout` while a capture holds the worker for far
+  longer. It is not an unconditional guarantee, and the boundary is worth
+  naming: if the first capture *completes* before the second request's
+  own classify returns, the second sees a terminal state and legitimately
+  schedules a fresh capture — which is the recapture case in the next
+  bullet, reached by an overlapping request rather than a later one. (An
+  eviction cannot manufacture that outcome by clearing an in-flight
+  item's tracked state: it may still reclaim such a source's stale
+  record, but `notifyEvicted` compare-and-sets the state downgrade under
+  the same lock `enqueue` commits `queued` under, so a scheduled job is
+  never downgraded and never becomes invisible to the idempotency check.)
+- **A later request for an already-captured source is a deliberate
+  recapture**, not a missed dedup: it re-probes, re-captures, and
+  refreshes the existing record in place under the same key.
+
+The flip side
+is deliberate and refcount-free: clearing a source via one playlist
+(`clearPlaylistCache`) makes it `not_cached` for every other cached
+playlist that contains it. The record's verbatim `item` field holds
+whichever resolution captured last — informational drift only, since
+replay reads `resources` and the DP-1 id inside is not an identity.
+
+`items/<sha256(item.source)>.json` (`ItemRecord`, see `types.go`):
 
 ```json
 {
-  "itemId":  "work-1",
-  "item":    { "id": "work-1", "source": "...", "...": "verbatim DP-1 item, source NEVER rewritten" },
+  "item":    { "id": "work-1", "source": "...", "...": "verbatim DP-1 item, source NEVER rewritten; item.source is the record's identity" },
   "entry":   "https://host/index.html",
   "resources": [
     { "url": "https://host/app.js",  "status": 200, "sha256": "ab12…", "contentType": "application/javascript" },
     { "url": "https://cdn.example.com/lib.js", "status": 200, "sha256": "cd34…", "contentType": "application/javascript",
       "headers": { "Access-Control-Allow-Origin": "https://host" } },
-    { "url": "https://host/mv.min.js", "status": 302, "redirectTo": "https://host/mv@1.2/mv.min.js" }
+    { "url": "https://host/mv.min.js", "status": 302, "redirectTo": "https://host/mv@1.2/mv.min.js" },
+    { "url": "https://cdn.example.com/preview/styles.css", "status": 200, "sha256": "ef56…",
+      "sniffedContentType": "text/plain", "//": "origin declared none: no contentType, so replay declares none either (§4.8)" }
   ],
   "coverage": { "complete": true, "reason": "" },
   "capturedAt": "2026-07-17T04:55:00Z"
 }
 ```
+
+**This layout is already sufficient for a future `.dp1c` capsule export**
+(DP-1's offline transport: a tar+zstd archive of `playlist.json` +
+`assets/`, integrity-checked via sha256 — see dp1-validator's
+`validator/capsule.go`), with no migration: a cached playlist's body and
+its item records are produced from the same resolved playlist struct, so
+their `source` strings are byte-identical, and an exporter derives
+everything by walking `playlists/<id>.json` → `items[].source` →
+`sha256(source)` → `items/<key>.json` → `resources[].sha256` →
+`blobs/<sha256>`. Changes to this on-disk format must keep that
+derivation chain intact.
 
 `playlists/<playlistId>.json` is the playlist as `commandrouter` resolved it
 through `dp1.DP1` before calling `Service.DownloadPlaylist` — `dynamicQuery`
@@ -897,7 +1226,10 @@ There is deliberately **no** top-level manifest, no separate
 - Only fields replay routing and status reporting actually consume are
   kept on `Resource`: `url`/`status`/`redirectTo` drive replay's
   fulfill-or-redirect decision, `sha256`/`contentType` drive the fulfill
-  body. `size` is not persisted — it derives from the blob file's own size
+  body. `contentType` is the origin's own declaration and is absent when
+  the origin made none; the separate, rarely-present
+  `sniffedContentType` holds Chromium's guess for the HEAD probe alone
+  (see §4.8). `size` is not persisted — it derives from the blob file's own size
   on disk. Capture-time diagnostics collapse into `Coverage.{Complete,Reason}`
   (free text — `csp_blocked`, `loading_failed(<errorText>):<url>`,
   `fetch_failed:<url>`, `unresolved_at_deadline:<url>`, `http_error(<status>):
@@ -969,12 +1301,44 @@ There is deliberately **no** top-level manifest, no separate
   caller could have enqueued a job — the one point in this package's
   lifecycle where "no capture can possibly be in flight" is true by
   construction, so unconditionally deleting every `*.tmp` file there is
-  safe in a way it would not be from `GC()`.
+  safe in a way it would not be from `GC()`. `Start` also runs one full
+  `GC()` pass in that same window: GC is otherwise only reached through
+  clears and eviction, and eviction can only free bytes by deleting
+  records `ListItemKeys` can see — so records GC must retire (a legacy
+  id-keyed cache from before source keying, or any invalid/mismatched
+  filename) would otherwise pin their blobs against `maxDiskBytes` where
+  no eviction pass could ever reclaim them, starving every new capture's
+  budget on a full store. **Operationally this means a device upgrading
+  from the id-keyed format loses its entire offline cache on the first
+  boot** — the records are unreadable under the new keying and their
+  blobs are reclaimed — and the transition is silent: `Start`'s rebuild
+  never sees those records, so no `offline_cache_status` notification is
+  emitted and clients learn of it at their next `getOfflineCacheStatus`.
+  Re-downloading is the recovery, and it is the accepted cost of shipping
+  this as a new on-disk format rather than carrying migration code.
 - Blobs are freed by a **sweep, not a refcount**: `store.go`'s `GC()` walks
   every saved item record's `Resources` to build the "keep" set, then
   deletes any blob not in it. There is no separate reference count kept in
   sync with saves/deletes — the saved item records are already the source
   of truth for what is live.
+- GC's mark phase retires two further unreachable-by-construction
+  shapes alongside genuinely unparsable records, and treats them
+  differently on purpose. A `.json` file whose name is not a valid source
+  key is **deleted**: that is the expected bulk state of a pre-source-keying
+  cache, and renaming a whole store's worth of records to `*.corrupt`
+  would strand those bytes permanently inside the `maxDiskBytes` budget
+  (`DiskUsage` counts them, `DeleteItem` only targets `<key>.json`, and
+  eviction only walks `ListItemKeys`, so nothing could reclaim them);
+  they are a stale record of a format the daemon no longer reads, and the
+  blobs they referenced are freed by the same sweep. A parseable record
+  at a VALID key whose own `item.source` does not hash to that filename
+  is instead **quarantined**: bytes written under an identity they do not
+  carry are a genuine anomaly worth preserving evidence of, they are rare
+  by construction (so the quarantine comment's "a few KB of JSON" bound
+  holds), and `LoadItem` rejects the same mismatch as corrupt — mirroring
+  `ReadBlob`'s hash-vs-name verification. No reader can load either shape,
+  so keeping them "live" would pin their blobs forever for content nothing
+  can serve.
 - A record the mark phase cannot load splits two ways, because the two
   failure shapes demand opposite responses. A **transient read error**
   (EIO/EMFILE) aborts the whole sweep with an error: the record still
@@ -986,7 +1350,7 @@ There is deliberately **no** top-level manifest, no separate
   next successful sweep). A **deterministically unparsable record**
   (`ErrItemRecordCorrupt` — bytes read fine, JSON never will parse) is
   instead **quarantined** (renamed to `<id>.json.corrupt`, out of
-  `ListItemIDs`' view but preserved for forensics) and the sweep
+  `ListItemKeys`' view but preserved for forensics) and the sweep
   continues. Aborting on it too would wedge GC on every future pass —
   and since GC is the only path that frees blob bytes (`DeleteItem`
   removes just the record JSON), that would permanently disable the disk
@@ -1059,7 +1423,7 @@ There is deliberately **no** top-level manifest, no separate
   next status query). The call is `notifyObserver`, *not* `notify`:
   `notify` would write the state back into `s.state`, re-adding the entry
   the clear just removed — and since `s.state` is also the in-memory half
-  of the known-item set (`allKnownItemIDs`), every cleared item would then
+  of the known-item set (`allKnownItemKeys`), every cleared item would then
   linger in whole-store status pages, and grow that map without bound,
   purely as a side effect of having been cleared.
 - That push is **ordered against a racing `enqueue`'s own `queued`
@@ -1263,6 +1627,27 @@ so a genuinely different URL can never be silently served the wrong
 cached bytes. If a future `ff-player` version starts appending another
 UI-only param, add it to `playerAppendedQueryParams` in `replay.go`.
 
+A second field reproduction (FF1-191TYKPB, a fully cached Art Blocks item
+reporting `ready`/100% yet showing Chromium's error page) narrowed how
+that append interacts with a **query-less** source. `ArtworkPlayer.tsx`
+appended the hint with `url.search += '&display_mode=…'`, and when
+`search` is empty the `URL` setter emits `…/147000065?&display_mode=fit`
+— an empty leading pair. Stripping `display_mode` alone then left a
+dangling `…/147000065?`, which is not the captured key
+`…/147000065`, so the item missed and failed closed exactly as before.
+This hit **every** source without a query string (all
+`generator.artblocks.io` URLs, and any bare `item.Source`); the CDN
+previews that carry `?edition_number=…` masked it, because for them the
+appended `&` is a legitimate separator. Fixed on both sides: `ff-player`
+now selects the separator from `search` (`?` vs `&`), and
+`stripQueryParams` drops empty pairs while rebuilding. The daemon-side
+half is not redundant — the player bundle and the daemon update on
+independent cadences, so a fielded device can run a new daemon against an
+old bundle. The drop is deliberately scoped to a query string already
+being rewritten to strip an allowlisted param: an empty pair on its own
+never triggers a rewrite, so it cannot widen what matches a cached
+resource.
+
 **The player's `HEAD` content-type probe is answered from the matching
 `GET` resource, not a separately-captured `HEAD` entry.** Before
 rendering a media item, `ff-player`'s `getContentTypeFromURL` issues a
@@ -1281,9 +1666,13 @@ the correct native `<img>`/`<video>`/`<audio>` element. `replay.go`'s
 `v`/`x-request` params (`headProbeQueryParams`, the same order/encoding-
 preserving stripping as `display_mode` above) and looking up the `GET`
 resource for that same URL; if found, it fulfills with that resource's
-status/`Content-Type`/allowlisted headers but an **empty body** — correct
-HTTP semantics for `HEAD`, and exactly what the probe needs to pick the
-right renderer. This substitutes method only, never URL, so it carries
+status/allowlisted headers and its `ProbeContentType()` but an **empty
+body** — correct HTTP semantics for `HEAD`, and exactly what the probe
+needs to pick the right renderer. This is the ONE caller that may fall
+back from the origin's declared `Content-Type` to Chromium's sniffed
+guess (§4.8): the probe feeds renderer selection, not the browser's own
+MIME enforcement, so a guess beats no answer here where it would break a
+stylesheet on any path that carries bytes. This substitutes method only, never URL, so it carries
 none of the "could serve the wrong bytes" risk a URL-based normalization
 would. Since native media elements render on the kiosk's TOP-LEVEL page
 (not inside a cross-origin iframe the way software artworks are — see
@@ -1361,8 +1750,8 @@ no new per-target machinery was needed for this.
 Replay is only enabled while a cached item is on screen:
 `commandrouter`'s `displayPlaylist` path and `playlist-refresher` call
 `KioskReplay.SyncPlaylist` (`kioskreplay.go`) with the current playlist's
-item IDs before/after the CDP display call, which enables `Fetch`
-interception scoped to whichever of those IDs are actually cached
+item source URLs before/after the CDP display call, which enables `Fetch`
+interception scoped to whichever of those sources are actually cached
 (`EnableForPlaylist` in `replay.go`) and disables it entirely when none are.
 `commandrouter`'s `displayPlaylist` handler calls `SyncPlaylist` for the
 *new* playlist **before** asking CDP to actually display it — deliberately,
@@ -1377,7 +1766,7 @@ leaves scope untouched, because the previous playlist keeps displaying
 and switching interception to the deferred playlist would — under a
 fail_closed scope — block the on-screen playlist's own requests even
 with live network. When a filtered cast IS pushed, the scope is synced
-with the FULL playlist's item IDs rather than the active cohort: the
+with the FULL playlist's item sources rather than the active cohort: the
 scheduler's timer/wake/retry cutovers push later cohorts of the same
 playlist directly with no replay-scope hook of their own, so the
 cast-time scope must already cover every cohort a cutover can display
@@ -1467,6 +1856,40 @@ displayPlaylist-by-URL offline fallback for playlists that far back —
 Item records are counted but not separately bounded: unlike playlist
 bodies they are deleted with their item, so they scale with a population
 eviction already controls.
+
+The ceiling is also **reported**, as `getOfflineCacheStatus`' `diskLimit`
+alongside the `diskUsed` it bounds, so a controller can show cache usage
+as a proportion rather than a bare byte count and explain why items
+disappear. It is omitted rather than sent as `0` when `maxDiskBytes <= 0`,
+because that case means no ceiling *and no item eviction* — the opposite
+of what a `0` would convey. (Playlist-body pruning above is by count and
+runs regardless, which is why that phrasing says *item*.)
+
+What `diskLimit` reports is the **budget, not the threshold eviction
+actually fires at** — the two are different numbers, and a controller that
+conflates them draws a gauge that misreads in both directions.
+`reclaimDiskForCapture` above runs before every capture and evicts down to
+`maxDiskBytes - maxDiskBytes/captureReclaimHeadroomDivisor`, so a busy
+store oscillates between roughly seven eighths of the budget and the
+budget itself (a capture is handed the whole freed headroom as its own
+ceiling — see `newDiskBudgetFromStore`); `enforceDiskLimit` only binds
+when one capture writes past the ceiling in a single pass. Usage can also
+sit *above* the budget indefinitely, because eviction runs only on the
+capture path: lowering `maxDiskBytes` on a populated device is not
+reconciled until the next download, and `Start` deliberately does not
+enforce the ceiling (it sweeps and GCs only). Playlist bodies are counted
+but bounded by count, so no eviction reclaims them either.
+
+`docs/controld-inbound-controller-messages.md` states all of this for
+client authors, and quotes the current one-eighth margin as an explicitly
+**illustrative, non-contractual** figure so a client can picture the
+behavior without hardcoding it. Retuning `captureReclaimHeadroomDivisor`
+therefore means updating every figure derived from it: "one eighth" and the
+"~8.75 GiB" example in that doc's "Cache size and eviction" paragraph, and
+"roughly seven eighths" above in this one — not merely rechecking the
+surrounding prose, which stays true at any margin. If a controller ever
+genuinely needs the threshold rather than the budget, add a field for it
+rather than letting clients derive one from the divisor.
 
 ### A child target is only resumed once interception is armed
 
@@ -1683,12 +2106,17 @@ identical cache state.
   window, not manifest-based; no capture is a formal guarantee. Coverage
   (`Coverage.Complete`/`Reason`) is the best-effort signal surfaced to the
   mobile app, not a certification.
-- **Nested targets are not separately attached on the CAPTURE side.**
-  Capture (`capture.go`) only observes the top-level page target's
-  `Network` events; it does not attach `Target.setAutoAttach` for Web
-  Workers or nested iframes, so requests issued purely from within a
-  worker or a nested iframe (rather than proxied through the top-level
-  page) can be invisible to capture. Service Workers registered by the
+- **Nested targets are attached, but not OBSERVED, on the CAPTURE side.**
+  These are two different things and the distinction matters. Capture
+  *does* now attach child targets — `enableGuardedAutoAttach` issues
+  `Target.setAutoAttach` recursively — but it arms only `Fetch` on them,
+  for the security guard (§9). It does **not** enable `Network` on a
+  child, so requests issued purely from within a worker or a nested
+  iframe (rather than proxied through the top-level page) are still
+  invisible to *discovery* and their bytes are not cached. Removing the
+  auto-attach to "simplify" this bullet would therefore reopen the
+  loopback bypass in §9 while changing nothing about coverage. Service
+  Workers registered by the
   artwork itself compound this: they can intercept and serve their own
   responses, further hiding requests from top-level `Network` domain
   capture. Note this is a capture-side statement: capture navigates the
@@ -1792,7 +2220,398 @@ identical cache state.
   needs the resource-fetch side effects of that rendering, not its visual
   accuracy — see `start-kiosk.sh`.
 
-## 9. See also
+## 9. Source safety: what a playlist is allowed to point at
+
+A playlist body is untrusted input. It arrives over the LAN hub — which
+binds `0.0.0.0:1111` and is **unauthenticated** — and over the relayer,
+and every `source` inside it is a URL this daemon will dial on the
+playlist's behalf from three separate places:
+
+- `classify.go`'s `HEAD` / ranged-`GET` probe,
+- `mediacapture.go`'s direct body download,
+- `capture.go`'s `Page.navigate` in the headless browser.
+
+The device runs privileged, unauthenticated services on loopback that
+those paths would otherwise reach: Chromium's DevTools endpoints on
+`127.0.0.1:9222` (kiosk) and `:9223` (capture), the hub itself on
+`:1111`, `feral-sys-monitord` on `:9001`, and the blob static server on
+`:8082`. Without a guard, a `source` of `file:///etc/shadow` is local
+file disclosure through the headless browser, and
+`http://127.0.0.1:9222/json/new?...` is full control of the kiosk
+browser — both reachable by anyone on the LAN.
+
+`sourceguard.go` closes that off inside `Classify`, which is the single
+function BOTH enqueue paths (`DownloadItem` and `DownloadPlaylist`) call
+before any I/O and before any job is queued. A rejected source is
+therefore never probed, never downloaded, and never navigated to. It
+rejects, with `ErrUnsafeSource`:
+
+- any scheme outside `http`/`https` — an allowlist, not a denylist, since
+  the set of schemes a browser or `http.Client` will act on (`file`,
+  `ftp`, `gopher`, `ws`, `chrome`, `devtools`, `about`, `blob`,
+  `javascript`, …) is long and grows;
+- a literal address outside clearly-public space, and the IPv4-mapped /
+  NAT64 / 6to4 forms that wrap one. The two families are handled in
+  opposite directions, deliberately:
+  - **IPv4 is a denylist**, because public v4 is fragmented across the
+    whole space with no single prefix to allow. It enumerates the IANA
+    Special-Purpose Address Registry rows that are not globally
+    reachable — loopback, RFC 1918, link-local (including
+    `169.254.169.254`), CGNAT, `0.0.0.0/8`, IETF protocol assignments,
+    the RFC 5737 documentation ranges, benchmarking, the deprecated
+    6to4 relay anycast prefix, `240.0.0.0/4`, multicast, broadcast.
+    Rows the registry marks globally reachable (the AS112 delegations,
+    AMT) are deliberately admitted: they are real public destinations.
+  - **IPv6 is an allowlist** — `2000::/3`, the only block IANA has ever
+    allocated for global unicast, minus the special-purpose blocks
+    inside it (`2001::/23`, `2001:db8::/32`, `3fff::/20`). Earlier
+    revisions enumerated the non-public v6 ranges instead and were
+    repeatedly found to be missing another one; a denylist over a
+    mostly-unallocated address space cannot be completed, so it was
+    inverted. The cost is that a future second global-unicast block
+    would need a one-line update, which fails closed rather than open.
+- a hostname that RESOLVES to any of the above — checked across *every*
+  answer, not just the first, so a name returning one public and one
+  loopback address cannot be admitted here and then dialed round-robin
+  later.
+
+Reachability on *this* device is deliberately not the criterion. IPv6 is
+disabled on the FF1 today and `0.0.0.x` times out rather than reaching
+loopback, so several refused forms are not live bypasses there — but lab
+and overlay networks do route the special-use ranges internally, and a
+predicate that admits non-public addresses because some current kernel
+does not route them is one config change away from being wrong.
+
+The userinfo trick (`http://cdn.feralfileassets.com@127.0.0.1:9222/…`)
+is handled by resolving the real host via `url.Hostname()` rather than
+matching on the visible prefix — the same hazard `replay.go` documents
+for its own origin checks.
+
+A DNS **resolution failure** is deliberately NOT tagged `ErrUnsafeSource`:
+it is a transient network fault, and reporting it as a security rejection
+would make an offline device look like it is under attack in its logs.
+
+**A URL check alone is not sufficient**, for two reasons that need no
+hostile DNS at all:
+
+- **Redirects.** `http.Client` follows up to ten hops by default, and only
+  the FIRST URL ever reaches the check. A source that passes and then
+  `302`s to `http://127.0.0.1:1111/` walked straight to the
+  unauthenticated hub. Demonstrated: with the enforcement removed, the
+  test client follows the hop and really does dial the private address
+  (`dial tcp 10.0.0.1:80: connect: operation timed out`).
+- **DNS rebinding.** The check resolves a name and discards the addresses;
+  the real dial resolves again, so an answer that flips to a reserved
+  address in between was never re-examined.
+
+Both are closed by applying the SAME policy **at the socket** rather than
+at the URL. `newGuardedHTTPClient` puts `addrsFor` in the transport's
+`DialContext`, which every hop and every re-resolution must pass through,
+and then dials the exact address it just validated so no second lookup can
+substitute another (TLS still verifies against the original hostname, so
+pinning the address costs nothing). `checkRedirect` adds the one thing a
+dialer cannot see — the scheme — plus an explicit hop cap. Both the
+classify probe and the media body client are built this way.
+
+**The transport carries no proxy**, deliberately. With one configured,
+`Transport` dials the *proxy* and hands it the origin host, so
+`DialContext` would validate the proxy's address while the proxy resolved
+and connected to whatever the URL named — the destination would never be
+examined, and everything above would be worth nothing. An earlier revision
+copied `http.DefaultTransport`'s settings wholesale and inherited
+`ProxyFromEnvironment` with them; a regression test now asserts
+`transport().Proxy` is nil, on the field rather than through the
+environment because `ProxyFromEnvironment` caches behind a `sync.Once`.
+
+The trade-off is accepted knowingly: a deployment that can only egress
+through a proxy cannot fetch artwork on these two paths. That is the right
+way round here — artwork origins are public CDNs reached directly on this
+device, and the daemon-wide client (relayer, indexer, OTA) still honors
+proxy environment variables, so only untrusted playlist-source fetches go
+direct. Supporting a proxy safely would mean enforcing the destination
+*through* it (CONNECT-aware checking), not re-enabling the field.
+
+`sourceGuard.check` still runs first: it is what stops a bad source from
+ever being queued, and it produces the error the caller reports.
+
+**Which client goes where matters, and getting it wrong is silent.** The
+capturer holds two: `cdpClient` reaches our OWN capture Chromium's
+DevTools endpoint on loopback (`127.0.0.1:9223/json`) and must be
+UNGUARDED; `fetchClient` pulls resource bytes from artwork origins and
+must be GUARDED. They have opposite trust properties, and one client
+cannot serve both — an earlier revision of this work passed the guarded
+client to both roles, and because the guard correctly rejects loopback,
+every `ClassSoftware` capture failed at `DialPageSession` before
+navigation. `NewCapturer` takes the two separately so the compiler is
+what keeps them apart, and
+`TestCapturer_CDPDiscoveryClientIsNotTheGuardedOne` pins both halves.
+
+**The capture browser is guarded too, at the request level.** The Go
+transport cannot cover Chromium: `capture.go` hands the artwork to
+`Page.navigate`, and the page then issues its own requests, which never
+pass through a Go client. So the capture CDP session enables `Fetch` with
+pattern `*` (the same machinery `replay.go` uses on the kiosk) and answers
+every `Fetch.requestPaused` with `continueRequest` or `failRequest` after
+running the URL's host through the same `addrsFor` policy. Armed before
+`Page.navigate`, so the page's very first request is already covered.
+
+Three details that are easy to get wrong:
+
+- **Handlers must not `Send` inline.** `CDPSession.On` runs handlers on the
+  read pump, and the reply a `Send` waits for can only arrive on that same
+  pump — so every decision is handed to a goroutine, exactly as
+  `replay.go` does.
+- **Saturation fails closed, for the life of the session.** Concurrent
+  decisions are bounded (`captureGuardConcurrency`); beyond that a request
+  is left unanswered rather than admitted, so flooding cannot push an
+  unchecked request through *while the guard is armed*. Be precise about
+  the end of that window: DevTools releases pending interceptions when the
+  `Fetch` domain goes away with its client, so an unanswered pause is a
+  stall, not a permanent kill. That is why capture navigates the page to
+  `about:blank` **before** dropping the session (`stopPageBeforeDetach`) —
+  it discards the page, its timers and its stalled requests together,
+  instead of handing them back to the network on detach.
+- **Only http(s) is checked.** `data:`, `blob:` and `about:` carry their
+  own bytes or name no resource at all, so they open no socket and
+  blocking them would break ordinary artwork for no security gain.
+  `about:` is also what the post-capture teardown navigates to, so
+  refusing it would block the very thing that stops the page.
+
+**Residual gaps, stated rather than hidden.** This is a URL-time check, so
+two things remain open, and both need Chromium's egress taken away
+entirely (a loopback filtering proxy it must dial through) rather than
+more interception:
+
+- **DNS rebinding.** Chromium resolves the host itself *after* we continue
+  the request, and can get a different answer than we did. A name that
+  answers public to us and loopback to Chromium still lands. This is the
+  same class of gap that made the original pre-flight URL check
+  insufficient for the Go paths — closed there by moving to `DialContext`,
+  which has no equivalent here.
+- **WebSocket.** CDP `Fetch` does not intercept WebSocket handshakes, so
+  `ws://` egress from the page is uncovered. The DevTools sockets are
+  awkward to reach (they need a target UUID, read over HTTP `/json`, which
+  IS blocked) — but do not let that understate it: the hub's own
+  `GET → WS /api/notification` on `:1111` is unauthenticated, needs no
+  UUID, and streams device notifications to anything that connects. That
+  is the reachable target, and it is the same surface #3471 closes.
+
+> **Where the real-browser test runs.** The loopback probe
+> (`TestCapturer_RealBrowser_LoopbackRequestsNeverLeaveTheBrowser`) needs a
+> Chromium that both exists and launches. GitHub's runners have one that
+> never starts under their AppArmor user-namespace restriction, and the
+> shipped argv passes no `--no-sandbox`, so **CI skips it** — a green CI
+> run is not evidence it passed. It executes on the FF1. Verified there:
+> three blocks logged, zero connections to the victim, and with the guard
+> verdict stubbed out the victim takes three connections.
+
+- **Workers are contained by pausing, not by interception.** Chromium does
+  not implement the `Fetch` domain on worker targets at all: `Fetch.enable`
+  on a `type:worker` session answers `cdp error -32601: 'Fetch.enable'
+  wasn't found`. Measured on the FF1, not inferred. Because
+  `armCaptureChildTarget` fails closed — it never sends
+  `Runtime.runIfWaitingForDebugger` when it could not arm interception
+  first — the worker simply stays paused for the whole capture and issues
+  no requests. That IS containment, and it is why the loopback probe below
+  records zero hits. But it carries a functional cost that belongs in the
+  open list rather than the solved one: **artwork whose rendering depends
+  on a worker is captured with that worker never running.** Recovering
+  that rendering means resuming the target without interception, which
+  hands every artwork worker an unguarded network — so the fix is the same
+  filtering proxy, not a change to this branch.
+
+Both interception gaps intersect an exposure `docs/architecture.md` already accepts as
+release-scoped (the open, unauthenticated `:1111` surface, end state
+#3471), and are the reason a filtering proxy remains the eventual
+complete answer.
+
+#### Source URL length is bounded at admission
+
+An item source is not merely dialed once — it is retained and re-emitted.
+It is the cache key, it is held in `sourceByKey` and every queued job, it
+is echoed in `offline_cache_status`, and `service.process` puts the
+capture error (which carries it) into a `notify()` `Coverage.Reason` that
+goes out over the relayer WebSocket. The hub accepts a 4 MiB request
+unauthenticated, so an unbounded source is multi-megabyte state plus
+repeated multi-megabyte notifications on a constrained device.
+
+`MaxSourceURLBytes` (2048) is therefore enforced at **admission** —
+`DownloadItem` and `classifyPlaylistItems` — rather than by sanitizing
+each log and wire site. Everything downstream becomes bounded by
+construction: classify's `*url.Error` (which quotes the whole URL),
+mediacapture's raw `%s` interpolation, the notification payload, the
+status response. `truncateSourceForLog` remains as defense in depth, not
+as the primary control.
+
+**The clear barrier.** `downloadPlaylistItem` must resolve a playlist
+before it knows the playlist ID, and that resolve is a network call that
+can block for seconds. So the per-playlist clear generation can only be
+sampled *after* it — by which point a `clearPlaylistCache` that landed
+**during** the resolve is already folded into the sampled value, its
+equality check passes, and the download re-queues the item and re-saves
+the record that the clear already reported as removed.
+
+`ClearBarrier`/`ClearedSinceBarrier` close that window without needing the
+key up front: a process-global, monotonic `clearSeq` is bumped by every
+clear, each cleared playlist ID and item sourceKey records the value it
+was cleared at, and the handler samples the barrier *before* the resolve
+and asks afterwards whether either key was cleared since. Both clear
+commands are covered — `clearPlaylistItemCache` racing a resolve is the
+same bug with a different key. Rejected as retryable `busy`, matching how
+the narrower enqueue-window twin (`ErrClearedDuringDownload`) already
+reports itself.
+
+Both download routes take the barrier — `downloadPlaylistItem` and
+`downloadPlaylist`. The whole-playlist route passes every resolved member
+source as well as the playlist ID, because `classifyPlaylistItems` samples
+its per-item epochs after the resolve too and so is equally blind to a
+clear that landed during it. It rejects the whole command rather than
+skipping the cleared member: the alternative invents partial-success
+semantics for a command whose contract is a single queued/total answer,
+to save one retry that succeeds as soon as the clear settles.
+
+**The clear's own membership snapshot is inside the same serialization.**
+The barrier above protects the *download* side. `ClearPlaylist` needed the
+mirror guarantee: it reads a playlist's member sources to decide what to
+invalidate, and an earlier revision took that snapshot while the clear
+generation was advanced only much later, at the record delete. A
+`DownloadPlaylist` saving a refreshed playlist in between enqueued a source
+the snapshot never saw, `reserveForClear` bumped only the older keys, and
+that item's capture persisted **after** the clear had already reported
+success — leaving it cached with no playlist referencing it, and therefore
+invisible to every playlist-scoped operation.
+
+The generation bump and the membership read now happen together under
+`playlistRecordMu`, the same mutex `savePlaylistAndURLIndex` holds across
+its own re-check and write, and the bump comes first. A save that commits
+earlier is in the snapshot and its items are invalidated; one arriving
+later fails its re-check, which returns `saved=false` and makes
+`DownloadPlaylist` return *before* its enqueue loop, so nothing is queued
+rather than queued-and-orphaned. Bumping first also means clearing an
+uncached playlist still advances the generation — an in-flight download for
+that ID loses to the clear, consistent with how `ClearedSinceBarrier`
+already treats a playlist bump.
+
+**Accepted risk — the narrow residual.** A download that both samples its
+generation *and* saves entirely inside a clear's window still has its
+record deleted with its newly-queued items left cached: the same orphan,
+through a narrower window. It needs a three-way interleaving — sample after
+the clear's first bump, classify the offending item after
+`reserveForClear`, save before the final bump — so a network-bound classify
+loop has to fit inside the clear's delete-and-GC phase. Rare, but that
+phase is not microseconds. Closing it means either holding
+`playlistRecordMu` across the item deletes and GC (putting blob I/O and
+`gc`'s `captureMu` wait under a lock every playlist save needs), or making
+the final delete conditional on the stored bytes still matching the
+snapshot, which changes clear-vs-download from *clear wins* to *newest
+writer wins*. A third option, cheaper than both, is an in-progress-clear
+marker keyed by playlist ID and checked by `savePlaylistAndURLIndex` — it
+runs under `playlistRecordMu` already, so it needs no new lock or ordering,
+though the marker must be released on every return path. Recorded here so
+this is re-opened as a decision rather than re-reported as a new finding.
+
+**What one capture may accumulate is also bounded.** Passing the source
+guard establishes that the ORIGIN is public, not that the page behaves.
+The disk budget caps bytes *fetched*, which does not cover this: the
+capture tracker also holds URLs for resources it never fetches (failures,
+and requests still pending at the deadline), so a permitted artwork
+emitting a stream of distinct long URLs grew daemon memory during the
+window and then grew `ItemRecord.Resources` and the on-disk coverage
+without limit. `MaxCaptureResources` (4096) and
+`MaxCaptureResourceURLBytes` (4096) are an anti-abuse ceiling, set
+generously so real work — a rich software artwork pulls hundreds of
+resources, and signed CDN links run long — never reaches them.
+
+Exceeding either marks the capture **incomplete** with one bounded
+`tracker_limit_exceeded` marker. That matters more than the bound itself:
+silently dropping resources while still reporting `Complete: true` would
+replay as an artwork with missing pieces and no explanation, which is
+worse than the growth being prevented. The marker deliberately does not
+name the refused URLs — those are exactly what was refused.
+
+Note this is the one place a `data:` source is still unbounded on disk, by
+design: a stored playlist body is persisted wholesale, inline items
+included, so `ClearPlaylist` reads those sources back out and truncates
+them at the error boundary rather than at admission.
+
+The **clear and status RPCs need their own bound** and do not inherit
+this one: neither passes through `DownloadItem`, and both echo the
+submitted source back — the clear handler in its `ok` response, status as
+a `not_cached` entry, up to `MaxStatusSources` of them per request, so the
+count bound alone leaves the aggregate unbounded. `CheckSourceKeyLength`
+covers those two boundaries and rejects non-retryably, reporting length
+and (for status) index, never the value — echoing it is the thing being
+prevented. It has no `data:` exemption, because an inline source can
+never be a cached key at all: `Classify` returns `ClassInline`,
+`DownloadItem` returns `ErrItemInlineNotQueued`, nothing is ever
+recorded, so such a lookup can only answer not_found/not_cached either
+way.
+
+Two exemptions, both deliberate: `data:` sources (an inline item's bytes
+ARE its source, legitimately large, never dialed) and subresource URLs
+during capture (signed CDN links routinely run long, and they are
+transient rather than retained). A playlist item whose source is
+oversized is skipped, not counted as a classify failure — otherwise one
+hostile item would make a legitimate playlist look like classification
+itself was down.
+
+> **Scope note.** This section covers what a *playlist item's source* is
+> allowed to point at. It does NOT cover the playlist URL itself:
+> `displayPlaylist` fetches that through `dp1` on the plain daemon client,
+> with no guard. Same untrusted origin, same threat model, different code
+> path — out of scope for this work, and called out here so nobody reads
+> §9 as covering the whole surface.
+
+#### Accepted-risk record: rebinding and WebSocket
+
+These two are an **explicit owner decision**, not an oversight, and are
+recorded here so they are not re-litigated as findings on every pass.
+
+*What was weighed.* Two shapes were costed. Request-level interception
+(what shipped) reuses proven machinery, touches no launch path, and closes
+four of the five exploit classes: a literal reserved URL, a hostname
+resolving reserved at check time, a `302` to a private address, and a page
+subresource aimed at loopback. Each of those costs an attacker nothing but
+a URL. The fifth — rebinding — additionally requires owning a domain,
+running authoritative DNS with a low TTL, and winning a race between our
+resolve and Chromium's. A loopback filtering proxy (`--proxy-server` plus
+`--proxy-bypass-list=<-loopback>`, egress validated by `addrsFor`) would
+close all five *and* WebSocket, because Chromium would have no direct
+egress at all — but it is a new component with its own lifecycle, and it
+would land in the Chromium launch path.
+
+*Correction from review.* An earlier version of this record claimed the
+shipped guard "closes four of the five exploit classes". That was not true
+while the captured page kept running unguarded until the browser's idle
+teardown — deferred egress via `setTimeout` needs no DNS and no
+infrastructure at all, so it belonged in the OPEN column. That hole is now
+closed (`stopPageBeforeDetach`), which is what makes the claim below
+accurate rather than aspirational.
+
+*The judgement.* Residual risk was estimated at roughly 10–15% of the
+practical attack surface: low likelihood, since rebinding needs
+infrastructure, but high impact, since what it reaches is the
+unauthenticated hub. Two facts decided it. The exposure **predates this
+work** — `Page.navigate` on an untrusted source was entirely unguarded
+before, so shipping this strictly improves the device rather than
+introducing anything. And the complete fix belongs with #3471, which is
+already chartered to close the `:1111` surface these paths lead to;
+building a second, overlapping mitigation first would likely be thrown
+away.
+
+*What this is not.* It is not a claim that the capture browser is fully
+guarded. It is guarded against everything that costs an attacker only a
+URL, and knowingly not against an attacker who runs DNS. Anyone reopening
+this should argue about the estimate or the sequencing with #3471, not
+re-report the gap — it is known.
+
+**Operational consequence.** Playlist sources on private or loopback
+addresses are refused. Artwork origins are public CDNs, so this does not
+affect normal operation, but a developer pointing a test playlist at a
+LAN-hosted asset server will see `ErrUnsafeSource` — that is the guard
+working, and would need an explicit opt-in config knob to relax.
+
+## 10. See also
 
 - `components/feral-controld/offlinecache/` — the implementation;
   `classify.go` (routing), `capture.go` (software/headless path),
@@ -1805,3 +2624,5 @@ identical cache state.
 - `components/feral-controld/config/config.go` — `OfflineCacheConfig`
   (`offlineCache.*`) tuning knobs, and their defaults in
   `offlinecache/bootstrap.go`.
+- `components/feral-controld/offlinecache/sourceguard.go` — the source
+  allowlist and reserved-address checks described in §9.

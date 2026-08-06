@@ -84,10 +84,10 @@ func TestResourceTransfer_SlowButProgressingBodyOutlivesTheFinalizeWindow(t *tes
 	url := srv.URL + "/big.bin"
 
 	store := NewStore(t.TempDir(), wrapper.NewOS(), wrapper.NewJSON(), zaptest.NewLogger(t))
-	c := &capturer{httpClient: wrapper.NewHTTPClientWithoutTimeout(), store: store, logger: zaptest.NewLogger(t)}
+	c := &capturer{fetchClient: wrapper.NewHTTPClientWithoutTimeout(), store: store, logger: zaptest.NewLogger(t)}
 
 	tracker := newCaptureTracker()
-	tracker.recordResource(url, go_http.StatusOK, "application/octet-stream", "", nil, go_http.MethodGet)
+	tracker.recordResource(observedResponse{URL: url, Status: go_http.StatusOK, ContentType: "application/octet-stream", Method: go_http.MethodGet})
 
 	// Long enough to let the fetch START (the work before it is a map
 	// walk and a sort, microseconds), far too short to let the ~1.5s
@@ -127,7 +127,7 @@ func TestResourceTransfer_StalledBodyIsCutOffPromptly(t *testing.T) {
 
 	srv, _ := trickleHandler(t, 20, 64, 10*time.Millisecond, 3) // 3 chunks, then silence
 	store := NewStore(t.TempDir(), wrapper.NewOS(), wrapper.NewJSON(), zaptest.NewLogger(t))
-	c := &capturer{httpClient: wrapper.NewHTTPClientWithoutTimeout(), store: store, logger: zaptest.NewLogger(t)}
+	c := &capturer{fetchClient: wrapper.NewHTTPClientWithoutTimeout(), store: store, logger: zaptest.NewLogger(t)}
 
 	start := time.Now()
 	_, _, err := c.fetchAndStoreBody(context.Background(), srv.URL+"/wedged.bin", go_http.MethodGet, 0)
@@ -148,7 +148,7 @@ func TestResourceTransfer_CeilingBoundsATrickleThatNeverStalls(t *testing.T) {
 
 	srv, _ := trickleHandler(t, 200, 8, 20*time.Millisecond, 0) // never stalls, but runs ~4s
 	store := NewStore(t.TempDir(), wrapper.NewOS(), wrapper.NewJSON(), zaptest.NewLogger(t))
-	c := &capturer{httpClient: wrapper.NewHTTPClientWithoutTimeout(), store: store, logger: zaptest.NewLogger(t)}
+	c := &capturer{fetchClient: wrapper.NewHTTPClientWithoutTimeout(), store: store, logger: zaptest.NewLogger(t)}
 
 	start := time.Now()
 	_, _, err := c.fetchAndStoreBody(context.Background(), srv.URL+"/trickle.bin", go_http.MethodGet, 0)

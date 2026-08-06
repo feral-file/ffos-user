@@ -21,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
+	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -69,12 +70,15 @@ type Executor interface {
 	// setupui.Service with the provisioning domain. Set once at wiring time; the
 	// lazy setupUI() fallback still covers tests that do not inject.
 	SetSetupUI(ui *setupui.Service)
-	// SetRelayerCloser injects the function that closes the LIVE relayer
-	// session (relayer.Close). Factory reset calls it so revoking the former
-	// owner's control channel does not depend on the staged reboot actually
-	// happening — the seam keeps devicectl from importing relayer. Set once at
-	// wiring time.
-	SetRelayerCloser(close func())
+	// ResetStaged reports that a factory reset is staged and its reboot is
+	// pending, so the command surface must stay closed (see the resetStaged
+	// field). It is a REQUIRED interface method rather than an optional
+	// type-asserted seam on purpose: an implementation that silently lacked it
+	// would fail OPEN, which for this guard means serving commands to a former
+	// owner on a device mid-wipe. Enforcement lives in commandrouter.Process —
+	// the one dispatch point every transport and every command family shares;
+	// devicectl only owns the latch.
+	ResetStaged() bool
 }
 
 type executor struct {
@@ -89,11 +93,6 @@ type executor struct {
 	// claimObserver, when set, is notified on claim-state transitions. Set once
 	// at wiring time before commands are served, so it needs no lock.
 	claimObserver func(claimed bool)
-
-	// relayerCloser, when set, closes the live relayer session (see
-	// SetRelayerCloser). Same single-writer wiring-time contract as
-	// claimObserver, so it needs no lock.
-	relayerCloser func()
 
 	// Add reference to StatusPoller to get metrics
 	statusPoller status.Poller
@@ -134,6 +133,15 @@ type executor struct {
 	// pre-claim gates.
 	autoClaimInFlight atomic.Bool
 
+	// autoClaimWake (built lazily via autoClaimWakeChan, buffered 1) lets an
+	// online transition or topic assignment that lands while a claim-flow run
+	// is in flight preempt that run's stretched ladder-failure backoff. The
+	// in-flight guard above would otherwise silently swallow those
+	// re-triggers for hours — the invariant the guard protects is "no
+	// concurrent gate runs", not "no wake-ups".
+	autoClaimWakeOnce sync.Once
+	autoClaimWake     chan struct{}
+
 	// pairingConfirmed latches the cloud's showPairingQRCode(false) pairing
 	// confirmation. connect() (the claim) sets ConnectedDevice, but the
 	// confirmation does NOT — without this latch the auto-claim loop stayed
@@ -141,6 +149,37 @@ type executor struct {
 	// Ready/hidden screen. In-memory: a restart re-derives via deviceClaimed
 	// (connect precedes the confirmation in the normal flow).
 	pairingConfirmed atomic.Bool
+
+	// resetStaged latches while a factory reset is staged and its reboot is
+	// pending. It exists because the reset's own unclaim (clearPersistedClaim)
+	// ARMS the very things it needs held off during the reset script's ~8s
+	// pre-reboot window, on a relayer session that stays open:
+	//
+	//   - the auto-claim flow, which stops being a no-op the moment
+	//     claimSettled() goes false, and repaints "finalizing" then the claim QR
+	//     over the factory_reset narration. Its trigger is a topic-less relayer
+	//     reconnect: the persisted topic is cleared, so ANY reconnect (the read
+	//     loop's own on a socket error — relayer.background — or the mediator's
+	//     sysmetrics reconcile) draws a fresh topic, and that empty->set edge
+	//     fires the mediator's topic observer. The same edge also fires if the
+	//     server re-sends a system message on the ESTABLISHED socket, so
+	//     removing any single reconnect path does not close this.
+	//   - every inbound command with an effect that OUTLIVES the reset. The
+	//     candidate boot can roll back to this subvolume, so a write under it
+	//     survives: connect re-persists ConnectedDevice, sshAccess writes
+	//     authorized_keys, the analytics/beta toggles write state sentinels,
+	//     and updateToLatestVersion arms a competing bootctl one-shot that can
+	//     displace the reset's own. commandrouter.Process rejects all of them
+	//     (see servedDuringFactoryReset) — deliberately NOT devicectl.Execute,
+	//     which only ever sees the device-control subset.
+	//
+	// Released on the two paths where the reboot provably is not coming: the
+	// unit failing to start, and the stuck-reset watchdog. Both matter because
+	// a stuck latch is worse than the bug it prevents — it would leave a live,
+	// unclaimed device permanently refusing commands behind a "do not power
+	// off" panel. In-memory by design: a successful reset reboots into a
+	// subvolume where none of this state exists.
+	resetStaged atomic.Bool
 
 	// staleOverlaySwept gates the once-per-process boot reconciliation of the
 	// player's overlay: narration is in-memory, so after a daemon restart the
@@ -249,6 +288,29 @@ type executor struct {
 	//     broken until repaired.
 	// nil (tests, doubles) means no expiry.
 	bootLifecycleProbe func() bool
+
+	// networkHealth, when wired (SetNetworkHealth), composes the additive
+	// §4.7 network object attached to getDeviceStatus replies.
+	networkHealth func(ctx context.Context) *status.NetworkHealth
+
+	// wifiSetupStarter, when wired (SetWifiSetupStarter), runs the
+	// provisioning machine's startWifiSetup admission and queues the
+	// user-requested raise (provisioning.Machine.StartWifiSetup). nil renders
+	// the command unavailable — a wiring that predates the seam must reject,
+	// not pretend.
+	wifiSetupStarter func(ctx context.Context) error
+
+	// internetProbe, when wired (SetInternetProbe), reports cached internet
+	// reachability. The claim flow's topic-wait expiry consults it to tell
+	// "reachable LAN but no WAN — the topic can never arrive" (narrate it:
+	// the unclaimed wired no-WAN device otherwise ends at a black screen,
+	// docs/network-recovery-ux.md §4.6) from "online but the relayer is slow"
+	// (keep today's silent hide). Deliberately TRI-STATE (value, error), not a
+	// bool: only a real "offline" verdict may narrate — a monitord restart or
+	// D-Bus timeout at expiry proves nothing, and degrading it to false would
+	// paint "no internet access" over a healthy network. nil, like an error,
+	// keeps the silent hide unconditionally.
+	internetProbe func(ctx context.Context) (bool, error)
 
 	// otaGateEntryProbe is the startup OTA gate's OWN entry-window predicate
 	// (main wires it to re-read /proc/uptime against the wider
@@ -440,17 +502,15 @@ func (e *executor) SetSetupUI(ui *setupui.Service) {
 	})
 }
 
-// SetRelayerCloser wires the live-session revocation used by factoryReset. See
-// the Executor interface doc.
-func (e *executor) SetRelayerCloser(close func()) {
-	e.relayerCloser = close
-}
-
 func (e *executor) SaveLastSysMetrics(metrics []byte) {
 	e.Lock()
 	defer e.Unlock()
 	e.lastSysMetrics = metrics
 }
+
+// ResetStaged reports the staged-factory-reset latch. See the Executor
+// interface doc for why enforcement lives in commandrouter, not here.
+func (e *executor) ResetStaged() bool { return e.resetStaged.Load() }
 
 func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface{}, error) {
 	cmdJSON, _ := cmd.JSON()
@@ -498,6 +558,8 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.setBetaFeaturesToggle(ctx, bytes)
 	case commands.CMD_DEVICE_STATUS:
 		result, err = e.getDeviceStatus(ctx)
+	case commands.CMD_START_WIFI_SETUP:
+		result, err = e.startWifiSetup(ctx)
 	case commands.CMD_UPDATE_TO_LATEST:
 		result, err = e.updateToLatest(ctx)
 	case commands.CMD_FACTORY_RESET:
@@ -685,20 +747,57 @@ func (e *executor) showPairingQRCodeInProcess(ctx context.Context, show bool) (i
 
 // runPreClaimGateAndPaint runs the mandatory pre-claim OTA gate and paints the
 // claim QR only when the gate settles on a supported build: the device must
-// reach one before it can be claimed. It reports whether the QR was painted
-// and whether the outcome is terminal for this process (ResultUpdateStarted:
+// reach one before it can be claimed. It reports whether the QR was painted,
+// whether the outcome is terminal for this process (ResultUpdateStarted:
 // the device is rebooting into the new build; ResultTooOldToUpgrade: nothing
 // short of a reflash helps) so the auto-claim retry loop knows when another
-// attempt is pointless.
-func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bool) (painted, terminal bool) {
+// attempt is pointless, and whether this call latched an update-LADDER
+// failure so the loop stretches its retry cadence (see
+// autoClaimLadderFailureBackoffMin/Max for why that is neither terminal nor
+// the normal backoff).
+func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bool) (painted, terminal, ladderFailed bool) {
+	// t0 anchors the latch-freshness check in the error branch below. It MUST
+	// be read from the same clock the gate stamps FailureState.At with (both
+	// are e.clock — see otaGateInstance) and MUST stay raw: no .UTC()/.Round()
+	// or serialization, so the comparison keeps Go's monotonic reading and an
+	// NTP step between t0 and the latch cannot reorder them.
+	t0 := e.clock.Now()
 	result, err := e.otaGateInstance().EnsureLatestBeforeClaim(ctx)
 	if err != nil {
-		// Retryable: version-check failures (often fresh-network DNS/route
-		// convergence) and failed update ladders (the ladder clears its own
-		// latch on the next explicit run).
+		// Two retryable failure shapes with very different costs (F-12):
+		//  - A version-check failure (often fresh-network DNS/route
+		//    convergence) or a ctx cancel (which never latches — see otagate
+		//    runLocal) is cheap; the normal 30s..5m backoff is right, and the
+		//    ladder clears its own latch on the next explicit run.
+		//  - The update LADDER ran and latched Failure() during this call.
+		//    The latch means ladder EXHAUSTION — a bad signature latches on
+		//    attempt one, three transient download failures latch on attempt
+		//    three; the latch does NOT carry the classifier's verdict. Either
+		//    way the round burned up to MaxUpdateRetries full multi-GB
+		//    downloads, so the normal cadence would re-download
+		//    near-continuously forever on an unattended device — and a bad
+		//    published signature/image strands every unclaimed device in the
+		//    batch at once. Report it so the retry loop stretches the cadence
+		//    (escalating, so the flaky-network shape recovers within the
+		//    hour) — but never hard-terminal: unlike the startup gate, the
+		//    claim flow has NO nightly-timer fallback, so a device that
+		//    simply stays online would otherwise remain unclaimable for the
+		//    whole process lifetime.
+		// Failure() is read AFTER the gate returned, so a concurrent
+		// RequestUpdate ladder latching inside that tiny window would be
+		// misattributed to this round and stretch a cheap version-check
+		// failure. Accepted: the loop only runs on unclaimed devices, the
+		// singleflight serializes gate runs, and the error direction is
+		// conservative (a slower retry, never a lost one — the wake channel
+		// still preempts it).
+		if updateLadderFailureLatchedSince(e.otaGateInstance().Failure(), err, t0) {
+			e.logger.Warn("Pre-claim OTA gate's update ladder failed; stretching claim retry cadence",
+				zap.Error(err), zap.Stringer("gateResult", result))
+			return false, false, true
+		}
 		e.logger.Warn("Pre-claim OTA gate did not pass; withholding claim QR",
 			zap.Error(err), zap.Stringer("gateResult", result))
-		return false, false
+		return false, false, false
 	}
 	if result != otagate.ResultNoUpdateNeeded {
 		e.logger.Info("Pre-claim OTA gate did not settle on no-update; withholding claim QR",
@@ -713,7 +812,7 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 		if result == otagate.ResultTooOldToUpgrade {
 			e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		}
-		return false, true
+		return false, true, false
 	}
 	// The gate is slow (live version check, possibly an update ladder); the
 	// device may have been claimed or pairing-confirmed while it ran. The
@@ -726,10 +825,30 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 	// the same intent.
 	if skipIfSettled && e.claimSettled() {
 		e.setupUI().HideIfShowing(setupui.StateFinalizing)
-		return false, true
+		return false, true, false
 	}
 	e.setupUI().ShowClaimQR(e.buildDeviceConnectURL(ctx), e.deviceID())
-	return true, false
+	return true, false, false
+}
+
+// updateLadderFailureLatchedSince reports whether the OTA gate's failure latch
+// was set by the gate call that started at t0 (t0 read from the SAME clock the
+// gate stamps FailureState.At with). The latch records that an update LADDER
+// ran to exhaustion — it does NOT carry the transient/permanent classifier
+// verdict, so callers must not read "latched" as "unrecoverable". Freshness
+// (At not before t0) is the primary criterion: the gate clears its latch only
+// on NoUpdateNeeded/ladder entry — deliberately NOT on VersionCheckFailed — so
+// a stale latch from an earlier round must not reclassify a cheap transient
+// failure as a ladder one. Error identity is the auxiliary criterion: a caller
+// that joined an already in-flight run (otagate singleflight) can have taken
+// t0 AFTER that run stamped its latch, and the shared error object is then the
+// only evidence the failure belongs to this round. Times are compared raw so
+// the monotonic clock reading survives (NTP-step immune).
+func updateLadderFailureLatchedSince(fs otagate.FailureState, gateErr error, t0 time.Time) bool {
+	if gateErr == nil || !fs.Failed {
+		return false
+	}
+	return !fs.At.Before(t0) || errors.Is(gateErr, fs.Err)
 }
 
 const (
@@ -757,6 +876,7 @@ type setupNarrator interface {
 	Hide()
 	SweepStaleOverlay()
 	HideIfShowing(states ...string)
+	ShowConnectingIfShowing(message string, states ...string)
 }
 
 // setupUI lazily builds the setup-narration surface from the executor's CDP
@@ -790,6 +910,34 @@ const (
 	// raced fresh-network DNS convergence would withhold the claim QR forever.
 	autoClaimRetryMin = 30 * time.Second
 	autoClaimRetryMax = 5 * time.Minute
+
+	// autoClaimLadderFailureBackoffMin/Max bound the stretched retry cadence
+	// after a pre-claim gate round whose update LADDER failed. The gate's
+	// failure latch records ladder EXHAUSTION, not a classifier verdict:
+	// three transient download failures latch exactly like a bad signature
+	// (otagate's runUpdateLadder returns the final error either way). Each
+	// latched round cost up to MaxUpdateRetries full multi-GB image
+	// downloads, so the transient 30s..5m cadence would re-download nearly
+	// continuously (F-12) — but a flat hours-long wait would equally punish a
+	// device that merely lost three download races on flaky Wi-Fi. Hence the
+	// escalation: the first latched round retries within the hour (the flaky
+	// network case), and consecutive latched rounds double toward one ladder
+	// per day (the bad published image case). Never hard-terminal: the claim
+	// flow has no nightly-timer fallback, so the loop must keep retrying on
+	// its own; an online transition or topic assignment arriving while the
+	// loop is PARKED shortens the wait to at most autoClaimLadderWakeFloor
+	// (pokes landing while the gate itself runs are dropped —
+	// drain-before-park), so a moved/fixed device recovers within minutes,
+	// not hours, without flapping links running ladders back-to-back.
+	autoClaimLadderFailureBackoffMin = 1 * time.Hour
+	autoClaimLadderFailureBackoffMax = 24 * time.Hour
+
+	// autoClaimLadderWakeFloor is the minimum spacing a wake-preempted park
+	// still enforces before re-entering the gate. Deliberately aliased to
+	// autoClaimRetryMax so the wake path can never re-run a download ladder
+	// faster than the transient cadence's cap allows — retuning either value
+	// means deciding for both.
+	autoClaimLadderWakeFloor = autoClaimRetryMax
 )
 
 // MaybeShowClaimQROnOnline is the SoftAP-era replacement for launcher-ui's
@@ -801,7 +949,21 @@ const (
 // concurrent runs, and topic-less waits (e.g. an offline wired link) are all
 // no-ops; a later online transition re-triggers.
 func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
+	// A staged factory reset owns the screen until the reboot lands. Checked
+	// before the in-flight swap so a poke cannot queue a repaint either — the
+	// reset's own unclaim is what made this flow live again (see resetStaged).
+	if e.resetStaged.Load() {
+		return
+	}
 	if !e.autoClaimInFlight.CompareAndSwap(false, true) {
+		// A run is already in flight — possibly parked in the stretched
+		// ladder-failure backoff. Poke it (non-blocking, buffered 1) so the
+		// online transition or topic assignment that landed here still
+		// shortens the wait instead of being silently swallowed for hours.
+		select {
+		case e.autoClaimWakeChan() <- struct{}{}:
+		default:
+		}
 		return
 	}
 	defer e.autoClaimInFlight.Store(false)
@@ -829,12 +991,35 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 
 	if !e.waitForRelayerTopic(ctx) {
 		e.logger.Warn("Auto claim flow: relayer topic not ready; withholding claim QR until the next online transition")
-		// Clear only our own finalizing narration; nothing is coming. The
-		// topic wait is 60s — the longest window in this flow for another
-		// narrator to take the screen (a link drop re-raises the setup AP
-		// and paints softap_qr), so an unconditional Hide here would blank
-		// an active setup surface. See runPreClaimGateAndPaint's settled
-		// branch for the shared rationale.
+		// The topic wait is 60s — the longest window in this flow for another
+		// narrator to take the screen (a link drop re-raises the setup AP and
+		// paints softap_qr), so BOTH branches below are conditional on the
+		// finalizing overlay this flow painted still being up; an
+		// unconditional paint or hide here would clobber an active setup
+		// surface. See runPreClaimGateAndPaint's settled branch for the shared
+		// rationale.
+		//
+		// With CONFIRMED no internet (cached verdict, unclaimed device) the
+		// topic can never arrive — the old silent hide here was the unclaimed
+		// wired no-WAN black screen (docs/network-recovery-ux.md §4.6):
+		// reachable over the LAN, claimable over the LAN, and nothing on the
+		// panel saying so. Narrate it instead; the overlay is cleared by this
+		// flow's own later narrations or any provisioning transition, the same
+		// ownership it has today.
+		if e.internetProbe != nil {
+			if online, perr := e.internetProbe(ctx); perr == nil && !online {
+				msg := "Connected by cable, but there is no internet access. " +
+					"Setup will continue when the connection is restored."
+				if name := e.deviceID(); name != "" {
+					msg += " (" + name + ")"
+				}
+				e.setupUI().ShowConnectingIfShowing(msg, setupui.StateFinalizing)
+				return
+			}
+		}
+		// Online, probe error, or no probe wired: nothing is coming this
+		// pass, but asserting "no internet" without a real offline verdict
+		// would smear a healthy network — keep the silent hide.
 		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return
 	}
@@ -848,13 +1033,40 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 
 	e.logger.Info("Auto claim flow: device online and unclaimed; running pre-claim gate")
 	backoff := autoClaimRetryMin
+	ladderBackoff := autoClaimLadderFailureBackoffMin
 	for {
-		painted, terminal := e.runPreClaimGateAndPaint(ctx, true)
+		painted, terminal, ladderFailed := e.runPreClaimGateAndPaint(ctx, true)
 		if painted || terminal {
 			return
 		}
-		e.logger.Info("Auto claim flow: gate not settled; retrying", zap.Duration("backoff", backoff))
-		if err := e.clock.SleepContext(ctx, backoff); err != nil {
+		wait := backoff
+		if ladderFailed {
+			// This round already burned a full download ladder (see
+			// runPreClaimGateAndPaint). The stretched cadence escalates across
+			// consecutive latched rounds (flaky Wi-Fi retries within the
+			// hour; a bad published image converges toward one ladder per
+			// day) and keeps recovery automatic: the wake channel below lets
+			// an online transition or topic assignment preempt the wait. The
+			// transient backoff is deliberately NOT advanced by these rounds:
+			// a later transient failure resumes the cheap cadence where it
+			// left off.
+			wait = ladderBackoff
+			ladderBackoff *= 2
+			if ladderBackoff > autoClaimLadderFailureBackoffMax {
+				ladderBackoff = autoClaimLadderFailureBackoffMax
+			}
+		}
+		e.logger.Info("Auto claim flow: gate not settled; retrying", zap.Duration("backoff", wait))
+		if ladderFailed {
+			// Preemptible sleep, stretched cadence ONLY: transient rounds
+			// keep the plain sleep so connectivity flaps cannot multiply
+			// cheap gate rounds into extra load, while a parked hours-long
+			// wait stays responsive to the re-triggers the narration
+			// promises.
+			if err := e.sleepClaimBackoffPreemptible(ctx, wait); err != nil {
+				return
+			}
+		} else if err := e.clock.SleepContext(ctx, wait); err != nil {
 			return
 		}
 		if e.claimSettled() {
@@ -863,10 +1075,80 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 			e.setupUI().HideIfShowing(setupui.StateFinalizing)
 			return
 		}
-		backoff *= 2
-		if backoff > autoClaimRetryMax {
-			backoff = autoClaimRetryMax
+		if !ladderFailed {
+			backoff *= 2
+			if backoff > autoClaimRetryMax {
+				backoff = autoClaimRetryMax
+			}
+			// Symmetric to the transient backoff surviving ladder rounds: a
+			// transient round resets the ladder escalation. The escalation
+			// accumulates evidence of a persistently bad published image
+			// (every round latches on a solid network), and a cheap failure
+			// slipping in between means the NETWORK itself just broke — which
+			// reattributes the earlier exhaustion toward the flaky-network
+			// cause the 1h floor exists for. Only consecutive latched rounds
+			// converge toward one ladder per day.
+			ladderBackoff = autoClaimLadderFailureBackoffMin
 		}
+	}
+}
+
+// autoClaimWakeChan lazily builds the buffered(1) wake channel that lets
+// MaybeShowClaimQROnOnline invocations arriving while a run is in flight
+// preempt that run's stretched ladder-failure backoff. Lazy (like setupUI) so
+// tests constructing a bare executor get a working channel from either side.
+func (e *executor) autoClaimWakeChan() chan struct{} {
+	e.autoClaimWakeOnce.Do(func() { e.autoClaimWake = make(chan struct{}, 1) })
+	return e.autoClaimWake
+}
+
+// sleepClaimBackoffPreemptible sleeps like clock.SleepContext but returns
+// early when the auto-claim wake channel is poked — an online transition or
+// topic assignment landed while this loop was parked in the stretched
+// ladder-failure backoff, and both of those wirings call the same in-flight-
+// guarded entry point, so without the poke they would be silently swallowed
+// for hours. Returns non-nil only when ctx is done (SleepContext's contract),
+// so the caller's abort path is unchanged.
+//
+// Two guards keep the wake path from re-opening F-12's back-to-back download
+// loop (a link flap DURING the ladder is the expected case on exactly the
+// device whose downloads fail, and the factory-fresh topic assignment
+// routinely lands before the first park):
+//   - Drain-before-park: a wake buffered while the gate was RUNNING is
+//     discarded, so only a transition that arrives while actually parked can
+//     preempt the wait.
+//   - Wake floor: even a legitimate mid-park wake re-enters the gate no
+//     sooner than autoClaimLadderWakeFloor after the park began — the remainder is
+//     slept non-preemptibly, capping download volume at one ladder per floor
+//     no matter how hard the link flaps, while still recovering a moved or
+//     fixed device within minutes instead of hours.
+func (e *executor) sleepClaimBackoffPreemptible(ctx context.Context, d time.Duration) error {
+	select {
+	case <-e.autoClaimWakeChan():
+	default:
+	}
+	parkedAt := e.clock.Now()
+	sleepCtx, cancelSleep := context.WithCancel(ctx)
+	defer cancelSleep()
+	done := make(chan error, 1)
+	go func() { done <- e.clock.SleepContext(sleepCtx, d) }()
+	select {
+	case err := <-done:
+		// sleepCtx can only have been canceled via ctx here, so the error
+		// passes through as the caller's own cancellation.
+		return err
+	case <-e.autoClaimWakeChan():
+		// Reap the sleeper before returning so no goroutine outlives the
+		// loop iteration holding a stale timer.
+		cancelSleep()
+		<-done
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if elapsed := e.clock.Now().Sub(parkedAt); elapsed < autoClaimLadderWakeFloor {
+			return e.clock.SleepContext(ctx, autoClaimLadderWakeFloor-elapsed)
+		}
+		return nil
 	}
 }
 
@@ -1032,6 +1314,21 @@ func (e *executor) SetStartupOTAGateEntryProbe(probe func() bool) {
 	e.otaGateEntryProbe = probe
 }
 
+// SetWifiSetupStarter injects the provisioning machine's startWifiSetup
+// admission+queue entry point. Same wiring-before-run ordering contract as
+// SetBootLifecycleProbe.
+func (e *executor) SetWifiSetupStarter(starter func(ctx context.Context) error) {
+	e.wifiSetupStarter = starter
+}
+
+// SetInternetProbe injects a cached internet-reachability check (sys-monitord's
+// cached connectivity, never a live network probe) used by the claim flow's
+// topic-wait expiry narration (see internetProbe for the tri-state contract).
+// Same wiring-before-run ordering contract as SetBootLifecycleProbe.
+func (e *executor) SetInternetProbe(probe func(ctx context.Context) (bool, error)) {
+	e.internetProbe = probe
+}
+
 // Defaults for awaitPlayerCommandHandlerReady. The timeout is shorter than the
 // connectivity re-seed's: on timeout this path still proceeds (and escalates
 // to the reload), so it only delays the dead-page repair, never skips it.
@@ -1159,7 +1456,68 @@ func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, versi
 }
 
 func (e *executor) getDeviceStatus(ctx context.Context) (interface{}, error) {
-	return e.deviceStatus.GetStatus(ctx)
+	resp, err := e.deviceStatus.GetStatus(ctx)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	// Attach the §4.7 health object (probe-free by the seam's contract);
+	// nil seam simply omits the additive field.
+	if e.networkHealth != nil {
+		resp.Network = e.networkHealth(ctx)
+	}
+	return resp, nil
+}
+
+// SetNetworkHealth injects the §4.7 network-health composer (the provisioning
+// snapshot plus the cached internet verdict — never a live probe). Same
+// wiring-before-run ordering contract as SetBootLifecycleProbe.
+func (e *executor) SetNetworkHealth(fn func(ctx context.Context) *status.NetworkHealth) {
+	e.networkHealth = fn
+}
+
+// startWifiSetup handles CMD_START_WIFI_SETUP
+// (docs/app-triggered-wifi-setup.md): admission runs synchronously in the
+// provisioning machine, but ACCEPTANCE only queues the raise, so the reply
+// below is PRODUCED before the raise is even queued — raising the AP severs
+// the station link that would carry it (constraint 1).
+//
+// Deliberately not claimed: that the reply is FLUSHED first. Nothing here
+// synchronizes with the transport, and once the event is queued the machine's
+// loop goroutine may start the raise while the reply is still on the wire.
+// Two things make that acceptable rather than a gap to close with ordering
+// machinery. The margin is enormous — the raise is seconds of nmcli work
+// against microseconds of reply flush — and, decisively, the contract already
+// tolerates the loss: the app treats a timed-out send as success precisely
+// because a raise can sever the reply in flight on either transport (relayer
+// or LAN hub). See docs/controld-inbound-controller-messages.md.
+//
+// A rejection is a NORMAL reply ({ok:false, code, message}), not a transport
+// error: the app branches on the code. The message strings render VERBATIM in
+// the mobile app, so they carry the app's product voice ("Art Computer") — not
+// the captive portal's deliberately separate "frame" voice.
+func (e *executor) startWifiSetup(ctx context.Context) (interface{}, error) {
+	if e.wifiSetupStarter == nil {
+		return map[string]any{"ok": false, "code": "unavailable",
+			"message": "Wi-Fi setup is not available on this device"}, nil
+	}
+	if err := e.wifiSetupStarter(ctx); err != nil {
+		code := "busy"
+		msg := "The Art Computer is busy joining a network. Try again in a moment."
+		if errors.Is(err, provisioning.ErrWiredLinkActive) {
+			code = "wired_link_active"
+			msg = "The Art Computer is connected by ethernet cable. Unplug the cable to set up Wi-Fi."
+		}
+		e.logger.Info("startWifiSetup rejected", zap.String("code", code), zap.Error(err))
+		return map[string]any{"ok": false, "code": code, "message": msg}, nil
+	}
+	// The AP SSID is deterministic (softap: the FF1-prefixed device id), so
+	// the reply can carry it without waiting for the raise.
+	ssid := e.deviceID()
+	if !strings.HasPrefix(ssid, "FF1-") {
+		ssid = "FF1-" + ssid
+	}
+	e.logger.Info("startWifiSetup accepted; setup AP raise queued", zap.String("ssid", ssid))
+	return map[string]any{"ok": true, "ssid": ssid}, nil
 }
 
 func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (interface{}, error) {
@@ -2334,6 +2692,12 @@ func (e *executor) updateToLatest(ctx context.Context) (interface{}, error) {
 // across relayer commands.
 func (e *executor) otaGateInstance() *otagate.Gate {
 	e.otaGateOnce.Do(func() {
+		// Test seam (same pattern as setupNarrator): a pre-set gate is kept
+		// as-is so tests can drive the failure latch through a Gate built on
+		// fake deps. Production wiring never pre-sets it.
+		if e.otaGate != nil {
+			return
+		}
 		e.otaGate = otagate.New(otagate.Deps{
 			HTTP:   wrapper.NewHTTPClient(),
 			Clock:  e.clock,
@@ -2370,16 +2734,20 @@ func (e *executor) otaGateInstance() *otagate.Gate {
 // is directly unit-testable without driving the gate's real HTTP/runner
 // plumbing.
 func (e *executor) otaPermanentFailureNarration(fs otagate.FailureState) {
-	reason := "update-failed"
-	if fs.Err != nil {
-		reason = fs.Err.Error()
-	}
 	if e.claimSettled() {
 		e.setupUI().HideIfShowing(setupui.StateUpdating)
 		e.logger.Warn("OTA update permanently failed on a settled device", zap.Error(fs.Err))
 		return
 	}
-	e.setupUI().ShowJoinFailed(reason)
+	// The only pre-claim narration surface is the player's join_failed screen,
+	// whose TITLE is player-owned ("Wi-Fi join failed") — only the body text
+	// is controllable from here, so a truthful title needs a new ff-player
+	// state and remains the open half of F-12 (ux-must-fix M-2 驗收:
+	// "畫面不再顯示 Wi-Fi 失敗"). Until then keep the body honest and legible:
+	// a fixed sentence the user can act on, never raw updater internals. The
+	// raw error goes to the log, where it belongs.
+	e.logger.Warn("OTA update ladder failed before claim; narrating via join_failed", zap.Error(fs.Err))
+	e.setupUI().ShowJoinFailed("System update failed. The device will keep retrying automatically.")
 }
 
 // clearStuckUpdatingOverlay is the post-ladder watchdog's fired callback
@@ -2409,16 +2777,28 @@ func (e *executor) narrateUpdateProgress(pct int) {
 func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	e.logger.Info("Executing factory reset command")
 
-	// Topic rotation (security invariant): set-factory-boot.service stages a
-	// one-shot boot into a pristine factory btrfs snapshot and reboots; it does
-	// NOT wipe the currently running subvolume, so the persisted relayer topicID
-	// (and the live relayer session) survive on disk until that reboot actually
-	// completes. A resold device — or one whose reset is interrupted before the
-	// reboot — would otherwise keep running on the old subvolume and stay
-	// commandable via the saved topic. Clear the persisted claim (topic AND
-	// ConnectedDevice) here so that window is closed: leaving ConnectedDevice
-	// would keep the process locally "claimed" (hub /api/status, mDNS TXT,
-	// claimSettled) after a failed/delayed reset, blocking any re-claim.
+	// Latch FIRST, before the unclaim below arms the claim flow and connect()
+	// (see resetStaged): the arming and the guard must not be separable by a
+	// concurrent relayer message.
+	e.resetStaged.Store(true)
+
+	// Topic rotation (security invariant): set-factory-boot.service does NOT
+	// swap the running root. It snapshots the factory image to
+	// @snapshots/@factory_reset_new and arms a ONE-SHOT boot entry
+	// (bootctl set-oneshot) while leaving the btrfs default at @snapshots/@ —
+	// so a candidate that fails to boot silently lands the device back on THIS
+	// subvolume, claim state and all, with the reset never having happened (see
+	// ffos docs/SNAPSHOT_SYSTEM_V2_FLOW.md). Clear the persisted claim (topic
+	// AND ConnectedDevice) here so that rollback — and a failed unit start
+	// below — cannot leave a resold device commandable on the old topic.
+	// Leaving ConnectedDevice would additionally keep the process locally
+	// "claimed" (hub /api/status, mDNS TXT, claimSettled), blocking any
+	// re-claim.
+	//
+	// On the SUCCESS path this write is redundant: the state file lives at
+	// /home/feralfile/.state/ inside the root subvolume (no separate @home —
+	// the install creates only @log, @pkg and @snapshots), so booting the
+	// candidate discards it wholesale. It is kept for the rollback path alone.
 	e.clearPersistedClaim()
 
 	// The process-lifetime pairing latch must fall with the persisted claim,
@@ -2432,21 +2812,20 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 		e.claimObserver(false)
 	}
 
-	// Revoke the LIVE control channel too, not just the persisted topic: the
-	// reset unit only STAGES a reboot, and until that reboot actually happens
-	// (it can be delayed, or the unit start below can fail) the former owner's
-	// established relayer WebSocket would keep delivering commands. Closing it
-	// now bounds the reset: any later reconnect runs with the topic already
-	// cleared, so the server assigns a FRESH topic the old controller does not
-	// know. Deliberately BEFORE the unit start so a failed reset still leaves
-	// the old session revoked — the fail-safe direction. Accepted trade-off:
-	// the command's own CmdOK ack can no longer be delivered over the closed
-	// socket (the mediator's Send fails gracefully). Sending it first would
-	// reopen the revocation window this exists to close; controllers must
-	// treat factory reset as fire-and-forget.
-	if e.relayerCloser != nil {
-		e.relayerCloser()
-	}
+	// The LIVE relayer session is deliberately left OPEN. Closing it (the
+	// former shape) revoked the old owner's control channel, but it was also
+	// the surest way to trip the topic-observer chain described on resetStaged:
+	// the close made the mediator reconcile the connection back up within ~2s,
+	// topic-less, and the fresh topic's assignment edge repainted the claim QR
+	// over this reset's own narration. It cost the command's CmdOK ack too —
+	// that ack could never be delivered over the socket it had just closed.
+	//
+	// What the close bought is now covered from the other side, and covered
+	// better: the persisted topic is already gone above, and resetStaged closes
+	// the command surface itself (commandrouter.Process's guard — every
+	// transport and every command family) rather than one transport to it. What remains reachable on that socket is read-only reporting. Do not
+	// reintroduce the close to shrink it further: the reconnect it forces is a
+	// repaint trigger, not a revocation.
 
 	// controld runs the reset in-process: start the system reset unit directly.
 	return e.factoryResetInProcess(ctx)
@@ -2482,9 +2861,58 @@ func (e *executor) factoryResetInProcess(ctx context.Context) (interface{}, erro
 
 	out, err := e.exec.CommandContext(ctx, "systemctl", "start", "set-factory-boot.service").CombinedOutput()
 	if err != nil {
+		// Nothing is staged and no reboot is coming: release the latch so the
+		// device — now unclaimed — can be re-claimed and can paint its claim QR
+		// again. Keeping it set would strand a live device with no way back.
+		e.releaseStuckResetLatch("factory reset unit failed to start")
 		return nil, fmt.Errorf("failed to start factory reset service: %w: %s", err, strings.TrimSpace(string(out)))
 	}
+	// A clean start is NOT evidence the reset was staged: the unit is
+	// Type=simple, so systemctl returns the moment the script is spawned, and
+	// factory_reset.sh runs under `set -euo pipefail` with explicit exit paths
+	// (subvolume delete, snapshot creation) BEFORE it ever reaches
+	// `bootctl set-oneshot`. Arm the watchdog for that gap.
+	e.scheduleStuckResetWatchdog()
 	return CmdOK, nil
+}
+
+// stuckResetWatchdogTimeout bounds how long the staged-reset latch may hold the
+// command surface and the screen. factory_reset.sh ends in `sleep 8; systemctl
+// reboot`, so a real reset kills this process an order of magnitude sooner;
+// still being alive when this elapses IS the "no reboot completed" signal — the
+// same detection-free design as otagate's post-ladder watchdog. Strictly it
+// cannot distinguish "never staged" from "shutdown itself is hanging past two
+// minutes", and the latter would release mid-shutdown; the process is being
+// killed either way, so the release is moot there.
+const stuckResetWatchdogTimeout = 2 * time.Minute
+
+// scheduleStuckResetWatchdog arms the release for a reset that never rebooted.
+// Detached from any caller ctx for the reason otagate's twin documents: in
+// production this runs under the daemon-lifetime ctx, and a canceled ctx would
+// make SleepContext return early and SKIP the release rather than perform it —
+// the wrong direction for a guard whose failure mode is a device stuck
+// refusing commands.
+func (e *executor) scheduleStuckResetWatchdog() {
+	go func() {
+		if err := e.clock.SleepContext(context.Background(), stuckResetWatchdogTimeout); err != nil {
+			return
+		}
+		if !e.resetStaged.Load() {
+			return
+		}
+		e.releaseStuckResetLatch("factory reset staged but no reboot followed within the watchdog timeout")
+	}()
+}
+
+// releaseStuckResetLatch reopens the command surface and takes down the reset
+// panel. Extracted as a named method — like otagate's clearStuckUpdatingOverlay
+// — so the policy is unit-testable without driving a real timer. The hide is
+// conditional (HideIfShowing) so a narrator that legitimately took the screen
+// while the reset was staged is not erased.
+func (e *executor) releaseStuckResetLatch(why string) {
+	e.logger.Warn("Releasing the staged factory-reset latch", zap.String("reason", why))
+	e.resetStaged.Store(false)
+	e.setupUI().HideIfShowing(setupui.StateFactoryReset)
 }
 
 func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, error) {

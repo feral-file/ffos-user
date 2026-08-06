@@ -469,7 +469,7 @@ func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
 		Return(mockPlaylist, nil).
 		AnyTimes()
 	mockKioskReplay.EXPECT().
-		SyncPlaylist(ctx, []string{"item1"}).
+		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
 		Return(nil).
 		MinTimes(1)
 	mockCDP.EXPECT().
@@ -628,7 +628,7 @@ func TestRefresher_ProcessPlayingPlaylist_HoldsPlaybackLockAcrossSyncAndSend(t *
 		mu.Unlock()
 	}).MinTimes(1)
 	mockKioskReplay.EXPECT().
-		SyncPlaylist(ctx, []string{"item1"}).
+		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
 		Do(func(_ context.Context, _ []string) { observeLockHeld("SyncPlaylist") }).
 		Return(nil).
 		MinTimes(1)
@@ -710,7 +710,7 @@ func TestRefresher_ForceRefresh_TriggersImmediateSyncBeforeNextTick(t *testing.T
 
 	syncCount := make(chan struct{}, 8)
 	mockKioskReplay.EXPECT().
-		SyncPlaylist(ctx, []string{"item1"}).
+		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
 		DoAndReturn(func(context.Context, []string) error {
 			syncCount <- struct{}{}
 			return nil
@@ -804,7 +804,7 @@ func TestRefresher_ProcessPlayingPlaylist_FallsBackToCachedPlaylistWhenOffline(t
 		Return(json.RawMessage(cachedRaw), nil).
 		AnyTimes()
 	mockKioskReplay.EXPECT().
-		SyncPlaylist(ctx, []string{"item1"}).
+		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
 		Return(nil).
 		MinTimes(1)
 	// The device is offline (live resolution just failed), but the
@@ -924,7 +924,7 @@ func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefr
 		Return(mockPlaylist, nil).
 		AnyTimes()
 	mockKioskReplay.EXPECT().
-		SyncPlaylist(ctx, []string{"item1"}).
+		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
 		Return(errors.New("dial failed")).
 		MinTimes(1)
 	// The authoritative generation bump must still fire even when the
@@ -1007,10 +1007,10 @@ func TestRefresher_ProcessPlayingPlaylist_CDPSendFailureRevertsKioskReplayScope(
 
 	url := "http://example.com/playlist.json"
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Items: []dp1playlist.PlaylistItem{{ID: "item-new"}},
+		Items: []dp1playlist.PlaylistItem{{ID: "item-new", Source: "https://example.com/item-new"}},
 	}}
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Items: []dp1playlist.PlaylistItem{{ID: "item-old"}},
+		Items: []dp1playlist.PlaylistItem{{ID: "item-old", Source: "https://example.com/item-old"}},
 	}}
 
 	mockStatusPoller.EXPECT().
@@ -1035,12 +1035,12 @@ func TestRefresher_ProcessPlayingPlaylist_CDPSendFailureRevertsKioskReplayScope(
 		AnyTimes()
 
 	mockKioskReplay.EXPECT().
-		SyncPlaylist(ctx, []string{"item-new"}).
+		SyncPlaylist(ctx, []string{"https://example.com/item-new"}).
 		Return(nil).
 		MinTimes(1)
 	reverted := make(chan struct{}, 8)
 	mockKioskReplay.EXPECT().
-		SyncPlaylist(ctx, []string{"item-old"}).
+		SyncPlaylist(ctx, []string{"https://example.com/item-old"}).
 		DoAndReturn(func(context.Context, []string) error {
 			select {
 			case reverted <- struct{}{}:
@@ -1106,10 +1106,10 @@ func TestRefresher_ProcessPlayingPlaylist_PlayerRejectionRevertsKioskReplayScope
 
 	url := "http://example.com/playlist.json"
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Items: []dp1playlist.PlaylistItem{{ID: "item-new"}},
+		Items: []dp1playlist.PlaylistItem{{ID: "item-new", Source: "https://example.com/item-new"}},
 	}}
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Items: []dp1playlist.PlaylistItem{{ID: "item-old"}},
+		Items: []dp1playlist.PlaylistItem{{ID: "item-old", Source: "https://example.com/item-old"}},
 	}}
 
 	gomock.InOrder(
@@ -1120,7 +1120,7 @@ func TestRefresher_ProcessPlayingPlaylist_PlayerRejectionRevertsKioskReplayScope
 			ProcessPlaylistURL(ctx, url, false).
 			Return(newPlaylist, nil),
 		mockKioskReplay.EXPECT().
-			SyncPlaylist(ctx, []string{"item-new"}).
+			SyncPlaylist(ctx, []string{"https://example.com/item-new"}).
 			Return(nil),
 		mockCDP.EXPECT().
 			Send(cdp.METHOD_EVALUATE, gomock.Any()).
@@ -1135,7 +1135,7 @@ func TestRefresher_ProcessPlayingPlaylist_PlayerRejectionRevertsKioskReplayScope
 			ProcessPlaylistURL(ctx, url, false).
 			Return(oldPlaylist, nil),
 		mockKioskReplay.EXPECT().
-			SyncPlaylist(ctx, []string{"item-old"}).
+			SyncPlaylist(ctx, []string{"https://example.com/item-old"}).
 			Return(nil),
 	)
 
@@ -1274,7 +1274,7 @@ func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskRep
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, mockPlaylist), nil).
 		AnyTimes()
 	mockKioskReplay.EXPECT().
-		SyncPlaylist(ctx, []string{"item1"}).
+		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
 		Return(nil).
 		MinTimes(1)
 	// Neither must ever be called: a static playlist has nothing dynamic
@@ -1585,9 +1585,18 @@ func TestRefresher_Background_ContextCancellation(t *testing.T) {
 	// Expect ticker to be stopped exactly twice:
 	// 1. Once by the defer statement when the goroutine exits
 	// 2. Once explicitly when context is canceled
+	//
+	// The second one lands on the BACKGROUND goroutine, and Stop() only
+	// closes the done channel — it does not wait for that goroutine to
+	// unwind. So ctrl.Finish() in teardown could run first and report
+	// "missing call(s) to Stop()", which is what made this test flaky in
+	// CI. Signal each call and join on them below instead of trusting a
+	// sleep to be long enough.
+	stopped := make(chan struct{}, 2)
 	mockTicker.EXPECT().
 		Stop().
-		Times(2)
+		Times(2).
+		Do(func() { stopped <- struct{}{} })
 
 	// Expect clock to create ticker
 	ts.mockClock.EXPECT().
@@ -1625,11 +1634,19 @@ func TestRefresher_Background_ContextCancellation(t *testing.T) {
 	// Cancel the context - this should trigger the ticker.Stop() call
 	ts.cancel()
 
-	// Give it a moment to process the cancellation
-	time.Sleep(50 * time.Millisecond)
-
 	// Stop the refresher
 	ts.refresher.Stop()
+
+	// Join on both Stop() calls before teardown runs ctrl.Finish(). This
+	// replaces a 50ms sleep that was only ever probabilistically long
+	// enough.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("ticker.Stop() was called %d time(s) within the deadline, want 2", i)
+		}
+	}
 }
 
 func TestRefresher_Background_DoneChannel(t *testing.T) {
@@ -1702,8 +1719,19 @@ func TestRefresher_HeadlessBoot_CDPNotInitialized(t *testing.T) {
 	ts := setupWithLogger(t, zap.New(core))
 	defer ts.teardown()
 
-	// CDP stays down for the whole test.
-	ts.mockCDP.EXPECT().Initialized().Return(false).MinTimes(2)
+	// CDP stays down for the whole test. The channel is the synchronization
+	// point: the test must observe the guard actually running (twice) before
+	// stopping — a wall-clock sleep here was flaky on loaded CI runners,
+	// where the startup-loop goroutine could go unscheduled long enough to
+	// miss the MinTimes(2) expectation.
+	initCalls := make(chan struct{}, 2)
+	ts.mockCDP.EXPECT().Initialized().DoAndReturn(func() bool {
+		select {
+		case initCalls <- struct{}{}:
+		default:
+		}
+		return false
+	}).MinTimes(2)
 
 	// Quiet retry loop: sleep between passes.
 	ts.mockClock.EXPECT().
@@ -1714,7 +1742,13 @@ func TestRefresher_HeadlessBoot_CDPNotInitialized(t *testing.T) {
 	// unexpected-call failure, proving the guard short-circuits before them.
 
 	ts.refresher.Start()
-	time.Sleep(100 * time.Millisecond)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-initCalls:
+		case <-time.After(5 * time.Second):
+			t.Fatal("startup loop never reached the CDP guard twice")
+		}
+	}
 	ts.refresher.Stop()
 
 	for _, entry := range observed.All() {

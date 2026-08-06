@@ -47,9 +47,12 @@ type KioskReplay interface {
 	// page's cross-origin child iframe targets are intercepted too (see
 	// kiosktargets.go). Call from cdp.CDP's onConnect hook.
 	AttachOnReconnect(ctx context.Context) error
-	// SyncPlaylist scopes replay to whichever of itemIDs are already
-	// cached, disabling interception entirely if none are.
-	SyncPlaylist(ctx context.Context, itemIDs []string) error
+	// SyncPlaylist scopes replay to whichever of the playlist's item
+	// sources are already cached, disabling interception entirely if
+	// none are. sources are raw item source URLs (the cache identity —
+	// see SourceKey); callers hold the resolved playlist, so they pass
+	// item.Source values directly.
+	SyncPlaylist(ctx context.Context, sources []string) error
 	// LockPlayback/UnlockPlayback serialize a full "sync replay scope
 	// then navigate/refresh the kiosk" sequence against every other such
 	// sequence. Replay scope and kiosk navigation are two separate
@@ -229,17 +232,17 @@ func (k *kioskReplay) redialIfDue(ctx context.Context) (bool, error) {
 	return true, k.dialAndAttach(ctx)
 }
 
-// SyncPlaylist scopes replay to whichever of itemIDs already have a
+// SyncPlaylist scopes replay to whichever of sources already have a
 // capture on disk (ready or partial — LoadItem succeeding is enough; a
 // partial capture is still worth serving what it has rather than nothing),
 // and disables interception entirely if none do. Call after resolving any
 // playlist for display and periodically while it keeps looping, since a
 // background download can complete (or a cache can be cleared) while the
 // same playlist is still on screen.
-func (k *kioskReplay) SyncPlaylist(ctx context.Context, itemIDs []string) error {
-	cachedIDs, mixed := k.scopeFor(itemIDs)
+func (k *kioskReplay) SyncPlaylist(ctx context.Context, sources []string) error {
+	cachedSources, mixed := k.scopeFor(sources)
 
-	err := k.applyScope(ctx, cachedIDs, mixed)
+	err := k.applyScope(ctx, cachedSources, mixed)
 	if err == nil {
 		return nil
 	}
@@ -273,47 +276,56 @@ func (k *kioskReplay) SyncPlaylist(ctx context.Context, itemIDs []string) error 
 		return errors.Join(err, dialErr)
 	}
 
-	// Scope restoration is free here: cachedIDs was recomputed from
+	// Scope restoration is free here: cachedSources was recomputed from
 	// current store state at the top of this call, so re-applying it to
 	// the fresh session installs exactly what should be in effect now —
 	// no cached "what was enabled before" to go stale, matching the
 	// reasoning in AttachOnReconnect's doc.
 	k.logger.Info("offline cache: re-dialed kiosk replay session after transport failure, restoring scope",
-		zap.Int("cached_items", len(cachedIDs)))
-	return k.applyScope(ctx, cachedIDs, mixed)
+		zap.Int("cached_items", len(cachedSources)))
+	return k.applyScope(ctx, cachedSources, mixed)
 }
 
-// scopeFor resolves which of itemIDs are actually replayable right now,
+// scopeFor resolves which of sources are actually replayable right now,
 // and whether the resulting scope is mixed. Pure (store reads only), so
 // SyncPlaylist can compute it once and re-apply it after a re-dial
-// without re-deriving it.
-func (k *kioskReplay) scopeFor(itemIDs []string) (cachedIDs []string, mixed bool) {
-	cachedIDs = make([]string, 0, len(itemIDs))
+// without re-deriving it. Duplicate sources (two playlist items sharing
+// one source — one cache record, see ItemRecord's doc) are deduped so
+// they neither double-load the record downstream nor skew the mixed
+// calculation's totals.
+func (k *kioskReplay) scopeFor(sources []string) (cachedSources []string, mixed bool) {
+	cachedSources = make([]string, 0, len(sources))
+	seen := make(map[string]bool, len(sources))
 	total := 0
-	for _, id := range itemIDs {
-		if id == "" {
+	for _, source := range sources {
+		if source == "" {
 			continue
 		}
+		key := SourceKey(source)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		total++
-		if _, err := k.store.LoadItem(id); err == nil {
-			cachedIDs = append(cachedIDs, id)
+		if _, err := k.store.LoadItem(key); err == nil {
+			cachedSources = append(cachedSources, source)
 			continue
 		} else if !errors.Is(err, ErrItemNotFound) {
 			k.logger.Warn("offline cache: failed to check cache state for playlist item, treating as uncached",
-				zap.String("item_id", id), zap.Error(err))
+				zap.String("source", truncateSourceForLog(source)), zap.Error(err))
 		}
 	}
 	// mixed is true whenever some (but not all) of the playlist's items
 	// are cached: see Replayer.EnableForPlaylist's doc for why that
 	// relaxes the miss policy to pass-through for this scope.
-	return cachedIDs, len(cachedIDs) < total
+	return cachedSources, len(cachedSources) < total
 }
 
-func (k *kioskReplay) applyScope(ctx context.Context, cachedIDs []string, mixed bool) error {
-	if len(cachedIDs) == 0 {
+func (k *kioskReplay) applyScope(ctx context.Context, cachedSources []string, mixed bool) error {
+	if len(cachedSources) == 0 {
 		return k.replayer.Disable(ctx)
 	}
-	return k.replayer.EnableForPlaylist(ctx, cachedIDs, mixed)
+	return k.replayer.EnableForPlaylist(ctx, cachedSources, mixed)
 }
 
 // LockPlayback acquires the process-wide playback coordinator. See the

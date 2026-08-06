@@ -60,74 +60,175 @@ func (h *handler) handleOfflineCacheCommand(ctx context.Context, commandType com
 }
 
 func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[string]any) (interface{}, error) {
-	itemID, ok := stringArg(args["itemId"])
+	// The item is selected by its source URL — the cache identity (see
+	// offlinecache.SourceKey) — never by the DP-1 item id, which the DP-1
+	// core schema makes optional and defines as a random UUID v4, so a
+	// conforming playlist may omit or change it freely.
+	source, ok := stringArg(args["source"])
 	if !ok {
-		return errorResponse("invalid_request", "itemId is required", false), nil
+		return errorResponse("invalid_request", "source is required", false), nil
 	}
+
+	// Sampled BEFORE the resolve, which is the whole point. The resolve
+	// is a network call that can block for seconds, and until it returns
+	// we do not know the playlist ID — so the per-playlist generation
+	// sampled below is necessarily sampled AFTER it, by which time a
+	// clear that landed DURING the resolve has already been folded into
+	// the value and its equality check passes. This barrier is what makes
+	// that window visible: see Service.ClearBarrier.
+	barrier := h.offlineCache.ClearBarrier()
 
 	playlist, err := h.resolveOfflineCachePlaylist(ctx, args)
 	if err != nil {
 		return errorResponse("resolve_failed", err.Error(), true), nil
 	}
 
-	item, found := findPlaylistItem(playlist, itemID)
-	if !found {
-		return errorResponse("not_found", "itemId not found in playlist", false), nil
+	// A clearPlaylistCache or clearPlaylistItemCache that completed while
+	// we were resolving already reported success to its own caller.
+	// Continuing would re-queue the item and re-save the playlist record,
+	// resurrecting exactly what that clear removed. Retryable: re-issuing
+	// after the clear has settled behaves normally, which is how the
+	// enqueue-window twin (ErrClearedDuringDownload) is already reported.
+	if h.offlineCache.ClearedSinceBarrier(playlist.ID, barrier, source) {
+		return errorResponse("busy",
+			"a clear for this playlist or item landed while it was being resolved, so nothing was queued", true), nil
 	}
 
-	// Only a playlistUrl-resolved download has a URL to index for the
-	// offline fallback; an inline dp1_call has none (same as
-	// DownloadPlaylist). When there IS one, sample the playlist's
-	// clear-generation BEFORE the download so a ClearPlaylist racing this
-	// whole download+index sequence is honored (the index write is
-	// skipped) rather than silently resurrecting the cleared playlist
-	// fallback record — see Service.CurrentPlaylistClearGeneration's doc.
+	item, found := findPlaylistItemBySource(playlist, source)
+	if !found {
+		return errorResponse("not_found", "source not found in playlist", false), nil
+	}
+
+	// Only a playlistUrl-resolved download has a URL to index the playlist
+	// BY; an inline dp1_call has none (same as DownloadPlaylist, which
+	// passes "" here too). That is a statement about the URL index alone
+	// — the playlist BODY must be persisted either way, which is why the
+	// save below is unconditional while sourceURL may be empty.
+	//
+	// Persisting for an inline playlist is not about the
+	// displayPlaylist-by-URL fallback (there is no URL, so there is no
+	// fallback). It is what makes the download reversible: ClearPlaylist
+	// loads the playlist record BY ID to enumerate the member sources it
+	// has to clear, so with no record saved it fails ErrPlaylistNotFound
+	// and the cached items are orphaned — clearable only one-by-one by
+	// source. DownloadPlaylist has always saved unconditionally, so
+	// gating this one made whether a playlist could later be cleared
+	// depend on whether it was downloaded whole or item-by-item.
+	//
+	// Sample the playlist's clear-generation BEFORE the download so a
+	// ClearPlaylist racing this whole download+save sequence is honored
+	// (the write is skipped) rather than silently resurrecting the
+	// cleared record — see Service.CurrentPlaylistClearGeneration's doc.
 	// Sampled here (just after resolve, before DownloadItem) for the same
 	// reason DownloadPlaylist samples right after it has the playlist
 	// body: it is the earliest point the playlist ID is known.
-	sourceURL, indexByURL := stringArg(args["playlistUrl"])
-	var clearGen uint64
-	if indexByURL {
-		clearGen = h.offlineCache.CurrentPlaylistClearGeneration(playlist.ID)
-	}
+	sourceURL, _ := stringArg(args["playlistUrl"])
+	clearGen := h.offlineCache.CurrentPlaylistClearGeneration(playlist.ID)
 
+	// ErrItemInlineNotQueued is an OUTCOME, not a failure: the item's
+	// bytes are inline in the playlist body, so it is already offline and
+	// nothing was queued. It must still fall through to the index step
+	// below — indexing is what persists that body, so it matters MORE for
+	// an inline item than for a downloaded one, not less.
+	status := "queued"
+	inline := false
 	if err := h.offlineCache.DownloadItem(ctx, item); err != nil {
-		return offlineCacheErrorResponse(err), nil
+		if !errors.Is(err, offlinecache.ErrItemInlineNotQueued) {
+			return offlineCacheErrorResponse(err), nil
+		}
+		// Reported distinctly so a client does not wait for a progress
+		// notification that will never arrive.
+		status = "not_queued_inline"
+		inline = true
 	}
 
 	// Best-effort, and deliberately after the queue above already
-	// succeeded: index the resolved playlist by its playlistUrl for the
-	// SAME displayPlaylist-by-URL offline fallback DownloadPlaylist's
-	// sourceURL already provides — see
+	// succeeded: persist the resolved playlist, and — when the request
+	// carried a playlistUrl — index it by that URL for the SAME
+	// displayPlaylist-by-URL offline fallback DownloadPlaylist's
+	// sourceURL already provides; see
 	// Service.IndexPlaylistForOfflineDisplay's doc for why a single-item
 	// download would otherwise leave that URL with no offline fallback at
-	// all, even though this one item is now genuinely cached. A failure
-	// here must never turn an already-successful item queue into an error
-	// response, since the item itself is queued/cached either way.
-	if indexByURL {
-		h.indexResolvedPlaylistForOfflineDisplay(playlist, sourceURL, clearGen)
+	// all, even though this one item is now genuinely cached. Runs on the
+	// ErrItemInlineNotQueued path too: an inline item needs no download
+	// precisely BECAUSE its bytes live in this body, so dropping the body
+	// is the one case where skipping the save loses the actual content.
+	// Best-effort for a QUEUED item, and that asymmetry is the point: its
+	// bytes are being fetched and stored independently, so losing the
+	// playlist record degrades the by-URL fallback and nothing else.
+	//
+	// For the INLINE outcome it is not best-effort, because this save is
+	// the only thing that happens at all. Nothing was downloaded — the
+	// bytes exist solely inside this playlist body — so reporting
+	// ok:true after the save failed would tell a client the item is
+	// cached offline when in fact nothing was written anywhere.
+	if err := h.indexResolvedPlaylistForOfflineDisplay(playlist, sourceURL, clearGen); err != nil && inline {
+		// ErrPlaylistSaveClearedRace is a skipped write, not a broken
+		// one: a ClearPlaylist landed inside the sample->save window and
+		// won. Reported as retryable "busy" to match how the QUEUED path
+		// already surfaces the identical race (ErrClearedDuringDownload),
+		// because the inline path never reaches enqueue and so has no
+		// other clear detection at all. Answering ok:true here would
+		// claim an offline copy that was deliberately not written.
+		if errors.Is(err, offlinecache.ErrPlaylistSaveClearedRace) {
+			return errorResponse("busy", err.Error(), true), nil
+		}
+		return errorResponse("internal", "inline item not persisted: "+err.Error(), true), nil
 	}
 
-	return map[string]any{"ok": true, "status": "queued", "itemId": itemID}, nil
+	return map[string]any{"ok": true, "status": status, "source": source}, nil
 }
 
-func (h *handler) indexResolvedPlaylistForOfflineDisplay(playlist *dp1.Playlist, sourceURL string, clearGen uint64) {
+// indexResolvedPlaylistForOfflineDisplay persists the playlist and, when
+// sourceURL is non-empty, indexes it by that URL. It still logs its own
+// failures — every caller wants them in the journal — but now also
+// RETURNS them, because one caller (the inline outcome) cannot treat this
+// as best-effort: see downloadPlaylistItem.
+func (h *handler) indexResolvedPlaylistForOfflineDisplay(playlist *dp1.Playlist, sourceURL string, clearGen uint64) error {
 	raw, err := h.json.Marshal(playlist)
 	if err != nil {
 		h.logger.Warn("offline cache: failed to marshal resolved playlist for URL indexing",
 			zap.String("playlist_url", sourceURL), zap.Error(err))
-		return
+		return err
 	}
 	if err := h.offlineCache.IndexPlaylistForOfflineDisplay(raw, sourceURL, clearGen); err != nil {
 		h.logger.Warn("offline cache: failed to index playlist for offline display fallback",
 			zap.String("playlist_url", sourceURL), zap.Error(err))
+		return err
 	}
+	return nil
 }
 
 func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]any) (interface{}, error) {
+	// Sampled before the resolve, for the reason spelled out in
+	// handleDownloadPlaylistItem: DownloadPlaylist samples its own clear
+	// epochs once it HAS the body, which is necessarily after this
+	// network-bound resolve, so a clear landing during the resolve is
+	// already folded into those samples and cannot be detected by them.
+	barrier := h.offlineCache.ClearBarrier()
+
 	playlist, err := h.resolveOfflineCachePlaylist(ctx, args)
 	if err != nil {
 		return errorResponse("resolve_failed", err.Error(), true), nil
+	}
+
+	// Every member source, not just the playlist id: clearPlaylistCache
+	// and clearPlaylistItemCache are both undone by proceeding here, and
+	// the per-item epochs classifyPlaylistItems samples are taken after
+	// the resolve too, so they cannot see a clear that landed during it.
+	//
+	// Rejecting the WHOLE command when any single member was cleared is
+	// deliberately coarser than skipping that member. The alternative
+	// invents partial-success semantics for a command whose contract is a
+	// single queued/total answer, to save a client one retry that
+	// succeeds immediately once the clear settles.
+	sources := make([]string, 0, len(playlist.Items))
+	for _, item := range playlist.Items {
+		sources = append(sources, item.Source)
+	}
+	if h.offlineCache.ClearedSinceBarrier(playlist.ID, barrier, sources...) {
+		return errorResponse("busy",
+			"a clear for this playlist or one of its items landed while it was being resolved, so nothing was queued", true), nil
 	}
 
 	raw, err := h.json.Marshal(playlist)
@@ -154,21 +255,39 @@ func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]an
 }
 
 func (h *handler) handleClearPlaylistItemCache(ctx context.Context, args map[string]any) (interface{}, error) {
-	itemID, ok := stringArg(args["itemId"])
+	source, ok := stringArg(args["source"])
 	if !ok {
-		return errorResponse("invalid_request", "itemId is required", false), nil
+		return errorResponse("invalid_request", "source is required", false), nil
 	}
-	if err := h.offlineCache.ClearItem(itemID); err != nil {
+	// Bounded here as well as at download admission: this path never goes
+	// through DownloadItem, so the admission bound does not cover it, and
+	// the ok response below echoes the source back. Non-retryable — a
+	// resend of the same oversized value cannot succeed — and the
+	// rejection deliberately reports only the length, never the value,
+	// since echoing it is the thing being prevented.
+	if err := offlinecache.CheckSourceKeyLength(source); err != nil {
+		return errorResponse("invalid_request", err.Error(), false), nil
+	}
+	if err := h.offlineCache.ClearItem(source); err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
 	h.resyncKioskReplayScopeToCurrentDisplay(ctx)
-	return map[string]any{"ok": true, "itemId": itemID}, nil
+	return map[string]any{"ok": true, "source": source}, nil
 }
 
 func (h *handler) handleClearPlaylistCache(ctx context.Context, args map[string]any) (interface{}, error) {
 	playlistID, ok := stringArg(args["playlistId"])
 	if !ok {
 		return errorResponse("invalid_request", "playlistId is required", false), nil
+	}
+	// Same reflection shape as the source key next door, and bounded for
+	// the same reason: this id is echoed in the ok body and embedded in
+	// every error along ClearPlaylist -> LoadPlaylist -> safeID. An
+	// oversized one fails ReadFile with ENAMETOOLONG rather than
+	// IsNotExist, so without this the whole submitted string comes back
+	// in the error message.
+	if err := offlinecache.CheckSourceKeyLength(playlistID); err != nil {
+		return errorResponse("invalid_request", err.Error(), false), nil
 	}
 	if err := h.offlineCache.ClearPlaylist(playlistID); err != nil {
 		return offlineCacheErrorResponse(err), nil
@@ -264,9 +383,9 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 		return
 	}
 
-	itemIDs := make([]string, 0, len(playlist.Items))
+	sources := make([]string, 0, len(playlist.Items))
 	for _, item := range playlist.Items {
-		itemIDs = append(itemIDs, item.ID)
+		sources = append(sources, item.Source)
 	}
 	// Serialize this scope resync against any concurrent displayPlaylist
 	// sync+send (see KioskReplay.LockPlayback's doc). Acquired only around
@@ -285,7 +404,7 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 	if h.kioskReplay.PlaybackGeneration() != genBeforeResolve {
 		return
 	}
-	if syncErr := h.kioskReplay.SyncPlaylist(ctx, itemIDs); syncErr != nil {
+	if syncErr := h.kioskReplay.SyncPlaylist(ctx, sources); syncErr != nil {
 		h.logger.Warn("offline cache: failed to sync kiosk replay scope after clear", zap.Error(syncErr))
 	}
 }
@@ -339,9 +458,9 @@ func (h *handler) handleGetOfflineCacheStatus(args map[string]any) (interface{},
 
 	// Built field by field rather than by marshaling the snapshot so the
 	// optional parts stay absent instead of serializing as null: totals/
-	// diskUsed are first-page-only (see StatusSnapshot's doc), and a
-	// client on the last page must not see an empty nextCursor it might
-	// follow.
+	// diskUsed/diskLimit are first-page-only (see StatusSnapshot's doc),
+	// and a client on the last page must not see an empty nextCursor it
+	// might follow.
 	response := map[string]any{
 		"ok":    true,
 		"items": snapshot.Items,
@@ -351,6 +470,11 @@ func (h *handler) handleGetOfflineCacheStatus(args map[string]any) (interface{},
 	}
 	if snapshot.DiskUsedBytes != nil {
 		response["diskUsed"] = *snapshot.DiskUsedBytes
+	}
+	// Absent means "no eviction ceiling", which is why it must not
+	// degrade to 0 here any more than it does on the snapshot.
+	if snapshot.DiskLimitBytes != nil {
+		response["diskLimit"] = *snapshot.DiskLimitBytes
 	}
 	if snapshot.NextCursor != "" {
 		response["nextCursor"] = snapshot.NextCursor
@@ -366,7 +490,7 @@ func (h *handler) handleGetOfflineCacheStatus(args map[string]any) (interface{},
 // This one command is validated strictly, unlike the lenient arg helpers
 // the older commands share, because every one of its inputs decides how
 // much work the daemon does and how large the response gets: a
-// misspelled itemIds (say a bare string instead of an array) used to
+// misspelled sources (say a bare string instead of an array) used to
 // fall through to "report on EVERY item", turning a client-side typo
 // into a full-store scan on a device that also has a kiosk browser to
 // keep alive. Failing closed with a non-retryable error is the cheaper
@@ -374,16 +498,45 @@ func (h *handler) handleGetOfflineCacheStatus(args map[string]any) (interface{},
 func parseStatusRequest(args map[string]any) (offlinecache.StatusRequest, map[string]any) {
 	var req offlinecache.StatusRequest
 
-	if raw, present := args["itemIds"]; present && raw != nil {
-		ids, ok := stringSliceArg(raw)
+	// The pre-source-keying filter key, rejected explicitly rather than
+	// ignored. This command treats an absent filter as "report on every
+	// known item", so silently dropping an unrecognized itemIds would
+	// widen a stale client's two-item query into a whole-store scan —
+	// precisely the "a client-side typo becomes a full-store scan on a
+	// device that also has a kiosk browser to keep alive" hazard this
+	// function's strict validation exists to prevent (see its doc). The
+	// rename made itemIds exactly such a typo, so it needs a name-level
+	// guard, not just a type-level one.
+	//
+	// Deliberately narrow: only this one known-legacy key is rejected,
+	// never "any unrecognized key", so genuinely additive future fields
+	// stay safe to introduce (docs/api-design.md's rule 1).
+	if _, present := args["itemIds"]; present {
+		return req, errorResponse("invalid_request",
+			"itemIds is no longer supported; use sources (item source URLs) — see docs/controld-inbound-controller-messages.md", false)
+	}
+
+	if raw, present := args["sources"]; present && raw != nil {
+		sources, ok := stringSliceArg(raw)
 		if !ok {
-			return req, errorResponse("invalid_request", "itemIds must be an array of non-empty strings", false)
+			return req, errorResponse("invalid_request", "sources must be an array of non-empty strings", false)
 		}
-		if len(ids) > offlinecache.MaxStatusItemIDs {
+		if len(sources) > offlinecache.MaxStatusSources {
 			return req, errorResponse("invalid_request",
-				fmt.Sprintf("itemIds accepts at most %d ids per request", offlinecache.MaxStatusItemIDs), false)
+				fmt.Sprintf("sources accepts at most %d sources per request", offlinecache.MaxStatusSources), false)
 		}
-		req.ItemIDs = ids
+		// Per-source bound on top of the count bound above: the count
+		// alone leaves the aggregate unbounded, and an unknown source is
+		// echoed straight back as a not_cached entry, so without this a
+		// caller can reflect MaxStatusSources oversized values out of one
+		// request. Reported by INDEX and length, never by value.
+		for i, src := range sources {
+			if err := offlinecache.CheckSourceKeyLength(src); err != nil {
+				return req, errorResponse("invalid_request",
+					fmt.Sprintf("sources[%d]: %s", i, err.Error()), false)
+			}
+		}
+		req.Sources = sources
 	}
 
 	if raw, present := args["limit"]; present && raw != nil {
@@ -491,12 +644,16 @@ func (h *handler) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
 	return playlist, nil
 }
 
-func findPlaylistItem(playlist *dp1.Playlist, itemID string) (dp1playlist.PlaylistItem, bool) {
+// findPlaylistItemBySource matches by exact (byte-for-byte) source string
+// — the same no-normalization rule the cache key itself uses (see
+// offlinecache.SourceKey). Duplicate sources in one playlist are the same
+// cache entry, so returning the first match is correct.
+func findPlaylistItemBySource(playlist *dp1.Playlist, source string) (dp1playlist.PlaylistItem, bool) {
 	if playlist == nil {
 		return dp1playlist.PlaylistItem{}, false
 	}
 	for _, item := range playlist.Items {
-		if item.ID == itemID {
+		if item.Source == source {
 			return item, true
 		}
 	}
@@ -532,7 +689,7 @@ func stringSliceArg(v any) ([]string, bool) {
 }
 
 // maxIntArgValue is an overflow guard, not a policy limit: the callers'
-// own bounds (MaxStatusItems, MaxStatusItemIDs) are far below it, and
+// own bounds (MaxStatusItems, MaxStatusSources) are far below it, and
 // anything above it could not be converted to int meaningfully anyway.
 const maxIntArgValue = 1 << 20
 
@@ -588,6 +745,20 @@ func offlineCacheErrorResponse(err error) map[string]any {
 	}
 	if errors.Is(err, offlinecache.ErrUnsupportedMediaClass) {
 		return errorResponse("unsupported_media", err.Error(), false)
+	}
+	// Both are PERMANENT properties of the request, not of the daemon:
+	// resending the same oversized URL, or the same source pointing at a
+	// reserved address, can never succeed. Falling through to the
+	// retryable offline_cache_error default below would have a
+	// conforming controller retry forever — and would contradict both
+	// the wire doc's definition of offline_cache_error (a store, disk or
+	// network failure) and the non-retryable invalid_request the clear
+	// and status handlers already return for the identical condition.
+	if errors.Is(err, offlinecache.ErrSourceTooLong) {
+		return errorResponse("invalid_request", err.Error(), false)
+	}
+	if errors.Is(err, offlinecache.ErrUnsafeSource) {
+		return errorResponse("invalid_request", err.Error(), false)
 	}
 	if errors.Is(err, offlinecache.ErrItemNotFound) || errors.Is(err, offlinecache.ErrPlaylistNotFound) {
 		return errorResponse("not_found", err.Error(), false)

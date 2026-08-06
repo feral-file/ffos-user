@@ -172,9 +172,12 @@ type Notifier struct {
 type notifyQueue struct {
 	mu       sync.Mutex
 	capacity int
-	// order holds item IDs awaiting delivery; pending holds each one's
-	// latest status. The two are always mutated together under mu — an id
-	// in order always has an entry in pending and vice versa.
+	// order holds source KEYS (SourceKey of each status's Source) awaiting
+	// delivery; pending holds each one's latest status. Coalescing on the
+	// key means notifications for the same source from different
+	// playlists collapse into one slot — the same identity rule the rest
+	// of the package keys on. The two are always mutated together under
+	// mu — a key in order always has an entry in pending and vice versa.
 	order   []string
 	pending map[string]ItemStatus
 	// wake is a 1-buffered signal channel, not a data channel: the worker
@@ -191,8 +194,8 @@ func newNotifyQueue(capacity int) *notifyQueue {
 	}
 }
 
-// push records status as itemID's pending notification, superseding any
-// undelivered one for the same item. It never blocks. dropped is true only
+// push records status as its source's pending notification, superseding
+// any undelivered one for the same source. It never blocks. dropped is true only
 // when this is a NEW item and capacity distinct items are already pending
 // — an update to an already-pending item is always accepted, since it
 // consumes no additional slot. pending is how many items are awaiting
@@ -201,9 +204,10 @@ func newNotifyQueue(capacity int) *notifyQueue {
 // contradicts the decision (a re-read afterwards could show room the
 // worker has since freed).
 func (q *notifyQueue) push(status ItemStatus) (dropped bool, pending int) {
+	key := SourceKey(status.Source)
 	q.mu.Lock()
-	if _, queued := q.pending[status.ItemID]; queued {
-		q.pending[status.ItemID] = status
+	if _, queued := q.pending[key]; queued {
+		q.pending[key] = status
 		pending = len(q.order)
 		q.mu.Unlock()
 		// No wake: the entry was already queued, so the worker either has
@@ -216,8 +220,8 @@ func (q *notifyQueue) push(status ItemStatus) (dropped bool, pending int) {
 		q.mu.Unlock()
 		return true, pending
 	}
-	q.order = append(q.order, status.ItemID)
-	q.pending[status.ItemID] = status
+	q.order = append(q.order, key)
+	q.pending[key] = status
 	pending = len(q.order)
 	q.mu.Unlock()
 
@@ -235,10 +239,10 @@ func (q *notifyQueue) pop() (ItemStatus, bool) {
 	if len(q.order) == 0 {
 		return ItemStatus{}, false
 	}
-	id := q.order[0]
+	key := q.order[0]
 	q.order = q.order[1:]
-	status := q.pending[id]
-	delete(q.pending, id)
+	status := q.pending[key]
+	delete(q.pending, key)
 	return status, true
 }
 
@@ -298,7 +302,7 @@ func (n *Notifier) OnItemStateChanged(status ItemStatus) {
 	// client's reconciliation path is getOfflineCacheStatus.
 	if dropped, pending := n.queue.push(status); dropped {
 		n.logger.Warn("offline cache: dropped offline_cache_status notification, delivery queue full",
-			zap.String("item_id", status.ItemID), zap.String("state", string(status.State)),
+			zap.String("source", truncateSourceForLog(status.Source)), zap.String("state", string(status.State)),
 			zap.Int("pending_items", pending))
 	}
 }
@@ -327,7 +331,7 @@ func (n *Notifier) deliver(status ItemStatus) {
 		ctx, cancel := context.WithTimeout(context.Background(), notifySendTimeout)
 		if err := n.relayer.Send(ctx, envelope); err != nil {
 			n.logger.Warn("offline cache: failed to send offline_cache_status via relayer",
-				zap.String("item_id", status.ItemID), zap.String("state", string(status.State)), zap.Error(err))
+				zap.String("source", truncateSourceForLog(status.Source)), zap.String("state", string(status.State)), zap.Error(err))
 		}
 		cancel()
 	}
@@ -376,7 +380,7 @@ func (n *Notifier) runWSWorker() {
 func (n *Notifier) sendWS(envelope map[string]interface{}, status ItemStatus) {
 	if err := n.ws.SendAll(envelope); err != nil {
 		n.logger.Warn("offline cache: failed to send offline_cache_status via websocket",
-			zap.String("item_id", status.ItemID),
+			zap.String("source", truncateSourceForLog(status.Source)),
 			zap.String("state", string(status.State)), zap.Error(err))
 	}
 }

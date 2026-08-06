@@ -87,18 +87,32 @@ func (mr *MockOfflineCacheServiceMockRecorder) CachedPlaylistForURL(sourceURL in
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CachedPlaylistForURL", reflect.TypeOf((*MockOfflineCacheService)(nil).CachedPlaylistForURL), sourceURL)
 }
 
-// ClearItem mocks base method.
-func (m *MockOfflineCacheService) ClearItem(itemID string) error {
+// ClearBarrier mocks base method.
+func (m *MockOfflineCacheService) ClearBarrier() uint64 {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ClearItem", itemID)
+	ret := m.ctrl.Call(m, "ClearBarrier")
+	ret0, _ := ret[0].(uint64)
+	return ret0
+}
+
+// ClearBarrier indicates an expected call of ClearBarrier.
+func (mr *MockOfflineCacheServiceMockRecorder) ClearBarrier() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearBarrier", reflect.TypeOf((*MockOfflineCacheService)(nil).ClearBarrier))
+}
+
+// ClearItem mocks base method.
+func (m *MockOfflineCacheService) ClearItem(source string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClearItem", source)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // ClearItem indicates an expected call of ClearItem.
-func (mr *MockOfflineCacheServiceMockRecorder) ClearItem(itemID interface{}) *gomock.Call {
+func (mr *MockOfflineCacheServiceMockRecorder) ClearItem(source interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearItem", reflect.TypeOf((*MockOfflineCacheService)(nil).ClearItem), itemID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearItem", reflect.TypeOf((*MockOfflineCacheService)(nil).ClearItem), source)
 }
 
 // ClearPlaylist mocks base method.
@@ -113,6 +127,39 @@ func (m *MockOfflineCacheService) ClearPlaylist(playlistID string) error {
 func (mr *MockOfflineCacheServiceMockRecorder) ClearPlaylist(playlistID interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearPlaylist", reflect.TypeOf((*MockOfflineCacheService)(nil).ClearPlaylist), playlistID)
+}
+
+// ClearedSinceBarrier mocks base method.
+func (m *MockOfflineCacheService) ClearedSinceBarrier(playlistID string, barrier uint64, sources ...string) bool {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{playlistID, barrier}
+	for _, a := range sources {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "ClearedSinceBarrier", varargs...)
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// ClearedSinceBarrier indicates an expected call of ClearedSinceBarrier.
+func (mr *MockOfflineCacheServiceMockRecorder) ClearedSinceBarrier(playlistID, barrier interface{}, sources ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]interface{}{playlistID, barrier}, sources...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearedSinceBarrier", reflect.TypeOf((*MockOfflineCacheService)(nil).ClearedSinceBarrier), varargs...)
+}
+
+// CurrentPlaylistClearGeneration mocks base method.
+func (m *MockOfflineCacheService) CurrentPlaylistClearGeneration(playlistID string) uint64 {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CurrentPlaylistClearGeneration", playlistID)
+	ret0, _ := ret[0].(uint64)
+	return ret0
+}
+
+// CurrentPlaylistClearGeneration indicates an expected call of CurrentPlaylistClearGeneration.
+func (mr *MockOfflineCacheServiceMockRecorder) CurrentPlaylistClearGeneration(playlistID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CurrentPlaylistClearGeneration", reflect.TypeOf((*MockOfflineCacheService)(nil).CurrentPlaylistClearGeneration), playlistID)
 }
 
 // DownloadItem mocks base method.
@@ -143,20 +190,6 @@ func (m *MockOfflineCacheService) DownloadPlaylist(ctx context.Context, playlist
 func (mr *MockOfflineCacheServiceMockRecorder) DownloadPlaylist(ctx, playlistRaw, sourceURL interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DownloadPlaylist", reflect.TypeOf((*MockOfflineCacheService)(nil).DownloadPlaylist), ctx, playlistRaw, sourceURL)
-}
-
-// CurrentPlaylistClearGeneration mocks base method.
-func (m *MockOfflineCacheService) CurrentPlaylistClearGeneration(playlistID string) uint64 {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "CurrentPlaylistClearGeneration", playlistID)
-	ret0, _ := ret[0].(uint64)
-	return ret0
-}
-
-// CurrentPlaylistClearGeneration indicates an expected call of CurrentPlaylistClearGeneration.
-func (mr *MockOfflineCacheServiceMockRecorder) CurrentPlaylistClearGeneration(playlistID interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CurrentPlaylistClearGeneration", reflect.TypeOf((*MockOfflineCacheService)(nil).CurrentPlaylistClearGeneration), playlistID)
 }
 
 // IndexPlaylistForOfflineDisplay mocks base method.

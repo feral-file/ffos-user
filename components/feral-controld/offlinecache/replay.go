@@ -139,12 +139,13 @@ type Replayer interface {
 	// live child's; the guard is kept symmetric with AttachChild rather
 	// than relying on that being merely unlikely.
 	DetachChild(root CDPSession, sessionID string)
-	// EnableForItem loads itemID's captured record and enables Fetch
+	// EnableForItem loads the captured record for source (a raw item
+	// source URL — the cache identity, see SourceKey) and enables Fetch
 	// interception scoped to it. Call before displaying a single cached
-	// item. Equivalent to EnableForPlaylist(ctx, []string{itemID}, false):
+	// item. Equivalent to EnableForPlaylist(ctx, []string{source}, false):
 	// a lone item is by definition not a "mixed" scope.
-	EnableForItem(ctx context.Context, itemID string) error
-	// EnableForPlaylist loads every itemID's captured record and enables
+	EnableForItem(ctx context.Context, source string) error
+	// EnableForPlaylist loads every source's captured record and enables
 	// Fetch interception scoped to the union of their captured
 	// resources. A DP-1 playlist plays multiple items in sequence inside
 	// the same kiosk page/CDP target without Go being told exactly which
@@ -153,7 +154,7 @@ type Replayer interface {
 	// URLs for as long as that playlist is showing rather than trying to
 	// track a single "current" item from the daemon side.
 	//
-	// mixed must be true whenever itemIDs is not the complete set of
+	// mixed must be true whenever sources is not the complete set of
 	// items the displayed playlist actually contains (i.e. the caller
 	// filtered out some uncached items before calling this — see
 	// KioskReplay.SyncPlaylist). It relaxes the miss policy to
@@ -167,7 +168,7 @@ type Replayer interface {
 	// mixed=false (a single item, or a playlist where every item is
 	// cached) keeps the configured missPolicy's strict guarantee, since
 	// every resource the page can legitimately need is then known.
-	EnableForPlaylist(ctx context.Context, itemIDs []string, mixed bool) error
+	EnableForPlaylist(ctx context.Context, sources []string, mixed bool) error
 	// Disable turns interception off; all requests pass through
 	// untouched. Call when moving to an uncached/online item. If the
 	// underlying Fetch.disable CDP call itself fails, scope is NOT
@@ -621,16 +622,16 @@ func (r *replayer) snapshotTargets() map[string]CDPSession {
 	return sessions
 }
 
-func (r *replayer) EnableForItem(ctx context.Context, itemID string) error {
-	return r.EnableForPlaylist(ctx, []string{itemID}, false)
+func (r *replayer) EnableForItem(ctx context.Context, source string) error {
+	return r.EnableForPlaylist(ctx, []string{source}, false)
 }
 
-func (r *replayer) EnableForPlaylist(ctx context.Context, itemIDs []string, mixed bool) error {
+func (r *replayer) EnableForPlaylist(ctx context.Context, sources []string, mixed bool) error {
 	resources := make(map[string]Resource)
-	for _, itemID := range itemIDs {
-		rec, err := r.store.LoadItem(itemID)
+	for _, source := range sources {
+		rec, err := r.store.LoadItem(SourceKey(source))
 		if err != nil {
-			return fmt.Errorf("offline cache replay: load item %s: %w", itemID, err)
+			return fmt.Errorf("offline cache replay: load item %s: %w", source, err)
 		}
 		for _, res := range rec.Resources {
 			resources[resourceKey(res.Method, res.URL)] = res
@@ -1239,6 +1240,18 @@ func stripHeadProbeParams(rawURL string) string {
 // verbatim, in DP-1 source order) and break the exact-string
 // resourceKey match this function exists to restore. Returns rawURL
 // unchanged if none of params are present.
+//
+// Empty pairs are dropped along the way, but ONLY on a query string this
+// function is already rewriting. ff-player builds its iframe URL with
+// `url.search += "&display_mode=..."`, which on a query-less source (every
+// Art Blocks generator URL, and any bare item.Source) emits
+// "...?&display_mode=fit" — an empty leading pair. Keeping it would leave
+// a dangling "?" after the strip, and "https://host/path?" is not the
+// captured key "https://host/path", so a fully cached artwork missed and
+// fail-closed to Chromium's error page. ff-player has been fixed to emit
+// the right separator; this stays because fielded devices update the
+// player bundle and the daemon on separate cadences, and because emitting
+// a URL that can never match a captured key is wrong on its own terms.
 func stripQueryParams(rawURL string, params []string) string {
 	before, after, ok := strings.Cut(rawURL, "?")
 	if !ok {
@@ -1262,6 +1275,14 @@ func stripQueryParams(rawURL string, params []string) string {
 		}
 		if slices.Contains(params, key) {
 			changed = true
+			continue
+		}
+		// Deliberately does NOT set changed: an empty pair alone is not a
+		// reason to rewrite a URL whose params we are not stripping, so a
+		// query string we do not otherwise touch still returns verbatim
+		// below and can only ever miss, never be rewritten into a
+		// different resource's key.
+		if pair == "" {
 			continue
 		}
 		kept = append(kept, pair)
@@ -1440,7 +1461,14 @@ func (r *replayer) fulfillHeadFromGet(ctx context.Context, session CDPSession, r
 	// Empty body is what makes this an honest HEAD response rather than
 	// a GET answered on the wrong method: status/Content-Type/headers
 	// mirror the stored GET resource exactly, but body is nil.
-	r.fulfill(ctx, session, requestID, statusOrDefault(resource.Status, go_http.StatusOK), resource.ContentType, nil, "", resource.Headers)
+	//
+	// ProbeContentType, not ContentType: this is the ONE caller allowed
+	// to fall back to Chromium's sniffed type. The probe's only consumer
+	// is ff-player's renderer selection, which needs a best guess for an
+	// extensionless media URL and is not the browser's own MIME
+	// enforcement — see Resource.SniffedContentType. Every fulfill that
+	// actually carries bytes must keep serving ContentType alone.
+	r.fulfill(ctx, session, requestID, statusOrDefault(resource.Status, go_http.StatusOK), resource.ProbeContentType(), nil, "", resource.Headers)
 }
 
 func (r *replayer) continueRequest(ctx context.Context, session CDPSession, requestID string) {

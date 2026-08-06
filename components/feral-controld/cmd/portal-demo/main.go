@@ -42,18 +42,18 @@ func main() {
 		Scan: func(context.Context) ([]string, error) {
 			return []string{"HomeNet-5G", "Cafe Wi-Fi", "Warehouse IoT"}, nil
 		},
-		Join: func(ssid, password string) error {
-			if password == "letmein" {
+		Join: func(req portal.JoinRequest) error {
+			if req.Password == "letmein" {
 				set(portal.Status{
 					State:   portal.JoinSucceeded,
-					SSID:    ssid,
+					SSID:    req.SSID,
 					Message: "Connected.",
 				})
 				return nil
 			}
 			set(portal.Status{
 				State:   portal.JoinFailed,
-				SSID:    ssid,
+				SSID:    req.SSID,
 				Reason:  "auth-failure",
 				Message: "Wrong Wi-Fi password. Please check it and try again.",
 			})

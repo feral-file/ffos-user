@@ -14,6 +14,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 
 	go_daemon "github.com/coreos/go-systemd/v22/daemon"
@@ -1216,6 +1217,7 @@ func TestInitializeApp(t *testing.T) {
 		"test-api-key",
 		nil,
 		nil,
+		provisioning.Tuning{},
 		"com.feralfile.test",
 		nil,
 	)
@@ -1281,6 +1283,7 @@ func TestInitializeApp_OfflineCacheEnabled(t *testing.T) {
 		"test-api-key",
 		nil,
 		&config.OfflineCacheConfig{Enabled: true, RootDir: t.TempDir()},
+		provisioning.Tuning{},
 		"com.feralfile.test",
 		nil,
 	)

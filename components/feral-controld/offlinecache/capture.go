@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	go_http "net/http"
+	go_url "net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -117,9 +118,26 @@ type Capturer interface {
 type capturer struct {
 	downloader Downloader
 	dialer     wrapper.WebSocketDialer
-	httpClient wrapper.HTTPClient
-	store      Store
-	json       wrapper.JSON
+	// cdpClient talks to OUR OWN capture Chromium's DevTools endpoint on
+	// loopback (:9223/json). It must NOT be the guarded client: that
+	// guard exists to keep untrusted playlist sources away from loopback,
+	// and pointing it at our own browser refuses every software capture
+	// before navigation. Trusted destination, so it is the ordinary
+	// timeout-bounded client.
+	cdpClient wrapper.HTTPClient
+	// fetchClient pulls resource bytes from artwork origins — untrusted
+	// input, so this one IS guarded (reserved-address policy enforced in
+	// its DialContext, no proxy). Keeping the two apart is the whole
+	// point: they have opposite trust properties and one client cannot
+	// serve both.
+	fetchClient wrapper.HTTPClient
+	// guard applies the same reserved-address policy to requests CHROMIUM
+	// makes. fetchClient only covers bytes this daemon pulls itself; the
+	// page is untrusted code that issues its own requests, and those
+	// never touch a Go client at all. See attachSourceGuard.
+	guard sourceGuard
+	store Store
+	json  wrapper.JSON
 	// io is used only for DialPageSession's small (/json targets list)
 	// HTTP body read — fetchAndStoreBody streams resource bodies
 	// straight into the store instead, see maxResourceBytes below.
@@ -259,10 +277,18 @@ func newDiskBudgetFromStore(store Store, maxDiskBytes int64, logger *zap.Logger)
 	return newCaptureDiskBudget(maxDiskBytes-used, false)
 }
 
+// NewCapturer takes TWO http clients on purpose. cdpClient reaches our
+// own capture Chromium on loopback and must be unguarded; fetchClient
+// reaches untrusted artwork origins and must be guarded. Passing one
+// client for both is the bug this signature exists to prevent — doing so
+// either blocks every software capture (guarded client on loopback) or
+// silently drops the SSRF protection on resource fetches.
 func NewCapturer(
 	downloader Downloader,
 	dialer wrapper.WebSocketDialer,
-	httpClient wrapper.HTTPClient,
+	cdpClient wrapper.HTTPClient,
+	fetchClient wrapper.HTTPClient,
+	resolver AddrResolver,
 	store Store,
 	jsonWrapper wrapper.JSON,
 	ioWrapper wrapper.IO,
@@ -273,7 +299,9 @@ func NewCapturer(
 	return &capturer{
 		downloader:       downloader,
 		dialer:           dialer,
-		httpClient:       httpClient,
+		cdpClient:        cdpClient,
+		fetchClient:      fetchClient,
+		guard:            sourceGuard{resolver: resolver},
 		store:            store,
 		json:             jsonWrapper,
 		io:               ioWrapper,
@@ -284,8 +312,11 @@ func NewCapturer(
 }
 
 func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, captureWindowMs int) (*ItemRecord, error) {
-	if item.ID == "" || item.Source == "" {
-		return nil, fmt.Errorf("offline cache: item must have an id and a source")
+	// Source is the item's cache identity (see SourceKey) and the URL this
+	// capture navigates to; the DP-1 item id is optional per spec and
+	// deliberately not required here.
+	if item.Source == "" {
+		return nil, fmt.Errorf("offline cache: item must have a source")
 	}
 	window := captureWindowDefault
 	if captureWindowMs > 0 {
@@ -298,14 +329,30 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	}
 	defer c.downloader.Release()
 
-	session, err := DialPageSession(ctx, endpoint, c.httpClient, c.dialer, c.json, c.io, c.logger)
+	session, err := DialPageSession(ctx, endpoint, c.cdpClient, c.dialer, c.json, c.io, c.logger)
 	if err != nil {
 		return nil, fmt.Errorf("offline cache: dial capture session: %w", err)
 	}
-	defer func() { _ = session.Close() }()
+	// Stop the page BEFORE dropping the session. Closing the session
+	// tears down Fetch interception with it, but nothing else tears down
+	// the PAGE: downloader.Release only schedules an idle teardown of the
+	// whole browser (DefaultHeadlessIdleTeardown, 30s), so without this
+	// the untrusted artwork keeps executing unguarded for that entire
+	// window. A timer is all it takes —
+	// setTimeout(() => fetch('http://127.0.0.1:1111/...'), 25000) — and
+	// no DNS control or other infrastructure is needed, which is why this
+	// is NOT covered by the accepted rebinding residual.
+	defer func() {
+		c.stopPageBeforeDetach(session)
+		_ = session.Close()
+	}()
 
 	tracker := newCaptureTracker()
 	c.attachHandlers(session, tracker)
+	// Registered BEFORE Fetch.enable below so no paused request can be
+	// delivered with no handler to answer it — an unanswered pause hangs
+	// that request until the capture window closes.
+	guard := c.attachSourceGuard(ctx, session)
 
 	if _, err := session.Send(ctx, "Network.enable", map[string]interface{}{}); err != nil {
 		return nil, fmt.Errorf("offline cache: Network.enable: %w", err)
@@ -315,6 +362,19 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	}
 	if err := c.resetTargetState(ctx, session, item.Source); err != nil {
 		return nil, fmt.Errorf("offline cache: reset chromium state before capture: %w", err)
+	}
+
+	// Enabled AFTER resetTargetState so the cache/storage clears above
+	// cannot be paused by our own handler, and BEFORE navigate so the
+	// very first request of the page is already covered.
+	if _, err := session.Send(ctx, "Fetch.enable", fetchEnablePatternAll()); err != nil {
+		return nil, fmt.Errorf("offline cache: Fetch.enable on capture session: %w", err)
+	}
+	// Cross-origin iframes and workers run in their own CDP targets whose
+	// requests never reach the root handler above — see this function's
+	// doc for why guarding only the root is a complete bypass.
+	if err := c.enableGuardedAutoAttach(ctx, session, guard); err != nil {
+		return nil, fmt.Errorf("offline cache: arm child-target source guard: %w", err)
 	}
 
 	navCtx, navCancel := context.WithTimeout(ctx, window)
@@ -362,7 +422,6 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	c.clearObservedOriginsStorage(ctx, session, resources)
 
 	rec := &ItemRecord{
-		ItemID:     item.ID,
 		Item:       item,
 		Entry:      item.Source,
 		Resources:  resources,
@@ -370,7 +429,7 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 		CapturedAt: c.clock.Now().UTC(),
 	}
 	if err := c.store.SaveItem(rec); err != nil {
-		return nil, fmt.Errorf("offline cache: save item %s: %w", item.ID, err)
+		return nil, fmt.Errorf("offline cache: save item %s: %w", item.Source, err)
 	}
 	return rec, nil
 }
@@ -419,7 +478,7 @@ func (c *capturer) resetTargetState(ctx context.Context, session CDPSession, sou
 		// rather than fail capture entirely just for this defense-in-
 		// depth step.
 		c.logger.Warn("offline cache: could not determine origin for storage reset, skipping",
-			zap.String("source", sourceURL), zap.Error(err))
+			zap.String("source", truncateSourceForLog(sourceURL)), zap.Error(err))
 		return nil
 	}
 	if _, err := session.Send(ctx, "Storage.clearDataForOrigin", map[string]interface{}{
@@ -534,7 +593,7 @@ var safeIdempotentMethods = map[string]bool{
 // fetched across every resource in this call — see captureDiskBudget's
 // doc.
 func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *captureTracker, budget *captureDiskBudget) ([]Resource, Coverage) {
-	keys, resources, failures, pendingURLs := tracker.snapshot()
+	keys, resources, failures, pendingURLs, overflow := tracker.snapshot()
 
 	result := make([]Resource, 0, len(keys))
 	var failureReasons []string
@@ -659,6 +718,17 @@ func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *capt
 		failureReasons = append(failureReasons, fmt.Sprintf("unresolved_at_deadline:%s", u))
 	}
 
+	// A capture that hit the tracker ceiling is INCOMPLETE by definition:
+	// resources the page asked for were never recorded, so replay would
+	// serve an artwork with missing pieces. One bounded marker rather
+	// than per-URL reasons — the URLs are exactly what was refused, so
+	// naming them here would reintroduce the growth the bound prevents.
+	if overflow > 0 {
+		failureReasons = append(failureReasons,
+			fmt.Sprintf("tracker_limit_exceeded:%d observation(s) dropped past %d resources/%d URL bytes",
+				overflow, MaxCaptureResources, MaxCaptureResourceURLBytes))
+	}
+
 	coverage := Coverage{Complete: len(failureReasons) == 0}
 	if len(failureReasons) > 0 {
 		coverage.Reason = strings.Join(failureReasons, "; ")
@@ -674,7 +744,7 @@ func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *capt
 // for the real bytes written, not the (possibly much larger) reserved
 // cap.
 func (c *capturer) fetchAndStoreBody(ctx context.Context, url, method string, capBytes int64) (string, int64, error) {
-	req, err := c.httpClient.NewRequest(method, url, nil)
+	req, err := c.fetchClient.NewRequest(method, url, nil)
 	if err != nil {
 		return "", 0, err
 	}
@@ -685,7 +755,7 @@ func (c *capturer) fetchAndStoreBody(ctx context.Context, url, method string, ca
 	transfer := beginResourceTransfer(ctx)
 	defer transfer.Close()
 
-	resp, err := c.httpClient.Do(req.WithContext(transfer.Context()))
+	resp, err := c.fetchClient.Do(req.WithContext(transfer.Context()))
 	if err != nil {
 		return "", 0, err
 	}
@@ -753,7 +823,16 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 		// its own earlier requestWillBeSent event, not this one's.
 		if evt.RedirectResponse != nil {
 			redirectMethod := tracker.methodForRequest(evt.RequestID)
-			tracker.recordResource(evt.RedirectResponse.URL, evt.RedirectResponse.Status, "", evt.Request.URL, filterReplayableHeaders(evt.RedirectResponse.Headers), redirectMethod)
+			// No content type of either kind: a 3xx carries no body for
+			// one to describe, and replay fulfills this hop with a
+			// Location header only (see fulfillFromBlob/IsRedirect).
+			tracker.recordResource(observedResponse{
+				URL:        evt.RedirectResponse.URL,
+				Status:     evt.RedirectResponse.Status,
+				RedirectTo: evt.Request.URL,
+				Headers:    filterReplayableHeaders(evt.RedirectResponse.Headers),
+				Method:     redirectMethod,
+			})
 		}
 		tracker.trackRequest(evt.RequestID, evt.Request.URL, evt.Request.Method)
 	})
@@ -776,7 +855,21 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 		// requestWillBeSent event, which always precedes its terminal
 		// responseReceived/loadingFailed.
 		method := tracker.methodForRequest(evt.RequestID)
-		tracker.recordResource(evt.Response.URL, evt.Response.Status, evt.Response.MimeType, "", filterReplayableHeaders(evt.Response.Headers), method)
+		// Read the origin's OWN Content-Type out of the raw header map
+		// (before filterReplayableHeaders drops it) rather than taking
+		// evt.Response.MimeType, which is Chromium's post-sniff verdict
+		// and would fabricate a declaration the origin never made. The
+		// sniffed value still travels, into its own field, for the HEAD
+		// probe alone — see Resource.ContentType/SniffedContentType for
+		// the full argument and the failure this split closes.
+		tracker.recordResource(observedResponse{
+			URL:                evt.Response.URL,
+			Status:             evt.Response.Status,
+			ContentType:        headerValue(evt.Response.Headers, "Content-Type"),
+			SniffedContentType: evt.Response.MimeType,
+			Headers:            filterReplayableHeaders(evt.Response.Headers),
+			Method:             method,
+		})
 		tracker.resolveRequest(evt.RequestID)
 	})
 
@@ -809,8 +902,46 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 // session. All access is mutex-guarded because events are delivered on the
 // CDPSession's read-pump goroutine while resolveResources reads the final
 // state from the caller's goroutine after the observation window closes.
+// MaxCaptureResources bounds how many distinct resources one capture may
+// track, and MaxCaptureResourceURLBytes bounds the length of each URL kept.
+//
+// Both exist because a capture's input is a PERMITTED artwork, and passing
+// the source guard says only that the origin is public — not that the page
+// is well behaved. Nothing else bounds this: the disk budget caps BYTES
+// FETCHED, but the tracker also holds URLs for resources it never fetches
+// (failures and still-pending requests), so a page issuing a stream of
+// distinct long URLs grew daemon memory during the capture window and then
+// grew ItemRecord.Resources and the on-disk coverage without limit.
+//
+// The limits are deliberately generous rather than tight: a rich software
+// artwork legitimately pulls hundreds of resources, and signed CDN links
+// legitimately run long, so these are an anti-abuse ceiling and must never
+// be reached by real work. Hitting either is recorded rather than silent —
+// see trackerOverflow — because a capture that quietly dropped resources
+// would replay as an artwork with missing pieces and no explanation.
+const (
+	MaxCaptureResources        = 4096
+	MaxCaptureResourceURLBytes = 4096
+	// MaxCaptureResourceMetaBytes bounds each stored content type and
+	// each allowlisted header VALUE. Much smaller than the URL bound
+	// because these are short by nature — a MIME type is tens of bytes,
+	// and the replayable header allowlist carries no field that
+	// legitimately runs long.
+	MaxCaptureResourceMetaBytes = 1024
+)
+
 type captureTracker struct {
 	mu sync.Mutex
+
+	// overflow counts observations refused by the bounds above. Keep this
+	// list complete — an enumerating comment that has gone stale is worse
+	// than none: distinct resources past MaxCaptureResources, URLs past
+	// MaxCaptureResourceURLBytes, an oversized redirect TARGET on an
+	// otherwise-accepted resource, and an oversized content type or
+	// header value past MaxCaptureResourceMetaBytes. Counted rather than
+	// dropped silently so Coverage can say the capture is incomplete AND
+	// why.
+	overflow int
 
 	// requestURL maps a CDP requestId to its current URL so
 	// Network.loadingFailed (which only carries the id) can be attributed
@@ -856,14 +987,94 @@ func isIgnoredCaptureURL(url string) bool {
 	return strings.HasPrefix(url, "blob:") || strings.HasPrefix(url, "data:")
 }
 
-func (t *captureTracker) recordResource(url string, status int, contentType, redirectTo string, headers map[string]string, method string) {
+// observedResponse is one response as capture observed it. Passed as a
+// struct rather than positionally because ContentType,
+// SniffedContentType and RedirectTo are three adjacent strings whose
+// meanings are NOT interchangeable: swapping two of them compiles
+// cleanly and then serves wrong metadata on every replay of that
+// resource, which is precisely the class of bug the ContentType split
+// exists to fix.
+type observedResponse struct {
+	URL    string
+	Status int
+	// ContentType is the origin's declared Content-Type, "" when it
+	// declared none; SniffedContentType is Chromium's guess. See the
+	// Resource fields of the same names — recordResource stores the
+	// latter only when the former is empty, so that invariant holds in
+	// one place rather than at each call site.
+	ContentType        string
+	SniffedContentType string
+	RedirectTo         string
+	Headers            map[string]string
+	Method             string
+}
+
+func (t *captureTracker) recordResource(obs observedResponse) {
+	url, status, redirectTo := obs.URL, obs.Status, obs.RedirectTo
+	contentType, sniffed, headers, method := obs.ContentType, obs.SniffedContentType, obs.Headers, obs.Method
 	if url == "" || isIgnoredCaptureURL(url) {
 		return
 	}
 	key := resourceKey(method, url)
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if len(url) > MaxCaptureResourceURLBytes {
+		t.overflow++
+		return
+	}
+	// redirectTo is attacker-controlled too (a 3xx Location header) and is
+	// persisted in Resource.RedirectTo and served back by replay, so it
+	// needs the same ceiling as url. Dropped rather than truncated, for
+	// the same reason: replay matches exact URLs, and a truncated target
+	// would be a permanent mis-resolution rather than a missing one.
+	if len(redirectTo) > MaxCaptureResourceURLBytes {
+		redirectTo = ""
+		t.overflow++
+	}
+	// contentType and the allowlisted header VALUES are attacker-supplied
+	// too, and both are persisted in Resource and served back by replay.
+	// Chromium caps one response's header block at ~256 KB, which bounds
+	// each resource — but MaxCaptureResources is 4096, so unbounded values
+	// still let one capture accumulate on the order of a gigabyte, which
+	// is precisely the accumulation this tracker's bounds exist to stop.
+	// Dropped rather than truncated, like redirectTo: a truncated MIME
+	// type or header value would be served on replay as though it were
+	// real, and serving subtly wrong metadata is worse than serving none.
+	if len(contentType) > MaxCaptureResourceMetaBytes {
+		contentType = ""
+		t.overflow++
+	}
+	// Enforced here, once, rather than at each call site: the sniffed
+	// type is a fallback for the HEAD probe when the origin declared
+	// nothing (see Resource.SniffedContentType), so beside a real
+	// declaration it is never read and would only bloat every record on
+	// disk. Deliberately reads the POST-bounding contentType, so an
+	// oversized declaration that was just dropped still leaves the
+	// sniffed fallback in place rather than losing both — and sits
+	// BEFORE the bound below so discarding a value nothing would have
+	// read cannot charge the item an overflow (which marks its whole
+	// Coverage incomplete).
+	if contentType != "" {
+		sniffed = ""
+	}
+	if len(sniffed) > MaxCaptureResourceMetaBytes {
+		sniffed = ""
+		t.overflow++
+	}
+	for name, value := range headers {
+		if len(value) > MaxCaptureResourceMetaBytes {
+			delete(headers, name)
+			t.overflow++
+		}
+	}
 	if _, exists := t.resources[key]; !exists {
+		// Bound checked only for a NEW key: an update to a resource
+		// already tracked costs no additional entry, and refusing it
+		// would leave a stale first-observation record in place.
+		if len(t.resources) >= MaxCaptureResources {
+			t.overflow++
+			return
+		}
 		t.order = append(t.order, key)
 	}
 	// Method is stored as "" for GET (see Resource.Method's doc), never
@@ -873,7 +1084,15 @@ func (t *captureTracker) recordResource(url string, status int, contentType, red
 	if normalized := strings.ToUpper(method); normalized != "" && normalized != go_http.MethodGet {
 		storedMethod = normalized
 	}
-	t.resources[key] = Resource{URL: url, Status: status, ContentType: contentType, RedirectTo: redirectTo, Headers: headers, Method: storedMethod}
+	t.resources[key] = Resource{
+		URL:                url,
+		Status:             status,
+		ContentType:        contentType,
+		SniffedContentType: sniffed,
+		RedirectTo:         redirectTo,
+		Headers:            headers,
+		Method:             storedMethod,
+	}
 }
 
 func (t *captureTracker) recordFailure(url, reason string) {
@@ -882,6 +1101,14 @@ func (t *captureTracker) recordFailure(url, reason string) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if len(url) > MaxCaptureResourceURLBytes {
+		t.overflow++
+		return
+	}
+	if _, exists := t.failures[url]; !exists && len(t.failures) >= MaxCaptureResources {
+		t.overflow++
+		return
+	}
 	t.failures[url] = reason
 }
 
@@ -899,6 +1126,22 @@ func (t *captureTracker) recordFailure(url, reason string) {
 func (t *captureTracker) trackRequest(requestID, url, method string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// Same ceiling on the in-flight maps. resolveRequest prunes both on
+	// every terminal event, so in practice these hold only requests
+	// actually in flight and this ceiling is a backstop against a page
+	// that starts requests and never lets them finish — NOT the normal
+	// bound. (An earlier version of this comment claimed concurrency
+	// bounding without the pruning that would make it true, which left
+	// the ceiling reachable by request COUNT and turned it into a lever
+	// for the methodUnknown downgrade described on that constant.)
+	if len(url) > MaxCaptureResourceURLBytes {
+		t.overflow++
+		return
+	}
+	if _, exists := t.requestURL[requestID]; !exists && len(t.requestURL) >= MaxCaptureResources {
+		t.overflow++
+		return
+	}
 	t.requestURL[requestID] = url
 	t.requestMethod[requestID] = method
 	t.pending[requestID] = struct{}{}
@@ -910,13 +1153,32 @@ func (t *captureTracker) urlForRequest(requestID string) string {
 	return t.requestURL[requestID]
 }
 
+// methodUnknown is what methodForRequest reports when a requestId has no
+// tracked method — because its requestWillBeSent was never seen, or was
+// refused at the tracker ceiling.
+//
+// It must NOT be the empty string, and this is a security property rather
+// than tidiness. Empty means GET everywhere downstream (Resource.Method's
+// doc, EffectiveMethod), GET is in safeIdempotentMethods, and
+// resolveResources RE-ISSUES a safe-idempotent resource whose body it
+// does not have. So an untracked POST would have been re-sent as a GET by
+// the daemon — exactly the side effect the unsupported_method branch
+// exists to prevent, reachable by any page that can get a requestId
+// dropped. methodUnknown is deliberately absent from safeIdempotentMethods
+// so an unknown method degrades to "recorded but not fetched" instead.
+const methodUnknown = "UNKNOWN"
+
 // methodForRequest returns the method most recently tracked for
 // requestID — see requestMethod's doc for why callers must read this
-// before a same-event trackRequest call would overwrite it.
+// before a same-event trackRequest call would overwrite it. An untracked
+// id yields methodUnknown, never "": see that constant.
 func (t *captureTracker) methodForRequest(requestID string) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.requestMethod[requestID]
+	if m, ok := t.requestMethod[requestID]; ok {
+		return m
+	}
+	return methodUnknown
 }
 
 // resolveRequest marks requestID as having reached a terminal event
@@ -926,6 +1188,25 @@ func (t *captureTracker) resolveRequest(requestID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.pending, requestID)
+	// Also drop the in-flight URL/method. Without this the two maps grow
+	// once per distinct requestId for the whole window and are bounded
+	// only by the ceiling below — which is a bound on TOTAL requests, not
+	// on concurrency, and is what a page saturates to force requestIds to
+	// be refused. Both terminal handlers read urlForRequest/
+	// methodForRequest BEFORE calling this, and a redirect hop re-tracks
+	// via its own requestWillBeSent rather than passing through here.
+	//
+	// One deliberate behavior change, stated rather than implied: CDP can
+	// emit loadingFailed AFTER responseReceived for the same requestId
+	// (a mid-body failure such as ERR_INCOMPLETE_CHUNKED_ENCODING). That
+	// late failure now finds no URL and is not recorded. Benign, and
+	// arguably better: the resource was already recorded at
+	// responseReceived and resolveResources re-fetches it, so a genuine
+	// breakage still surfaces as fetch_failed, while a browser-side body
+	// failure our own re-fetch succeeds at no longer marks the capture
+	// incomplete for no reason.
+	delete(t.requestURL, requestID)
+	delete(t.requestMethod, requestID)
 }
 
 // snapshot returns copies of the tracker's state for lock-free use after
@@ -938,7 +1219,7 @@ func (t *captureTracker) resolveRequest(requestID string) {
 // terminal event since they resolve in-page, so treating one as "still
 // pending" would be a permanent false incompleteness on every capture
 // rather than a real signal.
-func (t *captureTracker) snapshot() ([]string, map[string]Resource, map[string]string, []string) {
+func (t *captureTracker) snapshot() ([]string, map[string]Resource, map[string]string, []string, int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -958,5 +1239,361 @@ func (t *captureTracker) snapshot() ([]string, map[string]Resource, map[string]s
 		}
 	}
 	sort.Strings(pendingURLs)
-	return resourceKeys, resources, failures, pendingURLs
+	return resourceKeys, resources, failures, pendingURLs, t.overflow
+}
+
+// Capture-side source guarding. fetchClient covers the bytes THIS daemon
+// pulls; it cannot cover the requests the page itself makes, because
+// those never pass through a Go client. capture.go hands an untrusted
+// artwork to Chromium via Page.navigate, and Chromium then follows
+// redirects and loads subresources on its own — so without interception
+// a page can simply fetch http://127.0.0.1:1111/api/cast and drive the
+// unauthenticated hub, or read the kiosk's DevTools on :9222.
+const (
+	// captureGuardConcurrency bounds how many paused requests are being
+	// decided at once. Each decision may perform a DNS lookup, and the
+	// page is hostile-by-assumption, so this is what stops a page that
+	// issues thousands of requests from spawning thousands of resolving
+	// goroutines.
+	captureGuardConcurrency = 16
+	// captureGuardDecisionTimeout bounds one decision, so a resolver that
+	// hangs cannot pin a slot for the whole capture window.
+	captureGuardDecisionTimeout = 5 * time.Second
+	// captureTargetSetupConcurrency bounds how many child targets are
+	// being armed at once. Lower than the request bound because each
+	// setup is several sequential CDP round trips rather than one
+	// decision, and a page has no legitimate reason to open many targets
+	// at once.
+	captureTargetSetupConcurrency = 8
+)
+
+// attachSourceGuard arms Fetch interception on the capture session and
+// answers every paused request with continue or fail.
+//
+// Handler discipline: CDPSession.On runs handlers on the read pump, and a
+// handler must never Send inline (see that interface's doc) — the reply it
+// waits for can only arrive on the pump it is blocking. Every decision is
+// therefore handed to a goroutine, exactly as replay.go does for the kiosk.
+//
+// Saturation fails CLOSED: when every slot is busy the request is left
+// unanswered rather than admitted, so a page cannot get an unchecked
+// request through by flooding. The cost is that request stalling until the
+// bounded capture window ends, which degrades one capture's fidelity — the
+// right trade against admitting an unchecked request to loopback.
+//
+// KNOWN LIMITATION, deliberately not papered over: this is a URL-time
+// check, so DNS rebinding is NOT closed — Chromium resolves the host
+// itself after we continue the request, and may get a different answer
+// than we did. Closing that requires taking Chromium's egress away
+// entirely (a loopback filtering proxy it must dial through). CDP Fetch
+// also does not intercept WebSocket handshakes, so ws:// egress is
+// likewise uncovered. Both are recorded in
+// docs/offline-artwork-capture.md §9.
+func (c *capturer) attachSourceGuard(ctx context.Context, session CDPSession) *captureGuard {
+	g := &captureGuard{
+		c:           c,
+		slots:       make(chan struct{}, captureGuardConcurrency),
+		targetSlots: make(chan struct{}, captureTargetSetupConcurrency),
+	}
+	g.arm(ctx, session)
+	return g
+}
+
+// captureGuard carries the state shared by the root session and every
+// child target: one concurrency bound across ALL of them, so a page
+// cannot multiply its decision budget by spawning iframes.
+type captureGuard struct {
+	c     *capturer
+	slots chan struct{}
+	// targetSlots bounds CHILD-TARGET SETUP, which is separate work from
+	// deciding a paused request: each attach performs several CDP calls
+	// (Fetch.enable, setAutoAttach, resume), and a hostile page can create
+	// targets faster than those complete. Without its own bound, one
+	// goroutine per attach event is unbounded — the request semaphore
+	// above does not constrain it at all.
+	targetSlots         chan struct{}
+	saturatedOnce       sync.Once
+	targetSaturatedOnce sync.Once
+}
+
+// arm registers the Fetch.requestPaused handler on one session. Called
+// for the root page and again for every auto-attached child target.
+func (g *captureGuard) arm(ctx context.Context, session CDPSession) {
+	c := g.c
+	slots := g.slots
+	saturatedOnce := &g.saturatedOnce
+
+	session.On("Fetch.requestPaused", func(params json.RawMessage) {
+		var evt struct {
+			RequestID string `json:"requestId"`
+			Request   struct {
+				URL string `json:"url"`
+			} `json:"request"`
+		}
+		if err := c.json.Unmarshal(params, &evt); err != nil {
+			// No requestId means no way to answer this pause at all.
+			c.logger.Warn("offline cache capture: unparseable Fetch.requestPaused; request left blocked",
+				zap.Error(err))
+			return
+		}
+		select {
+		case slots <- struct{}{}:
+			go func() {
+				defer func() { <-slots }()
+				c.decidePausedRequest(ctx, session, evt.RequestID, evt.Request.URL)
+			}()
+		default:
+			saturatedOnce.Do(func() {
+				c.logger.Warn("offline cache capture: source-guard slots saturated; further requests blocked for this capture",
+					zap.Int("concurrency", captureGuardConcurrency))
+			})
+		}
+	})
+}
+
+// decidePausedRequest allows or blocks one paused request.
+func (c *capturer) decidePausedRequest(ctx context.Context, session CDPSession, requestID, rawURL string) {
+	decideCtx, cancel := context.WithTimeout(ctx, captureGuardDecisionTimeout)
+	defer cancel()
+
+	if err := c.pausedRequestAllowed(decideCtx, rawURL); err != nil {
+		c.logger.Warn("offline cache capture: blocked page request",
+			zap.String("url", truncateSourceForLog(rawURL)), zap.Error(err))
+		// Answered on its OWN context, not decideCtx. The dominant reason
+		// the check above fails is decideCtx expiring inside addrsFor (a
+		// hanging resolver — the case its 5s bound exists for), and
+		// sending the verdict on that same expired context would return
+		// immediately without ever failing the request, leaking the pause
+		// instead of closing it.
+		verdictCtx, cancelVerdict := context.WithTimeout(ctx, captureGuardDecisionTimeout)
+		defer cancelVerdict()
+		if _, err := session.Send(verdictCtx, "Fetch.failRequest", map[string]interface{}{
+			"requestId":   requestID,
+			"errorReason": "AccessDenied",
+		}); err != nil {
+			c.logger.Warn("offline cache capture: Fetch.failRequest failed",
+				zap.String("request_id", requestID), zap.Error(err))
+		}
+		return
+	}
+	if _, err := session.Send(decideCtx, "Fetch.continueRequest", map[string]interface{}{
+		"requestId": requestID,
+	}); err != nil {
+		c.logger.Warn("offline cache capture: Fetch.continueRequest failed",
+			zap.String("request_id", requestID), zap.Error(err))
+	}
+}
+
+// pausedRequestAllowed applies the source policy to one page request.
+//
+// ALLOWLIST, not a denylist — the same rule sourceGuard.check states and
+// for the same reason. An earlier version of this function continued
+// every scheme that was not http(s), intending only to let data: and
+// blob: through; that silently admitted file:, ftp:, chrome: and anything
+// else Chromium might hand us, which is precisely the shape of mistake a
+// denylist makes. data: and blob: are the ONLY non-dialing exceptions:
+// they carry their own bytes and open no socket, so refusing them would
+// break ordinary artwork for no security gain.
+func (c *capturer) pausedRequestAllowed(ctx context.Context, rawURL string) error {
+	u, err := go_url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("%w: unparseable request URL: %s", ErrUnsafeSource, truncateSourceForLog(err.Error()))
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		// Checked against the address policy below.
+	case "data", "blob", "about":
+		// Non-dialing: these carry their own bytes or name no resource at
+		// all, so they open no socket. "about" is also what the
+		// post-capture teardown navigates to, and refusing it here would
+		// block the very thing that stops the page.
+		return nil
+	default:
+		return fmt.Errorf("%w: request scheme %q is not permitted", ErrUnsafeSource, truncateSourceForLog(u.Scheme))
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("%w: request URL has no host", ErrUnsafeSource)
+	}
+	_, err = c.guard.addrsFor(ctx, host)
+	return err
+}
+
+// enableGuardedAutoAttach extends the source guard to CHILD CDP targets.
+//
+// Why this is required, not defense in depth: a cross-origin iframe
+// (OOPIF) and a worker each run in their OWN CDP target, and their
+// requests are never delivered to the root page session's
+// Fetch.requestPaused handler. Guarding only the root therefore leaves a
+// complete bypass — an artwork embeds a cross-origin iframe, and that
+// iframe fetches http://127.0.0.1:1111/api/cast unguarded.
+//
+// Ordering contract, and the reason waitForDebuggerOnStart is set: a new
+// child is PAUSED before it issues even its first request. On
+// Target.attachedToTarget we arm the guard and Fetch.enable on it FIRST,
+// then resume it. Without the pause, the child's opening request races
+// our Fetch.enable and can reach the network before interception exists.
+//
+// Differs from replay's equivalent (kiosktargets.go) in two ways, both
+// deliberate. No target-type filter: replay scopes to iframes because it
+// has nothing cached for a worker, but a worker can dial, so a SECURITY
+// boundary cannot skip it. And it recurses — setAutoAttach is reissued on
+// each child — because an artwork can nest iframes, and a boundary that
+// stops at depth one is a boundary with a documented way around it.
+//
+// A child whose interception could not be armed is NOT resumed. It stays
+// frozen, which costs that subframe's content; resuming it would let it
+// run entirely outside the guard, which is the failure this exists to
+// prevent.
+func (c *capturer) enableGuardedAutoAttach(ctx context.Context, root CDPSession, guard *captureGuard) error {
+	c.armAutoAttachHandler(ctx, root, root, guard)
+	return c.sendAutoAttach(ctx, root)
+}
+
+// armAutoAttachHandler registers the child-attach handler on session.
+// root is kept separately because flat-mode sessions are all routed over
+// the root connection, so ForSession is always called on it — including
+// for grandchildren, whose events arrive on a child's session.
+func (c *capturer) armAutoAttachHandler(ctx context.Context, root, session CDPSession, guard *captureGuard) {
+	session.On("Target.attachedToTarget", func(params json.RawMessage) {
+		// Off the read pump: this handler Sends (Fetch.enable, resume),
+		// and CDPSession.On forbids that inline. Bounded, because a
+		// hostile page can create targets faster than the several CDP
+		// calls per attach complete.
+		select {
+		case guard.targetSlots <- struct{}{}:
+			go func() {
+				defer func() { <-guard.targetSlots }()
+				c.handleCaptureTargetAttached(ctx, root, guard, params)
+			}()
+		default:
+			// Fail closed: the child was created with
+			// waitForDebuggerOnStart, so declining to set it up leaves it
+			// PAUSED and it never runs. Dropping the event is therefore
+			// safe in the direction that matters — the opposite of
+			// admitting an unguarded target.
+			guard.targetSaturatedOnce.Do(func() {
+				c.logger.Warn("offline cache capture: child-target setup saturated; further targets left paused for this capture",
+					zap.Int("concurrency", captureTargetSetupConcurrency))
+			})
+		}
+	})
+}
+
+func (c *capturer) sendAutoAttach(ctx context.Context, session CDPSession) error {
+	if _, err := session.Send(ctx, "Target.setAutoAttach", map[string]interface{}{
+		"autoAttach":             true,
+		"waitForDebuggerOnStart": true,
+		"flatten":                true,
+		// No "filter": every child type must be covered, workers included.
+	}); err != nil {
+		return fmt.Errorf("Target.setAutoAttach: %w", err)
+	}
+	return nil
+}
+
+// handleCaptureTargetAttached arms the guard on a newly attached child,
+// extends auto-attach into it, and only then resumes it.
+func (c *capturer) handleCaptureTargetAttached(ctx context.Context, root CDPSession, guard *captureGuard, params json.RawMessage) {
+	var evt targetAttachedEvent
+	if err := c.json.Unmarshal(params, &evt); err != nil {
+		c.logger.Warn("offline cache capture: failed to parse Target.attachedToTarget", zap.Error(err))
+		return
+	}
+	if evt.SessionID == "" {
+		// Without a sessionId there is nothing to route commands to, so
+		// the child can be neither guarded nor resumed.
+		c.logger.Warn("offline cache capture: Target.attachedToTarget without sessionId; child left paused",
+			zap.String("type", evt.TargetInfo.Type))
+		return
+	}
+
+	// Flat mode routes every session over the root connection, so the
+	// view is always taken from root — this is what makes the recursion
+	// below work for grandchildren too.
+	child := root.ForSession(evt.SessionID)
+	guard.arm(ctx, child)
+	if _, err := child.Send(ctx, "Fetch.enable", fetchEnablePatternAll()); err != nil {
+		// Deliberately NOT resumed: a child running without interception
+		// is exactly the bypass this closes.
+		//
+		// This is the NORMAL path for workers, not an error path. Chromium
+		// does not implement the Fetch domain on worker targets at all —
+		// measured on the FF1, a type:worker session answers
+		// "cdp error -32601: 'Fetch.enable' wasn't found". So a worker is
+		// contained by staying paused forever rather than by having its
+		// requests intercepted, which is safe but has a real functional
+		// cost worth knowing before anyone "fixes" this: artwork whose
+		// rendering depends on a worker is captured with that worker
+		// never running. Resuming it anyway to recover that rendering
+		// would hand every artwork worker an unguarded network — the
+		// exact trade this fail-closed branch refuses.
+		// TestCapturer_RealBrowser_LoopbackRequestsNeverLeaveTheBrowser
+		// pins it against a real browser.
+		c.logger.Warn("offline cache capture: Fetch.enable on child target failed; leaving it paused",
+			zap.String("session_id", evt.SessionID),
+			zap.String("type", evt.TargetInfo.Type), zap.Error(err))
+		return
+	}
+
+	// Recurse before resuming, so a nested target created by this child's
+	// first paint is already covered.
+	//
+	// A failure here is NOT survivable, for the same reason a failed
+	// Fetch.enable above is not: without auto-attach on this child, the
+	// targets IT creates are neither paused nor intercepted, so resuming
+	// it would reopen the loopback bypass one level down. An earlier
+	// version logged this and resumed anyway — fail-open, and inconsistent
+	// with the Fetch.enable path immediately above it.
+	c.armAutoAttachHandler(ctx, root, child, guard)
+	if err := c.sendAutoAttach(ctx, child); err != nil {
+		c.logger.Warn("offline cache capture: could not extend auto-attach into child target; leaving it paused",
+			zap.String("session_id", evt.SessionID),
+			zap.String("type", evt.TargetInfo.Type), zap.Error(err))
+		return
+	}
+
+	if _, err := child.Send(ctx, "Runtime.runIfWaitingForDebugger", map[string]interface{}{}); err != nil {
+		c.logger.Debug("offline cache capture: resuming child target failed",
+			zap.String("session_id", evt.SessionID), zap.Error(err))
+	}
+}
+
+// captureTeardownWindow bounds the post-capture navigation that stops the
+// page. Short: it is one CDP round trip, and a browser too wedged to
+// answer it is about to be torn down by the idle teardown anyway.
+const captureTeardownWindow = 5 * time.Second
+
+// stopPageBeforeDetach navigates the capture target to about:blank while
+// interception is STILL armed, which is the only moment it can be done
+// safely.
+//
+// Why it is required: Capture's session close removes Fetch interception,
+// but nothing removes the page. downloader.Release schedules an idle
+// teardown of the browser (30s by default), so between those two events
+// the untrusted artwork runs with no guard at all — its timers still
+// fire, its pending requests still complete, and any target left paused
+// by a saturated guard is released when the Fetch domain goes away with
+// the client. Navigating away discards all three in one step.
+//
+// Uses its own context rather than the capture's: the page must be
+// stopped whether capture succeeded, timed out, or was canceled, and the
+// capture context is expired in exactly the cases that leave the most
+// dangerous page running.
+//
+// about:blank commits without a network load, so this navigation is never
+// itself paused by our Fetch handler. If anyone widens this teardown to a
+// real URL, that stops being true — and the decision would then run on
+// decideCtx, derived from the possibly-expired capture context, which is
+// the asymmetry this function exists to avoid for its own Send.
+func (c *capturer) stopPageBeforeDetach(session CDPSession) {
+	ctx, cancel := context.WithTimeout(context.Background(), captureTeardownWindow)
+	defer cancel()
+	if _, err := session.Send(ctx, "Page.navigate", map[string]interface{}{"url": "about:blank"}); err != nil {
+		// Not fatal to the capture, whose bytes are already saved — but
+		// it does mean an untrusted page may keep running until the idle
+		// teardown, so it is a Warn rather than a Debug.
+		c.logger.Warn("offline cache capture: could not stop the captured page before detaching; it may keep running until idle teardown",
+			zap.Error(err))
+	}
 }

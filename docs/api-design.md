@@ -18,12 +18,17 @@ second production contract.
 For v2, `feral-controld` remains the only runtime external-control owner. It
 initiates MQTT 5 connections and owns the LAN HTTPS/WebSocket adapter, while
 focused protocol, state, and authentication packages implement the shared
-contract without hiding command policy in transport code. `feral-setupd`
-continues to own setup and recovery UX, including recovery SoftAP. Cross-service
-setup and reset coordination uses an explicitly versioned D-Bus interface:
-`feral-controld` owns external admission, confirmation records, broker cleanup,
-identity rotation, controller-authority bootstrap, and protocol completion;
-`feral-setupd` owns physical confirmation and durable local reset execution.
+contract without hiding command policy in transport code. It owns setup and
+recovery UX, including recovery SoftAP; setup and reset coordination is
+in-process, not the explicitly versioned D-Bus interface the v2 draft
+specified for it — one owner holds external admission, confirmation records,
+broker cleanup, identity rotation, controller-authority bootstrap and
+protocol completion together with physical confirmation and durable local
+reset execution.
+
+> This paragraph previously assigned setup/recovery UX to `feral-setupd`,
+> which was merged into `feral-controld` (see
+> [`architecture.md`](architecture.md), "The setupd merge").
 
 The v1 relayer envelope, Mint handoff, port-1111 Hub, and
 `GetRelayerTopicID` remain unchanged only through the migration compatibility
@@ -271,8 +276,8 @@ The portal binds `:80` (permitted by the system-wide `net.ipv4.ip_unprivileged_p
 
 | Route | Method | Behavior |
 |---|---|---|
-| `/` | GET/POST | Renders the network-picker page (SSID list from the pre-AP scan cache; falls back to a manual SSID field on scan failure). |
-| `/connect` | POST | Credential submit. Parses form fields `ssid` and `password` and calls the provisioning machine's join. On acceptance renders a "connecting, reconnect if this drops" page; on outright rejection re-renders the picker. Non-POST → `303` to `/`. |
+| `/` | GET/POST | Renders the network-picker page: the SSID list from the pre-AP scan cache **plus** an always-rendered manual name field and a "hidden network" checkbox (picker-only rendering made hidden networks unprovisionable whenever any network was in range — D3). Scan failure leaves just the manual field. |
+| `/connect` | POST | Credential submit. Form fields: `ssid` (picker), `ssid_manual`, `hidden`, `password`. A non-blank manual entry wins over the picker, carries the manual flag (downstream trims manual entries only; picker values pass verbatim), and is the only branch that honors `hidden`. On acceptance renders a "watch the frame's screen" page; on outright rejection re-renders the picker. Non-POST → `303` to `/`. |
 | `/status` | GET | JSON `{ "state", "ssid?", "reason?", "message?" }` where `state` ∈ `idle` / `joining` / `succeeded` / `failed`. Sourced from the provisioning machine so it survives a portal restart across the AP bounce. `Cache-Control: no-store`. |
 | `/rescan` | GET | Plain-HTML confirmation page (`rescan_confirm.html`) warning that the setup Wi-Fi will restart and the QR must be re-scanned. A page rather than `window.confirm()` because captive-portal mini-browsers (iOS CNA, Android sign-in sheet) suppress JS dialogs. Viewing it does not bounce the AP. |
 | `/rescan` | POST | Performs the bounce: the machine tears the AP down, runs a fresh station-mode scan, and re-raises — disconnecting the phone; the response page (sent before the bounce lands) tells the user to re-scan the QR code to reconnect. Renders `rescan.html` on acceptance, re-renders the picker on rejection. Other methods → `303` to `/`. |
@@ -290,16 +295,25 @@ The DNS and NAT layers only make the probe request arrive; the HTTP layer is wha
 
 ### AP trigger state machine (`provisioning`)
 
-Machine states: `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joining`. The AP is raised or suppressed from connectivity and link signals:
+Machine states: `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joining`. The AP is raised or suppressed from connectivity and link signals. A raised AP additionally runs under a **session policy** latched from the raise reason — bounded sessions, the link-absent recheck cadence, the unclaimed setup-incomplete episode, portal-activity deferral, and the wired exit; the canonical rules are the session-policy table and episode section in [`setup-flow.md`](setup-flow.md):
 
 - **Unprovisioned (no saved Wi-Fi profile) + offline + confirmed no link → raise the AP immediately at the boot assessment only** (a fresh device with no saved Wi-Fi and no ethernet needs the AP right away). Every later confirmed link loss — the online→offline edge (a LAN-switch reboot must not flash setup over artwork), the tick probe on a parked device (a cable unplug emits no connectivity event), or a redundant offline re-emission (a `sys-monitord` restart re-emits its first probe unconditionally) — gets the full continuous-confirmed-absence window, since a raised `ap_active` has no link-based exit. With no link guard wired the immediate raise keeps its original scope (nothing can confirm absence over time).
-- **Provisioned + offline → arm a sustained link-loss window** (`defaultOfflineWindow = 5m`, probed on a `15s` tick); any tick that sees a link — or gets an inconclusive probe — disarms the window, and the clock restarts at the next confirmed absence, so the AP is raised only after a full window of **continuous, confirmed link absence** (not merely "offline at expiry"), and a brief router reboot never pops the AP. The window is armed by the first confirmed-absent probe, not by the offline reading that preceded it (with no link guard wired it keeps the original "5m from the offline event" baseline).
+- **Provisioned + offline → arm a sustained link-loss window** (`defaultOfflineWindow = 5m`, probed on a `15s` tick). The window is **sample-counted**: the raise requires a full window of confirmed-absent probe samples, a `linkPresent` sighting fully resets the count, and an **inconclusive probe pauses it** — bounded by a discard after a window-length pause and a 2-fresh-sample debt before expiry — so a brief router reboot never pops the AP and a flaky probe can no longer starve the raise forever (D7). The window is armed by the first confirmed-absent probe, not by the offline reading that preceded it (that reading counts as at most the first sample).
 - **A redundant offline reading in `ap_active` keeps the AP up** while the AP is actually raised: the hotspot holds the radio, so "offline" is the definition of that state, not news; both trigger branches reconcile and stay put rather than tearing the portal down under a phone mid-setup. A *failed* raise (`ap_active`, hotspot not up) is the exception — a confirmed link-present reading, from an assessment or a tick probe, exits back to `offline_retrying`/`unprovisioned` so a late successful retry never drops a link that recovered while NM was refusing the raise.
 - **Any live local link suppresses the AP** — wired (ethernet) or an associated Wi-Fi station — even while reported offline. The AP raises on **link loss, not internet loss**: broken credentials and vanished SSIDs present as link *down*, while up-but-offline means a dead upstream the AP cannot fix — and raising it would drop the station link on the single radio (#233). The device's own setup hotspot never counts as a link (`status.LinkChecker.ExternalLink` excludes the `ff1-softap` profile by name, covering leftovers from a failed teardown), and a failed `nmcli` probe reads as *unknown*, which defers the AP rather than authorizing it.
 - **Any transition back online tears the AP down.**
-- **Join sequencing (the "AP bounce"):** on credential submit the machine tears the AP down *before* the station-mode join (the single radio cannot host the AP and join at once), then joins via `wifictl`. On **any** join failure (including wrong password) the AP is re-raised so the user can retry; the portal `/status` reports `failed` with a reason.
+- **Network health surface (§4.7):** the hub status routes (`/api/status`, `/api/v2/status`) and the `getDeviceStatus` reply all carry an additive `network` object — `{state, reason, ssid?, link, internet, deferred?}` — sourced from the provisioning machine's mu-guarded snapshot plus the cached monitord internet verdict; a status poll performs no probe, and `link` is the machine's last real probe evidence (the AP-phase short-circuit never overwrites it). `deferred` tells the app its own contact is holding an escape-policy raise down. Full shape in [`controld-inbound-controller-messages.md`](controld-inbound-controller-messages.md).
+- **App-triggered setup (`startWifiSetup`):** the app can put the frame into this same setup mode over the relayer or LAN cast (command reference in [`controld-inbound-controller-messages.md`](controld-inbound-controller-messages.md)). The reply (`{ok, ssid}` or `{ok:false, code}` with `wired_link_active`/`busy`) is produced before the raise is queued — not synchronized against the transport, which is why the app treats a timed-out send as success: a raise that severs the station link can drop the reply in flight on either transport. Acceptance queues the standard entry sequence and the session runs under the `user-requested` policy row. The relayer `getDeviceStatus` reply carries `contract:"2"` (equal to the hub's v2 contract — one firmware gate, two transports) so the app can identify a v2 frame off-LAN.
+- **Join sequencing (the "AP bounce"):** on credential submit the machine tears the AP down *before* the station-mode join (the single radio cannot host the AP and join at once), then joins via `wifictl` under a **120s deadline** (`Config.JoinTimeout` — the one long blocking call on the loop goroutine; expiry surfaces as the timeout failure, D10). On **any** join failure (including wrong password) the AP is re-raised so the user can retry; the portal `/status` reports `failed` with a reason.
 
-`wifictl` wraps `nmcli` for saved-profile enumeration, scanning (with a pre-AP scan cache, TTL 10m, because NM serializes Wi-Fi operations on the single radio), and joining. Join errors are classified as auth / SSID-not-found / timeout / unknown and mapped to portal messages.
+`wifictl` wraps `nmcli` for saved-profile enumeration, scanning (with a pre-AP scan cache, TTL 10m, because NM serializes Wi-Fi operations on the single radio), and joining. A hidden-network join passes `hidden yes` and skips the scan-visibility wait; an open network omits the `password` argument entirely; the pre-join stale-profile purge matches the profile's **target SSID** (not its name) and deletes only PSK/open profiles — never 802.1X (D9). Join errors are classified as auth / SSID-not-found / timeout / unknown and mapped to portal messages.
+
+### Setup narration (`setupDisplay`) extension states and send-time downgrades
+
+The player manifest's `setupDisplay` **required** state set is frozen at seven states (`softap_qr`, `joining`, `join_failed`, `updating`, `claim_qr`, `ready`, `hidden`) — growing it would latch narration off entirely on every device that takes the controld package before the player bundle (the delivery-skew posture). Everything newer is an **extension state**, in two classes:
+
+- **No-op-tolerant** (`scanning`, `finalizing`, `factory_reset`): older players accept them as `{ok:true}` and render nothing; no fallback needed.
+- **Downgradeable** (`connecting`, `setup_error`): these narrations are the only thing between a stuck device and a silent or lying screen, so a send against a manifest that PROVABLY lacks the state (a decoded manifest whose state list omits it — read/decode failures keep the last real verdict, never latch) substitutes a fallback at send time via one shared table (`setupui.sendFallbacks`). Both currently fall back to `join_failed` (degraded title, prose intact in `reason`); the table's value shape also admits a hide-operation fallback for pushes whose false-failure title would be worse than clearing the screen. `setup_error` carries its prose in `reason`, matching the `connecting` convention, and narrates the §4.6 escalation latches (persistent AP raise/teardown failure).
 
 ### Claim QR (`device_connect` URL)
 
@@ -317,6 +331,8 @@ https://link.feralfile.com/device_connect/<device_id>|<topic_id>|<internet>|<bra
 This string is a contract with the mobile app: field order and the `|` separator are fixed; the sixth field is an additive extension. Do not remove or reorder existing fields without a coordinated mobile-app release.
 
 **Claim QR lifecycle (`showPairingQRCode`).** `show=true` runs the mandatory pre-claim OTA gate (`EnsureLatestBeforeClaim`) and only paints the claim QR on `no-update-needed`; if an update starts, the device is too old, or the version check fails, the QR is withheld. `show=false` (cloud ended pairing) records the `ready` narration state **before** hiding the overlay, so a durable "pairing succeeded" transition is never lost if the hide is interrupted.
+
+**Auto-claim retry cadence (F-12).** The online-triggered claim flow (`MaybeShowClaimQROnOnline`) retries a failed gate on two distinct cadences, decided per round by whether the gate's failure latch was stamped during that round (`updateLadderFailureLatchedSince` — freshness against a same-clock `t0`, with error identity for singleflight joiners): a cheap failure (version check, ctx cancel) retries on the transient 30s-doubling-to-5m backoff, while a round whose update **ladder** ran to exhaustion (up to 3 full image downloads — the latch records exhaustion, not the transient/permanent classifier verdict) retries on a stretched cadence escalating 1h → 24h across consecutive latched rounds — consecutive strictly: a transient round in between resets the escalation to its 1h floor, since a cheap failure means the network itself broke and reattributes the earlier ladder exhaustion toward the flaky-network cause. The stretched wait is preemptible with two guards: an online transition or topic assignment landing **while the loop is parked** shortens the remaining wait to at most the wake floor (`autoClaimLadderWakeFloor` = `autoClaimRetryMax`, 5 minutes), while pokes arriving during the gate run itself are dropped (drain-before-park) — so a moved or fixed device recovers within minutes, but a flapping link can never run download ladders back-to-back. Neither cadence is terminal — the claim flow has no nightly-timer fallback, so it never gives up while the process lives.
 
 ---
 

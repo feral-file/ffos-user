@@ -81,20 +81,22 @@ func (m *MockExecutor) SetSetupUI(ui *setupui.Service) {
 	m.ctrl.Call(m, "SetSetupUI", ui)
 }
 
+// ResetStaged mocks base method.
+func (m *MockExecutor) ResetStaged() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ResetStaged")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// ResetStaged indicates an expected call of ResetStaged.
+func (mr *MockExecutorMockRecorder) ResetStaged() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResetStaged", reflect.TypeOf((*MockExecutor)(nil).ResetStaged))
+}
+
 // SetSetupUI indicates an expected call of SetSetupUI.
 func (mr *MockExecutorMockRecorder) SetSetupUI(ui interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSetupUI", reflect.TypeOf((*MockExecutor)(nil).SetSetupUI), ui)
-}
-
-// SetRelayerCloser mocks base method.
-func (m *MockExecutor) SetRelayerCloser(close func()) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "SetRelayerCloser", close)
-}
-
-// SetRelayerCloser indicates an expected call of SetRelayerCloser.
-func (mr *MockExecutorMockRecorder) SetRelayerCloser(close interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetRelayerCloser", reflect.TypeOf((*MockExecutor)(nil).SetRelayerCloser), close)
 }

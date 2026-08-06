@@ -114,6 +114,13 @@ type ExecCmd interface {
 	Wait() error
 	Output() ([]byte, error)
 	CombinedOutput() ([]byte, error)
+	// Pid reports the started process's PID, or 0 before Start succeeds.
+	// Note that for `systemd-run --scope` this is the PID of the WRAPPED
+	// command, not of systemd-run: --scope creates the unit and then execs
+	// in place, so the PID Start returned becomes the spawned program.
+	// offlinecache relies on that to read the capture Chromium's cgroup
+	// (see offlinecache/downloader.go's warnOnScopeEscape).
+	Pid() int
 }
 
 type execCmd struct {
@@ -142,6 +149,13 @@ func (e execCmd) Output() ([]byte, error) {
 
 func (e execCmd) CombinedOutput() ([]byte, error) {
 	return e.cmd.CombinedOutput()
+}
+
+func (e execCmd) Pid() int {
+	if e.cmd.Process == nil {
+		return 0
+	}
+	return e.cmd.Process.Pid
 }
 
 //go:generate mockgen -source=os.go -destination=../mocks/os.go -package=mocks -mock_names=Signal=MockSignal

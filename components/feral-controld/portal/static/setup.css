@@ -62,17 +62,20 @@ h1 {
 .status-joining { border-color: #1e3a5f; color: #a8c7fa; }
 .status-succeeded { border-color: #1e4620; color: #a6d4a8; }
 
-/* Inline notice on the rescan/result pages. Tint via modifier:
-   note-info (in progress) or note-warn (about to disconnect). */
+/* Inline notice on the rescan/result pages. Neutral-bordered by default
+   (like .status); tint via modifier: note-info (in progress) or note-warn
+   (about to disconnect). */
 .note {
   margin-top: 1.25rem;
   padding: 0.9rem 1rem;
   font-size: 0.92rem;
+  border: 1px solid #2e2e33;
   background: #131315;
+  color: #c9c9ce;
 }
 .note strong { color: #f5f5f6; font-weight: 600; }
-.note-info { border: 1px solid #1e3a5f; color: #a8c7fa; }
-.note-warn { border: 1px solid #5c4813; color: #e3c26f; }
+.note-info { border-color: #1e3a5f; color: #a8c7fa; }
+.note-warn { border-color: #5c4813; color: #e3c26f; }
 
 form.connect { margin-top: 2rem; }
 label {
@@ -105,6 +108,33 @@ select {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%239b9ba1' stroke-width='1.5'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 0.9rem center;
+}
+
+/* Hidden-network checkbox row: plain sentence-case text (it is an option,
+   not a section label), so it overrides the uppercase label styling. */
+label.check {
+  display: flex;
+  gap: 0.65rem;
+  align-items: flex-start;
+  margin: 1.1rem 0 0;
+  font-size: 0.88rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  color: #c9c9ce;
+}
+label.check input[type="checkbox"] {
+  margin-top: 0.2rem;
+  width: 1rem;
+  height: 1rem;
+  accent-color: #f5f5f6;
+  flex: none;
+}
+label.check small {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.78rem;
+  color: #8a8a90;
 }
 
 /* Password field wraps the input so the Show/Hide toggle can sit inside
@@ -161,22 +191,6 @@ button.secondary {
 }
 button.secondary:active { background: #1c1c1f; }
 
-/* Link styled as the primary action (result page). */
-a.action {
-  display: block;
-  margin-top: 1.75rem;
-  padding: 1rem;
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  text-align: center;
-  text-decoration: none;
-  color: #0a0a0b;
-  background: #f5f5f6;
-  border-radius: 2px;
-}
-a.action:active { background: #c9c9ce; }
 /* Link styled as the secondary action (confirm page). */
 a.cancel {
   display: block;

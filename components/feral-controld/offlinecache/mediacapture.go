@@ -3,8 +3,10 @@ package offlinecache
 import (
 	"context"
 	"fmt"
+	"io"
 	go_http "net/http"
 	go_url "net/url"
+	"slices"
 	"strings"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -62,8 +64,11 @@ func NewMediaCapturer(
 }
 
 func (c *mediaCapturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem) (*ItemRecord, error) {
-	if item.ID == "" || item.Source == "" {
-		return nil, fmt.Errorf("offline cache: item must have an id and a source")
+	// Source is the item's cache identity (see SourceKey) and the one URL
+	// this path downloads; the DP-1 item id is optional per spec and
+	// deliberately not required here.
+	if item.Source == "" {
+		return nil, fmt.Errorf("offline cache: item must have a source")
 	}
 
 	// A single-resource capture only ever needs one reservation (unlike
@@ -114,7 +119,6 @@ func (c *mediaCapturer) Capture(ctx context.Context, item dp1playlist.PlaylistIt
 	}
 
 	rec := &ItemRecord{
-		ItemID:     item.ID,
 		Item:       item,
 		Entry:      item.Source,
 		Resources:  []Resource{resource},
@@ -122,7 +126,7 @@ func (c *mediaCapturer) Capture(ctx context.Context, item dp1playlist.PlaylistIt
 		CapturedAt: c.clock.Now().UTC(),
 	}
 	if err := c.store.SaveItem(rec); err != nil {
-		return nil, fmt.Errorf("offline cache: save item %s: %w", item.ID, err)
+		return nil, fmt.Errorf("offline cache: save item %s: %w", item.Source, err)
 	}
 	return rec, nil
 }
@@ -268,7 +272,29 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 		return Resource{}, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
-	hash, err := c.store.WriteBlob(transfer.Body(resp.Body), capBytes)
+	// This path has no browser to sniff for it, so where the origin
+	// declared no Content-Type it must produce its own fallback or
+	// Resource.SniffedContentType's invariant ("declared, else a sniffed
+	// guess") would simply not hold here. That gap would land exactly
+	// where it hurts most: classifyContentType maps an empty
+	// Content-Type to ClassUnknown, which routes to THIS capturer — so a
+	// headerless media origin, the very condition the field exists to
+	// survive, would be the one case with nothing to fall back to, and
+	// ff-player's HEAD content-type probe would get no answer for an
+	// extensionless <img>/<video>/<audio> source.
+	//
+	// Sniffing wraps the body rather than re-reading the finished blob:
+	// these assets are gigabyte-scale (see the streaming contract above),
+	// and only the leading bytes are ever needed.
+	body := transfer.Body(resp.Body)
+	declared := resp.Header.Get("Content-Type")
+	var sniffer *bodySniffer
+	if declared == "" {
+		sniffer = &bodySniffer{reader: body}
+		body = sniffer
+	}
+
+	hash, err := c.store.WriteBlob(body, capBytes)
 	if err != nil {
 		return Resource{}, fmt.Errorf("write blob: %w", err)
 	}
@@ -281,7 +307,11 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 		// intermediate hop: Go's http.Client already reports the FINAL
 		// response's headers here regardless of how many redirects were
 		// followed to reach it.
-		ContentType: resp.Header.Get("Content-Type"),
+		ContentType: declared,
+		// Empty unless the origin declared nothing AND the leading bytes
+		// were recognizable — see bodySniffer.contentType and
+		// Resource.SniffedContentType.
+		SniffedContentType: sniffer.contentType(),
 		// Same allowlist-and-reason as capture.go's filterReplayableHeaders
 		// (§4.6 of docs/offline-artwork-capture.md): a cross-origin
 		// <video crossOrigin="anonymous"> element CORS-checks its
@@ -311,4 +341,69 @@ func headerFirstValues(h go_http.Header) map[string]string {
 		}
 	}
 	return out
+}
+
+// sniffWindowBytes is how many leading bytes bodySniffer retains, matching
+// http.DetectContentType's own window — it never inspects more, so keeping
+// more would be dead memory held for the whole (gigabyte-scale) transfer.
+const sniffWindowBytes = 512
+
+// bodySniffer is a pass-through io.Reader that retains the leading
+// sniffWindowBytes of what flows through it, so fetchResource can classify
+// a headerless response WITHOUT buffering the asset or re-reading the
+// finished blob off disk. A nil *bodySniffer is valid and reports no type:
+// fetchResource only allocates one when the origin declared nothing, so
+// the nil case is "there was a declaration, nothing to sniff".
+type bodySniffer struct {
+	reader io.Reader
+	head   []byte
+}
+
+func (s *bodySniffer) Read(p []byte) (int, error) {
+	n, err := s.reader.Read(p)
+	if n > 0 && len(s.head) < sniffWindowBytes {
+		s.head = append(s.head, p[:min(n, sniffWindowBytes-len(s.head))]...)
+	}
+	return n, err
+}
+
+// sniffCatchAlls are http.DetectContentType's two "I cannot tell"
+// answers — one per branch of its binary/text split (net/http's sniff
+// table ends in a textSig entry that matches anything printable, exactly
+// as the binary side falls through to octet-stream). Neither is a
+// positive identification, and this path must not report one as though
+// it were: a headerless SVG without an XML prolog and a headerless
+// .gltf manifest both land on the text catch-all, and both are
+// ClassUnknown items that route to THIS capturer, so reporting
+// text/plain for them is not hypothetical.
+var sniffCatchAlls = []string{"application/octet-stream", "text/plain; charset=utf-8"}
+
+// contentType returns what the retained bytes sniff to, or "" when there
+// is no honest answer.
+//
+// An empty body has nothing to classify, and a catch-all verdict is a
+// non-answer wearing an answer's clothes. Recording either would be
+// worse than silence for this field's one consumer: ff-player's renderer
+// selection reads a returned type as authoritative and stops falling
+// back to extension inference (see Resource.SniffedContentType), so a
+// sniffed text/plain would demote precisely the .svg/.gltf items above
+// from their correct renderer — the same class of offline-only breakage
+// this whole split exists to prevent. Nothing of value is given up:
+// every container the probe actually cares about (image/gif, image/png,
+// video/mp4, audio/mpeg, application/pdf, prologued SVG as text/xml)
+// carries a real signature.
+//
+// Chromium's own sniffed verdict on the capture.go path is kept verbatim
+// by contrast, catch-alls included: that is what the live browser
+// actually concluded about the response, not a guess this daemon
+// synthesized in its absence.
+func (s *bodySniffer) contentType() string {
+	if s == nil || len(s.head) == 0 {
+		return ""
+	}
+	sniffed := go_http.DetectContentType(s.head)
+	if slices.Contains(sniffCatchAlls, sniffed) {
+		return ""
+	}
+	return sniffed
 }

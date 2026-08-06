@@ -9,6 +9,8 @@
 package offlinecache
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	go_http "net/http"
 	go_url "net/url"
@@ -43,10 +45,42 @@ const (
 // deliberately dropped: role/note/failedRequests/size all derive from
 // these or from the blob file itself).
 type Resource struct {
-	URL         string `json:"url"`
-	Status      int    `json:"status"`
-	SHA256      string `json:"sha256,omitempty"`
+	URL    string `json:"url"`
+	Status int    `json:"status"`
+	SHA256 string `json:"sha256,omitempty"`
+	// ContentType is the Content-Type the ORIGIN declared for this
+	// response, verbatim (parameters included), or "" when the origin
+	// declared none at all. Replay's fulfill emits the header only when
+	// this is non-empty, so "the origin declared none" replays as "no
+	// header" and Chromium sniffs exactly as it did live.
+	//
+	// It must never hold Chromium's SNIFFED type (CDP's
+	// Network.responseReceived response.mimeType), which capture used to
+	// store here: sniffing turns "absent" into a concrete guess, and
+	// asserting that guess back on replay is strictly worse than
+	// asserting nothing. A headerless stylesheet sniffs as text/plain,
+	// which Chromium's standards-mode CSS loader REJECTS — it tolerates
+	// an absent Content-Type but not a non-CSS one — so the artwork
+	// replays with zero style rules while working fine online. Observed
+	// in the field as a <model-viewer> piece collapsing to its intrinsic
+	// 300x150 box in the corner of a 4K screen, from one CDN stylesheet
+	// served with no Content-Type at all.
 	ContentType string `json:"contentType,omitempty"`
+	// SniffedContentType is Chromium's sniffed mimeType, persisted ONLY
+	// when the origin declared no Content-Type of its own — where there
+	// IS a declaration it is both more faithful and what replay serves,
+	// so storing a guess beside it would be dead weight on disk.
+	//
+	// It is never emitted on a fulfill; see ContentType for why
+	// asserting a sniffed type breaks stylesheets. Its one consumer is
+	// the HEAD content-type probe (replay's fulfillHeadFromGet, answering
+	// ff-player's getContentTypeFromURL), which picks the native
+	// <img>/<video>/<audio> renderer for an extensionless media URL:
+	// answering that with nothing regresses the player to extension
+	// inference. A sniffed type is a good answer to "what is this,
+	// roughly?" and a bad answer to "what did the server say?" — these
+	// two fields exist to keep those questions apart.
+	SniffedContentType string `json:"sniffedContentType,omitempty"`
 	// RedirectTo holds the Location header of a 3xx response. Replay
 	// fulfills the redirect itself (rather than following it during
 	// capture) so the real target is captured and cached as its own
@@ -82,6 +116,18 @@ type Resource struct {
 // Location header rather than a cached body.
 func (r Resource) IsRedirect() bool {
 	return r.Status >= 300 && r.Status < 400 && r.RedirectTo != ""
+}
+
+// ProbeContentType returns the type replay may answer a HEAD
+// content-type probe with: the origin's own declaration when it made
+// one, else Chromium's sniffed type. See SniffedContentType's doc for
+// why that fallback exists and why no other caller may take it — a
+// fulfill must serve ContentType alone, empty included.
+func (r Resource) ProbeContentType() string {
+	if r.ContentType != "" {
+		return r.ContentType
+	}
+	return r.SniffedContentType
 }
 
 // EffectiveMethod returns r.Method, defaulting to GET — see Method's doc
@@ -136,7 +182,9 @@ func requestOrigin(rawURL string) (string, error) {
 //     would let an offline replay silently set stale/foreign cookies for
 //     the artwork's origin.
 //   - Content-Type is already tracked as its own Resource field, not
-//     duplicated here.
+//     duplicated here (see Resource.ContentType — capture reads the
+//     origin's declaration out of the same raw header map this filters,
+//     via headerValue, before the filtering happens).
 //
 // What remains is exactly the set of response headers Chromium's own
 // CORS / cross-origin enforcement checks when it receives a fetched
@@ -172,6 +220,16 @@ func isReplayableHeaderName(name string) bool {
 // Fetch.fulfillRequest and the static server always emit consistent
 // header names regardless of how the original origin cased them. Returns
 // nil (matching Resource.Headers' omitempty) when nothing in raw matched.
+//
+// Values are cut at the first newline for the same reason headerValue
+// does it (see its doc): CDP joins a repeated header into one
+// "\n"-separated value, and these values are persisted and re-emitted
+// verbatim as Fetch.fulfillRequest response headers, where a newline is
+// either a rejected fulfill (the paused request stalls forever, hanging
+// the artwork offline) or a header-splitting primitive fed by an
+// untrusted playlist source. The static-server path is not exposed —
+// Go's own Header.Set/writeSubset sanitize — but it shares this map, so
+// the cut belongs here rather than at the one risky consumer.
 func filterReplayableHeaders(raw map[string]string) map[string]string {
 	if len(raw) == 0 {
 		return nil
@@ -185,9 +243,42 @@ func filterReplayableHeaders(raw map[string]string) map[string]string {
 		if out == nil {
 			out = make(map[string]string, len(raw))
 		}
-		out[canonical] = value
+		first, _, _ := strings.Cut(value, "\n")
+		out[canonical] = strings.TrimSpace(first)
 	}
 	return out
+}
+
+// headerValue returns raw's value for name, matched case-insensitively.
+// CDP delivers response headers keyed however they arrived on the wire —
+// whatever case an HTTP/1.1 origin chose, all-lowercase over HTTP/2 — so
+// a direct map index would miss the header on one transport and find it
+// on the other, which for Content-Type is the difference between
+// replaying the origin's declaration and replaying nothing.
+//
+// Returns "" when raw carries no such header, which for Content-Type is
+// a meaningful value in its own right (see Resource.ContentType), not
+// merely "unknown".
+//
+// Only the value up to the first newline is returned. CDP joins a
+// header sent MORE than once into a single "\n"-separated value, and
+// what this reads goes on to be persisted and re-emitted as a response
+// header by replay — an embedded newline there is at best a
+// Fetch.fulfillRequest Chromium rejects (the paused request then stalls
+// forever, hanging the artwork) and at worst a header-splitting
+// primitive, from a value an untrusted playlist source controls. The
+// first value is the honest reading of a duplicated header anyway:
+// Content-Type is not a list-valued header, so a second one is the
+// origin contradicting itself, not adding to it.
+func headerValue(raw map[string]string, name string) string {
+	canonical := go_http.CanonicalHeaderKey(name)
+	for key, value := range raw {
+		if go_http.CanonicalHeaderKey(key) == canonical {
+			first, _, _ := strings.Cut(value, "\n")
+			return strings.TrimSpace(first)
+		}
+	}
+	return ""
 }
 
 // ReasonCSPBlocked is the one Coverage.Reason token capture.go emits as a
@@ -211,17 +302,79 @@ type Coverage struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-// ItemRecord is the single on-disk source of truth for one cached DP-1 item
-// (items/<itemId>.json in the Store). It merges the verbatim item, the
-// entry URL Chromium actually loaded, and the capture index replay/export
-// need, so there is exactly one file to read/write per item.
+// SourceKey derives the cache identity for a DP-1 item source URL:
+// hex(sha256(source)) over the EXACT byte string as it appears in the
+// resolved playlist, with deliberately NO normalization (no lowercasing,
+// no query-param sorting, no trailing-slash trimming). Replay interception
+// also matches the exact URL, so a "normalized" key would claim a cache
+// hit for bytes captured under a different URL — the one direction that
+// can serve wrong content. Under-normalizing merely costs a duplicate
+// capture for trivially-different spellings of the same URL, which is
+// rare and bounded.
+//
+// This is the identity EVERYWHERE inside the package: on-disk record
+// filenames (items/<sourceKey>.json), every service-side state map, the
+// capture queue, and replay scope resolution. The raw source string
+// appears only at package boundaries (the wire contract,
+// resolved-playlist call sites) and as reporting data carried alongside
+// the key. Fixed-length keys also keep map keys and filenames free of
+// arbitrary-length, externally-controlled URL strings — the same
+// convention the store's playlists/by-url/ index already uses.
+//
+// The DP-1 item id is deliberately NOT an identity anywhere, for a reason
+// that does not depend on how any particular resolver behaves: the DP-1
+// core schema makes `id` OPTIONAL (only `source` is required) and defines
+// it as a UUID v4 — a random identifier carrying no derivation from the
+// artwork — so a spec-conforming playlist may omit it entirely or change
+// it freely. Nothing durable may key on a field with that contract.
+// Source is also what replay actually matches paused requests against
+// (see resourceKey), so keying storage on it makes the storage identity
+// and the lookup identity the same thing.
+//
+// Observed instability is the symptom, not the argument. Items
+// materialized from the spec `dynamicQuery` profile carry whatever id the
+// remote resolver returned (dp1-go mints none), and in the field those
+// ids have been seen changing between resolutions of the same playlist —
+// which is what orphaned id-keyed records. Do not generalize that to
+// "dynamic playlists always regenerate ids": the legacy dynamicQueries/
+// FFIndexer path in dp1.go happens to mint a deterministic UUIDv5 over
+// (contract, chain, tokenNumber). That is an implementation detail of one
+// resolver, not a contract — and the spec above is why neither behavior
+// can be relied on.
+//
+// The trade-off this accepts, stated plainly: source is mutable where an
+// id may not be. An FFIndexer-resolved item's source is the token's
+// animation_url/image_url, so a CDN migration or a re-rendered preview
+// changes it and orphans the cached record, costing a re-download. That
+// is the correct outcome rather than a regression — the captured bytes
+// are keyed to the exact URL replay will request, so a record under the
+// old URL cannot serve the new one — but it is a real cost, and the
+// reason a future "same artwork, new source" recovery would need a
+// separate provenance-based alias rather than a change to this key.
+func SourceKey(source string) string {
+	sum := sha256.Sum256([]byte(source))
+	return hex.EncodeToString(sum[:])
+}
+
+// ItemRecord is the single on-disk source of truth for one cached artwork
+// source (items/<SourceKey(Item.Source)>.json in the Store). It merges the
+// verbatim item, the entry URL Chromium actually loaded, and the capture
+// index replay/export need, so there is exactly one file to read/write per
+// source.
+//
+// The record is per-SOURCE, not per-playlist-item: multiple playlist items
+// — within one playlist or across playlists — that share a source converge
+// on this one record. Saving refreshes the cached artifact for all of
+// them, and deleting it removes the cached artifact for all of them (no
+// refcount, by design — see Store.DeleteItem's doc).
 type ItemRecord struct {
-	// ItemID is the DP-1 item id and this record's identity/filename.
-	ItemID string `json:"itemId"`
-	// Item is the DP-1 playlist item as resolved by dp1.DP1. Source is
-	// never rewritten — replay interception keys on the original URL —
-	// which preserves the signed-playlist invariant from capture through
-	// to replay.
+	// Item is the DP-1 playlist item as resolved by dp1.DP1. Item.Source
+	// is this record's identity (see SourceKey) and is never rewritten —
+	// replay interception keys on the original URL — which preserves the
+	// signed-playlist invariant from capture through to replay. The item's
+	// optional DP-1 id is carried verbatim but is informational only:
+	// when items sharing this source appear in several resolutions, the
+	// record holds whichever item was captured last.
 	Item dp1playlist.PlaylistItem `json:"item"`
 	// Entry is the URL Chromium actually navigated to. Equal to
 	// Item.Source unless Source itself redirected.

@@ -12,7 +12,25 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-const FF_INDEXER_HOST = "indexer-v2.feralfile.com"
+// FF_INDEXER_HOSTS is the allowlist validateEndpoint checks a legacy
+// dynamicQueries endpoint against. It is an allowlist rather than a single
+// constant because the mobile app still emits legacy `dynamicQueries[]`
+// pointing at the older `indexer.feralfile.com` hostname, while newer
+// playlists use `indexer-v2.feralfile.com`. Both names front the same v2
+// GraphQL service, so the one query QueryTokens builds is valid against
+// either — this is a naming alias, NOT a second schema to support. If a
+// host is ever added here that speaks a different schema, QueryTokens
+// must learn to build that shape too; allowing the host alone would let
+// the request through only to fail with GraphQL errors.
+//
+// Keeping this narrow is the point: the endpoint arrives inside a
+// controller-supplied playlist, so an unrestricted host would let a
+// crafted playlist aim the device's indexer queries at an arbitrary
+// server.
+var FF_INDEXER_HOSTS = map[string]bool{
+	"indexer-v2.feralfile.com": true,
+	"indexer.feralfile.com":    true,
+}
 
 type Display struct {
 	ImageURL     *string `json:"image_url,omitempty"`
@@ -132,13 +150,26 @@ func (i *ffIndexer) QueryTokens(ctx context.Context, endpoint string, params map
 	return resp.Data.Tokens.Items, nil
 }
 
-// validateEndpoint validates that the endpoint is a valid FF Indexer endpoint
+// validateEndpoint validates that the endpoint is a valid FF Indexer
+// endpoint — see FF_INDEXER_HOSTS for why the host set is deliberately
+// closed. Matched on Host (so any port is rejected as a different host),
+// never on a suffix: a suffix match would accept
+// "indexer.feralfile.com.attacker.example".
 func validateEndpoint(endpoint string) error {
 	url, err := url.Parse(endpoint)
 	if err != nil {
 		return err
 	}
-	if url.Host != FF_INDEXER_HOST {
+	// Scheme is checked as well as host. The endpoint comes from a
+	// CONTROLLER-SUPPLIED dynamic playlist, and its GraphQL response
+	// decides what the device displays — so fetching it over cleartext
+	// would let anyone on the path rewrite that answer, host allowlist or
+	// not. Allowlisting the host alone left `http://<allowed-host>/...`
+	// accepted; a test even pinned that as expected behavior.
+	if url.Scheme != "https" {
+		return fmt.Errorf("invalid endpoint scheme %q (https required): %s", url.Scheme, endpoint)
+	}
+	if !FF_INDEXER_HOSTS[url.Host] {
 		return fmt.Errorf("invalid endpoint: %s", endpoint)
 	}
 	return nil

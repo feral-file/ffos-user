@@ -24,15 +24,26 @@
   {{end}}
 
   <form class="connect" method="POST" action="/connect">
-    <label for="ssid">Network</label>
     {{if .SSIDs}}
+    <label for="ssid">Network</label>
     <select id="ssid" name="ssid">
       {{range .SSIDs}}<option value="{{.}}">{{.}}</option>{{end}}
     </select>
+
+    <label for="ssid-manual">Or type a network name</label>
+    <input id="ssid-manual" name="ssid_manual" type="text" autocomplete="off"
+           autocapitalize="none" placeholder="Leave empty to use the list above">
     {{else}}
-    <input id="ssid" name="ssid" type="text" autocomplete="off"
+    <label for="ssid-manual">Network</label>
+    <input id="ssid-manual" name="ssid_manual" type="text" autocomplete="off"
            autocapitalize="none" placeholder="Network name">
     {{end}}
+
+    <label class="check" for="hidden">
+      <input id="hidden" name="hidden" type="checkbox" value="1">
+      <span>This is a hidden network<small>Only applies to a typed
+      name — hidden networks never appear in the list.</small></span>
+    </label>
 
     <label for="password">Password</label>
     <div class="pwfield">

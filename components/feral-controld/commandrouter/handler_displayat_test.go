@@ -28,7 +28,7 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersDisplayAt(t *testing.T) {
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -104,7 +104,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DefersFutureOnlySchedule(t *test
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -149,7 +149,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DeferredCastLeavesReplayScopeUnt
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -202,7 +202,7 @@ func TestCommandHandler_Process_DisplayPlaylist_ScopesFullPlaylistBeforeActiveSe
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -238,7 +238,7 @@ func TestCommandHandler_Process_DisplayPlaylist_ScopesFullPlaylistBeforeActiveSe
 	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(full, nil)
 
 	syncCall := mockKioskReplay.EXPECT().
-		SyncPlaylist(ctx, []string{"day21", "day22", "day23"}).
+		SyncPlaylist(ctx, []string{"https://example.com/21.html", "https://example.com/22.html", "https://example.com/23.html"}).
 		Return(nil).Times(1)
 	sendCall := mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
@@ -273,7 +273,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesExplicitIntent(t *testi
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -337,7 +337,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DefaultsIntentOnPlainPlaylist(t 
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -438,7 +438,7 @@ func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T)
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -487,7 +487,7 @@ func TestCommandHandler_Process_DisplayPlaylist_RecomputePreservesPlaylistURL(t 
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -561,7 +561,7 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_DoesNotClearDisplayAtCach
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -620,7 +620,7 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_PlayerRejectLeavesCache(t
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -681,7 +681,7 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_WaitsForInFlightRecompute
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -784,7 +784,7 @@ func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -848,7 +848,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCach
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
