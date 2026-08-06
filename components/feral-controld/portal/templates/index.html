@@ -3,157 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FF1 Setup — Connect to Wi-Fi</title>
-<style>
-  /* FF1 setup design language: this page must read as part of the device,
-     not a router admin panel. It mirrors the on-screen setup overlay
-     (ff-player SetupOverlay): near-black ground, white type, letterspaced
-     uppercase micro-labels, sharp corners, no color except muted semantic
-     status tints. Committed dark-only (color-scheme: dark) — the frame's
-     own UI never changes with the phone's theme, so neither does this. */
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; margin: 0; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-      "Helvetica Neue", Arial, sans-serif;
-    background: #0a0a0b;
-    color: #f5f5f6;
-    line-height: 1.5;
-    -webkit-font-smoothing: antialiased;
-  }
-  main {
-    max-width: 26rem;
-    margin: 0 auto;
-    padding: 2.25rem 1.5rem 3.5rem;
-  }
-  .brand {
-    font-size: 0.7rem;
-    font-weight: 600;
-    letter-spacing: 0.35em;
-    text-transform: uppercase;
-    color: #8a8a90;
-  }
-  h1 {
-    margin: 1.75rem 0 0.75rem;
-    font-size: 1.55rem;
-    font-weight: 500;
-    letter-spacing: -0.01em;
-  }
-  .lede { color: #a6a6ac; font-size: 0.95rem; }
-  .lede strong { color: #f5f5f6; font-weight: 600; }
-  .status {
-    margin-top: 1.5rem;
-    padding: 0.85rem 1rem;
-    font-size: 0.92rem;
-    border: 1px solid #2e2e33;
-    background: #131315;
-    color: #c9c9ce;
-  }
-  .status-failed { border-color: #5f2120; color: #f2b8b5; }
-  .status-joining { border-color: #1e3a5f; color: #a8c7fa; }
-  .status-succeeded { border-color: #1e4620; color: #a6d4a8; }
-  form.connect { margin-top: 2rem; }
-  label {
-    display: block;
-    margin: 1.4rem 0 0.5rem;
-    font-size: 0.68rem;
-    font-weight: 600;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    color: #9b9ba1;
-  }
-  select, input[type="text"], input[type="password"] {
-    width: 100%;
-    padding: 0.8rem 0.9rem;
-    font-size: 1rem;
-    font-family: inherit;
-    color: #f5f5f6;
-    background: #131315;
-    border: 1px solid #2e2e33;
-    border-radius: 2px;
-  }
-  select:focus, input:focus {
-    outline: none;
-    border-color: #f5f5f6;
-  }
-  select {
-    appearance: none;
-    -webkit-appearance: none;
-    padding-right: 2.6rem;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%239b9ba1' stroke-width='1.5'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 0.9rem center;
-  }
-  /* Password field wraps the input so the Show/Hide toggle can sit inside
-     its right edge; the input reserves room for it. The toggle ships
-     [hidden] and is revealed by the script below — without JS the field is
-     just a normal password input. */
-  .pwfield { position: relative; }
-  .pwfield input { padding-right: 4.6rem; }
-  .pwtoggle {
-    position: absolute;
-    top: 50%;
-    right: 0.35rem;
-    transform: translateY(-50%);
-    padding: 0.55rem 0.6rem;
-    font-family: inherit;
-    font-size: 0.66rem;
-    font-weight: 600;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-    color: #9b9ba1;
-    background: none;
-    border: 0;
-  }
-  .pwtoggle:active { color: #f5f5f6; }
-  button.primary {
-    width: 100%;
-    margin-top: 2rem;
-    padding: 1rem;
-    font-family: inherit;
-    font-size: 0.78rem;
-    font-weight: 600;
-    letter-spacing: 0.22em;
-    text-transform: uppercase;
-    color: #0a0a0b;
-    background: #f5f5f6;
-    border: 0;
-    border-radius: 2px;
-  }
-  button.primary:active { background: #c9c9ce; }
-  button.secondary {
-    width: 100%;
-    margin-top: 0.9rem;
-    padding: 0.95rem;
-    font-family: inherit;
-    font-size: 0.78rem;
-    font-weight: 600;
-    letter-spacing: 0.22em;
-    text-transform: uppercase;
-    color: #f5f5f6;
-    background: transparent;
-    border: 1px solid #3f3f46;
-    border-radius: 2px;
-  }
-  button.secondary:active { background: #1c1c1f; }
-  .hint {
-    margin-top: 2rem;
-    padding-top: 1.25rem;
-    border-top: 1px solid #1f1f23;
-    font-size: 0.85rem;
-    color: #8a8a90;
-  }
-  .hint strong { color: #c9c9ce; font-weight: 600; }
-</style>
+<title>Art Computer setup — Connect to Wi-Fi</title>
+<link rel="stylesheet" href="/setup.css">
 </head>
 <body>
 <main>
-  <p class="brand">Feral File · FF1</p>
+  <p class="brand">Feral File · Art Computer</p>
   <h1>Connect to Wi-Fi</h1>
   <p class="lede">
-    Choose the network your frame should use. After you tap Connect, this
-    page may pause while the frame switches networks — if it does, reconnect
-    your phone to <strong>{{.APSSID}}</strong> and open
+    Choose the network your Art Computer should use. After you press Connect,
+    this page may pause while it switches networks. If that happens, reconnect
+    to <strong>{{.APSSID}}</strong> and open
     <strong>http://ff1.config</strong> to check progress.
   </p>
 
@@ -164,14 +24,35 @@
   {{end}}
 
   <form class="connect" method="POST" action="/connect">
-    <label for="ssid">Network</label>
     {{if .SSIDs}}
+    <label for="ssid">Network</label>
     <select id="ssid" name="ssid">
       {{range .SSIDs}}<option value="{{.}}">{{.}}</option>{{end}}
+      {{- /* The empty value routes to the manual branch server-side (a blank
+           picker value can never be a real pick), so no-JS submissions of
+           this option degrade to the ordinary empty-SSID rejection. */}}
+      <option value="">Other network…</option>
     </select>
+
+    <div id="manual-entry">
+      <label for="ssid-manual">Or type a network name</label>
+      <input id="ssid-manual" name="ssid_manual" type="text" autocomplete="off"
+             autocapitalize="none" placeholder="Leave empty to use the list above">
+
+      <label class="check" for="hidden">
+        <input id="hidden" name="hidden" type="checkbox" value="1">
+        <span>This is a hidden network</span>
+      </label>
+    </div>
     {{else}}
-    <input id="ssid" name="ssid" type="text" autocomplete="off"
+    <label for="ssid-manual">Network</label>
+    <input id="ssid-manual" name="ssid_manual" type="text" autocomplete="off"
            autocapitalize="none" placeholder="Network name">
+
+    <label class="check" for="hidden">
+      <input id="hidden" name="hidden" type="checkbox" value="1">
+      <span>This is a hidden network</span>
+    </label>
     {{end}}
 
     <label for="password">Password</label>
@@ -179,7 +60,21 @@
       <input id="password" name="password" type="password" autocomplete="off">
       <button type="button" id="password-toggle" class="pwtoggle"
               aria-pressed="false" aria-label="Show password" hidden>
-        Show
+        {{- /* The icon shows the tap's ACTION, following the majority
+             convention (Material/Android, Edge): open eye while concealed
+             ("tap to reveal"), slashed eye while revealed. */}}
+        <svg id="pw-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true">
+          <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+        <svg id="pw-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true" hidden>
+          <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
+          <line x1="1" y1="1" x2="23" y2="23"/>
+        </svg>
       </button>
     </div>
 
@@ -192,24 +87,66 @@
 
   <p class="hint">
     Don't see your Wi-Fi network? Make sure your router is switched on, then
-    tap <strong>Search for networks again</strong>. The frame will restart
-    its setup Wi-Fi, so you'll need to scan the QR code on the frame again
-    afterwards.
+    tap <strong>Search for networks again</strong>. The Art Computer will
+    restart its setup network, so you'll need to scan the QR code on the
+    screen again afterwards.
   </p>
 </main>
 <script>
-  // Show/hide toggle for the Wi-Fi password. Progressive enhancement: the
-  // button ships [hidden] so a captive mini-browser with scripting disabled
-  // just gets a plain password field.
+  // Collapse manual entry behind the picker's "Other network…" option.
+  // Progressive enhancement: the markup ships fully visible, so a captive
+  // mini-browser with scripting disabled keeps today's dual-source form;
+  // the server accepts either shape unchanged. The reveal rewrites the
+  // label/placeholder copy ("Or type a network name" only reads right when
+  // the field sits beside the picker) and marks the input required — under
+  // "Other network…" a blank name can only be a mistake.
+  (function () {
+    var select = document.getElementById('ssid');
+    var manual = document.getElementById('manual-entry');
+    var input = document.getElementById('ssid-manual');
+    if (!select || !manual || !input) return;
+    var label = manual.querySelector('label[for="ssid-manual"]');
+    var sync = function (viaChange) {
+      var other = select.value === '';
+      manual.hidden = !other;
+      input.required = other;
+      if (other) {
+        if (label) label.textContent = 'Network name';
+        input.placeholder = "Type the network's name";
+        if (viaChange) input.focus();
+      } else {
+        // A typed name outranks the picker server-side, so a stale value
+        // left behind a re-hidden field would silently override the pick.
+        input.value = '';
+      }
+    };
+    select.addEventListener('change', function () { sync(true); });
+    sync(false);
+  })();
+
+  // Show/hide toggle for the Wi-Fi password, an icon-only button. The icon
+  // shows the tap's action — open eye while concealed ("tap to reveal"),
+  // slashed eye while revealed; aria-label carries the accessible name.
+  // Progressive enhancement: the button ships [hidden] so a captive
+  // mini-browser with scripting disabled just gets a plain password field.
   (function () {
     var input = document.getElementById('password');
     var toggle = document.getElementById('password-toggle');
-    if (!input || !toggle) return;
+    var eye = document.getElementById('pw-eye');
+    var eyeOff = document.getElementById('pw-eye-off');
+    if (!input || !toggle || !eye || !eyeOff) return;
     toggle.hidden = false;
+    // Attribute API, not the .hidden property: the icons are SVG elements,
+    // and `hidden` is an HTMLElement property — on an SVGElement assigning
+    // it creates an inert expando and the attribute never changes.
+    var show = function (el, on) {
+      if (on) { el.removeAttribute('hidden'); } else { el.setAttribute('hidden', ''); }
+    };
     toggle.addEventListener('click', function () {
       var reveal = input.type === 'password';
       input.type = reveal ? 'text' : 'password';
-      toggle.textContent = reveal ? 'Hide' : 'Show';
+      show(eye, !reveal);
+      show(eyeOff, reveal);
       toggle.setAttribute('aria-pressed', reveal ? 'true' : 'false');
       toggle.setAttribute('aria-label', reveal ? 'Hide password' : 'Show password');
     });

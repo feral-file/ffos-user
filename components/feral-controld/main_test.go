@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 
 	go_daemon "github.com/coreos/go-systemd/v22/daemon"
@@ -645,6 +647,232 @@ func TestApp_Run_Success(t *testing.T) {
 	}
 }
 
+func TestApp_Run_StartsAndStopsOfflineCacheWhenEnabled(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
+	ts.mockCDP.EXPECT().Close()
+	ts.mockWatchdog.EXPECT().Start(gomock.Any())
+	ts.mockWatchdog.EXPECT().Stop()
+	ts.mockDBus.EXPECT().Start().Return(nil)
+	ts.mockDBus.EXPECT().Stop().Return(nil)
+	ts.mockMediator.EXPECT().Start()
+	ts.mockMediator.EXPECT().Stop()
+	ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+	ts.mockStatusPoller.EXPECT().Stop()
+	ts.mockRefresher.EXPECT().Start()
+	ts.mockRefresher.EXPECT().Stop()
+	ts.mockHub.EXPECT().Start()
+	ts.mockHub.EXPECT().Stop().Return(nil)
+	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+	ts.mockDBus.EXPECT().
+		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+		Return([]interface{}{false}, nil)
+	ts.mockStateManager.EXPECT().
+		Load(ts.logger).
+		Return(&state.State{Relayer: &state.RelayerState{TopicID: ""}}, nil)
+	ts.mockStateManager.EXPECT().
+		ClaimSnapshot().
+		Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
+		AnyTimes()
+	// Relayer.Close is called unconditionally on shutdown regardless of the
+	// connectivity-gate outcome above (see run()'s own doc on why).
+	ts.mockRelayer.EXPECT().Close()
+
+	ctrl := ts.ctrl
+	mockOfflineService := mocks.NewMockOfflineCacheService(ctrl)
+	mockStaticServer := mocks.NewMockOfflineCacheStaticServer(ctrl)
+	mockOfflineService.EXPECT().Start(gomock.Any()).Return(nil).Times(1)
+	mockOfflineService.EXPECT().Stop().Times(1)
+	// Listen must succeed BEFORE Serve is ever launched — see main.go's
+	// doc on why binding is synchronous now rather than folded into a
+	// single background ListenAndServe call.
+	mockStaticServer.EXPECT().Listen().Return(nil).Times(1)
+	mockStaticServer.EXPECT().Serve().Return(http.ErrServerClosed).Times(1)
+	mockStaticServer.EXPECT().Shutdown(gomock.Any()).Return(nil).Times(1)
+	ts.app.OfflineCacheService = mockOfflineService
+	ts.app.OfflineCacheStaticServer = mockStaticServer
+
+	testCtx, cancel := context.WithTimeout(ts.ctx, 50*time.Millisecond)
+	defer cancel()
+
+	err := ts.app.run(testCtx, ts.config)
+	assert.NoError(t, err)
+}
+
+// TestApp_Run_SkipsServeAndShutdownWhenStaticServerBindFails is the
+// regression test for the startup-ordering fix: if the static server's
+// port cannot be bound (e.g. an unrelated process already holds it),
+// main.go must never launch Serve in the background — the old
+// ListenAndServe-only wiring would only discover a bind failure
+// asynchronously, well after the rest of daemon startup had already
+// proceeded assuming success — nor attempt Shutdown on a server that
+// was never actually started.
+func TestApp_Run_SkipsServeAndShutdownWhenStaticServerBindFails(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
+	ts.mockCDP.EXPECT().Close()
+	ts.mockWatchdog.EXPECT().Start(gomock.Any())
+	ts.mockWatchdog.EXPECT().Stop()
+	ts.mockDBus.EXPECT().Start().Return(nil)
+	ts.mockDBus.EXPECT().Stop().Return(nil)
+	ts.mockMediator.EXPECT().Start()
+	ts.mockMediator.EXPECT().Stop()
+	ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+	ts.mockStatusPoller.EXPECT().Stop()
+	ts.mockRefresher.EXPECT().Start()
+	ts.mockRefresher.EXPECT().Stop()
+	ts.mockHub.EXPECT().Start()
+	ts.mockHub.EXPECT().Stop().Return(nil)
+	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+	ts.mockDBus.EXPECT().
+		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+		Return([]interface{}{false}, nil)
+	ts.mockStateManager.EXPECT().
+		Load(ts.logger).
+		Return(&state.State{Relayer: &state.RelayerState{TopicID: ""}}, nil)
+	ts.mockStateManager.EXPECT().
+		ClaimSnapshot().
+		Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
+		AnyTimes()
+	// Relayer.Close is called unconditionally on shutdown regardless of the
+	// connectivity-gate outcome above (see run()'s own doc on why).
+	ts.mockRelayer.EXPECT().Close()
+
+	ctrl := ts.ctrl
+	mockOfflineService := mocks.NewMockOfflineCacheService(ctrl)
+	mockStaticServer := mocks.NewMockOfflineCacheStaticServer(ctrl)
+	mockOfflineService.EXPECT().Start(gomock.Any()).Return(nil).Times(1)
+	mockOfflineService.EXPECT().Stop().Times(1)
+	mockStaticServer.EXPECT().Listen().Return(errors.New("bind: address already in use")).Times(1)
+	// Deliberately no Serve/Shutdown expectations: gomock's strict
+	// controller fails this test if main.go calls either despite Listen
+	// having failed.
+	ts.app.OfflineCacheService = mockOfflineService
+	ts.app.OfflineCacheStaticServer = mockStaticServer
+
+	testCtx, cancel := context.WithTimeout(ts.ctx, 50*time.Millisecond)
+	defer cancel()
+
+	err := ts.app.run(testCtx, ts.config)
+	assert.NoError(t, err, "a static-server bind failure must degrade gracefully, never fail the whole daemon run")
+}
+
+// TestApp_Run_OnConnectAttachesOfflineCacheReplay pins the INLINE half of
+// the reconnect resync: AttachOnReconnect must run straight off the CDP
+// connect callback, because it arms Fetch interception on offlinecache's own
+// socket and needs no page JS.
+//
+// Its companion half — re-applying the item scope, which does need a hydrated
+// page — is deliberately NOT here: it is the "replay-scope-resync"
+// reconciler, covered by TestReplayScopeResyncReconciler. Asserting
+// PlaylistRefresher.ForceRefresh on this callback is what the old version of
+// this test did, and it pinned a resync that could not actually work at this
+// point in the lifecycle (the status fetch it depends on evaluates
+// window.handleCDPRequest against a document that has not hydrated yet).
+func TestApp_Run_OnConnectAttachesOfflineCacheReplay(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.mockWatchdog.EXPECT().Start(gomock.Any())
+	ts.mockWatchdog.EXPECT().Stop()
+	ts.mockDBus.EXPECT().Start().Return(nil)
+	ts.mockDBus.EXPECT().Stop().Return(nil)
+	ts.mockMediator.EXPECT().Start()
+	ts.mockMediator.EXPECT().Stop()
+	ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+	ts.mockStatusPoller.EXPECT().Stop()
+	ts.mockRefresher.EXPECT().Start()
+	ts.mockRefresher.EXPECT().Stop()
+	ts.mockHub.EXPECT().Start()
+	ts.mockHub.EXPECT().Stop().Return(nil)
+	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+	ts.mockDBus.EXPECT().
+		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+		Return([]interface{}{false}, nil)
+	ts.mockStateManager.EXPECT().
+		Load(ts.logger).
+		Return(&state.State{Relayer: &state.RelayerState{TopicID: ""}}, nil)
+	ts.mockStateManager.EXPECT().
+		ClaimSnapshot().
+		Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
+		AnyTimes()
+	// Relayer.Close is called unconditionally on shutdown regardless of the
+	// connectivity-gate outcome above (see run()'s own doc on why).
+	ts.mockRelayer.EXPECT().Close()
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().AttachOnReconnect(gomock.Any()).Return(nil).Times(1)
+	ts.app.KioskReplay = mockKioskReplay
+	// Deliberately no ForceRefresh expectation: the scope resync moved to the
+	// replay-scope-resync reconciler. ts.mockRefresher is a strict gomock mock,
+	// so an unexpected ForceRefresh here fails the test — which is what pins
+	// the split rather than merely not asserting it.
+
+	var onConnect func()
+	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any()).Do(func(_ context.Context, fn func()) {
+		onConnect = fn
+	})
+	ts.mockCDP.EXPECT().Close()
+
+	testCtx, cancel := context.WithTimeout(ts.ctx, 50*time.Millisecond)
+	defer cancel()
+
+	err := ts.app.run(testCtx, ts.config)
+	assert.NoError(t, err)
+
+	require.NotNil(t, onConnect, "CDP.Start must be given an onConnect callback")
+	onConnect()
+}
+
+// TestReplayScopeResyncReconciler pins the half of the reconnect resync that
+// moved off the CDP connect callback. Before this split the assertion lived in
+// TestApp_Run_OnConnectAttachesOfflineCacheReplay; without a test here the
+// resync would be entirely uncovered, and a future edit dropping the
+// registration in initializeApp would silently reinstate the up-to-
+// PLAYLIST_REFRESH_INTERVAL replay outage the reconciler exists to prevent.
+func TestReplayScopeResyncReconciler(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockRefresher := mocks.NewMockRefresher(ctrl)
+	mockRefresher.EXPECT().ForceRefresh().Times(1)
+
+	replayScopeResyncReconciler(mockRefresher)(context.Background())
+}
+
+// TestStatusForceRefreshReconciler covers the status poller half of what this
+// branch's merge moved OFF the connect callback (it is develop's reconciler
+// now). Deleting the inline call removed the repo's only assertion that a CDP
+// connect force-refreshes status, so without this the regression would be
+// uncovered on both sides of the move.
+//
+// There is deliberately no sibling TestSetupUIResyncReconciler: the other
+// moved producer, setupUIResyncReconciler, takes a concrete *setupui.Service
+// rather than a consumer-owned interface, so there is no seam to assert
+// against without narrowing that parameter first.
+func TestStatusForceRefreshReconciler(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockPoller := mocks.NewMockStatusPoller(ctrl)
+	mockPoller.EXPECT().ForceRefresh().Times(1)
+
+	statusForceRefreshReconciler(mockPoller)(context.Background())
+}
+
 func TestApp_Run_Errors(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -988,6 +1216,8 @@ func TestInitializeApp(t *testing.T) {
 		"wss://test.relay.com",
 		"test-api-key",
 		nil,
+		nil,
+		provisioning.Tuning{},
 		"com.feralfile.test",
 		nil,
 	)
@@ -1025,6 +1255,11 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app.PlaylistScheduler)
 	assert.NotNil(t, app.Hub)
 
+	// offlineCacheConfig was nil, so the feature stays fully disabled.
+	assert.Nil(t, app.KioskReplay)
+	assert.Nil(t, app.OfflineCacheService)
+	assert.Nil(t, app.OfflineCacheStaticServer)
+
 	// Test all wrappers are initialized
 	assert.NotNil(t, app.Clock)
 	assert.NotNil(t, app.OS)
@@ -1036,6 +1271,27 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app.Random)
 	assert.NotNil(t, app.Exec)
 	assert.NotNil(t, app.Math)
+}
+
+func TestInitializeApp_OfflineCacheEnabled(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+
+	app := initializeApp(
+		logger,
+		"http://localhost:9222",
+		"wss://test.relay.com",
+		"test-api-key",
+		nil,
+		&config.OfflineCacheConfig{Enabled: true, RootDir: t.TempDir()},
+		provisioning.Tuning{},
+		"com.feralfile.test",
+		nil,
+	)
+
+	assert.NotNil(t, app)
+	assert.NotNil(t, app.KioskReplay)
+	assert.NotNil(t, app.OfflineCacheService)
+	assert.NotNil(t, app.OfflineCacheStaticServer)
 }
 
 func TestInitializeTestApp(t *testing.T) {

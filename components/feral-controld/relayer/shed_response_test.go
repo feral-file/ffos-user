@@ -260,8 +260,21 @@ func TestDispatchMessage_ShedReplyDoesNotBlockReadLoop(t *testing.T) {
 		t.Fatal("dispatchMessage blocked on a slow shed-response write")
 	}
 
-	// Release the parked writer goroutine so the test leaves nothing wedged.
+	// Release the parked writer goroutine — and then WAIT for it, which is the
+	// part that was missing. Unblocking it is not the same as joining it: it
+	// goes on to call Send, which logs through the zaptest logger bound to t,
+	// and a t-bound logger written after its test returns races tRunner's own
+	// cleanup write. That surfaced as an intermittent -race failure in CI
+	// (roughly 1 run in 30 locally) reported against relayer.go rather than
+	// against this test, which is what made it look like a production race.
+	//
+	// Draining every shedSem slot is the join: shedResponseAsync's goroutine
+	// releases its slot in a defer that runs AFTER sendShedResponse has
+	// returned, so holding all of them proves no writer is still logging.
 	close(release)
+	for range cap(r.shedSem) {
+		r.shedSem <- struct{}{}
+	}
 }
 
 // A storm of messageID == "system" payloads must NOT escape into unbounded

@@ -282,6 +282,63 @@ func TestMediator_HandleDBusSignal_SysMetrics(t *testing.T) {
 	}
 }
 
+// TestMediator_SysMetricsObserver_ForwardsRawPayload pins the sink
+// contract: a registered observer receives every sysmetrics payload
+// verbatim (raw bytes, no decode — see SetSysMetricsObserver's doc), and
+// an absent observer is a no-op rather than a nil deref.
+func TestMediator_SysMetricsObserver_ForwardsRawPayload(t *testing.T) {
+	metricsData := []byte(`{"cpu":{"current_temperature":42}}`)
+	payload := godbus.DBusPayload{
+		Member: dbus.MONITORD_EVENT_SYSMETRICS,
+		Body:   []interface{}{metricsData},
+	}
+
+	t.Run("registered sink receives the raw body", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		ts.mockRelayer.EXPECT().IsConnected().Return(true).AnyTimes()
+
+		var capturedHandler func(context.Context, godbus.DBusPayload) ([]interface{}, error)
+		ts.mockDbus.EXPECT().
+			OnBusSignal(gomock.Any()).
+			DoAndReturn(func(handler func(context.Context, godbus.DBusPayload) ([]interface{}, error)) {
+				capturedHandler = handler
+			}).Times(1)
+		ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
+
+		var got []byte
+		ts.mediator.SetSysMetricsObserver(func(raw []byte) { got = raw })
+		ts.mediator.Start()
+
+		_, err := capturedHandler(ts.ctx, payload)
+		assert.NoError(t, err)
+		assert.Equal(t, metricsData, got)
+	})
+
+	t.Run("nil sink is a no-op", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		ts.mockRelayer.EXPECT().IsConnected().Return(true).AnyTimes()
+
+		var capturedHandler func(context.Context, godbus.DBusPayload) ([]interface{}, error)
+		ts.mockDbus.EXPECT().
+			OnBusSignal(gomock.Any()).
+			DoAndReturn(func(handler func(context.Context, godbus.DBusPayload) ([]interface{}, error)) {
+				capturedHandler = handler
+			}).Times(1)
+		ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
+
+		ts.mediator.Start()
+
+		_, err := capturedHandler(ts.ctx, payload)
+		assert.NoError(t, err)
+	})
+}
+
 func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 	tests := []struct {
 		name      string

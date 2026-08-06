@@ -24,13 +24,20 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 )
 
-//go:embed templates/*.html
+// The woff2 fonts are embedded so the portal renders in PP Mori — the same
+// face as the on-screen setup overlay and the app — with no internet (the
+// phone is on the setup AP, which has none). ~76 KiB total in the binary.
+// The stylesheet is likewise embedded and shared by every template (one
+// copy of the setup design language instead of four hand-synced ones).
+//
+//go:embed templates/*.html fonts/*.woff2 static/setup.css
 var assets embed.FS
 
 var tmpl = template.Must(template.ParseFS(assets, "templates/*.html"))
@@ -93,11 +100,29 @@ type Status struct {
 // unreliable, so the portal reads the pre-AP cache.
 type ScanFunc func(ctx context.Context) ([]string, error)
 
+// JoinRequest is one credential submission from the portal form.
+type JoinRequest struct {
+	SSID     string
+	Password string
+	// Hidden marks the target as a non-broadcasting network: the join must use
+	// directed probing (`hidden yes`) because the SSID never appears in scan
+	// results. Only settable on the manual-entry branch — a picked network was
+	// by definition visible in the scan.
+	Hidden bool
+	// Manual marks the SSID as typed by hand rather than picked from the scan
+	// list. Downstream trimming is keyed on this flag: a typed SSID gets
+	// leading/trailing whitespace stripped (phone keyboards autocomplete a
+	// trailing space), while a picker value must pass through VERBATIM —
+	// leading/trailing bytes are valid SSID content and the scan side
+	// preserves them.
+	Manual bool
+}
+
 // JoinFunc hands submitted credentials to the provisioning machine. It MUST
 // return promptly (the machine performs the AP-bounce + join asynchronously);
 // a non-nil error means the submission was rejected outright (e.g. empty SSID)
 // and the form is re-rendered.
-type JoinFunc func(ssid, password string) error
+type JoinFunc func(req JoinRequest) error
 
 // StatusFunc reports the current/last join outcome. Backed by the provisioning
 // machine so the outcome persists across portal restarts.
@@ -110,7 +135,7 @@ type StatusFunc func() Status
 // request was rejected (e.g. the machine is busy) and the form is re-rendered.
 type RescanFunc func() error
 
-// Config wires the portal's listener and its three seams.
+// Config wires the portal's listener and its seams.
 type Config struct {
 	// Addr is the bind address. Production binds ":80" (a sysctl lowers the
 	// unprivileged port floor; the portal adds no capabilities logic). Tests
@@ -123,7 +148,31 @@ type Config struct {
 	Join   JoinFunc
 	Status StatusFunc
 	Rescan RescanFunc
-	Logger *zap.Logger
+	// ActivityObserved, when set, is invoked once per HUMAN-CAUSED portal
+	// request — the /connect and /rescan action handlers only, classified by
+	// handler, not method (the rescan form submits as GET). It feeds the
+	// provisioning session policy's mid-portal teardown deferral
+	// (docs/network-recovery-ux.md §4.2). GET / is deliberately NOT counted:
+	// in net/http.ServeMux the "/" pattern is the catch-all, and the OS
+	// captive-probe routes exist precisely to redirect an idle phone's
+	// automatic probes to it — counting root fetches would let an idle
+	// associated phone pin every teardown to its ceiling. Invoked on request
+	// goroutines; the observer must be internally synchronized and
+	// non-blocking.
+	ActivityObserved func()
+	// TrafficObserved, when set, is invoked once per portal request of ANY
+	// kind — root fetches and OS captive probes included, from the
+	// withLimits chokepoint. Deliberately the OPPOSITE classification to
+	// ActivityObserved: it proves only that a device is attached to the AP
+	// and talking to us, not that a human acted. The provisioning machine
+	// consumes it for the recheck cadence's attached-phone deferral ONLY
+	// (short recheck phases must not kick a phone that has joined the AP
+	// but not yet submitted anything); the bounded session policies keep
+	// the probes-never-count rule above. Same calling contract as
+	// ActivityObserved: request goroutines, internally synchronized,
+	// non-blocking.
+	TrafficObserved func()
+	Logger          *zap.Logger
 }
 
 // Server is the captive-portal HTTP server.
@@ -168,6 +217,12 @@ func (s *Server) Handler() http.Handler { return s.withLimits(s.mux) }
 // bounds (Read/Write/Idle timeouts) live on the http.Server in Start.
 func (s *Server) withLimits(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Observed BEFORE the in-flight cap: a saturated portal is still
+		// hard evidence a device is attached, and the deferral this feeds
+		// must not lapse because the phone was too chatty.
+		if s.cfg.TrafficObserved != nil {
+			s.cfg.TrafficObserved()
+		}
 		select {
 		case s.reqSlots <- struct{}{}:
 			defer func() { <-s.reqSlots }()
@@ -185,6 +240,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/connect", s.handleConnect)
 	s.mux.HandleFunc("/status", s.handleStatus)
 	s.mux.HandleFunc("/rescan", s.handleRescan)
+	// Explicit registrations keep these asset paths out of handleRoot's
+	// treat-unknown-paths-as-captive-probes redirect.
+	s.mux.HandleFunc("/fonts/", s.handleFonts)
+	s.mux.HandleFunc("/setup.css", s.handleSetupCSS)
 
 	// OS captive-portal probes. Returning a redirect (rather than the 204 /
 	// success body each OS looks for) is what makes the phone decide it is
@@ -268,6 +327,45 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	s.renderIndex(w, r)
 }
 
+// handleFonts serves the embedded woff2 faces. Names are matched against the
+// embedded FS only (no path traversal: a name containing "/" is rejected
+// before the lookup). Content-Type is set explicitly because Go's built-in
+// mime table has no woff2 entry. The cache header spares the phone
+// re-fetching fonts across the portal's redirect-heavy flow, but only for a
+// session-scale hour: the URLs carry no content fingerprint, so a longer
+// (or immutable) lifetime would pin a stale face across an OTA that swaps
+// the font under the same name.
+func (s *Server) handleFonts(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/fonts/")
+	if name == "" || strings.Contains(name, "/") || !strings.HasSuffix(name, ".woff2") {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := assets.ReadFile("fonts/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "font/woff2")
+	w.Header().Set("Cache-Control", "max-age=3600")
+	_, _ = w.Write(data)
+}
+
+// handleSetupCSS serves the shared stylesheet. Unlike the fonts it is not
+// marked immutable: the sheet changes with daemon releases, and a phone that
+// cached it across an OTA would style the new pages with the old rules. An
+// hour comfortably covers a setup session.
+func (s *Server) handleSetupCSS(w http.ResponseWriter, r *http.Request) {
+	data, err := assets.ReadFile("static/setup.css")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Cache-Control", "max-age=3600")
+	_, _ = w.Write(data)
+}
+
 // renderIndex writes the picker page. It is path-independent so the /connect
 // rejection path can re-render the form without tripping handleRoot's
 // non-root-path redirect.
@@ -304,15 +402,33 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
+	s.noteActivity()
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	ssid := r.PostFormValue("ssid")
-	password := r.PostFormValue("password")
+	// Two SSID sources, both always rendered (picker plus manual field — a
+	// hidden network can never be picked, and D3 was exactly the picker
+	// crowding manual entry out whenever the scan was non-empty). A non-blank
+	// manual entry wins over the picker: the user typed it deliberately, while
+	// the select always submits SOME value. Blank-ness is judged on the
+	// trimmed value, but the RAW value is what gets passed through — the
+	// manual-branch trim is the machine's call, keyed on the Manual flag.
+	req := JoinRequest{
+		SSID:     r.PostFormValue("ssid"),
+		Password: r.PostFormValue("password"),
+	}
+	if manual := r.PostFormValue("ssid_manual"); strings.TrimSpace(manual) != "" || req.SSID == "" {
+		req.SSID = manual
+		req.Manual = true
+		// The hidden checkbox is scoped to manual entry: a picked network was
+		// visible in the scan, and `hidden yes` there would also skip the
+		// post-AP-bounce visibility wait the picker path relies on.
+		req.Hidden = r.PostFormValue("hidden") != ""
+	}
 
 	if s.cfg.Join != nil {
-		if err := s.cfg.Join(ssid, password); err != nil {
+		if err := s.cfg.Join(req); err != nil {
 			// Rejected outright (e.g. empty SSID): re-render the picker so the
 			// user can correct it. The AP has not bounced in this case.
 			s.logger.Info("portal: join submission rejected", zap.Error(err))
@@ -326,7 +442,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "result.html", struct {
 		SSID   string
 		APSSID string
-	}{SSID: ssid, APSSID: s.cfg.APSSID})
+	}{SSID: strings.TrimSpace(req.SSID), APSSID: s.cfg.APSSID})
 }
 
 // handleRescan drives the "search for networks again" flow. GET renders a
@@ -337,6 +453,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 // BEFORE the bounce lands) tells the user to scan the QR code on the frame
 // again to reconnect.
 func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
+	s.noteActivity()
 	switch r.Method {
 	case http.MethodGet:
 		s.render(w, "rescan_confirm.html", struct{ APSSID string }{APSSID: s.cfg.APSSID})
@@ -376,8 +493,19 @@ func (s *Server) redirectToPortal(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
+// noteActivity reports one human-caused request (see Config.ActivityObserved).
+func (s *Server) noteActivity() {
+	if s.cfg.ActivityObserved != nil {
+		s.cfg.ActivityObserved()
+	}
+}
+
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Every page carries live state (scan list, join status), and without a
+	// header the CNA mini-browser may heuristically cache it — a back
+	// navigation would then show a stale picker or a stale error.
+	w.Header().Set("Cache-Control", "no-store")
 	if err := tmpl.ExecuteTemplate(w, name, data); err != nil {
 		s.logger.Error("portal: render failed", zap.String("template", name), zap.Error(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)

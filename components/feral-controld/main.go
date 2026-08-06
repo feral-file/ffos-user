@@ -7,6 +7,7 @@ import (
 	"net/http"
 	go_os "os"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
@@ -91,8 +93,27 @@ type app struct {
 	PlaylistRefresher playlist_refresher.Refresher
 	PlaylistScheduler playlistschedule.Scheduler
 	MintPairing       mintpairing.Service
-	Hub               hub.Hub
-	LinkChecker       *status.LinkChecker
+	// KioskReplay, OfflineCacheService, and OfflineCacheStaticServer may
+	// all be nil (feature disabled via config.OfflineCacheConfig).
+	KioskReplay              offlinecache.KioskReplay
+	OfflineCacheService      offlinecache.Service
+	OfflineCacheStaticServer offlinecache.StaticServer
+	// OfflineCacheNotifier's shutdown (its background WS-delivery worker,
+	// stopped via CloseWithin — see run's defer) is driven directly here
+	// rather than through OfflineCacheService: Service only holds it via
+	// the narrower ProgressObserver interface, which has no Close method —
+	// see offlinecache.Runtime.Notifier's doc.
+	OfflineCacheNotifier *offlinecache.Notifier
+	Hub                  hub.Hub
+	LinkChecker          *status.LinkChecker
+
+	// StateLoadKnown records whether run()'s state.Load succeeded (false =
+	// the persisted state was unreadable and quarantined). The provisioning
+	// machine's boot claim seed reads it (see InitialClaimed): a corrupt state
+	// file must read as claim-UNKNOWN (= claimed, the fail-safe), not as the
+	// empty state's "unclaimed". Atomic because run() writes it after
+	// initializeApp built the closure that reads it.
+	StateLoadKnown *atomic.Bool
 
 	// Provisioning is the setup-AP trigger state machine. run() starts it
 	// unconditionally; left nil in the test app. Typed as an interface so tests
@@ -157,6 +178,8 @@ func main() {
 		config.RelayerConfig.Endpoint,
 		config.RelayerConfig.APIKey,
 		config.MintPairingConfig,
+		config.OfflineCache,
+		provisioningTuningFromConfig(config.ProvisioningTuning(finalLogger), finalLogger),
 		dbus.NAME,
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
@@ -215,6 +238,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 			app.Logger.Warn("Failed to quarantine state file", zap.Error(rerr))
 		}
 		state.GetState() // installs a fresh empty state
+	} else if app.StateLoadKnown != nil {
+		// A SUCCESSFUL load makes the claim reading known; the quarantine
+		// branch above deliberately leaves it unknown, so the provisioning
+		// machine's boot claim seed reads the empty state as
+		// claim-UNKNOWN = claimed (constraint 8's fail-safe) rather than as
+		// unclaimed — the one consumer for which "present as unclaimed and
+		// re-pair" is NOT acceptable, because it would authorize an automatic
+		// setup-AP raise over a possibly claimed exhibition frame.
+		app.StateLoadKnown.Store(true)
 	}
 
 	// Set global topic ID in Sentry if available.
@@ -392,6 +424,83 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		defer app.MintPairing.Stop()
 	}
 
+	// Start offline cache (job-queue worker + loopback static server for
+	// large cached assets) when config.OfflineCacheConfig.Enabled. Both
+	// are best-effort: a start failure here must not crash controld, since
+	// the daemon's core playback/command path never depended on this
+	// feature before it existed.
+	if app.OfflineCacheService != nil {
+		// OfflineCacheNotifier's shutdown is deferred BEFORE
+		// OfflineCacheService.Stop below (registered first), so Go's
+		// LIFO defer order runs Stop FIRST on shutdown: Stop's own doc
+		// guarantees no further ProgressObserver callbacks (so no more
+		// notifications will ever be enqueued) only once it returns.
+		// Stopping the notifier's background delivery worker before that
+		// would risk dropping an in-flight final notification for no
+		// benefit — that worker is just an idle goroutine until it is
+		// stopped anyway.
+		//
+		// Bounded (CloseWithin, not Close): the notifier's in-flight
+		// delivery can take far longer than this whole shutdown allows on
+		// either transport — see CloseWithin's doc for the two shapes —
+		// so waiting it out would blow past SHUTDOWN_TIMEOUT's forced exit
+		// and strand every cleanup step registered BEFORE this one (LIFO
+		// again).
+		//
+		// This is NOT an end-to-end shutdown bound. Both transports take,
+		// for their own teardown, the very mutex the abandoned delivery
+		// still holds — Relayer.Close and hub.Stop's ws.Close, both later
+		// in LIFO order — so the wedge just blocks at whichever comes
+		// next. Only mint-pairing and the playlist refresher are
+		// guaranteed to run either way. Abandoning the wait leaves at most
+		// one delivery still running in a process that is exiting anyway.
+		if app.OfflineCacheNotifier != nil {
+			defer func() {
+				if !app.OfflineCacheNotifier.CloseWithin(offlinecache.ShutdownCloseBudget) {
+					app.Logger.Warn("Offline cache notifier did not stop within its shutdown budget; continuing shutdown",
+						zap.Duration("budget", offlinecache.ShutdownCloseBudget))
+				}
+			}()
+		}
+		if err := app.OfflineCacheService.Start(ctx); err != nil {
+			app.Logger.Error("Failed to start offline cache service", zap.Error(err))
+		} else {
+			defer app.OfflineCacheService.Stop()
+		}
+	}
+	if app.OfflineCacheStaticServer != nil {
+		// Listen (bind) synchronously, BEFORE Serve ever runs in the
+		// background: net/http's ListenAndServe combines bind+serve
+		// into one blocking call, which would only ever surface a bind
+		// failure asynchronously via the goroutine's own log line,
+		// after Replayer may have already started 302-redirecting large
+		// cached assets to a port that either never bound (dead
+		// redirect) or, worse, was claimed by some OTHER unrelated
+		// loopback process (redirects silently served by the wrong
+		// service). Replayer's own IsListening() check is the second
+		// half of this fix — this call is what lets it observe the
+		// truth. A bind failure here is still best-effort/non-fatal
+		// (large-asset offline replay just becomes unavailable; every
+		// other offline-cache path is unaffected), consistent with this
+		// whole feature's startup posture.
+		if err := app.OfflineCacheStaticServer.Listen(); err != nil {
+			app.Logger.Error("Failed to bind offline cache static server; large-asset offline replay will be unavailable", zap.Error(err))
+		} else {
+			go func() {
+				if err := app.OfflineCacheStaticServer.Serve(); err != nil {
+					app.Logger.Error("Offline cache static server stopped unexpectedly", zap.Error(err))
+				}
+			}()
+			defer func() {
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), SHUTDOWN_TIMEOUT)
+				defer shutdownCancel()
+				if err := app.OfflineCacheStaticServer.Shutdown(shutdownCtx); err != nil {
+					app.Logger.Warn("Failed to shut down offline cache static server", zap.Error(err))
+				}
+			}()
+		}
+	}
+
 	// Start StatusPoller - it will handle relayer connection status internally
 	go app.StatusPoller.Start(ctx)
 	defer app.StatusPoller.Stop()
@@ -427,6 +536,33 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		// loop's other resync work.
 		if pr, ok := app.Executor.(bootPlayerRecoveryFlow); ok {
 			go pr.CompletePendingBootPlayerRecovery()
+		}
+
+		// Re-attach offline-cache replay interception on every (re)connect —
+		// this covers plain kiosk restarts AND OOM-recovery restarts alike,
+		// since both funnel through this same reconnect loop (see
+		// offlinecache.KioskReplay.AttachOnReconnect's doc). Nil whenever
+		// the offline cache is switched off (offlineCache.enabled unset or
+		// false), which is the default — see the Bootstrap call below.
+		//
+		// This ONE producer stays inline rather than becoming a reconciler
+		// like the resyncs named above, because it is the only one that needs
+		// no page JS: it arms Fetch interception on offlinecache's own CDP
+		// socket, and it must be armed as early as possible so the reloaded
+		// document's asset requests are intercepted rather than escaping to
+		// the live network. Its COMPANION half — re-applying the previously
+		// enabled item scope, which does need a hydrated page to resolve what
+		// is playing — is the "replay-scope-resync" reconciler instead; see
+		// replayScopeResyncReconciler for why splitting them is load-bearing.
+		//
+		// Runs AFTER the boot-recovery spawn above, not before: AttachOnReconnect
+		// dials a page session synchronously (bounded, but seconds under a sick
+		// kiosk) on this connect-loop goroutine, and ordering it first would
+		// gate that deliberately-async recovery behind this dial.
+		if app.KioskReplay != nil {
+			if err := app.KioskReplay.AttachOnReconnect(ctx); err != nil {
+				app.Logger.Warn("Failed to attach offline cache replay to kiosk CDP session", zap.Error(err))
+			}
 		}
 	})
 	defer app.CDP.Close()
@@ -553,6 +689,43 @@ func setupUIResyncReconciler(ui *setupui.Service) func(context.Context) {
 	}
 }
 
+// replayScopeResyncReconciler re-applies offline-cache replay's
+// Fetch-interception SCOPE after a page generation change.
+//
+// This is the half of the reconnect resync that cannot run inline on the CDP
+// connect callback next to AttachOnReconnect. AttachOnReconnect resets scope
+// (a new top-level socket starts with Fetch disabled — see replayer.attachRoot)
+// and deliberately does not re-apply it; something must call SyncPlaylist.
+// ForceRefresh is that something, but the pass it triggers resolves what is
+// playing via statusPoller.FetchPlayerStatus, which evaluates
+// window.handleCDPRequest in the page. Fired inline at connect time that
+// evaluate hits a document that has not hydrated yet, so the pass returns the
+// status error BEFORE reaching syncReplayScopeLocked and the scope is never
+// restored — leaving replay off until the next periodic pass up to
+// PLAYLIST_REFRESH_INTERVAL later, which is exactly the OOM-restart window
+// the resync exists to close. As a reconciler it runs once the new document
+// has installed its command handler, so the status fetch can actually answer.
+//
+// Nothing is lost by deferring it: scope is disabled between attach and
+// handler-ready either way, so assets fetched in that window miss
+// interception regardless of when this runs.
+//
+// Known residual, deliberately accepted: the generation-ready worker gates on
+// StageHandler, which proves window.handleCDPRequest is INSTALLED, not that
+// the player has restored playback. If hydration installs the handler before
+// the player restores its last playlist, FetchPlayerStatus answers with
+// Command != displayPlaylist and the pass returns nil without syncing scope
+// (refresher.go's "Player command is not display any playlist" branch),
+// leaving the resync to the periodic ticker. There is no "playback restored"
+// stage to wait on, so this is as tight as the current primitives allow — and
+// still strictly better than firing inline at connect, where the status fetch
+// could not answer at all.
+func replayScopeResyncReconciler(refresher playlist_refresher.Refresher) func(context.Context) {
+	return func(context.Context) {
+		refresher.ForceRefresh()
+	}
+}
+
 func bootRecoveryRetryReconciler(executor devicectl.Executor, logger *zap.Logger) func(context.Context) {
 	return func(context.Context) {
 		devicectl.RetryBootRecovery(executor, logger)
@@ -576,6 +749,8 @@ func initializeApp(
 	relayerEndpoint string,
 	relayerAPIKey string,
 	mintPairingConfig *config.MintPairingConfig,
+	offlineCacheConfig *config.OfflineCacheConfig,
+	provTuning provisioning.Tuning,
 	dbusName string,
 	dbusOpts []dbus_v5.MatchOption,
 ) *app {
@@ -583,6 +758,10 @@ func initializeApp(
 	// long-lived component built below, and main cancels it (app.Cancel) on
 	// SIGTERM so those components observe shutdown.
 	context, cancelApp := context.WithCancel(context.Background())
+
+	// stateLoadKnown starts UNKNOWN (false); run() stores the state.Load
+	// verdict before Provisioning.Start reads it via InitialClaimed.
+	stateLoadKnown := &atomic.Bool{}
 
 	// Wrappers
 	clock := wrapper.NewClock()
@@ -698,12 +877,37 @@ func initializeApp(
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
 	mintPairing := mintpairing.New(mintPairingOpts, relayer, cdp, httpClient, relayerAPIKey, json, logger)
 
+	// Offline cache. Disabled by default (see config.OfflineCacheConfig's
+	// doc on why it defaults off) — offlineCache/kioskReplay/staticServer
+	// stay nil in that case, and handler.go's/refresher's nil-guards
+	// mirror mintPairing's so the rest of the daemon behaves exactly as
+	// before this feature existed.
+	var offlineCache offlinecache.Service
+	var kioskReplay offlinecache.KioskReplay
+	var offlineCacheScopeLost offlinecache.ScopeLostRegistrar
+	var offlineCacheStaticServer offlinecache.StaticServer
+	var offlineCacheNotifier *offlinecache.Notifier
+	var offlineCacheSysMetricsSink func(raw []byte)
+	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
+		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
+		ocRuntime := offlinecache.Bootstrap(
+			ocOpts, relayer, wsHandler, httpClient, webSocketDialer,
+			os, io, json, exec, clock, logger,
+		)
+		offlineCache = ocRuntime.Service
+		kioskReplay = ocRuntime.KioskReplay
+		offlineCacheScopeLost = ocRuntime.ScopeLost
+		offlineCacheStaticServer = ocRuntime.StaticServer
+		offlineCacheNotifier = ocRuntime.Notifier
+		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
+	}
+
 	// Command handler. The raw handler serves internal daemon lifecycle flows
 	// (e.g. OOM recovery) directly; external ingress (relayer + LAN hub) is
 	// wrapped with command-storm protection so both paths share one set of
 	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
 	// must never be shed by external client traffic, so it bypasses the gate.
-	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, playlistScheduler, json, logger)
+	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, offlineCache, kioskReplay, playlistScheduler, json, logger)
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -716,7 +920,24 @@ func initializeApp(
 	cmdHandler := commandrouter.NewGate(rawCmdHandler, gateCfg, logger)
 
 	// Playlist refresher
-	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, playlistScheduler, clock, logger)
+	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
+
+	// Replay saturation invalidates Fetch-interception scope exactly the way
+	// a kiosk restart does: retireOnSaturation closes the root CDP session so
+	// the page stops hanging, which also means a fail_closed scope is
+	// enforced by nothing until something re-arms it. Without this the
+	// "something" is only this refresher's periodic pass, up to
+	// PLAYLIST_REFRESH_INTERVAL away, with the artwork silently served from
+	// the live network for that whole window. ForceRefresh is the same
+	// recovery the onConnect hook below already uses for the identical
+	// problem — best-effort acceleration rather than a bound (see
+	// docs/offline-artwork-capture.md for the paths that still fall back to
+	// the periodic tick). Wired here rather than in offlinecache.Bootstrap
+	// because the refresher depends on KioskReplay and so cannot exist until
+	// after that call.
+	if offlineCacheScopeLost != nil {
+		offlineCacheScopeLost.SetOnScopeLost(playlistRefresher.ForceRefresh)
+	}
 
 	// OOM Recoverer — internal lifecycle flow, uses the raw (ungated) handler.
 	oomRecoverer := oomrecovery.New(poller, rawCmdHandler, logger)
@@ -724,19 +945,31 @@ func initializeApp(
 	// Mediator
 	mediator := mediator.New(context, relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, json, logger)
 
+	// Feed monitord's sysmetrics into the offline cache's admission gate
+	// (see offlinecache.Runtime.SysMetricsSink). Wired here for the same
+	// no-cross-import reason as the claim observer below: the mediator
+	// forwards raw bytes without knowing who consumes them.
+	if offlineCacheSysMetricsSink != nil {
+		mediator.SetSysMetricsObserver(offlineCacheSysMetricsSink)
+	}
+
 	// LinkChecker is the shared link-state seam keying mDNS/hub discoverability
 	// on the presence of any LAN link rather than internet reachability.
 	linkChecker := status.NewLinkChecker(exec, logger)
 
 	// Claim-state transitions (a successful connect) re-register mDNS with the
-	// updated `claimed` TXT. Wire the executor's observer to the mediator here so
-	// neither package depends on the other's concrete type.
-	executor.SetClaimObserver(mediator.SetClaimed)
-	// Factory reset revokes the live relayer session, not just the persisted
-	// topic (the staged reboot can be delayed or fail). Wired here for the same
-	// no-cross-import reason as the claim observer.
-	executor.SetRelayerCloser(relayer.Close)
-
+	// updated `claimed` TXT, and feed the provisioning machine's loop-visible
+	// claim snapshot (escape policy, constraint 8). One observer fans out to
+	// both consumers; provMachine is declared below and assigned before the
+	// executor can observe any transition (command handling starts after
+	// initializeApp returns).
+	var provMachineForClaim *provisioning.Machine
+	executor.SetClaimObserver(func(claimed bool) {
+		mediator.SetClaimed(claimed)
+		if provMachineForClaim != nil {
+			provMachineForClaim.SetClaimed(claimed)
+		}
+	})
 	// Provisioning domain (SoftAP setup). controld owns setup, so run() starts it
 	// unconditionally. The connectivity adapter reads sys-monitord over the shared
 	// D-Bus client; the ActiveLink guard reuses the link checker so a device with
@@ -756,15 +989,28 @@ func initializeApp(
 	// Wire every off-lane producer to the session (design doc §4), now that
 	// they all exist. Registration ORDER is the reconciler execution order on
 	// every generation-ready: sleep invalidate+poke, playlist recompute,
-	// status force-refresh, setup-narration resync, boot-recovery retry,
-	// connectivity — replacing the five ad-hoc CDP-reconnect spawns run()
-	// used to do inline.
+	// status force-refresh, setup-narration resync, offline-cache replay-scope
+	// resync, boot-recovery retry, connectivity — replacing the five ad-hoc
+	// CDP-reconnect spawns run() used to do inline.
 	session.RegisterReconciler("sleep-invalidate", sleepInvalidateReconciler(executor, logger))
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))
 	}
 	session.RegisterReconciler("status-force-refresh", statusForceRefreshReconciler(poller))
 	session.RegisterReconciler("setupui-resync", setupUIResyncReconciler(setupNarrator))
+	// Guarded on kioskReplay, not on the refresher. This is not an
+	// optimization: ForceRefresh signals a full processPlayingPlaylist pass,
+	// which re-resolves the playlist over the network and re-sends
+	// displayPlaylist with refresh:true. Registering it unguarded would add a
+	// soft artwork refresh on EVERY generation bump (CDP connect, every
+	// recovery navigation, every stamp mismatch) to devices running the
+	// default config with the offline cache off — breaking the
+	// "feature off behaves exactly as before" contract the Bootstrap call
+	// above depends on. With the cache off, the periodic ticker stays the
+	// only resync, which is byte-identical to develop's behavior.
+	if kioskReplay != nil {
+		session.RegisterReconciler("replay-scope-resync", replayScopeResyncReconciler(playlistRefresher))
+	}
 	// Boot recovery's generation-bump accelerator (design doc §5.1): a new
 	// generation (CDP reconnect, a recovery navigation, a stamp-mismatch
 	// bump) is a signal the page or player state likely changed, so a
@@ -806,7 +1052,15 @@ func initializeApp(
 	wifiCtl := wifictl.New(exec, clock, logger, "")
 	// The claim QR auto-paints when an unclaimed device comes online — the
 	// launcher-ui replacement (see MaybeShowClaimQROnOnline).
-	provisioningNotifier := &setupNotifier{ui: setupNarrator, logger: logger, claimCtx: context}
+	provisioningNotifier := &setupNotifier{ui: setupNarrator, logger: logger, claimCtx: context,
+		// The same identity mDNS advertises; §4.6 trouble-state copy carries it
+		// so a user reporting a stuck frame can say which one.
+		deviceName: resolveMDNSDeviceInfo(os, state.ClaimSnapshot(), logger).Name}
+	// The claim flow's topic-wait expiry narration needs a cached internet
+	// verdict to tell "no WAN — the topic can never arrive" from "relayer
+	// slow" (§4.6, the unclaimed wired no-WAN black screen). Same cached
+	// monitord read the hub status provider serves; never a live probe.
+	wireInternetProbe(executor, dbusClient, logger)
 	if ac, ok := executor.(autoClaimFlow); ok {
 		provisioningNotifier.claim = ac.MaybeShowClaimQROnOnline
 		// Topic assignment re-triggers the claim flow: a factory-fresh device
@@ -830,13 +1084,39 @@ func initializeApp(
 		func() bool { return uptimeWithin(bootLifecycleWindow, go_os.ReadFile, logger) },
 		func() bool { return uptimeWithin(startupOTAGateEntryWindow, go_os.ReadFile, logger) })
 	provMachine := provisioning.New(provisioning.Config{
-		AP:           softAP,
-		Wifi:         wifiCtl,
-		Connectivity: &dbusConnectivity{dbus: dbusClient, logger: logger},
-		Clock:        clock,
-		Logger:       logger,
-		Notifier:     provisioningNotifier,
-		ActiveLink:   externalLinkProbe(linkChecker),
+		AP:               softAP,
+		Wifi:             wifiCtl,
+		Connectivity:     &dbusConnectivity{dbus: dbusClient, logger: logger},
+		Clock:            clock,
+		Logger:           logger,
+		Notifier:         provisioningNotifier,
+		ActiveLink:       externalLinkProbe(linkChecker),
+		ActiveLinkDetail: externalLinkDetailProbe(linkChecker),
+		// Ethernet-only verdict for the escape policy's wired guard and the
+		// wired exit from a raised AP (constraint 6 — NOT ExternalLink, which
+		// counts stations).
+		WiredLink: wiredLinkProbe(linkChecker),
+		// Boot-time claim snapshot; the executor's claim observer (above)
+		// keeps it fresh. known comes from stateLoadKnown, which run() stores
+		// AFTER state.Load and BEFORE Provisioning.Start: a quarantined
+		// (corrupt) state file reads as empty — i.e. unclaimed — everywhere
+		// else, but the machine must treat it as UNKNOWN = claimed
+		// (constraint 8's fail-safe: never auto-raise the setup AP over a
+		// possibly claimed exhibition frame off a disk error). Defaults false
+		// (unknown) so any ordering mistake fails safe.
+		InitialClaimed: func() (bool, bool) {
+			claim := state.ClaimSnapshot()
+			return claim.Claimed, stateLoadKnown.Load()
+		},
+		Tuning: provTuning,
+		// Same boot-vs-restart discriminator as wireBootLifecycleHooks above:
+		// the machine narrates its boot offline assessment (and may run the
+		// relocation check) only when this process start IS a device boot —
+		// a Restart=always daemon restart mid-outage must stay silent.
+		// provisioning.New evaluates this exactly once, here at wiring time,
+		// so the classification cannot drift past the window's edge while the
+		// machine's AP sweep and initial connectivity query run.
+		BootAssessment: func() bool { return uptimeWithin(bootLifecycleWindow, go_os.ReadFile, logger) },
 	})
 
 	// Hub status provider. The base provider reads identity/version/claim/topic
@@ -847,40 +1127,62 @@ func initializeApp(
 		base:     baseStatusProvider,
 		machine:  provMachine,
 		internet: internetProbeFrom(dbusClient, logger),
+		snapshot: provMachine.Snapshot,
 	}
 	hub := hub.New(context, wsHandler, cmdHandler, statusProvider, nil, json, logger)
+	// Control-plane hub contact defers the escape policy's episode raise
+	// (§4.1): a phone with the app open must not have its link yanked. The
+	// hub filters (counted routes, non-loopback) and the machine timestamps.
+	if sink, ok := hub.(interface{ SetContactObserver(func()) }); ok {
+		sink.SetContactObserver(provMachine.ObserveHubContact)
+	}
+	// The claim observer registered above fans out here (declared before the
+	// machine existed).
+	provMachineForClaim = provMachine
+	// App-triggered Wi-Fi setup (startWifiSetup): the executor's command
+	// handler runs the machine's admission and queues the user-requested
+	// raise; the §4.2 session machinery bounds the session.
+	wireWifiSetupStarter(executor, provMachine)
+	// getDeviceStatus carries the same §4.7 health object the hub status
+	// routes serve (one diagnosis, every transport).
+	wireNetworkHealth(executor, provMachine, internetProbeFrom(dbusClient, logger))
 
 	return &app{
-		Ctx:               context,
-		Cancel:            cancelApp,
-		Logger:            logger,
-		Clock:             clock,
-		OS:                os,
-		Signal:            signal,
-		Daemon:            daemon,
-		HTTPClient:        httpClient,
-		IO:                io,
-		JSON:              json,
-		Random:            randomizer,
-		Exec:              exec,
-		Math:              math,
-		CDP:               cdp,
-		Relayer:           relayer,
-		DBus:              dbusClient,
-		Mediator:          mediator,
-		OOMRecoverer:      oomRecoverer,
-		Executor:          executor,
-		DeviceStatus:      deviceStatus,
-		StatusPoller:      poller,
-		Watchdog:          watchdog,
-		PlaylistRefresher: playlistRefresher,
-		PlaylistScheduler: playlistScheduler,
-		MintPairing:       mintPairing,
-		Hub:               hub,
-		LinkChecker:       linkChecker,
-		Provisioning:      provMachine,
-		SetupUI:           setupNarrator,
-		Session:           session,
+		Ctx:                      context,
+		Cancel:                   cancelApp,
+		Logger:                   logger,
+		Clock:                    clock,
+		OS:                       os,
+		Signal:                   signal,
+		Daemon:                   daemon,
+		HTTPClient:               httpClient,
+		IO:                       io,
+		JSON:                     json,
+		Random:                   randomizer,
+		Exec:                     exec,
+		Math:                     math,
+		CDP:                      cdp,
+		Relayer:                  relayer,
+		DBus:                     dbusClient,
+		Mediator:                 mediator,
+		OOMRecoverer:             oomRecoverer,
+		Executor:                 executor,
+		DeviceStatus:             deviceStatus,
+		StatusPoller:             poller,
+		Watchdog:                 watchdog,
+		PlaylistRefresher:        playlistRefresher,
+		PlaylistScheduler:        playlistScheduler,
+		MintPairing:              mintPairing,
+		KioskReplay:              kioskReplay,
+		OfflineCacheService:      offlineCache,
+		OfflineCacheStaticServer: offlineCacheStaticServer,
+		OfflineCacheNotifier:     offlineCacheNotifier,
+		Hub:                      hub,
+		LinkChecker:              linkChecker,
+		Provisioning:             provMachine,
+		StateLoadKnown:           stateLoadKnown,
+		SetupUI:                  setupNarrator,
+		Session:                  session,
 	}
 }
 

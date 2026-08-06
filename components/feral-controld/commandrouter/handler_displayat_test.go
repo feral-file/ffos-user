@@ -28,7 +28,7 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersDisplayAt(t *testing.T) {
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -48,7 +48,7 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersDisplayAt(t *testing.T) {
 	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
 		return loc
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	playlistURL := "https://example.com/daily.json"
 	full := &dp1.Playlist{
@@ -104,7 +104,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DefersFutureOnlySchedule(t *test
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -117,7 +117,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DefersFutureOnlySchedule(t *test
 	).AnyTimes()
 
 	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 	playlistURL := "https://example.com/future.json"
 	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "future", Source: "https://example.com/future.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")}},
@@ -132,13 +132,148 @@ func TestCommandHandler_Process_DisplayPlaylist_DefersFutureOnlySchedule(t *test
 	assert.True(t, sched.HasCache())
 }
 
+// TestCommandHandler_Process_DisplayPlaylist_DeferredCastLeavesReplayScopeUntouched
+// is the regression test for the "scope switched before the scheduler
+// decided anything would display" hazard (feral-file/ffos-user#229 review
+// finding): a future-only cast defers — the player keeps showing the
+// previous playlist — so replay's Fetch-interception scope must not move
+// either. The old shape synced scope to the NEW playlist before
+// PrepareWithSource ran, then returned a synthetic ok that bypassed the
+// failure-path resync, leaving a fail_closed scope blocking the
+// still-on-screen playlist's own requests even with live network. The
+// strict mock pins the fix: any SyncPlaylist or MarkPlaybackChanged call
+// on this path fails the test.
+func TestCommandHandler_Process_DisplayPlaylist_DeferredCastLeavesReplayScopeUntouched(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() },
+	).AnyTimes()
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	// The playback coordinator is still taken — whether the cast defers is
+	// only known once the scheduler filtered under it — but scope must not
+	// move: no SyncPlaylist / MarkPlaybackChanged expectations, so either
+	// call is an unexpected mock invocation that fails the test.
+	mockKioskReplay.EXPECT().LockPlayback().Times(1)
+	mockKioskReplay.EXPECT().UnlockPlayback().Times(1)
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, mockKioskReplay, sched, mockJSON, logger)
+	playlistURL := "https://example.com/future.json"
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "future", Source: "https://example.com/future.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")}},
+	}}, nil)
+	// No CDP write for an empty active set, and no scope change either.
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Times(0)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := handler.Process(ctx, commands.Command{Type: commands.CMD_DISPLAY_PLAYLIST, Arguments: map[string]interface{}{"playlistUrl": playlistURL}})
+	require.NoError(t, err)
+	require.Equal(t, map[string]interface{}{"message": map[string]interface{}{"ok": true, "deferred": true}}, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_ScopesFullPlaylistBeforeActiveSend
+// pins the two halves of the scope-vs-scheduler contract for a cast whose
+// active set is a strict subset:
+//   - ordering: SyncPlaylist runs BEFORE the CDP send (scope must be in
+//     place before the artwork's first requests can arrive), enforced via
+//     gomock.InOrder;
+//   - breadth: scope covers the FULL playlist's item IDs, not just the
+//     filtered active cohort — the scheduler's timer/wake/retry cutovers
+//     push later cohorts directly with no replay-scope hook of their own,
+//     so the scope installed at cast time must already contain every
+//     cohort a cutover can display (see the syncReplayScope call site's
+//     comment in handler.go).
+func TestCommandHandler_Process_DisplayPlaylist_ScopesFullPlaylistBeforeActiveSend(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() },
+	).AnyTimes()
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().Times(1)
+	mockKioskReplay.EXPECT().UnlockPlayback().Times(1)
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().Times(1)
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return loc }, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, mockKioskReplay, sched, mockJSON, logger)
+
+	playlistURL := "https://example.com/daily.json"
+	full := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Title: "Daily",
+			Items: []dp1playlist.PlaylistItem{
+				{ID: "day21", Title: "Day 21", Source: "https://example.com/21.html", DisplayAt: strPtr("2026-07-21T00:00:00Z")},
+				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
+				{ID: "day23", Title: "Day 23", Source: "https://example.com/23.html", DisplayAt: strPtr("2026-07-23T00:00:00Z")},
+			},
+		},
+	}
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(full, nil)
+
+	syncCall := mockKioskReplay.EXPECT().
+		SyncPlaylist(ctx, []string{"https://example.com/21.html", "https://example.com/22.html", "https://example.com/23.html"}).
+		Return(nil).Times(1)
+	sendCall := mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, ok := params["expression"].(string)
+			require.True(t, ok)
+			const prefix = "window.handleCDPRequest("
+			require.Contains(t, expr, prefix)
+			payload := expr[len(prefix) : len(expr)-1]
+			var cmd commands.Command
+			require.NoError(t, json.Unmarshal([]byte(payload), &cmd))
+			pl, ok := cmd.Arguments["dp1_call"].(map[string]interface{})
+			require.True(t, ok)
+			items, ok := pl["items"].([]interface{})
+			require.True(t, ok)
+			require.Len(t, items, 1, "the player must still receive only the filtered active set")
+			assert.Equal(t, "day22", items[0].(map[string]interface{})["id"])
+			return playerOkResponse(), nil
+		}).Times(1)
+	gomock.InOrder(syncCall, sendCall)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	_, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": playlistURL},
+	})
+	require.NoError(t, err)
+}
+
 func TestCommandHandler_Process_DisplayPlaylist_PreservesExplicitIntent(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -157,7 +292,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesExplicitIntent(t *testi
 	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
 		return time.UTC
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	playlistURL := "https://example.com/plain.json"
 	full := &dp1.Playlist{
@@ -202,7 +337,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DefaultsIntentOnPlainPlaylist(t 
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -221,7 +356,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DefaultsIntentOnPlainPlaylist(t 
 	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
 		return time.UTC
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	playlistURL := "https://example.com/plain.json"
 	full := &dp1.Playlist{
@@ -303,7 +438,7 @@ func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T)
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -323,7 +458,7 @@ func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T)
 		return time.UTC
 	}, logger)
 	track := &trackingScheduler{inner: inner}
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, track, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, track, mockJSON, logger)
 
 	playlistURL := "https://example.com/daily.json"
 	full := &dp1.Playlist{
@@ -352,7 +487,7 @@ func TestCommandHandler_Process_DisplayPlaylist_RecomputePreservesPlaylistURL(t 
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -372,7 +507,7 @@ func TestCommandHandler_Process_DisplayPlaylist_RecomputePreservesPlaylistURL(t 
 	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
 		return loc
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	playlistURL := "https://example.com/daily.json"
 	full := &dp1.Playlist{
@@ -426,7 +561,7 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_DoesNotClearDisplayAtCach
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -446,7 +581,7 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_DoesNotClearDisplayAtCach
 		return time.UTC
 	}, logger)
 	track := &trackingScheduler{inner: inner}
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, track, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, track, mockJSON, logger)
 
 	_ = track.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
@@ -485,7 +620,7 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_PlayerRejectLeavesCache(t
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -505,7 +640,7 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_PlayerRejectLeavesCache(t
 		return time.UTC
 	}, logger)
 	track := &trackingScheduler{inner: inner}
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, track, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, track, mockJSON, logger)
 
 	_ = track.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
@@ -546,7 +681,7 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_WaitsForInFlightRecompute
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -588,7 +723,7 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_WaitsForInFlightRecompute
 	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
 		return time.UTC
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	_ = sched.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
@@ -649,7 +784,7 @@ func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -668,7 +803,7 @@ func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache
 	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
 		return time.UTC
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Title: "Old",
@@ -713,7 +848,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCach
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -732,7 +867,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCach
 	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
 		return time.UTC
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Title: "Old",

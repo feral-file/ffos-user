@@ -110,10 +110,31 @@ func DefaultGateConfig() GateConfig {
 		// one orientation.
 		commands.CMD_SCREEN_ROTATION: slowWrite,
 
+		// Offline-cache downloads: heavy, like displayPlaylist. Both do DP1
+		// resolution and downloadPlaylist additionally enqueues into
+		// offlinecache.Service's jobQueue — bounded (defaultMaxQueueLen,
+		// 4096) but only as a backlog safety valve, not a throttle a
+		// realistic burst is expected to hit — so a storm here is cheap
+		// to send but expensive to work through; heavy's dedupe
+		// also collapses a duplicate download request for the same
+		// playlist/item into the one already in flight rather than
+		// re-enqueuing (DownloadItem/DownloadPlaylist are themselves
+		// idempotent against an already-queued/downloading item, but
+		// dedupe avoids paying for a second Classify call to discover that).
+		commands.CMD_DOWNLOAD_PLAYLIST_ITEM: heavy,
+		commands.CMD_DOWNLOAD_PLAYLIST:      heavy,
+
+		// Offline-cache clears: disk I/O (delete + store-wide GC sweep) on
+		// every call, so classified the same as the other disruptive panel
+		// write above rather than left at the generous Default.
+		commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE: slowWrite,
+		commands.CMD_CLEAR_PLAYLIST_CACHE:      slowWrite,
+
 		// Cheap queries: deduped so a poll storm collapses to one execution.
-		commands.CMD_DEVICE_STATUS:    query,
-		commands.CMD_PROFILE:          query,
-		commands.CMD_DDC_PANEL_STATUS: query,
+		commands.CMD_DEVICE_STATUS:            query,
+		commands.CMD_PROFILE:                  query,
+		commands.CMD_DDC_PANEL_STATUS:         query,
+		commands.CMD_GET_OFFLINE_CACHE_STATUS: query,
 
 		// High-frequency input events: shared generous budget.
 		commands.CMD_KEYBOARD_EVENT:             input,

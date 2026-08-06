@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -69,6 +70,9 @@ func TestRootRendersNetworksAndPrewarning(t *testing.T) {
 	body := readAll(t, resp)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	// HTML is dynamic (scan list, join status): never cached, or a CNA back
+	// navigation would show a stale picker.
+	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	assert.Contains(t, body, "HomeNet")
 	assert.Contains(t, body, "Cafe-5G")
 	// AP-bounce pre-warning names the AP SSID to reconnect to.
@@ -95,16 +99,15 @@ func TestRootFallsBackToManualEntryOnScanError(t *testing.T) {
 func TestConnectInvokesJoinFuncWithFormValues(t *testing.T) {
 	var (
 		mu       sync.Mutex
-		gotSSID  string
-		gotPass  string
+		got      JoinRequest
 		callHits int
 	)
 	_, ts, client := newTestServer(t, Config{
 		APSSID: "FF1-abc",
-		Join: func(ssid, password string) error {
+		Join: func(req JoinRequest) error {
 			mu.Lock()
 			defer mu.Unlock()
-			gotSSID, gotPass, callHits = ssid, password, callHits+1
+			got, callHits = req, callHits+1
 			return nil
 		},
 	})
@@ -121,17 +124,97 @@ func TestConnectInvokesJoinFuncWithFormValues(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, 1, callHits)
-	assert.Equal(t, "HomeNet", gotSSID)
-	assert.Equal(t, "s3cret-pw", gotPass)
+	assert.Equal(t, JoinRequest{SSID: "HomeNet", Password: "s3cret-pw"}, got,
+		"a picker submission is neither manual nor hidden")
 	// "Connecting" result page, with the reconnect hint again.
 	assert.Contains(t, body, "Connecting to HomeNet")
 	assert.Contains(t, body, "FF1-abc")
 }
 
+// TestConnectRoutesManualEntry pins the two-source SSID rule (D3): a non-blank
+// manual field wins over the picker (the select always submits SOME value),
+// carries Manual so downstream can apply the manual-only trim, and the hidden
+// checkbox is honored only on this branch. The RAW manual value must pass
+// through — trimming is the machine's call, keyed on the Manual flag.
+func TestConnectRoutesManualEntry(t *testing.T) {
+	tests := []struct {
+		name string
+		form url.Values
+		want JoinRequest
+	}{
+		{
+			name: "manual entry wins over picker",
+			form: url.Values{"ssid": {"PickedNet"}, "ssid_manual": {"TypedNet"},
+				"password": {"pw"}, "hidden": {"1"}},
+			want: JoinRequest{SSID: "TypedNet", Password: "pw", Manual: true, Hidden: true},
+		},
+		{
+			name: "manual value passes through untrimmed",
+			form: url.Values{"ssid_manual": {" TypedNet "}, "password": {"pw"}},
+			want: JoinRequest{SSID: " TypedNet ", Password: "pw", Manual: true},
+		},
+		{
+			name: "blank manual falls back to picker, hidden ignored",
+			form: url.Values{"ssid": {"PickedNet"}, "ssid_manual": {"   "},
+				"password": {"pw"}, "hidden": {"1"}},
+			want: JoinRequest{SSID: "PickedNet", Password: "pw"},
+		},
+		{
+			name: "no picker at all takes the manual branch even when blank",
+			form: url.Values{"ssid_manual": {""}, "password": {"pw"}},
+			want: JoinRequest{SSID: "", Password: "pw", Manual: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				mu  sync.Mutex
+				got JoinRequest
+			)
+			_, ts, client := newTestServer(t, Config{
+				Join: func(req JoinRequest) error {
+					mu.Lock()
+					defer mu.Unlock()
+					got = req
+					return nil
+				},
+			})
+			resp, err := client.PostForm(ts.URL+"/connect", tt.form)
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestIndexAlwaysOffersManualEntry pins the D3 fix at the template: the manual
+// field and the hidden-network checkbox must render alongside a NON-empty
+// picker — the old either/or template made hidden networks unprovisionable
+// whenever any network was in range.
+func TestIndexAlwaysOffersManualEntry(t *testing.T) {
+	_, ts, client := newTestServer(t, Config{
+		Scan: func(context.Context) ([]string, error) { return []string{"HomeNet"}, nil },
+	})
+	resp, err := client.Get(ts.URL + "/")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body := readAll(t, resp)
+	assert.Contains(t, body, "<select", "picker must render for the scanned networks")
+	assert.Contains(t, body, `name="ssid_manual"`, "manual entry must render beside the picker")
+	assert.Contains(t, body, `name="hidden"`, "hidden-network checkbox must render")
+	// The page script collapses manual entry until this option is picked, so
+	// dropping it would make hidden networks unprovisionable again for every
+	// JS-enabled phone. The empty value routes to the manual branch.
+	assert.Contains(t, body, `<option value="">Other network…</option>`,
+		"picker must carry the manual-entry escape option")
+}
+
 func TestConnectRejectionReRendersForm(t *testing.T) {
 	_, ts, client := newTestServer(t, Config{
 		Scan: func(context.Context) ([]string, error) { return []string{"HomeNet"}, nil },
-		Join: func(ssid, password string) error {
+		Join: func(req JoinRequest) error {
 			return stubError("empty ssid")
 		},
 	})
@@ -240,7 +323,7 @@ func TestConnectOversizedBodyRejected(t *testing.T) {
 	joined := false
 	_, ts, client := newTestServer(t, Config{
 		APSSID: "FF1-abc",
-		Join:   func(_, _ string) error { joined = true; return nil },
+		Join:   func(JoinRequest) error { joined = true; return nil },
 	})
 
 	body := strings.NewReader("ssid=" + strings.Repeat("a", maxRequestBodyBytes+1024))
@@ -316,7 +399,7 @@ func TestSlowBodyClientIsDisconnected(t *testing.T) {
 	s := NewServer(Config{
 		Addr:   "127.0.0.1:0",
 		APSSID: "FF1-abc",
-		Join:   func(_, _ string) error { joined <- struct{}{}; return nil },
+		Join:   func(JoinRequest) error { joined <- struct{}{}; return nil },
 	})
 	require.NoError(t, s.Start())
 	defer func() { _ = s.Stop(context.Background()) }()
@@ -415,7 +498,8 @@ func TestRescanGetShowsConfirmationWithoutTriggering(t *testing.T) {
 	body := readAll(t, resp)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Contains(t, body, "Restart Wi-Fi search", "confirm page must carry the POST button")
+	assert.Contains(t, body, `<form method="POST" action="/rescan">`, "confirm page must carry the POST button")
+	assert.Contains(t, body, "Search for networks again", "confirm button must name the picker's action")
 	assert.Contains(t, body, "FF1-abc")
 	assert.Contains(t, body, "disconnected")
 	assert.Zero(t, called, "GET must not trigger a bounce")
@@ -454,4 +538,154 @@ func TestRescanRejectedReRendersPicker(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	// Back on the picker, not the rescan page.
 	assert.Contains(t, string(body), "Connect to Wi-Fi")
+}
+
+// TestFontsServeEmbeddedFaces: the /fonts/ subtree must serve the embedded
+// woff2 files (the portal's PP Mori faces) rather than falling into
+// handleRoot's treat-unknown-paths-as-captive-probes redirect, and must 404 —
+// not redirect — for anything else under it, including traversal shapes.
+func TestFontsServeEmbeddedFaces(t *testing.T) {
+	_, ts, client := newTestServer(t, Config{APSSID: "FF1-abc"})
+
+	for _, name := range []string{"PPMori-Regular.woff2", "PPMori-Bold.woff2"} {
+		resp, err := client.Get(ts.URL + "/fonts/" + name)
+		require.NoError(t, err)
+		body, readErr := io.ReadAll(resp.Body)
+		require.NoError(t, readErr)
+		_ = resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode, name)
+		assert.Equal(t, "font/woff2", resp.Header.Get("Content-Type"), name)
+		// Session-scale only: the URLs carry no fingerprint, so anything longer
+		// would pin a stale face across an OTA font swap.
+		assert.Equal(t, "max-age=3600", resp.Header.Get("Cache-Control"), name)
+		assert.NotEmpty(t, body, name)
+	}
+
+	for _, path := range []string{
+		"/fonts/",
+		"/fonts/missing.woff2",
+		"/fonts/PPMori-Regular.ttf",          // only woff2 is embedded
+		"/fonts/sub/PPMori-Regular.woff2",    // no subdirectories
+		"/fonts/%2e%2e/templates/index.html", // encoded traversal
+	} {
+		resp, err := client.Get(ts.URL + path)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode, path)
+	}
+}
+
+// TestSetupCSSServed: every template now links /setup.css instead of carrying
+// its own <style> block, so the route must serve real CSS (not bounce to the
+// captive-probe redirect) and every page must actually reference it.
+func TestSetupCSSServed(t *testing.T) {
+	_, ts, client := newTestServer(t, Config{APSSID: "FF1-abc"})
+
+	resp, err := client.Get(ts.URL + "/setup.css")
+	require.NoError(t, err)
+	body, readErr := io.ReadAll(resp.Body)
+	require.NoError(t, readErr)
+	_ = resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "text/css; charset=utf-8", resp.Header.Get("Content-Type"))
+	assert.Equal(t, "max-age=3600", resp.Header.Get("Cache-Control"))
+	assert.Contains(t, string(body), "PP Mori")
+
+	// Every template must link the shared sheet — checked against the embedded
+	// sources rather than by rendering each route, so a future page cannot
+	// slip in unstyled regardless of how it is reached.
+	names, err := fs.Glob(assets, "templates/*.html")
+	require.NoError(t, err)
+	require.NotEmpty(t, names)
+	for _, name := range names {
+		raw, readErr := assets.ReadFile(name)
+		require.NoError(t, readErr)
+		assert.Contains(t, string(raw), `href="/setup.css"`, name)
+		assert.NotContains(t, string(raw), "<style>", name)
+	}
+}
+
+// TestActivityObservedOnHumanRoutesOnly pins the §4.2 deferral signal's
+// classification: the /connect and /rescan action handlers count (by handler,
+// not method — the rescan form submits as GET), while root fetches and OS
+// captive probes never do, because the probe routes exist precisely to
+// redirect an idle phone's automatic requests to "/" and counting them would
+// let an idle phone pin every teardown to its ceiling.
+func TestActivityObservedOnHumanRoutesOnly(t *testing.T) {
+	var observed int
+	var mu sync.Mutex
+	_, ts, client := newTestServer(t, Config{
+		Join:             func(JoinRequest) error { return nil },
+		Rescan:           func() error { return nil },
+		ActivityObserved: func() { mu.Lock(); observed++; mu.Unlock() },
+	})
+
+	count := func() int { mu.Lock(); defer mu.Unlock(); return observed }
+
+	resp, err := client.Get(ts.URL + "/")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	resp, err = client.Get(ts.URL + "/generate_204")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 0, count(), "root fetches and OS probes are not human actions")
+
+	resp, err = client.PostForm(ts.URL+"/connect", url.Values{"ssid": {"X"}})
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 1, count(), "a credential submit is a human action")
+
+	resp, err = client.Get(ts.URL + "/rescan")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 2, count(), "the rescan confirmation page is handler-classified, method-agnostic")
+
+	resp, err = client.PostForm(ts.URL+"/rescan", nil)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 3, count())
+}
+
+// TestTrafficObservedCountsEveryRequest pins the two observers' opposite
+// classifications: TrafficObserved fires for EVERY request — root fetches and
+// OS captive probes included — while ActivityObserved stays action-only. The
+// recheck cadence's attached-phone deferral depends on exactly this split.
+func TestTrafficObservedCountsEveryRequest(t *testing.T) {
+	var traffic, activity int
+	var mu sync.Mutex
+	count := func(n *int) func() {
+		return func() { mu.Lock(); *n++; mu.Unlock() }
+	}
+	_, ts, client := newTestServer(t, Config{
+		APSSID:           "FF1-abc",
+		Scan:             func(context.Context) ([]string, error) { return []string{"Net"}, nil },
+		Rescan:           func() error { return nil },
+		ActivityObserved: count(&activity),
+		TrafficObserved:  count(&traffic),
+	})
+
+	// The asset routes ride along: a browser auto-fetching the stylesheet or a
+	// font proves a device is attached but is never a human action.
+	for _, path := range []string{
+		"/", "/generate_204", "/hotspot-detect.html",
+		"/setup.css", "/fonts/PPMori-Regular.woff2",
+	} {
+		resp, err := client.Get(ts.URL + path)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+	}
+	mu.Lock()
+	assert.Equal(t, 5, traffic, "probes, root fetches, and asset fetches all count as traffic")
+	assert.Equal(t, 0, activity, "none of them count as human activity")
+	mu.Unlock()
+
+	resp, err := client.Get(ts.URL + "/rescan")
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	mu.Lock()
+	assert.Equal(t, 6, traffic)
+	assert.Equal(t, 1, activity, "an action request counts as both")
+	mu.Unlock()
 }

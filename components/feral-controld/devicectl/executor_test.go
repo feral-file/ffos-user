@@ -4516,7 +4516,16 @@ func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 		testMetrics := []byte(`{"cpu": 85.5, "memory": 60.2, "disk": 45.0}`)
 		ts.executor.SaveLastSysMetrics(testMetrics)
 
-		saveComplete <- true
+		// Closed, not sent: saveComplete has TWO receivers — the first
+		// goroutine's tail wait and the third goroutine's head wait — so
+		// a single token is claimed by whichever gets there first and the
+		// other blocks forever. When the first goroutine won that race
+		// the third never ran, nothing ever sent readSecond, and the test
+		// hung until the 10-minute panic (seen on CI, ~10% of runs in a
+		// standalone reproduction of this channel topology). Closing
+		// releases both, which is what "save is done" was always meant
+		// to mean.
+		close(saveComplete)
 	}()
 
 	// Third goroutine: Read (should get saved data)
@@ -4598,27 +4607,35 @@ func TestExecutor_FactoryReset_StartsServiceAndRotatesTopic(t *testing.T) {
 	ts.mockExecCmd.EXPECT().
 		CombinedOutput().
 		Return([]byte(""), nil)
+	// A successful start arms the stuck-reset watchdog on its own goroutine.
+	// A non-nil sleep error is the "process is going away" shape, so it returns
+	// without firing — this test is about the reset boundary, not the watchdog
+	// (TestFactoryReset_StuckResetWatchdogReleasesLatch covers that).
+	ts.mockClock.EXPECT().
+		SleepContext(gomock.Any(), gomock.Any()).
+		Return(context.Canceled).
+		AnyTimes()
 
-	// The live relayer session is revoked as part of the reset boundary.
-	relayerClosed := false
-	ts.executor.SetRelayerCloser(func() { relayerClosed = true })
 	var observed []bool
 	ts.executor.SetClaimObserver(func(claimed bool) { observed = append(observed, claimed) })
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
+	// The executor RETURNS CmdOK with the relayer session left intact (no
+	// relayer participates here — delivery is the mediator's Send). The former
+	// shape closed the socket first, so this ack could never reach the
+	// controller; see factoryReset.
 	assert.Equal(t, devicectl.CmdOK, result)
-	assert.True(t, relayerClosed, "factory reset must close the live relayer session")
 	assert.Equal(t, []bool{false}, observed,
 		"the claim observer must see the unclaim so mDNS re-advertises claimed=false")
 }
 
-// TestExecutor_FactoryReset_UnitFailureStillRevokesSession: set-factory-boot
-// only STAGES a reboot, and its start can fail — the reset boundary (persisted
-// topic cleared + live relayer session closed) must hold BEFORE that outcome,
-// so a failed or delayed reset still leaves the former owner's control channel
-// revoked (the fail-safe direction).
-func TestExecutor_FactoryReset_UnitFailureStillRevokesSession(t *testing.T) {
+// TestExecutor_FactoryReset_UnitFailureStillClearsClaim: set-factory-boot only
+// ARMS a one-shot candidate boot (the btrfs default is left untouched), and its
+// start can fail outright — so the persisted-claim clear must hold BEFORE that
+// outcome, leaving a rolled-back or never-started reset unclaimed with no
+// usable topic on disk (the fail-safe direction).
+func TestExecutor_FactoryReset_UnitFailureStillClearsClaim(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -4642,14 +4659,11 @@ func TestExecutor_FactoryReset_UnitFailureStillRevokesSession(t *testing.T) {
 		CombinedOutput().
 		Return([]byte("Failed to start set-factory-boot.service"), errors.New("exit status 1"))
 
-	relayerClosed := false
-	ts.executor.SetRelayerCloser(func() { relayerClosed = true })
 	var observed []bool
 	ts.executor.SetClaimObserver(func(claimed bool) { observed = append(observed, claimed) })
 
 	_, err := ts.executor.Execute(ts.ctx, cmd)
 	require.Error(t, err)
-	assert.True(t, relayerClosed, "a failed reset unit must still leave the relayer session revoked")
 	assert.Equal(t, []bool{false}, observed,
 		"a failed reset unit must still leave the device locally unclaimed")
 }

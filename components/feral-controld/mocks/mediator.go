@@ -84,6 +84,18 @@ func (mr *MockMediatorMockRecorder) SetSession(session interface{}) *gomock.Call
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSession", reflect.TypeOf((*MockMediator)(nil).SetSession), session)
 }
 
+// SetSysMetricsObserver mocks base method.
+func (m *MockMediator) SetSysMetricsObserver(observer func([]byte)) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetSysMetricsObserver", observer)
+}
+
+// SetSysMetricsObserver indicates an expected call of SetSysMetricsObserver.
+func (mr *MockMediatorMockRecorder) SetSysMetricsObserver(observer interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSysMetricsObserver", reflect.TypeOf((*MockMediator)(nil).SetSysMetricsObserver), observer)
+}
+
 // SetTopicObserver mocks base method.
 func (m *MockMediator) SetTopicObserver(observer func()) {
 	m.ctrl.T.Helper()

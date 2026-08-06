@@ -203,6 +203,103 @@ func TestExternalLinkUnsurveyedOutputIsError(t *testing.T) {
 	}
 }
 
+// TestWiredLink pins the WiredLink verdict semantics from
+// docs/network-recovery-ux.md constraint 6: the verdict is computed from
+// ethernet rows only, and a valid survey (at least one ethernet/wifi row —
+// the same `surveyed` rule as the other probes) with no ethernet row is
+// confirmed-no-wire (false, nil).
+func TestWiredLink(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name: "activated ethernet is a wire",
+			output: dev("eth0", "ethernet", "100 (connected)", "Wired connection 1") +
+				dev("wlan0", "wifi", "30 (disconnected)", ""),
+			want: true,
+		},
+		{
+			// The assertion that catches the ExternalLink conflation
+			// (docs/app-triggered-wifi-setup.md constraint 5): an associated
+			// station is a LINK but never a WIRE. A probe reusing the combined
+			// verdict would return true here and reject every Wi-Fi target
+			// device of the setup flow.
+			name:   "wifi-only station is confirmed no-wire",
+			output: dev("wlan0", "wifi", "100 (connected)", "HomeWifi"),
+			want:   false,
+		},
+		{
+			// A valid survey whose listing simply has no ethernet device at all
+			// (Wi-Fi-only hardware) is a confirmed no-wire verdict, not an
+			// error — constraint 6's no-ethernet-row case.
+			name:   "no ethernet row at all is confirmed no-wire",
+			output: dev("wlan0", "wifi", "30 (disconnected)", ""),
+			want:   false,
+		},
+		{
+			name: "non-activated ethernet is not a wire",
+			output: dev("eth0", "ethernet", "20 (unavailable)", "") +
+				dev("wlan0", "wifi", "100 (connected)", "HomeWifi"),
+			want: false,
+		},
+		{
+			name: "wire plus station still reads as wired",
+			output: dev("eth0", "ethernet", "100 (connected)", "Wired connection 1") +
+				dev("wlan0", "wifi", "100 (connected)", "HomeWifi"),
+			want: true,
+		},
+		{
+			// The device's own hotspot is a wifi row; it must neither create a
+			// wire verdict nor mask an ethernet row.
+			name: "own hotspot is not a wire",
+			output: dev("wlan0", "wifi", "100 (connected)", "ff1-softap") +
+				dev("eth0", "ethernet", "20 (unavailable)", ""),
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lc := status.NewLinkChecker(probeExec(t, tt.output, nil), zap.NewNop())
+			got, err := lc.WiredLink(context.Background())
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestWiredLinkErrors pins WiredLink's surface-the-error bias: a probe failure
+// or an unsurveyed listing (corrupt/empty output — the shared `surveyed` rule)
+// must surface as an error, never as a confirmed verdict in either direction.
+// The admission caller fails closed on error; the escape-policy window treats
+// it as a pause.
+func TestWiredLinkErrors(t *testing.T) {
+	t.Run("probe failure surfaces", func(t *testing.T) {
+		lc := status.NewLinkChecker(probeExec(t, "", errors.New("nmcli timeout")), zap.NewNop())
+		_, err := lc.WiredLink(context.Background())
+		assert.Error(t, err)
+	})
+	for _, tt := range []struct {
+		name   string
+		output string
+	}{
+		{name: "corrupt output", output: "garbage output"},
+		{name: "empty output", output: ""},
+		{
+			name: "loopback and p2p only",
+			output: dev("lo", "loopback", "100 (connected (externally))", "lo") +
+				dev("p2p-dev-wlan0", "wifi-p2p", "30 (disconnected)", ""),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			lc := status.NewLinkChecker(probeExec(t, tt.output, nil), zap.NewNop())
+			_, err := lc.WiredLink(context.Background())
+			assert.Error(t, err, "an unsurveyed probe must read as unknown, not confirmed no-wire")
+		})
+	}
+}
+
 // TestHasLinkCountsOwnHotspot pins that HasLink deliberately does NOT exclude
 // the setup hotspot: a phone joined to the hotspot is a LAN peer, so mDNS/hub
 // discoverability stays keyed on it. Only the provisioning guard needs the

@@ -133,6 +133,10 @@ const (
 	NOTIFICATION_TYPE_DDC_STATUS                    NotificationType = "ddc_status"
 	NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST NotificationType = "mint_pairing_approval_request"
 	NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME NotificationType = "mint_pairing_approval_outcome"
+	// NOTIFICATION_TYPE_OFFLINE_CACHE_STATUS is emitted per item-state
+	// transition by offlinecache.Service (see offlinecache/notifier.go),
+	// mirroring the relayer+hub-WS dual-send path status.go uses.
+	NOTIFICATION_TYPE_OFFLINE_CACHE_STATUS NotificationType = "offline_cache_status"
 )
 
 //go:generate mockgen -source=relayer.go -destination=../mocks/relayer.go -package=mocks -mock_names=Relayer=MockRelayer

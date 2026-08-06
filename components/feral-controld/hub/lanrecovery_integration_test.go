@@ -74,6 +74,7 @@ type lanRig struct {
 	mockExec   *mocks.MockExec
 	mockOS     *mocks.MockOS
 	mockDevSts *mocks.MockDeviceStatus
+	mockClock  *mocks.MockClock
 }
 
 // newLANRig builds the offline pipeline. gateCfg selects the storm-gate policy
@@ -113,9 +114,10 @@ func newLANRig(t *testing.T, gateCfg commandrouter.GateConfig, statusInfo Status
 		jsonw, mockOS, mockExec, mockMath, mockClock, logger,
 	)
 
-	// Real command router + real storm gate. dp1 and mintPairing are unused by
-	// the device-control recovery commands and are left nil.
-	inner := commandrouter.New(executor, mockCDP, nil, mockPoller, nil, nil, jsonw, logger)
+	// Real command router + real storm gate. dp1, mintPairing, offlineCache,
+	// kioskReplay and the playlist scheduler are unused by the device-control
+	// recovery commands and are left nil.
+	inner := commandrouter.New(executor, mockCDP, nil, mockPoller, nil, nil, nil, nil, jsonw, logger)
 	gated := commandrouter.NewGate(inner, gateCfg, logger)
 
 	// Grab the mux the hub registers its routed+middlewared handlers onto, then
@@ -136,6 +138,7 @@ func newLANRig(t *testing.T, gateCfg commandrouter.GateConfig, statusInfo Status
 		mockExec:   mockExec,
 		mockOS:     mockOS,
 		mockDevSts: mockDevSts,
+		mockClock:  mockClock,
 	}
 }
 
@@ -206,6 +209,14 @@ func TestLANRecovery_OfflineCommandPipeline(t *testing.T) {
 			CommandContext(gomock.Any(), "systemctl", "start", "set-factory-boot.service").
 			Return(cmd).Times(1)
 		cmd.EXPECT().CombinedOutput().Return([]byte(""), nil).Times(1)
+		// A started reset unit arms devicectl's stuck-reset watchdog on its own
+		// goroutine. A non-nil sleep error is the "process is going away"
+		// shape, so it returns without firing — the watchdog policy itself is
+		// covered in devicectl, not through the LAN pipeline.
+		rig.mockClock.EXPECT().
+			SleepContext(gomock.Any(), gomock.Any()).
+			Return(context.Canceled).
+			AnyTimes()
 
 		code, body := rig.postCast(t, `{"command":"factoryReset"}`)
 

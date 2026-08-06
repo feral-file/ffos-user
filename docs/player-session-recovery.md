@@ -263,6 +263,7 @@ HTTP timeout) cannot afford to wait out someone else's navigation.
 | sleep_schedule `applySleepTransition*` | Generation re-check around the CDP send; a moved generation is recorded as `playerUnknownFailed` (§7), never surfaced as an error to a manual-override caller. |
 | commandrouter `sendCDPRequest` | Generation re-check; a moved generation returns `ErrGenerationRace` (`errors.Is`-able) — excluded from the refreshArtwork recovery escalation below, since a generation race is not itself evidence the page is broken. |
 | commandrouter refreshArtwork recovery | `NavigateHomeInline({PurgeCache:true})` on a refused/failed refresh — the caller holds no external lock. |
+| offlinecache kiosk replay | **Split across both lanes.** `AttachOnReconnect` runs INLINE on the CDP connect callback (`main.go`), not as a reconciler: it arms Fetch interception on offlinecache's own socket, needs no page JS, and must be armed before the reloaded document requests assets. Re-applying the item SCOPE is the `replay-scope-resync` reconciler, because the pass it triggers resolves what is playing via `FetchPlayerStatus`, which evaluates `window.handleCDPRequest` and therefore needs a hydrated page. |
 | scheduler/refresher/status/input/viewport | Off-lane, unchanged — read-only or self-retrying. |
 
 **feral-watchdog** is a second, ungated navigation authority

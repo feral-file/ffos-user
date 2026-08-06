@@ -2,6 +2,7 @@ package commandrouter_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -24,6 +25,17 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 )
+
+// newRoutableExecutor builds an executor mock for a device that is NOT mid
+// factory reset. Process consults ResetStaged on every command (the
+// staged-reset guard closes the whole command surface, every family and every
+// transport), so each routing test has to answer it; the rejection behavior
+// itself is covered by TestCommandHandler_Process_StagedFactoryReset_*.
+func newRoutableExecutor(ctrl *gomock.Controller) *mocks.MockExecutor {
+	m := mocks.NewMockExecutor(ctrl)
+	m.EXPECT().ResetStaged().Return(false).AnyTimes()
+	return m
+}
 
 // fakeRecoverySession is a directly-controllable commandrouter.RecoverySession
 // double: err, when set, is what NavigateHomeInline returns.
@@ -56,12 +68,12 @@ func setup(t *testing.T) *testSetup {
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
 
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, nil, mockJSON, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -237,7 +249,7 @@ func TestCommandHandler_Process_StartMintPairingSessionRoutesToMintPairing(t *te
 	args := map[string]any{"source": "controller"}
 	want := map[string]any{"ok": true, "status": "started"}
 	mintSvc := &fakeMintPairingService{startResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_START_MINT_PAIRING_SESSION,
@@ -277,7 +289,7 @@ func TestCommandHandler_Process_CloseMintPairingSessionRoutesToMintPairing(t *te
 	args := map[string]any{"source": "controller"}
 	want := map[string]any{"ok": true, "status": "closed"}
 	mintSvc := &fakeMintPairingService{closeResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLOSE_MINT_PAIRING_SESSION,
@@ -299,7 +311,7 @@ func TestCommandHandler_Process_MintPairingApprovalRoutesToMintPairing(t *testin
 	args := map[string]any{"approvalRequestID": "mpa_1", "decision": "approve"}
 	want := map[string]any{"ok": true, "status": "accepted"}
 	mintSvc := &fakeMintPairingService{approvalResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_MINT_PAIRING_APPROVAL,
@@ -415,6 +427,296 @@ func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
+}
+
+func TestCommandHandler_Process_DisplayPlaylist_SyncsKioskReplayScope(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	mockPlaylist := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Items: []dp1playlist.PlaylistItem{
+				{ID: "item1", Source: "https://example.com/video.mp4"},
+				{ID: "item2", Source: "https://example.com/app.js"},
+			},
+		},
+	}
+	expectDisplayPlaylistSuccess(ts, playlistURL, mockPlaylist)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/video.mp4", "https://example.com/app.js"}).Return(nil).Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+
+	command := commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": playlistURL},
+	}
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_HoldsPlaybackLockAcrossSyncAndSend
+// is the regression test for the "replay scope and kiosk navigation are
+// not serialized" hazard: the displayPlaylist path must hold the playback
+// coordinator across BOTH the replay-scope sync AND the CDP navigation
+// send, so a concurrent display command or playlist-refresher pass cannot
+// interleave its own sync+send between them and leave the on-screen
+// playlist and the Fetch interception scope disagreeing (see
+// offlinecache.KioskReplay.LockPlayback's doc). gomock.InOrder pins the
+// exact Lock -> Sync -> Send -> Unlock sequence: a future edit that moves
+// the lock acquisition after the sync, releases it before the send, or
+// drops it entirely fails here.
+func TestCommandHandler_Process_DisplayPlaylist_HoldsPlaybackLockAcrossSyncAndSend(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	mockPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item1", Source: "https://example.com/video.mp4"}},
+	}}
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL).Return(mockPlaylist, nil).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	lock := mockKioskReplay.EXPECT().LockPlayback().Times(1)
+	sync := mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/video.mp4"}).Return(nil).Times(1)
+	// MarkPlaybackChanged must be announced UNDER the lock, after the sync
+	// and before the unlock, so a concurrent resync defers to this
+	// authoritative scope change (see KioskReplay.PlaybackGeneration).
+	mark := mockKioskReplay.EXPECT().MarkPlaybackChanged().Times(1)
+	send := ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	unlock := mockKioskReplay.EXPECT().UnlockPlayback().Times(1)
+	gomock.InOrder(lock, sync, mark, send, unlock)
+
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": playlistURL},
+	})
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+func TestCommandHandler_Process_DisplayPlaylist_KioskReplaySyncFailureDoesNotBlockDisplay(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	mockPlaylist := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Items: []dp1playlist.PlaylistItem{{ID: "item1", Source: "https://example.com/video.mp4"}},
+		},
+	}
+	expectDisplayPlaylistSuccess(ts, playlistURL, mockPlaylist)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/video.mp4"}).Return(errors.New("dial failed")).Times(1)
+	// The authoritative generation bump MUST still fire even though the
+	// SyncPlaylist above errored: this display path is authoritative for
+	// what SHOULD be on screen, so a concurrent corrective resync must
+	// defer to it (see KioskReplay.PlaybackGeneration). Pinned to Times(1)
+	// — not AnyTimes — so a future change that drops the bump on the sync-
+	// error branch fails here instead of silently weakening the TOCTOU
+	// guard. The display itself succeeds here, so the failure-path resync
+	// (the only other MarkPlaybackChanged-adjacent caller) never runs.
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+
+	command := commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": playlistURL},
+	}
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	assert.NoError(t, err, "a replay-sync failure must never fail the display command itself")
+	assert.NotNil(t, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplayScope
+// is the regression test pinning that SyncPlaylist's pre-CDP-send scope
+// switch to the NEW playlist is reverted when the CDP send itself fails:
+// the kiosk never actually displayed the new playlist, so replay's scope
+// must be re-synced back to whatever the player reports it is still
+// showing, rather than being left pointed at a playlist load that never
+// happened.
+func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplayScope(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	newURL := "https://example.com/new.json"
+	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item-new", Source: "https://example.com/item-new"}},
+	}}
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL).Return(newPlaylist, nil).Times(1)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-new"}).Return(nil).Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(nil, errors.New("cdp send failed")).
+		Times(1)
+
+	oldURL := "https://example.com/old.json"
+	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item-old", Source: "https://example.com/item-old"}},
+	}}
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
+		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
+		PlaylistURL: &oldURL,
+	}, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, oldURL, false).Return(oldPlaylist, nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-old"}).Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": newURL},
+	})
+
+	assert.Error(t, err)
+	assert.Nil(t, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskReplayScope
+// mirrors the CDP-send-failure regression above for the other failure
+// shape: the CDP send itself succeeds, but the player replies ok:false
+// (rejecting the command), which must revert scope the same way.
+func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskReplayScope(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	newURL := "https://example.com/new.json"
+	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item-new", Source: "https://example.com/item-new"}},
+	}}
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL).Return(newPlaylist, nil).Times(1)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-new"}).Return(nil).Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(playerNotOkResponse(), nil).
+		Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	oldURL := "https://example.com/old.json"
+	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item-old", Source: "https://example.com/item-old"}},
+	}}
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
+		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
+		PlaylistURL: &oldURL,
+	}, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, oldURL, false).Return(oldPlaylist, nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-old"}).Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": newURL},
+	})
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOffline
+// is the regression test pinning that displayPlaylist with playlistUrl
+// must be able to use the downloaded cache when offline: a playlist
+// previously downloaded via downloadPlaylist for this exact URL must
+// still be displayable when live DP-1 resolution fails.
+func TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOffline(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	cachedRawBytes := []byte(`{"id":"playlist-1","items":[{"id":"item1","source":"https://example.com/video.mp4"}]}`)
+	cachedPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    "playlist-1",
+		Items: []dp1playlist.PlaylistItem{{ID: "item1", Source: "https://example.com/video.mp4"}},
+	}}
+
+	mockOfflineCache := mocks.NewMockOfflineCacheService(ts.ctrl)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, nil, nil, ts.mockJSON, ts.logger)
+
+	ts.mockDP1.EXPECT().
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
+		Return(nil, errors.New("network unreachable")).
+		Times(1)
+
+	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), nil).Times(1)
+	ts.mockJSON.EXPECT().
+		Unmarshal(cachedRawBytes, gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			p := v.(**dp1.Playlist)
+			*p = cachedPlaylist
+			return nil
+		}).
+		Times(1)
+
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(playerOkResponse(), nil).
+		Times(1)
+
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": playlistURL},
+	})
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_ReturnsOriginalErrorWhenNoCachedFallback
+// pins that the original live-resolution error is what gets reported when
+// there is nothing to fall back to (offline caching disabled here), not a
+// confusing "cache lookup failed" error about a fallback the caller never
+// asked for.
+func TestCommandHandler_Process_DisplayPlaylist_ReturnsOriginalErrorWhenNoCachedFallback(t *testing.T) {
+	ts := setup(t) // setup() wires offlineCache as nil
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	liveErr := errors.New("network unreachable")
+	ts.mockDP1.EXPECT().
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
+		Return(nil, liveErr).
+		Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": playlistURL},
+	})
+
+	assert.ErrorIs(t, err, liveErr)
+	assert.Nil(t, result)
 }
 
 func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T) {
@@ -1216,4 +1518,83 @@ func isPlayerResponseOkForTest(result interface{}) bool {
 	}
 	okVal, _ := msg["ok"].(bool)
 	return okVal
+}
+
+// --- staged factory reset (the command-surface guard) ------------------------
+
+// stagedResetHandler builds a router whose device is mid-factory-reset. Every
+// collaborator is wired so that a command reaching its handler would be
+// visible: nothing below is expected to, which is the point.
+func stagedResetHandler(t *testing.T) (commandrouter.Handler, *gomock.Controller) {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+
+	ex := mocks.NewMockExecutor(ctrl)
+	ex.EXPECT().ResetStaged().Return(true).AnyTimes()
+
+	// mintPairing/offlineCache left nil deliberately: unguarded, both families
+	// answer a nil collaborator with their own {ok:false, code:disabled|...}
+	// map and a NIL error, so requiring an error below proves the guard fired
+	// rather than the nil-guard.
+	return commandrouter.New(ex, mocks.NewMockCDP(ctrl), mocks.NewMockDP1(ctrl),
+		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil,
+		mocks.NewMockJSON(ctrl), logger), ctrl
+}
+
+// TestCommandHandler_Process_StagedFactoryReset_RejectsEveryFamily is the guard
+// that makes the wire contract's "the command surface closes" true. It spans
+// all four routed families deliberately: the guard used to sit inside
+// devicectl.Execute, where mint pairing, the offline cache and the player
+// commands bypassed it entirely — and the candidate boot can roll back, so
+// anything those handlers write survives a reset the new owner believes
+// happened. The absent collaborator expectations are the assertion: gomock
+// fails if any command reaches its handler.
+func TestCommandHandler_Process_StagedFactoryReset_RejectsEveryFamily(t *testing.T) {
+	h, ctrl := stagedResetHandler(t)
+	defer ctrl.Finish()
+
+	for _, cmd := range []commands.Type{
+		commands.CMD_CONNECT,                    // re-persists the claim
+		commands.CMD_SSH_ACCESS,                 // writes authorized_keys
+		commands.CMD_ANALYTICS_TOGGLE,           // writes a state sentinel
+		commands.CMD_UPDATE_TO_LATEST,           // arms a competing bootctl one-shot
+		commands.CMD_SHOW_PAIRING_QR_CODE,       // paints the claim QR
+		commands.CMD_START_MINT_PAIRING_SESSION, // mint pairing: own overlay + token minting
+		commands.CMD_DOWNLOAD_PLAYLIST,          // offline cache: writes under the root subvolume
+		commands.CMD_CLEAR_PLAYLIST_CACHE,       // offline cache: deletes under it
+		commands.CMD_FACTORY_RESET,              // a duplicate adds nothing while one is staged
+	} {
+		_, err := h.Process(context.Background(), commands.Command{Type: cmd})
+		require.Error(t, err, "%s must be rejected while a factory reset is staged", cmd)
+		assert.Contains(t, err.Error(), "factory reset in progress")
+	}
+}
+
+// TestCommandHandler_Process_StagedFactoryReset_ServesReadOnly: the guard
+// closes the command surface, not the device's ability to report what it is
+// doing — a controller polling through the still-open session gets an answer
+// rather than an error storm. These three are the allowlist; each is pure
+// reporting, with no persisted write, no screen ownership and no boot staging.
+func TestCommandHandler_Process_StagedFactoryReset_ServesReadOnly(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+
+	ex := mocks.NewMockExecutor(ctrl)
+	ex.EXPECT().ResetStaged().Return(true).AnyTimes()
+	h := commandrouter.New(ex, mocks.NewMockCDP(ctrl), mocks.NewMockDP1(ctrl),
+		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, mocks.NewMockJSON(ctrl), logger)
+
+	for _, cmd := range []commands.Type{
+		commands.CMD_DEVICE_STATUS,
+		commands.CMD_PROFILE,
+		commands.CMD_DDC_PANEL_STATUS,
+	} {
+		ex.EXPECT().
+			Execute(gomock.Any(), gomock.Any()).
+			Return(map[string]any{"ok": true}, nil)
+		_, err := h.Process(context.Background(), commands.Command{Type: cmd})
+		require.NoError(t, err, "%s must still be served during a staged reset", cmd)
+	}
 }
