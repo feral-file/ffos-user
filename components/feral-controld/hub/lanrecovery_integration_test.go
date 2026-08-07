@@ -43,7 +43,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -64,6 +66,12 @@ import (
 // errLANNotExist stands in for an fs "not found": every executor OS read misses
 // in this test. Its identity does not matter because IsNotExist is mocked true.
 var errLANNotExist = errors.New("lan test: not exist")
+
+// otaLocalConfigPath mirrors otagate's unexported localConfigPath — the running
+// build descriptor the OTA gate reads first. Duplicated rather than imported
+// because it is package-private to otagate; if that path moves, this test stops
+// observing the gate and fails loudly rather than silently passing.
+const otaLocalConfigPath = "/home/feralfile/ff1-config.json"
 
 // lanRig is a fully wired offline hub: real executor -> real storm gate ->
 // real hub handler chain, fronted by a loopback httptest.Server. Only the leaf
@@ -257,21 +265,44 @@ func TestLANRecovery_OfflineCommandPipeline(t *testing.T) {
 		assert.JSONEq(t, `{"ok":true}`, body)
 	})
 
-	t.Run("updateToLatestVersion drives the local OTA gate offline", func(t *testing.T) {
+	t.Run("updateToLatestVersion ACKs immediately and drives the local OTA gate offline", func(t *testing.T) {
 		// controld owns the update: updateToLatestVersion drives the OTA gate's
-		// LOCAL path — no relayer, no D-Bus forward to any other daemon. Offline the
-		// mandatory version check cannot read the local build descriptor (every OS
-		// read misses), so the gate fails the version check and the command errors;
-		// crucially it ran the in-process gate rather than forwarding elsewhere. The
+		// LOCAL path — no relayer, no D-Bus forward to any other daemon.
+		//
+		// The command is fire-and-forget, so the ACK deliberately cannot carry the
+		// gate's outcome: the ladder ends in a reboot that kills the process before
+		// any reply is written (hardware repro 2026-08-07, see updateToLatest's
+		// doc). What proves in-process handling is therefore the DETACHED gate
+		// reading the local build descriptor — offline that read misses, the
+		// mandatory version check fails and no ladder starts, but the read happens
+		// at all only if the command ran here instead of being forwarded. The
 		// successful local update path (mocked HTTP version check + updater) is
 		// covered by the otagate package tests.
 		rig := newLANRig(t, commandrouter.DefaultGateConfig(), offlineStatus())
+
+		// Declared before permissiveOSReads so gomock matches this narrower
+		// expectation first. Closing on the first read is enough: the gate reads
+		// the descriptor once per run, and once is what "it ran" means here.
+		gateRanLocally := make(chan struct{})
+		var closeOnce sync.Once
+		rig.mockOS.EXPECT().ReadFile(otaLocalConfigPath).DoAndReturn(
+			func(string) ([]byte, error) {
+				closeOnce.Do(func() { close(gateRanLocally) })
+				return nil, errLANNotExist
+			}).AnyTimes()
 		permissiveOSReads(rig.mockOS)
 
 		code, body := rig.postCast(t, `{"command":"updateToLatestVersion"}`)
-		assert.Equal(t, http.StatusInternalServerError, code,
-			"offline the local version check fails; the command is handled in-process, not forwarded")
-		assert.Contains(t, body, "Failed to process cast request")
+		assert.Equal(t, http.StatusOK, code,
+			"the ladder ends in a reboot, so the command ACKs before it runs")
+		assert.JSONEq(t, `{"ok":true}`, body)
+
+		select {
+		case <-gateRanLocally:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the detached OTA gate never read the local build descriptor: " +
+				"the command was not handled in-process")
+		}
 	})
 
 	t.Run("uploadLogs is handled in-process offline", func(t *testing.T) {
