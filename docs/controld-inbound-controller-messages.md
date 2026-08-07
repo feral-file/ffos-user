@@ -911,7 +911,23 @@ Current relayer error response: none standardized; command failure is logged.
 
 ### updateToLatestVersion
 
-Purpose: run a system update. Handled in-process by `feral-controld`'s OTA gate (`otagate.RequestUpdate`, mode `Available`), which narrates progress and drives the local updater.
+Purpose: run a system update. Handled in-process by `feral-controld`'s OTA gate
+(`otagate.RequestUpdate`, mode `Available`) and **fire-and-forget** (see
+[`api-design.md`](api-design.md)): the command schedules the update and ACKs
+immediately; a detached worker then runs the version check and the update
+ladder, narrating progress on screen and driving the local updater.
+Single-flighted — a duplicate command while an update is running is ACKed and
+ignored.
+
+The ACK is unconditional and carries no outcome. **It means "the update was
+started", not "the update succeeded"** — a successful ladder ends in a device
+reboot, so no completion reply could ever reach the caller. Controllers must
+track progress through the on-screen narration and the device's reported
+`installedVersion` after it comes back, never by waiting on this response.
+
+This is why the command was made fire-and-forget: it was previously synchronous,
+and the reboot tore the process down mid-request, so the caller got a dropped
+connection instead of any response at all.
 
 Example:
 
@@ -927,9 +943,16 @@ Example:
 
 Current success response: `{"ok": true}`.
 
-Current error cases:
+Current error cases: none are returned to the caller. There is no pre-schedule
+validation to fail (the command takes no arguments), so the command always
+answers `{"ok": true}`.
 
-- Starting or running the local updater fails.
+Everything after the ACK — a failed version check, a failed or permanently
+latched update ladder — is logged on-device by the detached worker and is **not**
+surfaced to the caller. Note that a failed version check (the common outcome
+when the distributor is unreachable, which is exactly the case on the offline
+LAN-hub path) neither latches nor fires `OnPermanentFailure`, so it produces no
+screen narration either: the device log is the only record.
 
 Current relayer error response: none standardized; command failure is logged.
 
