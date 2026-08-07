@@ -2693,12 +2693,15 @@ func (e *executor) getSysMetrics() (interface{}, error) {
 	return sysMetrics, nil
 }
 
-// updateToLatest starts the user-triggered OTA update and ACKs immediately.
+// updateToLatest schedules the user-triggered OTA gate run and ACKs
+// immediately. The ACK means "accepted for evaluation" and nothing more — the
+// gate may dedupe the request, fail its version check, or decide no update is
+// warranted, all of which answer the same CmdOK as an update that actually runs.
 //
 // Fire-and-forget on purpose, same shape as uploadLogs. A synchronous call here
-// can never deliver its reply: the ladder runs for minutes and ENDS IN A
-// REBOOT, so the updater tears the process down while the caller is still
-// waiting on the response. Hardware repro 2026-08-07 (FF1-8EVTK3RE): the app's
+// can never deliver its reply: an update that IS warranted runs for minutes and
+// ENDS IN A REBOOT, so the updater tears the process down while the caller is
+// still waiting on the response. Hardware repro 2026-08-07 (FF1-8EVTK3RE): the app's
 // POST /api/cast {"command":"updateToLatestVersion"} produced "Executing system
 // update command" with no matching "Hub request served" line ever — the update
 // itself ran to completion and rebooted the device 59s later, while the app saw
