@@ -36,7 +36,7 @@ This service should stay focused on observation and publication. It should not g
   - `connectivity_change` — emitted when online/offline state changes; body is a single `bool`.
   - `sysevent` — emitted for GPU events; body is the event string (`gpu_hanging` or `gpu_recover`).
 - `dbus.go` also exposes two D-Bus RPCs on the same bus/path: `GetConnectivityStatus(refresh bool) bool` and `GetSysMetrics() SysDBusMetrics`.
-- `promserver.go` exposes scrapeable Prometheus metrics at `localhost:9001`.
+- `promserver.go` exposes scrapeable Prometheus metrics at `localhost:9001`. Besides the CPU gauges, the registry carries `net_internet_reachable` / `net_internet_probe_duration_seconds` (docs/wan-outage-observability.md stage 0), written by `Connectivity` for every APPLIED probe verdict — the exported timeline must never disagree with what the D-Bus consumers were told, so the setters sit after the generation guards. Consumed by feral-vmagent's offline spool for post-outage diagnosis.
 
 ### Architectural direction
 - This component is a producer of health information, not a decision-maker for reboot or restart policy.

@@ -309,3 +309,61 @@ func TestHasLinkCountsOwnHotspot(t *testing.T) {
 	lc := status.NewLinkChecker(exec, zap.NewNop())
 	assert.True(t, lc.HasLink(context.Background()))
 }
+
+// TestLinkTelemetry covers the per-type telemetry verdicts feeding the
+// netmetrics gauges: raw (no hotspot exclusion — a radio ACTIVATED as the
+// device's own AP reads wifi=true, honest during an outage), and errors
+// surface so the caller exports "unknown" rather than a fabricated 0.
+func TestLinkTelemetry(t *testing.T) {
+	tests := []struct {
+		name      string
+		output    string
+		wantWired bool
+		wantWifi  bool
+		wantErr   bool
+	}{
+		{
+			name: "ethernet and station both activated",
+			output: dev("eth0", "ethernet", "100 (connected)", "Wired connection 1") +
+				dev("wlan0", "wifi", "100 (connected)", "HomeWifi"),
+			wantWired: true,
+			wantWifi:  true,
+		},
+		{
+			name: "own hotspot counts as wifi",
+			output: dev("wlan0", "wifi", "100 (connected)", "ff1-softap") +
+				dev("eth0", "ethernet", "20 (unavailable)", ""),
+			wantWifi: true,
+		},
+		{
+			name: "nothing activated",
+			output: dev("eth0", "ethernet", "20 (unavailable)", "") +
+				dev("wlan0", "wifi", "30 (disconnected)", ""),
+		},
+		{
+			name:    "unsurveyed output surfaces as error",
+			output:  dev("lo", "loopback", "100 (connected (externally))", "lo"),
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lc := status.NewLinkChecker(probeExec(t, tt.output, nil), zap.NewNop())
+			wired, wifi, err := lc.LinkTelemetry(context.Background())
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantWired, wired, "wired")
+			assert.Equal(t, tt.wantWifi, wifi, "wifi")
+		})
+	}
+}
+
+// TestLinkTelemetryProbeError: an exec failure must surface, not default.
+func TestLinkTelemetryProbeError(t *testing.T) {
+	lc := status.NewLinkChecker(probeExec(t, "", errors.New("nmcli exploded")), zap.NewNop())
+	_, _, err := lc.LinkTelemetry(context.Background())
+	assert.Error(t, err)
+}

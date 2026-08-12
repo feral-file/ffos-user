@@ -136,6 +136,21 @@ func (c *LinkChecker) WiredLink(ctx context.Context) (bool, error) {
 	return res.wired, err
 }
 
+// LinkTelemetry reports the per-type link verdicts (ethernet ACTIVATED, wifi
+// ACTIVATED) from one nmcli read, for the netmetrics gauges
+// (docs/wan-outage-observability.md stage 0). Unlike every other probe here it
+// applies no hotspot exclusion — a radio ACTIVATED as the device's own setup
+// AP reads as wifi=true, which is honest telemetry during an outage. Errors
+// surface so the caller can export "unknown" instead of a fabricated 0; it
+// must never feed a recovery or AP-raise decision.
+func (c *LinkChecker) LinkTelemetry(ctx context.Context) (wired, wifi bool, err error) {
+	if c == nil || c.exec == nil {
+		return false, false, errors.New("link checker not initialized")
+	}
+	res, err := c.linkProbe(ctx, "")
+	return res.wired, res.wifi, err
+}
+
 // nmDeviceStateActivated is NetworkManager's NM_DEVICE_STATE_ACTIVATED (100):
 // the device has an active connection with an address — a usable LAN link.
 // Compared numerically because the textual rendering is localized (see
@@ -145,12 +160,14 @@ const nmDeviceStateActivated = 100
 
 // linkResult carries one probe's verdicts. link is the combined uplink verdict
 // (any ACTIVATED ethernet or wifi device, minus the exclusion); wired is the
-// ethernet-only verdict. They are computed in one pass so WiredLink shares the
-// exact survey-validity rule of the other probes — two separate nmcli reads
-// could disagree about whether the output surveyed anything at all.
+// ethernet-only verdict; wifi is the wifi-only verdict. They are computed in
+// one pass so WiredLink shares the exact survey-validity rule of the other
+// probes — two separate nmcli reads could disagree about whether the output
+// surveyed anything at all.
 type linkResult struct {
 	link  bool
 	wired bool
+	wifi  bool
 }
 
 // linkProbe reports whether any ethernet or wifi device is in NetworkManager's
@@ -221,6 +238,14 @@ func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (lin
 		// ethernet row must never be hidden by a profile-name collision with it.
 		if cur.typ == "ethernet" {
 			res.wired = true
+		}
+		// The wifi verdict is likewise raw (pre-exclusion): it feeds telemetry
+		// (LinkTelemetry), where "the radio is ACTIVATED as our own AP" is
+		// itself signal during an outage and must not be hidden. It must NOT be
+		// consumed by any AP-raise guard — that is what the exclusion-aware
+		// combined `link` verdict is for.
+		if cur.typ == "wifi" {
+			res.wifi = true
 		}
 		if excludeProfile != "" && cur.conn == excludeProfile {
 			return

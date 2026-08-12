@@ -17,6 +17,7 @@ import (
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
@@ -331,6 +332,11 @@ func (r *relayer) Connect(ctx context.Context) error {
 
 	r.conn = conn
 	r.Unlock()
+	// Stage-0 observability (docs/wan-outage-observability.md): connection
+	// state is exported event-driven from the three lifecycle sites (here,
+	// closeConn, and the read-loop close-frame capture) so the gauge can never
+	// disagree with the connection the daemon actually holds.
+	netmetrics.SetRelayerConnected(true)
 	cfRay := ""
 	if resp != nil {
 		cfRay = resp.Header.Get("cf-ray")
@@ -464,6 +470,15 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 				r.Unlock()
 				_, msg, err := conn.ReadMessage()
 				if err != nil {
+					// The close code only exists here, at the read that saw the
+					// close frame — record it before any teardown path runs.
+					// Correlated server-side with net_internet_reachable it
+					// separates "middlebox killed the WSS" from WAN loss
+					// (docs/wan-outage-observability.md stage 0).
+					var closeErr *websocket.CloseError
+					if errors.As(err, &closeErr) {
+						netmetrics.RecordRelayerCloseCode(closeErr.Code)
+					}
 					if r.shouldStop(ctx, done) {
 						r.logger.Info("Relayer read loop stopped after connection shutdown", zap.Error(err))
 						return
@@ -809,6 +824,11 @@ func (r *relayer) closeConn() {
 	}
 
 	r.conn = nil
+	// Every real teardown funnels through here (read-error reconnects and
+	// explicit Close alike), so this is the one site that can count
+	// disconnects exactly once per connection.
+	netmetrics.SetRelayerConnected(false)
+	netmetrics.RecordRelayerDisconnect()
 	r.logger.Info("Relayer connection closed")
 }
 

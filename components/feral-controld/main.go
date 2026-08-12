@@ -32,6 +32,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
+	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
@@ -322,6 +323,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 				app.Logger.Warn("Failed to stop hub", zap.Error(err))
 			}
 		}()
+
+		// Stage-0 network telemetry (docs/wan-outage-observability.md): the
+		// poller writes the cache-only link/Wi-Fi gauges the hub's /metrics
+		// serves and vmagent spools. Keyed on the hub because the hub is the
+		// only thing that serves them; the relayer gauges are fed event-driven
+		// by the relayer itself, poller or not.
+		netPoller := netmetrics.NewPoller(app.LinkChecker, app.Exec, app.Clock, app.Logger)
+		netPoller.Start(ctx)
+		defer netPoller.Stop()
 
 		claim := state.ClaimSnapshot()
 		deviceInfo := resolveMDNSDeviceInfo(app.OS, claim, app.Logger)
