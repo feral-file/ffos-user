@@ -167,10 +167,12 @@ type OfflineCacheResourceGateConfig struct {
 type NetlogConfig struct {
 	// Disabled turns the recorder (ring + ladder + lastOutage) off entirely.
 	Disabled bool `json:"disabled"`
-	// Dir overrides the ring location (default netlog.DefaultDir).
+	// Dir overrides the ring location (default netlog.DefaultDir). A
+	// relocated ring still rides uploadLogs bundles: the wiring hands the
+	// effective directory to the log uploader (SetNetlogRingDir).
 	Dir string `json:"dir,omitempty"`
-	// MaxTotalBytes overrides the ring's total size cap (default 8 MiB).
-	// The cap must stay far below uploadLogs' 128 MB bundle budget.
+	// MaxTotalBytes overrides the ring's hard total size cap (default
+	// 8 MiB). The cap must stay far below uploadLogs' 128 MB bundle budget.
 	MaxTotalBytes int64 `json:"maxTotalBytes,omitempty"`
 	// SelfUploadAPIKey is the support-logs API key the reconnect-stability
 	// self-upload authenticates with. Empty = self-upload disabled (the

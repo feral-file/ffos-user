@@ -359,6 +359,12 @@ type executor struct {
 	// builds the HTTP-backed uploader.
 	logUploaderFactory func() logUploaderIface
 
+	// netlogRingDir is the effective flight-recorder ring directory, wired at
+	// startup (SetNetlogRingDir) before any command flows. Empty = the default
+	// <logsDir>/netlog. It exists so a netlog.dir override still rides every
+	// log bundle — the uploader cannot otherwise know where the ring went.
+	netlogRingDir string
+
 	// logUploadInFlight single-flights the detached log upload. The command is
 	// fire-and-forget (ACKs before the transfer finishes), so a retry storm of
 	// uploadLogs commands would otherwise stack concurrent goroutines each
@@ -3101,8 +3107,9 @@ func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundl
 // SelfUploadLogs is the netlog recorder's stage-2a egress (wired in main.go,
 // type-asserted like the other seams — deliberately NOT on the Executor
 // interface, so mocks stay untouched): after a reconnect-stability window it
-// pushes the log bundle (which includes the netlog ring — uploadLogs walks
-// ~/.logs recursively) without a controller in the loop. It reuses
+// pushes the log bundle (which includes the netlog ring — zipLogs collects
+// the effective ring directory first, wherever SetNetlogRingDir put it)
+// without a controller in the loop. It reuses
 // uploadLogsInProcess wholesale, so the single-flight CAS, the detached
 // 10-minute bound, and the wire shape are identical to the command path — a
 // concurrent controller-initiated upload simply wins the CAS and the
@@ -3126,7 +3133,18 @@ func (e *executor) newLogUploader() logUploaderIface {
 	if e.logUploaderFactory != nil {
 		return e.logUploaderFactory()
 	}
-	return newLogUploader(wrapper.NewHTTPClientWithoutTimeout(), e.os, e.json, e.logger)
+	up := newLogUploader(wrapper.NewHTTPClientWithoutTimeout(), e.os, e.json, e.logger)
+	up.netlogDir = e.netlogRingDir
+	return up
+}
+
+// SetNetlogRingDir records the effective netlog ring directory for the log
+// uploader (wired in main.go's netlog assembly, type-asserted like the other
+// netlog seams — deliberately NOT on the Executor interface, so mocks stay
+// untouched). Startup-only wiring: it must be called before commands flow,
+// like the other Set* seams.
+func (e *executor) SetNetlogRingDir(dir string) {
+	e.netlogRingDir = dir
 }
 
 // logUploadBuildInfo gathers the device identity/build metadata the log

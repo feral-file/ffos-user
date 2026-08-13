@@ -58,6 +58,13 @@ func buildNetlogRecorder(
 		logger.Warn("netlog: ring unavailable, flight recorder disabled", zap.Error(err))
 		return nil
 	}
+	// Tell the log uploader where the ring actually lives: a netlog.dir
+	// override placing it outside ~/.logs must still ride every uploadLogs
+	// bundle (the ring's primary egress), which otherwise only walks the
+	// default location.
+	if sink, ok := ex.(interface{ SetNetlogRingDir(string) }); ok {
+		sink.SetNetlogRingDir(ring.Dir())
+	}
 
 	// The daemon-lifetime ctx: shared ladder passes must not run on a
 	// caller's cancellable ctx (see netlog.Ladder.lifetimeCtx).

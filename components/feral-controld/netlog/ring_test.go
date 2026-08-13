@@ -59,9 +59,10 @@ func TestRingAppendAndReadBack(t *testing.T) {
 	assert.Equal(t, "b", recs[1].Note)
 }
 
-// TestRingSizeCapEvictsOldest pins the eviction contract: the ring stays
-// under its total cap by deleting the OLDEST sealed segments, and the active
-// segment is never deleted.
+// TestRingSizeCapEvictsOldest pins the eviction contract: maxTotalBytes is a
+// HARD cap (eviction reserves active-segment headroom, so the ring never
+// exceeds it even between rolls), oldest sealed segments are the ones
+// deleted, and the active segment is never deleted.
 func TestRingSizeCapEvictsOldest(t *testing.T) {
 	dir := t.TempDir()
 	r, err := OpenRing(dir, 2048)
@@ -71,20 +72,80 @@ func TestRingSizeCapEvictsOldest(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		require.NoError(t, r.Append(note(strings.Repeat("x", 64))))
+
+		segs, err := r.segmentsLocked()
+		require.NoError(t, err)
+		require.NotEmpty(t, segs)
+		var total int64
+		for _, s := range segs {
+			total += s.size
+		}
+		require.LessOrEqual(t, total, int64(2048), "cap must hold after EVERY append, not only after rolls")
 	}
 
 	segs, err := r.segmentsLocked()
 	require.NoError(t, err)
-	require.NotEmpty(t, segs)
+	assert.Greater(t, segs[0].seq, 1, "oldest segments must have been evicted")
+	assert.Equal(t, r.activeSeq, segs[len(segs)-1].seq, "active segment must survive eviction")
+}
+
+// TestRingTinyCapClampsSegmentSize: a configured cap below 4x the default
+// segment size must clamp the segment size to a QUARTER of the cap — small
+// enough that a single active segment cannot dominate the cap, large enough
+// that eviction's active-headroom reservation leaves ~3/4 of the cap for
+// sealed history. A clamp to the whole cap zeroed that budget: every
+// episode-close roll evicted the just-sealed episode and the recorder went
+// silently inert (review round 3 finding R1).
+func TestRingTinyCapClampsSegmentSize(t *testing.T) {
+	dir := t.TempDir()
+	r, err := OpenRing(dir, 1024)
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+	assert.Equal(t, int64(256), r.maxSegmentBytes, "segment size must clamp to a quarter of a small total cap")
+
+	// Model episode closes: appends with a Roll every few records.
+	for i := 0; i < 50; i++ {
+		require.NoError(t, r.Append(note(strings.Repeat("x", 64))))
+		if i%5 == 4 {
+			require.NoError(t, r.Roll())
+		}
+	}
+	segs, err := r.segmentsLocked()
+	require.NoError(t, err)
+	var total, sealed int64
+	for _, s := range segs {
+		total += s.size
+		if s.seq != r.activeSeq {
+			sealed += s.size
+		}
+	}
+	assert.LessOrEqual(t, total, int64(1024), "tiny configured cap must still be a hard cap")
+	assert.Positive(t, sealed, "sealed history must survive eviction — an episode-close roll must not wipe the episode it just sealed")
+}
+
+// TestRingCapEnforcedAtOpen: an operator lowering the cap must see it take
+// effect on restart, not only after the next outage seals a segment.
+func TestRingCapEnforcedAtOpen(t *testing.T) {
+	dir := t.TempDir()
+	r, err := OpenRing(dir, 8192)
+	require.NoError(t, err)
+	r.maxSegmentBytes = 512
+	for i := 0; i < 60; i++ {
+		require.NoError(t, r.Append(note(strings.Repeat("x", 64))))
+	}
+	require.NoError(t, r.Close())
+
+	r2, err := OpenRing(dir, 1024)
+	require.NoError(t, err)
+	defer func() { _ = r2.Close() }()
+	segs, err := r2.segmentsLocked()
+	require.NoError(t, err)
 	var total int64
 	for _, s := range segs {
 		total += s.size
 	}
-	// Cap is enforced after each roll; the active segment may still grow past
-	// it by at most one segment's worth.
-	assert.LessOrEqual(t, total, int64(2048+512), "ring must stay near its cap")
-	assert.Greater(t, segs[0].seq, 1, "oldest segments must have been evicted")
-	assert.Equal(t, r.activeSeq, segs[len(segs)-1].seq, "active segment must survive eviction")
+	assert.LessOrEqual(t, total, int64(1024), "lowered cap must be enforced at open")
+	assert.Equal(t, r2.activeSeq, segs[len(segs)-1].seq, "active segment must survive open-time eviction")
 }
 
 // TestRingReopenToleratesTornTail: a crash mid-write leaves a half line; on

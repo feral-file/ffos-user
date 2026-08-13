@@ -78,7 +78,13 @@ type logUploader struct {
 	// production); a struct field so tests can exercise the cap without
 	// gigabyte fixtures.
 	maxInputBytes int64
-	logger        *zap.Logger
+	// netlogDir is the EFFECTIVE flight-recorder ring directory (netlog.dir
+	// may relocate it outside logsDir, e.g. somewhere OTA-durable — plan
+	// branch B2). Empty means the default <logsDir>/netlog. zipLogs archives
+	// it under the netlog/ entry prefix either way: a configured ring must
+	// never silently drop out of the bundle that exists to carry it.
+	netlogDir string
+	logger    *zap.Logger
 }
 
 // logUploaderIface is the seam the executor drives; overridable in tests so the
@@ -175,10 +181,25 @@ func (u *logUploader) zipLogs() ([]byte, error) {
 	// outage. Collect the ring FIRST — its own 8 MiB cap bounds the claim —
 	// then walk the rest with the ring skipped so it is neither re-read nor
 	// double-charged.
-	if err := u.collectDir(filepath.Join(u.logsDir, netlogSubdir), netlogSubdir, files, &remaining, nil); err != nil {
+	ringDir := u.netlogDir
+	if ringDir == "" {
+		ringDir = filepath.Join(u.logsDir, netlogSubdir)
+	}
+	if err := u.collectDir(ringDir, netlogSubdir, files, &remaining, nil); err != nil {
 		return nil, err
 	}
-	skipNetlog := func(rel string) bool { return rel == netlogSubdir }
+	// The main walk skips <logsDir>/netlog unconditionally: when the ring is
+	// in its default place this avoids double-charging it, and when netlog.dir
+	// relocated it, a stale leftover default dir must not collide with (and
+	// overwrite) the live ring's netlog/ archive entries. A ring relocated to
+	// a DIFFERENT subdirectory of logsDir is skipped by its own relative path
+	// for the same double-charge reason.
+	skipRels := map[string]bool{netlogSubdir: true}
+	if rel, err := filepath.Rel(u.logsDir, ringDir); err == nil && rel != "." && rel != ".." &&
+		!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		skipRels[filepath.ToSlash(rel)] = true
+	}
+	skipNetlog := func(rel string) bool { return skipRels[rel] }
 	if err := u.collectDir(u.logsDir, "", files, &remaining, skipNetlog); err != nil {
 		return nil, err
 	}

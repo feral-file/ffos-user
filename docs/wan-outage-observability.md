@@ -158,7 +158,10 @@ S3 PUT. And the `device_status` notification feed over the relayer.
    7-day-old segments pruned by our own ring anyway.
 2. `/var/log/feral/` (`@log`, OTA-durable) — strictly better durability, but
    needs directory provisioning for the `feralfile` user → full-image rail.
-   Deferred; revisit only if OTA-coincident outages actually bite.
+   Deferred; revisit only if OTA-coincident outages actually bite. (The
+   upload path is already ready for it: the wiring hands the effective ring
+   directory to the log uploader, so a `netlog.dir` override outside
+   `~/.logs` still rides every bundle under the `netlog/` prefix.)
 
 **C. Ladder ownership of the "internet" verdict.**
 1. Ladder in controld, monitord untouched except gauges — **recommended.**

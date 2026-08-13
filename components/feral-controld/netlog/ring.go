@@ -103,6 +103,17 @@ func OpenRing(dir string, maxTotalBytes int64) (*Ring, error) {
 		maxSegmentAge:   defaultMaxSegmentAge,
 		maxSegments:     defaultMaxSegments,
 	}
+	// A configured total cap below 4x the segment size would otherwise be
+	// dominated by the active segment (a 100 KiB cap overshooting to
+	// 512 KiB). Clamp to a QUARTER of the cap, not the whole cap: eviction
+	// reserves one segment of active-file headroom (see enforceCapLocked),
+	// so a segment size equal to the cap would zero the sealed-byte budget
+	// and every episode-close roll would wipe the just-sealed episode —
+	// a silently inert recorder. A quarter keeps the hard cap while leaving
+	// ~3/4 of it for sealed history.
+	if quarter := max(r.maxTotalBytes/4, 1); r.maxSegmentBytes > quarter {
+		r.maxSegmentBytes = quarter
+	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("netlog: create ring dir: %w", err)
 	}
@@ -129,6 +140,9 @@ func OpenRing(dir string, maxTotalBytes int64) (*Ring, error) {
 		// write failure.
 		_ = err
 	}
+	// Enforce at open as well as at roll: an operator lowering the cap must
+	// see it take effect on restart, not only after the next outage rolls.
+	r.enforceCapLocked()
 	return r, nil
 }
 
@@ -162,9 +176,9 @@ func (r *Ring) Append(rec Record) error {
 	// Cap enforcement runs on ROLL, not per append: enforceCapLocked walks
 	// the directory (ReadDir + one lstat per segment), and on a flapping
 	// device — thousands of records — paying that per record would turn the
-	// recorder into eMMC load. Appends can overshoot the cap by at most one
-	// segment (the size-roll above bounds the active file), which the
-	// headroom between 8 MiB and uploadLogs' 128 MB budget absorbs.
+	// recorder into eMMC load. The total cap still holds between rolls
+	// because eviction pre-reserves a segment of active-file headroom (see
+	// enforceCapLocked).
 	return nil
 }
 
@@ -218,6 +232,18 @@ func (r *Ring) Close() error {
 
 // Dir exposes the ring location (wiring/logging convenience).
 func (r *Ring) Dir() string { return r.dir }
+
+// Prune removes sealed segments past the retention window. Open and roll
+// prune too, but neither happens on a device that stays healthy after its
+// last outage (dedupe means no appends, so no rolls) — the recorder calls
+// this on a periodic tick so segments cannot outlive the stated 7-day
+// retention just because nothing else touched the ring. Safe on a closed
+// ring: it only removes sealed files.
+func (r *Ring) Prune() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pruneLocked()
+}
 
 // --- internals (all *Locked helpers require r.mu held) ---
 
@@ -321,8 +347,17 @@ func (r *Ring) isolateTornTailLocked(path string) error {
 // enforceCapLocked deletes oldest sealed segments until the ring fits both
 // the byte cap and the segment-count cap (see defaultMaxSegments for why
 // count matters independently on flapping devices). The active segment is
-// never deleted — the cap arithmetic guarantees headroom because
-// maxSegmentBytes is a small fraction of the cap.
+// never deleted. maxTotalBytes is a HARD cap: eviction reserves headroom for
+// the active file's remaining growth to maxSegmentBytes, so the ring never
+// exceeds the cap between rolls even though enforcement only runs on
+// roll/open — provided no single record exceeds maxSegmentBytes, which the
+// per-rung detail/snapshot bounds keep far from true record sizes. (A LEGACY
+// active segment larger than a freshly lowered cap can also sit past the cap
+// transiently: the active file is never deleted, so the overage lasts exactly
+// until the first append rolls it.) The
+// OpenRing clamp guarantees the post-roll budget (maxTotalBytes -
+// maxSegmentBytes) stays at ~3/4 of the cap, so sealed history always
+// survives eviction.
 func (r *Ring) enforceCapLocked() {
 	segs, err := r.segmentsLocked()
 	if err != nil {
@@ -332,9 +367,15 @@ func (r *Ring) enforceCapLocked() {
 	for _, s := range segs {
 		total += s.size
 	}
+	// total includes the active segment; the sealed set must leave the active
+	// file room to grow to maxSegmentBytes without breaching the hard cap. An
+	// active file ALREADY past maxSegmentBytes (reopened after the cap was
+	// lowered) needs no growth headroom — the next append rolls it first.
+	headroom := max(r.maxSegmentBytes-r.activeSize, 0)
+	byteBudget := r.maxTotalBytes - headroom
 	count := len(segs)
 	for _, s := range segs {
-		if total <= r.maxTotalBytes && count <= r.maxSegments {
+		if total <= byteBudget && count <= r.maxSegments {
 			return
 		}
 		if s.seq == r.activeSeq {

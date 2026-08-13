@@ -2,6 +2,8 @@ package netlog
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,6 +24,10 @@ type fakeClock struct {
 	mu            sync.Mutex
 	now           time.Time
 	releaseSleeps chan struct{}
+	// pruneTicks, when non-nil, backs the ticker handed out for the
+	// recorder's prune interval so tests can fire retention sweeps on demand;
+	// every other ticker never fires.
+	pruneTicks chan time.Time
 }
 
 func newFakeClock() *fakeClock {
@@ -51,11 +57,18 @@ func (c *fakeClock) SleepContext(ctx context.Context, _ time.Duration) error {
 	}
 }
 
-func (c *fakeClock) NewTicker(time.Duration) wrapper.Ticker { return fakeTicker{} }
+func (c *fakeClock) NewTicker(d time.Duration) wrapper.Ticker {
+	if d == defaultPruneInterval && c.pruneTicks != nil {
+		return fakeTicker{ch: c.pruneTicks}
+	}
+	return fakeTicker{}
+}
 
-type fakeTicker struct{}
+type fakeTicker struct {
+	ch chan time.Time // nil = never fires; tests drive edges directly
+}
 
-func (fakeTicker) C() <-chan time.Time   { return nil } // never fires; tests drive edges directly
+func (t fakeTicker) C() <-chan time.Time { return t.ch }
 func (fakeTicker) Stop()                 {}
 func (fakeTicker) Reset(d time.Duration) {}
 
@@ -426,4 +439,34 @@ func TestRecorderDropAccounting(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("dropped events were never surfaced in-band")
+}
+
+// TestRecorderPeriodicPruneEnforcesRetention: retention must not depend on
+// outage activity. A device that stays healthy after its last outage never
+// appends (dedupe) and so never rolls — the worker's periodic tick is the
+// only thing standing between a sealed segment and outliving the 7-day
+// window into every support bundle.
+func TestRecorderPeriodicPruneEnforcesRetention(t *testing.T) {
+	pruneTicks := make(chan time.Time)
+	h := newHarness(t, func(opts *RecorderOptions) {
+		opts.Clock.(*fakeClock).pruneTicks = pruneTicks
+	})
+
+	// Plant a stale sealed segment AFTER open (open-time pruning already ran).
+	// A far-off seq so it can never collide with the live active segment.
+	stale := filepath.Join(h.dir, segmentName(999999))
+	require.NoError(t, os.WriteFile(stale, []byte("{}\n"), 0o600))
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	require.NoError(t, os.Chtimes(stale, old, old))
+
+	pruneTicks <- time.Now()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(stale); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("stale sealed segment survived the periodic prune tick")
 }

@@ -40,6 +40,14 @@ const (
 	// uplink load and S3 cost. Suppressed uploads are recorded in-band; the
 	// controller-initiated uploadLogs command is never subject to this.
 	defaultSelfUploadMinInterval = 6 * time.Hour
+
+	// defaultPruneInterval paces the ring's age-based retention sweep. The
+	// ring prunes at open and roll, but a device that stays healthy after its
+	// last outage does neither for months (the dedupe discipline means zero
+	// appends), which would let sealed segments outlive the stated 7-day
+	// retention and keep riding support bundles. Hourly is generous against a
+	// 7-day window and costs one ReadDir per tick.
+	defaultPruneInterval = time.Hour
 )
 
 // ladderRunner is the recorder's seam onto the Ladder (fake in tests).
@@ -259,12 +267,19 @@ func (r *Recorder) LastOutage() *OutageSummary {
 func (r *Recorder) run(ctx context.Context) {
 	defer r.wg.Done()
 	r.append(Record{Stamp: r.stamp(), Kind: KindNote, Note: "recorder_start"})
+	// Retention must not depend on outage activity (see defaultPruneInterval);
+	// the worker owns the tick so pruning shares the single-writer discipline
+	// with every other ring mutation.
+	pruneTicker := r.clock.NewTicker(defaultPruneInterval)
+	defer pruneTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-r.done:
 			return
+		case <-pruneTicker.C():
+			r.ring.Prune()
 		case ev := <-r.events:
 			r.handle(ctx, ev)
 			r.flushDrops()

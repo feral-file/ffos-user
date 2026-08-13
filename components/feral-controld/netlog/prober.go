@@ -259,7 +259,13 @@ func (p *prober) GatewayPing(ctx context.Context, gateway string) Step {
 	defer cancel2()
 	out, err := p.exec.CommandContext(neighCtx, "ip", "neigh", "show", "to", gateway).Output()
 	if err != nil {
-		return Step{Status: StatusFail, Detail: "icmp failed; arp unknown"}
+		// The ARP fallback exists because ICMP fail alone is NOT sufficient
+		// evidence of a dead gateway (ping-dropping gateways are common). If
+		// the fallback itself cannot run, the measurement is absent, not
+		// negative: error, never fail, or the classifier would claim
+		// gateway-dead off a broken probe (the taxonomy's unknown-on-probe-
+		// error rule).
+		return Step{Status: StatusError, Detail: "icmp failed; arp probe error: " + err.Error()}
 	}
 	if arpAlive(string(out)) {
 		return Step{Status: StatusOK, Detail: "icmp filtered; arp resolved"}

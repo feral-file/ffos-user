@@ -164,8 +164,12 @@ func TestGatewayPing(t *testing.T) {
 			execScript{output: "192.168.1.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff REACHABLE"}, StatusOK},
 		{"icmp dropped, arp unresolved", execScript{err: errors.New("exit 1")},
 			execScript{output: "192.168.1.1 dev wlan0 FAILED"}, StatusFail},
+		// An unavailable ARP fallback is a broken measurement, not negative
+		// evidence: it must read error (→ unknown-probe), never fail
+		// (→ gateway-dead), or a device with broken diagnostic tooling would
+		// report confident gateway failures.
 		{"icmp dropped, arp read broke", execScript{err: errors.New("exit 1")},
-			execScript{err: errors.New("no ip binary")}, StatusFail},
+			execScript{err: errors.New("no ip binary")}, StatusError},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
