@@ -1069,7 +1069,9 @@ walks the log directory recursively, so no dedicated flag exists or is needed.
 The device can also trigger this same upload path itself after an outage heals
 (stage 2a), but only when an operator has provisioned the support-logs API key
 in the on-device config (`netlog.selfUploadApiKey`); the device ships with no
-credential for this API.
+credential for this API. Self-uploads are bounded to at most one per 6 h — a
+flapping site must not push a bundle per recovery — while
+controller-initiated `uploadLogs` commands are never subject to that bound.
 
 ### runNetworkDiagnostics
 
@@ -1125,6 +1127,11 @@ Probe discipline: on-demand runs bypass the recorder's automatic rate limit
 (the automatic ladder runs only on failure edges, min 60 s apart) but share
 its one-run-at-a-time serialization. Each run is also recorded to the netlog
 ring, and a confident classification upgrades an open outage episode's class.
+The storm gate additionally caps the command at the disruptive tier (~1 per
+5 s, burst 2) and DEDUPES identical in-flight requests into one shared run —
+this command is reachable from the unauthenticated LAN hub, and stacked
+callers must share one answer rather than stacking probe load on an
+already-sick network.
 
 Current error cases:
 

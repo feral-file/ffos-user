@@ -249,6 +249,43 @@ func TestRecorderStabilityUpload(t *testing.T) {
 		3*time.Second, 5*time.Millisecond, "upload must fire once the window elapses online")
 }
 
+// TestRecorderSelfUploadRateLimit: a flapping site closing outages every few
+// minutes must not push one full log bundle per recovery — the second upload
+// inside the min interval is suppressed and the suppression recorded.
+func TestRecorderSelfUploadRateLimit(t *testing.T) {
+	var uploads atomic.Int64
+	h := newHarness(t, func(o *RecorderOptions) {
+		o.SelfUpload = func() { uploads.Add(1) }
+	})
+
+	h.rec.ObserveInternet(true)
+	h.rec.ObserveInternet(false)
+	h.rec.ObserveInternet(true)
+	h.waitRecords(func(r []Record) bool { return countKind(r, KindOutageEnd) == 1 })
+	close(h.clock.releaseSleeps) // every stability window now elapses instantly
+	assert.Eventually(t, func() bool { return uploads.Load() == 1 }, 3*time.Second, 5*time.Millisecond)
+
+	// Second episode well inside the 6h min interval.
+	h.clock.advance(30 * time.Minute)
+	h.rec.ObserveInternet(false)
+	h.rec.ObserveInternet(true)
+	h.waitRecords(func(r []Record) bool {
+		for _, rec := range r {
+			if rec.Kind == KindUploadState && rec.Note == "self_upload_rate_limited" {
+				return true
+			}
+		}
+		return false
+	})
+	assert.EqualValues(t, 1, uploads.Load(), "second upload inside the min interval must be suppressed")
+
+	// Past the interval, uploads resume.
+	h.clock.advance(7 * time.Hour)
+	h.rec.ObserveInternet(false)
+	h.rec.ObserveInternet(true)
+	assert.Eventually(t, func() bool { return uploads.Load() == 2 }, 3*time.Second, 5*time.Millisecond)
+}
+
 // TestRecorderStabilityUploadCanceledByRelapse: a relapse inside the window
 // must cancel the pending upload (uploading into a flapping network burns the
 // single-flight slot for nothing).

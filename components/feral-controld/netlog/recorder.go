@@ -32,6 +32,14 @@ const (
 
 	// outageCountWindow is the lastOutage.count24h accounting window.
 	outageCountWindow = 24 * time.Hour
+
+	// defaultSelfUploadMinInterval bounds how often the stability-window
+	// self-upload may fire. Without it, a site flapping every few minutes —
+	// exactly the site this feature targets — would push one full log bundle
+	// (up to 128 MB of input) per recovery, turning the diagnostic into
+	// uplink load and S3 cost. Suppressed uploads are recorded in-band; the
+	// controller-initiated uploadLogs command is never subject to this.
+	defaultSelfUploadMinInterval = 6 * time.Hour
 )
 
 // ladderRunner is the recorder's seam onto the Ladder (fake in tests).
@@ -126,6 +134,8 @@ type Recorder struct {
 	recentOutageEnds []time.Time
 	lastOutage       *OutageSummary
 	stabilityGen     int
+	lastSelfUpload   time.Time
+	haveSelfUpload   bool
 }
 
 // NewRecorder builds a Recorder over an open ring.
@@ -391,8 +401,20 @@ func (r *Recorder) armStabilityUpload(gen int) {
 		r.mu.Lock()
 		stale := gen != r.stabilityGen
 		online := r.lastInternet != nil && *r.lastInternet
+		now := r.clock.Now()
+		limited := r.haveSelfUpload && now.Sub(r.lastSelfUpload) < defaultSelfUploadMinInterval
+		if !stale && online && !limited {
+			r.lastSelfUpload = now
+			r.haveSelfUpload = true
+		}
 		r.mu.Unlock()
 		if stale || !online {
+			return
+		}
+		if limited {
+			// The suppression is timeline data too: support reading the ring
+			// later must see WHY no bundle arrived for this episode.
+			r.append(Record{Stamp: r.stamp(), Kind: KindUploadState, Note: "self_upload_rate_limited"})
 			return
 		}
 		r.append(Record{Stamp: r.stamp(), Kind: KindUploadState, Note: "self_upload_triggered"})
