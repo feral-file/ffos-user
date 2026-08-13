@@ -105,6 +105,23 @@ func TestParseLease(t *testing.T) {
 			wantSurveyed: true,
 		},
 		{
+			// The DHCP-failure presentation this survey exists for: NM parks
+			// the device at IP_CONFIG (70) while DHCP times out. It must
+			// count as an eligible interface WITHOUT a lease — an
+			// ACTIVATED-only gate here made no-lease unreachable and the
+			// ladder misread venue DHCP failures as link-down.
+			name: "dhcp-stuck device surveys as eligible without lease",
+			output: leaseBlock("eth0", "ethernet", "70 (connecting (getting IP configuration))",
+				"IP4.ADDRESS[1]:--", "IP4.GATEWAY:--"),
+			wantSurveyed: true,
+		},
+		{
+			// FAILED (120) numbers above ACTIVATED: a naive >= threshold
+			// would count it. A failed device is not an eligible interface.
+			name:   "failed device does not survey",
+			output: leaseBlock("wlan0", "wifi", "120 (connection failed)"),
+		},
+		{
 			name:   "nothing activated",
 			output: leaseBlock("wlan0", "wifi", "30 (disconnected)"),
 		},
@@ -254,7 +271,7 @@ type fakeLink struct {
 	err         error
 }
 
-func (f fakeLink) ExternalLinkDetail(_ context.Context, excludeProfile string) (bool, bool, error) {
+func (f fakeLink) DiagnosticLinkDetail(_ context.Context, excludeProfile string) (bool, bool, error) {
 	if f.t != nil {
 		require.Equal(f.t, "ff1-softap", excludeProfile, "the rung must exclude the setup AP profile")
 	}

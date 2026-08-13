@@ -281,6 +281,46 @@ func (r *Ring) Prune() {
 	r.pruneLocked()
 }
 
+// LastRecordWall scans segments newest-first for the most recent record with
+// the given kind and note, returning its wall-clock stamp. It exists so
+// recorder state that must survive a daemon restart (the self-upload
+// cooldown) can be recovered from the ring instead of a second durable
+// artifact — the ring already records those events. One-shot startup cost:
+// at worst one full ring read (≤ the total byte cap). Unparsable lines are
+// skipped, matching every other reader's torn-line tolerance.
+func (r *Ring) LastRecordWall(kind, note string) (time.Time, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	segs, err := r.segmentsLocked()
+	if err != nil {
+		return time.Time{}, false
+	}
+	for i := len(segs) - 1; i >= 0; i-- {
+		data, err := os.ReadFile(filepath.Join(r.dir, segs[i].name)) //nolint:gosec // G304: name came from parseSegmentName over the fixed ring dir
+		if err != nil {
+			continue
+		}
+		var found time.Time
+		var ok bool
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var rec Record
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				continue
+			}
+			if rec.Kind == kind && rec.Note == note {
+				found, ok = rec.Wall, true // keep scanning: later line = newer
+			}
+		}
+		if ok {
+			return found, true
+		}
+	}
+	return time.Time{}, false
+}
+
 // --- internals (all *Locked helpers require r.mu held) ---
 
 type segmentInfo struct {

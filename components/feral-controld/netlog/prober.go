@@ -43,11 +43,14 @@ const (
 // the primary field scenario — a technician on the raised setup AP running
 // runNetworkDiagnostics — would classify unknown-probe instead of link-down
 // (the AP holds the radio, Lease sees the AP's own shared-mode address, and
-// the classifier walks off the evidence cliff).
+// the classifier walks off the evidence cliff). It is the L2-level
+// DIAGNOSTIC verdict, not NM ACTIVATED: a device stuck in DHCP still has a
+// link, and reading it as link-down would hide the no-lease class.
 type LinkProber interface {
-	// ExternalLinkDetail reports (link, wired) for uplinks other than
-	// excludeProfile; errors surface (unknown, never a fabricated verdict).
-	ExternalLinkDetail(ctx context.Context, excludeProfile string) (link, wired bool, err error)
+	// DiagnosticLinkDetail reports (link, wired) at the carrier/association
+	// level for uplinks other than excludeProfile; errors surface (unknown,
+	// never a fabricated verdict).
+	DiagnosticLinkDetail(ctx context.Context, excludeProfile string) (link, wired bool, err error)
 }
 
 // prober is the production Prober. The exec/dial/http/lookup seams exist so
@@ -98,12 +101,12 @@ func NewProber(link LinkProber, exec wrapper.Exec, softapProfile string) Prober 
 }
 
 func (p *prober) Link(ctx context.Context) Step {
-	link, wired, err := p.link.ExternalLinkDetail(ctx, p.softapProfile)
+	link, wired, err := p.link.DiagnosticLinkDetail(ctx, p.softapProfile)
 	if err != nil {
 		return Step{Status: StatusError, Detail: err.Error()}
 	}
 	if !link {
-		return Step{Status: StatusFail, Detail: "no external uplink (own setup AP excluded)"}
+		return Step{Status: StatusFail, Detail: "no external L2 uplink (own setup AP excluded)"}
 	}
 	if wired {
 		return Step{Status: StatusOK, Detail: "ethernet"}
@@ -131,9 +134,11 @@ func (p *prober) NMSnapshot(ctx context.Context) string {
 	return string(out)
 }
 
-// Lease reads the ACTIVATED devices' IPv4 lease state from one nmcli pass:
-// an address present = lease ok; the first gateway found feeds the gateway
-// rung; DNS servers are recorded for the run's evidence.
+// Lease reads the eligible devices' IPv4 lease state from one nmcli pass
+// (eligible = the IP_CONFIG..ACTIVATED window, matching the link rung — a
+// DHCP-stuck device must survey here): an address present = lease ok; the
+// first gateway found feeds the gateway rung; DNS servers are recorded for
+// the run's evidence.
 func (p *prober) Lease(ctx context.Context) (LeaseInfo, Step) {
 	probeCtx, cancel := context.WithTimeout(ctx, nmcliProbeTimeout)
 	defer cancel()
@@ -145,7 +150,7 @@ func (p *prober) Lease(ctx context.Context) (LeaseInfo, Step) {
 	}
 	info, hasAddr, surveyed := parseLease(string(out), p.softapProfile)
 	if !surveyed {
-		return LeaseInfo{}, Step{Status: StatusError, Detail: "no activated ethernet/wifi block in nmcli output"}
+		return LeaseInfo{}, Step{Status: StatusError, Detail: "no eligible ethernet/wifi block (IP_CONFIG..ACTIVATED) in nmcli output"}
 	}
 	if !hasAddr {
 		return info, Step{Status: StatusFail, Detail: "no IPv4 address on any activated device"}
@@ -155,14 +160,19 @@ func (p *prober) Lease(ctx context.Context) (LeaseInfo, Step) {
 
 // parseLease walks terse `nmcli device show` blocks (same block-delimiter
 // contract as status.LinkChecker.linkProbe: GENERAL.DEVICE opens each block
-// because -f lists it first). Only ACTIVATED ethernet/wifi blocks count, and
-// — matching the Link rung's exclusion — a block whose active connection is
-// excludeProfile (the device's own setup AP) is skipped entirely: in the
-// mixed state (real uplink up while the AP is still raised, the wired-exit
-// window) the AP's shared-mode address would otherwise read as "has a
-// lease" and its gateway as a pingable next hop, poisoning both rungs with
-// self-evidence. surveyed=false means no countable block existed —
-// non-evidence, not a verdict.
+// because -f lists it first). Ethernet/wifi blocks from IP_CONFIG (70)
+// through ACTIVATED (100) count — the same L2 window as the diagnostic link
+// rung, and the load-bearing half of the no-lease class: a device stuck in
+// DHCP sits at IP_CONFIG with no IP4.ADDRESS, which must survey as "eligible
+// interface, no lease", not vanish behind an ACTIVATED-only gate (the range
+// excludes DEACTIVATING/FAILED, which number higher). Matching the Link
+// rung's exclusion, a block whose active connection is excludeProfile (the
+// device's own setup AP) is skipped entirely: in the mixed state (real
+// uplink up while the AP is still raised, the wired-exit window) the AP's
+// shared-mode address would otherwise read as "has a lease" and its gateway
+// as a pingable next hop, poisoning both rungs with self-evidence.
+// surveyed=false means no countable block existed — non-evidence, not a
+// verdict.
 func parseLease(output, excludeProfile string) (info LeaseInfo, hasAddr, surveyed bool) {
 	type block struct {
 		typ     string
@@ -177,7 +187,7 @@ func parseLease(output, excludeProfile string) (info LeaseInfo, hasAddr, surveye
 		if cur.typ != "ethernet" && cur.typ != "wifi" {
 			return
 		}
-		if cur.state != 100 { // NM_DEVICE_STATE_ACTIVATED
+		if cur.state < 70 || cur.state > 100 { // NM IP_CONFIG..ACTIVATED (see doc above)
 			return
 		}
 		if excludeProfile != "" && cur.conn == excludeProfile {

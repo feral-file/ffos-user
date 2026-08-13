@@ -92,8 +92,11 @@ type LeaseInfo struct {
 // rungs in parallel (see Run's timeout-budget note). The production prober is
 // stateless per call, so this holds by construction; fakes must synchronize.
 type Prober interface {
-	// Link reports whether any uplink (ethernet or wifi, own AP included) is
-	// ACTIVATED. StatusError means the survey itself failed.
+	// Link reports whether any external uplink (ethernet or wifi, the
+	// device's own setup AP excluded) has L2 connectivity — carrier or
+	// association, NOT full NM activation, so a DHCP-stuck device still
+	// reads as linked and the lease rung gets to name the real failure.
+	// StatusError means the survey itself failed.
 	Link(ctx context.Context) Step
 	// NMSnapshot best-effort captures nmcli device state+reason for the record.
 	NMSnapshot(ctx context.Context) string
@@ -183,7 +186,10 @@ func NewLadder(lifetimeCtx context.Context, prober Prober, backendHost string, c
 // Timeout budget: the serial prefix (link 3 s + NM snapshot 3 s + lease 3 s)
 // plus the CONCURRENT lower rungs — gateway is the slowest at 7 s worst
 // (4 s ping + 3 s ARP fallback), against DNS/TCP at 3 s and portal at 5 s —
-// bounds a full pass at ~16 s even with every rung timing out. That fits the
+// bounds a full pass at ~16 s even with every rung timing out. The link
+// rung's carrier-field fallback preserves this: it retries only after a FAST
+// failure (status.LinkChecker.DiagnosticLinkDetail), so a wedged
+// NetworkManager costs one 3 s timeout, never two. That fits the
 // executor's 25 s backstop and the hub's 30 s write deadline with margin;
 // the rungs were originally serial and worst-cased at ~33 s, which silently
 // truncated on-demand diagnosis to unknown-* on exactly the sick networks it

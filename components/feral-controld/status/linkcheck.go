@@ -46,11 +46,14 @@ type LinkState interface {
 type LinkChecker struct {
 	exec   wrapper.Exec
 	logger *zap.Logger
+	// now feeds the diagnostic probe's fast-fail retry guard; injected so the
+	// no-retry-after-timeout branch is testable without a real 3s hang.
+	now func() time.Time
 }
 
 // NewLinkChecker builds a LinkChecker over the given exec wrapper.
 func NewLinkChecker(exec wrapper.Exec, logger *zap.Logger) *LinkChecker {
-	return &LinkChecker{exec: exec, logger: logger}
+	return &LinkChecker{exec: exec, logger: logger, now: time.Now}
 }
 
 // HasLink returns true when at least one ethernet or wifi device is in
@@ -151,12 +154,59 @@ func (c *LinkChecker) LinkTelemetry(ctx context.Context) (wired, wifi bool, err 
 	return res.wired, res.wifi, err
 }
 
+// DiagnosticLinkDetail reports L2-level connectivity — carrier/association
+// rather than full NM activation — for the netlog diagnosis ladder's link
+// rung: a device mid-DHCP (IP_CONFIG..ACTIVATED) or an ethernet port with raw
+// carrier counts as an uplink, so the lease rung can then judge its IP layer.
+// Gating the ladder on ACTIVATED-only misread venue DHCP failures as
+// link-down (cable/radio out) and made the no-lease class unreachable —
+// exactly the failure the taxonomy exists to name. Exclusion and
+// survey-validity/error semantics match ExternalLinkDetail.
+//
+// It must NOT be wired into the AP-raise guard, hub/mDNS lifecycle, or
+// admission gates: those key on ACTIVATED deliberately, and counting a
+// mid-activation device as "link" would change their suppression behavior.
+func (c *LinkChecker) DiagnosticLinkDetail(ctx context.Context, excludeProfile string) (link, wired bool, err error) {
+	if c == nil || c.exec == nil {
+		return false, false, errors.New("link checker not initialized")
+	}
+	// The carrier field rides a SEPARATE nmcli invocation, never the shared
+	// probe: if a deployed NetworkManager rejected WIRED-PROPERTIES.CARRIER,
+	// a shared invocation would take down every ACTIVATED-only verdict with
+	// it — AP-raise deferred, hub/mDNS down, admission gate closed —
+	// fleet-wide, for the sake of a diagnostics-only field. Here a rejection
+	// costs one retry without the field (the state-window rule still covers
+	// the DHCP-stuck case), and the diagnostic path is rate-limited to once
+	// per 60s, so the extra exec is cheap.
+	start := c.now()
+	res, err := c.probe(ctx, excludeProfile, true)
+	// Retry only on a FAST failure: a rejected field errors immediately and
+	// dropping it can help, while a timeout means NetworkManager is wedged —
+	// retrying would double the ladder link rung's worst case to 6s and break
+	// its documented ~16s pass budget for a failure the fallback cannot fix.
+	// An unsurveyed parse (errNoUplinkRows) fails identically either way, so
+	// it skips the retry too, and keeps its informative error.
+	if err != nil && !errors.Is(err, errNoUplinkRows) && c.now().Sub(start) < linkCheckTimeout {
+		res, err = c.probe(ctx, excludeProfile, false)
+	}
+	return res.diagLink, res.diagWired, err
+}
+
 // nmDeviceStateActivated is NetworkManager's NM_DEVICE_STATE_ACTIVATED (100):
 // the device has an active connection with an address — a usable LAN link.
 // Compared numerically because the textual rendering is localized (see
 // linkProbe); the numeric enum also already covers externally-managed devices,
 // which NM ≥1.36 renders as "connected (externally)" but still numbers 100.
 const nmDeviceStateActivated = 100
+
+// nmDeviceStateIPConfig is NM_DEVICE_STATE_IP_CONFIG (70): L2 is established
+// (cable negotiated / station associated) and the device is requesting
+// addresses. States 70..100 therefore mean "the link itself is up" even when
+// DHCP never completes — the window the diagnostic verdicts (see
+// DiagnosticLinkDetail) must count, and the ACTIVATED-only verdicts must not.
+// DEACTIVATING (110) and FAILED (120) sit numerically above ACTIVATED, so
+// range checks below must bound both ends.
+const nmDeviceStateIPConfig = 70
 
 // linkResult carries one probe's verdicts. link is the combined uplink verdict
 // (any ACTIVATED ethernet or wifi device, minus the exclusion); wired is the
@@ -168,6 +218,15 @@ type linkResult struct {
 	link  bool
 	wired bool
 	wifi  bool
+	// diagLink/diagWired are the L2-level verdicts for the netlog diagnosis
+	// ladder (DiagnosticLinkDetail): a device counts from IP_CONFIG onward,
+	// or on raw ethernet carrier, so a venue DHCP failure reads as "link up,
+	// no lease" instead of "cable out". Kept separate because every other
+	// consumer (AP-raise guard, hub/mDNS lifecycle, admission gates) keys on
+	// ACTIVATED deliberately — loosening those would change suppression
+	// behavior.
+	diagLink  bool
+	diagWired bool
 }
 
 // linkProbe reports whether any ethernet or wifi device is in NetworkManager's
@@ -178,6 +237,13 @@ type linkResult struct {
 // wired one — it exists to discount the device's own Wi-Fi hotspot, which can
 // never be an ethernet row.
 func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (linkResult, error) {
+	return c.probe(ctx, excludeProfile, false)
+}
+
+// probe is the parser behind linkProbe and DiagnosticLinkDetail. withCarrier
+// adds WIRED-PROPERTIES.CARRIER to the field list and must stay OFF for the
+// shared probe (see DiagnosticLinkDetail for why the field is quarantined).
+func (c *LinkChecker) probe(ctx context.Context, excludeProfile string, withCarrier bool) (linkResult, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, linkCheckTimeout)
 	defer cancel()
 
@@ -192,8 +258,13 @@ func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (lin
 	// is how the hotspot is told apart from a station association on the same
 	// wifi device; Cut at the first ':' keeps a name containing colons intact
 	// (terse mode backslash-escapes them, and ff1-softap contains none).
-	cmd := c.exec.CommandContext(probeCtx, "nmcli", "-t", "-f",
-		"GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,GENERAL.CONNECTION", "device", "show")
+	fields := "GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,GENERAL.CONNECTION"
+	if withCarrier {
+		// Diagnostic-only field (see DiagnosticLinkDetail); nmcli emits it
+		// solely for ethernet blocks, so it never perturbs wifi parsing.
+		fields += ",WIRED-PROPERTIES.CARRIER"
+	}
+	cmd := c.exec.CommandContext(probeCtx, "nmcli", "-t", "-f", fields, "device", "show")
 	output, err := cmd.Output()
 	if err != nil {
 		return linkResult{}, err
@@ -210,6 +281,7 @@ func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (lin
 		typ, conn string
 		state     int
 		hasState  bool
+		carrier   bool
 	}
 	var cur record
 	var res linkResult
@@ -230,6 +302,20 @@ func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (lin
 			return
 		}
 		surveyed = true
+		// Diagnostic L2 verdict: IP_CONFIG..ACTIVATED (the range check excludes
+		// DEACTIVATING/FAILED, which number higher), or raw ethernet carrier —
+		// a cable NM has not activated is still a live link for diagnosis. Same
+		// exclusion as the combined link verdict: the device's own hotspot is
+		// never an uplink.
+		l2 := (cur.state >= nmDeviceStateIPConfig && cur.state <= nmDeviceStateActivated) ||
+			(cur.typ == "ethernet" && cur.carrier)
+		excluded := excludeProfile != "" && cur.conn == excludeProfile
+		if l2 && !excluded {
+			res.diagLink = true
+			if cur.typ == "ethernet" {
+				res.diagWired = true
+			}
+		}
 		if cur.state != nmDeviceStateActivated {
 			return
 		}
@@ -271,12 +357,24 @@ func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (lin
 			}
 		case "GENERAL.CONNECTION":
 			cur.conn = value
+		case "WIRED-PROPERTIES.CARRIER":
+			// nmcli may localize boolean value words; only the exact English
+			// "on" counts, and anything else safely degrades to the numeric
+			// state rule above (locale-stable), never to a false positive.
+			cur.carrier = value == "on"
 		}
 	}
 	flush()
 
 	if !surveyed {
-		return linkResult{}, errors.New("no ethernet/wifi device rows in nmcli output")
+		return linkResult{}, errNoUplinkRows
 	}
 	return res, nil
 }
+
+// errNoUplinkRows marks a probe whose output surveyed no candidate uplink
+// (see the survey-validity comment in probe). A sentinel so the diagnostic
+// fallback can tell "the FIELD LIST was rejected" (worth retrying without the
+// carrier field) from "the survey itself proved nothing" (identical either
+// way).
+var errNoUplinkRows = errors.New("no ethernet/wifi device rows in nmcli output")

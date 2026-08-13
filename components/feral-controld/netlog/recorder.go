@@ -41,6 +41,13 @@ const (
 	// controller-initiated uploadLogs command is never subject to this.
 	defaultSelfUploadMinInterval = 6 * time.Hour
 
+	// noteSelfUploadTriggered/noteSelfUploadRateLimited are the KindUploadState
+	// breadcrumbs. The triggered note doubles as DURABLE limiter state: it is
+	// written before the upload fires and recovered at construction (see
+	// NewRecorder), so the 6h cooldown survives daemon restarts.
+	noteSelfUploadTriggered   = "self_upload_triggered"
+	noteSelfUploadRateLimited = "self_upload_rate_limited"
+
 	// defaultPruneInterval paces the ring's age-based retention sweep. The
 	// ring prunes at open and roll, but a device that stays healthy after its
 	// last outage does neither for months (the dedupe discipline means zero
@@ -157,7 +164,7 @@ func NewRecorder(opts RecorderOptions) *Recorder {
 	if opts.stamp == nil {
 		opts.stamp = newStampSource()
 	}
-	return &Recorder{
+	r := &Recorder{
 		ring:              opts.Ring,
 		ladder:            opts.Ladder,
 		clock:             opts.Clock,
@@ -170,6 +177,24 @@ func NewRecorder(opts RecorderOptions) *Recorder {
 		events:            make(chan event, eventQueueDepth),
 		done:              make(chan struct{}),
 	}
+	// Recover the self-upload cooldown across restarts: controld runs
+	// Restart=always, so limiter state held only in memory resets on every
+	// restart — and a flapping site that also restarts the daemon could then
+	// ship one full log bundle per recovery, the exact uplink/S3 load the 6h
+	// bound exists to prevent. The ring is already the durable record (the
+	// trigger note is written before the upload fires); a stamp from a
+	// stepped-forward clock is clamped to now so a bad RTC cannot suppress
+	// uploads indefinitely.
+	if r.selfUpload != nil {
+		if t, ok := r.ring.LastRecordWall(KindUploadState, noteSelfUploadTriggered); ok {
+			if now := r.clock.Now(); t.After(now) {
+				t = now
+			}
+			r.lastSelfUpload = t
+			r.haveSelfUpload = true
+		}
+	}
+	return r
 }
 
 // Start launches the worker (and the level-reconcile loop when wired).
@@ -436,10 +461,10 @@ func (r *Recorder) armStabilityUpload(gen int) {
 		if limited {
 			// The suppression is timeline data too: support reading the ring
 			// later must see WHY no bundle arrived for this episode.
-			r.append(Record{Stamp: r.stamp(), Kind: KindUploadState, Note: "self_upload_rate_limited"})
+			r.append(Record{Stamp: r.stamp(), Kind: KindUploadState, Note: noteSelfUploadRateLimited})
 			return
 		}
-		r.append(Record{Stamp: r.stamp(), Kind: KindUploadState, Note: "self_upload_triggered"})
+		r.append(Record{Stamp: r.stamp(), Kind: KindUploadState, Note: noteSelfUploadTriggered})
 		r.selfUpload()
 	}()
 }

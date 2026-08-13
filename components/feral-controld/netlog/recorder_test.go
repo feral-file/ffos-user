@@ -504,3 +504,59 @@ func TestRecorderInternetEventSources(t *testing.T) {
 	}
 	assert.Equal(t, []string{"initial", "edge", "level"}, sources)
 }
+
+// TestRecorderSelfUploadCooldownSurvivesRestart: the 6h limiter must be
+// recovered from the ring's own self_upload_triggered breadcrumb — controld
+// runs Restart=always, so memory-only limiter state resets on every restart
+// and a flapping site that also restarts could ship one full bundle per
+// recovery, the exact load the bound exists to prevent.
+func TestRecorderSelfUploadCooldownSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	ring, err := OpenRing(dir, 0)
+	require.NoError(t, err)
+	clock := newFakeClock()
+	// The "previous life" of the daemon triggered an upload an hour ago.
+	require.NoError(t, ring.Append(Record{
+		Stamp: Stamp{Wall: clock.Now().Add(-time.Hour)},
+		Kind:  KindUploadState,
+		Note:  noteSelfUploadTriggered,
+	}))
+
+	var uploads atomic.Int64
+	rec := NewRecorder(RecorderOptions{
+		Ring: ring, Ladder: nil, Clock: clock, Logger: zap.NewNop(),
+		SelfUpload: func() { uploads.Add(1) },
+		stamp:      func() Stamp { return Stamp{Wall: clock.Now()} },
+	})
+	close(clock.releaseSleeps) // stability windows elapse instantly
+	rec.Start(context.Background())
+	t.Cleanup(rec.Stop)
+
+	// An outage recovery inside the recovered cooldown must be suppressed.
+	rec.ObserveInternet(true)
+	rec.ObserveInternet(false)
+	rec.ObserveInternet(true)
+	deadline := time.Now().Add(3 * time.Second)
+	suppressed := false
+	for time.Now().Before(deadline) && !suppressed {
+		recs, _ := readRing(t, dir)
+		for _, r := range recs {
+			if r.Kind == KindUploadState && r.Note == noteSelfUploadRateLimited {
+				suppressed = true
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.True(t, suppressed, "recovered cooldown must suppress the upload")
+	assert.EqualValues(t, 0, uploads.Load())
+
+	// Past the recovered cooldown, the next recovery uploads again.
+	clock.advance(7 * time.Hour)
+	rec.ObserveInternet(false)
+	rec.ObserveInternet(true)
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && uploads.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	assert.EqualValues(t, 1, uploads.Load(), "cooldown must expire, not suppress forever")
+}

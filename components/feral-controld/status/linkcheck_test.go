@@ -33,11 +33,47 @@ func probeExec(t *testing.T, output string, err error) *mocks.MockExec {
 	return exec
 }
 
+// diagProbeExec wires a MockExec for DiagnosticLinkDetail's two-step probe:
+// the carrier-bearing field list returns (outCarrier, errCarrier); the plain
+// shared field list — the fallback when the carrier field is rejected —
+// returns outPlain. Registering distinct argvs pins that the carrier field
+// stays quarantined to the diagnostic invocation.
+func diagProbeExec(t *testing.T, outCarrier string, errCarrier error, outPlain string) *mocks.MockExec {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	carrierCmd := mocks.NewMockExecCmd(ctrl)
+	if errCarrier != nil {
+		carrierCmd.EXPECT().Output().Return(nil, errCarrier).AnyTimes()
+	} else {
+		carrierCmd.EXPECT().Output().Return([]byte(outCarrier), nil).AnyTimes()
+	}
+	plainCmd := mocks.NewMockExecCmd(ctrl)
+	plainCmd.EXPECT().Output().Return([]byte(outPlain), nil).AnyTimes()
+	exec := mocks.NewMockExec(ctrl)
+	exec.EXPECT().
+		CommandContext(gomock.Any(), "nmcli", "-t", "-f",
+			"GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,GENERAL.CONNECTION,WIRED-PROPERTIES.CARRIER", "device", "show").
+		Return(carrierCmd).
+		AnyTimes()
+	exec.EXPECT().
+		CommandContext(gomock.Any(), "nmcli", "-t", "-f",
+			"GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,GENERAL.CONNECTION", "device", "show").
+		Return(plainCmd).
+		AnyTimes()
+	return exec
+}
+
 // dev renders one terse `device show` block in the requested field order, the
-// shape linkProbe parses.
+// shape linkProbe parses. (nmcli emits WIRED-PROPERTIES.CARRIER only for
+// ethernet blocks; devCarrier renders that variant.)
 func dev(device, typ, state, conn string) string {
 	return "GENERAL.DEVICE:" + device + "\nGENERAL.TYPE:" + typ +
 		"\nGENERAL.STATE:" + state + "\nGENERAL.CONNECTION:" + conn + "\n"
+}
+
+// devCarrier is dev plus an ethernet block's WIRED-PROPERTIES.CARRIER line.
+func devCarrier(device, typ, state, conn, carrier string) string {
+	return dev(device, typ, state, conn) + "WIRED-PROPERTIES.CARRIER:" + carrier + "\n"
 }
 
 // TestExternalLink covers the hotspot-exclusion probe the provisioning
@@ -366,4 +402,100 @@ func TestLinkTelemetryProbeError(t *testing.T) {
 	lc := status.NewLinkChecker(probeExec(t, "", errors.New("nmcli exploded")), zap.NewNop())
 	_, _, err := lc.LinkTelemetry(context.Background())
 	assert.Error(t, err)
+}
+
+// TestDiagnosticLinkDetail pins the L2-level predicate the netlog diagnosis
+// ladder keys on: DHCP-stuck devices (IP_CONFIG..ACTIVATED) and raw ethernet
+// carrier count as links — so venue DHCP failures classify no-lease, not
+// link-down — while FAILED/DEACTIVATING (numerically above ACTIVATED) and the
+// device's own hotspot never do. The ACTIVATED-only verdicts consumed by the
+// AP-raise guard and hub lifecycle must stay untouched by this predicate.
+func TestDiagnosticLinkDetail(t *testing.T) {
+	tests := []struct {
+		name      string
+		output    string
+		wantLink  bool
+		wantWired bool
+	}{
+		{
+			name:     "dhcp-stuck wifi station counts",
+			output:   dev("wlan0", "wifi", "70 (connecting (getting IP configuration))", "HomeWifi"),
+			wantLink: true,
+		},
+		{
+			name:      "dhcp-stuck ethernet counts as wired",
+			output:    devCarrier("eth0", "ethernet", "70 (connecting (getting IP configuration))", "Wired connection 1", "on"),
+			wantLink:  true,
+			wantWired: true,
+		},
+		{
+			name:      "ethernet carrier without activation counts",
+			output:    devCarrier("eth0", "ethernet", "30 (disconnected)", "", "on"),
+			wantLink:  true,
+			wantWired: true,
+		},
+		{
+			// FAILED (120) and DEACTIVATING (110) number above ACTIVATED; a
+			// naive >= threshold would count them as live links.
+			name:   "failed wifi does not count",
+			output: dev("wlan0", "wifi", "120 (connection failed)", "HomeWifi"),
+		},
+		{
+			name:   "disconnected ethernet without carrier does not count",
+			output: devCarrier("eth0", "ethernet", "30 (disconnected)", "", "off"),
+		},
+		{
+			// A localized/unexpected carrier rendering must degrade to the
+			// numeric state rule, never to a false positive.
+			name:   "unrecognized carrier value is ignored",
+			output: devCarrier("eth0", "ethernet", "30 (disconnected)", "", "an"),
+		},
+		{
+			name:   "own hotspot mid-activation is excluded",
+			output: dev("wlan0", "wifi", "70 (connecting (getting IP configuration))", "ff1-softap"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := status.NewLinkChecker(diagProbeExec(t, tt.output, nil, ""), zap.NewNop())
+			link, wired, err := c.DiagnosticLinkDetail(context.Background(), "ff1-softap")
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantLink, link, "link")
+			assert.Equal(t, tt.wantWired, wired, "wired")
+		})
+	}
+}
+
+// TestDiagnosticLinkDetailFallsBackWithoutCarrierField: if a deployed nmcli
+// rejected the carrier field, the diagnostic probe must retry with the plain
+// field list and still answer from the numeric state window — a rejection
+// costs the carrier bonus, never the diagnosis (and, because the field rides
+// a separate invocation, never the shared ACTIVATED-only verdicts).
+func TestDiagnosticLinkDetailFallsBackWithoutCarrierField(t *testing.T) {
+	fallback := dev("eth0", "ethernet", "70 (connecting (getting IP configuration))", "Wired connection 1")
+	c := status.NewLinkChecker(diagProbeExec(t, "", errors.New("Error: invalid field"), fallback), zap.NewNop())
+
+	link, wired, err := c.DiagnosticLinkDetail(context.Background(), "ff1-softap")
+	assert.NoError(t, err)
+	assert.True(t, link, "state-window rule must still diagnose without the carrier field")
+	assert.True(t, wired)
+}
+
+// TestDiagnosticDoesNotLoosenActivatedVerdicts: the diagnostic predicate must
+// not leak into the ACTIVATED-only verdicts — a DHCP-stuck device suppressing
+// the AP-raise guard or waking the hub would be a behavior change for every
+// existing consumer.
+func TestDiagnosticDoesNotLoosenActivatedVerdicts(t *testing.T) {
+	output := devCarrier("eth0", "ethernet", "70 (connecting (getting IP configuration))", "Wired connection 1", "on")
+	c := status.NewLinkChecker(probeExec(t, output, nil), zap.NewNop())
+
+	link, err := c.ExternalLink(context.Background(), "ff1-softap")
+	assert.NoError(t, err)
+	assert.False(t, link, "ExternalLink must stay ACTIVATED-only")
+
+	wired, err := c.WiredLink(context.Background())
+	assert.NoError(t, err)
+	assert.False(t, wired, "WiredLink must stay ACTIVATED-only")
+
+	assert.False(t, c.HasLink(context.Background()), "HasLink must stay ACTIVATED-only")
 }
