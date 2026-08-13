@@ -248,7 +248,7 @@ func TestUploadLogsInProcess_RoutesToUploader(t *testing.T) {
 		logUploaderFactory: func() logUploaderIface { return fake },
 	}
 
-	res, err := e.uploadLogsInProcess(context.Background(), "api-key-77", "  bundle-x  ")
+	res, err := e.uploadLogsInProcess(context.Background(), "api-key-77", "  bundle-x  ", false)
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 

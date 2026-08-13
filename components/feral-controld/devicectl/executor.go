@@ -3043,7 +3043,7 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 	// controld runs the log upload in-process (ported from feral-setupd
 	// log_uploader.rs). userId/title are validated for parity but unused by the
 	// v2 API, exactly as the Rust callback ignores them.
-	return e.uploadLogsInProcess(ctx, cmdArgs.APIKey, supportBundleID)
+	return e.uploadLogsInProcess(ctx, cmdArgs.APIKey, supportBundleID, false)
 }
 
 // logUploadTimeout bounds one detached log upload end-to-end (zip + pre-sign +
@@ -3060,7 +3060,14 @@ const logUploadTimeout = 10 * time.Minute
 // command-storm budget) open. Errors are logged, not surfaced, matching setupd.
 // Single-flighted via logUploadInFlight (see the field note) and bounded by
 // logUploadTimeout so the guard always releases.
-func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundleID string) (interface{}, error) {
+// selfInitiated selects the completion-failure log level: controller-initiated
+// uploads keep Error (a support engineer explicitly asked for this bundle and
+// the fire-and-forget reply makes Sentry the only failure signal), while the
+// AUTOMATIC netlog self-upload logs at Warn — it fires on freshly-healed,
+// often still-restricted networks where failure is routine, and the netlog
+// posture pins that outage-driven telemetry must not become Sentry noise (the
+// ring records the attempt either way).
+func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundleID string, selfInitiated bool) (interface{}, error) {
 	if !e.logUploadInFlight.CompareAndSwap(false, true) {
 		e.logger.Info("Log upload already in flight; duplicate command ignored")
 		return CmdOK, nil
@@ -3080,7 +3087,11 @@ func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundl
 		uploadCtx, cancel := context.WithTimeout(context.Background(), logUploadTimeout)
 		defer cancel()
 		if err := uploader.Upload(uploadCtx, apiKey, logUploadSource, info, supportBundleID); err != nil {
-			e.logger.Error("In-process log upload failed", zap.Error(err))
+			if selfInitiated {
+				e.logger.Warn("Netlog self-upload failed", zap.Error(err))
+			} else {
+				e.logger.Error("In-process log upload failed", zap.Error(err))
+			}
 		}
 	}()
 
@@ -3101,7 +3112,7 @@ func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundl
 func (e *executor) SelfUploadLogs(apiKey string) {
 	// Background ctx: there is no request to inherit from; the upload bounds
 	// itself with logUploadTimeout exactly like the command path.
-	if _, err := e.uploadLogsInProcess(context.Background(), apiKey, ""); err != nil {
+	if _, err := e.uploadLogsInProcess(context.Background(), apiKey, "", true); err != nil {
 		e.logger.Warn("netlog self-upload failed to start", zap.Error(err))
 	}
 }

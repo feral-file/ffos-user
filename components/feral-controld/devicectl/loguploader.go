@@ -166,7 +166,20 @@ func (u *logUploader) zipLogs() ([]byte, error) {
 	}
 
 	files := map[string][]byte{}
-	if err := u.collectDir(u.logsDir, "", files, &remaining); err != nil {
+	// The netlog ring is the outage artifact this bundle exists to carry
+	// (docs/wan-outage-observability.md stage 2a), and it needs its budget
+	// exactly when the rest of ~/.logs is at its worst: a flapping device
+	// balloons controld.log and its rotated backups, and "backup" sorts
+	// before "netlog" in the walk, so a shared budget consumed in directory
+	// order could evict the ring from the very bundle raised to diagnose the
+	// outage. Collect the ring FIRST — its own 8 MiB cap bounds the claim —
+	// then walk the rest with the ring skipped so it is neither re-read nor
+	// double-charged.
+	if err := u.collectDir(filepath.Join(u.logsDir, netlogSubdir), netlogSubdir, files, &remaining, nil); err != nil {
+		return nil, err
+	}
+	skipNetlog := func(rel string) bool { return rel == netlogSubdir }
+	if err := u.collectDir(u.logsDir, "", files, &remaining, skipNetlog); err != nil {
 		return nil, err
 	}
 	for _, path := range u.extraLogs {
@@ -230,7 +243,14 @@ func (u *logUploader) zipLogs() ([]byte, error) {
 // truncated support archive is diagnosable (a file that grows between Info and
 // ReadFile can overshoot by the growth only — acceptable slack for a hard cap
 // without opening file handles through the wrapper seam).
-func (u *logUploader) collectDir(dir, prefix string, files map[string][]byte, remaining *int64) error {
+// netlogSubdir is the flight-recorder ring directory under the logs dir; it
+// gets budget priority in zipLogs (see the call site for why).
+const netlogSubdir = "netlog"
+
+// collectDir walks dir recursively. skip, when non-nil, drops entries whose
+// archive-relative path matches (used to avoid re-walking the netlog ring
+// after its priority collection).
+func (u *logUploader) collectDir(dir, prefix string, files map[string][]byte, remaining *int64, skip func(rel string) bool) error {
 	entries, err := u.os.ReadDir(dir)
 	if err != nil {
 		if u.os.IsNotExist(err) {
@@ -244,8 +264,11 @@ func (u *logUploader) collectDir(dir, prefix string, files map[string][]byte, re
 		if prefix != "" {
 			rel = prefix + "/" + entry.Name()
 		}
+		if skip != nil && skip(rel) {
+			continue
+		}
 		if entry.IsDir() {
-			if err := u.collectDir(full, rel, files, remaining); err != nil {
+			if err := u.collectDir(full, rel, files, remaining, skip); err != nil {
 				return err
 			}
 			continue

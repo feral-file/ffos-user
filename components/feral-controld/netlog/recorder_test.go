@@ -376,6 +376,26 @@ func TestRecorderBootDuringOutage(t *testing.T) {
 	}
 }
 
+// TestRecorderProvTransitionRecordedOnce: one observed transition produces
+// exactly one KindProv record (pins the single-append contract a PR review
+// claimed was violated — it is not, and now cannot silently become so).
+func TestRecorderProvTransitionRecordedOnce(t *testing.T) {
+	h := newHarness(t, nil)
+
+	h.rec.ObserveProvTransition("online", "offline_retrying", "", "clear-offline")
+
+	h.waitRecords(func(r []Record) bool { return countKind(r, KindProv) >= 1 })
+	time.Sleep(50 * time.Millisecond) // window for a (wrong) duplicate to land
+	recs, _ := readRing(t, h.dir)
+	require.Equal(t, 1, countKind(recs, KindProv), "one transition = exactly one record")
+	for _, rec := range recs {
+		if rec.Kind == KindProv {
+			assert.Equal(t, "offline_retrying", rec.Prov.To)
+			assert.Equal(t, "clear-offline", rec.Prov.Reason)
+		}
+	}
+}
+
 // TestRecorderDropAccounting: producer overflow is counted and surfaced
 // in-band, never silently swallowed.
 func TestRecorderDropAccounting(t *testing.T) {

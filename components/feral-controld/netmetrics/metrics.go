@@ -157,13 +157,13 @@ var bssidSalt = sync.OnceValue(func() []byte {
 	if id, err := os.ReadFile("/etc/machine-id"); err == nil && len(bytes.TrimSpace(id)) > 0 {
 		return bytes.TrimSpace(id)
 	}
+	// Random per-process fallback: preserves the privacy property at the
+	// cost of series identity across restarts. crypto/rand.Read is
+	// guaranteed not to fail (Go >= 1.24: it crashes the program
+	// irrecoverably rather than returning an error), so there is no state
+	// in which a digest could be produced from a public salt.
 	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		// crypto/rand failing is effectively fatal elsewhere; here the
-		// honest degradation is a constant marker rather than a silently
-		// unsalted (reversible) digest.
-		return []byte("netmetrics-fallback-salt")
-	}
+	_, _ = rand.Read(salt)
 	return salt
 })
 
