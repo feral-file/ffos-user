@@ -1,6 +1,11 @@
 # Execution plan: WAN-outage observability (flight recorder, stages 0–2)
 
-Status: proposed 2026-08-12. Companion to feral-file/feral-file#3495 (moskovich's
+Status: proposed 2026-08-12; stages 0-2 implemented 2026-08-13 (stage 0:
+monitord/controld gauges + netmetrics; stages 1-2: the `netlog` package,
+recorder wiring, `lastOutage`, `runNetworkDiagnostics`, self-upload — the
+self-upload arms only once an operator provisions `netlog.selfUploadApiKey`,
+because the device ships with no support-logs credential; see §6 notes).
+Companion to feral-file/feral-file#3495 (moskovich's
 "disconnect telemetry first" recommendation); this is the controld/monitord half.
 Scope is deliberately capped at stage 2 — no LAN-served diagnostics surface. Any
 LAN download path waits for hub authentication (feral-file#3471) and is out of

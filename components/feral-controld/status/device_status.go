@@ -89,6 +89,22 @@ type NetworkHealth struct {
 	Deferred bool `json:"deferred,omitempty"`
 }
 
+// LastOutage is the additive outage summary on getDeviceStatus / the
+// device_status feed (docs/wan-outage-observability.md stage 2b): the netlog
+// recorder's last closed episode, so the backend sees the diagnosis without
+// pulling logs. Values come from the recorder's in-memory summary — a status
+// poll never reads the ring, let alone probes. Not persisted: a daemon
+// restart clears it (the ring still holds the full history for uploadLogs).
+type LastOutage struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+	// Class is the netlog taxonomy value (link-down, wan-down, dns-broken,
+	// captive-portal, backend-only-down, ... or unknown-*).
+	Class string `json:"class"`
+	// Count24h is how many outages ENDED in the 24h before this reply.
+	Count24h int `json:"count24h"`
+}
+
 // DeviceStatusResponse represents the structure of device status information
 type DeviceStatusResponse struct {
 	// Contract is DeviceStatusContract on every reply — deliberately no
@@ -99,7 +115,11 @@ type DeviceStatusResponse struct {
 	// Network is attached by the devicectl executor from the provisioning
 	// machine's snapshot (see NetworkHealth); nil (omitted) only when that
 	// seam is unwired.
-	Network             *NetworkHealth    `json:"network,omitempty"`
+	Network *NetworkHealth `json:"network,omitempty"`
+	// LastOutage is attached by the devicectl executor from the netlog
+	// recorder (see LastOutage); nil (omitted) when the recorder is disabled
+	// or no outage has closed since process start.
+	LastOutage          *LastOutage       `json:"lastOutage,omitempty"`
 	ScreenRotation      string            `json:"screenRotation,omitempty"`
 	ConnectedWifi       string            `json:"connectedWifi,omitempty"`
 	InstalledVersion    string            `json:"installedVersion,omitempty"`

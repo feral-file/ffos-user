@@ -32,6 +32,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
+	"github.com/feral-file/ffos-user/components/feral-controld/netlog"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
@@ -107,6 +108,9 @@ type app struct {
 	OfflineCacheNotifier *offlinecache.Notifier
 	Hub                  hub.Hub
 	LinkChecker          *status.LinkChecker
+	// Netlog is the WAN-outage flight recorder; nil when disabled by config,
+	// unavailable (ring open failed), or in the test app.
+	Netlog *netlog.Recorder
 
 	// StateLoadKnown records whether run()'s state.Load succeeded (false =
 	// the persisted state was unreadable and quarantined). The provisioning
@@ -180,6 +184,7 @@ func main() {
 		config.RelayerConfig.APIKey,
 		config.MintPairingConfig,
 		config.OfflineCache,
+		config.Netlog,
 		provisioningTuningFromConfig(config.ProvisioningTuning(finalLogger), finalLogger),
 		dbus.NAME,
 		[]dbus_v5.MatchOption{
@@ -305,6 +310,14 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	app.Mediator.Start()
 	defer app.Mediator.Stop()
 
+	// Start the WAN-outage flight recorder early — an outage in progress at
+	// boot is exactly the MoMA case it exists for — and independent of the
+	// hub: the ring must fill even when nothing serves metrics.
+	if app.Netlog != nil {
+		app.Netlog.Start(ctx)
+		defer app.Netlog.Stop()
+	}
+
 	// P2.5 startup ordering: the local recovery + setup surfaces (hub + mDNS, then
 	// the provisioning domain) come up BEFORE the relayer/CDP init below and never
 	// wait on them. The relayer connection is a best-effort, never-fatal step (see
@@ -328,10 +341,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		// poller writes the cache-only link/Wi-Fi gauges the hub's /metrics
 		// serves and vmagent spools. Keyed on the hub because the hub is the
 		// only thing that serves them; the relayer gauges are fed event-driven
-		// by the relayer itself, poller or not.
-		netPoller := netmetrics.NewPoller(app.LinkChecker, app.Exec, app.Clock, app.Logger)
-		netPoller.Start(ctx)
-		defer netPoller.Stop()
+		// by the relayer itself, poller or not. The LinkChecker guard is for
+		// the test app (initializeTestApp leaves the seam nil and injects a
+		// bare MockExec the poller's nmcli ticks would trip); production
+		// wiring always sets it.
+		if app.LinkChecker != nil {
+			netPoller := netmetrics.NewPoller(app.LinkChecker, app.Exec, app.Clock, app.Logger)
+			netPoller.Start(ctx)
+			defer netPoller.Stop()
+		}
 
 		claim := state.ClaimSnapshot()
 		deviceInfo := resolveMDNSDeviceInfo(app.OS, claim, app.Logger)
@@ -760,6 +778,7 @@ func initializeApp(
 	relayerAPIKey string,
 	mintPairingConfig *config.MintPairingConfig,
 	offlineCacheConfig *config.OfflineCacheConfig,
+	netlogConfig *config.NetlogConfig,
 	provTuning provisioning.Tuning,
 	dbusName string,
 	dbusOpts []dbus_v5.MatchOption,
@@ -967,6 +986,24 @@ func initializeApp(
 	// on the presence of any LAN link rather than internet reachability.
 	linkChecker := status.NewLinkChecker(exec, logger)
 
+	// WAN-outage flight recorder (docs/wan-outage-observability.md stages
+	// 1-2). nil when disabled or unavailable; every wiring below nil-guards.
+	// Producers feed it through type-asserted observe-only seams (the
+	// mediator's applied internet verdicts, the relayer's connection
+	// lifecycle, the provisioning machine's transitions via the Config field
+	// at construction below) — the recorder never calls back into any of them.
+	netlogRecorder := buildNetlogRecorder(netlogConfig, linkChecker, exec, clock, dbusClient, relayerEndpoint, executor, logger)
+	if netlogRecorder != nil {
+		if sink, ok := mediator.(interface{ SetInternetObserver(func(bool)) }); ok {
+			sink.SetInternetObserver(netlogRecorder.ObserveInternet)
+		}
+		if sink, ok := relayer.(interface {
+			SetConnectionObserver(func(connected bool, closeCode int))
+		}); ok {
+			sink.SetConnectionObserver(netlogRecorder.ObserveRelayer)
+		}
+	}
+
 	// Claim-state transitions (a successful connect) re-register mDNS with the
 	// updated `claimed` TXT, and feed the provisioning machine's loop-visible
 	// claim snapshot (escape policy, constraint 8). One observer fans out to
@@ -1094,14 +1131,17 @@ func initializeApp(
 		func() bool { return uptimeWithin(bootLifecycleWindow, go_os.ReadFile, logger) },
 		func() bool { return uptimeWithin(startupOTAGateEntryWindow, go_os.ReadFile, logger) })
 	provMachine := provisioning.New(provisioning.Config{
-		AP:               softAP,
-		Wifi:             wifiCtl,
-		Connectivity:     &dbusConnectivity{dbus: dbusClient, logger: logger},
-		Clock:            clock,
-		Logger:           logger,
-		Notifier:         provisioningNotifier,
-		ActiveLink:       externalLinkProbe(linkChecker),
-		ActiveLinkDetail: externalLinkDetailProbe(linkChecker),
+		AP:           softAP,
+		Wifi:         wifiCtl,
+		Connectivity: &dbusConnectivity{dbus: dbusClient, logger: logger},
+		Clock:        clock,
+		Logger:       logger,
+		Notifier:     provisioningNotifier,
+		// The flight recorder sees every state/reason change, silent legs
+		// included (nil when the recorder is disabled).
+		TransitionObserver: netlogTransitionObserver(netlogRecorder),
+		ActiveLink:         externalLinkProbe(linkChecker),
+		ActiveLinkDetail:   externalLinkDetailProbe(linkChecker),
 		// Ethernet-only verdict for the escape policy's wired guard and the
 		// wired exit from a raised AP (constraint 6 — NOT ExternalLink, which
 		// counts stations).
@@ -1189,6 +1229,7 @@ func initializeApp(
 		OfflineCacheNotifier:     offlineCacheNotifier,
 		Hub:                      hub,
 		LinkChecker:              linkChecker,
+		Netlog:                   netlogRecorder,
 		Provisioning:             provMachine,
 		StateLoadKnown:           stateLoadKnown,
 		SetupUI:                  setupNarrator,

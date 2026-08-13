@@ -151,6 +151,15 @@ type mediator struct {
 	connPushBusy bool
 	connPushMore bool
 
+	// internetObserver, when set, is told every APPLIED internet-verdict
+	// cache write (the connectivity_change edge and the cold-probe merge). It
+	// feeds the netlog flight recorder — observe-only glue, the mediator
+	// stays policy-free (same shape as sysMetricsObserver). Set once at
+	// wiring time before Start via SetInternetObserver (type-asserted seam,
+	// deliberately NOT on the Mediator interface so mocks stay untouched);
+	// must be internally synchronized and non-blocking.
+	internetObserver func(connected bool)
+
 	// connPushHook is the test-only completion seam (SetConnectivityPushHook).
 	connPushHook atomic.Pointer[func()]
 }
@@ -297,6 +306,19 @@ func (m *mediator) SetSession(session *playersession.Session) {
 	}
 }
 
+// SetInternetObserver wires the applied-verdict observer (see the field doc).
+// Call before Start.
+func (m *mediator) SetInternetObserver(fn func(connected bool)) {
+	m.internetObserver = fn
+}
+
+// notifyInternetObserver forwards one applied verdict, if an observer is wired.
+func (m *mediator) notifyInternetObserver(connected bool) {
+	if m.internetObserver != nil {
+		m.internetObserver(connected)
+	}
+}
+
 // SetConnectivityPushHook registers the test-only completion seam. See the
 // Mediator interface doc.
 func (m *mediator) SetConnectivityPushHook(fn func()) {
@@ -406,12 +428,20 @@ func (m *mediator) coldProbeConnectivity(seqAtStart uint64) (level bool, known b
 	connected, _ := v.(bool)
 
 	m.connMu.Lock()
-	defer m.connMu.Unlock()
-	if !m.connKnown && m.connSeq == seqAtStart {
+	applied := !m.connKnown && m.connSeq == seqAtStart
+	if applied {
 		m.connLevel = connected
 		m.connKnown = true
 	}
-	return m.connLevel, m.connKnown
+	level, known = m.connLevel, m.connKnown
+	m.connMu.Unlock()
+	// Observe only APPLIED cold-probe results (same rule as the edge site):
+	// a stale probe that lost the seq race must not enter the recorder's
+	// timeline any more than the mediator's cache.
+	if applied {
+		m.notifyInternetObserver(connected)
+	}
+	return level, known
 }
 
 func (m *mediator) connectivitySnapshot() (level bool, known bool, seq uint64) {
@@ -652,6 +682,10 @@ func (m *mediator) handleDBusSignal(
 		m.connKnown = true
 		m.connSeq++
 		m.connMu.Unlock()
+		// Feed the netlog flight recorder off the same applied edge (the
+		// recorder keeps its own level reconcile per the edge+level rule, so
+		// a missed edge here heals there).
+		m.notifyInternetObserver(connected)
 		m.enqueueConnectivityPush()
 
 		// Reconnect the relayer if it's not already connected

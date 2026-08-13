@@ -322,6 +322,14 @@ type Config struct {
 	// Notifier is optional.
 	Notifier Notifier
 
+	// TransitionObserver, when set, is told every machine state/reason
+	// change, INCLUDING the silent legs the Notifier's change-dedupe hides —
+	// it feeds the netlog flight recorder, whose whole value is the
+	// transitions nothing narrates. Observe-only by contract: it must never
+	// call back into the machine, and (like the Notifier) it must not block —
+	// the recorder's enqueue is non-blocking. Optional.
+	TransitionObserver func(fromState, toState, fromReason, toReason string)
+
 	// BootAssessment, when non-nil and true, marks this process start as part
 	// of a DEVICE boot (kernel boot window) rather than a Restart=always
 	// daemon restart mid-life. Only a boot gets the StateOfflineRetrying entry
@@ -429,13 +437,16 @@ type Config struct {
 
 // Machine is the setup-AP trigger state machine.
 type Machine struct {
-	ap         softap.Backend
-	wifi       WifiController
-	conn       Connectivity
-	clock      wrapper.Clock
-	logger     *zap.Logger
-	notifier   Notifier
-	activeLink func(ctx context.Context) (bool, error)
+	ap       softap.Backend
+	wifi     WifiController
+	conn     Connectivity
+	clock    wrapper.Clock
+	logger   *zap.Logger
+	notifier Notifier
+	// transitionObserver mirrors Config.TransitionObserver (observe-only,
+	// non-blocking; see that field's contract).
+	transitionObserver func(fromState, toState, fromReason, toReason string)
+	activeLink         func(ctx context.Context) (bool, error)
 
 	// startedAtBoot is Config.BootAssessment latched once by New (nil probe =
 	// never a boot). A bool, not the probe itself, so the boot-vs-restart
@@ -782,18 +793,19 @@ func New(cfg Config) *Machine {
 	// Start seeds it from InitialClaimed once the persisted state is loaded.
 	claimed := true
 	return &Machine{
-		ap:               cfg.AP,
-		wifi:             cfg.Wifi,
-		conn:             cfg.Connectivity,
-		clock:            cfg.Clock,
-		logger:           logger,
-		notifier:         cfg.Notifier,
-		activeLink:       cfg.ActiveLink,
-		activeLinkDetail: cfg.ActiveLinkDetail,
-		wiredLink:        cfg.WiredLink,
-		claimed:          claimed,
-		initialClaimed:   cfg.InitialClaimed,
-		tuning:           cfg.Tuning.withDefaults(cfg.CheckInterval, logger),
+		ap:                 cfg.AP,
+		wifi:               cfg.Wifi,
+		conn:               cfg.Connectivity,
+		clock:              cfg.Clock,
+		logger:             logger,
+		notifier:           cfg.Notifier,
+		transitionObserver: cfg.TransitionObserver,
+		activeLink:         cfg.ActiveLink,
+		activeLinkDetail:   cfg.ActiveLinkDetail,
+		wiredLink:          cfg.WiredLink,
+		claimed:            claimed,
+		initialClaimed:     cfg.InitialClaimed,
+		tuning:             cfg.Tuning.withDefaults(cfg.CheckInterval, logger),
 		// Latched HERE, not read at the offline assessment: New runs at
 		// wiring time (moments after process start), so this is the honest
 		// "did this process start at boot" answer regardless of how long the
@@ -1878,9 +1890,18 @@ func (m *Machine) applyJoin(ctx context.Context, ssid, psk string, hidden bool) 
 		m.logger.Warn("provisioning: join ignored, AP not active", zap.String("state", string(st)))
 		return
 	}
+	prevState, prevReason := m.state, m.lastReason
 	m.state = StateJoining
 	m.status = portal.Status{State: portal.JoinInProgress, SSID: ssid, Message: "Connecting to " + ssid}
 	m.mu.Unlock()
+	// The join path sets state directly (it never goes through transition());
+	// the recorder still needs the edge. The reason is reported unchanged
+	// because this site does not touch m.lastReason — the observed stream
+	// must stay consistent with what the next transition() will report as
+	// its from-reason.
+	if m.transitionObserver != nil {
+		m.transitionObserver(string(prevState), string(StateJoining), prevReason, prevReason)
+	}
 	// The join cancels the session TIMER, never the policy latch (§4.2): a
 	// failure re-raise re-arms a fresh timer under the retained policy, so a
 	// typo inside a bounded session keeps that session's own bound.
@@ -2188,6 +2209,14 @@ func (m *Machine) transition(ctx context.Context, target State, d Detail) {
 	m.state = target
 	m.lastReason = d.Reason
 	m.mu.Unlock()
+
+	// The flight recorder sees every REAL change (state or reason), a
+	// deliberately wider net than `changed` above: that flag encodes the
+	// narration dedupe policy (silent legs stay silent on screen), while the
+	// recorder exists precisely to keep the silent legs' timeline.
+	if m.transitionObserver != nil && (prevState != target || prevReason != d.Reason) {
+		m.transitionObserver(string(prevState), string(target), prevReason, d.Reason)
+	}
 
 	// Constraint 4(b): a narrated OfflineRetrying panel followed by a SILENT
 	// reason in the same state would strand as a permanent lie (the

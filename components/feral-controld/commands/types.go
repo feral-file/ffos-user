@@ -42,6 +42,7 @@ var deviceCtlCommands = map[Type]bool{
 	CMD_SLEEP_NOW:                  true,
 	CMD_WAKE_NOW:                   true,
 	CMD_START_WIFI_SETUP:           true,
+	CMD_RUN_NETWORK_DIAGNOSTICS:    true,
 }
 
 type Command struct {
@@ -99,6 +100,13 @@ const (
 	CMD_DDC_PANEL_CONTROL Type = "ddcPanelControl"
 	// CMD_DDC_PANEL_STATUS reads the same VCPs as ddcPanelControl via ddcutil getvcp --brief.
 	CMD_DDC_PANEL_STATUS Type = "ddcPanelStatus"
+
+	// CMD_RUN_NETWORK_DIAGNOSTICS runs the netlog diagnosis ladder once on
+	// demand and replies with the classification + per-rung evidence
+	// (docs/wan-outage-observability.md stage 2c). The reply is synchronous
+	// and can take up to ~25 s of probe time — callers should budget for it;
+	// it stays inside the hub's 30 s write deadline by construction.
+	CMD_RUN_NETWORK_DIAGNOSTICS Type = "runNetworkDiagnostics"
 
 	// Offline artwork caching commands (see components/feral-controld/offlinecache
 	// and offline-artwork-capture.md). Routed as a pre-CDP special case in

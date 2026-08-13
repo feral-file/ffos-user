@@ -263,6 +263,26 @@ evidence (a status poll never runs a probe); `deferred` tells the app its own
 control-plane contact is holding a pending setup-mode raise down, so it should
 surface the pairing/`startWifiSetup` action instead of waiting.
 
+The reply also carries the additive `lastOutage` object when the netlog
+flight recorder (docs/wan-outage-observability.md stage 2b) has closed at
+least one outage episode since process start:
+
+```json
+"lastOutage": {
+  "start": "2026-08-13T02:10:00Z",
+  "end": "2026-08-13T02:14:30Z",
+  "class": "wan-down",
+  "count24h": 3
+}
+```
+
+`class` is the diagnosis-ladder taxonomy (`link-down`, `no-lease`,
+`gateway-dead`, `dns-broken`, `captive-portal`, `wan-down`,
+`backend-only-down`, `online`, or `unknown-*`); `count24h` counts outages that
+ENDED in the 24 h before the reply. Omitted when the recorder is disabled or
+nothing has closed yet; not persisted across daemon restarts (the on-device
+netlog ring keeps the full history and rides every `uploadLogs` bundle).
+
 Current error cases:
 
 - Status collection dependencies may fail; unavailable fields are usually
@@ -1042,6 +1062,76 @@ Current relayer error response: none standardized; command failure is logged.
 
 Security note: `apiKey` is currently part of the inbound payload. Logs should
 continue to truncate command payloads and should avoid exposing full secrets.
+
+The uploaded bundle includes the netlog flight-recorder ring
+(`~/.logs/netlog/*.jsonl`, docs/wan-outage-observability.md) — the uploader
+walks the log directory recursively, so no dedicated flag exists or is needed.
+The device can also trigger this same upload path itself after an outage heals
+(stage 2a), but only when an operator has provisioned the support-logs API key
+in the on-device config (`netlog.selfUploadApiKey`); the device ships with no
+credential for this API.
+
+### runNetworkDiagnostics
+
+Purpose: run the netlog diagnosis ladder once, on demand, and return the
+classification with per-rung evidence (docs/wan-outage-observability.md stage
+2c). This is the remote "why does the device think it is offline" probe:
+link/carrier → lease + gateway → DNS (configured vs public) → TCP 443 (backend
++ neutral) → captive-portal 204 check.
+
+Example:
+
+```json
+{
+  "messageID": "msg-netdiag-1",
+  "message": {
+    "command": "runNetworkDiagnostics",
+    "request": {}
+  }
+}
+```
+
+Current success response example (abbreviated):
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-netdiag-1",
+  "message": {
+    "trigger": "on-demand",
+    "class": "dns-broken",
+    "link": { "status": "ok", "detail": "wifi", "ms": 210 },
+    "lease": { "status": "ok", "detail": "gw=192.168.1.1 dns=192.168.1.1", "ms": 180 },
+    "gateway": { "status": "ok", "detail": "icmp", "ms": 12 },
+    "dns_configured": { "status": "fail", "detail": "lookup timeout", "ms": 3000 },
+    "dns_public": { "status": "ok", "ms": 40 },
+    "tcp_backend": { "status": "fail", "detail": "dial timeout", "ms": 3000 },
+    "tcp_neutral": { "status": "ok", "ms": 35 },
+    "portal": { "status": "ok", "detail": "204", "ms": 90 },
+    "portal_verdict": "clear",
+    "nm_snapshot": "GENERAL.DEVICE:wlan0\n...",
+    "ms": 6600
+  }
+}
+```
+
+Reply semantics: **synchronous**, unlike the fire-and-forget `uploadLogs` —
+the caller asked a question and the answer takes probe time. Worst case is
+~25 s (every rung timing out is itself the evidence); the handler bounds the
+run so the reply stays inside the hub's 30 s write deadline. Callers should
+use a ≥30 s timeout.
+
+Probe discipline: on-demand runs bypass the recorder's automatic rate limit
+(the automatic ladder runs only on failure edges, min 60 s apart) but share
+its one-run-at-a-time serialization. Each run is also recorded to the netlog
+ring, and a confident classification upgrades an open outage episode's class.
+
+Current error cases:
+
+- The netlog recorder is disabled or unavailable → command fails with
+  "network diagnostics unavailable".
+
+Current relayer error response: none standardized; command failure is logged.
 
 ### shutdown
 

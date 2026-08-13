@@ -311,6 +311,18 @@ type executor struct {
 	// §4.7 network object attached to getDeviceStatus replies.
 	networkHealth func(ctx context.Context) *status.NetworkHealth
 
+	// lastOutage, when wired (SetLastOutage), serves the netlog recorder's
+	// last closed outage summary as the additive `lastOutage` status field
+	// (docs/wan-outage-observability.md stage 2b). Probe-free by contract —
+	// it reads the recorder's in-memory summary.
+	lastOutage func() *status.LastOutage
+
+	// networkDiagnostics, when wired (SetNetworkDiagnostics), runs the netlog
+	// diagnosis ladder once on demand for CMD_RUN_NETWORK_DIAGNOSTICS (stage
+	// 2c). nil renders the command unavailable — same posture as
+	// wifiSetupStarter: reject, never pretend.
+	networkDiagnostics func(ctx context.Context) (any, error)
+
 	// wifiSetupStarter, when wired (SetWifiSetupStarter), runs the
 	// provisioning machine's startWifiSetup admission and queues the
 	// user-requested raise (provisioning.Machine.StartWifiSetup). nil renders
@@ -578,6 +590,8 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.getDeviceStatus(ctx)
 	case commands.CMD_START_WIFI_SETUP:
 		result, err = e.startWifiSetup(ctx)
+	case commands.CMD_RUN_NETWORK_DIAGNOSTICS:
+		result, err = e.runNetworkDiagnostics(ctx)
 	case commands.CMD_UPDATE_TO_LATEST:
 		result, err = e.updateToLatest(ctx)
 	case commands.CMD_FACTORY_RESET:
@@ -1483,6 +1497,11 @@ func (e *executor) getDeviceStatus(ctx context.Context) (interface{}, error) {
 	if e.networkHealth != nil {
 		resp.Network = e.networkHealth(ctx)
 	}
+	// Attach the netlog outage summary (stage 2b) — additive, probe-free,
+	// omitted when unwired or empty.
+	if e.lastOutage != nil {
+		resp.LastOutage = e.lastOutage()
+	}
 	return resp, nil
 }
 
@@ -1491,6 +1510,40 @@ func (e *executor) getDeviceStatus(ctx context.Context) (interface{}, error) {
 // wiring-before-run ordering contract as SetBootLifecycleProbe.
 func (e *executor) SetNetworkHealth(fn func(ctx context.Context) *status.NetworkHealth) {
 	e.networkHealth = fn
+}
+
+// SetLastOutage injects the netlog recorder's outage-summary source (see the
+// lastOutage field). Same wiring-before-run ordering contract.
+func (e *executor) SetLastOutage(fn func() *status.LastOutage) {
+	e.lastOutage = fn
+}
+
+// SetNetworkDiagnostics injects the on-demand diagnosis runner (see the
+// networkDiagnostics field). Same wiring-before-run ordering contract.
+func (e *executor) SetNetworkDiagnostics(fn func(ctx context.Context) (any, error)) {
+	e.networkDiagnostics = fn
+}
+
+// runNetworkDiagnosticsTimeout bounds the on-demand ladder run. The ladder's
+// per-rung timeouts sum to ~23 s worst case; this backstop keeps the reply
+// inside the hub's 30 s write deadline even if a rung misbehaves.
+const runNetworkDiagnosticsTimeout = 25 * time.Second
+
+// runNetworkDiagnostics handles CMD_RUN_NETWORK_DIAGNOSTICS: one synchronous
+// ladder run, reply carries the classification and per-rung evidence. The
+// reply is deliberately synchronous (unlike fire-and-forget uploadLogs): the
+// caller asked a question, and the answer takes probe time to produce.
+func (e *executor) runNetworkDiagnostics(ctx context.Context) (interface{}, error) {
+	if e.networkDiagnostics == nil {
+		return nil, fmt.Errorf("network diagnostics unavailable")
+	}
+	dctx, cancel := context.WithTimeout(ctx, runNetworkDiagnosticsTimeout)
+	defer cancel()
+	res, err := e.networkDiagnostics(dctx)
+	if err != nil {
+		return nil, fmt.Errorf("network diagnostics failed: %w", err)
+	}
+	return res, nil
 }
 
 // startWifiSetup handles CMD_START_WIFI_SETUP
@@ -3045,6 +3098,25 @@ func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundl
 	}()
 
 	return CmdOK, nil
+}
+
+// SelfUploadLogs is the netlog recorder's stage-2a egress (wired in main.go,
+// type-asserted like the other seams — deliberately NOT on the Executor
+// interface, so mocks stay untouched): after a reconnect-stability window it
+// pushes the log bundle (which includes the netlog ring — uploadLogs walks
+// ~/.logs recursively) without a controller in the loop. It reuses
+// uploadLogsInProcess wholesale, so the single-flight CAS, the detached
+// 10-minute bound, and the wire shape are identical to the command path — a
+// concurrent controller-initiated upload simply wins the CAS and the
+// self-upload is dropped, which is correct (the bundle is the same).
+// apiKey is the operator-provisioned support-logs key (config
+// netlog.selfUploadApiKey); callers must not invoke this with an empty key.
+func (e *executor) SelfUploadLogs(apiKey string) {
+	// Background ctx: there is no request to inherit from; the upload bounds
+	// itself with logUploadTimeout exactly like the command path.
+	if _, err := e.uploadLogsInProcess(context.Background(), apiKey, ""); err != nil {
+		e.logger.Warn("netlog self-upload failed to start", zap.Error(err))
+	}
 }
 
 // newLogUploader builds the uploader used by the in-process path, honoring a

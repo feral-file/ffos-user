@@ -155,6 +155,29 @@ type OfflineCacheResourceGateConfig struct {
 	MaxDeferSeconds int `json:"maxDeferSeconds,omitempty"`
 }
 
+// NetlogConfig tunes the WAN-outage flight recorder
+// (components/feral-controld/netlog, docs/wan-outage-observability.md).
+// Follows the optional-pointer-section + Disabled convention: an absent
+// section keeps the recorder ON with built-in defaults — it exists to
+// diagnose devices nobody can reach, so it must not require configuration
+// to be effective. The one exception is SelfUploadAPIKey: the stage-2a
+// automatic upload stays OFF until an operator provisions the support-logs
+// API key, because the device ships with no credential for that API (the
+// uploadLogs command receives its key from the controller per call).
+type NetlogConfig struct {
+	// Disabled turns the recorder (ring + ladder + lastOutage) off entirely.
+	Disabled bool `json:"disabled"`
+	// Dir overrides the ring location (default netlog.DefaultDir).
+	Dir string `json:"dir,omitempty"`
+	// MaxTotalBytes overrides the ring's total size cap (default 8 MiB).
+	// The cap must stay far below uploadLogs' 128 MB bundle budget.
+	MaxTotalBytes int64 `json:"maxTotalBytes,omitempty"`
+	// SelfUploadAPIKey is the support-logs API key the reconnect-stability
+	// self-upload authenticates with. Empty = self-upload disabled (the
+	// recorder still records; uploadLogs still bundles the ring on demand).
+	SelfUploadAPIKey string `json:"selfUploadApiKey,omitempty"`
+}
+
 // Configuration for all components
 type Config struct {
 	CDPConfig         *CDPConfig           `json:"cdp"`
@@ -168,6 +191,7 @@ type Config struct {
 	EnableHub    *bool               `json:"enableHub"`
 	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
 	OfflineCache *OfflineCacheConfig `json:"offlineCache,omitempty"`
+	Netlog       *NetlogConfig       `json:"netlog,omitempty"`
 
 	// Provisioning carries the escape-policy tuning block
 	// (docs/network-recovery-ux.md §4.1/§4.2) as RAW bytes, decoded
