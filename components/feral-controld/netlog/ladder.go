@@ -243,11 +243,22 @@ func (l *Ladder) runPass(ctx context.Context, trigger string) *LadderResult {
 	return res
 }
 
-// timed wraps one rung with duration accounting.
+// stepDetailMaxBytes bounds one rung's Detail string. The detail can carry
+// network-controlled content (resolver answers, error strings from the venue
+// network under investigation), and an adversarial or broken network must
+// not get to set the ring's retention by inflating records — the same rule
+// as nmSnapshotMaxBytes.
+const stepDetailMaxBytes = 256
+
+// timed wraps one rung with duration accounting and the detail bound (here,
+// so every rung — including future ones — inherits it).
 func (l *Ladder) timed(ctx context.Context, fn func(context.Context) Step) Step {
 	start := l.clock.Now()
 	s := fn(ctx)
 	s.Millis = l.clock.Now().Sub(start).Milliseconds()
+	if len(s.Detail) > stepDetailMaxBytes {
+		s.Detail = s.Detail[:stepDetailMaxBytes]
+	}
 	return s
 }
 

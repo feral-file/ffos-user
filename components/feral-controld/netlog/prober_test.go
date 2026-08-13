@@ -208,26 +208,39 @@ func TestPortalCheck(t *testing.T) {
 	assert.Equal(t, StatusFail, step.Status)
 }
 
+// TestLinkStepMapping pins the exclusion-aware verdict: the rung asks about
+// EXTERNAL uplinks (the device's own setup AP passed as the exclusion), so a
+// raised AP with no station link reads link-down, not "wifi up".
 func TestLinkStepMapping(t *testing.T) {
-	p := &prober{link: fakeLink{wifi: true}}
+	p := &prober{link: fakeLink{t: t, link: true}, softapProfile: "ff1-softap"}
 	got := p.Link(context.Background())
 	require.Equal(t, StatusOK, got.Status)
 	assert.Equal(t, "wifi", got.Detail)
 
-	p = &prober{link: fakeLink{}}
-	assert.Equal(t, StatusFail, p.Link(context.Background()).Status)
+	p = &prober{link: fakeLink{t: t, link: true, wired: true}, softapProfile: "ff1-softap"}
+	assert.Equal(t, "ethernet", p.Link(context.Background()).Detail)
 
-	p = &prober{link: fakeLink{err: errors.New("nmcli wedged")}}
+	// Own-AP-only radio: the exclusion-aware probe reports no link.
+	p = &prober{link: fakeLink{t: t}, softapProfile: "ff1-softap"}
+	step := p.Link(context.Background())
+	assert.Equal(t, StatusFail, step.Status)
+	assert.Contains(t, step.Detail, "own setup AP excluded")
+
+	p = &prober{link: fakeLink{t: t, err: errors.New("nmcli wedged")}, softapProfile: "ff1-softap"}
 	assert.Equal(t, StatusError, p.Link(context.Background()).Status)
 }
 
 type fakeLink struct {
-	wired, wifi bool
+	t           *testing.T
+	link, wired bool
 	err         error
 }
 
-func (f fakeLink) LinkTelemetry(context.Context) (bool, bool, error) {
-	return f.wired, f.wifi, f.err
+func (f fakeLink) ExternalLinkDetail(_ context.Context, excludeProfile string) (bool, bool, error) {
+	if f.t != nil {
+		require.Equal(f.t, "ff1-softap", excludeProfile, "the rung must exclude the setup AP profile")
+	}
+	return f.link, f.wired, f.err
 }
 
 func TestNMSnapshotTruncates(t *testing.T) {

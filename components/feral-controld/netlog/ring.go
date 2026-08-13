@@ -39,6 +39,14 @@ const (
 	// stale data outlives every other log.
 	defaultMaxSegmentAge = 7 * 24 * time.Hour
 
+	// defaultMaxSegments caps the segment COUNT independently of bytes: the
+	// recorder rolls once per closed outage episode, so a device flapping
+	// every few minutes mints hundreds of tiny files per day — thousands
+	// before the byte cap would ever evict. Each file costs an lstat on
+	// every cap check and an entry in every uploadLogs bundle; 64 segments
+	// bounds both while still holding days of episodes.
+	defaultMaxSegments = 64
+
 	// segmentPrefix/segmentExt name segments netlog-<seq>.jsonl. The name is
 	// load-bearing twice over: log-rotation.sh must keep ignoring it (see
 	// DefaultDir), and reopen-after-crash orders segments by the numeric seq,
@@ -60,6 +68,7 @@ type Ring struct {
 	maxTotalBytes   int64
 	maxSegmentBytes int64
 	maxSegmentAge   time.Duration
+	maxSegments     int
 
 	active     *os.File
 	activeSize int64
@@ -87,6 +96,7 @@ func OpenRing(dir string, maxTotalBytes int64) (*Ring, error) {
 		maxTotalBytes:   maxTotalBytes,
 		maxSegmentBytes: defaultMaxSegmentBytes,
 		maxSegmentAge:   defaultMaxSegmentAge,
+		maxSegments:     defaultMaxSegments,
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("netlog: create ring dir: %w", err)
@@ -144,7 +154,12 @@ func (r *Ring) Append(rec Record) error {
 	if err := r.active.Sync(); err != nil {
 		return fmt.Errorf("netlog: sync: %w", err)
 	}
-	r.enforceCapLocked()
+	// Cap enforcement runs on ROLL, not per append: enforceCapLocked walks
+	// the directory (ReadDir + one lstat per segment), and on a flapping
+	// device — thousands of records — paying that per record would turn the
+	// recorder into eMMC load. Appends can overshoot the cap by at most one
+	// segment (the size-roll above bounds the active file), which the
+	// headroom between 8 MiB and uploadLogs' 128 MB budget absorbs.
 	return nil
 }
 
@@ -298,9 +313,11 @@ func (r *Ring) isolateTornTailLocked(path string) error {
 	return err
 }
 
-// enforceCapLocked deletes oldest sealed segments until the ring fits the
-// total cap. The active segment is never deleted — the cap arithmetic
-// guarantees headroom because maxSegmentBytes is a small fraction of the cap.
+// enforceCapLocked deletes oldest sealed segments until the ring fits both
+// the byte cap and the segment-count cap (see defaultMaxSegments for why
+// count matters independently on flapping devices). The active segment is
+// never deleted — the cap arithmetic guarantees headroom because
+// maxSegmentBytes is a small fraction of the cap.
 func (r *Ring) enforceCapLocked() {
 	segs, err := r.segmentsLocked()
 	if err != nil {
@@ -310,8 +327,9 @@ func (r *Ring) enforceCapLocked() {
 	for _, s := range segs {
 		total += s.size
 	}
+	count := len(segs)
 	for _, s := range segs {
-		if total <= r.maxTotalBytes {
+		if total <= r.maxTotalBytes && count <= r.maxSegments {
 			return
 		}
 		if s.seq == r.activeSeq {
@@ -319,6 +337,7 @@ func (r *Ring) enforceCapLocked() {
 		}
 		if err := os.Remove(filepath.Join(r.dir, s.name)); err == nil {
 			total -= s.size
+			count--
 		}
 	}
 }

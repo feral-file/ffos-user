@@ -36,10 +36,18 @@ const (
 	publicDNSAddr = "1.1.1.1:53"
 )
 
-// LinkProber is the consumer-owned seam onto status.LinkChecker.LinkTelemetry
-// (the same seam netmetrics uses).
+// LinkProber is the consumer-owned seam onto status.LinkChecker. The ladder
+// uses the EXCLUSION-AWARE verdict, unlike netmetrics' raw telemetry: the
+// diagnostic question is "does this device have an uplink", and a radio
+// ACTIVATED as the device's own setup AP is not one. Without the exclusion,
+// the primary field scenario — a technician on the raised setup AP running
+// runNetworkDiagnostics — would classify unknown-probe instead of link-down
+// (the AP holds the radio, Lease sees the AP's own shared-mode address, and
+// the classifier walks off the evidence cliff).
 type LinkProber interface {
-	LinkTelemetry(ctx context.Context) (wired, wifi bool, err error)
+	// ExternalLinkDetail reports (link, wired) for uplinks other than
+	// excludeProfile; errors surface (unknown, never a fabricated verdict).
+	ExternalLinkDetail(ctx context.Context, excludeProfile string) (link, wired bool, err error)
 }
 
 // prober is the production Prober. The exec/dial/http/lookup seams exist so
@@ -48,6 +56,9 @@ type LinkProber interface {
 type prober struct {
 	link LinkProber
 	exec wrapper.Exec
+	// softapProfile is the NM profile name of the device's own setup AP,
+	// discounted by the Link rung (see LinkProber).
+	softapProfile string
 
 	dial      func(ctx context.Context, network, addr string) (net.Conn, error)
 	httpDo    func(req *http.Request) (*http.Response, error)
@@ -56,8 +67,9 @@ type prober struct {
 }
 
 // NewProber builds the production prober over the shared link checker and
-// exec wrapper.
-func NewProber(link LinkProber, exec wrapper.Exec) Prober {
+// exec wrapper. softapProfile is the setup AP's NM profile name
+// (softap.ProfileName in production wiring).
+func NewProber(link LinkProber, exec wrapper.Exec, softapProfile string) Prober {
 	d := &net.Dialer{}
 	pubResolver := &net.Resolver{
 		PreferGo: true,
@@ -73,10 +85,11 @@ func NewProber(link LinkProber, exec wrapper.Exec) Prober {
 		Transport:     &http.Transport{DisableKeepAlives: true},
 	}
 	return &prober{
-		link:   link,
-		exec:   exec,
-		dial:   d.DialContext,
-		httpDo: httpClient.Do,
+		link:          link,
+		exec:          exec,
+		softapProfile: softapProfile,
+		dial:          d.DialContext,
+		httpDo:        httpClient.Do,
 		lookupSys: func(ctx context.Context, host string) ([]string, error) {
 			return net.DefaultResolver.LookupHost(ctx, host)
 		},
@@ -85,25 +98,17 @@ func NewProber(link LinkProber, exec wrapper.Exec) Prober {
 }
 
 func (p *prober) Link(ctx context.Context) Step {
-	wired, wifi, err := p.link.LinkTelemetry(ctx)
+	link, wired, err := p.link.ExternalLinkDetail(ctx, p.softapProfile)
 	if err != nil {
 		return Step{Status: StatusError, Detail: err.Error()}
 	}
-	if !wired && !wifi {
-		return Step{Status: StatusFail, Detail: "no activated uplink"}
+	if !link {
+		return Step{Status: StatusFail, Detail: "no external uplink (own setup AP excluded)"}
 	}
-	return Step{Status: StatusOK, Detail: linkDetail(wired, wifi)}
-}
-
-func linkDetail(wired, wifi bool) string {
-	switch {
-	case wired && wifi:
-		return "ethernet+wifi"
-	case wired:
-		return "ethernet"
-	default:
-		return "wifi"
+	if wired {
+		return Step{Status: StatusOK, Detail: "ethernet"}
 	}
+	return Step{Status: StatusOK, Detail: "wifi"}
 }
 
 // NMSnapshot captures device state + reason codes at run time (plan branch

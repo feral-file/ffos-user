@@ -13,8 +13,12 @@
 package netmetrics
 
 import (
+	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -52,13 +56,14 @@ var (
 	}, []string{})
 
 	// netWifiLinkInfo is an info-style gauge (constant 1) carrying the
-	// associated BSS identity: bssid_hash (truncated SHA-256, so fleet metrics
-	// never carry a raw BSSID) and channel. Label cardinality is bounded by
+	// associated BSS identity: bssid_hash (SALTED truncated SHA-256, so fleet
+	// metrics never carry a raw or brute-force-recoverable BSSID — see
+	// bssidSalt) and channel. Label cardinality is bounded by
 	// the handful of BSSes one device actually associates with; stale label
 	// sets are Reset away on every update so at most one series is live.
 	netWifiLinkInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "net_wifi_link_info",
-		Help: "Identity of the associated BSS: bssid_hash (truncated SHA-256) and channel. Constant 1; absent when not associated.",
+		Help: "Identity of the associated BSS: bssid_hash (salted truncated SHA-256, per-device salt) and channel. Constant 1; absent when not associated.",
 	}, []string{"bssid_hash", "channel"})
 
 	// relayerConnected is a plain gauge on purpose: 0 at process start is the
@@ -140,11 +145,35 @@ func RecordRelayerCloseCode(code int) {
 	relayerLastCloseCode.WithLabelValues().Set(float64(code))
 }
 
-// hashBSSID replaces a raw BSSID with a short stable digest: fleet metrics
-// must not carry venue MAC addresses, but "did the BSS change across the
-// outage" must stay answerable. 8 hex chars keep collision odds negligible at
-// per-device cardinality.
+// bssidSalt is a per-device secret mixed into the BSSID digest. An UNSALTED
+// truncated hash of a 48-bit MAC is reversible by brute force (a known OUI
+// leaves ~2^24 candidates), and a recovered BSSID is geolocatable through
+// public wardriving databases — so without the salt the metric would carry
+// venue-location data. /etc/machine-id gives a stable per-device value
+// (series identity survives restarts); when unreadable, a random per-process
+// salt preserves the privacy property at the cost of series identity across
+// restarts — the right side of that trade.
+var bssidSalt = sync.OnceValue(func() []byte {
+	if id, err := os.ReadFile("/etc/machine-id"); err == nil && len(bytes.TrimSpace(id)) > 0 {
+		return bytes.TrimSpace(id)
+	}
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		// crypto/rand failing is effectively fatal elsewhere; here the
+		// honest degradation is a constant marker rather than a silently
+		// unsalted (reversible) digest.
+		return []byte("netmetrics-fallback-salt")
+	}
+	return salt
+})
+
+// hashBSSID replaces a raw BSSID with a short salted digest: fleet metrics
+// must not carry venue MAC addresses (see bssidSalt for why unsalted hashing
+// would), but "did the BSS change across the outage" must stay answerable.
+// 8 hex chars keep collision odds negligible at per-device cardinality.
 func hashBSSID(bssid string) string {
-	sum := sha256.Sum256([]byte(bssid))
-	return hex.EncodeToString(sum[:])[:8]
+	h := sha256.New()
+	h.Write(bssidSalt())
+	h.Write([]byte(bssid))
+	return hex.EncodeToString(h.Sum(nil))[:8]
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/netlog"
+	"github.com/feral-file/ffos-user/components/feral-controld/softap"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -58,7 +59,7 @@ func buildNetlogRecorder(
 	}
 
 	ladder := netlog.NewLadder(
-		netlog.NewProber(linkChecker, exec),
+		netlog.NewProber(linkChecker, exec, softap.ProfileName),
 		netlogBackendHost(relayerEndpoint, logger),
 		clock, logger)
 
