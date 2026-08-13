@@ -50,6 +50,12 @@ func buildNetlogRecorder(
 			dir = conf.Dir
 		}
 		maxBytes = conf.MaxTotalBytes
+		// OpenRing floors undersized caps (segments must hold real records);
+		// warn so the raise is visible to the operator who configured it.
+		if maxBytes > 0 && maxBytes < netlog.MinTotalBytes {
+			logger.Warn("netlog: configured maxTotalBytes below minimum, raising",
+				zap.Int64("configured", maxBytes), zap.Int64("minimum", netlog.MinTotalBytes))
+		}
 	}
 	ring, err := netlog.OpenRing(dir, maxBytes)
 	if err != nil {

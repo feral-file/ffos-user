@@ -24,10 +24,12 @@ type fakeClock struct {
 	mu            sync.Mutex
 	now           time.Time
 	releaseSleeps chan struct{}
-	// pruneTicks, when non-nil, backs the ticker handed out for the
-	// recorder's prune interval so tests can fire retention sweeps on demand;
-	// every other ticker never fires.
+	// pruneTicks/levelTicks, when non-nil, back the tickers handed out for
+	// the recorder's prune interval and the level-reconcile loop's minute
+	// interval, so tests can fire those paths on demand; every other ticker
+	// never fires.
 	pruneTicks chan time.Time
+	levelTicks chan time.Time
 }
 
 func newFakeClock() *fakeClock {
@@ -60,6 +62,9 @@ func (c *fakeClock) SleepContext(ctx context.Context, _ time.Duration) error {
 func (c *fakeClock) NewTicker(d time.Duration) wrapper.Ticker {
 	if d == defaultPruneInterval && c.pruneTicks != nil {
 		return fakeTicker{ch: c.pruneTicks}
+	}
+	if d == time.Minute && c.levelTicks != nil {
+		return fakeTicker{ch: c.levelTicks}
 	}
 	return fakeTicker{}
 }
@@ -469,4 +474,33 @@ func TestRecorderPeriodicPruneEnforcesRetention(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("stale sealed segment survived the periodic prune tick")
+}
+
+// TestRecorderInternetEventSources pins the edge/level/initial tri-state on
+// KindInternet records: the mediator seam stamps "edge", the reconcile loop
+// stamps "level", and the first observation is "initial" whichever path
+// delivered it. Diagnostic value (InternetEvent's doc): a timeline made
+// entirely of "level" records means edges are being lost — which only reads
+// if edges are actually labeled.
+func TestRecorderInternetEventSources(t *testing.T) {
+	levelTicks := make(chan time.Time)
+	var verdict atomic.Bool
+	h := newHarness(t, func(opts *RecorderOptions) {
+		opts.Clock.(*fakeClock).levelTicks = levelTicks
+		opts.InternetLevel = func(context.Context) (bool, error) { return verdict.Load(), nil }
+	})
+
+	h.rec.ObserveInternet(true)  // first observation → "initial"
+	h.rec.ObserveInternet(false) // real D-Bus edge → "edge"
+	verdict.Store(true)
+	levelTicks <- time.Now() // reconcile heals the missed recovery edge → "level"
+
+	recs := h.waitRecords(func(r []Record) bool { return countKind(r, KindInternet) == 3 })
+	var sources []string
+	for _, rec := range recs {
+		if rec.Kind == KindInternet {
+			sources = append(sources, rec.Internet.Source)
+		}
+	}
+	assert.Equal(t, []string{"initial", "edge", "level"}, sources)
 }

@@ -195,10 +195,15 @@ func (r *Recorder) Stop() {
 
 // --- producer inputs (all non-blocking) ---
 
-// ObserveInternet feeds one internet-reachability verdict (edge or level —
-// the recorder dedupes, so callers report what they see, not transitions).
+// ObserveInternet feeds one internet-reachability verdict from the EDGE
+// signal path (the mediator's applied connectivity_change verdicts). The
+// level half is the recorder's own reconcile loop ("level"); keeping the two
+// sources distinguishable in the timeline is the point — a timeline made
+// entirely of "level" records means edges are being lost (InternetEvent's
+// doc). The recorder dedupes, so callers report what they see, not
+// transitions.
 func (r *Recorder) ObserveInternet(connected bool) {
-	r.observeInternet(connected, "")
+	r.observeInternet(connected, "edge")
 }
 
 func (r *Recorder) observeInternet(connected bool, source string) {
@@ -314,7 +319,9 @@ func (r *Recorder) handleInternet(ctx context.Context, ev event) {
 	first := r.lastInternet == nil
 	v := connected
 	r.lastInternet = &v
-	if first && ev.internet.Source == "" {
+	if first {
+		// The first observation is a baseline, not a transition — "initial"
+		// regardless of which path (edge or level) happened to deliver it.
 		ev.internet.Source = "initial"
 	}
 	r.mu.Unlock()

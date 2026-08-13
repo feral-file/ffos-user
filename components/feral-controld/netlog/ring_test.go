@@ -65,9 +65,13 @@ func TestRingAppendAndReadBack(t *testing.T) {
 // deleted, and the active segment is never deleted.
 func TestRingSizeCapEvictsOldest(t *testing.T) {
 	dir := t.TempDir()
-	r, err := OpenRing(dir, 2048)
+	r, err := OpenRing(dir, 0)
 	require.NoError(t, err)
 	defer func() { _ = r.Close() }()
+	// Synthetic small geometry set directly: OpenRing floors configured caps
+	// to MinTotalBytes, and the eviction arithmetic is easier to exercise at
+	// a few KiB than at 64 KiB.
+	r.maxTotalBytes = 2048
 	r.maxSegmentBytes = 512
 
 	for i := 0; i < 100; i++ {
@@ -89,19 +93,33 @@ func TestRingSizeCapEvictsOldest(t *testing.T) {
 	assert.Equal(t, r.activeSeq, segs[len(segs)-1].seq, "active segment must survive eviction")
 }
 
-// TestRingTinyCapClampsSegmentSize: a configured cap below 4x the default
-// segment size must clamp the segment size to a QUARTER of the cap — small
-// enough that a single active segment cannot dominate the cap, large enough
-// that eviction's active-headroom reservation leaves ~3/4 of the cap for
-// sealed history. A clamp to the whole cap zeroed that budget: every
-// episode-close roll evicted the just-sealed episode and the recorder went
-// silently inert (review round 3 finding R1).
-func TestRingTinyCapClampsSegmentSize(t *testing.T) {
+// TestRingSmallCapFloorAndQuarterClamp: a configured cap is floored to
+// MinTotalBytes (a segment must hold the largest real record), and small caps
+// clamp the segment size to a QUARTER of the cap — small enough that a single
+// active segment cannot dominate the cap, large enough that eviction's
+// active-headroom reservation leaves ~3/4 of the cap for sealed history. A
+// clamp to the whole cap zeroed that budget: every episode-close roll evicted
+// the just-sealed episode and the recorder went silently inert.
+func TestRingSmallCapFloorAndQuarterClamp(t *testing.T) {
 	dir := t.TempDir()
 	r, err := OpenRing(dir, 1024)
 	require.NoError(t, err)
 	defer func() { _ = r.Close() }()
-	assert.Equal(t, int64(256), r.maxSegmentBytes, "segment size must clamp to a quarter of a small total cap")
+	assert.Equal(t, int64(MinTotalBytes), r.maxTotalBytes, "undersized configured cap must be floored")
+	assert.Equal(t, int64(MinTotalBytes/4), r.maxSegmentBytes, "segment size must clamp to a quarter of a small total cap")
+}
+
+// TestRingHardCapPreservesSealedHistory: at any cap geometry the hard cap
+// must hold after EVERY append while sealed history still survives eviction —
+// an episode-close roll must not wipe the episode it just sealed.
+func TestRingHardCapPreservesSealedHistory(t *testing.T) {
+	dir := t.TempDir()
+	r, err := OpenRing(dir, 0)
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+	// Synthetic small geometry (see TestRingSizeCapEvictsOldest).
+	r.maxTotalBytes = 1024
+	r.maxSegmentBytes = 256
 
 	// Model episode closes: appends with a Roll every few records.
 	for i := 0; i < 50; i++ {
@@ -119,32 +137,65 @@ func TestRingTinyCapClampsSegmentSize(t *testing.T) {
 			sealed += s.size
 		}
 	}
-	assert.LessOrEqual(t, total, int64(1024), "tiny configured cap must still be a hard cap")
-	assert.Positive(t, sealed, "sealed history must survive eviction — an episode-close roll must not wipe the episode it just sealed")
+	assert.LessOrEqual(t, total, int64(1024), "cap must hold")
+	assert.Positive(t, sealed, "sealed history must survive eviction")
 }
 
-// TestRingCapEnforcedAtOpen: an operator lowering the cap must see it take
-// effect on restart, not only after the next outage seals a segment.
-func TestRingCapEnforcedAtOpen(t *testing.T) {
+// TestRingOversizedRecordDropped: a record whose line exceeds the segment
+// size must never be written (it would bypass the size roll into an empty
+// segment and breach the hard cap); a bounded in-band note takes its place so
+// the timeline shows the gap.
+func TestRingOversizedRecordDropped(t *testing.T) {
 	dir := t.TempDir()
-	r, err := OpenRing(dir, 8192)
+	r, err := OpenRing(dir, 0)
 	require.NoError(t, err)
-	r.maxSegmentBytes = 512
-	for i := 0; i < 60; i++ {
-		require.NoError(t, r.Append(note(strings.Repeat("x", 64))))
-	}
-	require.NoError(t, r.Close())
+	defer func() { _ = r.Close() }()
+	r.maxTotalBytes = 1024
+	r.maxSegmentBytes = 256
 
-	r2, err := OpenRing(dir, 1024)
-	require.NoError(t, err)
-	defer func() { _ = r2.Close() }()
-	segs, err := r2.segmentsLocked()
+	require.NoError(t, r.Append(note(strings.Repeat("x", 600))))
+
+	recs, torn := readRing(t, dir)
+	assert.Equal(t, 0, torn)
+	require.Len(t, recs, 1)
+	assert.Equal(t, noteOversizedRecordDropped, recs[0].Note)
+	assert.EqualValues(t, 1, recs[0].Dropped)
+
+	segs, err := r.segmentsLocked()
 	require.NoError(t, err)
 	var total int64
 	for _, s := range segs {
 		total += s.size
 	}
-	assert.LessOrEqual(t, total, int64(1024), "lowered cap must be enforced at open")
+	assert.LessOrEqual(t, total, int64(1024), "an oversized record must not breach the cap")
+}
+
+// TestRingCapEnforcedAtOpen: an operator lowering the cap must see it take
+// effect on restart, not only after the next outage seals a segment. Writes
+// past MinTotalBytes under the default cap, then reopens at the floor.
+func TestRingCapEnforcedAtOpen(t *testing.T) {
+	dir := t.TempDir()
+	r, err := OpenRing(dir, 0)
+	require.NoError(t, err)
+	r.maxSegmentBytes = 4096
+	for total := int64(0); total < MinTotalBytes+32<<10; {
+		require.NoError(t, r.Append(note(strings.Repeat("x", 600))))
+		total += 700 // ~line size; exact value irrelevant, just overshoot the floor
+	}
+	require.NoError(t, r.Close())
+
+	r2, err := OpenRing(dir, 1) // floors to MinTotalBytes
+	require.NoError(t, err)
+	defer func() { _ = r2.Close() }()
+	segs, err := r2.segmentsLocked()
+	require.NoError(t, err)
+	require.NotEmpty(t, segs)
+	var total int64
+	for _, s := range segs {
+		total += s.size
+	}
+	assert.LessOrEqual(t, total, int64(MinTotalBytes), "lowered cap must be enforced at open")
+	assert.Greater(t, segs[0].seq, 1, "oldest segments must be the ones evicted")
 	assert.Equal(t, r2.activeSeq, segs[len(segs)-1].seq, "active segment must survive open-time eviction")
 }
 

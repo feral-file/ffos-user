@@ -29,6 +29,16 @@ const (
 	// uploader's oversized-file skip).
 	DefaultMaxTotalBytes = 8 << 20
 
+	// MinTotalBytes floors a configured cap. The quarter clamp below makes
+	// segments maxTotalBytes/4, and a segment must comfortably hold the
+	// largest real record (a ladder result: ~4.5 KiB of bounded payload
+	// BEFORE JSON escaping — adversarial network content full of control
+	// bytes can escape 6:1, so don't tighten this floor without redoing that
+	// math), or the recorder ends up dropping the very records it exists to
+	// keep. 64 KiB → ≥16 KiB segments; the oversized-record backstop in
+	// Append degrades anything beyond it to a visible in-band note.
+	MinTotalBytes = 64 << 10
+
 	// defaultMaxSegmentBytes bounds one segment file. Small segments make
 	// eviction granular (dropping the oldest loses minutes, not days) and
 	// keep the active file's loss window on crash small.
@@ -96,6 +106,13 @@ func OpenRing(dir string, maxTotalBytes int64) (*Ring, error) {
 	if maxTotalBytes <= 0 {
 		maxTotalBytes = DefaultMaxTotalBytes
 	}
+	// Floor, don't reject: a too-small configured cap raised to MinTotalBytes
+	// keeps the recorder alive at a slightly larger footprint, where an open
+	// error would silently disable diagnostics entirely (the wiring warns so
+	// the raise is visible).
+	if maxTotalBytes < MinTotalBytes {
+		maxTotalBytes = MinTotalBytes
+	}
 	r := &Ring{
 		dir:             dir,
 		maxTotalBytes:   maxTotalBytes,
@@ -146,6 +163,10 @@ func OpenRing(dir string, maxTotalBytes int64) (*Ring, error) {
 	return r, nil
 }
 
+// noteOversizedRecordDropped is the in-band substitute for a record whose
+// serialized line would not fit one segment (see Append).
+const noteOversizedRecordDropped = "record_dropped_oversized"
+
 // Append writes one record as a JSONL line, rolling and evicting as needed.
 func (r *Ring) Append(rec Record) error {
 	line, err := json.Marshal(rec)
@@ -156,6 +177,21 @@ func (r *Ring) Append(rec Record) error {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// The hard-cap arithmetic (enforceCapLocked) relies on the invariant that
+	// no written line exceeds maxSegmentBytes — an oversized line into an
+	// empty segment would bypass the size roll below and breach the cap. The
+	// bounds on record payloads keep real records far below any floored
+	// segment size, so this backstop should never fire in production; when it
+	// does, a bounded in-band note replaces the record so the timeline shows
+	// the gap instead of silently missing an event.
+	if int64(len(line)) > r.maxSegmentBytes {
+		sub, err := json.Marshal(Record{Stamp: rec.Stamp, Kind: KindNote, Note: noteOversizedRecordDropped, Dropped: 1})
+		if err != nil || int64(len(sub))+1 > r.maxSegmentBytes {
+			return fmt.Errorf("netlog: record of %d bytes exceeds segment cap %d", len(line), r.maxSegmentBytes)
+		}
+		line = append(sub, '\n')
+	}
 	if err := r.ensureActiveLocked(); err != nil {
 		return err
 	}

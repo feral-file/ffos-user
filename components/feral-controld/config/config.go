@@ -172,7 +172,9 @@ type NetlogConfig struct {
 	// effective directory to the log uploader (SetNetlogRingDir).
 	Dir string `json:"dir,omitempty"`
 	// MaxTotalBytes overrides the ring's hard total size cap (default
-	// 8 MiB). The cap must stay far below uploadLogs' 128 MB bundle budget.
+	// 8 MiB; values below netlog.MinTotalBytes are raised to it with a warn —
+	// segments must hold the largest record). The cap must stay far below
+	// uploadLogs' 128 MB bundle budget.
 	MaxTotalBytes int64 `json:"maxTotalBytes,omitempty"`
 	// SelfUploadAPIKey is the support-logs API key the reconnect-stability
 	// self-upload authenticates with. Empty = self-upload disabled (the
