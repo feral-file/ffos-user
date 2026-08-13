@@ -1118,10 +1118,14 @@ Current success response example (abbreviated):
 ```
 
 Reply semantics: **synchronous**, unlike the fire-and-forget `uploadLogs` —
-the caller asked a question and the answer takes probe time. Worst case is
-~25 s (every rung timing out is itself the evidence); the handler bounds the
-run so the reply stays inside the hub's 30 s write deadline. Callers should
-use a ≥30 s timeout.
+the caller asked a question and the answer takes probe time. A full ladder
+pass worst-cases at ~16 s (the lower rungs run concurrently, and every rung
+timing out is itself the evidence); the executor bounds the run at 25 s so
+the reply stays inside the hub's 30 s write deadline. Callers should use a
+≥30 s timeout. A request arriving while a pass is already in flight joins it
+and shares its result, so the reply's `trigger` may read `failure-edge`
+rather than `on-demand` — the classification and rung evidence are the same
+either way.
 
 Probe discipline: on-demand runs bypass the recorder's automatic rate limit
 (the automatic ladder runs only on failure edges, min 60 s apart) but share
