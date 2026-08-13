@@ -992,7 +992,7 @@ func initializeApp(
 	// mediator's applied internet verdicts, the relayer's connection
 	// lifecycle, the provisioning machine's transitions via the Config field
 	// at construction below) — the recorder never calls back into any of them.
-	netlogRecorder := buildNetlogRecorder(netlogConfig, linkChecker, exec, clock, dbusClient, relayerEndpoint, executor, deviceStatus, logger)
+	netlogRecorder := buildNetlogRecorder(context, netlogConfig, linkChecker, exec, clock, dbusClient, relayerEndpoint, executor, deviceStatus, logger)
 	if netlogRecorder != nil {
 		if sink, ok := mediator.(interface{ SetInternetObserver(func(bool)) }); ok {
 			sink.SetInternetObserver(netlogRecorder.ObserveInternet)

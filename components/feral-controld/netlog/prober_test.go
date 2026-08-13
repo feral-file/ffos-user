@@ -91,6 +91,20 @@ func TestParseLease(t *testing.T) {
 			wantSurveyed: true,
 		},
 		{
+			// The mixed state (real uplink up while the setup AP is still
+			// raised): the AP's shared-mode address and gateway are
+			// SELF-evidence and must not read as a lease — otherwise
+			// no-lease is unreachable and the gateway rung pings the
+			// device itself.
+			name: "own setup AP block is excluded from lease evidence",
+			output: leaseBlock("wlan0", "wifi", "100 (connected)",
+				"GENERAL.CONNECTION:ff1-softap",
+				"IP4.ADDRESS[1]:10.42.0.1/24", "IP4.GATEWAY:10.42.0.1") +
+				leaseBlock("eth0", "ethernet", "100 (connected)",
+					"GENERAL.CONNECTION:Wired connection 1"),
+			wantSurveyed: true,
+		},
+		{
 			name:   "nothing activated",
 			output: leaseBlock("wlan0", "wifi", "30 (disconnected)"),
 		},
@@ -101,7 +115,7 @@ func TestParseLease(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			info, hasAddr, surveyed := parseLease(tt.output)
+			info, hasAddr, surveyed := parseLease(tt.output, "ff1-softap")
 			assert.Equal(t, tt.wantSurveyed, surveyed, "surveyed")
 			assert.Equal(t, tt.wantHasAddr, hasAddr, "hasAddr")
 			assert.Equal(t, tt.wantGateway, info.Gateway, "gateway")

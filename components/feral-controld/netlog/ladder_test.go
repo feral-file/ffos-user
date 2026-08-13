@@ -199,7 +199,7 @@ func (s *scriptedProber) PortalCheck(context.Context, string) (PortalVerdict, St
 // interface only stacks timeouts — the run must answer from the link rung.
 func TestLadderRunSkipsLowerRungsWithoutLink(t *testing.T) {
 	p := &scriptedProber{link: Step{Status: StatusFail}}
-	l := NewLadder(p, "relayer.example.com", wrapper.NewClock(), zap.NewNop())
+	l := NewLadder(context.Background(), p, "relayer.example.com", wrapper.NewClock(), zap.NewNop())
 
 	got := l.Run(context.Background(), "failure-edge")
 
@@ -212,7 +212,7 @@ func TestLadderRunSkipsLowerRungsWithoutLink(t *testing.T) {
 
 func TestLadderRunFullPass(t *testing.T) {
 	p := &scriptedProber{link: Step{Status: StatusOK}, lease: Step{Status: StatusOK}, leaseGw: "192.168.1.1"}
-	l := NewLadder(p, "relayer.example.com", wrapper.NewClock(), zap.NewNop())
+	l := NewLadder(context.Background(), p, "relayer.example.com", wrapper.NewClock(), zap.NewNop())
 
 	got := l.Run(context.Background(), "on-demand")
 
@@ -260,7 +260,7 @@ func TestLadderLowerRungsRunConcurrently(t *testing.T) {
 		scriptedProber: scriptedProber{link: Step{Status: StatusOK}, lease: Step{Status: StatusOK}, leaseGw: "192.168.1.1"},
 		rungDelay:      150 * time.Millisecond,
 	}
-	l := NewLadder(p, "relayer.example.com", wrapper.NewClock(), zap.NewNop())
+	l := NewLadder(context.Background(), p, "relayer.example.com", wrapper.NewClock(), zap.NewNop())
 
 	start := time.Now()
 	got := l.Run(context.Background(), "on-demand")
@@ -296,7 +296,7 @@ func (b *blockingLinkProber) Link(ctx context.Context) Step {
 // duplicate probe burst — the on-demand-during-automatic-run collision.
 func TestLadderSharesConcurrentRuns(t *testing.T) {
 	p := &blockingLinkProber{started: make(chan struct{}), release: make(chan struct{})}
-	l := NewLadder(p, "relayer.example.com", wrapper.NewClock(), zap.NewNop())
+	l := NewLadder(context.Background(), p, "relayer.example.com", wrapper.NewClock(), zap.NewNop())
 
 	results := make(chan *LadderResult, 2)
 	go func() { results <- l.Run(context.Background(), "failure-edge") }()
@@ -312,11 +312,42 @@ func TestLadderSharesConcurrentRuns(t *testing.T) {
 	assert.Equal(t, "failure-edge", a.Trigger, "the run keeps its starter's trigger")
 }
 
+// ctxCheckingProber records whether the rung contexts it receives are live.
+type ctxCheckingProber struct {
+	scriptedProber
+	sawDeadCtx atomic.Bool
+}
+
+func (c *ctxCheckingProber) DialTCP(ctx context.Context, addr string) Step {
+	if ctx.Err() != nil {
+		c.sawDeadCtx.Store(true)
+	}
+	return c.scriptedProber.DialTCP(ctx, addr)
+}
+
+// TestLadderPassRunsOnLifetimeCtxNotCallers pins the singleflight-poisoning
+// fix: the shared pass runs on the LADDER's lifetime ctx, so a caller whose
+// own ctx is already dead (an unauthenticated LAN caller disconnecting
+// mid-command) cannot turn every rung into StatusError for the joiners —
+// the mediator.coldProbeConnectivity rule, applied here.
+func TestLadderPassRunsOnLifetimeCtxNotCallers(t *testing.T) {
+	p := &ctxCheckingProber{scriptedProber: scriptedProber{
+		link: Step{Status: StatusOK}, lease: Step{Status: StatusOK}, leaseGw: "192.168.1.1"}}
+	l := NewLadder(context.Background(), p, "relayer.example.com", wrapper.NewClock(), zap.NewNop())
+
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := l.Run(dead, "on-demand")
+
+	assert.False(t, p.sawDeadCtx.Load(), "rungs must run on the lifetime ctx, not the canceled caller's")
+	assert.Equal(t, ClassOnline, got.Class, "a dead caller ctx must not poison the shared pass")
+}
+
 // TestLadderRunSkipsGatewayWithoutLeaseGateway: a lease with no gateway must
 // mark the rung skip (feeding the unknown-not-wan-down pin above).
 func TestLadderRunSkipsGatewayWithoutLeaseGateway(t *testing.T) {
 	p := &scriptedProber{link: Step{Status: StatusOK}, lease: Step{Status: StatusOK}}
-	l := NewLadder(p, "relayer.example.com", wrapper.NewClock(), zap.NewNop())
+	l := NewLadder(context.Background(), p, "relayer.example.com", wrapper.NewClock(), zap.NewNop())
 
 	got := l.Run(context.Background(), "on-demand")
 

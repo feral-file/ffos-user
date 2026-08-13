@@ -140,6 +140,17 @@ type Ladder struct {
 	clock  wrapper.Clock
 	logger *zap.Logger
 
+	// lifetimeCtx is the daemon-lifetime context every SHARED pass runs on.
+	// Singleflight fans one execution out to every waiter, so running the
+	// pass on the winning caller's ctx would let that one caller's own
+	// cancellation — an unauthenticated LAN caller disconnecting mid
+	// runNetworkDiagnostics — abort the pass for the daemon's own
+	// failure-edge diagnosis and leave the episode classified unknown-*
+	// (with the 60 s rate limit blocking a retry). Same rule, same reason as
+	// mediator.coldProbeConnectivity's daemonCtx. The per-rung timeouts
+	// bound the pass; daemon shutdown still cancels through this ctx.
+	lifetimeCtx context.Context
+
 	// backendAddr/probeHost derive from the relayer endpoint at wiring time:
 	// the backend the device actually needs reachable.
 	backendAddr string
@@ -149,9 +160,11 @@ type Ladder struct {
 }
 
 // NewLadder wires a diagnosis ladder. backendHost is the relayer endpoint's
-// hostname (dialed as host:443 and used as the DNS probe name).
-func NewLadder(prober Prober, backendHost string, clock wrapper.Clock, logger *zap.Logger) *Ladder {
+// hostname (dialed as host:443 and used as the DNS probe name); lifetimeCtx
+// is the daemon-lifetime context shared passes run on (see the field doc).
+func NewLadder(lifetimeCtx context.Context, prober Prober, backendHost string, clock wrapper.Clock, logger *zap.Logger) *Ladder {
 	return &Ladder{
+		lifetimeCtx: lifetimeCtx,
 		prober:      prober,
 		clock:       clock,
 		logger:      logger,
@@ -178,9 +191,12 @@ func NewLadder(prober Prober, backendHost string, clock wrapper.Clock, logger *z
 // full evidence set (e.g. "gateway dead but neutral TCP ok" is a
 // contradiction worth recording verbatim) — except that the lower rungs are
 // skipped when there is provably no link to run them over.
-func (l *Ladder) Run(ctx context.Context, trigger string) *LadderResult {
+func (l *Ladder) Run(_ context.Context, trigger string) *LadderResult {
+	// The caller's ctx is deliberately NOT threaded into the pass (see
+	// lifetimeCtx): callers still get their wait bounded by the pass's own
+	// ~16 s rung-timeout ceiling, which sits inside every caller budget.
 	v, _, _ := l.sf.Do("run", func() (interface{}, error) {
-		return l.runPass(ctx, trigger), nil
+		return l.runPass(l.lifetimeCtx, trigger), nil
 	})
 	return v.(*LadderResult)
 }

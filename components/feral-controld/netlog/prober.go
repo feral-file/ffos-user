@@ -138,12 +138,12 @@ func (p *prober) Lease(ctx context.Context) (LeaseInfo, Step) {
 	probeCtx, cancel := context.WithTimeout(ctx, nmcliProbeTimeout)
 	defer cancel()
 	cmd := p.exec.CommandContext(probeCtx, "nmcli", "-t", "-f",
-		"GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS", "device", "show")
+		"GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,GENERAL.CONNECTION,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS", "device", "show")
 	out, err := cmd.Output()
 	if err != nil {
 		return LeaseInfo{}, Step{Status: StatusError, Detail: err.Error()}
 	}
-	info, hasAddr, surveyed := parseLease(string(out))
+	info, hasAddr, surveyed := parseLease(string(out), p.softapProfile)
 	if !surveyed {
 		return LeaseInfo{}, Step{Status: StatusError, Detail: "no activated ethernet/wifi block in nmcli output"}
 	}
@@ -155,11 +155,18 @@ func (p *prober) Lease(ctx context.Context) (LeaseInfo, Step) {
 
 // parseLease walks terse `nmcli device show` blocks (same block-delimiter
 // contract as status.LinkChecker.linkProbe: GENERAL.DEVICE opens each block
-// because -f lists it first). Only ACTIVATED ethernet/wifi blocks count.
-// surveyed=false means no such block existed — non-evidence, not a verdict.
-func parseLease(output string) (info LeaseInfo, hasAddr, surveyed bool) {
+// because -f lists it first). Only ACTIVATED ethernet/wifi blocks count, and
+// — matching the Link rung's exclusion — a block whose active connection is
+// excludeProfile (the device's own setup AP) is skipped entirely: in the
+// mixed state (real uplink up while the AP is still raised, the wired-exit
+// window) the AP's shared-mode address would otherwise read as "has a
+// lease" and its gateway as a pingable next hop, poisoning both rungs with
+// self-evidence. surveyed=false means no countable block existed —
+// non-evidence, not a verdict.
+func parseLease(output, excludeProfile string) (info LeaseInfo, hasAddr, surveyed bool) {
 	type block struct {
 		typ     string
+		conn    string
 		state   int
 		addrs   []string
 		gateway string
@@ -171,6 +178,9 @@ func parseLease(output string) (info LeaseInfo, hasAddr, surveyed bool) {
 			return
 		}
 		if cur.state != 100 { // NM_DEVICE_STATE_ACTIVATED
+			return
+		}
+		if excludeProfile != "" && cur.conn == excludeProfile {
 			return
 		}
 		surveyed = true
@@ -197,6 +207,8 @@ func parseLease(output string) (info LeaseInfo, hasAddr, surveyed bool) {
 			cur = block{}
 		case "GENERAL.TYPE":
 			cur.typ = value
+		case "GENERAL.CONNECTION":
+			cur.conn = value
 		case "GENERAL.STATE":
 			// "100 (connected)" — locale-stable numeric enum first (same
 			// parsing rule as status.LinkChecker.linkProbe). Unparsable

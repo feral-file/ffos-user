@@ -29,6 +29,7 @@ import (
 // type-asserted-seam pattern as provisioning_wiring.go, so test doubles
 // without the methods simply leave those paths unwired.
 func buildNetlogRecorder(
+	lifetimeCtx context.Context,
 	conf *config.NetlogConfig,
 	linkChecker *status.LinkChecker,
 	exec wrapper.Exec,
@@ -58,7 +59,10 @@ func buildNetlogRecorder(
 		return nil
 	}
 
+	// The daemon-lifetime ctx: shared ladder passes must not run on a
+	// caller's cancellable ctx (see netlog.Ladder.lifetimeCtx).
 	ladder := netlog.NewLadder(
+		lifetimeCtx,
 		netlog.NewProber(linkChecker, exec, softap.ProfileName),
 		netlogBackendHost(relayerEndpoint, logger),
 		clock, logger)
