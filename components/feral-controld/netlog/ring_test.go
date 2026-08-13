@@ -134,6 +134,48 @@ func TestRingRollSealsSegment(t *testing.T) {
 	assert.Equal(t, 2, r.activeSeq)
 }
 
+// TestRingRecoversAfterFailedRoll: a transient filesystem error at roll time
+// (ENOSPC/EROFS-shaped: the ring dir made unwritable) must not silence the
+// recorder forever — the next Append after the condition clears reopens a
+// successor segment. Explicit Close stays final.
+func TestRingRecoversAfterFailedRoll(t *testing.T) {
+	dir := t.TempDir()
+	r, err := OpenRing(dir, 0)
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+	require.NoError(t, r.Append(note("episode")))
+
+	// Make creating the successor fail, then roll.
+	require.NoError(t, os.Chmod(dir, 0o500)) //nolint:gosec // G302: directory perms, deliberately unwritable to force the roll failure
+	rollErr := r.Roll()
+	if rollErr == nil {
+		// Running as root (or on a platform ignoring the chmod) the roll
+		// succeeds and there is nothing to recover from — skip rather than
+		// assert a failure that did not happen.
+		require.NoError(t, os.Chmod(dir, 0o750)) //nolint:gosec // G302: restoring directory perms
+		t.Skip("chmod did not make the ring dir unwritable in this environment")
+	}
+
+	// While the condition persists, appends fail loudly (never silently).
+	require.Error(t, r.Append(note("during-outage")))
+
+	// Condition clears: the very next append must recover.
+	require.NoError(t, os.Chmod(dir, 0o750)) //nolint:gosec // G302: directory perms (0750 matches the ring's own MkdirAll)
+	require.NoError(t, r.Append(note("after-recovery")))
+
+	recs, _ := readRing(t, dir)
+	var notes []string
+	for _, rec := range recs {
+		notes = append(notes, rec.Note)
+	}
+	assert.Contains(t, notes, "episode")
+	assert.Contains(t, notes, "after-recovery")
+
+	// Explicit Close is final: no resurrection.
+	require.NoError(t, r.Close())
+	assert.Error(t, r.Append(note("post-close")))
+}
+
 // TestRingAgePrune: segments older than the retention window are removed at
 // open time (the ring must not outlive the device's own log-rotation regime).
 func TestRingAgePrune(t *testing.T) {

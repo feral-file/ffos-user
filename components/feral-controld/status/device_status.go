@@ -38,6 +38,24 @@ type deviceStatus struct {
 	io         wrapper.IO
 	cdp        cdp.CDP
 	cache      *versionCache
+
+	// lastOutage, when wired (SetLastOutageSource), serves the netlog
+	// recorder's last closed outage summary. It lives on THIS collector —
+	// not the devicectl executor — because both consumers of the summary
+	// flow through GetStatus: the pulled getDeviceStatus command reply AND
+	// the poller's pushed device_status change feed (stage 2b's whole point
+	// is that the backend sees the diagnosis WITHOUT polling). Probe-free by
+	// contract: it reads the recorder's in-memory summary. Set once at
+	// wiring time before any GetStatus caller runs (type-asserted seam,
+	// deliberately not on the DeviceStatus interface, so mocks stay
+	// untouched).
+	lastOutage func() *LastOutage
+}
+
+// SetLastOutageSource wires the netlog outage-summary source (see the
+// lastOutage field). Call before Start/first use.
+func (d *deviceStatus) SetLastOutageSource(fn func() *LastOutage) {
+	d.lastOutage = fn
 }
 
 func NewDeviceStatus(
@@ -350,6 +368,15 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	// Get MAC info from config (fetched once at startup)
 	cfg := config.Get()
 	response.MACInfo = cfg.MACInfo
+
+	// Attach the netlog outage summary (stage 2b) — additive, probe-free,
+	// omitted when unwired or empty. Attached here (not in the executor) so
+	// the poller's pushed device_status feed carries it too; the summary only
+	// changes when an outage closes, so the poller's MD5 dedupe still
+	// suppresses no-change ticks.
+	if d.lastOutage != nil {
+		response.LastOutage = d.lastOutage()
+	}
 
 	return response, nil
 }

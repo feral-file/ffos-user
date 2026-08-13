@@ -64,6 +64,13 @@ type Ring struct {
 	active     *os.File
 	activeSize int64
 	activeSeq  int
+	// closed marks an explicit Close. It exists to tell "sealed on purpose"
+	// apart from "the last roll failed to open a successor" (ENOSPC on a
+	// /home the unbounded daemon logs can genuinely fill, EROFS, EMFILE):
+	// the former is final, the latter must stay retryable — a device that
+	// flaps hard enough to fill its disk is precisely the device whose
+	// timeline is wanted once log rotation frees space again.
+	closed bool
 }
 
 // OpenRing opens (creating if needed) the ring at dir. maxTotalBytes <= 0
@@ -120,8 +127,8 @@ func (r *Ring) Append(rec Record) error {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.active == nil {
-		return fmt.Errorf("netlog: ring closed")
+	if err := r.ensureActiveLocked(); err != nil {
+		return err
 	}
 	if r.activeSize+int64(len(line)) > r.maxSegmentBytes && r.activeSize > 0 {
 		if err := r.rollLocked(); err != nil {
@@ -147,8 +154,8 @@ func (r *Ring) Append(rec Record) error {
 func (r *Ring) Roll() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.active == nil {
-		return fmt.Errorf("netlog: ring closed")
+	if err := r.ensureActiveLocked(); err != nil {
+		return err
 	}
 	if r.activeSize == 0 {
 		return nil // nothing to seal; avoid minting empty segments on flap
@@ -156,10 +163,28 @@ func (r *Ring) Roll() error {
 	return r.rollLocked()
 }
 
+// ensureActiveLocked recovers from a previously failed roll (see the closed
+// field's doc): when the ring is not explicitly closed but has no active
+// segment, it retries opening the successor so one transient filesystem
+// error never silences the recorder for the rest of the process lifetime.
+func (r *Ring) ensureActiveLocked() error {
+	if r.closed {
+		return fmt.Errorf("netlog: ring closed")
+	}
+	if r.active != nil {
+		return nil
+	}
+	if err := r.openSegmentLocked(r.activeSeq + 1); err != nil {
+		return fmt.Errorf("netlog: reopen after failed roll: %w", err)
+	}
+	return nil
+}
+
 // Close seals the ring. Idempotent.
 func (r *Ring) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.closed = true
 	if r.active == nil {
 		return nil
 	}

@@ -104,8 +104,9 @@ const (
 	// CMD_RUN_NETWORK_DIAGNOSTICS runs the netlog diagnosis ladder once on
 	// demand and replies with the classification + per-rung evidence
 	// (docs/wan-outage-observability.md stage 2c). The reply is synchronous
-	// and can take up to ~25 s of probe time — callers should budget for it;
-	// it stays inside the hub's 30 s write deadline by construction.
+	// and can take ~16 s of probe time worst case (bounded at 25 s in the
+	// executor) — callers should budget for it; it stays inside the hub's
+	// 30 s write deadline by construction.
 	CMD_RUN_NETWORK_DIAGNOSTICS Type = "runNetworkDiagnostics"
 
 	// Offline artwork caching commands (see components/feral-controld/offlinecache

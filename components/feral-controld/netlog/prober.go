@@ -15,7 +15,10 @@ import (
 // Per-rung timeouts. Deliberately short: the ladder runs when the network is
 // already sick, must finish inside the runNetworkDiagnostics reply budget
 // (the hub's 30 s write deadline), and every rung that would hang is evidence
-// in itself. Worst case, all rungs timing out sums to roughly 23 s.
+// in itself. Budget shape (see Ladder.Run): serial prefix link+snapshot+lease
+// (3+3+3 s) then the lower rungs CONCURRENTLY, bounded by the slowest —
+// gateway at 7 s worst (4 s ping + 3 s ARP fallback) — so a full pass is
+// ~16 s even with every rung timing out.
 const (
 	nmcliProbeTimeout  = 3 * time.Second
 	pingProbeTimeout   = 4 * time.Second // ping -W 2 plus exec slack
@@ -197,8 +200,13 @@ func parseLease(output string) (info LeaseInfo, hasAddr, surveyed bool) {
 			if n, convErr := strconv.Atoi(num); convErr == nil {
 				cur.state = n
 			}
+		// nmcli terse mode renders requested-but-unset fields as "--", not by
+		// omitting the line, so ALL THREE IP4 fields need the placeholder
+		// guard: an unfiltered "IP4.ADDRESS:--" would read as "has a lease"
+		// and make the no-lease class unreachable on real DHCP-failure
+		// hardware (the exact taxonomy case it exists for).
 		case "IP4.ADDRESS":
-			if value != "" {
+			if value != "" && value != "--" {
 				cur.addrs = append(cur.addrs, value)
 			}
 		case "IP4.GATEWAY":
@@ -206,7 +214,7 @@ func parseLease(output string) (info LeaseInfo, hasAddr, surveyed bool) {
 				cur.gateway = value
 			}
 		case "IP4.DNS":
-			if value != "" {
+			if value != "" && value != "--" {
 				cur.dns = append(cur.dns, value)
 			}
 		}

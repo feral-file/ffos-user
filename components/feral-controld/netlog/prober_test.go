@@ -81,6 +81,16 @@ func TestParseLease(t *testing.T) {
 			wantSurveyed: true,
 		},
 		{
+			// nmcli renders requested-but-unset fields as "--" on every
+			// line, not by omission: an unguarded IP4.ADDRESS:-- must not
+			// read as "has a lease" (that would make no-lease unreachable
+			// on real DHCP-failure hardware).
+			name: "placeholder values on all IP4 fields",
+			output: leaseBlock("wlan0", "wifi", "100 (connected)",
+				"IP4.ADDRESS[1]:--", "IP4.GATEWAY:--", "IP4.DNS[1]:--"),
+			wantSurveyed: true,
+		},
+		{
 			name:   "nothing activated",
 			output: leaseBlock("wlan0", "wifi", "30 (disconnected)"),
 		},

@@ -45,12 +45,19 @@ func readUptimeSeconds() float64 {
 	if err != nil {
 		return 0
 	}
+	return parseUptimeSeconds(data)
+}
+
+// parseUptimeSeconds parses /proc/uptime's first field ("12345.67 8901.23").
+// Degrades to 0 on any malformed input: a broken uptime read weakens
+// cross-restart ordering but must never fail a record write.
+func parseUptimeSeconds(data []byte) float64 {
 	fields := strings.Fields(string(data))
 	if len(fields) < 1 {
 		return 0
 	}
 	v, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
+	if err != nil || v < 0 {
 		return 0
 	}
 	return v

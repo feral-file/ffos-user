@@ -311,12 +311,6 @@ type executor struct {
 	// §4.7 network object attached to getDeviceStatus replies.
 	networkHealth func(ctx context.Context) *status.NetworkHealth
 
-	// lastOutage, when wired (SetLastOutage), serves the netlog recorder's
-	// last closed outage summary as the additive `lastOutage` status field
-	// (docs/wan-outage-observability.md stage 2b). Probe-free by contract —
-	// it reads the recorder's in-memory summary.
-	lastOutage func() *status.LastOutage
-
 	// networkDiagnostics, when wired (SetNetworkDiagnostics), runs the netlog
 	// diagnosis ladder once on demand for CMD_RUN_NETWORK_DIAGNOSTICS (stage
 	// 2c). nil renders the command unavailable — same posture as
@@ -1497,11 +1491,9 @@ func (e *executor) getDeviceStatus(ctx context.Context) (interface{}, error) {
 	if e.networkHealth != nil {
 		resp.Network = e.networkHealth(ctx)
 	}
-	// Attach the netlog outage summary (stage 2b) — additive, probe-free,
-	// omitted when unwired or empty.
-	if e.lastOutage != nil {
-		resp.LastOutage = e.lastOutage()
-	}
+	// (The netlog lastOutage summary is attached inside GetStatus itself —
+	// the status collector is the shared point both this pulled reply and
+	// the poller's pushed device_status feed flow through.)
 	return resp, nil
 }
 
@@ -1512,21 +1504,16 @@ func (e *executor) SetNetworkHealth(fn func(ctx context.Context) *status.Network
 	e.networkHealth = fn
 }
 
-// SetLastOutage injects the netlog recorder's outage-summary source (see the
-// lastOutage field). Same wiring-before-run ordering contract.
-func (e *executor) SetLastOutage(fn func() *status.LastOutage) {
-	e.lastOutage = fn
-}
-
 // SetNetworkDiagnostics injects the on-demand diagnosis runner (see the
 // networkDiagnostics field). Same wiring-before-run ordering contract.
 func (e *executor) SetNetworkDiagnostics(fn func(ctx context.Context) (any, error)) {
 	e.networkDiagnostics = fn
 }
 
-// runNetworkDiagnosticsTimeout bounds the on-demand ladder run. The ladder's
-// per-rung timeouts sum to ~23 s worst case; this backstop keeps the reply
-// inside the hub's 30 s write deadline even if a rung misbehaves.
+// runNetworkDiagnosticsTimeout bounds the on-demand ladder run. A full pass
+// worst-cases at ~16 s (serial link/snapshot/lease prefix + concurrent lower
+// rungs; see netlog.Ladder.Run); this backstop keeps the reply inside the
+// hub's 30 s write deadline even if a rung misbehaves.
 const runNetworkDiagnosticsTimeout = 25 * time.Second
 
 // runNetworkDiagnostics handles CMD_RUN_NETWORK_DIAGNOSTICS: one synchronous

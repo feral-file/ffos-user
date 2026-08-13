@@ -4,48 +4,17 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
-	"github.com/feral-file/ffos-user/components/feral-controld/status"
 )
 
-// TestExecutor_DeviceStatus_AttachesLastOutage: the additive stage-2b field
-// rides getDeviceStatus when the netlog seam is wired, and MD5-dedupe safety
-// holds trivially (the summary only changes when an outage closes).
-func TestExecutor_DeviceStatus_AttachesLastOutage(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	summary := &status.LastOutage{
-		Start:    time.Unix(1700000000, 0),
-		End:      time.Unix(1700000300, 0),
-		Class:    "wan-down",
-		Count24h: 3,
-	}
-	sink, ok := ts.executor.(interface {
-		SetLastOutage(func() *status.LastOutage)
-	})
-	require.True(t, ok, "executor must expose the SetLastOutage seam")
-	sink.SetLastOutage(func() *status.LastOutage { return summary })
-
-	cmd := commands.Command{Type: commands.CMD_DEVICE_STATUS, Arguments: map[string]interface{}{}}
-	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(`{}`), nil)
-	ts.mockDeviceStatus.EXPECT().
-		GetStatus(ts.ctx).
-		Return(&status.DeviceStatusResponse{}, nil)
-
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	require.NoError(t, err)
-	resp, ok := result.(*status.DeviceStatusResponse)
-	require.True(t, ok)
-	require.NotNil(t, resp.LastOutage)
-	assert.Equal(t, "wan-down", resp.LastOutage.Class)
-	assert.Equal(t, 3, resp.LastOutage.Count24h)
-}
+// (The lastOutage attach test lives in the status package beside GetStatus —
+// the collector is the shared point both the pulled reply and the poller's
+// pushed device_status feed flow through; see
+// status.TestGetStatus_AttachesLastOutage.)
 
 // TestExecutor_RunNetworkDiagnostics_Unwired: same reject-never-pretend
 // posture as startWifiSetup — a wiring that predates the seam must error.

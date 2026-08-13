@@ -432,15 +432,17 @@ func (m *mediator) coldProbeConnectivity(seqAtStart uint64) (level bool, known b
 	if applied {
 		m.connLevel = connected
 		m.connKnown = true
+		// Observe only APPLIED cold-probe results (same rule as the edge
+		// site), and notify UNDER connMu deliberately: the observer stream
+		// must be totally ordered with the cache writes, or a cold probe
+		// racing an edge on another goroutine could deliver [edge, stale]
+		// to the recorder while the cache correctly holds the edge — a
+		// phantom outage in the timeline. The observer is non-blocking by
+		// contract, so the critical section stays cheap.
+		m.notifyInternetObserver(connected)
 	}
 	level, known = m.connLevel, m.connKnown
 	m.connMu.Unlock()
-	// Observe only APPLIED cold-probe results (same rule as the edge site):
-	// a stale probe that lost the seq race must not enter the recorder's
-	// timeline any more than the mediator's cache.
-	if applied {
-		m.notifyInternetObserver(connected)
-	}
 	return level, known
 }
 
@@ -681,11 +683,12 @@ func (m *mediator) handleDBusSignal(
 		m.connLevel = connected
 		m.connKnown = true
 		m.connSeq++
-		m.connMu.Unlock()
-		// Feed the netlog flight recorder off the same applied edge (the
-		// recorder keeps its own level reconcile per the edge+level rule, so
-		// a missed edge here heals there).
+		// Feed the netlog flight recorder off the same applied edge, UNDER
+		// connMu (see coldProbeConnectivity for why the observer stream must
+		// be ordered with the cache writes). The recorder keeps its own level
+		// reconcile per the edge+level rule, so a missed edge heals there.
 		m.notifyInternetObserver(connected)
+		m.connMu.Unlock()
 		m.enqueueConnectivityPush()
 
 		// Reconnect the relayer if it's not already connected

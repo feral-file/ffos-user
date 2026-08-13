@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -87,7 +88,9 @@ type LeaseInfo struct {
 
 // Prober is the seam the ladder runs on; the production implementation lives
 // in prober.go, tests substitute a table-driven fake. Every method must honor
-// ctx and be safe to call from one goroutine at a time.
+// ctx and be safe for CONCURRENT calls: the ladder runs the independent lower
+// rungs in parallel (see Run's timeout-budget note). The production prober is
+// stateless per call, so this holds by construction; fakes must synchronize.
 type Prober interface {
 	// Link reports whether any uplink (ethernet or wifi, own AP included) is
 	// ACTIVATED. StatusError means the survey itself failed.
@@ -125,10 +128,14 @@ const (
 )
 
 // Ladder runs the rung sequence over a Prober and classifies the outcome.
-// One Run at a time (mu): overlapping diagnosis runs would double network
-// load exactly when the network is sick.
+// Concurrent Run callers share ONE in-flight execution (singleflight):
+// overlapping diagnosis runs would double network load exactly when the
+// network is sick, and — decisively — an on-demand command arriving during
+// an automatic failure-edge run would otherwise wait out the whole run
+// behind a mutex only to burn its own reply budget re-probing the same
+// network for a near-identical answer.
 type Ladder struct {
-	mu     sync.Mutex
+	sf     singleflight.Group
 	prober Prober
 	clock  wrapper.Clock
 	logger *zap.Logger
@@ -155,16 +162,31 @@ func NewLadder(prober Prober, backendHost string, clock wrapper.Clock, logger *z
 	}
 }
 
-// Run executes one full ladder pass. Probe discipline: the caller (recorder)
-// enforces the rate limit for automatic triggers; Run itself only serializes.
-// Rungs run top-down and never short-circuit on failure — the classifier
-// needs the full evidence set (e.g. "gateway dead but neutral TCP ok" is a
-// contradiction worth recording verbatim) — except that DNS/TCP/portal rungs
-// are skipped when there is provably no link to run them over.
+// Run executes one full ladder pass, or joins the pass already in flight
+// (the joiner gets that run's result — its Trigger field says which caller
+// started it). Probe discipline: the caller (recorder) enforces the rate
+// limit for automatic triggers.
+//
+// Timeout budget: the serial prefix (link 3 s + NM snapshot 3 s + lease 3 s)
+// plus the CONCURRENT lower rungs — gateway is the slowest at 7 s worst
+// (4 s ping + 3 s ARP fallback), against DNS/TCP at 3 s and portal at 5 s —
+// bounds a full pass at ~16 s even with every rung timing out. That fits the
+// executor's 25 s backstop and the hub's 30 s write deadline with margin;
+// the rungs were originally serial and worst-cased at ~33 s, which silently
+// truncated on-demand diagnosis to unknown-* on exactly the sick networks it
+// targets. Rungs never short-circuit on failure — the classifier needs the
+// full evidence set (e.g. "gateway dead but neutral TCP ok" is a
+// contradiction worth recording verbatim) — except that the lower rungs are
+// skipped when there is provably no link to run them over.
 func (l *Ladder) Run(ctx context.Context, trigger string) *LadderResult {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	v, _, _ := l.sf.Do("run", func() (interface{}, error) {
+		return l.runPass(ctx, trigger), nil
+	})
+	return v.(*LadderResult)
+}
 
+// runPass is one real execution (see Run for the sharing and budget rules).
+func (l *Ladder) runPass(ctx context.Context, trigger string) *LadderResult {
 	started := l.clock.Now()
 	res := &LadderResult{Trigger: trigger, PortalVerdict: PortalSkipped}
 
@@ -181,21 +203,35 @@ func (l *Ladder) Run(ctx context.Context, trigger string) *LadderResult {
 			lease, s = l.prober.Lease(c)
 			return s
 		})
-		if lease.Gateway != "" {
-			gw := lease.Gateway
-			res.Gateway = l.timed(ctx, func(c context.Context) Step { return l.prober.GatewayPing(c, gw) })
+
+		// The remaining rungs are independent measurements: run them
+		// concurrently so the pass is bounded by the slowest rung, not the
+		// sum (the budget math above depends on this). Each goroutine writes
+		// a distinct res field; wg.Wait orders those writes before Classify
+		// reads them.
+		var wg sync.WaitGroup
+		parallel := func(target *Step, fn func(context.Context) Step) {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				*target = l.timed(ctx, fn)
+			}()
+		}
+		if gw := lease.Gateway; gw != "" {
+			parallel(&res.Gateway, func(c context.Context) Step { return l.prober.GatewayPing(c, gw) })
 		} else {
 			res.Gateway = Step{Status: StatusSkip, Detail: "no gateway in lease"}
 		}
-		res.DNSConfigured = l.timed(ctx, func(c context.Context) Step { return l.prober.ResolveConfigured(c, l.probeHost) })
-		res.DNSPublic = l.timed(ctx, func(c context.Context) Step { return l.prober.ResolvePublic(c, l.probeHost) })
-		res.TCPBackend = l.timed(ctx, func(c context.Context) Step { return l.prober.DialTCP(c, l.backendAddr) })
-		res.TCPNeutral = l.timed(ctx, func(c context.Context) Step { return l.prober.DialTCP(c, l.neutralAddr) })
-		res.Portal = l.timed(ctx, func(c context.Context) Step {
+		parallel(&res.DNSConfigured, func(c context.Context) Step { return l.prober.ResolveConfigured(c, l.probeHost) })
+		parallel(&res.DNSPublic, func(c context.Context) Step { return l.prober.ResolvePublic(c, l.probeHost) })
+		parallel(&res.TCPBackend, func(c context.Context) Step { return l.prober.DialTCP(c, l.backendAddr) })
+		parallel(&res.TCPNeutral, func(c context.Context) Step { return l.prober.DialTCP(c, l.neutralAddr) })
+		parallel(&res.Portal, func(c context.Context) Step {
 			var s Step
 			res.PortalVerdict, s = l.prober.PortalCheck(c, l.portalURL)
 			return s
 		})
+		wg.Wait()
 	} else {
 		skip := Step{Status: StatusSkip, Detail: "no link"}
 		res.Lease, res.Gateway, res.DNSConfigured, res.DNSPublic = skip, skip, skip, skip

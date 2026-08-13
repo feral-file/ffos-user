@@ -353,14 +353,16 @@ func (r *relayer) Connect(ctx context.Context) error {
 	}
 
 	r.conn = conn
-	r.Unlock()
 	// Stage-0/1 observability (docs/wan-outage-observability.md): connection
 	// state is exported event-driven from the three lifecycle sites (here,
-	// closeConn, and the read-loop close-frame capture) so the gauge and the
-	// flight recorder can never disagree with the connection the daemon
-	// actually holds.
+	// closeConn, and the read-loop close-frame capture). Published UNDER the
+	// relayer lock, matching closeConn's already-locked publication — an
+	// unlocked publish here could interleave with a concurrent Close() so
+	// that the final exported state says "connected" while r.conn is nil,
+	// corrupting the last record sealed into the ring at shutdown.
 	netmetrics.SetRelayerConnected(true)
 	r.observeConn(true, 0)
+	r.Unlock()
 	cfRay := ""
 	if resp != nil {
 		cfRay = resp.Header.Get("cf-ray")

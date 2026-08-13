@@ -22,8 +22,9 @@ import (
 // must never take the daemon down or block its startup; every consumer of the
 // returned value nil-guards.
 //
-// ex is the devicectl executor; the stage-2 egress seams (lastOutage status
-// field, on-demand diagnostics, self-upload) are wired here through the same
+// ex is the devicectl executor and ds the status.DeviceStatus collector; the
+// stage-2 egress seams (lastOutage on the collector, on-demand diagnostics
+// and self-upload on the executor) are wired here through the same
 // type-asserted-seam pattern as provisioning_wiring.go, so test doubles
 // without the methods simply leave those paths unwired.
 func buildNetlogRecorder(
@@ -33,7 +34,7 @@ func buildNetlogRecorder(
 	clock wrapper.Clock,
 	dc dbus.DBus,
 	relayerEndpoint string,
-	ex any,
+	ex, ds any,
 	logger *zap.Logger,
 ) *netlog.Recorder {
 	if conf != nil && conf.Disabled {
@@ -83,7 +84,7 @@ func buildNetlogRecorder(
 		SelfUpload:    selfUpload,
 		InternetLevel: netlogInternetLevel(dc),
 	})
-	wireNetlogStatusSeams(ex, rec)
+	wireNetlogStatusSeams(ex, ds, rec)
 	logger.Info("netlog: flight recorder ready", zap.String("dir", ring.Dir()))
 	return rec
 }
@@ -136,13 +137,16 @@ func netlogInternetLevel(dc dbus.DBus) func(ctx context.Context) (bool, error) {
 	}
 }
 
-// wireNetlogStatusSeams attaches the executor's stage-2 read paths: the
-// additive lastOutage status field and the runNetworkDiagnostics command.
-func wireNetlogStatusSeams(ex any, rec *netlog.Recorder) {
-	if sink, ok := ex.(interface {
-		SetLastOutage(func() *status.LastOutage)
+// wireNetlogStatusSeams attaches the stage-2 read paths: the additive
+// lastOutage field on the STATUS COLLECTOR (both the pulled getDeviceStatus
+// reply and the poller's pushed device_status feed flow through GetStatus —
+// stage 2b's point is that the backend sees the diagnosis without polling)
+// and the runNetworkDiagnostics command on the executor.
+func wireNetlogStatusSeams(ex, ds any, rec *netlog.Recorder) {
+	if sink, ok := ds.(interface {
+		SetLastOutageSource(func() *status.LastOutage)
 	}); ok {
-		sink.SetLastOutage(func() *status.LastOutage {
+		sink.SetLastOutageSource(func() *status.LastOutage {
 			o := rec.LastOutage()
 			if o == nil {
 				return nil
