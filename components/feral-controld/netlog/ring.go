@@ -42,10 +42,15 @@ const (
 	// defaultMaxSegments caps the segment COUNT independently of bytes: the
 	// recorder rolls once per closed outage episode, so a device flapping
 	// every few minutes mints hundreds of tiny files per day — thousands
-	// before the byte cap would ever evict. Each file costs an lstat on
-	// every cap check and an entry in every uploadLogs bundle; 64 segments
-	// bounds both while still holding days of episodes.
-	defaultMaxSegments = 64
+	// before the byte cap would ever evict, each costing an lstat per cap
+	// check and an entry in every uploadLogs bundle. The number is sized
+	// against the RETENTION math, not just file count: a 3-minute flapper
+	// closes ~120 episodes between 6-hourly self-uploads, so the cap must
+	// hold well more than that or the ring evicts classified episodes
+	// before any bundle ships them (a 64-entry first cut did exactly that).
+	// 1024 flap-sized (~2 KB) segments is ~2 MB — the byte cap governs
+	// again — and the scan cost is per episode close, not per record.
+	defaultMaxSegments = 1024
 
 	// segmentPrefix/segmentExt name segments netlog-<seq>.jsonl. The name is
 	// load-bearing twice over: log-rotation.sh must keep ignoring it (see

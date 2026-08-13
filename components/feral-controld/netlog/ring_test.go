@@ -134,6 +134,36 @@ func TestRingRollSealsSegment(t *testing.T) {
 	assert.Equal(t, 2, r.activeSeq)
 }
 
+// TestRingSegmentCountCapEvictsOldest pins the count cap alongside the byte
+// cap: one segment is minted per closed outage episode, and the cap must be
+// sized so a flapping device's episodes survive until the 6-hourly
+// self-upload — a 64-entry first cut evicted classified episodes before any
+// bundle shipped them (the retention arithmetic lives on defaultMaxSegments).
+func TestRingSegmentCountCapEvictsOldest(t *testing.T) {
+	dir := t.TempDir()
+	r, err := OpenRing(dir, 0)
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+	r.maxSegments = 5
+
+	// Mint 12 episode-shaped segments (one small record each, sealed by Roll).
+	for i := 0; i < 12; i++ {
+		require.NoError(t, r.Append(note("episode")))
+		require.NoError(t, r.Roll())
+	}
+
+	segs, err := r.segmentsLocked()
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(segs), 5, "count cap must evict")
+	assert.Equal(t, r.activeSeq, segs[len(segs)-1].seq, "active segment must survive")
+	assert.Greater(t, segs[0].seq, 1, "oldest segments must be the ones evicted")
+
+	// The default must hold well more than the episodes accumulated between
+	// self-uploads on a fast flapper (~120 at a 3-minute cycle over 6h).
+	assert.GreaterOrEqual(t, defaultMaxSegments, 512,
+		"default count cap must not evict a flapping device's episodes between self-uploads")
+}
+
 // TestRingRecoversAfterFailedRoll: a transient filesystem error at roll time
 // (ENOSPC/EROFS-shaped: the ring dir made unwritable) must not silence the
 // recorder forever — the next Append after the condition clears reopens a
