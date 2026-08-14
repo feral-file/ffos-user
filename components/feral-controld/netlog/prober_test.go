@@ -81,13 +81,25 @@ func TestParseLease(t *testing.T) {
 			wantSurveyed: true,
 		},
 		{
-			// nmcli renders requested-but-unset fields as "--" on every
-			// line, not by omission: an unguarded IP4.ADDRESS:-- must not
-			// read as "has a lease" (that would make no-lease unreachable
-			// on real DHCP-failure hardware).
+			// One of the two unset-field shapes (see parseLease): some nmcli
+			// builds render "--" on every requested line. An unguarded
+			// IP4.ADDRESS:-- must not read as "has a lease" (that would make
+			// no-lease unreachable on real DHCP-failure hardware).
 			name: "placeholder values on all IP4 fields",
 			output: leaseBlock("wlan0", "wifi", "100 (connected)",
 				"IP4.ADDRESS[1]:--", "IP4.GATEWAY:--", "IP4.DNS[1]:--"),
+			wantSurveyed: true,
+		},
+		{
+			// The OTHER unset-field shape, bench-captured on FF1 (2026-08-14)
+			// from a device genuinely stuck at state 70: the non-indexed
+			// IP4.GATEWAY renders empty and the indexed IP4.ADDRESS/IP4.DNS
+			// lines are omitted entirely — never "--". Must survey as
+			// "eligible interface, no lease" via the "" guard and natural
+			// omission, or no-lease is unreachable on this nmcli build.
+			name: "empty gateway with omitted address lines surveys without lease",
+			output: leaseBlock("veth-test", "ethernet", "70 (connecting (getting IP configuration))",
+				"GENERAL.CONNECTION:Wired connection 2", "IP4.GATEWAY:"),
 			wantSurveyed: true,
 		},
 		{
@@ -195,6 +207,27 @@ func TestGatewayPing(t *testing.T) {
 			assert.Equal(t, tt.want, got.Status)
 		})
 	}
+}
+
+// TestResolveStepLabelsResolver pins the failure-detail labeling: Go composes
+// the DNS error prefix from resolv.conf even when the custom Dial sends the
+// query to the public resolver, so without the "via ..." label a ResolvePublic
+// failure reads as a CONFIGURED-resolver failure — and telling the two apart
+// is the only reason both rungs exist.
+func TestResolveStepLabelsResolver(t *testing.T) {
+	failing := func(context.Context, string) ([]string, error) {
+		return nil, errors.New("lookup example.com on 192.168.50.1:53: write: operation not permitted")
+	}
+	p := &prober{lookupSys: failing, lookupPub: failing}
+
+	pub := p.ResolvePublic(context.Background(), "example.com")
+	assert.Equal(t, StatusFail, pub.Status)
+	assert.Contains(t, pub.Detail, "1.1.1.1:53")
+	assert.True(t, strings.HasPrefix(pub.Detail, "via "), "label must lead so it survives detail truncation")
+
+	sys := p.ResolveConfigured(context.Background(), "example.com")
+	assert.Equal(t, StatusFail, sys.Status)
+	assert.Contains(t, sys.Detail, "system resolver")
 }
 
 func TestDialTCPMapping(t *testing.T) {

@@ -231,11 +231,16 @@ func parseLease(output, excludeProfile string) (info LeaseInfo, hasAddr, surveye
 			if n, convErr := strconv.Atoi(num); convErr == nil {
 				cur.state = n
 			}
-		// nmcli terse mode renders requested-but-unset fields as "--", not by
-		// omitting the line, so ALL THREE IP4 fields need the placeholder
-		// guard: an unfiltered "IP4.ADDRESS:--" would read as "has a lease"
-		// and make the no-lease class unreachable on real DHCP-failure
-		// hardware (the exact taxonomy case it exists for).
+		// Unset IP4 fields arrive in two different shapes depending on the nmcli
+		// build, and BOTH guards below are load-bearing — do not delete either as
+		// redundant:
+		//   - Bench-verified on FF1 (2026-08-14, device genuinely stuck at
+		//     GENERAL.STATE:70): the non-indexed IP4.GATEWAY renders EMPTY, and the
+		//     indexed IP4.ADDRESS[n]/IP4.DNS[n] lines are OMITTED entirely.
+		//   - Other/older nmcli builds render the "--" placeholder instead.
+		// An unfiltered "IP4.ADDRESS:--" — or an empty one — would read as "has a
+		// lease" and make the no-lease class unreachable on real DHCP-failure
+		// hardware, the exact taxonomy case it exists for.
 		case "IP4.ADDRESS":
 			if value != "" && value != "--" {
 				cur.addrs = append(cur.addrs, value)
@@ -303,14 +308,14 @@ func arpAlive(out string) bool {
 }
 
 func (p *prober) ResolveConfigured(ctx context.Context, host string) Step {
-	return resolveStep(ctx, p.lookupSys, host)
+	return resolveStep(ctx, p.lookupSys, host, "system resolver")
 }
 
 func (p *prober) ResolvePublic(ctx context.Context, host string) Step {
-	return resolveStep(ctx, p.lookupPub, host)
+	return resolveStep(ctx, p.lookupPub, host, publicDNSAddr)
 }
 
-func resolveStep(ctx context.Context, lookup func(context.Context, string) ([]string, error), host string) Step {
+func resolveStep(ctx context.Context, lookup func(context.Context, string) ([]string, error), host, via string) Step {
 	probeCtx, cancel := context.WithTimeout(ctx, dnsProbeTimeout)
 	defer cancel()
 	addrs, err := lookup(probeCtx, host)
@@ -318,7 +323,12 @@ func resolveStep(ctx context.Context, lookup func(context.Context, string) ([]st
 		if ctx.Err() != nil {
 			return Step{Status: StatusError, Detail: ctx.Err().Error()}
 		}
-		return Step{Status: StatusFail, Detail: err.Error()}
+		// Go composes the resolver error prefix from resolv.conf even when a
+		// custom Dial sends the query elsewhere, so an unlabeled ResolvePublic
+		// failure reads as though the CONFIGURED resolver was used. Name the
+		// resolver actually dialed — distinguishing the two is the only reason
+		// both rungs exist.
+		return Step{Status: StatusFail, Detail: "via " + via + ": " + err.Error()}
 	}
 	return Step{Status: StatusOK, Detail: strings.Join(addrs, ",")}
 }

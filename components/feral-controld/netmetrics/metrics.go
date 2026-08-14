@@ -78,6 +78,10 @@ var (
 	// observed — "never saw a close code" and "close code 0" must not alias.
 	// Correlating this with net_internet_reachable is the stage-0 payoff: a
 	// middlebox killing the WSS while the probe stays green becomes visible.
+	// Note the target failure mode (a blackholed WAN) tears the socket down
+	// via i/o timeout with NO close frame, so in exactly that scenario this
+	// gauge stays absent by construction; relayer_disconnects_total and the
+	// netlog ladder class carry the signal there. Do not "fix" the absence.
 	relayerLastCloseCode = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "relayer_last_close_code",
 		Help: "Websocket close code of the most recent relayer close frame. Absent until one is observed.",

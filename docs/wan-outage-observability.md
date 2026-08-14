@@ -229,7 +229,13 @@ last-close-code on the `:1111/metrics` registry, cache-only. Payoff: server-side
 outage timeline for the failing device on the next package release, including
 the "probe offline but relayer up" contradiction that would implicate the probe
 target itself. (vmagent already scrapes both endpoints every 60 s — verified in
-`users/feralfile/vmagent/scrape.yml`; no scrape-config change needed.)
+`users/feralfile/vmagent/scrape.yml`; no scrape-config change needed.) Note
+that a blackholed WAN — the target failure mode — tears the websocket down via
+i/o timeout with no close frame, so `relayer_last_close_code` is expectedly
+absent through exactly those outages (bench-verified 2026-08-14: three real
+disconnects, gauge never appeared); `relayer_disconnects_total` and the
+diagnosis-ladder class are the load-bearing signals there, and dashboards or
+alerts must not depend on the close-code gauge for blackhole detection.
 
 **Stage 1 — flight recorder + diagnosis ladder (~1 week).**
 New `netlog` package in controld: JSONL ring under `~/.logs/netlog/`, ≤ 8 MB.

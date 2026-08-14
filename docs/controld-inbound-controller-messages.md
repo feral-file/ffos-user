@@ -279,7 +279,12 @@ least one outage episode since process start:
 `class` is the diagnosis-ladder taxonomy (`link-down`, `no-lease`,
 `gateway-dead`, `dns-broken`, `captive-portal`, `wan-down`,
 `backend-only-down`, `online`, or `unknown-*`); `count24h` counts outages that
-ENDED in the 24 h before the reply. Omitted when the recorder is disabled or
+ENDED in the 24 h before the reply. `class: "online"` on a closed outage is
+meaningful, not contradictory: connectivity was reported down while the ladder
+measured a healthy network — the connectivity probe's target itself is suspect,
+not the venue (bench-reproduced 2026-08-14 by blocking only monitord's
+8.8.8.8/8.8.4.4 probe targets). Consumers must not treat it as a no-op or a
+bug. Omitted when the recorder is disabled or
 nothing has closed yet; not persisted across daemon restarts (the on-device
 netlog ring keeps the full history and rides every `uploadLogs` bundle).
 
