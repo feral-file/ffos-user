@@ -250,7 +250,7 @@ func TestRecorderLadderRateLimit(t *testing.T) {
 func TestRecorderStabilityUpload(t *testing.T) {
 	var uploads atomic.Int64
 	h := newHarness(t, func(o *RecorderOptions) {
-		o.SelfUpload = func() { uploads.Add(1) }
+		o.SelfUpload = func() bool { uploads.Add(1); return true }
 	})
 
 	h.rec.ObserveInternet(true)
@@ -273,7 +273,7 @@ func TestRecorderStabilityUpload(t *testing.T) {
 func TestRecorderSelfUploadRateLimit(t *testing.T) {
 	var uploads atomic.Int64
 	h := newHarness(t, func(o *RecorderOptions) {
-		o.SelfUpload = func() { uploads.Add(1) }
+		o.SelfUpload = func() bool { uploads.Add(1); return true }
 	})
 
 	h.rec.ObserveInternet(true)
@@ -310,7 +310,7 @@ func TestRecorderSelfUploadRateLimit(t *testing.T) {
 func TestRecorderStabilityUploadCanceledByRelapse(t *testing.T) {
 	var uploads atomic.Int64
 	h := newHarness(t, func(o *RecorderOptions) {
-		o.SelfUpload = func() { uploads.Add(1) }
+		o.SelfUpload = func() bool { uploads.Add(1); return true }
 	})
 
 	h.rec.ObserveInternet(true)
@@ -525,7 +525,7 @@ func TestRecorderSelfUploadCooldownSurvivesRestart(t *testing.T) {
 	var uploads atomic.Int64
 	rec := NewRecorder(RecorderOptions{
 		Ring: ring, Ladder: nil, Clock: clock, Logger: zap.NewNop(),
-		SelfUpload: func() { uploads.Add(1) },
+		SelfUpload: func() bool { uploads.Add(1); return true },
 		stamp:      func() Stamp { return Stamp{Wall: clock.Now()} },
 	})
 	close(clock.releaseSleeps) // stability windows elapse instantly
@@ -559,4 +559,52 @@ func TestRecorderSelfUploadCooldownSurvivesRestart(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	assert.EqualValues(t, 1, uploads.Load(), "cooldown must expire, not suppress forever")
+}
+
+// TestRecorderSelfUploadDefersWhenSlotBusy: a stability window that finds the
+// single-flight slot held by another upload must NOT burn the durable 6h
+// cooldown — that in-flight bundle may have been zipped before this outage's
+// segment sealed, so it is not evidence egress. The attempt re-arms and
+// succeeds once the slot clears, and only THAT attempt persists the cooldown.
+func TestRecorderSelfUploadDefersWhenSlotBusy(t *testing.T) {
+	var attempts atomic.Int64
+	h := newHarness(t, func(o *RecorderOptions) {
+		o.SelfUpload = func() bool {
+			// First attempt: slot busy. Second: slot clear, upload scheduled.
+			return attempts.Add(1) >= 2
+		}
+	})
+	close(h.clock.releaseSleeps) // every stability window elapses instantly
+
+	h.rec.ObserveInternet(true)
+	h.rec.ObserveInternet(false)
+	h.rec.ObserveInternet(true)
+
+	recs := h.waitRecords(func(r []Record) bool {
+		return countKind(r, KindUploadState) >= 2
+	})
+	var notes []string
+	for _, rec := range recs {
+		if rec.Kind == KindUploadState {
+			notes = append(notes, rec.Note)
+		}
+	}
+	assert.Equal(t, []string{noteSelfUploadDeferred, noteSelfUploadTriggered}, notes,
+		"the busy attempt must record a deferral, then the retry must trigger")
+	assert.EqualValues(t, 2, attempts.Load())
+
+	// The deferral must not have advanced the cooldown: only the successful
+	// attempt did, so the NEXT episode inside 6h is rate-limited (proving the
+	// cooldown was persisted exactly once, by the scheduled attempt).
+	h.rec.ObserveInternet(false)
+	h.rec.ObserveInternet(true)
+	h.waitRecords(func(r []Record) bool {
+		for _, rec := range r {
+			if rec.Kind == KindUploadState && rec.Note == noteSelfUploadRateLimited {
+				return true
+			}
+		}
+		return false
+	})
+	assert.EqualValues(t, 2, attempts.Load(), "rate-limited episode must not attempt the upload")
 }

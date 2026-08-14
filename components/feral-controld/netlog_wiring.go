@@ -84,11 +84,13 @@ func buildNetlogRecorder(
 	// support-logs API key: the device ships with no credential for that API
 	// (the uploadLogs COMMAND receives its key from the controller per call),
 	// and probing the endpoint with a guessed key would only make noise.
-	var selfUpload func()
+	var selfUpload func() bool
 	if conf != nil && strings.TrimSpace(conf.SelfUploadAPIKey) != "" {
 		key := strings.TrimSpace(conf.SelfUploadAPIKey)
-		if up, ok := ex.(interface{ SelfUploadLogs(string) }); ok {
-			selfUpload = func() { up.SelfUploadLogs(key) }
+		// The bool is load-bearing: false = the single-flight slot was held
+		// and the recorder must re-arm instead of burning its cooldown.
+		if up, ok := ex.(interface{ SelfUploadLogs(string) bool }); ok {
+			selfUpload = func() bool { return up.SelfUploadLogs(key) }
 		}
 	} else {
 		logger.Info("netlog: self-upload disabled (no netlog.selfUploadApiKey provisioned); ring still rides uploadLogs bundles")

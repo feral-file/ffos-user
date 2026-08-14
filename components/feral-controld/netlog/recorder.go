@@ -41,12 +41,15 @@ const (
 	// controller-initiated uploadLogs command is never subject to this.
 	defaultSelfUploadMinInterval = 6 * time.Hour
 
-	// noteSelfUploadTriggered/noteSelfUploadRateLimited are the KindUploadState
-	// breadcrumbs. The triggered note doubles as DURABLE limiter state: it is
-	// written before the upload fires and recovered at construction (see
-	// NewRecorder), so the 6h cooldown survives daemon restarts.
+	// noteSelfUpload* are the KindUploadState breadcrumbs. The triggered note
+	// doubles as DURABLE limiter state: it is written when the upload is
+	// actually scheduled and recovered at construction (see NewRecorder), so
+	// the 6h cooldown survives daemon restarts. Deferred marks a stability
+	// window that found the single-flight slot held by another upload — no
+	// cooldown is burned, the attempt re-arms.
 	noteSelfUploadTriggered   = "self_upload_triggered"
 	noteSelfUploadRateLimited = "self_upload_rate_limited"
+	noteSelfUploadDeferred    = "self_upload_deferred"
 
 	// defaultPruneInterval paces the ring's age-based retention sweep. The
 	// ring prunes at open and roll, but a device that stays healthy after its
@@ -70,9 +73,13 @@ type RecorderOptions struct {
 	Logger *zap.Logger
 
 	// SelfUpload, when non-nil, is invoked (on its own goroutine) after an
-	// outage closes and the connection stays stable for StabilityWindow.
-	// nil = stage-2a egress disabled (no support-logs API key provisioned).
-	SelfUpload func()
+	// outage closes and the connection stays stable for StabilityWindow. It
+	// reports whether the upload was actually SCHEDULED — false means another
+	// upload holds the single-flight slot (its bundle may predate this
+	// outage's sealed segment), and the recorder re-arms instead of burning
+	// the cooldown. nil = stage-2a egress disabled (no support-logs API key
+	// provisioned).
+	SelfUpload func() bool
 
 	// InternetLevel is the cached-read level probe (never a live network
 	// probe) backing the edge+level discipline: any consumer of the
@@ -122,7 +129,7 @@ type Recorder struct {
 	logger *zap.Logger
 	stamp  stampSource
 
-	selfUpload    func()
+	selfUpload    func() bool
 	internetLevel func(ctx context.Context) (bool, error)
 
 	ladderMinInterval time.Duration
@@ -182,9 +189,9 @@ func NewRecorder(opts RecorderOptions) *Recorder {
 	// restart — and a flapping site that also restarts the daemon could then
 	// ship one full log bundle per recovery, the exact uplink/S3 load the 6h
 	// bound exists to prevent. The ring is already the durable record (the
-	// trigger note is written before the upload fires); a stamp from a
-	// stepped-forward clock is clamped to now so a bad RTC cannot suppress
-	// uploads indefinitely.
+	// trigger note is written when the upload is scheduled — never on a
+	// deferred attempt); a stamp from a stepped-forward clock is clamped to
+	// now so a bad RTC cannot suppress uploads indefinitely.
 	if r.selfUpload != nil {
 		if t, ok := r.ring.LastRecordWall(KindUploadState, noteSelfUploadTriggered); ok {
 			if now := r.clock.Now(); t.After(now) {
@@ -425,10 +432,12 @@ func (r *Recorder) closeOutage(at Stamp) {
 	}
 }
 
-// armStabilityUpload waits the stability window, then fires the self-upload
-// if no relapse (stabilityGen unchanged) happened meanwhile. A goroutine per
-// close is fine: gen invalidation makes stale ones exit silently, and closes
-// are rare by definition.
+// armStabilityUpload waits the stability window, then tries to schedule the
+// self-upload if no relapse (stabilityGen unchanged) happened meanwhile — and
+// keeps re-arming through further windows while another upload holds the
+// single-flight slot (see the loop comment). A goroutine per close is fine:
+// gen invalidation makes stale ones exit silently, and closes are rare by
+// definition.
 func (r *Recorder) armStabilityUpload(gen int) {
 	r.wg.Add(1)
 	go func() {
@@ -442,30 +451,44 @@ func (r *Recorder) armStabilityUpload(gen int) {
 			case <-ctx.Done():
 			}
 		}()
-		if err := r.clock.SleepContext(ctx, r.stabilityWindow); err != nil {
-			return
+		// Loop: each pass waits out the stability window, re-checks the
+		// episode state, and tries to schedule the upload. A refusal (another
+		// upload owns the single-flight slot — its bundle may have been
+		// zipped BEFORE this outage's segment sealed, so it is not evidence
+		// egress) re-arms rather than burning the durable cooldown; the
+		// holder is bounded by the uploader's 10-minute timeout, so the loop
+		// is bounded by relapse (gen), shutdown (ctx), or the slot clearing.
+		for {
+			if err := r.clock.SleepContext(ctx, r.stabilityWindow); err != nil {
+				return
+			}
+			r.mu.Lock()
+			stale := gen != r.stabilityGen
+			online := r.lastInternet != nil && *r.lastInternet
+			now := r.clock.Now()
+			limited := r.haveSelfUpload && now.Sub(r.lastSelfUpload) < defaultSelfUploadMinInterval
+			r.mu.Unlock()
+			if stale || !online {
+				return
+			}
+			if limited {
+				// The suppression is timeline data too: support reading the
+				// ring later must see WHY no bundle arrived for this episode.
+				r.append(Record{Stamp: r.stamp(), Kind: KindUploadState, Note: noteSelfUploadRateLimited})
+				return
+			}
+			if r.selfUpload() {
+				// Persist the cooldown only now, when the upload is actually
+				// scheduled — this is the durable state NewRecorder recovers.
+				r.mu.Lock()
+				r.lastSelfUpload = now
+				r.haveSelfUpload = true
+				r.mu.Unlock()
+				r.append(Record{Stamp: r.stamp(), Kind: KindUploadState, Note: noteSelfUploadTriggered})
+				return
+			}
+			r.append(Record{Stamp: r.stamp(), Kind: KindUploadState, Note: noteSelfUploadDeferred})
 		}
-		r.mu.Lock()
-		stale := gen != r.stabilityGen
-		online := r.lastInternet != nil && *r.lastInternet
-		now := r.clock.Now()
-		limited := r.haveSelfUpload && now.Sub(r.lastSelfUpload) < defaultSelfUploadMinInterval
-		if !stale && online && !limited {
-			r.lastSelfUpload = now
-			r.haveSelfUpload = true
-		}
-		r.mu.Unlock()
-		if stale || !online {
-			return
-		}
-		if limited {
-			// The suppression is timeline data too: support reading the ring
-			// later must see WHY no bundle arrived for this episode.
-			r.append(Record{Stamp: r.stamp(), Kind: KindUploadState, Note: noteSelfUploadRateLimited})
-			return
-		}
-		r.append(Record{Stamp: r.stamp(), Kind: KindUploadState, Note: noteSelfUploadTriggered})
-		r.selfUpload()
 	}()
 }
 

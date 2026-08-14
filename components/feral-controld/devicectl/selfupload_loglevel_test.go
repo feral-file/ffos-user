@@ -86,3 +86,18 @@ func TestUploadLogsCommand_FailureKeepsErrorLevel(t *testing.T) {
 	assert.NotZero(t, observed.FilterMessage("In-process log upload failed").Len(),
 		"controller-initiated failures keep their Error-level Sentry signal")
 }
+
+// TestSelfUploadLogs_ReportsSlotAcquisition pins the seam contract the netlog
+// recorder's cooldown depends on: true only when this call scheduled the
+// upload; false when another upload holds the single-flight slot (whose
+// bundle may predate the outage segment — the recorder re-arms on false).
+func TestSelfUploadLogs_ReportsSlotAcquisition(t *testing.T) {
+	ex, _ := uploadLevelExecutor(t)
+
+	ex.logUploadInFlight.Store(true) // a controller-initiated upload owns the slot
+	assert.False(t, ex.SelfUploadLogs("provisioned-key"), "held slot must report not-scheduled")
+
+	ex.logUploadInFlight.Store(false)
+	assert.True(t, ex.SelfUploadLogs("provisioned-key"), "free slot must report scheduled")
+	waitUploadSettled(t, ex)
+}

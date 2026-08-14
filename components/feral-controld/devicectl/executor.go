@@ -3074,9 +3074,21 @@ const logUploadTimeout = 10 * time.Minute
 // posture pins that outage-driven telemetry must not become Sentry noise (the
 // ring records the attempt either way).
 func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundleID string, selfInitiated bool) (interface{}, error) {
-	if !e.logUploadInFlight.CompareAndSwap(false, true) {
+	if !e.tryStartLogUpload(ctx, apiKey, supportBundleID, selfInitiated) {
 		e.logger.Info("Log upload already in flight; duplicate command ignored")
-		return CmdOK, nil
+	}
+	return CmdOK, nil
+}
+
+// tryStartLogUpload attempts to acquire the single-flight slot and launch the
+// detached upload, reporting whether it did. The bool matters to the netlog
+// self-upload path: a slot held by an earlier upload means THAT bundle was
+// zipped at its own start time — possibly before the outage segment sealed —
+// so "someone is uploading" is not "the new evidence egressed", and the
+// caller must not burn its cooldown on the refusal.
+func (e *executor) tryStartLogUpload(ctx context.Context, apiKey, supportBundleID string, selfInitiated bool) bool {
+	if !e.logUploadInFlight.CompareAndSwap(false, true) {
+		return false
 	}
 
 	info := e.logUploadBuildInfo(ctx)
@@ -3101,7 +3113,7 @@ func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundl
 		}
 	}()
 
-	return CmdOK, nil
+	return true
 }
 
 // SelfUploadLogs is the netlog recorder's stage-2a egress (wired in main.go,
@@ -3109,19 +3121,24 @@ func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundl
 // interface, so mocks stay untouched): after a reconnect-stability window it
 // pushes the log bundle (which includes the netlog ring — zipLogs collects
 // the effective ring directory first, wherever SetNetlogRingDir put it)
-// without a controller in the loop. It reuses
-// uploadLogsInProcess wholesale, so the single-flight CAS, the detached
-// 10-minute bound, and the wire shape are identical to the command path — a
-// concurrent controller-initiated upload simply wins the CAS and the
-// self-upload is dropped, which is correct (the bundle is the same).
+// without a controller in the loop. It shares tryStartLogUpload with the
+// command path, so the single-flight CAS, the detached 10-minute bound, and
+// the wire shape are identical. The return value reports whether the upload
+// was actually SCHEDULED: a controller-initiated upload holding the slot may
+// have zipped its bundle before this outage's segment sealed, so the
+// recorder must treat a refusal as "evidence not yet egressed" — it retries
+// later instead of burning its durable 6h cooldown on a bundle that may not
+// contain the evidence.
 // apiKey is the operator-provisioned support-logs key (config
 // netlog.selfUploadApiKey); callers must not invoke this with an empty key.
-func (e *executor) SelfUploadLogs(apiKey string) {
+func (e *executor) SelfUploadLogs(apiKey string) bool {
 	// Background ctx: there is no request to inherit from; the upload bounds
 	// itself with logUploadTimeout exactly like the command path.
-	if _, err := e.uploadLogsInProcess(context.Background(), apiKey, "", true); err != nil {
-		e.logger.Warn("netlog self-upload failed to start", zap.Error(err))
+	scheduled := e.tryStartLogUpload(context.Background(), apiKey, "", true)
+	if !scheduled {
+		e.logger.Info("Netlog self-upload deferred: another log upload holds the single-flight slot")
 	}
+	return scheduled
 }
 
 // newLogUploader builds the uploader used by the in-process path, honoring a
