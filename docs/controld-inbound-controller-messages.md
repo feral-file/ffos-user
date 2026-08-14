@@ -911,7 +911,37 @@ Current relayer error response: none standardized; command failure is logged.
 
 ### updateToLatestVersion
 
-Purpose: run a system update. Handled in-process by `feral-controld`'s OTA gate (`otagate.RequestUpdate`, mode `Available`), which narrates progress and drives the local updater.
+Purpose: ask the device to update to the latest available version. Handled
+in-process by `feral-controld`'s OTA gate (`otagate.RequestUpdate`, mode
+`Available`) and **fire-and-forget** (see [`api-design.md`](api-design.md)): the
+command schedules the request and ACKs immediately; a detached worker then runs
+the version check, decides whether an update is warranted, and only then drives
+the local updater, narrating progress on screen. Single-flighted — a duplicate
+command while a request is already being handled is ACKed and dropped.
+
+The ACK is unconditional and carries no outcome. **It means only "the request
+was accepted for evaluation"** — not that an update started, and not that one
+succeeded. Every one of these ends in the same `{"ok": true}`:
+
+- the request was deduplicated into one already in flight, and nothing else
+  happened;
+- the version check failed, so no decision was reached (`VersionCheckFailed`);
+- the running build already satisfies the gate, so no update was warranted
+  (`NoUpdateNeeded`);
+- the build is below the minimum upgradeable version and must be reflashed, so
+  no update was attempted (`TooOldToUpgrade`);
+- an update ran (`UpdateStarted`) and then failed;
+- an update ran and succeeded — in which case the device reboots, so no
+  completion reply could reach the caller anyway.
+
+Controllers must therefore never read this response as confirmation that
+anything happened. Track the outcome through the on-screen narration and the
+device's reported `installedVersion` once it is back, never by waiting on this
+response.
+
+This is why the command was made fire-and-forget: it was previously synchronous,
+and the reboot tore the process down mid-request, so the caller got a dropped
+connection instead of any response at all.
 
 Example:
 
@@ -927,9 +957,18 @@ Example:
 
 Current success response: `{"ok": true}`.
 
-Current error cases:
+Current error cases: none are returned to the caller. There is no pre-schedule
+validation to fail (the command takes no arguments), so the command always
+answers `{"ok": true}`.
 
-- Starting or running the local updater fails.
+Everything after the ACK — the gate's decision as much as its failures: a
+deduplicated request, a failed version check, a no-update-needed or
+too-old-to-upgrade verdict, a failed or permanently latched update ladder — is
+logged on-device by the detached worker and is **not** surfaced to the caller.
+Note that a failed version check (the common outcome
+when the distributor is unreachable, which is exactly the case on the offline
+LAN-hub path) neither latches nor fires `OnPermanentFailure`, so it produces no
+screen narration either: the device log is the only record.
 
 Current relayer error response: none standardized; command failure is logged.
 

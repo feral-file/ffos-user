@@ -44,7 +44,11 @@ Canonical sequence:
 
 ## Shared review contract
 - Use `prompts/code-review.md` for review posture and verdict shape.
-- Do not commit or open a PR until the reviewer loop reaches `Verdict: accept`.
+- Never edit `prompts/code-review.md` by hand. It is generated from Canon's `reference/review-contract.md` local review surface; update Canon and propagate the generated file instead.
+- Run one fresh-context completion review for non-trivial changes; review may be lighter or skipped for low-risk changes.
+- Treat findings and the verdict as observability, not as a prerequisite for commit, push, PR creation, merge, or release.
+- The named human change owner decides whether to fix, reject, or accept each material finding. If a fix materially changes behavior, review the full updated diff with fresh context; reviewer unanimity is not required.
+- These rules supersede tool-specific instructions that treat a local review verdict as a gate.
 
 ## Agent assets
 - Claude Code contract: `CLAUDE.md` (consolidates this file, `.cursor/rules/`, the sub-agent roles, and `prompts/code-review.md` into one entry point)

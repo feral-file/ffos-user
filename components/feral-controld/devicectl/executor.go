@@ -121,6 +121,24 @@ type executor struct {
 	otaGate     *otagate.Gate
 	otaGateOnce sync.Once
 
+	// otaUpdateInFlight single-flights the detached user-triggered update
+	// (updateToLatest). The command is fire-and-forget, so without this a retry
+	// storm would stack goroutines that all join the gate's ONE flight and then
+	// log the same outcome N times. The gate's own single-flight still governs
+	// correctness — this only keeps the command path from spawning redundant
+	// waiters. Deliberately scoped to this command: the pre-claim and startup
+	// entry points must still be free to open a flight that a later
+	// updateToLatest joins (see otagate.Gate.do).
+	//
+	// Unlike logUploadInFlight this needs no timeout to pair with. The latch is
+	// released when RequestUpdate returns, so its lifetime is a strict subset of
+	// the gate's own singleflight key: a wedged updater (otagate's tail has no
+	// overall deadline and runs until ctx cancel) would already have wedged every
+	// later update by parking it on that dead flight, latch or no latch. Adding a
+	// bound here would release the latch while the flight it guards was still
+	// stuck, which buys nothing and hides the real wedge.
+	otaUpdateInFlight atomic.Bool
+
 	// setupNarrator is the on-screen setup-narration surface driven by the
 	// controld-owned claim/factory-reset flows (dormant while setupd owns setup).
 	// Built lazily via setupUI() from the existing CDP seam so New()'s wiring is
@@ -2675,14 +2693,57 @@ func (e *executor) getSysMetrics() (interface{}, error) {
 	return sysMetrics, nil
 }
 
+// updateToLatest schedules the user-triggered OTA gate run and ACKs
+// immediately. The ACK means "accepted for evaluation" and nothing more — the
+// gate may dedupe the request, fail its version check, or decide no update is
+// warranted, all of which answer the same CmdOK as an update that actually runs.
+//
+// Fire-and-forget on purpose, same shape as uploadLogs. A synchronous call here
+// can never deliver its reply: an update that IS warranted runs for minutes and
+// ENDS IN A REBOOT, so the updater tears the process down while the caller is
+// still waiting on the response. Hardware repro 2026-08-07 (FF1-8EVTK3RE): the app's
+// POST /api/cast {"command":"updateToLatestVersion"} produced "Executing system
+// update command" with no matching "Hub request served" line ever — the update
+// itself ran to completion and rebooted the device 59s later, while the app saw
+// only a dropped connection and reported it as a transport error. Every reply
+// this handler could produce is therefore either undeliverable (success, reboot
+// wins the race) or better narrated on screen (failure, see below).
+//
+// ctx is the DAEMON-lifetime context, not a per-request one — the hub passes
+// h.ctx and the relayer read loop passes the ctx main() started it with — so it
+// is both safe and REQUIRED to carry into the detached goroutine: otagate's
+// runLocal keys its "a cancel must not latch a permanent failure" guard off
+// ctx.Err(), and a shutdown mid-ladder must still cancel the run. This is why
+// it does NOT swap in context.Background() the way uploadLogsInProcess does; if
+// a future caller ever hands this a request-scoped ctx, that guard has to be
+// revisited before this detaches from it.
+//
+// Failures are logged here and narrated on screen by the gate's OnProgress /
+// OnPermanentFailure callbacks rather than returned — by the time one is known
+// there is no caller left to return it to.
 func (e *executor) updateToLatest(ctx context.Context) (interface{}, error) {
+	if !e.otaUpdateInFlight.CompareAndSwap(false, true) {
+		e.logger.Info("System update already in flight; duplicate command ignored")
+		return CmdOK, nil
+	}
+
 	e.logger.Info("Executing system update command")
 
-	// Route the user-triggered update through the OTA gate so it is single-flighted
-	// with the mandatory pre-claim gate. The gate drives the updater locally.
-	if _, err := e.otaGateInstance().RequestUpdate(ctx); err != nil {
-		return nil, fmt.Errorf("failed to request system update: %w", err)
-	}
+	// Resolved here rather than inside the goroutine so a test-injected gate is
+	// observed deterministically, and so the lazy build's HTTP client, runner and
+	// narration callbacks are constructed on the command path instead of the
+	// detached one. (otaGateOnce is a sync.Once, so either placement is race-free.)
+	gate := e.otaGateInstance()
+
+	go func() {
+		defer e.otaUpdateInFlight.Store(false)
+		// Route the user-triggered update through the OTA gate so it is
+		// single-flighted with the mandatory pre-claim and startup gates. The
+		// gate drives the updater locally.
+		if _, err := gate.RequestUpdate(ctx); err != nil {
+			e.logger.Error("System update request failed", zap.Error(err))
+		}
+	}()
 
 	return CmdOK, nil
 }
