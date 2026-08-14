@@ -17,6 +17,7 @@ import (
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
@@ -172,8 +173,30 @@ type relayer struct {
 	controlSem   chan struct{}
 	shedSem      chan struct{}
 
+	// connObserver, when set, is told about connection lifecycle transitions:
+	// (true, 0) after a successful dial, (false, 0) on teardown, and
+	// (false, code) when the read loop saw a close frame with a code. It feeds
+	// the netlog flight recorder; the observer must be internally synchronized
+	// and non-blocking (the recorder's enqueue is). Set once at wiring time
+	// BEFORE any Connect (same plain-field ordering contract as the hub's
+	// contactObserver); nil is a no-op.
+	connObserver func(connected bool, closeCode int)
+
 	// Logger
 	logger *zap.Logger
+}
+
+// SetConnectionObserver wires the lifecycle observer (see connObserver).
+// Call before the first Connect.
+func (r *relayer) SetConnectionObserver(fn func(connected bool, closeCode int)) {
+	r.connObserver = fn
+}
+
+// observeConn forwards one lifecycle transition to the observer, if wired.
+func (r *relayer) observeConn(connected bool, closeCode int) {
+	if r.connObserver != nil {
+		r.connObserver(connected, closeCode)
+	}
 }
 
 // New creates a new Relayer client
@@ -330,6 +353,15 @@ func (r *relayer) Connect(ctx context.Context) error {
 	}
 
 	r.conn = conn
+	// Stage-0/1 observability (docs/wan-outage-observability.md): connection
+	// state is exported event-driven from the three lifecycle sites (here,
+	// closeConn, and the read-loop close-frame capture). Published UNDER the
+	// relayer lock, matching closeConn's already-locked publication — an
+	// unlocked publish here could interleave with a concurrent Close() so
+	// that the final exported state says "connected" while r.conn is nil,
+	// corrupting the last record sealed into the ring at shutdown.
+	netmetrics.SetRelayerConnected(true)
+	r.observeConn(true, 0)
 	r.Unlock()
 	cfRay := ""
 	if resp != nil {
@@ -464,6 +496,16 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 				r.Unlock()
 				_, msg, err := conn.ReadMessage()
 				if err != nil {
+					// The close code only exists here, at the read that saw the
+					// close frame — record it before any teardown path runs.
+					// Correlated server-side with net_internet_reachable it
+					// separates "middlebox killed the WSS" from WAN loss
+					// (docs/wan-outage-observability.md stage 0).
+					var closeErr *websocket.CloseError
+					if errors.As(err, &closeErr) {
+						netmetrics.RecordRelayerCloseCode(closeErr.Code)
+						r.observeConn(false, closeErr.Code)
+					}
 					if r.shouldStop(ctx, done) {
 						r.logger.Info("Relayer read loop stopped after connection shutdown", zap.Error(err))
 						return
@@ -809,6 +851,12 @@ func (r *relayer) closeConn() {
 	}
 
 	r.conn = nil
+	// Every real teardown funnels through here (read-error reconnects and
+	// explicit Close alike), so this is the one site that can count
+	// disconnects exactly once per connection.
+	netmetrics.SetRelayerConnected(false)
+	netmetrics.RecordRelayerDisconnect()
+	r.observeConn(false, 0)
 	r.logger.Info("Relayer connection closed")
 }
 

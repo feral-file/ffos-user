@@ -1217,6 +1217,10 @@ func TestInitializeApp(t *testing.T) {
 		"test-api-key",
 		nil,
 		nil,
+		// Netlog config: disabled so the wiring test never touches the real
+		// ring directory (buildNetlogRecorder would otherwise attempt
+		// /home/feralfile and merely degrade to nil with a warn).
+		&config.NetlogConfig{Disabled: true},
 		provisioning.Tuning{},
 		"com.feralfile.test",
 		nil,
@@ -1283,6 +1287,7 @@ func TestInitializeApp_OfflineCacheEnabled(t *testing.T) {
 		"test-api-key",
 		nil,
 		&config.OfflineCacheConfig{Enabled: true, RootDir: t.TempDir()},
+		&config.NetlogConfig{Disabled: true},
 		provisioning.Tuning{},
 		"com.feralfile.test",
 		nil,

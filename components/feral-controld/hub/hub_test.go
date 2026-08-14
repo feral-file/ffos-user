@@ -99,6 +99,25 @@ func TestNew(t *testing.T) {
 	assert.NotNil(t, h)
 }
 
+// TestMetricsRouteServesAllRegistries pins that /metrics merges every
+// producer-owned registry: the playback counters (status) and the stage-0
+// network gauges (netmetrics, docs/wan-outage-observability.md). A regression
+// that drops one gatherer would silently blind the vmagent timeline.
+func TestMetricsRouteServesAllRegistries(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	mux := ts.hub.(*hub).server.Handler()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, "playback_start_total", "status playback registry missing from /metrics")
+	assert.Contains(t, body, "relayer_connected", "netmetrics registry missing from /metrics")
+}
+
 func TestNew_UnsupportedHandlerType(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

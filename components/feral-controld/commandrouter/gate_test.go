@@ -322,6 +322,17 @@ func TestDefaultGateConfig_ClassifiesCommands(t *testing.T) {
 	assert.Greater(t, rotation.Rate, reboot.Rate)
 	assert.GreaterOrEqual(t, rotation.Burst, 3)
 	assert.False(t, rotation.Dedupe)
+
+	// runNetworkDiagnostics is the security control for a probe command
+	// reachable from the unauthenticated LAN hub: it holds a dispatch slot
+	// for a live ladder pass, so it must never regress to the generous
+	// Default budget, must stay deduped (identical in-flight requests share
+	// one run), and must weigh more than a cheap query.
+	netdiag, ok := cfg.Policies[commands.CMD_RUN_NETWORK_DIAGNOSTICS]
+	require.True(t, ok, "runNetworkDiagnostics must be explicitly classified, not Default")
+	assert.True(t, netdiag.Dedupe)
+	assert.Less(t, netdiag.Rate, 1.0)
+	assert.Greater(t, netdiag.Weight, query.Weight)
 }
 
 // TestDefaultGateConfig_ClassifiesOfflineCacheCommands is the regression

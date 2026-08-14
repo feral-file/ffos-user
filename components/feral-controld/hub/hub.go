@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
@@ -108,7 +110,15 @@ func (h *hub) routes() {
 		panic("Expected ServeMux handler, got different type")
 	}
 
-	metrics := promhttp.HandlerFor(status.PlaybackMetricsGatherer(), promhttp.HandlerOpts{})
+	// One /metrics route, several producer-owned registries: playback counters
+	// (status) and the stage-0 network gauges (netmetrics) each stay with the
+	// package that writes them, merged only at the serving edge here. Both are
+	// cache-only — a scrape never triggers probe work (the §4.7 rule extended
+	// to metrics; see docs/wan-outage-observability.md).
+	metrics := promhttp.HandlerFor(prometheus.Gatherers{
+		status.PlaybackMetricsGatherer(),
+		netmetrics.Gatherer(),
+	}, promhttp.HandlerOpts{})
 
 	mux.HandleFunc("/api/cast", h.withMiddleware("cast", h.handleCast))
 	mux.HandleFunc("/api/notification", h.withMiddleware("notification", h.handleNotification))
