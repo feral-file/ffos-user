@@ -187,7 +187,11 @@ func parseLease(output, excludeProfile string) (info LeaseInfo, hasAddr, surveye
 		if cur.typ != "ethernet" && cur.typ != "wifi" {
 			return
 		}
-		if cur.state < 70 || cur.state > 100 { // NM IP_CONFIG..ACTIVATED (see doc above)
+		// NM IP_CONFIG..ACTIVATED (see doc above). LOCKSTEP with
+		// status/linkcheck.go's nmDeviceStateIPConfig window (the diagnostic
+		// link rung): if one side's eligibility window moves, the other must
+		// move with it or link and lease evidence contradict each other.
+		if cur.state < 70 || cur.state > 100 {
 			return
 		}
 		if excludeProfile != "" && cur.conn == excludeProfile {
