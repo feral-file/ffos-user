@@ -608,3 +608,47 @@ func TestRecorderSelfUploadDefersWhenSlotBusy(t *testing.T) {
 	})
 	assert.EqualValues(t, 2, attempts.Load(), "rate-limited episode must not attempt the upload")
 }
+
+// TestRecorderRelayerLateCloseCodeUpgradesRecord: the relayer's two teardown
+// observations race — an explicit Close publishes the code-less closeConn
+// (false, 0) while the read loop is still parked, and the code-bearing
+// (false, code) arrives second. The close code is the evidence separating
+// "middlebox killed the WSS" from WAN loss, so the late code must be recorded
+// (once), not deduplicated away by the state-only rule.
+func TestRecorderRelayerLateCloseCodeUpgradesRecord(t *testing.T) {
+	h := newHarness(t, nil)
+
+	h.rec.ObserveRelayer(true, 0)
+	h.rec.ObserveRelayer(false, 0)    // closeConn wins the race: code-less
+	h.rec.ObserveRelayer(false, 1011) // read loop's close frame arrives late
+	h.rec.ObserveRelayer(false, 1006) // further duplicates dedupe as before
+	h.rec.ObserveRelayer(false, 0)
+
+	h.waitRecords(func(r []Record) bool { return countKind(r, KindRelayer) >= 3 })
+	time.Sleep(50 * time.Millisecond) // window for (wrong) extra records to land
+	recs, _ := readRing(t, h.dir)
+	var events []RelayerEvent
+	for _, rec := range recs {
+		if rec.Kind == KindRelayer {
+			events = append(events, *rec.Relayer)
+		}
+	}
+	require.Len(t, events, 3, "connect, code-less disconnect, one code upgrade — nothing else")
+	assert.Equal(t, RelayerEvent{Connected: true}, events[0])
+	assert.Equal(t, RelayerEvent{Connected: false, CloseCode: 0}, events[1])
+	assert.Equal(t, RelayerEvent{Connected: false, CloseCode: 1011}, events[2],
+		"the late close code must be recorded, and only the first one")
+
+	// A reconnect resets the upgrade: the next disconnect's code records
+	// normally through the state edge.
+	h.rec.ObserveRelayer(true, 0)
+	h.rec.ObserveRelayer(false, 1006)
+	recs = h.waitRecords(func(r []Record) bool { return countKind(r, KindRelayer) == 5 })
+	var last *RelayerEvent
+	for _, rec := range recs {
+		if rec.Kind == KindRelayer {
+			last = rec.Relayer
+		}
+	}
+	assert.Equal(t, RelayerEvent{Connected: false, CloseCode: 1006}, *last)
+}

@@ -106,8 +106,11 @@ type event struct {
 
 // relayerObservation carries the raw producer signal. The relayer reports a
 // close-frame teardown as (false, code) from its read loop and the code-less
-// closeConn teardown as (false, 0); state dedupe keeps whichever arrived
-// first, which is the code-carrying one on the close-frame path.
+// closeConn teardown as (false, 0) — and the ORDER is not guaranteed: an
+// explicit Close publishes closeConn's (false, 0) while the read loop is
+// still parked, whose (false, code) then arrives second (the ordering the
+// relayer gauge test pins). handleRelayer therefore upgrades a code-less
+// disconnect with a late code instead of deduplicating it away.
 type relayerObservation struct {
 	connected bool
 	closeCode int // 0 = no code in this observation
@@ -145,9 +148,13 @@ type Recorder struct {
 
 	// mu guards the episode/summary state shared between the worker and
 	// LastOutage()/RunDiagnostics() callers.
-	mu               sync.Mutex
-	lastInternet     *bool
-	lastRelayer      *bool
+	mu           sync.Mutex
+	lastInternet *bool
+	lastRelayer  *bool
+	// lastRelayerCode is the close code recorded for the current disconnect
+	// (0 = none yet), so a late code-bearing observation can upgrade a
+	// code-less record exactly once (see handleRelayer).
+	lastRelayerCode  int
 	outageOpen       bool
 	outageStart      time.Time
 	outageClass      Class
@@ -497,11 +504,25 @@ func (r *Recorder) handleRelayer(ev event) {
 
 	r.mu.Lock()
 	if r.lastRelayer != nil && *r.lastRelayer == obs.connected {
+		// Duplicate state — normally deduped, with ONE exception: teardown
+		// can publish the code-less closeConn observation before the read
+		// loop's code-bearing one (see relayerObservation), and the close
+		// code is the evidence separating "middlebox killed the WSS" from
+		// WAN loss. A late code upgrades a code-less disconnect exactly once;
+		// once a code is recorded, further duplicates dedupe as before.
+		upgrade := !obs.connected && obs.closeCode != 0 && r.lastRelayerCode == 0
+		if !upgrade {
+			r.mu.Unlock()
+			return
+		}
+		r.lastRelayerCode = obs.closeCode
 		r.mu.Unlock()
+		r.append(Record{Stamp: ev.stamp, Kind: KindRelayer, Relayer: &RelayerEvent{Connected: false, CloseCode: obs.closeCode}})
 		return
 	}
 	v := obs.connected
 	r.lastRelayer = &v
+	r.lastRelayerCode = obs.closeCode
 	r.mu.Unlock()
 
 	r.append(Record{Stamp: ev.stamp, Kind: KindRelayer, Relayer: &RelayerEvent{Connected: obs.connected, CloseCode: obs.closeCode}})
