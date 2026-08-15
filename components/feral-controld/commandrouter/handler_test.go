@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/golang/mock/gomock"
@@ -24,6 +25,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // newRoutableExecutor builds an executor mock for a device that is NOT mid
@@ -784,6 +786,110 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 
 	assert.NoError(t, err)
 	assert.Equal(t, cdpResult, result)
+}
+
+// inlineManifestJSON is a §3.6 inline Ref Manifest, shaped after the spec's own
+// example. The artist's empty "id" is deliberate: it is present-but-empty in the
+// spec example, and a manifest decoded into typed structs and re-encoded would
+// drop it under omitempty — which is exactly why dp1-go models inlineManifest as
+// raw JSON. Keeping it here means the round-trip assertion below would catch a
+// future change that starts decoding the field.
+const inlineManifestJSON = `{"refVersion":"1.1.0","id":"manifest-1",` +
+	`"created":"2026-01-01T00:00:00Z","locale":"en",` +
+	`"metadata":{"title":"Manifest Title","artists":[{"id":"","name":"Manifest Artist"}]},` +
+	`"controls":{"display":{"scaling":"fit"}}}`
+
+// TestCommandHandler_Process_DisplayPlaylist_PreservesInlineManifest pins the
+// invariant the whole dp1-go dependency floor exists for.
+//
+// Nothing in this daemon carries playlist JSON through as raw bytes at the item
+// level: an inline dp1_call arrives as map[string]interface{}, is marshaled and
+// unmarshalled into the TYPED *dp1.Playlist (Process's dp1_call branch), and the
+// typed value is what gets re-emitted to the player. dp1.Playlist embeds
+// dp1playlist.Playlist and carries no catch-all map, so any field the pinned
+// dp1-go does not model is erased at that first unmarshal — silently, with the
+// cast still succeeding. That is how ff-player's non-standard item.metadata and
+// playlist.curator are lost today.
+//
+// So this test is the executable statement of the version floor: it fails on
+// dp1-go < v0.6.0 (which has no PlaylistItem.InlineManifest) and passes at and
+// above it. It deliberately uses the REAL JSON wrapper rather than mocks —
+// mocking marshal/unmarshal would mock away the very step being pinned.
+func TestCommandHandler_Process_DisplayPlaylist_PreservesInlineManifest(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	handler := commandrouter.New(
+		newRoutableExecutor(ctrl), mockCDP, mocks.NewMockDP1(ctrl), mockStatusPoller,
+		nil, nil, nil, nil, wrapper.NewJSON(), logger)
+
+	var playlistMap map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"dpVersion": "1.1.0",
+		"id": "playlist-1",
+		"title": "Test Playlist",
+		"items": [{
+			"id": "item1",
+			"title": "Item Title",
+			"source": "https://example.com/video.mp4",
+			"duration": 300,
+			"license": "open",
+			"inlineManifest": `+inlineManifestJSON+`
+		}]
+	}`), &playlistMap))
+
+	var expression string
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expression, _ = params["expression"].(string)
+			return playerOkResponse(), nil
+		}).
+		Times(1)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	_, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"dp1_call": playlistMap},
+	})
+	require.NoError(t, err)
+
+	item := firstCastItem(t, expression)
+	inline, ok := item["inlineManifest"]
+	require.True(t, ok, "inlineManifest was dropped before reaching the player")
+	inlineBytes, err := json.Marshal(inline)
+	require.NoError(t, err)
+	assert.JSONEq(t, inlineManifestJSON, string(inlineBytes))
+
+	// The item's own fields must still be there: a bump that carried the new
+	// field but broke an existing one would otherwise pass the check above.
+	assert.Equal(t, "Item Title", item["title"])
+	assert.Equal(t, "https://example.com/video.mp4", item["source"])
+}
+
+// firstCastItem digs the first playlist item out of the CDP expression the
+// handler sent, which has the shape window.handleCDPRequest(<command JSON>).
+func firstCastItem(t *testing.T, expression string) map[string]interface{} {
+	t.Helper()
+
+	const prefix = "window.handleCDPRequest("
+	require.True(t, strings.HasPrefix(expression, prefix), "unexpected CDP expression: %s", expression)
+	require.True(t, strings.HasSuffix(expression, ")"), "unexpected CDP expression: %s", expression)
+
+	var payload struct {
+		Request struct {
+			DP1Call struct {
+				Items []map[string]interface{} `json:"items"`
+			} `json:"dp1_call"`
+		} `json:"request"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSuffix(strings.TrimPrefix(expression, prefix), ")")), &payload))
+	require.Len(t, payload.Request.DP1Call.Items, 1)
+	return payload.Request.DP1Call.Items[0]
 }
 
 func TestCommandHandler_Process_RefreshArtwork(t *testing.T) {

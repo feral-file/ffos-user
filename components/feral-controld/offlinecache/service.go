@@ -96,11 +96,26 @@ const dp1MaxPlaylistItems = 1024
 // DownloadPlaylist calls queued behind it before the single serial worker
 // drains them, is never rejected with ErrQueueFull under realistic use.
 // Each queued captureJob only holds item metadata
-// (dp1playlist.PlaylistItem), never resource bytes, so even 4096 entries
-// is a small, bounded amount of memory — this cap exists purely to stop a
-// truly pathological backlog (e.g. a caller bug that re-enqueues in a
-// loop) from growing without bound, not to meaningfully constrain
+// (dp1playlist.PlaylistItem), never resource bytes — this cap exists purely
+// to stop a truly pathological backlog (e.g. a caller bug that re-enqueues
+// in a loop) from growing without bound, not to meaningfully constrain
 // legitimate traffic.
+//
+// "Item metadata" stopped meaning "a few hundred bytes" once DP-1 added
+// the playlists-extension inlineManifest (§3.6): an item may now carry a
+// whole Ref Manifest as raw JSON, and the ref-manifest spec recommends
+// capping one of those at 64 KB uncompressed
+// (core/v1.1.0/ref-manifest.md §8 — the §3.6 overlay that permits the
+// inline carriage states no size guidance of its own, it inherits the
+// manifest's). A full 4096-entry backlog of manifest-carrying items is therefore
+// a couple of hundred MB rather than the megabyte this comment used to
+// imply, on a device already under kiosk memory pressure. That is still an
+// unreachable worst case — a realistic playlist is orders of magnitude
+// smaller than one burst, let alone four — and the field is deliberately
+// NOT stripped from the queued item, because ItemRecord.Item documents
+// itself as the verbatim DP-1 item and a silently-hollowed copy would be
+// the worse trade. But size the next bound against the manifest, not
+// against the id-and-URL item this comment was originally written for.
 const defaultMaxQueueLen = 4 * dp1MaxPlaylistItems
 
 // ErrClearedDuringDownload is returned by DownloadItem when a
