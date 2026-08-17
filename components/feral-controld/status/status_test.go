@@ -1036,6 +1036,105 @@ func TestPlayerStatus_TombstoneRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPlayerStatus_InlineManifestSurvivesLightweightNotification guards the
+// item-level §3.6 inline Ref Manifest across the same checkStatus -> typed
+// unmarshal -> player_status re-marshal bridge as the two tests above, plus the
+// lightweight filter that only player_status goes through.
+//
+// Two failure modes are pinned here, and they pull in opposite directions:
+//
+//   - The typed re-marshal drops any field dp1-go does not model, so this test
+//     fails on dp1-go < v0.6.0. Same class as defaultDuration and tombstone.
+//   - lightweightPlayerStatus exists to SHED weight, so a later reader looking
+//     for payload to trim will find an inline manifest a very tempting target.
+//     It must not be trimmed: controllers read the manifest for the artwork's
+//     title and artist, and no other field on player_status carries them.
+//
+// Source is still blanked, which is what makes the distinction concrete: this
+// filter drops what the controller cannot use, not simply what is large.
+func TestPlayerStatus_InlineManifestSurvivesLightweightNotification(t *testing.T) {
+	// The artist's present-but-empty "id" mirrors the spec's own §3.6 example.
+	// It survives only because dp1-go holds inlineManifest as raw JSON; a
+	// decoded manifest would drop it under omitempty on the way back out.
+	raw := []byte(`{
+		"ok": true,
+		"index": 0,
+		"items": [{
+			"id": "item1",
+			"title": "Item Title",
+			"source": "https://example.com/video.mp4",
+			"inlineManifest": {
+				"refVersion": "1.1.0",
+				"id": "manifest-1",
+				"created": "2026-01-01T00:00:00Z",
+				"locale": "en",
+				"metadata": {
+					"title": "Manifest Title",
+					"artists": [{"id": "", "name": "Manifest Artist"}]
+				}
+			}
+		}]
+	}`)
+
+	var playerStatus PlayerStatus
+	if err := json.Unmarshal(raw, &playerStatus); err != nil {
+		t.Fatalf("unmarshal checkStatus reply: %v", err)
+	}
+	if playerStatus.Items == nil || len(*playerStatus.Items) != 1 {
+		t.Fatal("items were dropped on unmarshal")
+	}
+	if len((*playerStatus.Items)[0].InlineManifest) == 0 {
+		t.Fatal("item inlineManifest was dropped on unmarshal")
+	}
+
+	p := &poller{logger: zap.NewNop()}
+	remarshaled, err := json.Marshal(p.lightweightPlayerStatus(&playerStatus))
+	if err != nil {
+		t.Fatalf("re-marshal lightweight player status: %v", err)
+	}
+
+	var wire struct {
+		Items []struct {
+			Source         string `json:"source"`
+			InlineManifest *struct {
+				Metadata struct {
+					Title   string `json:"title"`
+					Artists []struct {
+						ID   *string `json:"id"`
+						Name string  `json:"name"`
+					} `json:"artists"`
+				} `json:"metadata"`
+			} `json:"inlineManifest"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(remarshaled, &wire); err != nil {
+		t.Fatalf("parse re-marshaled status: %v", err)
+	}
+	if len(wire.Items) != 1 {
+		t.Fatalf("items on the wire = %d, want 1", len(wire.Items))
+	}
+	item := wire.Items[0]
+	if item.InlineManifest == nil {
+		t.Fatal("inlineManifest was stripped from the lightweight player_status payload")
+	}
+	if got := item.InlineManifest.Metadata.Title; got != "Manifest Title" {
+		t.Fatalf("manifest title = %q, want \"Manifest Title\"", got)
+	}
+	if len(item.InlineManifest.Metadata.Artists) != 1 {
+		t.Fatalf("manifest artists = %d, want 1", len(item.InlineManifest.Metadata.Artists))
+	}
+	artist := item.InlineManifest.Metadata.Artists[0]
+	if artist.Name != "Manifest Artist" {
+		t.Fatalf("manifest artist name = %q, want \"Manifest Artist\"", artist.Name)
+	}
+	if artist.ID == nil {
+		t.Fatal("manifest artist id was dropped; the manifest is not being carried verbatim")
+	}
+	if item.Source != "" {
+		t.Fatalf("source = %q, want it blanked by the lightweight filter", item.Source)
+	}
+}
+
 // TestPlayerStatus_TombstoneOmittedWhenAbsent ensures a player that never had
 // a tombstone mode set re-marshals without inventing one — absence is what
 // tells ff-app to show the "timed" fallback rather than a stored choice.

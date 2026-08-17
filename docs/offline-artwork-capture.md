@@ -1153,6 +1153,26 @@ byte-exact reproduction of the original document for a reason JCS
 canonicalization does not cover, that caller must capture the raw fetch
 bytes itself before `dp1` resolution; `offlinecache` does not do so today.
 
+That safety argument is narrower than it reads, and the limit is worth
+stating explicitly because it is invisible at the call site. JCS
+canonicalization absorbs key order and whitespace; it does **not** absorb a
+missing key. `dp1.Playlist` embeds `dp1playlist.Playlist` and carries no
+catch-all map, so any field the pinned `dp1-go` does not model is dropped
+at the parse step and never reaches the re-serialization — which changes
+the canonicalized payload and therefore the signature's digest. The
+protection is not "re-serialization is content-preserving" but "the pinned
+`dp1-go` models every field the document carries", and that second claim
+expires every time the spec grows a field. Item-level `inlineManifest`
+(playlists extension §3.6) is exactly such a field and is why the
+dependency floor is `dp1-go v0.6.0`; the regression tests in
+`commandrouter/handler_test.go` and `commandrouter/offlinecache_test.go`
+pin it across both the player send and this persisted copy.
+
+`feral-controld` verifies no signatures itself — it imports no `dp1-go/sign`
+— so a field lost this way produces no error here. It surfaces downstream,
+as a verification failure in a consumer that does check, or simply as
+metadata that vanished somewhere between the publisher and the screen.
+
 There is deliberately **no** top-level manifest, no separate
 `capsules/{key}/assets/index.json`, and no `playlists/{id}/items.json`:
 

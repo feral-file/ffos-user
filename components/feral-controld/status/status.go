@@ -488,6 +488,26 @@ func (s *poller) FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error) {
 
 // lightweightPlayerStatus creates a lightweight player status by removing the large fields (Playlist) from the player status
 // For all items, remove the source field from the item
+//
+// The filter drops what a controller cannot USE, which is not the same as
+// dropping whatever is large — the two only coincide for Playlist, whose items
+// this payload already carries. In particular an item's inlineManifest
+// (playlists extension §3.6) is deliberately kept even though it can be the
+// largest field here: the ref-manifest spec recommends a ceiling of 64 KB per
+// manifest (core/v1.1.0/ref-manifest.md §8), against an item that is otherwise
+// a few hundred bytes.
+//
+// It is kept because it carries the artwork's ARTIST names, which no other
+// field on player_status supplies — item.title survives this filter, artists
+// have no item-level counterpart at all. (The manifest's own title is also
+// usually the richer one, carrying e.g. the year, which is why ff-player's
+// tombstone prefers it; but that is a nicety, the artist line is the part that
+// simply disappears.) Trimming the manifest to shrink the payload would take
+// that away silently, leaving controllers no way to name who made the work.
+//
+// Source, by contrast, is blanked precisely because it is dead weight on this
+// wire: it is the cache identity and the URL Chromium loads, not something a
+// status consumer acts on.
 func (s *poller) lightweightPlayerStatus(playerStatus *PlayerStatus) *PlayerStatus {
 	items := make([]dp1playlist.PlaylistItem, 0)
 	if playerStatus.Items != nil {
