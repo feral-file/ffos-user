@@ -36,6 +36,11 @@ const (
 	maxTargetsResponseBytes = 1 << 20
 	maxCDPMessageBytes      = 48 << 20
 	maxScreenshotBytes      = 32 << 20
+	// Full PNG decoding is required to validate IDAT data and chunk checksums.
+	// Bound the decoded surface first so malformed metadata cannot force an
+	// unbounded allocation. This still permits a 4096-square custom capture and
+	// native ultrawide viewports with the same or fewer pixels.
+	maxDecodedPixels = MaxDimension * MaxDimension
 )
 
 var (
@@ -379,11 +384,23 @@ func decodeScreenshot(encoded string, bounds Bounds) (*Image, error) {
 	if config.Width <= 0 || config.Height <= 0 {
 		return nil, fmt.Errorf("%w: image has invalid dimensions %dx%d", ErrInvalidImage, config.Width, config.Height)
 	}
+	if config.Width > maxDecodedPixels/config.Height {
+		return nil, fmt.Errorf(
+			"%w: image dimensions %dx%d exceed the %d-pixel decode limit",
+			ErrInvalidImage,
+			config.Width,
+			config.Height,
+			maxDecodedPixels,
+		)
+	}
 	if bounds.Width > 0 && config.Width > bounds.Width {
 		return nil, fmt.Errorf("%w: image width %d exceeds requested bound %d", ErrInvalidImage, config.Width, bounds.Width)
 	}
 	if bounds.Height > 0 && config.Height > bounds.Height {
 		return nil, fmt.Errorf("%w: image height %d exceeds requested bound %d", ErrInvalidImage, config.Height, bounds.Height)
+	}
+	if _, err := png.Decode(bytes.NewReader(data)); err != nil {
+		return nil, fmt.Errorf("%w: fully decode PNG: %w", ErrInvalidImage, err)
 	}
 
 	digest := sha256.Sum256(data)

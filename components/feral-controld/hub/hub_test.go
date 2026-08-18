@@ -778,6 +778,8 @@ func TestHandleScreenshot_RejectsInvalidRequest(t *testing.T) {
 		status int
 	}{
 		{name: "wrong method", method: http.MethodPost, target: "/api/screenshot", status: http.StatusMethodNotAllowed},
+		{name: "empty width", method: http.MethodGet, target: "/api/screenshot?width=", status: http.StatusBadRequest},
+		{name: "empty height", method: http.MethodGet, target: "/api/screenshot?height=", status: http.StatusBadRequest},
 		{name: "non numeric width", method: http.MethodGet, target: "/api/screenshot?width=wide", status: http.StatusBadRequest},
 		{name: "zero width", method: http.MethodGet, target: "/api/screenshot?width=0", status: http.StatusBadRequest},
 		{name: "negative height", method: http.MethodGet, target: "/api/screenshot?height=-1", status: http.StatusBadRequest},

@@ -318,6 +318,9 @@ func screenshotBounds(r *http.Request) (screenshot.Bounds, error) {
 		if len(query[key]) != 1 {
 			return screenshot.Bounds{}, fmt.Errorf("query parameter %q must appear once", key)
 		}
+		if query[key][0] == "" {
+			return screenshot.Bounds{}, fmt.Errorf("query parameter %q cannot be empty", key)
+		}
 	}
 
 	width, err := screenshotDimension(query.Get("width"), "width")

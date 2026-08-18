@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
@@ -221,6 +223,29 @@ func TestCapturerCaptureReturnsBusyWithoutStartingSecondCapture(t *testing.T) {
 	assert.ErrorIs(t, err, ErrBusy)
 }
 
+func TestDecodeScreenshotRejectsTruncatedPNG(t *testing.T) {
+	fullPNG := makePNG(t, 32, 18)
+	truncatedPNG := fullPNG[:len(fullPNG)-12] // Remove the required IEND chunk.
+
+	_, configErr := png.DecodeConfig(bytes.NewReader(truncatedPNG))
+	require.NoError(t, configErr, "regression fixture must pass metadata-only validation")
+
+	_, err := decodeScreenshot(base64.StdEncoding.EncodeToString(truncatedPNG), Bounds{})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidImage)
+}
+
+func TestDecodeScreenshotRejectsOversizedDeclaredSurface(t *testing.T) {
+	data := pngWithDeclaredDimensions(t, MaxDimension+1, MaxDimension+1)
+
+	_, err := decodeScreenshot(base64.StdEncoding.EncodeToString(data), Bounds{})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidImage)
+	assert.ErrorContains(t, err, "pixel decode limit")
+}
+
 func captureResponse(t *testing.T, id int, data []byte) []byte {
 	t.Helper()
 
@@ -242,4 +267,14 @@ func makePNG(t *testing.T, width, height int) []byte {
 	var buf bytes.Buffer
 	require.NoError(t, png.Encode(&buf, img))
 	return buf.Bytes()
+}
+
+func pngWithDeclaredDimensions(t *testing.T, width, height uint32) []byte {
+	t.Helper()
+
+	data := makePNG(t, 1, 1)
+	binary.BigEndian.PutUint32(data[16:20], width)
+	binary.BigEndian.PutUint32(data[20:24], height)
+	binary.BigEndian.PutUint32(data[29:33], crc32.ChecksumIEEE(data[12:29]))
+	return data
 }
