@@ -112,7 +112,7 @@ func (c *capturer) Capture(ctx context.Context, bounds Bounds) (*Image, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("%w: dial CDP page target: %v", ErrUnavailable, err)
+		return nil, fmt.Errorf("%w: dial CDP page target: %w", ErrUnavailable, err)
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -193,7 +193,7 @@ func (c *capturer) pageTargetURL(ctx context.Context) (string, error) {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		return "", fmt.Errorf("%w: fetch CDP targets: %v", ErrUnavailable, err)
+		return "", fmt.Errorf("%w: fetch CDP targets: %w", ErrUnavailable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -202,7 +202,7 @@ func (c *capturer) pageTargetURL(ctx context.Context) (string, error) {
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTargetsResponseBytes+1))
 	if err != nil {
-		return "", fmt.Errorf("%w: read CDP targets: %v", ErrUnavailable, err)
+		return "", fmt.Errorf("%w: read CDP targets: %w", ErrUnavailable, err)
 	}
 	if len(body) > maxTargetsResponseBytes {
 		return "", fmt.Errorf("%w: CDP targets response exceeds %d bytes", ErrUnavailable, maxTargetsResponseBytes)
@@ -213,7 +213,7 @@ func (c *capturer) pageTargetURL(ctx context.Context) (string, error) {
 		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
 	}
 	if err := json.Unmarshal(body, &targets); err != nil {
-		return "", fmt.Errorf("%w: decode CDP targets: %v", ErrUnavailable, err)
+		return "", fmt.Errorf("%w: decode CDP targets: %w", ErrUnavailable, err)
 	}
 
 	pageTargets := make([]string, 0, 1)
@@ -366,7 +366,7 @@ func decodeScreenshot(encoded string, bounds Bounds) (*Image, error) {
 	}
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode base64: %v", ErrInvalidImage, err)
+		return nil, fmt.Errorf("%w: decode base64: %w", ErrInvalidImage, err)
 	}
 	if len(data) > maxScreenshotBytes {
 		return nil, fmt.Errorf("%w: image exceeds %d bytes", ErrInvalidImage, maxScreenshotBytes)
@@ -374,7 +374,7 @@ func decodeScreenshot(encoded string, bounds Bounds) (*Image, error) {
 
 	config, err := png.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode PNG metadata: %v", ErrInvalidImage, err)
+		return nil, fmt.Errorf("%w: decode PNG metadata: %w", ErrInvalidImage, err)
 	}
 	if config.Width <= 0 || config.Height <= 0 {
 		return nil, fmt.Errorf("%w: image has invalid dimensions %dx%d", ErrInvalidImage, config.Width, config.Height)
