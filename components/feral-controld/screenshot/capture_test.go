@@ -80,13 +80,22 @@ func TestFitDimensions(t *testing.T) {
 			wantScale:    600.0 / 1920.0,
 		},
 		{
-			name:         "single bound cannot expand proportional edge beyond safety cap",
+			name:         "single bound cannot exceed aggregate pixel budget",
 			nativeWidth:  1080,
 			nativeHeight: 1920,
 			bounds:       Bounds{Width: MaxDimension},
-			wantWidth:    2304,
-			wantHeight:   MaxDimension,
-			wantScale:    float64(MaxDimension) / 1920.0,
+			wantWidth:    2160,
+			wantHeight:   3840,
+			wantScale:    2,
+		},
+		{
+			name:         "full 4k UHD box is deliverable",
+			nativeWidth:  3840,
+			nativeHeight: 2160,
+			bounds:       Bounds{Width: 3840, Height: 2160},
+			wantWidth:    3840,
+			wantHeight:   2160,
+			wantScale:    1,
 		},
 	}
 
@@ -102,6 +111,29 @@ func TestFitDimensions(t *testing.T) {
 			assert.InDelta(t, tt.wantScale, scale, 0.000001)
 		})
 	}
+}
+
+func TestFitDimensionsRejectsBoxAbovePixelBudget(t *testing.T) {
+	_, _, _, err := fitDimensions(4096, 4096, Bounds{Width: 4096, Height: 4096})
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "cannot exceed 8294400 pixels")
+}
+
+func TestFitDimensionsRoundingStaysInsidePixelBudget(t *testing.T) {
+	width, height, _, err := fitDimensions(4001, 2003, Bounds{Width: MaxDimension})
+
+	require.NoError(t, err)
+	assert.LessOrEqual(t, width*height, MaxPixels)
+}
+
+func TestCaptureMemoryBudgetCarriesMaximumSurface(t *testing.T) {
+	// Four color bytes plus one PNG filter byte per maximum-length scanline.
+	maxRawScanlines := MaxPixels*4 + MaxDimension
+	assert.Less(t, maxRawScanlines, maxScreenshotBytes)
+
+	// Leave 1 MiB beyond the largest admitted base64 body for the CDP JSON envelope.
+	assert.Less(t, base64.StdEncoding.EncodedLen(maxScreenshotBytes)+(1<<20), maxCDPMessageBytes)
 }
 
 func TestCapturerCaptureCustomSize(t *testing.T) {

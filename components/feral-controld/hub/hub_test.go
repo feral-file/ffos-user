@@ -857,6 +857,7 @@ func TestHandleScreenshot_RejectsInvalidRequest(t *testing.T) {
 		{name: "zero width", method: http.MethodGet, target: "/api/screenshot?width=0", status: http.StatusBadRequest},
 		{name: "negative height", method: http.MethodGet, target: "/api/screenshot?height=-1", status: http.StatusBadRequest},
 		{name: "dimension too large", method: http.MethodGet, target: "/api/screenshot?width=4097", status: http.StatusBadRequest},
+		{name: "pixel budget too large", method: http.MethodGet, target: "/api/screenshot?width=4096&height=4096", status: http.StatusBadRequest},
 		{name: "duplicate dimension", method: http.MethodGet, target: "/api/screenshot?width=800&width=900", status: http.StatusBadRequest},
 		{name: "unknown query field", method: http.MethodGet, target: "/api/screenshot?size=800", status: http.StatusBadRequest},
 	}

@@ -23,9 +23,12 @@ import (
 
 const (
 	// MaxDimension caps caller-controlled output dimensions before Chromium allocates
-	// the screenshot surface. The native viewport is still allowed when no custom
-	// bounds are requested.
+	// the screenshot surface. MaxPixels is the companion aggregate cap.
 	MaxDimension = 4096
+	// MaxPixels permits a full 3840x2160 (4K UHD) surface while preventing a
+	// caller from turning two individually valid 4096-pixel edges into a 4096-square
+	// allocation. One-axis bounds are scaled down to this budget when necessary.
+	MaxPixels = 3840 * 2160
 
 	// CaptureTimeout bounds target discovery, CDP connection, and PNG encoding.
 	CaptureTimeout = 10 * time.Second
@@ -34,13 +37,16 @@ const (
 	methodCaptureScreenshot = "Page.captureScreenshot"
 
 	maxTargetsResponseBytes = 1 << 20
-	maxCDPMessageBytes      = 48 << 20
-	maxScreenshotBytes      = 32 << 20
+	// One response is single-flight through HTTP delivery. At MaxPixels, an
+	// 8-bit RGBA scanline surface is about 32 MiB; 40 MiB leaves bounded PNG
+	// framing/DEFLATE headroom, and 64 MiB carries its base64 JSON envelope.
+	maxCDPMessageBytes = 64 << 20
+	maxScreenshotBytes = 40 << 20
 	// Full PNG decoding is required to validate IDAT data and chunk checksums.
 	// Bound the decoded surface first so malformed metadata cannot force an
-	// unbounded allocation. This still permits a 4096-square custom capture and
-	// native ultrawide viewports with the same or fewer pixels.
-	maxDecodedPixels = MaxDimension * MaxDimension
+	// unbounded allocation. Native and custom captures share the same 4K-UHD
+	// pixel budget even when their edge lengths differ.
+	maxDecodedPixels = MaxPixels
 )
 
 var (
@@ -188,6 +194,9 @@ func validateBounds(bounds Bounds) error {
 	if bounds.Width > MaxDimension || bounds.Height > MaxDimension {
 		return fmt.Errorf("screenshot dimensions cannot exceed %d pixels", MaxDimension)
 	}
+	if bounds.Width > 0 && bounds.Height > 0 && bounds.Width > MaxPixels/bounds.Height {
+		return fmt.Errorf("screenshot bounds cannot exceed %d pixels", MaxPixels)
+	}
 	return nil
 }
 
@@ -303,11 +312,20 @@ func fitDimensions(nativeWidth, nativeHeight int, bounds Bounds) (int, int, floa
 			scale,
 			float64(MaxDimension)/float64(nativeWidth),
 			float64(MaxDimension)/float64(nativeHeight),
+			math.Sqrt(float64(MaxPixels)/(float64(nativeWidth)*float64(nativeHeight))),
 		)
 	}
 
 	width := max(1, int(math.Round(float64(nativeWidth)*scale)))
 	height := max(1, int(math.Round(float64(nativeHeight)*scale)))
+	// Rounding both axes can put the result a few pixels over the aggregate
+	// budget. Tighten scale from an integer-safe width so Chromium receives a
+	// proportional scale whose rounded output remains inside MaxPixels.
+	if width > MaxPixels/height {
+		width = MaxPixels / height
+		scale = float64(width) / float64(nativeWidth)
+		height = max(1, int(math.Round(float64(nativeHeight)*scale)))
+	}
 	if bounds.Width > 0 {
 		width = min(width, bounds.Width)
 	}

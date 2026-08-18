@@ -344,6 +344,9 @@ func screenshotBounds(r *http.Request) (screenshot.Bounds, error) {
 	if err != nil {
 		return screenshot.Bounds{}, err
 	}
+	if width > 0 && height > 0 && width > screenshot.MaxPixels/height {
+		return screenshot.Bounds{}, fmt.Errorf("width and height must define at most %d pixels", screenshot.MaxPixels)
+	}
 	return screenshot.Bounds{Width: width, Height: height}, nil
 }
 
