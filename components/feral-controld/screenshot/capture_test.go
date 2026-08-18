@@ -1,0 +1,245 @@
+package screenshot
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
+	"io"
+	"net/http"
+	"testing"
+
+	"github.com/golang/mock/gomock"
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+)
+
+func TestFitDimensions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		nativeWidth  int
+		nativeHeight int
+		bounds       Bounds
+		wantWidth    int
+		wantHeight   int
+		wantScale    float64
+	}{
+		{
+			name:         "native size without bounds",
+			nativeWidth:  1920,
+			nativeHeight: 1080,
+			bounds:       Bounds{},
+			wantWidth:    1920,
+			wantHeight:   1080,
+			wantScale:    1,
+		},
+		{
+			name:         "width only",
+			nativeWidth:  1920,
+			nativeHeight: 1080,
+			bounds:       Bounds{Width: 800},
+			wantWidth:    800,
+			wantHeight:   450,
+			wantScale:    800.0 / 1920.0,
+		},
+		{
+			name:         "height only",
+			nativeWidth:  1920,
+			nativeHeight: 1080,
+			bounds:       Bounds{Height: 600},
+			wantWidth:    1067,
+			wantHeight:   600,
+			wantScale:    600.0 / 1080.0,
+		},
+		{
+			name:         "square box preserves landscape ratio",
+			nativeWidth:  1920,
+			nativeHeight: 1080,
+			bounds:       Bounds{Width: 800, Height: 800},
+			wantWidth:    800,
+			wantHeight:   450,
+			wantScale:    800.0 / 1920.0,
+		},
+		{
+			name:         "portrait box is height limited",
+			nativeWidth:  1080,
+			nativeHeight: 1920,
+			bounds:       Bounds{Width: 1000, Height: 600},
+			wantWidth:    338,
+			wantHeight:   600,
+			wantScale:    600.0 / 1920.0,
+		},
+		{
+			name:         "single bound cannot expand proportional edge beyond safety cap",
+			nativeWidth:  1080,
+			nativeHeight: 1920,
+			bounds:       Bounds{Width: MaxDimension},
+			wantWidth:    2304,
+			wantHeight:   MaxDimension,
+			wantScale:    float64(MaxDimension) / 1920.0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			width, height, scale, err := fitDimensions(tt.nativeWidth, tt.nativeHeight, tt.bounds)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantWidth, width)
+			assert.Equal(t, tt.wantHeight, height)
+			assert.InDelta(t, tt.wantScale, scale, 0.000001)
+		})
+	}
+}
+
+func TestCapturerCaptureCustomSize(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	httpClient := mocks.NewMockHTTPClient(ctrl)
+	dialer := mocks.NewMockWebSocketDialer(ctrl)
+	conn := mocks.NewMockWebSocketConn(ctrl)
+
+	targets := `[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/1"}]`
+	httpClient.EXPECT().Do(gomock.Any()).DoAndReturn(func(req *http.Request) (*http.Response, error) {
+		assert.Equal(t, "http://127.0.0.1:9222/json", req.URL.String())
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(targets)),
+		}, nil
+	})
+	dialer.EXPECT().DialContext(gomock.Any(), "ws://127.0.0.1:9222/devtools/page/1", http.Header(nil)).Return(conn, nil, nil)
+	conn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil)
+	conn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
+	conn.EXPECT().Close().Return(nil)
+
+	conn.EXPECT().WriteMessage(websocket.TextMessage, gomock.Any()).DoAndReturn(func(_ int, data []byte) error {
+		var request cdpRequest
+		require.NoError(t, json.Unmarshal(data, &request))
+		assert.Equal(t, 1, request.ID)
+		assert.Equal(t, methodGetLayoutMetrics, request.Method)
+		return nil
+	})
+	conn.EXPECT().ReadMessage().Return(websocket.TextMessage, []byte(`{
+		"id":1,
+		"result":{"cssVisualViewport":{"pageX":100,"pageY":50,"clientWidth":1920,"clientHeight":1080}}
+	}`), nil)
+
+	pngBytes := makePNG(t, 800, 450)
+	conn.EXPECT().WriteMessage(websocket.TextMessage, gomock.Any()).DoAndReturn(func(_ int, data []byte) error {
+		var request struct {
+			ID     int                    `json:"id"`
+			Method string                 `json:"method"`
+			Params map[string]interface{} `json:"params"`
+		}
+		require.NoError(t, json.Unmarshal(data, &request))
+		assert.Equal(t, 2, request.ID)
+		assert.Equal(t, methodCaptureScreenshot, request.Method)
+		clip, ok := request.Params["clip"].(map[string]interface{})
+		require.True(t, ok)
+		assert.InDelta(t, 800.0/1920.0, clip["scale"], 0.000001)
+		assert.Equal(t, float64(100), clip["x"])
+		assert.Equal(t, float64(50), clip["y"])
+		assert.Equal(t, float64(1920), clip["width"])
+		assert.Equal(t, float64(1080), clip["height"])
+		return nil
+	})
+	conn.EXPECT().ReadMessage().Return(websocket.TextMessage, captureResponse(t, 2, pngBytes), nil)
+
+	capturer := New("http://127.0.0.1:9222", httpClient, dialer)
+	got, err := capturer.Capture(context.Background(), Bounds{Width: 800, Height: 800})
+
+	require.NoError(t, err)
+	assert.Equal(t, pngBytes, got.Data)
+	assert.Equal(t, 800, got.Width)
+	assert.Equal(t, 450, got.Height)
+	assert.NotEmpty(t, got.SHA256)
+	assert.False(t, got.CapturedAt.IsZero())
+}
+
+func TestCapturerCaptureRejectsImageOutsideRequestedBounds(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	httpClient := mocks.NewMockHTTPClient(ctrl)
+	dialer := mocks.NewMockWebSocketDialer(ctrl)
+	conn := mocks.NewMockWebSocketConn(ctrl)
+
+	targets := `[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/1"}]`
+	httpClient.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewBufferString(targets)),
+	}, nil)
+	dialer.EXPECT().DialContext(gomock.Any(), gomock.Any(), http.Header(nil)).Return(conn, nil, nil)
+	conn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil)
+	conn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
+	conn.EXPECT().Close().Return(nil)
+	conn.EXPECT().WriteMessage(websocket.TextMessage, gomock.Any()).Return(nil)
+	conn.EXPECT().ReadMessage().Return(websocket.TextMessage, []byte(`{
+		"id":1,
+		"result":{"cssLayoutViewport":{"clientWidth":1920,"clientHeight":1080}}
+	}`), nil)
+	conn.EXPECT().WriteMessage(websocket.TextMessage, gomock.Any()).Return(nil)
+	conn.EXPECT().ReadMessage().Return(websocket.TextMessage, captureResponse(t, 2, makePNG(t, 801, 450)), nil)
+
+	capturer := New("http://127.0.0.1:9222", httpClient, dialer)
+	_, err := capturer.Capture(context.Background(), Bounds{Width: 800, Height: 800})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidImage)
+}
+
+func TestCapturerCaptureReturnsUnavailableWithoutSinglePageTarget(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	httpClient := mocks.NewMockHTTPClient(ctrl)
+	dialer := mocks.NewMockWebSocketDialer(ctrl)
+
+	httpClient.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewBufferString(`[{"type":"worker"}]`)),
+	}, nil)
+
+	capturer := New("http://127.0.0.1:9222", httpClient, dialer)
+	_, err := capturer.Capture(context.Background(), Bounds{})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUnavailable)
+}
+
+func TestCapturerCaptureReturnsBusyWithoutStartingSecondCapture(t *testing.T) {
+	capturer := &capturer{captureSlot: make(chan struct{}, 1)}
+	capturer.captureSlot <- struct{}{}
+
+	_, err := capturer.Capture(context.Background(), Bounds{})
+
+	assert.ErrorIs(t, err, ErrBusy)
+}
+
+func captureResponse(t *testing.T, id int, data []byte) []byte {
+	t.Helper()
+
+	response, err := json.Marshal(map[string]interface{}{
+		"id": id,
+		"result": map[string]string{
+			"data": base64.StdEncoding.EncodeToString(data),
+		},
+	})
+	require.NoError(t, err)
+	return response
+}
+
+func makePNG(t *testing.T, width, height int) []byte {
+	t.Helper()
+
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	img.Set(0, 0, color.RGBA{R: 0xff, A: 0xff})
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	return buf.Bytes()
+}

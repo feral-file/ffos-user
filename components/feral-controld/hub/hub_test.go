@@ -22,8 +22,22 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
+
+type fakeScreenshotCapturer struct {
+	image  *screenshot.Image
+	err    error
+	bounds screenshot.Bounds
+	calls  int
+}
+
+func (f *fakeScreenshotCapturer) Capture(_ context.Context, bounds screenshot.Bounds) (*screenshot.Image, error) {
+	f.calls++
+	f.bounds = bounds
+	return f.image, f.err
+}
 
 type testSetup struct {
 	ctrl        *gomock.Controller
@@ -34,6 +48,8 @@ type testSetup struct {
 	mockJSON    *mocks.MockJSON
 	mockJSONDec *mocks.MockJSONDecoder
 	mockJSONEnc *mocks.MockJSONEncoder
+	capturer    *fakeScreenshotCapturer
+	mux         *http.ServeMux
 	hub         Hub
 	logger      *zap.Logger
 }
@@ -50,13 +66,14 @@ func setup(t *testing.T) *testSetup {
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockJSONDec := mocks.NewMockJSONDecoder(ctrl)
 	mockJSONEnc := mocks.NewMockJSONEncoder(ctrl)
+	capturer := &fakeScreenshotCapturer{}
 
 	// Mock HTTPServer Handler to return a ServeMux (needed for routes() in constructor)
 	// Create a fresh ServeMux for each test to avoid route conflicts
 	mux := http.NewServeMux()
 	mockServer.EXPECT().Handler().Return(mux).AnyTimes()
 
-	h := New(ctx, mockWS, mockCmd, nil, mockServer, mockJSON, logger)
+	h := New(ctx, mockWS, mockCmd, nil, capturer, mockServer, mockJSON, logger)
 
 	return &testSetup{
 		ctrl:        ctrl,
@@ -67,6 +84,8 @@ func setup(t *testing.T) *testSetup {
 		mockJSON:    mockJSON,
 		mockJSONDec: mockJSONDec,
 		mockJSONEnc: mockJSONEnc,
+		capturer:    capturer,
+		mux:         mux,
 		hub:         h,
 		logger:      logger,
 	}
@@ -95,7 +114,7 @@ func TestNew(t *testing.T) {
 		Return(http.NewServeMux()).
 		Times(1)
 
-	h := New(ctx, mockWS, mockCmd, nil, mockServer, mockJSON, logger)
+	h := New(ctx, mockWS, mockCmd, nil, nil, mockServer, mockJSON, logger)
 	assert.NotNil(t, h)
 }
 
@@ -138,7 +157,7 @@ func TestNew_UnsupportedHandlerType(t *testing.T) {
 		Times(1)
 
 	assert.Panics(t, func() {
-		New(ctx, mockWS, mockCmd, nil, mockServer, mockJSON, logger)
+		New(ctx, mockWS, mockCmd, nil, nil, mockServer, mockJSON, logger)
 	})
 }
 
@@ -244,7 +263,7 @@ func TestUnmatchedRouteGoesThroughMiddleware(t *testing.T) {
 	mux := http.NewServeMux()
 	mockServer.EXPECT().Handler().Return(mux).AnyTimes()
 
-	h := New(context.Background(), mockWS, mockCmd, nil, mockServer, mockJSON, logger)
+	h := New(context.Background(), mockWS, mockCmd, nil, nil, mockServer, mockJSON, logger)
 	hh := h.(*hub)
 
 	// Unsaturated: unmatched path 404s (served through the middleware).
@@ -281,7 +300,7 @@ func TestStart_ListenRetryStopsOnContextCancel(t *testing.T) {
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockServer.EXPECT().Handler().Return(http.NewServeMux()).AnyTimes()
 
-	h := New(ctx, mockWS, mockCmd, nil, mockServer, mockJSON, logger)
+	h := New(ctx, mockWS, mockCmd, nil, nil, mockServer, mockJSON, logger)
 
 	// One failing attempt; the default 1s backoff leaves ample room to cancel
 	// before a second attempt, and ctrl.Finish asserts exactly one call.
@@ -475,7 +494,7 @@ func TestHub_ContextCancellation(t *testing.T) {
 	mockServer.EXPECT().Shutdown(gomock.Any()).Return(nil).AnyTimes()
 
 	// Create hub with cancellable context
-	h := New(ctx, ts.mockWS, ts.mockCmd, nil, mockServer, wrapper.NewJSON(), logger)
+	h := New(ctx, ts.mockWS, ts.mockCmd, nil, nil, mockServer, wrapper.NewJSON(), logger)
 
 	// Mock WS Close - may be called multiple times due to context cancellation
 	ts.mockWS.EXPECT().Close().AnyTimes()
@@ -709,6 +728,135 @@ func TestHandleCast_ProcessNilResult(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, w.Code)
 }
 
+func TestHandleScreenshot_SuccessWithCustomBounds(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.capturer.image = &screenshot.Image{
+		Data:       []byte("png-data"),
+		Width:      800,
+		Height:     450,
+		SHA256:     "abc123",
+		CapturedAt: time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/screenshot?width=800&height=800", nil)
+	w := httptest.NewRecorder()
+
+	ts.mux.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, screenshot.Bounds{Width: 800, Height: 800}, ts.capturer.bounds)
+	assert.Equal(t, "image/png", w.Header().Get("Content-Type"))
+	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+	assert.Equal(t, "chromium-cdp", w.Header().Get("X-FF1-Capture-Source"))
+	assert.Equal(t, "800", w.Header().Get("X-FF1-Screenshot-Width"))
+	assert.Equal(t, "450", w.Header().Get("X-FF1-Screenshot-Height"))
+	assert.Equal(t, "abc123", w.Header().Get("X-FF1-Capture-SHA256"))
+	assert.Equal(t, "2026-08-18T12:00:00Z", w.Header().Get("X-FF1-Captured-At"))
+	assert.Equal(t, "png-data", w.Body.String())
+}
+
+func TestHandleScreenshot_UsesNativeSizeWhenBoundsAreOmitted(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.capturer.image = &screenshot.Image{Data: []byte("png-data"), Width: 1920, Height: 1080}
+	req := httptest.NewRequest(http.MethodGet, "/api/screenshot", nil)
+	w := httptest.NewRecorder()
+
+	ts.hub.(*hub).handleScreenshot(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, screenshot.Bounds{}, ts.capturer.bounds)
+}
+
+func TestHandleScreenshot_RejectsInvalidRequest(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		target string
+		status int
+	}{
+		{name: "wrong method", method: http.MethodPost, target: "/api/screenshot", status: http.StatusMethodNotAllowed},
+		{name: "non numeric width", method: http.MethodGet, target: "/api/screenshot?width=wide", status: http.StatusBadRequest},
+		{name: "zero width", method: http.MethodGet, target: "/api/screenshot?width=0", status: http.StatusBadRequest},
+		{name: "negative height", method: http.MethodGet, target: "/api/screenshot?height=-1", status: http.StatusBadRequest},
+		{name: "dimension too large", method: http.MethodGet, target: "/api/screenshot?width=4097", status: http.StatusBadRequest},
+		{name: "duplicate dimension", method: http.MethodGet, target: "/api/screenshot?width=800&width=900", status: http.StatusBadRequest},
+		{name: "unknown query field", method: http.MethodGet, target: "/api/screenshot?size=800", status: http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			req := httptest.NewRequest(tt.method, tt.target, nil)
+			w := httptest.NewRecorder()
+
+			ts.hub.(*hub).handleScreenshot(w, req)
+
+			assert.Equal(t, tt.status, w.Code)
+			assert.Zero(t, ts.capturer.calls)
+		})
+	}
+}
+
+func TestHandleScreenshot_RejectsBrowserRequest(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		value  string
+	}{
+		{name: "origin", header: "Origin", value: "https://attacker.example"},
+		{name: "fetch metadata", header: "Sec-Fetch-Site", value: "cross-site"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			req := httptest.NewRequest(http.MethodGet, "/api/screenshot", nil)
+			req.Header.Set(tt.header, tt.value)
+			w := httptest.NewRecorder()
+
+			ts.hub.(*hub).handleScreenshot(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Zero(t, ts.capturer.calls)
+		})
+	}
+}
+
+func TestHandleScreenshot_MapsCaptureErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		captureErr error
+		status     int
+	}{
+		{name: "busy", captureErr: screenshot.ErrBusy, status: http.StatusTooManyRequests},
+		{name: "unavailable", captureErr: screenshot.ErrUnavailable, status: http.StatusServiceUnavailable},
+		{name: "deadline", captureErr: context.DeadlineExceeded, status: http.StatusGatewayTimeout},
+		{name: "capture failure", captureErr: errors.New("capture failed"), status: http.StatusBadGateway},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			ts.capturer.err = tt.captureErr
+			req := httptest.NewRequest(http.MethodGet, "/api/screenshot", nil)
+			w := httptest.NewRecorder()
+
+			ts.hub.(*hub).handleScreenshot(w, req)
+
+			assert.Equal(t, tt.status, w.Code)
+		})
+	}
+}
+
 func TestHandleNotification_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -884,7 +1032,7 @@ func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
 		Connectivity: "connected",
 		TopicID:      "topic-xyz",
 	}}
-	h := New(ctx, mockWS, mockCmd, provider, mockServer, wrapper.NewJSON(), logger).(*hub)
+	h := New(ctx, mockWS, mockCmd, provider, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
 
 	req := httptest.NewRequest("GET", "/api/status", nil)
 	w := httptest.NewRecorder()
@@ -925,7 +1073,7 @@ func TestHandleCast_OversizedBodyRejected413(t *testing.T) {
 	mux := http.NewServeMux()
 	mockServer.EXPECT().Handler().Return(mux).AnyTimes()
 
-	New(context.Background(), mockWS, mockCmd, nil, mockServer, wrapper.NewJSON(), logger)
+	New(context.Background(), mockWS, mockCmd, nil, nil, mockServer, wrapper.NewJSON(), logger)
 
 	body := strings.NewReader(`{"command":"` + strings.Repeat("a", MAX_REQUEST_BODY_BYTES+1024) + `"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/cast", body)
@@ -972,7 +1120,7 @@ func TestHandleStatusV2_SamePayloadContract2(t *testing.T) {
 		Connectivity: "connected",
 		TopicID:      "topic-xyz",
 	}}
-	New(ctx, mockWS, mockCmd, provider, mockServer, wrapper.NewJSON(), logger)
+	New(ctx, mockWS, mockCmd, provider, nil, mockServer, wrapper.NewJSON(), logger)
 
 	// Through the real mux, so the route registration itself is covered.
 	get := func(path string) map[string]any {
@@ -1020,7 +1168,7 @@ func TestHandleStatus_ClaimedDeviceStillServesTopicID(t *testing.T) {
 		Claimed:  true,
 		TopicID:  "topic-xyz",
 	}}
-	h := New(ctx, mockWS, mockCmd, provider, mockServer, wrapper.NewJSON(), logger).(*hub)
+	h := New(ctx, mockWS, mockCmd, provider, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
 
 	req := httptest.NewRequest("GET", "/api/status", nil)
 	w := httptest.NewRecorder()
@@ -1088,7 +1236,7 @@ func TestMiddleware_EnvelopeRoundTrip(t *testing.T) {
 		MaxConcurrent: 16,
 		Default:       commandrouter.Policy{Rate: 5, Burst: 5, Weight: 1},
 	}, logger)
-	h := New(ctx, mockWS, gated, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
+	h := New(ctx, mockWS, gated, nil, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
 
 	body := `{"command":"roundtrip","request":{"k":"v"}}`
 	req := httptest.NewRequest("POST", "/api/cast", strings.NewReader(body))
@@ -1126,7 +1274,7 @@ func TestHandleCast_StormProtection(t *testing.T) {
 	}
 	gated := commandrouter.NewGate(stub, gateCfg, logger)
 
-	h := New(ctx, mockWS, gated, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
+	h := New(ctx, mockWS, gated, nil, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
 
 	const total = 5
 	var accepted, limited int
