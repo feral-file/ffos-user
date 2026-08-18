@@ -44,6 +44,15 @@ func TestFitDimensions(t *testing.T) {
 			wantScale:    1,
 		},
 		{
+			name:         "oversized native viewport is scaled before capture",
+			nativeWidth:  7680,
+			nativeHeight: 4320,
+			bounds:       Bounds{},
+			wantWidth:    3840,
+			wantHeight:   2160,
+			wantScale:    0.5,
+		},
+		{
 			name:         "width only",
 			nativeWidth:  1920,
 			nativeHeight: 1080,
@@ -200,6 +209,59 @@ func TestCapturerCaptureCustomSize(t *testing.T) {
 	assert.False(t, got.CapturedAt.IsZero())
 }
 
+func TestCapturerCaptureScalesOversizedNativeViewportBeforeEncoding(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	httpClient := mocks.NewMockHTTPClient(ctrl)
+	dialer := mocks.NewMockWebSocketDialer(ctrl)
+	conn := mocks.NewMockWebSocketConn(ctrl)
+
+	httpClient.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(bytes.NewBufferString(
+			`[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/1"}]`,
+		)),
+	}, nil)
+	dialer.EXPECT().DialContext(gomock.Any(), gomock.Any(), http.Header(nil)).Return(conn, nil, nil)
+	conn.EXPECT().SetReadLimit(int64(maxCDPMessageBytes))
+	conn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil)
+	conn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
+	conn.EXPECT().Close().Return(nil)
+
+	conn.EXPECT().WriteMessage(websocket.TextMessage, gomock.Any()).DoAndReturn(func(_ int, data []byte) error {
+		var request cdpRequest
+		require.NoError(t, json.Unmarshal(data, &request))
+		assert.Equal(t, methodGetLayoutMetrics, request.Method)
+		return nil
+	})
+	conn.EXPECT().ReadMessage().Return(websocket.TextMessage, []byte(`{
+		"id":1,
+		"result":{"cssVisualViewport":{"clientWidth":7680,"clientHeight":4320}}
+	}`), nil)
+	conn.EXPECT().WriteMessage(websocket.TextMessage, gomock.Any()).DoAndReturn(func(_ int, data []byte) error {
+		var request cdpRequest
+		require.NoError(t, json.Unmarshal(data, &request))
+		assert.Equal(t, methodCaptureScreenshot, request.Method)
+		clip, ok := request.Params["clip"].(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, float64(7680), clip["width"])
+		assert.Equal(t, float64(4320), clip["height"])
+		assert.Equal(t, 0.5, clip["scale"])
+		return nil
+	})
+	conn.EXPECT().ReadMessage().Return(
+		websocket.TextMessage,
+		captureResponse(t, 2, makePNG(t, 384, 216)),
+		nil,
+	)
+
+	capturer := New("http://127.0.0.1:9222", httpClient, dialer)
+	image, err := capturer.Capture(context.Background(), Bounds{})
+
+	require.NoError(t, err)
+	assert.Equal(t, 384, image.Width)
+	assert.Equal(t, 216, image.Height)
+}
+
 func TestCapturerCaptureRejectsImageOutsideRequestedBounds(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	httpClient := mocks.NewMockHTTPClient(ctrl)
@@ -271,13 +333,23 @@ func TestDecodeScreenshotRejectsTruncatedPNG(t *testing.T) {
 }
 
 func TestDecodeScreenshotRejectsOversizedDeclaredSurface(t *testing.T) {
-	data := pngWithDeclaredDimensions(t, MaxDimension+1, MaxDimension+1)
+	data := pngWithDeclaredDimensions(t, 3000, 3000)
 
 	_, err := decodeScreenshot(base64.StdEncoding.EncodeToString(data), Bounds{})
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrInvalidImage)
 	assert.ErrorContains(t, err, "pixel decode limit")
+}
+
+func TestDecodeScreenshotRejectsOversizedDeclaredEdge(t *testing.T) {
+	data := pngWithDeclaredDimensions(t, MaxDimension+1, 1)
+
+	_, err := decodeScreenshot(base64.StdEncoding.EncodeToString(data), Bounds{})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidImage)
+	assert.ErrorContains(t, err, "edge limit")
 }
 
 func captureResponse(t *testing.T, id int, data []byte) []byte {

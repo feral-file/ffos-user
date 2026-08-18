@@ -59,7 +59,8 @@ var (
 )
 
 // Bounds defines an optional output bounding box. A zero edge is derived from
-// the other edge and the viewport ratio; two zero edges request native size.
+// the other edge and the viewport ratio; two zero edges request native size
+// unless the viewport must be downscaled to the edge or pixel safety budget.
 type Bounds struct {
 	Width  int
 	Height int
@@ -147,20 +148,20 @@ func (c *capturer) Capture(ctx context.Context, bounds Bounds) (*Image, error) {
 		"captureBeyondViewport": false,
 	}
 
-	if bounds.Width != 0 || bounds.Height != 0 {
-		viewport, err := layoutViewport(conn, requestID)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, err
+	viewport, err := layoutViewport(conn, requestID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		requestID++
+		return nil, err
+	}
+	requestID++
 
-		_, _, scale, err := fitDimensions(viewport.Width, viewport.Height, bounds)
-		if err != nil {
-			return nil, err
-		}
+	_, _, scale, err := fitDimensions(viewport.Width, viewport.Height, bounds)
+	if err != nil {
+		return nil, err
+	}
+	if bounds.Width != 0 || bounds.Height != 0 || scale < 1 {
 		params["clip"] = map[string]interface{}{
 			"x":      viewport.X,
 			"y":      viewport.Y,
@@ -304,17 +305,15 @@ func fitDimensions(nativeWidth, nativeHeight int, bounds Bounds) (int, int, floa
 	case bounds.Height > 0:
 		scale = float64(bounds.Height) / float64(nativeHeight)
 	}
-	if bounds.Width > 0 || bounds.Height > 0 {
-		// A caller may provide only one dimension. Keep the proportional dimension
-		// bounded as well so a rotated or unusually wide viewport cannot make
-		// Chromium allocate an unexpectedly large capture surface.
-		scale = min(
-			scale,
-			float64(MaxDimension)/float64(nativeWidth),
-			float64(MaxDimension)/float64(nativeHeight),
-			math.Sqrt(float64(MaxPixels)/(float64(nativeWidth)*float64(nativeHeight))),
-		)
-	}
+	// Apply the resource budget before Chromium allocates the output surface.
+	// This also covers an omitted bounding box: native output is preserved when
+	// it fits, while an oversized native viewport is uniformly downscaled.
+	scale = min(
+		scale,
+		float64(MaxDimension)/float64(nativeWidth),
+		float64(MaxDimension)/float64(nativeHeight),
+		math.Sqrt(float64(MaxPixels)/(float64(nativeWidth)*float64(nativeHeight))),
+	)
 
 	width := max(1, int(math.Round(float64(nativeWidth)*scale)))
 	height := max(1, int(math.Round(float64(nativeHeight)*scale)))
@@ -404,6 +403,15 @@ func decodeScreenshot(encoded string, bounds Bounds) (*Image, error) {
 	}
 	if config.Width <= 0 || config.Height <= 0 {
 		return nil, fmt.Errorf("%w: image has invalid dimensions %dx%d", ErrInvalidImage, config.Width, config.Height)
+	}
+	if config.Width > MaxDimension || config.Height > MaxDimension {
+		return nil, fmt.Errorf(
+			"%w: image dimensions %dx%d exceed the %d-pixel edge limit",
+			ErrInvalidImage,
+			config.Width,
+			config.Height,
+			MaxDimension,
+		)
 	}
 	if config.Width > maxDecodedPixels/config.Height {
 		return nil, fmt.Errorf(
