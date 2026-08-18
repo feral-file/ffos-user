@@ -57,6 +57,7 @@ func (c *fakeWSConn) WriteMessage(messageType int, data []byte) error {
 
 func (c *fakeWSConn) WriteControl(messageType int, data []byte, deadline time.Time) error { return nil }
 func (c *fakeWSConn) SetPongHandler(h func(appData string) error)                         {}
+func (c *fakeWSConn) SetReadLimit(limit int64)                                            {}
 func (c *fakeWSConn) SetReadDeadline(t time.Time) error                                   { return nil }
 func (c *fakeWSConn) SetWriteDeadline(t time.Time) error                                  { return nil }
 
@@ -194,6 +195,7 @@ func (c *concurrencyTrackingConn) WriteControl(messageType int, data []byte, dea
 	return nil
 }
 func (c *concurrencyTrackingConn) SetPongHandler(h func(appData string) error) {}
+func (c *concurrencyTrackingConn) SetReadLimit(limit int64)                    {}
 func (c *concurrencyTrackingConn) SetReadDeadline(t time.Time) error           { return nil }
 func (c *concurrencyTrackingConn) SetWriteDeadline(t time.Time) error          { return nil }
 

@@ -39,15 +39,16 @@ type Hub interface {
 }
 
 type hub struct {
-	ctx            context.Context
-	logger         *zap.Logger
-	server         wrapper.HTTPServer
-	wsHandler      ws.WS
-	cmdHandler     commandrouter.Handler
-	statusProvider StatusProvider
-	capturer       screenshot.Capturer
-	json           wrapper.JSON
-	reqSlots       chan struct{}
+	ctx             context.Context
+	logger          *zap.Logger
+	server          wrapper.HTTPServer
+	wsHandler       ws.WS
+	cmdHandler      commandrouter.Handler
+	statusProvider  StatusProvider
+	capturer        screenshot.Capturer
+	json            wrapper.JSON
+	reqSlots        chan struct{}
+	screenshotSlots chan struct{}
 
 	// contactObserver, when set, is invoked once per request on the counted
 	// control-plane routes (cast, status, status_v2) from a NON-loopback
@@ -101,6 +102,10 @@ func New(
 		server:         server,
 		logger:         logger,
 		reqSlots:       make(chan struct{}, MAX_INFLIGHT_REQUESTS),
+		// Keep the renderer capture and its potentially backpressured HTTP write
+		// in one single-flight lifetime. The capturer's own slot ends when it
+		// returns and therefore cannot bound retained response images by itself.
+		screenshotSlots: make(chan struct{}, 1),
 	}
 	h.routes()
 	return h
@@ -273,6 +278,14 @@ func (h *hub) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.capturer == nil {
 		http.Error(w, "Screenshot capture is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	select {
+	case h.screenshotSlots <- struct{}{}:
+		defer func() { <-h.screenshotSlots }()
+	default:
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 		return
 	}
 

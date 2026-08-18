@@ -120,6 +120,9 @@ func (c *capturer) Capture(ctx context.Context, bounds Bounds) (*Image, error) {
 		return nil, fmt.Errorf("%w: dial CDP page target: %w", ErrUnavailable, err)
 	}
 	defer func() { _ = conn.Close() }()
+	// Gorilla applies the limit while assembling a message. The later length
+	// check remains defense in depth, but cannot prevent allocation by itself.
+	conn.SetReadLimit(maxCDPMessageBytes)
 
 	deadline, ok := ctx.Deadline()
 	if ok {

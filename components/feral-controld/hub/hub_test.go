@@ -33,6 +33,27 @@ type fakeScreenshotCapturer struct {
 	calls  int
 }
 
+type blockingScreenshotResponseWriter struct {
+	header       http.Header
+	status       int
+	writeStarted chan struct{}
+	unblock      chan struct{}
+}
+
+func (w *blockingScreenshotResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *blockingScreenshotResponseWriter) WriteHeader(status int) {
+	w.status = status
+}
+
+func (w *blockingScreenshotResponseWriter) Write(data []byte) (int, error) {
+	close(w.writeStarted)
+	<-w.unblock
+	return len(data), nil
+}
+
 func (f *fakeScreenshotCapturer) Capture(_ context.Context, bounds screenshot.Bounds) (*screenshot.Image, error) {
 	f.calls++
 	f.bounds = bounds
@@ -768,6 +789,58 @@ func TestHandleScreenshot_UsesNativeSizeWhenBoundsAreOmitted(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, screenshot.Bounds{}, ts.capturer.bounds)
+}
+
+func TestHandleScreenshot_HoldsSlotUntilResponseWriteCompletes(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.capturer.image = &screenshot.Image{Data: []byte("png-data"), Width: 1920, Height: 1080}
+	writeStarted := make(chan struct{})
+	unblock := make(chan struct{})
+	defer func() {
+		select {
+		case <-unblock:
+		default:
+			close(unblock)
+		}
+	}()
+	firstWriter := &blockingScreenshotResponseWriter{
+		header:       make(http.Header),
+		writeStarted: writeStarted,
+		unblock:      unblock,
+	}
+	firstDone := make(chan struct{})
+	go func() {
+		ts.hub.(*hub).handleScreenshot(
+			firstWriter,
+			httptest.NewRequest(http.MethodGet, "/api/screenshot", nil),
+		)
+		close(firstDone)
+	}()
+
+	select {
+	case <-writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first screenshot did not reach the response write")
+	}
+
+	secondWriter := httptest.NewRecorder()
+	ts.hub.(*hub).handleScreenshot(
+		secondWriter,
+		httptest.NewRequest(http.MethodGet, "/api/screenshot", nil),
+	)
+
+	assert.Equal(t, http.StatusTooManyRequests, secondWriter.Code)
+	assert.Equal(t, "1", secondWriter.Header().Get("Retry-After"))
+	close(unblock)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first screenshot did not finish after the response write unblocked")
+	}
+	assert.Equal(t, http.StatusOK, firstWriter.status)
+	assert.Equal(t, 1, ts.capturer.calls)
 }
 
 func TestHandleScreenshot_RejectsInvalidRequest(t *testing.T) {

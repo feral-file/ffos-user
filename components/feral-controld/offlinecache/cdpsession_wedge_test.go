@@ -41,6 +41,7 @@ func (c *wedgedConn) WriteControl(messageType int, data []byte, deadline time.Ti
 	return nil
 }
 func (c *wedgedConn) SetPongHandler(h func(appData string) error) {}
+func (c *wedgedConn) SetReadLimit(limit int64)                    {}
 func (c *wedgedConn) SetReadDeadline(t time.Time) error           { return nil }
 func (c *wedgedConn) SetWriteDeadline(t time.Time) error          { return nil }
 func (c *wedgedConn) Close() error {
@@ -129,6 +130,7 @@ func (c *blockedWriteConn) WriteControl(messageType int, data []byte, deadline t
 	return nil
 }
 func (c *blockedWriteConn) SetPongHandler(h func(appData string) error) {}
+func (c *blockedWriteConn) SetReadLimit(limit int64)                    {}
 func (c *blockedWriteConn) SetReadDeadline(t time.Time) error           { return nil }
 func (c *blockedWriteConn) Close() error {
 	c.closeOnce.Do(func() { close(c.closed) })

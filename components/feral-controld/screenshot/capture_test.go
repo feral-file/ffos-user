@@ -119,6 +119,7 @@ func TestCapturerCaptureCustomSize(t *testing.T) {
 		}, nil
 	})
 	dialer.EXPECT().DialContext(gomock.Any(), "ws://127.0.0.1:9222/devtools/page/1", http.Header(nil)).Return(conn, nil, nil)
+	conn.EXPECT().SetReadLimit(int64(maxCDPMessageBytes))
 	conn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil)
 	conn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
 	conn.EXPECT().Close().Return(nil)
@@ -179,6 +180,7 @@ func TestCapturerCaptureRejectsImageOutsideRequestedBounds(t *testing.T) {
 		Body:       io.NopCloser(bytes.NewBufferString(targets)),
 	}, nil)
 	dialer.EXPECT().DialContext(gomock.Any(), gomock.Any(), http.Header(nil)).Return(conn, nil, nil)
+	conn.EXPECT().SetReadLimit(int64(maxCDPMessageBytes))
 	conn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil)
 	conn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
 	conn.EXPECT().Close().Return(nil)
