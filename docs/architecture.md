@@ -181,7 +181,9 @@ Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0
 
 ### Local device control: LAN hub (port 1111)
 
-`feral-controld` exposes an HTTP server on `0.0.0.0:1111` (`hub` package). Unlike the earlier optional WebSocket hub, the listener now binds **unconditionally** at boot (gated only by the `enableHub` config flag, which defaults on): it is the BLE-replacement LAN recovery channel and must stay reachable whenever there is a link. It exposes `POST /api/cast` (relayer command envelope), `GET /api/status` (legacy, contract `"1"`), `GET /api/v2/status` (the LAN pairing surface, contract `"2"` — old firmware 404s here, which is how the app gates pairability), `GET → WS /api/notification`, and `GET /metrics`, all through one shared middleware. See `docs/api-design.md` for the wire surface and the open-LAN caveats above.
+`feral-controld` exposes an HTTP server on `0.0.0.0:1111` (`hub` package). Unlike the earlier optional WebSocket hub, the listener now binds **unconditionally** at boot (gated only by the `enableHub` config flag, which defaults on): it is the BLE-replacement LAN recovery channel and must stay reachable whenever there is a link. It exposes `POST /api/cast` (relayer command envelope), `GET /api/status` (legacy, contract `"1"`), `GET /api/v2/status` (the LAN pairing surface, contract `"2"` — old firmware 404s here, which is how the app gates pairability), `GET /api/screenshot` (bounded PNG observation of Chromium), `GET → WS /api/notification`, and `GET /metrics`, all through one shared middleware. See `docs/api-design.md` for the wire surface and the open-LAN caveats above.
+
+Screenshot capture uses a separate, short-lived CDP connection so it cannot monopolize the persistent command/status connection. The result proves only what Chromium rendered; it does not prove compositor, HDMI, or physical-panel output.
 
 ### Service discovery: mDNS
 

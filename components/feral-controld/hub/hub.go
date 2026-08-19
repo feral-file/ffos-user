@@ -3,7 +3,10 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -15,6 +18,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
+	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
@@ -35,14 +39,16 @@ type Hub interface {
 }
 
 type hub struct {
-	ctx            context.Context
-	logger         *zap.Logger
-	server         wrapper.HTTPServer
-	wsHandler      ws.WS
-	cmdHandler     commandrouter.Handler
-	statusProvider StatusProvider
-	json           wrapper.JSON
-	reqSlots       chan struct{}
+	ctx             context.Context
+	logger          *zap.Logger
+	server          wrapper.HTTPServer
+	wsHandler       ws.WS
+	cmdHandler      commandrouter.Handler
+	statusProvider  StatusProvider
+	capturer        screenshot.Capturer
+	json            wrapper.JSON
+	reqSlots        chan struct{}
+	screenshotSlots chan struct{}
 
 	// contactObserver, when set, is invoked once per request on the counted
 	// control-plane routes (cast, status, status_v2) from a NON-loopback
@@ -70,6 +76,7 @@ func New(
 	wsHandler ws.WS,
 	cmdHandler commandrouter.Handler,
 	statusProvider StatusProvider,
+	capturer screenshot.Capturer,
 	server wrapper.HTTPServer,
 	json wrapper.JSON,
 	logger *zap.Logger,
@@ -90,10 +97,15 @@ func New(
 		wsHandler:      wsHandler,
 		cmdHandler:     cmdHandler,
 		statusProvider: statusProvider,
+		capturer:       capturer,
 		json:           json,
 		server:         server,
 		logger:         logger,
 		reqSlots:       make(chan struct{}, MAX_INFLIGHT_REQUESTS),
+		// Keep the renderer capture and its potentially backpressured HTTP write
+		// in one single-flight lifetime. The capturer's own slot ends when it
+		// returns and therefore cannot bound retained response images by itself.
+		screenshotSlots: make(chan struct{}, 1),
 	}
 	h.routes()
 	return h
@@ -124,6 +136,7 @@ func (h *hub) routes() {
 	mux.HandleFunc("/api/notification", h.withMiddleware("notification", h.handleNotification))
 	mux.HandleFunc("/api/status", h.withMiddleware("status", h.handleStatus))
 	mux.HandleFunc("/api/v2/status", h.withMiddleware("status_v2", h.handleStatusV2))
+	mux.HandleFunc("/api/screenshot", h.withMiddleware("screenshot", h.handleScreenshot))
 	mux.HandleFunc("/metrics", h.withMiddleware("metrics", metrics.ServeHTTP))
 
 	// Chokepoint completeness: without this, the ServeMux serves unmatched
@@ -239,6 +252,129 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("Failed to respond with JSON", zap.Error(err))
 		return
 	}
+}
+
+// handleScreenshot captures Chromium's rendered page. It observes the
+// renderer, not the compositor, HDMI path, or physical panel. width and height
+// are optional bounding-box dimensions; Chromium scales the full viewport
+// uniformly so the result is never cropped or stretched.
+func (h *hub) handleScreenshot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET method is required", http.StatusMethodNotAllowed)
+		return
+	}
+	// This endpoint is intended for native LAN clients. Reject browser-originated
+	// requests so a remote page cannot read the FF1 display through DNS rebinding
+	// or a direct private-network request while Hub authentication is unfinished.
+	if r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != "" {
+		http.Error(w, "Browser origins are not allowed", http.StatusForbidden)
+		return
+	}
+
+	bounds, err := screenshotBounds(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if h.capturer == nil {
+		http.Error(w, "Screenshot capture is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	select {
+	case h.screenshotSlots <- struct{}{}:
+		defer func() { <-h.screenshotSlots }()
+	default:
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), screenshot.CaptureTimeout)
+	defer cancel()
+
+	image, err := h.capturer.Capture(ctx, bounds)
+	if err != nil {
+		statusCode := screenshotErrorStatus(err)
+		h.logger.Warn("Failed to capture screenshot", zap.Int("status", statusCode), zap.Error(err))
+		if statusCode == http.StatusTooManyRequests {
+			w.Header().Set("Retry-After", "1")
+		}
+		http.Error(w, http.StatusText(statusCode), statusCode)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Length", strconv.Itoa(len(image.Data)))
+	w.Header().Set("X-FF1-Capture-Source", "chromium-cdp")
+	w.Header().Set("X-FF1-Screenshot-Width", strconv.Itoa(image.Width))
+	w.Header().Set("X-FF1-Screenshot-Height", strconv.Itoa(image.Height))
+	if image.SHA256 != "" {
+		w.Header().Set("X-FF1-Capture-SHA256", image.SHA256)
+	}
+	if !image.CapturedAt.IsZero() {
+		w.Header().Set("X-FF1-Captured-At", image.CapturedAt.Format(time.RFC3339Nano))
+	}
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(image.Data); err != nil {
+		h.logger.Warn("Failed to write screenshot response", zap.Error(err))
+	}
+}
+
+func screenshotBounds(r *http.Request) (screenshot.Bounds, error) {
+	query := r.URL.Query()
+	for key := range query {
+		if key != "width" && key != "height" {
+			return screenshot.Bounds{}, fmt.Errorf("unsupported query parameter %q", key)
+		}
+		if len(query[key]) != 1 {
+			return screenshot.Bounds{}, fmt.Errorf("query parameter %q must appear once", key)
+		}
+		if query[key][0] == "" {
+			return screenshot.Bounds{}, fmt.Errorf("query parameter %q cannot be empty", key)
+		}
+	}
+
+	width, err := screenshotDimension(query.Get("width"), "width")
+	if err != nil {
+		return screenshot.Bounds{}, err
+	}
+	height, err := screenshotDimension(query.Get("height"), "height")
+	if err != nil {
+		return screenshot.Bounds{}, err
+	}
+	if width > 0 && height > 0 && width > screenshot.MaxPixels/height {
+		return screenshot.Bounds{}, fmt.Errorf("width and height must define at most %d pixels", screenshot.MaxPixels)
+	}
+	return screenshot.Bounds{Width: width, Height: height}, nil
+}
+
+func screenshotDimension(raw, name string) (int, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	dimension, err := strconv.Atoi(raw)
+	if err != nil || dimension <= 0 || dimension > screenshot.MaxDimension {
+		return 0, fmt.Errorf("%s must be an integer between 1 and %d", name, screenshot.MaxDimension)
+	}
+	return dimension, nil
+}
+
+func screenshotErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, screenshot.ErrBusy):
+		return http.StatusTooManyRequests
+	case errors.Is(err, screenshot.ErrUnavailable):
+		return http.StatusServiceUnavailable
+	case errors.Is(err, context.DeadlineExceeded):
+		return http.StatusGatewayTimeout
+	}
+	var timeoutErr net.Error
+	if errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
+		return http.StatusGatewayTimeout
+	}
+	return http.StatusBadGateway
 }
 
 // handleNotification handles GET /api/notification endpoint and upgrades to WebSocket

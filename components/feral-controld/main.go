@@ -41,6 +41,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/softap"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -1179,7 +1180,8 @@ func initializeApp(
 		internet: internetProbeFrom(dbusClient, logger),
 		snapshot: provMachine.Snapshot,
 	}
-	hub := hub.New(context, wsHandler, cmdHandler, statusProvider, nil, json, logger)
+	screenshotCapturer := screenshot.New(cdpEndpoint, httpClient, webSocketDialer)
+	hub := hub.New(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger)
 	// Control-plane hub contact defers the escape policy's episode raise
 	// (§4.1): a phone with the app open must not have its link yanked. The
 	// hub filters (counted routes, non-loopback) and the machine timestamps.
