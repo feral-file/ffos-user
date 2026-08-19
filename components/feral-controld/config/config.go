@@ -196,6 +196,12 @@ type Config struct {
 	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
 	OfflineCache *OfflineCacheConfig `json:"offlineCache,omitempty"`
 	Netlog       *NetlogConfig       `json:"netlog,omitempty"`
+	// GatewayUserAgent scopes the kiosk User-Agent rewrite (see the
+	// uarewrite package). Absent means ON with built-in defaults, unlike
+	// OfflineCache above: this is a fix for artworks that otherwise never
+	// render, not an opt-in feature, so a device that was never
+	// reconfigured must still get it.
+	GatewayUserAgent *GatewayUserAgentConfig `json:"gatewayUserAgent,omitempty"`
 
 	// Provisioning carries the escape-policy tuning block
 	// (docs/network-recovery-ux.md §4.1/§4.2) as RAW bytes, decoded
@@ -217,6 +223,41 @@ type Config struct {
 // explicit "enableHub": false disables it.
 func (c *Config) HubEnabled() bool {
 	return c.EnableHub == nil || *c.EnableHub
+}
+
+// GatewayUserAgentConfig scopes the kiosk User-Agent rewrite that keeps
+// artworks on bot-challenging origins renderable (feral-file/ffos-user#296,
+// and the uarewrite package's own doc for the mechanism).
+//
+// Hosts is the whole safety story of this feature. The rewrite is NOT
+// applied globally on purpose: an origin that rejects unrecognized agents
+// would start failing artworks that render today, and that regression would
+// be far harder to attribute than the bug being fixed. Keeping the scope in
+// config means a newly hostile gateway is an operator edit rather than a
+// daemon release.
+type GatewayUserAgentConfig struct {
+	// Enabled gates the rewrite. Pointer so an absent key defaults ON —
+	// only an explicit "enabled": false turns it off. Read via
+	// Config.GatewayUserAgentEnabled(), never directly.
+	Enabled *bool `json:"enabled"`
+	// UserAgent replaces Chromium's own on matching requests. Empty uses
+	// uarewrite.DefaultUserAgent. Do NOT set this to a browser UA: a
+	// browser UA is precisely what the mitigation layer challenges.
+	UserAgent string `json:"userAgent,omitempty"`
+	// Hosts are the bare origins to rewrite for (scheme and port are
+	// tolerated and stripped). Empty uses uarewrite.DefaultHosts.
+	// Matching is exact per host — subdomains must be listed explicitly.
+	Hosts []string `json:"hosts,omitempty"`
+}
+
+// GatewayUserAgentEnabled reports whether the kiosk User-Agent rewrite
+// should run. It defaults ON for the reason given on the config field: this
+// is a fix, and a device whose config predates it must still receive it.
+func (c *Config) GatewayUserAgentEnabled() bool {
+	if c.GatewayUserAgent == nil || c.GatewayUserAgent.Enabled == nil {
+		return true
+	}
+	return *c.GatewayUserAgent.Enabled
 }
 
 // ProvisioningTuning carries the on-device knobs for the provisioning escape

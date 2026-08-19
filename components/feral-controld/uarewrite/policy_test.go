@@ -1,0 +1,367 @@
+package uarewrite
+
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestNewDefaults(t *testing.T) {
+	t.Parallel()
+
+	p, err := New(nil, "")
+	if err != nil {
+		t.Fatalf("New(nil, \"\") = %v, want no error", err)
+	}
+	if got := p.UserAgent(); got != DefaultUserAgent {
+		t.Errorf("UserAgent() = %q, want %q", got, DefaultUserAgent)
+	}
+	if got := p.Hosts(); !reflect.DeepEqual(got, []string{"dweb.link", "ipfs.io"}) {
+		t.Errorf("Hosts() = %v, want the sorted default set", got)
+	}
+}
+
+// The replacement token must not look like a browser: a browser UA is
+// exactly what the mitigation layer challenges, so an "improvement" that
+// impersonates Chrome would silently reinstate the bug this package fixes.
+func TestDefaultUserAgentIsNotBrowserShaped(t *testing.T) {
+	t.Parallel()
+
+	for _, bad := range []string{"Mozilla", "Chrome", "Safari", "AppleWebKit", "Gecko"} {
+		if strings.Contains(DefaultUserAgent, bad) {
+			t.Errorf("DefaultUserAgent %q contains browser token %q", DefaultUserAgent, bad)
+		}
+	}
+}
+
+func TestNewHostNormalization(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		in    []string
+		want  []string
+		isErr bool
+	}{
+		{name: "bare hosts", in: []string{"ipfs.io"}, want: []string{"ipfs.io"}},
+		{name: "strips scheme", in: []string{"https://ipfs.io"}, want: []string{"ipfs.io"}},
+		{name: "strips port", in: []string{"ipfs.io:443"}, want: []string{"ipfs.io"}},
+		{name: "strips scheme and path", in: []string{"https://ipfs.io/ipfs/"}, want: []string{"ipfs.io"}},
+		{name: "lower-cases", in: []string{"IPFS.IO"}, want: []string{"ipfs.io"}},
+		{name: "trims space", in: []string{"  ipfs.io  "}, want: []string{"ipfs.io"}},
+		{name: "dedupes", in: []string{"ipfs.io", "https://ipfs.io", "IPFS.IO:443"}, want: []string{"ipfs.io"}},
+		{name: "sorted output", in: []string{"z.example", "a.example"}, want: []string{"a.example", "z.example"}},
+		{name: "empty entry is an error", in: []string{"ipfs.io", "  "}, isErr: true},
+		{name: "scheme with no host is an error", in: []string{"https://"}, isErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			p, err := New(tt.in, "ua/1")
+			if tt.isErr {
+				if err == nil {
+					t.Fatalf("New(%v) = nil error, want an error", tt.in)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("New(%v) = %v, want no error", tt.in, err)
+			}
+			if got := p.Hosts(); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Hosts() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMatches(t *testing.T) {
+	t.Parallel()
+
+	p, err := New([]string{"ipfs.io", "dweb.link"}, "ua/1")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{name: "listed host https", url: "https://ipfs.io/ipfs/QmAbc", want: true},
+		{name: "listed host http", url: "http://ipfs.io/ipfs/QmAbc", want: true},
+		{name: "listed host with port", url: "https://ipfs.io:8443/ipfs/QmAbc", want: true},
+		{name: "listed host upper case", url: "https://IPFS.IO/ipfs/QmAbc", want: true},
+		{name: "second listed host", url: "https://dweb.link/ipfs/QmAbc", want: true},
+		{name: "query string does not matter", url: "https://ipfs.io/x?a=1&b=2", want: true},
+
+		// Scope guards: everything below must be left alone, because a
+		// rewritten UA on an origin we have not reasoned about can break
+		// artworks that render correctly today.
+		{name: "unlisted host", url: "https://gateway.pinata.cloud/ipfs/QmAbc", want: false},
+		{name: "player shell on loopback", url: "http://127.0.0.1:8080/playlist", want: false},
+		{name: "subdomain does not match", url: "https://cdn.ipfs.io/ipfs/QmAbc", want: false},
+		{name: "host merely containing the entry", url: "https://ipfs.io.attacker.example/x", want: false},
+		{name: "entry as a path segment", url: "https://evil.example/ipfs.io/x", want: false},
+
+		// No remote origin to rewrite for.
+		{name: "data uri", url: "data:image/png;base64,iVBORw0KGgo=", want: false},
+		{name: "blob uri", url: "blob:http://127.0.0.1:8080/abc-def", want: false},
+		{name: "relative url", url: "/ipfs/QmAbc", want: false},
+		{name: "empty string", url: "", want: false},
+		{name: "unparseable", url: "://%%%", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := p.Matches(tt.url); got != tt.want {
+				t.Errorf("Matches(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFetchPatterns(t *testing.T) {
+	t.Parallel()
+
+	p, err := New([]string{"ipfs.io"}, "ua/1")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	got := p.FetchPatterns()
+	want := []map[string]interface{}{
+		{"urlPattern": "http://ipfs.io/*", "requestStage": "Request"},
+		{"urlPattern": "http://ipfs.io:*/*", "requestStage": "Request"},
+		{"urlPattern": "https://ipfs.io/*", "requestStage": "Request"},
+		{"urlPattern": "https://ipfs.io:*/*", "requestStage": "Request"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("FetchPatterns() = %v, want %v", got, want)
+	}
+}
+
+// Matches ignores the port, so the emitted patterns must cover a port-bearing
+// URL too. Without the ":*" variant the two halves of this policy disagree:
+// Matches calls a configured host in-scope while Chromium never pauses the
+// request, so the rewrite silently does not happen and the artwork fails
+// exactly as if the fix were absent — with nothing logged to say why.
+func TestFetchPatternsCoverEveryURLThatMatches(t *testing.T) {
+	t.Parallel()
+
+	p, err := New([]string{"ipfs.io"}, "ua/1")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	patterns := make([]string, 0, 4)
+	for _, pat := range p.FetchPatterns() {
+		patterns = append(patterns, pat["urlPattern"].(string))
+	}
+
+	for _, u := range []string{
+		"https://ipfs.io/ipfs/QmAbc",
+		"http://ipfs.io/ipfs/QmAbc",
+		"https://ipfs.io:8443/ipfs/QmAbc",
+		"http://ipfs.io:8080/ipfs/QmAbc",
+	} {
+		if !p.Matches(u) {
+			t.Fatalf("precondition: Matches(%q) = false", u)
+		}
+		if !anyGlobMatches(patterns, u) {
+			t.Errorf("Matches(%q) is true but no Fetch pattern covers it (patterns: %v)", u, patterns)
+		}
+	}
+}
+
+// anyGlobMatches models CDP's urlPattern semantics: a plain glob over the
+// full URL text where "*" matches any run of characters. Kept deliberately
+// small — it exists to assert pattern coverage, not to reimplement Chromium.
+func anyGlobMatches(patterns []string, url string) bool {
+	for _, p := range patterns {
+		if globMatch(p, url) {
+			return true
+		}
+	}
+	return false
+}
+
+func globMatch(pattern, s string) bool {
+	parts := strings.Split(pattern, "*")
+	if !strings.HasPrefix(s, parts[0]) {
+		return false
+	}
+	s = s[len(parts[0]):]
+	for i := 1; i < len(parts); i++ {
+		if parts[i] == "" {
+			if i == len(parts)-1 {
+				return true
+			}
+			continue
+		}
+		idx := strings.Index(s, parts[i])
+		if idx < 0 {
+			return false
+		}
+		s = s[idx+len(parts[i]):]
+	}
+	return strings.HasSuffix(pattern, "*") || s == ""
+}
+
+// A catch-all pattern would put a daemon round trip in front of every asset
+// a generative artwork loads. Guard the scoping property explicitly so a
+// later "simplification" to "*" fails here rather than in the field.
+func TestFetchPatternsAreScopedNotCatchAll(t *testing.T) {
+	t.Parallel()
+
+	p, err := New([]string{"ipfs.io", "dweb.link"}, "ua/1")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, pat := range p.FetchPatterns() {
+		got, _ := pat["urlPattern"].(string)
+		if got == "*" || got == "*://*/*" {
+			t.Fatalf("FetchPatterns() contains catch-all %q", got)
+		}
+		if !strings.Contains(got, "ipfs.io") && !strings.Contains(got, "dweb.link") {
+			t.Errorf("pattern %q names no configured host", got)
+		}
+		if pat["requestStage"] != "Request" {
+			t.Errorf("pattern %v must pause at the Request stage", pat)
+		}
+	}
+}
+
+func TestRewriteHeaders(t *testing.T) {
+	t.Parallel()
+
+	p, err := New([]string{"ipfs.io"}, "feral-player/9.9")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		in   map[string]string
+		want []map[string]string
+	}{
+		{
+			name: "canonical case is replaced in place",
+			in:   map[string]string{"User-Agent": "Mozilla/5.0 Chrome/150", "Accept": "image/*"},
+			want: []map[string]string{
+				{"name": "Accept", "value": "image/*"},
+				{"name": "User-Agent", "value": "feral-player/9.9"},
+			},
+		},
+		{
+			// HTTP/2 reports headers lower-cased. Emitting our own
+			// canonical-case header alongside would send the UA twice.
+			name: "lower case key is replaced, not duplicated",
+			in:   map[string]string{"user-agent": "Mozilla/5.0 Chrome/150"},
+			want: []map[string]string{
+				{"name": "user-agent", "value": "feral-player/9.9"},
+			},
+		},
+		{
+			name: "absent user-agent is added",
+			in:   map[string]string{"Accept": "image/*"},
+			want: []map[string]string{
+				{"name": "Accept", "value": "image/*"},
+				{"name": "User-Agent", "value": "feral-player/9.9"},
+			},
+		},
+		{
+			name: "no headers at all still yields ours",
+			in:   map[string]string{},
+			want: []map[string]string{
+				{"name": "User-Agent", "value": "feral-player/9.9"},
+			},
+		},
+		{
+			// Client hints are deliberately untouched: they were not
+			// needed to pass the challenge on device, so stripping them
+			// would widen the change past what was verified.
+			name: "other headers pass through untouched",
+			in: map[string]string{
+				"User-Agent":      "Mozilla/5.0 Chrome/150",
+				"Referer":         "http://127.0.0.1:8080/",
+				"sec-ch-ua":       "\"Chromium\";v=\"150\"",
+				"Sec-Fetch-Dest":  "image",
+				"Accept-Encoding": "gzip",
+			},
+			want: []map[string]string{
+				{"name": "Accept-Encoding", "value": "gzip"},
+				{"name": "Referer", "value": "http://127.0.0.1:8080/"},
+				{"name": "Sec-Fetch-Dest", "value": "image"},
+				{"name": "User-Agent", "value": "feral-player/9.9"},
+				{"name": "sec-ch-ua", "value": "\"Chromium\";v=\"150\""},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := p.RewriteHeaders(tt.in)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("RewriteHeaders(%v)\n got = %v\nwant = %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// Exactly one User-Agent must reach the origin. Two would let the origin
+// pick, which reinstates the challenge non-deterministically.
+func TestRewriteHeadersEmitsExactlyOneUserAgent(t *testing.T) {
+	t.Parallel()
+
+	p, err := New([]string{"ipfs.io"}, "ua/1")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for _, in := range []map[string]string{
+		{"User-Agent": "a"},
+		{"user-agent": "a"},
+		{"USER-AGENT": "a"},
+		{},
+	} {
+		count := 0
+		for _, h := range p.RewriteHeaders(in) {
+			if strings.EqualFold(h["name"], "user-agent") {
+				count++
+				if h["value"] != "ua/1" {
+					t.Errorf("RewriteHeaders(%v) kept UA %q", in, h["value"])
+				}
+			}
+		}
+		if count != 1 {
+			t.Errorf("RewriteHeaders(%v) emitted %d User-Agent headers, want 1", in, count)
+		}
+	}
+}
+
+// The caller's map must not be mutated: it comes straight off the CDP event
+// and may be reused by the caller for logging after the rewrite.
+func TestRewriteHeadersDoesNotMutateInput(t *testing.T) {
+	t.Parallel()
+
+	p, err := New([]string{"ipfs.io"}, "ua/1")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	in := map[string]string{"User-Agent": "original", "Accept": "image/*"}
+	p.RewriteHeaders(in)
+
+	if in["User-Agent"] != "original" {
+		t.Errorf("input map was mutated: User-Agent = %q", in["User-Agent"])
+	}
+	if len(in) != 2 {
+		t.Errorf("input map grew to %d entries", len(in))
+	}
+}
