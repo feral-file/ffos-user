@@ -1,0 +1,10 @@
+[Unit]
+Description=Enable magic-packet Wake-on-LAN for wired adapters
+After=system-ready.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/feralfile/scripts/enable-wake-on-lan.sh
+# A wedged driver or NetworkManager call must never hold the user manager or
+# delay FF OS startup indefinitely. systemd terminates the whole unit cgroup.
+TimeoutStartSec=15
