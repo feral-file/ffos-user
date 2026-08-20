@@ -197,11 +197,24 @@ type Config struct {
 	OfflineCache *OfflineCacheConfig `json:"offlineCache,omitempty"`
 	Netlog       *NetlogConfig       `json:"netlog,omitempty"`
 	// GatewayUserAgent scopes the kiosk User-Agent rewrite (see the
-	// uarewrite package). Absent means ON with built-in defaults, unlike
-	// OfflineCache above: this is a fix for artworks that otherwise never
-	// render, not an opt-in feature, so a device that was never
-	// reconfigured must still get it.
-	GatewayUserAgent *GatewayUserAgentConfig `json:"gatewayUserAgent,omitempty"`
+	// uarewrite package), carried as RAW bytes and decoded permissively by
+	// GatewayUserAgentTuning() — same treatment, and the same reason, as
+	// Provisioning below.
+	//
+	// Absent means ON with built-in defaults, unlike OfflineCache above:
+	// this is a fix for artworks that otherwise never render, not an opt-in
+	// feature, so a device that was never reconfigured must still get it.
+	//
+	// RawMessage is load-bearing, not a style choice. As a typed struct,
+	// valid JSON carrying one wrong-typed value — `{"hosts": "ipfs.io"}`
+	// instead of `["ipfs.io"]` — failed the top-level unmarshal, which made
+	// config.Load fail, which is FATAL. Under Restart=always that is an
+	// unbounded crash loop (the unit sets StartLimitIntervalSec=0 precisely
+	// so it never latches dead), and it takes the LAN hub, captive portal,
+	// provisioning, and claiming down with it — every remote recovery
+	// surface at once, over a typo in an optional block whose whole purpose
+	// is to be hand-edited when a new hostile gateway appears.
+	GatewayUserAgent json.RawMessage `json:"gatewayUserAgent,omitempty"`
 
 	// Provisioning carries the escape-policy tuning block
 	// (docs/network-recovery-ux.md §4.1/§4.2) as RAW bytes, decoded
@@ -266,6 +279,42 @@ func (g *GatewayUserAgentConfig) IsEnabled() bool {
 		return true
 	}
 	return *g.Enabled
+}
+
+// GatewayUserAgentTuning decodes the raw gatewayUserAgent block.
+//
+// A malformed or wrong-typed block is NOT an error here: it logs and returns
+// nil, which every caller reads as "absent" and therefore as the built-in
+// defaults. That is deliberate, and it is the whole point of holding the
+// block as RawMessage — see the field's doc for what failing instead used to
+// cost.
+//
+// Falling back to defaults rather than to disabled is also deliberate. The
+// realistic edit to this block is an operator ADDING a newly hostile gateway,
+// so a typo that disabled the rewrite would break artworks that render today
+// — a regression whose symptom (unrelated artworks failing) points nowhere
+// near its cause (a config edit about a different host). Falling back leaves
+// the device in exactly the state an unconfigured device is in, which
+// introduces no failure surface that was not already there.
+//
+// The log is Error, not the Warn its Provisioning sibling uses, because the
+// consequence differs: there, defaults replace some tuning knobs; here the
+// operator's ENTIRE stated intent is discarded. It names the effective host
+// list so the running scope is greppable from the device log rather than
+// inferred.
+func (c *Config) GatewayUserAgentTuning(logger *zap.Logger) *GatewayUserAgentConfig {
+	if len(c.GatewayUserAgent) == 0 {
+		return nil
+	}
+	var g GatewayUserAgentConfig
+	if err := json.Unmarshal(c.GatewayUserAgent, &g); err != nil {
+		if logger != nil {
+			logger.Error("gatewayUserAgent config block malformed; using built-in defaults",
+				zap.Error(err), zap.String("raw", string(c.GatewayUserAgent)))
+		}
+		return nil
+	}
+	return &g
 }
 
 // ProvisioningTuning carries the on-device knobs for the provisioning escape
