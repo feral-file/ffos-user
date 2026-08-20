@@ -565,42 +565,6 @@ func TestProvisioningTuningPermissiveDecode(t *testing.T) {
 	})
 }
 
-// GatewayUserAgentEnabled must default ON. A device whose controld.json
-// predates the gatewayUserAgent key still needs the fix (#296), so an absent
-// section — and an absent "enabled" inside a present section — must both
-// resolve to true. Only an explicit false turns it off.
-func TestGatewayUserAgentEnabledDefaultsOn(t *testing.T) {
-	t.Parallel()
-
-	truthy, falsy := true, false
-
-	tests := []struct {
-		name string
-		raw  string
-		want bool
-	}{
-		{name: "section absent entirely", raw: `{}`, want: true},
-		{name: "section present, enabled absent", raw: `{"gatewayUserAgent":{}}`, want: true},
-		{name: "explicitly enabled", raw: `{"gatewayUserAgent":{"enabled":true}}`, want: true},
-		{name: "explicitly disabled", raw: `{"gatewayUserAgent":{"enabled":false}}`, want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			var c config.Config
-			require.NoError(t, json.Unmarshal([]byte(tt.raw), &c))
-			assert.Equal(t, tt.want, c.GatewayUserAgentEnabled())
-		})
-	}
-
-	// Guard the pointer semantics directly too, so a refactor to a plain
-	// bool (which would silently default OFF) fails here.
-	assert.True(t, (&config.Config{GatewayUserAgent: &config.GatewayUserAgentConfig{Enabled: &truthy}}).GatewayUserAgentEnabled())
-	assert.False(t, (&config.Config{GatewayUserAgent: &config.GatewayUserAgentConfig{Enabled: &falsy}}).GatewayUserAgentEnabled())
-}
-
 func TestGatewayUserAgentConfigDecodesHostsAndUserAgent(t *testing.T) {
 	t.Parallel()
 

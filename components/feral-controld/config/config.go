@@ -238,7 +238,8 @@ func (c *Config) HubEnabled() bool {
 type GatewayUserAgentConfig struct {
 	// Enabled gates the rewrite. Pointer so an absent key defaults ON —
 	// only an explicit "enabled": false turns it off. Read via
-	// Config.GatewayUserAgentEnabled(), never directly.
+	// IsEnabled(), never directly: it is nil-safe on both the section and
+	// the field, which is what lets an absent block resolve to ON.
 	Enabled *bool `json:"enabled"`
 	// UserAgent replaces Chromium's own on matching requests. Empty uses
 	// uarewrite.DefaultUserAgent. Do NOT set this to a browser UA: a
@@ -250,23 +251,21 @@ type GatewayUserAgentConfig struct {
 	Hosts []string `json:"hosts,omitempty"`
 }
 
-// IsEnabled reports whether the rewrite should run. Defined on the section
-// (with a nil-receiver check) rather than only on Config so wiring that is
-// handed just this section — initializeApp takes config sections, not the
-// whole Config — resolves the default identically instead of re-deriving it
-// and drifting.
+// IsEnabled reports whether the rewrite should run. It defaults ON: this is
+// a fix, not an opt-in feature, so a device whose controld.json predates the
+// key must still receive it, and only an explicit "enabled": false disables
+// it.
+//
+// Defined on the SECTION with a nil-receiver check rather than on Config,
+// because initializeApp is handed individual config sections rather than the
+// whole Config. A second Config-level accessor existed briefly and was
+// removed: it was a pure alias with no production caller, and two spellings
+// of one default is how the two drift apart.
 func (g *GatewayUserAgentConfig) IsEnabled() bool {
 	if g == nil || g.Enabled == nil {
 		return true
 	}
 	return *g.Enabled
-}
-
-// GatewayUserAgentEnabled reports whether the kiosk User-Agent rewrite
-// should run. It defaults ON for the reason given on the config field: this
-// is a fix, and a device whose config predates it must still receive it.
-func (c *Config) GatewayUserAgentEnabled() bool {
-	return c.GatewayUserAgent.IsEnabled()
 }
 
 // ProvisioningTuning carries the on-device knobs for the provisioning escape

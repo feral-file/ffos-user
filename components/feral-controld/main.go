@@ -615,6 +615,25 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	})
 	defer app.CDP.Close()
 
+	// The rewrite interceptor owns a SEPARATE websocket to the kiosk plus the
+	// read-pump goroutine draining it, neither of which app.CDP.Close above
+	// touches. Without this the connection and that goroutine outlive run()
+	// on every shutdown path, which is both a leak and a divergence from how
+	// every other long-lived component here is torn down.
+	//
+	// Deferred after the CDP close so it runs BEFORE it (defers unwind in
+	// reverse): the interceptor's session is the more derived of the two, and
+	// closing it while the daemon's own CDP client is still up keeps teardown
+	// ordered from the outside in.
+	defer func() {
+		if app.UARewrite == nil {
+			return
+		}
+		if err := app.UARewrite.Close(); err != nil {
+			app.Logger.Warn("Failed to close kiosk User-Agent rewrite session", zap.Error(err))
+		}
+	}()
+
 	devicectl.StartSleepScheduleLoop(ctx, app.Executor, app.Logger)
 
 	// send ready notification to systemd
