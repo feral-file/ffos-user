@@ -3,6 +3,7 @@ package uarewrite
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -21,6 +22,19 @@ import (
 // the page see a network error beats holding the asset open indefinitely,
 // because the player's own retry can then make progress.
 const continueTimeout = 10 * time.Second
+
+// redialCooldown is the minimum spacing between recovery re-dials, and
+// redialTimeout bounds one such attempt.
+//
+// Spacing matters because the trigger is a per-request failure: a dead socket
+// fails every paused request it was holding, so without a cooldown one
+// Chromium hiccup becomes a dial storm against a kiosk that is already sick.
+// The value mirrors offlinecache's own replay re-dial (kioskreplay.go) rather
+// than inventing a second cadence for the same event on the same target.
+const (
+	redialCooldown = 30 * time.Second
+	redialTimeout  = 30 * time.Second
+)
 
 // Interceptor applies a Policy to live kiosk traffic.
 //
@@ -59,6 +73,13 @@ type Interceptor struct {
 	// a paused request never contends with a reconnect.
 	mu      sync.Mutex
 	session offlinecache.CDPSession
+
+	// redialMu guards lastRedial, the cooldown clock behind recoverFrom.
+	// Separate from mu: a recovery decision is not a session swap, and it
+	// must not serialize against the request path.
+	redialMu   sync.Mutex
+	lastRedial time.Time
+	clock      wrapper.Clock
 }
 
 // NewInterceptor builds an Interceptor. It performs no I/O; call
@@ -70,6 +91,7 @@ func NewInterceptor(
 	dialer wrapper.WebSocketDialer,
 	jsonWrapper wrapper.JSON,
 	ioWrapper wrapper.IO,
+	clock wrapper.Clock,
 	logger *zap.Logger,
 ) *Interceptor {
 	return &Interceptor{
@@ -79,6 +101,7 @@ func NewInterceptor(
 		dialer:     dialer,
 		json:       jsonWrapper,
 		io:         ioWrapper,
+		clock:      clock,
 		logger:     logger,
 	}
 }
@@ -221,13 +244,11 @@ func (i *Interceptor) processPaused(session offlinecache.CDPSession, params json
 	}
 
 	if _, err := session.Send(ctx, "Fetch.continueRequest", args); err != nil {
-		// Nothing further to try: the request stays paused until Chromium
-		// tears the session down. Log loudly enough to be attributable,
-		// since the user-visible symptom is a stalled artwork asset.
 		i.logger.Warn("uarewrite: Fetch.continueRequest failed",
 			zap.String("url", paused.Request.URL),
 			zap.Bool("rewritten", rewritten),
 			zap.Error(err))
+		i.recoverFrom(session, err)
 		return
 	}
 
@@ -235,4 +256,83 @@ func (i *Interceptor) processPaused(session offlinecache.CDPSession, params json
 		i.logger.Debug("uarewrite: rewrote User-Agent",
 			zap.String("url", paused.Request.URL))
 	}
+}
+
+// recoverFrom re-arms interception when the failure that produced err was the
+// SOCKET dying rather than a command being refused.
+//
+// This session is a separate WebSocket from the daemon's primary CDP client,
+// with its own read pump and write deadlines, so it can die on its own while
+// the primary stays perfectly healthy. AttachOnReconnect's only other caller
+// is main.go's onConnect hook, which fires on the PRIMARY connection — in
+// that case never. Without this, one dead socket retires the rewrite
+// permanently, until the kiosk or the primary connection restarts.
+//
+// The failure is invisible without this path, which is why it is worth
+// handling rather than logging: when a DevTools client drops, Chromium
+// releases the requests it had paused and stops honoring its Fetch patterns,
+// so traffic keeps flowing — with the browser User-Agent restored. Nothing
+// stalls, nothing new is logged, and the artworks this PR fixes silently
+// revert to failing.
+//
+// ErrCDPTransport is what separates the two shapes. The session package
+// classifies at the source (see its doc): a transport error means the
+// connection is unusable, while a CDP error REPLY or an expired caller
+// context leaves the socket perfectly healthy. Re-dialing the latter would be
+// pointless churn against a kiosk that is answering fine.
+func (i *Interceptor) recoverFrom(session offlinecache.CDPSession, err error) {
+	if !i.claimRedial(session, err) {
+		return
+	}
+
+	// Off the request goroutine: AttachOnReconnect dials synchronously
+	// (bounded, but seconds against a sick kiosk) and this path is reached
+	// from the CDP read pump's child goroutine.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), redialTimeout)
+		defer cancel()
+
+		if err := i.AttachOnReconnect(ctx); err != nil {
+			// Leave it retired. The next failed request past the cooldown
+			// tries again, and a primary-connection reconnect re-arms it
+			// regardless, so a permanently down kiosk costs one bounded
+			// dial per cooldown rather than a spin.
+			i.logger.Warn("uarewrite: re-dial after transport failure failed", zap.Error(err))
+		}
+	}()
+}
+
+// claimRedial decides whether this failure should trigger a re-dial, and
+// claims the cooldown slot if so. Split out from recoverFrom purely so the
+// decision is testable without performing a real dial — the dial itself needs
+// a live kiosk, the decision is where every mistake would hide.
+//
+// Returns false, without claiming anything, for the three cases that must not
+// re-dial: an error that left the socket healthy, a failure on a session that
+// has already been superseded, and an attempt inside the cooldown window.
+func (i *Interceptor) claimRedial(session offlinecache.CDPSession, err error) bool {
+	if !errors.Is(err, offlinecache.ErrCDPTransport) {
+		return false
+	}
+
+	// Only the live session's failure is worth acting on. A dead socket
+	// fails every request it was holding, so without this check a single
+	// drop would enqueue one recovery per in-flight request, and a
+	// reconnect that already happened would be undone by a late arrival.
+	i.mu.Lock()
+	current := i.session
+	i.mu.Unlock()
+	if current != session {
+		return false
+	}
+
+	i.redialMu.Lock()
+	defer i.redialMu.Unlock()
+
+	now := i.clock.Now()
+	if !i.lastRedial.IsZero() && now.Sub(i.lastRedial) < redialCooldown {
+		return false
+	}
+	i.lastRedial = now
+	return true
 }

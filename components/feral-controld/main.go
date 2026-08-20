@@ -994,7 +994,7 @@ func initializeApp(
 				zap.Error(err))
 		} else {
 			uaRewrite = uarewrite.NewInterceptor(
-				policy, cdpEndpoint, httpClient, webSocketDialer, json, io, logger,
+				policy, cdpEndpoint, httpClient, webSocketDialer, json, io, clock, logger,
 			)
 		}
 	}
