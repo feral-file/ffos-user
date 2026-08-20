@@ -223,14 +223,114 @@ func TestFetchPatternsAreScopedNotCatchAll(t *testing.T) {
 	}
 	for _, pat := range p.FetchPatterns() {
 		got, _ := pat["urlPattern"].(string)
-		if got == "*" || got == "*://*/*" {
-			t.Fatalf("FetchPatterns() contains catch-all %q", got)
+
+		// Assert on the AUTHORITY, not on whether the whole pattern equals
+		// some known catch-all literal. The earlier version of this test
+		// compared against "*" and "*://*/*" and therefore sailed past
+		// `https://*/*`, which is the pattern a `*` host entry actually
+		// produced — a catch-all that pauses every kiosk request. Checking
+		// the authority is what makes this test guard the invariant rather
+		// than a spelling of its violation.
+		authority := got
+		if i := strings.Index(authority, "://"); i >= 0 {
+			authority = authority[i+3:]
 		}
-		if !strings.Contains(got, "ipfs.io") && !strings.Contains(got, "dweb.link") {
-			t.Errorf("pattern %q names no configured host", got)
+		if i := strings.Index(authority, "/"); i >= 0 {
+			authority = authority[:i]
+		}
+		host := strings.TrimSuffix(authority, ":*")
+		if host != "ipfs.io" && host != "dweb.link" {
+			t.Errorf("pattern %q has authority %q, which is not a configured host", got, host)
+		}
+		if strings.ContainsAny(host, "*?[]") {
+			t.Errorf("pattern %q carries a glob metacharacter in its host", got)
 		}
 		if pat["requestStage"] != "Request" {
 			t.Errorf("pattern %v must pause at the Request stage", pat)
+		}
+	}
+}
+
+// A glob metacharacter in a configured host produces a pattern that pauses
+// far more than it rewrites: `*` yields `https://*/*`, which Chromium matches
+// against EVERY request, while Matches still compares the literal string "*"
+// and rewrites none of them. That is a daemon round trip in front of every
+// kiosk asset for zero benefit, with the scoping guarantee silently gone.
+// New must refuse the config outright so main.go degrades to "no rewrite".
+func TestNewRejectsGlobMetacharacters(t *testing.T) {
+	t.Parallel()
+
+	for _, entry := range []string{
+		"*",
+		"*.ipfs.io",
+		"ipfs.*",
+		"ipfs.io*",
+		"if?s.io",
+		"[ai]pfs.io",
+		"https://*",
+		"*:443",
+	} {
+		t.Run(entry, func(t *testing.T) {
+			t.Parallel()
+
+			p, err := New([]string{entry}, "ua/1")
+			if err == nil {
+				t.Fatalf("New(%q) accepted a glob host and emitted %v", entry, p.FetchPatterns())
+			}
+		})
+	}
+}
+
+// The guarantee that matters is behavioral, not textual: whatever New
+// accepts must never yield a pattern that matches a URL Matches would reject.
+// Pin it against the glob model so a future relaxation of the host grammar
+// has to keep both halves in step.
+func TestAcceptedHostsNeverProduceOverreachingPatterns(t *testing.T) {
+	t.Parallel()
+
+	p, err := New([]string{"ipfs.io", "dweb.link", "127.0.0.1"}, "ua/1")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	patterns := make([]string, 0, 12)
+	for _, pat := range p.FetchPatterns() {
+		patterns = append(patterns, pat["urlPattern"].(string))
+	}
+
+	for _, u := range []string{
+		"https://example.com/asset.js",
+		"http://127.0.0.1:8080/playlist",
+		"https://gateway.pinata.cloud/ipfs/QmAbc",
+		"https://cdn.ipfs.io/ipfs/QmAbc",
+		"https://ipfs.io.attacker.example/x",
+	} {
+		if p.Matches(u) {
+			continue // legitimately in scope; nothing to prove here
+		}
+		if anyGlobMatches(patterns, u) {
+			t.Errorf("%q is paused by a Fetch pattern but Matches() rejects it: "+
+				"the request round-trips through the daemon for no rewrite", u)
+		}
+	}
+}
+
+func TestNewAcceptsIPLiteralHosts(t *testing.T) {
+	t.Parallel()
+
+	for _, entry := range []string{"127.0.0.1", "192.168.31.151:8080", "[::1]", "http://[2001:db8::1]"} {
+		if _, err := New([]string{entry}, "ua/1"); err != nil {
+			t.Errorf("New(%q) rejected a literal IP host: %v", entry, err)
+		}
+	}
+}
+
+func TestNewRejectsMalformedLabels(t *testing.T) {
+	t.Parallel()
+
+	for _, entry := range []string{"-ipfs.io", "ipfs-.io", "ipfs..io", "ipfs_gateway.io"} {
+		if _, err := New([]string{entry}, "ua/1"); err == nil {
+			t.Errorf("New(%q) accepted a malformed host", entry)
 		}
 	}
 }
@@ -363,5 +463,34 @@ func TestRewriteHeadersDoesNotMutateInput(t *testing.T) {
 	}
 	if len(in) != 2 {
 		t.Errorf("input map grew to %d entries", len(in))
+	}
+}
+
+// url.Parse treats "?" and "#" as structure rather than host characters, so
+// an entry containing either is TRUNCATED rather than rejected: "if?s.io" (a
+// plausible typo for "ipfs.io") yields the host "if", which then looks like a
+// perfectly valid literal to every later check. Neither Matches nor
+// FetchPatterns can detect that after the fact, so the entry has to be
+// refused at the door.
+func TestNewRejectsEntriesThatWouldTruncateSilently(t *testing.T) {
+	t.Parallel()
+
+	for _, entry := range []string{
+		"if?s.io",
+		"ipfs.io?x=1",
+		"ipfs.io#frag",
+		"https://ipfs.io/path?x=1",
+	} {
+		t.Run(entry, func(t *testing.T) {
+			t.Parallel()
+
+			p, err := New([]string{entry}, "ua/1")
+			if err == nil {
+				t.Fatalf("New(%q) accepted an entry that truncates to hosts %v", entry, p.Hosts())
+			}
+			if !strings.Contains(err.Error(), "truncate") {
+				t.Errorf("New(%q) error %q should name the truncation hazard", entry, err)
+			}
+		})
 	}
 }

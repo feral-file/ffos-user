@@ -29,6 +29,7 @@ package uarewrite
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"sort"
 	"strings"
@@ -240,6 +241,20 @@ func normalizeHost(raw string) (string, error) {
 	if s == "" {
 		return "", fmt.Errorf("empty entry")
 	}
+	// Reject query/fragment markers BEFORE parsing. url.Parse treats them as
+	// structure, not as characters in a host, so it would silently truncate
+	// rather than fail: "if?s.io" (a plausible typo for "ipfs.io") parses to
+	// the host "if", which is then accepted as a perfectly valid literal and
+	// scoped against for the rest of the daemon's life. Neither half of this
+	// package can detect that afterwards — the truncation is lossless from
+	// their point of view. A query string never helps identify a HOST, so
+	// refusing the entry outright and naming the character is strictly more
+	// useful than any salvage attempt.
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		return "", fmt.Errorf(
+			"contains %q, which would truncate the host at that character; "+
+				"use the bare host name", s[i])
+	}
 	if !strings.Contains(s, "://") {
 		// url.Parse treats a bare "host:port" authority as scheme:opaque,
 		// so give it a scheme to parse against rather than special-casing
@@ -254,5 +269,67 @@ func normalizeHost(raw string) (string, error) {
 	if host == "" {
 		return "", fmt.Errorf("no host component")
 	}
+	if err := validateLiteralHost(host); err != nil {
+		return "", err
+	}
 	return host, nil
+}
+
+// validateLiteralHost enforces the invariant that ties this package's two
+// matching halves together: EVERY host accepted here must be inert under
+// glob interpretation.
+//
+// The host string flows into two places with DIFFERENT matching semantics —
+// Matches does literal set membership, FetchPatterns renders it into a CDP
+// urlPattern that Chromium evaluates as a glob. A host carrying a glob
+// metacharacter satisfies neither honestly: `*` yields the pattern
+// `https://*/*`, which pauses EVERY kiosk request, while Matches still
+// compares against the literal string "*" and rewrites none of them. The
+// result is a daemon round trip in front of every asset for zero benefit,
+// with the scoping guarantee silently gone and nothing in the log to say so.
+// `*.ipfs.io` is the more likely real-world spelling of this mistake than a
+// bare `*`, and it is worse: the operator believes they widened coverage to
+// subdomains while actually disabling the rewrite for ipfs.io entirely.
+//
+// This is the SECOND defect of exactly that shape (the first was ports —
+// see FetchPatterns' doc). Both came from the same place: a host value that
+// means one thing to Matches and another to the glob. Rejecting anything
+// non-literal at the door is what stops there being a third — so if a future
+// change wants to support wildcards, it must teach Matches the same grammar
+// in the same commit, not relax this check alone.
+//
+// Accepted: IPv4/IPv6 literals, and DNS names whose labels are
+// alphanumeric-with-internal-hyphens. Everything else is a config error and
+// is reported; main.go's wiring degrades to "no rewrite" rather than
+// starting with a policy that cannot do what it claims.
+func validateLiteralHost(host string) error {
+	// An IP literal is already unambiguous — no labels to validate, and
+	// url.Hostname has stripped any IPv6 brackets.
+	if net.ParseIP(host) != nil {
+		return nil
+	}
+	if len(host) > 253 {
+		return fmt.Errorf("host is longer than 253 characters")
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" {
+			return fmt.Errorf("empty label (leading, trailing, or doubled dot)")
+		}
+		if len(label) > 63 {
+			return fmt.Errorf("label %q is longer than 63 characters", label)
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("label %q starts or ends with a hyphen", label)
+		}
+		for _, r := range label {
+			isAlnum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+			if !isAlnum && r != '-' {
+				return fmt.Errorf(
+					"label %q contains %q; hosts must be literal names or IPs, "+
+						"and wildcards are not supported (see validateLiteralHost)",
+					label, r)
+			}
+		}
+	}
+	return nil
 }
