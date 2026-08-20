@@ -46,6 +46,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/softap"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
+	"github.com/feral-file/ffos-user/components/feral-controld/uarewrite"
 	"github.com/feral-file/ffos-user/components/feral-controld/watchdog"
 	"github.com/feral-file/ffos-user/components/feral-controld/wifictl"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -107,8 +108,14 @@ type app struct {
 	// the narrower ProgressObserver interface, which has no Close method —
 	// see offlinecache.Runtime.Notifier's doc.
 	OfflineCacheNotifier *offlinecache.Notifier
-	Hub                  hub.Hub
-	LinkChecker          *status.LinkChecker
+	// UARewrite rewrites the outgoing User-Agent for the configured
+	// artwork origins (#296). Independent of the offline cache above: the
+	// bug it fixes has nothing to do with caching, so it must run on a
+	// device with offlineCache off. Nil only when explicitly disabled via
+	// gatewayUserAgent.enabled=false, or when its policy failed to build.
+	UARewrite   *uarewrite.Interceptor
+	Hub         hub.Hub
+	LinkChecker *status.LinkChecker
 	// Netlog is the WAN-outage flight recorder; nil when disabled by config,
 	// unavailable (ring open failed), or in the test app.
 	Netlog *netlog.Recorder
@@ -185,6 +192,7 @@ func main() {
 		config.RelayerConfig.APIKey,
 		config.MintPairingConfig,
 		config.OfflineCache,
+		config.GatewayUserAgent,
 		config.Netlog,
 		provisioningTuningFromConfig(config.ProvisioningTuning(finalLogger), finalLogger),
 		dbus.NAME,
@@ -593,6 +601,17 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 				app.Logger.Warn("Failed to attach offline cache replay to kiosk CDP session", zap.Error(err))
 			}
 		}
+
+		// Re-arm the User-Agent rewrite on the same reconnect boundary and
+		// for the same reason: every kiosk restart mints a new target, so a
+		// session armed once at startup would silently stop intercepting
+		// after the first restart. Failure is logged, not fatal — the
+		// daemon's other duties must survive an unavailable kiosk.
+		if app.UARewrite != nil {
+			if err := app.UARewrite.AttachOnReconnect(ctx); err != nil {
+				app.Logger.Warn("Failed to arm kiosk User-Agent rewrite", zap.Error(err))
+			}
+		}
 	})
 	defer app.CDP.Close()
 
@@ -779,6 +798,7 @@ func initializeApp(
 	relayerAPIKey string,
 	mintPairingConfig *config.MintPairingConfig,
 	offlineCacheConfig *config.OfflineCacheConfig,
+	gatewayUserAgentConfig *config.GatewayUserAgentConfig,
 	netlogConfig *config.NetlogConfig,
 	provTuning provisioning.Tuning,
 	dbusName string,
@@ -930,6 +950,34 @@ func initializeApp(
 		offlineCacheStaticServer = ocRuntime.StaticServer
 		offlineCacheNotifier = ocRuntime.Notifier
 		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
+	}
+
+	// Kiosk User-Agent rewrite (#296). Built independently of the offline
+	// cache above and defaulting ON: an artwork whose origin challenges
+	// browser User-Agents never renders at all, and a device whose config
+	// predates this key must still get the fix.
+	//
+	// A bad host list is NOT fatal. config.Load failing is fatal under
+	// Restart=always, and this daemon owns every recovery surface on the
+	// device — so a typo'd host must degrade to "no rewrite" with a loud
+	// log, never crash-loop the box out of reach.
+	var uaRewrite *uarewrite.Interceptor
+	if gatewayUserAgentConfig.IsEnabled() {
+		var uaHosts []string
+		var uaAgent string
+		if gatewayUserAgentConfig != nil {
+			uaHosts = gatewayUserAgentConfig.Hosts
+			uaAgent = gatewayUserAgentConfig.UserAgent
+		}
+		policy, err := uarewrite.New(uaHosts, uaAgent)
+		if err != nil {
+			logger.Error("Invalid gatewayUserAgent config; kiosk User-Agent rewrite disabled",
+				zap.Error(err))
+		} else {
+			uaRewrite = uarewrite.NewInterceptor(
+				policy, cdpEndpoint, httpClient, webSocketDialer, json, io, logger,
+			)
+		}
 	}
 
 	// Command handler. The raw handler serves internal daemon lifecycle flows
@@ -1226,6 +1274,7 @@ func initializeApp(
 		PlaylistScheduler:        playlistScheduler,
 		MintPairing:              mintPairing,
 		KioskReplay:              kioskReplay,
+		UARewrite:                uaRewrite,
 		OfflineCacheService:      offlineCache,
 		OfflineCacheStaticServer: offlineCacheStaticServer,
 		OfflineCacheNotifier:     offlineCacheNotifier,

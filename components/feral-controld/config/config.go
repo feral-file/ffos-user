@@ -250,14 +250,23 @@ type GatewayUserAgentConfig struct {
 	Hosts []string `json:"hosts,omitempty"`
 }
 
+// IsEnabled reports whether the rewrite should run. Defined on the section
+// (with a nil-receiver check) rather than only on Config so wiring that is
+// handed just this section — initializeApp takes config sections, not the
+// whole Config — resolves the default identically instead of re-deriving it
+// and drifting.
+func (g *GatewayUserAgentConfig) IsEnabled() bool {
+	if g == nil || g.Enabled == nil {
+		return true
+	}
+	return *g.Enabled
+}
+
 // GatewayUserAgentEnabled reports whether the kiosk User-Agent rewrite
 // should run. It defaults ON for the reason given on the config field: this
 // is a fix, and a device whose config predates it must still receive it.
 func (c *Config) GatewayUserAgentEnabled() bool {
-	if c.GatewayUserAgent == nil || c.GatewayUserAgent.Enabled == nil {
-		return true
-	}
-	return *c.GatewayUserAgent.Enabled
+	return c.GatewayUserAgent.IsEnabled()
 }
 
 // ProvisioningTuning carries the on-device knobs for the provisioning escape

@@ -1217,6 +1217,12 @@ func TestInitializeApp(t *testing.T) {
 		"test-api-key",
 		nil,
 		nil,
+		// Gateway User-Agent config: absent, which is the fielded default
+		// and resolves to ENABLED — so this also asserts the wiring builds
+		// its interceptor with no config present. Constructing it performs
+		// no I/O; it dials only from AttachOnReconnect, which this test
+		// never reaches.
+		nil,
 		// Netlog config: disabled so the wiring test never touches the real
 		// ring directory (buildNetlogRecorder would otherwise attempt
 		// /home/feralfile and merely degrade to nil with a warn).
@@ -1229,6 +1235,13 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app)
 	assert.Equal(t, logger, app.Logger)
 	assert.NotNil(t, app.Ctx)
+
+	// The User-Agent rewrite must be wired with NO gatewayUserAgent config
+	// present: that is what every fielded device has today, and the bug it
+	// fixes (#296) leaves those artworks permanently unrenderable. A nil
+	// here would mean the fix ships switched off for exactly the fleet that
+	// needs it.
+	assert.NotNil(t, app.UARewrite, "kiosk User-Agent rewrite must default ON with absent config")
 
 	// The app context is the daemon-lifetime context handed to long-lived
 	// components (hub, claim flow); Cancel must cancel exactly it, or those
@@ -1287,6 +1300,7 @@ func TestInitializeApp_OfflineCacheEnabled(t *testing.T) {
 		"test-api-key",
 		nil,
 		&config.OfflineCacheConfig{Enabled: true, RootDir: t.TempDir()},
+		nil,
 		&config.NetlogConfig{Disabled: true},
 		provisioning.Tuning{},
 		"com.feralfile.test",
@@ -1461,4 +1475,55 @@ func TestApp_Run_StartupOrdering(t *testing.T) {
 	require.GreaterOrEqual(t, idxRelayer, 0, "relayer connect must have been attempted")
 	assert.Less(t, idxHub, idxRelayer, "hub must start before the relayer connect")
 	assert.Less(t, idxProv, idxRelayer, "provisioning must start before the relayer connect")
+}
+
+// An explicit "enabled": false is the documented off switch, and it must
+// actually leave the interceptor unbuilt — otherwise the daemon still opens
+// a CDP session and arms Fetch on a device whose operator disabled it.
+func TestInitializeAppGatewayUserAgentDisabled(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	disabled := false
+
+	app := initializeApp(
+		logger,
+		"http://localhost:9222",
+		"wss://test.relay.com",
+		"test-api-key",
+		nil,
+		nil,
+		&config.GatewayUserAgentConfig{Enabled: &disabled},
+		&config.NetlogConfig{Disabled: true},
+		provisioning.Tuning{},
+		"com.feralfile.test",
+		nil,
+	)
+	defer app.Cancel()
+
+	assert.Nil(t, app.UARewrite)
+}
+
+// A host list that cannot yield a usable entry must degrade to "no rewrite",
+// never abort startup: config.Load failure is fatal under Restart=always, and
+// this daemon owns every recovery surface on the device, so a typo in an
+// optional block must not crash-loop the box out of reach.
+func TestInitializeAppGatewayUserAgentInvalidHostsDegrades(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+
+	app := initializeApp(
+		logger,
+		"http://localhost:9222",
+		"wss://test.relay.com",
+		"test-api-key",
+		nil,
+		nil,
+		&config.GatewayUserAgentConfig{Hosts: []string{"https://"}},
+		&config.NetlogConfig{Disabled: true},
+		provisioning.Tuning{},
+		"com.feralfile.test",
+		nil,
+	)
+	defer app.Cancel()
+
+	assert.NotNil(t, app, "invalid host list must not abort startup")
+	assert.Nil(t, app.UARewrite, "invalid host list must degrade to no rewrite")
 }
