@@ -16,24 +16,38 @@ import (
 
 // continueTimeout bounds one Fetch.continueRequest round trip.
 //
-// A paused request is BLOCKED until we answer, so the ceiling here is a
-// ceiling on how long an artwork asset can stall waiting on the daemon. It is
-// deliberately short: if the CDP socket is wedged, failing fast and letting
-// the page see a network error beats holding the asset open indefinitely,
-// because the player's own retry can then make progress.
+// On its own this bounds only how long WE wait for the reply — Chromium
+// keeps the request paused regardless of when we stop waiting. What turns
+// this into a real ceiling on how long an asset can stall is the retirement
+// in processPaused's error path: a timeout retires (closes) the session, and
+// a detached Fetch client releases every request it had paused, so the asset
+// fails fast and the player's own retry can make progress against the
+// re-armed session. Do not remove that retirement and expect this constant
+// to keep meaning anything.
 const continueTimeout = 10 * time.Second
 
-// redialCooldown is the minimum spacing between recovery re-dials, and
-// redialTimeout bounds one such attempt.
-//
-// Spacing matters because the trigger is a per-request failure: a dead socket
-// fails every paused request it was holding, so without a cooldown one
-// Chromium hiccup becomes a dial storm against a kiosk that is already sick.
-// The value mirrors offlinecache's own replay re-dial (kioskreplay.go) rather
-// than inventing a second cadence for the same event on the same target.
 const (
+	// redialCooldown is the minimum spacing between recovery attach
+	// attempts, and redialTimeout bounds one such attempt. Spacing
+	// matters because a dead socket fails every request it was holding,
+	// so without it one Chromium hiccup becomes a dial storm against a
+	// kiosk that is already sick. The value mirrors offlinecache's own
+	// replay re-dial (kioskreplay.go) rather than inventing a second
+	// cadence for the same event on the same target.
 	redialCooldown = 30 * time.Second
 	redialTimeout  = 30 * time.Second
+
+	// superviseInterval paces the supervisor's health pass, and
+	// probeTimeout bounds its per-tick probe. The supervisor exists
+	// because every other recovery trigger here is a Fetch event, and the
+	// failure being recovered from is precisely the one that stops Fetch
+	// events from arriving: a session that dies IDLE produces no failed
+	// request, so nothing event-driven can ever notice it. offlinecache's
+	// replay does not need one only because playlist-refresher already
+	// touches its session every few minutes; this interceptor has no
+	// periodic caller, so it brings its own.
+	superviseInterval = 30 * time.Second
+	probeTimeout      = 10 * time.Second
 )
 
 // Interceptor applies a Policy to live kiosk traffic.
@@ -74,13 +88,39 @@ type Interceptor struct {
 	mu      sync.Mutex
 	session offlinecache.CDPSession
 
-	// redialMu guards lastRedial, the cooldown clock behind recoverFrom.
-	// Separate from mu: a recovery decision is not a session swap, and it
-	// must not serialize against the request path.
+	// redialMu guards lastRedial and attaching, the cooldown clock and
+	// single-flight latch behind claimAttach. Separate from mu: a recovery
+	// decision is not a session swap, and it must not serialize against
+	// the request path.
 	redialMu   sync.Mutex
 	lastRedial time.Time
+	attaching  bool
 	clock      wrapper.Clock
+
+	// dial is DialPageSession behind a seam so recovery paths are testable
+	// without a live kiosk. Production never overrides it.
+	dial dialFunc
+
+	// superviseOnce starts the supervisor exactly once, on the FIRST
+	// AttachOnReconnect call — success or failure. Starting it on failure
+	// too is the point: an initial attach against a kiosk that is still
+	// booting must leave something behind that keeps trying.
+	superviseOnce sync.Once
+	// done stops the supervisor; closeOnce keeps Close idempotent.
+	done      chan struct{}
+	closeOnce sync.Once
 }
+
+// dialFunc mirrors offlinecache.DialPageSession's signature.
+type dialFunc func(
+	ctx context.Context,
+	endpoint string,
+	httpClient wrapper.HTTPClient,
+	dialer wrapper.WebSocketDialer,
+	jsonWrapper wrapper.JSON,
+	ioWrapper wrapper.IO,
+	logger *zap.Logger,
+) (offlinecache.CDPSession, error)
 
 // NewInterceptor builds an Interceptor. It performs no I/O; call
 // AttachOnReconnect to establish the session.
@@ -103,6 +143,8 @@ func NewInterceptor(
 		io:         ioWrapper,
 		clock:      clock,
 		logger:     logger,
+		dial:       offlinecache.DialPageSession,
+		done:       make(chan struct{}),
 	}
 }
 
@@ -119,7 +161,22 @@ func NewInterceptor(
 // Any previous session is closed first so a reconnect cannot leave a second
 // Fetch client armed on a target we no longer track.
 func (i *Interceptor) AttachOnReconnect(ctx context.Context) error {
-	session, err := offlinecache.DialPageSession(ctx, i.endpoint, i.httpClient, i.dialer, i.json, i.io, i.logger)
+	// First call — success or failure — brings the supervisor up. It has
+	// to start even when this attach fails: the kiosk may simply not be
+	// up yet (boot ordering), and a failure that leaves nothing behind to
+	// retry is how the rewrite stays dead until the next full restart.
+	i.superviseOnce.Do(func() { go i.supervise() })
+
+	select {
+	case <-i.done:
+		// Closed interceptors must not install fresh sessions: a dial
+		// racing run()'s shutdown would otherwise leave a connection
+		// nobody will ever close.
+		return fmt.Errorf("uarewrite: interceptor closed")
+	default:
+	}
+
+	session, err := i.dial(ctx, i.endpoint, i.httpClient, i.dialer, i.json, i.io, i.logger)
 	if err != nil {
 		return fmt.Errorf("uarewrite: dial kiosk CDP session: %w", err)
 	}
@@ -160,8 +217,11 @@ func (i *Interceptor) AttachOnReconnect(ctx context.Context) error {
 	return nil
 }
 
-// Close tears down the session. Safe to call when never attached.
+// Close tears down the session and stops the supervisor. Safe to call when
+// never attached, and idempotent.
 func (i *Interceptor) Close() error {
+	i.closeOnce.Do(func() { close(i.done) })
+
 	i.mu.Lock()
 	session := i.session
 	i.session = nil
@@ -258,81 +318,174 @@ func (i *Interceptor) processPaused(session offlinecache.CDPSession, params json
 	}
 }
 
-// recoverFrom re-arms interception when the failure that produced err was the
-// SOCKET dying rather than a command being refused.
+// recoverableSendFailure reports whether err is worth recovering the session
+// over. Two shapes qualify:
 //
-// This session is a separate WebSocket from the daemon's primary CDP client,
-// with its own read pump and write deadlines, so it can die on its own while
-// the primary stays perfectly healthy. AttachOnReconnect's only other caller
-// is main.go's onConnect hook, which fires on the PRIMARY connection — in
-// that case never. Without this, one dead socket retires the rewrite
-// permanently, until the kiosk or the primary connection restarts.
+//   - ErrCDPTransport: the session package classifies at the source (see its
+//     doc) — the socket itself is unusable. shutdown() now wraps the pending-
+//     call error the same way, so an in-flight call killed by session death
+//     classifies identically to one issued after it.
+//   - context.DeadlineExceeded: the write went out but no reply came back
+//     inside our own bound (every ctx on this path is created locally, so the
+//     deadline is necessarily ours). The socket may technically be open, but
+//     a Fetch client that cannot get replies is not intercepting anything —
+//     and worse, Chromium is still holding whatever requests it paused for
+//     us. Only retiring the session makes Chromium release them.
 //
-// The failure is invisible without this path, which is why it is worth
-// handling rather than logging: when a DevTools client drops, Chromium
-// releases the requests it had paused and stops honoring its Fetch patterns,
-// so traffic keeps flowing — with the browser User-Agent restored. Nothing
-// stalls, nothing new is logged, and the artworks this PR fixes silently
-// revert to failing.
-//
-// ErrCDPTransport is what separates the two shapes. The session package
-// classifies at the source (see its doc): a transport error means the
-// connection is unusable, while a CDP error REPLY or an expired caller
-// context leaves the socket perfectly healthy. Re-dialing the latter would be
-// pointless churn against a kiosk that is answering fine.
+// A CDP error REPLY stays excluded: the peer answered, the socket is healthy,
+// and re-dialing a kiosk that is answering fine is pointless churn.
+func recoverableSendFailure(err error) bool {
+	return errors.Is(err, offlinecache.ErrCDPTransport) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// recoverFrom is the request-path accelerator: it retires the failed session
+// immediately and kicks one paced attach, so recovery lands in seconds when
+// traffic is flowing. It is NOT the guarantee — the supervisor is. A session
+// that dies idle produces no failed request to arrive here, and an attach
+// that fails here is not retried here; both are the supervisor's next tick.
 func (i *Interceptor) recoverFrom(session offlinecache.CDPSession, err error) {
-	if !i.claimRedial(session, err) {
+	if !recoverableSendFailure(err) {
+		return
+	}
+	if !i.retire(session) {
+		// Superseded: a dead socket fails every request it was holding, so
+		// late arrivals from the old session must not disturb the live one.
+		return
+	}
+	// Off the request goroutine: the dial is bounded but slow against a
+	// sick kiosk, and this path is reached from the CDP read pump's child
+	// goroutine.
+	go i.tryAttach("request-path failure")
+}
+
+// retire removes session if — and only if — it is still the installed one,
+// and closes it. Closing is what makes retirement matter beyond bookkeeping:
+// a detached Fetch client's paused requests are released by Chromium, so a
+// wedged session's assets fail fast instead of hanging on a pause nobody can
+// answer. Returns false when session was already superseded, in which case
+// the live session is left untouched.
+//
+// After retire, i.session == nil is the honest "not armed" signal the
+// supervisor keys on.
+func (i *Interceptor) retire(session offlinecache.CDPSession) bool {
+	i.mu.Lock()
+	if i.session != session {
+		i.mu.Unlock()
+		return false
+	}
+	i.session = nil
+	i.mu.Unlock()
+
+	if err := session.Close(); err != nil {
+		i.logger.Debug("uarewrite: closing retired session", zap.Error(err))
+	}
+	return true
+}
+
+// supervise is the recovery guarantee: a paced loop that keeps interception
+// armed until Close, regardless of whether any Fetch traffic is flowing.
+// Every other trigger in this file is an accelerator on top of it.
+func (i *Interceptor) supervise() {
+	ticker := i.clock.NewTicker(superviseInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-i.done:
+			return
+		case <-ticker.C():
+			i.ensureArmed()
+		}
+	}
+}
+
+// ensureArmed is one supervisor pass: attach if nothing is installed,
+// otherwise probe the installed session and retire it if it is dead.
+//
+// The probe IS Fetch.enable with the policy's own patterns, not a synthetic
+// ping. Re-enabling with identical patterns is idempotent in CDP, it answers
+// the exact question the supervisor cares about ("is interception armed on a
+// session that can still hear me"), and on a session that died idle it fails
+// deterministically — sendForSession refuses closed sessions with
+// ErrCDPTransport at entry, so the shutdown-race classification gap never
+// reaches this path. NOTE: this assumes the session carries only OUR Fetch
+// patterns; under the future shared seam, re-enabling would clobber the
+// union, which is one more reason this whole type dissolves into that seam.
+func (i *Interceptor) ensureArmed() {
+	i.mu.Lock()
+	session := i.session
+	i.mu.Unlock()
+
+	if session == nil {
+		i.tryAttach("supervisor: no session installed")
 		return
 	}
 
-	// Off the request goroutine: AttachOnReconnect dials synchronously
-	// (bounded, but seconds against a sick kiosk) and this path is reached
-	// from the CDP read pump's child goroutine.
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), redialTimeout)
-		defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
 
-		if err := i.AttachOnReconnect(ctx); err != nil {
-			// Leave it retired. The next failed request past the cooldown
-			// tries again, and a primary-connection reconnect re-arms it
-			// regardless, so a permanently down kiosk costs one bounded
-			// dial per cooldown rather than a spin.
-			i.logger.Warn("uarewrite: re-dial after transport failure failed", zap.Error(err))
+	if _, err := session.Send(ctx, "Fetch.enable", map[string]interface{}{
+		"patterns": i.policy.FetchPatterns(),
+	}); err != nil {
+		if !recoverableSendFailure(err) {
+			// The socket answered and refused. Re-dialing would loop the
+			// same refusal; leave the session installed and say so.
+			i.logger.Warn("uarewrite: supervisor probe refused on a live session", zap.Error(err))
+			return
 		}
-	}()
+		i.logger.Warn("uarewrite: supervisor found the rewrite session dead", zap.Error(err))
+		i.retire(session)
+		i.tryAttach("supervisor: probe failed")
+	}
 }
 
-// claimRedial decides whether this failure should trigger a re-dial, and
-// claims the cooldown slot if so. Split out from recoverFrom purely so the
-// decision is testable without performing a real dial — the dial itself needs
-// a live kiosk, the decision is where every mistake would hide.
+// tryAttach performs one paced, single-flight attach attempt. A failure is
+// only logged: the supervisor's next tick is the retry, which is what makes
+// "keeps trying until it succeeds or is closed" actually true — the previous
+// design claimed a next-failed-request retry that could not exist, because a
+// dead Fetch session produces no further failed requests.
 //
-// Returns false, without claiming anything, for the three cases that must not
-// re-dial: an error that left the socket healthy, a failure on a session that
-// has already been superseded, and an attempt inside the cooldown window.
-func (i *Interceptor) claimRedial(session offlinecache.CDPSession, err error) bool {
-	if !errors.Is(err, offlinecache.ErrCDPTransport) {
-		return false
+// The onConnect hook deliberately does NOT come through here: a primary CDP
+// reconnect is authoritative evidence of a fresh kiosk target, and making it
+// wait out a cooldown from an unrelated failed dial would delay arming at
+// exactly the moment arming is known to be possible.
+func (i *Interceptor) tryAttach(trigger string) {
+	if !i.claimAttach() {
+		return
 	}
+	defer i.releaseAttach()
 
-	// Only the live session's failure is worth acting on. A dead socket
-	// fails every request it was holding, so without this check a single
-	// drop would enqueue one recovery per in-flight request, and a
-	// reconnect that already happened would be undone by a late arrival.
-	i.mu.Lock()
-	current := i.session
-	i.mu.Unlock()
-	if current != session {
-		return false
+	ctx, cancel := context.WithTimeout(context.Background(), redialTimeout)
+	defer cancel()
+
+	if err := i.AttachOnReconnect(ctx); err != nil {
+		i.logger.Warn("uarewrite: recovery attach failed; supervisor retries next tick",
+			zap.String("trigger", trigger), zap.Error(err))
 	}
+}
 
+// claimAttach is the paced single-flight gate in front of tryAttach's dial:
+// at most one attempt in flight, at most one per cooldown window, shared by
+// the supervisor and the request-path accelerator so their combined rate can
+// never exceed one dial per window.
+func (i *Interceptor) claimAttach() bool {
 	i.redialMu.Lock()
 	defer i.redialMu.Unlock()
 
+	if i.attaching {
+		return false
+	}
 	now := i.clock.Now()
 	if !i.lastRedial.IsZero() && now.Sub(i.lastRedial) < redialCooldown {
 		return false
 	}
 	i.lastRedial = now
+	i.attaching = true
 	return true
+}
+
+func (i *Interceptor) releaseAttach() {
+	i.redialMu.Lock()
+	i.attaching = false
+	i.redialMu.Unlock()
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
@@ -24,7 +25,9 @@ func testInterceptorWithClock(t *testing.T, hosts []string, clock wrapper.Clock)
 	policy, err := New(hosts, "feral-player/test")
 	require.NoError(t, err)
 
-	return NewInterceptor(policy, "http://127.0.0.1:9222", nil, nil, wrapper.NewJSON(), nil, clock, zaptest.NewLogger(t))
+	i := NewInterceptor(policy, "http://127.0.0.1:9222", nil, nil, wrapper.NewJSON(), nil, clock, zaptest.NewLogger(t))
+	t.Cleanup(func() { _ = i.Close() })
+	return i
 }
 
 func testInterceptor(t *testing.T, hosts []string) *Interceptor {
@@ -33,7 +36,26 @@ func testInterceptor(t *testing.T, hosts []string) *Interceptor {
 	policy, err := New(hosts, "feral-player/test")
 	require.NoError(t, err)
 
-	return NewInterceptor(policy, "http://127.0.0.1:9222", nil, nil, wrapper.NewJSON(), nil, wrapper.NewClock(), zaptest.NewLogger(t))
+	i := NewInterceptor(policy, "http://127.0.0.1:9222", nil, nil, wrapper.NewJSON(), nil, wrapper.NewClock(), zaptest.NewLogger(t))
+	// The supervisor goroutine starts on the first AttachOnReconnect; Close
+	// is what stops it, so every test tears it down even on failure paths.
+	t.Cleanup(func() { _ = i.Close() })
+	return i
+}
+
+// mockClockWithTameTicker builds a MockClock whose NewTicker returns a ticker
+// that never fires (a nil channel blocks forever in select). Tests drive the
+// supervisor's PASS (ensureArmed) synchronously instead of racing its loop;
+// the ticker exists only so the loop can start and park without panicking.
+func mockClockWithTameTicker(t *testing.T, ctrl *gomock.Controller) *mocks.MockClock {
+	t.Helper()
+
+	clock := mocks.NewMockClock(ctrl)
+	ticker := mocks.NewMockTicker(ctrl)
+	ticker.EXPECT().C().Return(nil).AnyTimes()
+	ticker.EXPECT().Stop().AnyTimes()
+	clock.EXPECT().NewTicker(gomock.Any()).Return(ticker).AnyTimes()
+	return clock
 }
 
 func pausedEvent(t *testing.T, requestID, url string, headers map[string]string, responseStatus *int) json.RawMessage {
@@ -256,101 +278,248 @@ func TestCloseWithoutSessionIsNoOp(t *testing.T) {
 }
 
 // The interceptor's socket is INDEPENDENT of the daemon's primary CDP client,
-// so it can die while the primary stays healthy — and AttachOnReconnect's only
-// other caller is the primary's reconnect hook, which in that case never
-// fires. Without self-recovery the rewrite is retired permanently, and the
-// failure is invisible: when a DevTools client drops, Chromium releases the
-// requests it had paused and stops honoring its Fetch patterns, so traffic
-// keeps flowing with the browser User-Agent restored. Nothing stalls, nothing
-// new is logged, and the artworks this fixes silently revert to failing.
-func TestClaimRedialOnTransportFailure(t *testing.T) {
+// so it can die while the primary stays healthy — and the primary's reconnect
+// hook, the only external caller of AttachOnReconnect, then never fires. The
+// pieces below are the recovery machinery for that: recoverFrom accelerates,
+// retire keeps state honest, claimAttach paces, and the supervisor is the
+// guarantee that none of it depends on Fetch traffic still flowing.
+
+func TestRecoverableSendFailure(t *testing.T) {
 	t.Parallel()
 
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "transport failure", err: fmt.Errorf("wrapped: %w", offlinecache.ErrCDPTransport), want: true},
+		// A timeout means the write went out and no reply came back. The
+		// socket may be open, but a Fetch client that cannot get replies is
+		// not intercepting anything — and Chromium is still holding the
+		// requests it paused for us. Recovery (retire, so Chromium releases
+		// them) is the only way those assets fail fast instead of hanging.
+		{name: "reply timeout", err: context.DeadlineExceeded, want: true},
+		// The peer ANSWERED. The socket is healthy; re-dialing a kiosk
+		// that answers fine is pointless churn.
+		{name: "cdp error reply", err: errors.New("Fetch.continueRequest: invalid requestId"), want: false},
+	}
 
-	clock := mocks.NewMockClock(ctrl)
-	clock.EXPECT().Now().Return(time.Unix(1000, 0)).AnyTimes()
-
-	session := mocks.NewMockCDPSession(ctrl)
-	i := testInterceptorWithClock(t, []string{"ipfs.io"}, clock)
-	i.session = session
-
-	assert.True(t, i.claimRedial(session, fmt.Errorf("wrapped: %w", offlinecache.ErrCDPTransport)),
-		"a transport failure on the live session must claim a re-dial")
-}
-
-// A CDP error REPLY or an expired caller context leaves the socket perfectly
-// healthy. Re-dialing those would be pointless churn against a kiosk that is
-// answering fine — the session package classifies at the source precisely so
-// consumers do not have to infer "dead" by exclusion.
-func TestClaimRedialIgnoresNonTransportErrors(t *testing.T) {
-	t.Parallel()
-
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	clock := mocks.NewMockClock(ctrl)
-	clock.EXPECT().Now().Return(time.Unix(1000, 0)).AnyTimes()
-
-	session := mocks.NewMockCDPSession(ctrl)
-	i := testInterceptorWithClock(t, []string{"ipfs.io"}, clock)
-	i.session = session
-
-	for _, err := range []error{
-		errors.New("Fetch.continueRequest: invalid requestId"),
-		context.DeadlineExceeded,
-	} {
-		assert.False(t, i.claimRedial(session, err),
-			"error %v left the socket healthy and must not trigger a re-dial", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, recoverableSendFailure(tt.err))
+		})
 	}
 }
 
-// A dead socket fails EVERY request it was holding. Without the identity
-// check, one drop would enqueue a re-dial per in-flight request, and a
-// reconnect that already completed would be torn down by a late arrival from
-// the old session.
-func TestClaimRedialIgnoresSupersededSession(t *testing.T) {
+// A timed-out continueRequest must retire (close) the session: Chromium only
+// releases a paused request when the Fetch client that paused it detaches,
+// so without the close the asset hangs past every bound we claim to enforce.
+func TestProcessPausedTimeoutRetiresSession(t *testing.T) {
 	t.Parallel()
 
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	clock := mocks.NewMockClock(ctrl)
+	clock := mockClockWithTameTicker(t, ctrl)
 	clock.EXPECT().Now().Return(time.Unix(1000, 0)).AnyTimes()
 
-	old := mocks.NewMockCDPSession(ctrl)
-	current := mocks.NewMockCDPSession(ctrl)
+	session := mocks.NewMockCDPSession(ctrl)
+	session.EXPECT().
+		Send(gomock.Any(), "Fetch.continueRequest", gomock.Any()).
+		Return(nil, context.DeadlineExceeded)
+	closed := make(chan struct{})
+	session.EXPECT().Close().DoAndReturn(func() error {
+		close(closed)
+		return nil
+	})
 
 	i := testInterceptorWithClock(t, []string{"ipfs.io"}, clock)
-	i.session = current
+	i.session = session
+	// Point the dial seam at a permanent failure so the accelerator's
+	// follow-up attach cannot dial a real socket from a unit test.
+	i.dial = failingDial(errors.New("no kiosk in unit tests"))
 
-	assert.False(t, i.claimRedial(old, offlinecache.ErrCDPTransport),
-		"a failure from a superseded session must not disturb the live one")
+	i.processPaused(session, pausedEvent(t, "req-t1", "https://ipfs.io/ipfs/QmAbc",
+		map[string]string{"User-Agent": "Mozilla/5.0 Chrome/150"}, nil))
+
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the wedged session to be closed")
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	assert.Nil(t, i.session, "a retired session must leave the honest not-armed state behind")
 }
 
-// The trigger is per-request, so one dead socket produces a burst of identical
-// failures. The cooldown is what keeps that burst from becoming a dial storm
-// against a kiosk that is already sick.
-func TestClaimRedialHonorsCooldown(t *testing.T) {
+// A dead socket fails EVERY request it was holding. Retirement is identity-
+// guarded so late arrivals from the old session cannot disturb the live one
+// a reconnect already installed.
+func TestRetireIgnoresSupersededSession(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	old := mocks.NewMockCDPSession(ctrl) // Close must NOT be called
+	current := mocks.NewMockCDPSession(ctrl)
+	// The helper's cleanup closes whatever is installed; that teardown
+	// close is expected — retire closing OLD is what must never happen.
+	current.EXPECT().Close().Return(nil).MaxTimes(1)
+
+	i := testInterceptor(t, []string{"ipfs.io"})
+	i.session = current
+
+	assert.False(t, i.retire(old))
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	assert.Equal(t, current, i.session, "the live session must survive a stale retirement")
+}
+
+// One dial per cooldown window, no matter how many triggers fire: the
+// trigger is per-request, so a dead socket produces a burst of identical
+// failures, and the supervisor ticks on top of that.
+func TestClaimAttachPacesAndSingleFlights(t *testing.T) {
 	t.Parallel()
 
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
 	base := time.Unix(1000, 0)
-	clock := mocks.NewMockClock(ctrl)
+	clock := mockClockWithTameTicker(t, ctrl)
 	gomock.InOrder(
 		clock.EXPECT().Now().Return(base),
 		clock.EXPECT().Now().Return(base.Add(redialCooldown-time.Second)),
 		clock.EXPECT().Now().Return(base.Add(redialCooldown)),
 	)
 
+	i := testInterceptorWithClock(t, []string{"ipfs.io"}, clock)
+
+	assert.True(t, i.claimAttach(), "first claim wins")
+	assert.False(t, i.claimAttach(), "in-flight attempt must block a second")
+	i.releaseAttach()
+	assert.False(t, i.claimAttach(), "inside the cooldown window must not claim")
+	assert.True(t, i.claimAttach(), "past the cooldown claims again")
+}
+
+// The supervisor pass with nothing installed must attach — this is what
+// recovers BOTH an initial attach failure and a failed re-dial, neither of
+// which any Fetch event can ever retrigger.
+func TestEnsureArmedAttachesWhenNothingInstalled(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mockClockWithTameTicker(t, ctrl)
+	clock.EXPECT().Now().Return(time.Unix(1000, 0)).AnyTimes()
+
+	i := testInterceptorWithClock(t, []string{"ipfs.io"}, clock)
+	dialed := make(chan struct{}, 1)
+	i.dial = func(context.Context, string, wrapper.HTTPClient, wrapper.WebSocketDialer, wrapper.JSON, wrapper.IO, *zap.Logger) (offlinecache.CDPSession, error) {
+		dialed <- struct{}{}
+		return nil, errors.New("no kiosk in unit tests")
+	}
+
+	i.ensureArmed()
+
+	select {
+	case <-dialed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ensureArmed with no session must attempt an attach")
+	}
+}
+
+// A session that dies IDLE produces no failed request — the probe is the
+// only thing that can notice it. It must classify via the same
+// recoverableSendFailure gate, retire the corpse, and attach.
+func TestEnsureArmedRetiresDeadSessionFoundByProbe(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mockClockWithTameTicker(t, ctrl)
+	clock.EXPECT().Now().Return(time.Unix(1000, 0)).AnyTimes()
+
 	session := mocks.NewMockCDPSession(ctrl)
+	session.EXPECT().
+		Send(gomock.Any(), "Fetch.enable", gomock.Any()).
+		Return(nil, fmt.Errorf("%w: cdp session closed", offlinecache.ErrCDPTransport))
+	session.EXPECT().Close().Return(nil)
+
 	i := testInterceptorWithClock(t, []string{"ipfs.io"}, clock)
 	i.session = session
+	dialed := make(chan struct{}, 1)
+	i.dial = func(context.Context, string, wrapper.HTTPClient, wrapper.WebSocketDialer, wrapper.JSON, wrapper.IO, *zap.Logger) (offlinecache.CDPSession, error) {
+		dialed <- struct{}{}
+		return nil, errors.New("no kiosk in unit tests")
+	}
 
-	assert.True(t, i.claimRedial(session, offlinecache.ErrCDPTransport), "first failure claims")
-	assert.False(t, i.claimRedial(session, offlinecache.ErrCDPTransport), "inside cooldown must not claim")
-	assert.True(t, i.claimRedial(session, offlinecache.ErrCDPTransport), "past cooldown claims again")
+	i.ensureArmed()
+
+	select {
+	case <-dialed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a dead session found by the probe must trigger an attach")
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	assert.Nil(t, i.session)
+}
+
+// A probe REFUSED on a live socket must not churn: the kiosk answered, so
+// re-dialing it reproduces the same refusal at dial cost.
+func TestEnsureArmedLeavesLiveSessionOnRefusedProbe(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	session := mocks.NewMockCDPSession(ctrl)
+	session.EXPECT().
+		Send(gomock.Any(), "Fetch.enable", gomock.Any()).
+		Return(nil, errors.New("Fetch.enable: some CDP refusal"))
+	// No dial expectation: a refused probe must not churn. The single
+	// permitted Close is the helper's teardown — the assertion below that
+	// the session is STILL INSTALLED after ensureArmed is what proves the
+	// probe did not retire it.
+	session.EXPECT().Close().Return(nil).MaxTimes(1)
+
+	i := testInterceptor(t, []string{"ipfs.io"})
+	i.session = session
+
+	i.ensureArmed()
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	assert.Equal(t, session, i.session)
+}
+
+// Close must stop the supervisor and refuse late attaches, so a dial racing
+// shutdown cannot install a session nobody will ever close.
+func TestCloseStopsSupervisorAndRefusesAttach(t *testing.T) {
+	t.Parallel()
+
+	i := testInterceptor(t, []string{"ipfs.io"})
+	i.dial = failingDial(errors.New("no kiosk in unit tests"))
+
+	require.NoError(t, i.Close())
+	assert.NoError(t, i.Close(), "Close must be idempotent")
+
+	err := i.AttachOnReconnect(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "closed")
+}
+
+// failingDial is a dial seam that always fails — recovery paths in unit
+// tests must never open a real socket.
+func failingDial(err error) dialFunc {
+	return func(context.Context, string, wrapper.HTTPClient, wrapper.WebSocketDialer, wrapper.JSON, wrapper.IO, *zap.Logger) (offlinecache.CDPSession, error) {
+		return nil, err
+	}
 }
