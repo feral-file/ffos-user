@@ -178,8 +178,9 @@ func (p *Policy) FetchPatterns() []map[string]interface{} {
 	hosts := p.Hosts()
 	patterns := make([]map[string]interface{}, 0, len(hosts)*4)
 	for _, h := range hosts {
+		host := authorityFor(h)
 		for _, scheme := range []string{"http", "https"} {
-			for _, authority := range []string{h, h + ":*"} {
+			for _, authority := range []string{host, host + ":*"} {
 				patterns = append(patterns, map[string]interface{}{
 					"urlPattern":   scheme + "://" + authority + "/*",
 					"requestStage": "Request",
@@ -188,6 +189,39 @@ func (p *Policy) FetchPatterns() []map[string]interface{} {
 		}
 	}
 	return patterns
+}
+
+// authorityFor renders a stored host as it appears in URL TEXT.
+//
+// This is the seam that stops this package's two halves from drifting apart.
+// A host is STORED in the form url.Hostname() produces — which strips the
+// brackets from an IPv6 literal, so `[::1]` is kept as `::1`. Matches
+// compares against that stored form and is correct. But FetchPatterns builds
+// a glob that Chromium evaluates against the raw URL text, where an IPv6
+// authority is always bracketed. Concatenating the stored form straight into
+// a pattern yielded `https://::1/*`, which matches no real URL: Matches
+// called the host in scope while nothing was ever paused, so an operator's
+// IPv6 gateway silently kept Chromium's challenged User-Agent.
+//
+// That was the FOURTH defect on this branch with one root — ports, globs,
+// truncation, and this — all from the host string meaning one thing to
+// Matches and another to the pattern. Rendering the authority through a
+// single function is the structural answer: anything that changes how a host
+// is spelled in a URL now has exactly one place to change, and
+// TestAuthorityRoundTripsThroughURLParsing pins the property that makes the
+// two halves agree — parsing back what this produces must return the stored
+// host unchanged.
+//
+// Only IPv6 literals need brackets. A DNS name cannot contain a colon
+// (validateLiteralHost admits only alphanumerics and hyphens per label) and
+// neither can IPv4, so the colon test is exact rather than heuristic; it is
+// written against net.ParseIP as well so the intent survives a future
+// loosening of the label grammar.
+func authorityFor(host string) string {
+	if ip := net.ParseIP(host); ip != nil && strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
 }
 
 // RewriteHeaders returns headers with User-Agent replaced, preserving every

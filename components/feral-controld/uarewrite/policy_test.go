@@ -1,6 +1,7 @@
 package uarewrite
 
 import (
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -144,36 +145,109 @@ func TestFetchPatterns(t *testing.T) {
 	}
 }
 
+// acceptedHostShapes enumerates EVERY host spelling validateLiteralHost
+// admits, with the URL text a real request would carry for each.
+//
+// It is the fixture the coverage tests below are driven from, and that is the
+// point: the IPv6 defect existed because the coverage test was fed one
+// hand-picked DNS host while `New` had quietly grown support for IP literals.
+// A shape added to the validator must be added here, and it is then checked
+// end to end automatically instead of depending on whoever widens the grammar
+// remembering to widen the assertions too.
+var acceptedHostShapes = []struct {
+	name   string
+	config string   // what an operator writes in gatewayUserAgent.hosts
+	stored string   // the canonical form Hosts() must report
+	urls   []string // real URL text that must be in scope, written literally
+}{
+	{
+		name: "dns name", config: "ipfs.io", stored: "ipfs.io",
+		urls: []string{"https://ipfs.io/ipfs/QmAbc", "http://ipfs.io/x", "https://ipfs.io:8443/x"},
+	},
+	{
+		name: "ipv4 literal", config: "127.0.0.1", stored: "127.0.0.1",
+		urls: []string{"http://127.0.0.1/x", "http://127.0.0.1:8080/x"},
+	},
+	{
+		// Bracketed in URL text, unbracketed once stored — the exact
+		// asymmetry that produced `https://::1/*` and matched nothing.
+		name: "ipv6 loopback", config: "[::1]", stored: "::1",
+		urls: []string{"https://[::1]/x", "https://[::1]:8443/x"},
+	},
+	{
+		name: "ipv6 full", config: "[2001:db8::1]", stored: "2001:db8::1",
+		urls: []string{"https://[2001:db8::1]/x", "http://[2001:db8::1]:8080/x"},
+	},
+}
+
 // Matches ignores the port, so the emitted patterns must cover a port-bearing
-// URL too. Without the ":*" variant the two halves of this policy disagree:
-// Matches calls a configured host in-scope while Chromium never pauses the
-// request, so the rewrite silently does not happen and the artwork fails
-// exactly as if the fix were absent — with nothing logged to say why.
+// URL too. More generally: whenever Matches calls a URL in scope, some Fetch
+// pattern must actually pause it. When the two disagree the rewrite silently
+// does not happen and the artwork fails exactly as if the fix were absent —
+// with nothing logged to say why. Ports and IPv6 brackets have each broken
+// this once already.
 func TestFetchPatternsCoverEveryURLThatMatches(t *testing.T) {
 	t.Parallel()
 
-	p, err := New([]string{"ipfs.io"}, "ua/1")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	for _, shape := range acceptedHostShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			t.Parallel()
 
-	patterns := make([]string, 0, 4)
-	for _, pat := range p.FetchPatterns() {
-		patterns = append(patterns, pat["urlPattern"].(string))
-	}
+			p, err := New([]string{shape.config}, "ua/1")
+			if err != nil {
+				t.Fatalf("New(%q): %v", shape.config, err)
+			}
+			if got := p.Hosts(); len(got) != 1 || got[0] != shape.stored {
+				t.Fatalf("Hosts() = %v, want [%q]", got, shape.stored)
+			}
 
-	for _, u := range []string{
-		"https://ipfs.io/ipfs/QmAbc",
-		"http://ipfs.io/ipfs/QmAbc",
-		"https://ipfs.io:8443/ipfs/QmAbc",
-		"http://ipfs.io:8080/ipfs/QmAbc",
-	} {
-		if !p.Matches(u) {
-			t.Fatalf("precondition: Matches(%q) = false", u)
-		}
-		if !anyGlobMatches(patterns, u) {
-			t.Errorf("Matches(%q) is true but no Fetch pattern covers it (patterns: %v)", u, patterns)
-		}
+			patterns := make([]string, 0, 4)
+			for _, pat := range p.FetchPatterns() {
+				patterns = append(patterns, pat["urlPattern"].(string))
+			}
+
+			for _, u := range shape.urls {
+				if !p.Matches(u) {
+					t.Errorf("Matches(%q) = false, want true", u)
+					continue
+				}
+				if !anyGlobMatches(patterns, u) {
+					t.Errorf("Matches(%q) is true but no Fetch pattern covers it (patterns: %v)", u, patterns)
+				}
+			}
+		})
+	}
+}
+
+// The property that keeps Matches and FetchPatterns in agreement: rendering a
+// stored host into URL text and parsing it back must return that same stored
+// host. Matches reads url.Hostname(); patterns are built from authorityFor.
+// If those two are not inverses, one half is scoped to something the other
+// cannot see — which is precisely how the IPv6 form came to match nothing.
+func TestAuthorityRoundTripsThroughURLParsing(t *testing.T) {
+	t.Parallel()
+
+	for _, shape := range acceptedHostShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			t.Parallel()
+
+			p, err := New([]string{shape.config}, "ua/1")
+			if err != nil {
+				t.Fatalf("New(%q): %v", shape.config, err)
+			}
+			stored := p.Hosts()[0]
+
+			for _, scheme := range []string{"http", "https"} {
+				raw := scheme + "://" + authorityFor(stored) + "/x"
+				u, err := url.Parse(raw)
+				if err != nil {
+					t.Fatalf("rendered authority %q does not parse: %v", raw, err)
+				}
+				if got := u.Hostname(); got != stored {
+					t.Errorf("round trip broke: rendered %q, parsed host %q, stored %q", raw, got, stored)
+				}
+			}
+		})
 	}
 }
 
