@@ -375,8 +375,13 @@ func normalizeHost(raw string) (string, error) {
 //
 // Accepted: IPv4/IPv6 literals, and DNS names whose labels are
 // alphanumeric-with-internal-hyphens. Everything else is a config error and
-// is reported; main.go's wiring degrades to "no rewrite" rather than
-// starting with a policy that cannot do what it claims.
+// is reported to the caller. What the caller does with that differs by
+// entry point and the difference is deliberate: New fails the whole list
+// (the strict contract the policy tests pin), while NewFromOperatorHosts —
+// the hand-edited path the wiring uses — DROPS the offending entry, names
+// it in an Error log, and keeps applying the rest, falling back to
+// DefaultHosts only when nothing survives. A rejected host therefore never
+// means "no rewrite"; see NewFromOperatorHosts for why that matters.
 func validateLiteralHost(host string) error {
 	// An IP literal is already unambiguous — no labels to validate, and
 	// url.Hostname has stripped any IPv6 brackets.

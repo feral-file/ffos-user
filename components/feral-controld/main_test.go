@@ -1502,10 +1502,13 @@ func TestInitializeAppGatewayUserAgentDisabled(t *testing.T) {
 	assert.Nil(t, app.UARewrite)
 }
 
-// A host list that cannot yield a usable entry must degrade to "no rewrite",
+// A host list in which NO entry is usable must degrade to the default scope,
 // never abort startup: config.Load failure is fatal under Restart=always, and
 // this daemon owns every recovery surface on the device, so a typo in an
-// optional block must not crash-loop the box out of reach.
+// optional block must not crash-loop the box out of reach. Degrading to the
+// defaults rather than to "no rewrite" is the same landing point an
+// unreadable config block gets — see TestInitializeAppGatewayUserAgentKeeps-
+// UsableHosts for the partial case, which is the likelier one.
 func TestInitializeAppGatewayUserAgentInvalidHostsDegrades(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 
