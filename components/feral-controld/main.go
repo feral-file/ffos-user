@@ -46,6 +46,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/softap"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
+	"github.com/feral-file/ffos-user/components/feral-controld/uarewrite"
 	"github.com/feral-file/ffos-user/components/feral-controld/watchdog"
 	"github.com/feral-file/ffos-user/components/feral-controld/wifictl"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -107,8 +108,14 @@ type app struct {
 	// the narrower ProgressObserver interface, which has no Close method —
 	// see offlinecache.Runtime.Notifier's doc.
 	OfflineCacheNotifier *offlinecache.Notifier
-	Hub                  hub.Hub
-	LinkChecker          *status.LinkChecker
+	// UARewrite rewrites the outgoing User-Agent for the configured
+	// artwork origins (#296). Independent of the offline cache above: the
+	// bug it fixes has nothing to do with caching, so it must run on a
+	// device with offlineCache off. Nil only when explicitly disabled via
+	// gatewayUserAgent.enabled=false, or when its policy failed to build.
+	UARewrite   *uarewrite.Interceptor
+	Hub         hub.Hub
+	LinkChecker *status.LinkChecker
 	// Netlog is the WAN-outage flight recorder; nil when disabled by config,
 	// unavailable (ring open failed), or in the test app.
 	Netlog *netlog.Recorder
@@ -185,6 +192,7 @@ func main() {
 		config.RelayerConfig.APIKey,
 		config.MintPairingConfig,
 		config.OfflineCache,
+		config.GatewayUserAgentTuning(finalLogger),
 		config.Netlog,
 		provisioningTuningFromConfig(config.ProvisioningTuning(finalLogger), finalLogger),
 		dbus.NAME,
@@ -593,8 +601,38 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 				app.Logger.Warn("Failed to attach offline cache replay to kiosk CDP session", zap.Error(err))
 			}
 		}
+
+		// Re-arm the User-Agent rewrite on the same reconnect boundary and
+		// for the same reason: every kiosk restart mints a new target, so a
+		// session armed once at startup would silently stop intercepting
+		// after the first restart. Failure is logged, not fatal — the
+		// daemon's other duties must survive an unavailable kiosk.
+		if app.UARewrite != nil {
+			if err := app.UARewrite.AttachOnReconnect(ctx); err != nil {
+				app.Logger.Warn("Failed to arm kiosk User-Agent rewrite", zap.Error(err))
+			}
+		}
 	})
 	defer app.CDP.Close()
+
+	// The rewrite interceptor owns a SEPARATE websocket to the kiosk plus the
+	// read-pump goroutine draining it, neither of which app.CDP.Close above
+	// touches. Without this the connection and that goroutine outlive run()
+	// on every shutdown path, which is both a leak and a divergence from how
+	// every other long-lived component here is torn down.
+	//
+	// Deferred after the CDP close so it runs BEFORE it (defers unwind in
+	// reverse): the interceptor's session is the more derived of the two, and
+	// closing it while the daemon's own CDP client is still up keeps teardown
+	// ordered from the outside in.
+	defer func() {
+		if app.UARewrite == nil {
+			return
+		}
+		if err := app.UARewrite.Close(); err != nil {
+			app.Logger.Warn("Failed to close kiosk User-Agent rewrite session", zap.Error(err))
+		}
+	}()
 
 	devicectl.StartSleepScheduleLoop(ctx, app.Executor, app.Logger)
 
@@ -779,6 +817,7 @@ func initializeApp(
 	relayerAPIKey string,
 	mintPairingConfig *config.MintPairingConfig,
 	offlineCacheConfig *config.OfflineCacheConfig,
+	gatewayUserAgentConfig *config.GatewayUserAgentConfig,
 	netlogConfig *config.NetlogConfig,
 	provTuning provisioning.Tuning,
 	dbusName string,
@@ -930,6 +969,47 @@ func initializeApp(
 		offlineCacheStaticServer = ocRuntime.StaticServer
 		offlineCacheNotifier = ocRuntime.Notifier
 		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
+	}
+
+	// Kiosk User-Agent rewrite (#296). Built independently of the offline
+	// cache above and defaulting ON: an artwork whose origin challenges
+	// browser User-Agents never renders at all, and a device whose config
+	// predates this key must still get the fix.
+	//
+	// A bad host entry is NOT fatal, and it must not take the WORKING
+	// entries down with it. config.Load failing is fatal under
+	// Restart=always and this daemon owns every recovery surface on the
+	// device, so nothing here may crash-loop the box out of reach — but
+	// "degrade" has to mean degrade, not switch off. Appending one typo'd
+	// gateway to a working list used to disable the rewrite entirely,
+	// re-opening #296 for ipfs.io and dweb.link over an edit about a
+	// different host; NewFromOperatorHosts drops only what it cannot use.
+	// The rejected entries are logged at Error individually because on a
+	// headless device this log is the only place the operator's mistake
+	// is visible at all.
+	var uaRewrite *uarewrite.Interceptor
+	if gatewayUserAgentConfig.IsEnabled() {
+		var uaHosts []string
+		var uaAgent string
+		if gatewayUserAgentConfig != nil {
+			uaHosts = gatewayUserAgentConfig.Hosts
+			uaAgent = gatewayUserAgentConfig.UserAgent
+		}
+		policy, rejected, err := uarewrite.NewFromOperatorHosts(uaHosts, uaAgent)
+		if len(rejected) > 0 {
+			logger.Error("Ignoring unusable gatewayUserAgent hosts; the rest of the list still applies",
+				zap.Strings("rejected", rejected))
+		}
+		if err != nil {
+			// Only reachable if the BUILT-IN host list is unusable, i.e. a
+			// programming error — still not worth crash-looping over.
+			logger.Error("Invalid gatewayUserAgent config; kiosk User-Agent rewrite disabled",
+				zap.Error(err))
+		} else {
+			uaRewrite = uarewrite.NewInterceptor(
+				policy, cdpEndpoint, httpClient, webSocketDialer, json, io, clock, logger,
+			)
+		}
 	}
 
 	// Command handler. The raw handler serves internal daemon lifecycle flows
@@ -1226,6 +1306,7 @@ func initializeApp(
 		PlaylistScheduler:        playlistScheduler,
 		MintPairing:              mintPairing,
 		KioskReplay:              kioskReplay,
+		UARewrite:                uaRewrite,
 		OfflineCacheService:      offlineCache,
 		OfflineCacheStaticServer: offlineCacheStaticServer,
 		OfflineCacheNotifier:     offlineCacheNotifier,

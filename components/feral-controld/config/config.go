@@ -196,6 +196,25 @@ type Config struct {
 	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
 	OfflineCache *OfflineCacheConfig `json:"offlineCache,omitempty"`
 	Netlog       *NetlogConfig       `json:"netlog,omitempty"`
+	// GatewayUserAgent scopes the kiosk User-Agent rewrite (see the
+	// uarewrite package), carried as RAW bytes and decoded permissively by
+	// GatewayUserAgentTuning() — same treatment, and the same reason, as
+	// Provisioning below.
+	//
+	// Absent means ON with built-in defaults, unlike OfflineCache above:
+	// this is a fix for artworks that otherwise never render, not an opt-in
+	// feature, so a device that was never reconfigured must still get it.
+	//
+	// RawMessage is load-bearing, not a style choice. As a typed struct,
+	// valid JSON carrying one wrong-typed value — `{"hosts": "ipfs.io"}`
+	// instead of `["ipfs.io"]` — failed the top-level unmarshal, which made
+	// config.Load fail, which is FATAL. Under Restart=always that is an
+	// unbounded crash loop (the unit sets StartLimitIntervalSec=0 precisely
+	// so it never latches dead), and it takes the LAN hub, captive portal,
+	// provisioning, and claiming down with it — every remote recovery
+	// surface at once, over a typo in an optional block whose whole purpose
+	// is to be hand-edited when a new hostile gateway appears.
+	GatewayUserAgent json.RawMessage `json:"gatewayUserAgent,omitempty"`
 
 	// Provisioning carries the escape-policy tuning block
 	// (docs/network-recovery-ux.md §4.1/§4.2) as RAW bytes, decoded
@@ -217,6 +236,134 @@ type Config struct {
 // explicit "enableHub": false disables it.
 func (c *Config) HubEnabled() bool {
 	return c.EnableHub == nil || *c.EnableHub
+}
+
+// GatewayUserAgentConfig scopes the kiosk User-Agent rewrite that keeps
+// artworks on bot-challenging origins renderable (feral-file/ffos-user#296,
+// and the uarewrite package's own doc for the mechanism).
+//
+// Hosts is the whole safety story of this feature. The rewrite is NOT
+// applied globally on purpose: an origin that rejects unrecognized agents
+// would start failing artworks that render today, and that regression would
+// be far harder to attribute than the bug being fixed. Keeping the scope in
+// config means a newly hostile gateway is an operator edit rather than a
+// daemon release.
+type GatewayUserAgentConfig struct {
+	// Enabled gates the rewrite. Pointer so an absent key defaults ON —
+	// only an explicit "enabled": false turns it off. Read via
+	// IsEnabled(), never directly: it is nil-safe on both the section and
+	// the field, which is what lets an absent block resolve to ON.
+	Enabled *bool `json:"enabled"`
+	// UserAgent replaces Chromium's own on matching requests. Empty uses
+	// uarewrite.DefaultUserAgent. Do NOT set this to a browser UA: a
+	// browser UA is precisely what the mitigation layer challenges.
+	UserAgent string `json:"userAgent,omitempty"`
+	// Hosts are the bare origins to rewrite for (scheme and port are
+	// tolerated and stripped). Empty uses uarewrite.DefaultHosts.
+	// Matching is exact per host — subdomains must be listed explicitly.
+	//
+	// An unusable entry (a wildcard such as "*.ipfs.io" being the likely
+	// spelling) is DROPPED and named in an Error log; the rest of the list
+	// still applies, so appending a typo'd gateway cannot revoke the hosts
+	// that were already working. Only when NO entry survives does this fall
+	// back to the defaults — the same landing point an unreadable block
+	// gets. See uarewrite.NewFromOperatorHosts.
+	Hosts []string `json:"hosts,omitempty"`
+}
+
+// IsEnabled reports whether the rewrite should run. It defaults ON: this is
+// a fix, not an opt-in feature, so a device whose controld.json predates the
+// key must still receive it, and only an explicit "enabled": false disables
+// it.
+//
+// Defined on the SECTION with a nil-receiver check rather than on Config,
+// because initializeApp is handed individual config sections rather than the
+// whole Config. A second Config-level accessor existed briefly and was
+// removed: it was a pure alias with no production caller, and two spellings
+// of one default is how the two drift apart.
+func (g *GatewayUserAgentConfig) IsEnabled() bool {
+	if g == nil || g.Enabled == nil {
+		return true
+	}
+	return *g.Enabled
+}
+
+// GatewayUserAgentTuning decodes the raw gatewayUserAgent block.
+//
+// A malformed or wrong-typed block is NOT an error here: it logs and returns
+// nil, which every caller reads as "absent" and therefore as the built-in
+// defaults. That is deliberate, and it is the whole point of holding the
+// block as RawMessage — see the field's doc for what failing instead used to
+// cost.
+//
+// Falling back to defaults rather than to disabled is also deliberate. The
+// realistic edit to this block is an operator ADDING a newly hostile gateway,
+// so a typo that disabled the rewrite would break artworks that render today
+// — a regression whose symptom (unrelated artworks failing) points nowhere
+// near its cause (a config edit about a different host). Falling back leaves
+// the device in exactly the state an unconfigured device is in.
+//
+// There is ONE exception, and it is not a nuance: an explicit
+// "enabled": false is recovered on its own even when the rest of the block
+// is unreadable. Defaults are ON, so without that carve-out a type error in
+// a sibling field would silently re-arm the rewrite on a device whose
+// operator had turned it off — the one direction where "the state an
+// unconfigured device is in" is NOT what was asked for.
+//
+// The log is Error, not the Warn its Provisioning sibling uses, because the
+// consequence differs: there, defaults replace some tuning knobs; here the
+// operator's ENTIRE stated intent is discarded. It carries the raw block, not
+// the effective host list: by definition the block did not parse, so there is
+// no operator-supplied scope to name — the scope actually in force is logged
+// by uarewrite's "kiosk User-Agent rewrite armed" line when the interceptor
+// arms, which is the line to grep for the running scope.
+func (c *Config) GatewayUserAgentTuning(logger *zap.Logger) *GatewayUserAgentConfig {
+	if len(c.GatewayUserAgent) == 0 {
+		return nil
+	}
+	var g GatewayUserAgentConfig
+	if err := json.Unmarshal(c.GatewayUserAgent, &g); err != nil {
+		// Falling back to defaults is right for a typo in the SCOPE, but
+		// wrong for the switch: "enabled": false is an operator saying
+		// "off", and defaults are ON. Discarding the whole block would arm
+		// a rewrite on a device that explicitly asked for none, and the
+		// only trace would be this log line. So recover the switch on its
+		// own — encoding/json ignores unknown fields, meaning this narrow
+		// decode succeeds precisely when the failure was in a SIBLING
+		// field. A malformed "enabled" itself still falls through to
+		// defaults, which is the case the paragraph above reasons about.
+		if disabled := decodeDisableSwitch(c.GatewayUserAgent); disabled != nil {
+			if logger != nil {
+				logger.Error("gatewayUserAgent config block malformed; honoring only its explicit \"enabled\": false",
+					zap.Error(err), zap.String("raw", string(c.GatewayUserAgent)))
+			}
+			return &GatewayUserAgentConfig{Enabled: disabled}
+		}
+		if logger != nil {
+			logger.Error("gatewayUserAgent config block malformed; using built-in defaults",
+				zap.Error(err), zap.String("raw", string(c.GatewayUserAgent)))
+		}
+		return nil
+	}
+	return &g
+}
+
+// decodeDisableSwitch pulls ONLY an explicit "enabled": false out of a block
+// that failed to decode as a whole, returning nil for every other outcome
+// (unreadable, absent, or true). Returning a pointer rather than a bool keeps
+// "operator said false" distinct from "nothing to honor" — the caller must
+// not turn the latter into a disable.
+func decodeDisableSwitch(raw json.RawMessage) *bool {
+	var sw struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(raw, &sw); err != nil {
+		return nil
+	}
+	if sw.Enabled == nil || *sw.Enabled {
+		return nil
+	}
+	return sw.Enabled
 }
 
 // ProvisioningTuning carries the on-device knobs for the provisioning escape
