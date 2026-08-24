@@ -331,7 +331,11 @@ func TestFetchPatternsAreScopedNotCatchAll(t *testing.T) {
 // against EVERY request, while Matches still compares the literal string "*"
 // and rewrites none of them. That is a daemon round trip in front of every
 // kiosk asset for zero benefit, with the scoping guarantee silently gone.
-// New must refuse the config outright so main.go degrades to "no rewrite".
+// New must refuse the config outright: it is the strict, all-or-nothing
+// constructor NewFromOperatorHosts uses internally after filtering. main.go's
+// wiring calls NewFromOperatorHosts, not New directly, so in practice a
+// single glob entry like this is dropped and logged while the rest of the
+// list keeps applying — see TestInitializeAppGatewayUserAgentKeepsUsableHosts.
 func TestNewRejectsGlobMetacharacters(t *testing.T) {
 	t.Parallel()
 
