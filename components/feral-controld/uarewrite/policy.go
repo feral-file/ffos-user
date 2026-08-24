@@ -110,6 +110,47 @@ func New(hosts []string, userAgent string) (*Policy, error) {
 	return &Policy{hosts: set, userAgent: ua}, nil
 }
 
+// NewFromOperatorHosts builds a Policy from a HAND-EDITED host list,
+// salvaging the usable entries instead of failing the whole list on the
+// first bad one. It returns the rejected entries so the caller can name them
+// in a log; an empty result is not an error.
+//
+// This exists because New's all-or-nothing contract is wrong for the one
+// input the design expects operators to edit. The config block's whole
+// premise is that the next hostile gateway is a config edit, not a release,
+// and validateLiteralHost's own doc names "*.ipfs.io" as the likely
+// real-world spelling of that edit going wrong. Under New, appending one
+// such entry to a working list took ipfs.io and dweb.link down with it —
+// re-opening #296 on a headless device, with the cause visible only in a
+// daemon log. Meanwhile an UNREADABLE config block falls back to the
+// built-in defaults and keeps working (see config.GatewayUserAgentTuning).
+// One operator error class must not have two opposite outcomes, and the
+// more likely spelling must not take the worse path.
+//
+// Entries that survive are honored exactly as written: an operator who
+// deliberately narrowed the scope keeps their narrowing. Only when NOTHING
+// survives does this land on DefaultHosts, which is precisely where the
+// unreadable-block path lands. Keep New strict — it is the pure contract the
+// policy tests pin, and the tolerance belongs here where "what a host is" is
+// already decided, not scattered across the wiring.
+func NewFromOperatorHosts(hosts []string, userAgent string) (*Policy, []string, error) {
+	kept := make([]string, 0, len(hosts))
+	var rejected []string
+	for _, raw := range hosts {
+		if _, err := normalizeHost(raw); err != nil {
+			rejected = append(rejected, raw)
+			continue
+		}
+		kept = append(kept, raw)
+	}
+
+	// New maps an empty list to DefaultHosts, so the all-rejected case needs
+	// no special handling here. An error now means the BUILT-IN list is
+	// unusable, which is a programming error, not operator input.
+	policy, err := New(kept, userAgent)
+	return policy, rejected, err
+}
+
 // UserAgent is the replacement token to send for a matching request.
 func (p *Policy) UserAgent() string { return p.userAgent }
 

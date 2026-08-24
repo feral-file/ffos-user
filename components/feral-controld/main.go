@@ -976,10 +976,17 @@ func initializeApp(
 	// browser User-Agents never renders at all, and a device whose config
 	// predates this key must still get the fix.
 	//
-	// A bad host list is NOT fatal. config.Load failing is fatal under
-	// Restart=always, and this daemon owns every recovery surface on the
-	// device — so a typo'd host must degrade to "no rewrite" with a loud
-	// log, never crash-loop the box out of reach.
+	// A bad host entry is NOT fatal, and it must not take the WORKING
+	// entries down with it. config.Load failing is fatal under
+	// Restart=always and this daemon owns every recovery surface on the
+	// device, so nothing here may crash-loop the box out of reach — but
+	// "degrade" has to mean degrade, not switch off. Appending one typo'd
+	// gateway to a working list used to disable the rewrite entirely,
+	// re-opening #296 for ipfs.io and dweb.link over an edit about a
+	// different host; NewFromOperatorHosts drops only what it cannot use.
+	// The rejected entries are logged at Error individually because on a
+	// headless device this log is the only place the operator's mistake
+	// is visible at all.
 	var uaRewrite *uarewrite.Interceptor
 	if gatewayUserAgentConfig.IsEnabled() {
 		var uaHosts []string
@@ -988,8 +995,14 @@ func initializeApp(
 			uaHosts = gatewayUserAgentConfig.Hosts
 			uaAgent = gatewayUserAgentConfig.UserAgent
 		}
-		policy, err := uarewrite.New(uaHosts, uaAgent)
+		policy, rejected, err := uarewrite.NewFromOperatorHosts(uaHosts, uaAgent)
+		if len(rejected) > 0 {
+			logger.Error("Ignoring unusable gatewayUserAgent hosts; the rest of the list still applies",
+				zap.Strings("rejected", rejected))
+		}
 		if err != nil {
+			// Only reachable if the BUILT-IN host list is unusable, i.e. a
+			// programming error — still not worth crash-looping over.
 			logger.Error("Invalid gatewayUserAgent config; kiosk User-Agent rewrite disabled",
 				zap.Error(err))
 		} else {

@@ -261,6 +261,13 @@ type GatewayUserAgentConfig struct {
 	// Hosts are the bare origins to rewrite for (scheme and port are
 	// tolerated and stripped). Empty uses uarewrite.DefaultHosts.
 	// Matching is exact per host — subdomains must be listed explicitly.
+	//
+	// An unusable entry (a wildcard such as "*.ipfs.io" being the likely
+	// spelling) is DROPPED and named in an Error log; the rest of the list
+	// still applies, so appending a typo'd gateway cannot revoke the hosts
+	// that were already working. Only when NO entry survives does this fall
+	// back to the defaults — the same landing point an unreadable block
+	// gets. See uarewrite.NewFromOperatorHosts.
 	Hosts []string `json:"hosts,omitempty"`
 }
 

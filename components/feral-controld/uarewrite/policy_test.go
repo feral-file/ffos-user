@@ -3,6 +3,7 @@ package uarewrite
 import (
 	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -564,6 +565,98 @@ func TestNewRejectsEntriesThatWouldTruncateSilently(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "truncate") {
 				t.Errorf("New(%q) error %q should name the truncation hazard", entry, err)
+			}
+		})
+	}
+}
+
+// NewFromOperatorHosts is the hand-edited-list path. New's all-or-nothing
+// contract is right for a programmatic caller and wrong here: the config
+// block exists so the next hostile gateway is an operator edit rather than a
+// release, and one typo'd entry must not revoke the entries that work.
+func TestNewFromOperatorHostsSalvagesUsableEntries(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		hosts        []string
+		wantHosts    []string
+		wantRejected []string
+	}{
+		{
+			// The realistic edit: append a new gateway, spell it as a
+			// wildcard. The working entries must survive untouched.
+			name:         "one wildcard typo among good entries",
+			hosts:        []string{"ipfs.io", "*.newgateway.link", "dweb.link"},
+			wantHosts:    []string{"dweb.link", "ipfs.io"},
+			wantRejected: []string{"*.newgateway.link"},
+		},
+		{
+			// An operator who narrowed the scope keeps their narrowing;
+			// salvaging must not quietly re-add the built-in hosts.
+			name:         "deliberate narrowing is preserved",
+			hosts:        []string{"only-mine.example", "bad host"},
+			wantHosts:    []string{"only-mine.example"},
+			wantRejected: []string{"bad host"},
+		},
+		{
+			// Nothing survives, so there is no stated scope left to honor
+			// and the defaults are the same landing point an unreadable
+			// config block gets.
+			name:         "every entry unusable falls back to defaults",
+			hosts:        []string{"https://", "*.bad"},
+			wantHosts:    DefaultHosts,
+			wantRejected: []string{"https://", "*.bad"},
+		},
+		{
+			name:         "a wholly valid list rejects nothing",
+			hosts:        []string{"ipfs.io"},
+			wantHosts:    []string{"ipfs.io"},
+			wantRejected: nil,
+		},
+		{
+			name:         "an absent list is the default scope",
+			hosts:        nil,
+			wantHosts:    DefaultHosts,
+			wantRejected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			p, rejected, err := NewFromOperatorHosts(tt.hosts, "feral-player/test")
+			if err != nil {
+				t.Fatalf("NewFromOperatorHosts: unexpected error: %v", err)
+			}
+			if p == nil {
+				t.Fatal("NewFromOperatorHosts returned no policy")
+			}
+
+			if !reflect.DeepEqual(rejected, tt.wantRejected) {
+				t.Errorf("rejected = %v, want %v", rejected, tt.wantRejected)
+			}
+
+			want := append([]string(nil), tt.wantHosts...)
+			sort.Strings(want)
+			if got := p.Hosts(); !reflect.DeepEqual(got, want) {
+				t.Errorf("hosts = %v, want %v", got, want)
+			}
+
+			// The scoping guarantee must survive salvaging: a rejected
+			// entry may never leak into the Fetch patterns, and the pattern
+			// set must never widen to a catch-all.
+			for _, pattern := range p.FetchPatterns() {
+				urlPattern, _ := pattern["urlPattern"].(string)
+				if urlPattern == "*" {
+					t.Error("patterns must never be catch-all")
+				}
+				for _, bad := range tt.wantRejected {
+					if strings.Contains(urlPattern, strings.TrimPrefix(bad, "*.")) && bad != "https://" {
+						t.Errorf("rejected entry %q leaked into pattern %q", bad, urlPattern)
+					}
+				}
 			}
 		})
 	}

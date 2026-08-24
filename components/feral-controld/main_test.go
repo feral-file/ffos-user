@@ -1525,5 +1525,38 @@ func TestInitializeAppGatewayUserAgentInvalidHostsDegrades(t *testing.T) {
 	defer app.Cancel()
 
 	assert.NotNil(t, app, "invalid host list must not abort startup")
-	assert.Nil(t, app.UARewrite, "invalid host list must degrade to no rewrite")
+	// Every entry was unusable, so there is no operator scope left to
+	// honor and the rewrite lands on the built-in defaults — the same
+	// place an entirely unreadable config block lands.
+	assert.NotNil(t, app.UARewrite, "an unusable host list must degrade to the default scope, not to no rewrite")
+}
+
+// The realistic operator edit is APPENDING a newly hostile gateway, and
+// "*.newgateway.link" is the spelling validateLiteralHost's own doc calls
+// likely. That typo must not take ipfs.io and dweb.link down with it: doing
+// so re-opens #296 for artworks that were rendering fine, over a config edit
+// about an unrelated host, with the cause visible only in a daemon log on a
+// headless device.
+func TestInitializeAppGatewayUserAgentKeepsUsableHosts(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+
+	app := initializeApp(
+		logger,
+		"http://localhost:9222",
+		"wss://test.relay.com",
+		"test-api-key",
+		nil,
+		nil,
+		&config.GatewayUserAgentConfig{
+			Hosts: []string{"ipfs.io", "*.newgateway.link", "dweb.link"},
+		},
+		&config.NetlogConfig{Disabled: true},
+		provisioning.Tuning{},
+		"com.feralfile.test",
+		nil,
+	)
+	defer app.Cancel()
+
+	require.NotNil(t, app)
+	assert.NotNil(t, app.UARewrite, "one bad entry must not disable the whole rewrite")
 }
