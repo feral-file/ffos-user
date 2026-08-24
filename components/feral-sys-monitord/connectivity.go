@@ -9,6 +9,8 @@ import (
 
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/metric"
 )
 
 const (
@@ -166,7 +168,9 @@ func (c *Connectivity) background() {
 
 		// Always check connectivity for the first time
 		if lastConnected == nil {
+			probeStart := time.Now()
 			connected, err := c.probe(PING_TIMEOUT)
+			probeDuration := time.Since(probeStart)
 			if err != nil {
 				// We accept not being able to check connectivity and only log the warning
 				c.logger.Warn("Connectivity check failed", zap.Error(err))
@@ -187,6 +191,11 @@ func (c *Connectivity) background() {
 			c.lastConnected = &connected
 			lastConnected = c.lastConnected
 			c.Unlock()
+
+			// Export only APPLIED verdicts (past the generation guard above),
+			// so the Prometheus timeline can never disagree with the state the
+			// D-Bus consumers were told about.
+			metric.SetInternetReachability(connected, probeDuration)
 
 			c.logger.Info("Initial connectivity state determined", zap.Bool("connected", connected))
 
@@ -214,7 +223,9 @@ func (c *Connectivity) background() {
 				return
 			case <-ticker.C:
 				c.logger.Info("Checking connectivity")
+				probeStart := time.Now()
 				connected, err := c.probe(PING_TIMEOUT)
+				probeDuration := time.Since(probeStart)
 				// The watcher may have been stopped/restarted while the check
 				// was dialing (the change-triggered restart): its result belongs
 				// to the OLD generation and must not be applied or logged as
@@ -237,6 +248,10 @@ func (c *Connectivity) background() {
 				lastConnected := c.lastConnected
 				c.lastConnected = &connected
 				c.Unlock()
+
+				// Same rule as the initial-state site: only applied verdicts
+				// (past the guard and the error check) reach the gauges.
+				metric.SetInternetReachability(connected, probeDuration)
 
 				if lastConnected != nil && connected != *lastConnected {
 					c.logger.Info("Connectivity state changed",

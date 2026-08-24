@@ -96,6 +96,16 @@ func DefaultGateConfig() GateConfig {
 		commands.CMD_UPLOAD_LOGS:              heavy,
 		commands.CMD_SSH_ACCESS:               heavy,
 
+		// runNetworkDiagnostics holds its dispatch slot for up to ~25 s of
+		// live probe work and is reachable from the unauthenticated LAN hub,
+		// so the Default budget (10/s) would let a LAN caller stack minutes
+		// of probe load on an already-sick network. Disruptive-tier rate plus
+		// Dedupe: identical in-flight requests share ONE ladder run (the
+		// ladder is one-run-at-a-time anyway — queueing waiters behind its
+		// mutex would only pin dispatch slots to produce near-identical
+		// answers).
+		commands.CMD_RUN_NETWORK_DIAGNOSTICS: {Rate: 0.2, Burst: 2, Weight: 2, Dedupe: true},
+
 		// Slow, disruptive panel writes (DDC, incl. power): moderate + heavier.
 		commands.CMD_DDC_PANEL_CONTROL: slowWrite,
 		// Screen rotation is a relative step (each command advances one

@@ -82,6 +82,7 @@ func (c *fakeConn) Close() error {
 func (c *fakeConn) WriteJSON(interface{}) error               { return nil }
 func (c *fakeConn) WriteControl(int, []byte, time.Time) error { return nil }
 func (c *fakeConn) SetPongHandler(func(string) error)         {}
+func (c *fakeConn) SetReadLimit(int64)                        {}
 func (c *fakeConn) SetReadDeadline(time.Time) error           { return nil }
 func (c *fakeConn) SetWriteDeadline(time.Time) error          { return nil }
 

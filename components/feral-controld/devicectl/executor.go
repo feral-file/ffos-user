@@ -311,6 +311,12 @@ type executor struct {
 	// §4.7 network object attached to getDeviceStatus replies.
 	networkHealth func(ctx context.Context) *status.NetworkHealth
 
+	// networkDiagnostics, when wired (SetNetworkDiagnostics), runs the netlog
+	// diagnosis ladder once on demand for CMD_RUN_NETWORK_DIAGNOSTICS (stage
+	// 2c). nil renders the command unavailable — same posture as
+	// wifiSetupStarter: reject, never pretend.
+	networkDiagnostics func(ctx context.Context) (any, error)
+
 	// wifiSetupStarter, when wired (SetWifiSetupStarter), runs the
 	// provisioning machine's startWifiSetup admission and queues the
 	// user-requested raise (provisioning.Machine.StartWifiSetup). nil renders
@@ -352,6 +358,12 @@ type executor struct {
 	// to avoid a real network transfer; nil in production, where newLogUploader
 	// builds the HTTP-backed uploader.
 	logUploaderFactory func() logUploaderIface
+
+	// netlogRingDir is the effective flight-recorder ring directory, wired at
+	// startup (SetNetlogRingDir) before any command flows. Empty = the default
+	// <logsDir>/netlog. It exists so a netlog.dir override still rides every
+	// log bundle — the uploader cannot otherwise know where the ring went.
+	netlogRingDir string
 
 	// logUploadInFlight single-flights the detached log upload. The command is
 	// fire-and-forget (ACKs before the transfer finishes), so a retry storm of
@@ -578,6 +590,8 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.getDeviceStatus(ctx)
 	case commands.CMD_START_WIFI_SETUP:
 		result, err = e.startWifiSetup(ctx)
+	case commands.CMD_RUN_NETWORK_DIAGNOSTICS:
+		result, err = e.runNetworkDiagnostics(ctx)
 	case commands.CMD_UPDATE_TO_LATEST:
 		result, err = e.updateToLatest(ctx)
 	case commands.CMD_FACTORY_RESET:
@@ -1483,6 +1497,9 @@ func (e *executor) getDeviceStatus(ctx context.Context) (interface{}, error) {
 	if e.networkHealth != nil {
 		resp.Network = e.networkHealth(ctx)
 	}
+	// (The netlog lastOutage summary is attached inside GetStatus itself —
+	// the status collector is the shared point both this pulled reply and
+	// the poller's pushed device_status feed flow through.)
 	return resp, nil
 }
 
@@ -1491,6 +1508,35 @@ func (e *executor) getDeviceStatus(ctx context.Context) (interface{}, error) {
 // wiring-before-run ordering contract as SetBootLifecycleProbe.
 func (e *executor) SetNetworkHealth(fn func(ctx context.Context) *status.NetworkHealth) {
 	e.networkHealth = fn
+}
+
+// SetNetworkDiagnostics injects the on-demand diagnosis runner (see the
+// networkDiagnostics field). Same wiring-before-run ordering contract.
+func (e *executor) SetNetworkDiagnostics(fn func(ctx context.Context) (any, error)) {
+	e.networkDiagnostics = fn
+}
+
+// runNetworkDiagnosticsTimeout bounds the on-demand ladder run. A full pass
+// worst-cases at ~16 s (serial link/snapshot/lease prefix + concurrent lower
+// rungs; see netlog.Ladder.Run); this backstop keeps the reply inside the
+// hub's 30 s write deadline even if a rung misbehaves.
+const runNetworkDiagnosticsTimeout = 25 * time.Second
+
+// runNetworkDiagnostics handles CMD_RUN_NETWORK_DIAGNOSTICS: one synchronous
+// ladder run, reply carries the classification and per-rung evidence. The
+// reply is deliberately synchronous (unlike fire-and-forget uploadLogs): the
+// caller asked a question, and the answer takes probe time to produce.
+func (e *executor) runNetworkDiagnostics(ctx context.Context) (interface{}, error) {
+	if e.networkDiagnostics == nil {
+		return nil, fmt.Errorf("network diagnostics unavailable")
+	}
+	dctx, cancel := context.WithTimeout(ctx, runNetworkDiagnosticsTimeout)
+	defer cancel()
+	res, err := e.networkDiagnostics(dctx)
+	if err != nil {
+		return nil, fmt.Errorf("network diagnostics failed: %w", err)
+	}
+	return res, nil
 }
 
 // startWifiSetup handles CMD_START_WIFI_SETUP
@@ -3003,7 +3049,7 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 	// controld runs the log upload in-process (ported from feral-setupd
 	// log_uploader.rs). userId/title are validated for parity but unused by the
 	// v2 API, exactly as the Rust callback ignores them.
-	return e.uploadLogsInProcess(ctx, cmdArgs.APIKey, supportBundleID)
+	return e.uploadLogsInProcess(ctx, cmdArgs.APIKey, supportBundleID, false)
 }
 
 // logUploadTimeout bounds one detached log upload end-to-end (zip + pre-sign +
@@ -3020,10 +3066,29 @@ const logUploadTimeout = 10 * time.Minute
 // command-storm budget) open. Errors are logged, not surfaced, matching setupd.
 // Single-flighted via logUploadInFlight (see the field note) and bounded by
 // logUploadTimeout so the guard always releases.
-func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundleID string) (interface{}, error) {
-	if !e.logUploadInFlight.CompareAndSwap(false, true) {
+// selfInitiated selects the completion-failure log level: controller-initiated
+// uploads keep Error (a support engineer explicitly asked for this bundle and
+// the fire-and-forget reply makes Sentry the only failure signal), while the
+// AUTOMATIC netlog self-upload logs at Warn — it fires on freshly-healed,
+// often still-restricted networks where failure is routine, and the netlog
+// posture pins that outage-driven telemetry must not become Sentry noise (the
+// ring records the attempt either way).
+func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundleID string, selfInitiated bool) (interface{}, error) {
+	if !e.tryStartLogUpload(ctx, apiKey, supportBundleID, selfInitiated) {
 		e.logger.Info("Log upload already in flight; duplicate command ignored")
-		return CmdOK, nil
+	}
+	return CmdOK, nil
+}
+
+// tryStartLogUpload attempts to acquire the single-flight slot and launch the
+// detached upload, reporting whether it did. The bool matters to the netlog
+// self-upload path: a slot held by an earlier upload means THAT bundle was
+// zipped at its own start time — possibly before the outage segment sealed —
+// so "someone is uploading" is not "the new evidence egressed", and the
+// caller must not burn its cooldown on the refusal.
+func (e *executor) tryStartLogUpload(ctx context.Context, apiKey, supportBundleID string, selfInitiated bool) bool {
+	if !e.logUploadInFlight.CompareAndSwap(false, true) {
+		return false
 	}
 
 	info := e.logUploadBuildInfo(ctx)
@@ -3040,11 +3105,40 @@ func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundl
 		uploadCtx, cancel := context.WithTimeout(context.Background(), logUploadTimeout)
 		defer cancel()
 		if err := uploader.Upload(uploadCtx, apiKey, logUploadSource, info, supportBundleID); err != nil {
-			e.logger.Error("In-process log upload failed", zap.Error(err))
+			if selfInitiated {
+				e.logger.Warn("Netlog self-upload failed", zap.Error(err))
+			} else {
+				e.logger.Error("In-process log upload failed", zap.Error(err))
+			}
 		}
 	}()
 
-	return CmdOK, nil
+	return true
+}
+
+// SelfUploadLogs is the netlog recorder's stage-2a egress (wired in main.go,
+// type-asserted like the other seams — deliberately NOT on the Executor
+// interface, so mocks stay untouched): after a reconnect-stability window it
+// pushes the log bundle (which includes the netlog ring — zipLogs collects
+// the effective ring directory first, wherever SetNetlogRingDir put it)
+// without a controller in the loop. It shares tryStartLogUpload with the
+// command path, so the single-flight CAS, the detached 10-minute bound, and
+// the wire shape are identical. The return value reports whether the upload
+// was actually SCHEDULED: a controller-initiated upload holding the slot may
+// have zipped its bundle before this outage's segment sealed, so the
+// recorder must treat a refusal as "evidence not yet egressed" — it retries
+// later instead of burning its durable 6h cooldown on a bundle that may not
+// contain the evidence.
+// apiKey is the operator-provisioned support-logs key (config
+// netlog.selfUploadApiKey); callers must not invoke this with an empty key.
+func (e *executor) SelfUploadLogs(apiKey string) bool {
+	// Background ctx: there is no request to inherit from; the upload bounds
+	// itself with logUploadTimeout exactly like the command path.
+	scheduled := e.tryStartLogUpload(context.Background(), apiKey, "", true)
+	if !scheduled {
+		e.logger.Info("Netlog self-upload deferred: another log upload holds the single-flight slot")
+	}
+	return scheduled
 }
 
 // newLogUploader builds the uploader used by the in-process path, honoring a
@@ -3056,7 +3150,18 @@ func (e *executor) newLogUploader() logUploaderIface {
 	if e.logUploaderFactory != nil {
 		return e.logUploaderFactory()
 	}
-	return newLogUploader(wrapper.NewHTTPClientWithoutTimeout(), e.os, e.json, e.logger)
+	up := newLogUploader(wrapper.NewHTTPClientWithoutTimeout(), e.os, e.json, e.logger)
+	up.netlogDir = e.netlogRingDir
+	return up
+}
+
+// SetNetlogRingDir records the effective netlog ring directory for the log
+// uploader (wired in main.go's netlog assembly, type-asserted like the other
+// netlog seams — deliberately NOT on the Executor interface, so mocks stay
+// untouched). Startup-only wiring: it must be called before commands flow,
+// like the other Set* seams.
+func (e *executor) SetNetlogRingDir(dir string) {
+	e.netlogRingDir = dir
 }
 
 // logUploadBuildInfo gathers the device identity/build metadata the log

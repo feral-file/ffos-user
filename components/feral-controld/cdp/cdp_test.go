@@ -2014,19 +2014,29 @@ func TestClient_Send_Async(t *testing.T) {
 			// Store requestID by goroutine ID
 			requestIDMap.Store(goroutineID, requestID)
 
-			// Queue the request ID for ReadMessage correlation
-			requestIDQueue <- requestID
-
 			// Return the marshaled data
 			return []byte(fmt.Sprintf(`{"id":%d,"method":"%s","params":{"expression":"%s"}}`,
 				requestID, cdp.METHOD_EVALUATE, expression)), nil
 		}).
 		Times(numGoroutines)
 
-	// Expect WriteMessage for any data
+	// Expect WriteMessage for any data. The request ID is queued HERE, not in
+	// Marshal: Send correlates write→read by holding c.mu across the round
+	// trip, so WriteMessage order is the order readResponse consumes replies.
+	// Marshal runs OUTSIDE that lock — queueing there raced the mutex, and a
+	// goroutine that marshaled first but locked second received the other's
+	// response, discarded it as an interleaved frame, and re-read past the
+	// mock's Times budget (the 10-minute CI hang this comment buries).
 	ts.mockConn.EXPECT().
 		WriteMessage(websocket.TextMessage, gomock.Any()).
-		Return(nil).
+		DoAndReturn(func(_ int, data []byte) error {
+			var frame struct {
+				ID int `json:"id"`
+			}
+			require.NoError(t, stdjson.Unmarshal(data, &frame))
+			requestIDQueue <- frame.ID
+			return nil
+		}).
 		Times(numGoroutines)
 
 	// Expect ReadMessage to return responses

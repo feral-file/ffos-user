@@ -447,7 +447,17 @@ func (s *cdpSession) shutdown() {
 	s.mu.Unlock()
 
 	for _, call := range pending {
-		call.err = fmt.Errorf("offline cache: cdp session closed")
+		// Wrapped with ErrCDPTransport for the same reason the two sibling
+		// "session closed" errors in sendForSession are: the session dying
+		// IS a transport failure, and this is the third spelling of that
+		// one event. Unwrapped, a call that was in flight at the moment of
+		// death classified differently from one issued a microsecond later
+		// — nondeterministically, since shutdown closes call.done before
+		// doneChan and a racing select picks either. Consumers that retire
+		// dead sessions on ErrCDPTransport (replay's retireIfDeadLocked,
+		// uarewrite's recovery) would miss exactly the failure most likely
+		// to reach them first.
+		call.err = fmt.Errorf("%w: cdp session closed", ErrCDPTransport)
 		close(call.done)
 	}
 	close(s.doneChan)

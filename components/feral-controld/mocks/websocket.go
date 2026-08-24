@@ -10,9 +10,8 @@ import (
 	reflect "reflect"
 	time "time"
 
-	gomock "github.com/golang/mock/gomock"
-
 	wrapper "github.com/feral-file/ffos-user/components/feral-controld/wrapper"
+	gomock "github.com/golang/mock/gomock"
 )
 
 // MockWebSocketDialer is a mock of WebSocketDialer interface.
@@ -131,6 +130,18 @@ func (m *MockWebSocketConn) SetReadDeadline(t time.Time) error {
 func (mr *MockWebSocketConnMockRecorder) SetReadDeadline(t interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetReadDeadline", reflect.TypeOf((*MockWebSocketConn)(nil).SetReadDeadline), t)
+}
+
+// SetReadLimit mocks base method.
+func (m *MockWebSocketConn) SetReadLimit(limit int64) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetReadLimit", limit)
+}
+
+// SetReadLimit indicates an expected call of SetReadLimit.
+func (mr *MockWebSocketConnMockRecorder) SetReadLimit(limit interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetReadLimit", reflect.TypeOf((*MockWebSocketConn)(nil).SetReadLimit), limit)
 }
 
 // SetWriteDeadline mocks base method.

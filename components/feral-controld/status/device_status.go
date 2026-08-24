@@ -38,6 +38,24 @@ type deviceStatus struct {
 	io         wrapper.IO
 	cdp        cdp.CDP
 	cache      *versionCache
+
+	// lastOutage, when wired (SetLastOutageSource), serves the netlog
+	// recorder's last closed outage summary. It lives on THIS collector —
+	// not the devicectl executor — because both consumers of the summary
+	// flow through GetStatus: the pulled getDeviceStatus command reply AND
+	// the poller's pushed device_status change feed (stage 2b's whole point
+	// is that the backend sees the diagnosis WITHOUT polling). Probe-free by
+	// contract: it reads the recorder's in-memory summary. Set once at
+	// wiring time before any GetStatus caller runs (type-asserted seam,
+	// deliberately not on the DeviceStatus interface, so mocks stay
+	// untouched).
+	lastOutage func() *LastOutage
+}
+
+// SetLastOutageSource wires the netlog outage-summary source (see the
+// lastOutage field). Call before Start/first use.
+func (d *deviceStatus) SetLastOutageSource(fn func() *LastOutage) {
+	d.lastOutage = fn
 }
 
 func NewDeviceStatus(
@@ -89,6 +107,22 @@ type NetworkHealth struct {
 	Deferred bool `json:"deferred,omitempty"`
 }
 
+// LastOutage is the additive outage summary on getDeviceStatus / the
+// device_status feed (docs/wan-outage-observability.md stage 2b): the netlog
+// recorder's last closed episode, so the backend sees the diagnosis without
+// pulling logs. Values come from the recorder's in-memory summary — a status
+// poll never reads the ring, let alone probes. Not persisted: a daemon
+// restart clears it (the ring still holds the full history for uploadLogs).
+type LastOutage struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+	// Class is the netlog taxonomy value (link-down, wan-down, dns-broken,
+	// captive-portal, backend-only-down, ... or unknown-*).
+	Class string `json:"class"`
+	// Count24h is how many outages ENDED in the 24h before this reply.
+	Count24h int `json:"count24h"`
+}
+
 // DeviceStatusResponse represents the structure of device status information
 type DeviceStatusResponse struct {
 	// Contract is DeviceStatusContract on every reply — deliberately no
@@ -99,7 +133,11 @@ type DeviceStatusResponse struct {
 	// Network is attached by the devicectl executor from the provisioning
 	// machine's snapshot (see NetworkHealth); nil (omitted) only when that
 	// seam is unwired.
-	Network             *NetworkHealth    `json:"network,omitempty"`
+	Network *NetworkHealth `json:"network,omitempty"`
+	// LastOutage is attached by the devicectl executor from the netlog
+	// recorder (see LastOutage); nil (omitted) when the recorder is disabled
+	// or no outage has closed since process start.
+	LastOutage          *LastOutage       `json:"lastOutage,omitempty"`
 	ScreenRotation      string            `json:"screenRotation,omitempty"`
 	ConnectedWifi       string            `json:"connectedWifi,omitempty"`
 	InstalledVersion    string            `json:"installedVersion,omitempty"`
@@ -330,6 +368,15 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	// Get MAC info from config (fetched once at startup)
 	cfg := config.Get()
 	response.MACInfo = cfg.MACInfo
+
+	// Attach the netlog outage summary (stage 2b) — additive, probe-free,
+	// omitted when unwired or empty. Attached here (not in the executor) so
+	// the poller's pushed device_status feed carries it too; the summary only
+	// changes when an outage closes, so the poller's MD5 dedupe still
+	// suppresses no-change ticks.
+	if d.lastOutage != nil {
+		response.LastOutage = d.lastOutage()
+	}
 
 	return response, nil
 }

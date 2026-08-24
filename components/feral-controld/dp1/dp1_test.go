@@ -21,6 +21,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
@@ -1216,6 +1217,85 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 
 	// Verify we have items from tokens
 	assert.GreaterOrEqual(t, len(result.Items), 2, "Should have at least 2 items from tokens")
+}
+
+// TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation pins
+// the one behavior change the dp1-go v0.6.0 bump brought to a path this repo
+// already had: dynamicQuery acceptance (§4.5.1).
+//
+// v0.5.1's single-item overlay described only note/displayAt, so an
+// inlineManifest a resolver emitted was an undescribed key and passed
+// unexamined. v0.6.0 points that overlay at the unmodified ref-manifest schema,
+// so the field is now checked — and dp1-go's hydration loop returns on the
+// first invalid item rather than skipping it, which makes ONE bad manifest fail
+// the WHOLE cast. See processDynamicPlaylistSpec's doc for why that fail-closed
+// outcome is accepted rather than softened here.
+//
+// Both directions are pinned deliberately: a test that only asserted the
+// rejection would pass just as well if validation had become indiscriminate.
+func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation(t *testing.T) {
+	// locale is one of the ref-manifest schema's four required fields
+	// (refVersion, id, created, locale), so dropping it is the smallest
+	// realistic way for a resolver to emit a manifest that does not conform.
+	const validManifest = `{"refVersion":"1.1.0","id":"m1","created":"2026-01-01T00:00:00Z","locale":"en",` +
+		`"metadata":{"title":"Manifest Title","artists":[{"id":"","name":"Manifest Artist"}]}}`
+	const manifestMissingLocale = `{"refVersion":"1.1.0","id":"m1","created":"2026-01-01T00:00:00Z",` +
+		`"metadata":{"title":"Manifest Title"}}`
+
+	tests := []struct {
+		name           string
+		inlineManifest string
+		wantErr        bool
+	}{
+		{name: "valid manifest hydrates and is carried on the item", inlineManifest: validManifest},
+		{name: "malformed manifest fails the whole batch", inlineManifest: manifestMissingLocale, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			body := `{"data":{"items":[
+				{"id":"385f79b6-a45f-4c1c-8080-e93a192adccc","title":"FromIndexer","source":"https://media.example/a",
+				 "inlineManifest":` + tt.inlineManifest + `},
+				{"id":"485f79b6-a45f-4c1c-8080-e93a192adccd","title":"NoManifest","source":"https://media.example/b"}
+			]}}`
+			ts.mockHTTP.EXPECT().
+				Do(gomock.Any()).
+				DoAndReturn(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+				})
+
+			playlist := dp1.Playlist{
+				Playlist: dp1playlist.Playlist{
+					DynamicQuery: &playlists.DynamicQuery{
+						Profile:  dp1playlist.ProfileGraphQLV1,
+						Endpoint: "https://example.com/graphql",
+						Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
+						ResponseMapping: playlists.ResponseMapping{
+							ItemsPath:  "data.items",
+							ItemSchema: "dp1/1.0",
+						},
+					},
+				},
+			}
+
+			result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
+			if tt.wantErr {
+				// The second, manifest-less item is lost with the first: the
+				// batch is rejected whole, not filtered.
+				require.Error(t, err)
+				assert.Nil(t, result)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Len(t, result.Items, 2)
+			assert.JSONEq(t, tt.inlineManifest, string(result.Items[0].InlineManifest))
+			assert.Empty(t, result.Items[1].InlineManifest)
+		})
+	}
 }
 
 func float64Ptr(f float64) *float64 {

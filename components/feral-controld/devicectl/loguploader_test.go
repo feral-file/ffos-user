@@ -248,7 +248,7 @@ func TestUploadLogsInProcess_RoutesToUploader(t *testing.T) {
 		logUploaderFactory: func() logUploaderIface { return fake },
 	}
 
-	res, err := e.uploadLogsInProcess(context.Background(), "api-key-77", "  bundle-x  ")
+	res, err := e.uploadLogsInProcess(context.Background(), "api-key-77", "  bundle-x  ", false)
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 
@@ -265,4 +265,17 @@ func TestUploadLogsInProcess_RoutesToUploader(t *testing.T) {
 	assert.Equal(t, logUploadSource, fake.source) // "dbus"
 	assert.Equal(t, "FF1", fake.info.DeviceID)    // hostname fallback
 	assert.Equal(t, "  bundle-x  ", fake.bundle)  // trimming happens inside the uploader
+}
+
+// TestSetNetlogRingDirPlumbsToUploader: the startup seam must reach the
+// uploader actually constructed for a transfer — a netlog.dir override that
+// stopped here would silently drop the ring from every bundle (the exact
+// failure the seam exists to prevent).
+func TestSetNetlogRingDirPlumbsToUploader(t *testing.T) {
+	e := &executor{os: wrapper.NewOS(), json: wrapper.NewJSON(), logger: zap.NewNop()}
+	e.SetNetlogRingDir("/var/lib/feral/netlog")
+
+	up, ok := e.newLogUploader().(*logUploader)
+	require.True(t, ok, "production path must build the concrete uploader")
+	assert.Equal(t, "/var/lib/feral/netlog", up.netlogDir)
 }
