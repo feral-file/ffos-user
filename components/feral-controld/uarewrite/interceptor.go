@@ -31,10 +31,26 @@ const (
 	// attempts, and redialTimeout bounds one such attempt. Spacing
 	// matters because a dead socket fails every request it was holding,
 	// so without it one Chromium hiccup becomes a dial storm against a
-	// kiosk that is already sick. The value mirrors offlinecache's own
-	// replay re-dial (kioskreplay.go) rather than inventing a second
-	// cadence for the same event on the same target.
-	redialCooldown = 30 * time.Second
+	// kiosk that is already sick.
+	//
+	// LOAD-BEARING RELATIONSHIP: redialCooldown + probeTimeout must stay
+	// strictly BELOW superviseInterval, and this value is chosen to hold
+	// that with margin (15+10 < 30). claimAttach stamps lastRedial when
+	// the attempt is claimed, which is up to probeTimeout AFTER the tick
+	// that triggered it fired, so the measured gap between consecutive
+	// supervisor claims is superviseInterval minus that skew. Set the
+	// cooldown at or near superviseInterval — as an earlier revision did,
+	// at 30s each — and the supervisor starts rejecting its OWN next tick
+	// whenever the skew shrinks, silently halving its retry rate to one
+	// attempt per 60s and making tryAttach's "the supervisor's next tick
+	// is the retry" only half true. TestRedialCooldownCannotSwallowA-
+	// SupervisorTick pins this; do not retune one constant alone.
+	//
+	// It no longer mirrors offlinecache's replay re-dial (kioskreplay.go,
+	// 30s), and that divergence is deliberate: replay has no supervisor of
+	// its own for the cooldown to collide with, so the constraint above
+	// simply does not apply there.
+	redialCooldown = 15 * time.Second
 	redialTimeout  = 30 * time.Second
 
 	// superviseInterval paces the supervisor's health pass, and
@@ -158,8 +174,15 @@ func NewInterceptor(
 // is invisible from the daemon side, which is exactly the failure mode that
 // makes it worth re-arming explicitly rather than hoping.
 //
-// Any previous session is closed first so a reconnect cannot leave a second
-// Fetch client armed on a target we no longer track.
+// Any previous session is closed LAST, after the new one is armed and
+// installed — not first. That order is deliberate: closing first would leave
+// a window, as wide as the dial plus Fetch.enable (up to ~30s against a sick
+// kiosk), in which nothing is intercepting and the reloaded document's asset
+// requests escape with Chromium's own User-Agent. That is exactly the bug
+// this package exists to fix, and it would be invisible in the log. The cost
+// of this order is the mirror image: both sessions are briefly armed on the
+// same target, which is harmless because processPaused answers on the session
+// each event arrived on. Do not "tidy" this into a close-then-dial sequence.
 func (i *Interceptor) AttachOnReconnect(ctx context.Context) error {
 	// First call — success or failure — brings the supervisor up. It has
 	// to start even when this attach fails: the kiosk may simply not be
@@ -169,9 +192,10 @@ func (i *Interceptor) AttachOnReconnect(ctx context.Context) error {
 
 	select {
 	case <-i.done:
-		// Closed interceptors must not install fresh sessions: a dial
-		// racing run()'s shutdown would otherwise leave a connection
-		// nobody will ever close.
+		// Cheap pre-dial bail so an already-closed interceptor does not
+		// open a socket at all. It is NOT the guarantee — a Close that
+		// lands after this read is caught by the second check at install
+		// time below, which is the one that actually holds.
 		return fmt.Errorf("uarewrite: interceptor closed")
 	default:
 	}
@@ -200,7 +224,29 @@ func (i *Interceptor) AttachOnReconnect(ctx context.Context) error {
 		return fmt.Errorf("uarewrite: Fetch.enable on kiosk: %w", err)
 	}
 
+	// Re-check done under the SAME lock that installs the session. The
+	// pre-dial check above is a fast path, not the guarantee: the dial is
+	// bounded but slow (seconds against a sick kiosk), and Close can land
+	// inside it — the supervisor and the request-path accelerator both dial
+	// on a context.Background() timeout of their own, so neither is
+	// canceled by run()'s shutdown.
+	//
+	// mu is what makes the two orderings safe, because Close closes done
+	// BEFORE taking mu. Either Close takes mu first, in which case its
+	// close(done) happens-before this read and we bail; or we take mu first
+	// and install, in which case Close necessarily finds the session and
+	// closes it. Installing without this check is how an armed Fetch socket
+	// and its read pump outlive run() with no owner left to close them.
 	i.mu.Lock()
+	select {
+	case <-i.done:
+		i.mu.Unlock()
+		if cerr := session.Close(); cerr != nil {
+			i.logger.Debug("uarewrite: closing session dialed into shutdown", zap.Error(cerr))
+		}
+		return fmt.Errorf("uarewrite: interceptor closed")
+	default:
+	}
 	previous := i.session
 	i.session = session
 	i.mu.Unlock()
@@ -219,6 +265,13 @@ func (i *Interceptor) AttachOnReconnect(ctx context.Context) error {
 
 // Close tears down the session and stops the supervisor. Safe to call when
 // never attached, and idempotent.
+//
+// LOAD-BEARING ORDER: done is closed BEFORE mu is taken. AttachOnReconnect
+// re-reads done while holding mu, so this ordering is what makes the two
+// paths mutually exclusive — a Close that finds no installed session has
+// necessarily published the close to the racing attach. Taking mu first
+// would reopen the window where a dial in flight installs a session this
+// Close has already walked past.
 func (i *Interceptor) Close() error {
 	i.closeOnce.Do(func() { close(i.done) })
 
@@ -434,7 +487,21 @@ func (i *Interceptor) ensureArmed() {
 			return
 		}
 		i.logger.Warn("uarewrite: supervisor found the rewrite session dead", zap.Error(err))
-		i.retire(session)
+		if !i.retire(session) {
+			// Superseded mid-probe — the identical guard recoverFrom
+			// applies, and for the identical reason. The realistic race is
+			// a kiosk restart landing between this pass reading the session
+			// and its probe returning: onConnect's AttachOnReconnect
+			// installs a fresh session and closes this one, so the probe
+			// fails on a corpse. Attaching anyway would dial a THIRD
+			// session and close the healthy seconds-old one, and closing it
+			// detaches its Fetch client — releasing every request paused on
+			// it to continue with Chromium's own User-Agent, which is the
+			// challenge this package exists to prevent. onConnect does not
+			// go through claimAttach, so the cooldown would not absorb it
+			// either. A live session is installed; the next tick probes it.
+			return
+		}
 		i.tryAttach("supervisor: probe failed")
 	}
 }

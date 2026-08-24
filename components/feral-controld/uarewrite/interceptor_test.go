@@ -405,6 +405,45 @@ func TestClaimAttachPacesAndSingleFlights(t *testing.T) {
 	assert.True(t, i.claimAttach(), "past the cooldown claims again")
 }
 
+// The supervisor must never reject its OWN next tick. claimAttach stamps
+// lastRedial when the attempt is CLAIMED, which lags the tick that triggered
+// it by however long ensureArmed's probe took (bounded by probeTimeout), so
+// consecutive supervisor claims are spaced superviseInterval minus that skew
+// — not superviseInterval. With the cooldown set at or near the interval,
+// as an earlier revision had it at 30s each, any tick whose skew is smaller
+// than the previous one's gets swallowed and the retry rate silently halves.
+//
+// This pins the arithmetic rather than the wall clock, so it fails at the
+// moment someone retunes one of the three constants in isolation.
+func TestRedialCooldownCannotSwallowASupervisorTick(t *testing.T) {
+	t.Parallel()
+
+	assert.Less(t, redialCooldown+probeTimeout, superviseInterval,
+		"redialCooldown + probeTimeout must stay strictly below superviseInterval, "+
+			"or the supervisor rejects its own next tick and retries at half the intended rate")
+
+	// The worst case in full: tick N claims late (a probe that ran the
+	// whole probeTimeout), tick N+1 claims immediately. That is the
+	// narrowest gap two supervisor claims can ever have.
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	base := time.Unix(1000, 0)
+	worstCaseGap := superviseInterval - probeTimeout
+	clock := mockClockWithTameTicker(t, ctrl)
+	gomock.InOrder(
+		clock.EXPECT().Now().Return(base),
+		clock.EXPECT().Now().Return(base.Add(worstCaseGap)),
+	)
+
+	i := testInterceptorWithClock(t, []string{"ipfs.io"}, clock)
+
+	require.True(t, i.claimAttach(), "the late-claiming tick wins")
+	i.releaseAttach()
+	assert.True(t, i.claimAttach(),
+		"the next supervisor tick must still claim at the narrowest possible spacing")
+}
+
 // The supervisor pass with nothing installed must attach — this is what
 // recovers BOTH an initial attach failure and a failed re-dial, neither of
 // which any Fetch event can ever retrigger.
@@ -472,6 +511,61 @@ func TestEnsureArmedRetiresDeadSessionFoundByProbe(t *testing.T) {
 	assert.Nil(t, i.session)
 }
 
+// A probe that fails on a session which has ALREADY been superseded says
+// nothing about the live one. The realistic race is a kiosk restart landing
+// inside the probe window: onConnect installs a fresh session and closes the
+// one this pass is probing, so the probe fails on a corpse. Re-dialing then
+// would close the healthy seconds-old session — and closing it detaches its
+// Fetch client, releasing every request paused on it to continue with
+// Chromium's own User-Agent, which is the exact escape this package prevents.
+// onConnect bypasses claimAttach, so the cooldown would not absorb the extra
+// dial either. recoverFrom already guards this; the supervisor must match.
+func TestEnsureArmedIgnoresProbeFailureOnSupersededSession(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mockClockWithTameTicker(t, ctrl)
+	clock.EXPECT().Now().Return(time.Unix(1000, 0)).AnyTimes()
+
+	i := testInterceptorWithClock(t, []string{"ipfs.io"}, clock)
+
+	// live is what onConnect installed; stale is what this pass is probing.
+	live := mocks.NewMockCDPSession(ctrl)
+	live.EXPECT().Close().Return(nil).MaxTimes(1) // helper teardown only
+	stale := mocks.NewMockCDPSession(ctrl)
+	stale.EXPECT().
+		Send(gomock.Any(), "Fetch.enable", gomock.Any()).
+		DoAndReturn(func(interface{}, string, map[string]interface{}) (json.RawMessage, error) {
+			// The restart lands mid-probe: by the time the probe fails,
+			// the session it was issued on is no longer the installed one.
+			i.mu.Lock()
+			i.session = live
+			i.mu.Unlock()
+			return nil, fmt.Errorf("%w: cdp session closed", offlinecache.ErrCDPTransport)
+		})
+	// No stale.Close() expectation: retire must refuse to touch a session
+	// it no longer owns, and onConnect already closed this one.
+
+	i.mu.Lock()
+	i.session = stale
+	i.mu.Unlock()
+
+	// Any dial at all is the bug — it would install a third session and
+	// close the healthy one.
+	i.dial = func(context.Context, string, wrapper.HTTPClient, wrapper.WebSocketDialer, wrapper.JSON, wrapper.IO, *zap.Logger) (offlinecache.CDPSession, error) {
+		t.Error("a superseded session's probe failure must not trigger a re-dial")
+		return nil, errors.New("must not dial")
+	}
+
+	i.ensureArmed()
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	assert.Equal(t, live, i.session, "the live session must survive untouched")
+}
+
 // A probe REFUSED on a live socket must not churn: the kiosk answered, so
 // re-dialing it reproduces the same refusal at dial cost.
 func TestEnsureArmedLeavesLiveSessionOnRefusedProbe(t *testing.T) {
@@ -514,6 +608,57 @@ func TestCloseStopsSupervisorAndRefusesAttach(t *testing.T) {
 	err := i.AttachOnReconnect(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "closed")
+}
+
+// The interleaving TestCloseStopsSupervisorAndRefusesAttach cannot reach:
+// Close lands while a SUCCESSFUL dial is already in flight. The pre-dial
+// done check has passed by then, so only the install-time re-check can stop
+// the freshly armed session from being stored — and a stored session past
+// Close is an armed Fetch socket plus its read pump outliving run() with
+// nobody left to close either.
+//
+// Close is driven from inside the dial seam so the race is deterministic
+// rather than timing-dependent: by the time the dial returns, Close has
+// already returned too, which is exactly the ordering that used to leak.
+func TestAttachDuringCloseDoesNotInstallSession(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	session := mocks.NewMockCDPSession(ctrl)
+	// Arming must still succeed: the point is that a session which armed
+	// fine is nonetheless discarded because the owner is gone.
+	session.EXPECT().On("Fetch.requestPaused", gomock.Any()).AnyTimes()
+	session.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(nil, nil).AnyTimes()
+	closed := make(chan struct{})
+	session.EXPECT().Close().DoAndReturn(func() error {
+		close(closed)
+		return nil
+	})
+
+	i := testInterceptor(t, []string{"ipfs.io"})
+	i.dial = func(context.Context, string, wrapper.HTTPClient, wrapper.WebSocketDialer, wrapper.JSON, wrapper.IO, *zap.Logger) (offlinecache.CDPSession, error) {
+		// Shutdown happens mid-dial. Close sees no installed session and
+		// returns; without the install-time re-check the attach below
+		// would then store this session anyway.
+		require.NoError(t, i.Close())
+		return session, nil
+	}
+
+	err := i.AttachOnReconnect(context.Background())
+	require.Error(t, err, "an attach that completes after Close must not report success")
+	assert.Contains(t, err.Error(), "closed")
+
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a session dialed into shutdown must be closed, not leaked")
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	assert.Nil(t, i.session, "no session may remain installed past Close")
 }
 
 // failingDial is a dial seam that always fails — recovery paths in unit
