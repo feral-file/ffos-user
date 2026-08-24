@@ -884,11 +884,16 @@ func TestWaitForBrowserAndApproval_RefreshesCodeAfterPairingExpiryBeforeJoin(t *
 	}, time.Second, 10*time.Millisecond)
 	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-NEW", "")
 
-	s.mu.Lock()
-	active := s.active
-	s.mu.Unlock()
-	require.NotNil(t, active)
-	assert.Equal(t, "ch_new", active.channelID)
+	// HandleStartPairingSession displays the new code BEFORE publishing
+	// s.active, so "PAIR-NEW observed" does not imply the refreshed session is
+	// registered yet — a single read here raced that window on slow CI runners.
+	var active *activePairing
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		active = s.active
+		return active != nil && active.channelID == "ch_new"
+	}, time.Second, 10*time.Millisecond)
 	assert.Equal(t, "PAIR-NEW", active.pairingCode)
 	assert.Equal(t, 1, oldChannel.closeCount)
 	assert.Equal(t, 0, newChannel.closeCount)
