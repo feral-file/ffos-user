@@ -618,6 +618,67 @@ func TestGatewayUserAgentMalformedBlockIsNotFatal(t *testing.T) {
 	}
 }
 
+// The permissive fallback must not swallow the OFF switch. Defaults are ON,
+// so a block that fails to decode as a whole while carrying an explicit
+// "enabled": false is the one case where falling back to defaults would
+// override the operator instead of merely ignoring them — re-arming the
+// rewrite on a device that asked for none, with only a log line to show it.
+func TestGatewayUserAgentMalformedBlockStillHonorsExplicitDisable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		raw         string
+		wantEnabled bool
+	}{
+		{
+			name:        "sibling field is wrong-typed but enabled:false is readable",
+			raw:         `{"gatewayUserAgent":{"enabled":false,"hosts":"ipfs.io"}}`,
+			wantEnabled: false,
+		},
+		{
+			name:        "sibling field is wrong-typed and enabled:true is readable",
+			raw:         `{"gatewayUserAgent":{"enabled":true,"hosts":"ipfs.io"}}`,
+			wantEnabled: true,
+		},
+		{
+			// The switch ITSELF is unreadable, so there is no stated
+			// intent to honor — this is the case the fallback reasons
+			// about, and it must still land on the defaults.
+			name:        "enabled itself is wrong-typed",
+			raw:         `{"gatewayUserAgent":{"enabled":"no","hosts":"ipfs.io"}}`,
+			wantEnabled: true,
+		},
+		{
+			// A block that is not even an object carries no recoverable
+			// switch.
+			name:        "whole block is a string",
+			raw:         `{"gatewayUserAgent":"off"}`,
+			wantEnabled: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var c config.Config
+			require.NoError(t, json.Unmarshal([]byte(tt.raw), &c))
+
+			g := c.GatewayUserAgentTuning(zaptest.NewLogger(t))
+			assert.Equal(t, tt.wantEnabled, g.IsEnabled())
+
+			if !tt.wantEnabled {
+				// Only the switch is recovered. Honoring a scope read out
+				// of a block that did not parse would be inventing intent.
+				require.NotNil(t, g)
+				assert.Nil(t, g.Hosts, "a malformed block yields no host scope")
+				assert.Empty(t, g.UserAgent, "a malformed block yields no user agent")
+			}
+		})
+	}
+}
+
 // An absent block and a well-formed block must both keep working — the
 // permissive path must not have made the normal path lossy.
 func TestGatewayUserAgentTuningAbsentBlock(t *testing.T) {

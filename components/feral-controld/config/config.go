@@ -294,20 +294,44 @@ func (g *GatewayUserAgentConfig) IsEnabled() bool {
 // so a typo that disabled the rewrite would break artworks that render today
 // — a regression whose symptom (unrelated artworks failing) points nowhere
 // near its cause (a config edit about a different host). Falling back leaves
-// the device in exactly the state an unconfigured device is in, which
-// introduces no failure surface that was not already there.
+// the device in exactly the state an unconfigured device is in.
+//
+// There is ONE exception, and it is not a nuance: an explicit
+// "enabled": false is recovered on its own even when the rest of the block
+// is unreadable. Defaults are ON, so without that carve-out a type error in
+// a sibling field would silently re-arm the rewrite on a device whose
+// operator had turned it off — the one direction where "the state an
+// unconfigured device is in" is NOT what was asked for.
 //
 // The log is Error, not the Warn its Provisioning sibling uses, because the
 // consequence differs: there, defaults replace some tuning knobs; here the
-// operator's ENTIRE stated intent is discarded. It names the effective host
-// list so the running scope is greppable from the device log rather than
-// inferred.
+// operator's ENTIRE stated intent is discarded. It carries the raw block, not
+// the effective host list: by definition the block did not parse, so there is
+// no operator-supplied scope to name — the scope actually in force is logged
+// by uarewrite's "kiosk User-Agent rewrite armed" line when the interceptor
+// arms, which is the line to grep for the running scope.
 func (c *Config) GatewayUserAgentTuning(logger *zap.Logger) *GatewayUserAgentConfig {
 	if len(c.GatewayUserAgent) == 0 {
 		return nil
 	}
 	var g GatewayUserAgentConfig
 	if err := json.Unmarshal(c.GatewayUserAgent, &g); err != nil {
+		// Falling back to defaults is right for a typo in the SCOPE, but
+		// wrong for the switch: "enabled": false is an operator saying
+		// "off", and defaults are ON. Discarding the whole block would arm
+		// a rewrite on a device that explicitly asked for none, and the
+		// only trace would be this log line. So recover the switch on its
+		// own — encoding/json ignores unknown fields, meaning this narrow
+		// decode succeeds precisely when the failure was in a SIBLING
+		// field. A malformed "enabled" itself still falls through to
+		// defaults, which is the case the paragraph above reasons about.
+		if disabled := decodeDisableSwitch(c.GatewayUserAgent); disabled != nil {
+			if logger != nil {
+				logger.Error("gatewayUserAgent config block malformed; honoring only its explicit \"enabled\": false",
+					zap.Error(err), zap.String("raw", string(c.GatewayUserAgent)))
+			}
+			return &GatewayUserAgentConfig{Enabled: disabled}
+		}
 		if logger != nil {
 			logger.Error("gatewayUserAgent config block malformed; using built-in defaults",
 				zap.Error(err), zap.String("raw", string(c.GatewayUserAgent)))
@@ -315,6 +339,24 @@ func (c *Config) GatewayUserAgentTuning(logger *zap.Logger) *GatewayUserAgentCon
 		return nil
 	}
 	return &g
+}
+
+// decodeDisableSwitch pulls ONLY an explicit "enabled": false out of a block
+// that failed to decode as a whole, returning nil for every other outcome
+// (unreadable, absent, or true). Returning a pointer rather than a bool keeps
+// "operator said false" distinct from "nothing to honor" — the caller must
+// not turn the latter into a disable.
+func decodeDisableSwitch(raw json.RawMessage) *bool {
+	var sw struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(raw, &sw); err != nil {
+		return nil
+	}
+	if sw.Enabled == nil || *sw.Enabled {
+		return nil
+	}
+	return sw.Enabled
 }
 
 // ProvisioningTuning carries the on-device knobs for the provisioning escape
