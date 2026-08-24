@@ -449,12 +449,12 @@ while IFS= read -r line; do
 done < <(grep -E '^[[:space:]]*(sudo )?systemctl ((--user|--global) )?(start |enable --now |disable |stop |daemon-reload)' "$start_services")
 # EXACT count, not a floor: the scan must see precisely the boot-critical
 # set — six service starts, the system-ready.target start, three enable
-# blocks, the watchdog, the --no-block controld start, four backward-compat
-# disable/stop lines, and daemon-reload (6+1+3+1+1+4+1 = 17). An inequality
+# blocks, the watchdog, the two --no-block starts, four backward-compat
+# disable/stop lines, and daemon-reload (6+1+3+1+2+4+1 = 18). An inequality
 # would let a REMOVED required command pass as silently as an unguarded one;
 # adding or removing a systemctl line means updating this count deliberately.
-[ "$f03_lines" -eq 17 ] || \
-  fail "F-03 scan matched $f03_lines systemctl lines (expected exactly 17) — command added/removed or pattern drift?"
+[ "$f03_lines" -eq 18 ] || \
+  fail "F-03 scan matched $f03_lines systemctl lines (expected exactly 18) — command added/removed or pattern drift?"
 
 # --- 7. controld start-limit never latches -------------------------------------
 

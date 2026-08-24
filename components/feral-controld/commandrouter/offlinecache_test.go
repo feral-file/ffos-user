@@ -21,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // setupOfflineCache builds a handler with a mocked offlinecache.Service so
@@ -394,6 +395,62 @@ func TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL(t *t
 
 	require.NoError(t, err)
 	assertOkResponse(t, result)
+}
+
+// TestCommandHandler_DownloadPlaylist_PersistsInlineManifest pins the inline
+// §3.6 Ref Manifest across the SECOND lossy boundary, the one the display path
+// does not cross: the body offlinecache persists as the playlist's "raw" copy
+// is not the bytes a publisher served, it is a re-marshal of the typed
+// *dp1.Playlist (see indexResolvedPlaylistForOfflineDisplay's doc). So a field
+// the pinned dp1-go does not model is erased from the offline fallback copy
+// too, and the loss only surfaces later, on a device that has gone offline.
+//
+// Uses the real JSON wrapper: mocking Marshal/Unmarshal here would stub out
+// exactly the step under test.
+func TestCommandHandler_DownloadPlaylist_PersistsInlineManifest(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+	ts.handler = commandrouter.New(
+		ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller,
+		nil, mockOfflineCache, nil, nil, wrapper.NewJSON(), ts.logger)
+
+	var playlistMap map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"dpVersion": "1.1.0",
+		"id": "playlist-1",
+		"items": [{
+			"id": "item1",
+			"source": "https://example.com/video.mp4",
+			"inlineManifest": `+inlineManifestJSON+`
+		}]
+	}`), &playlistMap))
+
+	var persisted json.RawMessage
+	mockOfflineCache.EXPECT().
+		DownloadPlaylist(ts.ctx, gomock.Any(), "").
+		DoAndReturn(func(_ context.Context, raw json.RawMessage, _ string) (int, int, error) {
+			persisted = raw
+			return 1, 1, nil
+		}).
+		Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST,
+		Arguments: map[string]any{"dp1_call": playlistMap},
+	})
+	require.NoError(t, err)
+	assertOkResponse(t, result)
+
+	var body struct {
+		Items []struct {
+			InlineManifest json.RawMessage `json:"inlineManifest"`
+		} `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(persisted, &body))
+	require.Len(t, body.Items, 1)
+	require.NotEmpty(t, body.Items[0].InlineManifest,
+		"inlineManifest was dropped from the persisted offline-fallback playlist")
+	assert.JSONEq(t, inlineManifestJSON, string(body.Items[0].InlineManifest))
 }
 
 func TestCommandHandler_DownloadPlaylist_ResolveFailure(t *testing.T) {

@@ -197,6 +197,29 @@ func hasDisplayAtItems(items []dp1playlist.PlaylistItem) bool {
 // {{offset}} placeholders in dynamicQuery.query, matching MINIMAL/MAX batch sizes used by legacy.
 //
 // Replacement behavior matches legacy: playlist.Items is replaced by resolved dynamic items only (no merge with static items).
+//
+// ACCEPTED FAIL-CLOSED: dp1-go validates every hydrated item against the core
+// PlaylistItem schema plus the playlists-extension overlay, and its hydration
+// loop RETURNS on the first item that fails rather than skipping it — so one
+// malformed item fails the whole cast, and the error surfaces to the caller
+// (commandrouter returns it; the dp1_call branch has no cached fallback, only
+// the playlistUrl branch does). This is deliberate, but note it widened at
+// dp1-go v0.6.0: the single-item overlay now $refs the ref-manifest schema, so
+// an item's inlineManifest (§3.6) is checked too, where before it was an
+// undescribed key that passed unexamined. A resolver that starts emitting a
+// slightly non-conforming manifest therefore takes the whole playlist down,
+// not just its own item.
+//
+// Kept rather than softened, for two reasons. Skipping bad items would put a
+// silently shorter playlist on the wall — the controller asked for a playlist
+// and would be told it succeeded, with no signal that items went missing,
+// which is the worse failure for something whose whole job is showing a
+// specific set of works. And dp1-go owns the fetch/validate/decode loop, so
+// per-item recovery would mean reimplementing hydration here to get back a
+// behavior the spec does not ask for.
+//
+// Pinned by TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation,
+// which asserts both directions so a future change cannot quietly flip either.
 func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist, minimal bool, maxItems int) (*Playlist, error) {
 	if playlist.DynamicQuery == nil {
 		return nil, fmt.Errorf("internal: dynamicQuery is nil")

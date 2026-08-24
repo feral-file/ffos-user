@@ -12,6 +12,54 @@ An entry is the durable record that the release was cut on the full-image
 rail: it names the version and the exact `ffos` image-build dispatch that
 ships the units/scripts alongside the new binaries. Newest first.
 
+## 2.0.3 — full-image
+
+Everything on `develop` since the previous staging merge — four PRs
+(#287, #290, #294, #295; staging PR #299):
+
+- **Wake-on-LAN at startup** (#287) — the cross-rail change forcing the
+  full-image rail.
+- **WAN-outage observability, stages 0–2** (#290): connectivity gauges
+  (`netmetrics`), an in-memory flight recorder with a probe ladder
+  (`netlog`), outage classification (`status`), and diagnosis egress via
+  the log-upload bundle (controld + sys-monitord).
+- **dp1-go v0.6.0 bump** (#294) so `inlineManifest` survives to the player.
+- **Screenshot API** (#295): bounded native capture in controld.
+
+### Cross-rail changes
+
+Image rail (`users/**`):
+
+- NEW `enable-wake-on-lan.service` (timeout-bounded oneshot,
+  `TimeoutStartSec=15`) and `scripts/enable-wake-on-lan.sh`: arms magic-packet
+  wake on Ethernet adapters that support it (ethtool + PCI wake source) and
+  persists `802-3-ethernet.wake-on-lan magic` on NetworkManager Ethernet
+  profiles; Wi-Fi profiles and wireless interfaces are deliberately left
+  untouched.
+- `.start-services.sh`: starts the unit with `--no-block` right after
+  `feral-controld.service`, best-effort, so a wedged NIC/NetworkManager/sudo
+  call cannot delay the rest of FF OS startup.
+- `.file_permissions.sh`: marks the new helper executable.
+
+The helper's contract is pinned CI-side by `scripts/test-enable-wake-on-lan.sh`
+(run via `make verify-scripts`).
+
+Package rail (`components/**`): the controld/sys-monitord changes listed
+above (#290, #294, #295).
+
+### Release action
+
+Dispatch `build-image-to-cf.yml` in the `ffos` repo with `version=2.0.3` and
+`ffos_user_ref` pointing at the `v2.0.3` tag (the staging merge of this
+release).
+
+### Why package-only is NOT permitted
+
+The Wake-on-LAN unit, helper script, and startup-script hook ship ONLY on the
+full-image rsync rail. A package-only bump would roll out the new binaries
+while silently dropping the entire Wake-on-LAN feature on fielded devices —
+no unit file, no helper, nothing starting it.
+
 ## 2.0.0 — full-image
 
 Everything since `v1.0.21`: 317 commits on `develop` (319 counting the two

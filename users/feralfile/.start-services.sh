@@ -77,6 +77,11 @@ systemctl --user start system-ready.target || echo "WARN: system-ready.target fa
 # set -e that would abort here, before kiosk/watchdog/timers (F-03).
 systemctl --user start --no-block "feral-controld.service" || echo "WARN: feral-controld.service failed to start"
 
+# Arm wired adapters only after the recovery daemon has been submitted. This
+# is a timeout-bounded oneshot and is started without waiting, so a wedged NIC,
+# NetworkManager, or sudo call cannot delay the rest of FF OS startup.
+systemctl --user start --no-block "enable-wake-on-lan.service" || echo "WARN: enable-wake-on-lan.service failed to start"
+
 # Every blocking start/enable below is best-effort (|| echo WARN): this script
 # runs under set -euo pipefail, so without that ONE failed unit (e.g.
 # feral-player on a bad bundle) aborts the script here and nothing after it

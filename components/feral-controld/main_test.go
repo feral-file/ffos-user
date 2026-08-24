@@ -1217,6 +1217,16 @@ func TestInitializeApp(t *testing.T) {
 		"test-api-key",
 		nil,
 		nil,
+		// Gateway User-Agent config: absent, which is the fielded default
+		// and resolves to ENABLED — so this also asserts the wiring builds
+		// its interceptor with no config present. Constructing it performs
+		// no I/O; it dials only from AttachOnReconnect, which this test
+		// never reaches.
+		nil,
+		// Netlog config: disabled so the wiring test never touches the real
+		// ring directory (buildNetlogRecorder would otherwise attempt
+		// /home/feralfile and merely degrade to nil with a warn).
+		&config.NetlogConfig{Disabled: true},
 		provisioning.Tuning{},
 		"com.feralfile.test",
 		nil,
@@ -1225,6 +1235,13 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app)
 	assert.Equal(t, logger, app.Logger)
 	assert.NotNil(t, app.Ctx)
+
+	// The User-Agent rewrite must be wired with NO gatewayUserAgent config
+	// present: that is what every fielded device has today, and the bug it
+	// fixes (#296) leaves those artworks permanently unrenderable. A nil
+	// here would mean the fix ships switched off for exactly the fleet that
+	// needs it.
+	assert.NotNil(t, app.UARewrite, "kiosk User-Agent rewrite must default ON with absent config")
 
 	// The app context is the daemon-lifetime context handed to long-lived
 	// components (hub, claim flow); Cancel must cancel exactly it, or those
@@ -1283,6 +1300,8 @@ func TestInitializeApp_OfflineCacheEnabled(t *testing.T) {
 		"test-api-key",
 		nil,
 		&config.OfflineCacheConfig{Enabled: true, RootDir: t.TempDir()},
+		nil,
+		&config.NetlogConfig{Disabled: true},
 		provisioning.Tuning{},
 		"com.feralfile.test",
 		nil,
@@ -1456,4 +1475,91 @@ func TestApp_Run_StartupOrdering(t *testing.T) {
 	require.GreaterOrEqual(t, idxRelayer, 0, "relayer connect must have been attempted")
 	assert.Less(t, idxHub, idxRelayer, "hub must start before the relayer connect")
 	assert.Less(t, idxProv, idxRelayer, "provisioning must start before the relayer connect")
+}
+
+// An explicit "enabled": false is the documented off switch, and it must
+// actually leave the interceptor unbuilt — otherwise the daemon still opens
+// a CDP session and arms Fetch on a device whose operator disabled it.
+func TestInitializeAppGatewayUserAgentDisabled(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	disabled := false
+
+	app := initializeApp(
+		logger,
+		"http://localhost:9222",
+		"wss://test.relay.com",
+		"test-api-key",
+		nil,
+		nil,
+		&config.GatewayUserAgentConfig{Enabled: &disabled},
+		&config.NetlogConfig{Disabled: true},
+		provisioning.Tuning{},
+		"com.feralfile.test",
+		nil,
+	)
+	defer app.Cancel()
+
+	assert.Nil(t, app.UARewrite)
+}
+
+// A host list in which NO entry is usable must degrade to the default scope,
+// never abort startup: config.Load failure is fatal under Restart=always, and
+// this daemon owns every recovery surface on the device, so a typo in an
+// optional block must not crash-loop the box out of reach. Degrading to the
+// defaults rather than to "no rewrite" is the same landing point an
+// unreadable config block gets — see TestInitializeAppGatewayUserAgentKeeps-
+// UsableHosts for the partial case, which is the likelier one.
+func TestInitializeAppGatewayUserAgentInvalidHostsDegrades(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+
+	app := initializeApp(
+		logger,
+		"http://localhost:9222",
+		"wss://test.relay.com",
+		"test-api-key",
+		nil,
+		nil,
+		&config.GatewayUserAgentConfig{Hosts: []string{"https://"}},
+		&config.NetlogConfig{Disabled: true},
+		provisioning.Tuning{},
+		"com.feralfile.test",
+		nil,
+	)
+	defer app.Cancel()
+
+	assert.NotNil(t, app, "invalid host list must not abort startup")
+	// Every entry was unusable, so there is no operator scope left to
+	// honor and the rewrite lands on the built-in defaults — the same
+	// place an entirely unreadable config block lands.
+	assert.NotNil(t, app.UARewrite, "an unusable host list must degrade to the default scope, not to no rewrite")
+}
+
+// The realistic operator edit is APPENDING a newly hostile gateway, and
+// "*.newgateway.link" is the spelling validateLiteralHost's own doc calls
+// likely. That typo must not take ipfs.io and dweb.link down with it: doing
+// so re-opens #296 for artworks that were rendering fine, over a config edit
+// about an unrelated host, with the cause visible only in a daemon log on a
+// headless device.
+func TestInitializeAppGatewayUserAgentKeepsUsableHosts(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+
+	app := initializeApp(
+		logger,
+		"http://localhost:9222",
+		"wss://test.relay.com",
+		"test-api-key",
+		nil,
+		nil,
+		&config.GatewayUserAgentConfig{
+			Hosts: []string{"ipfs.io", "*.newgateway.link", "dweb.link"},
+		},
+		&config.NetlogConfig{Disabled: true},
+		provisioning.Tuning{},
+		"com.feralfile.test",
+		nil,
+	)
+	defer app.Cancel()
+
+	require.NotNil(t, app)
+	assert.NotNil(t, app.UARewrite, "one bad entry must not disable the whole rewrite")
 }

@@ -7,7 +7,10 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/metric"
 )
 
 // TestInitialProbeResultDiscardedAfterStop: the initial reachability probe can
@@ -41,13 +44,60 @@ func TestInitialProbeResultDiscardedAfterStop(t *testing.T) {
 	c.resetDone()
 	close(release)
 
-	// The stale result must be discarded: no state write, no notification.
+	// The stale result must be discarded: no state write, no notification, and
+	// no Prometheus export — the exported timeline must never carry a verdict
+	// the D-Bus consumers were not told about (stage 0 gauge rule; this runs
+	// before TestAppliedProbeResultExported, which is what makes the absence
+	// assertable).
 	select {
 	case got := <-notified:
 		t.Fatalf("stale initial probe result was notified (connected=%v)", got)
 	case <-time.After(200 * time.Millisecond):
 	}
 	assert.False(t, c.GetLastConnected(), "retired generation must not write lastConnected")
+	assert.False(t, reachabilityGaugeExported(t),
+		"retired generation must not export a reachability sample")
+}
+
+// reachabilityGaugeExported reports whether net_internet_reachable currently
+// has a series in the metric registry (absent = no probe result was ever
+// applied in this process).
+func reachabilityGaugeExported(t *testing.T) bool {
+	t.Helper()
+	families, err := metric.MetricsGatherer().Gather()
+	require.NoError(t, err)
+	for _, mf := range families {
+		if mf.GetName() == "net_internet_reachable" {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAppliedProbeResultExported: a probe result that survives the generation
+// guard and becomes watcher state must also land in the Prometheus registry —
+// that gauge is what the vmagent offline spool carries across an outage
+// (docs/wan-outage-observability.md stage 0).
+func TestAppliedProbeResultExported(t *testing.T) {
+	c := NewConnectivity(context.Background(), zap.NewNop())
+
+	notified := make(chan bool, 1)
+	c.OnConnectivityChange(func(_ context.Context, connected bool) {
+		notified <- connected
+	})
+	c.probe = func(time.Duration) (bool, error) { return true, nil }
+
+	c.Start()
+	select {
+	case got := <-notified:
+		assert.True(t, got)
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial probe result was never notified")
+	}
+	c.Stop()
+
+	assert.True(t, reachabilityGaugeExported(t), "applied probe result must be exported")
+	assert.True(t, c.GetLastConnected())
 }
 
 // TestConnectivityGenerationSwapConcurrent is the -race regression for the

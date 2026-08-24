@@ -32,6 +32,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
+	"github.com/feral-file/ffos-user/components/feral-controld/netlog"
+	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
@@ -39,10 +41,12 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/softap"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
+	"github.com/feral-file/ffos-user/components/feral-controld/uarewrite"
 	"github.com/feral-file/ffos-user/components/feral-controld/watchdog"
 	"github.com/feral-file/ffos-user/components/feral-controld/wifictl"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -104,8 +108,17 @@ type app struct {
 	// the narrower ProgressObserver interface, which has no Close method —
 	// see offlinecache.Runtime.Notifier's doc.
 	OfflineCacheNotifier *offlinecache.Notifier
-	Hub                  hub.Hub
-	LinkChecker          *status.LinkChecker
+	// UARewrite rewrites the outgoing User-Agent for the configured
+	// artwork origins (#296). Independent of the offline cache above: the
+	// bug it fixes has nothing to do with caching, so it must run on a
+	// device with offlineCache off. Nil only when explicitly disabled via
+	// gatewayUserAgent.enabled=false, or when its policy failed to build.
+	UARewrite   *uarewrite.Interceptor
+	Hub         hub.Hub
+	LinkChecker *status.LinkChecker
+	// Netlog is the WAN-outage flight recorder; nil when disabled by config,
+	// unavailable (ring open failed), or in the test app.
+	Netlog *netlog.Recorder
 
 	// StateLoadKnown records whether run()'s state.Load succeeded (false =
 	// the persisted state was unreadable and quarantined). The provisioning
@@ -179,6 +192,8 @@ func main() {
 		config.RelayerConfig.APIKey,
 		config.MintPairingConfig,
 		config.OfflineCache,
+		config.GatewayUserAgentTuning(finalLogger),
+		config.Netlog,
 		provisioningTuningFromConfig(config.ProvisioningTuning(finalLogger), finalLogger),
 		dbus.NAME,
 		[]dbus_v5.MatchOption{
@@ -304,6 +319,14 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	app.Mediator.Start()
 	defer app.Mediator.Stop()
 
+	// Start the WAN-outage flight recorder early — an outage in progress at
+	// boot is exactly the MoMA case it exists for — and independent of the
+	// hub: the ring must fill even when nothing serves metrics.
+	if app.Netlog != nil {
+		app.Netlog.Start(ctx)
+		defer app.Netlog.Stop()
+	}
+
 	// P2.5 startup ordering: the local recovery + setup surfaces (hub + mDNS, then
 	// the provisioning domain) come up BEFORE the relayer/CDP init below and never
 	// wait on them. The relayer connection is a best-effort, never-fatal step (see
@@ -322,6 +345,20 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 				app.Logger.Warn("Failed to stop hub", zap.Error(err))
 			}
 		}()
+
+		// Stage-0 network telemetry (docs/wan-outage-observability.md): the
+		// poller writes the cache-only link/Wi-Fi gauges the hub's /metrics
+		// serves and vmagent spools. Keyed on the hub because the hub is the
+		// only thing that serves them; the relayer gauges are fed event-driven
+		// by the relayer itself, poller or not. The LinkChecker guard is for
+		// the test app (initializeTestApp leaves the seam nil and injects a
+		// bare MockExec the poller's nmcli ticks would trip); production
+		// wiring always sets it.
+		if app.LinkChecker != nil {
+			netPoller := netmetrics.NewPoller(app.LinkChecker, app.Exec, app.Clock, app.Logger)
+			netPoller.Start(ctx)
+			defer netPoller.Stop()
+		}
 
 		claim := state.ClaimSnapshot()
 		deviceInfo := resolveMDNSDeviceInfo(app.OS, claim, app.Logger)
@@ -564,8 +601,38 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 				app.Logger.Warn("Failed to attach offline cache replay to kiosk CDP session", zap.Error(err))
 			}
 		}
+
+		// Re-arm the User-Agent rewrite on the same reconnect boundary and
+		// for the same reason: every kiosk restart mints a new target, so a
+		// session armed once at startup would silently stop intercepting
+		// after the first restart. Failure is logged, not fatal — the
+		// daemon's other duties must survive an unavailable kiosk.
+		if app.UARewrite != nil {
+			if err := app.UARewrite.AttachOnReconnect(ctx); err != nil {
+				app.Logger.Warn("Failed to arm kiosk User-Agent rewrite", zap.Error(err))
+			}
+		}
 	})
 	defer app.CDP.Close()
+
+	// The rewrite interceptor owns a SEPARATE websocket to the kiosk plus the
+	// read-pump goroutine draining it, neither of which app.CDP.Close above
+	// touches. Without this the connection and that goroutine outlive run()
+	// on every shutdown path, which is both a leak and a divergence from how
+	// every other long-lived component here is torn down.
+	//
+	// Deferred after the CDP close so it runs BEFORE it (defers unwind in
+	// reverse): the interceptor's session is the more derived of the two, and
+	// closing it while the daemon's own CDP client is still up keeps teardown
+	// ordered from the outside in.
+	defer func() {
+		if app.UARewrite == nil {
+			return
+		}
+		if err := app.UARewrite.Close(); err != nil {
+			app.Logger.Warn("Failed to close kiosk User-Agent rewrite session", zap.Error(err))
+		}
+	}()
 
 	devicectl.StartSleepScheduleLoop(ctx, app.Executor, app.Logger)
 
@@ -750,6 +817,8 @@ func initializeApp(
 	relayerAPIKey string,
 	mintPairingConfig *config.MintPairingConfig,
 	offlineCacheConfig *config.OfflineCacheConfig,
+	gatewayUserAgentConfig *config.GatewayUserAgentConfig,
+	netlogConfig *config.NetlogConfig,
 	provTuning provisioning.Tuning,
 	dbusName string,
 	dbusOpts []dbus_v5.MatchOption,
@@ -902,6 +971,47 @@ func initializeApp(
 		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
 	}
 
+	// Kiosk User-Agent rewrite (#296). Built independently of the offline
+	// cache above and defaulting ON: an artwork whose origin challenges
+	// browser User-Agents never renders at all, and a device whose config
+	// predates this key must still get the fix.
+	//
+	// A bad host entry is NOT fatal, and it must not take the WORKING
+	// entries down with it. config.Load failing is fatal under
+	// Restart=always and this daemon owns every recovery surface on the
+	// device, so nothing here may crash-loop the box out of reach — but
+	// "degrade" has to mean degrade, not switch off. Appending one typo'd
+	// gateway to a working list used to disable the rewrite entirely,
+	// re-opening #296 for ipfs.io and dweb.link over an edit about a
+	// different host; NewFromOperatorHosts drops only what it cannot use.
+	// The rejected entries are logged at Error individually because on a
+	// headless device this log is the only place the operator's mistake
+	// is visible at all.
+	var uaRewrite *uarewrite.Interceptor
+	if gatewayUserAgentConfig.IsEnabled() {
+		var uaHosts []string
+		var uaAgent string
+		if gatewayUserAgentConfig != nil {
+			uaHosts = gatewayUserAgentConfig.Hosts
+			uaAgent = gatewayUserAgentConfig.UserAgent
+		}
+		policy, rejected, err := uarewrite.NewFromOperatorHosts(uaHosts, uaAgent)
+		if len(rejected) > 0 {
+			logger.Error("Ignoring unusable gatewayUserAgent hosts; the rest of the list still applies",
+				zap.Strings("rejected", rejected))
+		}
+		if err != nil {
+			// Only reachable if the BUILT-IN host list is unusable, i.e. a
+			// programming error — still not worth crash-looping over.
+			logger.Error("Invalid gatewayUserAgent config; kiosk User-Agent rewrite disabled",
+				zap.Error(err))
+		} else {
+			uaRewrite = uarewrite.NewInterceptor(
+				policy, cdpEndpoint, httpClient, webSocketDialer, json, io, clock, logger,
+			)
+		}
+	}
+
 	// Command handler. The raw handler serves internal daemon lifecycle flows
 	// (e.g. OOM recovery) directly; external ingress (relayer + LAN hub) is
 	// wrapped with command-storm protection so both paths share one set of
@@ -956,6 +1066,24 @@ func initializeApp(
 	// LinkChecker is the shared link-state seam keying mDNS/hub discoverability
 	// on the presence of any LAN link rather than internet reachability.
 	linkChecker := status.NewLinkChecker(exec, logger)
+
+	// WAN-outage flight recorder (docs/wan-outage-observability.md stages
+	// 1-2). nil when disabled or unavailable; every wiring below nil-guards.
+	// Producers feed it through type-asserted observe-only seams (the
+	// mediator's applied internet verdicts, the relayer's connection
+	// lifecycle, the provisioning machine's transitions via the Config field
+	// at construction below) — the recorder never calls back into any of them.
+	netlogRecorder := buildNetlogRecorder(context, netlogConfig, linkChecker, exec, clock, dbusClient, relayerEndpoint, executor, deviceStatus, logger)
+	if netlogRecorder != nil {
+		if sink, ok := mediator.(interface{ SetInternetObserver(func(bool)) }); ok {
+			sink.SetInternetObserver(netlogRecorder.ObserveInternet)
+		}
+		if sink, ok := relayer.(interface {
+			SetConnectionObserver(func(connected bool, closeCode int))
+		}); ok {
+			sink.SetConnectionObserver(netlogRecorder.ObserveRelayer)
+		}
+	}
 
 	// Claim-state transitions (a successful connect) re-register mDNS with the
 	// updated `claimed` TXT, and feed the provisioning machine's loop-visible
@@ -1084,14 +1212,17 @@ func initializeApp(
 		func() bool { return uptimeWithin(bootLifecycleWindow, go_os.ReadFile, logger) },
 		func() bool { return uptimeWithin(startupOTAGateEntryWindow, go_os.ReadFile, logger) })
 	provMachine := provisioning.New(provisioning.Config{
-		AP:               softAP,
-		Wifi:             wifiCtl,
-		Connectivity:     &dbusConnectivity{dbus: dbusClient, logger: logger},
-		Clock:            clock,
-		Logger:           logger,
-		Notifier:         provisioningNotifier,
-		ActiveLink:       externalLinkProbe(linkChecker),
-		ActiveLinkDetail: externalLinkDetailProbe(linkChecker),
+		AP:           softAP,
+		Wifi:         wifiCtl,
+		Connectivity: &dbusConnectivity{dbus: dbusClient, logger: logger},
+		Clock:        clock,
+		Logger:       logger,
+		Notifier:     provisioningNotifier,
+		// The flight recorder sees every state/reason change, silent legs
+		// included (nil when the recorder is disabled).
+		TransitionObserver: netlogTransitionObserver(netlogRecorder),
+		ActiveLink:         externalLinkProbe(linkChecker),
+		ActiveLinkDetail:   externalLinkDetailProbe(linkChecker),
 		// Ethernet-only verdict for the escape policy's wired guard and the
 		// wired exit from a raised AP (constraint 6 — NOT ExternalLink, which
 		// counts stations).
@@ -1129,7 +1260,8 @@ func initializeApp(
 		internet: internetProbeFrom(dbusClient, logger),
 		snapshot: provMachine.Snapshot,
 	}
-	hub := hub.New(context, wsHandler, cmdHandler, statusProvider, nil, json, logger)
+	screenshotCapturer := screenshot.New(cdpEndpoint, httpClient, webSocketDialer)
+	hub := hub.New(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger)
 	// Control-plane hub contact defers the escape policy's episode raise
 	// (§4.1): a phone with the app open must not have its link yanked. The
 	// hub filters (counted routes, non-loopback) and the machine timestamps.
@@ -1174,11 +1306,13 @@ func initializeApp(
 		PlaylistScheduler:        playlistScheduler,
 		MintPairing:              mintPairing,
 		KioskReplay:              kioskReplay,
+		UARewrite:                uaRewrite,
 		OfflineCacheService:      offlineCache,
 		OfflineCacheStaticServer: offlineCacheStaticServer,
 		OfflineCacheNotifier:     offlineCacheNotifier,
 		Hub:                      hub,
 		LinkChecker:              linkChecker,
+		Netlog:                   netlogRecorder,
 		Provisioning:             provMachine,
 		StateLoadKnown:           stateLoadKnown,
 		SetupUI:                  setupNarrator,

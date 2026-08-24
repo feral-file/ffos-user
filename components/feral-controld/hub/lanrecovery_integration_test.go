@@ -135,7 +135,7 @@ func newLANRig(t *testing.T, gateCfg commandrouter.GateConfig, statusInfo Status
 	mockServer.EXPECT().Handler().Return(mux).AnyTimes()
 
 	provider := stubStatusProvider{info: statusInfo}
-	New(ctx, mockWS, gated, provider, mockServer, jsonw, logger)
+	New(ctx, mockWS, gated, provider, nil, mockServer, jsonw, logger)
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

@@ -30,10 +30,43 @@ var (
 		Name: "cpu_uptime_seconds",
 		Help: "Current CPU uptime in seconds",
 	})
+
+	// Connectivity gauges (WAN-outage observability stage 0,
+	// docs/wan-outage-observability.md). They mirror the Connectivity
+	// watcher's APPLIED verdict — the same value the connectivity_change
+	// D-Bus signal carries — so the vmagent offline spool captures an
+	// outage timeline the backend can read after reconnect. Declared as
+	// zero-label GaugeVecs deliberately: a plain Gauge exports 0 the moment
+	// the registry is scraped, and a fabricated "offline, 0s probe" sample
+	// before the first real probe would pollute the very timeline these
+	// exist to build. A vec exports nothing until first Set.
+	netInternetReachable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "net_internet_reachable",
+		Help: "1 when the last applied connectivity probe reached the internet, 0 when it did not. Absent until the first probe completes.",
+	}, []string{})
+	netInternetProbeDurationSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "net_internet_probe_duration_seconds",
+		Help: "Wall-clock duration of the last applied connectivity probe. Absent until the first probe completes.",
+	}, []string{})
 )
 
 func init() {
-	metricsRegistry.MustRegister(CPUTemperatureCelsius, CPUUptimeSeconds)
+	metricsRegistry.MustRegister(CPUTemperatureCelsius, CPUUptimeSeconds,
+		netInternetReachable, netInternetProbeDurationSeconds)
+}
+
+// SetInternetReachability records one APPLIED connectivity-probe outcome.
+// Callers must only invoke it for results that actually became the watcher's
+// state (i.e. after the generation guards in connectivity.go pass): a stale
+// probe result from a retired watcher generation must not appear in the
+// exported timeline any more than in the D-Bus one.
+func SetInternetReachability(reachable bool, probeDuration time.Duration) {
+	v := 0.0
+	if reachable {
+		v = 1.0
+	}
+	netInternetReachable.WithLabelValues().Set(v)
+	netInternetProbeDurationSeconds.WithLabelValues().Set(probeDuration.Seconds())
 }
 
 var errBestEffortMetricUnavailable = errors.New("best-effort metric unavailable")

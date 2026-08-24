@@ -68,6 +68,7 @@ func (f *fakeShedConn) WriteMessage(_ int, data []byte) error {
 }
 func (f *fakeShedConn) WriteControl(int, []byte, time.Time) error { return nil }
 func (f *fakeShedConn) SetPongHandler(func(string) error)         {}
+func (f *fakeShedConn) SetReadLimit(int64)                        {}
 func (f *fakeShedConn) SetReadDeadline(time.Time) error           { return nil }
 func (f *fakeShedConn) SetWriteDeadline(t time.Time) error {
 	f.mu.Lock()

@@ -564,3 +564,140 @@ func TestProvisioningTuningPermissiveDecode(t *testing.T) {
 		assert.Equal(t, config.ProvisioningTuning{}, c.ProvisioningTuning(zap.NewNop()))
 	})
 }
+
+func TestGatewayUserAgentTuningDecodesHostsAndUserAgent(t *testing.T) {
+	t.Parallel()
+
+	var c config.Config
+	raw := `{"gatewayUserAgent":{"userAgent":"feral-player/9.9","hosts":["ipfs.io","https://dweb.link"]}}`
+	require.NoError(t, json.Unmarshal([]byte(raw), &c))
+
+	g := c.GatewayUserAgentTuning(zaptest.NewLogger(t))
+	require.NotNil(t, g)
+	assert.Equal(t, "feral-player/9.9", g.UserAgent)
+	assert.Equal(t, []string{"ipfs.io", "https://dweb.link"}, g.Hosts)
+	assert.True(t, g.IsEnabled(), "a block without \"enabled\" stays ON")
+}
+
+// The whole reason gatewayUserAgent is held as RawMessage: a wrong-typed
+// value inside an OPTIONAL block must not fail config.Load. Load failure is
+// Fatal, and under Restart=always (the unit sets StartLimitIntervalSec=0 so
+// it never latches dead) that is an unbounded crash loop which takes the LAN
+// hub, captive portal, provisioning and claiming down with it — every remote
+// recovery surface, over a typo in a block whose purpose is to be hand-edited.
+func TestGatewayUserAgentMalformedBlockIsNotFatal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "hosts is a string, not an array", raw: `{"gatewayUserAgent":{"hosts":"ipfs.io"}}`},
+		{name: "enabled is a string, not a bool", raw: `{"gatewayUserAgent":{"enabled":"yes"}}`},
+		{name: "userAgent is a number", raw: `{"gatewayUserAgent":{"userAgent":123}}`},
+		{name: "whole block is a string", raw: `{"gatewayUserAgent":"off"}`},
+		{name: "whole block is an array", raw: `{"gatewayUserAgent":["ipfs.io"]}`},
+		{name: "hosts holds non-strings", raw: `{"gatewayUserAgent":{"hosts":[1,2,3]}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var c config.Config
+			// The top-level unmarshal is the step that used to die. It must
+			// now survive every shape above.
+			require.NoError(t, json.Unmarshal([]byte(tt.raw), &c),
+				"a malformed optional block must not fail the whole config parse")
+
+			// And the permissive decode must report "absent" rather than
+			// returning a half-populated section, so callers fall back to
+			// the built-in defaults.
+			assert.Nil(t, c.GatewayUserAgentTuning(zaptest.NewLogger(t)))
+		})
+	}
+}
+
+// The permissive fallback must not swallow the OFF switch. Defaults are ON,
+// so a block that fails to decode as a whole while carrying an explicit
+// "enabled": false is the one case where falling back to defaults would
+// override the operator instead of merely ignoring them — re-arming the
+// rewrite on a device that asked for none, with only a log line to show it.
+func TestGatewayUserAgentMalformedBlockStillHonorsExplicitDisable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		raw         string
+		wantEnabled bool
+	}{
+		{
+			name:        "sibling field is wrong-typed but enabled:false is readable",
+			raw:         `{"gatewayUserAgent":{"enabled":false,"hosts":"ipfs.io"}}`,
+			wantEnabled: false,
+		},
+		{
+			name:        "sibling field is wrong-typed and enabled:true is readable",
+			raw:         `{"gatewayUserAgent":{"enabled":true,"hosts":"ipfs.io"}}`,
+			wantEnabled: true,
+		},
+		{
+			// The switch ITSELF is unreadable, so there is no stated
+			// intent to honor — this is the case the fallback reasons
+			// about, and it must still land on the defaults.
+			name:        "enabled itself is wrong-typed",
+			raw:         `{"gatewayUserAgent":{"enabled":"no","hosts":"ipfs.io"}}`,
+			wantEnabled: true,
+		},
+		{
+			// A block that is not even an object carries no recoverable
+			// switch.
+			name:        "whole block is a string",
+			raw:         `{"gatewayUserAgent":"off"}`,
+			wantEnabled: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var c config.Config
+			require.NoError(t, json.Unmarshal([]byte(tt.raw), &c))
+
+			g := c.GatewayUserAgentTuning(zaptest.NewLogger(t))
+			assert.Equal(t, tt.wantEnabled, g.IsEnabled())
+
+			if !tt.wantEnabled {
+				// Only the switch is recovered. Honoring a scope read out
+				// of a block that did not parse would be inventing intent.
+				require.NotNil(t, g)
+				assert.Nil(t, g.Hosts, "a malformed block yields no host scope")
+				assert.Empty(t, g.UserAgent, "a malformed block yields no user agent")
+			}
+		})
+	}
+}
+
+// An absent block and a well-formed block must both keep working — the
+// permissive path must not have made the normal path lossy.
+func TestGatewayUserAgentTuningAbsentBlock(t *testing.T) {
+	t.Parallel()
+
+	var c config.Config
+	require.NoError(t, json.Unmarshal([]byte(`{}`), &c))
+
+	g := c.GatewayUserAgentTuning(zaptest.NewLogger(t))
+	assert.Nil(t, g)
+	assert.True(t, g.IsEnabled(), "an absent block leaves the rewrite ON")
+}
+
+// A nil logger must not panic: config decoding runs before the final logger
+// exists on some paths.
+func TestGatewayUserAgentTuningNilLogger(t *testing.T) {
+	t.Parallel()
+
+	var c config.Config
+	require.NoError(t, json.Unmarshal([]byte(`{"gatewayUserAgent":{"hosts":"bad"}}`), &c))
+	assert.NotPanics(t, func() { c.GatewayUserAgentTuning(nil) })
+}
