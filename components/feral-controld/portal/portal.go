@@ -65,6 +65,11 @@ const (
 	// session is one phone, occasionally two; the cap exists purely so
 	// misbehaving clients cannot pile up handler goroutines.
 	maxInflightRequests = 32
+	// manualSSIDOption is the form value for the picker's manual-entry branch.
+	// Its ASCII value is longer than an SSID's 32-byte maximum, so it cannot
+	// collide with a real scanned network. A non-empty value lets the select
+	// remain required while "Other network…" is selected, including without JS.
+	manualSSIDOption = "__feral_file_manual_network_entry_option__"
 )
 
 // JoinState is the coarse lifecycle of the current or last credential submission,
@@ -378,14 +383,24 @@ func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request) {
 			// SSID text field so the user can still type a hidden network.
 			s.logger.Warn("portal: scan failed, offering manual entry", zap.Error(err))
 		}
-		ssids = got
+		// The active hotspot is only the phone's temporary path to this
+		// portal; it can never be the station network the same radio joins.
+		// NetworkManager can nevertheless leave it in the pre-AP scan cache.
+		// Removing the exact SSID here prevents the picker from presenting
+		// the setup network as a valid destination.
+		for _, ssid := range got {
+			if ssid != s.cfg.APSSID {
+				ssids = append(ssids, ssid)
+			}
+		}
 	}
 
 	data := struct {
-		APSSID     string
-		SSIDs      []string
-		LastStatus *Status
-	}{APSSID: s.cfg.APSSID, SSIDs: ssids}
+		APSSID           string
+		SSIDs            []string
+		ManualSSIDOption string
+		LastStatus       *Status
+	}{APSSID: s.cfg.APSSID, SSIDs: ssids, ManualSSIDOption: manualSSIDOption}
 
 	if s.cfg.Status != nil {
 		st := s.cfg.Status()
@@ -411,14 +426,18 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// hidden network can never be picked, and D3 was exactly the picker
 	// crowding manual entry out whenever the scan was non-empty). A non-blank
 	// manual entry wins over the picker: the user typed it deliberately, while
-	// the select always submits SOME value. Blank-ness is judged on the
-	// trimmed value, but the RAW value is what gets passed through — the
-	// manual-branch trim is the machine's call, keyed on the Manual flag.
+	// a picked network normally submits its scanned value. The initial prompt
+	// submits an empty picker value, while "Other network…" submits the
+	// impossible-SSID sentinel and reveals the manual field in script-capable
+	// portal sheets. Blank-ness is judged on the trimmed value, but the RAW value
+	// is what gets passed through — the manual-branch trim is the machine's call,
+	// keyed on the Manual flag.
 	req := JoinRequest{
 		SSID:     r.PostFormValue("ssid"),
 		Password: r.PostFormValue("password"),
 	}
-	if manual := r.PostFormValue("ssid_manual"); strings.TrimSpace(manual) != "" || req.SSID == "" {
+	if manual := r.PostFormValue("ssid_manual"); strings.TrimSpace(manual) != "" ||
+		req.SSID == manualSSIDOption || req.SSID == "" {
 		req.SSID = manual
 		req.Manual = true
 		// The hidden checkbox is scoped to manual entry: a picked network was
