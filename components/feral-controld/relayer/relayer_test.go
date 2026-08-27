@@ -1954,25 +1954,19 @@ func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
 	ts.mockDialer.EXPECT().
 		DialContext(ts.ctx, gomock.Any(), nil).
 		Return(nil, nil, permanentErr).
-		Times(1)
+		AnyTimes()
 
-	// Expect os.Exit(1) to be called when reconnection fails with PermanentError
-	exitCalled := make(chan struct{})
-	flushCalled := make(chan struct{})
-	flushHook, ok := ts.client.(interface{ SetBeforeExit(func()) })
-	require.True(t, ok)
-	flushHook.SetBeforeExit(func() { close(flushCalled) })
-	ts.mockOS.EXPECT().
-		Exit(1).
-		DoAndReturn(func(code int) {
-			select {
-			case <-flushCalled:
-			default:
-				t.Error("expected stream flush before os.Exit")
-			}
-			close(exitCalled)
+	// Expect background retry loop sleep when reconnection fails instead of os.Exit(1)
+	sleepCalled := make(chan struct{})
+	var sleepOnce sync.Once
+	ts.mockClock.EXPECT().
+		Sleep(gomock.Any()).
+		DoAndReturn(func(d time.Duration) {
+			sleepOnce.Do(func() {
+				close(sleepCalled)
+			})
 		}).
-		Times(1)
+		AnyTimes()
 
 	// Test - Connect (this automatically starts background message reading)
 	err := ts.client.Connect(ts.ctx)
@@ -1986,11 +1980,95 @@ func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
 		t.Fatal("Expected ReadMessage error to occur within timeout")
 	}
 
-	// Wait for os.Exit(1) to be called
+	// Wait for background sleep to be called (proving daemon does NOT exit)
 	select {
-	case <-exitCalled:
-		// Exit was called as expected
+	case <-sleepCalled:
+		// Background retry sleep occurred as expected without process exit
 	case <-time.After(5 * time.Second):
-		t.Fatal("Expected os.Exit(1) to be called within timeout")
+		t.Fatal("Expected background retry sleep to occur within timeout")
 	}
 }
+
+// TestClient_BackgroundRetryLoop_PreservesRestoredConnection verifies Finding [F1]:
+// If a connection is restored (e.g. by mediator/reconciler calling RetryableConnect)
+// while the background retry loop is sleeping, the waking loop must NOT close the
+// newly restored connection.
+func TestClient_BackgroundRetryLoop_PreservesRestoredConnection(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	setupMockTicker(ts)
+	ts.mockClock.EXPECT().Now().Return(time.Time{}).AnyTimes()
+
+	// Second mock connection that simulates a connection restored by mediator
+	restoredConn := mocks.NewMockWebSocketConn(ts.ctrl)
+	restoredConn.EXPECT().SetReadLimit(int64(relayer.MAX_MESSAGE_BYTES)).AnyTimes()
+	restoredConn.EXPECT().SetPongHandler(gomock.Any()).AnyTimes()
+	restoredConn.EXPECT().WriteJSON(gomock.Any()).Return(nil).AnyTimes()
+	restoredConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil).AnyTimes()
+	restoredConn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil).AnyTimes()
+	restoredConn.EXPECT().ReadMessage().Return(0, []byte{}, nil).AnyTimes()
+	restoredConn.EXPECT().WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	// Expect initial connection success, then initial reconnect attempt failure
+	permanentErr := relayer.PermanentError{Err: errors.New("initial reconnect failed")}
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), nil).
+		Return(ts.mockConn, &http.Response{StatusCode: http.StatusOK}, nil).
+		Times(1)
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), nil).
+		Return(nil, nil, permanentErr).
+		Times(1)
+
+	ts.mockConn.EXPECT().SetPongHandler(gomock.Any()).Times(1)
+	ts.mockConn.EXPECT().WriteJSON(gomock.Any()).Return(nil).AnyTimes()
+	ts.mockConn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil).AnyTimes()
+	ts.mockConn.EXPECT().WriteControl(websocket.CloseMessage, gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	ts.mockConn.EXPECT().Close().Return(nil).Times(1)
+
+	readErrHappened := make(chan struct{})
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		DoAndReturn(func() (int, []byte, error) {
+			close(readErrHappened)
+			return 0, nil, errors.New("read error")
+		}).
+		Times(1)
+
+	// Intercept Sleep to simulate mediator restoring connection while retry loop sleeps
+	sleepStarted := make(chan struct{})
+	sleepCompleted := make(chan struct{})
+	ts.mockClock.EXPECT().
+		Sleep(gomock.Any()).
+		DoAndReturn(func(d time.Duration) {
+			close(sleepStarted)
+			<-sleepCompleted
+		}).
+		Times(1)
+
+	require.NoError(t, ts.client.Connect(ts.ctx))
+
+	<-readErrHappened
+	<-sleepStarted
+
+	// Simulate mediator restoring connection while retry loop is asleep
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), nil).
+		Return(restoredConn, &http.Response{StatusCode: http.StatusOK}, nil).
+		Times(1)
+	restoredConn.EXPECT().Close().Return(nil).Times(1)
+
+	require.NoError(t, ts.client.RetryableConnect(ts.ctx))
+	assert.True(t, ts.client.IsConnected(), "connection should be active from mediator restore")
+
+	// Release sleep loop
+	close(sleepCompleted)
+
+	// Wait briefly to ensure background loop wakes up and detects connection without calling Close() on restoredConn
+	time.Sleep(100 * time.Millisecond)
+
+	assert.True(t, ts.client.IsConnected(), "connection must remain active after retry loop wakes up")
+	ts.client.Close()
+}
+
