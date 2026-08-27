@@ -809,6 +809,31 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 				}
 				return m.relayer.Send(ctx, resp)
 			}
+			if commandrouter.IsSourceUnreachable(err) {
+				// A dead-source cast rejection is the CALLER's problem to act
+				// on, and remote casts are exactly the audience #304 exists
+				// for (a publisher pushing to someone else's wall must learn
+				// the link is dead) — so it gets a legible RPC error reply,
+				// mirroring the rate_limited shape above, rather than the
+				// reply-less logger.Error fallthrough below, which the
+				// caller can only experience as its own RPC timeout. Warn,
+				// not Error: this is client input being rejected, not a
+				// daemon fault, and must not page through Sentry.
+				m.logger.Warn("Cast rejected: no playlist item source is loadable",
+					zap.String("command", commandType.String()),
+					zap.Error(err),
+				)
+				resp := relayer.Response{
+					Type:      "RPC",
+					MessageID: payload.MessageID,
+					Message: map[string]any{
+						"error":   "sourceUnreachable",
+						"command": commandType.String(),
+						"message": err.Error(),
+					},
+				}
+				return m.relayer.Send(ctx, resp)
+			}
 			m.logger.Error("Failed to process command", zap.Error(err))
 			return err
 		}

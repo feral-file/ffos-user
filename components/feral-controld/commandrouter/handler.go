@@ -43,6 +43,15 @@ type handler struct {
 	scheduler   playlistschedule.Scheduler
 	logger      *zap.Logger
 
+	// sourceProber, when set (SetSourceProber), is the cast-time source
+	// preflight (#304). Independent of offlineCache above on purpose: the
+	// probe must run whether or not offline caching is enabled — it only
+	// LIVES in that package because that is where dialing untrusted
+	// playlist URLs is made safe. nil (tests, a build wired before the
+	// seam) skips the preflight entirely, degrading to the old
+	// accept-anything behavior — fail-open, documented at the call site.
+	sourceProber offlinecache.SourceProber
+
 	// sessionGeneration, when set (SetSessionGeneration), is
 	// playersession.Session.Generation narrowed to a func() uint64 seam
 	// (design doc §4). nil reads as generation 0 always, which never
@@ -119,6 +128,26 @@ func SetSessionGeneration(h Handler, fn func() uint64, logger *zap.Logger) {
 
 func (h *handler) setSessionGeneration(fn func() uint64) {
 	h.sessionGeneration = fn
+}
+
+// SetSourceProber injects the cast-time source preflight onto h, if h
+// supports it (the concrete *handler built by New — NOT the
+// storm-protection gate wrapper, so callers must wire it against the raw
+// handler before NewGate wraps it, mirroring SetSessionGeneration's
+// contract).
+func SetSourceProber(h Handler, prober offlinecache.SourceProber, logger *zap.Logger) {
+	setter, ok := h.(interface {
+		setSourceProber(offlinecache.SourceProber)
+	})
+	if !ok {
+		logger.Warn("Command handler does not support source preflight wiring")
+		return
+	}
+	setter.setSourceProber(prober)
+}
+
+func (h *handler) setSourceProber(prober offlinecache.SourceProber) {
+	h.sourceProber = prober
 }
 
 func (h *handler) currentGeneration() uint64 {
@@ -375,6 +404,54 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 			default:
 				return nil, fmt.Errorf("unknown payload type")
+			}
+
+			// Cast-time source preflight (#304). Without it, a cast whose
+			// every source 400s is forwarded, self-reported ok by the
+			// player (an iframe cannot see HTTP status), and shown as
+			// "playing" — so neither the casting end nor the device ever
+			// learns the links are dead. The probe rejects the cast ONLY
+			// when every item earned a definitive dead verdict (an actual
+			// HTTP >= 400 answer — or a malformed data: URI, the one
+			// non-HTTP verdict that is equally definitive because it is a
+			// parse, not a network guess): network errors, timeouts, guard
+			// refusals, and well-formed data: items all count in the cast's favor, so
+			// an offline device casting a fully-cached playlist (the
+			// cached-copy fallback above) still plays. A partially-dead
+			// playlist also still plays — rejecting it would punish nine
+			// good artworks for one dead link — with the dead items logged.
+			//
+			// Placed deliberately with the slow network-bound work: after
+			// DP-1 resolution (so dynamic items are probed as resolved) and
+			// BEFORE LockPlayback below, for the same reason resolution is
+			// (see that comment). err must be assigned, not just returned,
+			// so the deferred playback-failure accounting above records the
+			// rejection.
+			if h.sourceProber != nil && playlist != nil && len(playlist.Items) > 0 {
+				sources := make([]string, 0, len(playlist.Items))
+				for _, item := range playlist.Items {
+					sources = append(sources, item.Source)
+				}
+				probeResults := h.sourceProber.ProbeSources(ctx, sources)
+				dead := 0
+				for _, r := range probeResults {
+					switch r.Verdict {
+					case offlinecache.ProbeDead:
+						dead++
+						h.logger.Warn("displayPlaylist: item source is unreachable",
+							zap.String("source", r.Source),
+							zap.Int("status", r.Status),
+							zap.Error(r.Err))
+					case offlinecache.ProbeInconclusive:
+						h.logger.Debug("displayPlaylist: item source probe inconclusive",
+							zap.String("source", r.Source),
+							zap.Error(r.Err))
+					}
+				}
+				if dead == len(probeResults) {
+					err = &SourceUnreachableError{Results: probeResults}
+					return nil, err
+				}
 			}
 
 			// Player CanvasService rejects displayPlaylist without a known

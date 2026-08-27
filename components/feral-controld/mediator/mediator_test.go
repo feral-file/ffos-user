@@ -22,6 +22,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -1387,5 +1388,69 @@ func TestMediator_HandleRelayerMessage_RateLimited(t *testing.T) {
 	if assert.True(t, ok, "rate-limited response carries a structured body") {
 		assert.Equal(t, "rate_limited", msg["error"])
 		assert.Equal(t, cmd, msg["command"])
+	}
+}
+
+// TestMediator_HandleRelayerMessage_SourceUnreachable verifies the relayer
+// ingress path reports a dead-source cast rejection legibly: remote casters
+// (a publisher pushing a playlist to someone else's wall) are exactly the
+// audience the #304 preflight exists for, so the rejection must come back
+// as a structured "sourceUnreachable" RPC response carrying the per-item
+// detail — not fall through to the reply-less error path, which the caller
+// can only experience as its own RPC timeout.
+func TestMediator_HandleRelayerMessage_SourceUnreachable(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := string(commands.CMD_DISPLAY_PLAYLIST)
+	args := map[string]interface{}{"playlistUrl": "https://example/playlist.json"}
+	payload := relayer.Payload{
+		MessageID: "msg-source-unreachable",
+		Message: relayer.Message{
+			Command: &cmd,
+			Request: args,
+		},
+	}
+
+	ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte("{}"), nil).AnyTimes()
+
+	ts.mockCommandHandler.EXPECT().
+		Process(gomock.Any(), commands.Command{Type: commands.Type(cmd), Arguments: args}).
+		Return(nil, &commandrouter.SourceUnreachableError{
+			Results: []offlinecache.SourceProbeResult{
+				{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
+			},
+		}).
+		Times(1)
+
+	var sent relayer.Response
+	ts.mockRelayer.EXPECT().
+		Send(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, data interface{}) error {
+			sent = data.(relayer.Response)
+			return nil
+		}).
+		Times(1)
+
+	var capturedHandler relayer.Handler
+	ts.mockDbus.EXPECT().OnBusSignal(gomock.Any()).Times(1)
+	ts.mockRelayer.EXPECT().
+		OnRelayerMessage(gomock.Any()).
+		DoAndReturn(func(handler relayer.Handler) { capturedHandler = handler }).
+		Times(1)
+
+	ts.mediator.Start()
+	err := capturedHandler(ts.ctx, payload)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "RPC", sent.Type)
+	assert.Equal(t, "msg-source-unreachable", sent.MessageID)
+	msg, ok := sent.Message.(map[string]any)
+	if assert.True(t, ok, "source-unreachable response carries a structured body") {
+		assert.Equal(t, "sourceUnreachable", msg["error"])
+		assert.Equal(t, cmd, msg["command"])
+		message, _ := msg["message"].(string)
+		assert.Contains(t, message, "HTTP 400")
+		assert.Contains(t, message, "https://origin.example/dead")
 	}
 }

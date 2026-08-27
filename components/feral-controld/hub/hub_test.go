@@ -22,6 +22,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -698,6 +699,57 @@ func TestHandleCast_ProcessError(t *testing.T) {
 
 	// Verify the response - should return 500 Internal Server Error
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+// TestHandleCast_SourceUnreachableRejected422 pins the one behavior LAN
+// callers observe from the #304 cast-time source preflight: an all-dead
+// playlist maps to 422 with the per-item detail in the body, not the
+// generic 500 above — that detail is what tells the caster WHICH links
+// are dead.
+func TestHandleCast_SourceUnreachableRejected422(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	payload := commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": "https://example.com/playlist.json"},
+	}
+
+	ts.mockJSONDec.EXPECT().
+		Decode(gomock.Any()).
+		DoAndReturn(func(p *commands.Command) error {
+			*p = payload
+			return nil
+		}).
+		Times(1)
+
+	ts.mockCmd.EXPECT().
+		Process(ts.ctx, gomock.Any()).
+		Return(nil, &commandrouter.SourceUnreachableError{
+			Results: []offlinecache.SourceProbeResult{
+				{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
+			},
+		}).
+		Times(1)
+
+	ts.mockJSON.EXPECT().
+		NewDecoder(gomock.Any()).
+		Return(ts.mockJSONDec).
+		Times(1)
+
+	jsonPayload := `{"messageID":"test-123","message":{"command":"displayPlaylist","request":{"playlistUrl":"https://example.com/playlist.json"}}}`
+	req, err := http.NewRequest("POST", "/api/cast", strings.NewReader(jsonPayload))
+	assert.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	hubImpl := ts.hub.(*hub)
+	hubImpl.handleCast(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	assert.Contains(t, w.Body.String(), "sourceUnreachable")
+	assert.Contains(t, w.Body.String(), "HTTP 400")
+	assert.Contains(t, w.Body.String(), "https://origin.example/dead")
 }
 
 func TestHandleCast_ProcessNilResult(t *testing.T) {

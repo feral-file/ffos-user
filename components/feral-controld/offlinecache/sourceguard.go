@@ -20,10 +20,11 @@ import (
 // Threat model. A playlist body reaches this service from the LAN hub —
 // which binds 0.0.0.0:1111 and is unauthenticated (see the component
 // AGENTS.md) — and from the relayer. Every source URL inside it is
-// therefore untrusted input, and three separate paths in this package
+// therefore untrusted input, and four separate paths in this package
 // dial it:
 //
 //   - classify.go's HEAD / ranged-GET probe,
+//   - probe.go's cast-time liveness preflight (#304),
 //   - mediacapture.go's direct body download,
 //   - capture.go's Page.navigate in the headless browser.
 //

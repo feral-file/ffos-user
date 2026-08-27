@@ -1,0 +1,191 @@
+package commandrouter_test
+
+// Cast-time source preflight (feral-file/ffos-user#304): the displayPlaylist
+// path rejects a cast only when EVERY resolved item source earned a
+// definitive dead verdict, and fails open on everything else. The probe
+// mechanics themselves (HEAD/GET fallback, guard, timeouts) are covered in
+// offlinecache's probe tests; these cover the handler's decision rule and
+// its wiring.
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+)
+
+// fakeSourceProber is a directly-controllable offlinecache.SourceProber
+// double: results is returned verbatim, probed records what was asked.
+type fakeSourceProber struct {
+	results []offlinecache.SourceProbeResult
+	probed  [][]string
+}
+
+func (f *fakeSourceProber) ProbeSources(_ context.Context, sources []string) []offlinecache.SourceProbeResult {
+	f.probed = append(f.probed, sources)
+	return f.results
+}
+
+func probeTestPlaylist(sources ...string) *dp1.Playlist {
+	items := make([]dp1playlist.PlaylistItem, 0, len(sources))
+	for i, s := range sources {
+		items = append(items, dp1playlist.PlaylistItem{ID: string(rune('a' + i)), Source: s})
+	}
+	return &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: items}}
+}
+
+func displayPlaylistURLCommand(url string) commands.Command {
+	return commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": url},
+	}
+}
+
+func TestCommandHandler_Process_DisplayPlaylist_AllSourcesDead_RejectsCast(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	ts.mockDP1.EXPECT().
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
+		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		Times(1)
+	// No CDP Send and no ForceRefresh expectations: the rejection must
+	// happen before anything reaches the player.
+
+	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
+		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
+	}}
+	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	require.Error(t, err)
+	assert.True(t, commandrouter.IsSourceUnreachable(err))
+	assert.Contains(t, err.Error(), "sourceUnreachable")
+	assert.Contains(t, err.Error(), "HTTP 400")
+	assert.Nil(t, result)
+	require.Len(t, prober.probed, 1)
+	assert.Equal(t, []string{"https://origin.example/dead"}, prober.probed[0])
+}
+
+func TestCommandHandler_Process_DisplayPlaylist_PartiallyDead_StillCasts(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	expectDisplayPlaylistSuccess(ts, playlistURL,
+		probeTestPlaylist("https://origin.example/dead", "https://origin.example/alive"))
+
+	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
+		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
+		{Source: "https://origin.example/alive", Verdict: offlinecache.ProbeAlive, Status: 200},
+	}}
+	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_AllInconclusive_FailsOpen pins
+// the offline-device contract: when no probe got a definitive answer (the
+// shape an offline device produces for every item), the cast proceeds —
+// otherwise the cached-copy fallback would be unreachable exactly when it
+// is needed.
+func TestCommandHandler_Process_DisplayPlaylist_AllInconclusive_FailsOpen(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	expectDisplayPlaylistSuccess(ts, playlistURL,
+		probeTestPlaylist("https://origin.example/one", "https://origin.example/two"))
+
+	probeErr := errors.New("dial tcp: network is unreachable")
+	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
+		{Source: "https://origin.example/one", Verdict: offlinecache.ProbeInconclusive, Err: probeErr},
+		{Source: "https://origin.example/two", Verdict: offlinecache.ProbeInconclusive, Err: probeErr},
+	}}
+	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_NoProber_SkipsPreflight pins the
+// nil seam: a handler with no prober wired behaves exactly as before the
+// preflight existed. (Every other displayPlaylist test in this package also
+// exercises this implicitly; this one makes the contract explicit.)
+func TestCommandHandler_Process_DisplayPlaylist_NoProber_SkipsPreflight(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	expectDisplayPlaylistSuccess(ts, playlistURL,
+		probeTestPlaylist("https://origin.example/dead"))
+
+	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+func TestCommandHandler_Process_DisplayPlaylist_InlineDP1Call_AllDead_RejectsCast(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// The inline dp1_call variant round-trips the payload through the JSON
+	// wrapper; stub the round-trip the same way the existing inline test
+	// does (Marshal returns opaque bytes, Unmarshal plants the typed
+	// playlist).
+	playlistMap := map[string]interface{}{
+		"items": []interface{}{
+			map[string]interface{}{"id": "a", "source": "https://origin.example/dead"},
+		},
+	}
+	playlistBytes := []byte(`{"items":[{"id":"a"}]}`)
+	mockPlaylist := probeTestPlaylist("https://origin.example/dead")
+
+	ts.mockJSON.EXPECT().
+		Marshal(playlistMap).
+		Return(playlistBytes, nil).
+		Times(1)
+	ts.mockJSON.EXPECT().
+		Unmarshal(playlistBytes, gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			playlist := v.(**dp1.Playlist)
+			*playlist = mockPlaylist
+			return nil
+		}).
+		Times(1)
+	// No CDP Send / ForceRefresh expectations: the rejection precedes both.
+
+	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
+		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
+	}}
+	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+
+	command := commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"dp1_call": playlistMap},
+	}
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	require.Error(t, err)
+	assert.True(t, commandrouter.IsSourceUnreachable(err))
+	assert.Nil(t, result)
+}
