@@ -546,6 +546,17 @@ type Service interface {
 	// was but has since been cleared — see Store.LoadPlaylistIDForURL's
 	// doc for why a stale index entry still fails closed correctly here.
 	CachedPlaylistForURL(sourceURL string) (json.RawMessage, error)
+	// HasReplayableItem reports whether at least one of sources has a
+	// prior successful capture on disk — StateReady or StatePartial (a
+	// partial capture may still render; StateBrokenOnline is excluded
+	// because it means the artwork fails even online). It exists for the
+	// displayPlaylist source preflight's all-dead decision (#304 review
+	// F4): a definitively dead ORIGIN is not a dead CAST when replay can
+	// serve the item from cache — origin rot is exactly the case the
+	// offline cache exists for — so the preflight asks this before
+	// rejecting. Cheap by construction: one record read per source, no
+	// blob stats, first hit returns early. Empty sources reports false.
+	HasReplayableItem(sources ...string) bool
 	// IndexPlaylistForOfflineDisplay persists playlistRaw and, when
 	// sourceURL is non-empty, indexes it by that URL for
 	// CachedPlaylistForURL — exactly what DownloadPlaylist already does
@@ -2800,6 +2811,54 @@ func (s *service) CachedPlaylistForURL(sourceURL string) (json.RawMessage, error
 		return nil, err
 	}
 	return s.store.LoadPlaylist(playlistID)
+}
+
+// maxRescueLookups bounds how many UNIQUE sources HasReplayableItem will
+// read records for before failing open. The input is the unauthenticated
+// caster's own item list, and each lookup is a serial filesystem read
+// with no deadline of its own — a 4 MiB body packed with distinct tiny
+// URLs could otherwise demand ~10^5 reads on the rejection path, holding
+// a heavy command slot long past the probe's own ceiling. Past the
+// bound the answer is TRUE (fail open): uncertainty favors the cast
+// everywhere else in this design, and "rescued" just means the cast
+// proceeds — the pre-#304 behavior — while a false rejection would kill
+// a possibly-playable cast.
+const maxRescueLookups = 512
+
+// HasReplayableItem implements the Service interface method — see its
+// interface doc for the contract and the preflight rationale. It rides
+// itemStatus (the same in-memory-vs-on-disk derivation Status uses) with
+// withBytes=false, so a hit costs one record read and a miss costs at
+// most one per UNIQUE source: duplicates are deduped by SourceKey
+// (mirroring the probe's own dedup — same amplification concern) and
+// data: sources are skipped outright, since an inline item is never
+// cached at all (Classify returns ClassInline and nothing is enqueued —
+// see ClassInline's doc), so looking one up can only ever miss.
+func (s *service) HasReplayableItem(sources ...string) bool {
+	seen := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		if source == "" || isInlineSource(source) {
+			continue
+		}
+		key := SourceKey(source)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		if len(seen) == maxRescueLookups {
+			// Bound exhausted with no verdict: fail open, per the
+			// constant's doc.
+			return true
+		}
+		seen[key] = struct{}{}
+		item, ok := s.itemStatus(key, source, false)
+		if !ok {
+			continue
+		}
+		if item.State == StateReady || item.State == StatePartial {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *service) Status(req StatusRequest) (StatusSnapshot, error) {

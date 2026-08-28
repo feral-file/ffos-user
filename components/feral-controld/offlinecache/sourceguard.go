@@ -20,10 +20,11 @@ import (
 // Threat model. A playlist body reaches this service from the LAN hub —
 // which binds 0.0.0.0:1111 and is unauthenticated (see the component
 // AGENTS.md) — and from the relayer. Every source URL inside it is
-// therefore untrusted input, and three separate paths in this package
+// therefore untrusted input, and four separate paths in this package
 // dial it:
 //
 //   - classify.go's HEAD / ranged-GET probe,
+//   - probe.go's cast-time liveness preflight (#304),
 //   - mediacapture.go's direct body download,
 //   - capture.go's Page.navigate in the headless browser.
 //
@@ -333,6 +334,16 @@ func (g sourceGuard) checkRedirect(req *go_http.Request, via []*go_http.Request)
 	if len(via) >= maxSourceRedirects {
 		return fmt.Errorf("%w: stopped after %d redirects", ErrUnsafeSource, len(via))
 	}
+	// Go's redirect handling sets a Referer carrying the PREVIOUS hop's
+	// full URL, query string included (refererForURL strips only
+	// userinfo). A signed CDN source (?X-Amz-Signature=...) that 302s
+	// cross-origin would hand its credential-bearing URL to the next
+	// origin and its logs — something a browser's default
+	// strict-origin-when-cross-origin policy would never do, and these
+	// hops are between origins a hostile playlist chose. No fetch on
+	// this transport needs a Referer, so it is dropped on every hop
+	// rather than policy-matched.
+	req.Header.Del("Referer")
 	switch strings.ToLower(req.URL.Scheme) {
 	case "http", "https":
 		return nil
@@ -396,6 +407,17 @@ func (g sourceGuard) transport() *go_http.Transport {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		// Every fetch on this transport dials an untrusted, possibly
+		// hostile origin, and Go's default response-header ceiling is
+		// 10 MiB PER RESPONSE — so a probe wave fanning out
+		// concurrently (probeConcurrency-wide on the cast preflight)
+		// against a server that streams enormous header blocks and then
+		// stalls could hold hundreds of MiB resident on a constrained
+		// device before timeouts fire. 1 MiB is orders of magnitude
+		// above any legitimate header block (real-world limits sit at
+		// 8-64 KiB) while capping the wave at the size of one playlist
+		// body.
+		MaxResponseHeaderBytes: 1 << 20,
 	}
 }
 

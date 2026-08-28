@@ -238,6 +238,17 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Too many commands, slow down", http.StatusTooManyRequests)
 			return
 		}
+		// A dead-source rejection is the CALLER's problem to act on (the
+		// playlist it sent points nowhere loadable), so it gets a 4xx and
+		// the full per-item detail — err.Error() carries per-item HTTP
+		// statuses with sources already log-truncated at probe time — not
+		// the generic 500 below, which would tell the caster nothing
+		// (#304, the dead-link-cast bug this exists to surface).
+		if commandrouter.IsSourceUnreachable(err) {
+			h.logger.Warn("Cast rejected: no playlist item source is loadable", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
 		h.logger.Error("Failed to process cast request", zap.Error(err))
 		http.Error(w, "Failed to process cast request", http.StatusInternalServerError)
 		return
