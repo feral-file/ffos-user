@@ -30,7 +30,10 @@ func newTestProber() SourceProber {
 	// literal-IP and skip DNS); a static public answer keeps those from
 	// touching real DNS.
 	guard := sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}, isReserved: loopbackIsPublic}
-	return newSourceProberWith(guard, newGuardedHTTPClientFor(guard, 2*time.Second))
+	// Same no-redirect client shape as production (NewSourceProber): the
+	// request-count bound under test is only real if redirects are never
+	// followed here either.
+	return newSourceProberWith(guard, newGuardedNoRedirectHTTPClientFor(guard, 2*time.Second))
 }
 
 func probeOneSource(t *testing.T, prober SourceProber, source string) SourceProbeResult {
@@ -313,4 +316,68 @@ func TestSourceProber_LongValidDataURIMetadataFailsOpen(t *testing.T) {
 	proven := probeOneSource(t, prober, shortMalformed)
 	assert.Equal(t, ProbeDead, proven.Verdict,
 		"a short URI with no comma anywhere is proven malformed")
+}
+
+// TestSourceProber_RedirectsAreAnswersNotFollowed pins the #310 F1 fix:
+// the probe never follows a redirect — the 3xx IS the answer (alive,
+// fail-open; the kiosk follows it itself) — so one probed source is at
+// most ONE outbound request no matter how the origin answers, and a
+// redirect chain cannot multiply the per-cast budget.
+func TestSourceProber_RedirectsAreAnswersNotFollowed(t *testing.T) {
+	var destRequests atomic.Int32
+	dest := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
+		destRequests.Add(1)
+		w.WriteHeader(go_http.StatusOK)
+	}))
+	defer dest.Close()
+
+	var originRequests atomic.Int32
+	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		originRequests.Add(1)
+		w.Header().Set("Location", dest.URL)
+		w.WriteHeader(go_http.StatusFound)
+	}))
+	defer origin.Close()
+
+	result := probeOneSource(t, newTestProber(), origin.URL)
+
+	assert.Equal(t, ProbeAlive, result.Verdict, "a 3xx answer is alive, fail-open")
+	assert.Equal(t, go_http.StatusFound, result.Status)
+	assert.Equal(t, int32(1), originRequests.Load(), "exactly one request to the origin")
+	assert.Zero(t, destRequests.Load(), "the redirect target is never contacted")
+}
+
+// TestSourceProber_RedirectChainCannotExceedBudget pins the request-count
+// arithmetic end to end: a full budget of sources, every one answering
+// with a redirect (the amplification shape from the #310 review), still
+// produces exactly maxProbeAttempts outbound requests — not
+// maxProbeAttempts x maxSourceRedirects.
+func TestSourceProber_RedirectChainCannotExceedBudget(t *testing.T) {
+	var requests atomic.Int32
+	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		requests.Add(1)
+		// Self-redirect: with following enabled this would burn the whole
+		// redirect allowance per source.
+		w.Header().Set("Location", r.URL.Path)
+		w.WriteHeader(go_http.StatusMovedPermanently)
+	}))
+	defer origin.Close()
+
+	over := 10
+	sources := make([]string, maxProbeAttempts+over)
+	for i := range sources {
+		sources[i] = fmt.Sprintf("%s/loop?n=%d", origin.URL, i)
+	}
+	results := newTestProber().ProbeSources(context.Background(), sources)
+
+	assert.Equal(t, int32(maxProbeAttempts), requests.Load(),
+		"total outbound requests are bounded by the probe budget, redirects included")
+	require.Len(t, results, len(sources))
+	for i, r := range results {
+		if i < maxProbeAttempts {
+			assert.Equal(t, ProbeAlive, r.Verdict, "item %d: a redirect answer is alive", i)
+		} else {
+			assert.Equal(t, ProbeInconclusive, r.Verdict, "item %d: over budget", i)
+		}
+	}
 }
