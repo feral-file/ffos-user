@@ -310,6 +310,19 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// immediate error reply, in the worst case past the hub's write
 		// deadline.
 		var replayScopeTouched bool
+		// rescuedByCache marks an all-dead cast that proceeded ONLY because
+		// the offline cache holds a prior capture. Such a cast has exactly
+		// one way to actually show artwork — replay serving from cache — so
+		// unlike an ordinary live cast (where replay is a best-effort
+		// enhancement and a scope-sync failure is just logged), a rescued
+		// cast REQUIRES the replay scope to arm: if syncReplayScope fails
+		// below, the cast is rejected with the preflight's own error rather
+		// than forwarded to render every origin already proven dead (#308
+		// review). rescueProbeResults carries the probe evidence for that
+		// late rejection; scopeSyncErr is the closure's outcome seam.
+		var rescuedByCache bool
+		var rescueProbeResults []offlinecache.SourceProbeResult
+		var scopeSyncErr error
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			status.RecordPlaybackAttempt()
 			defer func() {
@@ -507,7 +520,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						// and rejecting would lose the deferred cast.
 						h.logger.Warn("displayPlaylist: every item source is unreachable but the playlist is displayAt-scheduled; deferring to the scheduler",
 							zap.Int("items", len(sources)))
-					case h.offlineCache != nil && h.offlineCache.HasReplayableItem(sources...):
+					case h.offlineCache != nil && h.kioskReplay != nil && h.offlineCache.HasReplayableItem(sources...):
 						// A definitively dead ORIGIN is not a dead CAST
 						// when the offline cache holds a prior capture:
 						// replay serves cached items regardless of origin
@@ -515,7 +528,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						// cache exists for (#305 review F4). Checked only
 						// on the all-dead path — one record read per
 						// source, worst case — so the common accept path
-						// pays nothing.
+						// pays nothing. The rescue is conditional on
+						// replay actually being able to serve: kioskReplay
+						// must be wired here, and the scope sync below
+						// must succeed (see rescuedByCache's doc) — a
+						// record on disk that replay cannot arm rescues
+						// nothing.
+						rescuedByCache = true
+						rescueProbeResults = probeResults
 						h.logger.Warn("displayPlaylist: every item source is unreachable but cached captures exist; casting for offline replay",
 							zap.Int("items", len(sources)))
 					default:
@@ -575,8 +595,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			for _, item := range p.Items {
 				sources = append(sources, item.Source)
 			}
-			if syncErr := h.kioskReplay.SyncPlaylist(ctx, sources); syncErr != nil {
-				h.logger.Warn("offline cache: failed to sync kiosk replay scope for playlist", zap.Error(syncErr))
+			// scopeSyncErr surfaces the outcome for the ONE caller that
+			// must treat a failure as fatal — the cache-rescued all-dead
+			// cast (see rescuedByCache's doc). Ordinary live casts keep
+			// the best-effort contract: log and proceed.
+			scopeSyncErr = h.kioskReplay.SyncPlaylist(ctx, sources)
+			if scopeSyncErr != nil {
+				h.logger.Warn("offline cache: failed to sync kiosk replay scope for playlist", zap.Error(scopeSyncErr))
 			}
 			// Announce this authoritative scope change (under the
 			// lock) so a concurrent corrective resync that sampled
@@ -644,6 +669,17 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// Replayer.EnableForPlaylist), and the playlist-refresher's
 				// periodic pass re-syncs as downloads complete.
 				syncReplayScope(fullPlaylist)
+				// A cache-rescued cast can only show artwork through replay,
+				// so a scope-sync failure means the rescue's one path to the
+				// screen is gone: reject with the preflight's own evidence
+				// instead of forwarding a cast whose every origin is proven
+				// dead (see rescuedByCache's doc). Restore mirrors the other
+				// pre-send failure exits from this closure.
+				if rescuedByCache && scopeSyncErr != nil {
+					err = &SourceUnreachableError{Results: rescueProbeResults}
+					h.scheduler.Restore(schedulerSnapshot)
+					return
+				}
 				command.Arguments["dp1_call"] = playlist
 				result, err = h.sendCDPRequest(command)
 				if err != nil || !playerresponse.OK(result) {
@@ -661,6 +697,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// No scheduler configured: every cast reaches the player
 				// unfiltered, so scope-sync immediately precedes the send.
 				syncReplayScope(playlist)
+				// Same fatal-for-rescue rule as the scheduler branch above
+				// — see rescuedByCache's doc.
+				if rescuedByCache && scopeSyncErr != nil {
+					err = &SourceUnreachableError{Results: rescueProbeResults}
+					return nil, err
+				}
 				command.Arguments["dp1_call"] = playlist
 			}
 			result, err = h.sendCDPRequest(command)

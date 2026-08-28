@@ -236,3 +236,81 @@ func TestSourceProber_DuplicateSourcesProbedOnce(t *testing.T) {
 		assert.Equal(t, go_http.StatusGone, r.Status)
 	}
 }
+
+// TestSourceProber_FragmentVariantsShareOneProbe pins the wire-key dedup
+// (#308 review): fragments never leave the client, so `#unique-N`
+// suffixes name the same wire URL and must not defeat the dedup.
+func TestSourceProber_FragmentVariantsShareOneProbe(t *testing.T) {
+	var requests atomic.Int32
+	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
+		requests.Add(1)
+		go_http.Error(w, "gone", go_http.StatusGone)
+	}))
+	defer origin.Close()
+
+	sources := []string{
+		origin.URL + "/art#frag-1",
+		origin.URL + "/art#frag-2",
+		origin.URL + "/art#frag-3",
+		origin.URL + "/art",
+	}
+	results := newTestProber().ProbeSources(context.Background(), sources)
+
+	assert.Equal(t, int32(1), requests.Load(), "fragment variants share one wire probe")
+	require.Len(t, results, len(sources))
+	for _, r := range results {
+		assert.Equal(t, ProbeDead, r.Verdict)
+	}
+}
+
+// TestSourceProber_ProbeBudgetFailsOpen pins the per-cast attempt cap:
+// wire-distinct URLs past maxProbeAttempts are never probed and land
+// Inconclusive — a cast over budget can therefore never be rejected on
+// the strength of unprobed items.
+func TestSourceProber_ProbeBudgetFailsOpen(t *testing.T) {
+	var requests atomic.Int32
+	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
+		requests.Add(1)
+		go_http.Error(w, "gone", go_http.StatusGone)
+	}))
+	defer origin.Close()
+
+	over := 20
+	sources := make([]string, maxProbeAttempts+over)
+	for i := range sources {
+		sources[i] = fmt.Sprintf("%s/art?n=%d", origin.URL, i)
+	}
+	results := newTestProber().ProbeSources(context.Background(), sources)
+
+	assert.Equal(t, int32(maxProbeAttempts), requests.Load(), "requests stop at the budget")
+	require.Len(t, results, len(sources))
+	for i, r := range results {
+		if i < maxProbeAttempts {
+			assert.Equal(t, ProbeDead, r.Verdict, "probed item %d", i)
+		} else {
+			assert.Equal(t, ProbeInconclusive, r.Verdict, "over-budget item %d", i)
+			assert.ErrorIs(t, r.Err, errProbeBudgetExhausted, "over-budget item %d", i)
+		}
+	}
+}
+
+// TestSourceProber_LongValidDataURIMetadataFailsOpen pins the #308 F4
+// rule: a comma beyond the bounded metadata scan is not proof of a
+// malformed URI (RFC 2397 allows long parameters), so scan exhaustion is
+// Inconclusive; only a URI that fits inside the scan and still has no
+// comma is proven malformed and Dead.
+func TestSourceProber_LongValidDataURIMetadataFailsOpen(t *testing.T) {
+	prober := newTestProber()
+
+	longParam := strings.Repeat("a", maxDataURIMetadataBytes+64)
+	longValid := "data:image/png;name=" + longParam + ",aGVsbG8="
+	result := probeOneSource(t, prober, longValid)
+	assert.Equal(t, ProbeInconclusive, result.Verdict,
+		"a comma beyond the scan bound is unproven, not dead")
+	assert.Error(t, result.Err)
+
+	shortMalformed := "data:image/png;base64"
+	proven := probeOneSource(t, prober, shortMalformed)
+	assert.Equal(t, ProbeDead, proven.Verdict,
+		"a short URI with no comma anywhere is proven malformed")
+}

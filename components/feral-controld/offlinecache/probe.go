@@ -2,14 +2,21 @@ package offlinecache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	go_url "net/url"
 	"sync"
 	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
+
+// errProbeBudgetExhausted marks a source the preflight never probed
+// because the cast already spent maxProbeAttempts distinct wire URLs.
+// Always an Inconclusive verdict — unprobed can never be dead.
+var errProbeBudgetExhausted = errors.New("source probe: per-cast probe budget exhausted")
 
 // probe.go answers one question for the DISPLAY path — "does this item's
 // source answer HTTP right now?" — at cast-accept time, so a playlist
@@ -165,25 +172,67 @@ const probePhaseCeiling = 10 * time.Second
 // thousands of stacks on a constrained device.
 const probeConcurrency = classifyConcurrency
 
+// maxProbeAttempts caps how many DISTINCT wire URLs one cast may probe.
+// The worker pool bounds concurrency and the ceiling bounds duration, but
+// neither bounds request COUNT against fast origins — and dedup alone is
+// not a bound either, since a hostile playlist can mint endless
+// wire-distinct URLs (query variants) against one target. Sources past
+// the cap are Inconclusive (fail open, never dead). 256 comfortably
+// covers real playlists (the dynamic-resolution path caps items at 255)
+// while keeping the worst case a burst, not a stream.
+const maxProbeAttempts = 256
+
+// probeWireKey is the dedup key for one source: the URL as it would
+// appear ON THE WIRE. Fragments never leave the client (HTTP strips
+// them), so keying on the raw string would let `#unique-N` suffixes
+// defeat the dedup and turn one target into N probes. A string that
+// does not parse as a URL keys as itself — it will fail the guard
+// before dialing anyway.
+func probeWireKey(source string) string {
+	u, err := go_url.Parse(source)
+	if err != nil {
+		return source
+	}
+	u.Fragment = ""
+	return u.String()
+}
+
 func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []SourceProbeResult {
 	results := make([]SourceProbeResult, len(sources))
 	ctx, cancel := context.WithTimeout(ctx, probePhaseCeiling)
 	defer cancel()
 
-	// Identical sources are probed ONCE and share the verdict. Semantically
-	// free (same URL, same answer, within one probe pass), and it removes
-	// the request amplifier the worker pool alone does not: the pool bounds
-	// concurrency, not request COUNT, so a hostile 4 MiB playlist repeating
-	// one tiny public URL thousands of times would otherwise turn a single
-	// unauthenticated cast into transport-speed traffic against that origin
-	// for the whole phase ceiling.
+	// Wire-identical sources are probed ONCE and share the verdict.
+	// Semantically free (same wire URL, same answer, within one probe
+	// pass), and it removes the request amplifier the worker pool alone
+	// does not: the pool bounds concurrency, not request COUNT, so a
+	// hostile 4 MiB playlist repeating one tiny public URL thousands of
+	// times would otherwise turn a single unauthenticated cast into
+	// transport-speed traffic against that origin for the whole phase
+	// ceiling. Keyed on probeWireKey, not the raw string — see its doc.
+	// maxProbeAttempts is the second half of the same bound, for
+	// wire-DISTINCT floods.
 	firstIndex := make(map[string]int, len(sources))
+	keyOf := make([]string, len(sources))
 	uniqueIndices := make([]int, 0, len(sources))
 	for i, source := range sources {
-		if _, seen := firstIndex[source]; seen {
+		key := probeWireKey(source)
+		keyOf[i] = key
+		if _, seen := firstIndex[key]; seen {
 			continue
 		}
-		firstIndex[source] = i
+		if len(uniqueIndices) == maxProbeAttempts {
+			// Over budget: this source is never probed, so it can never
+			// be dead. Not entered into firstIndex either — later
+			// duplicates of it fall through to the same Inconclusive.
+			results[i] = SourceProbeResult{
+				Source:  truncateSourceForLog(source),
+				Verdict: ProbeInconclusive,
+				Err:     errProbeBudgetExhausted,
+			}
+			continue
+		}
+		firstIndex[key] = i
 		uniqueIndices = append(uniqueIndices, i)
 	}
 
@@ -220,9 +269,11 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 	wg.Wait()
 
 	// Fan the unique verdicts back out to the duplicate positions, after
-	// the barrier so every read sees a settled result.
-	for i, source := range sources {
-		if first := firstIndex[source]; first != i {
+	// the barrier so every read sees a settled result. Over-budget keys
+	// are absent from firstIndex — every occurrence already wrote its
+	// own Inconclusive in the dedup pass above.
+	for i := range sources {
+		if first, probed := firstIndex[keyOf[i]]; probed && first != i {
 			results[i] = results[first]
 		}
 	}
@@ -234,13 +285,21 @@ func (p *sourceProber) probeOne(ctx context.Context, source string) SourceProbeR
 
 	// data: first, ahead of the guard, mirroring Classify: these are
 	// never dialed and the guard deliberately refuses them. Malformed
-	// METADATA (no comma within the scan bound) is Dead, not
-	// Inconclusive — the player cannot parse it either, and unlike a
-	// network fault this can never heal on its own. Payload bytes are
-	// deliberately not validated — see ProbeInline's doc for why.
+	// METADATA is Dead only when it is PROVEN malformed: the whole URI
+	// fits inside the metadata scan bound and still has no comma, so no
+	// valid RFC 2397 reading of it exists — the player cannot parse it
+	// either, and unlike a network fault this can never heal. A comma
+	// that merely sits BEYOND the bounded scan is not proof of anything
+	// (RFC 2397 allows long parameters before the delimiter), so
+	// scan-limit exhaustion fails open as Inconclusive. Payload bytes
+	// are deliberately not validated — see ProbeInline's doc for why.
 	if isDataURI(source) {
 		if _, err := dataURIMediaType(source); err != nil {
-			result.Verdict, result.Err = ProbeDead, err
+			if len(source) > len(dataURIScheme)+maxDataURIMetadataBytes {
+				result.Verdict, result.Err = ProbeInconclusive, err
+			} else {
+				result.Verdict, result.Err = ProbeDead, err
+			}
 			return result
 		}
 		result.Verdict = ProbeInline
