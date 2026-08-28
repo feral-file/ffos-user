@@ -375,6 +375,30 @@ func newGuardedHTTPClientFor(g sourceGuard, timeout time.Duration) wrapper.HTTPC
 	})
 }
 
+// newGuardedNoRedirectHTTPClientFor is the guarded client with redirect
+// FOLLOWING disabled outright: the first response — a 3xx included — is
+// returned as the final answer, and no second request is ever made.
+//
+// Built for the cast preflight, whose request-count bound must be a hard
+// one request per probed source: with following enabled, every probe
+// could legally fan into maxSourceRedirects further requests, turning a
+// budget of N into N x 10 against attacker-chosen origins (#310 review).
+// Not following also removes the probe's redirect-time SSRF surface
+// entirely — there is no hop for checkRedirect to police and no
+// cross-origin Referer to strip, though the dial-time guard still vets
+// the FIRST request's destination. Callers treat a 3xx answer as alive
+// (fail-open): the origin answered and delegates elsewhere; the kiosk's
+// own fetch follows it with the browser's policies.
+func newGuardedNoRedirectHTTPClientFor(g sourceGuard, timeout time.Duration) wrapper.HTTPClient {
+	return wrapper.NewHTTPClientFrom(&go_http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*go_http.Request, []*go_http.Request) error {
+			return go_http.ErrUseLastResponse
+		},
+		Transport: g.transport(),
+	})
+}
+
 // transport builds the guarded transport. Factored out so a test can
 // assert the Proxy field directly: http.ProxyFromEnvironment caches the
 // environment behind a sync.Once, which makes an env-driven test

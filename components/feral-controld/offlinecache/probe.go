@@ -37,7 +37,11 @@ var errProbeBudgetExhausted = errors.New("source probe: per-cast probe budget ex
 type SourceProbeVerdict string
 
 const (
-	// ProbeAlive: the origin answered with a non-error status.
+	// ProbeAlive: the origin answered with a non-error status. A 3xx
+	// counts: the probe never follows redirects (see
+	// newGuardedNoRedirectHTTPClientFor), so a redirect answer means
+	// "answered, delegates elsewhere" — fail-open, the kiosk's own fetch
+	// follows it.
 	ProbeAlive SourceProbeVerdict = "alive"
 	// ProbeDead: a definitive verdict that the item cannot load — the
 	// origin ANSWERED the player-equivalent GET with an HTTP error that
@@ -120,7 +124,12 @@ type sourceProber struct {
 // every call site remembering it.
 func NewSourceProber(resolver AddrResolver) SourceProber {
 	guard := sourceGuard{resolver: resolver}
-	return newSourceProberWith(guard, newGuardedHTTPClientFor(guard, probeItemTimeout))
+	// No-redirect client on purpose: the probe's request-count bound is
+	// ONE request per probed source, hard — following would multiply the
+	// per-cast budget by up to maxSourceRedirects against attacker-chosen
+	// origins. A 3xx answer is an answer (< 400 → alive, fail-open); the
+	// kiosk follows it itself. See newGuardedNoRedirectHTTPClientFor.
+	return newSourceProberWith(guard, newGuardedNoRedirectHTTPClientFor(guard, probeItemTimeout))
 }
 
 // newSourceProberWith is NewSourceProber with the guard and client
@@ -393,7 +402,11 @@ func verdictForStatus(status int) SourceProbeVerdict {
 // so the daemon never pulls an asset body just to read a status line.
 // Origins that ignore Range (200 with the full body) are still bounded:
 // the body is drained through a capped io.CopyN before the connection
-// is torn down — same shape as rangedGETClassify.
+// is torn down — same shape as rangedGETClassify. Redirects are never
+// followed (the client returns the 3xx itself — see
+// NewSourceProber's client choice), so "single request" is literal: one
+// probed source is at most one outbound request, no matter what the
+// origin answers.
 //
 // The Range header is the one deliberate deviation from
 // player-equivalence, kept because it is the bound on what a hostile

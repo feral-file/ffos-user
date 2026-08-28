@@ -239,7 +239,7 @@ func TestCommandHandler_Process_DisplayPlaylist_ScopesFullPlaylistBeforeActiveSe
 
 	syncCall := mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"https://example.com/21.html", "https://example.com/22.html", "https://example.com/23.html"}).
-		Return(nil).Times(1)
+		Return(1, nil).Times(1)
 	sendCall := mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr, ok := params["expression"].(string)

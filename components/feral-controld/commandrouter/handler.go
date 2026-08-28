@@ -323,6 +323,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var rescuedByCache bool
 		var rescueProbeResults []offlinecache.SourceProbeResult
 		var scopeSyncErr error
+		// scopeSyncEnabled is SyncPlaylist's enabled-count for the same one
+		// consumer: a rescue with an errorless sync that armed ZERO cached
+		// sources is still a dead cast — HasReplayableItem's answer can be
+		// stale (cleared between lookup and sync) or fail-open past its
+		// scan bound, so the installed scope's own count is what decides
+		// (#310 review).
+		var scopeSyncEnabled int
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			status.RecordPlaybackAttempt()
 			defer func() {
@@ -595,11 +602,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			for _, item := range p.Items {
 				sources = append(sources, item.Source)
 			}
-			// scopeSyncErr surfaces the outcome for the ONE caller that
-			// must treat a failure as fatal — the cache-rescued all-dead
-			// cast (see rescuedByCache's doc). Ordinary live casts keep
-			// the best-effort contract: log and proceed.
-			scopeSyncErr = h.kioskReplay.SyncPlaylist(ctx, sources)
+			// scopeSyncErr/scopeSyncEnabled surface the outcome for the ONE
+			// caller that must treat a failure — or an empty armed scope —
+			// as fatal: the cache-rescued all-dead cast (see
+			// rescuedByCache's and scopeSyncEnabled's docs). Ordinary live
+			// casts keep the best-effort contract: log and proceed.
+			scopeSyncEnabled, scopeSyncErr = h.kioskReplay.SyncPlaylist(ctx, sources)
 			if scopeSyncErr != nil {
 				h.logger.Warn("offline cache: failed to sync kiosk replay scope for playlist", zap.Error(scopeSyncErr))
 			}
@@ -675,7 +683,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// instead of forwarding a cast whose every origin is proven
 				// dead (see rescuedByCache's doc). Restore mirrors the other
 				// pre-send failure exits from this closure.
-				if rescuedByCache && scopeSyncErr != nil {
+				if rescuedByCache && (scopeSyncErr != nil || scopeSyncEnabled == 0) {
 					err = &SourceUnreachableError{Results: rescueProbeResults}
 					h.scheduler.Restore(schedulerSnapshot)
 					return
@@ -699,7 +707,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				syncReplayScope(playlist)
 				// Same fatal-for-rescue rule as the scheduler branch above
 				// — see rescuedByCache's doc.
-				if rescuedByCache && scopeSyncErr != nil {
+				if rescuedByCache && (scopeSyncErr != nil || scopeSyncEnabled == 0) {
 					err = &SourceUnreachableError{Results: rescueProbeResults}
 					return nil, err
 				}
