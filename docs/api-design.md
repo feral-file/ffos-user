@@ -381,7 +381,7 @@ The command-router rejection reply (rate limit / concurrency budget) is reliable
 
 The LAN-hub ingress reports the same condition with HTTP `429 Too Many Requests`. Controllers should treat both as "device busy" and back off; the command was not applied.
 
-**Dead-source cast rejection (standardized).** A `displayPlaylist` cast whose every resolved item source is definitively unreachable (an identity-independent HTTP 4xx answer, or a malformed `data:` URI) is rejected at accept time instead of being forwarded to the player and reported as playing (feral-file/ffos-user#304). The controller receives a reliable RPC response (command-router path, never the best-effort shed path) whose `message` body is:
+**Dead-source cast rejection (standardized).** A `displayPlaylist` cast whose every resolved item source is definitively unreachable (an identity-independent HTTP 4xx answer, or a `data:` URI with malformed metadata (payload bytes are not validated)) is rejected at accept time instead of being forwarded to the player and reported as playing (feral-file/ffos-user#304). The controller receives a reliable RPC response (command-router path, never the best-effort shed path) whose `message` body is:
 
 ```json
 {

@@ -48,8 +48,17 @@ const (
 	// way for every item and must keep working, so callers treat
 	// inconclusive exactly like alive when deciding a cast's fate.
 	ProbeInconclusive SourceProbeVerdict = "inconclusive"
-	// ProbeInline: a well-formed data: URI — its bytes travel inside the
-	// playlist body, there is nothing to dial, and it can always "load".
+	// ProbeInline: a data: URI with well-formed RFC 2397 METADATA — its
+	// bytes travel inside the playlist body and there is nothing to
+	// dial. The payload bytes themselves are deliberately NOT validated
+	// (a base64 payload may legitimately be percent-encoded, so a naive
+	// charset check would false-reject valid artwork — the worst
+	// direction — and full fidelity means reimplementing the browser's
+	// percent-decode-then-base64 pipeline); an inline item's bytes are
+	// also the CASTER'S OWN, so unlike a remote origin there is no
+	// information asymmetry for a probe to correct. A garbage payload
+	// therefore probes Inline and fails in the player, exactly as it
+	// did before the preflight existed.
 	ProbeInline SourceProbeVerdict = "inline"
 )
 
@@ -224,9 +233,11 @@ func (p *sourceProber) probeOne(ctx context.Context, source string) SourceProbeR
 	result := SourceProbeResult{Source: truncateSourceForLog(source)}
 
 	// data: first, ahead of the guard, mirroring Classify: these are
-	// never dialed and the guard deliberately refuses them. A malformed
-	// one is Dead, not Inconclusive — the player cannot render it either,
-	// and unlike a network fault this can never heal on its own.
+	// never dialed and the guard deliberately refuses them. Malformed
+	// METADATA (no comma within the scan bound) is Dead, not
+	// Inconclusive — the player cannot parse it either, and unlike a
+	// network fault this can never heal on its own. Payload bytes are
+	// deliberately not validated — see ProbeInline's doc for why.
 	if isDataURI(source) {
 		if _, err := dataURIMediaType(source); err != nil {
 			result.Verdict, result.Err = ProbeDead, err

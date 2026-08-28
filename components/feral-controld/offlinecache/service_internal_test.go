@@ -275,3 +275,51 @@ func TestService_HasReplayableItem(t *testing.T) {
 		"unknown and empty sources do not rescue")
 	assert.False(t, svc.HasReplayableItem(), "empty input reports false")
 }
+
+// countingStore wraps a Store and counts LoadItem calls, for pinning
+// HasReplayableItem's read bound.
+type countingStore struct {
+	Store
+	loads int
+}
+
+func (c *countingStore) LoadItem(sourceKey string) (*ItemRecord, error) {
+	c.loads++
+	return c.Store.LoadItem(sourceKey)
+}
+
+// TestService_HasReplayableItem_BoundedAndDeduped pins the rescue scan's
+// cost contract (#305 review): duplicates collapse to one record read,
+// inline sources are never looked up (they are never cached), and past
+// maxRescueLookups unique sources the scan fails OPEN — uncertainty
+// favors the cast, and "rescued" is just the pre-#304 behavior — instead
+// of grinding an unbounded number of serial filesystem reads on the
+// rejection path.
+func TestService_HasReplayableItem_BoundedAndDeduped(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	cs := &countingStore{Store: NewStore(t.TempDir(), wrapper.NewOS(), wrapper.NewJSON(), logger)}
+	svc := &service{
+		store: cs, state: make(map[string]ItemState),
+		sourceByKey: make(map[string]string), logger: logger,
+	}
+
+	dups := make([]string, 40)
+	for i := range dups {
+		dups[i] = "https://example.com/same"
+	}
+	assert.False(t, svc.HasReplayableItem(dups...))
+	assert.Equal(t, 1, cs.loads, "duplicates collapse to one record read")
+
+	cs.loads = 0
+	assert.False(t, svc.HasReplayableItem("data:text/plain,hi", "data:image/png;base64,aGk="))
+	assert.Zero(t, cs.loads, "inline sources are never looked up")
+
+	cs.loads = 0
+	many := make([]string, maxRescueLookups+10)
+	for i := range many {
+		many[i] = fmt.Sprintf("https://example.com/unique/%d", i)
+	}
+	assert.True(t, svc.HasReplayableItem(many...),
+		"an exhausted bound fails open rather than rejecting")
+	assert.Equal(t, maxRescueLookups, cs.loads, "the scan stops at the bound")
+}
