@@ -1450,7 +1450,10 @@ func TestMediator_HandleRelayerMessage_SourceUnreachable(t *testing.T) {
 		assert.Equal(t, "sourceUnreachable", msg["error"])
 		assert.Equal(t, cmd, msg["command"])
 		message, _ := msg["message"].(string)
-		assert.Contains(t, message, "HTTP 400")
-		assert.Contains(t, message, "https://origin.example/dead")
+		assert.Contains(t, message, "item 0: HTTP 400")
+		// Sanitization contract: resolved source URLs (signed CDN queries
+		// carry credentials) must never reach the RPC reply — items are
+		// named by index and status only.
+		assert.NotContains(t, message, "origin.example")
 	}
 }

@@ -39,31 +39,15 @@ func probeOneSource(t *testing.T, prober SourceProber, source string) SourceProb
 	return results[0]
 }
 
-func TestSourceProber_HealthyOriginIsAlive(t *testing.T) {
-	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
-		w.WriteHeader(go_http.StatusOK)
-	}))
-	defer origin.Close()
-
-	result := probeOneSource(t, newTestProber(), origin.URL)
-
-	assert.Equal(t, ProbeAlive, result.Verdict)
-	assert.Equal(t, go_http.StatusOK, result.Status)
-	assert.NoError(t, result.Err)
-}
-
-// TestSourceProber_HeadRejectingOriginIsAlive pins the GET fallback: an
-// origin that answers HEAD with an error but serves GET fine (a real CDN
-// shape — see headClassify's rationale) must not be judged dead, and the
-// confirming GET must be range-bounded so the probe never pulls an asset
-// body through the daemon.
-func TestSourceProber_HeadRejectingOriginIsAlive(t *testing.T) {
+// TestSourceProber_ProbeIsOneRangedGET pins the probe's request shape: a
+// single GET (what the player's renderer actually issues — a HEAD verdict
+// can disagree with the GET the artwork will get), range-bounded so the
+// probe never pulls an asset body through the daemon, and no HEAD at all.
+func TestSourceProber_ProbeIsOneRangedGET(t *testing.T) {
+	var methods []string
 	var sawRange string
 	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
-		if r.Method == go_http.MethodHead {
-			w.WriteHeader(go_http.StatusMethodNotAllowed)
-			return
-		}
+		methods = append(methods, r.Method)
 		sawRange = r.Header.Get("Range")
 		w.WriteHeader(go_http.StatusOK)
 	}))
@@ -73,14 +57,17 @@ func TestSourceProber_HeadRejectingOriginIsAlive(t *testing.T) {
 
 	assert.Equal(t, ProbeAlive, result.Verdict)
 	assert.Equal(t, go_http.StatusOK, result.Status)
+	assert.NoError(t, result.Err)
+	assert.Equal(t, []string{go_http.MethodGet}, methods,
+		"exactly one request, a GET — the player-equivalent verb")
 	assert.Equal(t, fmt.Sprintf("bytes=0-%d", ClassifyProbeRangeBytes-1), sawRange,
-		"the confirming GET must be range-bounded")
+		"the probe GET must be range-bounded")
 }
 
-// TestSourceProber_HTTPErrorOnBothVerbsIsDead is the #304 repro shape: an
-// origin that answers — with an error — for both HEAD and the confirming
-// GET is the one definitive Dead verdict this prober can issue.
-func TestSourceProber_HTTPErrorOnBothVerbsIsDead(t *testing.T) {
+// TestSourceProber_HTTPErrorIsDead is the #304 repro shape: the origin
+// understood the player-equivalent GET and answered an error that does
+// not depend on request identity.
+func TestSourceProber_HTTPErrorIsDead(t *testing.T) {
 	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
 		go_http.Error(w, "bad request", go_http.StatusBadRequest)
 	}))
@@ -90,6 +77,32 @@ func TestSourceProber_HTTPErrorOnBothVerbsIsDead(t *testing.T) {
 
 	assert.Equal(t, ProbeDead, result.Verdict)
 	assert.Equal(t, go_http.StatusBadRequest, result.Status)
+}
+
+// TestSourceProber_IdentityDependentStatusIsInconclusive pins the
+// verdict table's identity rule: the probe's request identity is not the
+// kiosk's (no cookies, Go's default User-Agent where uarewrite rewrites
+// the kiosk's for bot-challenging origins — #296 is the shipped proof a
+// 403 to one client is a 200 to another), so an auth wall, bot
+// challenge, or rate limit must never kill a cast the player might
+// render. Same rule for 5xx: server trouble is routinely transient.
+func TestSourceProber_IdentityDependentStatusIsInconclusive(t *testing.T) {
+	for _, status := range []int{
+		go_http.StatusUnauthorized,
+		go_http.StatusForbidden,
+		go_http.StatusTooManyRequests,
+		go_http.StatusInternalServerError,
+		go_http.StatusServiceUnavailable,
+	} {
+		origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
+			w.WriteHeader(status)
+		}))
+		result := probeOneSource(t, newTestProber(), origin.URL)
+		origin.Close()
+
+		assert.Equal(t, ProbeInconclusive, result.Verdict, "status %d", status)
+		assert.Equal(t, status, result.Status, "status %d")
+	}
 }
 
 func TestSourceProber_NetworkFaultIsInconclusive(t *testing.T) {
@@ -179,11 +192,18 @@ func TestSourceProber_SpentContextIsInconclusive(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	results := newTestProber().ProbeSources(ctx, []string{
-		"https://origin.example/a", "https://origin.example/b",
-	})
+	// Far more items than worker slots, deliberately: the pool must
+	// drain a large list against a spent context quickly (the O(1)
+	// ctx.Err path), and every result must land Inconclusive — never
+	// Dead — so a timed-out preflight can never kill a cast.
+	sources := make([]string, 50)
+	for i := range sources {
+		sources[i] = fmt.Sprintf("https://origin.example/%d", i)
+	}
 
-	require.Len(t, results, 2)
+	results := newTestProber().ProbeSources(ctx, sources)
+
+	require.Len(t, results, len(sources))
 	for _, r := range results {
 		assert.Equal(t, ProbeInconclusive, r.Verdict)
 		assert.Error(t, r.Err)

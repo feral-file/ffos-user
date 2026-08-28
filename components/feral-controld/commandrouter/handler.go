@@ -298,6 +298,18 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var playlist *dp1.Playlist
 		var schedulerSnapshot playlistschedule.Snapshot
 		var schedulerSource playlistschedule.Source
+		// replayScopeTouched records whether THIS request reached
+		// syncReplayScope (even a failed sync counts — it still bumps the
+		// playback generation). The corrective resync in the failure defer
+		// below is gated on it: the resync exists to revert a
+		// mistakenly-applied NEW scope, so a failure before any scope
+		// change (a malformed payload, a resolution error, a preflight
+		// rejection) has nothing to revert — and the resync is
+		// network-bound (a live FetchPlayerStatus plus playlist
+		// resolution), so running it anyway would delay an otherwise
+		// immediate error reply, in the worst case past the hub's write
+		// deadline.
+		var replayScopeTouched bool
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			status.RecordPlaybackAttempt()
 			defer func() {
@@ -312,8 +324,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// leaving scope pointed at the new playlist would
 					// misclassify the still-on-screen old playlist's own
 					// requests as misses. Re-syncing to the player's
-					// actual current status reverts that.
-					h.resyncKioskReplayScopeToCurrentDisplay(ctx)
+					// actual current status reverts that. Gated: a failure
+					// BEFORE any scope change has nothing to revert (see
+					// replayScopeTouched's doc).
+					if replayScopeTouched {
+						h.resyncKioskReplayScopeToCurrentDisplay(ctx)
+					}
 					return
 				}
 				h.logger.Info("result from CDP", zap.Any("result", result))
@@ -323,8 +339,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// Same rationale as the err != nil branch above: the
 					// send succeeded at the transport level but the
 					// player itself rejected the command, so it is still
-					// displaying whatever it had before.
-					h.resyncKioskReplayScopeToCurrentDisplay(ctx)
+					// displaying whatever it had before. (A player
+					// rejection implies the send ran, which implies scope
+					// was synced first — the gate matches that reality
+					// rather than assuming it.)
+					if replayScopeTouched {
+						h.resyncKioskReplayScopeToCurrentDisplay(ctx)
+					}
 				}
 			}()
 			// heldPlaybackLock records whether this path acquired the
@@ -433,20 +454,35 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					sources = append(sources, item.Source)
 				}
 				probeResults := h.sourceProber.ProbeSources(ctx, sources)
-				dead := 0
-				for _, r := range probeResults {
+				// Per-item log detail is capped: the hub accepts a 4 MiB
+				// playlist with no item cap, so an all-dead hostile cast
+				// must not be able to mint one log line per item on a
+				// device whose logs are size-rotated files. The first few
+				// carry the truncated sources an operator greps for; the
+				// rest collapse into counts.
+				dead, inconclusive := 0, 0
+				for i, r := range probeResults {
 					switch r.Verdict {
 					case offlinecache.ProbeDead:
 						dead++
-						h.logger.Warn("displayPlaylist: item source is unreachable",
-							zap.String("source", r.Source),
-							zap.Int("status", r.Status),
-							zap.Error(r.Err))
+						if dead <= maxProbeLogDetailItems {
+							h.logger.Warn("displayPlaylist: item source is unreachable",
+								zap.Int("item", i),
+								zap.String("source", r.Source),
+								zap.Int("status", r.Status),
+								zap.Error(r.Err))
+						}
 					case offlinecache.ProbeInconclusive:
-						h.logger.Debug("displayPlaylist: item source probe inconclusive",
-							zap.String("source", r.Source),
-							zap.Error(r.Err))
+						inconclusive++
 					}
+				}
+				if dead > maxProbeLogDetailItems {
+					h.logger.Warn("displayPlaylist: additional item sources unreachable",
+						zap.Int("count", dead-maxProbeLogDetailItems))
+				}
+				if inconclusive > 0 {
+					h.logger.Debug("displayPlaylist: item source probes inconclusive",
+						zap.Int("count", inconclusive))
 				}
 				if dead == len(probeResults) {
 					err = &SourceUnreachableError{Results: probeResults}
@@ -495,6 +531,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if h.kioskReplay == nil || p == nil {
 				return
 			}
+			// Set BEFORE the sync call: a failed SyncPlaylist below still
+			// bumps the playback generation (MarkPlaybackChanged), so scope
+			// state has been touched either way and the failure defer's
+			// corrective resync must run — see replayScopeTouched's doc.
+			replayScopeTouched = true
 			sources := make([]string, 0, len(p.Items))
 			for _, item := range p.Items {
 				sources = append(sources, item.Source)

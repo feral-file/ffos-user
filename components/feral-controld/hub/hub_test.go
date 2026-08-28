@@ -748,8 +748,11 @@ func TestHandleCast_SourceUnreachableRejected422(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 	assert.Contains(t, w.Body.String(), "sourceUnreachable")
-	assert.Contains(t, w.Body.String(), "HTTP 400")
-	assert.Contains(t, w.Body.String(), "https://origin.example/dead")
+	assert.Contains(t, w.Body.String(), "item 0: HTTP 400")
+	// Sanitization contract: resolved source URLs (signed CDN queries
+	// carry credentials) must never reach the response body — items are
+	// named by index and status only.
+	assert.NotContains(t, w.Body.String(), "origin.example")
 }
 
 func TestHandleCast_ProcessNilResult(t *testing.T) {

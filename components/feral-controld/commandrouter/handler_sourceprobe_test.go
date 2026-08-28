@@ -21,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 )
 
@@ -73,10 +74,72 @@ func TestCommandHandler_Process_DisplayPlaylist_AllSourcesDead_RejectsCast(t *te
 	require.Error(t, err)
 	assert.True(t, commandrouter.IsSourceUnreachable(err))
 	assert.Contains(t, err.Error(), "sourceUnreachable")
-	assert.Contains(t, err.Error(), "HTTP 400")
+	assert.Contains(t, err.Error(), "item 0: HTTP 400")
+	// Sanitization contract: the error is returned verbatim to casters,
+	// and resolved source URLs are playlist content they may never have
+	// supplied (signed CDN queries carry credentials) — items are named
+	// by index and status only.
+	assert.NotContains(t, err.Error(), "origin.example")
 	assert.Nil(t, result)
 	require.Len(t, prober.probed, 1)
 	assert.Equal(t, []string{"https://origin.example/dead"}, prober.probed[0])
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_RejectionSkipsReplayResync pins
+// the preflight-rejection fast path: the rejection happens before any
+// replay-scope change, so the failure defer's corrective resync (a
+// network-bound FetchPlayerStatus plus playlist resolution) must NOT run —
+// running it would delay an otherwise immediate error reply, in the worst
+// case past the hub's write deadline. The strict mocks are the assertion:
+// any KioskReplay or FetchPlayerStatus call here fails the test.
+func TestCommandHandler_Process_DisplayPlaylist_RejectionSkipsReplayResync(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	// No EXPECT calls on purpose: the rejection path must never touch the
+	// playback lock, scope sync, or the corrective resync.
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+
+	playlistURL := "https://example.com/playlist.json"
+	ts.mockDP1.EXPECT().
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
+		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		Times(1)
+
+	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
+		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
+	}}
+	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	require.Error(t, err)
+	assert.True(t, commandrouter.IsSourceUnreachable(err))
+	assert.Nil(t, result)
+}
+
+// TestSourceUnreachableError_CapsAndSanitizesDetail pins the response
+// amplification bound: past the detail cap a single omitted-count entry
+// stands in, and no source URL appears no matter how many results ride
+// the error.
+func TestSourceUnreachableError_CapsAndSanitizesDetail(t *testing.T) {
+	results := make([]offlinecache.SourceProbeResult, 15)
+	for i := range results {
+		results[i] = offlinecache.SourceProbeResult{
+			Source:  "https://origin.example/signed?token=secret",
+			Verdict: offlinecache.ProbeDead,
+			Status:  404,
+		}
+	}
+	err := &commandrouter.SourceUnreachableError{Results: results}
+
+	msg := err.Error()
+	assert.Contains(t, msg, "item 9: HTTP 404")
+	assert.Contains(t, msg, "and 5 more")
+	assert.NotContains(t, msg, "item 10:")
+	assert.NotContains(t, msg, "origin.example")
+	assert.NotContains(t, msg, "token=secret")
 }
 
 func TestCommandHandler_Process_DisplayPlaylist_PartiallyDead_StillCasts(t *testing.T) {
