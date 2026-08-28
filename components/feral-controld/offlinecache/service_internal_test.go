@@ -236,3 +236,42 @@ func (o *recordingProgressObserver) states() []ItemState {
 	defer o.mu.Unlock()
 	return append([]ItemState(nil), o.recorded...)
 }
+
+// TestService_HasReplayableItem pins the preflight's cache-rescue
+// predicate (#305 review F4): a prior successful capture on disk —
+// complete (ready) or partial — rescues an all-dead cast, while
+// broken-online (fails even with network), not-cached, and unknown
+// sources do not. Empty input reports false.
+func TestService_HasReplayableItem(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	store := NewStore(t.TempDir(), wrapper.NewOS(), wrapper.NewJSON(), logger)
+	svc := &service{
+		store: store, state: make(map[string]ItemState),
+		sourceByKey: make(map[string]string), logger: logger,
+	}
+
+	save := func(source string, cov Coverage) {
+		t.Helper()
+		require.NoError(t, store.SaveItem(&ItemRecord{
+			Item:     dp1playlist.PlaylistItem{Source: source},
+			Coverage: cov,
+		}))
+	}
+	const (
+		ready   = "https://example.com/ready"
+		partial = "https://example.com/partial"
+		broken  = "https://example.com/broken"
+	)
+	save(ready, Coverage{Complete: true})
+	save(partial, Coverage{Complete: false, Reason: "one asset failed: timeout"})
+	save(broken, Coverage{Complete: false, Reason: string(ReasonCSPBlocked)})
+
+	assert.True(t, svc.HasReplayableItem(ready), "a complete capture rescues")
+	assert.True(t, svc.HasReplayableItem("https://example.com/missing", partial),
+		"a partial capture rescues, even alongside unknown sources")
+	assert.False(t, svc.HasReplayableItem(broken),
+		"broken-online fails even with network and must not rescue")
+	assert.False(t, svc.HasReplayableItem("https://example.com/missing", ""),
+		"unknown and empty sources do not rescue")
+	assert.False(t, svc.HasReplayableItem(), "empty input reports false")
+}

@@ -397,6 +397,17 @@ func (g sourceGuard) transport() *go_http.Transport {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		// Every fetch on this transport dials an untrusted, possibly
+		// hostile origin, and Go's default response-header ceiling is
+		// 10 MiB PER RESPONSE — so a probe wave fanning out
+		// concurrently (probeConcurrency-wide on the cast preflight)
+		// against a server that streams enormous header blocks and then
+		// stalls could hold hundreds of MiB resident on a constrained
+		// device before timeouts fire. 1 MiB is orders of magnitude
+		// above any legitimate header block (real-world limits sit at
+		// 8-64 KiB) while capping the wave at the size of one playlist
+		// body.
+		MaxResponseHeaderBytes: 1 << 20,
 	}
 }
 

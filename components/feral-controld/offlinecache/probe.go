@@ -258,6 +258,12 @@ func (p *sourceProber) probeOne(ctx context.Context, source string) SourceProbeR
 //     or a rate limit can answer differently for the player, and #296
 //     is the shipped proof that a 403 to one client is a 200 to
 //     another. Judging these dead would reject casts the kiosk renders.
+//   - 408 is Inconclusive: a request timeout is transient by
+//     definition, same footing as a network-level timeout.
+//   - 416 is Inconclusive because it is PROBE-SHAPE-dependent, not
+//     identity-dependent: the probe adds a Range header the player's
+//     document fetch does not send, so a zero-length or range-hostile
+//     resource can 416 the probe while serving the player fine.
 //   - 5xx is Inconclusive: server trouble is routinely transient, and
 //     the fail-open bias says a maybe-down origin does not kill a cast.
 //   - The remaining 4xx (400, 404, 410, ...) are Dead: the origin
@@ -270,7 +276,9 @@ func verdictForStatus(status int) SourceProbeVerdict {
 	case status == http.StatusUnauthorized,
 		status == http.StatusForbidden,
 		status == http.StatusProxyAuthRequired,
-		status == http.StatusTooManyRequests:
+		status == http.StatusRequestTimeout,
+		status == http.StatusTooManyRequests,
+		status == http.StatusRequestedRangeNotSatisfiable:
 		return ProbeInconclusive
 	case status < http.StatusInternalServerError:
 		return ProbeDead

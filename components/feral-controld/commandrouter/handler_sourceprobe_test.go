@@ -85,6 +85,69 @@ func TestCommandHandler_Process_DisplayPlaylist_AllSourcesDead_RejectsCast(t *te
 	assert.Equal(t, []string{"https://origin.example/dead"}, prober.probed[0])
 }
 
+// TestCommandHandler_Process_DisplayPlaylist_AllDeadButCached_CastsForReplay
+// pins the cache rescue (#305 review F4): a definitively dead origin is not
+// a dead cast when the offline cache holds a prior capture — replay serves
+// cached items regardless of origin state — so an all-dead preflight
+// consults the cache before rejecting, and a replayable item lets the cast
+// proceed.
+func TestCommandHandler_Process_DisplayPlaylist_AllDeadButCached_CastsForReplay(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	mockService := mocks.NewMockOfflineCacheService(ts.ctrl)
+	mockService.EXPECT().
+		HasReplayableItem("https://origin.example/dead").
+		Return(true).
+		Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockService, nil, nil, ts.mockJSON, ts.logger)
+
+	playlistURL := "https://example.com/playlist.json"
+	expectDisplayPlaylistSuccess(ts, playlistURL,
+		probeTestPlaylist("https://origin.example/dead"))
+
+	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
+		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
+	}}
+	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+// ...and the negative half: with the cache consulted and empty-handed, the
+// all-dead rejection stands.
+func TestCommandHandler_Process_DisplayPlaylist_AllDeadNotCached_StillRejects(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	mockService := mocks.NewMockOfflineCacheService(ts.ctrl)
+	mockService.EXPECT().
+		HasReplayableItem("https://origin.example/dead").
+		Return(false).
+		Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockService, nil, nil, ts.mockJSON, ts.logger)
+
+	playlistURL := "https://example.com/playlist.json"
+	ts.mockDP1.EXPECT().
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
+		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		Times(1)
+
+	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
+		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
+	}}
+	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	require.Error(t, err)
+	assert.True(t, commandrouter.IsSourceUnreachable(err))
+	assert.Nil(t, result)
+}
+
 // TestCommandHandler_Process_DisplayPlaylist_RejectionSkipsReplayResync pins
 // the preflight-rejection fast path: the rejection happens before any
 // replay-scope change, so the failure defer's corrective resync (a

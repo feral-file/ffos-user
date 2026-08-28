@@ -485,8 +485,20 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						zap.Int("count", inconclusive))
 				}
 				if dead == len(probeResults) {
-					err = &SourceUnreachableError{Results: probeResults}
-					return nil, err
+					// A definitively dead ORIGIN is not a dead CAST when
+					// the offline cache holds a prior capture: replay
+					// serves cached items regardless of origin state, and
+					// origin rot is exactly the case the cache exists for
+					// (#305 review F4). Checked only on the all-dead path
+					// — one record read per source, worst case — so the
+					// common accept path pays nothing.
+					if h.offlineCache != nil && h.offlineCache.HasReplayableItem(sources...) {
+						h.logger.Warn("displayPlaylist: every item source is unreachable but cached captures exist; casting for offline replay",
+							zap.Int("items", len(sources)))
+					} else {
+						err = &SourceUnreachableError{Results: probeResults}
+						return nil, err
+					}
 				}
 			}
 

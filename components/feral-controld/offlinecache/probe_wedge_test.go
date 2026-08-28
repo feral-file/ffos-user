@@ -90,7 +90,9 @@ func TestSourceProber_IdentityDependentStatusIsInconclusive(t *testing.T) {
 	for _, status := range []int{
 		go_http.StatusUnauthorized,
 		go_http.StatusForbidden,
+		go_http.StatusRequestTimeout,
 		go_http.StatusTooManyRequests,
+		go_http.StatusRequestedRangeNotSatisfiable,
 		go_http.StatusInternalServerError,
 		go_http.StatusServiceUnavailable,
 	} {
