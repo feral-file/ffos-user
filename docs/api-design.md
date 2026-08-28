@@ -367,7 +367,7 @@ Use `dbus.NewError(message, []interface{}{})` for all D-Bus method errors. The f
 
 Most command failures are not standardized: when an executor command fails, `controld` logs the error and does not send an explicit error response to the relayer unless the command protocol requires a reply. When adding new commands that need error responses, document the response shape in code comments near the command handler.
 
-**Command-storm rejection (standardized).** Command-storm protection (see below) is the one path with a defined controller-visible error envelope. When the command router rejects a command (rate limit or concurrency budget) or the relayer sheds a command under dispatch saturation, the controller receives an RPC response whose `message` body is:
+**Command-storm rejection (standardized).** Command-storm protection (see below) is one of two paths with a defined controller-visible error envelope (the other is the dead-source cast rejection below). When the command router rejects a command (rate limit or concurrency budget) or the relayer sheds a command under dispatch saturation, the controller receives an RPC response whose `message` body is:
 
 ```json
 {
@@ -380,6 +380,21 @@ Most command failures are not standardized: when an executor command fails, `con
 The command-router rejection reply (rate limit / concurrency budget) is reliable. The relayer-side shed reply under **dispatch saturation** is **best-effort**: to avoid blocking its read loop under a sustained storm, the relayer drops the reply when its shed-response writers are all busy. Controllers must not rely on receiving it for that case and should fall back to a request timeout and retry.
 
 The LAN-hub ingress reports the same condition with HTTP `429 Too Many Requests`. Controllers should treat both as "device busy" and back off; the command was not applied.
+
+**Dead-source cast rejection (standardized).** A `displayPlaylist` cast whose every resolved item source is definitively unreachable (an identity-independent HTTP 4xx answer, or a `data:` URI with malformed metadata (payload bytes are not validated)) is rejected at accept time instead of being forwarded to the player and reported as playing (feral-file/ffos-user#304). The controller receives a reliable RPC response (command-router path, never the best-effort shed path) whose `message` body is:
+
+```json
+{
+  "ok": false,
+  "error": "sourceUnreachable",
+  "command": "displayPlaylist",
+  "message": "sourceUnreachable: no playlist item source is loadable (item 0: HTTP 400; item 1: HTTP 404)"
+}
+```
+
+`ok: false` is contractual — existing controllers decide success by that field. The human-readable `message` names items by INDEX and HTTP STATUS only, capped at 10 entries plus an `and N more` count; it never carries source URLs (resolved sources are playlist content the caller may not have supplied, and signed CDN URLs carry credentials in their query strings). The error name matches DP-1 core spec §14's `sourceUnreachable` player error code.
+
+The LAN-hub ingress reports the same condition with HTTP `422 Unprocessable Entity`, body = the same `message` text. In both transports the command was **not applied** — the device keeps displaying what it had. This is a caller-input error, not "device busy": retrying without fixing the sources fails again. Two conditions are deliberately never rejected by this path: a `displayAt`-scheduled playlist (its sources may legitimately be dead until go-live, so it is not probed at all — the preflight adds no latency in front of a due cutover), and a playlist with at least one cached offline capture whose replay scope also arms at least one cached source at cast time (replay can then serve it regardless of origin state; if the scope sync fails or arms nothing, the rejection stands). Anything short of a definitive dead verdict for every item — network errors, timeouts, auth walls/bot challenges (401/403/406/407/408/416/429), 5xx — fails open and the cast proceeds.
 
 ### Command-storm protection
 

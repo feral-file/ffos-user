@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	go_os "os"
 	"strings"
@@ -1018,6 +1019,15 @@ func initializeApp(
 	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
 	// must never be shed by external client traffic, so it bypasses the gate.
 	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, offlineCache, kioskReplay, playlistScheduler, json, logger)
+	// Cast-time source preflight (#304): a displayPlaylist whose every item
+	// source definitively answers an HTTP error is rejected at accept time
+	// instead of being forwarded and self-reported as playing. Wired against
+	// the raw handler before NewGate wraps it (SetSourceProber's contract),
+	// and unconditionally — the probe is independent of whether the offline
+	// cache is enabled. net.DefaultResolver for the same reason the offline
+	// cache's classifier uses it: the guard's view of a name must match what
+	// would actually be dialed (see offlinecache.ErrUnsafeSource).
+	commandrouter.SetSourceProber(rawCmdHandler, offlinecache.NewSourceProber(net.DefaultResolver), logger)
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {

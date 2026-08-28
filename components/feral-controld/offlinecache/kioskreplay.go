@@ -52,7 +52,17 @@ type KioskReplay interface {
 	// none are. sources are raw item source URLs (the cache identity —
 	// see SourceKey); callers hold the resolved playlist, so they pass
 	// item.Source values directly.
-	SyncPlaylist(ctx context.Context, sources []string) error
+	//
+	// enabled reports how many distinct cached sources the applied scope
+	// actually covers — 0 means interception was disabled because
+	// nothing in sources is cached. Most callers only care about err
+	// (scope sync is best-effort for live casts), but the cache-rescued
+	// all-dead cast (#310 review) REQUIRES enabled >= 1: its only path
+	// to the screen is replay, and HasReplayableItem's answer can be
+	// stale (a clear between lookup and sync) or fail-open (its bounded
+	// scan), so the count from the scope actually installed is the
+	// authoritative one.
+	SyncPlaylist(ctx context.Context, sources []string) (enabled int, err error)
 	// LockPlayback/UnlockPlayback serialize a full "sync replay scope
 	// then navigate/refresh the kiosk" sequence against every other such
 	// sequence. Replay scope and kiosk navigation are two separate
@@ -239,12 +249,12 @@ func (k *kioskReplay) redialIfDue(ctx context.Context) (bool, error) {
 // playlist for display and periodically while it keeps looping, since a
 // background download can complete (or a cache can be cleared) while the
 // same playlist is still on screen.
-func (k *kioskReplay) SyncPlaylist(ctx context.Context, sources []string) error {
+func (k *kioskReplay) SyncPlaylist(ctx context.Context, sources []string) (int, error) {
 	cachedSources, mixed := k.scopeFor(sources)
 
 	err := k.applyScope(ctx, cachedSources, mixed)
 	if err == nil {
-		return nil
+		return len(cachedSources), nil
 	}
 
 	// The replay session is a SEPARATE socket from the daemon's primary
@@ -263,17 +273,17 @@ func (k *kioskReplay) SyncPlaylist(ctx context.Context, sources []string) error 
 	// and the command itself was refused — re-dialing that would be
 	// pointless churn.
 	if k.replayer.RootAttached() {
-		return err
+		return 0, err
 	}
 
 	attempted, dialErr := k.redialIfDue(ctx)
 	if !attempted {
 		// Cooled down from a recent attempt: report the real failure
 		// rather than pretending a recovery was tried.
-		return err
+		return 0, err
 	}
 	if dialErr != nil {
-		return errors.Join(err, dialErr)
+		return 0, errors.Join(err, dialErr)
 	}
 
 	// Scope restoration is free here: cachedSources was recomputed from
@@ -283,7 +293,10 @@ func (k *kioskReplay) SyncPlaylist(ctx context.Context, sources []string) error 
 	// reasoning in AttachOnReconnect's doc.
 	k.logger.Info("offline cache: re-dialed kiosk replay session after transport failure, restoring scope",
 		zap.Int("cached_items", len(cachedSources)))
-	return k.applyScope(ctx, cachedSources, mixed)
+	if applyErr := k.applyScope(ctx, cachedSources, mixed); applyErr != nil {
+		return 0, applyErr
+	}
+	return len(cachedSources), nil
 }
 
 // scopeFor resolves which of sources are actually replayable right now,

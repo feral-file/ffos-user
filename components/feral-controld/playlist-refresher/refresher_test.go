@@ -470,7 +470,7 @@ func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
 		AnyTimes()
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
-		Return(nil).
+		Return(1, nil).
 		MinTimes(1)
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
@@ -630,7 +630,7 @@ func TestRefresher_ProcessPlayingPlaylist_HoldsPlaybackLockAcrossSyncAndSend(t *
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
 		Do(func(_ context.Context, _ []string) { observeLockHeld("SyncPlaylist") }).
-		Return(nil).
+		Return(1, nil).
 		MinTimes(1)
 	// MarkPlaybackChanged must also run under the lock (it announces the
 	// scope change the resync must defer to — see
@@ -711,9 +711,9 @@ func TestRefresher_ForceRefresh_TriggersImmediateSyncBeforeNextTick(t *testing.T
 	syncCount := make(chan struct{}, 8)
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
-		DoAndReturn(func(context.Context, []string) error {
+		DoAndReturn(func(context.Context, []string) (int, error) {
 			syncCount <- struct{}{}
-			return nil
+			return 1, nil
 		}).
 		MinTimes(1)
 
@@ -805,7 +805,7 @@ func TestRefresher_ProcessPlayingPlaylist_FallsBackToCachedPlaylistWhenOffline(t
 		AnyTimes()
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
-		Return(nil).
+		Return(1, nil).
 		MinTimes(1)
 	// The device is offline (live resolution just failed), but the
 	// cached copy must still be pushed to the player, exactly as a live
@@ -925,7 +925,7 @@ func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefr
 		AnyTimes()
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
-		Return(errors.New("dial failed")).
+		Return(0, errors.New("dial failed")).
 		MinTimes(1)
 	// The authoritative generation bump must still fire even when the
 	// SyncPlaylist above errors (see KioskReplay.PlaybackGeneration).
@@ -1036,17 +1036,17 @@ func TestRefresher_ProcessPlayingPlaylist_CDPSendFailureRevertsKioskReplayScope(
 
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"https://example.com/item-new"}).
-		Return(nil).
+		Return(1, nil).
 		MinTimes(1)
 	reverted := make(chan struct{}, 8)
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"https://example.com/item-old"}).
-		DoAndReturn(func(context.Context, []string) error {
+		DoAndReturn(func(context.Context, []string) (int, error) {
 			select {
 			case reverted <- struct{}{}:
 			default:
 			}
-			return nil
+			return 1, nil
 		}).
 		MinTimes(1)
 
@@ -1121,7 +1121,7 @@ func TestRefresher_ProcessPlayingPlaylist_PlayerRejectionRevertsKioskReplayScope
 			Return(newPlaylist, nil),
 		mockKioskReplay.EXPECT().
 			SyncPlaylist(ctx, []string{"https://example.com/item-new"}).
-			Return(nil),
+			Return(1, nil),
 		mockCDP.EXPECT().
 			Send(cdp.METHOD_EVALUATE, gomock.Any()).
 			Return(playerNotOkResponse(), nil),
@@ -1136,7 +1136,7 @@ func TestRefresher_ProcessPlayingPlaylist_PlayerRejectionRevertsKioskReplayScope
 			Return(oldPlaylist, nil),
 		mockKioskReplay.EXPECT().
 			SyncPlaylist(ctx, []string{"https://example.com/item-old"}).
-			Return(nil),
+			Return(1, nil),
 	)
 
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
@@ -1275,7 +1275,7 @@ func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskRep
 		AnyTimes()
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
-		Return(nil).
+		Return(1, nil).
 		MinTimes(1)
 	// Neither must ever be called: a static playlist has nothing dynamic
 	// to re-resolve, and it must not be re-sent to CDP on every refresh
