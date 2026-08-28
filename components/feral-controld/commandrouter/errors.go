@@ -46,6 +46,20 @@ type SourceUnreachableError struct {
 	Results []offlinecache.SourceProbeResult
 }
 
+// maxPreflightItems bounds how many playlist items the source preflight
+// will even build bookkeeping for. The unauthenticated hub accepts a
+// 4 MiB cast with no item limit, and while the probe's request count
+// (256) and the rescue's record reads (512) are capped, the per-item
+// slices and maps in front of those caps were still sized to the whole
+// playlist — attacker-sized allocation for one probe request's worth of
+// work, multipliable by the gate's concurrent heavy-command budget.
+// Past this bound the preflight is SKIPPED entirely (fail open, the
+// pre-#304 behavior): 2048 is roughly an order of magnitude above any
+// real playlist (the dynamic-resolution path caps at 255), so the only
+// casts that lose preflight coverage are the hostile shapes the bound
+// exists to starve.
+const maxPreflightItems = 2048
+
 // maxProbeLogDetailItems caps how many dead items the displayPlaylist
 // preflight logs individually (with their truncated sources) before the
 // remainder collapses into a count — same amplification concern as
