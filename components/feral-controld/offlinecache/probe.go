@@ -295,6 +295,19 @@ func verdictForStatus(status int) SourceProbeVerdict {
 // Origins that ignore Range (200 with the full body) are still bounded:
 // the body is drained through a capped io.CopyN before the connection
 // is torn down — same shape as rangedGETClassify.
+//
+// The Range header is the one deliberate deviation from
+// player-equivalence, kept because it is the bound on what a hostile
+// origin can make the daemon pull (CopyN caps what is read, but Range
+// is what tells a compliant origin not to send it; classify's probe
+// makes the same call, and its comment calls the alternative —
+// trusting Body.Close to abandon an unread stream — transport-
+// dependent). The verdict table pays for the deviation where it can
+// bite: 416, the one status Range itself can provoke, is Inconclusive.
+// Residual, accepted: an edge/WAF that 400s ranged or Go-UA requests
+// wholesale reads as dead; it only affects a cast when EVERY item sits
+// behind such an edge, and fail-open on 400 would give up the #304
+// repro class itself.
 func (p *sourceProber) rangedGETStatus(ctx context.Context, url string) (int, error) {
 	req, err := p.httpClient.NewRequest(http.MethodGet, url, nil)
 	if err != nil {

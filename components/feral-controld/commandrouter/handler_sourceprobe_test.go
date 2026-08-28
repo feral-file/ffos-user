@@ -148,6 +148,37 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadNotCached_StillRejects(t 
 	assert.Nil(t, result)
 }
 
+// TestCommandHandler_Process_DisplayPlaylist_AllDeadButScheduled_DefersNotRejects
+// pins the premiere carve-out: a displayAt-scheduled playlist's sources are
+// probed pre-filter, and a scheduled drop's assets routinely 404 until
+// go-live (publish-then-upload ordering) — so an all-dead verdict on a
+// scheduled playlist must never reject the cast the scheduler was about to
+// defer-accept and arm a timer for.
+func TestCommandHandler_Process_DisplayPlaylist_AllDeadButScheduled_DefersNotRejects(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	displayAt := "2999-01-01T00:00:00Z"
+	playlist := probeTestPlaylist("https://origin.example/premiere")
+	playlist.Items[0].DisplayAt = &displayAt
+
+	playlistURL := "https://example.com/playlist.json"
+	// No scheduler wired in this setup, so the cast proceeds down the
+	// default send path — the assertion is that it PROCEEDS (reaches the
+	// player) instead of being rejected by the preflight.
+	expectDisplayPlaylistSuccess(ts, playlistURL, playlist)
+
+	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
+		{Source: "https://origin.example/premiere", Verdict: offlinecache.ProbeDead, Status: 404},
+	}}
+	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
 // TestCommandHandler_Process_DisplayPlaylist_RejectionSkipsReplayResync pins
 // the preflight-rejection fast path: the rejection happens before any
 // replay-scope change, so the failure defer's corrective resync (a

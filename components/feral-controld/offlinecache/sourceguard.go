@@ -334,6 +334,16 @@ func (g sourceGuard) checkRedirect(req *go_http.Request, via []*go_http.Request)
 	if len(via) >= maxSourceRedirects {
 		return fmt.Errorf("%w: stopped after %d redirects", ErrUnsafeSource, len(via))
 	}
+	// Go's redirect handling sets a Referer carrying the PREVIOUS hop's
+	// full URL, query string included (refererForURL strips only
+	// userinfo). A signed CDN source (?X-Amz-Signature=...) that 302s
+	// cross-origin would hand its credential-bearing URL to the next
+	// origin and its logs — something a browser's default
+	// strict-origin-when-cross-origin policy would never do, and these
+	// hops are between origins a hostile playlist chose. No fetch on
+	// this transport needs a Referer, so it is dropped on every hop
+	// rather than policy-matched.
+	req.Header.Del("Referer")
 	switch strings.ToLower(req.URL.Scheme) {
 	case "http", "https":
 		return nil

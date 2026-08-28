@@ -450,8 +450,23 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// rejection.
 			if h.sourceProber != nil && playlist != nil && len(playlist.Items) > 0 {
 				sources := make([]string, 0, len(playlist.Items))
+				// scheduledPlaylist: any item carrying displayAt makes this
+				// a scheduler-filtered playlist, and the probe sees the
+				// FULL item list before that filtering. An item outside
+				// the current cohort can be dead NOW and live at display
+				// time — publish-then-upload is the normal premiere
+				// ordering, so a scheduled drop's sources routinely 404
+				// until go-live. Rejecting would silently lose the cast
+				// the scheduler was about to defer-accept and arm a timer
+				// for (the {ok:true, deferred:true} path below), so for
+				// scheduled playlists the probe is observability-only:
+				// dead items are logged, the rejection stands down.
+				scheduledPlaylist := false
 				for _, item := range playlist.Items {
 					sources = append(sources, item.Source)
+					if item.DisplayAt != nil && *item.DisplayAt != "" {
+						scheduledPlaylist = true
+					}
 				}
 				probeResults := h.sourceProber.ProbeSources(ctx, sources)
 				// Per-item log detail is capped: the hub accepts a 4 MiB
@@ -485,17 +500,25 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						zap.Int("count", inconclusive))
 				}
 				if dead == len(probeResults) {
-					// A definitively dead ORIGIN is not a dead CAST when
-					// the offline cache holds a prior capture: replay
-					// serves cached items regardless of origin state, and
-					// origin rot is exactly the case the cache exists for
-					// (#305 review F4). Checked only on the all-dead path
-					// — one record read per source, worst case — so the
-					// common accept path pays nothing.
-					if h.offlineCache != nil && h.offlineCache.HasReplayableItem(sources...) {
+					switch {
+					case scheduledPlaylist:
+						// See scheduledPlaylist's doc above: dead-now is
+						// not dead-at-display-time for a scheduled drop,
+						// and rejecting would lose the deferred cast.
+						h.logger.Warn("displayPlaylist: every item source is unreachable but the playlist is displayAt-scheduled; deferring to the scheduler",
+							zap.Int("items", len(sources)))
+					case h.offlineCache != nil && h.offlineCache.HasReplayableItem(sources...):
+						// A definitively dead ORIGIN is not a dead CAST
+						// when the offline cache holds a prior capture:
+						// replay serves cached items regardless of origin
+						// state, and origin rot is exactly the case the
+						// cache exists for (#305 review F4). Checked only
+						// on the all-dead path — one record read per
+						// source, worst case — so the common accept path
+						// pays nothing.
 						h.logger.Warn("displayPlaylist: every item source is unreachable but cached captures exist; casting for offline replay",
 							zap.Int("items", len(sources)))
-					} else {
+					default:
 						err = &SourceUnreachableError{Results: probeResults}
 						return nil, err
 					}
