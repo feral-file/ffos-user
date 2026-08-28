@@ -100,7 +100,15 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadButCached_CastsForReplay(
 		HasReplayableItem("https://origin.example/dead").
 		Return(true).
 		Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockService, nil, nil, ts.mockJSON, ts.logger)
+	// The rescue requires replay to actually arm: successful scope sync is
+	// what lets the cast proceed (see the sync-failure test below for the
+	// other half of that contract).
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().Times(1)
+	mockKioskReplay.EXPECT().UnlockPlayback().Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://origin.example/dead"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockService, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	playlistURL := "https://example.com/playlist.json"
 	expectDisplayPlaylistSuccess(ts, playlistURL,
@@ -117,6 +125,89 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadButCached_CastsForReplay(
 	assert.NotNil(t, result)
 }
 
+// TestCommandHandler_Process_DisplayPlaylist_CachedButScopeSyncFails_Rejects
+// pins the second half of the rescue contract (#308 review): a cache
+// record replay cannot arm rescues nothing — a rescued cast's ONLY path to
+// the screen is replay, so a scope-sync failure must reject the cast with
+// the preflight's own error instead of forwarding it to render origins
+// already proven dead.
+func TestCommandHandler_Process_DisplayPlaylist_CachedButScopeSyncFails_Rejects(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	mockService := mocks.NewMockOfflineCacheService(ts.ctrl)
+	mockService.EXPECT().
+		HasReplayableItem("https://origin.example/dead").
+		Return(true).
+		Times(1)
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().
+		SyncPlaylist(ts.ctx, []string{"https://origin.example/dead"}).
+		Return(errors.New("replay session down")).
+		Times(1)
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().Times(1)
+	// The failed sync TOUCHED scope (generation bumped), so the failure
+	// defer's corrective resync must run — unlike the pre-sync rejection
+	// path (see RejectionSkipsReplayResync). Its player-status fetch
+	// failing is fine: the resync is best-effort by contract.
+	ts.mockStatusPoller.EXPECT().
+		FetchPlayerStatus(gomock.Any()).
+		Return(nil, errors.New("player unavailable")).
+		Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockService, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+
+	playlistURL := "https://example.com/playlist.json"
+	ts.mockDP1.EXPECT().
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
+		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		Times(1)
+	// No CDP Send expectation: the sync failure must stop the cast.
+
+	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
+		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
+	}}
+	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	require.Error(t, err)
+	assert.True(t, commandrouter.IsSourceUnreachable(err))
+	assert.Nil(t, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_CachedButNoReplayWired_Rejects
+// pins the degenerate case of the same contract: with no kiosk replay
+// wired at all, a cached capture is unreachable, so the cache must not
+// even be consulted and the all-dead rejection stands.
+func TestCommandHandler_Process_DisplayPlaylist_CachedButNoReplayWired_Rejects(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	mockService := mocks.NewMockOfflineCacheService(ts.ctrl)
+	// No HasReplayableItem expectation: without replay the lookup is moot.
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockService, nil, nil, ts.mockJSON, ts.logger)
+
+	playlistURL := "https://example.com/playlist.json"
+	ts.mockDP1.EXPECT().
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
+		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		Times(1)
+
+	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
+		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
+	}}
+	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	require.Error(t, err)
+	assert.True(t, commandrouter.IsSourceUnreachable(err))
+	assert.Nil(t, result)
+}
+
 // ...and the negative half: with the cache consulted and empty-handed, the
 // all-dead rejection stands.
 func TestCommandHandler_Process_DisplayPlaylist_AllDeadNotCached_StillRejects(t *testing.T) {
@@ -128,7 +219,11 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadNotCached_StillRejects(t 
 		HasReplayableItem("https://origin.example/dead").
 		Return(false).
 		Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockService, nil, nil, ts.mockJSON, ts.logger)
+	// Replay wired (so the cache IS consulted) but empty-handed: the
+	// rejection stands, and it fires before the playback lock — no other
+	// kioskReplay expectations on purpose.
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockService, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
