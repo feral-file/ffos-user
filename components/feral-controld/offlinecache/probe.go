@@ -181,7 +181,10 @@ const probePhaseCeiling = 10 * time.Second
 // thousands of stacks on a constrained device.
 const probeConcurrency = classifyConcurrency
 
-// maxProbeAttempts caps how many DISTINCT wire URLs one cast may probe.
+// maxProbeAttempts caps how many DISTINCT DIALING wire URLs one cast may
+// probe. data: URIs are settled synchronously outside this budget — they
+// never dial, and letting them consume attempts would let inline items
+// shield a real dead HTTP source from its verdict (see the dedup pass).
 // The worker pool bounds concurrency and the ceiling bounds duration, but
 // neither bounds request COUNT against fast origins — and dedup alone is
 // not a bound either, since a hostile playlist can mint endless
@@ -231,6 +234,19 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 		key := probeWireKey(source)
 		keyOf[i] = key
 		if _, seen := firstIndex[key]; seen {
+			continue
+		}
+		// data: URIs are settled synchronously and OUTSIDE the budget:
+		// they never dial, so charging them attempts would let a
+		// playlist packed with malformed inline items (a pure-CPU Dead
+		// verdict) exhaust the budget and push a real dead HTTP source
+		// into Inconclusive — forwarding an entirely unusable cast past
+		// the rejection contract (#308 review round 5). probeOne's data:
+		// branch is a bounded metadata scan, no I/O, so settling it here
+		// costs what the dedup pass already costs.
+		if isDataURI(source) {
+			firstIndex[key] = i
+			results[i] = p.probeOne(ctx, source)
 			continue
 		}
 		if len(uniqueIndices) == maxProbeAttempts {

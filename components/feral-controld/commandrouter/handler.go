@@ -325,10 +325,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var scopeSyncErr error
 		// scopeSyncEnabled is SyncPlaylist's enabled-count for the same one
 		// consumer: a rescue with an errorless sync that armed ZERO cached
-		// sources is still a dead cast — HasReplayableItem's answer can be
-		// stale (cleared between lookup and sync) or fail-open past its
-		// scan bound, so the installed scope's own count is what decides
-		// (#310 review).
+		// sources is still a dead cast — HasReplayableItem now grants a
+		// rescue only on a confirmed hit, but that hit can go stale (the
+		// record cleared between lookup and sync), so the installed
+		// scope's own count remains the final authority (#310 review).
 		var scopeSyncEnabled int
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			status.RecordPlaybackAttempt()

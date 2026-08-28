@@ -289,12 +289,12 @@ func (c *countingStore) LoadItem(sourceKey string) (*ItemRecord, error) {
 }
 
 // TestService_HasReplayableItem_BoundedAndDeduped pins the rescue scan's
-// cost contract (#305 review): duplicates collapse to one record read,
+// cost and evidence contract: duplicates collapse to one record read,
 // inline sources are never looked up (they are never cached), and past
-// maxRescueLookups unique sources the scan fails OPEN — uncertainty
-// favors the cast, and "rescued" is just the pre-#304 behavior — instead
-// of grinding an unbounded number of serial filesystem reads on the
-// rejection path.
+// maxRescueLookups unique sources the scan stops WITHOUT granting the
+// rescue — the rescue is an exception to a proven rejection and needs a
+// confirmed hit (#308 round 5), while the bound keeps the rejection path
+// from grinding unbounded serial filesystem reads.
 func TestService_HasReplayableItem_BoundedAndDeduped(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	cs := &countingStore{Store: NewStore(t.TempDir(), wrapper.NewOS(), wrapper.NewJSON(), logger)}
@@ -319,7 +319,7 @@ func TestService_HasReplayableItem_BoundedAndDeduped(t *testing.T) {
 	for i := range many {
 		many[i] = fmt.Sprintf("https://example.com/unique/%d", i)
 	}
-	assert.True(t, svc.HasReplayableItem(many...),
-		"an exhausted bound fails open rather than rejecting")
+	assert.False(t, svc.HasReplayableItem(many...),
+		"an exhausted bound with no hit is NO EVIDENCE — the rescue must not be granted, or an unproven rescue would go on to mutate replay scope")
 	assert.Equal(t, maxRescueLookups, cs.loads, "the scan stops at the bound")
 }
