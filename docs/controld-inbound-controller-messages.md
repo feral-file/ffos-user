@@ -85,7 +85,7 @@ send a standardized RPC error response over the relayer for most failures, so
 new inbound message families that require controller-visible errors must define
 their own response shape.
 
-The one standardized exception is **command-storm rejection**. When the device
+There are two standardized exceptions. The first is **command-storm rejection**. When the device
 sheds a command to protect itself from flooding (rate limit, concurrency
 budget, or relayer dispatch saturation — see feral-file/ffos-user#208), it
 sends an RPC response whose `message` body is:
@@ -109,6 +109,31 @@ The LAN-hub ingress reports the same condition as HTTP `429`. Controllers
 should treat this as "device busy", back off, and retry; the command was not
 applied. Control-plane messages (e.g. the `system`/topic-state message above)
 are never shed by command pressure.
+
+The second is the **dead-source cast rejection** on `displayPlaylist`
+(feral-file/ffos-user#304): when every resolved item source is definitively
+unreachable (an identity-independent HTTP 4xx, or a malformed `data:` URI),
+the cast is rejected at accept time and the controller receives a reliable
+RPC response whose `message` body is:
+
+```json
+{
+  "ok": false,
+  "error": "sourceUnreachable",
+  "command": "displayPlaylist",
+  "message": "sourceUnreachable: no playlist item source is loadable (item 0: HTTP 400)"
+}
+```
+
+`ok: false` is contractual (existing controllers decide success by that
+field). The detail names items by index and HTTP status only, capped at 10
+entries plus an omitted count — never source URLs. The LAN hub reports the
+same condition as HTTP `422`, body = the same message text. The command was
+not applied, and this is a caller-input error, not "device busy": retrying
+without fixing the sources fails again. See the `displayPlaylist` section's
+source preflight notes for the conditions that are deliberately never
+rejected (scheduled playlists, cached captures, and every non-definitive
+probe outcome).
 
 ## Shared Success Responses
 
@@ -547,8 +572,17 @@ Current error cases:
   failure metrics but the raw player response is still returned if CDP
   succeeded.
 
-Current relayer error response: none standardized for processing failures;
-command failure is logged.
+- Every resolved item source definitively unreachable (source preflight,
+  #304), unless the playlist is `displayAt`-scheduled or has a cached
+  offline capture: standardized `sourceUnreachable` rejection — see the
+  standardized error envelopes near the top of this document for the RPC body (`ok:false`, capped index+status detail)
+  and the LAN hub's 422 mapping. Anything short of a definitive dead
+  verdict for every item (network errors, timeouts, 401/403/406/407/408/
+  416/429, 5xx) fails open and the cast proceeds.
+
+Current relayer error response: the `sourceUnreachable` rejection above is
+standardized; all other processing failures remain non-standardized and are
+logged as command failures.
 
 ### displayDefaultPlaylist
 

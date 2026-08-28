@@ -1447,6 +1447,11 @@ func TestMediator_HandleRelayerMessage_SourceUnreachable(t *testing.T) {
 	assert.Equal(t, "msg-source-unreachable", sent.MessageID)
 	msg, ok := sent.Message.(map[string]any)
 	if assert.True(t, ok, "source-unreachable response carries a structured body") {
+		// ok:false must be present and false: ff-cli's relayer helper
+		// hunts for a boolean ok and reads a body WITHOUT one as success,
+		// and ff-app casts the field and throws on absence — see the
+		// mediator's reply-shape comment.
+		assert.Equal(t, false, msg["ok"])
 		assert.Equal(t, "sourceUnreachable", msg["error"])
 		assert.Equal(t, cmd, msg["command"])
 		message, _ := msg["message"].(string)

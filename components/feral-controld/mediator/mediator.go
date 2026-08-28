@@ -827,6 +827,18 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 					Type:      "RPC",
 					MessageID: payload.MessageID,
 					Message: map[string]any{
+						// ok:false is the load-bearing field for current
+						// controllers, not decoration: ff-cli's relayer
+						// helper decides success by hunting for a boolean
+						// ok (nestedOk in ff1-relayer.ts) and treats a
+						// body with none as SUCCESS, and ff-app casts the
+						// ok field and throws when it is absent. An
+						// error-only body would tell both clients the
+						// dead-link cast worked — the exact failure this
+						// reply exists to surface. (rate_limited above
+						// predates this and ships without ok; changing
+						// that shape is a separate decision.)
+						"ok":      false,
 						"error":   "sourceUnreachable",
 						"command": commandType.String(),
 						"message": err.Error(),

@@ -17,6 +17,7 @@ import (
 	go_http "net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -90,6 +91,7 @@ func TestSourceProber_IdentityDependentStatusIsInconclusive(t *testing.T) {
 	for _, status := range []int{
 		go_http.StatusUnauthorized,
 		go_http.StatusForbidden,
+		go_http.StatusNotAcceptable,
 		go_http.StatusRequestTimeout,
 		go_http.StatusTooManyRequests,
 		go_http.StatusRequestedRangeNotSatisfiable,
@@ -209,5 +211,28 @@ func TestSourceProber_SpentContextIsInconclusive(t *testing.T) {
 	for _, r := range results {
 		assert.Equal(t, ProbeInconclusive, r.Verdict)
 		assert.Error(t, r.Err)
+	}
+}
+
+// TestSourceProber_DuplicateSourcesProbedOnce pins the dedup: the worker
+// pool bounds concurrency but not request count, so identical sources must
+// share one probe — otherwise a playlist repeating one URL turns a single
+// cast into transport-speed traffic against that origin.
+func TestSourceProber_DuplicateSourcesProbedOnce(t *testing.T) {
+	var requests atomic.Int32
+	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
+		requests.Add(1)
+		go_http.Error(w, "gone", go_http.StatusGone)
+	}))
+	defer origin.Close()
+
+	sources := []string{origin.URL, origin.URL, origin.URL, origin.URL}
+	results := newTestProber().ProbeSources(context.Background(), sources)
+
+	assert.Equal(t, int32(1), requests.Load(), "identical sources share one probe request")
+	require.Len(t, results, len(sources))
+	for _, r := range results {
+		assert.Equal(t, ProbeDead, r.Verdict)
+		assert.Equal(t, go_http.StatusGone, r.Status)
 	}
 }

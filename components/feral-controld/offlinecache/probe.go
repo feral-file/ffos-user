@@ -161,9 +161,26 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 	ctx, cancel := context.WithTimeout(ctx, probePhaseCeiling)
 	defer cancel()
 
+	// Identical sources are probed ONCE and share the verdict. Semantically
+	// free (same URL, same answer, within one probe pass), and it removes
+	// the request amplifier the worker pool alone does not: the pool bounds
+	// concurrency, not request COUNT, so a hostile 4 MiB playlist repeating
+	// one tiny public URL thousands of times would otherwise turn a single
+	// unauthenticated cast into transport-speed traffic against that origin
+	// for the whole phase ceiling.
+	firstIndex := make(map[string]int, len(sources))
+	uniqueIndices := make([]int, 0, len(sources))
+	for i, source := range sources {
+		if _, seen := firstIndex[source]; seen {
+			continue
+		}
+		firstIndex[source] = i
+		uniqueIndices = append(uniqueIndices, i)
+	}
+
 	workers := probeConcurrency
-	if len(sources) < workers {
-		workers = len(sources)
+	if len(uniqueIndices) < workers {
+		workers = len(uniqueIndices)
 	}
 	indices := make(chan int)
 	var wg sync.WaitGroup
@@ -187,11 +204,19 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 			}
 		}()
 	}
-	for i := range sources {
+	for _, i := range uniqueIndices {
 		indices <- i
 	}
 	close(indices)
 	wg.Wait()
+
+	// Fan the unique verdicts back out to the duplicate positions, after
+	// the barrier so every read sees a settled result.
+	for i, source := range sources {
+		if first := firstIndex[source]; first != i {
+			results[i] = results[first]
+		}
+	}
 	return results
 }
 
@@ -258,6 +283,9 @@ func (p *sourceProber) probeOne(ctx context.Context, source string) SourceProbeR
 //     or a rate limit can answer differently for the player, and #296
 //     is the shipped proof that a 403 to one client is a 200 to
 //     another. Judging these dead would reject casts the kiosk renders.
+//   - 406 is Inconclusive: content negotiation answers the probe's
+//     request headers, not the kiosk's — an origin can refuse the
+//     probe's representation while serving one Chromium renders.
 //   - 408 is Inconclusive: a request timeout is transient by
 //     definition, same footing as a network-level timeout.
 //   - 416 is Inconclusive because it is PROBE-SHAPE-dependent, not
@@ -275,6 +303,7 @@ func verdictForStatus(status int) SourceProbeVerdict {
 		return ProbeAlive
 	case status == http.StatusUnauthorized,
 		status == http.StatusForbidden,
+		status == http.StatusNotAcceptable,
 		status == http.StatusProxyAuthRequired,
 		status == http.StatusRequestTimeout,
 		status == http.StatusTooManyRequests,
