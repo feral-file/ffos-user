@@ -411,3 +411,34 @@ func TestSourceProber_NoConnectionReuseAcrossProbes(t *testing.T) {
 	assert.Equal(t, int32(probes), conns.Load(),
 		"each probe must arrive on its own new connection — an idle connection left open would be the replay surface")
 }
+
+// TestSourceProber_DataURIsDoNotConsumeDialBudget pins the #308-round-5
+// rule: inline items never dial, so they must not charge the outbound
+// budget — otherwise a playlist packed with malformed data: URIs (a
+// pure-CPU Dead verdict) would push a real dead HTTP source into
+// budget-exhausted Inconclusive and shield an entirely unusable cast
+// from rejection.
+func TestSourceProber_DataURIsDoNotConsumeDialBudget(t *testing.T) {
+	var requests atomic.Int32
+	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
+		requests.Add(1)
+		go_http.Error(w, "not found", go_http.StatusNotFound)
+	}))
+	defer origin.Close()
+
+	// A full budget's worth of distinct malformed inline items, then the
+	// one real HTTP source.
+	sources := make([]string, 0, maxProbeAttempts+1)
+	for i := 0; i < maxProbeAttempts; i++ {
+		sources = append(sources, fmt.Sprintf("data:image/png;name=%d;base64", i))
+	}
+	sources = append(sources, origin.URL+"/dead")
+
+	results := newTestProber().ProbeSources(context.Background(), sources)
+
+	require.Len(t, results, maxProbeAttempts+1)
+	assert.Equal(t, int32(1), requests.Load(), "the one HTTP source is still probed")
+	for i, r := range results {
+		assert.Equal(t, ProbeDead, r.Verdict, "item %d: every item is definitively dead", i)
+	}
+}
