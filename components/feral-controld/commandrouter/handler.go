@@ -471,16 +471,16 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if h.sourceProber != nil && playlist != nil && len(playlist.Items) > 0 {
 				sources := make([]string, 0, len(playlist.Items))
 				// scheduledPlaylist: any item carrying displayAt makes this
-				// a scheduler-filtered playlist, and the probe sees the
-				// FULL item list before that filtering. An item outside
+				// a scheduler-filtered playlist, and the probe would see
+				// the FULL item list before that filtering. An item outside
 				// the current cohort can be dead NOW and live at display
 				// time — publish-then-upload is the normal premiere
 				// ordering, so a scheduled drop's sources routinely 404
-				// until go-live. Rejecting would silently lose the cast
+				// until go-live, and rejecting would silently lose the cast
 				// the scheduler was about to defer-accept and arm a timer
-				// for (the {ok:true, deferred:true} path below), so for
-				// scheduled playlists the probe is observability-only:
-				// dead items are logged, the rejection stands down.
+				// for (the {ok:true, deferred:true} path below). Since the
+				// probe can therefore never affect a scheduled cast, it is
+				// skipped entirely for them — see the branch below.
 				scheduledPlaylist := false
 				for _, item := range playlist.Items {
 					sources = append(sources, item.Source)
@@ -488,66 +488,76 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						scheduledPlaylist = true
 					}
 				}
-				probeResults := h.sourceProber.ProbeSources(ctx, sources)
-				// Per-item log detail is capped: the hub accepts a 4 MiB
-				// playlist with no item cap, so an all-dead hostile cast
-				// must not be able to mint one log line per item on a
-				// device whose logs are size-rotated files. The first few
-				// carry the truncated sources an operator greps for; the
-				// rest collapse into counts.
-				dead, inconclusive := 0, 0
-				for i, r := range probeResults {
-					switch r.Verdict {
-					case offlinecache.ProbeDead:
-						dead++
-						if dead <= maxProbeLogDetailItems {
-							h.logger.Warn("displayPlaylist: item source is unreachable",
-								zap.Int("item", i),
-								zap.String("source", r.Source),
-								zap.Int("status", r.Status),
-								zap.Error(r.Err))
+				if scheduledPlaylist {
+					// Scheduled playlists skip the preflight ENTIRELY, not
+					// just its rejection: the probe could never reject them
+					// (dead-now is not dead-at-display-time), so on this
+					// path it buys only log lines — at a price of up to
+					// probePhaseCeiling of added latency sitting directly
+					// in front of PrepareWithSource arming the timer and
+					// sending the current cohort, which can make a due
+					// cutover visibly late (#308 review). The scheduler's
+					// timing contract wins; dead scheduled sources surface
+					// when the cohort actually fails to render, and via
+					// the playlist-refresher follow-up tracked in #304.
+					h.logger.Debug("displayPlaylist: displayAt-scheduled playlist; source preflight skipped",
+						zap.Int("items", len(sources)))
+				} else {
+					probeResults := h.sourceProber.ProbeSources(ctx, sources)
+					// Per-item log detail is capped: the hub accepts a 4 MiB
+					// playlist with no item cap, so an all-dead hostile cast
+					// must not be able to mint one log line per item on a
+					// device whose logs are size-rotated files. The first few
+					// carry the truncated sources an operator greps for; the
+					// rest collapse into counts.
+					dead, inconclusive := 0, 0
+					for i, r := range probeResults {
+						switch r.Verdict {
+						case offlinecache.ProbeDead:
+							dead++
+							if dead <= maxProbeLogDetailItems {
+								h.logger.Warn("displayPlaylist: item source is unreachable",
+									zap.Int("item", i),
+									zap.String("source", r.Source),
+									zap.Int("status", r.Status),
+									zap.Error(r.Err))
+							}
+						case offlinecache.ProbeInconclusive:
+							inconclusive++
 						}
-					case offlinecache.ProbeInconclusive:
-						inconclusive++
 					}
-				}
-				if dead > maxProbeLogDetailItems {
-					h.logger.Warn("displayPlaylist: additional item sources unreachable",
-						zap.Int("count", dead-maxProbeLogDetailItems))
-				}
-				if inconclusive > 0 {
-					h.logger.Debug("displayPlaylist: item source probes inconclusive",
-						zap.Int("count", inconclusive))
-				}
-				if dead == len(probeResults) {
-					switch {
-					case scheduledPlaylist:
-						// See scheduledPlaylist's doc above: dead-now is
-						// not dead-at-display-time for a scheduled drop,
-						// and rejecting would lose the deferred cast.
-						h.logger.Warn("displayPlaylist: every item source is unreachable but the playlist is displayAt-scheduled; deferring to the scheduler",
-							zap.Int("items", len(sources)))
-					case h.offlineCache != nil && h.kioskReplay != nil && h.offlineCache.HasReplayableItem(sources...):
-						// A definitively dead ORIGIN is not a dead CAST
-						// when the offline cache holds a prior capture:
-						// replay serves cached items regardless of origin
-						// state, and origin rot is exactly the case the
-						// cache exists for (#305 review F4). Checked only
-						// on the all-dead path — one record read per
-						// source, worst case — so the common accept path
-						// pays nothing. The rescue is conditional on
-						// replay actually being able to serve: kioskReplay
-						// must be wired here, and the scope sync below
-						// must succeed (see rescuedByCache's doc) — a
-						// record on disk that replay cannot arm rescues
-						// nothing.
-						rescuedByCache = true
-						rescueProbeResults = probeResults
-						h.logger.Warn("displayPlaylist: every item source is unreachable but cached captures exist; casting for offline replay",
-							zap.Int("items", len(sources)))
-					default:
-						err = &SourceUnreachableError{Results: probeResults}
-						return nil, err
+					if dead > maxProbeLogDetailItems {
+						h.logger.Warn("displayPlaylist: additional item sources unreachable",
+							zap.Int("count", dead-maxProbeLogDetailItems))
+					}
+					if inconclusive > 0 {
+						h.logger.Debug("displayPlaylist: item source probes inconclusive",
+							zap.Int("count", inconclusive))
+					}
+					if dead == len(probeResults) {
+						switch {
+						case h.offlineCache != nil && h.kioskReplay != nil && h.offlineCache.HasReplayableItem(sources...):
+							// A definitively dead ORIGIN is not a dead CAST
+							// when the offline cache holds a prior capture:
+							// replay serves cached items regardless of origin
+							// state, and origin rot is exactly the case the
+							// cache exists for (#305 review F4). Checked only
+							// on the all-dead path — one record read per
+							// source, worst case — so the common accept path
+							// pays nothing. The rescue is conditional on
+							// replay actually being able to serve: kioskReplay
+							// must be wired here, and the scope sync below
+							// must succeed (see rescuedByCache's doc) — a
+							// record on disk that replay cannot arm rescues
+							// nothing.
+							rescuedByCache = true
+							rescueProbeResults = probeResults
+							h.logger.Warn("displayPlaylist: every item source is unreachable but cached captures exist; casting for offline replay",
+								zap.Int("items", len(sources)))
+						default:
+							err = &SourceUnreachableError{Results: probeResults}
+							return nil, err
+						}
 					}
 				}
 			}

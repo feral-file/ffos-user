@@ -296,13 +296,13 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadNotCached_StillRejects(t 
 	assert.Nil(t, result)
 }
 
-// TestCommandHandler_Process_DisplayPlaylist_AllDeadButScheduled_DefersNotRejects
-// pins the premiere carve-out: a displayAt-scheduled playlist's sources are
-// probed pre-filter, and a scheduled drop's assets routinely 404 until
-// go-live (publish-then-upload ordering) — so an all-dead verdict on a
-// scheduled playlist must never reject the cast the scheduler was about to
-// defer-accept and arm a timer for.
-func TestCommandHandler_Process_DisplayPlaylist_AllDeadButScheduled_DefersNotRejects(t *testing.T) {
+// TestCommandHandler_Process_DisplayPlaylist_Scheduled_SkipsPreflightEntirely
+// pins the premiere carve-out in its #308-round-3 form: a scheduled
+// playlist's probe verdict could never affect the cast (dead-now is not
+// dead-at-display-time), so the preflight must not run AT ALL — its only
+// possible contribution is up to probePhaseCeiling of latency sitting in
+// front of the scheduler arming a due cutover.
+func TestCommandHandler_Process_DisplayPlaylist_Scheduled_SkipsPreflightEntirely(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -312,8 +312,8 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadButScheduled_DefersNotRej
 
 	playlistURL := "https://example.com/playlist.json"
 	// No scheduler wired in this setup, so the cast proceeds down the
-	// default send path — the assertion is that it PROCEEDS (reaches the
-	// player) instead of being rejected by the preflight.
+	// default send path — the assertions are that it PROCEEDS and that
+	// the prober was never consulted.
 	expectDisplayPlaylistSuccess(ts, playlistURL, playlist)
 
 	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
@@ -325,6 +325,8 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadButScheduled_DefersNotRej
 
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
+	assert.Empty(t, prober.probed,
+		"a scheduled playlist must not be probed at all — the verdict could never affect it, only delay it")
 }
 
 // TestCommandHandler_Process_DisplayPlaylist_RejectionSkipsReplayResync pins
