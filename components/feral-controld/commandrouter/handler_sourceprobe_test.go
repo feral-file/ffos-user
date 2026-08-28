@@ -10,6 +10,7 @@ package commandrouter_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/golang/mock/gomock"
@@ -327,6 +328,35 @@ func TestCommandHandler_Process_DisplayPlaylist_Scheduled_SkipsPreflightEntirely
 	assert.NotNil(t, result)
 	assert.Empty(t, prober.probed,
 		"a scheduled playlist must not be probed at all — the verdict could never affect it, only delay it")
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_OverItemBudget_SkipsPreflight
+// pins the #308-round-4 bound: past maxPreflightItems the preflight is
+// skipped before ANY per-item bookkeeping is built (fail open) — the
+// request and lookup caps already bounded network and disk work, and this
+// bounds the memory/CPU bookkeeping in front of them.
+func TestCommandHandler_Process_DisplayPlaylist_OverItemBudget_SkipsPreflight(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	items := make([]dp1playlist.PlaylistItem, commandrouter.MaxPreflightItemsForTest+1)
+	for i := range items {
+		items[i] = dp1playlist.PlaylistItem{ID: fmt.Sprintf("i%d", i), Source: "https://origin.example/dead"}
+	}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: items}}
+
+	playlistURL := "https://example.com/playlist.json"
+	expectDisplayPlaylistSuccess(ts, playlistURL, playlist)
+
+	prober := &fakeSourceProber{results: nil}
+	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Empty(t, prober.probed,
+		"an over-budget playlist must not be probed at all — fail open before any per-item state")
 }
 
 // TestCommandHandler_Process_DisplayPlaylist_RejectionSkipsReplayResync pins

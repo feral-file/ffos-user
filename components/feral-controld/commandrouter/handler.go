@@ -468,7 +468,8 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// (see that comment). err must be assigned, not just returned,
 			// so the deferred playback-failure accounting above records the
 			// rejection.
-			if h.sourceProber != nil && playlist != nil && len(playlist.Items) > 0 {
+			if h.sourceProber != nil && playlist != nil && len(playlist.Items) > 0 &&
+				len(playlist.Items) <= maxPreflightItems {
 				sources := make([]string, 0, len(playlist.Items))
 				// scheduledPlaylist: any item carrying displayAt makes this
 				// a scheduler-filtered playlist, and the probe would see
@@ -560,6 +561,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						}
 					}
 				}
+			}
+
+			if h.sourceProber != nil && playlist != nil && len(playlist.Items) > maxPreflightItems {
+				// Over the preflight item budget: skip before building any
+				// per-item state (fail open) — see maxPreflightItems.
+				h.logger.Warn("displayPlaylist: playlist exceeds the preflight item budget; source preflight skipped",
+					zap.Int("items", len(playlist.Items)),
+					zap.Int("budget", maxPreflightItems))
 			}
 
 			// Player CanvasService rejects displayPlaylist without a known

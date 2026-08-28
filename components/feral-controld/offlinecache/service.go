@@ -2835,7 +2835,9 @@ const maxRescueLookups = 512
 // cached at all (Classify returns ClassInline and nothing is enqueued —
 // see ClassInline's doc), so looking one up can only ever miss.
 func (s *service) HasReplayableItem(sources ...string) bool {
-	seen := make(map[string]struct{}, len(sources))
+	// Capacity capped at the lookup bound, not the raw item count — same
+	// attacker-sized-allocation concern as the probe's own maps.
+	seen := make(map[string]struct{}, min(len(sources), maxRescueLookups))
 	for _, source := range sources {
 		if source == "" || isInlineSource(source) {
 			continue

@@ -221,9 +221,12 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 	// ceiling. Keyed on probeWireKey, not the raw string — see its doc.
 	// maxProbeAttempts is the second half of the same bound, for
 	// wire-DISTINCT floods.
-	firstIndex := make(map[string]int, len(sources))
+	// Capacity hints are capped at what the budget can actually admit:
+	// sizing them to the raw item count would hand an attacker-sized
+	// allocation to a playlist that repeats one tiny URL (#308 review).
+	firstIndex := make(map[string]int, min(len(sources), maxProbeAttempts))
 	keyOf := make([]string, len(sources))
-	uniqueIndices := make([]int, 0, len(sources))
+	uniqueIndices := make([]int, 0, min(len(sources), maxProbeAttempts))
 	for i, source := range sources {
 		key := probeWireKey(source)
 		keyOf[i] = key
