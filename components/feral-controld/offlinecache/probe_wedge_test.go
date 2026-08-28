@@ -14,6 +14,7 @@ package offlinecache
 import (
 	"context"
 	"fmt"
+	"net"
 	go_http "net/http"
 	"net/http/httptest"
 	"strings"
@@ -380,4 +381,33 @@ func TestSourceProber_RedirectChainCannotExceedBudget(t *testing.T) {
 			assert.Equal(t, ProbeInconclusive, r.Verdict, "item %d: over budget", i)
 		}
 	}
+}
+
+// TestSourceProber_NoConnectionReuseAcrossProbes pins the #311 round-2
+// fix at its mechanism: every probe dials a FRESH connection (keep-alives
+// disabled), because net/http replays an idempotent GET only on a REUSED
+// idle connection that dies — no reuse, no replay, and the per-cast
+// request budget stays literal even against an origin that seeds and
+// drops idle connections.
+func TestSourceProber_NoConnectionReuseAcrossProbes(t *testing.T) {
+	var conns atomic.Int32
+	server := httptest.NewUnstartedServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
+		w.WriteHeader(go_http.StatusOK)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state go_http.ConnState) {
+		if state == go_http.StateNew {
+			conns.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	prober := newTestProber()
+	const probes = 3
+	for i := 0; i < probes; i++ {
+		result := probeOneSource(t, prober, fmt.Sprintf("%s/item?n=%d", server.URL, i))
+		assert.Equal(t, ProbeAlive, result.Verdict, "probe %d", i)
+	}
+	assert.Equal(t, int32(probes), conns.Load(),
+		"each probe must arrive on its own new connection — an idle connection left open would be the replay surface")
 }
