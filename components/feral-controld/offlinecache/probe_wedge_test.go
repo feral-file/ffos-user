@@ -101,7 +101,7 @@ func TestSourceProber_IdentityDependentStatusIsInconclusive(t *testing.T) {
 		origin.Close()
 
 		assert.Equal(t, ProbeInconclusive, result.Verdict, "status %d", status)
-		assert.Equal(t, status, result.Status, "status %d")
+		assert.Equal(t, status, result.Status, "status %d", status)
 	}
 }
 

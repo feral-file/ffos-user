@@ -3,7 +3,7 @@ package commandrouter_test
 // Cast-time source preflight (feral-file/ffos-user#304): the displayPlaylist
 // path rejects a cast only when EVERY resolved item source earned a
 // definitive dead verdict, and fails open on everything else. The probe
-// mechanics themselves (HEAD/GET fallback, guard, timeouts) are covered in
+// mechanics themselves (the single ranged GET, guard, timeouts) are covered in
 // offlinecache's probe tests; these cover the handler's decision rule and
 // its wiring.
 
