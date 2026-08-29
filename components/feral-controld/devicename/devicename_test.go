@@ -20,7 +20,7 @@ func TestSanitize(t *testing.T) {
 			// A name set over the LAN command surface can carry these
 			// invisibly; they would let one unit's record render as another's.
 			name: "strips bidi overrides and zero-width",
-			in:   "Living‮Room​",
+			in:   "Living\u202eRoom\u200b",
 			want: "LivingRoom",
 		},
 		{
