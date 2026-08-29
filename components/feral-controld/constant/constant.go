@@ -11,7 +11,12 @@ const (
 	STATE_FILE               = "/home/feralfile/.state/controld.state"
 	SLEEP_SCHEDULE_FILE      = "/home/feralfile/.state/sleep-schedule.json"
 	DISPLAY_AT_PLAYLIST_FILE = "/home/feralfile/.state/display-at-playlist.json"
-	CONFIG_FILE              = "/home/feralfile/.config/controld.json"
+	// DEVICE_NAME_FILE holds the owner's name for this unit. Deliberately not
+	// the hostname: the hostname is the serial, which is the device's identity
+	// on the network and the key the registry, telemetry, and the owner-contact
+	// record all share. A label the owner can change must not be able to move it.
+	DEVICE_NAME_FILE = "/home/feralfile/.state/device-name.json"
+	CONFIG_FILE      = "/home/feralfile/.config/controld.json"
 
 	SSH_AUTHORIZED_KEYS_FILE = "/home/feralfile/.ssh/authorized_keys"
 	SSH_DISABLE_UNIT         = "ff1-ssh-disable"

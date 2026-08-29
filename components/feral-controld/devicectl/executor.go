@@ -18,6 +18,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
@@ -65,6 +66,12 @@ type Executor interface {
 	// seam that lets the mediator re-register mDNS with an updated `claimed` TXT
 	// without coupling the executor to the mediator. Set once at wiring time.
 	SetClaimObserver(observer func(claimed bool))
+
+	// SetDeviceNameObserver registers a callback invoked with the stored name
+	// after a successful setDeviceName. mDNS publishes its TXT record once at
+	// Register time, so the advertised name only changes if something
+	// re-registers — the same constraint SetClaimObserver exists for.
+	SetDeviceNameObserver(observer func(name string))
 	// SetSetupUI injects the process-wide setup-narration surface so the
 	// controld-owned claim/factory-reset/OTA-failure narration shares ONE
 	// setupui.Service with the provisioning domain. Set once at wiring time; the
@@ -93,6 +100,11 @@ type executor struct {
 	// claimObserver, when set, is notified on claim-state transitions. Set once
 	// at wiring time before commands are served, so it needs no lock.
 	claimObserver func(claimed bool)
+
+	// nameObserver, when set, is notified after the device name is stored so
+	// the mDNS record can be re-registered with it. Same wiring discipline as
+	// claimObserver: set once before commands are served, so no lock.
+	nameObserver func(name string)
 
 	// Add reference to StatusPoller to get metrics
 	statusPoller status.Poller
@@ -501,6 +513,10 @@ func (e *executor) SetClaimObserver(observer func(claimed bool)) {
 	e.claimObserver = observer
 }
 
+func (e *executor) SetDeviceNameObserver(observer func(name string)) {
+	e.nameObserver = observer
+}
+
 // SetSetupUI injects the shared setup-narration surface so the controld-owned
 // claim/factory-reset/OTA-failure narration and the provisioning domain's
 // narration all flow through ONE setupui.Service — the same instance main wires
@@ -610,6 +626,8 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.ddcPanelStatus(ctx, bytes)
 	case commands.CMD_SET_SLEEP_SCHEDULE:
 		result, err = e.setSleepSchedule(ctx, bytes)
+	case commands.CMD_SET_DEVICE_NAME:
+		result, err = e.setDeviceName(ctx, bytes)
 	case commands.CMD_SLEEP_NOW:
 		result, err = e.sleepNow(ctx)
 	case commands.CMD_WAKE_NOW:
@@ -2907,6 +2925,16 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	// the install creates only @log, @pkg and @snapshots), so booting the
 	// candidate discards it wholesale. It is kept for the rollback path alone.
 	e.clearPersistedClaim()
+
+	// The owner's name for this unit falls with the claim, and for the same
+	// rollback reason: on the success path the record is discarded with the
+	// subvolume, but a reset that rolls back must not leave a resold frame
+	// still announcing the previous owner's vocabulary over mDNS. Best-effort
+	// — a name that outlives a failed reset is cosmetic, and failing the reset
+	// over it would trade a real outcome for a label.
+	if err := devicename.Clear(e.os); err != nil {
+		e.logger.Warn("Failed to clear device name during factory reset", zap.Error(err))
+	}
 
 	// The process-lifetime pairing latch must fall with the persisted claim,
 	// or claimSettled() would still read true and withhold the claim QR after

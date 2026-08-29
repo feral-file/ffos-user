@@ -19,6 +19,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
@@ -217,10 +218,17 @@ func stagedResetExecutor(t *testing.T, ctrl *gomock.Controller, unitOK bool) (*e
 		mockCmd.EXPECT().CombinedOutput().Return([]byte("unit failed"), errors.New("exit status 1"))
 	}
 
+	// The reset clears the owner's device name alongside the claim, so the
+	// executor needs a real OS seam here even though this test is about the
+	// claim-QR latch.
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
+
 	spy := &narratorSpy{}
 	e := &executor{
 		logger:        zap.NewNop(),
 		exec:          mockExec,
+		os:            mockOS,
 		setupNarrator: spy,
 		json:          wrapper.NewJSON(),
 		clock:         &pendingRebootClock{},
@@ -309,9 +317,12 @@ func TestFactoryReset_StuckResetWatchdogArms(t *testing.T) {
 		Return(mockCmd)
 	mockCmd.EXPECT().CombinedOutput().Return([]byte(""), nil)
 
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
+
 	// No narratorSpy here: the watchdog fires on its own goroutine, and the spy
 	// is not synchronized. The lazily-built real Service is.
-	e := &executor{logger: zap.NewNop(), exec: mockExec, json: wrapper.NewJSON(), clock: &autoClaimClock{}}
+	e := &executor{logger: zap.NewNop(), exec: mockExec, os: mockOS, json: wrapper.NewJSON(), clock: &autoClaimClock{}}
 
 	_, err := e.factoryReset(context.Background())
 	require.NoError(t, err)

@@ -183,6 +183,8 @@ func permissiveOSReads(m *mocks.MockOS) {
 	m.EXPECT().ReadDir(gomock.Any()).Return(nil, errLANNotExist).AnyTimes()
 	m.EXPECT().Stat(gomock.Any()).Return(nil, errLANNotExist).AnyTimes()
 	m.EXPECT().IsNotExist(gomock.Any()).Return(true).AnyTimes()
+	// factoryReset clears the owner's device-name record alongside the claim.
+	m.EXPECT().Remove(gomock.Any()).Return(errLANNotExist).AnyTimes()
 }
 
 // TestLANRecovery_OfflineCommandPipeline drives the full ex-BLE recovery set
