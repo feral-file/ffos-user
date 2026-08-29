@@ -868,6 +868,46 @@ Current error cases:
 
 Current relayer error response: none standardized; command failure is logged.
 
+### setDeviceName
+
+Purpose: set the owner-visible display label for this Art Computer. The label
+is not an identity — the hostname remains the device serial and the advertised
+mDNS TXT `id`.
+
+Example:
+
+```json
+{
+  "messageID": "msg-device-name-1",
+  "message": {
+    "command": "setDeviceName",
+    "request": {
+      "name": "Living Room"
+    }
+  }
+}
+```
+
+Current success response: `{"ok": true, "deviceName": "Living Room"}`. The
+returned value is the **stored** form after normalization (control characters
+to a space, formatting characters removed, whitespace collapsed, truncated to
+32 runes), which may differ from what was sent. Controllers should adopt the
+returned value rather than echoing their own input.
+
+Clearing: send `{"name": ""}`. The record is removed from the display path and
+the unit falls back to its serial in both mDNS and status.
+
+Current error cases:
+
+- `request` absent or `null`, `name` absent, or `name` explicitly `null` —
+  rejected as invalid arguments. This is deliberate: an incomplete request must
+  not silently erase an owner-set label, and `""` remains the way to clear.
+- A factory reset has staged. The rename is rejected rather than racing the
+  reset's clear.
+- State directory creation, temp write, or rename fails.
+
+Current relayer error response: none standardized; command failure is logged.
+
 ### betaFeaturesToggle
 
 Purpose: enable or disable beta features by updating the local sentinel file.

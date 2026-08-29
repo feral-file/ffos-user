@@ -99,3 +99,68 @@ func TestSetDeviceName_RejectsMalformedArguments(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid arguments")
 }
+
+// A missing or null name is malformed, NOT a clear. The two are one character
+// apart on the wire and opposite in effect, so an incomplete controller
+// request must not silently erase an owner-set label. Note an omitted
+// `request` object reaches this handler as literal `null`.
+func TestSetDeviceName_RejectsAbsentAndNullName(t *testing.T) {
+	for _, args := range []string{`{}`, `null`, `{"name":null}`} {
+		t.Run(args, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			// No filesystem expectations: none of these may reach the disk.
+			e := &executor{
+				logger: zap.NewNop(),
+				os:     mocks.NewMockOS(ctrl),
+				json:   wrapper.NewJSON(),
+			}
+
+			_, err := e.setDeviceName(context.Background(), []byte(args))
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "name is required")
+		})
+	}
+}
+
+// The command router checks the reset latch before dispatch, which only proves
+// no reset had staged when the request was ADMITTED. This pins the re-check
+// inside the mutation lock — without it a rename can land after the reset
+// cleared the record, and a rolled-back unit keeps the previous owner's label.
+func TestSetDeviceName_RefusesOnceAFactoryResetIsStaged(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	e := &executor{
+		logger: zap.NewNop(),
+		os:     mocks.NewMockOS(ctrl),
+		json:   wrapper.NewJSON(),
+	}
+	e.resetStaged.Store(true)
+
+	_, err := e.setDeviceName(context.Background(), []byte(`{"name":"Living Room"}`))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "factory reset in progress")
+}
+
+// The reset's clear must move the ADVERTISED name too. It previously notified
+// only the claim observer, whose re-registration republishes the mediator's
+// cached name — so a rolled-back reset kept announcing the old label.
+func TestClearDeviceName_AnnouncesTheFallback(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
+
+	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON()}
+
+	var announced []string
+	e.SetDeviceNameObserver(func(name string) { announced = append(announced, name) })
+
+	require.NoError(t, e.clearDeviceName())
+	assert.Equal(t, []string{""}, announced)
+}

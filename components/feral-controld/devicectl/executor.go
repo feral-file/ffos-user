@@ -18,7 +18,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
-	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
@@ -105,6 +104,13 @@ type executor struct {
 	// the mDNS record can be re-registered with it. Same wiring discipline as
 	// claimObserver: set once before commands are served, so no lock.
 	nameObserver func(name string)
+
+	// deviceNameMu serializes every mutation of the device-name record and the
+	// observer notification that follows it. Both writers stage through one
+	// shared temp path and both are reachable concurrently (a rename over the
+	// hub while a factory reset runs), so this is what keeps disk, mDNS, and
+	// status from disagreeing. See setDeviceName for the two races it closes.
+	deviceNameMu sync.Mutex
 
 	// Add reference to StatusPoller to get metrics
 	statusPoller status.Poller
@@ -2932,7 +2938,7 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	// still announcing the previous owner's vocabulary over mDNS. Best-effort
 	// — a name that outlives a failed reset is cosmetic, and failing the reset
 	// over it would trade a real outcome for a label.
-	if err := devicename.Clear(e.os); err != nil {
+	if err := e.clearDeviceName(); err != nil {
 		e.logger.Warn("Failed to clear device name during factory reset", zap.Error(err))
 	}
 
