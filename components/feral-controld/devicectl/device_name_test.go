@@ -4,13 +4,14 @@ import (
 	"context"
 	"testing"
 
-	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
-	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
-	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // deviceNameExecutor builds a bare executor with a real JSON wrapper and a
