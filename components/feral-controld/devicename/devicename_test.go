@@ -24,6 +24,14 @@ func TestSanitize(t *testing.T) {
 			want: "LivingRoom",
 		},
 		{
+			// The plain bidi marks set direction with no paired scope, so a
+			// single invisible character reorders the label. Blocking the
+			// override class without these would leave the easier attack open.
+			name: "strips the bidi marks LRM, RLM and ALM",
+			in:   "Living\u200eRoom\u200f\u061c",
+			want: "LivingRoom",
+		},
+		{
 			// Empty is a value, not a rejection: it is how an owner undoes a
 			// rename, and the unit falls back to its serial.
 			name: "input that cleans away to nothing yields empty",

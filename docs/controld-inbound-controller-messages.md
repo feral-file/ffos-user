@@ -256,10 +256,18 @@ Current success response example:
     },
     "volume": 75,
     "isMuted": false,
-    "displayURL": "http://127.0.0.1:8080/"
+    "displayURL": "http://127.0.0.1:8080/",
+    "deviceName": "Living Room"
   }
 }
 ```
+
+`deviceName` is the owner-set display label (see `setDeviceName`). Like
+`contract`, it is **always present** on firmware that supports it and carries
+`""` when the unit has never been named — so its PRESENCE, not its value, is
+the capability signal: a controller offers renaming when the key exists and
+withholds the affordance when it does not. An empty value means "unnamed, show
+the serial", never "this frame cannot be renamed".
 
 `contract` is always `"2"` on this firmware (equal to the hub's
 `/api/v2/status` contract — one firmware gate, two transports): it lets the

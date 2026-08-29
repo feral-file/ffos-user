@@ -39,10 +39,16 @@ type Record struct {
 var controlCharacters = regexp.MustCompile(`[\x00-\x1f\x7f-\x9f]`)
 
 // formattingCharacters matches characters that are invisible but change how
-// the text around them renders: zero-width spaces and joiners, bidi overrides
-// and isolates, the line and paragraph separators, and the BOM. These are
-// removed rather than spaced, because they occupy no width — turning one into
-// a space would alter a name the owner can see.
+// the text around them renders: zero-width spaces and joiners, the bidi marks
+// (LRM/RLM/ALM), bidi overrides and isolates, the line and paragraph
+// separators, and the BOM. These are removed rather than spaced, because they
+// occupy no width — turning one into a space would alter a name the owner can
+// see.
+//
+// The plain marks matter as much as the overrides: U+200E, U+200F and U+061C
+// set direction for the text that follows without any of the paired-scope
+// machinery, so leaving them in would let a caller reorder a label with a
+// single invisible character while the override class was carefully blocked.
 //
 // They are stripped rather than rejected. The name arrives over a command
 // surface the hub serves unauthenticated on the LAN today, so a device on the
@@ -54,7 +60,7 @@ var controlCharacters = regexp.MustCompile(`[\x00-\x1f\x7f-\x9f]`)
 // disagree, the owner sees one name in the field and the device stores
 // another.
 var formattingCharacters = regexp.MustCompile(
-	`[\x{200b}-\x{200d}\x{202a}-\x{202e}\x{2066}-\x{2069}\x{2028}\x{2029}\x{feff}]`,
+	`[\x{061c}\x{200b}-\x{200f}\x{202a}-\x{202e}\x{2066}-\x{2069}\x{2028}\x{2029}\x{feff}]`,
 )
 
 var repeatedWhitespace = regexp.MustCompile(`\s+`)
