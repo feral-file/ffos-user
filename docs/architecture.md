@@ -229,6 +229,7 @@ Each service owns its own state files exclusively. No service should read or wri
 | `feral-controld` | `/home/feralfile/.state/analytics-toggle-off` | Presence = analytics disabled |
 | `feral-controld` | `/home/feralfile/.state/beta-features-toggle-on` | Presence = beta features enabled |
 | `feral-controld` | `/home/feralfile/.state/saved-volume` | Persisted volume level |
+| `feral-controld` | `/home/feralfile/.state/device-name.json` | Owner-set display label for this unit. Never the identity — the hostname remains the serial. Cleared by factory reset; every read failure degrades to the serial so a bad record cannot make the device undiscoverable |
 | updater scripts | `/home/feralfile/ff1-config.json` | Device branch, current version, update channel URLs (read-only at runtime by services) |
 | system | `/etc/hostname` | Device hostname (read-only at runtime; used by `controld` for mDNS identity, the SoftAP SSID/PSK, and the device id) |
 | earlyoom/oom-state | `/var/lib/oom_state/chromium-oom-kill-count` | Chromium OOM kill count (read by `controld` OOM recoverer) |

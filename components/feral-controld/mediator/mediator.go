@@ -39,6 +39,7 @@ type Mediator interface {
 	// LAN even with no upstream internet.
 	InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, link status.LinkState)
 	SetClaimed(claimed bool)
+	SetDeviceName(name string)
 	// SetTopicObserver registers a callback invoked when the relayer assigns
 	// this device its system topic (empty -> non-empty transition). Wired once
 	// at composition time, before Start; main uses it to re-trigger the
@@ -526,6 +527,37 @@ func (m *mediator) SetClaimed(claimed bool) {
 	// Only re-advertise while a link exists, mirroring the link-keyed lifecycle;
 	// if the link is down the periodic reconcile (SYSMETRICS) brings it back with
 	// the current (now updated) TXT once a link appears.
+	if m.linkState != nil && m.linkState.HasLink(context.Background()) {
+		m.startMDNSLocked()
+	}
+}
+
+// SetDeviceName updates the advertised device name. Same mechanism and same
+// reason as SetClaimed: zeroconf publishes its TXT record once at Register
+// time, so a name change only reaches the network through a Stop+Start.
+//
+// The name is also the mDNS service-instance label, so re-registering moves
+// the device to a new instance name — controllers see the old instance go and
+// a new one arrive. That is safe because discovery identity is the TXT `id`
+// (the serial), which does not change here; a resolver keying on the instance
+// name alone would already be broken by an ordinary re-register.
+func (m *mediator) SetDeviceName(name string) {
+	m.mdnsMu.Lock()
+	defer m.mdnsMu.Unlock()
+
+	if m.mdnsDeviceInfo.Name == name {
+		return
+	}
+	m.mdnsDeviceInfo.Name = name
+
+	if m.mdnsAdvertiser == nil {
+		return
+	}
+
+	m.logger.Info("Re-registering mDNS after device-name change")
+	m.stopMDNSLocked()
+	// Link-keyed, exactly as SetClaimed: with no link the periodic reconcile
+	// brings the advertiser back carrying the updated name.
 	if m.linkState != nil && m.linkState.HasLink(context.Background()) {
 		m.startMDNSLocked()
 	}

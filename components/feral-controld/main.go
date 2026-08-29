@@ -26,6 +26,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
@@ -362,7 +363,7 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		}
 
 		claim := state.ClaimSnapshot()
-		deviceInfo := resolveMDNSDeviceInfo(app.OS, claim, app.Logger)
+		deviceInfo := resolveMDNSDeviceInfo(app.OS, app.JSON, claim, app.Logger)
 		deviceInfo.Claimed = claim.Claimed
 		advertiser := mdns.New(app.Logger)
 		defer advertiser.Stop()
@@ -658,7 +659,7 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	return nil
 }
 
-func resolveMDNSDeviceInfo(os wrapper.OS, claim state.ClaimInfo, logger *zap.Logger) mdns.DeviceInfo {
+func resolveMDNSDeviceInfo(os wrapper.OS, json wrapper.JSON, claim state.ClaimInfo, logger *zap.Logger) mdns.DeviceInfo {
 	deviceID := ""
 	deviceName := ""
 	hostnameBytes, err := os.ReadFile(constants.HOSTNAME_FILE)
@@ -670,6 +671,17 @@ func resolveMDNSDeviceInfo(os wrapper.OS, claim state.ClaimInfo, logger *zap.Log
 			deviceID = hostname
 			deviceName = hostname
 		}
+	}
+
+	// The owner's name outranks the hostname as the DISPLAY label only; the
+	// hostname remains deviceID above, so the serial stays the identity every
+	// resolver keys on. An unnamed unit, an unreadable record, or a corrupt
+	// one all leave deviceName as the hostname — the name is cosmetic and must
+	// never be able to make a device undiscoverable.
+	if record, nameErr := devicename.Load(os, json); nameErr != nil {
+		logger.Warn("Failed to read device name for mDNS", zap.Error(nameErr))
+	} else if record.Name != "" {
+		deviceName = record.Name
 	}
 
 	if (deviceID == "" || deviceName == "") && claim.DeviceID != "" {
@@ -1102,6 +1114,13 @@ func initializeApp(
 	// executor can observe any transition (command handling starts after
 	// initializeApp returns).
 	var provMachineForClaim *provisioning.Machine
+	// A rename re-registers mDNS with the new label so a second controller —
+	// another phone, ff-cli's discovery — sees it without the owner repeating
+	// themselves. The advertised identity (TXT `id`) is untouched.
+	executor.SetDeviceNameObserver(func(name string) {
+		mediator.SetDeviceName(name)
+	})
+
 	executor.SetClaimObserver(func(claimed bool) {
 		mediator.SetClaimed(claimed)
 		if provMachineForClaim != nil {
@@ -1193,7 +1212,7 @@ func initializeApp(
 	provisioningNotifier := &setupNotifier{ui: setupNarrator, logger: logger, claimCtx: context,
 		// The same identity mDNS advertises; §4.6 trouble-state copy carries it
 		// so a user reporting a stuck frame can say which one.
-		deviceName: resolveMDNSDeviceInfo(os, state.ClaimSnapshot(), logger).Name}
+		deviceName: resolveMDNSDeviceInfo(os, json, state.ClaimSnapshot(), logger).Name}
 	// The claim flow's topic-wait expiry narration needs a cached internet
 	// verdict to tell "no WAN — the topic can never arrive" from "relayer
 	// slow" (§4.6, the unclaimed wired no-WAN black screen). Same cached

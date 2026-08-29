@@ -12,6 +12,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
@@ -148,6 +149,13 @@ type DeviceStatusResponse struct {
 	Volume              *int              `json:"volume,omitempty"`
 	IsMuted             *bool             `json:"isMuted,omitempty"`
 	DisplayURL          *string           `json:"displayURL,omitempty"` // Chrome UI URL from CDP; omitted if unavailable.
+	// DeviceName is the owner's label for this unit, empty when nobody has set
+	// one. Deliberately no omitempty, for the same reason as Contract above:
+	// its PRESENCE is the capability signal a controller gates its rename
+	// affordance on, and an unnamed device is the ordinary case — omitting the
+	// key there would report "this firmware cannot be renamed" on every frame
+	// that simply has not been.
+	DeviceName string `json:"deviceName"`
 	// SleepSchedule is derived from persisted schedule + wall clock (see sleepschedule).
 	// It reflects intended FF1 sleep mode; FFP panel DDC power may lag after transitions
 	// because controld aligns panel power asynchronously (best-effort, eventual vs. ddcPanelStatus).
@@ -169,6 +177,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	var isMuted *bool
 	var displayURL *string
 	var sleepScheduleStatus *sleepschedule.Status
+	var deviceName string
 
 	// Chrome UI document URL. This is the same target listing the poller uses, but
 	// keeping it here preserves the response shape for direct CMD_DEVICE_STATUS calls.
@@ -182,6 +191,19 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 			return nil
 		}
 		displayURL = &u
+		return nil
+	})
+
+	// Owner-set device name. A read failure or a corrupt record yields the
+	// empty name rather than an error: the field is cosmetic, every consumer
+	// falls back to the serial, and failing the whole status collection over a
+	// label would take the frame's health readout down with it.
+	g.Go(func() error {
+		record, err := devicename.Load(d.os, d.json)
+		if err != nil {
+			return nil
+		}
+		deviceName = record.Name
 		return nil
 	})
 
@@ -363,6 +385,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.Volume = volume
 	response.IsMuted = isMuted
 	response.DisplayURL = displayURL
+	response.DeviceName = deviceName
 	response.SleepSchedule = sleepScheduleStatus
 
 	// Get MAC info from config (fetched once at startup)
