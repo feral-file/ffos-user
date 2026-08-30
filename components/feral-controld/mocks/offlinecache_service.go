@@ -192,6 +192,24 @@ func (mr *MockOfflineCacheServiceMockRecorder) DownloadPlaylist(ctx, playlistRaw
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DownloadPlaylist", reflect.TypeOf((*MockOfflineCacheService)(nil).DownloadPlaylist), ctx, playlistRaw, sourceURL)
 }
 
+// HasReplayableItem mocks base method.
+func (m *MockOfflineCacheService) HasReplayableItem(sources ...string) bool {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{}
+	for _, a := range sources {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "HasReplayableItem", varargs...)
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// HasReplayableItem indicates an expected call of HasReplayableItem.
+func (mr *MockOfflineCacheServiceMockRecorder) HasReplayableItem(sources ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HasReplayableItem", reflect.TypeOf((*MockOfflineCacheService)(nil).HasReplayableItem), sources...)
+}
+
 // IndexPlaylistForOfflineDisplay mocks base method.
 func (m *MockOfflineCacheService) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64) error {
 	m.ctrl.T.Helper()

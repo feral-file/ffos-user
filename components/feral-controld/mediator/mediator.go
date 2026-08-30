@@ -39,6 +39,7 @@ type Mediator interface {
 	// LAN even with no upstream internet.
 	InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, link status.LinkState)
 	SetClaimed(claimed bool)
+	SetDeviceName(name string)
 	// SetTopicObserver registers a callback invoked when the relayer assigns
 	// this device its system topic (empty -> non-empty transition). Wired once
 	// at composition time, before Start; main uses it to re-trigger the
@@ -531,6 +532,37 @@ func (m *mediator) SetClaimed(claimed bool) {
 	}
 }
 
+// SetDeviceName updates the advertised device name. Same mechanism and same
+// reason as SetClaimed: zeroconf publishes its TXT record once at Register
+// time, so a name change only reaches the network through a Stop+Start.
+//
+// The name is also the mDNS service-instance label, so re-registering moves
+// the device to a new instance name — controllers see the old instance go and
+// a new one arrive. That is safe because discovery identity is the TXT `id`
+// (the serial), which does not change here; a resolver keying on the instance
+// name alone would already be broken by an ordinary re-register.
+func (m *mediator) SetDeviceName(name string) {
+	m.mdnsMu.Lock()
+	defer m.mdnsMu.Unlock()
+
+	if m.mdnsDeviceInfo.Name == name {
+		return
+	}
+	m.mdnsDeviceInfo.Name = name
+
+	if m.mdnsAdvertiser == nil {
+		return
+	}
+
+	m.logger.Info("Re-registering mDNS after device-name change")
+	m.stopMDNSLocked()
+	// Link-keyed, exactly as SetClaimed: with no link the periodic reconcile
+	// brings the advertiser back carrying the updated name.
+	if m.linkState != nil && m.linkState.HasLink(context.Background()) {
+		m.startMDNSLocked()
+	}
+}
+
 // reconcileRelayer drives the relayer connection to its desired state —
 // connected whenever the device is online — off the periodic SYSMETRICS
 // heartbeat. It is deliberately cheap on the steady path: a connected relayer
@@ -803,6 +835,43 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 					MessageID: payload.MessageID,
 					Message: map[string]any{
 						"error":   "rate_limited",
+						"command": commandType.String(),
+						"message": err.Error(),
+					},
+				}
+				return m.relayer.Send(ctx, resp)
+			}
+			if commandrouter.IsSourceUnreachable(err) {
+				// A dead-source cast rejection is the CALLER's problem to act
+				// on, and remote casts are exactly the audience #304 exists
+				// for (a publisher pushing to someone else's wall must learn
+				// the link is dead) — so it gets a legible RPC error reply,
+				// mirroring the rate_limited shape above, rather than the
+				// reply-less logger.Error fallthrough below, which the
+				// caller can only experience as its own RPC timeout. Warn,
+				// not Error: this is client input being rejected, not a
+				// daemon fault, and must not page through Sentry.
+				m.logger.Warn("Cast rejected: no playlist item source is loadable",
+					zap.String("command", commandType.String()),
+					zap.Error(err),
+				)
+				resp := relayer.Response{
+					Type:      "RPC",
+					MessageID: payload.MessageID,
+					Message: map[string]any{
+						// ok:false is the load-bearing field for current
+						// controllers, not decoration: ff-cli's relayer
+						// helper decides success by hunting for a boolean
+						// ok (nestedOk in ff1-relayer.ts) and treats a
+						// body with none as SUCCESS, and ff-app casts the
+						// ok field and throws when it is absent. An
+						// error-only body would tell both clients the
+						// dead-link cast worked — the exact failure this
+						// reply exists to surface. (rate_limited above
+						// predates this and ships without ok; changing
+						// that shape is a separate decision.)
+						"ok":      false,
+						"error":   "sourceUnreachable",
 						"command": commandType.String(),
 						"message": err.Error(),
 					},

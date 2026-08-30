@@ -39,6 +39,7 @@ var deviceCtlCommands = map[Type]bool{
 	CMD_DDC_PANEL_CONTROL:          true,
 	CMD_DDC_PANEL_STATUS:           true,
 	CMD_SET_SLEEP_SCHEDULE:         true,
+	CMD_SET_DEVICE_NAME:            true,
 	CMD_SLEEP_NOW:                  true,
 	CMD_WAKE_NOW:                   true,
 	CMD_START_WIFI_SETUP:           true,
@@ -85,6 +86,12 @@ const (
 	CMD_SLEEP_NOW                  Type = "sleepNow"
 	CMD_WAKE_NOW                   Type = "wakeNow"
 	CMD_SET_SLEEP_MODE             Type = "setSleepMode"
+	// CMD_SET_DEVICE_NAME sets the owner-visible name for this unit. The name
+	// is a display label only — the serial stays the identity every other
+	// system keys on — and it is reported back in device status, which is the
+	// capability gate: a controller offers renaming only to a frame whose
+	// status carries the field.
+	CMD_SET_DEVICE_NAME Type = "setDeviceName"
 	// CMD_START_WIFI_SETUP puts the frame into its existing SoftAP setup mode
 	// on the app's request (docs/app-triggered-wifi-setup.md). The reply is
 	// produced BEFORE any radio work — raising the AP severs the link that

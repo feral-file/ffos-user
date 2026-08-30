@@ -63,6 +63,18 @@ func (mr *MockExecutorMockRecorder) SaveLastSysMetrics(metrics interface{}) *gom
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveLastSysMetrics", reflect.TypeOf((*MockExecutor)(nil).SaveLastSysMetrics), metrics)
 }
 
+// SetDeviceNameObserver mocks base method.
+func (m *MockExecutor) SetDeviceNameObserver(observer func(string)) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetDeviceNameObserver", observer)
+}
+
+// SetDeviceNameObserver indicates an expected call of SetDeviceNameObserver.
+func (mr *MockExecutorMockRecorder) SetDeviceNameObserver(observer interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetDeviceNameObserver", reflect.TypeOf((*MockExecutor)(nil).SetDeviceNameObserver), observer)
+}
+
 // SetClaimObserver mocks base method.
 func (m *MockExecutor) SetClaimObserver(observer func(bool)) {
 	m.ctrl.T.Helper()
