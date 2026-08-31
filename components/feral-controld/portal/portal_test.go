@@ -57,7 +57,7 @@ func TestCaptiveProbesRedirectToPortal(t *testing.T) {
 	}
 }
 
-func TestRootRendersNetworksAndPrewarning(t *testing.T) {
+func TestRootRendersEssentialNetworkPicker(t *testing.T) {
 	_, ts, client := newTestServer(t, Config{
 		APSSID: "FF1-devicexyz",
 		Scan: func(context.Context) ([]string, error) {
@@ -75,9 +75,68 @@ func TestRootRendersNetworksAndPrewarning(t *testing.T) {
 	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	assert.Contains(t, body, "HomeNet")
 	assert.Contains(t, body, "Cafe-5G")
-	// AP-bounce pre-warning names the AP SSID to reconnect to.
-	assert.Contains(t, body, "FF1-devicexyz")
-	assert.Contains(t, body, "reconnect")
+	assert.Contains(t, body, "Choose a Wi-Fi network")
+	assert.Contains(t, body, "Use the password for the selected network—not the setup password.")
+	assert.Contains(t, body, ">Connect</button>")
+	assert.Contains(t, body, ">Network not listed?</button>")
+	assert.NotContains(t, body, "FF1-devicexyz", "the setup SSID is not destination guidance")
+	assert.NotContains(t, body, "Don't see your Wi-Fi network", "the refresh confirmation owns that explanation")
+}
+
+func TestRootOmitsSetupNetworkAndRequiresAVisibleChoice(t *testing.T) {
+	_, ts, client := newTestServer(t, Config{
+		APSSID: "FF1-devicexyz",
+		Scan: func(context.Context) ([]string, error) {
+			return []string{"FF1-devicexyz", "HomeNet"}, nil
+		},
+	})
+	resp, err := client.Get(ts.URL + "/")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body := readAll(t, resp)
+
+	assert.Equal(t, 0, strings.Count(body, "FF1-devicexyz"),
+		"the active setup SSID must never be offered or presented as the destination")
+	assert.Contains(t, body, `<option value="" selected disabled>Select a network…</option>`,
+		"the first scanned network must not be silently selected")
+	assert.Contains(t, body, `<select id="ssid" name="ssid">`)
+	assert.NotContains(t, body, `<select id="ssid" name="ssid" required>`,
+		"base HTML must allow the visible manual field to submit without JavaScript")
+	assert.Contains(t, body, "select.required = !other;",
+		"JavaScript-capable sheets should still validate the active picker branch")
+	assert.Contains(t, body, `<option value="HomeNet">HomeNet</option>`)
+}
+
+func TestRootFiltersSetupNetworkBeforeDisplayCap(t *testing.T) {
+	destinations := []string{
+		"Net1", "Net2", "Net3", "Net4", "Net5",
+		"Net6", "Net7", "Net8", "Net9",
+	}
+	require.Len(t, destinations, maxDisplayedSSIDs)
+	scan := append([]string{"FF1-devicexyz"}, destinations...)
+	scan = append(scan, "Net10")
+
+	_, ts, client := newTestServer(t, Config{
+		APSSID: "FF1-devicexyz",
+		Scan: func(context.Context) ([]string, error) {
+			return scan, nil
+		},
+	})
+	resp, err := client.Get(ts.URL + "/")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body := readAll(t, resp)
+
+	assert.NotContains(t, body, "FF1-devicexyz")
+	for _, ssid := range destinations {
+		assert.Contains(t, body, `<option value="`+ssid+`">`+ssid+`</option>`)
+	}
+	assert.NotContains(t, body, "Net10",
+		"the display cap still applies after the setup network is removed")
+}
+
+func TestManualSSIDOptionCannotCollideWithARealSSID(t *testing.T) {
+	assert.Greater(t, len(manualSSIDOption), 32)
 }
 
 func TestRootFallsBackToManualEntryOnScanError(t *testing.T) {
@@ -132,10 +191,10 @@ func TestConnectInvokesJoinFuncWithFormValues(t *testing.T) {
 }
 
 // TestConnectRoutesManualEntry pins the two-source SSID rule (D3): a non-blank
-// manual field wins over the picker (the select always submits SOME value),
-// carries Manual so downstream can apply the manual-only trim, and the hidden
-// checkbox is honored only on this branch. The RAW manual value must pass
-// through — trimming is the machine's call, keyed on the Manual flag.
+// manual field wins over any picker value, carries Manual so downstream can
+// apply the manual-only trim, and honors the hidden checkbox only on this
+// branch. The RAW manual value must pass through — trimming is the machine's
+// call, keyed on the Manual flag.
 func TestConnectRoutesManualEntry(t *testing.T) {
 	tests := []struct {
 		name string
@@ -162,6 +221,11 @@ func TestConnectRoutesManualEntry(t *testing.T) {
 		{
 			name: "no picker at all takes the manual branch even when blank",
 			form: url.Values{"ssid_manual": {""}, "password": {"pw"}},
+			want: JoinRequest{SSID: "", Password: "pw", Manual: true},
+		},
+		{
+			name: "manual option sentinel becomes an empty manual value",
+			form: url.Values{"ssid": {manualSSIDOption}, "ssid_manual": {""}, "password": {"pw"}},
 			want: JoinRequest{SSID: "", Password: "pw", Manual: true},
 		},
 	}
@@ -206,8 +270,9 @@ func TestIndexAlwaysOffersManualEntry(t *testing.T) {
 	assert.Contains(t, body, `name="hidden"`, "hidden-network checkbox must render")
 	// The page script collapses manual entry until this option is picked, so
 	// dropping it would make hidden networks unprovisionable again for every
-	// JS-enabled phone. The empty value routes to the manual branch.
-	assert.Contains(t, body, `<option value="">Other network…</option>`,
+	// JS-enabled phone. The impossible-SSID sentinel routes to the manual branch
+	// while no-JS phones can type directly into the always-visible field.
+	assert.Contains(t, body, `<option value="`+manualSSIDOption+`" data-manual>Other network…</option>`,
 		"picker must carry the manual-entry escape option")
 }
 
@@ -476,10 +541,11 @@ func TestRescanPostTriggersBounceAndExplainsRejoin(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, 1, called)
-	// The page must warn about the AP restart and tell the user to re-scan the
-	// QR code to reconnect.
-	assert.Contains(t, string(body), "FF1-abc")
-	assert.Contains(t, string(body), "scan it to reconnect")
+	// The transient page only needs the next action; the confirmation already
+	// explained why the phone will disconnect.
+	assert.Contains(t, string(body), "When the QR code returns on your Art Computer, scan it again.")
+	assert.NotContains(t, string(body), "FF1-abc")
+	assert.NotContains(t, string(body), "see the updated list")
 }
 
 // TestRescanGetShowsConfirmationWithoutTriggering: the warning is a plain-HTML
@@ -499,9 +565,11 @@ func TestRescanGetShowsConfirmationWithoutTriggering(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, body, `<form method="POST" action="/rescan">`, "confirm page must carry the POST button")
-	assert.Contains(t, body, "Search for networks again", "confirm button must name the picker's action")
-	assert.Contains(t, body, "FF1-abc")
-	assert.Contains(t, body, "disconnected")
+	assert.Contains(t, body, "Refresh network list", "confirm button must name the disruptive operation")
+	assert.Contains(t, body, "briefly disconnects your phone")
+	assert.Contains(t, body, "scan it again")
+	assert.NotContains(t, body, "FF1-abc")
+	assert.NotContains(t, body, "see the updated list")
 	assert.Zero(t, called, "GET must not trigger a bounce")
 }
 
@@ -537,7 +605,7 @@ func TestRescanRejectedReRendersPicker(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	// Back on the picker, not the rescan page.
-	assert.Contains(t, string(body), "Connect to Wi-Fi")
+	assert.Contains(t, string(body), "Choose a Wi-Fi network")
 }
 
 // TestFontsServeEmbeddedFaces: the /fonts/ subtree must serve the embedded

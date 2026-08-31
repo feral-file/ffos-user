@@ -531,6 +531,29 @@ func TestCachedScanServesWithinTTLThenRefreshes(t *testing.T) {
 	assert.Equal(t, 2, scans)
 }
 
+func TestRefreshScanCachePreservesCandidatesBeyondDisplayCap(t *testing.T) {
+	var ssids []string
+	for i := 0; i < maxSSIDs+1; i++ {
+		ssids = append(ssids, fmt.Sprintf("Net%02d", i))
+	}
+	scanOutput := []byte(strings.Join(ssids, "\n") + "\n")
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
+			return scanOutput, nil
+		}
+		return nil, nil
+	})
+
+	live, err := c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, ssids, live)
+
+	cached, err := c.CachedScan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, ssids, cached,
+		"the portal cache must remain uncapped until the setup SSID is removed")
+}
+
 // --- scan readiness gate -----------------------------------------------------
 
 // deviceShowOut renders the terse `nmcli device show` block shape the readiness

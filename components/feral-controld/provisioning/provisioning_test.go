@@ -437,8 +437,10 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	rec := &recorder{}
 	h := &harness{
-		rec:      rec,
-		ap:       &fakeAP{rec: rec, info: softap.Info{SSID: "FF1-abc", PSK: "abc12345"}},
+		rec: rec,
+		ap: &fakeAP{rec: rec, info: softap.Info{
+			SSID: "FF1-abc", PSK: "abc12345", PortalURL: "http://10.42.0.1",
+		}},
 		wifi:     &fakeWifi{rec: rec},
 		conn:     &fakeConn{},
 		clk:      newFakeClock(),
@@ -1185,6 +1187,7 @@ func TestScanningNarrationPrecedesAPRaise(t *testing.T) {
 	require.NotEqual(t, -1, scanIdx, "scanning announcement must fire")
 	require.NotEqual(t, -1, apIdx, "credential-bearing AP-up announcement must fire")
 	assert.Less(t, scanIdx, apIdx)
+	assert.Equal(t, "http://10.42.0.1", h.notifier.details()[apIdx].Detail.PortalURL)
 }
 
 // --- portal rescan bounce ----------------------------------------------------

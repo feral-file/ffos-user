@@ -26,8 +26,9 @@ import (
 const (
 	nmcliBin = "nmcli"
 
-	// maxSSIDs caps how many networks we surface to the captive portal. Ported
-	// from feral-setupd (constant::MAX_SSIDS) so the picker UI keeps its shape.
+	// maxSSIDs caps the public Scan result for callers that need the legacy
+	// picker-sized list. The pre-AP cache is deliberately uncapped so the
+	// portal can remove its own setup SSID before applying its display cap.
 	maxSSIDs = 9
 
 	// scanCacheTTL bounds how long a pre-AP scan stays usable. Ported from
@@ -222,6 +223,10 @@ func (c *Controller) SavedWifiSSIDs(ctx context.Context) (ssids []string, anyHid
 // signal order. force triggers a fresh rescan rather than reusing NM's own
 // scan results.
 func (c *Controller) Scan(ctx context.Context, force bool) ([]string, error) {
+	return c.scan(ctx, force, maxSSIDs)
+}
+
+func (c *Controller) scan(ctx context.Context, force bool, limit int) ([]string, error) {
 	args := []string{"-t", "-f", "SSID", "device", "wifi", "list"}
 	if force {
 		args = append(args, "--rescan", "yes")
@@ -230,7 +235,7 @@ func (c *Controller) Scan(ctx context.Context, force bool) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseSSIDs(string(out)), nil
+	return parseSSIDsCapped(string(out), limit), nil
 }
 
 // ScanAllSSIDs performs a forced live scan and returns every unique SSID in
@@ -307,7 +312,10 @@ func (c *Controller) RefreshScanCache(ctx context.Context) ([]string, error) {
 	// asking early does not fail loudly, it returns an empty list.
 	c.waitForScanReady(ctx)
 
-	ssids, err := c.Scan(ctx, true)
+	// Preserve every candidate in the cache. NetworkManager can retain the
+	// active setup SSID in these results; the portal must remove that exact
+	// non-destination before applying its nine-network display cap.
+	ssids, err := c.scan(ctx, true, 0)
 	if err != nil {
 		return nil, err
 	}

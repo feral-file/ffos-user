@@ -65,6 +65,15 @@ const (
 	// session is one phone, occasionally two; the cap exists purely so
 	// misbehaving clients cannot pile up handler goroutines.
 	maxInflightRequests = 32
+	// maxDisplayedSSIDs preserves the original setup picker's compact list.
+	// Apply it only after excluding the active setup AP so that temporary
+	// network never consumes a destination slot.
+	maxDisplayedSSIDs = 9
+	// manualSSIDOption is the form value for the picker's manual-entry branch.
+	// Its ASCII value is longer than an SSID's 32-byte maximum, so it cannot
+	// collide with a real scanned network and unambiguously selects the manual
+	// branch when "Other network…" is chosen.
+	manualSSIDOption = "__feral_file_manual_network_entry_option__"
 )
 
 // JoinState is the coarse lifecycle of the current or last credential submission,
@@ -141,8 +150,8 @@ type Config struct {
 	// unprivileged port floor; the portal adds no capabilities logic). Tests
 	// inject "127.0.0.1:0" or use Handler directly.
 	Addr string
-	// APSSID is the setup AP's SSID, templated into the "reconnect to ..."
-	// pre-warning the page shows around the AP bounce.
+	// APSSID is the setup AP's SSID. The picker excludes it from destination
+	// choices, and the join-result page names it as the retry network.
 	APSSID string
 	Scan   ScanFunc
 	Join   JoinFunc
@@ -378,14 +387,27 @@ func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request) {
 			// SSID text field so the user can still type a hidden network.
 			s.logger.Warn("portal: scan failed, offering manual entry", zap.Error(err))
 		}
-		ssids = got
+		// The active hotspot is only the phone's temporary path to this
+		// portal; it can never be the station network the same radio joins.
+		// NetworkManager can nevertheless leave it in the pre-AP scan cache.
+		// Removing the exact SSID here prevents the picker from presenting
+		// the setup network as a valid destination.
+		for _, ssid := range got {
+			if ssid != s.cfg.APSSID {
+				ssids = append(ssids, ssid)
+				if len(ssids) == maxDisplayedSSIDs {
+					break
+				}
+			}
+		}
 	}
 
 	data := struct {
-		APSSID     string
-		SSIDs      []string
-		LastStatus *Status
-	}{APSSID: s.cfg.APSSID, SSIDs: ssids}
+		APSSID           string
+		SSIDs            []string
+		ManualSSIDOption string
+		LastStatus       *Status
+	}{APSSID: s.cfg.APSSID, SSIDs: ssids, ManualSSIDOption: manualSSIDOption}
 
 	if s.cfg.Status != nil {
 		st := s.cfg.Status()
@@ -411,14 +433,18 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// hidden network can never be picked, and D3 was exactly the picker
 	// crowding manual entry out whenever the scan was non-empty). A non-blank
 	// manual entry wins over the picker: the user typed it deliberately, while
-	// the select always submits SOME value. Blank-ness is judged on the
-	// trimmed value, but the RAW value is what gets passed through — the
-	// manual-branch trim is the machine's call, keyed on the Manual flag.
+	// a picked network normally submits its scanned value. The initial prompt
+	// submits an empty picker value, while "Other network…" submits the
+	// impossible-SSID sentinel and reveals the manual field in script-capable
+	// portal sheets. Blank-ness is judged on the trimmed value, but the RAW value
+	// is what gets passed through — the manual-branch trim is the machine's call,
+	// keyed on the Manual flag.
 	req := JoinRequest{
 		SSID:     r.PostFormValue("ssid"),
 		Password: r.PostFormValue("password"),
 	}
-	if manual := r.PostFormValue("ssid_manual"); strings.TrimSpace(manual) != "" || req.SSID == "" {
+	if manual := r.PostFormValue("ssid_manual"); strings.TrimSpace(manual) != "" ||
+		req.SSID == manualSSIDOption || req.SSID == "" {
 		req.SSID = manual
 		req.Manual = true
 		// The hidden checkbox is scoped to manual entry: a picked network was
@@ -445,18 +471,18 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}{SSID: strings.TrimSpace(req.SSID), APSSID: s.cfg.APSSID})
 }
 
-// handleRescan drives the "search for networks again" flow. GET renders a
+// handleRescan drives the network-list refresh flow. GET renders a
 // plain-HTML confirmation page — captive-portal mini-browsers (iOS CNA,
 // Android's sign-in sheet) suppress window.confirm(), so the warning must not
 // depend on JS. POST performs the bounce: the machine tears the AP down to run
 // a fresh scan, which disconnects the phone, so the response page (rendered
-// BEFORE the bounce lands) tells the user to scan the QR code on the frame
-// again to reconnect.
+// BEFORE the bounce lands) tells the user to scan the QR code on the Art
+// Computer again to reconnect.
 func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 	s.noteActivity()
 	switch r.Method {
 	case http.MethodGet:
-		s.render(w, "rescan_confirm.html", struct{ APSSID string }{APSSID: s.cfg.APSSID})
+		s.render(w, "rescan_confirm.html", nil)
 	case http.MethodPost:
 		// Info on receipt: the submission must be traceable in production logs
 		// even when the machine-side bounce log is missing.
@@ -468,7 +494,7 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		s.render(w, "rescan.html", struct{ APSSID string }{APSSID: s.cfg.APSSID})
+		s.render(w, "rescan.html", nil)
 	default:
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
