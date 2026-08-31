@@ -52,7 +52,6 @@ h1 {
   letter-spacing: -0.01em;
 }
 .lede { color: #a6a6ac; font-size: 0.95rem; }
-.lede strong { color: #f5f5f6; font-weight: 600; }
 
 /* Join-outcome banner on the picker page. */
 .status {
@@ -67,9 +66,8 @@ h1 {
 .status-joining { border-color: #1e3a5f; color: #a8c7fa; }
 .status-succeeded { border-color: #1e4620; color: #a6d4a8; }
 
-/* Inline notice on the rescan/result pages. Neutral-bordered by default
-   (like .status); tint via modifier: note-info (in progress) or note-warn
-   (about to disconnect). */
+/* Inline notice on the connection-result page. Neutral-bordered by default
+   (like .status); tint the active state via note-info. */
 .note {
   margin-top: 1.25rem;
   padding: 0.9rem 1rem;
@@ -80,7 +78,6 @@ h1 {
 }
 .note strong { color: #f5f5f6; font-weight: 600; }
 .note-info { border-color: #1e3a5f; color: #a8c7fa; }
-.note-warn { border-color: #5c4813; color: #e3c26f; }
 
 form.connect { margin-top: 2rem; }
 label {
@@ -215,12 +212,3 @@ a.cancel {
   border-radius: 2px;
 }
 a.cancel:active { background: #1c1c1f; }
-
-.hint {
-  margin-top: 2rem;
-  padding-top: 1.25rem;
-  border-top: 1px solid #1f1f23;
-  font-size: 0.85rem;
-  color: #8a8a90;
-}
-.hint strong { color: #c9c9ce; font-weight: 600; }

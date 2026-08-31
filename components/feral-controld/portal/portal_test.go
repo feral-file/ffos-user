@@ -57,7 +57,7 @@ func TestCaptiveProbesRedirectToPortal(t *testing.T) {
 	}
 }
 
-func TestRootRendersNetworksAndExplainsSetupNetwork(t *testing.T) {
+func TestRootRendersEssentialNetworkPicker(t *testing.T) {
 	_, ts, client := newTestServer(t, Config{
 		APSSID: "FF1-devicexyz",
 		Scan: func(context.Context) ([]string, error) {
@@ -75,11 +75,12 @@ func TestRootRendersNetworksAndExplainsSetupNetwork(t *testing.T) {
 	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	assert.Contains(t, body, "HomeNet")
 	assert.Contains(t, body, "Cafe-5G")
-	// The lede names the current AP and distinguishes its temporary role from
-	// the destination network the user is about to choose.
-	assert.Contains(t, body, "FF1-devicexyz")
-	assert.Contains(t, body, "temporary")
-	assert.Contains(t, body, "Choose the Wi-Fi network")
+	assert.Contains(t, body, "Choose a Wi-Fi network")
+	assert.Contains(t, body, "Use the password for the selected network—not the setup password.")
+	assert.Contains(t, body, ">Connect</button>")
+	assert.Contains(t, body, ">Refresh network list</button>")
+	assert.NotContains(t, body, "FF1-devicexyz", "the setup SSID is not destination guidance")
+	assert.NotContains(t, body, "Don't see your Wi-Fi network", "the refresh confirmation owns that explanation")
 }
 
 func TestRootOmitsSetupNetworkAndRequiresAVisibleChoice(t *testing.T) {
@@ -94,9 +95,9 @@ func TestRootOmitsSetupNetworkAndRequiresAVisibleChoice(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	body := readAll(t, resp)
 
-	assert.Equal(t, 1, strings.Count(body, "FF1-devicexyz"),
-		"the setup SSID belongs in the explanation, never in the destination options")
-	assert.Contains(t, body, `<option value="" selected disabled>Select a Wi-Fi network…</option>`,
+	assert.Equal(t, 0, strings.Count(body, "FF1-devicexyz"),
+		"the active setup SSID must never be offered or presented as the destination")
+	assert.Contains(t, body, `<option value="" selected disabled>Select a network…</option>`,
 		"the first scanned network must not be silently selected")
 	assert.Contains(t, body, `<select id="ssid" name="ssid" required>`,
 		"the selection prompt must block submission until the user chooses a path")
@@ -509,10 +510,11 @@ func TestRescanPostTriggersBounceAndExplainsRejoin(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, 1, called)
-	// The page must warn about the AP restart and tell the user to re-scan the
-	// QR code to reconnect.
-	assert.Contains(t, string(body), "FF1-abc")
-	assert.Contains(t, string(body), "scan it to reconnect")
+	// The transient page only needs the next action; the confirmation already
+	// explained why the phone will disconnect.
+	assert.Contains(t, string(body), "When the QR code returns on your Art Computer, scan it again.")
+	assert.NotContains(t, string(body), "FF1-abc")
+	assert.NotContains(t, string(body), "see the updated list")
 }
 
 // TestRescanGetShowsConfirmationWithoutTriggering: the warning is a plain-HTML
@@ -532,9 +534,11 @@ func TestRescanGetShowsConfirmationWithoutTriggering(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, body, `<form method="POST" action="/rescan">`, "confirm page must carry the POST button")
-	assert.Contains(t, body, "Search for networks again", "confirm button must name the picker's action")
-	assert.Contains(t, body, "FF1-abc")
-	assert.Contains(t, body, "disconnected")
+	assert.Contains(t, body, "Refresh network list", "confirm button must name the picker's action")
+	assert.Contains(t, body, "briefly disconnects your phone")
+	assert.Contains(t, body, "scan it again")
+	assert.NotContains(t, body, "FF1-abc")
+	assert.NotContains(t, body, "see the updated list")
 	assert.Zero(t, called, "GET must not trigger a bounce")
 }
 

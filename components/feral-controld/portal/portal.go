@@ -146,8 +146,8 @@ type Config struct {
 	// unprivileged port floor; the portal adds no capabilities logic). Tests
 	// inject "127.0.0.1:0" or use Handler directly.
 	Addr string
-	// APSSID is the setup AP's SSID, templated into the "reconnect to ..."
-	// pre-warning the page shows around the AP bounce.
+	// APSSID is the setup AP's SSID. The picker excludes it from destination
+	// choices, and the join-result page names it as the retry network.
 	APSSID string
 	Scan   ScanFunc
 	Join   JoinFunc
@@ -464,18 +464,18 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}{SSID: strings.TrimSpace(req.SSID), APSSID: s.cfg.APSSID})
 }
 
-// handleRescan drives the "search for networks again" flow. GET renders a
+// handleRescan drives the network-list refresh flow. GET renders a
 // plain-HTML confirmation page — captive-portal mini-browsers (iOS CNA,
 // Android's sign-in sheet) suppress window.confirm(), so the warning must not
 // depend on JS. POST performs the bounce: the machine tears the AP down to run
 // a fresh scan, which disconnects the phone, so the response page (rendered
-// BEFORE the bounce lands) tells the user to scan the QR code on the frame
-// again to reconnect.
+// BEFORE the bounce lands) tells the user to scan the QR code on the Art
+// Computer again to reconnect.
 func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 	s.noteActivity()
 	switch r.Method {
 	case http.MethodGet:
-		s.render(w, "rescan_confirm.html", struct{ APSSID string }{APSSID: s.cfg.APSSID})
+		s.render(w, "rescan_confirm.html", nil)
 	case http.MethodPost:
 		// Info on receipt: the submission must be traceable in production logs
 		// even when the machine-side bounce log is missing.
@@ -487,7 +487,7 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		s.render(w, "rescan.html", struct{ APSSID string }{APSSID: s.cfg.APSSID})
+		s.render(w, "rescan.html", nil)
 	default:
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
