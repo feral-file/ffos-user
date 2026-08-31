@@ -266,17 +266,19 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 		absent     []string
 	}{
 		{
-			name:       "softap qr with password",
-			call:       func(s *Service) { s.ShowSoftAPQR("FF1-abc", "secret123") },
-			wantState:  stateSoftAPQR,
-			wantFields: map[string]any{"ssid": "FF1-abc", "password": "secret123"},
+			name:      "softap qr with password",
+			call:      func(s *Service) { s.ShowSoftAPQR("FF1-abc", "secret123", "http://10.42.0.1") },
+			wantState: stateSoftAPQR,
+			wantFields: map[string]any{
+				"ssid": "FF1-abc", "password": "secret123", "portal_url": "http://10.42.0.1",
+			},
 		},
 		{
-			name:       "softap qr omits blank password",
-			call:       func(s *Service) { s.ShowSoftAPQR("FF1-abc", "") },
+			name:       "softap qr omits blank optional fields",
+			call:       func(s *Service) { s.ShowSoftAPQR("FF1-abc", "", "") },
 			wantState:  stateSoftAPQR,
 			wantFields: map[string]any{"ssid": "FF1-abc"},
-			absent:     []string{"password"},
+			absent:     []string{"password", "portal_url"},
 		},
 		{
 			name:      "scanning",
@@ -619,6 +621,10 @@ func TestShippingManifestDeclaresProsePayloads(t *testing.T) {
 		assert.Contains(t, fields.Optional, "reason",
 			"state %q must declare the reason payload ShowConnecting/ShowJoinFailed send", state)
 	}
+	softAPFields, ok := manifest.Contracts.SetupDisplay.StateFields[stateSoftAPQR]
+	require.True(t, ok, "shipping manifest missing stateFields for %q", stateSoftAPQR)
+	assert.Contains(t, softAPFields.Optional, "portal_url",
+		"softap_qr must declare the direct portal fallback ShowSoftAPQR sends")
 }
 
 // TestShowCallersDoNotBlockOnManifestRead pins the notifier's non-blocking
@@ -796,7 +802,7 @@ func TestManifestWithoutSetupDisplayDisablesNarration(t *testing.T) {
 	sender := newFakeCDP()
 	svc := newTestService(t, sender, contractWithoutSetupDisplay)
 
-	svc.ShowSoftAPQR("FF1-abc", "secret123")
+	svc.ShowSoftAPQR("FF1-abc", "secret123", "http://10.42.0.1")
 	svc.ShowJoining()
 	svc.ShowReady()
 	svc.Resync()
@@ -1488,7 +1494,7 @@ func TestShowConnectingIfShowing(t *testing.T) {
 		sender := newFakeCDP()
 		svc := newTestService(t, sender, contractWithConnecting)
 
-		svc.ShowSoftAPQR("FF1-TEST", "12345678")
+		svc.ShowSoftAPQR("FF1-TEST", "12345678", "http://10.42.0.1")
 		sender.waitForCalls(t, 1)
 		svc.ShowConnectingIfShowing("Connected by cable, but no internet.", StateFinalizing)
 

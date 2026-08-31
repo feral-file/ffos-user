@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 
@@ -27,8 +28,9 @@ import (
 // Info describes the credentials the running AP advertises. The captive portal
 // and any QR/onboarding surface read these back.
 type Info struct {
-	SSID string
-	PSK  string
+	SSID      string
+	PSK       string
+	PortalURL string
 }
 
 // Status reports whether the AP is currently up.
@@ -93,6 +95,9 @@ func NewNetworkManager(exec wrapper.Exec, logger *zap.Logger, iface string, host
 	if hostname == nil {
 		hostname = readEtcHostname
 	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &nmBackend{
 		exec:     exec,
 		logger:   logger,
@@ -131,7 +136,38 @@ func (b *nmBackend) Up(ctx context.Context) (Info, error) {
 	if _, err := b.run(ctx, args...); err != nil {
 		return Info{}, err
 	}
+	// Read the address NetworkManager actually assigned instead of publishing
+	// its usual 10.42.0.1 as a constant. Shared mode may choose another subnet
+	// to avoid a collision, and only the active profile is authoritative. A
+	// direct on-link address is the deterministic browser fallback once the
+	// user accepts the no-internet Wi-Fi: it bypasses Private DNS and cellular
+	// DNS entirely.
+	info.PortalURL = b.activePortalURL(ctx)
 	return info, nil
+}
+
+// activePortalURL returns the HTTP portal address on the hotspot's own IPv4
+// subnet. Address discovery is best-effort: a failure here must not tear down
+// an otherwise usable AP whose captive portal can still open automatically.
+// The player omits the manual-address instruction when PortalURL is blank.
+func (b *nmBackend) activePortalURL(ctx context.Context) string {
+	out, err := b.run(ctx, "-g", "IP4.ADDRESS", "connection", "show", "id", ProfileName)
+	if err != nil {
+		b.logger.Warn("setup AP active address unavailable; omitting direct portal fallback", zap.Error(err))
+		return ""
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		prefix, parseErr := netip.ParsePrefix(strings.TrimSpace(line))
+		if parseErr != nil {
+			continue
+		}
+		addr := prefix.Addr().Unmap()
+		if addr.Is4() && !addr.IsUnspecified() && !addr.IsLoopback() {
+			return "http://" + addr.String()
+		}
+	}
+	b.logger.Warn("setup AP active address missing; omitting direct portal fallback")
+	return ""
 }
 
 func (b *nmBackend) Down(ctx context.Context) error {

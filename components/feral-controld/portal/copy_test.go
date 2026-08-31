@@ -12,7 +12,7 @@ import (
 // ff-cli have equivalents; extend the word lists together). It scans the
 // text a person actually sees — template HTML with comments, <style>,
 // <script>, and {{...}} actions stripped — so identifiers where these
-// tokens are legitimate (the ff1.config portal address, the FF1-<id> SSID
+// tokens are legitimate (the FF1-<id> SSID
 // arriving via {{.APSSID}}, CSS class names) never trip it.
 //
 // "frame" -> "Art Computer" is a repo-local rule beyond the Canon table:
@@ -31,7 +31,7 @@ func TestTemplatesUseApprovedTerms(t *testing.T) {
 	}{
 		{regexp.MustCompile(`(?i)\bwifi\b`), "Wi-Fi"}, // \b splits the correct Wi-Fi at the hyphen
 		{regexp.MustCompile(`\bDP1\b`), "DP-1"},
-		{regexp.MustCompile(`\bFF1\b`), "Art Computer"}, // case-sensitive: ff1.config stays legal
+		{regexp.MustCompile(`\bFF1\b`), "Art Computer"}, // case-sensitive: FF1-<id> stays legal
 		{regexp.MustCompile(`\bFFP\b`), "Art Panel"},
 		{regexp.MustCompile(`(?i)\bferalfile\b`), "Feral File"},
 		{regexp.MustCompile(`Device (?:Id|id)\b`), "Device ID"},

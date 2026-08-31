@@ -55,7 +55,7 @@ flowchart LR
 | State | Shown when |
 |---|---|
 | `scanning` | The pre-AP Wi-Fi scan is running (extension state; players that predate it render nothing). Shown before the first AP raise and during a portal-requested rescan bounce. |
-| `softap_qr` | AP is up; the phone should join `FF1-<device_id>` and open the portal. Carries SSID and PSK. |
+| `softap_qr` | AP is up; the phone should join `FF1-<device_id>` and open the portal. Carries SSID, PSK, and the optional direct on-link `portal_url`. |
 | `joining` | Credentials submitted; the device is joining the chosen network. |
 | `finalizing` | Extension state covering the gap between a successful join and the claim step (relayer-topic wait + pre-claim OTA version check and its retries). Cleared (`hidden`) if the flow gives up so a stale "preparing" never lingers. |
 | `join_failed` | Two uses share this state. (1) Its namesake: a join failed (wrong password / not found / timeout) and the AP is being re-raised for a retry — carries a reason. (2) The pre-claim OTA flow when an update ladder fails (fixed prose reason, no AP re-raise — see the narrator-policy bullet below). The player-owned "Couldn't connect to Wi-Fi" **title** is still wrong for use (2) — the remaining open sliver of F-12. |
@@ -194,7 +194,7 @@ When the machine enters `ap_active`:
 
 1. `wifictl.RefreshScanCache` runs a live scan **before** the AP goes up (the single radio can't scan and host at once), caching SSIDs for the portal's picker.
 2. `softap.Up` raises the NetworkManager hotspot: SSID `FF1-<device_id>`, WPA2-PSK a deterministic 8-digit numeric code derived from the device id (first 4 bytes of SHA-256, reduced mod 10⁸, zero-padded — see [`api-design.md`](api-design.md), "The access point"). NM runs DHCP/NAT.
-3. The portal starts on `:80`. `setupui` narrates `softap_qr` with the SSID and PSK so the TV shows a join QR.
+3. The portal starts on `:80`. `setupui` narrates `softap_qr` with the SSID, PSK, and NetworkManager's active on-link portal URL so the TV shows a join QR plus a DNS-independent fallback address. If the active address lookup fails, the URL is omitted without failing the otherwise usable AP.
 
 Scanning the QR proposes the AP to the phone; it does not guarantee that the phone joins it. Some phones require a separate Join/Connect confirmation, and others open Wi-Fi settings without selecting the setup SSID. Once the phone joins, its OS issues a captive-portal probe (`/generate_204`, `/hotspot-detect.html`, etc.). The portal answers every probe with a `302` to `/` (rather than the 204/success body the OS expects), which makes the OS pop the captive-portal page.
 
