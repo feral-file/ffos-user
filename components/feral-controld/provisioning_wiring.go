@@ -93,7 +93,7 @@ func (c *dbusConnectivity) Subscribe(fn func(online bool)) (unsubscribe func()) 
 // without a real CDP-backed service. *setupui.Service satisfies it.
 type setupNarrationUI interface {
 	ShowScanning()
-	ShowSoftAPQR(ssid, psk string)
+	ShowSoftAPQR(ssid, psk, portalURL string)
 	ShowJoinFailed(reason string)
 	ShowConnecting(message string)
 	// ShowConnectingOrHide is the ap-recheck flavor: its manifest downgrade is
@@ -324,7 +324,7 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 			n.ui.ShowScanning()
 		case d.PSK != "":
 			n.narrating = true
-			n.ui.ShowSoftAPQR(d.SSID, d.PSK)
+			n.ui.ShowSoftAPQR(d.SSID, d.PSK, d.PortalURL)
 		case d.SSID != "":
 			n.narrating = true
 			n.ui.ShowJoinFailed(d.Reason)

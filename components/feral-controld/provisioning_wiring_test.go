@@ -21,6 +21,9 @@ import (
 // spyNarrationUI records the narration calls the notifier makes.
 type spyNarrationUI struct {
 	calls []string
+	// softAPPortalURLs records the DNS-independent fallback carried with each
+	// successfully raised setup AP.
+	softAPPortalURLs []string
 	// joinFailedReasons records ShowJoinFailed bodies in order (real join
 	// failures re-announced with the AP raise).
 	joinFailedReasons []string
@@ -40,8 +43,11 @@ func (s *spyNarrationUI) ShowSetupError(reason string) {
 	s.setupErrorReasons = append(s.setupErrorReasons, reason)
 }
 
-func (s *spyNarrationUI) ShowScanning()                 { s.calls = append(s.calls, "scanning") }
-func (s *spyNarrationUI) ShowSoftAPQR(ssid, psk string) { s.calls = append(s.calls, "softap") }
+func (s *spyNarrationUI) ShowScanning() { s.calls = append(s.calls, "scanning") }
+func (s *spyNarrationUI) ShowSoftAPQR(ssid, psk, portalURL string) {
+	s.calls = append(s.calls, "softap")
+	s.softAPPortalURLs = append(s.softAPPortalURLs, portalURL)
+}
 func (s *spyNarrationUI) ShowJoinFailed(reason string) {
 	s.calls = append(s.calls, "join_failed")
 	s.joinFailedReasons = append(s.joinFailedReasons, reason)
@@ -73,7 +79,9 @@ func TestSetupNotifierHidesOnlyOwnNarration(t *testing.T) {
 	}
 
 	// A real provisioning cycle: AP up → joining → online must hide exactly once.
-	n.OnStateChange(provisioning.StateAPActive, provisioning.Detail{SSID: "FF1-x", PSK: "p"})
+	n.OnStateChange(provisioning.StateAPActive, provisioning.Detail{
+		SSID: "FF1-x", PSK: "p", PortalURL: "http://10.42.0.1",
+	})
 	n.OnStateChange(provisioning.StateJoining, provisioning.Detail{})
 	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{})
 	want := []string{"softap", "joining", "hide"}
@@ -85,6 +93,7 @@ func TestSetupNotifierHidesOnlyOwnNarration(t *testing.T) {
 			t.Fatalf("calls = %v, want %v", spy.calls, want)
 		}
 	}
+	assert.Equal(t, []string{"http://10.42.0.1"}, spy.softAPPortalURLs)
 
 	// A second →Online (already hidden) must not hide again.
 	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{})
