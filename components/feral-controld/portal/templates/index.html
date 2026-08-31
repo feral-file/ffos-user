@@ -3,18 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Art Computer setup — Connect to Wi-Fi</title>
+<title>Art Computer setup — Choose a Wi-Fi network</title>
 <link rel="stylesheet" href="/setup.css">
 </head>
 <body>
 <main>
   <p class="brand">Feral File · Art Computer</p>
-  <h1>Connect to Wi-Fi</h1>
+  <h1>Choose a Wi-Fi network</h1>
   <p class="lede">
-    Choose the network your Art Computer should use. After you press Connect,
-    this page may pause while it switches networks. If that happens, reconnect
-    to <strong>{{.APSSID}}</strong> and open
-    <strong>http://ff1.config</strong> to check progress.
+    You are connected to <strong>{{.APSSID}}</strong>, the temporary setup
+    network. Choose the Wi-Fi network your Art Computer should use.
   </p>
 
   {{if .LastStatus}}
@@ -25,13 +23,15 @@
 
   <form class="connect" method="POST" action="/connect">
     {{if .SSIDs}}
-    <label for="ssid">Network</label>
-    <select id="ssid" name="ssid">
+    <label for="ssid">Wi-Fi network</label>
+    <select id="ssid" name="ssid" required>
+      <option value="" selected disabled>Select a Wi-Fi network…</option>
       {{range .SSIDs}}<option value="{{.}}">{{.}}</option>{{end}}
-      {{- /* The empty value routes to the manual branch server-side (a blank
-           picker value can never be a real pick), so no-JS submissions of
-           this option degrade to the ordinary empty-SSID rejection. */}}
-      <option value="">Other network…</option>
+      {{- /* This non-empty sentinel keeps the required select valid when the
+           manual branch is chosen, including without JS. It exceeds the
+           maximum SSID length and is converted back to an empty manual value
+           server-side, so it cannot collide with a real scanned network. */}}
+      <option value="{{.ManualSSIDOption}}" data-manual>Other network…</option>
     </select>
 
     <div id="manual-entry">
@@ -45,7 +45,7 @@
       </label>
     </div>
     {{else}}
-    <label for="ssid-manual">Network</label>
+    <label for="ssid-manual">Wi-Fi network</label>
     <input id="ssid-manual" name="ssid_manual" type="text" autocomplete="off"
            autocapitalize="none" placeholder="Network name">
 
@@ -55,9 +55,10 @@
     </label>
     {{end}}
 
-    <label for="password">Password</label>
+    <label for="password">Wi-Fi password</label>
     <div class="pwfield">
-      <input id="password" name="password" type="password" autocomplete="off">
+      <input id="password" name="password" type="password" autocomplete="off"
+             aria-describedby="password-help">
       <button type="button" id="password-toggle" class="pwtoggle"
               aria-pressed="false" aria-label="Show password" hidden>
         {{- /* The icon shows the tap's ACTION, following the majority
@@ -77,8 +78,12 @@
         </svg>
       </button>
     </div>
+    <p id="password-help" class="field-hint">
+      If the network requires a password, use that password. The setup
+      password shown on your Art Computer is only for the temporary connection.
+    </p>
 
-    <button type="submit" class="primary">Connect</button>
+    <button type="submit" class="primary">Connect Art Computer</button>
   </form>
 
   <form method="GET" action="/rescan">
@@ -107,7 +112,8 @@
     if (!select || !manual || !input) return;
     var label = manual.querySelector('label[for="ssid-manual"]');
     var sync = function (viaChange) {
-      var other = select.value === '';
+      var choice = select.options[select.selectedIndex];
+      var other = !!choice && choice.hasAttribute('data-manual');
       manual.hidden = !other;
       input.required = other;
       if (other) {
