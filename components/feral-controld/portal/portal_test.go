@@ -78,7 +78,7 @@ func TestRootRendersEssentialNetworkPicker(t *testing.T) {
 	assert.Contains(t, body, "Choose a Wi-Fi network")
 	assert.Contains(t, body, "Use the password for the selected network—not the setup password.")
 	assert.Contains(t, body, ">Connect</button>")
-	assert.Contains(t, body, ">Refresh network list</button>")
+	assert.Contains(t, body, ">Network not listed?</button>")
 	assert.NotContains(t, body, "FF1-devicexyz", "the setup SSID is not destination guidance")
 	assert.NotContains(t, body, "Don't see your Wi-Fi network", "the refresh confirmation owns that explanation")
 }
@@ -534,7 +534,7 @@ func TestRescanGetShowsConfirmationWithoutTriggering(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, body, `<form method="POST" action="/rescan">`, "confirm page must carry the POST button")
-	assert.Contains(t, body, "Refresh network list", "confirm button must name the picker's action")
+	assert.Contains(t, body, "Refresh network list", "confirm button must name the disruptive operation")
 	assert.Contains(t, body, "briefly disconnects your phone")
 	assert.Contains(t, body, "scan it again")
 	assert.NotContains(t, body, "FF1-abc")
