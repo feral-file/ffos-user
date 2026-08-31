@@ -10,10 +10,6 @@
 <main>
   <p class="brand">Feral File · Art Computer</p>
   <h1>Choose a Wi-Fi network</h1>
-  <p class="lede">
-    You are connected to <strong>{{.APSSID}}</strong>, the temporary setup
-    network. Choose the Wi-Fi network your Art Computer should use.
-  </p>
 
   {{if .LastStatus}}
   <div class="status status-{{.LastStatus.State}}">
@@ -25,7 +21,7 @@
     {{if .SSIDs}}
     <label for="ssid">Wi-Fi network</label>
     <select id="ssid" name="ssid" required>
-      <option value="" selected disabled>Select a Wi-Fi network…</option>
+      <option value="" selected disabled>Select a network…</option>
       {{range .SSIDs}}<option value="{{.}}">{{.}}</option>{{end}}
       {{- /* This non-empty sentinel keeps the required select valid when the
            manual branch is chosen, including without JS. It exceeds the
@@ -79,23 +75,15 @@
       </button>
     </div>
     <p id="password-help" class="field-hint">
-      If the network requires a password, use that password. The setup
-      password shown on your Art Computer is only for the temporary connection.
+      Use the password for the selected network—not the setup password.
     </p>
 
-    <button type="submit" class="primary">Connect Art Computer</button>
+    <button type="submit" class="primary">Connect</button>
   </form>
 
   <form method="GET" action="/rescan">
-    <button type="submit" class="secondary">Search for networks again</button>
+    <button type="submit" class="secondary">Refresh network list</button>
   </form>
-
-  <p class="hint">
-    Don't see your Wi-Fi network? Make sure your router is switched on, then
-    tap <strong>Search for networks again</strong>. The Art Computer will
-    restart its setup network, so you'll need to scan the QR code on the
-    screen again afterwards.
-  </p>
 </main>
 <script>
   // Collapse manual entry behind the picker's "Other network…" option.
