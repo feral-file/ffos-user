@@ -19,6 +19,7 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -71,6 +72,10 @@ const (
 
 	// defaultHostnamePath is the source of the MAC-derived device_id.
 	defaultHostnamePath = "/etc/hostname"
+
+	// portalURLLookupTimeout keeps optional address discovery from delaying
+	// portal startup when NetworkManager is unresponsive.
+	portalURLLookupTimeout = 3 * time.Second
 )
 
 // HostnameFunc yields the device_id used to derive the SSID and PSK. It is a
@@ -87,6 +92,10 @@ type nmBackend struct {
 
 	// iface optionally pins the AP to a Wi-Fi device. Empty lets nmcli choose.
 	iface string
+
+	// portalURLTimeout is configurable only so the blocking-query regression
+	// test can run quickly. Production always receives the constant above.
+	portalURLTimeout time.Duration
 }
 
 // NewNetworkManager builds the nmcli-backed AP. hostname may be nil to read the
@@ -99,10 +108,11 @@ func NewNetworkManager(exec wrapper.Exec, logger *zap.Logger, iface string, host
 		logger = zap.NewNop()
 	}
 	return &nmBackend{
-		exec:     exec,
-		logger:   logger,
-		hostname: hostname,
-		iface:    iface,
+		exec:             exec,
+		logger:           logger,
+		hostname:         hostname,
+		iface:            iface,
+		portalURLTimeout: portalURLLookupTimeout,
 	}
 }
 
@@ -151,7 +161,10 @@ func (b *nmBackend) Up(ctx context.Context) (Info, error) {
 // an otherwise usable AP whose captive portal can still open automatically.
 // The player omits the manual-address instruction when PortalURL is blank.
 func (b *nmBackend) activePortalURL(ctx context.Context) string {
-	out, err := b.run(ctx, "-g", "IP4.ADDRESS", "connection", "show", "id", ProfileName)
+	lookupCtx, cancel := context.WithTimeout(ctx, b.portalURLTimeout)
+	defer cancel()
+
+	out, err := b.run(lookupCtx, "-g", "IP4.ADDRESS", "connection", "show", "id", ProfileName)
 	if err != nil {
 		b.logger.Warn("setup AP active address unavailable; omitting direct portal fallback", zap.Error(err))
 		return ""

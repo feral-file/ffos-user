@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,18 +21,30 @@ type scriptedExec struct {
 	reply func(argv []string) ([]byte, error)
 }
 
-type scriptedCmd struct {
-	out []byte
-	err error
+type execFunc func(context.Context, string, ...string) wrapper.ExecCmd
+
+func (f execFunc) CommandContext(ctx context.Context, name string, arg ...string) wrapper.ExecCmd {
+	return f(ctx, name, arg...)
 }
 
-func (c scriptedCmd) String() string                  { return "scripted" }
-func (c scriptedCmd) Run() error                      { return c.err }
-func (c scriptedCmd) Start() error                    { return c.err }
-func (c scriptedCmd) Wait() error                     { return c.err }
-func (c scriptedCmd) Output() ([]byte, error)         { return c.out, c.err }
-func (c scriptedCmd) CombinedOutput() ([]byte, error) { return c.out, c.err }
-func (c scriptedCmd) Pid() int                        { return 0 }
+type scriptedCmd struct {
+	out            []byte
+	err            error
+	combinedOutput func() ([]byte, error)
+}
+
+func (c scriptedCmd) String() string          { return "scripted" }
+func (c scriptedCmd) Run() error              { return c.err }
+func (c scriptedCmd) Start() error            { return c.err }
+func (c scriptedCmd) Wait() error             { return c.err }
+func (c scriptedCmd) Output() ([]byte, error) { return c.out, c.err }
+func (c scriptedCmd) CombinedOutput() ([]byte, error) {
+	if c.combinedOutput != nil {
+		return c.combinedOutput()
+	}
+	return c.out, c.err
+}
+func (c scriptedCmd) Pid() int { return 0 }
 
 func (e *scriptedExec) CommandContext(_ context.Context, name string, arg ...string) wrapper.ExecCmd {
 	argv := append([]string{name}, arg...)
@@ -196,6 +209,55 @@ func TestUpOmitsPortalURLWhenActiveAddressIsUnavailable(t *testing.T) {
 	info, err := b.Up(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, info.PortalURL)
+}
+
+func TestUpBoundsBlockingPortalAddressLookup(t *testing.T) {
+	addressStarted := make(chan struct{})
+	var startOnce sync.Once
+	exec := &scriptedExec{reply: func(argv []string) ([]byte, error) {
+		return nil, nil
+	}}
+	execCommandContext := exec.CommandContext
+	b := NewNetworkManager(execFunc(func(ctx context.Context, name string, arg ...string) wrapper.ExecCmd {
+		if len(arg) > 1 && arg[0] == "-g" && arg[1] == "IP4.ADDRESS" {
+			return scriptedCmd{combinedOutput: func() ([]byte, error) {
+				startOnce.Do(func() { close(addressStarted) })
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}}
+		}
+		return execCommandContext(ctx, name, arg...)
+	}), zap.NewNop(), "", func() (string, error) {
+		return "a1b2c3d4e5f6", nil
+	}).(*nmBackend)
+	b.portalURLTimeout = 20 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type upResult struct {
+		info Info
+		err  error
+	}
+	done := make(chan upResult, 1)
+	go func() {
+		info, err := b.Up(ctx)
+		done <- upResult{info: info, err: err}
+	}()
+
+	select {
+	case result := <-done:
+		require.NoError(t, result.err)
+		assert.Empty(t, result.info.PortalURL)
+		assert.NoError(t, ctx.Err(), "the lookup timeout must not cancel the provisioning context")
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("Up remained blocked on optional portal-address discovery")
+	}
+	select {
+	case <-addressStarted:
+	default:
+		t.Fatal("portal-address lookup was not attempted")
+	}
 }
 
 func TestUpSelectsFirstUsableActiveIPv4Address(t *testing.T) {
