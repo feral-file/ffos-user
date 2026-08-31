@@ -20,13 +20,12 @@
   <form class="connect" method="POST" action="/connect">
     {{if .SSIDs}}
     <label for="ssid">Wi-Fi network</label>
-    <select id="ssid" name="ssid" required>
+    <select id="ssid" name="ssid">
       <option value="" selected disabled>Select a network…</option>
       {{range .SSIDs}}<option value="{{.}}">{{.}}</option>{{end}}
-      {{- /* This non-empty sentinel keeps the required select valid when the
-           manual branch is chosen, including without JS. It exceeds the
-           maximum SSID length and is converted back to an empty manual value
-           server-side, so it cannot collide with a real scanned network. */}}
+      {{- /* This non-empty sentinel identifies the manual branch. It exceeds
+           the maximum SSID length and is converted back to an empty manual
+           value server-side, so it cannot collide with a real network. */}}
       <option value="{{.ManualSSIDOption}}" data-manual>Other network…</option>
     </select>
 
@@ -91,8 +90,10 @@
   // mini-browser with scripting disabled keeps today's dual-source form;
   // the server accepts either shape unchanged. The reveal rewrites the
   // label/placeholder copy ("Or type a network name" only reads right when
-  // the field sits beside the picker) and marks the input required — under
-  // "Other network…" a blank name can only be a mistake.
+  // the field sits beside the picker) and applies branch-specific validation.
+  // The base HTML deliberately leaves the picker optional so a no-JS phone
+  // can submit the always-visible manual field; the server rejects an empty
+  // submission in either mode.
   (function () {
     var select = document.getElementById('ssid');
     var manual = document.getElementById('manual-entry');
@@ -103,6 +104,7 @@
       var choice = select.options[select.selectedIndex];
       var other = !!choice && choice.hasAttribute('data-manual');
       manual.hidden = !other;
+      select.required = !other;
       input.required = other;
       if (other) {
         if (label) label.textContent = 'Network name';

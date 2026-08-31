@@ -99,9 +99,40 @@ func TestRootOmitsSetupNetworkAndRequiresAVisibleChoice(t *testing.T) {
 		"the active setup SSID must never be offered or presented as the destination")
 	assert.Contains(t, body, `<option value="" selected disabled>Select a network…</option>`,
 		"the first scanned network must not be silently selected")
-	assert.Contains(t, body, `<select id="ssid" name="ssid" required>`,
-		"the selection prompt must block submission until the user chooses a path")
+	assert.Contains(t, body, `<select id="ssid" name="ssid">`)
+	assert.NotContains(t, body, `<select id="ssid" name="ssid" required>`,
+		"base HTML must allow the visible manual field to submit without JavaScript")
+	assert.Contains(t, body, "select.required = !other;",
+		"JavaScript-capable sheets should still validate the active picker branch")
 	assert.Contains(t, body, `<option value="HomeNet">HomeNet</option>`)
+}
+
+func TestRootFiltersSetupNetworkBeforeDisplayCap(t *testing.T) {
+	destinations := []string{
+		"Net1", "Net2", "Net3", "Net4", "Net5",
+		"Net6", "Net7", "Net8", "Net9",
+	}
+	require.Len(t, destinations, maxDisplayedSSIDs)
+	scan := append([]string{"FF1-devicexyz"}, destinations...)
+	scan = append(scan, "Net10")
+
+	_, ts, client := newTestServer(t, Config{
+		APSSID: "FF1-devicexyz",
+		Scan: func(context.Context) ([]string, error) {
+			return scan, nil
+		},
+	})
+	resp, err := client.Get(ts.URL + "/")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body := readAll(t, resp)
+
+	assert.NotContains(t, body, "FF1-devicexyz")
+	for _, ssid := range destinations {
+		assert.Contains(t, body, `<option value="`+ssid+`">`+ssid+`</option>`)
+	}
+	assert.NotContains(t, body, "Net10",
+		"the display cap still applies after the setup network is removed")
 }
 
 func TestManualSSIDOptionCannotCollideWithARealSSID(t *testing.T) {
@@ -240,7 +271,7 @@ func TestIndexAlwaysOffersManualEntry(t *testing.T) {
 	// The page script collapses manual entry until this option is picked, so
 	// dropping it would make hidden networks unprovisionable again for every
 	// JS-enabled phone. The impossible-SSID sentinel routes to the manual branch
-	// and keeps the required select valid.
+	// while no-JS phones can type directly into the always-visible field.
 	assert.Contains(t, body, `<option value="`+manualSSIDOption+`" data-manual>Other network…</option>`,
 		"picker must carry the manual-entry escape option")
 }

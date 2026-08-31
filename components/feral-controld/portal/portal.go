@@ -65,10 +65,14 @@ const (
 	// session is one phone, occasionally two; the cap exists purely so
 	// misbehaving clients cannot pile up handler goroutines.
 	maxInflightRequests = 32
+	// maxDisplayedSSIDs preserves the original setup picker's compact list.
+	// Apply it only after excluding the active setup AP so that temporary
+	// network never consumes a destination slot.
+	maxDisplayedSSIDs = 9
 	// manualSSIDOption is the form value for the picker's manual-entry branch.
 	// Its ASCII value is longer than an SSID's 32-byte maximum, so it cannot
-	// collide with a real scanned network. A non-empty value lets the select
-	// remain required while "Other network…" is selected, including without JS.
+	// collide with a real scanned network and unambiguously selects the manual
+	// branch when "Other network…" is chosen.
 	manualSSIDOption = "__feral_file_manual_network_entry_option__"
 )
 
@@ -391,6 +395,9 @@ func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request) {
 		for _, ssid := range got {
 			if ssid != s.cfg.APSSID {
 				ssids = append(ssids, ssid)
+				if len(ssids) == maxDisplayedSSIDs {
+					break
+				}
 			}
 		}
 	}
