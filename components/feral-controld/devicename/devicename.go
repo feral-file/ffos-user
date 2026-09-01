@@ -8,6 +8,7 @@
 package devicename
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -155,12 +156,21 @@ func Save(os wrapper.OS, json wrapper.JSON, record *Record) error {
 // strands the previous owner's label at the .tmp path, and a reset that
 // removed only the live record would hand the unit on with that label still
 // on disk — the precise leak this function exists to prevent.
+//
+// The LIVE record goes first, and a failure on either path does not stop the
+// other: only the live record is loaded, advertised, and reported, while the
+// .tmp normally does not even exist. Ordered the other way, a state-dir write
+// error (EIO from wearing eMMC, a read-only remount) would fail on the
+// irrelevant .tmp and leave the advertised name untouched — factory reset
+// logs a clear failure and continues, so that ordering turns a best-effort
+// cleanup miss into the exact leak described above.
 func Clear(os wrapper.OS) error {
-	if err := os.Remove(constants.DEVICE_NAME_FILE + ".tmp"); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("clear device name tmp: %w", err)
-	}
+	var errs []error
 	if err := os.Remove(constants.DEVICE_NAME_FILE); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("clear device name: %w", err)
+		errs = append(errs, fmt.Errorf("clear device name: %w", err))
 	}
-	return nil
+	if err := os.Remove(constants.DEVICE_NAME_FILE + ".tmp"); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("clear device name tmp: %w", err))
+	}
+	return errors.Join(errs...)
 }

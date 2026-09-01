@@ -104,12 +104,18 @@ func (e *executor) clearDeviceName() error {
 	e.deviceNameMu.Lock()
 	defer e.deviceNameMu.Unlock()
 
-	if err := devicename.Clear(e.os); err != nil {
-		return err
-	}
+	// The observer fires even when the disk clear failed: factory reset logs
+	// the error and continues to the claim observer, whose mDNS re-register
+	// republishes the mediator's cached name — so skipping the notify here
+	// would keep the previous owner's label ON THE AIR over the exact
+	// rollback path this function exists for. Worst case (live record still
+	// on disk after an EIO) the advertised serial and the stored name
+	// disagree until the next load, which is the lesser leak: the record is
+	// only readable locally, the advertisement is broadcast.
+	err := devicename.Clear(e.os)
 
 	if e.nameObserver != nil {
 		e.nameObserver("")
 	}
-	return nil
+	return err
 }

@@ -44,12 +44,28 @@ type Status struct {
 // Up on an already-up AP succeeds by REPLACING it (a brief bounce, never a
 // same-name duplicate), and Down on an already-down AP succeeds.
 type Backend interface {
-	// Up raises the AP and returns the advertised credentials.
+	// Up raises the AP and returns the advertised credentials. Info.PortalURL
+	// is NOT filled here — see PortalURL for why the lookup is a separate call.
 	Up(ctx context.Context) (Info, error)
 	// Down tears the AP down. Missing/inactive is treated as success.
 	Down(ctx context.Context) error
 	// Status reports whether the AP is active.
 	Status(ctx context.Context) (Status, error)
+	// PortalURL resolves the direct HTTP portal address on the active AP's own
+	// subnet, best-effort: empty when unavailable, never an error. Only
+	// meaningful while the AP is up.
+	//
+	// A separate call rather than part of Up so the caller can sequence it
+	// AFTER the portal binds :80. Up returns with beacons already going out
+	// and NM's DHCP answering, and on the rescan path the phone re-joins the
+	// saved SSID the moment beacons return — its captive probe races the
+	// portal bind. An optional, up-to-3s nmcli round-trip inside that gap
+	// widens it from a net.Listen to a subprocess timeout, and a probe landing
+	// there gets a RST, which iOS in particular reads as "no portal here"
+	// without retrying soon (the sign-in sheet never raises). The address is
+	// only the manual-fallback line on the TV, so it must never sit between
+	// the AP going live and the portal answering.
+	PortalURL(ctx context.Context) string
 }
 
 const (
@@ -146,21 +162,22 @@ func (b *nmBackend) Up(ctx context.Context) (Info, error) {
 	if _, err := b.run(ctx, args...); err != nil {
 		return Info{}, err
 	}
-	// Read the address NetworkManager actually assigned instead of publishing
-	// its usual 10.42.0.1 as a constant. Shared mode may choose another subnet
-	// to avoid a collision, and only the active profile is authoritative. A
-	// direct on-link address is the deterministic browser fallback once the
-	// user accepts the no-internet Wi-Fi: it bypasses Private DNS and cellular
-	// DNS entirely.
-	info.PortalURL = b.activePortalURL(ctx)
 	return info, nil
 }
 
-// activePortalURL returns the HTTP portal address on the hotspot's own IPv4
-// subnet. Address discovery is best-effort: a failure here must not tear down
-// an otherwise usable AP whose captive portal can still open automatically.
-// The player omits the manual-address instruction when PortalURL is blank.
-func (b *nmBackend) activePortalURL(ctx context.Context) string {
+// PortalURL returns the HTTP portal address on the hotspot's own IPv4 subnet.
+// It reads the address NetworkManager actually assigned instead of publishing
+// its usual 10.42.0.1 as a constant: shared mode may choose another subnet to
+// avoid a collision, and only the active profile is authoritative. A direct
+// on-link address is the deterministic browser fallback once the user accepts
+// the no-internet Wi-Fi — it bypasses Private DNS and cellular DNS entirely.
+//
+// Discovery is best-effort: a failure here must not tear down an otherwise
+// usable AP whose captive portal can still open automatically. The player
+// omits the manual-address instruction when PortalURL is blank. See the
+// Backend interface doc for why this runs after the portal binds, not
+// inside Up.
+func (b *nmBackend) PortalURL(ctx context.Context) string {
 	lookupCtx, cancel := context.WithTimeout(ctx, b.portalURLTimeout)
 	defer cancel()
 

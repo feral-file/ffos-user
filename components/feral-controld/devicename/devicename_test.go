@@ -99,10 +99,13 @@ type fakeOS struct {
 	wrapper.OS
 	files map[string][]byte
 	dirs  map[string]bool
+	// removeErr injects a per-path failure into Remove without consuming the
+	// file, standing in for EIO or a read-only remount of the state dir.
+	removeErr map[string]error
 }
 
 func newFakeOS() *fakeOS {
-	return &fakeOS{files: map[string][]byte{}, dirs: map[string]bool{}}
+	return &fakeOS{files: map[string][]byte{}, dirs: map[string]bool{}, removeErr: map[string]error{}}
 }
 
 var errFakeNotExist = errors.New("fake os: not exist")
@@ -136,6 +139,9 @@ func (f *fakeOS) Rename(oldpath, newpath string) error {
 }
 
 func (f *fakeOS) Remove(path string) error {
+	if err := f.removeErr[path]; err != nil {
+		return err
+	}
 	if _, ok := f.files[path]; !ok {
 		return errFakeNotExist
 	}
@@ -204,6 +210,39 @@ func TestClearRemovesStrandedTemp(t *testing.T) {
 	}
 	if len(osw.files) != 0 {
 		t.Fatalf("Clear left files behind: %v", osw.files)
+	}
+}
+
+// TestClearFailuresAreIndependent pins Clear's ordering and accumulation: the
+// LIVE record — the only path that is loaded and advertised — must not be left
+// behind because the normally-absent .tmp failed first, and a live-record
+// failure must still be reported after the .tmp is cleaned. Factory reset logs
+// a Clear failure and continues, so a short-circuit here silently hands a
+// resold frame the previous owner's label.
+func TestClearFailuresAreIndependent(t *testing.T) {
+	errEIO := errors.New("fake os: eio")
+
+	// A failing .tmp removal must not shield the live record.
+	osw := newFakeOS()
+	osw.files[constants.DEVICE_NAME_FILE] = []byte(`{"name":"Sam's Studio"}`)
+	osw.removeErr[constants.DEVICE_NAME_FILE+".tmp"] = errEIO
+	if err := devicename.Clear(osw); !errors.Is(err, errEIO) {
+		t.Fatalf("Clear = %v, want the injected tmp error", err)
+	}
+	if _, live := osw.files[constants.DEVICE_NAME_FILE]; live {
+		t.Fatal("Clear left the live record behind after a .tmp failure")
+	}
+
+	// A failing live removal is reported, and the stranded .tmp still goes.
+	osw = newFakeOS()
+	osw.files[constants.DEVICE_NAME_FILE] = []byte(`{"name":"Sam's Studio"}`)
+	osw.files[constants.DEVICE_NAME_FILE+".tmp"] = []byte(`{"name":"Sam's Studio"}`)
+	osw.removeErr[constants.DEVICE_NAME_FILE] = errEIO
+	if err := devicename.Clear(osw); !errors.Is(err, errEIO) {
+		t.Fatalf("Clear = %v, want the injected live-record error", err)
+	}
+	if _, tmp := osw.files[constants.DEVICE_NAME_FILE+".tmp"]; tmp {
+		t.Fatal("Clear left the stranded .tmp behind after a live-record failure")
 	}
 }
 

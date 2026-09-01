@@ -73,8 +73,10 @@
         </svg>
       </button>
     </div>
+    {{- /* Renders in BOTH form shapes — picker and empty-scan manual entry —
+         so it must not say "selected". */}}
     <p id="password-help" class="field-hint">
-      Use the password for the selected network—not the setup password.
+      Use that network's own password—not the setup password.
     </p>
 
     <button type="submit" class="primary">Connect</button>

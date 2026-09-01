@@ -189,7 +189,7 @@ func (c *Controller) SavedWifiSSIDs(ctx context.Context) (ssids []string, anyHid
 		}
 		// Strip ONLY nmcli's record terminator (a single trailing newline).
 		// Leading/trailing spaces are valid SSID bytes, and the scan side
-		// (parseSSIDsCapped) preserves them — TrimSpace here made a
+		// (parseSSIDs) preserves them — TrimSpace here made a
 		// whitespace-padded saved SSID compare unequal to its own scan
 		// sighting, so an in-range network read as "absent" and could satisfy
 		// every relocation confirmation: exactly the false positive this
@@ -214,13 +214,13 @@ func (c *Controller) SavedWifiSSIDs(ctx context.Context) (ssids []string, anyHid
 // Scanning (with pre-AP cache)
 // -----------------------------------------------------------------------------
 
-// scan runs the nmcli SSID listing shared by RefreshScanCache and
-// ScanAllSSIDs. There is deliberately NO capped public wrapper anymore: the
-// only live display cap is portal.maxDisplayedSSIDs, applied AFTER the portal
-// removes its own setup SSID. A cap re-introduced here would sit BEFORE that
-// filter and reinstate the dense-scan bug where the setup AP consumed one of
-// the nine picker slots.
-func (c *Controller) scan(ctx context.Context, force bool, limit int) ([]string, error) {
+// scan runs the nmcli SSID listing behind RefreshScanCache (ScanAllSSIDs
+// builds its own interface-pinned argv). It is deliberately UNCAPPED, with no
+// cap parameter to reach for: the only live display cap is
+// portal.maxDisplayedSSIDs, applied AFTER the portal removes its own setup
+// SSID. A cap re-introduced here would sit BEFORE that filter and reinstate
+// the dense-scan bug where the setup AP consumed one of the nine picker slots.
+func (c *Controller) scan(ctx context.Context, force bool) ([]string, error) {
 	args := []string{"-t", "-f", "SSID", "device", "wifi", "list"}
 	if force {
 		args = append(args, "--rescan", "yes")
@@ -229,7 +229,7 @@ func (c *Controller) scan(ctx context.Context, force bool, limit int) ([]string,
 	if err != nil {
 		return nil, err
 	}
-	return parseSSIDsCapped(string(out), limit), nil
+	return parseSSIDs(string(out)), nil
 }
 
 // ScanAllSSIDs performs a forced live scan and returns every unique SSID in
@@ -261,7 +261,7 @@ func (c *Controller) ScanAllSSIDs(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseSSIDsUncapped(string(out)), nil
+	return parseSSIDs(string(out)), nil
 }
 
 // CachedScan returns a cached scan when it is still fresh, otherwise performs a
@@ -310,7 +310,7 @@ func (c *Controller) RefreshScanCache(ctx context.Context) ([]string, error) {
 	// Preserve every candidate in the cache. NetworkManager can retain the
 	// active setup SSID in these results; the portal must remove that exact
 	// non-destination before applying its nine-network display cap.
-	ssids, err := c.scan(ctx, true, 0)
+	ssids, err := c.scan(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -933,13 +933,12 @@ func exitCode(err error) int {
 	return -1
 }
 
-// parseSSIDsUncapped extracts every unique, non-empty SSID — for callers that
-// treat scan CONTENTS as evidence, where truncation would fabricate absence.
-func parseSSIDsUncapped(out string) []string {
-	return parseSSIDsCapped(out, 0)
-}
-
-func parseSSIDsCapped(out string, limit int) []string {
+// parseSSIDs extracts every unique, non-empty SSID, uncapped: every caller
+// treats scan CONTENTS as evidence (relocation checks, the portal cache), and
+// truncation at this layer would fabricate absence. Display capping is the
+// portal's concern alone (portal.maxDisplayedSSIDs, applied after it removes
+// the setup SSID).
+func parseSSIDs(out string) []string {
 	seen := make(map[string]struct{})
 	var ssids []string
 	for _, line := range strings.Split(out, "\n") {
@@ -952,9 +951,6 @@ func parseSSIDsCapped(out string, limit int) []string {
 		}
 		seen[ssid] = struct{}{}
 		ssids = append(ssids, ssid)
-		if limit > 0 && len(ssids) >= limit {
-			break
-		}
 	}
 	return ssids
 }

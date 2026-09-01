@@ -54,13 +54,14 @@ func TestInstanceLabel(t *testing.T) {
 	assert.Equal(t, "FF1", instanceLabel(DeviceInfo{}))
 }
 
-// TestInstanceLabel_DottedNamesFallBackToSerial pins the dot guard. zeroconf
-// does no DNS escaping, so a dotted instance string becomes multiple DNS
-// labels — and consecutive dots become an EMPTY label, which fails
+// TestInstanceLabel_DottedNamesFallBackToSerial pins the metacharacter guard.
+// zeroconf does no DNS escaping, so a dotted instance string becomes multiple
+// DNS labels — and consecutive dots become an EMPTY label, which fails
 // dns.Msg.Pack on every response while Register itself still returns nil: the
 // frame keeps a live server that answers nothing, persistently, because the
-// name is on disk. Any dot therefore surrenders the label to the serial; the
-// owner's exact name still travels in TXT.
+// name is on disk. Backslash is the other presentation-format metacharacter
+// (see instanceLabel's doc). Either one therefore surrenders the label to the
+// serial; the owner's exact name still travels in TXT.
 func TestInstanceLabel_DottedNamesFallBackToSerial(t *testing.T) {
 	cases := []struct {
 		name string
@@ -73,6 +74,15 @@ func TestInstanceLabel_DottedNamesFallBackToSerial(t *testing.T) {
 		{"ordinary abbreviation", "Apt. 3"},
 		{"trailing dot", "Studio."},
 		{"leading dot", ".hidden"},
+		// Backslash is the OTHER DNS presentation-format metacharacter: a
+		// trailing one escapes the label separator (the record lands under
+		// "_tcp.local.", outside the browsed service type) and "\DDD" is
+		// consumed as a decimal escape, advertising a label that differs
+		// from the stored name.
+		{"trailing backslash", `Room\`},
+		{"backslash only", `\`},
+		{"decimal escape", `Sam\123 Studio`},
+		{"interior backslash", `a\b`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -89,4 +99,6 @@ func TestInstanceLabel_DottedNamesFallBackToSerial(t *testing.T) {
 	// A hostname that itself carries a dot (an FQDN-shaped serial) is not a
 	// valid single label either.
 	assert.Equal(t, "FF1", instanceLabel(DeviceInfo{ID: "ff1.local", Name: "a..b"}))
+	// Nor is a serial carrying a backslash.
+	assert.Equal(t, "FF1", instanceLabel(DeviceInfo{ID: `ff1\abc`, Name: `a\b`}))
 }
