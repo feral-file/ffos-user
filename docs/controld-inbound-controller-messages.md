@@ -902,8 +902,14 @@ to a space, formatting characters removed, whitespace collapsed, truncated to
 32 runes), which may differ from what was sent. Controllers should adopt the
 returned value rather than echoing their own input.
 
-Clearing: send `{"name": ""}`. The record is removed from the display path and
-the unit falls back to its serial in both mDNS and status.
+Clearing: send `{"name": ""}`. The record is removed from the display path.
+**mDNS** falls back to the serial, so the unit still announces something a
+person can read. **Status does not**: `device_status.message.deviceName` is
+always present on firmware carrying this command and becomes the empty string,
+because its presence is the capability gate a controller uses to decide whether
+to offer renaming, and a serial there would be indistinguishable from a name
+somebody chose. A controller reading status for a cleared unit gets `""`, not
+the serial. This matches `docs/api-design.md`.
 
 Current error cases:
 
