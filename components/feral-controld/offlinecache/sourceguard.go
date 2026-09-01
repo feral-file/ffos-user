@@ -20,10 +20,11 @@ import (
 // Threat model. A playlist body reaches this service from the LAN hub —
 // which binds 0.0.0.0:1111 and is unauthenticated (see the component
 // AGENTS.md) — and from the relayer. Every source URL inside it is
-// therefore untrusted input, and three separate paths in this package
+// therefore untrusted input, and four separate paths in this package
 // dial it:
 //
 //   - classify.go's HEAD / ranged-GET probe,
+//   - probe.go's cast-time liveness preflight (#304),
 //   - mediacapture.go's direct body download,
 //   - capture.go's Page.navigate in the headless browser.
 //
@@ -333,6 +334,16 @@ func (g sourceGuard) checkRedirect(req *go_http.Request, via []*go_http.Request)
 	if len(via) >= maxSourceRedirects {
 		return fmt.Errorf("%w: stopped after %d redirects", ErrUnsafeSource, len(via))
 	}
+	// Go's redirect handling sets a Referer carrying the PREVIOUS hop's
+	// full URL, query string included (refererForURL strips only
+	// userinfo). A signed CDN source (?X-Amz-Signature=...) that 302s
+	// cross-origin would hand its credential-bearing URL to the next
+	// origin and its logs — something a browser's default
+	// strict-origin-when-cross-origin policy would never do, and these
+	// hops are between origins a hostile playlist chose. No fetch on
+	// this transport needs a Referer, so it is dropped on every hop
+	// rather than policy-matched.
+	req.Header.Del("Referer")
 	switch strings.ToLower(req.URL.Scheme) {
 	case "http", "https":
 		return nil
@@ -361,6 +372,42 @@ func newGuardedHTTPClientFor(g sourceGuard, timeout time.Duration) wrapper.HTTPC
 		Timeout:       timeout,
 		CheckRedirect: g.checkRedirect,
 		Transport:     g.transport(),
+	})
+}
+
+// newGuardedNoRedirectHTTPClientFor is the guarded client with redirect
+// FOLLOWING disabled outright: the first response — a 3xx included — is
+// returned as the final answer, and no second request is ever made.
+//
+// Built for the cast preflight, whose request-count bound must be a hard
+// one request per probed source: with following enabled, every probe
+// could legally fan into maxSourceRedirects further requests, turning a
+// budget of N into N x 10 against attacker-chosen origins (#310 review).
+// Not following also removes the probe's redirect-time SSRF surface
+// entirely — there is no hop for checkRedirect to police and no
+// cross-origin Referer to strip, though the dial-time guard still vets
+// the FIRST request's destination. Callers treat a 3xx answer as alive
+// (fail-open): the origin answered and delegates elsewhere; the kiosk's
+// own fetch follows it with the browser's policies.
+// Keep-alives are disabled for the same literal-budget reason (#311
+// review): net/http silently RETRIES an idempotent GET whose REUSED
+// idle connection dies before response headers arrive, so a hostile
+// origin could seed an idle connection and then drop the next request
+// on it to be handed a replayed one — a second outbound request the
+// budget never counted. Go's replay fires only on reused connections,
+// so no reuse means no replay and the cap stays a literal
+// received-request bound. The cost — a fresh dial per probe — is
+// bounded by that same cap, against origins an untrusted playlist
+// chose, where pooling buys nothing worth the replay surface.
+func newGuardedNoRedirectHTTPClientFor(g sourceGuard, timeout time.Duration) wrapper.HTTPClient {
+	transport := g.transport()
+	transport.DisableKeepAlives = true
+	return wrapper.NewHTTPClientFrom(&go_http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*go_http.Request, []*go_http.Request) error {
+			return go_http.ErrUseLastResponse
+		},
+		Transport: transport,
 	})
 }
 
@@ -396,6 +443,17 @@ func (g sourceGuard) transport() *go_http.Transport {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		// Every fetch on this transport dials an untrusted, possibly
+		// hostile origin, and Go's default response-header ceiling is
+		// 10 MiB PER RESPONSE — so a probe wave fanning out
+		// concurrently (probeConcurrency-wide on the cast preflight)
+		// against a server that streams enormous header blocks and then
+		// stalls could hold hundreds of MiB resident on a constrained
+		// device before timeouts fire. 1 MiB is orders of magnitude
+		// above any legitimate header block (real-world limits sit at
+		// 8-64 KiB) while capping the wave at the size of one playlist
+		// body.
+		MaxResponseHeaderBytes: 1 << 20,
 	}
 }
 

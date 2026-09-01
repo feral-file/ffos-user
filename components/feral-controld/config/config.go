@@ -47,6 +47,25 @@ type CommandStormConfig struct {
 	MaxConcurrent int64 `json:"maxConcurrent"`
 }
 
+// SourceProbeConfig tunes the displayPlaylist source preflight (#304): the
+// probe that rejects a cast whose every item source is definitively dead.
+// Follows CommandStormConfig's optional-section + Disabled opt-out convention.
+//
+// The Disabled switch exists because the preflight turns a previously
+// always-accept command path into one that can REFUSE, based on a verdict
+// table (identity-independent 4xx = dead) whose accepted residual is an
+// origin that answers this probe a 4xx while still rendering in the kiosk —
+// a class the repo has shipped evidence of (see uarewrite). If that residual
+// materializes on the fleet, this flag is the remedy; without it the only
+// recovery is a package rollback. Same reasoning as uarewrite's operator-
+// editable host list: new hostile origin behavior should be a config edit,
+// not a release.
+type SourceProbeConfig struct {
+	// Disabled turns the cast-time source preflight off entirely (casts are
+	// forwarded unprobed, the pre-#304 behavior). Default (false) keeps it on.
+	Disabled bool `json:"disabled"`
+}
+
 // OfflineCacheConfig tunes the offlinecache package (see
 // components/feral-controld/offlinecache and docs/offline-artwork-capture.md).
 // All fields besides Enabled are optional; zero/empty values fall back to
@@ -194,6 +213,7 @@ type Config struct {
 	// HubEnabled(), never directly.
 	EnableHub    *bool               `json:"enableHub"`
 	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
+	SourceProbe  *SourceProbeConfig  `json:"sourceProbe,omitempty"`
 	OfflineCache *OfflineCacheConfig `json:"offlineCache,omitempty"`
 	Netlog       *NetlogConfig       `json:"netlog,omitempty"`
 	// GatewayUserAgent scopes the kiosk User-Agent rewrite (see the

@@ -404,7 +404,7 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 	if h.kioskReplay.PlaybackGeneration() != genBeforeResolve {
 		return
 	}
-	if syncErr := h.kioskReplay.SyncPlaylist(ctx, sources); syncErr != nil {
+	if _, syncErr := h.kioskReplay.SyncPlaylist(ctx, sources); syncErr != nil {
 		h.logger.Warn("offline cache: failed to sync kiosk replay scope after clear", zap.Error(syncErr))
 	}
 }

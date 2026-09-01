@@ -43,6 +43,15 @@ type handler struct {
 	scheduler   playlistschedule.Scheduler
 	logger      *zap.Logger
 
+	// sourceProber, when set (SetSourceProber), is the cast-time source
+	// preflight (#304). Independent of offlineCache above on purpose: the
+	// probe must run whether or not offline caching is enabled — it only
+	// LIVES in that package because that is where dialing untrusted
+	// playlist URLs is made safe. nil (tests, a build wired before the
+	// seam) skips the preflight entirely, degrading to the old
+	// accept-anything behavior — fail-open, documented at the call site.
+	sourceProber offlinecache.SourceProber
+
 	// sessionGeneration, when set (SetSessionGeneration), is
 	// playersession.Session.Generation narrowed to a func() uint64 seam
 	// (design doc §4). nil reads as generation 0 always, which never
@@ -119,6 +128,26 @@ func SetSessionGeneration(h Handler, fn func() uint64, logger *zap.Logger) {
 
 func (h *handler) setSessionGeneration(fn func() uint64) {
 	h.sessionGeneration = fn
+}
+
+// SetSourceProber injects the cast-time source preflight onto h, if h
+// supports it (the concrete *handler built by New — NOT the
+// storm-protection gate wrapper, so callers must wire it against the raw
+// handler before NewGate wraps it, mirroring SetSessionGeneration's
+// contract).
+func SetSourceProber(h Handler, prober offlinecache.SourceProber, logger *zap.Logger) {
+	setter, ok := h.(interface {
+		setSourceProber(offlinecache.SourceProber)
+	})
+	if !ok {
+		logger.Warn("Command handler does not support source preflight wiring")
+		return
+	}
+	setter.setSourceProber(prober)
+}
+
+func (h *handler) setSourceProber(prober offlinecache.SourceProber) {
+	h.sourceProber = prober
 }
 
 func (h *handler) currentGeneration() uint64 {
@@ -269,6 +298,38 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var playlist *dp1.Playlist
 		var schedulerSnapshot playlistschedule.Snapshot
 		var schedulerSource playlistschedule.Source
+		// replayScopeTouched records whether THIS request reached
+		// syncReplayScope (even a failed sync counts — it still bumps the
+		// playback generation). The corrective resync in the failure defer
+		// below is gated on it: the resync exists to revert a
+		// mistakenly-applied NEW scope, so a failure before any scope
+		// change (a malformed payload, a resolution error, a preflight
+		// rejection) has nothing to revert — and the resync is
+		// network-bound (a live FetchPlayerStatus plus playlist
+		// resolution), so running it anyway would delay an otherwise
+		// immediate error reply, in the worst case past the hub's write
+		// deadline.
+		var replayScopeTouched bool
+		// rescuedByCache marks an all-dead cast that proceeded ONLY because
+		// the offline cache holds a prior capture. Such a cast has exactly
+		// one way to actually show artwork — replay serving from cache — so
+		// unlike an ordinary live cast (where replay is a best-effort
+		// enhancement and a scope-sync failure is just logged), a rescued
+		// cast REQUIRES the replay scope to arm: if syncReplayScope fails
+		// below, the cast is rejected with the preflight's own error rather
+		// than forwarded to render every origin already proven dead (#308
+		// review). rescueProbeResults carries the probe evidence for that
+		// late rejection; scopeSyncErr is the closure's outcome seam.
+		var rescuedByCache bool
+		var rescueProbeResults []offlinecache.SourceProbeResult
+		var scopeSyncErr error
+		// scopeSyncEnabled is SyncPlaylist's enabled-count for the same one
+		// consumer: a rescue with an errorless sync that armed ZERO cached
+		// sources is still a dead cast — HasReplayableItem now grants a
+		// rescue only on a confirmed hit, but that hit can go stale (the
+		// record cleared between lookup and sync), so the installed
+		// scope's own count remains the final authority (#310 review).
+		var scopeSyncEnabled int
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			status.RecordPlaybackAttempt()
 			defer func() {
@@ -283,8 +344,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// leaving scope pointed at the new playlist would
 					// misclassify the still-on-screen old playlist's own
 					// requests as misses. Re-syncing to the player's
-					// actual current status reverts that.
-					h.resyncKioskReplayScopeToCurrentDisplay(ctx)
+					// actual current status reverts that. Gated: a failure
+					// BEFORE any scope change has nothing to revert (see
+					// replayScopeTouched's doc).
+					if replayScopeTouched {
+						h.resyncKioskReplayScopeToCurrentDisplay(ctx)
+					}
 					return
 				}
 				h.logger.Info("result from CDP", zap.Any("result", result))
@@ -294,8 +359,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// Same rationale as the err != nil branch above: the
 					// send succeeded at the transport level but the
 					// player itself rejected the command, so it is still
-					// displaying whatever it had before.
-					h.resyncKioskReplayScopeToCurrentDisplay(ctx)
+					// displaying whatever it had before. (A player
+					// rejection implies the send ran, which implies scope
+					// was synced first — the gate matches that reality
+					// rather than assuming it.)
+					if replayScopeTouched {
+						h.resyncKioskReplayScopeToCurrentDisplay(ctx)
+					}
 				}
 			}()
 			// heldPlaybackLock records whether this path acquired the
@@ -377,6 +447,133 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				return nil, fmt.Errorf("unknown payload type")
 			}
 
+			// Cast-time source preflight (#304). Without it, a cast whose
+			// every source 400s is forwarded, self-reported ok by the
+			// player (an iframe cannot see HTTP status), and shown as
+			// "playing" — so neither the casting end nor the device ever
+			// learns the links are dead. The probe rejects the cast ONLY
+			// when every item earned a definitive dead verdict (an actual
+			// HTTP >= 400 answer — or a malformed data: URI, the one
+			// non-HTTP verdict that is equally definitive because it is a
+			// parse, not a network guess): network errors, timeouts, guard
+			// refusals, and well-formed data: items all count in the cast's favor, so
+			// an offline device casting a fully-cached playlist (the
+			// cached-copy fallback above) still plays. A partially-dead
+			// playlist also still plays — rejecting it would punish nine
+			// good artworks for one dead link — with the dead items logged.
+			//
+			// Placed deliberately with the slow network-bound work: after
+			// DP-1 resolution (so dynamic items are probed as resolved) and
+			// BEFORE LockPlayback below, for the same reason resolution is
+			// (see that comment). err must be assigned, not just returned,
+			// so the deferred playback-failure accounting above records the
+			// rejection.
+			if h.sourceProber != nil && playlist != nil && len(playlist.Items) > 0 &&
+				len(playlist.Items) <= maxPreflightItems {
+				sources := make([]string, 0, len(playlist.Items))
+				// scheduledPlaylist: any item carrying displayAt makes this
+				// a scheduler-filtered playlist, and the probe would see
+				// the FULL item list before that filtering. An item outside
+				// the current cohort can be dead NOW and live at display
+				// time — publish-then-upload is the normal premiere
+				// ordering, so a scheduled drop's sources routinely 404
+				// until go-live, and rejecting would silently lose the cast
+				// the scheduler was about to defer-accept and arm a timer
+				// for (the {ok:true, deferred:true} path below). Since the
+				// probe can therefore never affect a scheduled cast, it is
+				// skipped entirely for them — see the branch below.
+				scheduledPlaylist := false
+				for _, item := range playlist.Items {
+					sources = append(sources, item.Source)
+					if item.DisplayAt != nil && *item.DisplayAt != "" {
+						scheduledPlaylist = true
+					}
+				}
+				if scheduledPlaylist {
+					// Scheduled playlists skip the preflight ENTIRELY, not
+					// just its rejection: the probe could never reject them
+					// (dead-now is not dead-at-display-time), so on this
+					// path it buys only log lines — at a price of up to
+					// probePhaseCeiling of added latency sitting directly
+					// in front of PrepareWithSource arming the timer and
+					// sending the current cohort, which can make a due
+					// cutover visibly late (#308 review). The scheduler's
+					// timing contract wins; dead scheduled sources surface
+					// when the cohort actually fails to render, and via
+					// the playlist-refresher follow-up tracked in #304.
+					h.logger.Debug("displayPlaylist: displayAt-scheduled playlist; source preflight skipped",
+						zap.Int("items", len(sources)))
+				} else {
+					probeResults := h.sourceProber.ProbeSources(ctx, sources)
+					// Per-item log detail is capped: the hub accepts a 4 MiB
+					// playlist with no item cap, so an all-dead hostile cast
+					// must not be able to mint one log line per item on a
+					// device whose logs are size-rotated files. The first few
+					// carry the query-redacted, truncated sources an operator
+					// greps for (redaction because uploadLogs ships this log
+					// off-device and signed URLs carry credentials in their
+					// query strings — see SourceProbeResult.Source); the rest
+					// collapse into counts.
+					dead, inconclusive := 0, 0
+					for i, r := range probeResults {
+						switch r.Verdict {
+						case offlinecache.ProbeDead:
+							dead++
+							if dead <= maxProbeLogDetailItems {
+								h.logger.Warn("displayPlaylist: item source is unreachable",
+									zap.Int("item", i),
+									zap.String("source", r.Source),
+									zap.Int("status", r.Status),
+									zap.Error(r.Err))
+							}
+						case offlinecache.ProbeInconclusive:
+							inconclusive++
+						}
+					}
+					if dead > maxProbeLogDetailItems {
+						h.logger.Warn("displayPlaylist: additional item sources unreachable",
+							zap.Int("count", dead-maxProbeLogDetailItems))
+					}
+					if inconclusive > 0 {
+						h.logger.Debug("displayPlaylist: item source probes inconclusive",
+							zap.Int("count", inconclusive))
+					}
+					if dead == len(probeResults) {
+						switch {
+						case h.offlineCache != nil && h.kioskReplay != nil && h.offlineCache.HasReplayableItem(sources...):
+							// A definitively dead ORIGIN is not a dead CAST
+							// when the offline cache holds a prior capture:
+							// replay serves cached items regardless of origin
+							// state, and origin rot is exactly the case the
+							// cache exists for (#305 review F4). Checked only
+							// on the all-dead path — one record read per
+							// source, worst case — so the common accept path
+							// pays nothing. The rescue is conditional on
+							// replay actually being able to serve: kioskReplay
+							// must be wired here, and the scope sync below
+							// must succeed (see rescuedByCache's doc) — a
+							// record on disk that replay cannot arm rescues
+							// nothing.
+							rescuedByCache = true
+							rescueProbeResults = probeResults
+							h.logger.Warn("displayPlaylist: every item source is unreachable but cached captures exist; casting for offline replay",
+								zap.Int("items", len(sources)))
+						default:
+							err = &SourceUnreachableError{Results: probeResults}
+							return nil, err
+						}
+					}
+				}
+			}
+
+			if h.sourceProber != nil && playlist != nil && len(playlist.Items) > maxPreflightItems {
+				// Over the preflight item budget: skip before building any
+				// per-item state (fail open) — see maxPreflightItems.
+				h.logger.Warn("displayPlaylist: playlist exceeds the preflight item budget; source preflight skipped",
+					zap.Int("items", len(playlist.Items)),
+					zap.Int("budget", maxPreflightItems))
+			}
+
 			// Player CanvasService rejects displayPlaylist without a known
 			// intent.action ("Unknown DP1 action: undefined" → ok:false).
 			// Controller casts are force-display, same contract as
@@ -418,12 +615,23 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if h.kioskReplay == nil || p == nil {
 				return
 			}
+			// Set BEFORE the sync call: a failed SyncPlaylist below still
+			// bumps the playback generation (MarkPlaybackChanged), so scope
+			// state has been touched either way and the failure defer's
+			// corrective resync must run — see replayScopeTouched's doc.
+			replayScopeTouched = true
 			sources := make([]string, 0, len(p.Items))
 			for _, item := range p.Items {
 				sources = append(sources, item.Source)
 			}
-			if syncErr := h.kioskReplay.SyncPlaylist(ctx, sources); syncErr != nil {
-				h.logger.Warn("offline cache: failed to sync kiosk replay scope for playlist", zap.Error(syncErr))
+			// scopeSyncErr/scopeSyncEnabled surface the outcome for the ONE
+			// caller that must treat a failure — or an empty armed scope —
+			// as fatal: the cache-rescued all-dead cast (see
+			// rescuedByCache's and scopeSyncEnabled's docs). Ordinary live
+			// casts keep the best-effort contract: log and proceed.
+			scopeSyncEnabled, scopeSyncErr = h.kioskReplay.SyncPlaylist(ctx, sources)
+			if scopeSyncErr != nil {
+				h.logger.Warn("offline cache: failed to sync kiosk replay scope for playlist", zap.Error(scopeSyncErr))
 			}
 			// Announce this authoritative scope change (under the
 			// lock) so a concurrent corrective resync that sampled
@@ -491,6 +699,17 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// Replayer.EnableForPlaylist), and the playlist-refresher's
 				// periodic pass re-syncs as downloads complete.
 				syncReplayScope(fullPlaylist)
+				// A cache-rescued cast can only show artwork through replay,
+				// so a scope-sync failure means the rescue's one path to the
+				// screen is gone: reject with the preflight's own evidence
+				// instead of forwarding a cast whose every origin is proven
+				// dead (see rescuedByCache's doc). Restore mirrors the other
+				// pre-send failure exits from this closure.
+				if rescuedByCache && (scopeSyncErr != nil || scopeSyncEnabled == 0) {
+					err = &SourceUnreachableError{Results: rescueProbeResults}
+					h.scheduler.Restore(schedulerSnapshot)
+					return
+				}
 				command.Arguments["dp1_call"] = playlist
 				result, err = h.sendCDPRequest(command)
 				if err != nil || !playerresponse.OK(result) {
@@ -508,6 +727,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// No scheduler configured: every cast reaches the player
 				// unfiltered, so scope-sync immediately precedes the send.
 				syncReplayScope(playlist)
+				// Same fatal-for-rescue rule as the scheduler branch above
+				// — see rescuedByCache's doc.
+				if rescuedByCache && (scopeSyncErr != nil || scopeSyncEnabled == 0) {
+					err = &SourceUnreachableError{Results: rescueProbeResults}
+					return nil, err
+				}
 				command.Arguments["dp1_call"] = playlist
 			}
 			result, err = h.sendCDPRequest(command)

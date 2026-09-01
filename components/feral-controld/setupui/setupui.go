@@ -237,15 +237,19 @@ func (s *Service) SetSession(session NavigationSession) {
 }
 
 // ShowSoftAPQR narrates the soft-AP onboarding step: the phone should join the
-// device's setup Wi-Fi. ssid is required; psk (the WPA2 passphrase) is optional
-// and omitted from the payload when blank.
-func (s *Service) ShowSoftAPQR(ssid string, psk string) {
+// device's setup Wi-Fi. ssid is required; psk (the WPA2 passphrase) and
+// portalURL (the direct on-link HTTP fallback) are optional and omitted from
+// the payload when blank.
+func (s *Service) ShowSoftAPQR(ssid string, psk string, portalURL string) {
 	req := map[string]any{
 		"state": stateSoftAPQR,
 		"ssid":  ssid,
 	}
 	if strings.TrimSpace(psk) != "" {
 		req["password"] = psk
+	}
+	if strings.TrimSpace(portalURL) != "" {
+		req["portal_url"] = portalURL
 	}
 	s.push(req)
 }

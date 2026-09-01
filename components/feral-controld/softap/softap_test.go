@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,18 +21,30 @@ type scriptedExec struct {
 	reply func(argv []string) ([]byte, error)
 }
 
-type scriptedCmd struct {
-	out []byte
-	err error
+type execFunc func(context.Context, string, ...string) wrapper.ExecCmd
+
+func (f execFunc) CommandContext(ctx context.Context, name string, arg ...string) wrapper.ExecCmd {
+	return f(ctx, name, arg...)
 }
 
-func (c scriptedCmd) String() string                  { return "scripted" }
-func (c scriptedCmd) Run() error                      { return c.err }
-func (c scriptedCmd) Start() error                    { return c.err }
-func (c scriptedCmd) Wait() error                     { return c.err }
-func (c scriptedCmd) Output() ([]byte, error)         { return c.out, c.err }
-func (c scriptedCmd) CombinedOutput() ([]byte, error) { return c.out, c.err }
-func (c scriptedCmd) Pid() int                        { return 0 }
+type scriptedCmd struct {
+	out            []byte
+	err            error
+	combinedOutput func() ([]byte, error)
+}
+
+func (c scriptedCmd) String() string          { return "scripted" }
+func (c scriptedCmd) Run() error              { return c.err }
+func (c scriptedCmd) Start() error            { return c.err }
+func (c scriptedCmd) Wait() error             { return c.err }
+func (c scriptedCmd) Output() ([]byte, error) { return c.out, c.err }
+func (c scriptedCmd) CombinedOutput() ([]byte, error) {
+	if c.combinedOutput != nil {
+		return c.combinedOutput()
+	}
+	return c.out, c.err
+}
+func (c scriptedCmd) Pid() int { return 0 }
 
 func (e *scriptedExec) CommandContext(_ context.Context, name string, arg ...string) wrapper.ExecCmd {
 	argv := append([]string{name}, arg...)
@@ -167,6 +180,10 @@ func TestUp(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "FF1-a1b2c3d4e5f6", info.SSID)
 	assert.Equal(t, "86106003", info.PSK) // numericPSK("a1b2c3d4e5f6")
+	// The address lookup is NOT part of Up: beacons are live the moment nmcli
+	// returns, and anything between here and the portal's net.Listen widens
+	// the window where a captive probe gets a RST (see Backend.PortalURL).
+	assert.Empty(t, info.PortalURL)
 
 	// Replace-not-stack: the raise pre-deletes any same-name profile so a
 	// leftover from an ungraceful previous run can never become a duplicate.
@@ -178,6 +195,73 @@ func TestUp(t *testing.T) {
 	assert.Contains(t, call, "con-name "+ProfileName)
 	assert.Contains(t, call, "ssid FF1-a1b2c3d4e5f6")
 	assert.Contains(t, call, "password 86106003")
+}
+
+func TestPortalURLReadsActiveAddress(t *testing.T) {
+	b, exec := newBackend("a1b2c3d4e5f6", func(argv []string) ([]byte, error) {
+		return []byte("10.42.0.1/24\n"), nil
+	})
+	assert.Equal(t, "http://10.42.0.1", b.PortalURL(context.Background()))
+	require.Len(t, exec.recorded(), 1)
+	assert.Equal(t, []string{"nmcli", "-g", "IP4.ADDRESS", "connection", "show", "id", ProfileName},
+		exec.recorded()[0])
+}
+
+func TestPortalURLOmittedWhenActiveAddressIsUnavailable(t *testing.T) {
+	b, _ := newBackend("a1b2c3d4e5f6", func(argv []string) ([]byte, error) {
+		return []byte("not-an-address\n"), nil
+	})
+	assert.Empty(t, b.PortalURL(context.Background()))
+}
+
+func TestPortalURLBoundsBlockingLookup(t *testing.T) {
+	addressStarted := make(chan struct{})
+	var startOnce sync.Once
+	exec := &scriptedExec{reply: func(argv []string) ([]byte, error) {
+		return nil, nil
+	}}
+	execCommandContext := exec.CommandContext
+	b := NewNetworkManager(execFunc(func(ctx context.Context, name string, arg ...string) wrapper.ExecCmd {
+		if len(arg) > 1 && arg[0] == "-g" && arg[1] == "IP4.ADDRESS" {
+			return scriptedCmd{combinedOutput: func() ([]byte, error) {
+				startOnce.Do(func() { close(addressStarted) })
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}}
+		}
+		return execCommandContext(ctx, name, arg...)
+	}), zap.NewNop(), "", func() (string, error) {
+		return "a1b2c3d4e5f6", nil
+	}).(*nmBackend)
+	b.portalURLTimeout = 20 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan string, 1)
+	go func() {
+		done <- b.PortalURL(ctx)
+	}()
+
+	select {
+	case url := <-done:
+		assert.Empty(t, url)
+		assert.NoError(t, ctx.Err(), "the lookup timeout must not cancel the provisioning context")
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("PortalURL remained blocked on optional portal-address discovery")
+	}
+	select {
+	case <-addressStarted:
+	default:
+		t.Fatal("portal-address lookup was not attempted")
+	}
+}
+
+func TestPortalURLSelectsFirstUsableActiveIPv4Address(t *testing.T) {
+	b, _ := newBackend("a1b2c3d4e5f6", func(argv []string) ([]byte, error) {
+		return []byte("garbage\n127.0.0.1/8\n10.42.7.1/24\n10.42.8.1/24\n"), nil
+	})
+	assert.Equal(t, "http://10.42.7.1", b.PortalURL(context.Background()))
 }
 
 func TestUpWithIface(t *testing.T) {

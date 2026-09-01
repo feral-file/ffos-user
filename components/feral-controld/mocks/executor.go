@@ -51,6 +51,20 @@ func (mr *MockExecutorMockRecorder) Execute(ctx, cmd interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Execute", reflect.TypeOf((*MockExecutor)(nil).Execute), ctx, cmd)
 }
 
+// ResetStaged mocks base method.
+func (m *MockExecutor) ResetStaged() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ResetStaged")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// ResetStaged indicates an expected call of ResetStaged.
+func (mr *MockExecutorMockRecorder) ResetStaged() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResetStaged", reflect.TypeOf((*MockExecutor)(nil).ResetStaged))
+}
+
 // SaveLastSysMetrics mocks base method.
 func (m *MockExecutor) SaveLastSysMetrics(metrics []byte) {
 	m.ctrl.T.Helper()
@@ -75,28 +89,178 @@ func (mr *MockExecutorMockRecorder) SetClaimObserver(observer interface{}) *gomo
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetClaimObserver", reflect.TypeOf((*MockExecutor)(nil).SetClaimObserver), observer)
 }
 
+// SetDeviceNameObserver mocks base method.
+func (m *MockExecutor) SetDeviceNameObserver(observer func(string)) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetDeviceNameObserver", observer)
+}
+
+// SetDeviceNameObserver indicates an expected call of SetDeviceNameObserver.
+func (mr *MockExecutorMockRecorder) SetDeviceNameObserver(observer interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetDeviceNameObserver", reflect.TypeOf((*MockExecutor)(nil).SetDeviceNameObserver), observer)
+}
+
 // SetSetupUI mocks base method.
 func (m *MockExecutor) SetSetupUI(ui *setupui.Service) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "SetSetupUI", ui)
 }
 
-// ResetStaged mocks base method.
-func (m *MockExecutor) ResetStaged() bool {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ResetStaged")
-	ret0, _ := ret[0].(bool)
-	return ret0
-}
-
-// ResetStaged indicates an expected call of ResetStaged.
-func (mr *MockExecutorMockRecorder) ResetStaged() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResetStaged", reflect.TypeOf((*MockExecutor)(nil).ResetStaged))
-}
-
 // SetSetupUI indicates an expected call of SetSetupUI.
 func (mr *MockExecutorMockRecorder) SetSetupUI(ui interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSetupUI", reflect.TypeOf((*MockExecutor)(nil).SetSetupUI), ui)
+}
+
+// MocksetupNarrator is a mock of setupNarrator interface.
+type MocksetupNarrator struct {
+	ctrl     *gomock.Controller
+	recorder *MocksetupNarratorMockRecorder
+}
+
+// MocksetupNarratorMockRecorder is the mock recorder for MocksetupNarrator.
+type MocksetupNarratorMockRecorder struct {
+	mock *MocksetupNarrator
+}
+
+// NewMocksetupNarrator creates a new mock instance.
+func NewMocksetupNarrator(ctrl *gomock.Controller) *MocksetupNarrator {
+	mock := &MocksetupNarrator{ctrl: ctrl}
+	mock.recorder = &MocksetupNarratorMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MocksetupNarrator) EXPECT() *MocksetupNarratorMockRecorder {
+	return m.recorder
+}
+
+// Hide mocks base method.
+func (m *MocksetupNarrator) Hide() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "Hide")
+}
+
+// Hide indicates an expected call of Hide.
+func (mr *MocksetupNarratorMockRecorder) Hide() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Hide", reflect.TypeOf((*MocksetupNarrator)(nil).Hide))
+}
+
+// HideIfShowing mocks base method.
+func (m *MocksetupNarrator) HideIfShowing(states ...string) {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{}
+	for _, a := range states {
+		varargs = append(varargs, a)
+	}
+	m.ctrl.Call(m, "HideIfShowing", varargs...)
+}
+
+// HideIfShowing indicates an expected call of HideIfShowing.
+func (mr *MocksetupNarratorMockRecorder) HideIfShowing(states ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HideIfShowing", reflect.TypeOf((*MocksetupNarrator)(nil).HideIfShowing), states...)
+}
+
+// ShowClaimQR mocks base method.
+func (m *MocksetupNarrator) ShowClaimQR(url, deviceName string) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ShowClaimQR", url, deviceName)
+}
+
+// ShowClaimQR indicates an expected call of ShowClaimQR.
+func (mr *MocksetupNarratorMockRecorder) ShowClaimQR(url, deviceName interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowClaimQR", reflect.TypeOf((*MocksetupNarrator)(nil).ShowClaimQR), url, deviceName)
+}
+
+// ShowConnectingIfShowing mocks base method.
+func (m *MocksetupNarrator) ShowConnectingIfShowing(message string, states ...string) {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{message}
+	for _, a := range states {
+		varargs = append(varargs, a)
+	}
+	m.ctrl.Call(m, "ShowConnectingIfShowing", varargs...)
+}
+
+// ShowConnectingIfShowing indicates an expected call of ShowConnectingIfShowing.
+func (mr *MocksetupNarratorMockRecorder) ShowConnectingIfShowing(message interface{}, states ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]interface{}{message}, states...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowConnectingIfShowing", reflect.TypeOf((*MocksetupNarrator)(nil).ShowConnectingIfShowing), varargs...)
+}
+
+// ShowFactoryReset mocks base method.
+func (m *MocksetupNarrator) ShowFactoryReset() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ShowFactoryReset")
+}
+
+// ShowFactoryReset indicates an expected call of ShowFactoryReset.
+func (mr *MocksetupNarratorMockRecorder) ShowFactoryReset() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowFactoryReset", reflect.TypeOf((*MocksetupNarrator)(nil).ShowFactoryReset))
+}
+
+// ShowFinalizing mocks base method.
+func (m *MocksetupNarrator) ShowFinalizing() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ShowFinalizing")
+}
+
+// ShowFinalizing indicates an expected call of ShowFinalizing.
+func (mr *MocksetupNarratorMockRecorder) ShowFinalizing() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowFinalizing", reflect.TypeOf((*MocksetupNarrator)(nil).ShowFinalizing))
+}
+
+// ShowJoinFailed mocks base method.
+func (m *MocksetupNarrator) ShowJoinFailed(reason string) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ShowJoinFailed", reason)
+}
+
+// ShowJoinFailed indicates an expected call of ShowJoinFailed.
+func (mr *MocksetupNarratorMockRecorder) ShowJoinFailed(reason interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowJoinFailed", reflect.TypeOf((*MocksetupNarrator)(nil).ShowJoinFailed), reason)
+}
+
+// ShowReady mocks base method.
+func (m *MocksetupNarrator) ShowReady() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ShowReady")
+}
+
+// ShowReady indicates an expected call of ShowReady.
+func (mr *MocksetupNarratorMockRecorder) ShowReady() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowReady", reflect.TypeOf((*MocksetupNarrator)(nil).ShowReady))
+}
+
+// ShowUpdating mocks base method.
+func (m *MocksetupNarrator) ShowUpdating(progress int) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ShowUpdating", progress)
+}
+
+// ShowUpdating indicates an expected call of ShowUpdating.
+func (mr *MocksetupNarratorMockRecorder) ShowUpdating(progress interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowUpdating", reflect.TypeOf((*MocksetupNarrator)(nil).ShowUpdating), progress)
+}
+
+// SweepStaleOverlay mocks base method.
+func (m *MocksetupNarrator) SweepStaleOverlay() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SweepStaleOverlay")
+}
+
+// SweepStaleOverlay indicates an expected call of SweepStaleOverlay.
+func (mr *MocksetupNarratorMockRecorder) SweepStaleOverlay() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SweepStaleOverlay", reflect.TypeOf((*MocksetupNarrator)(nil).SweepStaleOverlay))
 }

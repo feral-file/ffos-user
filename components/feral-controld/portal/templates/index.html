@@ -3,19 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Art Computer setup — Connect to Wi-Fi</title>
+<title>Art Computer setup — Choose a Wi-Fi network</title>
 <link rel="stylesheet" href="/setup.css">
 </head>
 <body>
 <main>
   <p class="brand">Feral File · Art Computer</p>
-  <h1>Connect to Wi-Fi</h1>
-  <p class="lede">
-    Choose the network your Art Computer should use. After you press Connect,
-    this page may pause while it switches networks. If that happens, reconnect
-    to <strong>{{.APSSID}}</strong> and open
-    <strong>http://ff1.config</strong> to check progress.
-  </p>
+  <h1>Choose a Wi-Fi network</h1>
 
   {{if .LastStatus}}
   <div class="status status-{{.LastStatus.State}}">
@@ -25,13 +19,14 @@
 
   <form class="connect" method="POST" action="/connect">
     {{if .SSIDs}}
-    <label for="ssid">Network</label>
+    <label for="ssid">Wi-Fi network</label>
     <select id="ssid" name="ssid">
+      <option value="" selected disabled>Select a network…</option>
       {{range .SSIDs}}<option value="{{.}}">{{.}}</option>{{end}}
-      {{- /* The empty value routes to the manual branch server-side (a blank
-           picker value can never be a real pick), so no-JS submissions of
-           this option degrade to the ordinary empty-SSID rejection. */}}
-      <option value="">Other network…</option>
+      {{- /* This non-empty sentinel identifies the manual branch. It exceeds
+           the maximum SSID length and is converted back to an empty manual
+           value server-side, so it cannot collide with a real network. */}}
+      <option value="{{.ManualSSIDOption}}" data-manual>Other network…</option>
     </select>
 
     <div id="manual-entry">
@@ -45,7 +40,7 @@
       </label>
     </div>
     {{else}}
-    <label for="ssid-manual">Network</label>
+    <label for="ssid-manual">Wi-Fi network</label>
     <input id="ssid-manual" name="ssid_manual" type="text" autocomplete="off"
            autocapitalize="none" placeholder="Network name">
 
@@ -55,9 +50,10 @@
     </label>
     {{end}}
 
-    <label for="password">Password</label>
+    <label for="password">Wi-Fi password</label>
     <div class="pwfield">
-      <input id="password" name="password" type="password" autocomplete="off">
+      <input id="password" name="password" type="password" autocomplete="off"
+             aria-describedby="password-help">
       <button type="button" id="password-toggle" class="pwtoggle"
               aria-pressed="false" aria-label="Show password" hidden>
         {{- /* The icon shows the tap's ACTION, following the majority
@@ -77,20 +73,18 @@
         </svg>
       </button>
     </div>
+    {{- /* Renders in BOTH form shapes — picker and empty-scan manual entry —
+         so it must not say "selected". */}}
+    <p id="password-help" class="field-hint">
+      Use that network's own password—not the setup password.
+    </p>
 
     <button type="submit" class="primary">Connect</button>
   </form>
 
   <form method="GET" action="/rescan">
-    <button type="submit" class="secondary">Search for networks again</button>
+    <button type="submit" class="secondary">Network not listed?</button>
   </form>
-
-  <p class="hint">
-    Don't see your Wi-Fi network? Make sure your router is switched on, then
-    tap <strong>Search for networks again</strong>. The Art Computer will
-    restart its setup network, so you'll need to scan the QR code on the
-    screen again afterwards.
-  </p>
 </main>
 <script>
   // Collapse manual entry behind the picker's "Other network…" option.
@@ -98,8 +92,10 @@
   // mini-browser with scripting disabled keeps today's dual-source form;
   // the server accepts either shape unchanged. The reveal rewrites the
   // label/placeholder copy ("Or type a network name" only reads right when
-  // the field sits beside the picker) and marks the input required — under
-  // "Other network…" a blank name can only be a mistake.
+  // the field sits beside the picker) and applies branch-specific validation.
+  // The base HTML deliberately leaves the picker optional so a no-JS phone
+  // can submit the always-visible manual field; the server rejects an empty
+  // submission in either mode.
   (function () {
     var select = document.getElementById('ssid');
     var manual = document.getElementById('manual-entry');
@@ -107,8 +103,10 @@
     if (!select || !manual || !input) return;
     var label = manual.querySelector('label[for="ssid-manual"]');
     var sync = function (viaChange) {
-      var other = select.value === '';
+      var choice = select.options[select.selectedIndex];
+      var other = !!choice && choice.hasAttribute('data-manual');
       manual.hidden = !other;
+      select.required = !other;
       input.required = other;
       if (other) {
         if (label) label.textContent = 'Network name';

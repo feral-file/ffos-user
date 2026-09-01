@@ -564,7 +564,7 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope(t *testin
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-1", "https://example.com/item-2"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-1", "https://example.com/item-2"}).Return(1, nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -654,7 +654,7 @@ func TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope(t *testing.T)
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-a"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-a"}).Return(1, nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -740,9 +740,9 @@ func newLockStepKioskReplay() *lockStepKioskReplay {
 }
 
 func (f *lockStepKioskReplay) AttachOnReconnect(context.Context) error { return nil }
-func (f *lockStepKioskReplay) SyncPlaylist(_ context.Context, ids []string) error {
+func (f *lockStepKioskReplay) SyncPlaylist(_ context.Context, ids []string) (int, error) {
 	f.syncCalls <- ids
-	return nil
+	return len(ids), nil
 }
 func (f *lockStepKioskReplay) LockPlayback() {
 	select {
@@ -908,7 +908,7 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWh
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-1", "https://example.com/item-2"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-1", "https://example.com/item-2"}).Return(1, nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
