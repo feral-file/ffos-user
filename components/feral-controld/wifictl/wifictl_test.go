@@ -531,6 +531,31 @@ func TestCachedScanServesWithinTTLThenRefreshes(t *testing.T) {
 	assert.Equal(t, 2, scans)
 }
 
+func TestRefreshScanCachePreservesCandidatesBeyondDisplayCap(t *testing.T) {
+	var ssids []string
+	// One past the portal's nine-slot display cap (portal.maxDisplayedSSIDs —
+	// the only live cap; wifictl itself no longer caps anything).
+	for i := 0; i < 10; i++ {
+		ssids = append(ssids, fmt.Sprintf("Net%02d", i))
+	}
+	scanOutput := []byte(strings.Join(ssids, "\n") + "\n")
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
+			return scanOutput, nil
+		}
+		return nil, nil
+	})
+
+	live, err := c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, ssids, live)
+
+	cached, err := c.CachedScan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, ssids, cached,
+		"the portal cache must remain uncapped until the setup SSID is removed")
+}
+
 // --- scan readiness gate -----------------------------------------------------
 
 // deviceShowOut renders the terse `nmcli device show` block shape the readiness
@@ -815,13 +840,15 @@ func TestScanForcesRescan(t *testing.T) {
 	c, exec, _ := newController(func(argv []string) ([]byte, error) {
 		return []byte("Alpha\n"), nil
 	})
-	_, err := c.Scan(context.Background(), true)
+	_, err := c.scan(context.Background(), true)
 	require.NoError(t, err)
 	assert.Contains(t, strings.Join(exec.recorded()[0], " "), "--rescan yes")
 }
 
-func TestParseSSIDsDedupOrderAndCap(t *testing.T) {
-	// Duplicates collapse, order is preserved, and the list caps at maxSSIDs.
+func TestParseSSIDsDedupAndOrder(t *testing.T) {
+	// Duplicates collapse, order is preserved, and nothing is truncated:
+	// display capping is the portal's concern (portal.maxDisplayedSSIDs), and
+	// a cap at this layer would fabricate absence for the evidence callers.
 	var b strings.Builder
 	b.WriteString("First\nFirst\nSecond\n\n")
 	for i := 0; i < 20; i++ {
@@ -830,7 +857,7 @@ func TestParseSSIDsDedupOrderAndCap(t *testing.T) {
 		b.WriteString("\n")
 	}
 	got := parseSSIDs(b.String())
-	assert.Len(t, got, maxSSIDs)
+	assert.Len(t, got, 22)
 	assert.Equal(t, "First", got[0])
 	assert.Equal(t, "Second", got[1])
 }
@@ -1039,12 +1066,14 @@ func TestScanAllSSIDsPinsConfiguredInterface(t *testing.T) {
 	}
 }
 
-// TestScanAllSSIDsIsUncapped: Scan truncates at the portal display cap
-// (maxSSIDs); ScanAllSSIDs must not — a saved network ranked below the cap
-// would otherwise read as absent and fire a false relocation.
+// TestScanAllSSIDsIsUncapped: ScanAllSSIDs must return the FULL list — its
+// callers treat scan presence as relocation evidence, and a saved network
+// truncated out by any cap (the portal's display cap is nine) would read as
+// absent and fire a false relocation.
 func TestScanAllSSIDsIsUncapped(t *testing.T) {
+	const total = 12 // comfortably past the portal's nine-slot display cap
 	var lines []string
-	for i := 0; i < maxSSIDs+3; i++ {
+	for i := 0; i < total; i++ {
 		lines = append(lines, fmt.Sprintf("Net%02d", i))
 	}
 	out := []byte(strings.Join(lines, "\n") + "\n")
@@ -1052,20 +1081,12 @@ func TestScanAllSSIDsIsUncapped(t *testing.T) {
 		return out, nil
 	})
 
-	capped, err := c.Scan(context.Background(), false)
-	if err != nil {
-		t.Fatalf("Scan: %v", err)
-	}
-	if len(capped) != maxSSIDs {
-		t.Fatalf("Scan returned %d SSIDs, want the %d display cap", len(capped), maxSSIDs)
-	}
-
 	all, err := c.ScanAllSSIDs(context.Background())
 	if err != nil {
 		t.Fatalf("ScanAllSSIDs: %v", err)
 	}
-	if len(all) != maxSSIDs+3 {
-		t.Fatalf("ScanAllSSIDs returned %d SSIDs, want %d (uncapped)", len(all), maxSSIDs+3)
+	if len(all) != total {
+		t.Fatalf("ScanAllSSIDs returned %d SSIDs, want %d (uncapped)", len(all), total)
 	}
 	// And it must force a fresh scan: stale results are not relocation evidence.
 	last := exec.recorded()[len(exec.recorded())-1]

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	stdos "os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -245,8 +246,13 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockHub.EXPECT().Start()
 				ts.mockHub.EXPECT().Stop().Return(nil)
 
-				// Mock OS ReadFile for mDNS device info
+				// Mock OS ReadFile for mDNS device info. The device-name
+				// record is read alongside the hostname: an unnamed unit is
+				// the ordinary case, and a missing file must leave the
+				// advertised name as the serial.
 				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+				ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
+				ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
 
 				// Mock Mediator InitializeMDNS
 				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
@@ -323,8 +329,13 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockHub.EXPECT().Start()
 				ts.mockHub.EXPECT().Stop().Return(nil)
 
-				// Mock OS ReadFile for mDNS device info
+				// Mock OS ReadFile for mDNS device info. The device-name
+				// record is read alongside the hostname: an unnamed unit is
+				// the ordinary case, and a missing file must leave the
+				// advertised name as the serial.
 				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+				ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
+				ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
 
 				// Mock Mediator InitializeMDNS
 				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
@@ -388,6 +399,8 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockHub.EXPECT().Start()
 				ts.mockHub.EXPECT().Stop().Return(nil)
 				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+				ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
+				ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
 				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
 
 				// ...the degraded connectivity query reads as offline (no relayer
@@ -458,6 +471,8 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockHub.EXPECT().Start()
 				ts.mockHub.EXPECT().Stop().Return(nil)
 				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+				ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
+				ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
 				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
 
 				// The startup connectivity query may run before or after the
@@ -666,6 +681,8 @@ func TestApp_Run_StartsAndStopsOfflineCacheWhenEnabled(t *testing.T) {
 	ts.mockHub.EXPECT().Start()
 	ts.mockHub.EXPECT().Stop().Return(nil)
 	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+	ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
+	ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
 	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
 	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
 	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
@@ -731,6 +748,8 @@ func TestApp_Run_SkipsServeAndShutdownWhenStaticServerBindFails(t *testing.T) {
 	ts.mockHub.EXPECT().Start()
 	ts.mockHub.EXPECT().Stop().Return(nil)
 	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+	ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
+	ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
 	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
 	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
 	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
@@ -796,6 +815,8 @@ func TestApp_Run_OnConnectAttachesOfflineCacheReplay(t *testing.T) {
 	ts.mockHub.EXPECT().Start()
 	ts.mockHub.EXPECT().Stop().Return(nil)
 	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+	ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
+	ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
 	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
 	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
 	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
@@ -951,8 +972,13 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockHub.EXPECT().Start()
 				ts.mockHub.EXPECT().Stop().Return(nil)
 
-				// Mock OS ReadFile for mDNS device info
+				// Mock OS ReadFile for mDNS device info. The device-name
+				// record is read alongside the hostname: an unnamed unit is
+				// the ordinary case, and a missing file must leave the
+				// advertised name as the serial.
 				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+				ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
+				ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
 
 				// Mock Mediator InitializeMDNS
 				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
@@ -1023,8 +1049,13 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockHub.EXPECT().Start()
 				ts.mockHub.EXPECT().Stop().Return(nil)
 
-				// Mock OS ReadFile for mDNS device info
+				// Mock OS ReadFile for mDNS device info. The device-name
+				// record is read alongside the hostname: an unnamed unit is
+				// the ordinary case, and a missing file must leave the
+				// advertised name as the serial.
 				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+				ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
+				ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
 
 				// Mock Mediator InitializeMDNS
 				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
@@ -1087,8 +1118,13 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockHub.EXPECT().Start()
 				ts.mockHub.EXPECT().Stop().Return(nil)
 
-				// Mock OS ReadFile for mDNS device info
+				// Mock OS ReadFile for mDNS device info. The device-name
+				// record is read alongside the hostname: an unnamed unit is
+				// the ordinary case, and a missing file must leave the
+				// advertised name as the serial.
 				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+				ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
+				ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
 
 				// Mock Mediator InitializeMDNS
 				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
@@ -1438,6 +1474,8 @@ func TestApp_Run_StartupOrdering(t *testing.T) {
 	ts.mockHub.EXPECT().Start().Do(func() { record("hub") })
 	ts.mockHub.EXPECT().Stop().Return(nil)
 	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+	ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
+	ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
 	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
 
 	ts.mockDBus.EXPECT().

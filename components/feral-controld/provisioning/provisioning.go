@@ -169,6 +169,11 @@ type Detail struct {
 	// Notifier tells "these are the AP credentials" from "this SSID is a join
 	// target". It is never logged.
 	PSK string
+	// PortalURL is the direct HTTP address on the active setup AP's own subnet.
+	// It accompanies the credentials-bearing StateAPActive notification when
+	// NetworkManager reports an address, and is empty otherwise. Using the
+	// on-link address gives the narration UI a DNS-independent recovery path.
+	PortalURL string
 	// Reason is a short machine-readable cause (e.g. "auth-failure",
 	// "sustained-offline", "unprovisioned").
 	Reason string
@@ -2369,6 +2374,14 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		return err
 	}
 
+	// Resolve the direct-address fallback only now that :80 is accepting. On
+	// the rescan path the phone re-joins the saved SSID the moment beacons
+	// return, so its captive probe races this function; an optional 3s-bounded
+	// nmcli lookup between softap.Up and srv.Start would hand that probe a
+	// RST, and iOS reads a RST as "no portal" without a prompt retry. The
+	// lookup is fail-open (empty string omits the TV's manual-address line).
+	info.PortalURL = m.ap.PortalURL(ctx)
+
 	m.mu.Lock()
 	m.apUp = true
 	m.apInfo = info
@@ -2383,16 +2396,28 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 
 	// Re-announce StateAPActive now that the AP is actually up, carrying the live
 	// hotspot credentials. The transition-time notify fired before this point (AP
-	// not yet raised, so no SSID/PSK to render); this second announcement is the
+	// not yet raised, so no SSID/PSK/portal URL to render); this second announcement is the
 	// one a narration surface uses to paint the soft-AP QR. PSK-in-Detail is the
 	// signal that "these are the AP credentials" (see Detail.PSK). Fires only on an
 	// actual raise, not on every idempotent reconcile, because ensureAPUp returns
 	// early above when the AP is already up.
+	//
+	// info.PortalURL is single-shot BY ACCEPTED TRADE, not oversight: it is
+	// read once per raise (above, 3 s bound, after the portal bind) and
+	// published only through THIS notify — apInfo carries a copy but nothing
+	// reads it back today, so there is no latch to self-heal from. If that
+	// one lookup missed (NM slow to publish IP4.ADDRESS), the TV omits the
+	// manual-address fallback line until the next actual raise. The AP,
+	// captive flow, and portal are all unaffected (the lookup is fail-open),
+	// and a reconcile-tick retry would need re-notify plumbing for a line
+	// that is itself only a fallback. Do not assume this self-heals when
+	// editing here; if the field misses often, add the retry then.
 	m.notify(StateAPActive, Detail{
-		SSID:    info.SSID,
-		PSK:     info.PSK,
-		Reason:  "ap-active",
-		Message: "Scan the QR code to set up Wi-Fi",
+		SSID:      info.SSID,
+		PSK:       info.PSK,
+		PortalURL: info.PortalURL,
+		Reason:    "ap-active",
+		Message:   "Scan the QR code to set up Wi-Fi",
 	})
 	return nil
 }

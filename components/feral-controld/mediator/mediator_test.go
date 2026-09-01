@@ -22,6 +22,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -765,6 +766,69 @@ func TestMediator_SetClaimed(t *testing.T) {
 	})
 }
 
+// TestMediator_SetDeviceName pins the rename half of the mDNS re-registration
+// mechanism — the riskiest half of device naming, because a wrong re-register
+// here churns the LAN or drops the advertisement entirely. The re-registered
+// DeviceInfo must keep ID and Claimed (the name is a display label, never the
+// identity), an unchanged name must be a strict no-op, and with no link the
+// stop must NOT be followed by a start — the periodic reconcile owns bringing
+// the advertiser back once a link appears.
+func TestMediator_SetDeviceName(t *testing.T) {
+	deviceInfo := mdns.DeviceInfo{ID: "test-device", Name: "Test Device", Port: 1111, Claimed: true}
+	renamedInfo := deviceInfo
+	renamedInfo.Name = "Living Room"
+
+	t.Run("rename re-registers keeping ID and Claimed", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		mockAdvertiser.EXPECT().Stop().Times(1)
+		mockAdvertiser.EXPECT().Start(renamedInfo).Return(nil).Times(1)
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: true})
+		ts.mediator.SetDeviceName("Living Room")
+	})
+
+	t.Run("unchanged name does not re-register", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		// Same name again: the advertiser must not be touched.
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: true})
+		ts.mediator.SetDeviceName("Test Device")
+	})
+
+	t.Run("no link stops but defers restart to the reconcile", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		link := &stubLinkState{hasLink: true}
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		mockAdvertiser.EXPECT().Stop().Times(1)
+		// No Start expectation: link is down at rename time.
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, link)
+		link.hasLink = false
+		ts.mediator.SetDeviceName("Living Room")
+	})
+
+	t.Run("nil advertiser records the name without panicking", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		// mDNS never initialized (e.g. startup failed before wiring): the
+		// rename must still be absorbed so a later InitializeMDNS-free
+		// process life does not crash the command path.
+		ts.mediator.SetDeviceName("Living Room")
+	})
+}
+
 // TestMediator_SysMetricsSelfHealsMDNS is the F1 regression: a LAN link that
 // comes up while the internet stays down never fires connectivity_change, so the
 // advertiser would otherwise never start and the recovery hub would be
@@ -1387,5 +1451,77 @@ func TestMediator_HandleRelayerMessage_RateLimited(t *testing.T) {
 	if assert.True(t, ok, "rate-limited response carries a structured body") {
 		assert.Equal(t, "rate_limited", msg["error"])
 		assert.Equal(t, cmd, msg["command"])
+	}
+}
+
+// TestMediator_HandleRelayerMessage_SourceUnreachable verifies the relayer
+// ingress path reports a dead-source cast rejection legibly: remote casters
+// (a publisher pushing a playlist to someone else's wall) are exactly the
+// audience the #304 preflight exists for, so the rejection must come back
+// as a structured "sourceUnreachable" RPC response carrying the per-item
+// detail — not fall through to the reply-less error path, which the caller
+// can only experience as its own RPC timeout.
+func TestMediator_HandleRelayerMessage_SourceUnreachable(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := string(commands.CMD_DISPLAY_PLAYLIST)
+	args := map[string]interface{}{"playlistUrl": "https://example/playlist.json"}
+	payload := relayer.Payload{
+		MessageID: "msg-source-unreachable",
+		Message: relayer.Message{
+			Command: &cmd,
+			Request: args,
+		},
+	}
+
+	ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte("{}"), nil).AnyTimes()
+
+	ts.mockCommandHandler.EXPECT().
+		Process(gomock.Any(), commands.Command{Type: commands.Type(cmd), Arguments: args}).
+		Return(nil, &commandrouter.SourceUnreachableError{
+			Results: []offlinecache.SourceProbeResult{
+				{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
+			},
+		}).
+		Times(1)
+
+	var sent relayer.Response
+	ts.mockRelayer.EXPECT().
+		Send(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, data interface{}) error {
+			sent = data.(relayer.Response)
+			return nil
+		}).
+		Times(1)
+
+	var capturedHandler relayer.Handler
+	ts.mockDbus.EXPECT().OnBusSignal(gomock.Any()).Times(1)
+	ts.mockRelayer.EXPECT().
+		OnRelayerMessage(gomock.Any()).
+		DoAndReturn(func(handler relayer.Handler) { capturedHandler = handler }).
+		Times(1)
+
+	ts.mediator.Start()
+	err := capturedHandler(ts.ctx, payload)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "RPC", sent.Type)
+	assert.Equal(t, "msg-source-unreachable", sent.MessageID)
+	msg, ok := sent.Message.(map[string]any)
+	if assert.True(t, ok, "source-unreachable response carries a structured body") {
+		// ok:false must be present and false: ff-cli's relayer helper
+		// hunts for a boolean ok and reads a body WITHOUT one as success,
+		// and ff-app casts the field and throws on absence — see the
+		// mediator's reply-shape comment.
+		assert.Equal(t, false, msg["ok"])
+		assert.Equal(t, "sourceUnreachable", msg["error"])
+		assert.Equal(t, cmd, msg["command"])
+		message, _ := msg["message"].(string)
+		assert.Contains(t, message, "item 0: HTTP 400")
+		// Sanitization contract: resolved source URLs (signed CDN queries
+		// carry credentials) must never reach the RPC reply — items are
+		// named by index and status only.
+		assert.NotContains(t, message, "origin.example")
 	}
 }

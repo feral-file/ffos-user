@@ -2245,9 +2245,10 @@ identical cache state.
 A playlist body is untrusted input. It arrives over the LAN hub — which
 binds `0.0.0.0:1111` and is **unauthenticated** — and over the relayer,
 and every `source` inside it is a URL this daemon will dial on the
-playlist's behalf from three separate places:
+playlist's behalf from four separate places:
 
 - `classify.go`'s `HEAD` / ranged-`GET` probe,
+- `probe.go`'s cast-time liveness preflight (#304),
 - `mediacapture.go`'s direct body download,
 - `capture.go`'s `Page.navigate` in the headless browser.
 
@@ -2263,7 +2264,11 @@ browser — both reachable by anyone on the LAN.
 `sourceguard.go` closes that off inside `Classify`, which is the single
 function BOTH enqueue paths (`DownloadItem` and `DownloadPlaylist`) call
 before any I/O and before any job is queued. A rejected source is
-therefore never probed, never downloaded, and never navigated to. It
+therefore never probed, never downloaded, and never navigated to. The
+cast-time preflight does not cross `Classify`: it applies the same guard
+directly (`guard.check` plus the guarded transport, both inside
+`probe.go`), so a policy change in the guard must be re-checked against
+that path separately. It
 rejects, with `ErrUnsafeSource`:
 
 - any scheme outside `http`/`https` — an allowlist, not a denylist, since
@@ -2630,6 +2635,20 @@ addresses are refused. Artwork origins are public CDNs, so this does not
 affect normal operation, but a developer pointing a test playlist at a
 LAN-hosted asset server will see `ErrUnsafeSource` — that is the guard
 working, and would need an explicit opt-in config knob to relax.
+
+**Accepted risk — the preflight as a bounded outbound amplifier.** The
+cast-time source preflight (#304) gives the unauthenticated LAN a new way
+to make the device dial out: a `displayPlaylist` may probe up to 256
+distinct wire URLs at concurrency 16, each on a fresh dial (keep-alives
+are off by design), and the hub's 422 body reflects per-item HTTP status
+back to the caller. Under the storm gate's heavy-tier budget that is on
+the order of 10² outbound requests/second at attacker-chosen **public**
+origins from the device's egress IP — the source guard confines targets
+to public addresses, so this is a reflection/reachability surface, not an
+internal scanner. Accepted alongside the guard's other residuals (#3471:
+the LAN control plane is unauthenticated by design); the storm gate and
+the per-cast probe budget are the containment, and the `sourceProbe`
+config kill switch removes the surface entirely if it is ever abused.
 
 ## 10. See also
 

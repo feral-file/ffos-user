@@ -333,6 +333,15 @@ func TestDefaultGateConfig_ClassifiesCommands(t *testing.T) {
 	assert.True(t, netdiag.Dedupe)
 	assert.Less(t, netdiag.Rate, 1.0)
 	assert.Greater(t, netdiag.Weight, query.Weight)
+
+	// setDeviceName is a persisted eMMC write plus a full mDNS Stop+Start
+	// re-registration per accepted change, reachable from the unauthenticated
+	// LAN hub, and the mediator's unchanged-name early return is defeated by
+	// alternating two names — so it must never regress to the Default budget.
+	rename, ok := cfg.Policies[commands.CMD_SET_DEVICE_NAME]
+	require.True(t, ok, "setDeviceName must be explicitly classified, not Default")
+	assert.True(t, rename.Dedupe)
+	assert.Less(t, rename.Rate, 1.0)
 }
 
 // TestDefaultGateConfig_ClassifiesOfflineCacheCommands is the regression

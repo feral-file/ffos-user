@@ -546,6 +546,31 @@ type Service interface {
 	// was but has since been cleared — see Store.LoadPlaylistIDForURL's
 	// doc for why a stale index entry still fails closed correctly here.
 	CachedPlaylistForURL(sourceURL string) (json.RawMessage, error)
+	// HasReplayableItem reports whether at least one of sources has a
+	// prior successful capture on disk — StateReady or StatePartial (a
+	// partial capture may still render; StateBrokenOnline is excluded
+	// because it means the artwork fails even online). It exists for the
+	// displayPlaylist source preflight's all-dead decision (#304 review
+	// F4): a definitively dead ORIGIN is not a dead CAST when replay can
+	// serve the item from cache — origin rot is exactly the case the
+	// offline cache exists for — so the preflight asks this before
+	// rejecting. ONE cached item out of N is the INTENDED rescue
+	// threshold, not an oversight: a 20-item cast with 19 proven-dead
+	// origins and 1 cached capture is accepted (and reported ok), so 1
+	// artwork replays while 19 render as failures. That is strictly
+	// better than rejecting the whole cast — the alternative discards
+	// the one item that CAN play — but any future edit tightening this
+	// to "a quorum of items" or loosening it further changes the
+	// controller-visible accept/reject contract and must update the
+	// dead-source rejection docs (docs/api-design.md,
+	// docs/controld-inbound-controller-messages.md) in the same change.
+	// True ONLY on a confirmed hit within maxRescueLookups
+	// unique reads; an exhausted scan with no hit is false, because the
+	// rescue needs positive evidence before the handler will let it
+	// touch replay scope (see maxRescueLookups). Cheap by construction:
+	// one record read per unique source, no blob stats, first hit
+	// returns early. Empty sources reports false.
+	HasReplayableItem(sources ...string) bool
 	// IndexPlaylistForOfflineDisplay persists playlistRaw and, when
 	// sourceURL is non-empty, indexes it by that URL for
 	// CachedPlaylistForURL — exactly what DownloadPlaylist already does
@@ -1722,6 +1747,16 @@ const maxLoggedSourceBytes = 256
 // cutting on a rune boundary so a multi-byte sequence is never split.
 // The marker matters: a silently shortened URL would send an operator
 // hunting for a source that never existed in that form.
+//
+// This truncates; it does NOT redact. The cast preflight logs through
+// redactSourceForLog (probe.go) instead, which strips query/userinfo
+// credentials first, because the preflight fires on EVERY cast with a
+// dead item. The download-path call sites in this file keep logging the
+// full (truncated) URL by accepted scope: they fire only on explicit
+// download/cache commands on a cache-enabled device, and the intact
+// query string is what an operator diagnosing a failed capture greps
+// for. Widening the redaction to these sites is a deliberate decision
+// for whoever next touches log egress, not a drive-by.
 func truncateSourceForLog(source string) string {
 	if len(source) <= maxLoggedSourceBytes {
 		return source
@@ -2800,6 +2835,72 @@ func (s *service) CachedPlaylistForURL(sourceURL string) (json.RawMessage, error
 		return nil, err
 	}
 	return s.store.LoadPlaylist(playlistID)
+}
+
+// maxRescueLookups bounds how many UNIQUE sources HasReplayableItem will
+// read records for. The input is the unauthenticated caster's own item
+// list, and each lookup is a serial filesystem read with no deadline of
+// its own — a 4 MiB body packed with distinct tiny URLs could otherwise
+// demand ~10^5 reads on the rejection path, holding a heavy command slot
+// long past the probe's own ceiling. Past the bound with no hit the
+// answer is FALSE: the rescue is an EXCEPTION to an already-proven
+// all-dead rejection and needs positive evidence — an earlier revision
+// failed open here, and the granted-but-unproven rescue went on to
+// mutate replay scope (disabling the on-screen playlist's replay) before
+// its empty sync finally rejected the cast anyway (#308 review round 5).
+// The cost is that a playlist whose 513th-or-later UNIQUE source holds
+// the only cached capture is rejected rather than replayed. That
+// includes fragment variants: the store keys on the RAW string (see
+// SourceKey), so `url#1` … `url#N` are N distinct lookups here even
+// though the probe collapses them to ONE dial (probeWireKey strips
+// fragments) — this bound is therefore INDEPENDENT of the probe's dial
+// budget, not derived from it. Accepted because the dynamic-resolution
+// path caps at 255 items, and while the playlistUrl and static dp1_call
+// paths carry no such item cap, a real playlist that parks its only
+// live capture past 512 unique sources is not a shape worth a bigger
+// read burst on the unauthenticated rejection path.
+const maxRescueLookups = 512
+
+// HasReplayableItem implements the Service interface method — see its
+// interface doc for the contract and the preflight rationale. It rides
+// itemStatus (the same in-memory-vs-on-disk derivation Status uses) with
+// withBytes=false, so a hit costs one record read and a miss costs at
+// most one per UNIQUE source. The dedup domain is SourceKey over the RAW
+// string — the store's own key, NOT the probe's fragment-stripped wire
+// key: collapsing fragment variants here would skip records the store
+// holds under those variant keys and drop genuine rescues. The read
+// burst is therefore bounded by maxRescueLookups alone (512 serial
+// record reads worst-case), not by how few wire URLs the probe dialed.
+// data: sources are skipped outright, since an inline item is never
+// cached at all (Classify returns ClassInline and nothing is enqueued —
+// see ClassInline's doc), so looking one up can only ever miss.
+func (s *service) HasReplayableItem(sources ...string) bool {
+	// Capacity capped at the lookup bound, not the raw item count — same
+	// attacker-sized-allocation concern as the probe's own maps.
+	seen := make(map[string]struct{}, min(len(sources), maxRescueLookups))
+	for _, source := range sources {
+		if source == "" || isInlineSource(source) {
+			continue
+		}
+		key := SourceKey(source)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		if len(seen) == maxRescueLookups {
+			// Bound exhausted with no hit: no evidence, no rescue — see
+			// the constant's doc for why this is false, not fail-open.
+			return false
+		}
+		seen[key] = struct{}{}
+		item, ok := s.itemStatus(key, source, false)
+		if !ok {
+			continue
+		}
+		if item.State == StateReady || item.State == StatePartial {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *service) Status(req StatusRequest) (StatusSnapshot, error) {
