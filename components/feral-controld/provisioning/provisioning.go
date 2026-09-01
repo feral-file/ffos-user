@@ -2393,6 +2393,16 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	// signal that "these are the AP credentials" (see Detail.PSK). Fires only on an
 	// actual raise, not on every idempotent reconcile, because ensureAPUp returns
 	// early above when the AP is already up.
+	//
+	// info.PortalURL is single-shot BY ACCEPTED TRADE, not oversight: it is
+	// read once inside softap.Up (3 s bound) and latched into apInfo for the
+	// whole AP session — nothing re-reads it on the reconcile tick, so if that
+	// one lookup missed (NM slow to publish IP4.ADDRESS), the TV omits the
+	// manual-address fallback line until the next actual raise. The AP,
+	// captive flow, and portal are all unaffected (the lookup is fail-open),
+	// and a reconcile-tick retry would need re-notify plumbing for a line
+	// that is itself only a fallback. Do not assume this self-heals when
+	// editing here; if the field misses often, add the retry then.
 	m.notify(StateAPActive, Detail{
 		SSID:      info.SSID,
 		PSK:       info.PSK,

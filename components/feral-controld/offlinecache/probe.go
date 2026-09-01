@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	go_url "net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,16 +76,18 @@ const (
 
 // SourceProbeResult is one item source's probe outcome.
 //
-// Source is truncated via truncateSourceForLog at construction and is
-// for the DAEMON LOG ONLY. It must never ride an error message or any
-// response to a caster: resolved item sources are playlist content a
-// playlistUrl or dynamic-playlist caller never supplied, and signed CDN
-// URLs carry credentials in their query strings — the controller
-// contract requires sanitized error messages. Callers report items by
-// index and status instead (see commandrouter.SourceUnreachableError).
+// Source is query-redacted and truncated via redactSourceForLog at
+// construction and is for the DAEMON LOG ONLY. It must never ride an
+// error message or any response to a caster: resolved item sources are
+// playlist content a playlistUrl or dynamic-playlist caller never
+// supplied, and signed CDN URLs carry credentials in their query
+// strings — the controller contract requires sanitized error messages.
+// The redaction also protects the log itself, because uploadLogs ships
+// the daemon log off-device in the support bundle. Callers report items
+// by index and status instead (see commandrouter.SourceUnreachableError).
 type SourceProbeResult struct {
-	// Source is the probed URL, truncated, for daemon-local logging only
-	// — see the struct doc's sanitization rule.
+	// Source is the probed URL, query-redacted and truncated, for
+	// daemon-local logging only — see the struct doc's sanitization rule.
 	Source string
 	// Verdict is the probe outcome; see the SourceProbeVerdict values.
 	Verdict SourceProbeVerdict
@@ -254,7 +257,7 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 			// be dead. Not entered into firstIndex either — later
 			// duplicates of it fall through to the same Inconclusive.
 			results[i] = SourceProbeResult{
-				Source:  truncateSourceForLog(source),
+				Source:  redactSourceForLog(source),
 				Verdict: ProbeInconclusive,
 				Err:     errProbeBudgetExhausted,
 			}
@@ -280,7 +283,7 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 				// of each one burning a doomed dial.
 				if ctx.Err() != nil {
 					results[i] = SourceProbeResult{
-						Source:  truncateSourceForLog(sources[i]),
+						Source:  redactSourceForLog(sources[i]),
 						Verdict: ProbeInconclusive,
 						Err:     ctx.Err(),
 					}
@@ -308,8 +311,46 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 	return results
 }
 
+// redactSourceForLog prepares a source URL for the daemon log: the query
+// string and fragment are dropped before the usual truncation. The daemon log
+// leaves the device in uploadLogs support bundles, and signed CDN URLs carry
+// their credentials (e.g. X-Amz-Signature) in the query string — truncation
+// alone is not a redaction, because a presigned URL's credential parameters
+// commonly sit inside the first 256 bytes. Scheme, host, and path survive,
+// which is what an operator greps a probe failure by; a trailing "?…" marks
+// that a query was removed. A URL that does not parse is cut at the first
+// '?' rather than trusted to be credential-free. data: URIs pass straight to
+// truncation — their bounded prefix is content, not a credential carrier,
+// matching how the rest of this package logs them.
+func redactSourceForLog(source string) string {
+	if isDataURI(source) {
+		return truncateSourceForLog(source)
+	}
+	u, err := go_url.Parse(source)
+	if err != nil {
+		if i := strings.IndexByte(source, '?'); i >= 0 {
+			return truncateSourceForLog(source[:i] + "?…")
+		}
+		return truncateSourceForLog(source)
+	}
+	hadQuery := u.RawQuery != "" || u.ForceQuery
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	// Userinfo is the other standard credential channel in a URL
+	// (https://id:secret@host/...); u.String() would render it verbatim,
+	// password included, so it is dropped along with the query.
+	u.User = nil
+	redacted := u.String()
+	if hadQuery {
+		redacted += "?…"
+	}
+	return truncateSourceForLog(redacted)
+}
+
 func (p *sourceProber) probeOne(ctx context.Context, source string) SourceProbeResult {
-	result := SourceProbeResult{Source: truncateSourceForLog(source)}
+	result := SourceProbeResult{Source: redactSourceForLog(source)}
 
 	// data: first, ahead of the guard, mirroring Classify: these are
 	// never dialed and the guard deliberately refuses them. Malformed

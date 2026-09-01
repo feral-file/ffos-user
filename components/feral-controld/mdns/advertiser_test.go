@@ -53,3 +53,40 @@ func TestInstanceLabel(t *testing.T) {
 	// Nothing usable at all still registers something rather than failing.
 	assert.Equal(t, "FF1", instanceLabel(DeviceInfo{}))
 }
+
+// TestInstanceLabel_DottedNamesFallBackToSerial pins the dot guard. zeroconf
+// does no DNS escaping, so a dotted instance string becomes multiple DNS
+// labels — and consecutive dots become an EMPTY label, which fails
+// dns.Msg.Pack on every response while Register itself still returns nil: the
+// frame keeps a live server that answers nothing, persistently, because the
+// name is on disk. Any dot therefore surrenders the label to the serial; the
+// owner's exact name still travels in TXT.
+func TestInstanceLabel_DottedNamesFallBackToSerial(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"consecutive dots mid-name", "Hi.. there"},
+		{"consecutive dots bare", "a..b"},
+		{"dots only", "..."},
+		{"single interior dot", "Sam.Studio"},
+		{"ordinary abbreviation", "Apt. 3"},
+		{"trailing dot", "Studio."},
+		{"leading dot", ".hidden"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := DeviceInfo{ID: "ff1-abc", Name: tc.in}
+			assert.Equal(t, "ff1-abc", instanceLabel(info),
+				"a dotted name must not reach the DNS-SD instance label")
+			// The display name is untouched: TXT still carries it verbatim.
+			assert.Contains(t, txtRecords(info), "name="+tc.in)
+		})
+	}
+
+	// A dotted name with no usable serial still registers something valid.
+	assert.Equal(t, "FF1", instanceLabel(DeviceInfo{Name: "a..b"}))
+	// A hostname that itself carries a dot (an FQDN-shaped serial) is not a
+	// valid single label either.
+	assert.Equal(t, "FF1", instanceLabel(DeviceInfo{ID: "ff1.local", Name: "a..b"}))
+}

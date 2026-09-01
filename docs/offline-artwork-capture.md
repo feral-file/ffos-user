@@ -2636,6 +2636,20 @@ affect normal operation, but a developer pointing a test playlist at a
 LAN-hosted asset server will see `ErrUnsafeSource` — that is the guard
 working, and would need an explicit opt-in config knob to relax.
 
+**Accepted risk — the preflight as a bounded outbound amplifier.** The
+cast-time source preflight (#304) gives the unauthenticated LAN a new way
+to make the device dial out: a `displayPlaylist` may probe up to 256
+distinct wire URLs at concurrency 16, each on a fresh dial (keep-alives
+are off by design), and the hub's 422 body reflects per-item HTTP status
+back to the caller. Under the storm gate's heavy-tier budget that is on
+the order of 10² outbound requests/second at attacker-chosen **public**
+origins from the device's egress IP — the source guard confines targets
+to public addresses, so this is a reflection/reachability surface, not an
+internal scanner. Accepted alongside the guard's other residuals (#3471:
+the LAN control plane is unauthenticated by design); the storm gate and
+the per-cast probe budget are the containment, and the `sourceProbe`
+config kill switch removes the surface entirely if it is ever abused.
+
 ## 10. See also
 
 - `components/feral-controld/offlinecache/` — the implementation;

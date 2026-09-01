@@ -130,7 +130,9 @@ type JoinRequest struct {
 // JoinFunc hands submitted credentials to the provisioning machine. It MUST
 // return promptly (the machine performs the AP-bounce + join asynchronously);
 // a non-nil error means the submission was rejected outright (e.g. empty SSID)
-// and the form is re-rendered.
+// and the form is re-rendered. The error's text is shown VERBATIM in the
+// re-rendered page's status banner (the no-JS rejection feedback), so it must
+// be user-facing copy — never a wrapped internal error.
 type JoinFunc func(req JoinRequest) error
 
 // StatusFunc reports the current/last join outcome. Backed by the provisioning
@@ -142,6 +144,8 @@ type StatusFunc func() Status
 // JoinFunc it MUST return promptly — the bounce runs asynchronously, since it
 // disconnects the phone that pressed the button; a non-nil error means the
 // request was rejected (e.g. the machine is busy) and the form is re-rendered.
+// As with JoinFunc, the error's text is shown verbatim in the status banner,
+// so it must be user-facing copy.
 type RescanFunc func() error
 
 // Config wires the portal's listener and its seams.
@@ -379,6 +383,18 @@ func (s *Server) handleSetupCSS(w http.ResponseWriter, r *http.Request) {
 // rejection path can re-render the form without tripping handleRoot's
 // non-root-path redirect.
 func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request) {
+	s.renderIndexRejection(w, r, "")
+}
+
+// renderIndexRejection re-renders the picker after a rejected submission,
+// surfacing the rejection in the page's status banner. The banner exists
+// because a rejected submission never reaches the provisioning machine, so
+// cfg.Status() still reports JoinIdle and renders nothing — and on a
+// scripting-disabled portal sheet (a shape this portal explicitly preserves)
+// nothing else stands between the user and a byte-identical page that
+// silently ignored their tap. rejection must be user-facing copy (the
+// machine's RequestJoin/RequestRescan messages are written for this slot).
+func (s *Server) renderIndexRejection(w http.ResponseWriter, r *http.Request, rejection string) {
 	var ssids []string
 	if s.cfg.Scan != nil {
 		got, err := s.cfg.Scan(r.Context())
@@ -403,13 +419,16 @@ func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := struct {
-		APSSID           string
 		SSIDs            []string
 		ManualSSIDOption string
 		LastStatus       *Status
-	}{APSSID: s.cfg.APSSID, SSIDs: ssids, ManualSSIDOption: manualSSIDOption}
+	}{SSIDs: ssids, ManualSSIDOption: manualSSIDOption}
 
-	if s.cfg.Status != nil {
+	if rejection != "" {
+		// A fresh rejection outranks the machine's last join outcome: the
+		// user needs to know why THIS submission did nothing.
+		data.LastStatus = &Status{State: JoinFailed, Message: rejection}
+	} else if s.cfg.Status != nil {
 		st := s.cfg.Status()
 		if st.State != JoinIdle && st.State != "" {
 			data.LastStatus = &st
@@ -456,9 +475,10 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Join != nil {
 		if err := s.cfg.Join(req); err != nil {
 			// Rejected outright (e.g. empty SSID): re-render the picker so the
-			// user can correct it. The AP has not bounced in this case.
+			// user can correct it, with the reason in the status banner. The
+			// AP has not bounced in this case.
 			s.logger.Info("portal: join submission rejected", zap.Error(err))
-			s.renderIndex(w, r)
+			s.renderIndexRejection(w, r, err.Error())
 			return
 		}
 	}
@@ -490,7 +510,7 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.Rescan != nil {
 			if err := s.cfg.Rescan(); err != nil {
 				s.logger.Info("portal: rescan request rejected", zap.Error(err))
-				s.renderIndex(w, r)
+				s.renderIndexRejection(w, r, err.Error())
 				return
 			}
 		}

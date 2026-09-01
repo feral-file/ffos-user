@@ -197,10 +197,14 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	// Owner-set device name. A read failure or a corrupt record yields the
 	// empty name rather than an error: the field is cosmetic, every consumer
 	// falls back to the serial, and failing the whole status collection over a
-	// label would take the frame's health readout down with it.
+	// label would take the frame's health readout down with it. Logged though
+	// (parity with resolveMDNSDeviceInfo's warning): silently reporting
+	// "unnamed" while a corrupt record still sits on disk would otherwise
+	// leave nothing to diagnose the owner's "my frame forgot its name" by.
 	g.Go(func() error {
 		record, err := devicename.Load(d.os, d.json)
 		if err != nil {
+			log.Printf("Failed to read device name for status: %v", err)
 			return nil
 		}
 		deviceName = record.Name

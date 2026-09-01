@@ -679,6 +679,23 @@ func TestGatewayUserAgentMalformedBlockStillHonorsExplicitDisable(t *testing.T) 
 	}
 }
 
+// TestSourceProbeConfig pins the preflight kill switch's config shape: an
+// absent block means enabled (nil section), and the explicit opt-out decodes.
+// The flag is the fleet's only preflight remedy short of a package rollback,
+// so its parse behavior must not drift silently.
+func TestSourceProbeConfig(t *testing.T) {
+	t.Parallel()
+
+	var c config.Config
+	require.NoError(t, json.Unmarshal([]byte(`{}`), &c))
+	assert.Nil(t, c.SourceProbe, "absent block leaves the preflight ON")
+
+	var d config.Config
+	require.NoError(t, json.Unmarshal([]byte(`{"sourceProbe":{"disabled":true}}`), &d))
+	require.NotNil(t, d.SourceProbe)
+	assert.True(t, d.SourceProbe.Disabled)
+}
+
 // An absent block and a well-formed block must both keep working — the
 // permissive path must not have made the normal path lossy.
 func TestGatewayUserAgentTuningAbsentBlock(t *testing.T) {

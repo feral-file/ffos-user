@@ -1035,11 +1035,19 @@ func initializeApp(
 	// source definitively answers an HTTP error is rejected at accept time
 	// instead of being forwarded and self-reported as playing. Wired against
 	// the raw handler before NewGate wraps it (SetSourceProber's contract),
-	// and unconditionally — the probe is independent of whether the offline
-	// cache is enabled. net.DefaultResolver for the same reason the offline
-	// cache's classifier uses it: the guard's view of a name must match what
-	// would actually be dialed (see offlinecache.ErrUnsafeSource).
-	commandrouter.SetSourceProber(rawCmdHandler, offlinecache.NewSourceProber(net.DefaultResolver), logger)
+	// and independently of whether the offline cache is enabled. The
+	// sourceProbe.disabled config flag is the runtime kill switch: the
+	// preflight can REFUSE the device's primary function, so an origin class
+	// that answers this probe dead while still rendering in the kiosk must be
+	// recoverable by a config edit, not a package rollback (see
+	// config.SourceProbeConfig). net.DefaultResolver for the same reason the
+	// offline cache's classifier uses it: the guard's view of a name must
+	// match what would actually be dialed (see offlinecache.ErrUnsafeSource).
+	if sp := config.Get().SourceProbe; sp != nil && sp.Disabled {
+		logger.Warn("displayPlaylist source preflight disabled by config; casts are forwarded unprobed")
+	} else {
+		commandrouter.SetSourceProber(rawCmdHandler, offlinecache.NewSourceProber(net.DefaultResolver), logger)
+	}
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -1210,9 +1218,13 @@ func initializeApp(
 	// The claim QR auto-paints when an unclaimed device comes online — the
 	// launcher-ui replacement (see MaybeShowClaimQROnOnline).
 	provisioningNotifier := &setupNotifier{ui: setupNarrator, logger: logger, claimCtx: context,
-		// The same identity mDNS advertises; §4.6 trouble-state copy carries it
-		// so a user reporting a stuck frame can say which one.
-		deviceName: resolveMDNSDeviceInfo(os, json, state.ClaimSnapshot(), logger).Name}
+		// The SERIAL (mDNS TXT `id`), deliberately not the owner's display
+		// name: §4.6 trouble-state copy exists so a user reporting a stuck
+		// frame can say WHICH one, and support resolves that on the serial —
+		// unique across a household and printed on the unit, where "Living
+		// Room" is neither. (resolveMDNSDeviceInfo.Name became the owner's
+		// label when device naming landed; this caller's need did not change.)
+		deviceName: resolveMDNSDeviceInfo(os, json, state.ClaimSnapshot(), logger).ID}
 	// The claim flow's topic-wait expiry narration needs a cached internet
 	// verdict to tell "no WAN — the topic can never arrive" from "relayer
 	// slow" (§4.6, the unclaimed wired no-WAN black screen). Same cached

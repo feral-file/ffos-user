@@ -509,8 +509,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// playlist with no item cap, so an all-dead hostile cast
 					// must not be able to mint one log line per item on a
 					// device whose logs are size-rotated files. The first few
-					// carry the truncated sources an operator greps for; the
-					// rest collapse into counts.
+					// carry the query-redacted, truncated sources an operator
+					// greps for (redaction because uploadLogs ships this log
+					// off-device and signed URLs carry credentials in their
+					// query strings — see SourceProbeResult.Source); the rest
+					// collapse into counts.
 					dead, inconclusive := 0, 0
 					for i, r := range probeResults {
 						switch r.Verdict {

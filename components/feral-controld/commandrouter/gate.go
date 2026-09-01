@@ -84,6 +84,16 @@ func DefaultGateConfig() GateConfig {
 		commands.CMD_UPDATE_TO_LATEST:   disruptive,
 		commands.CMD_SET_SLEEP_SCHEDULE: disruptive,
 		commands.CMD_SET_SLEEP_MODE:     disruptive,
+		// setDeviceName is a persisted eMMC write PLUS a full mDNS Stop+Start
+		// re-registration (goodbye multicast, socket rebind, probe/announce
+		// cycle) on every accepted change, reachable from the unauthenticated
+		// LAN hub. The mediator's unchanged-name early return is defeated by
+		// simply alternating two names, so without a policy the Default
+		// budget (10/s) lets a LAN caller sustain multicast churn and flash
+		// write amplification. Same tier as setSleepSchedule, the closest
+		// persisted-write analog; renaming is a rare deliberate act, so
+		// ~1-per-5s cannot reject legitimate use.
+		commands.CMD_SET_DEVICE_NAME: disruptive,
 
 		// User-initiated power toggles: loosely capped (executor coalesces).
 		commands.CMD_SLEEP_NOW: userAction,

@@ -67,6 +67,16 @@ func (e *executor) setDeviceName(_ context.Context, args []byte) (interface{}, e
 
 	// Notified under the lock, so the advertised name cannot be re-registered
 	// out of order with respect to a concurrent clear.
+	//
+	// Lock-ordering invariant: this call reaches mediator.SetDeviceName, which
+	// takes mdnsMu and performs zeroconf Stop+Start (multicast writes, socket
+	// rebind) — network I/O held under deviceNameMu. That is accepted, and it
+	// is safe ONLY while the ordering stays one-way: deviceNameMu → mdnsMu.
+	// No mediator path may ever call back into the executor's name half (note
+	// SetClaimed takes only mdnsMu). The cost is that a factory reset's
+	// clearDeviceName can briefly queue behind a rename's mDNS re-register;
+	// the alternative — notifying outside the lock — reopens the
+	// rename-vs-clear ordering race this lock exists to close.
 	if e.nameObserver != nil {
 		e.nameObserver(stored)
 	}

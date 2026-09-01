@@ -766,6 +766,69 @@ func TestMediator_SetClaimed(t *testing.T) {
 	})
 }
 
+// TestMediator_SetDeviceName pins the rename half of the mDNS re-registration
+// mechanism — the riskiest half of device naming, because a wrong re-register
+// here churns the LAN or drops the advertisement entirely. The re-registered
+// DeviceInfo must keep ID and Claimed (the name is a display label, never the
+// identity), an unchanged name must be a strict no-op, and with no link the
+// stop must NOT be followed by a start — the periodic reconcile owns bringing
+// the advertiser back once a link appears.
+func TestMediator_SetDeviceName(t *testing.T) {
+	deviceInfo := mdns.DeviceInfo{ID: "test-device", Name: "Test Device", Port: 1111, Claimed: true}
+	renamedInfo := deviceInfo
+	renamedInfo.Name = "Living Room"
+
+	t.Run("rename re-registers keeping ID and Claimed", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		mockAdvertiser.EXPECT().Stop().Times(1)
+		mockAdvertiser.EXPECT().Start(renamedInfo).Return(nil).Times(1)
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: true})
+		ts.mediator.SetDeviceName("Living Room")
+	})
+
+	t.Run("unchanged name does not re-register", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		// Same name again: the advertiser must not be touched.
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: true})
+		ts.mediator.SetDeviceName("Test Device")
+	})
+
+	t.Run("no link stops but defers restart to the reconcile", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		link := &stubLinkState{hasLink: true}
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		mockAdvertiser.EXPECT().Stop().Times(1)
+		// No Start expectation: link is down at rename time.
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, link)
+		link.hasLink = false
+		ts.mediator.SetDeviceName("Living Room")
+	})
+
+	t.Run("nil advertiser records the name without panicking", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		// mDNS never initialized (e.g. startup failed before wiring): the
+		// rename must still be absorbed so a later InitializeMDNS-free
+		// process life does not crash the command path.
+		ts.mediator.SetDeviceName("Living Room")
+	})
+}
+
 // TestMediator_SysMetricsSelfHealsMDNS is the F1 regression: a LAN link that
 // comes up while the internet stays down never fires connectivity_change, so the
 // advertiser would otherwise never start and the recovery hub would be
