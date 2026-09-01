@@ -446,14 +446,27 @@ func (g sourceGuard) transport() *go_http.Transport {
 		// Every fetch on this transport dials an untrusted, possibly
 		// hostile origin, and Go's default response-header ceiling is
 		// 10 MiB PER RESPONSE — so a probe wave fanning out
-		// concurrently (probeConcurrency-wide on the cast preflight)
-		// against a server that streams enormous header blocks and then
-		// stalls could hold hundreds of MiB resident on a constrained
-		// device before timeouts fire. 1 MiB is orders of magnitude
-		// above any legitimate header block (real-world limits sit at
-		// 8-64 KiB) while capping the wave at the size of one playlist
-		// body.
-		MaxResponseHeaderBytes: 1 << 20,
+		// concurrently against a server that streams enormous header
+		// blocks and then stalls could hold hundreds of MiB resident on
+		// a constrained device before timeouts fire.
+		//
+		// The ceiling has to be sized against the whole admitted wave,
+		// not one response. The storm gate runs MaxConcurrent 16 with
+		// casting at Weight 4, so four casts are admitted at once, and
+		// each preflight probes classifyConcurrency (16) sources
+		// concurrently: 64 probes in flight, every one holding its
+		// completed headers while its body stalls out the 5s timeout.
+		// At the previous 1 MiB that is 64 MiB of attacker-chosen bytes
+		// resident on an OOM-sensitive device, reachable by an
+		// unauthenticated LAN caller.
+		//
+		// 64 KiB is the top of the range real servers actually use
+		// (nginx and Apache default to 8 KiB), so it costs nothing
+		// legitimate, and it bounds the wave at 4 MiB. Keep this in
+		// step with classifyConcurrency and the gate's weights: raising
+		// either without revisiting this number raises the ceiling with
+		// it.
+		MaxResponseHeaderBytes: 64 << 10,
 	}
 }
 
