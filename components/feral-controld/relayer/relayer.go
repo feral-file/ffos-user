@@ -521,9 +521,37 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 							r.logger.Info("Skipping relayer reconnect failure during shutdown", zap.Error(err))
 							return
 						}
-						// Stop the program and let the systemd restart it
-						r.logger.Error("Failed to reconnect to Relayer, the controld will be restarted by systemd shortly", zap.Error(err))
-						r.os.Exit(1)
+						r.logger.Warn("Initial relayer reconnect failed; launching background exponential backoff retry loop",
+							zap.Error(err),
+						)
+						go func() {
+							backoff := 5 * time.Second
+							maxBackoff := 60 * time.Second
+							for {
+								if r.shouldStop(ctx, done) {
+									return
+								}
+								r.clock.Sleep(backoff)
+								if r.shouldStop(ctx, done) {
+									return
+								}
+								r.logger.Info("Attempting background relayer reconnection", zap.Duration("backoff", backoff))
+								recErr := r.reconnect(ctx)
+								if recErr == nil {
+									r.logger.Info("Relayer reconnected successfully in background")
+									return
+								}
+								r.logger.Warn("Background relayer reconnect attempt failed, retrying",
+									zap.Error(recErr),
+									zap.Duration("next_backoff", backoff*2),
+								)
+								backoff *= 2
+								if backoff > maxBackoff {
+									backoff = maxBackoff
+								}
+							}
+						}()
+						return
 					}
 					return
 				}
