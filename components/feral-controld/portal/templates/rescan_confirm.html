@@ -14,6 +14,22 @@
     This briefly disconnects your phone. When the QR code returns on your Art
     Computer, scan it again.
   </p>
+  {{- /* Refreshing only helps a network that could appear in a scan (just
+       switched on, briefly missed). The two causes the entry button names —
+       hidden networks, and networks ranked below the displayed list in a
+       dense environment — are not fixed by any number of refreshes, so this
+       page must point at the escape that DOES fix them (typing the name)
+       before the user commits to the disruptive bounce. */}}
+  {{- /* "type its name" must hold in BOTH index shapes: with scan results the
+       manual field sits behind "Other network…", and on the empty-scan page it
+       is the always-visible field — so the copy names the action, then the
+       picker option only as the way to reach it. */}}
+  <p class="lede">
+    Refreshing helps when the network was recently switched on. If your
+    network is hidden, or there are many networks nearby, refreshing won't
+    reveal it — go back and type its name instead (choose “Other network…”
+    if you see the list).
+  </p>
   <form method="POST" action="/rescan">
     <button type="submit" class="primary">Refresh network list</button>
   </form>

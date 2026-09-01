@@ -76,7 +76,9 @@ func TestRootRendersEssentialNetworkPicker(t *testing.T) {
 	assert.Contains(t, body, "HomeNet")
 	assert.Contains(t, body, "Cafe-5G")
 	assert.Contains(t, body, "Choose a Wi-Fi network")
-	assert.Contains(t, body, "Use the password for the selected network—not the setup password.")
+	// Copy must hold in both form shapes (picker and empty-scan manual
+	// entry), so it never says "selected".
+	assert.Contains(t, body, "Use that network's own password—not the setup password.")
 	assert.Contains(t, body, ">Connect</button>")
 	assert.Contains(t, body, ">Network not listed?</button>")
 	assert.NotContains(t, body, "FF1-devicexyz", "the setup SSID is not destination guidance")
@@ -599,6 +601,11 @@ func TestRescanGetShowsConfirmationWithoutTriggering(t *testing.T) {
 	assert.Contains(t, body, "Refresh network list", "confirm button must name the disruptive operation")
 	assert.Contains(t, body, "briefly disconnects your phone")
 	assert.Contains(t, body, "scan it again")
+	// The two causes the entry button names — hidden networks and dense
+	// environments — are not fixed by a rescan, so the confirm page must
+	// point at the escape that does fix them before the disruptive bounce.
+	assert.Contains(t, body, "type its name instead",
+		"confirm page must name the manual-entry escape for hidden/dense-scan networks")
 	assert.NotContains(t, body, "FF1-abc")
 	assert.NotContains(t, body, "see the updated list")
 	assert.Zero(t, called, "GET must not trigger a bounce")

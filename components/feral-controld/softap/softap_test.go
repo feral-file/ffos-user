@@ -174,44 +174,47 @@ func TestCredentialsHostnameReadError(t *testing.T) {
 
 func TestUp(t *testing.T) {
 	b, exec := newBackend("a1b2c3d4e5f6", func(argv []string) ([]byte, error) {
-		if len(argv) > 2 && argv[1] == "-g" && argv[2] == "IP4.ADDRESS" {
-			return []byte("10.42.0.1/24\n"), nil
-		}
 		return []byte("Hotspot active"), nil
 	})
 	info, err := b.Up(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "FF1-a1b2c3d4e5f6", info.SSID)
 	assert.Equal(t, "86106003", info.PSK) // numericPSK("a1b2c3d4e5f6")
-	assert.Equal(t, "http://10.42.0.1", info.PortalURL)
+	// The address lookup is NOT part of Up: beacons are live the moment nmcli
+	// returns, and anything between here and the portal's net.Listen widens
+	// the window where a captive probe gets a RST (see Backend.PortalURL).
+	assert.Empty(t, info.PortalURL)
 
 	// Replace-not-stack: the raise pre-deletes any same-name profile so a
 	// leftover from an ungraceful previous run can never become a duplicate.
 	calls := exec.recorded()
-	require.Len(t, calls, 3)
+	require.Len(t, calls, 2)
 	assert.Equal(t, []string{"nmcli", "connection", "delete", ProfileName}, calls[0])
 	call := strings.Join(calls[1], " ")
 	assert.Contains(t, call, "device wifi hotspot")
 	assert.Contains(t, call, "con-name "+ProfileName)
 	assert.Contains(t, call, "ssid FF1-a1b2c3d4e5f6")
 	assert.Contains(t, call, "password 86106003")
-	assert.Equal(t, []string{"nmcli", "-g", "IP4.ADDRESS", "connection", "show", "id", ProfileName}, calls[2])
 }
 
-func TestUpOmitsPortalURLWhenActiveAddressIsUnavailable(t *testing.T) {
-	b, _ := newBackend("a1b2c3d4e5f6", func(argv []string) ([]byte, error) {
-		if len(argv) > 2 && argv[1] == "-g" && argv[2] == "IP4.ADDRESS" {
-			return []byte("not-an-address\n"), nil
-		}
-		return nil, nil
+func TestPortalURLReadsActiveAddress(t *testing.T) {
+	b, exec := newBackend("a1b2c3d4e5f6", func(argv []string) ([]byte, error) {
+		return []byte("10.42.0.1/24\n"), nil
 	})
-
-	info, err := b.Up(context.Background())
-	require.NoError(t, err)
-	assert.Empty(t, info.PortalURL)
+	assert.Equal(t, "http://10.42.0.1", b.PortalURL(context.Background()))
+	require.Len(t, exec.recorded(), 1)
+	assert.Equal(t, []string{"nmcli", "-g", "IP4.ADDRESS", "connection", "show", "id", ProfileName},
+		exec.recorded()[0])
 }
 
-func TestUpBoundsBlockingPortalAddressLookup(t *testing.T) {
+func TestPortalURLOmittedWhenActiveAddressIsUnavailable(t *testing.T) {
+	b, _ := newBackend("a1b2c3d4e5f6", func(argv []string) ([]byte, error) {
+		return []byte("not-an-address\n"), nil
+	})
+	assert.Empty(t, b.PortalURL(context.Background()))
+}
+
+func TestPortalURLBoundsBlockingLookup(t *testing.T) {
 	addressStarted := make(chan struct{})
 	var startOnce sync.Once
 	exec := &scriptedExec{reply: func(argv []string) ([]byte, error) {
@@ -234,24 +237,18 @@ func TestUpBoundsBlockingPortalAddressLookup(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	type upResult struct {
-		info Info
-		err  error
-	}
-	done := make(chan upResult, 1)
+	done := make(chan string, 1)
 	go func() {
-		info, err := b.Up(ctx)
-		done <- upResult{info: info, err: err}
+		done <- b.PortalURL(ctx)
 	}()
 
 	select {
-	case result := <-done:
-		require.NoError(t, result.err)
-		assert.Empty(t, result.info.PortalURL)
+	case url := <-done:
+		assert.Empty(t, url)
 		assert.NoError(t, ctx.Err(), "the lookup timeout must not cancel the provisioning context")
 	case <-time.After(time.Second):
 		cancel()
-		t.Fatal("Up remained blocked on optional portal-address discovery")
+		t.Fatal("PortalURL remained blocked on optional portal-address discovery")
 	}
 	select {
 	case <-addressStarted:
@@ -260,17 +257,11 @@ func TestUpBoundsBlockingPortalAddressLookup(t *testing.T) {
 	}
 }
 
-func TestUpSelectsFirstUsableActiveIPv4Address(t *testing.T) {
+func TestPortalURLSelectsFirstUsableActiveIPv4Address(t *testing.T) {
 	b, _ := newBackend("a1b2c3d4e5f6", func(argv []string) ([]byte, error) {
-		if len(argv) > 2 && argv[1] == "-g" && argv[2] == "IP4.ADDRESS" {
-			return []byte("garbage\n127.0.0.1/8\n10.42.7.1/24\n10.42.8.1/24\n"), nil
-		}
-		return nil, nil
+		return []byte("garbage\n127.0.0.1/8\n10.42.7.1/24\n10.42.8.1/24\n"), nil
 	})
-
-	info, err := b.Up(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, "http://10.42.7.1", info.PortalURL)
+	assert.Equal(t, "http://10.42.7.1", b.PortalURL(context.Background()))
 }
 
 func TestUpWithIface(t *testing.T) {

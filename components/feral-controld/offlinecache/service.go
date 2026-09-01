@@ -2848,18 +2848,29 @@ func (s *service) CachedPlaylistForURL(sourceURL string) (json.RawMessage, error
 // failed open here, and the granted-but-unproven rescue went on to
 // mutate replay scope (disabling the on-screen playlist's replay) before
 // its empty sync finally rejected the cast anyway (#308 review round 5).
-// The cost is that a >512-unique-source fully-cached playlist whose
-// every origin rotted simultaneously is rejected rather than replayed —
-// a shape real playlists do not take (the dynamic path caps at 255
-// items).
+// The cost is that a playlist whose 513th-or-later UNIQUE source holds
+// the only cached capture is rejected rather than replayed. That
+// includes fragment variants: the store keys on the RAW string (see
+// SourceKey), so `url#1` … `url#N` are N distinct lookups here even
+// though the probe collapses them to ONE dial (probeWireKey strips
+// fragments) — this bound is therefore INDEPENDENT of the probe's dial
+// budget, not derived from it. Accepted because the dynamic-resolution
+// path caps at 255 items, and while the playlistUrl and static dp1_call
+// paths carry no such item cap, a real playlist that parks its only
+// live capture past 512 unique sources is not a shape worth a bigger
+// read burst on the unauthenticated rejection path.
 const maxRescueLookups = 512
 
 // HasReplayableItem implements the Service interface method — see its
 // interface doc for the contract and the preflight rationale. It rides
 // itemStatus (the same in-memory-vs-on-disk derivation Status uses) with
 // withBytes=false, so a hit costs one record read and a miss costs at
-// most one per UNIQUE source: duplicates are deduped by SourceKey
-// (mirroring the probe's own dedup — same amplification concern) and
+// most one per UNIQUE source. The dedup domain is SourceKey over the RAW
+// string — the store's own key, NOT the probe's fragment-stripped wire
+// key: collapsing fragment variants here would skip records the store
+// holds under those variant keys and drop genuine rescues. The read
+// burst is therefore bounded by maxRescueLookups alone (512 serial
+// record reads worst-case), not by how few wire URLs the probe dialed.
 // data: sources are skipped outright, since an inline item is never
 // cached at all (Classify returns ClassInline and nothing is enqueued —
 // see ClassInline's doc), so looking one up can only ever miss.

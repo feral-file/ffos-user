@@ -2374,6 +2374,14 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		return err
 	}
 
+	// Resolve the direct-address fallback only now that :80 is accepting. On
+	// the rescan path the phone re-joins the saved SSID the moment beacons
+	// return, so its captive probe races this function; an optional 3s-bounded
+	// nmcli lookup between softap.Up and srv.Start would hand that probe a
+	// RST, and iOS reads a RST as "no portal" without a prompt retry. The
+	// lookup is fail-open (empty string omits the TV's manual-address line).
+	info.PortalURL = m.ap.PortalURL(ctx)
+
 	m.mu.Lock()
 	m.apUp = true
 	m.apInfo = info
@@ -2395,8 +2403,9 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	// early above when the AP is already up.
 	//
 	// info.PortalURL is single-shot BY ACCEPTED TRADE, not oversight: it is
-	// read once inside softap.Up (3 s bound) and latched into apInfo for the
-	// whole AP session — nothing re-reads it on the reconcile tick, so if that
+	// read once per raise (above, 3 s bound, after the portal bind) and
+	// published only through THIS notify — apInfo carries a copy but nothing
+	// reads it back today, so there is no latch to self-heal from. If that
 	// one lookup missed (NM slow to publish IP4.ADDRESS), the TV omits the
 	// manual-address fallback line until the next actual raise. The AP,
 	// captive flow, and portal are all unaffected (the lookup is fail-open),

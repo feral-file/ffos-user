@@ -99,6 +99,13 @@ func (a *fakeAP) Status(context.Context) (softap.Status, error) {
 	return softap.Status{}, nil
 }
 
+// PortalURL is recorded so tests can pin its place in the raise sequence: it
+// must run only after the portal has bound :80 (see ensureAPUp).
+func (a *fakeAP) PortalURL(context.Context) string {
+	a.rec.add("ap.PortalURL")
+	return a.info.PortalURL
+}
+
 type fakeWifi struct {
 	rec        *recorder
 	mu         sync.Mutex
@@ -988,6 +995,8 @@ func TestPortalBindFailureTearsAPBackDown(t *testing.T) {
 	require.NotEqual(t, -1, iStart, "portal start must be attempted: %v", events)
 	require.NotEqual(t, -1, iDown, "AP must be torn back down after the portal failed to bind: %v", events)
 	assert.Less(t, iStart, iDown, "teardown must follow the failed portal start: %v", events)
+	assert.Equal(t, 0, h.rec.count("ap.PortalURL"),
+		"no address lookup on a failed bind — there is nothing to publish: %v", events)
 	assert.Equal(t, StateAPActive, h.m.State(), "machine stays in APActive so the tick retries")
 
 	// Retry with the bind conflict resolved: the full constraint-1 sequence
@@ -1004,6 +1013,24 @@ func TestPortalBindFailureTearsAPBackDown(t *testing.T) {
 	last := events[indexOf(events[iDown:], "wifi.RefreshScanCache")+iDown:]
 	assert.Less(t, indexOf(last, "wifi.RefreshScanCache"), indexOf(last, "ap.Up"),
 		"retry must scan before re-raising the AP: %v", events)
+}
+
+// TestPortalURLResolvedOnlyAfterPortalBind pins the raise ordering: the
+// optional direct-address lookup must never sit between the AP going live
+// (beacons out, phone re-associating) and the portal binding :80 — a captive
+// probe landing in that gap gets a RST, which iOS reads as "no portal here"
+// and never raises the sign-in sheet.
+func TestPortalURLResolvedOnlyAfterPortalBind(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false) // unprovisioned
+	h.m.onConnectivity(context.Background(), false, false)
+
+	events := h.rec.list()
+	iStart := indexOf(events, "portal.Start")
+	iURL := indexOf(events, "ap.PortalURL")
+	require.NotEqual(t, -1, iStart, "portal must start: %v", events)
+	require.NotEqual(t, -1, iURL, "address lookup must run on a successful raise: %v", events)
+	assert.Less(t, iStart, iURL, "address lookup must wait for the portal bind: %v", events)
 }
 
 // TestFreshAPRaiseResetsStaleJoinStatus: a join outcome from a past setup must

@@ -840,15 +840,15 @@ func TestScanForcesRescan(t *testing.T) {
 	c, exec, _ := newController(func(argv []string) ([]byte, error) {
 		return []byte("Alpha\n"), nil
 	})
-	_, err := c.scan(context.Background(), true, 0)
+	_, err := c.scan(context.Background(), true)
 	require.NoError(t, err)
 	assert.Contains(t, strings.Join(exec.recorded()[0], " "), "--rescan yes")
 }
 
-func TestParseSSIDsDedupOrderAndCap(t *testing.T) {
-	// Duplicates collapse, order is preserved, and a positive limit caps the
-	// list. The limit is a caller concern (the portal's display cap) — wifictl
-	// itself no longer owns a cap constant.
+func TestParseSSIDsDedupAndOrder(t *testing.T) {
+	// Duplicates collapse, order is preserved, and nothing is truncated:
+	// display capping is the portal's concern (portal.maxDisplayedSSIDs), and
+	// a cap at this layer would fabricate absence for the evidence callers.
 	var b strings.Builder
 	b.WriteString("First\nFirst\nSecond\n\n")
 	for i := 0; i < 20; i++ {
@@ -856,14 +856,14 @@ func TestParseSSIDsDedupOrderAndCap(t *testing.T) {
 		b.WriteByte(byte('a' + i))
 		b.WriteString("\n")
 	}
-	got := parseSSIDsCapped(b.String(), 9)
-	assert.Len(t, got, 9)
+	got := parseSSIDs(b.String())
+	assert.Len(t, got, 22)
 	assert.Equal(t, "First", got[0])
 	assert.Equal(t, "Second", got[1])
 }
 
 func TestParseSSIDsUnescapesColons(t *testing.T) {
-	got := parseSSIDsUncapped(`My\:Net` + "\n")
+	got := parseSSIDs(`My\:Net` + "\n")
 	require.Len(t, got, 1)
 	assert.Equal(t, "My:Net", got[0])
 }

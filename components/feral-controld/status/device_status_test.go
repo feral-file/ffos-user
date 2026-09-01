@@ -185,4 +185,42 @@ func TestGetStatusCarriesContract(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(raw), `"contract":"2"`,
 		"the reply must carry the key even when best-effort fields are empty")
+	// deviceName is the same kind of capability gate: docs/api-design.md
+	// declares its PRESENCE (empty string when unnamed) as the signal a
+	// controller offers renaming on. This assertion is what stands between
+	// that contract and an omitempty added in passing — which would tell
+	// every unnamed frame's controller "this firmware cannot be renamed".
+	assert.Contains(t, string(raw), `"deviceName":""`,
+		"an unnamed unit must still carry the deviceName key")
+}
+
+// TestGetStatus_DeviceName pins the read path: a stored record's name reaches
+// the status reply (the app's rename affordance shows the current label from
+// here when mDNS TXT is unavailable).
+func TestGetStatus_DeviceName(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	mockOS := mocks.NewMockOS(ctrl)
+	mockExec := mocks.NewMockExec(ctrl)
+	mockHTTP := mocks.NewMockHTTPClient(ctrl)
+	mockIO := mocks.NewMockIO(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	nmcliCmd := mocks.NewMockExecCmd(ctrl)
+	pamCmd := mocks.NewMockExecCmd(ctrl)
+
+	mockOS.EXPECT().ReadFile(constants.SCREEN_ORIENTATION_FILE).Return(nil, os.ErrNotExist).Times(1)
+	mockOS.EXPECT().ReadFile(constants.FF1_CONFIG_FILE).Return([]byte(testFF1ConfigJSON), nil).Times(1)
+	mockOS.EXPECT().ReadFile(constants.SLEEP_SCHEDULE_FILE).Return(nil, os.ErrNotExist).Times(1)
+	mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return([]byte(`{"name":"Living Room"}`), nil).Times(1)
+	mockOS.EXPECT().ReadFile("/home/feralfile/.state/analytics-toggle-off").Return(nil, os.ErrNotExist).Times(1)
+	mockOS.EXPECT().ReadFile("/home/feralfile/.state/beta-features-toggle-on").Return(nil, os.ErrNotExist).Times(1)
+	mockOS.EXPECT().IsNotExist(gomock.Any()).DoAndReturn(func(err error) bool { return os.IsNotExist(err) }).AnyTimes()
+	expectDeviceStatusExecMocks(t, mockExec, nmcliCmd, pamCmd)
+	mockCDP.EXPECT().PageNavigationURL(gomock.Any()).Return("", errors.New("cdp down")).Times(1)
+
+	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, mockCDP)
+	resp, err := ds.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "Living Room", resp.DeviceName)
 }

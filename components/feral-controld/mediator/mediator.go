@@ -259,6 +259,17 @@ func (m *mediator) Stop() {
 // present. Advertising is keyed on link state, not internet reachability: the
 // LAN hub is the BLE-replacement recovery channel and must be discoverable on
 // any LAN even with no upstream internet.
+//
+// Known, accepted boot-window race: the hub starts serving setDeviceName
+// before main reads the stored record and calls this, and the wholesale
+// `m.mdnsDeviceInfo = info` assignment discards a Name (or Claimed) that a
+// concurrent SetDeviceName/SetClaimed already wrote — those setters return
+// early on a nil advertiser, leaving nothing registered to preserve. A rename
+// landing in that sub-millisecond window is persisted and reported in status
+// but advertised stale until the next rename or restart. Accepted because the
+// window requires a LAN caller racing boot; if it ever matters, merge instead
+// of replace here (keep an already-set Name/Claimed) rather than reordering
+// startup.
 func (m *mediator) InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, link status.LinkState) {
 	m.mdnsMu.Lock()
 	defer m.mdnsMu.Unlock()

@@ -2,6 +2,7 @@ package devicectl
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/golang/mock/gomock"
@@ -154,9 +155,10 @@ func TestClearDeviceName_AnnouncesTheFallback(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockOS := mocks.NewMockOS(ctrl)
-	// Clear removes the staged temp first (resold-frame leak guard).
-	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
+	// Clear removes the live record first (resold-frame leak guard), then the
+	// staged temp.
 	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
 
 	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON()}
 
@@ -165,4 +167,29 @@ func TestClearDeviceName_AnnouncesTheFallback(t *testing.T) {
 
 	require.NoError(t, e.clearDeviceName())
 	assert.Equal(t, []string{""}, announced)
+}
+
+// A failed disk clear must still move the advertised name: factory reset logs
+// the error and continues to the claim observer, whose mDNS re-register
+// republishes the mediator's cached name — the broadcast leak outranks the
+// local-disk one.
+func TestClearDeviceName_AnnouncesTheFallbackEvenWhenClearFails(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	errEIO := errors.New("eio")
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(errEIO)
+	mockOS.EXPECT().IsNotExist(errEIO).Return(false)
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
+
+	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON()}
+
+	var announced []string
+	e.SetDeviceNameObserver(func(name string) { announced = append(announced, name) })
+
+	err := e.clearDeviceName()
+	require.ErrorIs(t, err, errEIO)
+	assert.Equal(t, []string{""}, announced,
+		"the fallback must be announced even when the disk clear failed")
 }
