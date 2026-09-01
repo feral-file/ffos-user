@@ -914,6 +914,11 @@ Current error cases:
   reset's clear.
 - State directory creation, temp write, or rename fails.
 
+`setDeviceName` is classified as a disruptive command in the storm gate
+(~1 per 5 s, deduped): every accepted change is a persisted write plus a
+full mDNS re-registration, so a flood of renames answers with the
+standardized command-storm rejection above rather than churning the LAN.
+
 Current relayer error response: none standardized; command failure is logged.
 
 ### betaFeaturesToggle

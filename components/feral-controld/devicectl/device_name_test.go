@@ -154,6 +154,8 @@ func TestClearDeviceName_AnnouncesTheFallback(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockOS := mocks.NewMockOS(ctrl)
+	// Clear removes the staged temp first (resold-frame leak guard).
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
 	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
 
 	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON()}

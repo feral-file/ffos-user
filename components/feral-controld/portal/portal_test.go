@@ -291,6 +291,37 @@ func TestConnectRejectionReRendersForm(t *testing.T) {
 	// Back on the picker (form action present), not the result page.
 	assert.Contains(t, body, `action="/connect"`)
 	assert.NotContains(t, body, "Connecting to")
+	// The rejection reason is IN the page. Load-bearing for the no-JS shape:
+	// the machine never saw the submission (Status stays JoinIdle), and the
+	// script-side `required` guard is the only other thing preventing an
+	// empty placeholder-first submission — without this banner a
+	// scripting-disabled sheet re-renders a byte-identical page and the tap
+	// silently did nothing.
+	assert.Contains(t, body, "empty ssid")
+}
+
+// TestConnectEmptyPickerSubmissionExplainsItself is the no-JS regression for
+// the placeholder-first picker: an untouched picker submits ssid="" (the
+// disabled prompt), which must come back with the machine's user-facing
+// rejection visible, not a silently identical page. Uses the real
+// provisioning-side message so the copy contract is pinned end-to-end.
+func TestConnectEmptyPickerSubmissionExplainsItself(t *testing.T) {
+	_, ts, client := newTestServer(t, Config{
+		Scan: func(context.Context) ([]string, error) { return []string{"HomeNet"}, nil },
+		Join: func(req JoinRequest) error {
+			if strings.TrimSpace(req.SSID) == "" {
+				return stubError("please choose a Wi-Fi network")
+			}
+			return nil
+		},
+	})
+	resp, err := client.PostForm(ts.URL+"/connect", url.Values{"ssid": {""}, "ssid_manual": {""}})
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body := readAll(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, body, "please choose a Wi-Fi network")
+	assert.Contains(t, body, `class="status status-failed"`)
 }
 
 func TestStatusReflectsStatusFunc(t *testing.T) {

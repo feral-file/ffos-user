@@ -113,6 +113,14 @@ func Load(os wrapper.OS, json wrapper.JSON) (*Record, error) {
 // Written to a temp file and renamed: the mDNS advertiser reads this file when
 // it re-registers, and a torn write would either fail to parse or advertise a
 // half-written name.
+//
+// Deliberately NOT fsynced (wrapper.OS exposes no sync seam): temp+rename
+// protects concurrent READERS, while a power cut in the rename window can
+// still leave an empty or truncated file. Accepted because the worst outcome
+// is bounded and self-recovering — an empty file loads as the empty record
+// and a corrupt one falls back to the serial, so the cost is a lost label,
+// never an undiscoverable or wedged device. Contrast netlog, which fsyncs
+// per record because ITS loss is diagnostic evidence.
 func Save(os wrapper.OS, json wrapper.JSON, record *Record) error {
 	if record == nil {
 		record = &Record{}
@@ -142,7 +150,15 @@ func Save(os wrapper.OS, json wrapper.JSON, record *Record) error {
 // Clear removes the stored name. Used by factory reset: the unit is being
 // handed on, and arriving in its new home still called "Sam's Studio" would
 // leak the previous owner's vocabulary.
+//
+// The temp file is removed too: a crash between Save's WriteFile and Rename
+// strands the previous owner's label at the .tmp path, and a reset that
+// removed only the live record would hand the unit on with that label still
+// on disk — the precise leak this function exists to prevent.
 func Clear(os wrapper.OS) error {
+	if err := os.Remove(constants.DEVICE_NAME_FILE + ".tmp"); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clear device name tmp: %w", err)
+	}
 	if err := os.Remove(constants.DEVICE_NAME_FILE); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("clear device name: %w", err)
 	}

@@ -554,7 +554,17 @@ type Service interface {
 	// F4): a definitively dead ORIGIN is not a dead CAST when replay can
 	// serve the item from cache — origin rot is exactly the case the
 	// offline cache exists for — so the preflight asks this before
-	// rejecting. True ONLY on a confirmed hit within maxRescueLookups
+	// rejecting. ONE cached item out of N is the INTENDED rescue
+	// threshold, not an oversight: a 20-item cast with 19 proven-dead
+	// origins and 1 cached capture is accepted (and reported ok), so 1
+	// artwork replays while 19 render as failures. That is strictly
+	// better than rejecting the whole cast — the alternative discards
+	// the one item that CAN play — but any future edit tightening this
+	// to "a quorum of items" or loosening it further changes the
+	// controller-visible accept/reject contract and must update the
+	// dead-source rejection docs (docs/api-design.md,
+	// docs/controld-inbound-controller-messages.md) in the same change.
+	// True ONLY on a confirmed hit within maxRescueLookups
 	// unique reads; an exhausted scan with no hit is false, because the
 	// rescue needs positive evidence before the handler will let it
 	// touch replay scope (see maxRescueLookups). Cheap by construction:
@@ -1737,6 +1747,16 @@ const maxLoggedSourceBytes = 256
 // cutting on a rune boundary so a multi-byte sequence is never split.
 // The marker matters: a silently shortened URL would send an operator
 // hunting for a source that never existed in that form.
+//
+// This truncates; it does NOT redact. The cast preflight logs through
+// redactSourceForLog (probe.go) instead, which strips query/userinfo
+// credentials first, because the preflight fires on EVERY cast with a
+// dead item. The download-path call sites in this file keep logging the
+// full (truncated) URL by accepted scope: they fire only on explicit
+// download/cache commands on a cache-enabled device, and the intact
+// query string is what an operator diagnosing a failed capture greps
+// for. Widening the redaction to these sites is a deliberate decision
+// for whoever next touches log egress, not a drive-by.
 func truncateSourceForLog(source string) string {
 	if len(source) <= maxLoggedSourceBytes {
 		return source

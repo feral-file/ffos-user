@@ -222,6 +222,8 @@ func stagedResetExecutor(t *testing.T, ctrl *gomock.Controller, unitOK bool) (*e
 	// executor needs a real OS seam here even though this test is about the
 	// claim-QR latch.
 	mockOS := mocks.NewMockOS(ctrl)
+	// Clear removes the staged temp first (resold-frame leak guard).
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
 	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
 
 	spy := &narratorSpy{}
@@ -318,6 +320,8 @@ func TestFactoryReset_StuckResetWatchdogArms(t *testing.T) {
 	mockCmd.EXPECT().CombinedOutput().Return([]byte(""), nil)
 
 	mockOS := mocks.NewMockOS(ctrl)
+	// Clear removes the staged temp first (resold-frame leak guard).
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
 	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
 
 	// No narratorSpy here: the watchdog fires on its own goroutine, and the spy

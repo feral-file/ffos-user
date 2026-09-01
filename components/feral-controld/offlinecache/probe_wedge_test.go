@@ -442,3 +442,44 @@ func TestSourceProber_DataURIsDoNotConsumeDialBudget(t *testing.T) {
 		assert.Equal(t, ProbeDead, r.Verdict, "item %d: every item is definitively dead", i)
 	}
 }
+
+// TestRedactSourceForLog pins the log-side credential redaction: the daemon
+// log rides off-device in uploadLogs bundles, and a presigned CDN URL's
+// credential parameters commonly sit inside truncateSourceForLog's 256-byte
+// window — so the query string must be GONE, not merely shortened, before
+// truncation. Host and path survive for operator grep.
+func TestRedactSourceForLog(t *testing.T) {
+	signed := "https://cdn.example.com/art/piece.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIA123%2F20260901&X-Amz-Signature=deadbeef"
+	got := redactSourceForLog(signed)
+	assert.Equal(t, "https://cdn.example.com/art/piece.html?…", got)
+	assert.NotContains(t, got, "X-Amz")
+
+	// No query: untouched apart from the usual truncation path.
+	assert.Equal(t, "https://cdn.example.com/a.html",
+		redactSourceForLog("https://cdn.example.com/a.html"))
+
+	// Fragments are dropped too (never sent on the wire; nothing to grep).
+	assert.Equal(t, "https://cdn.example.com/a.html",
+		redactSourceForLog("https://cdn.example.com/a.html#frag"))
+
+	// An unparseable URL is cut at the first '?' rather than trusted.
+	assert.Equal(t, "http://bad\x7f?…",
+		redactSourceForLog("http://bad\x7f?X-Amz-Signature=deadbeef"))
+
+	// Userinfo is the other credential channel in a URL and must not
+	// survive either — password or token, with or without a query.
+	assert.Equal(t, "https://cdn.example.com/a.html",
+		redactSourceForLog("https://id:secret@cdn.example.com/a.html"))
+	got = redactSourceForLog("https://token@cdn.example.com/a.html?sig=deadbeef")
+	assert.Equal(t, "https://cdn.example.com/a.html?…", got)
+	assert.NotContains(t, got, "token")
+
+	// data: URIs keep the pre-existing bounded-prefix logging behavior.
+	assert.Equal(t, "data:text/html,hello",
+		redactSourceForLog("data:text/html,hello"))
+
+	// Redaction happens BEFORE truncation, so a signed URL with a huge
+	// query never leaks its head into the truncated form.
+	huge := "https://cdn.example.com/p.html?sig=" + strings.Repeat("s", maxLoggedSourceBytes*2)
+	assert.Equal(t, "https://cdn.example.com/p.html?…", redactSourceForLog(huge))
+}

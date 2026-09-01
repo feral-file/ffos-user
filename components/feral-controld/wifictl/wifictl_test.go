@@ -533,7 +533,9 @@ func TestCachedScanServesWithinTTLThenRefreshes(t *testing.T) {
 
 func TestRefreshScanCachePreservesCandidatesBeyondDisplayCap(t *testing.T) {
 	var ssids []string
-	for i := 0; i < maxSSIDs+1; i++ {
+	// One past the portal's nine-slot display cap (portal.maxDisplayedSSIDs —
+	// the only live cap; wifictl itself no longer caps anything).
+	for i := 0; i < 10; i++ {
 		ssids = append(ssids, fmt.Sprintf("Net%02d", i))
 	}
 	scanOutput := []byte(strings.Join(ssids, "\n") + "\n")
@@ -838,13 +840,15 @@ func TestScanForcesRescan(t *testing.T) {
 	c, exec, _ := newController(func(argv []string) ([]byte, error) {
 		return []byte("Alpha\n"), nil
 	})
-	_, err := c.Scan(context.Background(), true)
+	_, err := c.scan(context.Background(), true, 0)
 	require.NoError(t, err)
 	assert.Contains(t, strings.Join(exec.recorded()[0], " "), "--rescan yes")
 }
 
 func TestParseSSIDsDedupOrderAndCap(t *testing.T) {
-	// Duplicates collapse, order is preserved, and the list caps at maxSSIDs.
+	// Duplicates collapse, order is preserved, and a positive limit caps the
+	// list. The limit is a caller concern (the portal's display cap) — wifictl
+	// itself no longer owns a cap constant.
 	var b strings.Builder
 	b.WriteString("First\nFirst\nSecond\n\n")
 	for i := 0; i < 20; i++ {
@@ -852,14 +856,14 @@ func TestParseSSIDsDedupOrderAndCap(t *testing.T) {
 		b.WriteByte(byte('a' + i))
 		b.WriteString("\n")
 	}
-	got := parseSSIDs(b.String())
-	assert.Len(t, got, maxSSIDs)
+	got := parseSSIDsCapped(b.String(), 9)
+	assert.Len(t, got, 9)
 	assert.Equal(t, "First", got[0])
 	assert.Equal(t, "Second", got[1])
 }
 
 func TestParseSSIDsUnescapesColons(t *testing.T) {
-	got := parseSSIDs(`My\:Net` + "\n")
+	got := parseSSIDsUncapped(`My\:Net` + "\n")
 	require.Len(t, got, 1)
 	assert.Equal(t, "My:Net", got[0])
 }
@@ -1062,12 +1066,14 @@ func TestScanAllSSIDsPinsConfiguredInterface(t *testing.T) {
 	}
 }
 
-// TestScanAllSSIDsIsUncapped: Scan truncates at the portal display cap
-// (maxSSIDs); ScanAllSSIDs must not — a saved network ranked below the cap
-// would otherwise read as absent and fire a false relocation.
+// TestScanAllSSIDsIsUncapped: ScanAllSSIDs must return the FULL list — its
+// callers treat scan presence as relocation evidence, and a saved network
+// truncated out by any cap (the portal's display cap is nine) would read as
+// absent and fire a false relocation.
 func TestScanAllSSIDsIsUncapped(t *testing.T) {
+	const total = 12 // comfortably past the portal's nine-slot display cap
 	var lines []string
-	for i := 0; i < maxSSIDs+3; i++ {
+	for i := 0; i < total; i++ {
 		lines = append(lines, fmt.Sprintf("Net%02d", i))
 	}
 	out := []byte(strings.Join(lines, "\n") + "\n")
@@ -1075,20 +1081,12 @@ func TestScanAllSSIDsIsUncapped(t *testing.T) {
 		return out, nil
 	})
 
-	capped, err := c.Scan(context.Background(), false)
-	if err != nil {
-		t.Fatalf("Scan: %v", err)
-	}
-	if len(capped) != maxSSIDs {
-		t.Fatalf("Scan returned %d SSIDs, want the %d display cap", len(capped), maxSSIDs)
-	}
-
 	all, err := c.ScanAllSSIDs(context.Background())
 	if err != nil {
 		t.Fatalf("ScanAllSSIDs: %v", err)
 	}
-	if len(all) != maxSSIDs+3 {
-		t.Fatalf("ScanAllSSIDs returned %d SSIDs, want %d (uncapped)", len(all), maxSSIDs+3)
+	if len(all) != total {
+		t.Fatalf("ScanAllSSIDs returned %d SSIDs, want %d (uncapped)", len(all), total)
 	}
 	// And it must force a fresh scan: stale results are not relocation evidence.
 	last := exec.recorded()[len(exec.recorded())-1]

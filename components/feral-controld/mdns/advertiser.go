@@ -2,6 +2,7 @@ package mdns
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/grandcat/zeroconf"
@@ -107,13 +108,26 @@ func displayName(info DeviceInfo) string {
 // than a plain instance name: the rename path stops the existing advertisement
 // before re-registering, so a rejected label would leave the frame
 // undiscoverable while the command reported success.
+//
+// A name containing a dot takes the same serial fallback, and this branch is
+// load-bearing, not cosmetic. An RFC 6763 §4.3 service-instance name is
+// exactly ONE label, and zeroconf performs no DNS escaping: it splices the
+// instance string verbatim into "<instance>.<service>.<domain>". A single dot
+// therefore produces a multi-label instance name that Avahi/Bonjour/NsdManager
+// parse differently from each other, and consecutive dots ("Hi.. there", an
+// ellipsis) produce an EMPTY label, which makes every outgoing response fail
+// dns.Msg.Pack ("bad rdata") — zeroconf.Register still returns nil because
+// probe/announce run in goroutines, so the daemon believes it is advertising
+// while answering no queries at all. The name persists on disk, so without
+// this guard one dotted rename would silently and permanently remove the
+// frame from mDNS discovery — the BLE-replacement LAN recovery channel.
 func instanceLabel(info DeviceInfo) string {
 	name := displayName(info)
 	if name == "" {
 		return "FF1"
 	}
-	if len(name) > maxInstanceLabelOctets {
-		if info.ID != "" && len(info.ID) <= maxInstanceLabelOctets {
+	if len(name) > maxInstanceLabelOctets || strings.Contains(name, ".") {
+		if info.ID != "" && len(info.ID) <= maxInstanceLabelOctets && !strings.Contains(info.ID, ".") {
 			return info.ID
 		}
 		return "FF1"

@@ -26,11 +26,6 @@ import (
 const (
 	nmcliBin = "nmcli"
 
-	// maxSSIDs caps the public Scan result for callers that need the legacy
-	// picker-sized list. The pre-AP cache is deliberately uncapped so the
-	// portal can remove its own setup SSID before applying its display cap.
-	maxSSIDs = 9
-
 	// scanCacheTTL bounds how long a pre-AP scan stays usable. Ported from
 	// feral-setupd (constant::SSID_CACHE_TTL, 10 minutes).
 	scanCacheTTL = 10 * time.Minute
@@ -219,13 +214,12 @@ func (c *Controller) SavedWifiSSIDs(ctx context.Context) (ssids []string, anyHid
 // Scanning (with pre-AP cache)
 // -----------------------------------------------------------------------------
 
-// Scan performs a live Wi-Fi scan and returns up to maxSSIDs unique SSIDs in
-// signal order. force triggers a fresh rescan rather than reusing NM's own
-// scan results.
-func (c *Controller) Scan(ctx context.Context, force bool) ([]string, error) {
-	return c.scan(ctx, force, maxSSIDs)
-}
-
+// scan runs the nmcli SSID listing shared by RefreshScanCache and
+// ScanAllSSIDs. There is deliberately NO capped public wrapper anymore: the
+// only live display cap is portal.maxDisplayedSSIDs, applied AFTER the portal
+// removes its own setup SSID. A cap re-introduced here would sit BEFORE that
+// filter and reinstate the dense-scan bug where the setup AP consumed one of
+// the nine picker slots.
 func (c *Controller) scan(ctx context.Context, force bool, limit int) ([]string, error) {
 	args := []string{"-t", "-f", "SSID", "device", "wifi", "list"}
 	if force {
@@ -239,7 +233,8 @@ func (c *Controller) scan(ctx context.Context, force bool, limit int) ([]string,
 }
 
 // ScanAllSSIDs performs a forced live scan and returns every unique SSID in
-// range, uncapped. Scan's maxSSIDs cap is a captive-portal DISPLAY concern;
+// range, uncapped. The picker's display cap is a captive-portal concern
+// (portal.maxDisplayedSSIDs, applied portal-side);
 // callers that use scan presence as EVIDENCE (the boot relocation check reads
 // "no saved SSID in the scan" as "the device was moved" and raises the setup
 // AP on it — a one-way door on this hardware) must see the full list: a
@@ -869,9 +864,9 @@ func (c *Controller) waitForSSID(ctx context.Context, ssid string) {
 	}
 }
 
-// ssidInScan reports whether ssid appears in nmcli terse scan output. Unlike
-// parseSSIDs it is deliberately NOT capped at maxSSIDs: the join target may
-// rank below the portal picker's cut in a dense environment.
+// ssidInScan reports whether ssid appears in nmcli terse scan output.
+// Deliberately uncapped: the join target may rank below the portal picker's
+// display cut in a dense environment.
 func ssidInScan(out, ssid string) bool {
 	for _, line := range strings.Split(out, "\n") {
 		if unescapeTerse(line) == ssid {
@@ -938,13 +933,7 @@ func exitCode(err error) int {
 	return -1
 }
 
-// parseSSIDs extracts unique, non-empty SSIDs from nmcli terse output, ordered
-// as nmcli returned them and capped at maxSSIDs (the portal display cap).
-func parseSSIDs(out string) []string {
-	return parseSSIDsCapped(out, maxSSIDs)
-}
-
-// parseSSIDsUncapped is parseSSIDs without the display cap — for callers that
+// parseSSIDsUncapped extracts every unique, non-empty SSID — for callers that
 // treat scan CONTENTS as evidence, where truncation would fabricate absence.
 func parseSSIDsUncapped(out string) []string {
 	return parseSSIDsCapped(out, 0)
