@@ -11,8 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"golang.org/x/sync/semaphore"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // errProbeBudgetExhausted marks a source the preflight never probed

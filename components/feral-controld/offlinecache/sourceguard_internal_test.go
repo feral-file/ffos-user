@@ -10,9 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // TestTransport_BoundsAggregateProbeHeaderMemory pins the response-header
