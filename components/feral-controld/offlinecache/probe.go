@@ -155,16 +155,6 @@ const (
 	// closed. With the current values, 32 units admit at most 32 HTTP parsers or
 	// eight TLS parsers inside the same 8 MiB envelope.
 	maxConcurrentHeaderProbes = maxAggregateProbeHeaderBytes / maxProbeHeaderBudgetBytesPerSlot
-
-	// MaxConcurrentSourceProbeCasts is how many worst-case HTTPS worker waves the
-	// aggregate budget can admit, rounded up to keep one cast available when the
-	// shared semaphore intentionally runs fewer TLS handshakes than workers.
-	// main.go uses this with the effective displayPlaylist gate weight to cap
-	// configured gate capacity; the shared units remain the final bound when the
-	// gate is disabled.
-	MaxConcurrentSourceProbeCasts = (maxConcurrentHeaderProbes +
-		(probeConcurrency * probeHTTPSHeaderBudgetSlots) - 1) /
-		(probeConcurrency * probeHTTPSHeaderBudgetSlots)
 )
 
 var processSourceProbeHeaderSlots = semaphore.NewWeighted(maxConcurrentHeaderProbes)

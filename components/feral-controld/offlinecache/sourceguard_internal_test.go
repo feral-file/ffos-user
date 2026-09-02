@@ -63,6 +63,8 @@ func TestProbeParser_BoundsAggregateHeaderMemory(t *testing.T) {
 func TestProbeTLSHandshake_RejectsOversizedCertificateBeforeParsing(t *testing.T) {
 	certificateSource := httptest.NewTLSServer(go_http.HandlerFunc(func(go_http.ResponseWriter, *go_http.Request) {}))
 	certificate := certificateSource.TLS.Certificates[0]
+	roots := x509.NewCertPool()
+	roots.AddCert(certificateSource.Certificate())
 	certificateSource.Close()
 
 	leafDER := certificate.Certificate[0]
@@ -83,7 +85,6 @@ func TestProbeTLSHandshake_RejectsOversizedCertificateBeforeParsing(t *testing.T
 	serverTLS := tls.Server(serverRaw, &tls.Config{
 		Certificates: []tls.Certificate{certificate},
 		MinVersion:   tls.VersionTLS12,
-		MaxVersion:   tls.VersionTLS12,
 	})
 	serverDone := make(chan error, 1)
 	go func() {
@@ -91,10 +92,10 @@ func TestProbeTLSHandshake_RejectsOversizedCertificateBeforeParsing(t *testing.T
 	}()
 
 	handshakeConn := newProbeTLSHandshakeConn(clientRaw)
-	clientTLS := tls.Client(handshakeConn, &tls.Config{ //nolint:gosec // Deliberately hostile synthetic peer; trust is irrelevant to the byte-envelope test.
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS12,
-		MaxVersion:         tls.VersionTLS12,
+	clientTLS := tls.Client(handshakeConn, &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    roots,
+		ServerName: "example.com",
 	})
 	err := clientTLS.HandshakeContext(context.Background())
 	require.ErrorIs(t, err, errProbeTLSHandshakeTooLarge)

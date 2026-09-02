@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
-	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
@@ -1602,24 +1600,4 @@ func TestInitializeAppGatewayUserAgentKeepsUsableHosts(t *testing.T) {
 
 	require.NotNil(t, app)
 	assert.NotNil(t, app.UARewrite, "one bad entry must not disable the whole rewrite")
-}
-
-func TestBoundGateForSourceProbeCapsConfiguredCapacityFromEffectivePolicy(t *testing.T) {
-	gateCfg := commandrouter.DefaultGateConfig()
-	gateCfg.MaxConcurrent = 64
-	gateCfg.Policies[commands.CMD_DISPLAY_PLAYLIST] = commandrouter.Policy{Weight: 2}
-
-	bounded := boundGateForSourceProbe(gateCfg, zap.NewNop())
-
-	assert.Equal(t, int64(2), bounded.MaxConcurrent,
-		"one worst-case HTTPS cast at effective weight two exhausts the parsing budget")
-}
-
-func TestBoundGateForSourceProbeLeavesSafeCapacityAlone(t *testing.T) {
-	gateCfg := commandrouter.DefaultGateConfig()
-	gateCfg.MaxConcurrent = 4
-
-	bounded := boundGateForSourceProbe(gateCfg, zap.NewNop())
-
-	assert.Equal(t, gateCfg.MaxConcurrent, bounded.MaxConcurrent)
 }
