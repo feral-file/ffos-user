@@ -23,7 +23,8 @@ import (
 // are excluded; the per-slot budget also leaves a full list-sized allowance
 // for Go's materialized map and transport bookkeeping.
 func TestTransport_BoundsAggregateProbeHeaderMemory(t *testing.T) {
-	limit := sourceGuard{}.transport().MaxResponseHeaderBytes
+	transport := sourceGuard{}.oneShotProbeTransport()
+	limit := transport.MaxResponseHeaderBytes
 	worstCaseHeaders := int64(maxConcurrentHeaderProbes) * maxProbeHeaderBytesPerSlot
 	worstCaseBudget := int64(maxConcurrentHeaderProbes) * maxProbeHeaderBudgetBytesPerSlot
 
@@ -31,8 +32,11 @@ func TestTransport_BoundsAggregateProbeHeaderMemory(t *testing.T) {
 		t.Fatalf("MaxResponseHeaderBytes must be set; Go's 10 MiB default is far too high here")
 	}
 	if limit+http2HeaderListAccountingBytes != maxResponseHeaderListBytes {
-		t.Fatalf("the configured limit plus Go's HTTP/2 allowance is %d, want the effective per-list ceiling %d",
+		t.Fatalf("the configured limit plus the conservative rounding allowance is %d, want the per-slot header ceiling %d",
 			limit+http2HeaderListAccountingBytes, maxResponseHeaderListBytes)
+	}
+	if transport.Protocols == nil || !transport.Protocols.HTTP1() || transport.Protocols.HTTP2() {
+		t.Fatalf("one-shot probes must permit only HTTP/1; got protocols %v", transport.Protocols)
 	}
 	if worstCaseHeaders > maxAggregateProbeHeaderBytes {
 		t.Fatalf("the shared probe budget can hold %d bytes of attacker-chosen response headers (%d slots x %d); keep it under %d",
@@ -44,16 +48,20 @@ func TestTransport_BoundsAggregateProbeHeaderMemory(t *testing.T) {
 	}
 }
 
-// TestTransport_HTTP2InitialHeaderHonorsEffectiveLimit keeps the transport
-// setting and Go's HTTP/2 list-size adjustment coupled to a real response.
-func TestTransport_HTTP2InitialHeaderHonorsEffectiveLimit(t *testing.T) {
+// TestProbeTransport_RejectsHTTP2AndDoesNotParseImmediateTrailers proves the
+// one-shot client negotiates HTTP/1 even when the origin offers HTTP/2. The
+// origin returns a trailer immediately; closing without reading EOF must leave
+// it unparsed while the bounded initial header remains available.
+func TestProbeTransport_RejectsHTTP2AndDoesNotParseImmediateTrailers(t *testing.T) {
 	const nearLimitBlockBytes = int(maxResponseHeaderListBytes - (4 << 10))
 	initial := strings.Repeat("i", nearLimitBlockBytes)
 
 	origin := httptest.NewUnstartedServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
 		w.Header().Set("X-Probe-Initial", initial)
+		w.Header().Set("Trailer", "X-Probe-Trailer")
 		w.WriteHeader(go_http.StatusOK)
 		_, _ = w.Write([]byte("x"))
+		w.Header().Set("X-Probe-Trailer", strings.Repeat("t", nearLimitBlockBytes))
 	}))
 	origin.EnableHTTP2 = true
 	origin.StartTLS()
@@ -62,7 +70,7 @@ func TestTransport_HTTP2InitialHeaderHonorsEffectiveLimit(t *testing.T) {
 	roots := x509.NewCertPool()
 	roots.AddCert(origin.Certificate())
 	guard := sourceGuard{isReserved: loopbackIsPublic}
-	transport := guard.transport()
+	transport := guard.oneShotProbeTransport()
 	transport.TLSClientConfig = &tls.Config{ //nolint:gosec // Test trusts only httptest's ephemeral certificate.
 		MinVersion: tls.VersionTLS12,
 		RootCAs:    roots,
@@ -78,8 +86,9 @@ func TestTransport_HTTP2InitialHeaderHonorsEffectiveLimit(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 
-	assert.Equal(t, 2, resp.ProtoMajor, "the regression requires HTTP/2 header accounting")
+	assert.Equal(t, 1, resp.ProtoMajor, "one-shot probes must reject offered HTTP/2")
 	assert.Len(t, resp.Header.Get("X-Probe-Initial"), nearLimitBlockBytes)
+	assert.Empty(t, resp.Trailer.Get("X-Probe-Trailer"), "closing before EOF must not parse trailers")
 }
 
 // TestSourceProbe_HTTP1ChunkedTrailerIsNeverParsed proves the source probe

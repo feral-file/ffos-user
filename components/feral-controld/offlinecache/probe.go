@@ -125,11 +125,11 @@ const (
 	// storm gate: disabling or widening that gate must not widen this bound.
 	maxAggregateProbeHeaderBytes int64 = 8 << 20
 
-	// rangedGETStatus closes the response without reading the body, so neither
-	// HTTP/1 chunked trailers nor HTTP/2 trailers are parsed. One admitted
-	// request can therefore retain only its initial response-header list. Use
-	// the effective HTTP/2 allowance here, including Go's list-size adjustment.
-	maxProbeHeaderBytesPerSlot = maxResponseHeaderBytes + http2HeaderListAccountingBytes
+	// The one-shot probe transport permits only HTTP/1 and rangedGETStatus
+	// closes without reading the body, so chunked trailers are never parsed.
+	// Round its slightly lower configured initial-header limit up to 64 KiB for
+	// conservative, legible per-slot accounting.
+	maxProbeHeaderBytesPerSlot = maxResponseHeaderListBytes
 
 	// Header values are not the transport's only allocations: Go also builds a
 	// MIMEHeader map and keeps request/decoder bookkeeping while the response is

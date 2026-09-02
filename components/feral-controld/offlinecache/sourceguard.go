@@ -415,8 +415,7 @@ func newGuardedHTTPClientFor(g sourceGuard, timeout time.Duration) wrapper.HTTPC
 // bounded by that same cap, against origins an untrusted playlist
 // chose, where pooling buys nothing worth the replay surface.
 func newGuardedNoRedirectHTTPClientFor(g sourceGuard, timeout time.Duration) wrapper.HTTPClient {
-	transport := g.transport()
-	transport.DisableKeepAlives = true
+	transport := g.oneShotProbeTransport()
 	return wrapper.NewHTTPClientFrom(&go_http.Client{
 		Timeout: timeout,
 		CheckRedirect: func(*go_http.Request, []*go_http.Request) error {
@@ -424,6 +423,22 @@ func newGuardedNoRedirectHTTPClientFor(g sourceGuard, timeout time.Duration) wra
 		},
 		Transport: transport,
 	})
+}
+
+// oneShotProbeTransport narrows the shared guarded transport for cast-time
+// status probes. HTTP/2 can parse an immediately available trailing HEADERS
+// frame before the caller closes Body, so closing without reading EOF is not
+// enough to exclude a second attacker-chosen header list. Pinning HTTP/1 keeps
+// the slot calculation literal: one bounded initial header block, with chunked
+// trailers left unparsed because the body is never read.
+func (g sourceGuard) oneShotProbeTransport() *go_http.Transport {
+	transport := g.transport()
+	protocols := new(go_http.Protocols)
+	protocols.SetHTTP1(true)
+	transport.Protocols = protocols
+	transport.ForceAttemptHTTP2 = false
+	transport.DisableKeepAlives = true
+	return transport
 }
 
 // transport builds the guarded transport. Factored out so a test can
@@ -468,13 +483,15 @@ func (g sourceGuard) transport() *go_http.Transport {
 		// The ceiling has to be sized against the whole process, not one
 		// response or one storm-gate configuration. The effective 64 KiB
 		// list allowance is the top of the range real servers actually use
-		// (nginx and Apache default to 8 KiB). The cast preflight closes its
-		// one-shot response without reading the body, so HTTP/1 chunked and
-		// HTTP/2 trailers are never parsed. probe.go admits only
+		// (nginx and Apache default to 8 KiB). The cast preflight pins HTTP/1
+		// and closes its one-shot response without reading the body, so chunked
+		// trailers are never parsed. probe.go admits only
 		// maxConcurrentHeaderProbes initial lists at once and reserves equal
 		// per-slot implementation headroom. Together they keep attacker-chosen
 		// preflight header bytes inside maxAggregateProbeHeaderBytes even when
-		// command-storm protection is reconfigured or explicitly disabled.
+		// command-storm protection is reconfigured or explicitly disabled. The
+		// preflight-specific transport also pins HTTP/1 so an immediately
+		// available HTTP/2 trailer list cannot enter this accounting envelope.
 		MaxResponseHeaderBytes: maxResponseHeaderBytes,
 	}
 }
