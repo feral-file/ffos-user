@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
+	"golang.org/x/sync/semaphore"
 )
 
 // errProbeBudgetExhausted marks a source the preflight never probed
@@ -112,9 +113,42 @@ type SourceProber interface {
 }
 
 type sourceProber struct {
-	httpClient wrapper.HTTPClient
-	guard      sourceGuard
+	httpClient  wrapper.HTTPClient
+	guard       sourceGuard
+	headerSlots *semaphore.Weighted
 }
+
+const (
+	// maxAggregateProbeHeaderBytes is the process-wide ceiling for
+	// attacker-chosen response-header bytes held by cast-time source
+	// preflights. It is independent of the operator-configurable command
+	// storm gate: disabling or widening that gate must not widen this bound.
+	maxAggregateProbeHeaderBytes int64 = 8 << 20
+
+	// HTTP/2 parses and retains response trailers separately from the initial
+	// response headers, applying the transport's header-list limit to each.
+	// rangedGETStatus reads to EOF, so an origin can make both coexist while
+	// the request holds one semaphore slot. Include Go's HTTP/2 list-size
+	// adjustment on both blocks rather than treating MaxResponseHeaderBytes as
+	// a per-request ceiling.
+	maxRetainedProbeHeaderLists int64 = 2
+	maxProbeHeaderBytesPerSlot        = maxRetainedProbeHeaderLists *
+		(maxResponseHeaderBytes + http2HeaderListAccountingBytes)
+
+	// maxConcurrentHeaderProbes couples the aggregate ceiling to the guarded
+	// transport's worst-case retained header lists. Every worker acquires one
+	// shared slot before it can issue the ranged GET and holds it through body
+	// drain (and therefore trailer parsing).
+	maxConcurrentHeaderProbes = maxAggregateProbeHeaderBytes / maxProbeHeaderBytesPerSlot
+
+	// MaxConcurrentSourceProbeCasts is how many full probeConcurrency-wide
+	// casts fit inside the aggregate header budget. main.go uses this with the
+	// effective displayPlaylist gate weight to cap configured gate capacity;
+	// the shared slots remain the final bound when the gate is disabled.
+	MaxConcurrentSourceProbeCasts = maxConcurrentHeaderProbes / probeConcurrency
+)
+
+var processSourceProbeHeaderSlots = semaphore.NewWeighted(maxConcurrentHeaderProbes)
 
 // NewSourceProber builds the cast-time source prober. resolver is the
 // DNS seam the source guard uses — pass net.DefaultResolver in
@@ -139,7 +173,24 @@ func NewSourceProber(resolver AddrResolver) SourceProber {
 // supplied directly, so a test can hand in a guard carrying the
 // isReserved override its httptest servers need.
 func newSourceProberWith(guard sourceGuard, httpClient wrapper.HTTPClient) SourceProber {
-	return &sourceProber{httpClient: httpClient, guard: guard}
+	return &sourceProber{
+		httpClient:  httpClient,
+		guard:       guard,
+		headerSlots: processSourceProbeHeaderSlots,
+	}
+}
+
+// newSourceProberWithHeaderSlots gives a white-box test its own small budget;
+// production constructors always share processSourceProbeHeaderSlots.
+func newSourceProberWithHeaderSlots(guard sourceGuard, httpClient wrapper.HTTPClient, slots int64) SourceProber {
+	if slots < 1 {
+		slots = 1
+	}
+	return &sourceProber{
+		httpClient:  httpClient,
+		guard:       guard,
+		headerSlots: semaphore.NewWeighted(slots),
+	}
 }
 
 // probeItemTimeout bounds ONE source's COMPLETE probe: probeOne derives
@@ -289,7 +340,7 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 					}
 					continue
 				}
-				results[i] = p.probeOne(ctx, sources[i])
+				results[i] = p.probeOneWithinHeaderBudget(ctx, sources[i])
 			}
 		}()
 	}
@@ -309,6 +360,23 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 		}
 	}
 	return results
+}
+
+// probeOneWithinHeaderBudget admits the only part of a source preflight that
+// can retain response headers. headerSlots is shared by every production
+// SourceProber instance, so concurrent casts cannot multiply the memory bound
+// by widening or disabling the command storm gate. Waiting past the phase
+// ceiling is Inconclusive, preserving the preflight's fail-open contract.
+func (p *sourceProber) probeOneWithinHeaderBudget(ctx context.Context, source string) SourceProbeResult {
+	if err := p.headerSlots.Acquire(ctx, 1); err != nil {
+		return SourceProbeResult{
+			Source:  redactSourceForLog(source),
+			Verdict: ProbeInconclusive,
+			Err:     err,
+		}
+	}
+	defer p.headerSlots.Release(1)
+	return p.probeOne(ctx, source)
 }
 
 // redactSourceForLog prepares a source URL for the daemon log: the query

@@ -416,8 +416,8 @@ It is on by default with tuned defaults. The optional `commandStorm` config sect
 }
 ```
 
-- `disabled` (default `false`) — turn the gate off entirely.
-- `maxConcurrent` (default `16`, used when `> 0`) — global in-flight command budget. A command's internal weight is clamped to this budget, so setting it below a heavy command's weight throttles that command (it reserves the whole budget while in flight) rather than rejecting it forever.
+- `disabled` (default `false`) — turn the gate off entirely. Cast-time source probes still enforce their own process-wide 8 MiB response-header budget; disabling the command gate does not disable that resource bound.
+- `maxConcurrent` (default `16`, used when `> 0`) — requested global in-flight command budget. A command's internal weight is clamped to this budget, so setting it below a heavy command's weight throttles that command (it reserves the whole budget while in flight) rather than rejecting it forever. While the source preflight is enabled, an oversized value is lowered so no more than four full `displayPlaylist` preflights fit in the aggregate header budget: with the current cast weight of 4, the effective maximum is 16, and controld logs both the configured and effective values when it applies the cap. The calculation charges every request for both HTTP/2 header lists that can coexist at EOF (initial headers and trailers); the transport's configured limit is lowered by Go's list-accounting allowance so the effective per-list ceiling remains 64 KiB. `sourceProbe.disabled: true` removes that derived cap because casts no longer probe; `commandStorm.disabled: true` removes the gate altogether, while the prober's own shared slots remain the final header-memory bound.
 
 ### Provisioning join errors
 

@@ -13,6 +13,21 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
+const (
+	// Go's HTTP/2 transport advertises MaxResponseHeaderBytes plus 32 bytes for
+	// each of ten assumed fields as SETTINGS_MAX_HEADER_LIST_SIZE. That means
+	// the peer can legally send this much beyond the configured value for EACH
+	// separately parsed header list. Keep this coupled to the supported Go
+	// implementation and the adversarial HTTP/2 test.
+	http2HeaderListAccountingBytes int64 = 32 * 10
+
+	// Keep the effective HTTP/2 allowance at 64 KiB by subtracting Go's
+	// adjustment from the configured HTTP/1-style transport value. probe.go
+	// then charges the full effective allowance for every retained list.
+	maxResponseHeaderListBytes int64 = 64 << 10
+	maxResponseHeaderBytes           = maxResponseHeaderListBytes - http2HeaderListAccountingBytes
+)
+
 // ErrUnsafeSource is returned by Classify when a playlist item's source
 // URL points somewhere this daemon must never dial on a playlist's
 // behalf.
@@ -450,23 +465,18 @@ func (g sourceGuard) transport() *go_http.Transport {
 		// blocks and then stalls could hold hundreds of MiB resident on
 		// a constrained device before timeouts fire.
 		//
-		// The ceiling has to be sized against the whole admitted wave,
-		// not one response. The storm gate runs MaxConcurrent 16 with
-		// casting at Weight 4, so four casts are admitted at once, and
-		// each preflight probes classifyConcurrency (16) sources
-		// concurrently: 64 probes in flight, every one holding its
-		// completed headers while its body stalls out the 5s timeout.
-		// At the previous 1 MiB that is 64 MiB of attacker-chosen bytes
-		// resident on an OOM-sensitive device, reachable by an
-		// unauthenticated LAN caller.
-		//
-		// 64 KiB is the top of the range real servers actually use
-		// (nginx and Apache default to 8 KiB), so it costs nothing
-		// legitimate, and it bounds the wave at 4 MiB. Keep this in
-		// step with classifyConcurrency and the gate's weights: raising
-		// either without revisiting this number raises the ceiling with
-		// it.
-		MaxResponseHeaderBytes: 64 << 10,
+		// The ceiling has to be sized against the whole process, not one
+		// response or one storm-gate configuration. The effective 64 KiB
+		// list allowance is the top of the range real servers actually use
+		// (nginx and Apache default to 8 KiB). HTTP/2 can retain an initial
+		// list AND a separately-limited
+		// trailer list, with a small Go accounting allowance on each;
+		// probe.go includes both in maxProbeHeaderBytesPerSlot and admits only
+		// maxConcurrentHeaderProbes requests at once. Together they cap
+		// attacker-chosen preflight header bytes at
+		// maxAggregateProbeHeaderBytes even when command-storm protection
+		// is reconfigured or explicitly disabled.
+		MaxResponseHeaderBytes: maxResponseHeaderBytes,
 	}
 }
 

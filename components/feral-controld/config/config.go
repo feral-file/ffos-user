@@ -44,6 +44,9 @@ type CommandStormConfig struct {
 	// Disabled turns the storm gate off entirely. Default (false) keeps it on.
 	Disabled bool `json:"disabled"`
 	// MaxConcurrent overrides the global in-flight command budget when > 0.
+	// While the displayPlaylist source preflight is enabled, composition may
+	// lower an oversized value so the effective cast wave stays inside that
+	// preflight's aggregate response-header memory budget.
 	MaxConcurrent int64 `json:"maxConcurrent"`
 }
 

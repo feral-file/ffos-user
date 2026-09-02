@@ -21,6 +21,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
@@ -62,6 +63,37 @@ const (
 var (
 	debug = false
 )
+
+// boundGateForSourceProbe caps configured command capacity using the current
+// displayPlaylist policy, rather than assuming DefaultGateConfig's weight.
+// The prober also owns a process-wide slot budget; this cap keeps an enabled
+// gate from admitting work that can only queue behind that hard bound.
+func boundGateForSourceProbe(gateCfg commandrouter.GateConfig, logger *zap.Logger) commandrouter.GateConfig {
+	if !gateCfg.Enabled || gateCfg.MaxConcurrent <= 0 {
+		return gateCfg
+	}
+
+	castPolicy, ok := gateCfg.Policies[commands.CMD_DISPLAY_PLAYLIST]
+	if !ok {
+		castPolicy = gateCfg.Default
+	}
+	castWeight := castPolicy.Weight
+	if castWeight < 1 {
+		castWeight = 1
+	}
+	maxConcurrent := int64(offlinecache.MaxConcurrentSourceProbeCasts) * castWeight
+	if gateCfg.MaxConcurrent <= maxConcurrent {
+		return gateCfg
+	}
+
+	logger.Warn("command storm maxConcurrent capped by source-probe header budget",
+		zap.Int64("configured", gateCfg.MaxConcurrent),
+		zap.Int64("effective", maxConcurrent),
+		zap.Int64("displayPlaylistWeight", castWeight),
+	)
+	gateCfg.MaxConcurrent = maxConcurrent
+	return gateCfg
+}
 
 type app struct {
 	// Basic components
@@ -1043,7 +1075,9 @@ func initializeApp(
 	// config.SourceProbeConfig). net.DefaultResolver for the same reason the
 	// offline cache's classifier uses it: the guard's view of a name must
 	// match what would actually be dialed (see offlinecache.ErrUnsafeSource).
+	sourceProbeEnabled := true
 	if sp := config.Get().SourceProbe; sp != nil && sp.Disabled {
+		sourceProbeEnabled = false
 		logger.Warn("displayPlaylist source preflight disabled by config; casts are forwarded unprobed")
 	} else {
 		commandrouter.SetSourceProber(rawCmdHandler, offlinecache.NewSourceProber(net.DefaultResolver), logger)
@@ -1056,6 +1090,9 @@ func initializeApp(
 		if cs.MaxConcurrent > 0 {
 			gateCfg.MaxConcurrent = cs.MaxConcurrent
 		}
+	}
+	if sourceProbeEnabled {
+		gateCfg = boundGateForSourceProbe(gateCfg, logger)
 	}
 	cmdHandler := commandrouter.NewGate(rawCmdHandler, gateCfg, logger)
 
