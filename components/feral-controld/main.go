@@ -86,7 +86,7 @@ func boundGateForSourceProbe(gateCfg commandrouter.GateConfig, logger *zap.Logge
 		return gateCfg
 	}
 
-	logger.Warn("command storm maxConcurrent capped by source-probe header budget",
+	logger.Warn("command storm maxConcurrent capped by source-probe parsing budget",
 		zap.Int64("configured", gateCfg.MaxConcurrent),
 		zap.Int64("effective", maxConcurrent),
 		zap.Int64("displayPlaylistWeight", castWeight),

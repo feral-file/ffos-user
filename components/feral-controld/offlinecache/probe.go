@@ -119,10 +119,10 @@ type sourceProber struct {
 }
 
 const (
-	// maxAggregateProbeHeaderBytes is the process-wide ceiling for
-	// attacker-chosen response-header bytes held by cast-time source
-	// preflights. It is independent of the operator-configurable command
-	// storm gate: disabling or widening that gate must not widen this bound.
+	// maxAggregateProbeHeaderBytes is the process-wide ceiling charged for
+	// peer-controlled TLS and response-header parsing during cast-time source
+	// preflights. It is independent of the operator-configurable command storm
+	// gate: disabling or widening that gate must not widen this bound.
 	maxAggregateProbeHeaderBytes int64 = 8 << 20
 
 	// The status-only probe parser accepts at most this many response bytes and
@@ -134,28 +134,37 @@ const (
 	maxProbeStatusLineBytes            = 1024
 	probeResponseReadBufferBytes       = 4 << 10
 	maxProbeHeaderBytesPerSlot         = maxProbeResponseHeaderBytes
+	maxProbeTLSHandshakeBytes    int64 = 64 << 10
 
-	// Charge four times the accepted wire bytes per live parser. The parser's
-	// only variable allocation is its status line (capped above); the remainder
-	// covers its fixed read buffer, TLS/connection parsing state, response shell,
-	// and implementation headroom without pretending wire bytes map 1:1 to heap.
+	// One budget unit charges four times the accepted response-header bytes.
+	// Plain HTTP spends one unit. HTTPS spends four: its entire peer handshake is
+	// capped at 64 KiB before crypto/tls can parse a certificate, and the 1 MiB
+	// charge leaves 16x that input for x509 structures, response parsing, fixed
+	// buffers, and allocator overhead. The semaphore accounts mixed HTTP/HTTPS
+	// waves in these units instead of pretending their parser costs are equal.
 	probeHeaderBudgetHeadroomFactor  int64 = 4
 	maxProbeHeaderBudgetBytesPerSlot       = probeHeaderBudgetHeadroomFactor *
 		maxProbeHeaderBytesPerSlot
+	probeHTTPSHeaderBudgetSlots int64 = 4
+	maxProbeHTTPSBudgetBytes          = probeHTTPSHeaderBudgetSlots *
+		maxProbeHeaderBudgetBytesPerSlot
 
 	// maxConcurrentHeaderProbes couples the aggregate ceiling to the guarded
 	// status parser's per-response budget. Every worker acquires one shared slot
 	// before it can issue the ranged GET and holds it until the response body is
-	// closed. With the current values, 32 slots admit at most 2 MiB of response
-	// header bytes inside an 8 MiB envelope; the other 6 MiB is parser and
-	// transport headroom.
+	// closed. With the current values, 32 units admit at most 32 HTTP parsers or
+	// eight TLS parsers inside the same 8 MiB envelope.
 	maxConcurrentHeaderProbes = maxAggregateProbeHeaderBytes / maxProbeHeaderBudgetBytesPerSlot
 
-	// MaxConcurrentSourceProbeCasts is how many full probeConcurrency-wide
-	// casts fit inside the aggregate header budget. main.go uses this with the
-	// effective displayPlaylist gate weight to cap configured gate capacity;
-	// the shared slots remain the final bound when the gate is disabled.
-	MaxConcurrentSourceProbeCasts = maxConcurrentHeaderProbes / probeConcurrency
+	// MaxConcurrentSourceProbeCasts is how many worst-case HTTPS worker waves the
+	// aggregate budget can admit, rounded up to keep one cast available when the
+	// shared semaphore intentionally runs fewer TLS handshakes than workers.
+	// main.go uses this with the effective displayPlaylist gate weight to cap
+	// configured gate capacity; the shared units remain the final bound when the
+	// gate is disabled.
+	MaxConcurrentSourceProbeCasts = (maxConcurrentHeaderProbes +
+		(probeConcurrency * probeHTTPSHeaderBudgetSlots) - 1) /
+		(probeConcurrency * probeHTTPSHeaderBudgetSlots)
 )
 
 var processSourceProbeHeaderSlots = semaphore.NewWeighted(maxConcurrentHeaderProbes)
@@ -378,15 +387,24 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 // by widening or disabling the command storm gate. Waiting past the phase
 // ceiling is Inconclusive, preserving the preflight's fail-open contract.
 func (p *sourceProber) probeOneWithinHeaderBudget(ctx context.Context, source string) SourceProbeResult {
-	if err := p.headerSlots.Acquire(ctx, 1); err != nil {
+	weight := probeHeaderBudgetWeight(source)
+	if err := p.headerSlots.Acquire(ctx, weight); err != nil {
 		return SourceProbeResult{
 			Source:  redactSourceForLog(source),
 			Verdict: ProbeInconclusive,
 			Err:     err,
 		}
 	}
-	defer p.headerSlots.Release(1)
+	defer p.headerSlots.Release(weight)
 	return p.probeOne(ctx, source)
+}
+
+func probeHeaderBudgetWeight(source string) int64 {
+	u, err := go_url.Parse(source)
+	if err == nil && strings.EqualFold(u.Scheme, "https") {
+		return probeHTTPSHeaderBudgetSlots
+	}
+	return 1
 }
 
 // redactSourceForLog prepares a source URL for the daemon log: the query

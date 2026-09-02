@@ -1611,13 +1611,13 @@ func TestBoundGateForSourceProbeCapsConfiguredCapacityFromEffectivePolicy(t *tes
 
 	bounded := boundGateForSourceProbe(gateCfg, zap.NewNop())
 
-	assert.Equal(t, int64(4), bounded.MaxConcurrent,
-		"two concurrent casts at effective weight two exhaust the status-parser header budget")
+	assert.Equal(t, int64(2), bounded.MaxConcurrent,
+		"one worst-case HTTPS cast at effective weight two exhausts the parsing budget")
 }
 
 func TestBoundGateForSourceProbeLeavesSafeCapacityAlone(t *testing.T) {
 	gateCfg := commandrouter.DefaultGateConfig()
-	gateCfg.MaxConcurrent = 8
+	gateCfg.MaxConcurrent = 4
 
 	bounded := boundGateForSourceProbe(gateCfg, zap.NewNop())
 

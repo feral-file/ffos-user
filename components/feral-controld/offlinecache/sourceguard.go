@@ -32,6 +32,8 @@ const (
 	maxResponseHeaderBytes           = maxResponseHeaderListBytes - http2HeaderListAccountingBytes
 )
 
+var errProbeTLSHandshakeTooLarge = errors.New("source probe: TLS handshake exceeds peer-byte limit")
+
 // ErrUnsafeSource is returned by Classify when a playlist item's source
 // URL points somewhere this daemon must never dial on a playlist's
 // behalf.
@@ -457,6 +459,51 @@ type probeStatusRoundTripper struct {
 	tlsConfig *tls.Config
 }
 
+// probeTLSHandshakeConn bounds peer bytes before crypto/tls can buffer or
+// parse them. Go permits a Certificate handshake message up to 256 KiB; the
+// status probe needs no unusually large chain, so its stricter whole-handshake
+// cap keeps certificate cardinality inside the HTTPS semaphore charge. Once
+// HandshakeContext succeeds, finishHandshake removes this read limit and the
+// status parser's independent response-envelope limit takes over.
+type probeTLSHandshakeConn struct {
+	net.Conn
+	remaining int64
+	limiting  bool
+}
+
+func newProbeTLSHandshakeConn(conn net.Conn) *probeTLSHandshakeConn {
+	return &probeTLSHandshakeConn{
+		Conn:      conn,
+		remaining: maxProbeTLSHandshakeBytes,
+		limiting:  true,
+	}
+}
+
+func (c *probeTLSHandshakeConn) Read(p []byte) (int, error) {
+	if !c.limiting || len(p) == 0 {
+		return c.Conn.Read(p)
+	}
+	if c.remaining <= 0 {
+		return 0, errProbeTLSHandshakeTooLarge
+	}
+
+	readLimit := int64(len(p))
+	if readLimit > c.remaining+1 {
+		readLimit = c.remaining + 1
+	}
+	n, err := c.Conn.Read(p[:int(readLimit)])
+	if int64(n) > c.remaining {
+		c.remaining = 0
+		return 0, errProbeTLSHandshakeTooLarge
+	}
+	c.remaining -= int64(n)
+	return n, err
+}
+
+func (c *probeTLSHandshakeConn) finishHandshake() {
+	c.limiting = false
+}
+
 func (t *probeStatusRoundTripper) RoundTrip(req *go_http.Request) (*go_http.Response, error) {
 	if req == nil || req.URL == nil {
 		return nil, errors.New("source probe: nil request URL")
@@ -502,7 +549,6 @@ func (t *probeStatusRoundTripper) RoundTrip(req *go_http.Request) (*go_http.Resp
 	}
 
 	conn := net.Conn(rawConn)
-	var tlsState *tls.ConnectionState
 	if scheme == "https" {
 		config := &tls.Config{MinVersion: tls.VersionTLS12}
 		if t.tlsConfig != nil {
@@ -515,10 +561,12 @@ func (t *probeStatusRoundTripper) RoundTrip(req *go_http.Request) (*go_http.Resp
 			config.ServerName = host
 		}
 		config.NextProtos = []string{"http/1.1"}
-		tlsConn := tls.Client(rawConn, config)
+		handshakeConn := newProbeTLSHandshakeConn(rawConn)
+		tlsConn := tls.Client(handshakeConn, config)
 		if err := tlsConn.HandshakeContext(req.Context()); err != nil {
 			return nil, fmt.Errorf("source probe: TLS handshake: %w", err)
 		}
+		handshakeConn.finishHandshake()
 		state := tlsConn.ConnectionState()
 		if state.NegotiatedProtocol != "" && state.NegotiatedProtocol != "http/1.1" {
 			return nil, fmt.Errorf(
@@ -526,7 +574,6 @@ func (t *probeStatusRoundTripper) RoundTrip(req *go_http.Request) (*go_http.Resp
 				state.NegotiatedProtocol,
 			)
 		}
-		tlsState = &state
 		conn = tlsConn
 	}
 
@@ -564,7 +611,6 @@ func (t *probeStatusRoundTripper) RoundTrip(req *go_http.Request) (*go_http.Resp
 			ContentLength: 0,
 			Close:         true,
 			Request:       req,
-			TLS:           tlsState,
 		}, nil
 	}
 }

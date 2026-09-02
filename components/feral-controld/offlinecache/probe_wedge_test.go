@@ -98,7 +98,11 @@ func TestSourceProber_HeaderBudgetIsSharedAcrossCalls(t *testing.T) {
 		release: make(chan struct{}, 4),
 	}
 	guard := sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}}
-	prober := newSourceProberWithHeaderSlots(guard, client, 2)
+	prober := newSourceProberWithHeaderSlots(
+		guard,
+		client,
+		2*probeHTTPSHeaderBudgetSlots,
+	)
 
 	var wg sync.WaitGroup
 	for call := 0; call < 2; call++ {
