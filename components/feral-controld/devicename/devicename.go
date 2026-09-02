@@ -65,7 +65,10 @@ var controlCharacters = regexp.MustCompile(`[\x00-\x1f\x7f-\x9f]`)
 // This split must stay identical to the app's `stripUnsafeDisplayCharacters`.
 // The app sanitizes to drive its character counter and preview; if the two
 // disagree, the owner sees one name in the field and the device stores
-// another.
+// another. The app strips this same set as of feral-file/ff-app#741; the word
+// joiner is pinned on both sides -- `devicename_test.go` here and
+// `ff1_device_name_test.dart` there -- so either side dropping it fails its
+// own suite rather than drifting silently.
 var formattingCharacters = regexp.MustCompile(
 	`[\x{061c}\x{200b}-\x{200f}\x{202a}-\x{202e}\x{2060}\x{2066}-\x{2069}\x{2028}\x{2029}\x{feff}]`,
 )
