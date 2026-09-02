@@ -125,26 +125,30 @@ const (
 	// storm gate: disabling or widening that gate must not widen this bound.
 	maxAggregateProbeHeaderBytes int64 = 8 << 20
 
-	// The one-shot probe transport permits only HTTP/1 and rangedGETStatus
-	// closes without reading the body, so chunked trailers are never parsed.
-	// Round its slightly lower configured initial-header limit up to 64 KiB for
-	// conservative, legible per-slot accounting.
-	maxProbeHeaderBytesPerSlot = maxResponseHeaderListBytes
+	// The status-only probe parser accepts at most this many response bytes and
+	// fields across informational plus final header blocks. It discards fields
+	// through a fixed reader instead of materializing net/http's MIMEHeader map,
+	// so many tiny distinct names cannot amplify heap use.
+	maxProbeResponseHeaderBytes  int64 = 64 << 10
+	maxProbeResponseHeaderFields       = 128
+	maxProbeStatusLineBytes            = 1024
+	probeResponseReadBufferBytes       = 4 << 10
+	maxProbeHeaderBytesPerSlot         = maxProbeResponseHeaderBytes
 
-	// Header values are not the transport's only allocations: Go also builds a
-	// MIMEHeader map and keeps request/decoder bookkeeping while the response is
-	// live. Reserve an additional header-list-sized allowance per slot instead
-	// of spending the whole process envelope on attacker-chosen field bytes.
-	probeHeaderBudgetHeadroomFactor  int64 = 2
+	// Charge four times the accepted wire bytes per live parser. The parser's
+	// only variable allocation is its status line (capped above); the remainder
+	// covers its fixed read buffer, TLS/connection parsing state, response shell,
+	// and implementation headroom without pretending wire bytes map 1:1 to heap.
+	probeHeaderBudgetHeadroomFactor  int64 = 4
 	maxProbeHeaderBudgetBytesPerSlot       = probeHeaderBudgetHeadroomFactor *
 		maxProbeHeaderBytesPerSlot
 
 	// maxConcurrentHeaderProbes couples the aggregate ceiling to the guarded
-	// transport's per-response budget. Every worker acquires one shared slot
+	// status parser's per-response budget. Every worker acquires one shared slot
 	// before it can issue the ranged GET and holds it until the response body is
-	// closed. With the current values, 64 slots admit at most 4 MiB of initial
-	// header fields inside an 8 MiB envelope, leaving the other half as
-	// implementation headroom.
+	// closed. With the current values, 32 slots admit at most 2 MiB of response
+	// header bytes inside an 8 MiB envelope; the other 6 MiB is parser and
+	// transport headroom.
 	maxConcurrentHeaderProbes = maxAggregateProbeHeaderBytes / maxProbeHeaderBudgetBytesPerSlot
 
 	// MaxConcurrentSourceProbeCasts is how many full probeConcurrency-wide
@@ -163,7 +167,7 @@ var processSourceProbeHeaderSlots = semaphore.NewWeighted(maxConcurrentHeaderPro
 //
 // The HTTP client is built here rather than taken from the caller so
 // the one thing that must always be true — that these fetches ride the
-// guarded transport, never the daemon-wide client — cannot depend on
+// guarded status-only client, never the daemon-wide client — cannot depend on
 // every call site remembering it.
 func NewSourceProber(resolver AddrResolver) SourceProber {
 	guard := sourceGuard{resolver: resolver}
@@ -534,22 +538,21 @@ func verdictForStatus(status int) SourceProbeVerdict {
 // verdict can disagree with the GET the artwork will get — origins
 // exist that 200 a HEAD and 4xx the GET, and vice versa), range-bounded
 // so the daemon never pulls an asset body just to read a status line.
-// Origins that ignore Range (200 with the full body) are still bounded:
-// this probe's transport disables keep-alives, and the body is closed
-// without being read, which tears down the HTTP/1 connection or cancels
-// the HTTP/2 stream. Crucially, not advancing the body to EOF also means
-// response trailers are never parsed or retained. Redirects are never
-// followed (the client returns the 3xx itself — see NewSourceProber's
-// client choice), so "single request" is literal: one probed source is
-// at most one outbound request, no matter what the origin answers.
+// Origins that ignore Range (200 with the full body) are still bounded: the
+// status-only client scans and discards a bounded HTTP/1 header block, closes
+// the socket before the body, and returns an empty response shell. It never
+// constructs a header map or parses trailers. Redirects are never followed
+// because Location is discarded with every other field (the 3xx status itself
+// is the answer), so "single request" is literal: one probed source is at most
+// one outbound request, no matter what the origin answers.
 //
 // The Range header is the one deliberate deviation from
 // player-equivalence, kept because it is the bound on what a hostile
 // origin can make the daemon receive (a compliant origin answers with at
-// most this range). The local read bound comes from closing the response
-// immediately on the probe's non-reusing transport. The verdict table
-// pays for the deviation where it can bite: 416, the one status Range
-// itself can provoke, is Inconclusive.
+// most this range). The local read bound comes from closing the one-shot socket
+// immediately after the status-only header scan. The verdict table pays for
+// the deviation where it can bite: 416, the one status Range itself can
+// provoke, is Inconclusive.
 // Residual, accepted: an edge/WAF that 400s ranged or Go-UA requests
 // wholesale reads as dead; it only affects a cast when EVERY item sits
 // behind such an edge, and fail-open on 400 would give up the #304

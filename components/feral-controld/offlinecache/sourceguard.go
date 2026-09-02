@@ -1,12 +1,16 @@
 package offlinecache
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	go_io "io"
 	"net"
 	go_http "net/http"
 	go_url "net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,12 +22,12 @@ const (
 	// each of ten assumed fields as SETTINGS_MAX_HEADER_LIST_SIZE. That means
 	// the peer can legally send this much beyond the configured value for EACH
 	// separately parsed header list. Keep this coupled to the supported Go
-	// implementation and the adversarial HTTP/2 test.
+	// implementation and the guarded-fetch transport tests. The cast preflight
+	// does not use this parser or HTTP/2; see probeStatusRoundTripper below.
 	http2HeaderListAccountingBytes int64 = 32 * 10
 
 	// Keep the effective HTTP/2 allowance at 64 KiB by subtracting Go's
-	// adjustment from the configured HTTP/1-style transport value. probe.go
-	// then charges the full effective allowance for every retained list.
+	// adjustment from the configured HTTP/1-style transport value.
 	maxResponseHeaderListBytes int64 = 64 << 10
 	maxResponseHeaderBytes           = maxResponseHeaderListBytes - http2HeaderListAccountingBytes
 )
@@ -415,30 +419,308 @@ func newGuardedHTTPClientFor(g sourceGuard, timeout time.Duration) wrapper.HTTPC
 // bounded by that same cap, against origins an untrusted playlist
 // chose, where pooling buys nothing worth the replay surface.
 func newGuardedNoRedirectHTTPClientFor(g sourceGuard, timeout time.Duration) wrapper.HTTPClient {
-	transport := g.oneShotProbeTransport()
+	return newGuardedNoRedirectHTTPClientForTLS(g, timeout, nil)
+}
+
+func newGuardedNoRedirectHTTPClientForTLS(
+	g sourceGuard,
+	timeout time.Duration,
+	tlsConfig *tls.Config,
+) wrapper.HTTPClient {
 	return wrapper.NewHTTPClientFrom(&go_http.Client{
 		Timeout: timeout,
 		CheckRedirect: func(*go_http.Request, []*go_http.Request) error {
 			return go_http.ErrUseLastResponse
 		},
-		Transport: transport,
+		Transport: &probeStatusRoundTripper{
+			guard:     g,
+			tlsConfig: tlsConfig,
+		},
 	})
 }
 
-// oneShotProbeTransport narrows the shared guarded transport for cast-time
-// status probes. HTTP/2 can parse an immediately available trailing HEADERS
-// frame before the caller closes Body, so closing without reading EOF is not
-// enough to exclude a second attacker-chosen header list. Pinning HTTP/1 keeps
-// the slot calculation literal: one bounded initial header block, with chunked
-// trailers left unparsed because the body is never read.
-func (g sourceGuard) oneShotProbeTransport() *go_http.Transport {
-	transport := g.transport()
-	protocols := new(go_http.Protocols)
-	protocols.SetHTTP1(true)
-	transport.Protocols = protocols
-	transport.ForceAttemptHTTP2 = false
-	transport.DisableKeepAlives = true
-	return transport
+// probeStatusRoundTripper is the deliberately narrow HTTP surface needed by a
+// cast preflight: send one guarded GET and retain only its status. net/http's
+// HTTP/1 response parser materializes every header field into a map before a
+// RoundTripper returns; a small wire block containing thousands of distinct
+// names can therefore expand far beyond MaxResponseHeaderBytes. Parsing and
+// discarding one byte at a time through a fixed reader makes field cardinality
+// irrelevant to memory, while explicit byte and field ceilings bound input and
+// work before any response object is constructed.
+//
+// The connection is always HTTP/1 and always closed after the initial header
+// block. That also excludes HTTP/2 trailing HEADERS and HTTP/1 chunked trailers
+// from the response entirely. Redirect headers are discarded, so http.Client
+// cannot follow them; a 3xx status itself remains the probe's fail-open answer.
+type probeStatusRoundTripper struct {
+	guard     sourceGuard
+	tlsConfig *tls.Config
+}
+
+func (t *probeStatusRoundTripper) RoundTrip(req *go_http.Request) (*go_http.Response, error) {
+	if req == nil || req.URL == nil {
+		return nil, errors.New("source probe: nil request URL")
+	}
+	if req.Body != nil {
+		return nil, errors.New("source probe: request body is unsupported")
+	}
+
+	scheme := strings.ToLower(req.URL.Scheme)
+	port := req.URL.Port()
+	switch scheme {
+	case "http":
+		if port == "" {
+			port = "80"
+		}
+	case "https":
+		if port == "" {
+			port = "443"
+		}
+	default:
+		return nil, fmt.Errorf("source probe: unsupported URL scheme %q", scheme)
+	}
+	host := req.URL.Hostname()
+	if host == "" {
+		return nil, errors.New("source probe: URL has no host")
+	}
+
+	rawConn, err := t.guard.dialContext(
+		req.Context(),
+		"tcp",
+		net.JoinHostPort(host, port),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("source probe: dial: %w", err)
+	}
+	defer func() { _ = rawConn.Close() }()
+	stopClosing := context.AfterFunc(req.Context(), func() {
+		_ = rawConn.Close()
+	})
+	defer stopClosing()
+	if deadline, ok := req.Context().Deadline(); ok {
+		_ = rawConn.SetDeadline(deadline)
+	}
+
+	conn := net.Conn(rawConn)
+	var tlsState *tls.ConnectionState
+	if scheme == "https" {
+		config := &tls.Config{MinVersion: tls.VersionTLS12}
+		if t.tlsConfig != nil {
+			config = t.tlsConfig.Clone()
+			if config.MinVersion == 0 {
+				config.MinVersion = tls.VersionTLS12
+			}
+		}
+		if config.ServerName == "" {
+			config.ServerName = host
+		}
+		config.NextProtos = []string{"http/1.1"}
+		tlsConn := tls.Client(rawConn, config)
+		if err := tlsConn.HandshakeContext(req.Context()); err != nil {
+			return nil, fmt.Errorf("source probe: TLS handshake: %w", err)
+		}
+		state := tlsConn.ConnectionState()
+		if state.NegotiatedProtocol != "" && state.NegotiatedProtocol != "http/1.1" {
+			return nil, fmt.Errorf(
+				"source probe: unexpected negotiated protocol %q",
+				state.NegotiatedProtocol,
+			)
+		}
+		tlsState = &state
+		conn = tlsConn
+	}
+
+	wireRequest := req.Clone(req.Context())
+	wireRequest.Close = true
+	if err := wireRequest.Write(conn); err != nil {
+		return nil, fmt.Errorf("source probe: write request: %w", err)
+	}
+
+	reader := bufio.NewReaderSize(conn, probeResponseReadBufferBytes)
+	remaining := maxProbeResponseHeaderBytes
+	headerFields := 0
+	for {
+		proto, status, statusCode, protoMajor, protoMinor, err := readProbeStatusLine(
+			reader,
+			&remaining,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if err := discardProbeHeaderBlock(reader, &remaining, &headerFields); err != nil {
+			return nil, err
+		}
+		if statusCode >= 100 && statusCode <= 199 && statusCode != go_http.StatusSwitchingProtocols {
+			continue
+		}
+		return &go_http.Response{
+			Status:        status,
+			StatusCode:    statusCode,
+			Proto:         proto,
+			ProtoMajor:    protoMajor,
+			ProtoMinor:    protoMinor,
+			Header:        make(go_http.Header),
+			Body:          go_io.NopCloser(strings.NewReader("")),
+			ContentLength: 0,
+			Close:         true,
+			Request:       req,
+			TLS:           tlsState,
+		}, nil
+	}
+}
+
+func readProbeStatusLine(
+	reader *bufio.Reader,
+	remaining *int64,
+) (proto string, status string, statusCode int, protoMajor int, protoMinor int, err error) {
+	line := make([]byte, 0, 64)
+	for {
+		b, readErr := reader.ReadByte()
+		if readErr != nil {
+			err = fmt.Errorf("source probe: read status line: %w", readErr)
+			return
+		}
+		if spendErr := spendProbeHeaderByte(remaining); spendErr != nil {
+			err = spendErr
+			return
+		}
+		if b == '\n' {
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
+			break
+		}
+		if len(line) == maxProbeStatusLineBytes {
+			err = errors.New("source probe: HTTP status line is too long")
+			return
+		}
+		line = append(line, b)
+	}
+
+	proto, status, ok := strings.Cut(string(line), " ")
+	if !ok {
+		err = errors.New("source probe: malformed HTTP status line")
+		return
+	}
+	if protoMajor, protoMinor, ok = go_http.ParseHTTPVersion(proto); !ok || protoMajor != 1 {
+		err = fmt.Errorf("source probe: unsupported HTTP version %q", proto)
+		return
+	}
+	status = strings.TrimLeft(status, " ")
+	statusText, _, _ := strings.Cut(status, " ")
+	if len(statusText) != 3 {
+		err = errors.New("source probe: malformed HTTP status code")
+		return
+	}
+	statusCode, err = strconv.Atoi(statusText)
+	if err != nil || statusCode < 100 {
+		err = errors.New("source probe: malformed HTTP status code")
+	}
+	return
+}
+
+func discardProbeHeaderBlock(
+	reader *bufio.Reader,
+	remaining *int64,
+	headerFields *int,
+) error {
+	lineBytes := 0
+	fieldNameBytes := 0
+	sawColon := false
+	pendingCarriageReturn := false
+
+	finishLine := func() (bool, error) {
+		if lineBytes == 0 {
+			return true, nil
+		}
+		if !sawColon || fieldNameBytes == 0 {
+			return false, errors.New("source probe: malformed HTTP response header")
+		}
+		(*headerFields)++
+		if *headerFields > maxProbeResponseHeaderFields {
+			return false, fmt.Errorf(
+				"source probe: response has more than %d header fields",
+				maxProbeResponseHeaderFields,
+			)
+		}
+		lineBytes = 0
+		fieldNameBytes = 0
+		sawColon = false
+		return false, nil
+	}
+
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return fmt.Errorf("source probe: read response headers: %w", err)
+		}
+		if err := spendProbeHeaderByte(remaining); err != nil {
+			return err
+		}
+
+		if pendingCarriageReturn {
+			if b != '\n' {
+				return errors.New("source probe: malformed carriage return in response header")
+			}
+			pendingCarriageReturn = false
+			done, err := finishLine()
+			if err != nil || done {
+				return err
+			}
+			continue
+		}
+		switch b {
+		case '\r':
+			pendingCarriageReturn = true
+		case '\n':
+			done, err := finishLine()
+			if err != nil || done {
+				return err
+			}
+		default:
+			lineBytes++
+			if !sawColon {
+				if b == ':' {
+					if fieldNameBytes == 0 {
+						return errors.New("source probe: empty HTTP response header name")
+					}
+					sawColon = true
+					continue
+				}
+				if !isHTTPTokenByte(b) {
+					return errors.New("source probe: invalid HTTP response header name")
+				}
+				fieldNameBytes++
+				continue
+			}
+			if b != '\t' && (b < 0x20 || b == 0x7f) {
+				return errors.New("source probe: invalid HTTP response header value")
+			}
+		}
+	}
+}
+
+func spendProbeHeaderByte(remaining *int64) error {
+	if *remaining <= 0 {
+		return fmt.Errorf(
+			"source probe: response headers exceed %d bytes",
+			maxProbeResponseHeaderBytes,
+		)
+	}
+	(*remaining)--
+	return nil
+}
+
+func isHTTPTokenByte(b byte) bool {
+	if b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' {
+		return true
+	}
+	switch b {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	default:
+		return false
+	}
 }
 
 // transport builds the guarded transport. Factored out so a test can
@@ -473,25 +755,14 @@ func (g sourceGuard) transport() *go_http.Transport {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		// Every fetch on this transport dials an untrusted, possibly
-		// hostile origin, and Go's default response-header ceiling is
-		// 10 MiB PER RESPONSE — so a probe wave fanning out
-		// concurrently against a server that streams enormous header
-		// blocks and then stalls could hold hundreds of MiB resident on
-		// a constrained device before timeouts fire.
-		//
-		// The ceiling has to be sized against the whole process, not one
-		// response or one storm-gate configuration. The effective 64 KiB
-		// list allowance is the top of the range real servers actually use
-		// (nginx and Apache default to 8 KiB). The cast preflight pins HTTP/1
-		// and closes its one-shot response without reading the body, so chunked
-		// trailers are never parsed. probe.go admits only
-		// maxConcurrentHeaderProbes initial lists at once and reserves equal
-		// per-slot implementation headroom. Together they keep attacker-chosen
-		// preflight header bytes inside maxAggregateProbeHeaderBytes even when
-		// command-storm protection is reconfigured or explicitly disabled. The
-		// preflight-specific transport also pins HTTP/1 so an immediately
-		// available HTTP/2 trailer list cannot enter this accounting envelope.
+		// Every fetch on this transport dials an untrusted, possibly hostile
+		// origin, and Go's default response-header ceiling is 10 MiB per
+		// response. Keep the reusable classify/capture client to an effective
+		// 64 KiB list allowance, comfortably above common server defaults.
+		// The more tightly bounded cast preflight deliberately does not use
+		// net/http's response parser or this transport; its HTTP/1-only,
+		// status-only parser above discards fields before a map can amplify
+		// their cardinality and owns the process-wide budget in probe.go.
 		MaxResponseHeaderBytes: maxResponseHeaderBytes,
 	}
 }

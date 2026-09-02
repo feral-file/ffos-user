@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	go_http "net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,31 +13,22 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-// TestTransport_BoundsAggregateProbeHeaderMemory pins the response-header
-// ceiling against the prober's process-wide slot budget, not a particular
-// command-storm configuration. Every probe can hold its completed initial
-// headers while the body stalls. It closes without reading EOF, so trailers
-// are excluded; the per-slot budget also leaves a full list-sized allowance
-// for Go's materialized map and transport bookkeeping.
-func TestTransport_BoundsAggregateProbeHeaderMemory(t *testing.T) {
-	transport := sourceGuard{}.oneShotProbeTransport()
-	limit := transport.MaxResponseHeaderBytes
+// TestProbeParser_BoundsAggregateHeaderMemory pins the status-only parser's
+// byte ceiling and conservative per-slot charge against the shared process
+// budget. Response fields are discarded through a fixed reader rather than
+// materialized into a map, so cardinality cannot multiply the slot charge.
+func TestProbeParser_BoundsAggregateHeaderMemory(t *testing.T) {
 	worstCaseHeaders := int64(maxConcurrentHeaderProbes) * maxProbeHeaderBytesPerSlot
 	worstCaseBudget := int64(maxConcurrentHeaderProbes) * maxProbeHeaderBudgetBytesPerSlot
 
-	if limit <= 0 {
-		t.Fatalf("MaxResponseHeaderBytes must be set; Go's 10 MiB default is far too high here")
+	if maxProbeResponseHeaderBytes <= 0 || maxProbeResponseHeaderFields <= 0 {
+		t.Fatal("probe response byte and field ceilings must both be positive")
 	}
-	if limit+http2HeaderListAccountingBytes != maxResponseHeaderListBytes {
-		t.Fatalf("the configured limit plus the conservative rounding allowance is %d, want the per-slot header ceiling %d",
-			limit+http2HeaderListAccountingBytes, maxResponseHeaderListBytes)
-	}
-	if transport.Protocols == nil || !transport.Protocols.HTTP1() || transport.Protocols.HTTP2() {
-		t.Fatalf("one-shot probes must permit only HTTP/1; got protocols %v", transport.Protocols)
+	if maxProbeHeaderBudgetBytesPerSlot < maxProbeResponseHeaderBytes {
+		t.Fatalf("per-slot charge %d is below accepted wire bytes %d",
+			maxProbeHeaderBudgetBytesPerSlot, maxProbeResponseHeaderBytes)
 	}
 	if worstCaseHeaders > maxAggregateProbeHeaderBytes {
 		t.Fatalf("the shared probe budget can hold %d bytes of attacker-chosen response headers (%d slots x %d); keep it under %d",
@@ -48,12 +40,12 @@ func TestTransport_BoundsAggregateProbeHeaderMemory(t *testing.T) {
 	}
 }
 
-// TestProbeTransport_RejectsHTTP2AndDoesNotParseImmediateTrailers proves the
-// one-shot client negotiates HTTP/1 even when the origin offers HTTP/2. The
-// origin returns a trailer immediately; closing without reading EOF must leave
-// it unparsed while the bounded initial header remains available.
-func TestProbeTransport_RejectsHTTP2AndDoesNotParseImmediateTrailers(t *testing.T) {
-	const nearLimitBlockBytes = int(maxResponseHeaderListBytes - (4 << 10))
+// TestProbeClient_RejectsHTTP2AndDiscardsImmediateTrailers proves the
+// status-only client negotiates HTTP/1 even when the origin offers HTTP/2.
+// Both initial fields and the immediate trailer are discarded rather than
+// materialized into the returned response.
+func TestProbeClient_RejectsHTTP2AndDiscardsImmediateTrailers(t *testing.T) {
+	const nearLimitBlockBytes = int(maxProbeResponseHeaderBytes - (4 << 10))
 	initial := strings.Repeat("i", nearLimitBlockBytes)
 
 	origin := httptest.NewUnstartedServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
@@ -70,15 +62,14 @@ func TestProbeTransport_RejectsHTTP2AndDoesNotParseImmediateTrailers(t *testing.
 	roots := x509.NewCertPool()
 	roots.AddCert(origin.Certificate())
 	guard := sourceGuard{isReserved: loopbackIsPublic}
-	transport := guard.oneShotProbeTransport()
-	transport.TLSClientConfig = &tls.Config{ //nolint:gosec // Test trusts only httptest's ephemeral certificate.
-		MinVersion: tls.VersionTLS12,
-		RootCAs:    roots,
-	}
-	client := wrapper.NewHTTPClientFrom(&go_http.Client{
-		Timeout:   2 * time.Second,
-		Transport: transport,
-	})
+	client := newGuardedNoRedirectHTTPClientForTLS(
+		guard,
+		2*time.Second,
+		&tls.Config{ //nolint:gosec // Test trusts only httptest's ephemeral certificate.
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    roots,
+		},
+	)
 
 	req, err := client.NewRequest(go_http.MethodGet, origin.URL, nil)
 	require.NoError(t, err)
@@ -86,9 +77,31 @@ func TestProbeTransport_RejectsHTTP2AndDoesNotParseImmediateTrailers(t *testing.
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 
-	assert.Equal(t, 1, resp.ProtoMajor, "one-shot probes must reject offered HTTP/2")
-	assert.Len(t, resp.Header.Get("X-Probe-Initial"), nearLimitBlockBytes)
-	assert.Empty(t, resp.Trailer.Get("X-Probe-Trailer"), "closing before EOF must not parse trailers")
+	assert.Equal(t, 1, resp.ProtoMajor, "status-only probes must reject offered HTTP/2")
+	assert.Empty(t, resp.Header, "probe response headers must never be materialized")
+	assert.Empty(t, resp.Trailer, "probe response trailers must never be parsed")
+}
+
+// TestProbeClient_RejectsHeaderCardinalityBeforeResponseConstruction covers
+// the expansion case a wire-byte limit alone misses: many short, distinct
+// names. The parser refuses the field that crosses its ceiling and returns no
+// response map at all.
+func TestProbeClient_RejectsHeaderCardinalityBeforeResponseConstruction(t *testing.T) {
+	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
+		for i := 0; i < maxProbeResponseHeaderFields; i++ {
+			w.Header().Set(fmt.Sprintf("X-Probe-%03d", i), "x")
+		}
+		w.WriteHeader(go_http.StatusOK)
+	}))
+	defer origin.Close()
+
+	guard := sourceGuard{isReserved: loopbackIsPublic}
+	client := newGuardedNoRedirectHTTPClientFor(guard, 2*time.Second)
+	resp, err := client.Get(origin.URL)
+
+	assert.Nil(t, resp)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "header fields")
 }
 
 // TestSourceProbe_HTTP1ChunkedTrailerIsNeverParsed proves the source probe

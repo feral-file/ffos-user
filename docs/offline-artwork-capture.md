@@ -2648,15 +2648,15 @@ to public addresses, so this is a reflection/reachability surface, not an
 internal scanner. Accepted alongside the guard's other residuals (#3471:
 the LAN control plane is unauthenticated by design); the storm gate, the
 per-cast probe budget, and the prober's process-wide 8 MiB response-header
-budget are the containment. A probe's one-shot transport permits HTTP/1 only and
-closes its response without reading the body to EOF, so chunked trailers are never
-parsed; HTTP/2 is disabled because an immediate trailing HEADERS frame can arrive
-before `Body.Close`. Each admitted request is charged for one 64 KiB initial
-response-header allowance plus an equal allowance for Go's in-memory
-representation and transport bookkeeping. Disabling the storm gate removes its
-rate and command-concurrency controls but not the prober's own shared header
-slots; the `sourceProbe` config kill switch removes the surface entirely if it is
-ever abused.
+budget are the containment. A probe uses a status-only HTTP/1 client that accepts
+at most 64 KiB and 128 fields across informational plus final header blocks, then
+closes before the body so trailers are never parsed. It discards fields through a
+fixed reader instead of allowing `net/http` to materialize a cardinality-amplified
+header map. Each of the 32 shared parser slots is charged 256 KiB for accepted
+wire bytes, fixed parsing/TLS state, the response shell, and implementation
+headroom. Disabling the storm gate removes its rate and command-concurrency
+controls but not these slots; the `sourceProbe` config kill switch removes the
+surface entirely if it is ever abused.
 
 ## 10. See also
 
