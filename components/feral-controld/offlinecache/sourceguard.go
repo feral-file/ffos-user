@@ -468,14 +468,13 @@ func (g sourceGuard) transport() *go_http.Transport {
 		// The ceiling has to be sized against the whole process, not one
 		// response or one storm-gate configuration. The effective 64 KiB
 		// list allowance is the top of the range real servers actually use
-		// (nginx and Apache default to 8 KiB). HTTP/2 can retain an initial
-		// list AND a separately-limited
-		// trailer list, with a small Go accounting allowance on each;
-		// probe.go includes both in maxProbeHeaderBytesPerSlot and admits only
-		// maxConcurrentHeaderProbes requests at once. Together they cap
-		// attacker-chosen preflight header bytes at
-		// maxAggregateProbeHeaderBytes even when command-storm protection
-		// is reconfigured or explicitly disabled.
+		// (nginx and Apache default to 8 KiB). The cast preflight closes its
+		// one-shot response without reading the body, so HTTP/1 chunked and
+		// HTTP/2 trailers are never parsed. probe.go admits only
+		// maxConcurrentHeaderProbes initial lists at once and reserves equal
+		// per-slot implementation headroom. Together they keep attacker-chosen
+		// preflight header bytes inside maxAggregateProbeHeaderBytes even when
+		// command-storm protection is reconfigured or explicitly disabled.
 		MaxResponseHeaderBytes: maxResponseHeaderBytes,
 	}
 }

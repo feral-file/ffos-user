@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	go_url "net/url"
 	"strings"
@@ -126,21 +125,27 @@ const (
 	// storm gate: disabling or widening that gate must not widen this bound.
 	maxAggregateProbeHeaderBytes int64 = 8 << 20
 
-	// HTTP/2 parses and retains response trailers separately from the initial
-	// response headers, applying the transport's header-list limit to each.
-	// rangedGETStatus reads to EOF, so an origin can make both coexist while
-	// the request holds one semaphore slot. Include Go's HTTP/2 list-size
-	// adjustment on both blocks rather than treating MaxResponseHeaderBytes as
-	// a per-request ceiling.
-	maxRetainedProbeHeaderLists int64 = 2
-	maxProbeHeaderBytesPerSlot        = maxRetainedProbeHeaderLists *
-		(maxResponseHeaderBytes + http2HeaderListAccountingBytes)
+	// rangedGETStatus closes the response without reading the body, so neither
+	// HTTP/1 chunked trailers nor HTTP/2 trailers are parsed. One admitted
+	// request can therefore retain only its initial response-header list. Use
+	// the effective HTTP/2 allowance here, including Go's list-size adjustment.
+	maxProbeHeaderBytesPerSlot = maxResponseHeaderBytes + http2HeaderListAccountingBytes
+
+	// Header values are not the transport's only allocations: Go also builds a
+	// MIMEHeader map and keeps request/decoder bookkeeping while the response is
+	// live. Reserve an additional header-list-sized allowance per slot instead
+	// of spending the whole process envelope on attacker-chosen field bytes.
+	probeHeaderBudgetHeadroomFactor  int64 = 2
+	maxProbeHeaderBudgetBytesPerSlot       = probeHeaderBudgetHeadroomFactor *
+		maxProbeHeaderBytesPerSlot
 
 	// maxConcurrentHeaderProbes couples the aggregate ceiling to the guarded
-	// transport's worst-case retained header lists. Every worker acquires one
-	// shared slot before it can issue the ranged GET and holds it through body
-	// drain (and therefore trailer parsing).
-	maxConcurrentHeaderProbes = maxAggregateProbeHeaderBytes / maxProbeHeaderBytesPerSlot
+	// transport's per-response budget. Every worker acquires one shared slot
+	// before it can issue the ranged GET and holds it until the response body is
+	// closed. With the current values, 64 slots admit at most 4 MiB of initial
+	// header fields inside an 8 MiB envelope, leaving the other half as
+	// implementation headroom.
+	maxConcurrentHeaderProbes = maxAggregateProbeHeaderBytes / maxProbeHeaderBudgetBytesPerSlot
 
 	// MaxConcurrentSourceProbeCasts is how many full probeConcurrency-wide
 	// casts fit inside the aggregate header budget. main.go uses this with the
@@ -530,21 +535,21 @@ func verdictForStatus(status int) SourceProbeVerdict {
 // exist that 200 a HEAD and 4xx the GET, and vice versa), range-bounded
 // so the daemon never pulls an asset body just to read a status line.
 // Origins that ignore Range (200 with the full body) are still bounded:
-// the body is drained through a capped io.CopyN before the connection
-// is torn down — same shape as rangedGETClassify. Redirects are never
-// followed (the client returns the 3xx itself — see
-// NewSourceProber's client choice), so "single request" is literal: one
-// probed source is at most one outbound request, no matter what the
-// origin answers.
+// this probe's transport disables keep-alives, and the body is closed
+// without being read, which tears down the HTTP/1 connection or cancels
+// the HTTP/2 stream. Crucially, not advancing the body to EOF also means
+// response trailers are never parsed or retained. Redirects are never
+// followed (the client returns the 3xx itself — see NewSourceProber's
+// client choice), so "single request" is literal: one probed source is
+// at most one outbound request, no matter what the origin answers.
 //
 // The Range header is the one deliberate deviation from
 // player-equivalence, kept because it is the bound on what a hostile
-// origin can make the daemon pull (CopyN caps what is read, but Range
-// is what tells a compliant origin not to send it; classify's probe
-// makes the same call, and its comment calls the alternative —
-// trusting Body.Close to abandon an unread stream — transport-
-// dependent). The verdict table pays for the deviation where it can
-// bite: 416, the one status Range itself can provoke, is Inconclusive.
+// origin can make the daemon receive (a compliant origin answers with at
+// most this range). The local read bound comes from closing the response
+// immediately on the probe's non-reusing transport. The verdict table
+// pays for the deviation where it can bite: 416, the one status Range
+// itself can provoke, is Inconclusive.
 // Residual, accepted: an edge/WAF that 400s ranged or Go-UA requests
 // wholesale reads as dead; it only affects a cast when EVERY item sits
 // behind such an edge, and fail-open on 400 would give up the #304
@@ -562,8 +567,6 @@ func (p *sourceProber) rangedGETStatus(ctx context.Context, url string) (int, er
 		return 0, fmt.Errorf("source probe: GET request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-
-	_, _ = io.CopyN(io.Discard, resp.Body, ClassifyProbeRangeBytes)
 
 	// A 206 answer means the asset is loadable; StatusCode is already
 	// what verdictForStatus needs (206 < 400).
