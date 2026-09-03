@@ -36,6 +36,16 @@ func TestSanitize(t *testing.T) {
 			want: "LivingRoom",
 		},
 		{
+			// U+2060 is neither a control character nor inside the
+			// U+200B-200F block, and whitespace collapsing does not touch it,
+			// so it reached storage until it was named explicitly. Two labels
+			// that read the same but compare differently are enough to
+			// impersonate another unit in a list of frames.
+			name: "strips the word joiner",
+			in:   "Living\u2060Room",
+			want: "LivingRoom",
+		},
+		{
 			// Empty is a value, not a rejection: it is how an owner undoes a
 			// rename, and the unit falls back to its serial.
 			name: "input that cleans away to nothing yields empty",

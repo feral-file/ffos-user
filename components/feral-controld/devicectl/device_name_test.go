@@ -60,7 +60,11 @@ func TestSetDeviceName_StoresSanitizedAndAnnouncesIt(t *testing.T) {
 	// The reply and the announcement both carry the STORED form. A controller
 	// that echoed its own input would drift from the device on the first name
 	// that needed cleaning.
-	assert.Equal(t, map[string]interface{}{"deviceName": "Living Room"}, result)
+	//
+	// `ok` is part of the published contract and the app treats a reply
+	// without it as malformed, so it is pinned here rather than left to the
+	// hub or the relayer to add — neither of them touches this map.
+	assert.Equal(t, map[string]interface{}{"ok": true, "deviceName": "Living Room"}, result)
 	assert.Equal(t, []string{"Living Room"}, announced,
 		"a rename must re-register mDNS, or a second controller keeps the old label")
 }
@@ -80,7 +84,7 @@ func TestSetDeviceName_EmptyNameIsAValidRequest(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.JSONEq(t, `{"name":""}`, string(*written))
-	assert.Equal(t, map[string]interface{}{"deviceName": ""}, result)
+	assert.Equal(t, map[string]interface{}{"ok": true, "deviceName": ""}, result)
 	assert.Equal(t, []string{""}, announced)
 }
 
