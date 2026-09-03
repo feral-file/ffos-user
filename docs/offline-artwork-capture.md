@@ -2646,9 +2646,19 @@ the order of 10² outbound requests/second at attacker-chosen **public**
 origins from the device's egress IP — the source guard confines targets
 to public addresses, so this is a reflection/reachability surface, not an
 internal scanner. Accepted alongside the guard's other residuals (#3471:
-the LAN control plane is unauthenticated by design); the storm gate and
-the per-cast probe budget are the containment, and the `sourceProbe`
-config kill switch removes the surface entirely if it is ever abused.
+the LAN control plane is unauthenticated by design); the storm gate, the
+per-cast probe budget, and the prober's process-wide 8 MiB peer-controlled parsing
+budget are the containment. A probe uses a status-only HTTP/1 client that accepts
+at most 64 KiB and 128 fields across informational plus final header blocks, then
+closes before the body so trailers are never parsed. It discards fields through a
+fixed reader instead of allowing `net/http` to materialize a cardinality-amplified
+header map. The shared semaphore has 32 x 256 KiB budget units. HTTP spends one;
+HTTPS spends four (1 MiB), caps the whole inbound TLS handshake at 64 KiB before
+`crypto/tls` can parse certificates, and does not retain TLS connection state in
+the response. The resulting envelope admits at most 32 HTTP parsers or eight TLS
+parsers. Disabling the storm gate removes its rate and command-concurrency
+controls but not these weighted units; the `sourceProbe` config kill switch
+removes the surface entirely if it is ever abused.
 
 ## 10. See also
 
