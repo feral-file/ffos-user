@@ -1,0 +1,29 @@
+name: Test captive portal lab
+
+on:
+  push:
+    branches: [develop, release]
+    paths:
+      - 'scripts/captive-portal-lab.py'
+      - 'scripts/test-captive-portal-lab.py'
+      - '.github/workflows/test-captive-portal-lab.yaml'
+  pull_request:
+    paths:
+      - 'scripts/captive-portal-lab.py'
+      - 'scripts/test-captive-portal-lab.py'
+      - '.github/workflows/test-captive-portal-lab.yaml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: captive-portal-lab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -B scripts/test-captive-portal-lab.py -v
