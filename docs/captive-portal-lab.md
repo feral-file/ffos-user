@@ -16,15 +16,30 @@ The control uses a different HTTP server and a smaller page than production. It 
 
 ## Check without a phone
 
-Only Python's standard library is required. Tests exercise real HTTP/1.0 requests, response differences, body-free HEAD replies, form rejection, minimal logs, and process expiry with an incomplete client request.
+The HTTP tests require only Python's standard library. They exercise real HTTP/1.0 requests, response differences, body-free HEAD replies, form rejection, minimal logs, and process expiry with an incomplete client request.
 
 ```sh
-python3 scripts/test-captive-portal-lab.py -v
+python3 -B scripts/test-captive-portal-lab.py -v
 python3 scripts/captive-portal-lab.py --mode absolute \
   --portal-url http://127.0.0.1:18080 --duration 60
 ```
 
 The default binds loopback and changes no networking. A browser can load `http://127.0.0.1:18080/`; a probe request to `/hotspot-detect.html` shows the selected response.
+
+The network test uses the production Go portal handler, a copy of FF1's captive redirect rule, and a client in a second network namespace. It checks both the gateway and synthetic captive address, all three modes, expiry while the lab is running, recovery after `SIGKILL`, and immediate recovery after `SIGTERM`. The original captive rule must remain unchanged.
+
+On Linux, with Go, Python 3, `ip`, `nft`, `unshare`, and `nsenter` installed, build from the controller module and run from the repository root:
+
+```sh
+(cd components/feral-controld && CGO_ENABLED=0 go build \
+  -o /tmp/ff1-portal-fixture ../../scripts/fixtures/captive-portal/main.go)
+sudo python3 -B scripts/test-captive-portal-network.py \
+  --portal-fixture /tmp/ff1-portal-fixture
+```
+
+The test creates isolated namespaces and refuses to modify one with existing interfaces or firewall tables. Namespace teardown removes its interfaces and rules. NetworkManager AP metadata is supplied by a fixture; radio transitions, DHCP, and phone behavior are outside this test. Both test suites run in CI.
+
+These network checks passed on physical FF1 hardware running 2.0.4. A separate desktop Chromium check confirmed that a plain HTTP probe emits no visibility beacon and a rendered test page emits one. These results validate the experiment; they do not establish how iOS will present it.
 
 ## Run a brief hardware trial
 
