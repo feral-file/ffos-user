@@ -2604,7 +2604,12 @@ func (m *Machine) rearmAttachedClientIfIdle() {
 		m.clock.Now().Sub(m.lastPortalTraffic) >= attachedIdleReset
 	info := m.apInfo
 	if idle {
+		// Both latches: a pending attach (address still unknown) whose
+		// phone has since gone silent must not have a later tick's retry
+		// paint the address QR for nobody, with no idle reset left to undo
+		// it — the tick retry is bounded by the latch it belongs to.
 		m.apClientSeen = false
+		m.apAttachPending = false
 	}
 	m.mu.Unlock()
 	if !idle || info.SSID == "" {

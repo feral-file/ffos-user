@@ -674,12 +674,17 @@ func (m *Machine) sessionExpiryDue() bool {
 	// policies keep the probes-never-count rule because their phases were
 	// never shortened.
 	//
-	// Best-effort, not a guarantee: the portal page itself never polls, so
-	// after the initial page load this signal is only as fresh as the OS's
-	// own captive re-probe cadence — minutes-scale and backing off on some
-	// platforms. A phone whose OS goes quiet for a full activity window is
-	// treated as absent and the blink proceeds; the mitigation narrows R1,
-	// it does not close it.
+	// Freshness comes from two sources. An OPEN picker polls /status every
+	// two seconds (the #3515 hand-off watcher, before it hands off), and
+	// those polls count: a human on the form keeps the AP up, bounded by
+	// the deferral ceiling below. Once the page has handed off its polls
+	// carry X-Setup-Watcher and are excluded (portal.Config.TrafficObserved),
+	// so a tab left open after the user moved on cannot hold the AP. With
+	// no page open, the signal is only as fresh as the OS's own captive
+	// re-probe cadence — minutes-scale and backing off on some platforms —
+	// so a phone whose OS goes quiet for a full activity window is treated
+	// as absent and the blink proceeds; best-effort, the mitigation narrows
+	// R1, it does not close it.
 	if m.sessionPolicy == sessionRecheck {
 		m.mu.Lock()
 		lastTraffic := m.lastPortalTraffic

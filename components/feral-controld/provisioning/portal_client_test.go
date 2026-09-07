@@ -335,3 +335,34 @@ func TestNonAppleTrafficNeverArmsTheRepaint(t *testing.T) {
 	traffic(portal.ClientApple)
 	assert.Equal(t, 1, drainPortalClientEvents(t, h), "an Apple client arms it")
 }
+
+// TestIdleResetCancelsAPendingAttach: a pending attach (address unknown)
+// whose phone went silent is dropped by the idle reset together with the
+// latch; an address appearing afterwards must not paint the address QR for
+// a phone that is gone, with no idle reset left to undo it.
+func TestIdleResetCancelsAPendingAttach(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(false) // unbounded out-of-box raise: no blink to rescue it
+	h.m.onConnectivity(ctx, false, false)
+	require.Equal(t, StateAPActive, h.m.State())
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	require.Equal(t, 1, drainPortalClientEvents(t, h))
+	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
+	require.True(t, h.m.apAttachPending)
+
+	h.tickN(ctx, int(attachedIdleReset/(15*time.Second))+1)
+	assert.False(t, h.m.apAttachPending, "the idle reset drops the pending attach")
+	assert.False(t, h.m.apClientSeen)
+
+	h.ap.info.PortalURL = "http://10.42.0.1"
+	h.tickN(ctx, 3)
+	assert.Equal(t, 0, attachedNotifies(h), "an address arriving after the reset paints nothing")
+
+	// A returning phone starts over as a first request and gets the repaint.
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	require.Equal(t, 1, drainPortalClientEvents(t, h))
+	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
+	assert.Equal(t, 1, attachedNotifies(h))
+}

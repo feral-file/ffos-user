@@ -128,10 +128,14 @@ traffic of ANY kind — probes and root fetches included — under the same
 window and ceiling: with ladder-short early phases, a phone that has joined
 the AP but not yet submitted anything (the user reading the network list)
 must not be kicked by the first blink, and an attached phone's automatic
-probes are exactly that evidence. Best-effort, not a guarantee: the portal
-page never polls, so the signal is only as fresh as the OS's own captive
-re-probe cadence — a phone whose OS goes quiet for a full window is treated
-as absent and the blink proceeds. The bounded rows keep the
+probes are that evidence — as is an OPEN picker page, which polls `/status`
+every two seconds until it hands off (the #3515 watcher); those polls count,
+so a user on the form defers the blink up to the ceiling. After the hand-off
+the page's polls carry `X-Setup-Watcher` and are excluded, so a tab left
+open after the user moved on cannot hold the AP. Best-effort, not a
+guarantee: with no page open the signal is only as fresh as the OS's own
+captive re-probe cadence — a phone whose OS goes quiet for a full window is
+treated as absent and the blink proceeds. The bounded rows keep the
 probes-never-count rule; their phases were never shortened. An `applyRescan`
 re-arm restarts only the CURRENT ladder phase, never the ladder index —
 resetting the index would let repeated rescans hold the cadence at 2-minute
