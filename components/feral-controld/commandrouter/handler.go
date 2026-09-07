@@ -308,6 +308,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		}
 		return recentPlayerReply(result), nil
 	}
+	if commandType == commands.CMD_RESOLVE_RECENTLY_PLAYED {
+		return map[string]interface{}{
+			"ok":     false,
+			"status": "error",
+			"error":  "resolveRecentlyPlayed is internal",
+		}, nil
+	}
 
 	// Replay never accepts a phone-supplied source. It resolves an opaque
 	// device-local record, rebuilds a one-work unsigned DP-1 call, then invokes
@@ -324,7 +331,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}, nil
 		}
 		resolved, err := h.sendCDPRequest(commands.Command{
-			Type:      commands.Type("resolveRecentlyPlayed"),
+			Type:      commands.CMD_RESOLVE_RECENTLY_PLAYED,
 			Arguments: map[string]interface{}{"recordId": recordID},
 		})
 		if err != nil {

@@ -87,10 +87,13 @@ const (
 	// opaque record locally then re-enters CMD_DISPLAY_PLAYLIST.
 	CMD_GET_RECENTLY_PLAYED  Type = "getRecentlyPlayed"
 	CMD_PLAY_RECENTLY_PLAYED Type = "playRecentlyPlayed"
-	CMD_SET_SLEEP_SCHEDULE   Type = "setSleepSchedule"
-	CMD_SLEEP_NOW            Type = "sleepNow"
-	CMD_WAKE_NOW             Type = "wakeNow"
-	CMD_SET_SLEEP_MODE       Type = "setSleepMode"
+	// Internal only: its reply contains the device-retained DP-1 item rather
+	// than bounded list metadata, so the public router must refuse it.
+	CMD_RESOLVE_RECENTLY_PLAYED Type = "resolveRecentlyPlayed"
+	CMD_SET_SLEEP_SCHEDULE      Type = "setSleepSchedule"
+	CMD_SLEEP_NOW               Type = "sleepNow"
+	CMD_WAKE_NOW                Type = "wakeNow"
+	CMD_SET_SLEEP_MODE          Type = "setSleepMode"
 	// CMD_SET_DEVICE_NAME sets the owner-visible name for this unit. The name
 	// is a display label only — the serial stays the identity every other
 	// system keys on — and it is reported back in device status, which is the
