@@ -10,7 +10,6 @@ package provisioning
 import (
 	"context"
 	"errors"
-	"github.com/feral-file/ffos-user/components/feral-controld/portal"
 	"testing"
 	"time"
 
@@ -18,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/portal"
 	"github.com/feral-file/ffos-user/components/feral-controld/wifictl"
 )
 
