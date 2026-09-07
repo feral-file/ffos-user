@@ -795,3 +795,19 @@ func TestTrafficObservedCountsEveryRequest(t *testing.T) {
 	assert.Equal(t, 1, activity, "an action request counts as both")
 	mu.Unlock()
 }
+
+// TestIndexCarriesHandOffWatcher pins the picker's /status watcher (the
+// #3515 Safari hand-off): the page must poll /status and be able to turn
+// itself into the hand-off screen, and it must do so only on a started join,
+// never on a failed one.
+func TestIndexCarriesHandOffWatcher(t *testing.T) {
+	srv := NewServer(Config{APSSID: "FF1-abc"})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	assert.Contains(t, body, "fetch('/status'")
+	assert.Contains(t, body, "st.state === 'joining' || st.state === 'succeeded'")
+	assert.Contains(t, body, "Setup continues on your Art Computer")
+	assert.NotContains(t, body, "st.state === 'failed'", "a failed join must keep the form")
+}

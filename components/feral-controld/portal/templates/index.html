@@ -149,6 +149,61 @@
       toggle.setAttribute('aria-label', reveal ? 'Hide password' : 'Show password');
     });
   })();
+
+  // Hand-off watcher. On an iPhone the setup link the on-screen QR opens
+  // lands in Safari, and iOS then presents its own captive sheet ON TOP of
+  // Safari (Safari coming forward is the "Wi-Fi app in front" condition
+  // that releases the sheet — feral-file#3515). The user completes setup in
+  // the sheet, which closes itself when the hotspot drops, and this Safari
+  // page would otherwise be left on an untouched picker. So while this page
+  // is idle it polls /status; once a join has started anywhere (the sheet,
+  // another device), or the device stops answering after having answered,
+  // it becomes the hand-off screen. A failed join stays a form: that user
+  // needs to retry here. Progressive enhancement — no script, no watcher.
+  (function () {
+    var main = document.querySelector('main');
+    if (!main || !window.fetch) return;
+    var answered = false;
+    var misses = 0;
+    var handOff = function () {
+      while (main.firstChild) main.removeChild(main.firstChild);
+      var brand = document.createElement('p');
+      brand.className = 'brand';
+      brand.textContent = 'Feral File · Art Computer';
+      var h1 = document.createElement('h1');
+      h1.textContent = 'Setup continues on your Art Computer';
+      var note = document.createElement('p');
+      note.className = 'note note-info';
+      note.textContent = 'Watch its screen \u2014 it shows the progress. You can close this page.';
+      main.appendChild(brand);
+      main.appendChild(h1);
+      main.appendChild(note);
+    };
+    var poll = function () {
+      fetch('/status', { cache: 'no-store' }).then(function (r) {
+        return r.json();
+      }).then(function (st) {
+        answered = true;
+        misses = 0;
+        if (st && (st.state === 'joining' || st.state === 'succeeded')) {
+          handOff();
+          return;
+        }
+        setTimeout(poll, 2000);
+      }).catch(function () {
+        misses += 1;
+        // Three misses after a good answer: the hotspot is gone under us
+        // (a join tore it down). Never on a cold start — a page that never
+        // reached the device has nothing to hand off.
+        if (answered && misses >= 3) {
+          handOff();
+          return;
+        }
+        setTimeout(poll, 2000);
+      });
+    };
+    setTimeout(poll, 2000);
+  })();
 </script>
 </body>
 </html>
