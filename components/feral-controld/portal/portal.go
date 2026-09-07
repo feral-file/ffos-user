@@ -22,6 +22,7 @@ import (
 	"embed"
 	"encoding/json"
 	"html/template"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -199,6 +200,15 @@ type Server struct {
 	mu   sync.Mutex
 	http *http.Server
 	ln   net.Listener
+
+	// authorized is the set of client IPs whose OS captive probes are answered
+	// with the success body instead of the portal redirect (see
+	// authorizeIfFullBrowser). Per server, so it lives and dies with the raise:
+	// a re-raised AP starts every phone captive again, matching the
+	// re-association the phone has to make. Guarded by authMu, not mu — mu
+	// wraps the listener lifecycle and must not be held on request paths.
+	authMu     sync.Mutex
+	authorized map[string]struct{}
 }
 
 // NewServer builds a portal Server. Call Start to bind and serve, or use
@@ -209,10 +219,11 @@ func NewServer(cfg Config) *Server {
 		logger = zap.NewNop()
 	}
 	s := &Server{
-		cfg:      cfg,
-		logger:   logger,
-		mux:      http.NewServeMux(),
-		reqSlots: make(chan struct{}, maxInflightRequests),
+		cfg:        cfg,
+		logger:     logger,
+		mux:        http.NewServeMux(),
+		reqSlots:   make(chan struct{}, maxInflightRequests),
+		authorized: make(map[string]struct{}),
 	}
 	s.routes()
 	return s
@@ -337,7 +348,72 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		s.redirectToPortal(w, r)
 		return
 	}
+	s.authorizeIfFullBrowser(r)
 	s.renderIndex(w, r)
+}
+
+// authorizeIfFullBrowser marks the requesting client as past the captive
+// step when the page was fetched by a FULL browser rather than the OS's
+// captive mini-browser. From then on that client's probes get the success
+// body, so the OS stops treating the network as captive and never presents
+// its native sheet.
+//
+// Why: the on-screen portal-address QR (feral-file#3515) hands the phone a
+// Safari link because iOS will not present the captive sheet while the
+// Camera app stays in front. The moment Safari comes forward, though, iOS
+// decides a Wi-Fi app is now up and launches the sheet ON TOP of Safari —
+// two copies of the same form (field trial 2026-09-07: sheet registered 80 ms
+// after Safari's foreground). Once a real browser has the page, the sheet is
+// redundant; answering that client's probes with success is the standard
+// way a portal tells the OS "this client is through".
+//
+// Why full browsers only: the captive mini-browsers (iOS/macOS CNA, Android's
+// CaptivePortalLogin) close THEMSELVES when the network validates. Authorizing
+// on their fetch would slam the sheet shut on the Settings-join user before
+// the password is typed. The CNA user agents carry no "Safari/" token and
+// Android's login app is a WebView ("; wv)"), so the token test separates
+// them from Safari, Chrome, Firefox, and Edge. Keyed on client IP: the AP's
+// DHCP pool hands each device its own address for the raise's lifetime.
+func (s *Server) authorizeIfFullBrowser(r *http.Request) {
+	if !isFullBrowserUserAgent(r.UserAgent()) {
+		return
+	}
+	ip := clientIP(r)
+	s.authMu.Lock()
+	_, already := s.authorized[ip]
+	s.authorized[ip] = struct{}{}
+	s.authMu.Unlock()
+	if !already {
+		s.logger.Info("portal: full browser fetched the page; answering this client's captive probes with success", zap.String("client", ip))
+	}
+}
+
+func (s *Server) isAuthorized(r *http.Request) bool {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	_, ok := s.authorized[clientIP(r)]
+	return ok
+}
+
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// isFullBrowserUserAgent reports whether ua names a user-driven browser
+// rather than an OS captive helper. Probes ("CaptiveNetworkSupport … wispr",
+// "Dalvik", Windows NCSI) and captive mini-browsers fail the test; see
+// authorizeIfFullBrowser for why the "; wv)" exclusion matters.
+func isFullBrowserUserAgent(ua string) bool {
+	if strings.Contains(ua, "CaptiveNetworkSupport") || strings.Contains(ua, "; wv)") {
+		return false
+	}
+	return strings.Contains(ua, "Safari/") ||
+		strings.Contains(ua, "Chrome/") ||
+		strings.Contains(ua, "Firefox/")
 }
 
 // handleFonts serves the embedded woff2 faces. Names are matched against the
@@ -536,7 +612,34 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) redirectToPortal(w http.ResponseWriter, r *http.Request) {
+	if s.isAuthorized(r) {
+		s.serveProbeSuccess(w, r)
+		return
+	}
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// serveProbeSuccess answers an OS captive probe the way the internet would,
+// per probe family, so the OS concludes the network is not captive. Only
+// reached for clients authorizeIfFullBrowser admitted.
+func (s *Server) serveProbeSuccess(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	switch r.URL.Path {
+	case "/hotspot-detect.html", "/library/test/success.html":
+		// Apple's captive.apple.com body, byte for byte what CNA compares.
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>\n")
+	case "/connecttest.txt":
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "Microsoft Connect Test")
+	case "/ncsi.txt":
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "Microsoft NCSI")
+	default:
+		// Android's generate_204 / gen_204 and any probe variant we did not
+		// enumerate: an empty 204 is the universal "no portal here".
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 // noteActivity reports one human-caused request (see Config.ActivityObserved).
