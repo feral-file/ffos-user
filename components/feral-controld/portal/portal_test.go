@@ -813,7 +813,8 @@ func TestIndexCarriesHandOffWatcher(t *testing.T) {
 	// A failed join reaching an UNTOUCHED picker reloads it so the server's
 	// failure banner appears (Safari was frozen under the sheet for the whole
 	// wrong-password round trip); a form holding input or focus stays.
-	assert.Contains(t, body, "if (st && st.state === 'failed' && !formTouched()) {")
+	assert.Contains(t, body, "if (st && st.state === 'failed' && renderedStatus !== 'failed' && !formTouched()) {")
+	assert.Contains(t, body, `<main data-status="idle">`, "an idle render stamps idle")
 	// The shapes the 2026-09-07 trials and audit forced (see the template
 	// comment): an immediate first poll, a bounded fetch, a visibility hook,
 	// the watcher header, HTTP errors not counted as misses, the form guard,
@@ -880,4 +881,18 @@ func TestTrafficObservedClassifiesAppleClients(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, []ClientKind{ClientApple, ClientUnknown, ClientUnknown, ClientUnknown}, kinds)
+}
+
+// TestFailedPickerRenderStampsItsStatus: the picker rendered WITH the failure
+// banner must stamp data-status="failed" so its watcher does not reload
+// again on the same persisted outcome (the reload loop the review bot caught).
+func TestFailedPickerRenderStampsItsStatus(t *testing.T) {
+	srv := NewServer(Config{APSSID: "FF1-abc", Status: func() Status {
+		return Status{State: JoinFailed, SSID: "Home", Reason: "auth-failure", Message: "Wrong Wi-Fi password."}
+	}})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+	assert.Contains(t, body, `<main data-status="failed">`)
+	assert.Contains(t, body, "Wrong Wi-Fi password.", "the banner the reload exists to show")
 }

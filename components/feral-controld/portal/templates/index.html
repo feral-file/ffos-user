@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="/setup.css">
 </head>
 <body>
-<main>
+<main data-status="{{if .LastStatus}}{{.LastStatus.State}}{{else}}idle{{end}}">
   <p class="brand">Feral File · Art Computer</p>
   <h1>Choose a Wi-Fi network</h1>
 
@@ -168,9 +168,12 @@
   // phone back on the hotspot) can be over before this page polls again,
   // and its first poll then answers "failed" against a picker rendered
   // while the status was still idle — no banner. An untouched form reloads
-  // on "failed" to pick the banner up; a form holding input or focus is
-  // the user's retry in progress and stays. Progressive enhancement — no
-  // script, no watcher.
+  // on "failed" to pick the banner up — but only when the page was NOT
+  // rendered with that failure already (main[data-status] carries the
+  // status the server rendered; the outcome persists across the re-raise,
+  // so an unconditional reload would loop forever on the banner page). A
+  // form holding input or focus is the user's retry in progress and stays.
+  // Progressive enhancement — no script, no watcher.
   //
   // Rules the 2026-09-07 trials and the outside audit forced:
   // - The first poll runs on load, while Safari is still in front (iOS
@@ -196,6 +199,7 @@
   (function () {
     var main = document.querySelector('main');
     if (!main || !window.fetch) return;
+    var renderedStatus = main.getAttribute('data-status') || 'idle';
     var misses = 0;
     var inflight = false;
     var handedOff = false;
@@ -265,7 +269,7 @@
             handOff();
             return;
           }
-          if (st && st.state === 'failed' && !formTouched()) {
+          if (st && st.state === 'failed' && renderedStatus !== 'failed' && !formTouched()) {
             window.location.reload();
             return;
           }
