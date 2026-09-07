@@ -387,12 +387,13 @@ func (m *Machine) observePortalTraffic() {
 	m.lastPortalTraffic = m.clock.Now()
 	first := !m.apClientSeen
 	m.apClientSeen = true
+	gen := m.apRaiseGen
 	m.mu.Unlock()
 	if !first {
 		return
 	}
 	select {
-	case m.events <- event{kind: evPortalClient}:
+	case m.events <- event{kind: evPortalClient, gen: gen}:
 	default:
 		m.logger.Warn("provisioning: event queue full, dropping attached-client repaint")
 	}

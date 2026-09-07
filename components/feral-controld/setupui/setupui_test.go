@@ -36,8 +36,8 @@ const validContract = `{
 // contractWithConnecting is the SHIPPING player manifest, loaded verbatim
 // from testdata/ffos-player-contract.json — a byte-for-byte copy of
 // ff-player `public/ffos-player-contract.json` on branch
-// feat/setup-display-connecting-state (PR feral-file/ff-player#275), kept in
-// lockstep by `cp`, the same convention as the DRM display-connected
+// fix/softap-portal-qr-on-attach (PR feral-file/ff-player#291, which adds
+// softap_qr's `client_attached`; previously PR #275), kept in lockstep by `cp`, the same convention as the DRM display-connected
 // predicate's mirrored copies (an inlined Go string cannot be byte-faithful:
 // the manifest's notes contain backticks). Deliberately the full file, not a
 // trimmed extract: the point is that the manifest these tests gate on is the

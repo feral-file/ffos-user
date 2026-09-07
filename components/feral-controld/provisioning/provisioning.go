@@ -162,6 +162,10 @@ const (
 	// never sees it); the wiring notifier reads Detail.ClientAttached, not
 	// this reason, to swap the on-screen join QR for the portal-address QR.
 	ReasonAPClientAttached = "ap-client-attached"
+	// ReasonAPClientIdle marks the reverse repaint: the attached phase has
+	// seen no portal traffic for attachedIdleReset, so the join QR is
+	// painted again (rearmAttachedClientIfIdle). Likewise not a transition.
+	ReasonAPClientIdle = "ap-client-idle"
 )
 
 // Detail is the side-channel context published alongside a State change: enough
@@ -513,8 +517,18 @@ type Machine struct {
 	// ReasonAPClientAttached repaint fires once per raise: a phone that keeps
 	// probing must not repaint the panel on every request, and a re-raise
 	// (join failure, recheck blink) — whose fresh softap_qr paint is the join
-	// QR again — must re-arm it because the phone has to re-associate.
+	// QR again — must re-arm it because the phone has to re-associate. It
+	// also re-arms on portal silence (attachedIdleReset, onTick): under the
+	// unbounded out-of-box session a raise can stand for hours, and a phone
+	// that left must not leave an unattended screen on a code only an
+	// associated device can use.
 	apClientSeen bool
+	// apRaiseGen counts latch re-arms (every actual raise). evPortalClient
+	// carries the generation it was queued under; the loop's select can
+	// let a tick's blink tear the AP down and re-raise it before a queued
+	// event drains, and a stale event must not repaint the fresh raise —
+	// whose hotspot no phone has joined yet — with the portal-address QR.
+	apRaiseGen uint64
 	// apDownPending records a failed softap.Down: the persisted hotspot profile
 	// may still exist (possibly still broadcasting) even though apUp is false.
 	// ensureAPDown retries the deletion on every reconcile until it succeeds,
@@ -790,6 +804,10 @@ type event struct {
 	psk     string
 	hidden  bool
 	claimed bool
+	// gen is the apRaiseGen the evPortalClient event was queued under, so
+	// the loop can drop one that outlived its raise (see
+	// applyPortalClientAttached).
+	gen uint64
 }
 
 // New builds a Machine, applying defaults.
@@ -1044,7 +1062,7 @@ func (m *Machine) loop(ctx context.Context) {
 			case evUserSetup:
 				m.applyUserSetup(ctx)
 			case evPortalClient:
-				m.applyPortalClientAttached()
+				m.applyPortalClientAttached(ev.gen)
 			}
 		case <-ticker.C():
 			m.onTick(ctx)
@@ -1624,6 +1642,8 @@ func (m *Machine) onTick(ctx context.Context) {
 			m.onConnectivity(ctx, online, false)
 		}
 	}
+
+	m.rearmAttachedClientIfIdle()
 
 	m.mu.Lock()
 	st := m.state
@@ -2379,6 +2399,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	// the queued event only after this function has published the raise.
 	m.mu.Lock()
 	m.apClientSeen = false
+	m.apRaiseGen++
 	m.mu.Unlock()
 
 	srv := m.newPortal(portal.Config{
@@ -2475,17 +2496,25 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 // screen, so the swapped code hands it a Safari link without any app-switch
 // instruction; Safari coming forward also releases the native sheet.
 //
-// Guarded on the CURRENT raise: the event may have been queued by a probe on
-// a portal that has since been torn down (join bounce, recheck blink, exit),
-// in which case there is nothing to repaint — the next raise re-arms the
-// latch and paints the join QR again. The announcement is a repaint, not a
-// transition: state, lastReason, and the flight recorder are untouched.
-func (m *Machine) applyPortalClientAttached() {
+// Guarded on the raise the event was queued under (gen): a probe can queue
+// it on a portal that is torn down — and possibly re-raised — before the
+// loop drains it (join bounce, recheck blink, exit), and a fresh raise's
+// hotspot has no phone on it yet, so a stale event must repaint nothing;
+// that raise's own first request re-arms and repaints. Also skipped when
+// the raise never learned its address (PortalURL is single-shot and
+// fail-open): there is nothing to swap the join QR for, so the panel stays
+// as painted. The announcement is a repaint, not a transition: state,
+// lastReason, and the flight recorder are untouched.
+func (m *Machine) applyPortalClientAttached(gen uint64) {
 	m.mu.Lock()
-	up := m.apUp && m.state == StateAPActive
+	up := m.apUp && m.state == StateAPActive && gen == m.apRaiseGen
 	info := m.apInfo
 	m.mu.Unlock()
 	if !up || info.SSID == "" {
+		return
+	}
+	if info.PortalURL == "" {
+		m.logger.Info("provisioning: client attached to the setup AP, but no portal address to show", zap.String("ssid", info.SSID))
 		return
 	}
 	m.logger.Info("provisioning: first client attached to the setup AP", zap.String("ssid", info.SSID))
@@ -2496,6 +2525,45 @@ func (m *Machine) applyPortalClientAttached() {
 		ClientAttached: true,
 		Reason:         ReasonAPClientAttached,
 		Message:        "Phone connected to the setup Wi-Fi; scan the QR code to open setup",
+	})
+}
+
+// attachedIdleReset is the portal silence after which a raise that painted
+// the attached phase goes back to the join QR. A phone on the portal page is
+// idle for at most the time it takes to type a password; a phone that
+// dismissed the sheet and dropped the no-internet network never speaks
+// again, and under the unbounded out-of-box session no re-raise would ever
+// repaint the join QR for the next person at the screen. Generous rather
+// than tight: flipping back while someone is still reading the form costs
+// nothing (they are already on the portal), while flipping early on a slow
+// typist just repaints — the next probe re-attaches.
+const attachedIdleReset = 3 * time.Minute
+
+// rearmAttachedClientIfIdle runs every tick on the loop goroutine: once the
+// attached phase has been painted and the portal has been silent for
+// attachedIdleReset, re-arm the latch and repaint the join QR (a plain
+// ap-active announcement, same credentials). Ticks only, never a request
+// goroutine — the Notifier contract is single-goroutine.
+func (m *Machine) rearmAttachedClientIfIdle() {
+	m.mu.Lock()
+	idle := m.apUp && m.state == StateAPActive && m.apClientSeen &&
+		!m.lastPortalTraffic.IsZero() &&
+		m.clock.Now().Sub(m.lastPortalTraffic) >= attachedIdleReset
+	info := m.apInfo
+	if idle {
+		m.apClientSeen = false
+	}
+	m.mu.Unlock()
+	if !idle || info.SSID == "" {
+		return
+	}
+	m.logger.Info("provisioning: setup AP client idle; showing the join QR again", zap.String("ssid", info.SSID))
+	m.notify(StateAPActive, Detail{
+		SSID:      info.SSID,
+		PSK:       info.PSK,
+		PortalURL: info.PortalURL,
+		Reason:    ReasonAPClientIdle,
+		Message:   "Scan the QR code to set up Wi-Fi",
 	})
 }
 
