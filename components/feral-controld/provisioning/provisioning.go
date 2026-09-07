@@ -523,6 +523,14 @@ type Machine struct {
 	// that left must not leave an unattended screen on a code only an
 	// associated device can use.
 	apClientSeen bool
+	// apAttachPending latches an Apple attach whose repaint is waiting on the
+	// hotspot address: both the post-bind lookup and the attach-time retry
+	// came back empty. The iOS Camera path makes ONE probe and then waits
+	// for foreground UI, so there is no "next probe" to retry on — the loop's
+	// tick retries the bounded lookup instead (retryPendingAttach) until it
+	// succeeds or this raise ends. Cleared with the latch on every raise and
+	// teardown.
+	apAttachPending bool
 	// apRaiseGen counts latch re-arms (every actual raise). evPortalClient
 	// carries the generation it was queued under; the loop's select can
 	// let a tick's blink tear the AP down and re-raise it before a queued
@@ -973,6 +981,7 @@ func (m *Machine) loop(ctx context.Context) {
 	m.portalSrv = nil
 	m.apInfo = softap.Info{}
 	m.apClientSeen = false
+	m.apAttachPending = false
 	m.mu.Unlock()
 	if leftoverSrv != nil {
 		stopCtx, cancel := context.WithTimeout(context.Background(), portalStopTimeout)
@@ -1643,6 +1652,7 @@ func (m *Machine) onTick(ctx context.Context) {
 		}
 	}
 
+	m.retryPendingAttach(ctx)
 	m.rearmAttachedClientIfIdle()
 
 	m.mu.Lock()
@@ -2399,6 +2409,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	// the queued event only after this function has published the raise.
 	m.mu.Lock()
 	m.apClientSeen = false
+	m.apAttachPending = false
 	m.apRaiseGen++
 	raiseGen := m.apRaiseGen
 	m.mu.Unlock()
@@ -2507,12 +2518,13 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 // hotspot has no phone on it yet, so a stale event must repaint nothing;
 // that raise's own first request re-arms and repaints. When the raise never
 // learned its address (the post-bind lookup in ensureAPUp is single-shot
-// and fail-open), the lookup is retried HERE, once per attach: the address
-// is what the repaint exists to show, so a raise that missed it must not
-// stay on the join QR for its whole lifetime. A retry that still finds
-// nothing gives the latch back, so the phone's next probe tries again. The
-// announcement is a repaint, not a transition: state, lastReason, and the
-// flight recorder are untouched.
+// and fail-open), the lookup is retried HERE: the address is what the
+// repaint exists to show, so a raise that missed it must not stay on the
+// join QR for its whole lifetime. A retry that still finds nothing latches
+// apAttachPending and the loop's tick keeps retrying (retryPendingAttach) —
+// the iOS Camera path sends one probe and then waits, so "the next probe"
+// is not a retry trigger that exists. The announcement is a repaint, not a
+// transition: state, lastReason, and the flight recorder are untouched.
 func (m *Machine) applyPortalClientAttached(ctx context.Context, gen uint64) {
 	m.mu.Lock()
 	up := m.apUp && m.state == StateAPActive && gen == m.apRaiseGen
@@ -2528,18 +2540,21 @@ func (m *Machine) applyPortalClientAttached(ctx context.Context, gen uint64) {
 		if current && url != "" {
 			m.apInfo.PortalURL = url
 		} else if current {
-			m.apClientSeen = false
+			m.apAttachPending = true
 		}
 		m.mu.Unlock()
 		if !current {
 			return
 		}
 		if url == "" {
-			m.logger.Info("provisioning: client attached to the setup AP, but no portal address to show yet; will retry on the next probe", zap.String("ssid", info.SSID))
+			m.logger.Info("provisioning: client attached to the setup AP, but no portal address to show yet; retrying on the tick", zap.String("ssid", info.SSID))
 			return
 		}
 		info.PortalURL = url
 	}
+	m.mu.Lock()
+	m.apAttachPending = false
+	m.mu.Unlock()
 	m.logger.Info("provisioning: first client attached to the setup AP", zap.String("ssid", info.SSID))
 	m.notify(StateAPActive, Detail{
 		SSID:           info.SSID,
@@ -2561,6 +2576,21 @@ func (m *Machine) applyPortalClientAttached(ctx context.Context, gen uint64) {
 // nothing (they are already on the portal), while flipping early on a slow
 // typist just repaints — the next probe re-attaches.
 const attachedIdleReset = 3 * time.Minute
+
+// retryPendingAttach runs every tick on the loop goroutine: an Apple client
+// attached to a raise whose address is still unknown (apAttachPending)
+// gets the bounded NetworkManager lookup retried, and the attached repaint
+// once it succeeds. Bounded by the raise: teardown clears the flag.
+func (m *Machine) retryPendingAttach(ctx context.Context) {
+	m.mu.Lock()
+	pending := m.apAttachPending && m.apUp && m.state == StateAPActive
+	gen := m.apRaiseGen
+	m.mu.Unlock()
+	if !pending {
+		return
+	}
+	m.applyPortalClientAttached(ctx, gen)
+}
 
 // rearmAttachedClientIfIdle runs every tick on the loop goroutine: once the
 // attached phase has been painted and the portal has been silent for
@@ -2638,6 +2668,7 @@ func (m *Machine) ensureAPDown(ctx context.Context) bool {
 	m.portalSrv = nil
 	m.apInfo = softap.Info{}
 	m.apClientSeen = false
+	m.apAttachPending = false
 	m.apDownPending = !downOK
 	m.mu.Unlock()
 	if downOK {

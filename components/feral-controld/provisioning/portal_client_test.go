@@ -104,13 +104,68 @@ func TestPortalTrafficLatchReArmsOnReRaise(t *testing.T) {
 	assert.Equal(t, 1, drainPortalClientEvents(t, h), "the re-raise re-arms the first-request latch")
 
 	// The link harness's AP never learned its address: the handler retries
-	// the lookup, still finds nothing, announces nothing, and gives the
-	// latch back so the phone's next probe tries again.
+	// the lookup, still finds nothing, announces nothing, and latches the
+	// attach as pending for the tick (the iOS Camera path sends no further
+	// probe to retry on).
 	before := len(h.notifier.details())
 	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	assert.Len(t, h.notifier.details(), before, "no attached repaint without a portal address")
+	assert.True(t, h.m.apAttachPending, "the attach stays pending for the tick")
 	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
-	assert.Equal(t, 1, drainPortalClientEvents(t, h), "the latch is handed back after a failed address retry")
+	assert.Equal(t, 0, drainPortalClientEvents(t, h), "the latch is not handed back — the tick owns the retry")
+}
+
+// TestPendingAttachRetriesOnTheTick: with the address still unknown after
+// the attach-time retry, the loop's tick keeps retrying the lookup and
+// paints the attached phase once NetworkManager publishes the address —
+// without any further request from the phone.
+func TestPendingAttachRetriesOnTheTick(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	driveSustainedRaise(t, h, ctx) // no address
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	require.Equal(t, 1, drainPortalClientEvents(t, h))
+	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
+	require.True(t, h.m.apAttachPending)
+	require.Equal(t, 0, attachedNotifies(h))
+
+	h.tick(ctx) // still no address: stays pending, no repaint
+	assert.True(t, h.m.apAttachPending)
+	assert.Equal(t, 0, attachedNotifies(h))
+
+	h.ap.info.PortalURL = "http://10.42.0.1"
+	h.tick(ctx)
+	assert.False(t, h.m.apAttachPending, "the tick's retry found the address")
+	require.Equal(t, 1, attachedNotifies(h), "and painted the attached phase")
+	all := h.notifier.details()
+	assert.Equal(t, "http://10.42.0.1", all[len(all)-1].Detail.PortalURL)
+
+	h.tick(ctx)
+	assert.Equal(t, 1, attachedNotifies(h), "once")
+}
+
+// TestPendingAttachEndsWithTheRaise: a teardown clears the pending attach so
+// the next raise starts on the join QR like any other.
+func TestPendingAttachEndsWithTheRaise(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	driveSustainedRaise(t, h, ctx)
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	require.Equal(t, 1, drainPortalClientEvents(t, h))
+	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
+	require.True(t, h.m.apAttachPending)
+
+	h.wifi.joinErr = &wifictl.JoinError{Kind: wifictl.JoinErrAuth, Output: "secrets were required"}
+	h.m.applyJoin(ctx, "Home", "wrong", false)
+	require.Equal(t, StateAPActive, h.m.State())
+	assert.False(t, h.m.apAttachPending, "the re-raise starts clean")
+	h.ap.info.PortalURL = "http://10.42.0.1"
+	h.tick(ctx)
+	assert.Equal(t, 0, attachedNotifies(h), "no repaint from a pending attach of a previous raise")
 }
 
 // TestAttachRetriesTheAddressLookup: a raise whose post-bind address lookup
