@@ -157,29 +157,45 @@
   // the sheet, which closes itself when the hotspot drops, and this Safari
   // page would otherwise be left on an untouched picker. So while this page
   // is idle it polls /status; once a join has started anywhere (the sheet,
-  // another device), or the device stops answering after having answered,
-  // it becomes the hand-off screen. A failed join stays a form: that user
-  // needs to retry here. Progressive enhancement — no script, no watcher.
+  // another device), or the device stops answering, it becomes the hand-off
+  // screen — and then keeps watching: the daemon tears the hotspot down
+  // BEFORE the join is attempted, so a wrong password re-raises it, and the
+  // hand-off must not strand that user. When the device answers again in
+  // any state but "joining", the page reloads into the picker (with the
+  // failure banner the server renders). A failed status while still on the
+  // form keeps the form. Progressive enhancement — no script, no watcher.
   //
-  // Timing, from the 2026-09-07 trials: the join tears the hotspot down
-  // 20 ms after /status turns "joining", so the signal that actually lands
-  // is the device going silent. Three shapes had to be handled for that to
-  // work: (1) iOS freezes a backgrounded tab's timers, so the first poll
-  // runs immediately on load while Safari is still in front — that is what
-  // opens the "answered" gate; (2) once the phone is back on its home
-  // network a fetch to the hotspot address hangs for a minute instead of
-  // failing, so every poll is aborted after 1.5 s; (3) Safari coming back
-  // in front (the sheet closed) triggers a poll right away instead of
-  // waiting out the interval. Three misses after a good answer is the
-  // hand-off: ~5 s after the sheet closes, and a live hotspot answering in
-  // milliseconds never accumulates them.
+  // Rules the 2026-09-07 trials and the outside audit forced:
+  // - The first poll runs on load, while Safari is still in front (iOS
+  //   freezes a backgrounded tab's timers). There is no "answered" gate:
+  //   this page was served by the device, so it has already answered.
+  // - Every poll is aborted after 1.5 s: once the phone is back on its
+  //   home network a fetch to the hotspot address hangs instead of failing.
+  // - Only a NETWORK failure is a miss. An HTTP error (the 429 the
+  //   in-flight cap returns, a 5xx) proves the device is there and resets
+  //   the count — three "busy" answers must not delete unsent credentials.
+  // - Misses never hand off while the form holds input or focus: an
+  //   Android Chrome or macOS user typing in this very page through a
+  //   transient drop keeps their form. A started join elsewhere still
+  //   hands off — that is the sheet case this exists for.
+  // - The page becoming visible again (the sheet closed) polls at once.
+  // - Polls carry X-Setup-Watcher so the daemon does not count this
+  //   script as an attached device talking (portal.Config.TrafficObserved).
   (function () {
     var main = document.querySelector('main');
     if (!main || !window.fetch) return;
-    var answered = false;
     var misses = 0;
     var inflight = false;
     var handedOff = false;
+    var formTouched = function () {
+      var pw = document.getElementById('password');
+      var manual = document.getElementById('ssid-manual');
+      var select = document.getElementById('ssid');
+      if ((pw && pw.value) || (manual && manual.value)) return true;
+      if (select && select.selectedIndex > 0) return true;
+      var active = document.activeElement;
+      return !!active && active !== document.body && main.contains(active);
+    };
     var handOff = function () {
       handedOff = true;
       while (main.firstChild) main.removeChild(main.firstChild);
@@ -194,12 +210,15 @@
       main.appendChild(brand);
       main.appendChild(h1);
       main.appendChild(note);
+      setTimeout(watchForReturn, 3000);
     };
     var boundedFetch = function () {
-      if (!window.AbortController) return fetch('/status', { cache: 'no-store' });
+      var opts = { cache: 'no-store', headers: { 'X-Setup-Watcher': '1' } };
+      if (!window.AbortController) return fetch('/status', opts);
       var ctl = new AbortController();
+      opts.signal = ctl.signal;
       var timer = setTimeout(function () { ctl.abort(); }, 1500);
-      return fetch('/status', { cache: 'no-store', signal: ctl.signal }).then(function (r) {
+      return fetch('/status', opts).then(function (r) {
         clearTimeout(timer);
         return r;
       }, function (err) {
@@ -207,24 +226,38 @@
         throw err;
       });
     };
+    // After the hand-off: the hotspot answering again means it was re-raised
+    // (the join failed, or a new session) unless the state is still the
+    // 20 ms "joining" window; reload into the picker the server renders.
+    var watchForReturn = function () {
+      boundedFetch().then(function (r) {
+        if (!r.ok) { setTimeout(watchForReturn, 3000); return; }
+        return r.json().then(function (st) {
+          if (st && st.state === 'joining') { setTimeout(watchForReturn, 3000); return; }
+          window.location.reload();
+        });
+      }).catch(function () {
+        setTimeout(watchForReturn, 3000);
+      });
+    };
     var poll = function () {
       if (handedOff || inflight) return;
       inflight = true;
       boundedFetch().then(function (r) {
-        return r.json();
-      }).then(function (st) {
         inflight = false;
-        answered = true;
         misses = 0;
-        if (st && (st.state === 'joining' || st.state === 'succeeded')) {
-          handOff();
-          return;
-        }
-        setTimeout(poll, 2000);
+        if (!r.ok) { setTimeout(poll, 2000); return; }
+        return r.json().then(function (st) {
+          if (st && (st.state === 'joining' || st.state === 'succeeded')) {
+            handOff();
+            return;
+          }
+          setTimeout(poll, 2000);
+        });
       }).catch(function () {
         inflight = false;
         misses += 1;
-        if (answered && misses >= 3) {
+        if (misses >= 3 && !formTouched()) {
           handOff();
           return;
         }
@@ -232,7 +265,7 @@
       });
     };
     document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState === 'visible') poll();
+      if (document.visibilityState === 'visible' && !handedOff) poll();
     });
     poll();
   })();

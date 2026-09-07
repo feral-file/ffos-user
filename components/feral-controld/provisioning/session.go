@@ -388,15 +388,21 @@ func (m *Machine) observePortalActivity() {
 // join QR stays up, which is today's behavior) rather than stalling a
 // request goroutine, and the latch is NOT rolled back on a drop because the
 // buffer only fills under a storm this courtesy repaint should not add to.
+// gen is the raise the calling portal was built for (ensureAPUp binds it):
+// a callback outliving its hotspot across a stop and a re-raise is dropped
+// before it can stamp traffic or take the fresh raise's latch.
 // Request-goroutine-safe.
-func (m *Machine) observePortalTraffic(kind portal.ClientKind) {
+func (m *Machine) observePortalTraffic(gen uint64, kind portal.ClientKind) {
 	m.mu.Lock()
+	if gen != m.apRaiseGen {
+		m.mu.Unlock()
+		return
+	}
 	m.lastPortalTraffic = m.clock.Now()
 	first := kind == portal.ClientApple && !m.apClientSeen
 	if first {
 		m.apClientSeen = true
 	}
-	gen := m.apRaiseGen
 	m.mu.Unlock()
 	if !first {
 		return

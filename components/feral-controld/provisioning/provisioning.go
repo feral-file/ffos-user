@@ -1062,7 +1062,7 @@ func (m *Machine) loop(ctx context.Context) {
 			case evUserSetup:
 				m.applyUserSetup(ctx)
 			case evPortalClient:
-				m.applyPortalClientAttached(ev.gen)
+				m.applyPortalClientAttached(ctx, ev.gen)
 			}
 		case <-ticker.C():
 			m.onTick(ctx)
@@ -2400,6 +2400,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	m.mu.Lock()
 	m.apClientSeen = false
 	m.apRaiseGen++
+	raiseGen := m.apRaiseGen
 	m.mu.Unlock()
 
 	srv := m.newPortal(portal.Config{
@@ -2414,8 +2415,11 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		ActivityObserved: m.observePortalActivity,
 		// ANY portal request — probes included — feeds the recheck-only
 		// attached-phone deferral; Apple clients additionally arm the
-		// portal-address QR repaint (see observePortalTraffic).
-		TrafficObserved: m.observePortalTraffic,
+		// portal-address QR repaint (see observePortalTraffic). Bound to
+		// THIS raise's generation at construction: a request still in flight
+		// on the old listener across a bounded stop and a re-raise must not
+		// stamp traffic or consume the latch of a hotspot no phone has joined.
+		TrafficObserved: func(kind portal.ClientKind) { m.observePortalTraffic(raiseGen, kind) },
 		Logger:          m.logger,
 	})
 	if err := srv.Start(); err != nil {
@@ -2501,12 +2505,15 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 // it on a portal that is torn down — and possibly re-raised — before the
 // loop drains it (join bounce, recheck blink, exit), and a fresh raise's
 // hotspot has no phone on it yet, so a stale event must repaint nothing;
-// that raise's own first request re-arms and repaints. Also skipped when
-// the raise never learned its address (PortalURL is single-shot and
-// fail-open): there is nothing to swap the join QR for, so the panel stays
-// as painted. The announcement is a repaint, not a transition: state,
-// lastReason, and the flight recorder are untouched.
-func (m *Machine) applyPortalClientAttached(gen uint64) {
+// that raise's own first request re-arms and repaints. When the raise never
+// learned its address (the post-bind lookup in ensureAPUp is single-shot
+// and fail-open), the lookup is retried HERE, once per attach: the address
+// is what the repaint exists to show, so a raise that missed it must not
+// stay on the join QR for its whole lifetime. A retry that still finds
+// nothing gives the latch back, so the phone's next probe tries again. The
+// announcement is a repaint, not a transition: state, lastReason, and the
+// flight recorder are untouched.
+func (m *Machine) applyPortalClientAttached(ctx context.Context, gen uint64) {
 	m.mu.Lock()
 	up := m.apUp && m.state == StateAPActive && gen == m.apRaiseGen
 	info := m.apInfo
@@ -2515,8 +2522,23 @@ func (m *Machine) applyPortalClientAttached(gen uint64) {
 		return
 	}
 	if info.PortalURL == "" {
-		m.logger.Info("provisioning: client attached to the setup AP, but no portal address to show", zap.String("ssid", info.SSID))
-		return
+		url := m.ap.PortalURL(ctx)
+		m.mu.Lock()
+		current := gen == m.apRaiseGen
+		if current && url != "" {
+			m.apInfo.PortalURL = url
+		} else if current {
+			m.apClientSeen = false
+		}
+		m.mu.Unlock()
+		if !current {
+			return
+		}
+		if url == "" {
+			m.logger.Info("provisioning: client attached to the setup AP, but no portal address to show yet; will retry on the next probe", zap.String("ssid", info.SSID))
+			return
+		}
+		info.PortalURL = url
 	}
 	m.logger.Info("provisioning: first client attached to the setup AP", zap.String("ssid", info.SSID))
 	m.notify(StateAPActive, Detail{

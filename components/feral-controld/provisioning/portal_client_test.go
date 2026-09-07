@@ -63,7 +63,7 @@ func TestFirstPortalTrafficRepaintsOnce(t *testing.T) {
 	assert.Equal(t, 1, drainPortalClientEvents(t, h), "only the first request of a raise queues the repaint")
 
 	before := len(h.notifier.details())
-	h.m.applyPortalClientAttached(h.m.apRaiseGen)
+	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	all := h.notifier.details()
 	require.Len(t, all, before+1, "the handler announces exactly once")
 	last := all[len(all)-1]
@@ -103,11 +103,60 @@ func TestPortalTrafficLatchReArmsOnReRaise(t *testing.T) {
 	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
 	assert.Equal(t, 1, drainPortalClientEvents(t, h), "the re-raise re-arms the first-request latch")
 
-	// The link harness's AP never learned its address: with nothing to swap
-	// the join QR for, the handler must announce nothing at all.
+	// The link harness's AP never learned its address: the handler retries
+	// the lookup, still finds nothing, announces nothing, and gives the
+	// latch back so the phone's next probe tries again.
 	before := len(h.notifier.details())
-	h.m.applyPortalClientAttached(h.m.apRaiseGen)
+	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	assert.Len(t, h.notifier.details(), before, "no attached repaint without a portal address")
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	assert.Equal(t, 1, drainPortalClientEvents(t, h), "the latch is handed back after a failed address retry")
+}
+
+// TestAttachRetriesTheAddressLookup: a raise whose post-bind address lookup
+// missed must not stay on the join QR for its lifetime — the attach retries
+// the lookup and repaints once NetworkManager has published the address.
+func TestAttachRetriesTheAddressLookup(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	driveSustainedRaise(t, h, ctx)           // raised with no address
+	h.ap.info.PortalURL = "http://10.42.0.1" // NM publishes it afterwards
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	require.Equal(t, 1, drainPortalClientEvents(t, h))
+	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
+	require.Equal(t, 1, attachedNotifies(h))
+	all := h.notifier.details()
+	assert.Equal(t, "http://10.42.0.1", all[len(all)-1].Detail.PortalURL)
+}
+
+// TestOldPortalCallbackCannotTouchTheNewRaise: a TrafficObserved callback
+// retained from a torn-down portal (a request in flight across the bounded
+// stop) must neither stamp traffic nor arm the latch of the re-raised
+// hotspot, which no phone has joined.
+func TestOldPortalCallbackCannotTouchTheNewRaise(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.ap.info.PortalURL = "http://10.42.0.1"
+	h.wifi.setProfile(true)
+	driveSustainedRaise(t, h, ctx)
+	old := h.portals[len(h.portals)-1].cfg.TrafficObserved
+
+	h.wifi.joinErr = &wifictl.JoinError{Kind: wifictl.JoinErrAuth, Output: "secrets were required"}
+	h.m.applyJoin(ctx, "Home", "wrong", false)
+	require.Equal(t, StateAPActive, h.m.State())
+	require.Greater(t, len(h.portals), 1)
+
+	h.clk.advance(time.Second)
+	before := h.m.lastPortalTraffic
+	old(portal.ClientApple)
+	assert.Equal(t, 0, drainPortalClientEvents(t, h), "a stale callback must not arm the new raise")
+	assert.Equal(t, before, h.m.lastPortalTraffic, "a stale callback must not count as traffic")
+
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	assert.Equal(t, 1, drainPortalClientEvents(t, h), "the new raise's own callback still arms it")
 }
 
 // TestPortalClientRepaintDropsStaleGeneration: an event queued under one
@@ -130,7 +179,7 @@ func TestPortalClientRepaintDropsStaleGeneration(t *testing.T) {
 	require.NotEqual(t, stale, h.m.apRaiseGen, "a re-raise advances the generation")
 
 	before := len(h.notifier.details())
-	h.m.applyPortalClientAttached(stale)
+	h.m.applyPortalClientAttached(ctx, stale)
 	assert.Len(t, h.notifier.details(), before, "a stale event repaints nothing")
 	assert.Equal(t, 0, attachedNotifies(h))
 }
@@ -155,7 +204,7 @@ func TestAttachedPhaseRearmsOnPortalSilence(t *testing.T) {
 	traffic := h.portals[len(h.portals)-1].cfg.TrafficObserved
 	traffic(portal.ClientApple)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
-	h.m.applyPortalClientAttached(h.m.apRaiseGen)
+	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	require.Equal(t, 1, attachedNotifies(h))
 
 	// Chatty phone: silence never accumulates, no reverse repaint.
@@ -200,7 +249,7 @@ func TestPortalClientRepaintSkipsTornDownAP(t *testing.T) {
 	require.NotEqual(t, StateAPActive, h.m.State(), "an online transition tears the AP down")
 
 	before := len(h.notifier.details())
-	h.m.applyPortalClientAttached(h.m.apRaiseGen)
+	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	assert.Len(t, h.notifier.details(), before, "no repaint for a torn-down AP")
 	assert.Equal(t, 0, attachedNotifies(h))
 }

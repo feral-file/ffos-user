@@ -810,11 +810,40 @@ func TestIndexCarriesHandOffWatcher(t *testing.T) {
 	assert.Contains(t, body, "st.state === 'joining' || st.state === 'succeeded'")
 	assert.Contains(t, body, "Setup continues on your Art Computer")
 	assert.NotContains(t, body, "st.state === 'failed'", "a failed join must keep the form")
-	// The three timing shapes the 2026-09-07 trials forced (see the template
-	// comment): an immediate first poll, a bounded fetch, a visibility hook.
+	// The shapes the 2026-09-07 trials and audit forced (see the template
+	// comment): an immediate first poll, a bounded fetch, a visibility hook,
+	// the watcher header, HTTP errors not counted as misses, the form guard,
+	// and the post-hand-off return watch that reloads into the picker.
 	assert.Contains(t, body, "new AbortController()")
 	assert.Contains(t, body, "visibilitychange")
+	assert.Contains(t, body, "'X-Setup-Watcher': '1'")
+	assert.Contains(t, body, "if (!r.ok) { setTimeout(poll, 2000); return; }")
+	assert.Contains(t, body, "misses >= 3 && !formTouched()")
+	assert.Contains(t, body, "window.location.reload()")
+	assert.NotContains(t, body, "answered", "a page served by the device needs no answered gate")
 	assert.Regexp(t, `\n    poll\(\);\n  \}\)\(\);`, body, "the first poll must run on load, not on a timer")
+}
+
+// TestWatcherPollsAreNotTraffic: the picker's own /status watcher must not
+// register as an attached device talking — it would pin the recheck
+// deferral and the address-QR phase open on its own.
+func TestWatcherPollsAreNotTraffic(t *testing.T) {
+	var mu sync.Mutex
+	traffic := 0
+	h := NewServer(Config{APSSID: "FF1-abc", TrafficObserved: func(ClientKind) {
+		mu.Lock()
+		traffic++
+		mu.Unlock()
+	}}).Handler()
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	req.Header.Set(watcherHeader, "1")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "the watcher poll is still served")
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/status", nil))
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, traffic, "only the unmarked /status counted")
 }
 
 // TestTrafficObservedClassifiesAppleClients pins the ClientKind the seam
