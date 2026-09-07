@@ -181,6 +181,10 @@
   //   this page was served by the device, so it has already answered.
   // - Every poll is aborted after 1.5 s: once the phone is back on its
   //   home network a fetch to the hotspot address hangs instead of failing.
+  //   The watcher therefore requires AbortController and does not run
+  //   without it (fetch alone would leave the return watch hung on the
+  //   first post-teardown request): a browser that old keeps the plain
+  //   page, the same as with scripting disabled.
   // - Only a NETWORK failure is a miss. An HTTP error (the 429 the
   //   in-flight cap returns, a 5xx) proves the device is there and resets
   //   the count — three "busy" answers must not delete unsent credentials.
@@ -198,7 +202,7 @@
   //   blink must not tear the hotspot down under them.
   (function () {
     var main = document.querySelector('main');
-    if (!main || !window.fetch) return;
+    if (!main || !window.fetch || !window.AbortController) return;
     var renderedStatus = main.getAttribute('data-status') || 'idle';
     var misses = 0;
     var inflight = false;
@@ -231,7 +235,6 @@
     var boundedFetch = function () {
       var opts = { cache: 'no-store' };
       if (handedOff) opts.headers = { 'X-Setup-Watcher': '1' };
-      if (!window.AbortController) return fetch('/status', opts);
       var ctl = new AbortController();
       opts.signal = ctl.signal;
       var timer = setTimeout(function () { ctl.abort(); }, 1500);

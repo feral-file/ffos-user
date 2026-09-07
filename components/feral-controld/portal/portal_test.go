@@ -819,7 +819,10 @@ func TestIndexCarriesHandOffWatcher(t *testing.T) {
 	// comment): an immediate first poll, a bounded fetch, a visibility hook,
 	// the watcher header, HTTP errors not counted as misses, the form guard,
 	// and the post-hand-off return watch that reloads into the picker.
+	assert.Contains(t, body, "if (!main || !window.fetch || !window.AbortController) return;",
+		"no watcher without a bounded fetch — an unbounded poll would hang the return watch")
 	assert.Contains(t, body, "new AbortController()")
+	assert.NotContains(t, body, "return fetch('/status', opts);", "no unbounded fallback")
 	assert.Contains(t, body, "visibilitychange")
 	assert.Contains(t, body, "if (handedOff) opts.headers = { 'X-Setup-Watcher': '1' };",
 		"only post-hand-off polls are excluded from traffic; an open picker still counts as a human mid-setup")
