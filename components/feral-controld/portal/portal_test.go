@@ -769,7 +769,7 @@ func TestTrafficObservedCountsEveryRequest(t *testing.T) {
 		Scan:             func(context.Context) ([]string, error) { return []string{"Net"}, nil },
 		Rescan:           func() error { return nil },
 		ActivityObserved: count(&activity),
-		TrafficObserved:  count(&traffic),
+		TrafficObserved:  func(ClientKind) { count(&traffic)() },
 	})
 
 	// The asset routes ride along: a browser auto-fetching the stylesheet or a
@@ -815,4 +815,32 @@ func TestIndexCarriesHandOffWatcher(t *testing.T) {
 	assert.Contains(t, body, "new AbortController()")
 	assert.Contains(t, body, "visibilitychange")
 	assert.Regexp(t, `\n    poll\(\);\n  \}\)\(\);`, body, "the first poll must run on load, not on a timer")
+}
+
+// TestTrafficObservedClassifiesAppleClients pins the ClientKind the seam
+// hands the machine: the iOS/macOS probe agent is Apple, everything else —
+// Android's generic desktop-looking probe agent included — is unknown.
+func TestTrafficObservedClassifiesAppleClients(t *testing.T) {
+	var mu sync.Mutex
+	var kinds []ClientKind
+	h := NewServer(Config{APSSID: "FF1-abc", TrafficObserved: func(k ClientKind) {
+		mu.Lock()
+		kinds = append(kinds, k)
+		mu.Unlock()
+	}}).Handler()
+	for _, ua := range []string{
+		"CaptiveNetworkSupport-514.160.1.0.1 wispr",
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.32 Safari/537.36",
+		"Dalvik/2.1.0 (Linux; U; Android 17; Pixel 8 Build/BP1A)",
+		"",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil)
+		if ua != "" {
+			req.Header.Set("User-Agent", ua)
+		}
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []ClientKind{ClientApple, ClientUnknown, ClientUnknown, ClientUnknown}, kinds)
 }

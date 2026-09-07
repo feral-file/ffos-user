@@ -2413,7 +2413,8 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		// portal classifies (action handlers only), the machine timestamps.
 		ActivityObserved: m.observePortalActivity,
 		// ANY portal request — probes included — feeds the recheck-only
-		// attached-phone deferral (see sessionExpiryDue for the scope).
+		// attached-phone deferral; Apple clients additionally arm the
+		// portal-address QR repaint (see observePortalTraffic).
 		TrafficObserved: m.observePortalTraffic,
 		Logger:          m.logger,
 	})

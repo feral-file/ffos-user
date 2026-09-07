@@ -23,6 +23,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/portal"
 	"github.com/feral-file/ffos-user/components/feral-controld/wifictl"
 )
 
@@ -375,18 +376,26 @@ func (m *Machine) observePortalActivity() {
 // by ensureAPUp). Weaker evidence than observePortalActivity: it proves a
 // phone is attached to the AP, not that a human acted. Consumed by the
 // recheck blink's attached-phone deferral in sessionExpiryDue, and — on the
-// FIRST request of a raise only — it queues evPortalClient so the loop can
-// repaint the on-screen QR for the attached phone (applyPortalClientAttached).
+// FIRST Apple request of a raise only — it queues evPortalClient so the loop
+// can repaint the on-screen QR for the attached phone
+// (applyPortalClientAttached). Apple only: the repaint exists for the iOS
+// Camera join, and on Android it is a dead link — the phone keeps cellular
+// as its default route while the hotspot is unvalidated, and Google Camera
+// has already handed off to Wi-Fi Settings (portal.ClientKind). Non-Apple
+// traffic still stamps lastPortalTraffic, so the deferral and the idle
+// re-arm see every attached device.
 // The queue send is non-blocking: a full event buffer drops the repaint (the
 // join QR stays up, which is today's behavior) rather than stalling a
 // request goroutine, and the latch is NOT rolled back on a drop because the
 // buffer only fills under a storm this courtesy repaint should not add to.
 // Request-goroutine-safe.
-func (m *Machine) observePortalTraffic() {
+func (m *Machine) observePortalTraffic(kind portal.ClientKind) {
 	m.mu.Lock()
 	m.lastPortalTraffic = m.clock.Now()
-	first := !m.apClientSeen
-	m.apClientSeen = true
+	first := kind == portal.ClientApple && !m.apClientSeen
+	if first {
+		m.apClientSeen = true
+	}
 	gen := m.apRaiseGen
 	m.mu.Unlock()
 	if !first {

@@ -178,14 +178,45 @@ type Config struct {
 	// withLimits chokepoint. Deliberately the OPPOSITE classification to
 	// ActivityObserved: it proves only that a device is attached to the AP
 	// and talking to us, not that a human acted. The provisioning machine
-	// consumes it for the recheck cadence's attached-phone deferral ONLY
-	// (short recheck phases must not kick a phone that has joined the AP
-	// but not yet submitted anything); the bounded session policies keep
-	// the probes-never-count rule above. Same calling contract as
-	// ActivityObserved: request goroutines, internally synchronized,
-	// non-blocking.
-	TrafficObserved func()
+	// consumes it for the recheck cadence's attached-phone deferral (short
+	// recheck phases must not kick a phone that has joined the AP but not
+	// yet submitted anything) and, for Apple clients only, for the
+	// portal-address QR repaint (feral-file#3515); the bounded session
+	// policies keep the probes-never-count rule above. The ClientKind is
+	// read off the request's User-Agent (see ClassifyClient). Same calling
+	// contract as ActivityObserved: request goroutines, internally
+	// synchronized, non-blocking.
+	TrafficObserved func(ClientKind)
 	Logger          *zap.Logger
+}
+
+// ClientKind is the coarse identity of the device behind a portal request,
+// read off its User-Agent. Only Apple is distinguished: iOS and macOS captive
+// probes announce themselves ("CaptiveNetworkSupport-… wispr"), and the
+// on-screen portal-address QR repaint exists for exactly that platform —
+// iOS will not present its captive sheet while the Camera app that scanned
+// the join code stays in front. Android's probe carries a generic desktop
+// user agent, and on Android the repaint is a dead end anyway: Google
+// Camera's QR join hands off to Wi-Fi Settings (nothing is looking at the
+// screen), and a phone with cellular data keeps cellular as its default
+// route while the hotspot is unvalidated, so a browser opened on the
+// hotspot address never reaches it (field trial 2026-09-07, Pixel). Android
+// users take the OS's own "Tap to sign in" path, which binds to the hotspot.
+type ClientKind int
+
+const (
+	// ClientUnknown: everything that does not identify as Apple.
+	ClientUnknown ClientKind = iota
+	// ClientApple: an iOS/macOS captive probe or captive-sheet fetch.
+	ClientApple
+)
+
+// ClassifyClient maps a User-Agent to a ClientKind.
+func ClassifyClient(userAgent string) ClientKind {
+	if strings.Contains(userAgent, "CaptiveNetworkSupport") {
+		return ClientApple
+	}
+	return ClientUnknown
 }
 
 // Server is the captive-portal HTTP server.
@@ -234,7 +265,7 @@ func (s *Server) withLimits(next http.Handler) http.Handler {
 		// hard evidence a device is attached, and the deferral this feeds
 		// must not lapse because the phone was too chatty.
 		if s.cfg.TrafficObserved != nil {
-			s.cfg.TrafficObserved()
+			s.cfg.TrafficObserved(ClassifyClient(r.UserAgent()))
 		}
 		select {
 		case s.reqSlots <- struct{}{}:

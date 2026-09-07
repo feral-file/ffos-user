@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/portal"
 	"github.com/feral-file/ffos-user/components/feral-controld/wifictl"
 )
 
@@ -57,7 +58,7 @@ func TestFirstPortalTrafficRepaintsOnce(t *testing.T) {
 	require.NotNil(t, traffic)
 
 	for i := 0; i < 5; i++ {
-		traffic()
+		traffic(portal.ClientApple)
 	}
 	assert.Equal(t, 1, drainPortalClientEvents(t, h), "only the first request of a raise queues the repaint")
 
@@ -78,7 +79,7 @@ func TestFirstPortalTrafficRepaintsOnce(t *testing.T) {
 	assert.Equal(t, "sustained-offline", h.m.Snapshot().Reason)
 
 	// Later traffic stays silent for the rest of this raise.
-	traffic()
+	traffic(portal.ClientApple)
 	assert.Equal(t, 0, drainPortalClientEvents(t, h))
 }
 
@@ -91,7 +92,7 @@ func TestPortalTrafficLatchReArmsOnReRaise(t *testing.T) {
 	h := newLinkHarness(t, fl)
 	h.wifi.setProfile(true)
 	driveSustainedRaise(t, h, ctx)
-	h.portals[len(h.portals)-1].cfg.TrafficObserved()
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 
 	h.wifi.joinErr = &wifictl.JoinError{Kind: wifictl.JoinErrAuth, Output: "secrets were required"}
@@ -99,7 +100,7 @@ func TestPortalTrafficLatchReArmsOnReRaise(t *testing.T) {
 	require.Equal(t, StateAPActive, h.m.State(), "a failed join re-raises the AP")
 	require.Greater(t, len(h.portals), 1, "the re-raise builds a fresh portal")
 
-	h.portals[len(h.portals)-1].cfg.TrafficObserved()
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
 	assert.Equal(t, 1, drainPortalClientEvents(t, h), "the re-raise re-arms the first-request latch")
 
 	// The link harness's AP never learned its address: with nothing to swap
@@ -118,7 +119,7 @@ func TestPortalClientRepaintDropsStaleGeneration(t *testing.T) {
 	h.ap.info.PortalURL = "http://10.42.0.1"
 	h.wifi.setProfile(true)
 	driveSustainedRaise(t, h, ctx)
-	h.portals[len(h.portals)-1].cfg.TrafficObserved()
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
 	stale := h.m.apRaiseGen
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 
@@ -152,14 +153,14 @@ func TestAttachedPhaseRearmsOnPortalSilence(t *testing.T) {
 	require.Equal(t, 1, countReason(h, StateAPActive, "unprovisioned"))
 	require.NotEmpty(t, h.portals)
 	traffic := h.portals[len(h.portals)-1].cfg.TrafficObserved
-	traffic()
+	traffic(portal.ClientApple)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 	h.m.applyPortalClientAttached(h.m.apRaiseGen)
 	require.Equal(t, 1, attachedNotifies(h))
 
 	// Chatty phone: silence never accumulates, no reverse repaint.
 	for i := 0; i < 8; i++ {
-		traffic()
+		traffic(portal.ClientApple)
 		h.tick(ctx)
 	}
 	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientIdle))
@@ -178,7 +179,7 @@ func TestAttachedPhaseRearmsOnPortalSilence(t *testing.T) {
 	// Still silent: no repeat. A returning phone re-attaches as a first request.
 	h.tickN(ctx, 4)
 	assert.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientIdle))
-	traffic()
+	traffic(portal.ClientApple)
 	assert.Equal(t, 1, drainPortalClientEvents(t, h), "the idle reset re-armed the latch")
 }
 
@@ -191,7 +192,7 @@ func TestPortalClientRepaintSkipsTornDownAP(t *testing.T) {
 	h := newLinkHarness(t, fl)
 	h.wifi.setProfile(true)
 	driveSustainedRaise(t, h, ctx)
-	h.portals[len(h.portals)-1].cfg.TrafficObserved()
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 
 	fl.up = true
@@ -202,4 +203,31 @@ func TestPortalClientRepaintSkipsTornDownAP(t *testing.T) {
 	h.m.applyPortalClientAttached(h.m.apRaiseGen)
 	assert.Len(t, h.notifier.details(), before, "no repaint for a torn-down AP")
 	assert.Equal(t, 0, attachedNotifies(h))
+}
+
+// TestNonAppleTrafficNeverArmsTheRepaint: an Android (or unknown) client's
+// probes stamp lastPortalTraffic but never queue the portal-address QR —
+// on Android the link would be dead (cellular stays the default route) and
+// nothing is looking at the screen. A later Apple client still arms it.
+func TestNonAppleTrafficNeverArmsTheRepaint(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.ap.info.PortalURL = "http://10.42.0.1"
+	h.wifi.setProfile(true)
+	driveSustainedRaise(t, h, ctx)
+	traffic := h.portals[len(h.portals)-1].cfg.TrafficObserved
+
+	before := h.clk.Now()
+	h.clk.advance(time.Second)
+	traffic(portal.ClientUnknown)
+	traffic(portal.ClientUnknown)
+	assert.Equal(t, 0, drainPortalClientEvents(t, h), "non-Apple traffic never queues the repaint")
+	h.m.mu.Lock()
+	stamped := h.m.lastPortalTraffic.After(before)
+	h.m.mu.Unlock()
+	assert.True(t, stamped, "non-Apple traffic still counts as an attached device")
+
+	traffic(portal.ClientApple)
+	assert.Equal(t, 1, drainPortalClientEvents(t, h), "an Apple client arms it")
 }
