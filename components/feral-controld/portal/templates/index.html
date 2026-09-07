@@ -162,8 +162,15 @@
   // BEFORE the join is attempted, so a wrong password re-raises it, and the
   // hand-off must not strand that user. When the device answers again in
   // any state but "joining", the page reloads into the picker (with the
-  // failure banner the server renders). A failed status while still on the
-  // form keeps the form. Progressive enhancement — no script, no watcher.
+  // failure banner the server renders). The same applies BEFORE any
+  // hand-off: Safari is frozen under the sheet, so a fast wrong-password
+  // round trip (submit in the sheet → teardown → failed join → re-raise →
+  // phone back on the hotspot) can be over before this page polls again,
+  // and its first poll then answers "failed" against a picker rendered
+  // while the status was still idle — no banner. An untouched form reloads
+  // on "failed" to pick the banner up; a form holding input or focus is
+  // the user's retry in progress and stays. Progressive enhancement — no
+  // script, no watcher.
   //
   // Rules the 2026-09-07 trials and the outside audit forced:
   // - The first poll runs on load, while Safari is still in front (iOS
@@ -256,6 +263,10 @@
         return r.json().then(function (st) {
           if (st && (st.state === 'joining' || st.state === 'succeeded')) {
             handOff();
+            return;
+          }
+          if (st && st.state === 'failed' && !formTouched()) {
+            window.location.reload();
             return;
           }
           setTimeout(poll, 2000);

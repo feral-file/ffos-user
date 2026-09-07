@@ -798,8 +798,9 @@ func TestTrafficObservedCountsEveryRequest(t *testing.T) {
 
 // TestIndexCarriesHandOffWatcher pins the picker's /status watcher (the
 // #3515 Safari hand-off): the page must poll /status and be able to turn
-// itself into the hand-off screen, and it must do so only on a started join,
-// never on a failed one.
+// itself into the hand-off screen on a started join; a failed join never
+// hands off — it reloads an untouched picker for the banner and leaves a
+// touched one alone.
 func TestIndexCarriesHandOffWatcher(t *testing.T) {
 	srv := NewServer(Config{APSSID: "FF1-abc"})
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -809,7 +810,10 @@ func TestIndexCarriesHandOffWatcher(t *testing.T) {
 	assert.Contains(t, body, "fetch('/status'")
 	assert.Contains(t, body, "st.state === 'joining' || st.state === 'succeeded'")
 	assert.Contains(t, body, "Setup continues on your Art Computer")
-	assert.NotContains(t, body, "st.state === 'failed'", "a failed join must keep the form")
+	// A failed join reaching an UNTOUCHED picker reloads it so the server's
+	// failure banner appears (Safari was frozen under the sheet for the whole
+	// wrong-password round trip); a form holding input or focus stays.
+	assert.Contains(t, body, "if (st && st.state === 'failed' && !formTouched()) {")
 	// The shapes the 2026-09-07 trials and audit forced (see the template
 	// comment): an immediate first poll, a bounded fetch, a visibility hook,
 	// the watcher header, HTTP errors not counted as misses, the form guard,
