@@ -184,20 +184,21 @@ type Config struct {
 	// portal-address QR repaint (feral-file#3515); the bounded session
 	// policies keep the probes-never-count rule above. The ClientKind is
 	// read off the request's User-Agent (see ClassifyClient). The picker
-	// page's own /status watcher (marked with the watcherHeader) is NOT
-	// counted: it is this portal's script, not the device speaking, and a
-	// tab polling every two seconds would otherwise pin the recheck
-	// deferral to its ceiling and hold the address-QR phase open after the
-	// phone that caused it has gone. Same calling contract as
+	// page's post-hand-off /status watcher (marked with the watcherHeader)
+	// is NOT counted: it is this portal's script on a page whose user has
+	// moved on, and a tab left open would otherwise pin the recheck deferral
+	// to its ceiling and hold the address-QR phase open after the phone that
+	// caused it has gone. The picker's pre-hand-off polls are unmarked and
+	// DO count — an open picker is a human mid-setup. Same calling contract as
 	// ActivityObserved: request goroutines, internally synchronized,
 	// non-blocking.
 	TrafficObserved func(ClientKind)
 	Logger          *zap.Logger
 }
 
-// watcherHeader marks a /status request issued by the picker page's hand-off
-// watcher (templates/index.html). Requests carrying it are served normally
-// but excluded from TrafficObserved — see Config.TrafficObserved.
+// watcherHeader marks a /status request issued by the picker page AFTER it
+// has handed off (templates/index.html). Requests carrying it are served
+// normally but excluded from TrafficObserved — see Config.TrafficObserved.
 const watcherHeader = "X-Setup-Watcher"
 
 // ClientKind is the coarse identity of the device behind a portal request,

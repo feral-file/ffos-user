@@ -179,8 +179,13 @@
   //   transient drop keeps their form. A started join elsewhere still
   //   hands off — that is the sheet case this exists for.
   // - The page becoming visible again (the sheet closed) polls at once.
-  // - Polls carry X-Setup-Watcher so the daemon does not count this
-  //   script as an attached device talking (portal.Config.TrafficObserved).
+  // - Polls made AFTER the hand-off carry X-Setup-Watcher so the daemon
+  //   does not count this script as an attached device talking
+  //   (portal.Config.TrafficObserved): the phone that caused the address
+  //   QR may be gone, and a tab left open must not hold that phase or the
+  //   recheck deferral. Polls BEFORE the hand-off are unmarked on purpose:
+  //   an open picker is a human mid-setup, and in a recheck session the
+  //   blink must not tear the hotspot down under them.
   (function () {
     var main = document.querySelector('main');
     if (!main || !window.fetch) return;
@@ -213,7 +218,8 @@
       setTimeout(watchForReturn, 3000);
     };
     var boundedFetch = function () {
-      var opts = { cache: 'no-store', headers: { 'X-Setup-Watcher': '1' } };
+      var opts = { cache: 'no-store' };
+      if (handedOff) opts.headers = { 'X-Setup-Watcher': '1' };
       if (!window.AbortController) return fetch('/status', opts);
       var ctl = new AbortController();
       opts.signal = ctl.signal;

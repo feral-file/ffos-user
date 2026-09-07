@@ -816,17 +816,21 @@ func TestIndexCarriesHandOffWatcher(t *testing.T) {
 	// and the post-hand-off return watch that reloads into the picker.
 	assert.Contains(t, body, "new AbortController()")
 	assert.Contains(t, body, "visibilitychange")
-	assert.Contains(t, body, "'X-Setup-Watcher': '1'")
+	assert.Contains(t, body, "if (handedOff) opts.headers = { 'X-Setup-Watcher': '1' };",
+		"only post-hand-off polls are excluded from traffic; an open picker still counts as a human mid-setup")
 	assert.Contains(t, body, "if (!r.ok) { setTimeout(poll, 2000); return; }")
 	assert.Contains(t, body, "misses >= 3 && !formTouched()")
 	assert.Contains(t, body, "window.location.reload()")
-	assert.NotContains(t, body, "answered", "a page served by the device needs no answered gate")
+	// html/template elides JS comments in the served body, so the prose
+	// mention of the removed gate never reaches the client; pin the CODE.
+	assert.NotContains(t, body, "var answered", "a page served by the device needs no answered gate")
 	assert.Regexp(t, `\n    poll\(\);\n  \}\)\(\);`, body, "the first poll must run on load, not on a timer")
 }
 
-// TestWatcherPollsAreNotTraffic: the picker's own /status watcher must not
-// register as an attached device talking — it would pin the recheck
-// deferral and the address-QR phase open on its own.
+// TestWatcherPollsAreNotTraffic: the picker's post-hand-off /status watcher
+// must not register as an attached device talking — it would pin the
+// recheck deferral and the address-QR phase open on its own. (Pre-hand-off
+// polls carry no header and count; see the template.)
 func TestWatcherPollsAreNotTraffic(t *testing.T) {
 	var mu sync.Mutex
 	traffic := 0
