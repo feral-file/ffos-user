@@ -810,4 +810,9 @@ func TestIndexCarriesHandOffWatcher(t *testing.T) {
 	assert.Contains(t, body, "st.state === 'joining' || st.state === 'succeeded'")
 	assert.Contains(t, body, "Setup continues on your Art Computer")
 	assert.NotContains(t, body, "st.state === 'failed'", "a failed join must keep the form")
+	// The three timing shapes the 2026-09-07 trials forced (see the template
+	// comment): an immediate first poll, a bounded fetch, a visibility hook.
+	assert.Contains(t, body, "new AbortController()")
+	assert.Contains(t, body, "visibilitychange")
+	assert.Regexp(t, `\n    poll\(\);\n  \}\)\(\);`, body, "the first poll must run on load, not on a timer")
 }

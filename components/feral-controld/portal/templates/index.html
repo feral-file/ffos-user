@@ -160,12 +160,28 @@
   // another device), or the device stops answering after having answered,
   // it becomes the hand-off screen. A failed join stays a form: that user
   // needs to retry here. Progressive enhancement — no script, no watcher.
+  //
+  // Timing, from the 2026-09-07 trials: the join tears the hotspot down
+  // 20 ms after /status turns "joining", so the signal that actually lands
+  // is the device going silent. Three shapes had to be handled for that to
+  // work: (1) iOS freezes a backgrounded tab's timers, so the first poll
+  // runs immediately on load while Safari is still in front — that is what
+  // opens the "answered" gate; (2) once the phone is back on its home
+  // network a fetch to the hotspot address hangs for a minute instead of
+  // failing, so every poll is aborted after 1.5 s; (3) Safari coming back
+  // in front (the sheet closed) triggers a poll right away instead of
+  // waiting out the interval. Three misses after a good answer is the
+  // hand-off: ~5 s after the sheet closes, and a live hotspot answering in
+  // milliseconds never accumulates them.
   (function () {
     var main = document.querySelector('main');
     if (!main || !window.fetch) return;
     var answered = false;
     var misses = 0;
+    var inflight = false;
+    var handedOff = false;
     var handOff = function () {
+      handedOff = true;
       while (main.firstChild) main.removeChild(main.firstChild);
       var brand = document.createElement('p');
       brand.className = 'brand';
@@ -179,10 +195,25 @@
       main.appendChild(h1);
       main.appendChild(note);
     };
+    var boundedFetch = function () {
+      if (!window.AbortController) return fetch('/status', { cache: 'no-store' });
+      var ctl = new AbortController();
+      var timer = setTimeout(function () { ctl.abort(); }, 1500);
+      return fetch('/status', { cache: 'no-store', signal: ctl.signal }).then(function (r) {
+        clearTimeout(timer);
+        return r;
+      }, function (err) {
+        clearTimeout(timer);
+        throw err;
+      });
+    };
     var poll = function () {
-      fetch('/status', { cache: 'no-store' }).then(function (r) {
+      if (handedOff || inflight) return;
+      inflight = true;
+      boundedFetch().then(function (r) {
         return r.json();
       }).then(function (st) {
+        inflight = false;
         answered = true;
         misses = 0;
         if (st && (st.state === 'joining' || st.state === 'succeeded')) {
@@ -191,18 +222,19 @@
         }
         setTimeout(poll, 2000);
       }).catch(function () {
+        inflight = false;
         misses += 1;
-        // Three misses after a good answer: the hotspot is gone under us
-        // (a join tore it down). Never on a cold start — a page that never
-        // reached the device has nothing to hand off.
         if (answered && misses >= 3) {
           handOff();
           return;
         }
-        setTimeout(poll, 2000);
+        setTimeout(poll, 1000);
       });
     };
-    setTimeout(poll, 2000);
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') poll();
+    });
+    poll();
   })();
 </script>
 </body>
