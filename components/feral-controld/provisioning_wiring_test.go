@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,10 @@ func (s *spyNarrationUI) ShowSetupError(reason string) {
 func (s *spyNarrationUI) ShowScanning() { s.calls = append(s.calls, "scanning") }
 func (s *spyNarrationUI) ShowSoftAPQR(ssid, psk, portalURL string) {
 	s.calls = append(s.calls, "softap")
+	s.softAPPortalURLs = append(s.softAPPortalURLs, portalURL)
+}
+func (s *spyNarrationUI) ShowSoftAPPortalQR(ssid, psk, portalURL string) {
+	s.calls = append(s.calls, "softap_portal")
 	s.softAPPortalURLs = append(s.softAPPortalURLs, portalURL)
 }
 func (s *spyNarrationUI) ShowJoinFailed(reason string) {
@@ -682,4 +687,39 @@ func TestProvisioningTuningFromConfigRejectsOutOfRangeSeconds(t *testing.T) {
 		assert.Equal(t, []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute},
 			got.EpisodeStationLadder)
 	})
+}
+
+// TestSetupNotifierAttachedClientRepaintsPortalQR pins the #3515 repaint: the
+// credentials-bearing AP-active announcement paints the join QR, and the
+// ClientAttached re-announcement (same credentials, ReasonAPClientAttached)
+// paints the attached phase — the portal-address QR — instead of a second
+// join QR. Both take narration ownership so the eventual online hide fires.
+func TestSetupNotifierAttachedClientRepaintsPortalQR(t *testing.T) {
+	spy := &spyNarrationUI{}
+	n := &setupNotifier{ui: spy}
+
+	raise := provisioning.Detail{SSID: "FF1-abc", PSK: "abc12345", PortalURL: "http://10.42.0.1", Reason: "ap-active"}
+	n.OnStateChange(provisioning.StateAPActive, raise)
+	attached := raise
+	attached.ClientAttached = true
+	attached.Reason = provisioning.ReasonAPClientAttached
+	n.OnStateChange(provisioning.StateAPActive, attached)
+
+	if got, want := strings.Join(spy.calls, ","), "softap,softap_portal"; got != want {
+		t.Fatalf("calls = %q; want %q", got, want)
+	}
+	if got := spy.softAPPortalURLs; len(got) != 2 || got[1] != "http://10.42.0.1" {
+		t.Fatalf("portal URLs = %v; want the raise address carried into the attached repaint", got)
+	}
+	if !n.narrating {
+		t.Fatal("attached repaint must keep narration ownership")
+	}
+
+	// The attached flag without credentials is not a raise announcement:
+	// it must fall through to the join-failed / no-op legs, never paint a
+	// portal QR with an empty address.
+	n.OnStateChange(provisioning.StateAPActive, provisioning.Detail{ClientAttached: true})
+	if got := strings.Join(spy.calls, ","); got != "softap,softap_portal" {
+		t.Fatalf("credential-less attached detail painted: %q", got)
+	}
 }

@@ -94,6 +94,7 @@ func (c *dbusConnectivity) Subscribe(fn func(online bool)) (unsubscribe func()) 
 type setupNarrationUI interface {
 	ShowScanning()
 	ShowSoftAPQR(ssid, psk, portalURL string)
+	ShowSoftAPPortalQR(ssid, psk, portalURL string)
 	ShowJoinFailed(reason string)
 	ShowConnecting(message string)
 	// ShowConnectingOrHide is the ap-recheck flavor: its manifest downgrade is
@@ -322,6 +323,13 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 		case d.Reason == "scanning":
 			n.narrating = true
 			n.ui.ShowScanning()
+		case d.PSK != "" && d.ClientAttached:
+			// The raise's first portal request landed: a phone is on the
+			// hotspot. Repaint the same panel in its attached phase so the
+			// still-open camera gets a portal link (#3515); the join QR is
+			// what the NEXT raise announcement paints again.
+			n.narrating = true
+			n.ui.ShowSoftAPPortalQR(d.SSID, d.PSK, d.PortalURL)
 		case d.PSK != "":
 			n.narrating = true
 			n.ui.ShowSoftAPQR(d.SSID, d.PSK, d.PortalURL)

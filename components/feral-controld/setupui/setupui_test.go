@@ -278,7 +278,16 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 			call:       func(s *Service) { s.ShowSoftAPQR("FF1-abc", "", "") },
 			wantState:  stateSoftAPQR,
 			wantFields: map[string]any{"ssid": "FF1-abc"},
-			absent:     []string{"password", "portal_url"},
+			absent:     []string{"password", "portal_url", "client_attached"},
+		},
+		{
+			name:      "softap portal qr flags the attached phase",
+			call:      func(s *Service) { s.ShowSoftAPPortalQR("FF1-abc", "secret123", "http://10.42.0.1") },
+			wantState: stateSoftAPQR,
+			wantFields: map[string]any{
+				"ssid": "FF1-abc", "password": "secret123", "portal_url": "http://10.42.0.1",
+				"client_attached": true,
+			},
 		},
 		{
 			name:      "scanning",
@@ -625,6 +634,8 @@ func TestShippingManifestDeclaresProsePayloads(t *testing.T) {
 	require.True(t, ok, "shipping manifest missing stateFields for %q", stateSoftAPQR)
 	assert.Contains(t, softAPFields.Optional, "portal_url",
 		"softap_qr must declare the direct portal fallback ShowSoftAPQR sends")
+	assert.Contains(t, softAPFields.Optional, "client_attached",
+		"softap_qr must declare the attached-phase flag ShowSoftAPPortalQR sends")
 }
 
 // TestShowCallersDoNotBlockOnManifestRead pins the notifier's non-blocking

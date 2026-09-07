@@ -373,13 +373,29 @@ func (m *Machine) observePortalActivity() {
 // observePortalTraffic records one portal request of ANY kind — captive
 // probes and root fetches included (wired into portal.Config.TrafficObserved
 // by ensureAPUp). Weaker evidence than observePortalActivity: it proves a
-// phone is attached to the AP, not that a human acted. Consumed only by the
-// recheck blink's attached-phone deferral in sessionExpiryDue.
+// phone is attached to the AP, not that a human acted. Consumed by the
+// recheck blink's attached-phone deferral in sessionExpiryDue, and — on the
+// FIRST request of a raise only — it queues evPortalClient so the loop can
+// repaint the on-screen QR for the attached phone (applyPortalClientAttached).
+// The queue send is non-blocking: a full event buffer drops the repaint (the
+// join QR stays up, which is today's behavior) rather than stalling a
+// request goroutine, and the latch is NOT rolled back on a drop because the
+// buffer only fills under a storm this courtesy repaint should not add to.
 // Request-goroutine-safe.
 func (m *Machine) observePortalTraffic() {
 	m.mu.Lock()
 	m.lastPortalTraffic = m.clock.Now()
+	first := !m.apClientSeen
+	m.apClientSeen = true
 	m.mu.Unlock()
+	if !first {
+		return
+	}
+	select {
+	case m.events <- event{kind: evPortalClient}:
+	default:
+		m.logger.Warn("provisioning: event queue full, dropping attached-client repaint")
+	}
 }
 
 // hubContactFresh reports whether a counted hub contact landed within the

@@ -154,6 +154,14 @@ const (
 	// The notifier answers it with a narrating-guarded hide, so the error
 	// panel cannot strand over artwork.
 	ReasonSetupErrorCleared = "setup-error-cleared"
+
+	// ReasonAPClientAttached marks the repeat StateAPActive announcement the
+	// machine emits once the FIRST device talks to the captive portal after a
+	// raise — the evidence that a phone joined the setup hotspot. It is not a
+	// transition (state and lastReason are untouched; the flight recorder
+	// never sees it); the wiring notifier reads Detail.ClientAttached, not
+	// this reason, to swap the on-screen join QR for the portal-address QR.
+	ReasonAPClientAttached = "ap-client-attached"
 )
 
 // Detail is the side-channel context published alongside a State change: enough
@@ -174,6 +182,14 @@ type Detail struct {
 	// NetworkManager reports an address, and is empty otherwise. Using the
 	// on-link address gives the narration UI a DNS-independent recovery path.
 	PortalURL string
+	// ClientAttached is true ONLY on the repeat StateAPActive announcement
+	// (ReasonAPClientAttached) the machine emits after the first portal
+	// request of a raise: a device has joined the setup hotspot and is
+	// probing or fetching the portal. It carries the same SSID/PSK/PortalURL
+	// as the raise announcement so the narration surface can repaint the
+	// softap_qr panel in its attached phase (a portal-address QR the phone's
+	// still-open camera can scan) without re-deriving the credentials.
+	ClientAttached bool
 	// Reason is a short machine-readable cause (e.g. "auth-failure",
 	// "sustained-offline", "unprovisioned").
 	Reason string
@@ -492,6 +508,13 @@ type Machine struct {
 	apUp       bool
 	apInfo     softap.Info
 	portalSrv  PortalServer
+	// apClientSeen latches the first portal request of the current raise (set
+	// by observePortalTraffic, cleared wherever apInfo is), so the
+	// ReasonAPClientAttached repaint fires once per raise: a phone that keeps
+	// probing must not repaint the panel on every request, and a re-raise
+	// (join failure, recheck blink) — whose fresh softap_qr paint is the join
+	// QR again — must re-arm it because the phone has to re-associate.
+	apClientSeen bool
 	// apDownPending records a failed softap.Down: the persisted hotspot profile
 	// may still exist (possibly still broadcasting) even though apUp is false.
 	// ensureAPDown retries the deletion on every reconcile until it succeeds,
@@ -753,6 +776,11 @@ const (
 	evRescan
 	evClaim
 	evUserSetup
+	// evPortalClient: the first portal request of a raise landed
+	// (observePortalTraffic). Handled on the loop goroutine because the
+	// Notifier contract is single-goroutine — the wiring notifier's
+	// narration ownership flag is unsynchronized by design.
+	evPortalClient
 )
 
 type event struct {
@@ -926,6 +954,7 @@ func (m *Machine) loop(ctx context.Context) {
 	m.apUp = false
 	m.portalSrv = nil
 	m.apInfo = softap.Info{}
+	m.apClientSeen = false
 	m.mu.Unlock()
 	if leftoverSrv != nil {
 		stopCtx, cancel := context.WithTimeout(context.Background(), portalStopTimeout)
@@ -1014,6 +1043,8 @@ func (m *Machine) loop(ctx context.Context) {
 				m.applyClaim(ctx, ev.claimed)
 			case evUserSetup:
 				m.applyUserSetup(ctx)
+			case evPortalClient:
+				m.applyPortalClientAttached()
 			}
 		case <-ticker.C():
 			m.onTick(ctx)
@@ -2340,6 +2371,16 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		return err
 	}
 
+	// Re-arm the attached-client latch BEFORE the portal can accept a request:
+	// on the rescan/re-raise paths the phone's captive probe races srv.Start
+	// (see the PortalURL note below), and a probe landing between Start and
+	// the apInfo publish must still count as this raise's first client.
+	// applyPortalClientAttached tolerates that ordering — the loop processes
+	// the queued event only after this function has published the raise.
+	m.mu.Lock()
+	m.apClientSeen = false
+	m.mu.Unlock()
+
 	srv := m.newPortal(portal.Config{
 		Addr:   m.portalAddr,
 		APSSID: info.SSID,
@@ -2404,8 +2445,9 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	//
 	// info.PortalURL is single-shot BY ACCEPTED TRADE, not oversight: it is
 	// read once per raise (above, 3 s bound, after the portal bind) and
-	// published only through THIS notify — apInfo carries a copy but nothing
-	// reads it back today, so there is no latch to self-heal from. If that
+	// published only through THIS notify and the attached-client repaint
+	// (applyPortalClientAttached re-reads apInfo's copy verbatim), so there
+	// is no latch to self-heal from. If that
 	// one lookup missed (NM slow to publish IP4.ADDRESS), the TV omits the
 	// manual-address fallback line until the next actual raise. The AP,
 	// captive flow, and portal are all unaffected (the lookup is fail-open),
@@ -2420,6 +2462,41 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		Message:   "Scan the QR code to set up Wi-Fi",
 	})
 	return nil
+}
+
+// applyPortalClientAttached handles evPortalClient on the loop goroutine: the
+// first device of this raise has talked to the portal, so re-announce
+// StateAPActive with ClientAttached set. The wiring notifier repaints
+// softap_qr in its attached phase — a QR carrying the portal address instead
+// of the Wi-Fi join payload — because iOS does not auto-present the captive
+// sheet while the Camera app that scanned the join QR stays in front (it
+// waits for a "Wi-Fi app" such as Safari or Settings to come forward;
+// feral-file/feral-file#3515). The phone's camera is still pointed at the
+// screen, so the swapped code hands it a Safari link without any app-switch
+// instruction; Safari coming forward also releases the native sheet.
+//
+// Guarded on the CURRENT raise: the event may have been queued by a probe on
+// a portal that has since been torn down (join bounce, recheck blink, exit),
+// in which case there is nothing to repaint — the next raise re-arms the
+// latch and paints the join QR again. The announcement is a repaint, not a
+// transition: state, lastReason, and the flight recorder are untouched.
+func (m *Machine) applyPortalClientAttached() {
+	m.mu.Lock()
+	up := m.apUp && m.state == StateAPActive
+	info := m.apInfo
+	m.mu.Unlock()
+	if !up || info.SSID == "" {
+		return
+	}
+	m.logger.Info("provisioning: first client attached to the setup AP", zap.String("ssid", info.SSID))
+	m.notify(StateAPActive, Detail{
+		SSID:           info.SSID,
+		PSK:            info.PSK,
+		PortalURL:      info.PortalURL,
+		ClientAttached: true,
+		Reason:         ReasonAPClientAttached,
+		Message:        "Phone connected to the setup Wi-Fi; scan the QR code to open setup",
+	})
 }
 
 // ensureAPDown tears the portal + AP down if up, and reports whether the AP
@@ -2469,6 +2546,7 @@ func (m *Machine) ensureAPDown(ctx context.Context) bool {
 	m.apUp = false
 	m.portalSrv = nil
 	m.apInfo = softap.Info{}
+	m.apClientSeen = false
 	m.apDownPending = !downOK
 	m.mu.Unlock()
 	if downOK {
