@@ -297,6 +297,79 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		return h.mintPairing.HandleClosePairingSession(ctx, command.Arguments)
 	}
 
+	// The player owns the retained, castable DP-1 item; the public history
+	// query deliberately exposes only its bounded label snapshot. Old players
+	// reply with bare ok:false for this unknown command, which is an explicit
+	// unsupported capability rather than a false empty history.
+	if commandType == commands.CMD_GET_RECENTLY_PLAYED {
+		result, err := h.sendCDPRequest(command)
+		if err != nil {
+			return nil, err
+		}
+		return recentPlayerReply(result), nil
+	}
+
+	// Replay never accepts a phone-supplied source. It resolves an opaque
+	// device-local record, rebuilds a one-work unsigned DP-1 call, then invokes
+	// this handler's ordinary displayPlaylist branch. That preserves scheduler
+	// authority, playback/replay-scope locking, source preflight, and the
+	// future policy gate at the normal composition boundary.
+	if commandType == commands.CMD_PLAY_RECENTLY_PLAYED {
+		recordID, _ := command.Arguments["recordId"].(string)
+		if recordID == "" {
+			return map[string]interface{}{
+				"ok":     false,
+				"status": "error",
+				"error":  "recordId is required",
+			}, nil
+		}
+		resolved, err := h.sendCDPRequest(commands.Command{
+			Type:      commands.Type("resolveRecentlyPlayed"),
+			Arguments: map[string]interface{}{"recordId": recordID},
+		})
+		if err != nil {
+			return nil, err
+		}
+		message := recentPlayerReply(resolved)
+		if !playerresponse.OK(message) {
+			return message, nil
+		}
+		playerMessage, ok := message["message"].(map[string]interface{})
+		if !ok {
+			return map[string]interface{}{"ok": false, "status": "error", "error": "invalid recently played reply"}, nil
+		}
+		item, ok := playerMessage["item"].(map[string]interface{})
+		if !ok {
+			return map[string]interface{}{"ok": false, "status": "error", "error": "recently played record has no item"}, nil
+		}
+		title, _ := item["title"].(string)
+		if title == "" {
+			title = "Recently played"
+		}
+		result, err := h.Process(ctx, commands.Command{
+			Type: commands.CMD_DISPLAY_PLAYLIST,
+			Arguments: map[string]interface{}{
+				"dp1_call": map[string]interface{}{
+					"dpVersion": "1.0",
+					"title":     title,
+					"items":     []interface{}{item},
+				},
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		// The acknowledgement is bounded and names the requested occurrence;
+		// callers must still wait for status/render outcome, particularly when
+		// the same work is deliberately replayed twice.
+		if resultMessage, ok := result.(map[string]interface{}); ok {
+			if nested, ok := resultMessage["message"].(map[string]interface{}); ok {
+				return map[string]interface{}{"recordId": recordID, "message": nested}, nil
+			}
+		}
+		return map[string]interface{}{"recordId": recordID, "message": result}, nil
+	}
+
 	if commandType == commands.CMD_MINT_PAIRING_APPROVAL {
 		if h.mintPairing == nil {
 			return map[string]any{
@@ -956,6 +1029,28 @@ func policyAckMatches(result interface{}, want contentpolicy.Policy) bool {
 		return false
 	}
 	return got == want
+}
+
+// recentPlayerReply normalizes the CDP envelope only enough to classify the
+// history capability. No raw DP-1 item is added to the public list response.
+func recentPlayerReply(result interface{}) map[string]interface{} {
+	response, ok := result.(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{"ok": false, "status": "error", "error": "invalid player reply"}
+	}
+	message, ok := response["message"].(map[string]interface{})
+	if !ok {
+		message = response
+		response = map[string]interface{}{"message": message}
+	}
+	if okValue, _ := message["ok"].(bool); !okValue {
+		if _, hasStatus := message["status"]; !hasStatus {
+			// ff-player before #729 has only the generic unknown-command reply.
+			message["status"] = "unsupported"
+			message["error"] = "Recently played is not supported by this player"
+		}
+	}
+	return response
 }
 
 // ensureDisplayPlaylistIntent sets intent.action=now_display when the cast

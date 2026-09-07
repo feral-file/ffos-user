@@ -103,6 +103,7 @@ func DefaultGateConfig() GateConfig {
 		commands.CMD_DISPLAY_PLAYLIST:         heavy,
 		commands.CMD_DISPLAY_DEFAULT_PLAYLIST: heavy,
 		commands.CMD_REFRESH_ARTWORK:          heavy,
+		commands.CMD_PLAY_RECENTLY_PLAYED:     heavy,
 		commands.CMD_UPLOAD_LOGS:              heavy,
 		commands.CMD_SSH_ACCESS:               heavy,
 
@@ -155,6 +156,7 @@ func DefaultGateConfig() GateConfig {
 		commands.CMD_PROFILE:                  query,
 		commands.CMD_DDC_PANEL_STATUS:         query,
 		commands.CMD_GET_OFFLINE_CACHE_STATUS: query,
+		commands.CMD_GET_RECENTLY_PLAYED:      query,
 
 		// High-frequency input events: shared generous budget.
 		commands.CMD_KEYBOARD_EVENT:             input,
