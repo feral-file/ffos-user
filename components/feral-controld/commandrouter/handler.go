@@ -353,14 +353,22 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		if title == "" {
 			title = "Recently played"
 		}
+		// Extracting one item invalidates the original full-playlist
+		// signature. Preserve only the applicable defaults, which carry
+		// artist-level controls for this work; machine settings remain owned by
+		// the player and are intentionally not snapshotted here.
+		dp1Call := map[string]interface{}{
+			"dpVersion": "1.0",
+			"title":     title,
+			"items":     []interface{}{item},
+		}
+		if defaults, ok := playerMessage["defaults"].(map[string]interface{}); ok {
+			dp1Call["defaults"] = defaults
+		}
 		result, err := h.Process(ctx, commands.Command{
 			Type: commands.CMD_DISPLAY_PLAYLIST,
 			Arguments: map[string]interface{}{
-				"dp1_call": map[string]interface{}{
-					"dpVersion": "1.0",
-					"title":     title,
-					"items":     []interface{}{item},
-				},
+				"dp1_call": dp1Call,
 			},
 		})
 		if err != nil {

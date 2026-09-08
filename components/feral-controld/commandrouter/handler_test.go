@@ -883,6 +883,54 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesInlineManifest(t *testi
 	assert.Equal(t, "https://example.com/video.mp4", item["source"])
 }
 
+// A recent-played replay must not become a side channel to CanvasService. The
+// second CDP call below is the ordinary displayPlaylist command, so it keeps
+// the scheduler, offline-replay scope, validation and future policy seam that
+// every other cast uses. The controller-only request contains an opaque id;
+// only the device-internal resolver ever sees the retained source.
+func TestCommandHandler_Process_PlayRecentlyPlayed_ReentersDisplayPlaylist(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx := context.Background()
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	handler := commandrouter.New(
+		newRoutableExecutor(ctrl), mockCDP, mocks.NewMockDP1(ctrl), mockStatusPoller,
+		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	var displayExpression string
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			assert.Contains(t, expr, "resolveRecentlyPlayed")
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok": true, "status": "ok", "item": map[string]interface{}{
+					"id": "retained-work", "source": "https://example.test/retained", "license": "open",
+				},
+			}}, nil
+		}).Times(1)
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			displayExpression = params["expression"].(string)
+			return playerOkResponse(), nil
+		}).Times(1)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := handler.Process(ctx, commands.Command{
+		Type: commands.CMD_PLAY_RECENTLY_PLAYED,
+		Arguments: map[string]interface{}{"recordId": "rp-42"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "rp-42", result.(map[string]interface{})["recordId"])
+	assert.Contains(t, displayExpression, "displayPlaylist")
+	item := firstCastItem(t, displayExpression)
+	assert.Equal(t, "https://example.test/retained", item["source"])
+	assert.NotContains(t, displayExpression, "rp-42")
+}
+
 // firstCastItem digs the first playlist item out of the CDP expression the
 // handler sent, which has the shape window.handleCDPRequest(<command JSON>).
 func firstCastItem(t *testing.T, expression string) map[string]interface{} {
