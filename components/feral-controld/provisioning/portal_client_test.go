@@ -366,3 +366,31 @@ func TestIdleResetCancelsAPendingAttach(t *testing.T) {
 	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	assert.Equal(t, 1, attachedNotifies(h))
 }
+
+// TestReRaiseAfterFailedJoinCarriesTheReason: the AP-up announcement after a
+// wrong password carries the failure's user-facing message, and a raise with
+// no failed outcome carries none.
+func TestReRaiseAfterFailedJoinCarriesTheReason(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	driveSustainedRaise(t, h, ctx)
+	first := h.notifier.details()
+	assert.Equal(t, "", first[len(first)-1].Detail.JoinFailure, "a clean raise has no failure line")
+
+	h.wifi.joinErr = &wifictl.JoinError{Kind: wifictl.JoinErrAuth, Output: "secrets were required"}
+	h.m.applyJoin(ctx, "Home", "wrong", false)
+	require.Equal(t, StateAPActive, h.m.State())
+	all := h.notifier.details()
+	var reraise *Detail
+	for i := len(all) - 1; i >= 0; i-- {
+		if all[i].State == StateAPActive && all[i].Detail.PSK != "" {
+			d := all[i].Detail
+			reraise = &d
+			break
+		}
+	}
+	require.NotNil(t, reraise, "the re-raise announces the AP with credentials")
+	assert.Equal(t, "Wrong Wi-Fi password. Please check it and try again.", reraise.JoinFailure)
+}

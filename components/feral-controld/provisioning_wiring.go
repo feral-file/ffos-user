@@ -95,6 +95,7 @@ type setupNarrationUI interface {
 	ShowScanning()
 	ShowSoftAPQR(ssid, psk, portalURL string)
 	ShowSoftAPPortalQR(ssid, psk, portalURL string)
+	ShowSoftAPQRRetry(ssid, psk, portalURL, reason string)
 	ShowJoinFailed(reason string)
 	ShowConnecting(message string)
 	// ShowConnectingOrHide is the ap-recheck flavor: its manifest downgrade is
@@ -330,6 +331,12 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 			// what the NEXT raise announcement paints again.
 			n.narrating = true
 			n.ui.ShowSoftAPPortalQR(d.SSID, d.PSK, d.PortalURL)
+		case d.PSK != "" && d.JoinFailure != "":
+			// The AP is back after a failed join: the join QR again, with
+			// the failure reason on it — the join_failed panel that preceded
+			// this announcement is on screen for a millisecond at most.
+			n.narrating = true
+			n.ui.ShowSoftAPQRRetry(d.SSID, d.PSK, d.PortalURL, d.JoinFailure)
 		case d.PSK != "":
 			n.narrating = true
 			n.ui.ShowSoftAPQR(d.SSID, d.PSK, d.PortalURL)

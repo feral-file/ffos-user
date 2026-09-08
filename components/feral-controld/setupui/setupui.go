@@ -277,6 +277,26 @@ func (s *Service) ShowSoftAPPortalQR(ssid string, psk string, portalURL string) 
 	s.push(req)
 }
 
+// ShowSoftAPQRRetry narrates the join QR coming back after a failed join:
+// same payload as ShowSoftAPQR plus `reason`, the failure's user-facing
+// message, which the player shows under the title so the screen says why
+// the code is back (the preceding join_failed paint lives a millisecond).
+// Players that predate the field ignore it and paint the plain join QR.
+func (s *Service) ShowSoftAPQRRetry(ssid string, psk string, portalURL string, reason string) {
+	req := map[string]any{
+		"state":  stateSoftAPQR,
+		"ssid":   ssid,
+		"reason": reason,
+	}
+	if strings.TrimSpace(psk) != "" {
+		req["password"] = psk
+	}
+	if strings.TrimSpace(portalURL) != "" {
+		req["portal_url"] = portalURL
+	}
+	s.push(req)
+}
+
 // ShowScanning narrates the pre-AP Wi-Fi scan: the device is searching for
 // nearby networks and will advertise its setup hotspot once the scan
 // completes. Extension state; older players render nothing (see

@@ -194,6 +194,14 @@ type Detail struct {
 	// softap_qr panel in its attached phase (a portal-address QR the phone's
 	// still-open camera can scan) without re-deriving the credentials.
 	ClientAttached bool
+	// JoinFailure is the user-facing message of the join that just failed,
+	// carried on the AP-up announcements that follow it (the re-raise and
+	// the idle re-arm) so the screen can say WHY the join QR is back. The
+	// join_failed narration itself is overwritten by the re-raise's scanning
+	// panel within a millisecond, so without this the reason is never
+	// visible on the device (field run 2026-09-07). Empty when the last
+	// outcome is not a failure.
+	JoinFailure string
 	// Reason is a short machine-readable cause (e.g. "auth-failure",
 	// "sustained-offline", "unprovisioned").
 	Reason string
@@ -2464,6 +2472,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	m.apUp = true
 	m.apInfo = info
 	m.portalSrv = srv
+	joinFailure := m.lastJoinFailureLocked()
 	m.mu.Unlock()
 	m.clearAPRaiseFailures()
 	// Every successful raise (re-)arms the session phase timer under the
@@ -2492,13 +2501,25 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	// that is itself only a fallback. Do not assume this self-heals when
 	// editing here; if the field misses often, add the retry then.
 	m.notify(StateAPActive, Detail{
-		SSID:      info.SSID,
-		PSK:       info.PSK,
-		PortalURL: info.PortalURL,
-		Reason:    "ap-active",
-		Message:   "Scan the QR code to set up Wi-Fi",
+		SSID:        info.SSID,
+		PSK:         info.PSK,
+		PortalURL:   info.PortalURL,
+		JoinFailure: joinFailure,
+		Reason:      "ap-active",
+		Message:     "Scan the QR code to set up Wi-Fi",
 	})
 	return nil
+}
+
+// lastJoinFailureLocked returns the user-facing message of the last join
+// attempt when it failed, else "". Caller holds mu. Feeds Detail.JoinFailure
+// on the AP-up announcements; the status itself is reset by the next submit
+// or rescan, so the line lives exactly as long as the failure is current.
+func (m *Machine) lastJoinFailureLocked() string {
+	if m.status.State == portal.JoinFailed {
+		return m.status.Message
+	}
+	return ""
 }
 
 // applyPortalClientAttached handles evPortalClient on the loop goroutine: the
@@ -2603,6 +2624,7 @@ func (m *Machine) rearmAttachedClientIfIdle() {
 		!m.lastPortalTraffic.IsZero() &&
 		m.clock.Now().Sub(m.lastPortalTraffic) >= attachedIdleReset
 	info := m.apInfo
+	joinFailure := m.lastJoinFailureLocked()
 	if idle {
 		// Both latches: a pending attach (address still unknown) whose
 		// phone has since gone silent must not have a later tick's retry
@@ -2617,11 +2639,12 @@ func (m *Machine) rearmAttachedClientIfIdle() {
 	}
 	m.logger.Info("provisioning: setup AP client idle; showing the join QR again", zap.String("ssid", info.SSID))
 	m.notify(StateAPActive, Detail{
-		SSID:      info.SSID,
-		PSK:       info.PSK,
-		PortalURL: info.PortalURL,
-		Reason:    ReasonAPClientIdle,
-		Message:   "Scan the QR code to set up Wi-Fi",
+		SSID:        info.SSID,
+		PSK:         info.PSK,
+		PortalURL:   info.PortalURL,
+		JoinFailure: joinFailure,
+		Reason:      ReasonAPClientIdle,
+		Message:     "Scan the QR code to set up Wi-Fi",
 	})
 }
 

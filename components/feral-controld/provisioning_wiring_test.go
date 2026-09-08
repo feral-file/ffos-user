@@ -53,6 +53,11 @@ func (s *spyNarrationUI) ShowSoftAPPortalQR(ssid, psk, portalURL string) {
 	s.calls = append(s.calls, "softap_portal")
 	s.softAPPortalURLs = append(s.softAPPortalURLs, portalURL)
 }
+func (s *spyNarrationUI) ShowSoftAPQRRetry(ssid, psk, portalURL, reason string) {
+	s.calls = append(s.calls, "softap_retry")
+	s.softAPPortalURLs = append(s.softAPPortalURLs, portalURL)
+	s.joinFailedReasons = append(s.joinFailedReasons, reason)
+}
 func (s *spyNarrationUI) ShowJoinFailed(reason string) {
 	s.calls = append(s.calls, "join_failed")
 	s.joinFailedReasons = append(s.joinFailedReasons, reason)
@@ -721,5 +726,27 @@ func TestSetupNotifierAttachedClientRepaintsPortalQR(t *testing.T) {
 	n.OnStateChange(provisioning.StateAPActive, provisioning.Detail{ClientAttached: true})
 	if got := strings.Join(spy.calls, ","); got != "softap,softap_portal" {
 		t.Fatalf("credential-less attached detail painted: %q", got)
+	}
+}
+
+// TestSetupNotifierRetryQRCarriesTheFailure: the AP-up announcement that
+// follows a failed join paints the join QR WITH the failure reason, and the
+// attached repaint still takes precedence when both are set.
+func TestSetupNotifierRetryQRCarriesTheFailure(t *testing.T) {
+	spy := &spyNarrationUI{}
+	n := &setupNotifier{ui: spy}
+	d := provisioning.Detail{SSID: "FF1-abc", PSK: "abc12345", PortalURL: "http://10.42.0.1",
+		JoinFailure: "Wrong Wi-Fi password. Please check it and try again.", Reason: "ap-active"}
+	n.OnStateChange(provisioning.StateAPActive, d)
+	if got := strings.Join(spy.calls, ","); got != "softap_retry" {
+		t.Fatalf("calls = %q; want softap_retry", got)
+	}
+	if got := spy.joinFailedReasons; len(got) != 1 || got[0] != d.JoinFailure {
+		t.Fatalf("reasons = %v; want the failure message", got)
+	}
+	d.ClientAttached = true
+	n.OnStateChange(provisioning.StateAPActive, d)
+	if got := strings.Join(spy.calls, ","); got != "softap_retry,softap_portal" {
+		t.Fatalf("calls = %q; the attached repaint wins over the retry line", got)
 	}
 }

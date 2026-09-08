@@ -33,7 +33,7 @@
       "stateFields": {
         "softap_qr": {
           "required": ["ssid"],
-          "optional": ["password", "portal_url", "client_attached"]
+          "optional": ["password", "portal_url", "client_attached", "reason"]
         },
         "join_failed": {
           "optional": ["reason"]
