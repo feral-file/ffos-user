@@ -23,6 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
@@ -806,6 +807,14 @@ func replayScopeResyncReconciler(refresher playlist_refresher.Refresher) func(co
 	}
 }
 
+func contentPolicyReconciler(handler commandrouter.Handler, logger *zap.Logger) func(context.Context) {
+	return func(context.Context) {
+		if err := commandrouter.SyncContentPolicy(handler); err != nil {
+			logger.Warn("content policy unavailable for current player generation", zap.Error(err))
+		}
+	}
+}
+
 func bootRecoveryRetryReconciler(executor devicectl.Executor, logger *zap.Logger) func(context.Context) {
 	return func(context.Context) {
 		devicectl.RetryBootRecovery(executor, logger)
@@ -1045,6 +1054,16 @@ func initializeApp(
 	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
 	// must never be shed by external client traffic, so it bypasses the gate.
 	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, offlineCache, kioskReplay, playlistScheduler, json, logger)
+	blockUnratedCurated := false
+	if cfg := config.Get().ContentPolicy; cfg != nil {
+		blockUnratedCurated = cfg.BlockUnratedCurated
+	}
+	policyStore, policyErr := contentpolicy.Open(constants.CONTENT_POLICY_FILE, blockUnratedCurated)
+	if policyErr != nil {
+		logger.Error("content policy store unreadable; using safe defaults until a durable update succeeds", zap.Error(policyErr))
+		policyStore = contentpolicy.Fallback(constants.CONTENT_POLICY_FILE, blockUnratedCurated)
+	}
+	commandrouter.SetContentPolicy(rawCmdHandler, policyStore, logger)
 	// Cast-time source preflight (#304): a displayPlaylist whose every item
 	// source definitively answers an HTTP error is rejected at accept time
 	// instead of being forwarded and self-reported as playing. Wired against
@@ -1075,6 +1094,7 @@ func initializeApp(
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
+	playlist_refresher.SetContentPolicy(playlistRefresher, policyStore)
 
 	// Replay saturation invalidates Fetch-interception scope exactly the way
 	// a kiosk restart does: retireOnSaturation closes the root CDP session so
@@ -1177,6 +1197,9 @@ func initializeApp(
 	}
 	session.RegisterReconciler("status-force-refresh", statusForceRefreshReconciler(poller))
 	session.RegisterReconciler("setupui-resync", setupUIResyncReconciler(setupNarrator))
+	if policyStore != nil {
+		session.RegisterReconciler("content-policy", contentPolicyReconciler(rawCmdHandler, logger))
+	}
 	// Guarded on kioskReplay, not on the refresher. This is not an
 	// optimization: ForceRefresh signals a full processPlayingPlaylist pass,
 	// which re-resolves the playlist over the network and re-sends

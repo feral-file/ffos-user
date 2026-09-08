@@ -249,6 +249,10 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
+		if commandrouter.IsContentBlocked(err) {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
 		h.logger.Error("Failed to process cast request", zap.Error(err))
 		http.Error(w, "Failed to process cast request", http.StatusInternalServerError)
 		return

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/display-protocol/dp1-go/extension/contentrating"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -347,6 +348,13 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
 	bytes, err := d.io.ReadAll(resp.Body)
 	if err != nil {
 		return Playlist{}, err
+	}
+	// This legacy ingestion path cannot yet require a signed core document, but
+	// it must validate any present content-rating extension fields before they
+	// can become policy input. The fragment validator needs no core signature;
+	// malformed-present labels are playlistInvalid, never silently unrated.
+	if err := contentrating.ValidatePlaylistFragment(bytes); err != nil {
+		return Playlist{}, fmt.Errorf("playlistInvalid: content rating extension: %w", err)
 	}
 
 	var playlist Playlist

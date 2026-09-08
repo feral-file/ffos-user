@@ -106,3 +106,14 @@ func IsSourceUnreachable(err error) bool {
 	var sue *SourceUnreachableError
 	return errors.As(err, &sue)
 }
+
+type ContentBlockedError struct{}
+
+func (*ContentBlockedError) Error() string {
+	return "contentBlocked: no playlist item is allowed by the active content policy"
+}
+
+func IsContentBlocked(err error) bool {
+	var target *ContentBlockedError
+	return errors.As(err, &target)
+}

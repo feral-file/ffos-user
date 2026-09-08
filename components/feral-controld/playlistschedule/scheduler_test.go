@@ -645,6 +645,7 @@ func TestTimerFires_RecomputesAndPushesActiveSet(t *testing.T) {
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr, _ := params["expression"].(string)
 			assert.Contains(t, expr, `"action":"now_display"`)
+			assert.Contains(t, expr, `"contentContext":"personal"`)
 			assert.NotContains(t, expr, `"refresh":true`)
 			assert.Contains(t, expr, "day23")
 			pushed <- struct{}{}
@@ -660,7 +661,7 @@ func TestTimerFires_RecomputesAndPushesActiveSet(t *testing.T) {
 		item("day22", "2026-07-22T00:00:00Z"),
 		item("day23", "2026-07-23T00:00:00Z"),
 	)
-	active := sched.Prepare(full)
+	active := sched.PrepareWithSource(full, playlistschedule.Source{ContentContext: "personal"})
 	require.Equal(t, []string{"day22"}, itemIDs(active.Items))
 
 	<-sleepStarted

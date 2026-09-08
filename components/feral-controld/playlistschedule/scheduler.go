@@ -703,7 +703,8 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 			"intent": map[string]interface{}{
 				"action": "now_display",
 			},
-			"dp1_call": playlist,
+			"dp1_call":       playlist,
+			"contentContext": source.ContentContext,
 		},
 	}
 	if source.PlaylistURL != "" {

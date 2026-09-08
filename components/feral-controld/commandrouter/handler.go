@@ -2,13 +2,16 @@ package commandrouter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
+	"github.com/display-protocol/dp1-go/extension/contentrating"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
@@ -74,6 +77,36 @@ type handler struct {
 	// would deadlock on that non-reentrant lock — re-check this before doing
 	// so, rather than trusting the sentence above.
 	recoverySession RecoverySession
+	contentPolicy   *contentpolicy.Store
+}
+
+func SetContentPolicy(h Handler, policy *contentpolicy.Store, logger *zap.Logger) {
+	setter, ok := h.(interface{ setContentPolicy(*contentpolicy.Store) })
+	if !ok {
+		logger.Warn("Command handler does not support content policy wiring")
+		return
+	}
+	setter.setContentPolicy(policy)
+}
+
+func (h *handler) setContentPolicy(policy *contentpolicy.Store) { h.contentPolicy = policy }
+
+func SyncContentPolicy(h Handler) error {
+	target, ok := h.(*handler)
+	if !ok || target.contentPolicy == nil {
+		return errors.New("content policy unavailable")
+	}
+	target.contentPolicy.Lock()
+	defer target.contentPolicy.Unlock()
+	p := target.contentPolicy.CurrentLocked()
+	result, err := target.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": p})
+	if err != nil {
+		return err
+	}
+	if !policyAckMatches(result, p) {
+		return errors.New("player content policy acknowledgement mismatch")
+	}
+	return nil
 }
 
 // RecoverySession is the narrow slice of playersession.Session the relayer's
@@ -192,9 +225,10 @@ func New(
 // is already staged has nothing to add, and once the stuck-reset watchdog
 // releases the latch a retry is accepted normally again.
 var servedDuringFactoryReset = map[commands.Type]bool{
-	commands.CMD_DEVICE_STATUS:    true,
-	commands.CMD_PROFILE:          true, // == CMD_SYS_METRICS ("deviceMetrics")
-	commands.CMD_DDC_PANEL_STATUS: true,
+	commands.CMD_DEVICE_STATUS:      true,
+	commands.CMD_PROFILE:            true, // == CMD_SYS_METRICS ("deviceMetrics")
+	commands.CMD_DDC_PANEL_STATUS:   true,
+	commands.CMD_GET_CONTENT_POLICY: true,
 }
 
 // Process processes the command and returns the result
@@ -281,6 +315,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		return h.handleOfflineCacheCommand(ctx, commandType, command.Arguments)
 	}
 
+	if commandType == commands.CMD_GET_CONTENT_POLICY || commandType == commands.CMD_SET_CONTENT_POLICY {
+		return h.handleContentPolicy(command)
+	}
+
 	if commandType.DeviceCtlCommand() {
 		// Handle device control command
 		result, err = h.executor.Execute(ctx,
@@ -331,6 +369,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// scope's own count remains the final authority (#310 review).
 		var scopeSyncEnabled int
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
+			delete(command.Arguments, "retireBlockedCurrent") // internal refresh-only signal
+			if h.contentPolicy != nil {
+				h.contentPolicy.Lock()
+				defer h.contentPolicy.Unlock()
+			}
 			status.RecordPlaybackAttempt()
 			defer func() {
 				if err != nil {
@@ -405,8 +448,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// re-resolution: it will not reflect anything
 					// published at url after it was downloaded, and (by
 					// construction, since it can only exist if it was
-					// downloaded successfully before) was already
-					// signature-verified once at that time.
+					// downloaded successfully before) already crossed the
+					// daemon's source-trust boundary. Legacy controld does not
+					// cryptographically verify playlist signatures here.
 					cachedPlaylist, cacheErr := h.loadCachedPlaylistForURL(url)
 					if cacheErr != nil {
 						return nil, err
@@ -433,6 +477,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				if err = h.json.Unmarshal(playlistBytes, &playlist); err != nil {
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
 				}
+				if err = contentrating.ValidatePlaylistFragment(playlistBytes); err != nil {
+					return nil, fmt.Errorf("playlistInvalid: content rating extension: %w", err)
+				}
 
 				if playlist.HasDynamicContent() {
 					schedulerSource = playlistschedule.Source{DynamicPlaylist: playlist}
@@ -446,6 +493,23 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			default:
 				return nil, fmt.Errorf("unknown payload type")
 			}
+
+			contentContext, contextErr := contentpolicy.NormalizeContext(command.Arguments["contentContext"])
+			if contextErr != nil {
+				return nil, contextErr
+			}
+			if h.contentPolicy != nil {
+				filtered, filterErr := h.contentPolicy.FilterLocked(&playlist.Playlist, contentContext)
+				if filterErr != nil {
+					if errors.Is(filterErr, contentpolicy.ErrContentBlocked) {
+						return nil, &ContentBlockedError{}
+					}
+					return nil, filterErr
+				}
+				playlist.Playlist = *filtered
+			}
+			command.Arguments["contentContext"] = string(contentContext)
+			schedulerSource.ContentContext = string(contentContext)
 
 			// Cast-time source preflight (#304). Without it, a cast whose
 			// every source 400s is forwarded, self-reported ok by the
@@ -797,6 +861,101 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 		return result, nil
 	}
+}
+
+func (h *handler) handleContentPolicy(command commands.Command) (interface{}, error) {
+	if h.contentPolicy == nil {
+		return policyFailure("contentPolicyUnavailable"), nil
+	}
+	h.contentPolicy.Lock()
+	defer h.contentPolicy.Unlock()
+	policy := h.contentPolicy.CurrentLocked()
+	if command.Type == commands.CMD_SET_CONTENT_POLICY {
+		if len(command.Arguments) != 2 {
+			return policyFailure("invalidRequest"), nil
+		}
+		show, okShow := command.Arguments["showMatureContent"].(bool)
+		strict, okStrict := command.Arguments["strictPersonal"].(bool)
+		if !okShow || !okStrict {
+			return policyFailure("invalidRequest"), nil
+		}
+		var err error
+		policy, err = h.contentPolicy.UpdateLocked(show, strict)
+		if err != nil {
+			return policyFailure("contentPolicyUnavailable"), nil
+		}
+		result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": policy})
+		if err != nil || !policyAckMatches(result, policy) {
+			return policyFailure(policyFailureCode(result)), nil
+		}
+		return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}, nil
+	}
+	result, err := h.sendContentPolicyCDP(commands.CMD_GET_CONTENT_POLICY, map[string]interface{}{})
+	if err != nil || !policyAckMatches(result, policy) {
+		return policyFailure(policyFailureCode(result)), nil
+	}
+	return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}, nil
+}
+
+func policyFailure(code string) interface{} {
+	return map[string]interface{}{"ok": false, "error": code}
+}
+
+func policyFailureCode(result interface{}) string {
+	if m, ok := result.(map[string]interface{}); ok {
+		if msg, ok := m["message"].(map[string]interface{}); ok {
+			m = msg
+		}
+		if code, _ := m["error"].(string); code == "unsupported" {
+			return code
+		}
+	}
+	return "contentPolicyUnavailable"
+}
+
+func (h *handler) sendContentPolicyCDP(commandType commands.Type, request map[string]interface{}) (interface{}, error) {
+	cmd := commands.Command{Type: commandType, Arguments: request}
+	b, err := cmd.JSON()
+	if err != nil {
+		return nil, err
+	}
+	genBefore := h.currentGeneration()
+	result, err := h.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+		"expression":    fmt.Sprintf("window.handleCDPRequest(%s)", b),
+		"awaitPromise":  true,
+		"returnByValue": true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if genAfter := h.currentGeneration(); genAfter != genBefore {
+		return nil, fmt.Errorf("content policy acknowledgement raced player generation change: %w", ErrGenerationRace)
+	}
+	return result, nil
+}
+
+func policyAckMatches(result interface{}, want contentpolicy.Policy) bool {
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if msg, ok := m["message"].(map[string]interface{}); ok {
+		m = msg
+	}
+	okValue, _ := m["ok"].(bool)
+	active, _ := m["active"].(bool)
+	if !okValue || !active {
+		return false
+	}
+	b, err := json.Marshal(m["contentPolicy"])
+	if err != nil {
+		return false
+	}
+	var got contentpolicy.Policy
+	if err := json.Unmarshal(b, &got); err != nil {
+		return false
+	}
+	return got == want
 }
 
 // ensureDisplayPlaylistIntent sets intent.action=now_display when the cast

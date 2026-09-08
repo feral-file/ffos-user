@@ -889,6 +889,12 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 				}
 				return m.relayer.Send(ctx, resp)
 			}
+			if commandrouter.IsContentBlocked(err) {
+				resp := relayer.Response{Type: "RPC", MessageID: payload.MessageID, Message: map[string]any{
+					"ok": false, "error": "contentBlocked", "command": commandType.String(), "message": err.Error(),
+				}}
+				return m.relayer.Send(ctx, resp)
+			}
 			m.logger.Error("Failed to process command", zap.Error(err))
 			return err
 		}

@@ -125,6 +125,8 @@ const (
 	CMD_CLEAR_PLAYLIST_ITEM_CACHE Type = "clearPlaylistItemCache"
 	CMD_CLEAR_PLAYLIST_CACHE      Type = "clearPlaylistCache"
 	CMD_GET_OFFLINE_CACHE_STATUS  Type = "getOfflineCacheStatus"
+	CMD_GET_CONTENT_POLICY        Type = "getContentPolicy"
+	CMD_SET_CONTENT_POLICY        Type = "setContentPolicy"
 )
 
 func (c Type) DeviceCtlCommand() bool {

@@ -362,6 +362,27 @@ follow the separate explicit gates above and in the migration plan.
 
 ## Error Payload Conventions
 
+### Content policy commands
+
+`getContentPolicy` accepts `{}`. `setContentPolicy` accepts exactly
+`{"showMatureContent":bool,"strictPersonal":bool}`; controllers cannot set the
+operator-owned `blockUnratedCurated` audit gate. Success is reported only after
+the daemon's atomic store is durable and the current player generation returns
+a matching awaited acknowledgement:
+
+```json
+{"ok":true,"contentPolicy":{"version":1,"showMatureContent":false,"strictPersonal":false,"blockUnratedCurated":false},"active":true}
+```
+
+Unsupported or unsynchronized players return `ok:false` with `unsupported` or
+`contentPolicyUnavailable`; they never return a false `active:true`. An optional
+`contentContext` on `displayPlaylist` is `curated` or `personal`; absence means
+`curated`. This context is outside the signed DP-1 document and is preserved by
+refresh and display-at scheduling. `retireBlockedCurrent:true` is a narrow
+daemon-to-player, refresh-only flag: it tells the player to retire a current
+item whose newly refreshed label is blocked, selecting an allowed replacement
+or blacking the display if the projection is empty. Controllers do not send it.
+
 ### D-Bus errors
 
 Use `dbus.NewError(message, []interface{}{})` for all D-Bus method errors. The first argument is a human-readable error message. The second is an empty slice (no additional error body values). Do not put structured data in the error body.

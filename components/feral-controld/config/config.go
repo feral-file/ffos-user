@@ -213,11 +213,12 @@ type Config struct {
 	// ON: the hub is the BLE-replacement recovery channel, so it must run
 	// unless an operator explicitly sets "enableHub": false. Read via
 	// HubEnabled(), never directly.
-	EnableHub    *bool               `json:"enableHub"`
-	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
-	SourceProbe  *SourceProbeConfig  `json:"sourceProbe,omitempty"`
-	OfflineCache *OfflineCacheConfig `json:"offlineCache,omitempty"`
-	Netlog       *NetlogConfig       `json:"netlog,omitempty"`
+	EnableHub     *bool                `json:"enableHub"`
+	CommandStorm  *CommandStormConfig  `json:"commandStorm,omitempty"`
+	SourceProbe   *SourceProbeConfig   `json:"sourceProbe,omitempty"`
+	OfflineCache  *OfflineCacheConfig  `json:"offlineCache,omitempty"`
+	Netlog        *NetlogConfig        `json:"netlog,omitempty"`
+	ContentPolicy *ContentPolicyConfig `json:"contentPolicy,omitempty"`
 	// GatewayUserAgent scopes the kiosk User-Agent rewrite (see the
 	// uarewrite package), carried as RAW bytes and decoded permissively by
 	// GatewayUserAgentTuning() — same treatment, and the same reason, as
@@ -252,6 +253,11 @@ type Config struct {
 	// MACInfo contains MAC addresses for all network interfaces
 	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
 	MACInfo map[string]string `json:"-"`
+}
+
+// ContentPolicyConfig contains the operator-only unrated archive audit gate.
+type ContentPolicyConfig struct {
+	BlockUnratedCurated bool `json:"blockUnratedCurated"`
 }
 
 // HubEnabled reports whether the LAN hub should run. It defaults ON: only an

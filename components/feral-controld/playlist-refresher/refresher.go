@@ -10,10 +10,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/display-protocol/dp1-go/extension/contentrating"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
@@ -118,9 +120,10 @@ type refresher struct {
 	// offlineCache backs the same cached-playlist-by-URL fallback
 	// commandrouter's resolveDisplayedPlaylist uses (see loadCachedPlaylistForURL
 	// below): also nil-able when offline caching is disabled/not wired.
-	offlineCache offlinecache.Service
-	json         wrapper.JSON
-	scheduler    playlistschedule.Scheduler
+	offlineCache  offlinecache.Service
+	json          wrapper.JSON
+	scheduler     playlistschedule.Scheduler
+	contentPolicy *contentpolicy.Store
 
 	clock  wrapper.Clock
 	logger *zap.Logger
@@ -136,6 +139,14 @@ type refresher struct {
 	// harmless: it just costs one redundant extra pass right after the
 	// next Start.
 	refreshChan chan struct{}
+}
+
+// SetContentPolicy shares the command router's authoritative store/ordering
+// lock with refresh so a policy update cannot race an old-policy projection.
+func SetContentPolicy(r Refresher, policy *contentpolicy.Store) {
+	if target, ok := r.(*refresher); ok {
+		target.contentPolicy = policy
+	}
 }
 
 func New(
@@ -327,6 +338,10 @@ func (r *refresher) logProcessFailure(err error) {
 // err is a named return so the deferred revert below can inspect the
 // pass's final outcome without a separate captured variable.
 func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
+	if r.contentPolicy != nil {
+		r.contentPolicy.Lock()
+		defer r.contentPolicy.Unlock()
+	}
 	// FetchPlayerStatus and the final Send both need a live CDP connection; bail
 	// out before them while it is absent so headless boots do not poll Chromium
 	// that intentionally is not running. The connection can still drop between
@@ -380,11 +395,13 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	// notice. So it is carried out of the source-derivation switch rather
 	// than returned from inside it.
 	var staticInline *dp1.Playlist
+	var playerStatus *status.PlayerStatus
 
 	if schedulerSource.IsZero() {
 		// No scheduler-owned source exists, so the player remains the source of
 		// truth for normal URL/dynamic refreshes.
-		playerStatus, statusErr := r.statusPoller.FetchPlayerStatus(r.context)
+		var statusErr error
+		playerStatus, statusErr = r.statusPoller.FetchPlayerStatus(r.context)
 		if statusErr != nil {
 			return statusErr
 		}
@@ -400,9 +417,9 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 
 		switch {
 		case playerStatus.PlaylistURL != nil:
-			schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL}
+			schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL, ContentContext: playerStatus.ContentContext}
 		case playerStatus.Playlist != nil && playerStatus.Playlist.HasDynamicContent():
-			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist}
+			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist, ContentContext: playerStatus.ContentContext}
 		case playerStatus.Playlist != nil:
 			// Static inline player status only contains the filtered active set and
 			// no refreshable source identity, so it cannot rebuild future items.
@@ -457,6 +474,35 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		return r.handleRefreshError(err, kind, schedulerSource)
 	}
 
+	contentContext, contextErr := contentpolicy.NormalizeContext(schedulerSource.ContentContext)
+	if contextErr != nil {
+		return contextErr
+	}
+	retireBlockedCurrent := false
+	if r.contentPolicy != nil {
+		var blocked bool
+		projected, blocked, projectErr := r.contentPolicy.ProjectLocked(&playlist.Playlist, contentContext)
+		if projectErr != nil {
+			return projectErr
+		}
+		// A removed item may be the one currently on screen. The player receives
+		// this refresh-only flag only when the fresh copy of that item is blocked,
+		// so it retires immediately instead of retaining a stale formerly-unrated frame.
+		if len(projected.Items) != len(playlist.Items) {
+			if playerStatus == nil {
+				// Scheduler-owned refreshes normally skip status. Sample it only
+				// when filtering changed the set, to distinguish the current item
+				// from some other blocked item without adding cost to ordinary ticks.
+				playerStatus, _ = r.statusPoller.FetchPlayerStatus(r.context)
+			}
+			retireBlockedCurrent = currentBlockedByRefresh(playerStatus, playlist, r.contentPolicy.CurrentLocked(), contentContext)
+		}
+		playlist.Playlist = *projected
+		if blocked {
+			r.logger.Warn("Playlist refresh is all blocked; retiring current content")
+		}
+	}
+
 	// Re-sync offline-cache replay scope before the re-send: this is the
 	// periodic path that keeps interception coherent while a playlist keeps
 	// looping. Best-effort — never let a sync failure block the actual
@@ -486,8 +532,12 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 
 	// Send playlist to CDP
 	args := map[string]interface{}{
-		"dp1_call": playlist,
-		"refresh":  true,
+		"dp1_call":       playlist,
+		"refresh":        true,
+		"contentContext": string(contentContext),
+	}
+	if retireBlockedCurrent {
+		args["retireBlockedCurrent"] = true
 	}
 	command := commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -519,6 +569,20 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				return
 			}
 			if len(playlist.Items) == 0 {
+				if retireBlockedCurrent {
+					command.Arguments["dp1_call"] = playlist
+					result, sendCDPErr := r.sendCDPRequest(command)
+					sendErr = sendCDPErr
+					if sendErr == nil && !playerresponse.OK(result) {
+						sendErr = errPlayerRejectedRefresh
+					}
+					if sendErr != nil {
+						r.scheduler.Restore(schedulerSnapshot)
+					} else {
+						r.scheduler.Commit()
+					}
+					return
+				}
 				// Keep the future schedule armed, but do not send an empty list:
 				// the player rejects it and cannot improve the current artwork.
 				r.scheduler.Commit()
@@ -540,7 +604,11 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				"intent": map[string]interface{}{
 					"action": "now_display",
 				},
-				"dp1_call": playlist,
+				"dp1_call":       playlist,
+				"contentContext": string(contentContext),
+			}
+			if retireBlockedCurrent {
+				command.Arguments["retireBlockedCurrent"] = true
 			}
 			if schedulerSource.PlaylistURL != "" {
 				command.Arguments["playlistUrl"] = schedulerSource.PlaylistURL
@@ -574,6 +642,32 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	// observes it.
 	err = sendErr
 	return err
+}
+
+func currentBlockedByRefresh(playerStatus *status.PlayerStatus, fresh *dp1.Playlist, policy contentpolicy.Policy, origin contentpolicy.Context) bool {
+	// Unknown current identity fails safe: the refresh changed the allowed set,
+	// so remounting is preferable to retaining a newly mature old frame.
+	if playerStatus == nil || playerStatus.Index == nil || *playerStatus.Index < 0 {
+		return true
+	}
+	items := playerStatus.Items
+	if items == nil && playerStatus.Playlist != nil {
+		items = &playerStatus.Playlist.Items
+	}
+	if items == nil || *playerStatus.Index >= len(*items) {
+		return true
+	}
+	current := (*items)[*playerStatus.Index]
+	for _, item := range fresh.Items {
+		same := current.ID != "" && item.ID == current.ID
+		if !same && current.ID == "" {
+			same = item.Source == current.Source
+		}
+		if same {
+			return !policy.Allows(item, origin)
+		}
+	}
+	return false
 }
 
 // syncReplayScopeLocked points offline-cache replay at playlist's items and
@@ -795,7 +889,7 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 
 // loadCachedPlaylistForURL mirrors commandrouter's handler.loadCachedPlaylistForURL
 // (see its doc): the raw body Service.CachedPlaylistForURL returns was already
-// fully resolved and signature-verified once, back when downloadPlaylist
+// fully resolved and accepted by the legacy source-trust boundary when downloadPlaylist
 // originally saved it, so unmarshaling it here needs no further DP-1
 // processing. Returns an error whenever there is nothing to fall back to
 // (offline caching disabled, url was never downloaded, or the downloaded
@@ -808,6 +902,9 @@ func (r *refresher) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) 
 	raw, err := r.offlineCache.CachedPlaylistForURL(url)
 	if err != nil {
 		return nil, fmt.Errorf("offline cache: no cached playlist for %s: %w", url, err)
+	}
+	if err := contentrating.ValidatePlaylistFragment(raw); err != nil {
+		return nil, fmt.Errorf("playlistInvalid: offline cache content rating for %s: %w", url, err)
 	}
 	var playlist *dp1.Playlist
 	if err := r.json.Unmarshal(raw, &playlist); err != nil {
