@@ -278,6 +278,16 @@ func (s *Server) withLimits(next http.Handler) http.Handler {
 		if s.cfg.TrafficObserved != nil && r.Header.Get(watcherHeader) == "" {
 			s.cfg.TrafficObserved(ClassifyClient(r.UserAgent()))
 		}
+		// One access line per request. The portal sees a handful of requests
+		// per setup (the OS probe, the page, its assets, the submission), and
+		// which of them arrived — and with which User-Agent — is the only
+		// evidence for why the attached-phase repaint did or did not fire
+		// (feral-file#3515 field run 2026-09-09: the sheet opened but no
+		// Apple probe reached the portal). Host and query are omitted.
+		s.logger.Info("portal: request",
+			zap.String("method", r.Method), zap.String("path", r.URL.Path),
+			zap.String("remote_addr", r.RemoteAddr), zap.String("user_agent", r.UserAgent()),
+			zap.Bool("watcher", r.Header.Get(watcherHeader) != ""))
 		select {
 		case s.reqSlots <- struct{}{}:
 			defer func() { <-s.reqSlots }()
