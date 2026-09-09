@@ -30,7 +30,7 @@ var errNoAPInterface = errors.New("no wireless interface in AP mode")
 // stationQuery is one open kernel session: count runs the station dump,
 // close releases the socket — and, called from another goroutine, unblocks
 // a count that is stuck in the kernel. The seam exists so the timeout and
-// single-flight behaviour below can be tested without a radio.
+// single-flight behavior below can be tested without a radio.
 type stationQuery interface {
 	count() (int, error)
 	close() error

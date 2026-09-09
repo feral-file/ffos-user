@@ -116,7 +116,7 @@ func TestStationQueryBusyReportsUnknownWithoutOpening(t *testing.T) {
 	assert.Equal(t, int32(1), opened.Load(), "the busy call opened nothing")
 
 	cancel()
-	assert.False(t, <-first, "the cancelled first query is unknown too")
+	assert.False(t, <-first, "the canceled first query is unknown too")
 	require.Eventually(t, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
