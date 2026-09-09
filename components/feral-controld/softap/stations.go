@@ -44,7 +44,7 @@ func NewNL80211StationCounter(logger *zap.Logger) StationCounter {
 	return &nl80211Stations{logger: logger}
 }
 
-// AttachedStations queries the kernel on its own goroutine and honours ctx:
+// AttachedStations queries the kernel on its own goroutine and honors ctx:
 // the netlink round trip is local and sub-millisecond, but the machine's
 // loop must never inherit a stall from it, so a query that outlives ctx is
 // reported unknown and left to finish on its own.
@@ -83,7 +83,9 @@ func countAPStations() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer c.Close()
+	// A close failure on a read-only socket changes nothing about the count
+	// already taken; log-free by design, the next poll opens a fresh one.
+	defer func() { _ = c.Close() }()
 	ifis, err := c.Interfaces()
 	if err != nil {
 		return 0, err
