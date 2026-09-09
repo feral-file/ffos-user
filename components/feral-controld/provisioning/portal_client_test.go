@@ -576,3 +576,67 @@ func TestStationWatcherStartsOncePerRaiseAndStops(t *testing.T) {
 		return h.m.apStationWatchGen == 0
 	}, 10*time.Second, 50*time.Millisecond, "the goroutine exits once the raise no longer wants it")
 }
+
+// TestLateAddressAttachStartsAFreshIdleWindow: an attach that goes pending
+// because the address is unknown stamps lastPortalTraffic at the phone's ONE
+// request; the address can arrive minutes later. The paint must then get an
+// idle window of its own — measuring the silence from the original request
+// would let the same tick that finally painted the portal-address QR replace
+// it with the join QR.
+//
+// Timing (attachedIdleReset = 3m, one tick = 15s, so ticks = 12+1 = 13):
+//
+//	t0        the Apple request: lastPortalTraffic = t0, attach goes pending
+//	t0+165s   11 ticks (ticks-2), still no address: silence 165s < 180s, quiet
+//	t0+180s   the address appears; this tick's retry paints the attached
+//	          phase. Silence since t0 is exactly 180s — the old code's idle
+//	          re-arm would fire on this very tick — but the paint is now.
+//	t0+345s   11 more ticks: 165s since the paint, still no re-arm
+//	t0+360s   one more: 180s since the paint, exactly one idle repaint
+func TestLateAddressAttachStartsAFreshIdleWindow(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.ap.info.PortalURL = "" // NM has not published the hotspot address yet
+	h.wifi.setProfile(false) // unbounded out-of-box raise: no blink to rescue it
+	h.m.onConnectivity(ctx, false, false)
+	require.Equal(t, StateAPActive, h.m.State())
+	require.NotEmpty(t, h.portals)
+
+	traffic := h.portals[len(h.portals)-1].cfg.TrafficObserved
+	traffic(portal.ClientApple)
+	require.Equal(t, 1, drainPortalClientEvents(t, h))
+	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
+	require.True(t, h.m.apAttachPending, "no address: the attach waits for the tick")
+	require.Equal(t, 0, attachedNotifies(h))
+
+	// Stop two ticks short of the threshold so the retry's tick lands exactly
+	// on it: the silence since the phone's request is then >= attachedIdleReset.
+	ticks := int(attachedIdleReset/(15*time.Second)) + 1
+	h.tickN(ctx, ticks-2)
+	require.Equal(t, 0, attachedNotifies(h), "still no address to paint")
+	require.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientIdle))
+
+	h.ap.info.PortalURL = "http://10.42.0.1"
+	h.tick(ctx)
+	require.Equal(t, 1, attachedNotifies(h), "the tick's retry painted the attached phase")
+	assert.False(t, h.m.apAttachPending)
+	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientIdle),
+		"the paint starts its own idle window; stale traffic must not undo it")
+	all := h.notifier.details()
+	assert.Equal(t, "http://10.42.0.1", all[len(all)-1].Detail.PortalURL)
+
+	// The window runs from the paint, not from the phone's request.
+	h.tickN(ctx, ticks-2)
+	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientIdle),
+		"165s of silence since the paint is inside the window")
+
+	h.tick(ctx)
+	assert.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientIdle),
+		"180s since the paint: one reverse repaint")
+	assert.False(t, h.m.apClientSeen)
+	assert.False(t, h.m.apAttachPending)
+
+	h.tickN(ctx, 4)
+	assert.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientIdle), "once")
+}

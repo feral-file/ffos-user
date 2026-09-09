@@ -559,6 +559,17 @@ type Machine struct {
 	// succeeds or this raise ends. Cleared with the latch on every raise and
 	// teardown.
 	apAttachPending bool
+	// apAttachPaintedAt records when the attached phase (the portal-address
+	// QR) was last painted for this raise, so the idle re-arm measures
+	// silence from the LATER of the last portal traffic and that paint. A
+	// pending attach whose address lookup only succeeds after
+	// attachedIdleReset of silence would otherwise have its fresh repaint
+	// undone by the idle re-arm on the very same tick: the first Apple
+	// request stamps lastPortalTraffic, the address arrives minutes later,
+	// and the join QR would replace the portal-address QR the instant it
+	// went up (review bot on 1d98968). Zero when the attached phase is not
+	// painted.
+	apAttachPaintedAt time.Time
 	// apRaiseGen counts latch re-arms (every actual raise). evPortalClient
 	// carries the generation it was queued under; the loop's select can
 	// let a tick's blink tear the AP down and re-raise it before a queued
@@ -1045,6 +1056,7 @@ func (m *Machine) loop(ctx context.Context) {
 	m.apInfo = softap.Info{}
 	m.apClientSeen = false
 	m.apAttachPending = false
+	m.apAttachPaintedAt = time.Time{}
 	m.resetStationPollLocked()
 	m.mu.Unlock()
 	if leftoverSrv != nil {
@@ -2481,6 +2493,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	m.mu.Lock()
 	m.apClientSeen = false
 	m.apAttachPending = false
+	m.apAttachPaintedAt = time.Time{}
 	m.resetStationPollLocked()
 	m.apRaiseGen++
 	raiseGen := m.apRaiseGen
@@ -2639,6 +2652,7 @@ func (m *Machine) applyPortalClientAttached(ctx context.Context, gen uint64) {
 	}
 	m.mu.Lock()
 	m.apAttachPending = false
+	m.apAttachPaintedAt = m.clock.Now()
 	m.mu.Unlock()
 	m.logger.Info("provisioning: first client attached to the setup AP", zap.String("ssid", info.SSID))
 	m.notify(StateAPActive, Detail{
@@ -2659,7 +2673,11 @@ func (m *Machine) applyPortalClientAttached(ctx context.Context, gen uint64) {
 // repaint the join QR for the next person at the screen. Generous rather
 // than tight: flipping back while someone is still reading the form costs
 // nothing (they are already on the portal), while flipping early on a slow
-// typist just repaints — the next probe re-attaches.
+// typist just repaints — the next probe re-attaches. The silence is measured
+// from the LATER of the last portal traffic and the attached-phase paint
+// (apAttachPaintedAt), so a repaint always gets a full window of its own: an
+// attach whose address only arrives late must not be undone by traffic that
+// was already stale when it was painted.
 const attachedIdleReset = 3 * time.Minute
 
 // retryPendingAttach runs every tick on the loop goroutine: an Apple client
@@ -2680,13 +2698,21 @@ func (m *Machine) retryPendingAttach(ctx context.Context) {
 // rearmAttachedClientIfIdle runs every tick on the loop goroutine: once the
 // attached phase has been painted and the portal has been silent for
 // attachedIdleReset, re-arm the latch and repaint the join QR (a plain
-// ap-active announcement, same credentials). Ticks only, never a request
-// goroutine — the Notifier contract is single-goroutine.
+// ap-active announcement, same credentials). The silence is measured from the
+// later of the last portal traffic and the attached-phase paint
+// (apAttachPaintedAt), so a repaint whose address arrived late keeps the
+// portal-address QR for a full window instead of being undone by the same
+// tick that painted it. Ticks only, never a request goroutine — the Notifier
+// contract is single-goroutine.
 func (m *Machine) rearmAttachedClientIfIdle() {
 	m.mu.Lock()
+	ref := m.lastPortalTraffic
+	if m.apAttachPaintedAt.After(ref) {
+		ref = m.apAttachPaintedAt
+	}
 	idle := m.apUp && m.state == StateAPActive && m.apClientSeen &&
-		!m.lastPortalTraffic.IsZero() &&
-		m.clock.Now().Sub(m.lastPortalTraffic) >= attachedIdleReset
+		!ref.IsZero() &&
+		m.clock.Now().Sub(ref) >= attachedIdleReset
 	info := m.apInfo
 	joinFailure := m.lastJoinFailureLocked()
 	if idle {
@@ -2696,6 +2722,7 @@ func (m *Machine) rearmAttachedClientIfIdle() {
 		// it — the tick retry is bounded by the latch it belongs to.
 		m.apClientSeen = false
 		m.apAttachPending = false
+		m.apAttachPaintedAt = time.Time{}
 	}
 	m.mu.Unlock()
 	if !idle || info.SSID == "" {
@@ -2824,6 +2851,7 @@ func (m *Machine) applyStationPoll(gen uint64, n int, known bool) {
 	if left {
 		m.apClientSeen = false
 		m.apAttachPending = false
+		m.apAttachPaintedAt = time.Time{}
 		m.resetStationPollLocked()
 	}
 	info := m.apInfo
@@ -2921,6 +2949,7 @@ func (m *Machine) ensureAPDown(ctx context.Context) bool {
 	m.apInfo = softap.Info{}
 	m.apClientSeen = false
 	m.apAttachPending = false
+	m.apAttachPaintedAt = time.Time{}
 	m.resetStationPollLocked()
 	m.apDownPending = !downOK
 	m.mu.Unlock()
