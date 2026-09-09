@@ -91,6 +91,11 @@ func (c *dbusConnectivity) Subscribe(fn func(online bool)) (unsubscribe func()) 
 // setupNarrationUI is the slice of setupui.Service the provisioning notifier
 // drives. Consumer-owned so main_test.go can spy on the hide-guard behavior
 // without a real CDP-backed service. *setupui.Service satisfies it.
+// phoneLeftLine is the join-QR subtitle after the attached phone left the
+// setup hotspot (provisioning.ReasonAPClientLeft): the screen swapped to the
+// portal-address QR for that phone and now shows the join code again.
+const phoneLeftLine = "Your phone left the setup Wi-Fi. Scan the code to join again."
+
 type setupNarrationUI interface {
 	ShowScanning()
 	ShowSoftAPQR(ssid, psk, portalURL string)
@@ -331,6 +336,13 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 			// what the NEXT raise announcement paints again.
 			n.narrating = true
 			n.ui.ShowSoftAPPortalQR(d.SSID, d.PSK, d.PortalURL)
+		case d.PSK != "" && d.ClientLeft:
+			// The attached phone dropped off the hotspot: the join QR is
+			// back, and the line says why the code changed under a user
+			// who may still be looking at the screen. Wins over a still-
+			// current JoinFailure because it is the more recent event.
+			n.narrating = true
+			n.ui.ShowSoftAPQRRetry(d.SSID, d.PSK, d.PortalURL, phoneLeftLine)
 		case d.PSK != "" && d.JoinFailure != "":
 			// The AP is back after a failed join: the join QR again, with
 			// the failure reason on it — the join_failed panel that preceded

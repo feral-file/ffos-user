@@ -106,6 +106,28 @@ func (a *fakeAP) PortalURL(context.Context) string {
 	return a.info.PortalURL
 }
 
+// fakeStations scripts the associated-station count the attached phase
+// polls. The harness never runs the loop, so the poll goroutine never starts;
+// tests feed readings straight into applyStationPoll. Guarded anyway because
+// a loop-running test could start the goroutine.
+type fakeStations struct {
+	mu sync.Mutex
+	n  int
+	ok bool
+}
+
+func (f *fakeStations) set(n int, ok bool) {
+	f.mu.Lock()
+	f.n, f.ok = n, ok
+	f.mu.Unlock()
+}
+
+func (f *fakeStations) AttachedStations(context.Context) (int, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n, f.ok
+}
+
 type fakeWifi struct {
 	rec        *recorder
 	mu         sync.Mutex
@@ -435,6 +457,7 @@ type harness struct {
 	conn     *fakeConn
 	clk      *fakeClock
 	notifier *fakeNotifier
+	stations *fakeStations
 	portals  []*fakePortal
 	// portalStartErr, when set, makes every NEW portal's Start fail with it.
 	portalStartErr error
@@ -452,6 +475,7 @@ func newHarness(t *testing.T) *harness {
 		conn:     &fakeConn{},
 		clk:      newFakeClock(),
 		notifier: &fakeNotifier{rec: rec},
+		stations: &fakeStations{n: 1, ok: true},
 	}
 	h.m = New(Config{
 		AP:            h.ap,
@@ -460,6 +484,7 @@ func newHarness(t *testing.T) *harness {
 		Clock:         h.clk,
 		Logger:        zap.NewNop(),
 		Notifier:      h.notifier,
+		Stations:      h.stations,
 		OfflineWindow: 5 * time.Minute,
 		CheckInterval: 15 * time.Second,
 		PortalAddr:    "127.0.0.1:0",

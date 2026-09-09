@@ -402,6 +402,10 @@ func (m *Machine) observePortalTraffic(gen uint64, kind portal.ClientKind) {
 	first := kind == portal.ClientApple && !m.apClientSeen
 	if first {
 		m.apClientSeen = true
+		// A fresh attach starts the station poll from zero evidence: a
+		// re-attach after the idle re-arm must not inherit the streak that
+		// preceded it.
+		m.resetStationPollLocked()
 	}
 	m.mu.Unlock()
 	if !first {

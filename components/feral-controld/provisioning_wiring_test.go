@@ -729,6 +729,35 @@ func TestSetupNotifierAttachedClientRepaintsPortalQR(t *testing.T) {
 	}
 }
 
+// TestSetupNotifierClientLeftPaintsTheJoinQRWithTheLine: the repaint after
+// the attached phone dropped off the hotspot paints the join QR with the
+// phone-left line, and that line wins over a still-current failure reason
+// because it is the more recent event; the attached repaint still wins over
+// both.
+func TestSetupNotifierClientLeftPaintsTheJoinQRWithTheLine(t *testing.T) {
+	spy := &spyNarrationUI{}
+	n := &setupNotifier{ui: spy}
+	d := provisioning.Detail{SSID: "FF1-abc", PSK: "abc12345", PortalURL: "http://10.42.0.1",
+		ClientLeft: true, Reason: provisioning.ReasonAPClientLeft}
+	n.OnStateChange(provisioning.StateAPActive, d)
+	if got := strings.Join(spy.calls, ","); got != "softap_retry" {
+		t.Fatalf("calls = %q; want softap_retry", got)
+	}
+	if got := spy.joinFailedReasons; len(got) != 1 || got[0] != phoneLeftLine {
+		t.Fatalf("reasons = %v; want the phone-left line", got)
+	}
+	d.JoinFailure = "Wrong Wi-Fi password. Please check it and try again."
+	n.OnStateChange(provisioning.StateAPActive, d)
+	if got := spy.joinFailedReasons; len(got) != 2 || got[1] != phoneLeftLine {
+		t.Fatalf("reasons = %v; the phone-left line wins over a stale failure", got)
+	}
+	d.ClientAttached = true
+	n.OnStateChange(provisioning.StateAPActive, d)
+	if got := strings.Join(spy.calls, ","); got != "softap_retry,softap_retry,softap_portal" {
+		t.Fatalf("calls = %q; the attached repaint wins over the phone-left line", got)
+	}
+}
+
 // TestSetupNotifierRetryQRCarriesTheFailure: the AP-up announcement that
 // follows a failed join paints the join QR WITH the failure reason, and the
 // attached repaint still takes precedence when both are set.

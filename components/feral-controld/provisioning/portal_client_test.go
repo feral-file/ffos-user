@@ -394,3 +394,162 @@ func TestReRaiseAfterFailedJoinCarriesTheReason(t *testing.T) {
 	require.NotNil(t, reraise, "the re-raise announces the AP with credentials")
 	assert.Equal(t, "Wrong Wi-Fi password. Please check it and try again.", reraise.JoinFailure)
 }
+
+// attachAppleClient raises the out-of-box AP on a link harness, lands the
+// raise's first Apple request, and runs the loop-side repaint — the state
+// every station-poll test starts from.
+func attachAppleClient(ctx context.Context, t *testing.T) (*harness, func(portal.ClientKind)) {
+	t.Helper()
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.ap.info.PortalURL = "http://10.42.0.1"
+	h.wifi.setProfile(false)
+	h.m.onConnectivity(ctx, false, false)
+	require.Equal(t, StateAPActive, h.m.State())
+	require.NotEmpty(t, h.portals)
+	traffic := h.portals[len(h.portals)-1].cfg.TrafficObserved
+	traffic(portal.ClientApple)
+	require.Equal(t, 1, drainPortalClientEvents(t, h))
+	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
+	require.Equal(t, 1, attachedNotifies(h))
+	return h, traffic
+}
+
+// TestStationPollSwapsBackWhenThePhoneLeaves: with the portal-address QR up,
+// stationLeftPolls consecutive empty station reads put the join QR back
+// (ReasonAPClientLeft, ClientLeft set, credentials carried), hand the latch
+// back so the next first request re-attaches, and a single empty read is not
+// enough.
+func TestStationPollSwapsBackWhenThePhoneLeaves(t *testing.T) {
+	ctx := context.Background()
+	h, traffic := attachAppleClient(ctx, t)
+	gen := h.m.apRaiseGen
+	require.True(t, h.m.stationWatchWantedLocked(), "an attached Apple client wants the poll")
+
+	// Phone present: nothing happens, however long.
+	for i := 0; i < 5; i++ {
+		h.m.applyStationPoll(gen, 1, true)
+	}
+	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
+
+	// One empty read is a transient, not a verdict.
+	h.m.applyStationPoll(gen, 0, true)
+	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
+	// A station reappearing resets the streak.
+	h.m.applyStationPoll(gen, 1, true)
+	h.m.applyStationPoll(gen, 0, true)
+	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
+
+	// The second consecutive empty read is the verdict.
+	h.m.applyStationPoll(gen, 0, true)
+	require.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientLeft), "one swap-back after stationLeftPolls empty reads")
+	all := h.notifier.details()
+	last := all[len(all)-1]
+	assert.True(t, last.Detail.ClientLeft)
+	assert.False(t, last.Detail.ClientAttached)
+	assert.Equal(t, "abc12345", last.Detail.PSK, "the join QR repaint carries the credentials")
+	assert.Equal(t, "http://10.42.0.1", last.Detail.PortalURL)
+	assert.Equal(t, StateAPActive, h.m.State())
+	assert.False(t, h.m.stationWatchWantedLocked(), "the latch is handed back, so the poll stops")
+
+	// Further readings after the latch cleared are dropped.
+	h.m.applyStationPoll(gen, 0, true)
+	assert.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientLeft))
+
+	// A returning phone re-attaches as a first request, from a clean streak.
+	traffic(portal.ClientApple)
+	assert.Equal(t, 1, drainPortalClientEvents(t, h), "the swap-back re-armed the latch")
+	assert.Equal(t, 0, h.m.apStationZero)
+}
+
+// TestStationPollGivesUpOnUnknownReads: stationUnknownGiveUp consecutive
+// unknown readings switch the poll off for the raise without repainting;
+// the portal-silence re-arm still brings the join QR back, and the next
+// raise polls again.
+func TestStationPollGivesUpOnUnknownReads(t *testing.T) {
+	ctx := context.Background()
+	h, _ := attachAppleClient(ctx, t)
+	gen := h.m.apRaiseGen
+	for i := 0; i < stationUnknownGiveUp-1; i++ {
+		h.m.applyStationPoll(gen, 0, false)
+	}
+	assert.True(t, h.m.stationWatchWantedLocked(), "still polling one short of the give-up")
+	// A known read in between resets the unknown streak.
+	h.m.applyStationPoll(gen, 1, true)
+	assert.Equal(t, 0, h.m.apStationUnknown)
+	for i := 0; i < stationUnknownGiveUp; i++ {
+		h.m.applyStationPoll(gen, 0, false)
+	}
+	assert.False(t, h.m.stationWatchWantedLocked(), "the poll is off for this raise")
+	assert.True(t, h.m.apClientSeen, "giving up keeps the attached phase painted")
+	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
+	// Empty reads after the give-up are dropped, not counted.
+	h.m.applyStationPoll(gen, 0, true)
+	h.m.applyStationPoll(gen, 0, true)
+	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
+
+	// The silence backstop is untouched.
+	ticks := int(attachedIdleReset/(15*time.Second)) + 1
+	h.tickN(ctx, ticks)
+	assert.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientIdle))
+}
+
+// TestStationPollIgnoresOtherRaisesAndTornDownAPs: a reading from a
+// previous raise's goroutine, or one landing after the AP went down, must
+// not repaint anything or touch the counters.
+func TestStationPollIgnoresOtherRaisesAndTornDownAPs(t *testing.T) {
+	ctx := context.Background()
+	h, _ := attachAppleClient(ctx, t)
+	gen := h.m.apRaiseGen
+	h.m.applyStationPoll(gen, 0, true)
+	require.Equal(t, 1, h.m.apStationZero)
+
+	// Stale generation: dropped.
+	h.m.applyStationPoll(gen-1, 0, true)
+	assert.Equal(t, 1, h.m.apStationZero)
+	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
+
+	// AP torn down under the poll: the counters reset with the latch and a
+	// late reading is dropped.
+	h.m.ensureAPDown(ctx)
+	assert.Equal(t, 0, h.m.apStationZero)
+	assert.False(t, h.m.stationWatchWantedLocked())
+	h.m.applyStationPoll(gen, 0, true)
+	h.m.applyStationPoll(gen, 0, true)
+	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
+}
+
+// TestStationWatcherStartsOncePerRaiseAndStops: ensureStationWatcher starts
+// one goroutine for the attached raise, is idempotent while it runs, and the
+// goroutine exits — clearing its generation — once the latch is handed back.
+// The counter is scripted empty, so the goroutine's own readings drive the
+// swap-back end to end through the event queue.
+func TestStationWatcherStartsOncePerRaiseAndStops(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h, _ := attachAppleClient(ctx, t)
+	gen := h.m.apRaiseGen
+	h.stations.set(0, true)
+
+	h.m.ensureStationWatcher(ctx)
+	h.m.ensureStationWatcher(ctx)
+	assert.Equal(t, gen, h.m.apStationWatchGen, "one watcher, bound to this raise")
+
+	// Drain the goroutine's readings into the loop-side handler until the
+	// swap-back lands (2 s cadence, so a few seconds at most).
+	deadline := time.After(15 * time.Second)
+	for countReason(h, StateAPActive, ReasonAPClientLeft) == 0 {
+		select {
+		case ev := <-h.m.events:
+			require.Equal(t, evStationPoll, ev.kind)
+			h.m.applyStationPoll(ev.gen, ev.stations, ev.known)
+		case <-deadline:
+			t.Fatal("the watcher's readings never produced the swap-back")
+		}
+	}
+	require.Eventually(t, func() bool {
+		h.m.mu.Lock()
+		defer h.m.mu.Unlock()
+		return h.m.apStationWatchGen == 0
+	}, 10*time.Second, 50*time.Millisecond, "the goroutine exits once the raise no longer wants it")
+}

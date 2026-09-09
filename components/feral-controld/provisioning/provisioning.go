@@ -166,6 +166,13 @@ const (
 	// seen no portal traffic for attachedIdleReset, so the join QR is
 	// painted again (rearmAttachedClientIfIdle). Likewise not a transition.
 	ReasonAPClientIdle = "ap-client-idle"
+	// ReasonAPClientLeft marks the other reverse repaint: the phone that
+	// attached is no longer associated with the hotspot (station poll,
+	// applyStationPoll), so the join QR is painted again within seconds —
+	// the case a phone that joined, probed, and dropped the network would
+	// otherwise leave on the portal-address QR until the silence backstop.
+	// Likewise not a transition.
+	ReasonAPClientLeft = "ap-client-left"
 )
 
 // Detail is the side-channel context published alongside a State change: enough
@@ -202,6 +209,12 @@ type Detail struct {
 	// visible on the device (field run 2026-09-07). Empty when the last
 	// outcome is not a failure.
 	JoinFailure string
+	// ClientLeft is true ONLY on the ReasonAPClientLeft repaint: the phone
+	// that attached has left the hotspot, so the screen can say why the join
+	// QR is back. Carried separately from JoinFailure because a failure line
+	// can still be current from the raise's own history; the notifier lets
+	// the more recent event win.
+	ClientLeft bool
 	// Reason is a short machine-readable cause (e.g. "auth-failure",
 	// "sustained-offline", "unprovisioned").
 	Reason string
@@ -354,6 +367,13 @@ type Config struct {
 
 	// Notifier is optional.
 	Notifier Notifier
+
+	// Stations is optional: the kernel's view of who is associated with the
+	// setup hotspot, polled while the screen shows the portal-address QR so a
+	// phone that left hands the screen back to the join QR within seconds
+	// (applyStationPoll). Nil disables the poll; the portal-silence re-arm
+	// (attachedIdleReset) then remains the only way back.
+	Stations softap.StationCounter
 
 	// TransitionObserver, when set, is told every machine state/reason
 	// change, INCLUDING the silent legs the Notifier's change-dedupe hides —
@@ -545,6 +565,28 @@ type Machine struct {
 	// event drains, and a stale event must not repaint the fresh raise —
 	// whose hotspot no phone has joined yet — with the portal-address QR.
 	apRaiseGen uint64
+	// stations answers "is anyone still associated" for the attached phase;
+	// nil when the wiring provides none (see Config.Stations).
+	stations softap.StationCounter
+	// apStationWatchGen is the raise generation the running station-poll
+	// goroutine belongs to (0: none running). The loop starts one per
+	// attached raise (ensureStationWatcher) and the goroutine exits on its
+	// own once its raise no longer wants it; a stale goroutine that has not
+	// noticed yet must not be mistaken for the new raise's watcher, hence
+	// the generation rather than a bool.
+	apStationWatchGen uint64
+	// apStationZero counts consecutive polls that saw NO station on the AP
+	// while the attached phase is painted; stationLeftPolls of them are the
+	// "phone left" verdict (one empty read can be a transient). Reset by any
+	// poll that sees a station, at attach, and with the latch.
+	apStationZero int
+	// apStationUnknown counts consecutive polls whose count was unknown
+	// (query failed, no AP interface, timeout); stationUnknownGiveUp of them
+	// switch the poll off for this raise (apStationWatchOff) so a broken
+	// query does not burn a goroutine for hours — the silence backstop still
+	// applies. Reset by any known read, at attach, and with the latch.
+	apStationUnknown  int
+	apStationWatchOff bool
 	// apDownPending records a failed softap.Down: the persisted hotspot profile
 	// may still exist (possibly still broadcasting) even though apUp is false.
 	// ensureAPDown retries the deletion on every reconcile until it succeeds,
@@ -811,6 +853,11 @@ const (
 	// Notifier contract is single-goroutine — the wiring notifier's
 	// narration ownership flag is unsynchronized by design.
 	evPortalClient
+	// evStationPoll: one reading of the AP's station count from the
+	// station-poll goroutine (watchAttachedStations). Bookkeeping and the
+	// repaint it may cause run on the loop goroutine for the same
+	// single-goroutine Notifier reason as evPortalClient.
+	evStationPoll
 )
 
 type event struct {
@@ -824,6 +871,10 @@ type event struct {
 	// the loop can drop one that outlived its raise (see
 	// applyPortalClientAttached).
 	gen uint64
+	// stations/known carry an evStationPoll reading: the associated-station
+	// count and whether it was known at all.
+	stations int
+	known    bool
 }
 
 // New builds a Machine, applying defaults.
@@ -866,6 +917,7 @@ func New(cfg Config) *Machine {
 		clock:              cfg.Clock,
 		logger:             logger,
 		notifier:           cfg.Notifier,
+		stations:           cfg.Stations,
 		transitionObserver: cfg.TransitionObserver,
 		activeLink:         cfg.ActiveLink,
 		activeLinkDetail:   cfg.ActiveLinkDetail,
@@ -990,6 +1042,7 @@ func (m *Machine) loop(ctx context.Context) {
 	m.apInfo = softap.Info{}
 	m.apClientSeen = false
 	m.apAttachPending = false
+	m.resetStationPollLocked()
 	m.mu.Unlock()
 	if leftoverSrv != nil {
 		stopCtx, cancel := context.WithTimeout(context.Background(), portalStopTimeout)
@@ -1080,10 +1133,17 @@ func (m *Machine) loop(ctx context.Context) {
 				m.applyUserSetup(ctx)
 			case evPortalClient:
 				m.applyPortalClientAttached(ctx, ev.gen)
+			case evStationPoll:
+				m.applyStationPoll(ev.gen, ev.stations, ev.known)
 			}
 		case <-ticker.C():
 			m.onTick(ctx)
 		}
+		// After every event and tick, not inside the handlers: the attach
+		// can land through applyPortalClientAttached or the tick's
+		// retryPendingAttach, and tests drive those directly without a loop
+		// to own a goroutine.
+		m.ensureStationWatcher(ctx)
 	}
 }
 
@@ -2418,6 +2478,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	m.mu.Lock()
 	m.apClientSeen = false
 	m.apAttachPending = false
+	m.resetStationPollLocked()
 	m.apRaiseGen++
 	raiseGen := m.apRaiseGen
 	m.mu.Unlock()
@@ -2648,6 +2709,165 @@ func (m *Machine) rearmAttachedClientIfIdle() {
 	})
 }
 
+// Station poll (the attached phase's "is the phone still here" check).
+const (
+	// stationPollInterval is the cadence of the associated-station read
+	// while the portal-address QR is up. Two seconds with stationLeftPolls
+	// consecutive empty reads puts the join QR back 4–6 s after the phone
+	// drops — "within seconds" against the 3-minute silence backstop, and
+	// slow enough that the poll is invisible next to the AP's own beacons.
+	stationPollInterval = 2 * time.Second
+	// stationPollTimeout bounds one kernel read; a read that outlives it is
+	// reported unknown by the counter and counted toward the give-up.
+	stationPollTimeout = 1500 * time.Millisecond
+	// stationLeftPolls is how many consecutive empty reads mean "left".
+	stationLeftPolls = 2
+	// stationUnknownGiveUp is how many consecutive unknown reads switch the
+	// poll off for the raise.
+	stationUnknownGiveUp = 5
+)
+
+// resetStationPollLocked clears the poll's per-raise counters. Caller holds
+// mu. The watcher goroutine itself is not touched here: it notices the
+// generation or latch change on its next tick and exits.
+func (m *Machine) resetStationPollLocked() {
+	m.apStationZero = 0
+	m.apStationUnknown = 0
+	m.apStationWatchOff = false
+}
+
+// stationWatchWantedLocked reports whether the current raise wants the
+// station poll running: a counter is wired, the AP is up in its active
+// state, an Apple client has attached (the latch that paints the
+// portal-address QR), and the poll has not given up. Caller holds mu.
+func (m *Machine) stationWatchWantedLocked() bool {
+	return m.stations != nil && m.apUp && m.state == StateAPActive &&
+		m.apClientSeen && !m.apStationWatchOff
+}
+
+// ensureStationWatcher runs on the loop goroutine after every event and
+// tick: when the current raise wants the station poll and no goroutine is
+// watching THIS raise, start one. Idempotent per raise; a goroutine left
+// over from a previous raise exits on its own (watchAttachedStations).
+func (m *Machine) ensureStationWatcher(ctx context.Context) {
+	m.mu.Lock()
+	gen := m.apRaiseGen
+	start := m.stationWatchWantedLocked() && m.apStationWatchGen != gen
+	if start {
+		m.apStationWatchGen = gen
+	}
+	m.mu.Unlock()
+	if !start {
+		return
+	}
+	go m.watchAttachedStations(ctx, gen)
+}
+
+// watchAttachedStations is the station-poll goroutine for one raise. Real
+// time rather than the machine clock: the poll is a side channel with no
+// sample semantics, and the loop's ticker is the only wrapper.Ticker the
+// tests can drive. Each reading is handed to the loop as evStationPoll
+// (non-blocking, like the portal's attach event: a full buffer drops a
+// reading, and the next one is two seconds away). The kernel read happens
+// HERE, never on the loop, so a stalled query cannot stall the machine.
+func (m *Machine) watchAttachedStations(ctx context.Context, gen uint64) {
+	defer func() {
+		m.mu.Lock()
+		if m.apStationWatchGen == gen {
+			m.apStationWatchGen = 0
+		}
+		m.mu.Unlock()
+	}()
+	t := time.NewTicker(stationPollInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		m.mu.Lock()
+		wanted := gen == m.apRaiseGen && m.stationWatchWantedLocked()
+		m.mu.Unlock()
+		if !wanted {
+			return
+		}
+		pollCtx, cancel := context.WithTimeout(ctx, stationPollTimeout)
+		n, ok := m.stations.AttachedStations(pollCtx)
+		cancel()
+		select {
+		case m.events <- event{kind: evStationPoll, gen: gen, stations: n, known: ok}:
+		default:
+			m.logger.Warn("provisioning: event queue full, dropping a station poll reading")
+		}
+	}
+}
+
+// applyStationPoll handles one evStationPoll on the loop goroutine. A
+// reading from another raise, or one landing after the latch cleared, is
+// dropped. Consecutive empty reads (stationLeftPolls) mean the attached
+// phone left: hand the latch back and paint the join QR again with
+// ClientLeft set, so the screen shows the code the next scan needs and says
+// why. Consecutive unknown reads (stationUnknownGiveUp) switch the poll off
+// for the raise; the silence re-arm remains. Like the idle re-arm, this is a
+// repaint, not a transition.
+func (m *Machine) applyStationPoll(gen uint64, n int, known bool) {
+	m.mu.Lock()
+	if gen != m.apRaiseGen || !m.stationWatchWantedLocked() {
+		m.mu.Unlock()
+		return
+	}
+	left, gaveUp := m.recordStationPollLocked(n, known)
+	if left {
+		m.apClientSeen = false
+		m.apAttachPending = false
+		m.resetStationPollLocked()
+	}
+	info := m.apInfo
+	joinFailure := m.lastJoinFailureLocked()
+	m.mu.Unlock()
+	if gaveUp {
+		m.logger.Warn("provisioning: station poll gave up for this raise; the portal-silence re-arm remains", zap.String("ssid", info.SSID))
+		return
+	}
+	if !left || info.SSID == "" {
+		return
+	}
+	m.logger.Info("provisioning: attached phone left the setup AP; showing the join QR again", zap.String("ssid", info.SSID))
+	m.notify(StateAPActive, Detail{
+		SSID:        info.SSID,
+		PSK:         info.PSK,
+		PortalURL:   info.PortalURL,
+		JoinFailure: joinFailure,
+		ClientLeft:  true,
+		Reason:      ReasonAPClientLeft,
+		Message:     "Scan the QR code to set up Wi-Fi",
+	})
+}
+
+// recordStationPollLocked folds one reading into the streak counters and
+// reports the verdicts it produces. Caller holds mu.
+func (m *Machine) recordStationPollLocked(n int, known bool) (left, gaveUp bool) {
+	switch {
+	case !known:
+		m.apStationUnknown++
+		if m.apStationUnknown >= stationUnknownGiveUp {
+			m.apStationWatchOff = true
+			return false, true
+		}
+	case n > 0:
+		m.apStationZero = 0
+		m.apStationUnknown = 0
+	default:
+		m.apStationUnknown = 0
+		m.apStationZero++
+		if m.apStationZero >= stationLeftPolls {
+			return true, false
+		}
+	}
+	return false, false
+}
+
 // ensureAPDown tears the portal + AP down if up, and reports whether the AP
 // side is known clean (profile deleted or never up). Idempotent. A failed
 // softap.Down still clears apUp/portalSrv — the portal IS stopped and the pair
@@ -2697,6 +2917,7 @@ func (m *Machine) ensureAPDown(ctx context.Context) bool {
 	m.apInfo = softap.Info{}
 	m.apClientSeen = false
 	m.apAttachPending = false
+	m.resetStationPollLocked()
 	m.apDownPending = !downOK
 	m.mu.Unlock()
 	if downOK {

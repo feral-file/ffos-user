@@ -1259,6 +1259,10 @@ func initializeApp(
 		Clock:        clock,
 		Logger:       logger,
 		Notifier:     provisioningNotifier,
+		// Kernel-side "is the phone still associated" for the attached
+		// phase's swap-back (feral-file#3515); nl80211 because the user
+		// service can reach neither wpa_supplicant's bus objects nor `iw`.
+		Stations: softap.NewNL80211StationCounter(logger),
 		// The flight recorder sees every state/reason change, silent legs
 		// included (nil when the recorder is disabled).
 		TransitionObserver: netlogTransitionObserver(netlogRecorder),
