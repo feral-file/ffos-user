@@ -462,6 +462,29 @@ func TestStationPollSwapsBackWhenThePhoneLeaves(t *testing.T) {
 	assert.Equal(t, 0, h.m.apStationZero)
 }
 
+// TestStationPollUnknownReadBreaksTheEmptyStreak: the "phone left" verdict
+// wants stationLeftPolls known-empty reads with nothing in between. An
+// unknown read (query failed, timeout) says nothing about whether the phone
+// is still associated, so empty/unknown/empty must not repaint the join QR
+// under a phone that never went anywhere — the streak restarts at the read
+// after the unknown one.
+func TestStationPollUnknownReadBreaksTheEmptyStreak(t *testing.T) {
+	ctx := context.Background()
+	h, _ := attachAppleClient(ctx, t)
+	gen := h.m.apRaiseGen
+	require.True(t, h.m.stationWatchWantedLocked(), "an attached Apple client wants the poll")
+
+	h.m.applyStationPoll(gen, 0, true)
+	h.m.applyStationPoll(gen, 0, false)
+	h.m.applyStationPoll(gen, 0, true)
+	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft), "the unknown read broke the streak, so these two empties are not consecutive")
+	assert.Equal(t, 1, h.m.apStationZero, "the streak restarted at the empty read after the unknown one")
+
+	// The next known-empty read is the second consecutive one: the verdict.
+	h.m.applyStationPoll(gen, 0, true)
+	require.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientLeft), "one swap-back after stationLeftPolls consecutive empty reads")
+}
+
 // TestStationPollGivesUpOnUnknownReads: stationUnknownGiveUp consecutive
 // unknown readings switch the poll off for the raise without repainting;
 // the portal-silence re-arm still brings the join QR back, and the next

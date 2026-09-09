@@ -578,7 +578,10 @@ type Machine struct {
 	// apStationZero counts consecutive polls that saw NO station on the AP
 	// while the attached phase is painted; stationLeftPolls of them are the
 	// "phone left" verdict (one empty read can be a transient). Reset by any
-	// poll that sees a station, at attach, and with the latch.
+	// poll that sees a station, by any unknown read, at attach, and with the
+	// latch: "consecutive" means known-empty reads with nothing in between,
+	// because a failed query says nothing about whether the phone is still
+	// there and must not count as half a departure.
 	apStationZero int
 	// apStationUnknown counts consecutive polls whose count was unknown
 	// (query failed, no AP interface, timeout); stationUnknownGiveUp of them
@@ -2850,6 +2853,7 @@ func (m *Machine) applyStationPoll(gen uint64, n int, known bool) {
 func (m *Machine) recordStationPollLocked(n int, known bool) (left, gaveUp bool) {
 	switch {
 	case !known:
+		m.apStationZero = 0
 		m.apStationUnknown++
 		if m.apStationUnknown >= stationUnknownGiveUp {
 			m.apStationWatchOff = true
