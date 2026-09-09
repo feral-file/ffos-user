@@ -519,6 +519,36 @@ func TestAccessLineTruncatesClientControlledFields(t *testing.T) {
 	assert.Equal(t, "/status", lines[1].ContextMap()["path"])
 }
 
+// TestAccessLineOmitsClientAddress: the portal client's address is a device
+// identifier and must not reach the log (review bot on 6eaaf14). The line
+// carries the classified client kind instead — which is what the attached-
+// phase repaint is diagnosed from — and nothing that names the phone.
+func TestAccessLineOmitsClientAddress(t *testing.T) {
+	core, observed := observer.New(zap.InfoLevel)
+	h := NewServer(Config{APSSID: "FF1-abc", Logger: zap.New(core)}).Handler()
+
+	apple := httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil)
+	apple.Header.Set("User-Agent", "CaptiveNetworkSupport-355.200.27 wispr")
+	apple.RemoteAddr = "10.42.0.77:51000"
+	h.ServeHTTP(httptest.NewRecorder(), apple)
+
+	other := httptest.NewRequest(http.MethodGet, "/status", nil)
+	other.Header.Set("User-Agent", "Mozilla/5.0")
+	other.RemoteAddr = "10.42.0.78:51001"
+	h.ServeHTTP(httptest.NewRecorder(), other)
+
+	lines := observed.FilterMessage("portal: request").All()
+	require.Len(t, lines, 2)
+	for _, line := range lines {
+		fields := line.ContextMap()
+		assert.NotContains(t, fields, "remote_addr", "the client address stays out of the log")
+		require.Contains(t, fields, "client", "the classified client kind replaces it")
+		assert.NotContains(t, line.Message, "10.42.0.")
+	}
+	assert.Equal(t, "apple", lines[0].ContextMap()["client"])
+	assert.Equal(t, "unknown", lines[1].ContextMap()["client"])
+}
+
 // TestAccessLineIsRateLimitedAndReportsWhatItDropped: a client on the open
 // setup subnet can send a sequential stream, and controld.log rotates on time
 // rather than size — so the line is capped at accessLogBurst with an

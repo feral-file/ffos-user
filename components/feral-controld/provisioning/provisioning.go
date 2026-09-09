@@ -2897,9 +2897,11 @@ func (m *Machine) readAttachedPresence(ctx context.Context, gen uint64) (present
 				mac = m.apAttachMAC
 			}
 			m.mu.Unlock()
-			// The address itself is a device identifier and stays out of the
-			// log; that it resolved is what the log needs to say.
-			m.logger.Info("provisioning: attached phone identified", zap.String("ip", ip))
+			// Both addresses — the phone's address on the hotspot and the
+			// hardware address it resolved to — are device identifiers and
+			// stay out of the log; that the resolution succeeded is what the
+			// log needs to say.
+			m.logger.Info("provisioning: attached phone identified")
 		}
 	}
 

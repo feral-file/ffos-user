@@ -241,6 +241,14 @@ const (
 	ClientApple
 )
 
+// String is the log form of a ClientKind, named for the constant.
+func (k ClientKind) String() string {
+	if k == ClientApple {
+		return "apple"
+	}
+	return "unknown"
+}
+
 // remoteIP is the host part of a request's RemoteAddr, the form the kernel's
 // neighbor table is keyed by. An address that does not parse is passed
 // through as-is: the resolver simply finds nothing for it, which is the same
@@ -390,12 +398,14 @@ func (s *Server) withLimits(next http.Handler) http.Handler {
 		// 128 bytes and User-Agent to 160; requests the in-flight cap sheds
 		// with 429 are not logged at all (the cap's own saturation is the
 		// evidence there); and a flood is reported as the suppressed count on
-		// the next line that gets through. Host and query are omitted.
+		// the next line that gets through. Host, query, and the client
+		// address are omitted (only the request kind is identifying enough
+		// to be useful).
 		if ok, suppressed := s.access.allow(); ok {
 			fields := []zap.Field{
 				zap.String("method", r.Method),
 				zap.String("path", truncate(r.URL.Path, maxLoggedPathBytes)),
-				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("client", ClassifyClient(r.UserAgent()).String()),
 				zap.String("user_agent", truncate(r.UserAgent(), maxLoggedUserAgentBytes)),
 				zap.Bool("watcher", r.Header.Get(watcherHeader) != ""),
 			}
