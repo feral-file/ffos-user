@@ -17,6 +17,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // newTestServer builds a portal Server with in-memory seams and an httptest
@@ -444,8 +446,10 @@ func TestInflightCapRejectsExcessRequests(t *testing.T) {
 	t.Cleanup(releaseAll)
 
 	started := make(chan struct{}, maxInflightRequests)
+	core, observed := observer.New(zap.InfoLevel)
 	_, ts, client := newTestServer(t, Config{
 		APSSID: "FF1-abc",
+		Logger: zap.New(core),
 		Status: func() Status {
 			started <- struct{}{}
 			<-release
@@ -477,9 +481,84 @@ func TestInflightCapRejectsExcessRequests(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+	// A shed request writes no access line: the cap's own saturation is the
+	// evidence there, and logging what it rejects is what would let a
+	// sequential stream drive the log (review bot on 6ba6f96).
+	assert.Equal(t, maxInflightRequests, observed.FilterMessage("portal: request").Len(),
+		"only the admitted requests logged")
 
 	releaseAll()
 	wg.Wait()
+}
+
+// TestAccessLineTruncatesClientControlledFields: the path and User-Agent of
+// the access line are attacker-controlled and unbounded on the wire, so the
+// line carries bounded copies of both.
+func TestAccessLineTruncatesClientControlledFields(t *testing.T) {
+	core, observed := observer.New(zap.InfoLevel)
+	h := NewServer(Config{APSSID: "FF1-abc", Logger: zap.New(core)}).Handler()
+	req := httptest.NewRequest(http.MethodGet, "/"+strings.Repeat("a", 4000), nil)
+	req.Header.Set("User-Agent", strings.Repeat("u", 4000))
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	lines := observed.FilterMessage("portal: request").All()
+	require.Len(t, lines, 1)
+	fields := lines[0].ContextMap()
+	path, _ := fields["path"].(string)
+	agent, _ := fields["user_agent"].(string)
+	assert.Equal(t, maxLoggedPathBytes+len("…"), len(path), "the path is cut at its byte bound")
+	assert.True(t, strings.HasSuffix(path, "…"), "a cut value is marked")
+	assert.Equal(t, maxLoggedUserAgentBytes+len("…"), len(agent), "the agent is cut at its byte bound")
+	assert.True(t, strings.HasSuffix(agent, "…"))
+	assert.NotContains(t, fields, "suppressed", "nothing was dropped")
+
+	// A field inside the bound passes through whole.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/status", nil))
+	lines = observed.FilterMessage("portal: request").All()
+	require.Len(t, lines, 2)
+	assert.Equal(t, "/status", lines[1].ContextMap()["path"])
+}
+
+// TestAccessLineIsRateLimitedAndReportsWhatItDropped: a client on the open
+// setup subnet can send a sequential stream, and controld.log rotates on time
+// rather than size — so the line is capped at accessLogBurst with an
+// accessLogPerMinute refill, and the flood it swallowed is reported as a
+// count on the next line rather than as silence.
+func TestAccessLineIsRateLimitedAndReportsWhatItDropped(t *testing.T) {
+	core, observed := observer.New(zap.InfoLevel)
+	s := NewServer(Config{APSSID: "FF1-abc", Logger: zap.New(core)})
+	now := time.Now()
+	s.access.now = func() time.Time { return now }
+	h := s.Handler()
+	get := func() {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/status", nil))
+	}
+	lines := func() int { return observed.FilterMessage("portal: request").Len() }
+
+	for i := 0; i < accessLogBurst; i++ {
+		get()
+	}
+	require.Equal(t, accessLogBurst, lines(), "the burst covers a whole setup session")
+
+	const flood = 25
+	for i := 0; i < flood; i++ {
+		get()
+	}
+	assert.Equal(t, accessLogBurst, lines(), "the burst spent, a stream of requests writes nothing")
+
+	// A minute of refill later the line resumes, carrying what the flood cost.
+	now = now.Add(time.Minute)
+	get()
+	all := observed.FilterMessage("portal: request").All()
+	require.Len(t, all, accessLogBurst+1)
+	assert.EqualValues(t, flood, all[len(all)-1].ContextMap()["suppressed"],
+		"a flood shows up as one number, not as silence")
+
+	// The count is claimed exactly once.
+	get()
+	all = observed.FilterMessage("portal: request").All()
+	require.Len(t, all, accessLogBurst+2)
+	assert.NotContains(t, all[len(all)-1].ContextMap(), "suppressed")
 }
 
 // TestSlowBodyClientIsDisconnected: wire-level slowloris guard. A client that
