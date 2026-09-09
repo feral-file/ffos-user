@@ -204,7 +204,14 @@ type Config struct {
 	// DO count — an open picker is a human mid-setup. Same calling contract as
 	// ActivityObserved: request goroutines, internally synchronized,
 	// non-blocking.
-	TrafficObserved func(ClientKind)
+	//
+	// remoteIP is the host part of the request's RemoteAddr (the whole
+	// RemoteAddr when it does not parse), which the machine resolves through
+	// the kernel's neighbor table to the station address of the phone that
+	// raised the address QR: departure is only a repaint trigger when the
+	// station that LEFT is that phone, and an aggregate count cannot say so
+	// while a second device is on the hotspot (review bot on 6ba6f96).
+	TrafficObserved func(kind ClientKind, remoteIP string)
 	Logger          *zap.Logger
 }
 
@@ -233,6 +240,18 @@ const (
 	// ClientApple: an iOS/macOS captive probe or captive-sheet fetch.
 	ClientApple
 )
+
+// remoteIP is the host part of a request's RemoteAddr, the form the kernel's
+// neighbor table is keyed by. An address that does not parse is passed
+// through as-is: the resolver simply finds nothing for it, which is the same
+// outcome as an empty string and keeps the raw value visible.
+func remoteIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
 
 // ClassifyClient maps a User-Agent to a ClientKind.
 func ClassifyClient(userAgent string) ClientKind {
@@ -346,7 +365,7 @@ func (s *Server) withLimits(next http.Handler) http.Handler {
 		// hard evidence a device is attached, and the deferral this feeds
 		// must not lapse because the phone was too chatty.
 		if s.cfg.TrafficObserved != nil && r.Header.Get(watcherHeader) == "" {
-			s.cfg.TrafficObserved(ClassifyClient(r.UserAgent()))
+			s.cfg.TrafficObserved(ClassifyClient(r.UserAgent()), remoteIP(r.RemoteAddr))
 		}
 		select {
 		case s.reqSlots <- struct{}{}:

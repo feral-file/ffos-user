@@ -848,7 +848,7 @@ func TestTrafficObservedCountsEveryRequest(t *testing.T) {
 		Scan:             func(context.Context) ([]string, error) { return []string{"Net"}, nil },
 		Rescan:           func() error { return nil },
 		ActivityObserved: count(&activity),
-		TrafficObserved:  func(ClientKind) { count(&traffic)() },
+		TrafficObserved:  func(ClientKind, string) { count(&traffic)() },
 	})
 
 	// The asset routes ride along: a browser auto-fetching the stylesheet or a
@@ -921,7 +921,7 @@ func TestIndexCarriesHandOffWatcher(t *testing.T) {
 func TestWatcherPollsAreNotTraffic(t *testing.T) {
 	var mu sync.Mutex
 	traffic := 0
-	h := NewServer(Config{APSSID: "FF1-abc", TrafficObserved: func(ClientKind) {
+	h := NewServer(Config{APSSID: "FF1-abc", TrafficObserved: func(ClientKind, string) {
 		mu.Lock()
 		traffic++
 		mu.Unlock()
@@ -943,7 +943,7 @@ func TestWatcherPollsAreNotTraffic(t *testing.T) {
 func TestTrafficObservedClassifiesAppleClients(t *testing.T) {
 	var mu sync.Mutex
 	var kinds []ClientKind
-	h := NewServer(Config{APSSID: "FF1-abc", TrafficObserved: func(k ClientKind) {
+	h := NewServer(Config{APSSID: "FF1-abc", TrafficObserved: func(k ClientKind, _ string) {
 		mu.Lock()
 		kinds = append(kinds, k)
 		mu.Unlock()
@@ -977,4 +977,31 @@ func TestFailedPickerRenderStampsItsStatus(t *testing.T) {
 	body := rec.Body.String()
 	assert.Contains(t, body, `<main data-status="failed">`)
 	assert.Contains(t, body, "Wrong Wi-Fi password.", "the banner the reload exists to show")
+}
+
+// TestTrafficObservedCarriesTheClientIP: the seam hands the machine the host
+// part of RemoteAddr — the key the kernel's neighbor table is looked up by,
+// which is how the station poll tells the phone that raised the address QR
+// from any other device on the hotspot. An address that does not parse is
+// passed through rather than dropped.
+func TestTrafficObservedCarriesTheClientIP(t *testing.T) {
+	var mu sync.Mutex
+	var ips []string
+	h := NewServer(Config{APSSID: "FF1-abc", TrafficObserved: func(_ ClientKind, ip string) {
+		mu.Lock()
+		ips = append(ips, ip)
+		mu.Unlock()
+	}}).Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil)
+	req.RemoteAddr = "10.42.0.22:51234"
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	req = httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil)
+	req.RemoteAddr = "not-an-address"
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"10.42.0.22", "not-an-address"}, ips)
 }

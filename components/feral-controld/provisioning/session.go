@@ -391,8 +391,12 @@ func (m *Machine) observePortalActivity() {
 // gen is the raise the calling portal was built for (ensureAPUp binds it):
 // a callback outliving its hotspot across a stop and a re-raise is dropped
 // before it can stamp traffic or take the fresh raise's latch.
+// remoteIP is the request's source address: on the first Apple request it
+// becomes the identity of the attached phone (apAttachIP), which the station
+// poll resolves through the kernel's neighbor table so a second device on the
+// hotspot cannot mask this one leaving (readAttachedPresence).
 // Request-goroutine-safe.
-func (m *Machine) observePortalTraffic(gen uint64, kind portal.ClientKind) {
+func (m *Machine) observePortalTraffic(gen uint64, kind portal.ClientKind, remoteIP string) {
 	m.mu.Lock()
 	if gen != m.apRaiseGen {
 		m.mu.Unlock()
@@ -402,6 +406,11 @@ func (m *Machine) observePortalTraffic(gen uint64, kind portal.ClientKind) {
 	first := kind == portal.ClientApple && !m.apClientSeen
 	if first {
 		m.apClientSeen = true
+		// The source of THIS request is the phone the address QR goes up
+		// for; the station poll resolves it to a station address and
+		// watches for that one leaving, not for the list emptying.
+		m.apAttachIP = remoteIP
+		m.apAttachMAC = ""
 		// A fresh attach starts the station poll from zero evidence: a
 		// re-attach after the idle re-arm must not inherit the streak that
 		// preceded it.

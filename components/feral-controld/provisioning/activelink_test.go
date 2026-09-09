@@ -39,7 +39,8 @@ func newLinkHarness(t *testing.T, fl *fakeLink) *harness {
 		// timeline, and without the wiring its inner scan finds no
 		// notifications to check at all.
 		notifier: &fakeNotifier{rec: rec},
-		stations: &fakeStations{n: 1, ok: true},
+		stations: &fakeStations{macs: []string{attachedMAC}, ok: true},
+		neigh:    newFakeNeighbors(),
 	}
 	h.m = New(Config{
 		AP:            h.ap,
@@ -49,6 +50,7 @@ func newLinkHarness(t *testing.T, fl *fakeLink) *harness {
 		Logger:        zap.NewNop(),
 		Notifier:      h.notifier,
 		Stations:      h.stations,
+		NeighborMAC:   h.neigh.lookup,
 		OfflineWindow: 5 * time.Minute,
 		CheckInterval: 15 * time.Second,
 		PortalAddr:    "127.0.0.1:0",

@@ -58,7 +58,7 @@ func TestFirstPortalTrafficRepaintsOnce(t *testing.T) {
 	require.NotNil(t, traffic)
 
 	for i := 0; i < 5; i++ {
-		traffic(portal.ClientApple)
+		traffic(portal.ClientApple, attachIP)
 	}
 	assert.Equal(t, 1, drainPortalClientEvents(t, h), "only the first request of a raise queues the repaint")
 
@@ -79,7 +79,7 @@ func TestFirstPortalTrafficRepaintsOnce(t *testing.T) {
 	assert.Equal(t, "sustained-offline", h.m.Snapshot().Reason)
 
 	// Later traffic stays silent for the rest of this raise.
-	traffic(portal.ClientApple)
+	traffic(portal.ClientApple, attachIP)
 	assert.Equal(t, 0, drainPortalClientEvents(t, h))
 }
 
@@ -92,7 +92,7 @@ func TestPortalTrafficLatchReArmsOnReRaise(t *testing.T) {
 	h := newLinkHarness(t, fl)
 	h.wifi.setProfile(true)
 	driveSustainedRaise(t, h, ctx)
-	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple, attachIP)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 
 	h.wifi.joinErr = &wifictl.JoinError{Kind: wifictl.JoinErrAuth, Output: "secrets were required"}
@@ -100,7 +100,7 @@ func TestPortalTrafficLatchReArmsOnReRaise(t *testing.T) {
 	require.Equal(t, StateAPActive, h.m.State(), "a failed join re-raises the AP")
 	require.Greater(t, len(h.portals), 1, "the re-raise builds a fresh portal")
 
-	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple, attachIP)
 	assert.Equal(t, 1, drainPortalClientEvents(t, h), "the re-raise re-arms the first-request latch")
 
 	// The link harness's AP never learned its address: the handler retries
@@ -111,7 +111,7 @@ func TestPortalTrafficLatchReArmsOnReRaise(t *testing.T) {
 	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	assert.Len(t, h.notifier.details(), before, "no attached repaint without a portal address")
 	assert.True(t, h.m.apAttachPending, "the attach stays pending for the tick")
-	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple, attachIP)
 	assert.Equal(t, 0, drainPortalClientEvents(t, h), "the latch is not handed back — the tick owns the retry")
 }
 
@@ -125,7 +125,7 @@ func TestPendingAttachRetriesOnTheTick(t *testing.T) {
 	h := newLinkHarness(t, fl)
 	h.wifi.setProfile(true)
 	driveSustainedRaise(t, h, ctx) // no address
-	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple, attachIP)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	require.True(t, h.m.apAttachPending)
@@ -154,7 +154,7 @@ func TestPendingAttachEndsWithTheRaise(t *testing.T) {
 	h := newLinkHarness(t, fl)
 	h.wifi.setProfile(true)
 	driveSustainedRaise(t, h, ctx)
-	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple, attachIP)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	require.True(t, h.m.apAttachPending)
@@ -178,7 +178,7 @@ func TestAttachRetriesTheAddressLookup(t *testing.T) {
 	h.wifi.setProfile(true)
 	driveSustainedRaise(t, h, ctx)           // raised with no address
 	h.ap.info.PortalURL = "http://10.42.0.1" // NM publishes it afterwards
-	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple, attachIP)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	require.Equal(t, 1, attachedNotifies(h))
@@ -206,11 +206,11 @@ func TestOldPortalCallbackCannotTouchTheNewRaise(t *testing.T) {
 
 	h.clk.advance(time.Second)
 	before := h.m.lastPortalTraffic
-	old(portal.ClientApple)
+	old(portal.ClientApple, attachIP)
 	assert.Equal(t, 0, drainPortalClientEvents(t, h), "a stale callback must not arm the new raise")
 	assert.Equal(t, before, h.m.lastPortalTraffic, "a stale callback must not count as traffic")
 
-	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple, attachIP)
 	assert.Equal(t, 1, drainPortalClientEvents(t, h), "the new raise's own callback still arms it")
 }
 
@@ -223,7 +223,7 @@ func TestPortalClientRepaintDropsStaleGeneration(t *testing.T) {
 	h.ap.info.PortalURL = "http://10.42.0.1"
 	h.wifi.setProfile(true)
 	driveSustainedRaise(t, h, ctx)
-	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple, attachIP)
 	stale := h.m.apRaiseGen
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 
@@ -257,14 +257,14 @@ func TestAttachedPhaseRearmsOnPortalSilence(t *testing.T) {
 	require.Equal(t, 1, countReason(h, StateAPActive, "unprovisioned"))
 	require.NotEmpty(t, h.portals)
 	traffic := h.portals[len(h.portals)-1].cfg.TrafficObserved
-	traffic(portal.ClientApple)
+	traffic(portal.ClientApple, attachIP)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	require.Equal(t, 1, attachedNotifies(h))
 
 	// Chatty phone: silence never accumulates, no reverse repaint.
 	for i := 0; i < 8; i++ {
-		traffic(portal.ClientApple)
+		traffic(portal.ClientApple, attachIP)
 		h.tick(ctx)
 	}
 	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientIdle))
@@ -283,7 +283,7 @@ func TestAttachedPhaseRearmsOnPortalSilence(t *testing.T) {
 	// Still silent: no repeat. A returning phone re-attaches as a first request.
 	h.tickN(ctx, 4)
 	assert.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientIdle))
-	traffic(portal.ClientApple)
+	traffic(portal.ClientApple, attachIP)
 	assert.Equal(t, 1, drainPortalClientEvents(t, h), "the idle reset re-armed the latch")
 }
 
@@ -296,7 +296,7 @@ func TestPortalClientRepaintSkipsTornDownAP(t *testing.T) {
 	h := newLinkHarness(t, fl)
 	h.wifi.setProfile(true)
 	driveSustainedRaise(t, h, ctx)
-	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple, attachIP)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 
 	fl.up = true
@@ -324,15 +324,15 @@ func TestNonAppleTrafficNeverArmsTheRepaint(t *testing.T) {
 
 	before := h.clk.Now()
 	h.clk.advance(time.Second)
-	traffic(portal.ClientUnknown)
-	traffic(portal.ClientUnknown)
+	traffic(portal.ClientUnknown, otherIP)
+	traffic(portal.ClientUnknown, otherIP)
 	assert.Equal(t, 0, drainPortalClientEvents(t, h), "non-Apple traffic never queues the repaint")
 	h.m.mu.Lock()
 	stamped := h.m.lastPortalTraffic.After(before)
 	h.m.mu.Unlock()
 	assert.True(t, stamped, "non-Apple traffic still counts as an attached device")
 
-	traffic(portal.ClientApple)
+	traffic(portal.ClientApple, attachIP)
 	assert.Equal(t, 1, drainPortalClientEvents(t, h), "an Apple client arms it")
 }
 
@@ -347,7 +347,7 @@ func TestIdleResetCancelsAPendingAttach(t *testing.T) {
 	h.wifi.setProfile(false) // unbounded out-of-box raise: no blink to rescue it
 	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
-	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple, attachIP)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	require.True(t, h.m.apAttachPending)
@@ -361,7 +361,7 @@ func TestIdleResetCancelsAPendingAttach(t *testing.T) {
 	assert.Equal(t, 0, attachedNotifies(h), "an address arriving after the reset paints nothing")
 
 	// A returning phone starts over as a first request and gets the repaint.
-	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple)
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple, attachIP)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	assert.Equal(t, 1, attachedNotifies(h))
@@ -398,7 +398,7 @@ func TestReRaiseAfterFailedJoinCarriesTheReason(t *testing.T) {
 // attachAppleClient raises the out-of-box AP on a link harness, lands the
 // raise's first Apple request, and runs the loop-side repaint — the state
 // every station-poll test starts from.
-func attachAppleClient(ctx context.Context, t *testing.T) (*harness, func(portal.ClientKind)) {
+func attachAppleClient(ctx context.Context, t *testing.T) (*harness, func(portal.ClientKind, string)) {
 	t.Helper()
 	fl := &fakeLink{up: false}
 	h := newLinkHarness(t, fl)
@@ -408,7 +408,7 @@ func attachAppleClient(ctx context.Context, t *testing.T) (*harness, func(portal
 	require.Equal(t, StateAPActive, h.m.State())
 	require.NotEmpty(t, h.portals)
 	traffic := h.portals[len(h.portals)-1].cfg.TrafficObserved
-	traffic(portal.ClientApple)
+	traffic(portal.ClientApple, attachIP)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	require.Equal(t, 1, attachedNotifies(h))
@@ -416,7 +416,7 @@ func attachAppleClient(ctx context.Context, t *testing.T) (*harness, func(portal
 }
 
 // TestStationPollSwapsBackWhenThePhoneLeaves: with the portal-address QR up,
-// stationLeftPolls consecutive empty station reads put the join QR back
+// stationLeftPolls consecutive reads without the attached phone put the join QR back
 // (ReasonAPClientLeft, ClientLeft set, credentials carried), hand the latch
 // back so the next first request re-attaches, and a single empty read is not
 // enough.
@@ -428,20 +428,20 @@ func TestStationPollSwapsBackWhenThePhoneLeaves(t *testing.T) {
 
 	// Phone present: nothing happens, however long.
 	for i := 0; i < 5; i++ {
-		h.m.applyStationPoll(gen, 1, true)
+		h.m.applyStationPoll(gen, true, true)
 	}
 	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
 
 	// One empty read is a transient, not a verdict.
-	h.m.applyStationPoll(gen, 0, true)
+	h.m.applyStationPoll(gen, false, true)
 	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
 	// A station reappearing resets the streak.
-	h.m.applyStationPoll(gen, 1, true)
-	h.m.applyStationPoll(gen, 0, true)
+	h.m.applyStationPoll(gen, true, true)
+	h.m.applyStationPoll(gen, false, true)
 	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
 
 	// The second consecutive empty read is the verdict.
-	h.m.applyStationPoll(gen, 0, true)
+	h.m.applyStationPoll(gen, false, true)
 	require.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientLeft), "one swap-back after stationLeftPolls empty reads")
 	all := h.notifier.details()
 	last := all[len(all)-1]
@@ -453,11 +453,11 @@ func TestStationPollSwapsBackWhenThePhoneLeaves(t *testing.T) {
 	assert.False(t, h.m.stationWatchWantedLocked(), "the latch is handed back, so the poll stops")
 
 	// Further readings after the latch cleared are dropped.
-	h.m.applyStationPoll(gen, 0, true)
+	h.m.applyStationPoll(gen, false, true)
 	assert.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientLeft))
 
 	// A returning phone re-attaches as a first request, from a clean streak.
-	traffic(portal.ClientApple)
+	traffic(portal.ClientApple, attachIP)
 	assert.Equal(t, 1, drainPortalClientEvents(t, h), "the swap-back re-armed the latch")
 	assert.Equal(t, 0, h.m.apStationZero)
 }
@@ -474,14 +474,14 @@ func TestStationPollUnknownReadBreaksTheEmptyStreak(t *testing.T) {
 	gen := h.m.apRaiseGen
 	require.True(t, h.m.stationWatchWantedLocked(), "an attached Apple client wants the poll")
 
-	h.m.applyStationPoll(gen, 0, true)
-	h.m.applyStationPoll(gen, 0, false)
-	h.m.applyStationPoll(gen, 0, true)
+	h.m.applyStationPoll(gen, false, true)
+	h.m.applyStationPoll(gen, false, false)
+	h.m.applyStationPoll(gen, false, true)
 	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft), "the unknown read broke the streak, so these two empties are not consecutive")
 	assert.Equal(t, 1, h.m.apStationZero, "the streak restarted at the empty read after the unknown one")
 
 	// The next known-empty read is the second consecutive one: the verdict.
-	h.m.applyStationPoll(gen, 0, true)
+	h.m.applyStationPoll(gen, false, true)
 	require.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientLeft), "one swap-back after stationLeftPolls consecutive empty reads")
 }
 
@@ -494,21 +494,21 @@ func TestStationPollGivesUpOnUnknownReads(t *testing.T) {
 	h, _ := attachAppleClient(ctx, t)
 	gen := h.m.apRaiseGen
 	for i := 0; i < stationUnknownGiveUp-1; i++ {
-		h.m.applyStationPoll(gen, 0, false)
+		h.m.applyStationPoll(gen, false, false)
 	}
 	assert.True(t, h.m.stationWatchWantedLocked(), "still polling one short of the give-up")
 	// A known read in between resets the unknown streak.
-	h.m.applyStationPoll(gen, 1, true)
+	h.m.applyStationPoll(gen, true, true)
 	assert.Equal(t, 0, h.m.apStationUnknown)
 	for i := 0; i < stationUnknownGiveUp; i++ {
-		h.m.applyStationPoll(gen, 0, false)
+		h.m.applyStationPoll(gen, false, false)
 	}
 	assert.False(t, h.m.stationWatchWantedLocked(), "the poll is off for this raise")
 	assert.True(t, h.m.apClientSeen, "giving up keeps the attached phase painted")
 	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
 	// Empty reads after the give-up are dropped, not counted.
-	h.m.applyStationPoll(gen, 0, true)
-	h.m.applyStationPoll(gen, 0, true)
+	h.m.applyStationPoll(gen, false, true)
+	h.m.applyStationPoll(gen, false, true)
 	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
 
 	// The silence backstop is untouched.
@@ -524,11 +524,11 @@ func TestStationPollIgnoresOtherRaisesAndTornDownAPs(t *testing.T) {
 	ctx := context.Background()
 	h, _ := attachAppleClient(ctx, t)
 	gen := h.m.apRaiseGen
-	h.m.applyStationPoll(gen, 0, true)
+	h.m.applyStationPoll(gen, false, true)
 	require.Equal(t, 1, h.m.apStationZero)
 
 	// Stale generation: dropped.
-	h.m.applyStationPoll(gen-1, 0, true)
+	h.m.applyStationPoll(gen-1, false, true)
 	assert.Equal(t, 1, h.m.apStationZero)
 	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
 
@@ -537,8 +537,8 @@ func TestStationPollIgnoresOtherRaisesAndTornDownAPs(t *testing.T) {
 	h.m.ensureAPDown(ctx)
 	assert.Equal(t, 0, h.m.apStationZero)
 	assert.False(t, h.m.stationWatchWantedLocked())
-	h.m.applyStationPoll(gen, 0, true)
-	h.m.applyStationPoll(gen, 0, true)
+	h.m.applyStationPoll(gen, false, true)
+	h.m.applyStationPoll(gen, false, true)
 	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
 }
 
@@ -552,7 +552,7 @@ func TestStationWatcherStartsOncePerRaiseAndStops(t *testing.T) {
 	defer cancel()
 	h, _ := attachAppleClient(ctx, t)
 	gen := h.m.apRaiseGen
-	h.stations.set(0, true)
+	h.stations.set(nil, true)
 
 	h.m.ensureStationWatcher(ctx)
 	h.m.ensureStationWatcher(ctx)
@@ -565,7 +565,7 @@ func TestStationWatcherStartsOncePerRaiseAndStops(t *testing.T) {
 		select {
 		case ev := <-h.m.events:
 			require.Equal(t, evStationPoll, ev.kind)
-			h.m.applyStationPoll(ev.gen, ev.stations, ev.known)
+			h.m.applyStationPoll(ev.gen, ev.present, ev.known)
 		case <-deadline:
 			t.Fatal("the watcher's readings never produced the swap-back")
 		}
@@ -604,7 +604,7 @@ func TestLateAddressAttachStartsAFreshIdleWindow(t *testing.T) {
 	require.NotEmpty(t, h.portals)
 
 	traffic := h.portals[len(h.portals)-1].cfg.TrafficObserved
-	traffic(portal.ClientApple)
+	traffic(portal.ClientApple, attachIP)
 	require.Equal(t, 1, drainPortalClientEvents(t, h))
 	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
 	require.True(t, h.m.apAttachPending, "no address: the attach waits for the tick")
@@ -639,4 +639,118 @@ func TestLateAddressAttachStartsAFreshIdleWindow(t *testing.T) {
 
 	h.tickN(ctx, 4)
 	assert.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientIdle), "once")
+}
+
+// TestStationPollTracksTheAttachedPhoneNotTheCount: the poll asks whether the
+// phone that raised the address QR is still associated, not whether anyone
+// is. With a second device sharing the hotspot, the aggregate never reaches
+// zero when the attached phone walks away — and that second device's own
+// portal traffic keeps the silence backstop from firing either, so the screen
+// would hold a code only an associated phone can use (review bot on 6ba6f96).
+func TestStationPollTracksTheAttachedPhoneNotTheCount(t *testing.T) {
+	ctx := context.Background()
+	h, _ := attachAppleClient(ctx, t)
+	gen := h.m.apRaiseGen
+	require.Equal(t, attachIP, h.m.apAttachIP, "the raise's first Apple request identifies the phone")
+
+	// Both devices on the hotspot: the attached phone is present.
+	h.stations.set([]string{attachedMAC, otherMAC}, true)
+	for i := 0; i < 3; i++ {
+		present, known, wanted := h.m.readAttachedPresence(ctx, gen)
+		require.True(t, wanted)
+		assert.True(t, known)
+		assert.True(t, present)
+		h.m.applyStationPoll(gen, present, known)
+	}
+	assert.Equal(t, attachedMAC, h.m.apAttachMAC, "the neighbor table resolved the phone")
+	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
+
+	// The attached phone leaves; the other device stays associated.
+	h.stations.set([]string{otherMAC}, true)
+	for i := 0; i < stationLeftPolls; i++ {
+		present, known, wanted := h.m.readAttachedPresence(ctx, gen)
+		require.True(t, wanted)
+		assert.False(t, present, "a station list without the attached phone is not presence")
+		h.m.applyStationPoll(gen, present, known)
+	}
+	assert.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientLeft),
+		"the phone that raised the address QR left, whatever else is on the hotspot")
+	assert.False(t, h.m.apClientSeen, "the latch is handed back")
+	assert.Empty(t, h.m.apAttachMAC, "and the identity goes with it")
+}
+
+// TestStationPollHoldsWhileTheAttachedPhoneStays is the reverse reading: the
+// attached phone is the only station, another device is talking to the portal
+// from its own address, and nothing swaps back.
+func TestStationPollHoldsWhileTheAttachedPhoneStays(t *testing.T) {
+	ctx := context.Background()
+	h, traffic := attachAppleClient(ctx, t)
+	gen := h.m.apRaiseGen
+	h.stations.set([]string{attachedMAC}, true)
+
+	for i := 0; i < stationLeftPolls+3; i++ {
+		traffic(portal.ClientApple, otherIP) // a second client's portal traffic
+		present, known, wanted := h.m.readAttachedPresence(ctx, gen)
+		require.True(t, wanted)
+		assert.True(t, present)
+		h.m.applyStationPoll(gen, present, known)
+	}
+	assert.Equal(t, 0, countReason(h, StateAPActive, ReasonAPClientLeft))
+	assert.True(t, h.m.apClientSeen, "the address QR stays up for the phone that is still here")
+	assert.Equal(t, attachIP, h.m.apAttachIP, "a later request does not re-point the identity")
+}
+
+// TestStationPollFallsBackToCountUntilTheNeighborTableAnswers: the first
+// probe can land before the ARP entry for that address is complete. Until it
+// resolves, the poll uses the aggregate (the behavior the identity rule
+// replaces); the identity rule takes over the moment the table answers.
+func TestStationPollFallsBackToCountUntilTheNeighborTableAnswers(t *testing.T) {
+	ctx := context.Background()
+	h, _ := attachAppleClient(ctx, t)
+	gen := h.m.apRaiseGen
+	h.neigh.set(nil) // the table has nothing for the attached phone yet
+
+	h.stations.set([]string{otherMAC}, true)
+	present, known, wanted := h.m.readAttachedPresence(ctx, gen)
+	require.True(t, wanted)
+	assert.True(t, known)
+	assert.True(t, present, "unresolved: any station counts as the phone")
+	assert.Empty(t, h.m.apAttachMAC)
+
+	h.stations.set(nil, true)
+	for i := 0; i < stationLeftPolls; i++ {
+		present, known, _ = h.m.readAttachedPresence(ctx, gen)
+		h.m.applyStationPoll(gen, present, known)
+	}
+	assert.Equal(t, 1, countReason(h, StateAPActive, ReasonAPClientLeft),
+		"an empty station list is still a departure while the fallback is in force")
+
+	// A fresh attach, and this time the table answers: the identity rule
+	// takes over on the first read.
+	h.portals[len(h.portals)-1].cfg.TrafficObserved(portal.ClientApple, attachIP)
+	require.Equal(t, 1, drainPortalClientEvents(t, h))
+	h.m.applyPortalClientAttached(ctx, h.m.apRaiseGen)
+	h.neigh.set(map[string]string{attachIP: attachedMAC})
+	h.stations.set([]string{otherMAC}, true)
+	present, known, wanted = h.m.readAttachedPresence(ctx, h.m.apRaiseGen)
+	require.True(t, wanted)
+	assert.True(t, known)
+	assert.False(t, present, "resolved: only the attached phone counts")
+	assert.Equal(t, attachedMAC, h.m.apAttachMAC)
+}
+
+// TestStationPollStopsWhenTheRaiseNoLongerWantsIt: readAttachedPresence is
+// the goroutine's per-tick unit, so it owns the stop check — a torn-down AP
+// or a stale generation must query nothing and tell the caller to exit.
+func TestStationPollStopsWhenTheRaiseNoLongerWantsIt(t *testing.T) {
+	ctx := context.Background()
+	h, _ := attachAppleClient(ctx, t)
+	gen := h.m.apRaiseGen
+
+	_, _, wanted := h.m.readAttachedPresence(ctx, gen-1)
+	assert.False(t, wanted, "a stale generation stops")
+
+	h.m.ensureAPDown(ctx)
+	_, _, wanted = h.m.readAttachedPresence(ctx, gen)
+	assert.False(t, wanted, "a torn-down AP stops")
 }

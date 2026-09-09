@@ -106,26 +106,61 @@ func (a *fakeAP) PortalURL(context.Context) string {
 	return a.info.PortalURL
 }
 
-// fakeStations scripts the associated-station count the attached phase
-// polls. The harness never runs the loop, so the poll goroutine never starts;
-// tests feed readings straight into applyStationPoll. Guarded anyway because
-// a loop-running test could start the goroutine.
+// The identities the station-poll tests run on: the phone that attaches (its
+// portal request comes from attachIP, and the neighbor table resolves that to
+// attachedMAC) and a second device that shares the hotspot with it.
+const (
+	attachIP    = "10.42.0.22"
+	attachedMAC = "aa:bb:cc:dd:ee:01"
+	otherIP     = "10.42.0.23"
+	otherMAC    = "aa:bb:cc:dd:ee:02"
+)
+
+// fakeStations scripts the AP's station list the attached phase polls. The
+// harness never runs the loop, so the poll goroutine never starts; tests feed
+// readings straight into applyStationPoll or call readAttachedPresence.
+// Guarded anyway because a loop-running test could start the goroutine.
 type fakeStations struct {
-	mu sync.Mutex
-	n  int
-	ok bool
+	mu   sync.Mutex
+	macs []string
+	ok   bool
 }
 
-func (f *fakeStations) set(n int, ok bool) {
+func (f *fakeStations) set(macs []string, ok bool) {
 	f.mu.Lock()
-	f.n, f.ok = n, ok
+	f.macs, f.ok = macs, ok
 	f.mu.Unlock()
 }
 
-func (f *fakeStations) AttachedStations(context.Context) (int, bool) {
+func (f *fakeStations) AttachedStations(context.Context) ([]string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.n, f.ok
+	return f.macs, f.ok
+}
+
+// fakeNeighbors is the kernel neighbor table the poll resolves the attached
+// phone's request IP through (softap.NeighborMAC in production). Guarded for
+// the same reason as fakeStations: the poll goroutine reads it.
+type fakeNeighbors struct {
+	mu   sync.Mutex
+	byIP map[string]string
+}
+
+func newFakeNeighbors() *fakeNeighbors {
+	return &fakeNeighbors{byIP: map[string]string{attachIP: attachedMAC, otherIP: otherMAC}}
+}
+
+func (f *fakeNeighbors) set(byIP map[string]string) {
+	f.mu.Lock()
+	f.byIP = byIP
+	f.mu.Unlock()
+}
+
+func (f *fakeNeighbors) lookup(ip string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	mac, ok := f.byIP[ip]
+	return mac, ok
 }
 
 type fakeWifi struct {
@@ -458,6 +493,7 @@ type harness struct {
 	clk      *fakeClock
 	notifier *fakeNotifier
 	stations *fakeStations
+	neigh    *fakeNeighbors
 	portals  []*fakePortal
 	// portalStartErr, when set, makes every NEW portal's Start fail with it.
 	portalStartErr error
@@ -475,7 +511,8 @@ func newHarness(t *testing.T) *harness {
 		conn:     &fakeConn{},
 		clk:      newFakeClock(),
 		notifier: &fakeNotifier{rec: rec},
-		stations: &fakeStations{n: 1, ok: true},
+		stations: &fakeStations{macs: []string{attachedMAC}, ok: true},
+		neigh:    newFakeNeighbors(),
 	}
 	h.m = New(Config{
 		AP:            h.ap,
@@ -485,6 +522,7 @@ func newHarness(t *testing.T) *harness {
 		Logger:        zap.NewNop(),
 		Notifier:      h.notifier,
 		Stations:      h.stations,
+		NeighborMAC:   h.neigh.lookup,
 		OfflineWindow: 5 * time.Minute,
 		CheckInterval: 15 * time.Second,
 		PortalAddr:    "127.0.0.1:0",

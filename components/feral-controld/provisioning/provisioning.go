@@ -375,6 +375,12 @@ type Config struct {
 	// (attachedIdleReset) then remains the only way back.
 	Stations softap.StationCounter
 
+	// NeighborMAC resolves the IP a portal request came from to that device's
+	// station address, so the poll above can track the phone that raised the
+	// address QR rather than the size of the station list. Nil uses
+	// softap.NeighborMAC (the kernel's neighbor table); tests inject a map.
+	NeighborMAC func(ip string) (string, bool)
+
 	// TransitionObserver, when set, is told every machine state/reason
 	// change, INCLUDING the silent legs the Notifier's change-dedupe hides —
 	// it feeds the netlog flight recorder, whose whole value is the
@@ -576,9 +582,19 @@ type Machine struct {
 	// event drains, and a stale event must not repaint the fresh raise —
 	// whose hotspot no phone has joined yet — with the portal-address QR.
 	apRaiseGen uint64
-	// stations answers "is anyone still associated" for the attached phase;
+	// stations answers "who is still associated" for the attached phase;
 	// nil when the wiring provides none (see Config.Stations).
 	stations softap.StationCounter
+	// neighborMAC resolves apAttachIP to apAttachMAC (see Config.NeighborMAC).
+	neighborMAC func(ip string) (string, bool)
+	// apAttachIP is the source IP of the request that armed apClientSeen, and
+	// apAttachMAC the station address it resolves to — the identity of the
+	// phone the portal-address QR is up for. Set on the raise's first Apple
+	// request (observePortalTraffic) and lazily resolved by the poll
+	// goroutine; both are cleared with the latch, because a new attach is a
+	// new phone. The MAC is a device identifier and is never logged.
+	apAttachIP  string
+	apAttachMAC string
 	// apStationWatchGen is the raise generation the running station-poll
 	// goroutine belongs to (0: none running). The loop starts one per
 	// attached raise (ensureStationWatcher) and the goroutine exits on its
@@ -586,13 +602,17 @@ type Machine struct {
 	// noticed yet must not be mistaken for the new raise's watcher, hence
 	// the generation rather than a bool.
 	apStationWatchGen uint64
-	// apStationZero counts consecutive polls that saw NO station on the AP
-	// while the attached phase is painted; stationLeftPolls of them are the
-	// "phone left" verdict (one empty read can be a transient). Reset by any
-	// poll that sees a station, by any unknown read, at attach, and with the
-	// latch: "consecutive" means known-empty reads with nothing in between,
-	// because a failed query says nothing about whether the phone is still
-	// there and must not count as half a departure.
+	// apStationZero counts consecutive polls that did not see the attached
+	// phone among the AP's stations while the attached phase is painted;
+	// stationLeftPolls of them are the "phone left" verdict (one absent read
+	// can be a transient). "The attached phone" is apAttachMAC when the
+	// neighbor table has resolved it, and any station at all until then — the
+	// aggregate is the weaker fallback the identity rule replaces as soon as
+	// it can answer. Reset by any poll that sees the phone, by any unknown
+	// read, at attach, and with the latch: "consecutive" means known reads
+	// with nothing in between, because a failed query says nothing about
+	// whether the phone is still there and must not count as half a
+	// departure.
 	apStationZero int
 	// apStationUnknown counts consecutive polls whose count was unknown
 	// (query failed, no AP interface, timeout); stationUnknownGiveUp of them
@@ -867,7 +887,7 @@ const (
 	// Notifier contract is single-goroutine — the wiring notifier's
 	// narration ownership flag is unsynchronized by design.
 	evPortalClient
-	// evStationPoll: one reading of the AP's station count from the
+	// evStationPoll: one reading of the AP's station list from the
 	// station-poll goroutine (watchAttachedStations). Bookkeeping and the
 	// repaint it may cause run on the loop goroutine for the same
 	// single-goroutine Notifier reason as evPortalClient.
@@ -885,10 +905,11 @@ type event struct {
 	// the loop can drop one that outlived its raise (see
 	// applyPortalClientAttached).
 	gen uint64
-	// stations/known carry an evStationPoll reading: the associated-station
-	// count and whether it was known at all.
-	stations int
-	known    bool
+	// present/known carry an evStationPoll reading: whether the attached
+	// phone was among the AP's stations, and whether the station list was
+	// known at all.
+	present bool
+	known   bool
 }
 
 // New builds a Machine, applying defaults.
@@ -920,6 +941,10 @@ func New(cfg Config) *Machine {
 	if windowSamples < 1 {
 		windowSamples = 1
 	}
+	neighborMAC := cfg.NeighborMAC
+	if neighborMAC == nil {
+		neighborMAC = softap.NeighborMAC
+	}
 	// The claim snapshot defaults to CLAIMED (constraint 8's fail-safe
 	// direction — never auto-raise over a possibly claimed exhibition frame);
 	// Start seeds it from InitialClaimed once the persisted state is loaded.
@@ -932,6 +957,7 @@ func New(cfg Config) *Machine {
 		logger:             logger,
 		notifier:           cfg.Notifier,
 		stations:           cfg.Stations,
+		neighborMAC:        neighborMAC,
 		transitionObserver: cfg.TransitionObserver,
 		activeLink:         cfg.ActiveLink,
 		activeLinkDetail:   cfg.ActiveLinkDetail,
@@ -1054,9 +1080,7 @@ func (m *Machine) loop(ctx context.Context) {
 	m.apUp = false
 	m.portalSrv = nil
 	m.apInfo = softap.Info{}
-	m.apClientSeen = false
-	m.apAttachPending = false
-	m.apAttachPaintedAt = time.Time{}
+	m.clearAttachLatchLocked()
 	m.resetStationPollLocked()
 	m.mu.Unlock()
 	if leftoverSrv != nil {
@@ -1149,7 +1173,7 @@ func (m *Machine) loop(ctx context.Context) {
 			case evPortalClient:
 				m.applyPortalClientAttached(ctx, ev.gen)
 			case evStationPoll:
-				m.applyStationPoll(ev.gen, ev.stations, ev.known)
+				m.applyStationPoll(ev.gen, ev.present, ev.known)
 			}
 		case <-ticker.C():
 			m.onTick(ctx)
@@ -2491,9 +2515,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	// applyPortalClientAttached tolerates that ordering — the loop processes
 	// the queued event only after this function has published the raise.
 	m.mu.Lock()
-	m.apClientSeen = false
-	m.apAttachPending = false
-	m.apAttachPaintedAt = time.Time{}
+	m.clearAttachLatchLocked()
 	m.resetStationPollLocked()
 	m.apRaiseGen++
 	raiseGen := m.apRaiseGen
@@ -2515,8 +2537,10 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		// THIS raise's generation at construction: a request still in flight
 		// on the old listener across a bounded stop and a re-raise must not
 		// stamp traffic or consume the latch of a hotspot no phone has joined.
-		TrafficObserved: func(kind portal.ClientKind) { m.observePortalTraffic(raiseGen, kind) },
-		Logger:          m.logger,
+		TrafficObserved: func(kind portal.ClientKind, remoteIP string) {
+			m.observePortalTraffic(raiseGen, kind, remoteIP)
+		},
+		Logger: m.logger,
 	})
 	if err := srv.Start(); err != nil {
 		// The AP is up but the portal could not bind. Tear the radio hotspot back
@@ -2720,9 +2744,7 @@ func (m *Machine) rearmAttachedClientIfIdle() {
 		// phone has since gone silent must not have a later tick's retry
 		// paint the address QR for nobody, with no idle reset left to undo
 		// it — the tick retry is bounded by the latch it belongs to.
-		m.apClientSeen = false
-		m.apAttachPending = false
-		m.apAttachPaintedAt = time.Time{}
+		m.clearAttachLatchLocked()
 	}
 	m.mu.Unlock()
 	if !idle || info.SSID == "" {
@@ -2743,19 +2765,34 @@ func (m *Machine) rearmAttachedClientIfIdle() {
 const (
 	// stationPollInterval is the cadence of the associated-station read
 	// while the portal-address QR is up. Two seconds with stationLeftPolls
-	// consecutive empty reads puts the join QR back 4–6 s after the phone
+	// consecutive reads missing the phone puts the join QR back 4–6 s after it
 	// drops — "within seconds" against the 3-minute silence backstop, and
 	// slow enough that the poll is invisible next to the AP's own beacons.
 	stationPollInterval = 2 * time.Second
 	// stationPollTimeout bounds one kernel read; a read that outlives it is
 	// reported unknown by the counter and counted toward the give-up.
 	stationPollTimeout = 1500 * time.Millisecond
-	// stationLeftPolls is how many consecutive empty reads mean "left".
+	// stationLeftPolls is how many consecutive reads without the attached
+	// phone mean "left".
 	stationLeftPolls = 2
 	// stationUnknownGiveUp is how many consecutive unknown reads switch the
 	// poll off for the raise.
 	stationUnknownGiveUp = 5
 )
+
+// clearAttachLatchLocked hands the attached-phase latch back: the phase is no
+// longer painted for anybody, so the pending retry, the paint stamp, and the
+// identity of the phone it was painted for all go with it. A later attach is
+// a different phone (or the same one re-associating with a new lease), and
+// keeping the old identity would have the poll watch for a station that is
+// never coming back. Caller holds mu.
+func (m *Machine) clearAttachLatchLocked() {
+	m.apClientSeen = false
+	m.apAttachPending = false
+	m.apAttachPaintedAt = time.Time{}
+	m.apAttachIP = ""
+	m.apAttachMAC = ""
+}
 
 // resetStationPollLocked clears the poll's per-raise counters. Caller holds
 // mu. The watcher goroutine itself is not touched here: it notices the
@@ -2816,42 +2853,90 @@ func (m *Machine) watchAttachedStations(ctx context.Context, gen uint64) {
 			return
 		case <-t.C:
 		}
-		m.mu.Lock()
-		wanted := gen == m.apRaiseGen && m.stationWatchWantedLocked()
-		m.mu.Unlock()
+		present, known, wanted := m.readAttachedPresence(ctx, gen)
 		if !wanted {
 			return
 		}
-		pollCtx, cancel := context.WithTimeout(ctx, stationPollTimeout)
-		n, ok := m.stations.AttachedStations(pollCtx)
-		cancel()
 		select {
-		case m.events <- event{kind: evStationPoll, gen: gen, stations: n, known: ok}:
+		case m.events <- event{kind: evStationPoll, gen: gen, present: present, known: known}:
 		default:
 			m.logger.Warn("provisioning: event queue full, dropping a station poll reading")
 		}
 	}
 }
 
+// readAttachedPresence is one tick of the poll: resolve the attached phone's
+// station address if the neighbor table can answer yet, read the AP's station
+// list, and report whether that phone is on it. wanted is false when the
+// raise no longer wants the poll — the caller's cue to stop.
+//
+// The question is deliberately "is THAT phone associated", not "is anyone":
+// with a second device on the hotspot (another phone, a laptop, a watch), an
+// aggregate count never reaches zero when the phone that raised the address
+// QR walks away, and that other device's own portal traffic keeps the silence
+// backstop from firing too (review bot on 6ba6f96). Until the neighbor table
+// has an answer — the first probe can land before the ARP entry is complete —
+// the aggregate is the fallback, which is the behavior this replaces.
+func (m *Machine) readAttachedPresence(ctx context.Context, gen uint64) (present, known, wanted bool) {
+	m.mu.Lock()
+	wanted = gen == m.apRaiseGen && m.stationWatchWantedLocked()
+	ip, mac := m.apAttachIP, m.apAttachMAC
+	m.mu.Unlock()
+	if !wanted {
+		return false, false, false
+	}
+	if mac == "" && ip != "" && m.neighborMAC != nil {
+		if resolved, ok := m.neighborMAC(ip); ok {
+			mac = resolved
+			m.mu.Lock()
+			// Only for the raise that asked: a teardown or a fresh attach
+			// under the read owns the field now.
+			if gen == m.apRaiseGen && m.apAttachIP == ip && m.apAttachMAC == "" {
+				m.apAttachMAC = mac
+			} else {
+				mac = m.apAttachMAC
+			}
+			m.mu.Unlock()
+			// The address itself is a device identifier and stays out of the
+			// log; that it resolved is what the log needs to say.
+			m.logger.Info("provisioning: attached phone identified", zap.String("ip", ip))
+		}
+	}
+
+	pollCtx, cancel := context.WithTimeout(ctx, stationPollTimeout)
+	macs, ok := m.stations.AttachedStations(pollCtx)
+	cancel()
+	if !ok {
+		return false, false, true
+	}
+	if mac == "" {
+		return len(macs) > 0, true, true
+	}
+	for _, sta := range macs {
+		if strings.EqualFold(sta, mac) {
+			return true, true, true
+		}
+	}
+	return false, true, true
+}
+
 // applyStationPoll handles one evStationPoll on the loop goroutine. A
 // reading from another raise, or one landing after the latch cleared, is
-// dropped. Consecutive empty reads (stationLeftPolls) mean the attached
-// phone left: hand the latch back and paint the join QR again with
-// ClientLeft set, so the screen shows the code the next scan needs and says
-// why. Consecutive unknown reads (stationUnknownGiveUp) switch the poll off
+// dropped. Consecutive reads that do not see the attached phone
+// (stationLeftPolls) mean it left: hand the latch back and paint the join QR
+// again with ClientLeft set, so the screen shows the code the next scan needs
+// and says why. Consecutive unknown reads (stationUnknownGiveUp) switch the poll off
 // for the raise; the silence re-arm remains. Like the idle re-arm, this is a
 // repaint, not a transition.
-func (m *Machine) applyStationPoll(gen uint64, n int, known bool) {
+func (m *Machine) applyStationPoll(gen uint64, present, known bool) {
 	m.mu.Lock()
 	if gen != m.apRaiseGen || !m.stationWatchWantedLocked() {
 		m.mu.Unlock()
 		return
 	}
-	left, gaveUp := m.recordStationPollLocked(n, known)
+	left, gaveUp := m.recordStationPollLocked(present, known)
 	if left {
-		m.apClientSeen = false
-		m.apAttachPending = false
-		m.apAttachPaintedAt = time.Time{}
+		m.clearAttachLatchLocked()
 		m.resetStationPollLocked()
 	}
 	info := m.apInfo
@@ -2878,7 +2963,7 @@ func (m *Machine) applyStationPoll(gen uint64, n int, known bool) {
 
 // recordStationPollLocked folds one reading into the streak counters and
 // reports the verdicts it produces. Caller holds mu.
-func (m *Machine) recordStationPollLocked(n int, known bool) (left, gaveUp bool) {
+func (m *Machine) recordStationPollLocked(present, known bool) (left, gaveUp bool) {
 	switch {
 	case !known:
 		m.apStationZero = 0
@@ -2887,7 +2972,7 @@ func (m *Machine) recordStationPollLocked(n int, known bool) (left, gaveUp bool)
 			m.apStationWatchOff = true
 			return false, true
 		}
-	case n > 0:
+	case present:
 		m.apStationZero = 0
 		m.apStationUnknown = 0
 	default:
@@ -2947,9 +3032,7 @@ func (m *Machine) ensureAPDown(ctx context.Context) bool {
 	m.apUp = false
 	m.portalSrv = nil
 	m.apInfo = softap.Info{}
-	m.apClientSeen = false
-	m.apAttachPending = false
-	m.apAttachPaintedAt = time.Time{}
+	m.clearAttachLatchLocked()
 	m.resetStationPollLocked()
 	m.apDownPending = !downOK
 	m.mu.Unlock()
