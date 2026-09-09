@@ -281,9 +281,12 @@ func (s *Server) withLimits(next http.Handler) http.Handler {
 		// One access line per request. The portal sees a handful of requests
 		// per setup (the OS probe, the page, its assets, the submission), and
 		// which of them arrived — and with which User-Agent — is the only
-		// evidence for why the attached-phase repaint did or did not fire
-		// (feral-file#3515 field run 2026-09-09: the sheet opened but no
-		// Apple probe reached the portal). Host and query are omitted.
+		// evidence for why the attached-phase repaint did or did not fire.
+		// Field run 2026-09-09 (feral-file#3515): three trials showed no
+		// repaint and the log could not say whether the phone's probe had
+		// reached the portal at all; the cause was a different controld
+		// binary running under a runtime unit override, which this line
+		// would have exposed in one run. Host and query are omitted.
 		s.logger.Info("portal: request",
 			zap.String("method", r.Method), zap.String("path", r.URL.Path),
 			zap.String("remote_addr", r.RemoteAddr), zap.String("user_agent", r.UserAgent()),
