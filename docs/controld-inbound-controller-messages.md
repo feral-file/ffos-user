@@ -1496,11 +1496,15 @@ Factory reset ends every browser session too, in this order:
    sent a moment earlier can commit AFTER the sweep below has listed the topic,
    and that listing would never see it. So the reset waits for those creations
    to return — each one then runs its own guard, sees the invalidated claim,
-   and revokes the session it made. The wait is bounded (the create's own
-   request budget plus a small margin, capped at 35 s): a create that never
-   returns must not hold a wipe, and giving up is logged at error level with
-   the number still outstanding, since those are exactly the sessions the sweep
-   can miss. A creation whose response is lost entirely is the relay
+   and revokes the session it made. A decision counts as in flight from the
+   moment it is admitted — before it re-reads the claim, not after — so a reset
+   can never slip between that read and the POST. The wait is bounded: a create
+   that never returns must not hold a wipe, and giving up is logged at error
+   level with the number still outstanding, since those are exactly the
+   sessions the sweep can miss. This wait and the sweep below share ONE 20 s
+   budget (up to 15 s waiting, the remainder for the sweep, never less than
+   3 s), because the reset is answered synchronously: over LAN the reply cannot
+   start until the cleanup returns, against the hub's 30 s write timeout. A creation whose response is lost entirely is the relay
    idempotency case — the device never learns the session id — tracked as
    ff-relayer #20.
 3. **Sweep the topic.** It lists that topic's sessions

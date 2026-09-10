@@ -169,6 +169,11 @@ type service struct {
 	// createGate and WaitForInFlightCreates.
 	creates *createGate
 
+	// afterCreateAdmission runs immediately after a decision is admitted to
+	// the create gate and before its topic-guard check. Test-only seam for the
+	// reset-lands-in-that-window case; nil everywhere else.
+	afterCreateAdmission func()
+
 	// session, when set (SetSession), is the playersession.Session the
 	// display sends park against while a recovery navigation is pending
 	// — same generation-snapshot park discipline setupui.Service gets
@@ -1026,17 +1031,14 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		s.logger.Warn("Failed to display mint pairing token creation status", zap.Error(err), zap.String("channelID", request.ChannelID))
 	}
 
-	if !guard.sameAs(currentTopicGuard()) {
-		return s.rejectTopicChanged(channel, request, topicID, approvalRequestID)
-	}
-
-	lifetime := s.sessionLifetimeFor(decision, request)
-
-	// From here until the post-create guard has run, this creation counts as
-	// in flight: the relayer may commit a session at any moment inside that
-	// window, and until the guard has looked, nothing else knows the session
-	// exists. releaseCreate is deliberately called as early as the contract
-	// allows, with the defer only as a safety net for the early returns.
+	// Admission comes BEFORE the guard check, not after it. A factory reset
+	// that lands in between would otherwise find the gate drained, sweep an
+	// empty topic, and only then would this mint POST — leaving a session
+	// whose sole remaining owner is a process the reset is about to reboot.
+	// From here the creation counts as in flight until this path either
+	// decides not to POST at all or has finished its post-create guard,
+	// revoke included. releaseCreate is called as early as that contract
+	// allows; the defer is the safety net for the early returns.
 	s.creates.enter()
 	createReleased := false
 	releaseCreate := func() {
@@ -1047,6 +1049,21 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		s.creates.leave()
 	}
 	defer releaseCreate()
+
+	// afterCreateAdmission is a test-only seam: it exists so a test can land a
+	// factory reset in the window this admission was moved to cover. Nil in
+	// every production wiring.
+	if s.afterCreateAdmission != nil {
+		s.afterCreateAdmission()
+	}
+
+	if !guard.sameAs(currentTopicGuard()) {
+		// No POST will happen, so nothing is in flight any more.
+		releaseCreate()
+		return s.rejectTopicChanged(channel, request, topicID, approvalRequestID)
+	}
+
+	lifetime := s.sessionLifetimeFor(decision, request)
 
 	sessionCtx, cancelSession := context.WithTimeout(ctx, wrapper.HTTPClientTimeout)
 	session, err := s.sessionCreator.CreateEphemeralSession(sessionCtx, topicID, request, lifetime)

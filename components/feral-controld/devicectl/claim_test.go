@@ -336,7 +336,7 @@ func TestFactoryReset_SweepsAnywayWhenTheInFlightWaitExpires(t *testing.T) {
 		},
 		revoke: func(_ context.Context, topicID string) (int, error) {
 			sweptTopic = topicID
-			return 1, nil
+			return 1, errors.New("relayer unreachable")
 		},
 	}
 
@@ -351,6 +351,72 @@ func TestFactoryReset_SweepsAnywayWhenTheInFlightWaitExpires(t *testing.T) {
 	require.Equal(t, 1, entries.Len())
 	assert.Equal(t, int64(2), entries.All()[0].ContextMap()["inFlight"],
 		"the log names how many creates were still outstanding")
+
+	// A sweep that also fails inside the budget is the other half of the same
+	// story, and must be just as loud.
+	swept := logs.FilterMessage("Factory reset: failed to revoke browser sessions for the outgoing topic; sessions may survive the reset")
+	require.Equal(t, 1, swept.Len())
+	assert.Equal(t, int64(1), swept.All()[0].ContextMap()["revoked"])
+	assert.True(t, e.ResetStaged(), "the reset still stages")
+}
+
+// TestFactoryReset_CleanupSharesOneBudgetInsideTheHubWriteDeadline: the reset
+// is answered synchronously — over LAN that reply cannot start until this
+// returns, against the hub's 30s server write timeout — so the wait and the
+// sweep share one 20s budget rather than each having their own.
+func TestFactoryReset_CleanupSharesOneBudgetInsideTheHubWriteDeadline(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
+	sm.EXPECT().InvalidateRelayerTopic().Return("topic-1", true, nil)
+	sm.EXPECT().ClearClaim().Return(true, nil)
+
+	var waitBudget, sweepBudgetSeen time.Duration
+	var sweepDeadline time.Time
+	cleanup := fakeBrowserSessionCleanup{
+		wait: func(ctx context.Context) (int, error) {
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok, "the wait must be bounded")
+			waitBudget = time.Until(deadline)
+			return 0, nil
+		},
+		revoke: func(ctx context.Context, _ string) (int, error) {
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok, "the sweep must be bounded")
+			sweepDeadline = deadline
+			sweepBudgetSeen = time.Until(deadline)
+			return 1, nil
+		},
+	}
+
+	e := resetExecutorWithCleanup(t, ctrl, cleanup, zap.NewNop())
+
+	started := time.Now()
+	_, err := e.factoryReset(context.Background())
+	require.NoError(t, err)
+
+	assert.LessOrEqual(t, waitBudget, inFlightCreateWaitBudget, "the wait cannot exceed its own share")
+	assert.GreaterOrEqual(t, sweepBudgetSeen, minSweepBudget, "the sweep always gets a real chance")
+	assert.LessOrEqual(t, sweepDeadline.Sub(started), browserSessionCleanupBudget+time.Second,
+		"the sweep runs inside the budget the wait started, not a fresh one")
+	assert.Less(t, browserSessionCleanupBudget, hubWriteDeadlineForTest,
+		"the whole cleanup must fit inside the hub write deadline with margin")
+	assert.Less(t, time.Since(started), 2*time.Second, "a cleanup with nothing to do returns at once")
+}
+
+// hubWriteDeadlineForTest mirrors hub.WRITE_TIMEOUT. It is duplicated rather
+// than imported because hub imports devicectl, and the number is the reason
+// the cleanup budget is what it is.
+const hubWriteDeadlineForTest = 30 * time.Second
+
+func TestSweepBudget_FloorsAtAUsableDuration(t *testing.T) {
+	assert.Equal(t, minSweepBudget, sweepBudget(0), "an exhausted budget still buys a sweep")
+	assert.Equal(t, minSweepBudget, sweepBudget(-5*time.Second))
+	assert.Equal(t, 8*time.Second, sweepBudget(8*time.Second))
 }
 
 // TestFactoryReset_CompletesWhenSessionRevocationFails: an unreachable relayer

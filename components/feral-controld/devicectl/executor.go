@@ -2958,8 +2958,7 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	// generation), so waiting for those returns is what makes the sweep's
 	// enumeration complete.
 	outgoingTopicID := e.invalidateRelayerTopic()
-	e.waitForInFlightBrowserSessionCreates()
-	e.revokeTopicBrowserSessions(outgoingTopicID)
+	e.cleanupBrowserSessions(outgoingTopicID)
 
 	e.clearPersistedClaim()
 
@@ -3034,54 +3033,87 @@ func (e *executor) invalidateRelayerTopic() string {
 // purpose — what survives it is a live session against a device its previous
 // owner no longer holds, and this log is the only trace of it, since the
 // re-claimed device cannot reach the old topic to try again.
-// inFlightCreateWaitTimeout bounds the wait for session creations already sent
-// to the relayer: their own request budget plus a small margin for the
-// post-create guard that follows, capped so a reset can never be held long by
-// this step.
-func inFlightCreateWaitTimeout() time.Duration {
-	const (
-		margin  = 5 * time.Second
-		maxWait = 35 * time.Second
-	)
-	wait := wrapper.HTTPClientTimeout + margin
-	if wait > maxWait {
-		wait = maxWait
+// The reset's browser-session cleanup runs inside ONE budget, because the
+// reset is synchronous: a factoryReset over LAN is answered on the hub, whose
+// server write timeout is 30s (hub.WRITE_TIMEOUT), and the reply cannot start
+// until this returns. 20s total leaves the response real margin, and the
+// relayer work is best effort anyway — the wipe is coming either way.
+const (
+	// browserSessionCleanupBudget is the whole cleanup: wait plus sweep.
+	browserSessionCleanupBudget = 20 * time.Second
+	// inFlightCreateWaitBudget caps the wait alone, so a stuck creation can
+	// never eat the sweep's share of the budget.
+	inFlightCreateWaitBudget = 15 * time.Second
+	// minSweepBudget is what the sweep gets even when the wait overran: a
+	// sweep with no time at all is the same as no sweep.
+	minSweepBudget = 3 * time.Second
+)
+
+// sweepBudget is what is left of the cleanup budget for the sweep, floored so
+// the sweep always gets a real chance to run.
+func sweepBudget(remaining time.Duration) time.Duration {
+	if remaining < minSweepBudget {
+		return minSweepBudget
 	}
-	return wait
+	return remaining
 }
 
-// waitForInFlightBrowserSessionCreates lets creations that are already at the
-// relayer finish, so the sweep that follows enumerates a settled set. Bounded:
-// a create that never returns must not hold a wipe, and giving up is logged at
-// error level with what was still outstanding, because those are exactly the
-// sessions the sweep can miss.
-func (e *executor) waitForInFlightBrowserSessionCreates() {
+// cleanupBrowserSessions ends the browser sessions the relayer holds for the
+// topic this device has just stopped answering to: it lets creations already
+// in flight settle (they then revoke themselves against the invalidated
+// claim), then sweeps what the relayer still holds. Both steps share one
+// budget; overrunning it is logged and never blocks the reset.
+func (e *executor) cleanupBrowserSessions(topicID string) {
 	if e.browserSessions == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), inFlightCreateWaitTimeout())
+	deadline := time.Now().Add(browserSessionCleanupBudget)
+	e.waitForInFlightBrowserSessionCreates(deadline)
+	e.revokeTopicBrowserSessions(topicID, deadline)
+}
+
+// waitForInFlightBrowserSessionCreates lets creations that are already at the
+// relayer finish, so the sweep that follows enumerates a settled set. Bounded
+// twice — by its own share of the budget and by the budget itself — because a
+// create that never returns must not hold a wipe. Giving up is logged at error
+// level with what was still outstanding: those are exactly the sessions the
+// sweep can miss.
+func (e *executor) waitForInFlightBrowserSessionCreates(deadline time.Time) {
+	wait := time.Until(deadline)
+	if wait > inFlightCreateWaitBudget {
+		wait = inFlightCreateWaitBudget
+	}
+	if wait <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 	inFlight, err := e.browserSessions.WaitForInFlightCreates(ctx)
 	if err != nil {
 		e.logger.Error("Factory reset: gave up waiting for in-flight browser session creations; sessions they commit will survive the sweep",
 			zap.Error(err),
-			zap.Int("inFlight", inFlight))
+			zap.Int("inFlight", inFlight),
+			zap.Duration("waited", wait))
 	}
 }
 
-func (e *executor) revokeTopicBrowserSessions(topicID string) {
-	if e.browserSessions == nil {
-		return
-	}
+// revokeTopicBrowserSessions revokes the relayer's browser sessions for the
+// topic this device has just stopped answering to, inside whatever is left of
+// the cleanup budget. Best effort: the reset completes regardless. A failure
+// is logged at error level on purpose — what survives it is a live session
+// against a device its previous owner no longer holds, and this log is the
+// only trace of it, since the re-claimed device cannot reach the old topic to
+// try again.
+func (e *executor) revokeTopicBrowserSessions(topicID string, deadline time.Time) {
 	if topicID == "" {
 		return
 	}
-	// Rooted on Background with its own small budget: the command context may
-	// already be canceled by the caller that asked for the reset, and this
+	// Rooted on Background with the budget's remainder: the command context
+	// may already be canceled by the caller that asked for the reset, and this
 	// cleanup is worth doing either way.
-	revokeCtx, cancel := context.WithTimeout(context.Background(), browserSessionRevokeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), sweepBudget(time.Until(deadline)))
 	defer cancel()
-	revoked, err := e.browserSessions.RevokeTopicSessions(revokeCtx, topicID)
+	revoked, err := e.browserSessions.RevokeTopicSessions(ctx, topicID)
 	if err != nil {
 		e.logger.Error("Factory reset: failed to revoke browser sessions for the outgoing topic; sessions may survive the reset",
 			zap.Error(err),

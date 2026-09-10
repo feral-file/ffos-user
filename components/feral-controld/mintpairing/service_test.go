@@ -2064,6 +2064,87 @@ func TestWaitForInFlightCreates_BlocksUntilThePostCreateGuardHasRun(t *testing.T
 	assert.Empty(t, ch.DeliveredSessions())
 }
 
+// TestCompleteDecision_ResetBetweenAdmissionAndTheGuardCheckIsWaitedFor pins
+// the window the create gate was moved to cover. The reset lands after this
+// decision has been admitted but before it has re-read the claim: if admission
+// came after that read, the reset would see an empty gate, sweep an empty
+// topic, and only then would this mint POST — leaving a session behind at the
+// relayer whose only remaining owner is a process about to reboot.
+func TestCompleteDecision_ResetBetweenAdmissionAndTheGuardCheckIsWaitedFor(t *testing.T) {
+	defer state.ResetForTesting()
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+	startGuard := currentTopicGuard()
+
+	admitted := make(chan struct{})
+	resetDone := make(chan struct{})
+	ch := &fakeBrokerChannel{rejectionSent: make(chan struct{}, 1)}
+	creator := &recordingSessionCreator{persistent: true}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		&fakeRelayer{sent: make(chan relayer.Response, 2)},
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	// The reset lands in the window between admission and the guard check.
+	s.afterCreateAdmission = func() {
+		close(admitted)
+		<-resetDone
+	}
+
+	mintDone := make(chan struct{})
+	go func() {
+		defer close(mintDone)
+		_, _ = s.completeDecision(context.Background(), ch, minter.MintRequest{
+			ChannelID:                  "ch_1",
+			MessageID:                  "msg_1",
+			SupportsPersistentSessions: true,
+		}, startGuard, "mpa_1", approvalDecisionRequest{
+			ApprovalRequestID: "mpa_1",
+			TopicID:           "topic-1",
+			ChannelID:         "ch_1",
+			RequestMessageID:  "msg_1",
+			Decision:          "approve",
+			KeepPaired:        true,
+		})
+	}()
+
+	<-admitted
+
+	// This is the reset: invalidate, then ask whether anything is mid-create.
+	if _, _, err := state.InvalidateRelayerTopic(); err != nil {
+		t.Logf("InvalidateRelayerTopic save failed as expected in tests: %v", err)
+	}
+	tooSoon, cancelTooSoon := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	inFlight, err := s.WaitForInFlightCreates(tooSoon)
+	cancelTooSoon()
+	require.Error(t, err, "the reset must see this decision as in flight")
+	assert.Equal(t, 1, inFlight)
+
+	close(resetDone)
+
+	settled, cancelSettled := context.WithTimeout(context.Background(), 2*time.Second)
+	inFlight, err = s.WaitForInFlightCreates(settled)
+	cancelSettled()
+	require.NoError(t, err, "the wait clears once the decision has settled")
+	assert.Zero(t, inFlight)
+
+	<-mintDone
+
+	// Admitted, then stopped by the guard: nothing was ever POSTed, so there
+	// is nothing for the sweep to miss.
+	assert.Zero(t, creator.calls, "the mint must not create a session for a wiped claim")
+	assert.Empty(t, creator.revokes)
+	assert.Empty(t, ch.DeliveredSessions())
+	ch.mu.Lock()
+	assert.Equal(t, []string{"topic_changed"}, ch.rejectionReasons)
+	ch.mu.Unlock()
+}
+
 func TestWaitForInFlightCreates_ReturnsImmediatelyWhenNothingIsInFlight(t *testing.T) {
 	s := newTestService()
 
