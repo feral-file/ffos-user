@@ -45,8 +45,15 @@ type PlayerStatus struct {
 	Ok             bool                        `json:"ok,omitempty"`
 	Error          *string                     `json:"error,omitempty"`
 	DeviceSettings *struct {
-		Scaling     *string `json:"scaling,omitempty"`
-		Orientation *string `json:"orientation,omitempty"`
+		// Composition is the player's committed showing after DP-1 merging
+		// and ephemeral Control Center writes, not persisted machine defaults.
+		// Keep margin's DP-1 number (pixels) or string (CSS) representation.
+		ShowingKey          *string         `json:"showingKey,omitempty"`
+		CompositionRevision *uint64         `json:"compositionRevision,omitempty"`
+		Margin              json.RawMessage `json:"margin,omitempty"`
+		Background          *string         `json:"background,omitempty"`
+		Scaling             *string         `json:"scaling,omitempty"`
+		Orientation         *string         `json:"orientation,omitempty"`
 		// Device-level default playlist item duration in seconds, set via the
 		// updateDefaultDuration cast command. Absent means "auto" (no
 		// override). Must round-trip here or this typed re-marshal drops it
