@@ -1492,7 +1492,13 @@ Factory reset ends every browser session too, in this order:
    device's topic generation has moved, so any mint already in flight fails its
    own guard check — before creation, or after delivery — and revokes the
    session it made.
-2. **Let creations already at `ff-relayer` settle.** A session-creation POST
+2. **Close the pairing session in progress.** The pairing worker sits in a
+   broker poll on a socket the device still holds, so until it is gone a
+   browser request can still arrive for the claim being wiped. The reset closes
+   it and waits, boundedly, for the worker to exit. The worker guards itself
+   too: a request it reads after the claim it began under has moved is dropped
+   with a log — never displayed on the panel, never sent to a controller.
+3. **Let creations already at `ff-relayer` settle.** A session-creation POST
    sent a moment earlier can commit AFTER the sweep below has listed the topic,
    and that listing would never see it. So the reset waits for those creations
    to return — each one then runs its own guard, sees the invalidated claim,
@@ -1502,18 +1508,19 @@ Factory reset ends every browser session too, in this order:
    that never returns must not hold a wipe, and giving up is logged at error
    level with the number still outstanding, since those are exactly the
    sessions the sweep can miss. This wait and the sweep below share ONE 20 s
-   budget (up to 15 s waiting, the remainder for the sweep, never less than
-   3 s), because the reset is answered synchronously: over LAN the reply cannot
+   budget with the close above (5 s closing, up to 12 s waiting, the remainder
+   for the sweep, never less than 3 s), because the reset is answered
+   synchronously: over LAN the reply cannot
    start until the cleanup returns, against the hub's 30 s write timeout. A creation whose response is lost entirely is the relay
    idempotency case — the device never learns the session id — tracked as
    ff-relayer #20.
-3. **Sweep the topic.** It lists that topic's sessions
+4. **Sweep the topic.** It lists that topic's sessions
    (`GET /api/ephemeral-sessions?topicID=...`) and revokes each one. Sessions
    live on `ff-relayer`, keyed by topic, and an owner-kept one has no expiry to
    reclaim it, so this is the last moment anything can end them: afterwards the
    device cannot name the topic they belong to, and the re-claimed device's
    paired-sites screen reads a new one.
-4. **Clear the rest of the claim.**
+5. **Clear the rest of the claim.**
 
 The order is deliberate. Sweeping first would leave a hole: an approval
 accepted a moment before the reset could mint its session after the sweep had

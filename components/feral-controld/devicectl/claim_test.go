@@ -360,6 +360,95 @@ func TestFactoryReset_SweepsAnywayWhenTheInFlightWaitExpires(t *testing.T) {
 	assert.True(t, e.ResetStaged(), "the reset still stages")
 }
 
+// TestFactoryReset_ClosesTheActivePairingBeforeAnythingElse: the pairing
+// worker polls the broker on a socket the device still holds. It is closed
+// first, before the wait and the sweep, so nothing is still listening for the
+// claim being wiped.
+func TestFactoryReset_ClosesTheActivePairingBeforeAnythingElse(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
+
+	step := 0
+	invalidatedAt, closedAt, waitedAt, sweptAt := 0, 0, 0, 0
+	sm.EXPECT().InvalidateRelayerTopic().DoAndReturn(func() (string, bool, error) {
+		step++
+		invalidatedAt = step
+		return "topic-1", true, nil
+	})
+	sm.EXPECT().ClearClaim().Return(true, nil)
+
+	cleanup := fakeBrowserSessionCleanup{
+		closePairing: func(ctx context.Context) (bool, error) {
+			step++
+			closedAt = step
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok, "the close must be bounded")
+			assert.LessOrEqual(t, time.Until(deadline), pairingCloseBudget)
+			return true, nil
+		},
+		wait: func(context.Context) (int, error) {
+			step++
+			waitedAt = step
+			return 0, nil
+		},
+		revoke: func(context.Context, string) (int, error) {
+			step++
+			sweptAt = step
+			return 1, nil
+		},
+	}
+
+	e := resetExecutorWithCleanup(t, ctrl, cleanup, zap.NewNop())
+
+	_, err := e.factoryReset(context.Background())
+	require.NoError(t, err)
+
+	assert.Less(t, invalidatedAt, closedAt, "the claim is invalidated before the pairing is closed")
+	assert.Less(t, closedAt, waitedAt, "the worker is gone before the reset waits on creations")
+	assert.Less(t, waitedAt, sweptAt)
+}
+
+// TestFactoryReset_CompletesWhenTheActivePairingWillNotClose: a worker that
+// will not exit must not hold a wipe; the reset logs and carries on, and the
+// worker's own topic check still drops anything it reads.
+func TestFactoryReset_CompletesWhenTheActivePairingWillNotClose(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
+	sm.EXPECT().InvalidateRelayerTopic().Return("topic-1", true, nil)
+	sm.EXPECT().ClearClaim().Return(true, nil)
+
+	swept := false
+	cleanup := fakeBrowserSessionCleanup{
+		closePairing: func(context.Context) (bool, error) {
+			return true, context.DeadlineExceeded
+		},
+		revoke: func(context.Context, string) (int, error) {
+			swept = true
+			return 1, nil
+		},
+	}
+
+	core, logs := observer.New(zap.ErrorLevel)
+	e := resetExecutorWithCleanup(t, ctrl, cleanup, zap.New(core))
+
+	result, err := e.factoryReset(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, CmdOK, result)
+	assert.True(t, swept, "the rest of the cleanup still runs")
+	assert.True(t, e.ResetStaged())
+	assert.Equal(t, 1, logs.FilterMessage("Factory reset: the active mint pairing session did not close in time").Len())
+}
+
 // TestFactoryReset_CleanupSharesOneBudgetInsideTheHubWriteDeadline: the reset
 // is answered synchronously — over LAN that reply cannot start until this
 // returns, against the hub's 30s server write timeout — so the wait and the
@@ -460,8 +549,16 @@ func TestFactoryReset_WithoutARevokerBehavesAsBefore(t *testing.T) {
 // fakeBrowserSessionCleanup is the mint-pairing seam factory reset drives:
 // wait for creations already at the relayer, then revoke what it holds.
 type fakeBrowserSessionCleanup struct {
-	wait   func(ctx context.Context) (int, error)
-	revoke func(ctx context.Context, topicID string) (int, error)
+	closePairing func(ctx context.Context) (bool, error)
+	wait         func(ctx context.Context) (int, error)
+	revoke       func(ctx context.Context, topicID string) (int, error)
+}
+
+func (f fakeBrowserSessionCleanup) CloseActivePairing(ctx context.Context) (bool, error) {
+	if f.closePairing == nil {
+		return false, nil
+	}
+	return f.closePairing(ctx)
 }
 
 func (f fakeBrowserSessionCleanup) WaitForInFlightCreates(ctx context.Context) (int, error) {

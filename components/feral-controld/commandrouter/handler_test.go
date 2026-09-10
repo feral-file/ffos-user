@@ -407,6 +407,10 @@ func (f *fakeMintPairingService) WaitForInFlightCreates(context.Context) (int, e
 	return 0, nil
 }
 
+func (f *fakeMintPairingService) CloseActivePairing(context.Context) (bool, error) {
+	return false, nil
+}
+
 func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

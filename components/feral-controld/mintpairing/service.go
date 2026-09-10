@@ -126,6 +126,15 @@ type Service interface {
 	// sweep has enumerated, and the only thing that then knows about that
 	// session is the create call itself.
 	WaitForInFlightCreates(ctx context.Context) (int, error)
+	// CloseActivePairing ends any pairing session in progress and waits for
+	// its worker to exit, or until ctx expires. closed reports whether there
+	// was one to close.
+	//
+	// Factory reset calls it right after invalidating the claim: the pairing
+	// worker keeps polling the broker on a socket the device still holds, and
+	// a request arriving after the wipe has begun belongs to a claim that is
+	// gone.
+	CloseActivePairing(ctx context.Context) (closed bool, err error)
 }
 
 // NavigationSession is the narrow slice of playersession.Session the display
@@ -882,6 +891,21 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		return
 	}
 
+	// The claim can go while this worker sits in its poll: a factory reset
+	// clears the topic, and the socket this device still holds belongs to a
+	// claim that no longer exists. Drop the request before it touches
+	// anything the owner can see — no screen, no controller notification —
+	// because both would be a previous owner's pairing surfacing on a device
+	// mid-wipe.
+	if !guard.sameAs(currentTopicGuard()) {
+		s.logger.Warn("Dropping mint pairing request: the claim this pairing began under is gone",
+			zap.String("channelID", request.ChannelID),
+			zap.String("requestMessageID", request.MessageID),
+			zap.String("origin", request.Origin),
+			zap.String("pairedForTopicID", guard.topicID))
+		return
+	}
+
 	approvalRequestID, err := newApprovalRequestID()
 	if err != nil {
 		s.logger.Warn("Failed to create mint pairing approval request id", zap.Error(err), zap.String("channelID", active.channelID))
@@ -1196,6 +1220,30 @@ func classifyDeliveryFailure(err error) deliveryVerdict {
 		return deliveryNeverSent
 	}
 	return deliveryUnknown
+}
+
+// CloseActivePairing ends the pairing session in progress. See Service.
+func (s *service) CloseActivePairing(ctx context.Context) (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	active := s.cancelActivePairing()
+	if active == nil {
+		return false, nil
+	}
+	s.logger.Info("Closing active mint pairing session: the claim it belongs to is gone",
+		pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+	if active.done == nil {
+		return true, nil
+	}
+	// Waiting for the worker, not just cancelling it: until it returns it can
+	// still be mid-display or mid-notification for the claim being wiped.
+	select {
+	case <-active.done:
+		return true, nil
+	case <-ctx.Done():
+		return true, ctx.Err()
+	}
 }
 
 // WaitForInFlightCreates blocks until nothing is mid-creation. See Service.

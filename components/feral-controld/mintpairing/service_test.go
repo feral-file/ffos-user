@@ -2927,6 +2927,160 @@ func TestCompleteDecision_WithoutKeepPairedDeliversAnExpiringSession(t *testing.
 	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
 }
 
+// TestWaitForBrowserAndApproval_DropsARequestArrivingAfterTheClaimIsGone: the
+// pairing worker sits in a broker poll on a socket this device still holds. If
+// the claim goes while it waits — a factory reset — the request it then reads
+// belongs to a pairing nobody on this device can honour any more. It must not
+// reach the screen or the controller: a previous owner's approval prompt
+// appearing on a device mid-wipe is exactly what the reset is undoing.
+func TestWaitForBrowserAndApproval_DropsARequestArrivingAfterTheClaimIsGone(t *testing.T) {
+	defer state.ResetForTesting()
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+
+	polled := make(chan struct{})
+	ch := &fakeBrokerChannel{
+		pairingCode: "PAIR-123",
+		beforePoll:  func() { closeOnce(polled) },
+		request: &minter.MintRequest{
+			ChannelID:   "ch_1",
+			MessageID:   "msg_1",
+			Origin:      "https://gallery.example",
+			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
+		},
+	}
+	cdpClient := &fakeCDP{}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		&fakeBrokerStarter{channel: ch},
+		fakeSessionCreator{},
+		relayerClient,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	// The claim is wiped before the worker reads the request waiting for it.
+	if _, _, err := state.InvalidateRelayerTopic(); err != nil {
+		t.Logf("InvalidateRelayerTopic save failed as expected in tests: %v", err)
+	}
+
+	// A fresh start would be refused outright (no topic), so drive the worker
+	// directly: this is a pairing that began under the claim that has since
+	// been invalidated.
+	startResult, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertCommandError(t, startResult, "topic_not_ready", true)
+	staleGuard := topicGuard{topicID: "topic-1", generation: 0}
+	active := &activePairing{
+		channel:     ch,
+		channelID:   "ch_1",
+		pairingCode: "PAIR-123",
+		expiresAt:   time.Now().Add(time.Minute),
+		cancel:      func() {},
+		done:        make(chan struct{}),
+	}
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		s.waitForBrowserAndApproval(context.Background(), active, staleGuard)
+	}()
+
+	select {
+	case <-polled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker never polled for a request")
+	}
+
+	select {
+	case <-workerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker never returned after dropping the request")
+	}
+
+	assert.Empty(t, cdpClient.displayRequestsSnapshot(), "a dropped request never reaches the screen")
+	select {
+	case sent := <-relayerClient.sent:
+		t.Fatalf("a dropped request must not notify the controller: %v", sent)
+	default:
+	}
+	ch.mu.Lock()
+	assert.Equal(t, 0, ch.successCount)
+	ch.mu.Unlock()
+}
+
+// TestCloseActivePairing_EndsTheWorkerAndStopsLaterRequests: the reset closes
+// the pairing session it finds, and waits for the worker, so nothing is still
+// polling for the claim being wiped.
+func TestCloseActivePairing_EndsTheWorkerAndStopsLaterRequests(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{pairingCode: "PAIR-123"}
+	cdpClient := &fakeCDP{}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		&fakeBrokerStarter{channel: ch},
+		fakeSessionCreator{},
+		relayerClient,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	require.True(t, result.(startPairingResponse).OK)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	closed, err := s.CloseActivePairing(ctx)
+
+	require.NoError(t, err, "the worker must exit inside the reset's budget")
+	assert.True(t, closed, "there was a pairing session to close")
+
+	// The browser's request lands after the close: with no worker left, it is
+	// never read, never displayed, never notified.
+	ch.mu.Lock()
+	ch.request = &minter.MintRequest{ChannelID: "ch_1", MessageID: "msg_1", Origin: "https://gallery.example"}
+	ch.mu.Unlock()
+
+	time.Sleep(50 * time.Millisecond)
+	for _, request := range cdpClient.displayRequestsSnapshot() {
+		assert.NotEqual(t, "request_received", request["state"],
+			"no worker is left to display a request arriving after the close")
+	}
+	select {
+	case sent := <-relayerClient.sent:
+		t.Fatalf("no worker is left to notify a controller after the close: %v", sent)
+	default:
+	}
+
+	// Closing again reports there was nothing to close.
+	closed, err = s.CloseActivePairing(ctx)
+	require.NoError(t, err)
+	assert.False(t, closed)
+}
+
 func TestWaitForBrowserAndApproval_RejectsIfTopicChangesAfterApproval(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -3186,6 +3340,15 @@ type fakeBrokerChannel struct {
 	deliveredSessions []minter.MintResult
 	successErr        error
 	onSend            func()
+	beforePoll        func()
+}
+
+func closeOnce(ch chan struct{}) {
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
 }
 
 func (f *fakeBrokerChannel) DeliveredSessions() []minter.MintResult {
@@ -3209,6 +3372,9 @@ func (f *fakeBrokerChannel) MinterPublicKeyJWK() minter.PublicJWK {
 func (f *fakeBrokerChannel) PollMintRequest(_ context.Context, afterSeq int64) (*minter.MintRequest, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.beforePoll != nil {
+		f.beforePoll()
+	}
 	f.pollAfterSeqs = append(f.pollAfterSeqs, afterSeq)
 	if f.ignoredSeq > afterSeq {
 		nextSeq := f.ignoredSeq

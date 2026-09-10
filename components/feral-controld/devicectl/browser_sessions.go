@@ -15,6 +15,10 @@ import (
 // that file, and a mock carrying this type would import devicectl, which
 // devicectl's own tests already import back.
 type BrowserSessionCleanup interface {
+	// CloseActivePairing ends a pairing session in progress and waits for its
+	// worker to exit. A worker left polling would keep answering for a claim
+	// the reset has already invalidated.
+	CloseActivePairing(ctx context.Context) (closed bool, err error)
 	WaitForInFlightCreates(ctx context.Context) (inFlight int, err error)
 	RevokeTopicSessions(ctx context.Context, topicID string) (revoked int, err error)
 }

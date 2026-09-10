@@ -3034,13 +3034,17 @@ func (e *executor) invalidateRelayerTopic() string {
 // until this returns. 20s total leaves the response real margin, and the
 // relayer work is best effort anyway — the wipe is coming either way.
 const (
-	// browserSessionCleanupBudget is the whole cleanup: wait plus sweep.
+	// browserSessionCleanupBudget is the whole cleanup: closing the active
+	// pairing, waiting for creations in flight, and the sweep. The per-step
+	// caps below add up to exactly this.
 	browserSessionCleanupBudget = 20 * time.Second
+	// pairingCloseBudget caps the wait for the pairing worker to exit.
+	pairingCloseBudget = 5 * time.Second
 	// inFlightCreateWaitBudget caps the wait alone, so a stuck creation can
 	// never eat the sweep's share of the budget.
-	inFlightCreateWaitBudget = 15 * time.Second
-	// minSweepBudget is what the sweep gets even when the wait overran: a
-	// sweep with no time at all is the same as no sweep.
+	inFlightCreateWaitBudget = 12 * time.Second
+	// minSweepBudget is what the sweep gets even when the earlier steps
+	// overran: a sweep with no time at all is the same as no sweep.
 	minSweepBudget = 3 * time.Second
 )
 
@@ -3063,8 +3067,43 @@ func (e *executor) cleanupBrowserSessions(topicID string) {
 		return
 	}
 	deadline := time.Now().Add(browserSessionCleanupBudget)
+	e.closeActivePairing(deadline)
 	e.waitForInFlightBrowserSessionCreates(deadline)
 	e.revokeTopicBrowserSessions(topicID, deadline)
+}
+
+// closeActivePairing ends a pairing session in progress and waits for its
+// worker to exit. It runs first, before the wait and the sweep: the worker
+// polls the broker on a socket this device still holds, so until it is gone a
+// browser request can still arrive for the claim being wiped. Bounded and best
+// effort — the worker also drops such a request on its own topic check, so
+// this is belt and braces, not the only guard.
+func (e *executor) closeActivePairing(deadline time.Time) {
+	budget := stepBudget(time.Until(deadline), pairingCloseBudget)
+	if budget <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	closed, err := e.browserSessions.CloseActivePairing(ctx)
+	if err != nil {
+		e.logger.Error("Factory reset: the active mint pairing session did not close in time",
+			zap.Error(err),
+			zap.Duration("waited", budget))
+		return
+	}
+	if closed {
+		e.logger.Info("Factory reset: closed the active mint pairing session")
+	}
+}
+
+// stepBudget caps one cleanup step at its own share and at whatever is left of
+// the shared budget.
+func stepBudget(remaining time.Duration, share time.Duration) time.Duration {
+	if remaining > share {
+		return share
+	}
+	return remaining
 }
 
 // waitForInFlightBrowserSessionCreates lets creations that are already at the
@@ -3074,10 +3113,7 @@ func (e *executor) cleanupBrowserSessions(topicID string) {
 // level with what was still outstanding: those are exactly the sessions the
 // sweep can miss.
 func (e *executor) waitForInFlightBrowserSessionCreates(deadline time.Time) {
-	wait := time.Until(deadline)
-	if wait > inFlightCreateWaitBudget {
-		wait = inFlightCreateWaitBudget
-	}
+	wait := stepBudget(time.Until(deadline), inFlightCreateWaitBudget)
 	if wait <= 0 {
 		return
 	}
