@@ -449,6 +449,43 @@ func TestFactoryReset_CompletesWhenTheActivePairingWillNotClose(t *testing.T) {
 	assert.Equal(t, 1, logs.FilterMessage("Factory reset: the active mint pairing session did not close in time").Len())
 }
 
+// TestFactoryReset_WithNoTopicStaysOffTheNetwork: having no topic is the only
+// thing that keeps the reset's cleanup off the relayer. There is nothing to
+// name, so there is nothing to list or revoke — but the local half still runs,
+// since a pairing in progress is worth closing either way.
+func TestFactoryReset_WithNoTopicStaysOffTheNetwork(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
+	sm.EXPECT().InvalidateRelayerTopic().Return("", false, nil)
+	sm.EXPECT().ClearClaim().Return(true, nil)
+
+	closed := false
+	swept := false
+	cleanup := fakeBrowserSessionCleanup{
+		closePairing: func(context.Context) (bool, error) {
+			closed = true
+			return false, nil
+		},
+		revoke: func(context.Context, string) (int, error) {
+			swept = true
+			return 0, nil
+		},
+	}
+
+	e := resetExecutorWithCleanup(t, ctrl, cleanup, zap.NewNop())
+
+	_, err := e.factoryReset(context.Background())
+	require.NoError(t, err)
+
+	assert.True(t, closed, "a pairing in progress is still closed")
+	assert.False(t, swept, "with no topic there is nothing to list or revoke")
+}
+
 // TestFactoryReset_CleanupSharesOneBudgetInsideTheHubWriteDeadline: the reset
 // is answered synchronously — over LAN that reply cannot start until this
 // returns, against the hub's 30s server write timeout — so the wait and the

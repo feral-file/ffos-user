@@ -1495,9 +1495,17 @@ Factory reset ends every browser session too, in this order:
 2. **Close the pairing session in progress.** The pairing worker sits in a
    broker poll on a socket the device still holds, so until it is gone a
    browser request can still arrive for the claim being wiped. The reset closes
-   it and waits, boundedly, for the worker to exit. The worker guards itself
-   too: a request it reads after the claim it began under has moved is dropped
-   with a log — never displayed on the panel, never sent to a controller.
+   it and waits, boundedly, for the worker to exit; a pairing that is still
+   *starting* — its broker call in flight, nothing published yet — is canceled
+   and awaited the same way, and the close repeats until neither exists, since
+   a start it is waiting on can publish a session while it waits. Every one of
+   those surfaces also guards itself against the claim moving: a start whose
+   claim went while the broker answered closes its channel and returns
+   `topic_changed` rather than painting a code, the same check runs again once
+   the code is on screen (taking it back down instead of publishing a session
+   for a claim that went while it painted), and a request read after the claim
+   moved is dropped with a log — never displayed on the panel, never sent to a
+   controller.
 3. **Let creations already at `ff-relayer` settle.** A session-creation POST
    sent a moment earlier can commit AFTER the sweep below has listed the topic,
    and that listing would never see it. So the reset waits for those creations
@@ -1528,8 +1536,10 @@ already listed the topic, and that session would survive the wipe. The sweep is
 bounded and best effort — a reset completes even if `ff-relayer` is unreachable,
 and what could not be revoked is logged at error level, because a session that
 survives is a live session against a device its previous owner no longer
-holds. A device with mint pairing disabled has no sessions to end, so the whole
-cleanup is skipped rather than spending the budget on a relayer round trip.
+holds. The cleanup does NOT depend on mint pairing being enabled: a device can mint an
+owner-kept session, be restarted with the feature turned off, and only then be
+reset — the credential outlives the flag. Having no topic is the only thing
+that keeps the reset off the network, because then there is nothing to name.
 
 Implementation note: `feral-controld` embeds the temporary Go minter client from
 `ff-art-computer-handoff` for Mint Pairing Broker channels, encrypted browser

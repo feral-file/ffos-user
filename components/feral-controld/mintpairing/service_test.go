@@ -2200,7 +2200,12 @@ func TestRevokeTopicSessions_KeepsGoingAfterAFailure(t *testing.T) {
 	assert.Len(t, creator.revokes, 2, "one unreachable session must not strand the rest")
 }
 
-func TestRevokeTopicSessions_IsANoOpWhenMintPairingIsDisabled(t *testing.T) {
+// TestRevokeTopicSessions_SweepsEvenWhenMintPairingIsDisabled: a device can
+// mint an owner-kept session, be restarted with mint pairing turned off, and
+// only then be reset. The credential outlives the feature flag, so the sweep
+// must too — gating this on Enabled would leave a live session against a
+// device its owner has just wiped.
+func TestRevokeTopicSessions_SweepsEvenWhenMintPairingIsDisabled(t *testing.T) {
 	creator := &recordingSessionCreator{listIDs: []string{"session-1"}}
 	s := newService(
 		Options{},
@@ -2215,9 +2220,9 @@ func TestRevokeTopicSessions_IsANoOpWhenMintPairingIsDisabled(t *testing.T) {
 	revoked, err := s.RevokeTopicSessions(context.Background(), "topic-1")
 
 	require.NoError(t, err)
-	assert.Zero(t, revoked)
-	assert.Empty(t, creator.revokes, "a device that never minted a session has nothing to sweep")
-	assert.Empty(t, creator.listIDsCalls, "and must not spend reset budget on a relayer round trip")
+	assert.Equal(t, 1, revoked)
+	assert.Equal(t, []string{"topic-1"}, creator.listIDsCalls)
+	assert.Equal(t, []revokedSession{{topicID: "topic-1", sessionID: "session-1"}}, creator.revokes)
 }
 
 func TestRevokeTopicSessions_IsANoOpWithoutATopic(t *testing.T) {
@@ -3110,6 +3115,152 @@ func TestHandleStartPairingSession_ResetDuringTheBrokerCallLeavesNothingBehind(t
 	assert.Nil(t, starting, "the in-progress slot is released")
 }
 
+// TestCloseActivePairing_ClosesASessionPublishedWhileItWaited: the close takes
+// what is registered now, and a start it is waiting on can publish a session
+// in the meantime. One pass would leave that session running for a wiped
+// claim, so the close loops until nothing is left.
+func TestCloseActivePairing_ClosesASessionPublishedWhileItWaited(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	s := newService(
+		Options{Enabled: true, BrokerBaseURL: "https://broker.example"},
+		nil,
+		fakeSessionCreator{},
+		&fakeRelayer{sent: make(chan relayer.Response, 2)},
+		&fakeCDP{},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	// A start in progress that publishes a session as it finishes — the
+	// interleaving the loop exists for.
+	published := &activePairing{
+		channelID:   "ch_1",
+		pairingCode: "PAIR-123",
+		expiresAt:   time.Now().Add(time.Minute),
+		cancel:      func() {},
+		done:        make(chan struct{}),
+	}
+	close(published.done) // its worker is already gone
+	starting := &startingPairing{
+		cancel: func() {},
+		done:   make(chan struct{}),
+	}
+	s.registerStarting(starting)
+	go func() {
+		s.mu.Lock()
+		s.active = published
+		s.mu.Unlock()
+		s.finishStarting(starting)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	closed, err := s.CloseActivePairing(ctx)
+
+	require.NoError(t, err)
+	assert.True(t, closed)
+	s.mu.Lock()
+	active := s.active
+	s.mu.Unlock()
+	assert.Nil(t, active, "a session published while the close waited must not survive it")
+}
+
+// TestHandleStartPairingSession_DropsASessionWhoseClaimWentWhileTheCodeWasDisplayed:
+// the QR paint is the last blocking call before the session is published. A
+// reset landing there sees a start to wait for but no session to close, so
+// without a check after the display this start would publish a worker for a
+// claim that is already gone — and the next start would answer
+// "already_started" for it.
+func TestHandleStartPairingSession_DropsASessionWhoseClaimWentWhileTheCodeWasDisplayed(t *testing.T) {
+	defer state.ResetForTesting()
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+
+	ch := &fakeBrokerChannel{pairingCode: "PAIR-123", closed: make(chan struct{}, 1)}
+	cdpClient := &fakeCDP{}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		&fakeBrokerStarter{channel: ch},
+		fakeSessionCreator{},
+		relayerClient,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	// The reset lands while the code is being painted. It invalidates the
+	// claim there and then, and its close runs concurrently with the rest of
+	// the start — which is the whole point: the close sees a start to wait for
+	// and no session to close.
+	resetDone := make(chan struct{})
+	cdpClient.onDisplay = func(displayState string) {
+		if displayState != "pairing_code" {
+			return
+		}
+		cdpClient.mu.Lock()
+		cdpClient.onDisplay = nil // only the first paint
+		cdpClient.mu.Unlock()
+		if _, _, err := state.InvalidateRelayerTopic(); err != nil {
+			t.Logf("InvalidateRelayerTopic save failed as expected in tests: %v", err)
+		}
+		go func() {
+			defer close(resetDone)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_, closeErr := s.CloseActivePairing(ctx)
+			assert.NoError(t, closeErr, "the close must not outlive its bound")
+		}()
+	}
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertCommandError(t, result, "topic_changed", true)
+
+	select {
+	case <-resetDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the reset's close never returned")
+	}
+
+	select {
+	case <-ch.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the channel whose claim went was never closed")
+	}
+
+	s.mu.Lock()
+	active := s.active
+	starting := s.starting
+	s.mu.Unlock()
+	require.Nil(t, active, "no session may survive the reset")
+	require.Nil(t, starting)
+
+	// And the next start must not find one either: "already_started" here
+	// would mean the wiped claim's session was still registered.
+	if _, err := state.SetRelayerTopicID("topic-2"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+	next := &fakeBrokerChannel{pairingCode: "PAIR-456"}
+	s.broker = &fakeBrokerStarter{channel: next}
+	result, err = s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	response, ok := result.(startPairingResponse)
+	require.True(t, ok, "the next start must succeed on the new claim: %v", result)
+	assert.Equal(t, "started", response.Status, "a wiped claim must not leave an already_started session behind")
+}
+
 // TestHandleStartPairingSession_DropsAChannelWhoseClaimMovedWhileStarting: the
 // broker call can succeed just as the claim goes. The channel is closed and
 // the start abandoned before anything is displayed or published.
@@ -3770,6 +3921,9 @@ type fakeCDP struct {
 	appResponseForRequest  func(map[string]any) any
 	defaultNavigateStarted chan struct{}
 	releaseDefaultNavigate chan struct{}
+	// onDisplay runs (outside the lock) for every display request, so a test
+	// can land something else while a paint is in flight.
+	onDisplay func(state string)
 }
 
 func (f *fakeCDP) Init(context.Context) error { return nil }
@@ -3800,7 +3954,12 @@ func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (inter
 
 		f.mu.Lock()
 		f.displayRequests = append(f.displayRequests, request)
+		onDisplay := f.onDisplay
 		f.mu.Unlock()
+		if onDisplay != nil {
+			state, _ := request["state"].(string)
+			onDisplay(state)
+		}
 		return f.mintPairingDisplayResponse(request), nil
 	}
 	return f.mintPairingDisplayResponse(nil), nil

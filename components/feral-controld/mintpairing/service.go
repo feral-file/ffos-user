@@ -743,6 +743,22 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	}
 	s.logger.Info("Displayed mint pairing code", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
 
+	// The display can block, and a reset landing while it does would find a
+	// start it must wait for but no session to close — and this publish would
+	// then hand a worker to a claim that is already gone. Check once more,
+	// with the code already on screen, and take it back down if it moved.
+	if !startGuard.sameAs(currentTopicGuard()) {
+		sessionCancel()
+		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
+		if restoreDisplay {
+			s.restoreDefaultDisplay(active.channelID, displayGeneration)
+		}
+		s.closeChannel(channel)
+		s.logger.Warn("Dropping a mint pairing session whose claim went while its code was displayed",
+			pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+		return commandError("topic_changed", "the relayer topic changed while the pairing session was starting", true), nil
+	}
+
 	s.mu.Lock()
 	s.active = active
 	s.mu.Unlock()
@@ -1262,37 +1278,47 @@ func (s *service) CloseActivePairing(ctx context.Context) (bool, error) {
 	if s == nil {
 		return false, nil
 	}
-	// A start still inside its broker call has published nothing to close, so
-	// it is canceled and awaited on its own: its channel is dropped by the
-	// guard re-check that follows the call.
-	starting := s.cancelStartingPairing()
-	active := s.cancelActivePairing()
-	if starting == nil && active == nil {
-		return false, nil
-	}
-	if starting != nil {
-		s.logger.Info("Canceling a mint pairing start in progress: the claim it belongs to is gone")
-		select {
-		case <-starting.done:
-		case <-ctx.Done():
-			return true, ctx.Err()
+	// This loops rather than closing once: a start that was still inside its
+	// broker call can publish an active session while we wait for it to
+	// unwind, and that session is exactly what the reset came to close. Each
+	// pass takes whatever is registered now; the loop ends when a pass finds
+	// nothing (the command surface is already closed by the staged reset, so
+	// no new start can appear) or the caller's bound expires.
+	closedAny := false
+	for {
+		// A start still inside its broker call has published nothing to close,
+		// so it is canceled and awaited on its own: its channel is dropped by
+		// one of the guard re-checks around the call.
+		starting := s.cancelStartingPairing()
+		active := s.cancelActivePairing()
+		if starting == nil && active == nil {
+			return closedAny, nil
 		}
-	}
-	if active == nil {
-		return true, nil
-	}
-	s.logger.Info("Closing active mint pairing session: the claim it belongs to is gone",
-		pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
-	if active.done == nil {
-		return true, nil
-	}
-	// Waiting for the worker, not just canceling it: until it returns it can
-	// still be mid-display or mid-notification for the claim being wiped.
-	select {
-	case <-active.done:
-		return true, nil
-	case <-ctx.Done():
-		return true, ctx.Err()
+		closedAny = true
+
+		if starting != nil {
+			s.logger.Info("Canceling a mint pairing start in progress: the claim it belongs to is gone")
+			select {
+			case <-starting.done:
+			case <-ctx.Done():
+				return true, ctx.Err()
+			}
+		}
+
+		if active != nil {
+			s.logger.Info("Closing active mint pairing session: the claim it belongs to is gone",
+				pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+			if active.done != nil {
+				// Waiting for the worker, not just canceling it: until it
+				// returns it can still be mid-display or mid-notification for
+				// the claim being wiped.
+				select {
+				case <-active.done:
+				case <-ctx.Done():
+					return true, ctx.Err()
+				}
+			}
+		}
 	}
 }
 
@@ -1312,13 +1338,10 @@ func (s *service) RevokeTopicSessions(ctx context.Context, topicID string) (int,
 	if s == nil || s.sessionCreator == nil {
 		return 0, nil
 	}
-	// A device with mint pairing off has never minted a session, so there is
-	// nothing to list. The wiring skips this seam entirely on such a device;
-	// this is the backstop that keeps a stray call from spending a factory
-	// reset's budget on a relayer round trip.
-	if !s.opts.Enabled {
-		return 0, nil
-	}
+	// Deliberately NOT gated on opts.Enabled: a device can mint a kept session,
+	// be restarted with mint pairing turned off, and then be reset. The
+	// credential outlives the feature flag, so the sweep has to outlive it too.
+	// The only thing that keeps this off the network is having no topic.
 	if strings.TrimSpace(topicID) == "" {
 		return 0, nil
 	}
