@@ -1178,16 +1178,8 @@ func currentTopicGuard() topicGuard {
 	}
 }
 
-func (g topicGuard) matches(topicID string) bool {
-	return g.topicID == strings.TrimSpace(topicID)
-}
-
 func (g topicGuard) sameAs(other topicGuard) bool {
 	return g.topicID == other.topicID && g.generation == other.generation
-}
-
-func currentRelayerTopicMatches(topicID string) bool {
-	return currentTopicGuard().matches(topicID)
 }
 
 func browserDisplayName(info minter.BrowserInfo) string {

@@ -3026,7 +3026,7 @@ func (e *executor) revokeTopicBrowserSessions(ctx context.Context) {
 		return
 	}
 	// Deliberately rooted on Background: the command context may already be
-	// cancelled by the caller that asked for the reset, and this cleanup is
+	// canceled by the caller that asked for the reset, and this cleanup is
 	// worth its own small budget either way.
 	revokeCtx, cancel := context.WithTimeout(context.Background(), browserSessionRevokeTimeout)
 	defer cancel()
