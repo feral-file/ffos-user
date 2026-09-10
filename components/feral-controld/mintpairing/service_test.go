@@ -324,6 +324,20 @@ func TestRelayerSessionCreator_PersistenceFollowsTheRelayerAnswer(t *testing.T) 
 	assert.False(t, session.ExpiresAt.IsZero())
 }
 
+func TestRelayerSessionCreator_RejectsATimedSessionWithoutAnExpiry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"session":{"id":"session-1","expiresAt":null},"token":"browser-token"}`))
+	}))
+	defer server.Close()
+
+	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+	_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, false)
+
+	require.Error(t, err, "a non-persistent session with no expiry is a malformed relayer answer")
+	assert.Contains(t, err.Error(), "expiresAt")
+}
+
 func TestRelayerHTTPBaseString_NormalizesWebSocketEndpointToOrigin(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1741,6 +1755,11 @@ func TestCompleteDecision_KeepPairedDeliversAPersistentSessionWithNoExpiry(t *te
 	assert.True(t, delivered[0].ExpiresAt.IsZero(), "an owner-kept session is delivered without an expiry")
 	assert.Equal(t, "https://relayer.example", delivered[0].RelayerBaseURL)
 
+	// The payload the minter client encrypts for the browser.
+	payload := decodeSessionPayload(t, delivered[0])
+	assert.Equal(t, true, payload["persistent"])
+	assert.Nil(t, payload["expiresAt"], "an owner-kept session carries a null expiry")
+
 	outcome := <-relayerClient.sent
 	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
 	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
@@ -1782,6 +1801,10 @@ func TestCompleteDecision_WithoutKeepPairedDeliversAnExpiringSession(t *testing.
 	require.Len(t, delivered, 1)
 	assert.False(t, delivered[0].Persistent)
 	assert.False(t, delivered[0].ExpiresAt.IsZero())
+
+	payload := decodeSessionPayload(t, delivered[0])
+	assert.NotContains(t, payload, "persistent")
+	assert.NotNil(t, payload["expiresAt"], "a timed session always carries its expiry")
 
 	outcome := <-relayerClient.sent
 	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
@@ -1968,6 +1991,17 @@ func validDecisionArgs(approvalID, topicID, channelID, messageID string) map[str
 	}
 }
 
+// decodeSessionPayload renders a delivered session the way the minter client
+// serializes it into the encrypted mint_succeeded message the browser reads.
+func decodeSessionPayload(t *testing.T, session minter.MintResult) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(session)
+	require.NoError(t, err)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(raw, &payload))
+	return payload
+}
+
 func assertCommandError(t *testing.T, result any, code string, retryable bool) {
 	t.Helper()
 	resp, ok := result.(map[string]any)
@@ -2033,13 +2067,13 @@ type fakeBrokerChannel struct {
 	successCount      int
 	closeCount        int
 	rejectionReasons  []string
-	deliveredSessions []mintedSession
+	deliveredSessions []minter.MintResult
 }
 
-func (f *fakeBrokerChannel) DeliveredSessions() []mintedSession {
+func (f *fakeBrokerChannel) DeliveredSessions() []minter.MintResult {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]mintedSession(nil), f.deliveredSessions...)
+	return append([]minter.MintResult(nil), f.deliveredSessions...)
 }
 
 func (f *fakeBrokerChannel) PairingDisplay() minter.PairingDisplay {
@@ -2071,7 +2105,7 @@ func (f *fakeBrokerChannel) PollMintRequest(_ context.Context, afterSeq int64) (
 	return request, request.Seq, nil
 }
 
-func (f *fakeBrokerChannel) SendMintSuccess(_ context.Context, _ minter.MintRequest, session mintedSession) (*minter.SendMessageResult, error) {
+func (f *fakeBrokerChannel) SendMintSuccess(_ context.Context, _ minter.MintRequest, session minter.MintResult) (*minter.SendMessageResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.successCount++
@@ -2149,24 +2183,20 @@ type recordingSessionCreator struct {
 	persistent         bool
 }
 
-func (r *recordingSessionCreator) CreateEphemeralSession(_ context.Context, _ string, _ minter.MintRequest, keepPaired bool) (mintedSession, error) {
+func (r *recordingSessionCreator) CreateEphemeralSession(_ context.Context, _ string, _ minter.MintRequest, keepPaired bool) (minter.MintResult, error) {
 	r.calls++
 	r.keepPairedRequests = append(r.keepPairedRequests, keepPaired)
 	if r.persistent {
-		return mintedSession{
-			MintResult: minter.MintResult{
-				SessionID: "session-1",
-				Token:     "browser-token",
-			},
+		return minter.MintResult{
+			SessionID:  "session-1",
+			Token:      "browser-token",
 			Persistent: true,
 		}, nil
 	}
-	return mintedSession{
-		MintResult: minter.MintResult{
-			SessionID: "session-1",
-			Token:     "browser-token",
-			ExpiresAt: time.Now().Add(time.Hour),
-		},
+	return minter.MintResult{
+		SessionID: "session-1",
+		Token:     "browser-token",
+		ExpiresAt: time.Now().Add(time.Hour),
 	}, nil
 }
 
@@ -2177,7 +2207,7 @@ type fakeSessionCreator struct {
 	err     error
 }
 
-func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string, _ minter.MintRequest, _ bool) (mintedSession, error) {
+func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string, _ minter.MintRequest, _ bool) (minter.MintResult, error) {
 	if f.started != nil {
 		select {
 		case f.started <- struct{}{}:
@@ -2187,7 +2217,7 @@ func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string
 	if f.release != nil {
 		select {
 		case <-ctx.Done():
-			return mintedSession{}, ctx.Err()
+			return minter.MintResult{}, ctx.Err()
 		case <-f.release:
 		}
 	}
@@ -2196,19 +2226,17 @@ func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
-			return mintedSession{}, ctx.Err()
+			return minter.MintResult{}, ctx.Err()
 		case <-timer.C:
 		}
 	}
 	if f.err != nil {
-		return mintedSession{}, f.err
+		return minter.MintResult{}, f.err
 	}
-	return mintedSession{
-		MintResult: minter.MintResult{
-			SessionID: "session-1",
-			Token:     "browser-token",
-			ExpiresAt: time.Now().Add(time.Hour),
-		},
+	return minter.MintResult{
+		SessionID: "session-1",
+		Token:     "browser-token",
+		ExpiresAt: time.Now().Add(time.Hour),
 	}, nil
 }
 
