@@ -194,9 +194,20 @@ func TestParseDecision_KeepPairedDefaultsOffAndOnlyAppliesToApprovals(t *testing
 	assert.False(t, decision.KeepPaired, "keepPaired is meaningless on a rejection")
 
 	args["decision"] = "approve"
-	args["keepPaired"] = "yes"
-	_, err = s.parseDecision(args)
-	require.Error(t, err, "keepPaired must be a boolean")
+	for _, bad := range []any{"yes", "true", nil, float64(1), map[string]any{}} {
+		args["keepPaired"] = bad
+		_, err = s.parseDecision(args)
+		require.Errorf(t, err, "keepPaired %#v must be rejected, not read as false", bad)
+	}
+
+	// An explicitly null flag is malformed, not a silent "do not keep".
+	args["keepPaired"] = nil
+	result, err := s.HandleApprovalDecision(context.Background(), args)
+	require.NoError(t, err)
+	resp, ok := result.(approvalResponse)
+	require.True(t, ok)
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "invalid_request", resp.Error.Code)
 }
 
 func TestRelayerSessionCreator_CreateEphemeralSession(t *testing.T) {
@@ -368,6 +379,19 @@ func TestRelayerSessionCreator_RefusesAndRevokesAContradictoryReply(t *testing.T
 		{
 			name:  "timed with no expiry",
 			reply: `{"session":{"id":"session-1","expiresAt":null},"token":"browser-token"}`,
+		},
+		{
+			// A relayer must not grant more than was asked: nobody chose to
+			// keep this site paired.
+			name:   "persistent reply to a request that did not ask to keep",
+			reply:  `{"session":{"id":"session-1","persistent":true},"token":"browser-token"}`,
+			reason: "did not ask to keep the site paired",
+		},
+		{
+			name:     "persistent reply to the requester fallback",
+			lifetime: lifetimeTimedFallbackRequester,
+			reply:    `{"session":{"id":"session-1","persistent":true},"token":"browser-token"}`,
+			reason:   "did not ask to keep the site paired",
 		},
 		{
 			// An id with no token is a session the relayer allocated and the
@@ -1915,6 +1939,100 @@ func TestCompleteDecision_RevokesTheSessionWhenTheTopicChangesAfterCreation(t *t
 	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
 }
 
+func TestCompleteDecision_RevokesWhenTheTopicMovesWhileTheSessionIsDelivered(t *testing.T) {
+	defer state.ResetForTesting()
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		// The persisted write has nowhere to land in a test; the in-memory
+		// topic and its generation are what this exercises.
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+
+	core, logs := observer.New(zap.WarnLevel)
+	ch := &fakeBrokerChannel{}
+	// The topic is reclaimed mid-delivery: the check passed, the session is
+	// already on its way to the browser, and the topic it was minted for is
+	// gone by the time the send returns.
+	ch.onSend = func() {
+		_, _ = state.ClearClaim()
+		_, _ = state.SetRelayerTopicID("topic-1")
+	}
+	creator := &recordingSessionCreator{persistent: true}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		relayerClient,
+		nil,
+		wrapper.NewJSON(),
+		zap.New(core),
+	).(*service)
+
+	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+		ChannelID:                  "ch_1",
+		MessageID:                  "msg_1",
+		SupportsPersistentSessions: true,
+	}, "topic-1", "mpa_1", approvalDecisionRequest{
+		ApprovalRequestID: "mpa_1",
+		TopicID:           "topic-1",
+		ChannelID:         "ch_1",
+		RequestMessageID:  "msg_1",
+		Decision:          "approve",
+		KeepPaired:        true,
+	})
+
+	require.NoError(t, err)
+	assert.True(t, terminalSent)
+	require.Len(t, ch.DeliveredSessions(), 1, "the browser's message is not taken back")
+	assert.Equal(t, []revokedSession{{topicID: "topic-1", sessionID: "session-1"}}, creator.revokes,
+		"the topic it was minted for is gone, so the session is revoked")
+	assert.Equal(t, 1, logs.FilterMessage("Relayer topic changed while delivering a mint pairing session; revoking the session it was minted for").Len())
+
+	outcome := <-relayerClient.sent
+	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
+}
+
+func TestCompleteDecision_KeepsTheSessionWhenTheTopicIsUnchanged(t *testing.T) {
+	defer state.ResetForTesting()
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+
+	ch := &fakeBrokerChannel{}
+	// An idempotent re-write of the same topic must not read as a change.
+	ch.onSend = func() { _, _ = state.SetRelayerTopicID("topic-1") }
+	creator := &recordingSessionCreator{persistent: true}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		relayerClient,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	_, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+		ChannelID:                  "ch_1",
+		MessageID:                  "msg_1",
+		SupportsPersistentSessions: true,
+	}, "topic-1", "mpa_1", approvalDecisionRequest{
+		ApprovalRequestID: "mpa_1",
+		TopicID:           "topic-1",
+		ChannelID:         "ch_1",
+		RequestMessageID:  "msg_1",
+		Decision:          "approve",
+		KeepPaired:        true,
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, creator.revokes, "a delivered session on an unchanged topic is left alone")
+
+	outcome := <-relayerClient.sent
+	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
+}
+
 func TestCompleteDecision_RevokesWhenTheBrokerRefusedTheMessage(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -2510,6 +2628,7 @@ type fakeBrokerChannel struct {
 	rejectionReasons  []string
 	deliveredSessions []minter.MintResult
 	successErr        error
+	onSend            func()
 }
 
 func (f *fakeBrokerChannel) DeliveredSessions() []minter.MintResult {
@@ -2552,6 +2671,9 @@ func (f *fakeBrokerChannel) SendMintSuccess(_ context.Context, _ minter.MintRequ
 	defer f.mu.Unlock()
 	f.successCount++
 	f.deliveredSessions = append(f.deliveredSessions, session)
+	if f.onSend != nil {
+		f.onSend()
+	}
 	if f.successErr != nil {
 		return nil, f.successErr
 	}

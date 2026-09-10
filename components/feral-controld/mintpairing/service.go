@@ -317,11 +317,18 @@ type approvalDecisionRequest struct {
 	ChannelID         string         `json:"channelID"`
 	RequestMessageID  string         `json:"requestMessageID"`
 	Decision          string         `json:"decision"`
-	KeepPaired        bool           `json:"keepPaired,omitempty"`
 	Reason            string         `json:"reason,omitempty"`
 	Retryable         bool           `json:"retryable,omitempty"`
 	DecidedAt         string         `json:"decidedAt,omitempty"`
 	Controller        map[string]any `json:"controller,omitempty"`
+
+	// KeepPairedRaw holds the wire value so an absent flag stays
+	// distinguishable from an explicit null: decoding straight into a bool
+	// turns `"keepPaired": null` into a silent false, which reads as "the
+	// owner chose not to keep this site" when the controller in fact sent
+	// something malformed. parseDecision resolves it into KeepPaired.
+	KeepPairedRaw json.RawMessage `json:"keepPaired,omitempty"`
+	KeepPaired    bool            `json:"-"`
 }
 
 type approvalResponse struct {
@@ -692,6 +699,9 @@ func (s *service) parseDecision(args map[string]any) (approvalDecisionRequest, e
 	if decision.ApprovalRequestID == "" || decision.TopicID == "" || decision.ChannelID == "" || decision.RequestMessageID == "" {
 		return decision, errors.New("approvalRequestID, topicID, channelID, and requestMessageID are required")
 	}
+	if err := s.resolveKeepPaired(&decision); err != nil {
+		return decision, err
+	}
 	switch decision.Decision {
 	case "approve":
 	case "reject":
@@ -707,6 +717,29 @@ func (s *service) parseDecision(args map[string]any) (approvalDecisionRequest, e
 		return decision, errors.New("decision must be approve or reject")
 	}
 	return decision, nil
+}
+
+// resolveKeepPaired reads the wire value into KeepPaired. Absent is false;
+// only a literal true or false is accepted, so a null or a "true" string is a
+// malformed decision rather than a silent no.
+func (s *service) resolveKeepPaired(decision *approvalDecisionRequest) error {
+	raw := bytes.TrimSpace(decision.KeepPairedRaw)
+	if len(raw) == 0 {
+		decision.KeepPaired = false
+		return nil
+	}
+	// A JSON null unmarshals into a bool without error, leaving it false — the
+	// exact silent "the owner did not ask to keep this site" this check exists
+	// to prevent — so it is rejected by value before the decode.
+	if bytes.Equal(raw, []byte("null")) {
+		return errors.New("keepPaired must be true or false")
+	}
+	var keepPaired bool
+	if err := s.json.Unmarshal(raw, &keepPaired); err != nil {
+		return errors.New("keepPaired must be true or false")
+	}
+	decision.KeepPaired = keepPaired
+	return nil
 }
 
 func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activePairing, topicID string) {
@@ -906,7 +939,11 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		}
 		return true, fmt.Errorf("create session: %w", err)
 	}
-	if !currentRelayerTopicMatches(topicID) {
+	// The guard captured here is what the session is delivered under; it is
+	// re-read after delivery, because the check and the send cannot be one
+	// atomic step.
+	deliveryGuard := currentTopicGuard()
+	if !deliveryGuard.matches(topicID) {
 		// The session exists on the relayer but no browser will ever hold it.
 		// Revoke after the terminal message so cleanup never delays what the
 		// browser is told.
@@ -939,6 +976,20 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		}
 		return false, fmt.Errorf("send mint success: %w", err)
 	}
+	// The topic can move between the last check and the send. Re-read it
+	// synchronously: if the topic this session was minted for is gone, the
+	// session is dead on the relayer's side of the pairing no matter who holds
+	// the token, so revoking it cannot cut off a valid pairing. The browser's
+	// terminal message is already delivered and is not taken back.
+	if after := currentTopicGuard(); !after.sameAs(deliveryGuard) {
+		s.logger.Warn("Relayer topic changed while delivering a mint pairing session; revoking the session it was minted for",
+			zap.String("mintedForTopicID", topicID),
+			zap.String("currentTopicID", after.topicID),
+			zap.String("sessionID", session.SessionID),
+			zap.Bool("persistent", session.Persistent))
+		s.revokeAbandonedSession(topicID, session.SessionID)
+	}
+
 	outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
 	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "completed", lifetime.outcomeLifetime())
 	cancelOutcome()
@@ -1055,8 +1106,33 @@ func currentRelayerTopicID() string {
 	return strings.TrimSpace(state.ClaimSnapshot().TopicID)
 }
 
+// topicGuard is a snapshot of which relayer topic this device answers to,
+// taken atomically. Comparing two guards catches a topic that was cleared and
+// reassigned between them — a factory reset and re-claim onto the same topic
+// id reads as unchanged by id alone, but moves the generation.
+type topicGuard struct {
+	topicID    string
+	generation uint64
+}
+
+func currentTopicGuard() topicGuard {
+	snapshot := state.ClaimSnapshot()
+	return topicGuard{
+		topicID:    strings.TrimSpace(snapshot.TopicID),
+		generation: snapshot.TopicGeneration,
+	}
+}
+
+func (g topicGuard) matches(topicID string) bool {
+	return g.topicID == strings.TrimSpace(topicID)
+}
+
+func (g topicGuard) sameAs(other topicGuard) bool {
+	return g.topicID == other.topicID && g.generation == other.generation
+}
+
 func currentRelayerTopicMatches(topicID string) bool {
-	return currentRelayerTopicID() == strings.TrimSpace(topicID)
+	return currentTopicGuard().matches(topicID)
 }
 
 func browserDisplayName(info minter.BrowserInfo) string {
@@ -1596,6 +1672,16 @@ func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topi
 	// before the error returns: nothing the device refuses is left holding a
 	// slot in the topic's cap.
 	if session.Persistent {
+		// A relayer must not grant more than the device asked for. Only a
+		// persistent ASK may be answered with a kept session; anything else
+		// getting one back is a relayer bug or a swapped reply, and silently
+		// accepting it would pair a site forever that the owner never chose to
+		// keep. (The reverse — asking persistent and being handed a timed
+		// session — is the deliberate fallback above, not this case.)
+		if lifetime != lifetimePersistent {
+			return minter.MintResult{}, c.rejectAndRevoke(session.SessionID, topicID,
+				errors.New("relayer minted a persistent session for a request that did not ask to keep the site paired"))
+		}
 		if decoded.Session.ExpiresAt != nil {
 			return minter.MintResult{}, c.rejectAndRevoke(session.SessionID, topicID,
 				errors.New("relayer session response has an expiresAt for a persistent session"))

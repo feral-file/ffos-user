@@ -47,6 +47,15 @@ type ClaimInfo struct {
 	TopicID string
 	// TopicReady mirrors RelayerState.IsReady()'s exact (untrimmed) check.
 	TopicReady bool
+	// TopicGeneration counts the times the relayer topic this device answers
+	// to has actually changed — a new topic, a cleared one, a load that read a
+	// different topic off disk. Work that spans a lock release (mint a browser
+	// session, then deliver it) captures the generation with the topic and
+	// re-reads it afterwards: a moved generation means the topic the work was
+	// started for is gone, which two equal TopicID reads cannot tell you when
+	// the topic was cleared and reassigned in between. An idempotent re-write
+	// of the same topic deliberately does NOT move it.
+	TopicGeneration uint64
 }
 
 //go:generate mockgen -source=state.go -destination=../mocks/state.go -package=mocks -mock_names=StateManager=MockStateManager
@@ -78,8 +87,24 @@ type StateManager interface {
 type defaultStateManager struct {
 	stateLock sync.Mutex
 	state     *State
-	os        wrapper.OS
-	json      wrapper.JSON
+	// topicGeneration is bumped under stateLock by every write that changes
+	// the relayer topic. See ClaimInfo.TopicGeneration.
+	topicGeneration uint64
+	os              wrapper.OS
+	json            wrapper.JSON
+}
+
+// setTopicLocked assigns the relayer topic and moves the generation when the
+// value actually changes. Assumes stateLock is held.
+func (m *defaultStateManager) setTopicLocked(s *State, topicID string) {
+	if s.Relayer == nil {
+		s.Relayer = &RelayerState{}
+	}
+	if s.Relayer.TopicID == topicID {
+		return
+	}
+	s.Relayer.TopicID = topicID
+	m.topicGeneration++
 }
 
 func NewStateManager() StateManager {
@@ -110,12 +135,20 @@ func (m *defaultStateManager) Load(logger *zap.Logger) (*State, error) {
 		return nil, fmt.Errorf("failed to create state directory: %w", err)
 	}
 
+	previousTopic := ""
+	if m.state != nil && m.state.Relayer != nil {
+		previousTopic = m.state.Relayer.TopicID
+	}
+
 	// Try to read the file
 	data, err := m.os.ReadFile(constants.STATE_FILE)
 	if m.os.IsNotExist(err) {
 		// File doesn't exist, return empty state
 		logger.Info("State file does not exist, returning empty state object")
 		m.state = emptyState()
+		if previousTopic != "" {
+			m.topicGeneration++
+		}
 		return m.state, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to read state file: %w", err)
@@ -123,6 +156,9 @@ func (m *defaultStateManager) Load(logger *zap.Logger) (*State, error) {
 		// File is empty, return empty state
 		logger.Info("State file is empty, returning empty state object")
 		m.state = emptyState()
+		if previousTopic != "" {
+			m.topicGeneration++
+		}
 		return m.state, nil
 	}
 
@@ -132,6 +168,9 @@ func (m *defaultStateManager) Load(logger *zap.Logger) (*State, error) {
 	}
 
 	m.state = &s
+	if s.Relayer != nil && s.Relayer.TopicID != previousTopic {
+		m.topicGeneration++
+	}
 	return m.state, nil
 }
 
@@ -225,6 +264,7 @@ func (m *defaultStateManager) ClaimSnapshot() ClaimInfo {
 		info.TopicID = s.Relayer.TopicID
 		info.TopicReady = s.Relayer.IsReady()
 	}
+	info.TopicGeneration = m.topicGeneration
 	return info
 }
 
@@ -245,7 +285,7 @@ func (m *defaultStateManager) ClearClaim() (changed bool, err error) {
 
 	s := m.currentLocked()
 	if s.Relayer != nil && s.Relayer.TopicID != "" {
-		s.Relayer.TopicID = ""
+		m.setTopicLocked(s, "")
 		changed = true
 	}
 	if s.ConnectedDevice != nil && strings.TrimSpace(s.ConnectedDevice.ID) != "" {
@@ -265,10 +305,7 @@ func (m *defaultStateManager) SetRelayerTopicID(topicID string) (hadTopicBefore 
 
 	s := m.currentLocked()
 	hadTopicBefore = s.Relayer != nil && strings.TrimSpace(s.Relayer.TopicID) != ""
-	if s.Relayer == nil {
-		s.Relayer = &RelayerState{}
-	}
-	s.Relayer.TopicID = topicID
+	m.setTopicLocked(s, topicID)
 	return hadTopicBefore, m.saveLocked(s)
 }
 

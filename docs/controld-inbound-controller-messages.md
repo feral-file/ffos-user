@@ -1470,7 +1470,17 @@ The mint-pairing flow adds an approval decision message from
    owner-kept one appears in the app's paired-sites list, where the owner can
    remove it. `feral-controld` also revokes a session it refuses as
    contradictory (see the session-shape rules above), so a reply it will not
-   deliver never holds one of the topic's persistent-session slots.
+   deliver never holds one of the topic's persistent-session slots — including
+   a reply that grants MORE than was asked: a `persistent` session for an
+   approval that did not send `keepPaired` is refused, never delivered.
+   One more revoke happens after a successful delivery: `feral-controld`
+   re-reads the relayer topic once the encrypted `mint_succeeded` has gone out,
+   and if the topic moved while it was being sent — reassigned, cleared, or
+   factory reset — it revokes the session, because the topic it was minted for
+   no longer exists. The browser's terminal message is not taken back and the
+   outcome still reports `completed`; the session simply no longer exists on
+   the relayer, and the site pairs again when the owner approves it under the
+   current topic.
 
 `ff-controller` must not receive raw browser session tokens or DP1 playlist
 content.
@@ -1698,7 +1708,9 @@ Required fields:
 Optional fields:
 
 - `keepPaired`: meaningful for `approve`, ignored for `reject`, default
-  `false`. `true` asks for an owner-kept session: `persistent: true` to
+  `false` when absent. Only a literal `true` or `false` is accepted — `null`
+  or any non-boolean is `invalid_request`, never a silent `false`. `true` asks
+  for an owner-kept session: `persistent: true` to
   `ff-relayer`, no `expiresInSeconds`. Two things can still make the delivered
   session timed — a requester that did not declare
   `supportsPersistentSessions` (minted at 86400 seconds instead) and a relayer
@@ -1759,7 +1771,7 @@ Error cases:
 
 | Case | Detection | controld response to controller | Browser result |
 |---|---|---|---|
-| Malformed decision payload | Missing required fields, invalid `decision`, non-object `request` | `ok: false`, `invalid_request`, `retryable: false` | Keep waiting until approval timeout |
+| Malformed decision payload | Missing required fields, invalid `decision`, non-object `request`, non-boolean `keepPaired` (`null` included) | `ok: false`, `invalid_request`, `retryable: false` | Keep waiting until approval timeout |
 | Unknown approval request | No pending request for `approvalRequestID` | `ok: false`, `not_found`, `retryable: false` | No change |
 | Topic mismatch | Decision `topicID` differs from current device topic | `ok: false`, `topic_mismatch`, `retryable: false` | Keep waiting until timeout |
 | Channel/request mismatch | `channelID` or `requestMessageID` differs from pending request | `ok: false`, `request_mismatch`, `retryable: false` | Keep waiting until timeout |
