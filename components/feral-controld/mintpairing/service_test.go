@@ -2150,6 +2150,77 @@ func TestCompleteDecision_RejectsAMintForAClaimThatWasReplacedByTheSameTopic(t *
 	ch.mu.Unlock()
 }
 
+// TestCompleteDecision_RevokesASessionTheResetSweepCouldNotSee drives the
+// factory reset's exact interleaving against a mint that was already accepted:
+//
+//  1. the reset invalidates the claim — the topic generation moves
+//  2. the reset sweeps the topic's sessions — THIS session does not exist yet,
+//     so the sweep cannot possibly revoke it
+//  3. the mint creates its session and tries to finish
+//
+// Step 3 is the only thing left that can end it, which is why the mint carries
+// the guard it began under: it sees the moved generation and revokes what it
+// just created instead of handing the browser a session against a wiped claim.
+func TestCompleteDecision_RevokesASessionTheResetSweepCouldNotSee(t *testing.T) {
+	defer state.ResetForTesting()
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+
+	// The claim this pairing began under.
+	startGuard := currentTopicGuard()
+
+	ch := &fakeBrokerChannel{rejectionSent: make(chan struct{}, 1)}
+	// listIDs stays empty: at sweep time the relayer holds nothing for this
+	// topic, because the session below has not been created yet.
+	creator := &recordingSessionCreator{persistent: true}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		relayerClient,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	sweptTopic := ""
+	sweptCount := -1
+	// The reset lands while this mint is creating its session.
+	creator.onCreate = func() {
+		topicID, _, err := state.InvalidateRelayerTopic()
+		if err != nil {
+			t.Logf("InvalidateRelayerTopic save failed as expected in tests: %v", err)
+		}
+		sweptTopic = topicID
+		revoked, sweepErr := s.RevokeTopicSessions(context.Background(), topicID)
+		require.NoError(t, sweepErr)
+		sweptCount = revoked
+	}
+
+	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+		ChannelID:                  "ch_1",
+		MessageID:                  "msg_1",
+		SupportsPersistentSessions: true,
+	}, startGuard, "mpa_1", approvalDecisionRequest{
+		ApprovalRequestID: "mpa_1",
+		TopicID:           "topic-1",
+		ChannelID:         "ch_1",
+		RequestMessageID:  "msg_1",
+		Decision:          "approve",
+		KeepPaired:        true,
+	})
+
+	require.Error(t, err)
+	assert.True(t, terminalSent)
+	assert.Equal(t, "topic-1", sweptTopic)
+	assert.Zero(t, sweptCount, "the sweep ran before this session existed")
+	assert.Empty(t, ch.DeliveredSessions(), "a session for a wiped claim is never delivered")
+	assert.Equal(t, []revokedSession{{topicID: "topic-1", sessionID: "session-1"}}, creator.revokes,
+		"the mint revokes what the sweep could not see")
+}
+
 func TestCompleteDecision_RevokesASessionMintedAcrossAFactoryReset(t *testing.T) {
 	defer state.ResetForTesting()
 	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {

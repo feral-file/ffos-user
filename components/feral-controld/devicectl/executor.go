@@ -2949,15 +2949,21 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	// /home/feralfile/.state/ inside the root subvolume (no separate @home —
 	// the install creates only @log, @pkg and @snapshots), so booting the
 	// candidate discards it wholesale. It is kept for the rollback path alone.
+	// Order matters here, and it is the opposite of the obvious one.
+	//
 	// Browser sessions are held by the RELAYER, which knows nothing about a
-	// factory reset. An owner-kept session has no expiry to reclaim it, and
-	// once the claim below is cleared nothing on this device can name the old
-	// topic again — the re-claimed device's paired-sites screen reads the new
-	// one. So the sessions are revoked here, while the topic is still known,
-	// and before the clear. Clearing the claim then moves the topic generation,
-	// so a mint that is in flight right now sees the move and revokes the
-	// session it just created (see mintpairing's topic guard).
-	e.revokeTopicBrowserSessions(ctx)
+	// factory reset, and an owner-kept session has no expiry to reclaim it. So
+	// they have to be swept from here — but sweeping FIRST leaves a hole: an
+	// approval accepted a moment before the reset can mint its session after
+	// the sweep has already listed the topic, and that session would then
+	// survive the wipe. So the claim is invalidated first, in one locked step
+	// that also hands back the topic id: from that instant the topic
+	// generation has moved, so any mint in flight fails its own guard check
+	// (before creation, or after delivery) and revokes the session it made.
+	// The sweep then runs against the captured id and cleans up everything
+	// that existed before, and the rest of the claim is cleared after.
+	outgoingTopicID := e.invalidateRelayerTopic()
+	e.revokeTopicBrowserSessions(outgoingTopicID)
 
 	e.clearPersistedClaim()
 
@@ -3011,23 +3017,37 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 // way.
 const browserSessionRevokeTimeout = 5 * time.Second
 
+// invalidateRelayerTopic clears the persisted relayer topic and returns the id
+// it cleared, so the caller can clean up remotely for a topic this device has
+// already stopped answering to. The clear is what moves the topic generation,
+// which is how work already in flight learns its claim is gone.
+func (e *executor) invalidateRelayerTopic() string {
+	topicID, changed, err := state.InvalidateRelayerTopic()
+	if err != nil {
+		e.logger.Error("Factory reset: failed to persist the relayer topic invalidation", zap.Error(err))
+	}
+	if !changed {
+		return ""
+	}
+	return strings.TrimSpace(topicID)
+}
+
 // revokeTopicBrowserSessions revokes the relayer's browser sessions for the
-// topic this device is about to stop answering to. Best effort and bounded:
+// topic this device has just stopped answering to. Best effort and bounded:
 // the reset completes regardless. A failure is logged at error level on
 // purpose — what survives it is a live session against a device its previous
 // owner no longer holds, and this log is the only trace of it, since the
 // re-claimed device cannot reach the old topic to try again.
-func (e *executor) revokeTopicBrowserSessions(ctx context.Context) {
+func (e *executor) revokeTopicBrowserSessions(topicID string) {
 	if e.browserSessionRevoker == nil {
 		return
 	}
-	topicID := strings.TrimSpace(state.ClaimSnapshot().TopicID)
 	if topicID == "" {
 		return
 	}
-	// Deliberately rooted on Background: the command context may already be
-	// canceled by the caller that asked for the reset, and this cleanup is
-	// worth its own small budget either way.
+	// Rooted on Background with its own small budget: the command context may
+	// already be canceled by the caller that asked for the reset, and this
+	// cleanup is worth doing either way.
 	revokeCtx, cancel := context.WithTimeout(context.Background(), browserSessionRevokeTimeout)
 	defer cancel()
 	revoked, err := e.browserSessionRevoker(revokeCtx, topicID)

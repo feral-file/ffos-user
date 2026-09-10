@@ -82,6 +82,15 @@ type StateManager interface {
 	// hadTopicBefore reports whether a non-empty topic was already
 	// persisted BEFORE this write — the edge callers notify observers on.
 	SetRelayerTopicID(topicID string) (hadTopicBefore bool, err error)
+	// InvalidateRelayerTopic clears the persisted relayer topic and returns
+	// the topic it cleared, in one critical section. It exists so a caller
+	// can invalidate a claim BEFORE doing slow work about it: the generation
+	// moves inside the lock, so anything already in flight fails its next
+	// guard check, while the returned id still names what has to be cleaned
+	// up remotely. Factory reset is the caller — it invalidates, then sweeps
+	// the relayer's sessions for the returned topic, then clears the rest of
+	// the claim. changed is false when there was no topic to clear.
+	InvalidateRelayerTopic() (topicID string, changed bool, err error)
 }
 
 type defaultStateManager struct {
@@ -309,6 +318,20 @@ func (m *defaultStateManager) SetRelayerTopicID(topicID string) (hadTopicBefore 
 	return hadTopicBefore, m.saveLocked(s)
 }
 
+// InvalidateRelayerTopic clears the persisted relayer topic. See StateManager.
+func (m *defaultStateManager) InvalidateRelayerTopic() (topicID string, changed bool, err error) {
+	m.stateLock.Lock()
+	defer m.stateLock.Unlock()
+
+	s := m.currentLocked()
+	if s.Relayer == nil || s.Relayer.TopicID == "" {
+		return "", false, nil
+	}
+	topicID = s.Relayer.TopicID
+	m.setTopicLocked(s, "")
+	return topicID, true, m.saveLocked(s)
+}
+
 // Global instance for backward compatibility
 var globalStateManager StateManager = NewStateManager()
 
@@ -340,6 +363,12 @@ func ClearClaim() (changed bool, err error) {
 // SetRelayerTopicID persists a new relayer topic ID atomically.
 func SetRelayerTopicID(topicID string) (hadTopicBefore bool, err error) {
 	return globalStateManager.SetRelayerTopicID(topicID)
+}
+
+// InvalidateRelayerTopic clears the persisted relayer topic atomically and
+// returns the topic it cleared.
+func InvalidateRelayerTopic() (topicID string, changed bool, err error) {
+	return globalStateManager.InvalidateRelayerTopic()
 }
 
 // New convenience function for saving - replaces s.Save()

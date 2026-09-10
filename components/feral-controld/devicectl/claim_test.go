@@ -196,12 +196,13 @@ func (c *pendingRebootClock) SleepContext(ctx context.Context, _ time.Duration) 
 // stagedResetExecutor builds an executor mid-factory-reset: the state manager
 // is injected, the reset unit's start is mocked with unitOK, and factoryReset
 // has run. Shared by the resetStaged tests below.
-// TestFactoryReset_RevokesBrowserSessionsBeforeClearingTheClaim: browser
-// sessions live on the relayer, keyed by the topic. An owner-kept one has no
-// expiry to reclaim it, and once the claim is cleared this device can no
-// longer name the old topic — so the revoke has to happen here, while the
-// topic is still known, and BEFORE the clear.
-func TestFactoryReset_RevokesBrowserSessionsBeforeClearingTheClaim(t *testing.T) {
+// TestFactoryReset_InvalidatesTheClaimBeforeSweepingItsSessions: the order is
+// the whole fix. Sweeping first leaves a hole — an approval accepted a moment
+// before the reset can mint after the sweep listed the topic, and that session
+// would survive the wipe. Invalidating first moves the topic generation, so a
+// mint in flight fails its own guard and revokes what it made; the sweep then
+// only has to clean up what already existed.
+func TestFactoryReset_InvalidatesTheClaimBeforeSweepingItsSessions(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -211,28 +212,35 @@ func TestFactoryReset_RevokesBrowserSessionsBeforeClearingTheClaim(t *testing.T)
 	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
 
 	step := 0
+	invalidatedAt := 0
 	clearedAt := 0
+	sm.EXPECT().InvalidateRelayerTopic().DoAndReturn(func() (string, bool, error) {
+		step++
+		invalidatedAt = step
+		return "topic-1", true, nil
+	})
 	sm.EXPECT().ClearClaim().DoAndReturn(func() (bool, error) {
 		step++
 		clearedAt = step
 		return true, nil
 	})
 
-	revokedAt := 0
-	revokedTopic := ""
+	sweptAt := 0
+	sweptTopic := ""
 	e := resetExecutorWithRevoker(t, ctrl, func(_ context.Context, topicID string) (int, error) {
 		step++
-		revokedAt = step
-		revokedTopic = topicID
+		sweptAt = step
+		sweptTopic = topicID
 		return 2, nil
 	})
 
 	_, err := e.factoryReset(context.Background())
 	require.NoError(t, err)
 
-	assert.Equal(t, "topic-1", revokedTopic, "the sessions are revoked for the outgoing topic")
-	require.NotZero(t, revokedAt, "the revoke must happen")
-	assert.Less(t, revokedAt, clearedAt, "revoking after the clear would have no topic to name")
+	require.NotZero(t, sweptAt, "the sweep must happen")
+	assert.Equal(t, "topic-1", sweptTopic, "the sweep runs against the topic the invalidation handed back")
+	assert.Less(t, invalidatedAt, sweptAt, "a session minted during the sweep must already be invalid")
+	assert.Less(t, sweptAt, clearedAt)
 }
 
 // TestFactoryReset_CompletesWhenSessionRevocationFails: an unreachable relayer
@@ -246,6 +254,7 @@ func TestFactoryReset_CompletesWhenSessionRevocationFails(t *testing.T) {
 	state.InjectStateManagerForTesting(sm)
 	t.Cleanup(state.ResetForTesting)
 	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
+	sm.EXPECT().InvalidateRelayerTopic().Return("topic-1", true, nil)
 	sm.EXPECT().ClearClaim().Return(true, nil)
 
 	called := false
@@ -306,6 +315,7 @@ func stagedResetExecutor(t *testing.T, ctrl *gomock.Controller, unitOK bool) (*e
 	sm := mocks.NewMockStateManager(ctrl)
 	state.InjectStateManagerForTesting(sm)
 	t.Cleanup(state.ResetForTesting) // don't leave a finished mock as the global manager
+	sm.EXPECT().InvalidateRelayerTopic().Return("topic-1", true, nil)
 	sm.EXPECT().ClearClaim().Return(true, nil)
 	// Unclaimed for the rest of the test: the reset just cleared the claim,
 	// which is exactly what arms the flows resetStaged guards.
@@ -413,6 +423,7 @@ func TestFactoryReset_StuckResetWatchdogArms(t *testing.T) {
 	sm := mocks.NewMockStateManager(ctrl)
 	state.InjectStateManagerForTesting(sm)
 	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().InvalidateRelayerTopic().Return("topic-1", true, nil)
 	sm.EXPECT().ClearClaim().Return(true, nil)
 	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
 

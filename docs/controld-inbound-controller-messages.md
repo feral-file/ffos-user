@@ -1485,18 +1485,28 @@ The mint-pairing flow adds an approval decision message from
 `ff-controller` must not receive raw browser session tokens or DP1 playlist
 content.
 
-Factory reset ends every browser session too. Sessions live on `ff-relayer`,
-keyed by topic, and an owner-kept one has no expiry to reclaim it, so
-`factoryReset` lists the topic's sessions
-(`GET /api/ephemeral-sessions?topicID=...`) and revokes each one BEFORE it
-clears the claim — after the clear, the device can no longer name the topic
-they belong to, and the re-claimed device's paired-sites screen reads the new
-one. The pass is bounded and best effort: a reset completes even if
-`ff-relayer` is unreachable, and what could not be revoked is logged at error
-level, because a session that survives is a live session against a device its
-previous owner no longer holds. Clearing the claim also moves the device's
-topic generation, so a mint already in flight sees the move and revokes the
-session it just created rather than delivering it.
+Factory reset ends every browser session too, in this order:
+
+1. **Invalidate the claim.** `feral-controld` clears the persisted relayer
+   topic in one locked step that hands back the topic id. From that instant the
+   device's topic generation has moved, so any mint already in flight fails its
+   own guard check — before creation, or after delivery — and revokes the
+   session it made.
+2. **Sweep the topic.** It lists that topic's sessions
+   (`GET /api/ephemeral-sessions?topicID=...`) and revokes each one. Sessions
+   live on `ff-relayer`, keyed by topic, and an owner-kept one has no expiry to
+   reclaim it, so this is the last moment anything can end them: afterwards the
+   device cannot name the topic they belong to, and the re-claimed device's
+   paired-sites screen reads a new one.
+3. **Clear the rest of the claim.**
+
+The order is deliberate. Sweeping first would leave a hole: an approval
+accepted a moment before the reset could mint its session after the sweep had
+already listed the topic, and that session would survive the wipe. The sweep is
+bounded and best effort — a reset completes even if `ff-relayer` is unreachable,
+and what could not be revoked is logged at error level, because a session that
+survives is a live session against a device its previous owner no longer
+holds.
 
 Implementation note: `feral-controld` embeds the temporary Go minter client from
 `ff-art-computer-handoff` for Mint Pairing Broker channels, encrypted browser
