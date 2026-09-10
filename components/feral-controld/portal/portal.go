@@ -676,8 +676,10 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 		s.render(w, "rescan_confirm.html", nil)
 	case http.MethodPost:
 		// Info on receipt: the submission must be traceable in production logs
-		// even when the machine-side bounce log is missing.
-		s.logger.Info("portal: rescan submitted", zap.String("remote_addr", r.RemoteAddr))
+		// even when the machine-side bounce log is missing. The classified
+		// client kind carries the diagnosis; the client's address is a device
+		// identifier and stays out of the log.
+		s.logger.Info("portal: rescan submitted", zap.String("client", ClassifyClient(r.UserAgent()).String()))
 		if s.cfg.Rescan != nil {
 			if err := s.cfg.Rescan(); err != nil {
 				s.logger.Info("portal: rescan request rejected", zap.Error(err))

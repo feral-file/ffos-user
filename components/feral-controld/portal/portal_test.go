@@ -522,10 +522,17 @@ func TestAccessLineTruncatesClientControlledFields(t *testing.T) {
 // TestAccessLineOmitsClientAddress: the portal client's address is a device
 // identifier and must not reach the log (review bot on 6eaaf14). The line
 // carries the classified client kind instead — which is what the attached-
-// phase repaint is diagnosed from — and nothing that names the phone.
+// phase repaint is diagnosed from — and nothing that names the phone. The
+// same holds for the /rescan submission line, which logged the address of
+// its own accord (review bot on 8e5a23d), so the sweep at the end covers
+// every line the portal emits, not just the access line.
 func TestAccessLineOmitsClientAddress(t *testing.T) {
 	core, observed := observer.New(zap.InfoLevel)
-	h := NewServer(Config{APSSID: "FF1-abc", Logger: zap.New(core)}).Handler()
+	h := NewServer(Config{
+		APSSID: "FF1-abc",
+		Logger: zap.New(core),
+		Rescan: func() error { return nil },
+	}).Handler()
 
 	apple := httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil)
 	apple.Header.Set("User-Agent", "CaptiveNetworkSupport-355.200.27 wispr")
@@ -547,6 +554,22 @@ func TestAccessLineOmitsClientAddress(t *testing.T) {
 	}
 	assert.Equal(t, "apple", lines[0].ContextMap()["client"])
 	assert.Equal(t, "unknown", lines[1].ContextMap()["client"])
+
+	// The rescan submission is logged on its own, outside the access line.
+	rescan := httptest.NewRequest(http.MethodPost, "/rescan", nil)
+	rescan.Header.Set("User-Agent", "CaptiveNetworkSupport-355.200.27 wispr")
+	rescan.RemoteAddr = "10.42.0.79:51002"
+	h.ServeHTTP(httptest.NewRecorder(), rescan)
+
+	submitted := observed.FilterMessage("portal: rescan submitted").All()
+	require.Len(t, submitted, 1)
+	assert.Equal(t, "apple", submitted[0].ContextMap()["client"], "the classified client kind replaces the address")
+
+	// Nothing the portal logged names the phone.
+	for _, line := range observed.All() {
+		assert.NotContains(t, line.ContextMap(), "remote_addr", "no portal line carries the client address")
+		assert.NotContains(t, line.Message, "10.42.0.")
+	}
 }
 
 // TestAccessLineIsRateLimitedAndReportsWhatItDropped: a client on the open
