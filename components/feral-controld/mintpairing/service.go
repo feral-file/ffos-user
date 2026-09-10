@@ -1545,7 +1545,7 @@ func (c *RelayerSessionCreator) rejectAndRevoke(sessionID string, topicID string
 	ctx, cancel := context.WithTimeout(context.Background(), sessionRevokeTimeout)
 	defer cancel()
 	if err := c.RevokeEphemeralSession(ctx, topicID, sessionID); err != nil {
-		return fmt.Errorf("%w (revoking the refused session failed: %v)", reason, err)
+		return fmt.Errorf("%w (revoking the refused session failed: %w)", reason, err)
 	}
 	return reason
 }
