@@ -11,6 +11,7 @@ import (
 	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
+	"github.com/google/uuid"
 
 	"go.uber.org/zap"
 
@@ -529,6 +530,14 @@ func (s *poller) lightweightPlayerStatus(playerStatus *PlayerStatus) *PlayerStat
 
 	playerStatus.Items = &items
 	playerStatus.Playlist = &dp1.Playlist{}
+	// An independently updated daemon may still hear the older source-bearing
+	// showing key. Only canonical UUIDs may cross either notification channel.
+	if settings := playerStatus.DeviceSettings; settings != nil && settings.ShowingKey != nil {
+		key, err := uuid.Parse(*settings.ShowingKey)
+		if err != nil || key.String() != *settings.ShowingKey {
+			settings.ShowingKey = nil
+		}
+	}
 	// Stamp is the playersession generation carrier (§2.1 source 3), an
 	// internal implementation detail of this daemon — it must not leak onto
 	// the relayer-facing player_status payload.

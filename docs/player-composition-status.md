@@ -31,3 +31,5 @@ guards against inventing defaults. `TestCompositionNotificationDoesNotExposeSour
 verifies that the source-free UUID survives while signed item sources are removed.
 The companion player regression proves that raw renderer identities become UUIDs
 before they enter composition status.
+
+Before broadcasting notifications, controld drops any showing key that is not a canonical UUID. This also protects mixed-version devices whose player still emits an older source-bearing identity. Other composition fields remain available.
