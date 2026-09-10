@@ -2930,7 +2930,7 @@ func TestCompleteDecision_WithoutKeepPairedDeliversAnExpiringSession(t *testing.
 // TestWaitForBrowserAndApproval_DropsARequestArrivingAfterTheClaimIsGone: the
 // pairing worker sits in a broker poll on a socket this device still holds. If
 // the claim goes while it waits — a factory reset — the request it then reads
-// belongs to a pairing nobody on this device can honour any more. It must not
+// belongs to a pairing nobody on this device can honor any more. It must not
 // reach the screen or the controller: a previous owner's approval prompt
 // appearing on a device mid-wipe is exactly what the reset is undoing.
 func TestWaitForBrowserAndApproval_DropsARequestArrivingAfterTheClaimIsGone(t *testing.T) {

@@ -1236,7 +1236,7 @@ func (s *service) CloseActivePairing(ctx context.Context) (bool, error) {
 	if active.done == nil {
 		return true, nil
 	}
-	// Waiting for the worker, not just cancelling it: until it returns it can
+	// Waiting for the worker, not just canceling it: until it returns it can
 	// still be mid-display or mid-notification for the claim being wiped.
 	select {
 	case <-active.done:
