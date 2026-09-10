@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
@@ -324,6 +325,20 @@ func TestRelayerSessionCreator_PersistenceFollowsTheRelayerAnswer(t *testing.T) 
 	assert.False(t, session.ExpiresAt.IsZero())
 }
 
+func TestRelayerSessionCreator_RejectsAPersistentSessionCarryingAnExpiry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"session":{"id":"session-1","persistent":true,"expiresAt":"2030-01-01T00:00:00Z"},"token":"browser-token"}`))
+	}))
+	defer server.Close()
+
+	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+	_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, true)
+
+	require.Error(t, err, "a persistent session with an expiry is a contradictory relayer answer")
+	assert.Contains(t, err.Error(), "expiresAt")
+}
+
 func TestRelayerSessionCreator_RejectsATimedSessionWithoutAnExpiry(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
@@ -336,6 +351,49 @@ func TestRelayerSessionCreator_RejectsATimedSessionWithoutAnExpiry(t *testing.T)
 
 	require.Error(t, err, "a non-persistent session with no expiry is a malformed relayer answer")
 	assert.Contains(t, err.Error(), "expiresAt")
+}
+
+func TestRelayerSessionCreator_RevokeEphemeralSession(t *testing.T) {
+	var seen struct {
+		Method  string
+		Path    string
+		TopicID string
+		APIKey  string
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen.Method = r.Method
+		seen.Path = r.URL.Path
+		seen.TopicID = r.URL.Query().Get("topicID")
+		seen.APIKey = r.Header.Get("API-KEY")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	creator := NewRelayerSessionCreator(server.URL, "api-key-1", wrapper.NewHTTPClient(), wrapper.NewJSON())
+	require.NoError(t, creator.RevokeEphemeralSession(context.Background(), "topic-1", "session-1"))
+
+	assert.Equal(t, http.MethodDelete, seen.Method)
+	assert.Equal(t, "/api/ephemeral-sessions/session-1", seen.Path)
+	assert.Equal(t, "topic-1", seen.TopicID)
+	assert.Equal(t, "api-key-1", seen.APIKey)
+}
+
+func TestRelayerSessionCreator_RevokeTreatsAMissingSessionAsRevoked(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+	assert.NoError(t, creator.RevokeEphemeralSession(context.Background(), "topic-1", "session-1"))
+
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+
+	creator = NewRelayerSessionCreator(failing.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+	assert.Error(t, creator.RevokeEphemeralSession(context.Background(), "topic-1", "session-1"))
 }
 
 func TestRelayerHTTPBaseString_NormalizesWebSocketEndpointToOrigin(t *testing.T) {
@@ -1716,6 +1774,130 @@ func TestCompleteDecision_RejectsStaleTopicBeforeCreatingSession(t *testing.T) {
 	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
 }
 
+func TestCompleteDecision_RevokesTheSessionWhenTheTopicChangesAfterCreation(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{}
+	creator := &recordingSessionCreator{persistent: true}
+	// The topic moves while the session is being minted: the browser can never
+	// be handed this session, and an owner-kept one has no TTL to clean it up.
+	creator.onCreate = func() { state.GetState().Relayer.TopicID = "topic-2" }
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		relayerClient,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+		ChannelID: "ch_1",
+		MessageID: "msg_1",
+	}, "topic-1", "mpa_1", approvalDecisionRequest{
+		ApprovalRequestID: "mpa_1",
+		TopicID:           "topic-1",
+		ChannelID:         "ch_1",
+		RequestMessageID:  "msg_1",
+		Decision:          "approve",
+		KeepPaired:        true,
+	})
+
+	require.Error(t, err)
+	assert.True(t, terminalSent)
+	assert.Empty(t, ch.DeliveredSessions(), "a stale-topic session is never delivered")
+	assert.Equal(t, []revokedSession{{topicID: "topic-1", sessionID: "session-1"}}, creator.revokes)
+
+	ch.mu.Lock()
+	assert.Equal(t, []string{"topic_changed"}, ch.rejectionReasons)
+	ch.mu.Unlock()
+
+	outcome := <-relayerClient.sent
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
+}
+
+func TestCompleteDecision_RevokesTheSessionWhenBrowserDeliveryFails(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{successErr: errors.New("broker unreachable")}
+	creator := &recordingSessionCreator{}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		relayerClient,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+		ChannelID: "ch_1",
+		MessageID: "msg_1",
+	}, "topic-1", "mpa_1", approvalDecisionRequest{
+		ApprovalRequestID: "mpa_1",
+		TopicID:           "topic-1",
+		ChannelID:         "ch_1",
+		RequestMessageID:  "msg_1",
+		Decision:          "approve",
+	})
+
+	require.Error(t, err)
+	assert.False(t, terminalSent)
+	assert.Equal(t, []revokedSession{{topicID: "topic-1", sessionID: "session-1"}}, creator.revokes,
+		"a session the browser never received is revoked, timed or not")
+
+	outcome := <-relayerClient.sent
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
+}
+
+func TestCompleteDecision_RevokeFailureIsLoggedAndChangesNothing(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	core, logs := observer.New(zap.WarnLevel)
+	ch := &fakeBrokerChannel{successErr: errors.New("broker unreachable")}
+	creator := &recordingSessionCreator{revokeErr: errors.New("relayer unreachable")}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		relayerClient,
+		nil,
+		wrapper.NewJSON(),
+		zap.New(core),
+	).(*service)
+
+	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+		ChannelID: "ch_1",
+		MessageID: "msg_1",
+	}, "topic-1", "mpa_1", approvalDecisionRequest{
+		ApprovalRequestID: "mpa_1",
+		TopicID:           "topic-1",
+		ChannelID:         "ch_1",
+		RequestMessageID:  "msg_1",
+		Decision:          "approve",
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "send mint success", "the browser-facing failure is what the caller sees")
+	assert.False(t, terminalSent)
+	assert.Len(t, creator.revokes, 1)
+	assert.Equal(t, 1, logs.FilterMessage("Failed to revoke abandoned mint pairing session").Len())
+
+	outcome := <-relayerClient.sent
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
+}
+
 func TestCompleteDecision_KeepPairedDeliversAPersistentSessionWithNoExpiry(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -2068,6 +2250,7 @@ type fakeBrokerChannel struct {
 	closeCount        int
 	rejectionReasons  []string
 	deliveredSessions []minter.MintResult
+	successErr        error
 }
 
 func (f *fakeBrokerChannel) DeliveredSessions() []minter.MintResult {
@@ -2110,6 +2293,9 @@ func (f *fakeBrokerChannel) SendMintSuccess(_ context.Context, _ minter.MintRequ
 	defer f.mu.Unlock()
 	f.successCount++
 	f.deliveredSessions = append(f.deliveredSessions, session)
+	if f.successErr != nil {
+		return nil, f.successErr
+	}
 	if f.successSent != nil {
 		select {
 		case f.successSent <- struct{}{}:
@@ -2181,11 +2367,27 @@ type recordingSessionCreator struct {
 	calls              int
 	keepPairedRequests []bool
 	persistent         bool
+	onCreate           func()
+	revokes            []revokedSession
+	revokeErr          error
+}
+
+type revokedSession struct {
+	topicID   string
+	sessionID string
+}
+
+func (r *recordingSessionCreator) RevokeEphemeralSession(_ context.Context, topicID string, sessionID string) error {
+	r.revokes = append(r.revokes, revokedSession{topicID: topicID, sessionID: sessionID})
+	return r.revokeErr
 }
 
 func (r *recordingSessionCreator) CreateEphemeralSession(_ context.Context, _ string, _ minter.MintRequest, keepPaired bool) (minter.MintResult, error) {
 	r.calls++
 	r.keepPairedRequests = append(r.keepPairedRequests, keepPaired)
+	if r.onCreate != nil {
+		r.onCreate()
+	}
 	if r.persistent {
 		return minter.MintResult{
 			SessionID:  "session-1",
@@ -2205,6 +2407,17 @@ type fakeSessionCreator struct {
 	started chan struct{}
 	release chan struct{}
 	err     error
+	revoked chan revokedSession
+}
+
+func (f fakeSessionCreator) RevokeEphemeralSession(_ context.Context, topicID string, sessionID string) error {
+	if f.revoked != nil {
+		select {
+		case f.revoked <- revokedSession{topicID: topicID, sessionID: sessionID}:
+		default:
+		}
+	}
+	return nil
 }
 
 func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string, _ minter.MintRequest, _ bool) (minter.MintResult, error) {

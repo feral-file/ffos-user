@@ -1442,7 +1442,12 @@ The mint-pairing flow adds an approval decision message from
    `persistent: true` with a null `expiresAt`. An owner-kept session ends only
    when the owner removes the site from the app's paired-sites screen.
 6. On rejection or terminal failure, `feral-controld` sends encrypted
-   `mint_rejected` to the browser.
+   `mint_rejected` to the browser. If the session was already created when the
+   failure landed, `feral-controld` also revokes it through
+   `DELETE /api/ephemeral-sessions/{sessionID}?topicID=...` — best effort,
+   logged on failure — so a session no browser holds does not linger. This
+   matters most for an owner-kept session: it has no TTL to clean it up and
+   would hold one of the topic's persistent-session slots for good.
 
 `ff-controller` must not receive raw browser session tokens or DP1 playlist
 content.

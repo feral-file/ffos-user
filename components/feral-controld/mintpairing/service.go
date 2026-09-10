@@ -36,6 +36,7 @@ const (
 	defaultSessionTTLSeconds  = 3600
 	maxSessionTTLSeconds      = 86400
 	terminalOperationTimeout  = 750 * time.Millisecond
+	sessionRevokeTimeout      = 1500 * time.Millisecond
 	displayRecoveryTimeout    = 500 * time.Millisecond
 	stopCleanupTimeout        = 1500 * time.Millisecond
 	channelCloseTimeout       = 500 * time.Millisecond
@@ -160,6 +161,7 @@ type brokerStarter interface {
 
 type sessionCreator interface {
 	CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest, keepPaired bool) (minter.MintResult, error)
+	RevokeEphemeralSession(ctx context.Context, topicID string, sessionID string) error
 }
 
 type brokerChannel interface {
@@ -867,7 +869,12 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		return true, fmt.Errorf("create session: %w", err)
 	}
 	if !currentRelayerTopicMatches(topicID) {
-		return s.rejectTopicChanged(channel, request, topicID, approvalRequestID)
+		// The session exists on the relayer but no browser will ever hold it.
+		// Revoke after the terminal message so cleanup never delays what the
+		// browser is told.
+		terminalSent, topicErr := s.rejectTopicChanged(channel, request, topicID, approvalRequestID)
+		s.revokeAbandonedSession(topicID, session.SessionID)
+		return terminalSent, topicErr
 	}
 	if session.RelayerBaseURL == "" {
 		session.RelayerBaseURL = s.opts.RelayerBaseURL
@@ -879,12 +886,32 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
 		s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "failed")
 		cancelOutcome()
+		s.revokeAbandonedSession(topicID, session.SessionID)
 		return false, fmt.Errorf("send mint success: %w", err)
 	}
 	outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
 	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "completed")
 	cancelOutcome()
 	return true, nil
+}
+
+// revokeAbandonedSession returns a created session the browser never received.
+// Best effort by design: the browser already has its terminal message, so a
+// failed revoke is logged and changes nothing it was told. Leaving the session
+// behind is not harmless — a persistent one has no TTL to clean it up and
+// would hold one of the topic's owner-kept slots for good.
+func (s *service) revokeAbandonedSession(topicID string, sessionID string) {
+	if s.sessionCreator == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sessionRevokeTimeout)
+	defer cancel()
+	if err := s.sessionCreator.RevokeEphemeralSession(ctx, topicID, sessionID); err != nil {
+		s.logger.Warn("Failed to revoke abandoned mint pairing session",
+			zap.Error(err),
+			zap.String("topicID", topicID),
+			zap.String("sessionID", sessionID))
+	}
 }
 
 func (s *service) rejectTopicChanged(channel brokerChannel, request minter.MintRequest, expectedTopicID string, approvalRequestID string) (bool, error) {
@@ -1426,12 +1453,16 @@ func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topi
 		Persistent:     decoded.Session.Persistent,
 		RelayerBaseURL: c.baseURL,
 	}
-	// The two session shapes stay separable end to end: an owner-kept session
-	// keeps the zero ExpiresAt the minter client serializes as a null
-	// `expiresAt`, and a timed session with no expiry is a malformed relayer
-	// answer — failing here sends the browser a retryable session-create
-	// rejection instead of a session whose deadline is missing or invented.
+	// The two session shapes stay separable end to end, and a reply that mixes
+	// them is malformed either way: an owner-kept session must carry no expiry
+	// (its zero ExpiresAt is what the minter client serializes as a null
+	// `expiresAt`), and a timed one must carry one. Failing here sends the
+	// browser a retryable session-create rejection instead of a session whose
+	// deadline is invented, missing, or silently dropped.
 	if session.Persistent {
+		if decoded.Session.ExpiresAt != nil && !decoded.Session.ExpiresAt.IsZero() {
+			return minter.MintResult{}, errors.New("relayer session response has an expiresAt for a persistent session")
+		}
 		return session, nil
 	}
 	if decoded.Session.ExpiresAt == nil || decoded.Session.ExpiresAt.IsZero() {
@@ -1439,6 +1470,52 @@ func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topi
 	}
 	session.ExpiresAt = *decoded.Session.ExpiresAt
 	return session, nil
+}
+
+// RevokeEphemeralSession deletes one session on the relayer. A session the
+// relayer no longer has (404) is already in the state the caller wanted, so it
+// is not an error.
+func (c *RelayerSessionCreator) RevokeEphemeralSession(ctx context.Context, topicID string, sessionID string) error {
+	if c.httpClient == nil {
+		return errors.New("http client is required")
+	}
+	if strings.TrimSpace(c.baseURL) == "" {
+		return errors.New("relayer base URL is required")
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return errors.New("session id is required")
+	}
+	endpoint, err := url.Parse(c.baseURL + "/api/ephemeral-sessions/" + url.PathEscape(sessionID))
+	if err != nil {
+		return fmt.Errorf("parse relayer session revoke URL: %w", err)
+	}
+	q := endpoint.Query()
+	q.Set("topicID", topicID)
+	endpoint.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint.String(), nil)
+	if err != nil {
+		return fmt.Errorf("build relayer session revoke request: %w", err)
+	}
+	req.Header.Set("User-Agent", "feral-controld")
+	if apiKey := strings.TrimSpace(c.apiKey); apiKey != "" {
+		req.Header.Set("API-KEY", apiKey)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("delete relayer session: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("relayer session revoke failed with status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func effectiveSessionTTLSeconds(requested int) int {
