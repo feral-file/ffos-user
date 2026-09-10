@@ -76,6 +76,11 @@ type Executor interface {
 	// setupui.Service with the provisioning domain. Set once at wiring time; the
 	// lazy setupUI() fallback still covers tests that do not inject.
 	SetSetupUI(ui *setupui.Service)
+	// SetBrowserSessionRevoker injects the mint-pairing seam factory reset
+	// uses to revoke the outgoing topic's browser sessions before it clears
+	// the claim. Optional: a nil revoker (mint pairing disabled, or no relayer
+	// credentials) makes the reset skip the step. Set once at wiring time.
+	SetBrowserSessionRevoker(revoke func(ctx context.Context, topicID string) (int, error))
 	// ResetStaged reports that a factory reset is staged and its reboot is
 	// pending, so the command surface must stay closed (see the resetStaged
 	// field). It is a REQUIRED interface method rather than an optional
@@ -353,6 +358,13 @@ type executor struct {
 	// paint "no internet access" over a healthy network. nil, like an error,
 	// keeps the silent hide unconditionally.
 	internetProbe func(ctx context.Context) (bool, error)
+
+	// browserSessionRevoker, when wired (SetBrowserSessionRevoker), revokes
+	// every browser session the relayer holds for a topic. Factory reset calls
+	// it while the topic is still known. Optional: nil (mint pairing disabled,
+	// or no relayer credentials) makes the reset skip the step, exactly as it
+	// behaved before owner-kept sessions existed.
+	browserSessionRevoker func(ctx context.Context, topicID string) (int, error)
 
 	// otaGateEntryProbe is the startup OTA gate's OWN entry-window predicate
 	// (main wires it to re-read /proc/uptime against the wider
@@ -1383,6 +1395,13 @@ func (e *executor) SetWifiSetupStarter(starter func(ctx context.Context) error) 
 // Same wiring-before-run ordering contract as SetBootLifecycleProbe.
 func (e *executor) SetInternetProbe(probe func(ctx context.Context) (bool, error)) {
 	e.internetProbe = probe
+}
+
+// SetBrowserSessionRevoker injects the mint-pairing seam factory reset uses to
+// revoke the topic's browser sessions before the claim is cleared. Same
+// wiring-before-run ordering contract as SetInternetProbe.
+func (e *executor) SetBrowserSessionRevoker(revoke func(ctx context.Context, topicID string) (int, error)) {
+	e.browserSessionRevoker = revoke
 }
 
 // Defaults for awaitPlayerCommandHandlerReady. The timeout is shorter than the
@@ -2930,6 +2949,16 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	// /home/feralfile/.state/ inside the root subvolume (no separate @home —
 	// the install creates only @log, @pkg and @snapshots), so booting the
 	// candidate discards it wholesale. It is kept for the rollback path alone.
+	// Browser sessions are held by the RELAYER, which knows nothing about a
+	// factory reset. An owner-kept session has no expiry to reclaim it, and
+	// once the claim below is cleared nothing on this device can name the old
+	// topic again — the re-claimed device's paired-sites screen reads the new
+	// one. So the sessions are revoked here, while the topic is still known,
+	// and before the clear. Clearing the claim then moves the topic generation,
+	// so a mint that is in flight right now sees the move and revokes the
+	// session it just created (see mintpairing's topic guard).
+	e.revokeTopicBrowserSessions(ctx)
+
 	e.clearPersistedClaim()
 
 	// The owner's name for this unit falls with the claim, and for the same
@@ -2977,6 +3006,45 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 // Best-effort: a save failure is logged but does not abort the reset (the
 // reboot into the factory snapshot still discards both). A no-op when nothing
 // is persisted.
+// browserSessionRevokeTimeout bounds the whole revoke pass. A reset must not
+// wait on an unreachable relayer, and the reboot it stages is coming either
+// way.
+const browserSessionRevokeTimeout = 5 * time.Second
+
+// revokeTopicBrowserSessions revokes the relayer's browser sessions for the
+// topic this device is about to stop answering to. Best effort and bounded:
+// the reset completes regardless. A failure is logged at error level on
+// purpose — what survives it is a live session against a device its previous
+// owner no longer holds, and this log is the only trace of it, since the
+// re-claimed device cannot reach the old topic to try again.
+func (e *executor) revokeTopicBrowserSessions(ctx context.Context) {
+	if e.browserSessionRevoker == nil {
+		return
+	}
+	topicID := strings.TrimSpace(state.ClaimSnapshot().TopicID)
+	if topicID == "" {
+		return
+	}
+	// Deliberately rooted on Background: the command context may already be
+	// cancelled by the caller that asked for the reset, and this cleanup is
+	// worth its own small budget either way.
+	revokeCtx, cancel := context.WithTimeout(context.Background(), browserSessionRevokeTimeout)
+	defer cancel()
+	revoked, err := e.browserSessionRevoker(revokeCtx, topicID)
+	if err != nil {
+		e.logger.Error("Factory reset: failed to revoke browser sessions for the outgoing topic; sessions may survive the reset",
+			zap.Error(err),
+			zap.String("topicID", topicID),
+			zap.Int("revoked", revoked))
+		return
+	}
+	if revoked > 0 {
+		e.logger.Info("Factory reset: revoked browser sessions for the outgoing topic",
+			zap.String("topicID", topicID),
+			zap.Int("revoked", revoked))
+	}
+}
+
 func (e *executor) clearPersistedClaim() {
 	changed, err := state.ClearClaim()
 	if !changed {

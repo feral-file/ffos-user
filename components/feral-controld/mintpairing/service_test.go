@@ -34,7 +34,7 @@ func TestHandleApprovalDecision_AcceptsAndDeduplicates(t *testing.T) {
 	s := newTestService()
 	pending := &pendingApproval{
 		approvalRequestID: "mpa_1",
-		topicID:           "topic-1",
+		guard:             topicGuard{topicID: "topic-1"},
 		channelID:         "ch_1",
 		requestMessageID:  "msg_1",
 		expiresAt:         time.Now().Add(time.Minute),
@@ -86,7 +86,7 @@ func TestHandleApprovalDecision_RejectsMismatches(t *testing.T) {
 	s := newTestService()
 	s.registerPending(&pendingApproval{
 		approvalRequestID: "mpa_1",
-		topicID:           "topic-1",
+		guard:             topicGuard{topicID: "topic-1"},
 		channelID:         "ch_1",
 		requestMessageID:  "msg_1",
 		expiresAt:         time.Now().Add(time.Minute),
@@ -139,7 +139,7 @@ func TestHandleApprovalDecision_KeepPairedTravelsWithTheApproval(t *testing.T) {
 	s := newTestService()
 	pending := &pendingApproval{
 		approvalRequestID: "mpa_1",
-		topicID:           "topic-1",
+		guard:             topicGuard{topicID: "topic-1"},
 		channelID:         "ch_1",
 		requestMessageID:  "msg_1",
 		expiresAt:         time.Now().Add(time.Minute),
@@ -494,6 +494,60 @@ func TestRelayerSessionCreator_RevokeEphemeralSession(t *testing.T) {
 	assert.Equal(t, "/api/ephemeral-sessions/session-1", seen.Path)
 	assert.Equal(t, "topic-1", seen.TopicID)
 	assert.Equal(t, "api-key-1", seen.APIKey)
+}
+
+func TestRelayerSessionCreator_ListEphemeralSessionIDs(t *testing.T) {
+	tests := []struct {
+		name  string
+		reply string
+	}{
+		{
+			name:  "wrapped in a sessions array",
+			reply: `{"sessions":[{"id":"session-1","persistent":true},{"id":"session-2","expiresAt":"2030-01-01T00:00:00Z"}]}`,
+		},
+		{
+			name:  "bare array",
+			reply: `[{"id":"session-1"},{"id":"session-2"}]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var seen struct {
+				Method  string
+				Path    string
+				TopicID string
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen.Method = r.Method
+				seen.Path = r.URL.Path
+				seen.TopicID = r.URL.Query().Get("topicID")
+				_, _ = w.Write([]byte(tt.reply))
+			}))
+			defer server.Close()
+
+			creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+			ids, err := creator.ListEphemeralSessionIDs(context.Background(), "topic-1")
+
+			require.NoError(t, err)
+			assert.Equal(t, []string{"session-1", "session-2"}, ids)
+			assert.Equal(t, http.MethodGet, seen.Method)
+			assert.Equal(t, "/api/ephemeral-sessions", seen.Path)
+			assert.Equal(t, "topic-1", seen.TopicID)
+		})
+	}
+}
+
+func TestRelayerSessionCreator_ListEphemeralSessionIDsReportsAFailedList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+	_, err := creator.ListEphemeralSessionIDs(context.Background(), "topic-1")
+
+	require.Error(t, err, "an unreadable list must never look like an empty one")
 }
 
 func TestRelayerSessionCreator_RevokeTreatsAMissingSessionAsRevoked(t *testing.T) {
@@ -1811,7 +1865,7 @@ func TestCompleteDecision_SendsSessionCreateFailureAfterContextCancellation(t *t
 			ChannelID:   "ch_1",
 			MessageID:   "msg_1",
 			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
-		}, "topic-1", "mpa_1", approvalDecisionRequest{
+		}, topicGuard{topicID: "topic-1"}, "mpa_1", approvalDecisionRequest{
 			ApprovalRequestID: "mpa_1",
 			TopicID:           "topic-1",
 			ChannelID:         "ch_1",
@@ -1870,7 +1924,7 @@ func TestCompleteDecision_RejectsStaleTopicBeforeCreatingSession(t *testing.T) {
 	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
 		ChannelID: "ch_1",
 		MessageID: "msg_1",
-	}, "topic-1", "mpa_1", approvalDecisionRequest{
+	}, topicGuard{topicID: "topic-1"}, "mpa_1", approvalDecisionRequest{
 		ApprovalRequestID: "mpa_1",
 		TopicID:           "topic-1",
 		ChannelID:         "ch_1",
@@ -1916,7 +1970,7 @@ func TestCompleteDecision_RevokesTheSessionWhenTheTopicChangesAfterCreation(t *t
 		ChannelID:                  "ch_1",
 		MessageID:                  "msg_1",
 		SupportsPersistentSessions: true,
-	}, "topic-1", "mpa_1", approvalDecisionRequest{
+	}, topicGuard{topicID: "topic-1"}, "mpa_1", approvalDecisionRequest{
 		ApprovalRequestID: "mpa_1",
 		TopicID:           "topic-1",
 		ChannelID:         "ch_1",
@@ -1939,6 +1993,207 @@ func TestCompleteDecision_RevokesTheSessionWhenTheTopicChangesAfterCreation(t *t
 	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
 }
 
+func TestRevokeTopicSessions_RevokesEveryListedSession(t *testing.T) {
+	creator := &recordingSessionCreator{listIDs: []string{"session-1", "session-2"}}
+	s := newService(
+		Options{},
+		nil,
+		creator,
+		nil,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	revoked, err := s.RevokeTopicSessions(context.Background(), "topic-1")
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, revoked)
+	assert.Equal(t, []revokedSession{
+		{topicID: "topic-1", sessionID: "session-1"},
+		{topicID: "topic-1", sessionID: "session-2"},
+	}, creator.revokes)
+}
+
+func TestRevokeTopicSessions_KeepsGoingAfterAFailure(t *testing.T) {
+	creator := &recordingSessionCreator{
+		listIDs:   []string{"session-1", "session-2"},
+		revokeErr: errors.New("relayer unreachable"),
+	}
+	s := newService(
+		Options{},
+		nil,
+		creator,
+		nil,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	revoked, err := s.RevokeTopicSessions(context.Background(), "topic-1")
+
+	require.Error(t, err, "the caller is told what could not be revoked")
+	assert.Zero(t, revoked)
+	assert.Len(t, creator.revokes, 2, "one unreachable session must not strand the rest")
+}
+
+func TestRevokeTopicSessions_IsANoOpWithoutATopic(t *testing.T) {
+	creator := &recordingSessionCreator{listIDs: []string{"session-1"}}
+	s := newService(
+		Options{},
+		nil,
+		creator,
+		nil,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	revoked, err := s.RevokeTopicSessions(context.Background(), "  ")
+
+	require.NoError(t, err)
+	assert.Zero(t, revoked)
+	assert.Empty(t, creator.revokes)
+}
+
+func TestHandleApprovalDecision_RejectsAnApprovalFromBeforeAReclaimOntoTheSameTopic(t *testing.T) {
+	defer state.ResetForTesting()
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+
+	s := newTestService()
+	// The pairing began under the claim that existed a moment ago.
+	pending := &pendingApproval{
+		approvalRequestID: "mpa_1",
+		guard:             currentTopicGuard(),
+		channelID:         "ch_1",
+		requestMessageID:  "msg_1",
+		expiresAt:         time.Now().Add(time.Minute),
+		decisionCh:        make(chan approvalDecisionRequest, 1),
+	}
+	s.registerPending(pending)
+
+	// A factory reset and a re-claim that lands on the SAME topic id: every id
+	// comparison still passes, and this approval belongs to the claim before it.
+	if _, err := state.ClearClaim(); err != nil {
+		t.Logf("ClearClaim save failed as expected in tests: %v", err)
+	}
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+
+	result, err := s.HandleApprovalDecision(context.Background(), validDecisionArgs("mpa_1", "topic-1", "ch_1", "msg_1"))
+	require.NoError(t, err)
+	resp := result.(approvalResponse)
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "topic_mismatch", resp.Error.Code,
+		"a re-claim onto the same topic id is a different pairing")
+
+	select {
+	case <-pending.decisionCh:
+		t.Fatal("a decision from the previous claim must never reach the mint flow")
+	default:
+	}
+}
+
+func TestCompleteDecision_RejectsAMintForAClaimThatWasReplacedByTheSameTopic(t *testing.T) {
+	defer state.ResetForTesting()
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+
+	// The claim this pairing began under.
+	startGuard := currentTopicGuard()
+
+	ch := &fakeBrokerChannel{rejectionSent: make(chan struct{}, 1)}
+	creator := &recordingSessionCreator{persistent: true}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		relayerClient,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	// Reset and re-claim onto the same topic id before the decision is acted on.
+	if _, err := state.ClearClaim(); err != nil {
+		t.Logf("ClearClaim save failed as expected in tests: %v", err)
+	}
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+
+	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+		ChannelID:                  "ch_1",
+		MessageID:                  "msg_1",
+		SupportsPersistentSessions: true,
+	}, startGuard, "mpa_1", approvalDecisionRequest{
+		ApprovalRequestID: "mpa_1",
+		TopicID:           "topic-1",
+		ChannelID:         "ch_1",
+		RequestMessageID:  "msg_1",
+		Decision:          "approve",
+		KeepPaired:        true,
+	})
+
+	require.Error(t, err)
+	assert.True(t, terminalSent)
+	assert.Zero(t, creator.calls, "the replaced claim never mints a session")
+	assert.Empty(t, ch.DeliveredSessions())
+
+	ch.mu.Lock()
+	assert.Equal(t, []string{"topic_changed"}, ch.rejectionReasons)
+	ch.mu.Unlock()
+}
+
+func TestCompleteDecision_RevokesASessionMintedAcrossAFactoryReset(t *testing.T) {
+	defer state.ResetForTesting()
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+
+	ch := &fakeBrokerChannel{rejectionSent: make(chan struct{}, 1)}
+	// The claim this pairing begins under.
+	startGuard := currentTopicGuard()
+	creator := &recordingSessionCreator{persistent: true}
+	// The factory reset lands while the session is being minted: it clears the
+	// claim, which is what moves the topic out from under this mint.
+	creator.onCreate = func() { _, _ = state.ClearClaim() }
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		relayerClient,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+		ChannelID:                  "ch_1",
+		MessageID:                  "msg_1",
+		SupportsPersistentSessions: true,
+	}, startGuard, "mpa_1", approvalDecisionRequest{
+		ApprovalRequestID: "mpa_1",
+		TopicID:           "topic-1",
+		ChannelID:         "ch_1",
+		RequestMessageID:  "msg_1",
+		Decision:          "approve",
+		KeepPaired:        true,
+	})
+
+	require.Error(t, err, "a session minted for a wiped claim is never delivered")
+	assert.True(t, terminalSent)
+	assert.Empty(t, ch.DeliveredSessions())
+	assert.Equal(t, []revokedSession{{topicID: "topic-1", sessionID: "session-1"}}, creator.revokes,
+		"the reset must not leave a kept session alive on the old topic")
+}
+
 func TestCompleteDecision_RevokesWhenTheTopicMovesWhileTheSessionIsDelivered(t *testing.T) {
 	defer state.ResetForTesting()
 	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
@@ -1956,6 +2211,8 @@ func TestCompleteDecision_RevokesWhenTheTopicMovesWhileTheSessionIsDelivered(t *
 		_, _ = state.ClearClaim()
 		_, _ = state.SetRelayerTopicID("topic-1")
 	}
+	// The claim this pairing begins under.
+	startGuard := currentTopicGuard()
 	creator := &recordingSessionCreator{persistent: true}
 	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
 	s := newService(
@@ -1972,7 +2229,7 @@ func TestCompleteDecision_RevokesWhenTheTopicMovesWhileTheSessionIsDelivered(t *
 		ChannelID:                  "ch_1",
 		MessageID:                  "msg_1",
 		SupportsPersistentSessions: true,
-	}, "topic-1", "mpa_1", approvalDecisionRequest{
+	}, startGuard, "mpa_1", approvalDecisionRequest{
 		ApprovalRequestID: "mpa_1",
 		TopicID:           "topic-1",
 		ChannelID:         "ch_1",
@@ -2001,6 +2258,8 @@ func TestCompleteDecision_KeepsTheSessionWhenTheTopicIsUnchanged(t *testing.T) {
 	ch := &fakeBrokerChannel{}
 	// An idempotent re-write of the same topic must not read as a change.
 	ch.onSend = func() { _, _ = state.SetRelayerTopicID("topic-1") }
+	// The claim this pairing begins under.
+	startGuard := currentTopicGuard()
 	creator := &recordingSessionCreator{persistent: true}
 	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
 	s := newService(
@@ -2017,7 +2276,7 @@ func TestCompleteDecision_KeepsTheSessionWhenTheTopicIsUnchanged(t *testing.T) {
 		ChannelID:                  "ch_1",
 		MessageID:                  "msg_1",
 		SupportsPersistentSessions: true,
-	}, "topic-1", "mpa_1", approvalDecisionRequest{
+	}, startGuard, "mpa_1", approvalDecisionRequest{
 		ApprovalRequestID: "mpa_1",
 		TopicID:           "topic-1",
 		ChannelID:         "ch_1",
@@ -2054,7 +2313,7 @@ func TestCompleteDecision_RevokesWhenTheBrokerRefusedTheMessage(t *testing.T) {
 	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
 		ChannelID: "ch_1",
 		MessageID: "msg_1",
-	}, "topic-1", "mpa_1", approvalDecisionRequest{
+	}, topicGuard{topicID: "topic-1"}, "mpa_1", approvalDecisionRequest{
 		ApprovalRequestID: "mpa_1",
 		TopicID:           "topic-1",
 		ChannelID:         "ch_1",
@@ -2106,7 +2365,7 @@ func TestCompleteDecision_LeavesTheSessionInPlaceWhenDeliveryIsIndeterminate(t *
 				ChannelID:                  "ch_1",
 				MessageID:                  "msg_1",
 				SupportsPersistentSessions: true,
-			}, "topic-1", "mpa_1", approvalDecisionRequest{
+			}, topicGuard{topicID: "topic-1"}, "mpa_1", approvalDecisionRequest{
 				ApprovalRequestID: "mpa_1",
 				TopicID:           "topic-1",
 				ChannelID:         "ch_1",
@@ -2173,7 +2432,7 @@ func TestCompleteDecision_RevokeFailureIsLoggedAndChangesNothing(t *testing.T) {
 	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
 		ChannelID: "ch_1",
 		MessageID: "msg_1",
-	}, "topic-1", "mpa_1", approvalDecisionRequest{
+	}, topicGuard{topicID: "topic-1"}, "mpa_1", approvalDecisionRequest{
 		ApprovalRequestID: "mpa_1",
 		TopicID:           "topic-1",
 		ChannelID:         "ch_1",
@@ -2213,7 +2472,7 @@ func TestCompleteDecision_KeepPairedDeliversAPersistentSessionWithNoExpiry(t *te
 		ChannelID:                  "ch_1",
 		MessageID:                  "msg_1",
 		SupportsPersistentSessions: true,
-	}, "topic-1", "mpa_1", approvalDecisionRequest{
+	}, topicGuard{topicID: "topic-1"}, "mpa_1", approvalDecisionRequest{
 		ApprovalRequestID: "mpa_1",
 		TopicID:           "topic-1",
 		ChannelID:         "ch_1",
@@ -2268,7 +2527,7 @@ func TestCompleteDecision_KeepPairedFallsBackWhenTheRequesterCannotHoldAPersiste
 		ChannelID: "ch_1",
 		MessageID: "msg_1",
 		Origin:    "https://gallery.example",
-	}, "topic-1", "mpa_1", approvalDecisionRequest{
+	}, topicGuard{topicID: "topic-1"}, "mpa_1", approvalDecisionRequest{
 		ApprovalRequestID: "mpa_1",
 		TopicID:           "topic-1",
 		ChannelID:         "ch_1",
@@ -2296,6 +2555,70 @@ func TestCompleteDecision_KeepPairedFallsBackWhenTheRequesterCannotHoldAPersiste
 	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
 	assert.Equal(t, "timed_fallback_requester", outcome.Message.(map[string]any)["lifetime"],
 		"the controller is told what the owner actually got")
+}
+
+func TestCompleteDecision_ReportsTheDeliveredLifetimeNotTheRequestedOne(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{}
+	// keepPaired was asked for and the requester could hold it, but the
+	// relayer answered with an ordinary timed session.
+	creator := &recordingSessionCreator{}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		relayerClient,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	_, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+		ChannelID:                  "ch_1",
+		MessageID:                  "msg_1",
+		SupportsPersistentSessions: true,
+	}, topicGuard{topicID: "topic-1"}, "mpa_1", approvalDecisionRequest{
+		ApprovalRequestID: "mpa_1",
+		TopicID:           "topic-1",
+		ChannelID:         "ch_1",
+		RequestMessageID:  "msg_1",
+		Decision:          "approve",
+		KeepPaired:        true,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []sessionLifetime{lifetimePersistent}, creator.lifetimes, "the ask was persistent")
+
+	delivered := ch.DeliveredSessions()
+	require.Len(t, delivered, 1)
+	assert.False(t, delivered[0].Persistent)
+
+	outcome := <-relayerClient.sent
+	assert.Equal(t, "timed", outcome.Message.(map[string]any)["lifetime"],
+		"the owner is told what the session is, not what was asked for")
+}
+
+func TestDeliveredOutcomeLifetime(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested sessionLifetime
+		session   minter.MintResult
+		want      string
+	}{
+		{name: "timed ask, timed session", requested: lifetimeTimed, session: minter.MintResult{ExpiresAt: time.Now()}, want: "timed"},
+		{name: "persistent ask, persistent session", requested: lifetimePersistent, session: minter.MintResult{Persistent: true}, want: "persistent"},
+		{name: "persistent ask, timed session", requested: lifetimePersistent, session: minter.MintResult{ExpiresAt: time.Now()}, want: "timed"},
+		{name: "requester fallback, timed session", requested: lifetimeTimedFallbackRequester, session: minter.MintResult{ExpiresAt: time.Now()}, want: "timed_fallback_requester"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, deliveredOutcomeLifetime(tt.requested, tt.session))
+		})
+	}
 }
 
 func TestSessionLifetimeFor(t *testing.T) {
@@ -2344,7 +2667,7 @@ func TestCompleteDecision_WithoutKeepPairedDeliversAnExpiringSession(t *testing.
 	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
 		ChannelID: "ch_1",
 		MessageID: "msg_1",
-	}, "topic-1", "mpa_1", approvalDecisionRequest{
+	}, topicGuard{topicID: "topic-1"}, "mpa_1", approvalDecisionRequest{
 		ApprovalRequestID: "mpa_1",
 		TopicID:           "topic-1",
 		ChannelID:         "ch_1",
@@ -2751,6 +3074,12 @@ type recordingSessionCreator struct {
 	onCreate   func()
 	revokes    []revokedSession
 	revokeErr  error
+	listIDs    []string
+	listErr    error
+}
+
+func (r *recordingSessionCreator) ListEphemeralSessionIDs(_ context.Context, _ string) ([]string, error) {
+	return r.listIDs, r.listErr
 }
 
 type revokedSession struct {
@@ -2789,6 +3118,10 @@ type fakeSessionCreator struct {
 	release chan struct{}
 	err     error
 	revoked chan revokedSession
+}
+
+func (f fakeSessionCreator) ListEphemeralSessionIDs(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
 }
 
 func (f fakeSessionCreator) RevokeEphemeralSession(_ context.Context, topicID string, sessionID string) error {

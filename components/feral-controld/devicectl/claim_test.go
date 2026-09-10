@@ -196,6 +196,110 @@ func (c *pendingRebootClock) SleepContext(ctx context.Context, _ time.Duration) 
 // stagedResetExecutor builds an executor mid-factory-reset: the state manager
 // is injected, the reset unit's start is mocked with unitOK, and factoryReset
 // has run. Shared by the resetStaged tests below.
+// TestFactoryReset_RevokesBrowserSessionsBeforeClearingTheClaim: browser
+// sessions live on the relayer, keyed by the topic. An owner-kept one has no
+// expiry to reclaim it, and once the claim is cleared this device can no
+// longer name the old topic — so the revoke has to happen here, while the
+// topic is still known, and BEFORE the clear.
+func TestFactoryReset_RevokesBrowserSessionsBeforeClearingTheClaim(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
+
+	step := 0
+	clearedAt := 0
+	sm.EXPECT().ClearClaim().DoAndReturn(func() (bool, error) {
+		step++
+		clearedAt = step
+		return true, nil
+	})
+
+	revokedAt := 0
+	revokedTopic := ""
+	e := resetExecutorWithRevoker(t, ctrl, func(_ context.Context, topicID string) (int, error) {
+		step++
+		revokedAt = step
+		revokedTopic = topicID
+		return 2, nil
+	})
+
+	_, err := e.factoryReset(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, "topic-1", revokedTopic, "the sessions are revoked for the outgoing topic")
+	require.NotZero(t, revokedAt, "the revoke must happen")
+	assert.Less(t, revokedAt, clearedAt, "revoking after the clear would have no topic to name")
+}
+
+// TestFactoryReset_CompletesWhenSessionRevocationFails: an unreachable relayer
+// must not block a wipe. The sessions that survive are logged loudly by the
+// executor; the reset still stages.
+func TestFactoryReset_CompletesWhenSessionRevocationFails(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
+	sm.EXPECT().ClearClaim().Return(true, nil)
+
+	called := false
+	e := resetExecutorWithRevoker(t, ctrl, func(_ context.Context, _ string) (int, error) {
+		called = true
+		return 0, errors.New("relayer unreachable")
+	})
+
+	result, err := e.factoryReset(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, CmdOK, result)
+	assert.True(t, called)
+	assert.True(t, e.ResetStaged(), "the reset still stages")
+}
+
+// TestFactoryReset_WithoutARevokerBehavesAsBefore: mint pairing is optional,
+// and a device without it resets exactly the way it did before owner-kept
+// sessions existed.
+func TestFactoryReset_WithoutARevokerBehavesAsBefore(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	e, _, _ := stagedResetExecutor(t, ctrl, true)
+	assert.True(t, e.ResetStaged())
+}
+
+// resetExecutorWithRevoker builds the same executor stagedResetExecutor does,
+// with a successful reset unit and the browser-session revoker wired.
+func resetExecutorWithRevoker(t *testing.T, ctrl *gomock.Controller, revoke func(ctx context.Context, topicID string) (int, error)) *executor {
+	t.Helper()
+
+	mockExec := mocks.NewMockExec(ctrl)
+	mockCmd := mocks.NewMockExecCmd(ctrl)
+	mockExec.EXPECT().
+		CommandContext(gomock.Any(), "systemctl", "start", "set-factory-boot.service").
+		Return(mockCmd)
+	mockCmd.EXPECT().CombinedOutput().Return([]byte(""), nil)
+
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
+
+	e := &executor{
+		logger:        zap.NewNop(),
+		exec:          mockExec,
+		os:            mockOS,
+		setupNarrator: &narratorSpy{},
+		json:          wrapper.NewJSON(),
+		clock:         &pendingRebootClock{},
+	}
+	e.SetBrowserSessionRevoker(revoke)
+	return e
+}
+
 func stagedResetExecutor(t *testing.T, ctrl *gomock.Controller, unitOK bool) (*executor, *narratorSpy, *mocks.MockStateManager) {
 	t.Helper()
 

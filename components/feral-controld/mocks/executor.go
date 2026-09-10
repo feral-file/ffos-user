@@ -77,6 +77,18 @@ func (mr *MockExecutorMockRecorder) SaveLastSysMetrics(metrics interface{}) *gom
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveLastSysMetrics", reflect.TypeOf((*MockExecutor)(nil).SaveLastSysMetrics), metrics)
 }
 
+// SetBrowserSessionRevoker mocks base method.
+func (m *MockExecutor) SetBrowserSessionRevoker(revoke func(context.Context, string) (int, error)) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetBrowserSessionRevoker", revoke)
+}
+
+// SetBrowserSessionRevoker indicates an expected call of SetBrowserSessionRevoker.
+func (mr *MockExecutorMockRecorder) SetBrowserSessionRevoker(revoke interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetBrowserSessionRevoker", reflect.TypeOf((*MockExecutor)(nil).SetBrowserSessionRevoker), revoke)
+}
+
 // SetClaimObserver mocks base method.
 func (m *MockExecutor) SetClaimObserver(observer func(bool)) {
 	m.ctrl.T.Helper()

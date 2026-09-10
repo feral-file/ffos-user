@@ -1485,6 +1485,19 @@ The mint-pairing flow adds an approval decision message from
 `ff-controller` must not receive raw browser session tokens or DP1 playlist
 content.
 
+Factory reset ends every browser session too. Sessions live on `ff-relayer`,
+keyed by topic, and an owner-kept one has no expiry to reclaim it, so
+`factoryReset` lists the topic's sessions
+(`GET /api/ephemeral-sessions?topicID=...`) and revokes each one BEFORE it
+clears the claim — after the clear, the device can no longer name the topic
+they belong to, and the re-claimed device's paired-sites screen reads the new
+one. The pass is bounded and best effort: a reset completes even if
+`ff-relayer` is unreachable, and what could not be revoked is logged at error
+level, because a session that survives is a live session against a device its
+previous owner no longer holds. Clearing the claim also moves the device's
+topic generation, so a mint already in flight sees the move and revokes the
+session it just created rather than delivering it.
+
 Implementation note: `feral-controld` embeds the temporary Go minter client from
 `ff-art-computer-handoff` for Mint Pairing Broker channels, encrypted browser
 requests, and encrypted browser results. Relayer approval dispatch and
@@ -1773,7 +1786,7 @@ Error cases:
 |---|---|---|---|
 | Malformed decision payload | Missing required fields, invalid `decision`, non-object `request`, non-boolean `keepPaired` (`null` included) | `ok: false`, `invalid_request`, `retryable: false` | Keep waiting until approval timeout |
 | Unknown approval request | No pending request for `approvalRequestID` | `ok: false`, `not_found`, `retryable: false` | No change |
-| Topic mismatch | Decision `topicID` differs from current device topic | `ok: false`, `topic_mismatch`, `retryable: false` | Keep waiting until timeout |
+| Topic mismatch | Decision `topicID` differs from the current device topic, or the claim the pairing began under was cleared and re-taken (a factory reset and re-claim, even onto the same topic id) | `ok: false`, `topic_mismatch`, `retryable: false` | Keep waiting until timeout |
 | Channel/request mismatch | `channelID` or `requestMessageID` differs from pending request | `ok: false`, `request_mismatch`, `retryable: false` | Keep waiting until timeout |
 | Expired decision | Request deadline passed before valid decision | `ok: false`, `expired`, `retryable: false` | Encrypted `mint_rejected` with `approval_expired` |
 | Duplicate same decision | Same accepted decision delivered again | `ok: true`, `status: "already_accepted"` | No duplicate minting |
@@ -1819,15 +1832,19 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
 }
 ```
 
-`lifetime` is present only on `completed` and names the shape of the session
-the browser actually received:
+`lifetime` is present only on `completed` and is read from the session the
+browser actually received, never from what the approval asked for — a
+`keepPaired` approval answered by `ff-relayer` with a timed session reports
+`timed`. It names the shape:
 
 - `persistent`: an owner-kept session; it ends when the owner removes the site.
 - `timed`: an ordinary session with an expiry.
 - `timed_fallback_requester`: the owner approved with `keepPaired`, but the
   requester had not declared `supportsPersistentSessions`, so it received a
   timed session at 86400 seconds. A controller showing "kept until you remove
-  it" should correct that copy when it sees this value.
+  it" should correct that copy when it sees this value — as it should for a
+  plain `timed` after a `keepPaired` approval, which means `ff-relayer` did not
+  mint a kept session.
 
 Allowed `status` values:
 
