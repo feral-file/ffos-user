@@ -3007,11 +3007,6 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 // Best-effort: a save failure is logged but does not abort the reset (the
 // reboot into the factory snapshot still discards both). A no-op when nothing
 // is persisted.
-// browserSessionRevokeTimeout bounds the whole revoke pass. A reset must not
-// wait on an unreachable relayer, and the reboot it stages is coming either
-// way.
-const browserSessionRevokeTimeout = 5 * time.Second
-
 // invalidateRelayerTopic clears the persisted relayer topic and returns the id
 // it cleared, so the caller can clean up remotely for a topic this device has
 // already stopped answering to. The clear is what moves the topic generation,
