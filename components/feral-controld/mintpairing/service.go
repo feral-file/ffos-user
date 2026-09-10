@@ -162,8 +162,42 @@ type brokerStarter interface {
 }
 
 type sessionCreator interface {
-	CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest, keepPaired bool) (minter.MintResult, error)
+	CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest, lifetime sessionLifetime) (minter.MintResult, error)
 	RevokeEphemeralSession(ctx context.Context, topicID string, sessionID string) error
+}
+
+// sessionLifetime is what the device asks the relayer to mint for one approved
+// request. It is decided from the owner's decision and the requester's declared
+// capability together — never from the decision alone.
+type sessionLifetime int
+
+const (
+	// lifetimeTimed: the ordinary session, under the controld-owned TTL policy
+	// applied to the browser's requested lifetime.
+	lifetimeTimed sessionLifetime = iota
+	// lifetimePersistent: the owner asked to keep the site paired and the
+	// requester declared it can hold a session with no expiry.
+	lifetimePersistent
+	// lifetimeTimedFallbackRequester: the owner asked to keep the site paired
+	// but the requester never declared the capability — every client released
+	// before owner-kept sessions existed requires a real expiresAt and cannot
+	// parse a session without one. Handing it a persistent session would break
+	// the page outright, so it gets the longest timed session instead and the
+	// owner has to re-approve when it lapses.
+	lifetimeTimedFallbackRequester
+)
+
+// outcomeLifetime names the shape for the controller's approval outcome, so
+// the app can tell the owner what it actually got rather than what was asked.
+func (l sessionLifetime) outcomeLifetime() string {
+	switch l {
+	case lifetimePersistent:
+		return "persistent"
+	case lifetimeTimedFallbackRequester:
+		return "timed_fallback_requester"
+	default:
+		return "timed"
+	}
 }
 
 type brokerChannel interface {
@@ -787,7 +821,7 @@ func (s *service) sendApprovalCancelled(active *activePairing, request minter.Mi
 	terminalCtx, cancel := context.WithTimeout(context.Background(), terminalOperationTimeout)
 	defer cancel()
 	_, err := active.channel.SendMintRejection(terminalCtx, request, minter.MintRejection{Reason: approvalCancellationStatus, Retryable: true})
-	s.sendApprovalOutcome(terminalCtx, approvalRequestID, request.ChannelID, request.MessageID, approvalCancellationStatus)
+	s.sendApprovalOutcome(terminalCtx, approvalRequestID, request.ChannelID, request.MessageID, approvalCancellationStatus, "")
 	if err != nil {
 		s.logger.Warn("Failed to send mint pairing cancellation to browser", zap.Error(err), zap.String("channelID", active.channelID))
 	}
@@ -801,7 +835,7 @@ func (s *service) sendApprovalExpired(active *activePairing, request minter.Mint
 	terminalCtx, cancel := context.WithTimeout(context.Background(), terminalOperationTimeout)
 	defer cancel()
 	_, err := active.channel.SendMintRejection(terminalCtx, request, minter.MintRejection{Reason: "approval_expired", Retryable: true})
-	s.sendApprovalOutcome(terminalCtx, approvalRequestID, request.ChannelID, request.MessageID, "expired")
+	s.sendApprovalOutcome(terminalCtx, approvalRequestID, request.ChannelID, request.MessageID, "expired", "")
 	if err != nil {
 		s.logger.Warn("Failed to send mint pairing expiration to browser", zap.Error(err), zap.String("channelID", active.channelID))
 		return false
@@ -860,8 +894,10 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		return s.rejectTopicChanged(channel, request, topicID, approvalRequestID)
 	}
 
+	lifetime := s.sessionLifetimeFor(decision, request)
+
 	sessionCtx, cancelSession := context.WithTimeout(ctx, wrapper.HTTPClientTimeout)
-	session, err := s.sessionCreator.CreateEphemeralSession(sessionCtx, topicID, request, decision.KeepPaired)
+	session, err := s.sessionCreator.CreateEphemeralSession(sessionCtx, topicID, request, lifetime)
 	cancelSession()
 	if err != nil {
 		sendErr := s.sendTerminalRejectionAndOutcome(channel, request, approvalRequestID, "session_create_failed", true, "failed")
@@ -886,7 +922,7 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 	cancelSuccess()
 	if err != nil {
 		outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
-		s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "failed")
+		s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "failed", "")
 		cancelOutcome()
 		// A failed send is not proof of non-delivery. Revoke only when the
 		// broker refused the message outright; otherwise the browser may
@@ -904,9 +940,27 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		return false, fmt.Errorf("send mint success: %w", err)
 	}
 	outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
-	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "completed")
+	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "completed", lifetime.outcomeLifetime())
 	cancelOutcome()
 	return true, nil
+}
+
+// sessionLifetimeFor reads the owner's decision against what the requester can
+// actually hold. A keepPaired approval for a requester that never declared
+// support is not an error and not a rejection: the owner still approved the
+// site, so it gets the longest timed session the policy allows.
+func (s *service) sessionLifetimeFor(decision approvalDecisionRequest, request minter.MintRequest) sessionLifetime {
+	if !decision.KeepPaired {
+		return lifetimeTimed
+	}
+	if request.SupportsPersistentSessions {
+		return lifetimePersistent
+	}
+	s.logger.Warn("Owner asked to keep this site paired, but the requester cannot hold a session without an expiry; minting the longest timed session instead",
+		zap.String("origin", request.Origin),
+		zap.String("channelID", request.ChannelID),
+		zap.Int("expiresInSeconds", maxSessionTTLSeconds))
+	return lifetimeTimedFallbackRequester
 }
 
 // deliveryVerdict says what a failed browser delivery proves about whether the
@@ -992,7 +1046,7 @@ func (s *service) sendTerminalRejectionAndOutcome(channel brokerChannel, request
 	// budget so a canceled or exhausted session-creation context cannot hide
 	// the terminal state from both sides of the handoff.
 	outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
-	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, outcomeStatus)
+	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, outcomeStatus, "")
 	cancelOutcome()
 	return err
 }
@@ -1016,17 +1070,18 @@ func browserDisplayName(info minter.BrowserInfo) string {
 
 func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID string, topicID string, request minter.MintRequest, minterPublicKey minter.PublicJWK, expiresAt time.Time) error {
 	msg := map[string]any{
-		"v":                         1,
-		"topicID":                   topicID,
-		"approvalRequestID":         approvalRequestID,
-		"channelID":                 request.ChannelID,
-		"requestMessageID":          request.MessageID,
-		"origin":                    request.Origin,
-		"browserInfo":               request.BrowserInfo,
-		"requestedExpiresInSeconds": request.RequestedExpiresInSeconds,
-		"effectiveExpiresInSeconds": effectiveSessionTTLSeconds(request.RequestedExpiresInSeconds),
-		"requestedAt":               time.Now().UTC().Format(time.RFC3339),
-		"expiresAt":                 expiresAt.UTC().Format(time.RFC3339),
+		"v":                          1,
+		"topicID":                    topicID,
+		"approvalRequestID":          approvalRequestID,
+		"channelID":                  request.ChannelID,
+		"requestMessageID":           request.MessageID,
+		"origin":                     request.Origin,
+		"browserInfo":                request.BrowserInfo,
+		"requestedExpiresInSeconds":  request.RequestedExpiresInSeconds,
+		"effectiveExpiresInSeconds":  effectiveSessionTTLSeconds(request.RequestedExpiresInSeconds),
+		"supportsPersistentSessions": request.SupportsPersistentSessions,
+		"requestedAt":                time.Now().UTC().Format(time.RFC3339),
+		"expiresAt":                  expiresAt.UTC().Format(time.RFC3339),
 		"challenge": map[string]any{
 			"algorithm":                   minter.Algorithm,
 			"browserPublicKeyFingerprint": fingerprintPublicJWK(request.BrowserPublicKeyJWK),
@@ -1036,15 +1091,22 @@ func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID str
 	return s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST, approvalRequestID, msg, 10)
 }
 
-func (s *service) sendApprovalOutcome(ctx context.Context, approvalRequestID string, channelID string, requestMessageID string, status string) {
-	err := s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME, approvalRequestID, map[string]any{
+// sendApprovalOutcome reports the terminal state to the controller. lifetime is
+// the shape of the session the browser received and is empty for every outcome
+// that delivered none.
+func (s *service) sendApprovalOutcome(ctx context.Context, approvalRequestID string, channelID string, requestMessageID string, status string, lifetime string) {
+	message := map[string]any{
 		"v":                 1,
 		"approvalRequestID": approvalRequestID,
 		"channelID":         channelID,
 		"requestMessageID":  requestMessageID,
 		"status":            status,
 		"completedAt":       time.Now().UTC().Format(time.RFC3339),
-	}, 10)
+	}
+	if lifetime != "" {
+		message["lifetime"] = lifetime
+	}
+	err := s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME, approvalRequestID, message, 10)
 	if err != nil {
 		s.logger.Warn("Failed to send mint pairing approval outcome", zap.Error(err), zap.String("approvalRequestID", approvalRequestID))
 	}
@@ -1434,12 +1496,13 @@ func NewRelayerSessionCreator(baseURL string, apiKey string, httpClient wrapper.
 	}
 }
 
-// CreateEphemeralSession mints one browser session on the relayer. With
-// keepPaired the device asks for an owner-kept session: it sends
-// `persistent: true`, omits `expiresInSeconds` entirely, and ignores the
-// browser's requestedExpiresInSeconds — the owner's choice outranks the site's
-// request. Without it the controld-owned TTL policy applies unchanged.
-func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest, keepPaired bool) (minter.MintResult, error) {
+// CreateEphemeralSession mints one browser session on the relayer. A
+// persistent lifetime sends `persistent: true`, omits `expiresInSeconds`
+// entirely, and ignores the browser's requestedExpiresInSeconds — the owner's
+// choice outranks the site's request. The requester fallback asks for the
+// longest timed session instead of a persistent one. An ordinary timed
+// lifetime applies the controld-owned TTL policy unchanged.
+func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest, lifetime sessionLifetime) (minter.MintResult, error) {
 	if c.httpClient == nil {
 		return minter.MintResult{}, errors.New("http client is required")
 	}
@@ -1459,9 +1522,12 @@ func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topi
 		"browserUserAgent": request.BrowserInfo.UserAgent,
 		"label":            request.BrowserInfo.Label,
 	}
-	if keepPaired {
+	switch lifetime {
+	case lifetimePersistent:
 		body["persistent"] = true
-	} else {
+	case lifetimeTimedFallbackRequester:
+		body["expiresInSeconds"] = maxSessionTTLSeconds
+	default:
 		body["expiresInSeconds"] = effectiveSessionTTLSeconds(request.RequestedExpiresInSeconds)
 	}
 	raw, err := c.json.Marshal(body)

@@ -1438,8 +1438,15 @@ The mint-pairing flow adds an approval decision message from
    `ff-relayer` and sends the raw token only inside encrypted
    `mint_succeeded` to the browser. An approval with `keepPaired` asks for an
    owner-kept session instead: `feral-controld` sends `persistent: true` to
-   `ff-relayer` and sends no `expiresInSeconds`. **The delivered session's
-   shape follows the relayer's answer, not the request.** When the relayer
+   `ff-relayer` and sends no `expiresInSeconds` — but only for a requester that
+   declared `supportsPersistentSessions` in its mint request. A requester that
+   did not (every client released before owner-kept sessions existed) requires
+   a real `expiresAt` and cannot parse a session without one, so a `keepPaired`
+   approval for it is minted as a timed session at the policy maximum (86400
+   seconds) instead, logged with the requesting origin. The approval is not
+   rejected — the owner still approved the site; it simply lapses and has to be
+   approved again. **The delivered session's shape follows the relayer's
+   answer, not the request.** When the relayer
    mints the owner-kept session, the delivered session carries
    `persistent: true` with a null `expiresAt` and ends only when the owner
    removes the site from the app's paired-sites screen. When the relayer
@@ -1601,6 +1608,7 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
     },
     "requestedExpiresInSeconds": 86400,
     "effectiveExpiresInSeconds": 86400,
+    "supportsPersistentSessions": true,
     "requestedAt": "2026-06-16T03:00:00Z",
     "expiresAt": "2026-06-16T03:05:00Z",
     "challenge": {
@@ -1618,8 +1626,14 @@ will request from `ff-relayer` if the controller approves. `feral-controld`
 owns this policy: omitted or non-positive requests default to 3600 seconds,
 requests below 90 seconds are raised to 90 seconds, and requests above 86400
 seconds are capped at 86400 seconds. Both fields are moot when the
-controller approves with `keepPaired`: an owner-kept session has no TTL and the
-browser's request is ignored.
+controller approves with `keepPaired` and the requester can hold an owner-kept
+session: it has no TTL and the browser's request is ignored.
+
+`supportsPersistentSessions` says whether this requester declared that it can
+hold a session with no expiry. It is `false` for every client released before
+owner-kept sessions existed. A `keepPaired` approval for such a requester is
+minted as a timed session at 86400 seconds, so a controller may use this field
+to tell the owner up front that this site cannot be kept paired yet.
 
 ### mintPairingApprovalDecision
 
@@ -1685,10 +1699,11 @@ Optional fields:
 
 - `keepPaired`: meaningful for `approve`, ignored for `reject`, default
   `false`. `true` asks for an owner-kept session: `persistent: true` to
-  `ff-relayer`, no `expiresInSeconds`. The delivered session follows the
-  relayer's answer — `persistent: true` with a null `expiresAt` when the
-  relayer mints a kept session, an ordinary `expiresAt` when it answers with a
-  timed one (see the flow above)
+  `ff-relayer`, no `expiresInSeconds`. Two things can still make the delivered
+  session timed — a requester that did not declare
+  `supportsPersistentSessions` (minted at 86400 seconds instead) and a relayer
+  that answers with a timed session — so read the shape from what was
+  delivered, not from the request (see the flow above)
 - `reason`: required for `reject`, ignored for `approve`
 - `retryable`: meaningful for `reject`, default `false`
 - `decidedAt`
@@ -1786,10 +1801,21 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
     "channelID": "ch_pQ9Yab...",
     "requestMessageID": "msg_2WaF8D7xV9zJvdm8SK5LSA",
     "status": "completed",
+    "lifetime": "persistent",
     "completedAt": "2026-06-16T03:00:22Z"
   }
 }
 ```
+
+`lifetime` is present only on `completed` and names the shape of the session
+the browser actually received:
+
+- `persistent`: an owner-kept session; it ends when the owner removes the site.
+- `timed`: an ordinary session with an expiry.
+- `timed_fallback_requester`: the owner approved with `keepPaired`, but the
+  requester had not declared `supportsPersistentSessions`, so it received a
+  timed session at 86400 seconds. A controller showing "kept until you remove
+  it" should correct that copy when it sees this value.
 
 Allowed `status` values:
 

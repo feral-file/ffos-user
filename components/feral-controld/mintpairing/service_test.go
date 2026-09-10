@@ -226,7 +226,7 @@ func TestRelayerSessionCreator_CreateEphemeralSession(t *testing.T) {
 			Label:     "Gallery laptop",
 		},
 		RequestedExpiresInSeconds: 3600,
-	}, false)
+	}, lifetimeTimed)
 
 	require.NoError(t, err)
 	assert.Equal(t, "session-1", result.SessionID)
@@ -277,7 +277,7 @@ func TestRelayerSessionCreator_AppliesControldOwnedSessionTTLPolicy(t *testing.T
 			creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
 			_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{
 				RequestedExpiresInSeconds: tt.requested,
-			}, false)
+			}, lifetimeTimed)
 
 			require.NoError(t, err)
 			assert.Equal(t, float64(tt.want), body["expiresInSeconds"])
@@ -298,7 +298,7 @@ func TestRelayerSessionCreator_KeepPairedAsksForAPersistentSessionWithoutTTL(t *
 	session, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{
 		BrowserInfo:               minter.BrowserInfo{Name: "Chrome", Label: "Gallery laptop"},
 		RequestedExpiresInSeconds: 300,
-	}, true)
+	}, lifetimePersistent)
 
 	require.NoError(t, err)
 	assert.Equal(t, true, body["persistent"])
@@ -307,6 +307,27 @@ func TestRelayerSessionCreator_KeepPairedAsksForAPersistentSessionWithoutTTL(t *
 	assert.True(t, session.Persistent)
 	assert.True(t, session.ExpiresAt.IsZero(), "a persistent session never expires")
 	assert.Equal(t, "browser-token", session.Token)
+}
+
+func TestRelayerSessionCreator_RequesterFallbackAsksForTheLongestTimedSession(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"session":{"id":"session-1","expiresAt":"2030-01-01T00:00:00Z"},"token":"browser-token"}`))
+	}))
+	defer server.Close()
+
+	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+	session, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{
+		RequestedExpiresInSeconds: 300,
+	}, lifetimeTimedFallbackRequester)
+
+	require.NoError(t, err)
+	assert.NotContains(t, body, "persistent", "an incapable requester is never offered a persistent session")
+	assert.Equal(t, float64(maxSessionTTLSeconds), body["expiresInSeconds"],
+		"the fallback outranks the browser's own request, the way keepPaired would have")
+	assert.False(t, session.Persistent)
 }
 
 func TestRelayerSessionCreator_PersistenceFollowsTheRelayerAnswer(t *testing.T) {
@@ -318,7 +339,7 @@ func TestRelayerSessionCreator_PersistenceFollowsTheRelayerAnswer(t *testing.T) 
 	defer server.Close()
 
 	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
-	session, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, true)
+	session, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, lifetimePersistent)
 
 	require.NoError(t, err)
 	assert.False(t, session.Persistent, "a relayer that ignored persistent minted an expiring session")
@@ -327,22 +348,22 @@ func TestRelayerSessionCreator_PersistenceFollowsTheRelayerAnswer(t *testing.T) 
 
 func TestRelayerSessionCreator_RefusesAndRevokesAContradictoryReply(t *testing.T) {
 	tests := []struct {
-		name       string
-		keepPaired bool
-		reply      string
-		reason     string
+		name     string
+		lifetime sessionLifetime
+		reply    string
+		reason   string
 	}{
 		{
-			name:       "persistent with an expiry",
-			keepPaired: true,
-			reply:      `{"session":{"id":"session-1","persistent":true,"expiresAt":"2030-01-01T00:00:00Z"},"token":"browser-token"}`,
+			name:     "persistent with an expiry",
+			lifetime: lifetimePersistent,
+			reply:    `{"session":{"id":"session-1","persistent":true,"expiresAt":"2030-01-01T00:00:00Z"},"token":"browser-token"}`,
 		},
 		{
 			// A present-but-zero expiry is a deadline the relayer failed to
 			// write, not a null one, so it must not pass as persistent.
-			name:       "persistent with a zero expiry",
-			keepPaired: true,
-			reply:      `{"session":{"id":"session-1","persistent":true,"expiresAt":"0001-01-01T00:00:00Z"},"token":"browser-token"}`,
+			name:     "persistent with a zero expiry",
+			lifetime: lifetimePersistent,
+			reply:    `{"session":{"id":"session-1","persistent":true,"expiresAt":"0001-01-01T00:00:00Z"},"token":"browser-token"}`,
 		},
 		{
 			name:  "timed with no expiry",
@@ -372,7 +393,7 @@ func TestRelayerSessionCreator_RefusesAndRevokesAContradictoryReply(t *testing.T
 			defer server.Close()
 
 			creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
-			_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, tt.keepPaired)
+			_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, tt.lifetime)
 
 			require.Error(t, err, "a contradictory relayer reply is refused")
 			reason := tt.reason
@@ -400,7 +421,7 @@ func TestRelayerSessionCreator_RefusesAReplyWithNoSessionID(t *testing.T) {
 	defer server.Close()
 
 	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
-	_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, false)
+	_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, lifetimeTimed)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "session id")
@@ -419,7 +440,7 @@ func TestRelayerSessionCreator_ReportsAFailedRevokeOfARefusedSession(t *testing.
 	defer server.Close()
 
 	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
-	_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, true)
+	_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, lifetimePersistent)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "expiresAt", "the refusal reason survives")
@@ -1868,8 +1889,9 @@ func TestCompleteDecision_RevokesTheSessionWhenTheTopicChangesAfterCreation(t *t
 	).(*service)
 
 	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
-		ChannelID: "ch_1",
-		MessageID: "msg_1",
+		ChannelID:                  "ch_1",
+		MessageID:                  "msg_1",
+		SupportsPersistentSessions: true,
 	}, "topic-1", "mpa_1", approvalDecisionRequest{
 		ApprovalRequestID: "mpa_1",
 		TopicID:           "topic-1",
@@ -1963,8 +1985,9 @@ func TestCompleteDecision_LeavesTheSessionInPlaceWhenDeliveryIsIndeterminate(t *
 			).(*service)
 
 			_, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
-				ChannelID: "ch_1",
-				MessageID: "msg_1",
+				ChannelID:                  "ch_1",
+				MessageID:                  "msg_1",
+				SupportsPersistentSessions: true,
 			}, "topic-1", "mpa_1", approvalDecisionRequest{
 				ApprovalRequestID: "mpa_1",
 				TopicID:           "topic-1",
@@ -2069,8 +2092,9 @@ func TestCompleteDecision_KeepPairedDeliversAPersistentSessionWithNoExpiry(t *te
 	).(*service)
 
 	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
-		ChannelID: "ch_1",
-		MessageID: "msg_1",
+		ChannelID:                  "ch_1",
+		MessageID:                  "msg_1",
+		SupportsPersistentSessions: true,
 	}, "topic-1", "mpa_1", approvalDecisionRequest{
 		ApprovalRequestID: "mpa_1",
 		TopicID:           "topic-1",
@@ -2082,7 +2106,7 @@ func TestCompleteDecision_KeepPairedDeliversAPersistentSessionWithNoExpiry(t *te
 
 	require.NoError(t, err)
 	assert.True(t, terminalSent)
-	assert.Equal(t, []bool{true}, creator.keepPairedRequests)
+	assert.Equal(t, []sessionLifetime{lifetimePersistent}, creator.lifetimes)
 
 	delivered := ch.DeliveredSessions()
 	require.Len(t, delivered, 1)
@@ -2098,6 +2122,88 @@ func TestCompleteDecision_KeepPairedDeliversAPersistentSessionWithNoExpiry(t *te
 	outcome := <-relayerClient.sent
 	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
 	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
+	assert.Equal(t, "persistent", outcome.Message.(map[string]any)["lifetime"])
+}
+
+func TestCompleteDecision_KeepPairedFallsBackWhenTheRequesterCannotHoldAPersistentSession(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	core, logs := observer.New(zap.WarnLevel)
+	ch := &fakeBrokerChannel{}
+	creator := &recordingSessionCreator{}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		relayerClient,
+		nil,
+		wrapper.NewJSON(),
+		zap.New(core),
+	).(*service)
+
+	// The owner asked to keep the site paired, but this requester never
+	// declared the capability: a client released before owner-kept sessions
+	// cannot parse a session with no expiry.
+	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+		ChannelID: "ch_1",
+		MessageID: "msg_1",
+		Origin:    "https://gallery.example",
+	}, "topic-1", "mpa_1", approvalDecisionRequest{
+		ApprovalRequestID: "mpa_1",
+		TopicID:           "topic-1",
+		ChannelID:         "ch_1",
+		RequestMessageID:  "msg_1",
+		Decision:          "approve",
+		KeepPaired:        true,
+	})
+
+	require.NoError(t, err)
+	assert.True(t, terminalSent)
+	assert.Equal(t, []sessionLifetime{lifetimeTimedFallbackRequester}, creator.lifetimes,
+		"an incapable requester is never asked to hold a persistent session")
+
+	delivered := ch.DeliveredSessions()
+	require.Len(t, delivered, 1)
+	assert.False(t, delivered[0].Persistent)
+	assert.False(t, delivered[0].ExpiresAt.IsZero())
+
+	fallback := logs.FilterMessage("Owner asked to keep this site paired, but the requester cannot hold a session without an expiry; minting the longest timed session instead")
+	require.Equal(t, 1, fallback.Len())
+	assert.Equal(t, "https://gallery.example", fallback.All()[0].ContextMap()["origin"])
+
+	outcome := <-relayerClient.sent
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
+	assert.Equal(t, "timed_fallback_requester", outcome.Message.(map[string]any)["lifetime"],
+		"the controller is told what the owner actually got")
+}
+
+func TestSessionLifetimeFor(t *testing.T) {
+	s := newTestService()
+
+	tests := []struct {
+		name       string
+		keepPaired bool
+		capable    bool
+		want       sessionLifetime
+	}{
+		{name: "no keep", want: lifetimeTimed},
+		{name: "no keep, capable requester", capable: true, want: lifetimeTimed},
+		{name: "keep, capable requester", keepPaired: true, capable: true, want: lifetimePersistent},
+		{name: "keep, incapable requester", keepPaired: true, want: lifetimeTimedFallbackRequester},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lifetime := s.sessionLifetimeFor(
+				approvalDecisionRequest{Decision: "approve", KeepPaired: tt.keepPaired},
+				minter.MintRequest{SupportsPersistentSessions: tt.capable},
+			)
+			assert.Equal(t, tt.want, lifetime)
+		})
+	}
 }
 
 func TestCompleteDecision_WithoutKeepPairedDeliversAnExpiringSession(t *testing.T) {
@@ -2130,7 +2236,7 @@ func TestCompleteDecision_WithoutKeepPairedDeliversAnExpiringSession(t *testing.
 
 	require.NoError(t, err)
 	assert.True(t, terminalSent)
-	assert.Equal(t, []bool{false}, creator.keepPairedRequests)
+	assert.Equal(t, []sessionLifetime{lifetimeTimed}, creator.lifetimes)
 
 	delivered := ch.DeliveredSessions()
 	require.Len(t, delivered, 1)
@@ -2517,12 +2623,12 @@ func (f *fakeBrokerChannel) resolvedChannelID() string {
 }
 
 type recordingSessionCreator struct {
-	calls              int
-	keepPairedRequests []bool
-	persistent         bool
-	onCreate           func()
-	revokes            []revokedSession
-	revokeErr          error
+	calls      int
+	lifetimes  []sessionLifetime
+	persistent bool
+	onCreate   func()
+	revokes    []revokedSession
+	revokeErr  error
 }
 
 type revokedSession struct {
@@ -2535,9 +2641,9 @@ func (r *recordingSessionCreator) RevokeEphemeralSession(_ context.Context, topi
 	return r.revokeErr
 }
 
-func (r *recordingSessionCreator) CreateEphemeralSession(_ context.Context, _ string, _ minter.MintRequest, keepPaired bool) (minter.MintResult, error) {
+func (r *recordingSessionCreator) CreateEphemeralSession(_ context.Context, _ string, _ minter.MintRequest, lifetime sessionLifetime) (minter.MintResult, error) {
 	r.calls++
-	r.keepPairedRequests = append(r.keepPairedRequests, keepPaired)
+	r.lifetimes = append(r.lifetimes, lifetime)
 	if r.onCreate != nil {
 		r.onCreate()
 	}
@@ -2573,7 +2679,7 @@ func (f fakeSessionCreator) RevokeEphemeralSession(_ context.Context, topicID st
 	return nil
 }
 
-func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string, _ minter.MintRequest, _ bool) (minter.MintResult, error) {
+func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string, _ minter.MintRequest, _ sessionLifetime) (minter.MintResult, error) {
 	if f.started != nil {
 		select {
 		case f.started <- struct{}{}:
