@@ -330,6 +330,7 @@ func TestRelayerSessionCreator_RefusesAndRevokesAContradictoryReply(t *testing.T
 		name       string
 		keepPaired bool
 		reply      string
+		reason     string
 	}{
 		{
 			name:       "persistent with an expiry",
@@ -346,6 +347,13 @@ func TestRelayerSessionCreator_RefusesAndRevokesAContradictoryReply(t *testing.T
 		{
 			name:  "timed with no expiry",
 			reply: `{"session":{"id":"session-1","expiresAt":null},"token":"browser-token"}`,
+		},
+		{
+			// An id with no token is a session the relayer allocated and the
+			// device can never use: it must not be stranded.
+			name:   "id with no token",
+			reply:  `{"session":{"id":"session-1","expiresAt":"2030-01-01T00:00:00Z"},"token":""}`,
+			reason: "token",
 		},
 	}
 
@@ -367,11 +375,36 @@ func TestRelayerSessionCreator_RefusesAndRevokesAContradictoryReply(t *testing.T
 			_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, tt.keepPaired)
 
 			require.Error(t, err, "a contradictory relayer reply is refused")
-			assert.Contains(t, err.Error(), "expiresAt")
+			reason := tt.reason
+			if reason == "" {
+				reason = "expiresAt"
+			}
+			assert.Contains(t, err.Error(), reason)
 			assert.Equal(t, []string{"/api/ephemeral-sessions/session-1?topicID=topic-1"}, revoked,
 				"the committed session is revoked, not left holding a slot")
 		})
 	}
+}
+
+func TestRelayerSessionCreator_RefusesAReplyWithNoSessionID(t *testing.T) {
+	var deletes int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes++
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"session":{"expiresAt":"2030-01-01T00:00:00Z"},"token":"browser-token"}`))
+	}))
+	defer server.Close()
+
+	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+	_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "session id")
+	assert.Zero(t, deletes, "there is no id to revoke")
 }
 
 func TestRelayerSessionCreator_ReportsAFailedRevokeOfARefusedSession(t *testing.T) {

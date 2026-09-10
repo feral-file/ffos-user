@@ -1500,8 +1500,15 @@ func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topi
 	if err := c.json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return minter.MintResult{}, fmt.Errorf("decode relayer session response: %w", err)
 	}
-	if decoded.Session.ID == "" || decoded.Token == "" {
-		return minter.MintResult{}, errors.New("relayer session response missing session id or token")
+	// An id with no token is still a session the relayer allocated. Split the
+	// two checks so the id can be revoked instead of stranded: from here on,
+	// every validation failure goes through rejectAndRevoke.
+	if decoded.Session.ID == "" {
+		return minter.MintResult{}, errors.New("relayer session response missing session id")
+	}
+	if decoded.Token == "" {
+		return minter.MintResult{}, c.rejectAndRevoke(decoded.Session.ID, topicID,
+			errors.New("relayer session response missing token"))
 	}
 	// The relayer's answer decides, not the device's request: a relayer that
 	// does not honor `persistent` returns an ordinary expiring session, and the

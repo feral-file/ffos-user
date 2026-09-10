@@ -1436,11 +1436,20 @@ The mint-pairing flow adds an approval decision message from
 4. `feral-controld` accepts exactly one valid decision.
 5. On approval, `feral-controld` creates a browser session through
    `ff-relayer` and sends the raw token only inside encrypted
-   `mint_succeeded` to the browser. An approval with `keepPaired` creates an
+   `mint_succeeded` to the browser. An approval with `keepPaired` asks for an
    owner-kept session instead: `feral-controld` sends `persistent: true` to
-   `ff-relayer`, sends no `expiresInSeconds`, and the delivered session carries
-   `persistent: true` with a null `expiresAt`. An owner-kept session ends only
-   when the owner removes the site from the app's paired-sites screen.
+   `ff-relayer` and sends no `expiresInSeconds`. **The delivered session's
+   shape follows the relayer's answer, not the request.** When the relayer
+   mints the owner-kept session, the delivered session carries
+   `persistent: true` with a null `expiresAt` and ends only when the owner
+   removes the site from the app's paired-sites screen. When the relayer
+   answers with an ordinary timed session — an older relayer, or one that does
+   not honor `persistent` — `feral-controld` delivers exactly that: no
+   `persistent`, a real `expiresAt`, and a session that expires on its own. It
+   is never re-labelled as kept, because a session the relayer will expire must
+   not be presented as one that never will. Anything read from the delivered
+   session — the app's paired-sites row, its copy, the browser client's local
+   expiry — must follow the delivered shape rather than what was requested.
 6. On rejection or terminal failure, `feral-controld` sends encrypted
    `mint_rejected` to the browser. If the session was already created when the
    failure landed, `feral-controld` revokes it through
@@ -1675,9 +1684,11 @@ Required fields:
 Optional fields:
 
 - `keepPaired`: meaningful for `approve`, ignored for `reject`, default
-  `false`. `true` mints an owner-kept session: `persistent: true` to
-  `ff-relayer`, no `expiresInSeconds`, and a delivered session with
-  `persistent: true` and a null `expiresAt`
+  `false`. `true` asks for an owner-kept session: `persistent: true` to
+  `ff-relayer`, no `expiresInSeconds`. The delivered session follows the
+  relayer's answer — `persistent: true` with a null `expiresAt` when the
+  relayer mints a kept session, an ordinary `expiresAt` when it answers with a
+  timed one (see the flow above)
 - `reason`: required for `reject`, ignored for `approve`
 - `retryable`: meaningful for `reject`, default `false`
 - `decidedAt`
