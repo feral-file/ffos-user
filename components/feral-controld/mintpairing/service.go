@@ -116,6 +116,16 @@ type Service interface {
 	// can reach it afterwards. Best effort by contract — the error says what
 	// could not be revoked, and the caller decides whether that stops it.
 	RevokeTopicSessions(ctx context.Context, topicID string) (int, error)
+	// WaitForInFlightCreates blocks until every session creation already sent
+	// to the relayer has finished its post-create guard — including the revoke
+	// that guard performs when the claim moved under it — or until ctx
+	// expires. It reports how many were still in flight when it gave up.
+	//
+	// Factory reset waits on this between invalidating the claim and sweeping
+	// the topic: a POST already in flight can commit a session AFTER the
+	// sweep has enumerated, and the only thing that then knows about that
+	// session is the create call itself.
+	WaitForInFlightCreates(ctx context.Context) (int, error)
 }
 
 // NavigationSession is the narrow slice of playersession.Session the display
@@ -155,6 +165,10 @@ type service struct {
 	pending           map[string]*pendingApproval
 	doneMap           map[string]completedApproval
 
+	// creates counts session creations in flight at the relayer. See
+	// createGate and WaitForInFlightCreates.
+	creates *createGate
+
 	// session, when set (SetSession), is the playersession.Session the
 	// display sends park against while a recovery navigation is pending
 	// — same generation-snapshot park discipline setupui.Service gets
@@ -167,6 +181,65 @@ type service struct {
 	// contract as session above.
 	navigationParkPollInterval time.Duration
 	navigationParkTimeout      time.Duration
+}
+
+// createGate counts session creations that have been handed to the relayer and
+// have not yet finished their post-create guard. It exists for one caller:
+// factory reset has to know when it is safe to enumerate the relayer's
+// sessions, and a create still in flight can commit one after the enumeration.
+//
+// It is a counter with a broadcast rather than a sync.WaitGroup because waiters
+// and new creates overlap freely here — a WaitGroup forbids an Add that races
+// its own Wait from zero, which is exactly what a reset landing between two
+// approvals would do.
+type createGate struct {
+	mu      sync.Mutex
+	count   int
+	drained chan struct{}
+}
+
+func newCreateGate() *createGate {
+	gate := &createGate{drained: make(chan struct{})}
+	close(gate.drained) // nothing in flight yet
+	return gate
+}
+
+func (g *createGate) enter() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.count == 0 {
+		g.drained = make(chan struct{})
+	}
+	g.count++
+}
+
+func (g *createGate) leave() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.count == 0 {
+		return
+	}
+	g.count--
+	if g.count == 0 {
+		close(g.drained)
+	}
+}
+
+// wait blocks until nothing is in flight or ctx expires, reporting the count
+// still in flight in the second case.
+func (g *createGate) wait(ctx context.Context) (int, error) {
+	g.mu.Lock()
+	drained := g.drained
+	g.mu.Unlock()
+
+	select {
+	case <-drained:
+		return 0, nil
+	case <-ctx.Done():
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return g.count, ctx.Err()
+	}
 }
 
 type brokerStarter interface {
@@ -401,6 +474,7 @@ func newService(
 		logger:         logger,
 		pending:        make(map[string]*pendingApproval),
 		doneMap:        make(map[string]completedApproval),
+		creates:        newCreateGate(),
 	}
 }
 
@@ -958,6 +1032,22 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 
 	lifetime := s.sessionLifetimeFor(decision, request)
 
+	// From here until the post-create guard has run, this creation counts as
+	// in flight: the relayer may commit a session at any moment inside that
+	// window, and until the guard has looked, nothing else knows the session
+	// exists. releaseCreate is deliberately called as early as the contract
+	// allows, with the defer only as a safety net for the early returns.
+	s.creates.enter()
+	createReleased := false
+	releaseCreate := func() {
+		if createReleased {
+			return
+		}
+		createReleased = true
+		s.creates.leave()
+	}
+	defer releaseCreate()
+
 	sessionCtx, cancelSession := context.WithTimeout(ctx, wrapper.HTTPClientTimeout)
 	session, err := s.sessionCreator.CreateEphemeralSession(sessionCtx, topicID, request, lifetime)
 	cancelSession()
@@ -979,6 +1069,9 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		s.revokeAbandonedSession(topicID, session.SessionID)
 		return terminalSent, topicErr
 	}
+	// The guard has run and this session is accounted for: a reset waiting on
+	// in-flight creations can stop waiting on this one.
+	releaseCreate()
 	if session.RelayerBaseURL == "" {
 		session.RelayerBaseURL = s.opts.RelayerBaseURL
 	}
@@ -1086,6 +1179,14 @@ func classifyDeliveryFailure(err error) deliveryVerdict {
 		return deliveryNeverSent
 	}
 	return deliveryUnknown
+}
+
+// WaitForInFlightCreates blocks until nothing is mid-creation. See Service.
+func (s *service) WaitForInFlightCreates(ctx context.Context) (int, error) {
+	if s == nil || s.creates == nil {
+		return 0, nil
+	}
+	return s.creates.wait(ctx)
 }
 
 // RevokeTopicSessions revokes every session the relayer holds for topicID.

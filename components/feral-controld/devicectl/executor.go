@@ -76,11 +76,6 @@ type Executor interface {
 	// setupui.Service with the provisioning domain. Set once at wiring time; the
 	// lazy setupUI() fallback still covers tests that do not inject.
 	SetSetupUI(ui *setupui.Service)
-	// SetBrowserSessionRevoker injects the mint-pairing seam factory reset
-	// uses to revoke the outgoing topic's browser sessions before it clears
-	// the claim. Optional: a nil revoker (mint pairing disabled, or no relayer
-	// credentials) makes the reset skip the step. Set once at wiring time.
-	SetBrowserSessionRevoker(revoke func(ctx context.Context, topicID string) (int, error))
 	// ResetStaged reports that a factory reset is staged and its reboot is
 	// pending, so the command surface must stay closed (see the resetStaged
 	// field). It is a REQUIRED interface method rather than an optional
@@ -359,12 +354,12 @@ type executor struct {
 	// keeps the silent hide unconditionally.
 	internetProbe func(ctx context.Context) (bool, error)
 
-	// browserSessionRevoker, when wired (SetBrowserSessionRevoker), revokes
-	// every browser session the relayer holds for a topic. Factory reset calls
-	// it while the topic is still known. Optional: nil (mint pairing disabled,
-	// or no relayer credentials) makes the reset skip the step, exactly as it
+	// browserSessions, when wired (SetBrowserSessionCleanup), ends the browser
+	// sessions the relayer holds for a topic. Factory reset uses it right
+	// after it invalidates the claim. Optional: nil (mint pairing disabled, or
+	// no relayer credentials) makes the reset skip the step, exactly as it
 	// behaved before owner-kept sessions existed.
-	browserSessionRevoker func(ctx context.Context, topicID string) (int, error)
+	browserSessions BrowserSessionCleanup
 
 	// otaGateEntryProbe is the startup OTA gate's OWN entry-window predicate
 	// (main wires it to re-read /proc/uptime against the wider
@@ -1395,13 +1390,6 @@ func (e *executor) SetWifiSetupStarter(starter func(ctx context.Context) error) 
 // Same wiring-before-run ordering contract as SetBootLifecycleProbe.
 func (e *executor) SetInternetProbe(probe func(ctx context.Context) (bool, error)) {
 	e.internetProbe = probe
-}
-
-// SetBrowserSessionRevoker injects the mint-pairing seam factory reset uses to
-// revoke the topic's browser sessions before the claim is cleared. Same
-// wiring-before-run ordering contract as SetInternetProbe.
-func (e *executor) SetBrowserSessionRevoker(revoke func(ctx context.Context, topicID string) (int, error)) {
-	e.browserSessionRevoker = revoke
 }
 
 // Defaults for awaitPlayerCommandHandlerReady. The timeout is shorter than the
@@ -2962,7 +2950,15 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	// (before creation, or after delivery) and revokes the session it made.
 	// The sweep then runs against the captured id and cleans up everything
 	// that existed before, and the rest of the claim is cleared after.
+	//
+	// Between the two, the reset waits for creations already sent to the
+	// relayer: a POST in flight can commit its session AFTER the sweep has
+	// enumerated, and the enumeration would never see it. A create that
+	// returns after the invalidation revokes itself (its guard sees the moved
+	// generation), so waiting for those returns is what makes the sweep's
+	// enumeration complete.
 	outgoingTopicID := e.invalidateRelayerTopic()
+	e.waitForInFlightBrowserSessionCreates()
 	e.revokeTopicBrowserSessions(outgoingTopicID)
 
 	e.clearPersistedClaim()
@@ -3038,8 +3034,43 @@ func (e *executor) invalidateRelayerTopic() string {
 // purpose — what survives it is a live session against a device its previous
 // owner no longer holds, and this log is the only trace of it, since the
 // re-claimed device cannot reach the old topic to try again.
+// inFlightCreateWaitTimeout bounds the wait for session creations already sent
+// to the relayer: their own request budget plus a small margin for the
+// post-create guard that follows, capped so a reset can never be held long by
+// this step.
+func inFlightCreateWaitTimeout() time.Duration {
+	const (
+		margin  = 5 * time.Second
+		maxWait = 35 * time.Second
+	)
+	wait := wrapper.HTTPClientTimeout + margin
+	if wait > maxWait {
+		wait = maxWait
+	}
+	return wait
+}
+
+// waitForInFlightBrowserSessionCreates lets creations that are already at the
+// relayer finish, so the sweep that follows enumerates a settled set. Bounded:
+// a create that never returns must not hold a wipe, and giving up is logged at
+// error level with what was still outstanding, because those are exactly the
+// sessions the sweep can miss.
+func (e *executor) waitForInFlightBrowserSessionCreates() {
+	if e.browserSessions == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), inFlightCreateWaitTimeout())
+	defer cancel()
+	inFlight, err := e.browserSessions.WaitForInFlightCreates(ctx)
+	if err != nil {
+		e.logger.Error("Factory reset: gave up waiting for in-flight browser session creations; sessions they commit will survive the sweep",
+			zap.Error(err),
+			zap.Int("inFlight", inFlight))
+	}
+}
+
 func (e *executor) revokeTopicBrowserSessions(topicID string) {
-	if e.browserSessionRevoker == nil {
+	if e.browserSessions == nil {
 		return
 	}
 	if topicID == "" {
@@ -3050,7 +3081,7 @@ func (e *executor) revokeTopicBrowserSessions(topicID string) {
 	// cleanup is worth doing either way.
 	revokeCtx, cancel := context.WithTimeout(context.Background(), browserSessionRevokeTimeout)
 	defer cancel()
-	revoked, err := e.browserSessionRevoker(revokeCtx, topicID)
+	revoked, err := e.browserSessions.RevokeTopicSessions(revokeCtx, topicID)
 	if err != nil {
 		e.logger.Error("Factory reset: failed to revoke browser sessions for the outgoing topic; sessions may survive the reset",
 			zap.Error(err),

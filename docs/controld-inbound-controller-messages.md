@@ -1492,13 +1492,24 @@ Factory reset ends every browser session too, in this order:
    device's topic generation has moved, so any mint already in flight fails its
    own guard check — before creation, or after delivery — and revokes the
    session it made.
-2. **Sweep the topic.** It lists that topic's sessions
+2. **Let creations already at `ff-relayer` settle.** A session-creation POST
+   sent a moment earlier can commit AFTER the sweep below has listed the topic,
+   and that listing would never see it. So the reset waits for those creations
+   to return — each one then runs its own guard, sees the invalidated claim,
+   and revokes the session it made. The wait is bounded (the create's own
+   request budget plus a small margin, capped at 35 s): a create that never
+   returns must not hold a wipe, and giving up is logged at error level with
+   the number still outstanding, since those are exactly the sessions the sweep
+   can miss. A creation whose response is lost entirely is the relay
+   idempotency case — the device never learns the session id — tracked as
+   ff-relayer #20.
+3. **Sweep the topic.** It lists that topic's sessions
    (`GET /api/ephemeral-sessions?topicID=...`) and revokes each one. Sessions
    live on `ff-relayer`, keyed by topic, and an owner-kept one has no expiry to
    reclaim it, so this is the last moment anything can end them: afterwards the
    device cannot name the topic they belong to, and the re-claimed device's
    paired-sites screen reads a new one.
-3. **Clear the rest of the claim.**
+4. **Clear the rest of the claim.**
 
 The order is deliberate. Sweeping first would leave a hole: an approval
 accepted a moment before the reset could mint its session after the sweep had

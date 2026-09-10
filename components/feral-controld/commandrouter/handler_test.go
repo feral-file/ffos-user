@@ -403,6 +403,10 @@ func (f *fakeMintPairingService) RevokeTopicSessions(context.Context, string) (i
 	return 0, nil
 }
 
+func (f *fakeMintPairingService) WaitForInFlightCreates(context.Context) (int, error) {
+	return 0, nil
+}
+
 func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

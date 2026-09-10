@@ -1993,6 +1993,88 @@ func TestCompleteDecision_RevokesTheSessionWhenTheTopicChangesAfterCreation(t *t
 	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
 }
 
+func TestWaitForInFlightCreates_BlocksUntilThePostCreateGuardHasRun(t *testing.T) {
+	defer state.ResetForTesting()
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+	startGuard := currentTopicGuard()
+
+	inCreate := make(chan struct{})
+	releaseCreate := make(chan struct{})
+	ch := &fakeBrokerChannel{rejectionSent: make(chan struct{}, 1)}
+	creator := &recordingSessionCreator{persistent: true}
+	// The reset lands while this create is at the relayer.
+	creator.onCreate = func() {
+		close(inCreate)
+		<-releaseCreate
+		if _, _, err := state.InvalidateRelayerTopic(); err != nil {
+			t.Logf("InvalidateRelayerTopic save failed as expected in tests: %v", err)
+		}
+	}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		&fakeRelayer{sent: make(chan relayer.Response, 2)},
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	mintDone := make(chan struct{})
+	go func() {
+		defer close(mintDone)
+		_, _ = s.completeDecision(context.Background(), ch, minter.MintRequest{
+			ChannelID:                  "ch_1",
+			MessageID:                  "msg_1",
+			SupportsPersistentSessions: true,
+		}, startGuard, "mpa_1", approvalDecisionRequest{
+			ApprovalRequestID: "mpa_1",
+			TopicID:           "topic-1",
+			ChannelID:         "ch_1",
+			RequestMessageID:  "msg_1",
+			Decision:          "approve",
+			KeepPaired:        true,
+		})
+	}()
+
+	<-inCreate
+
+	// A reset asking now must not be told the coast is clear.
+	tooSoon, cancelTooSoon := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	inFlight, err := s.WaitForInFlightCreates(tooSoon)
+	cancelTooSoon()
+	require.Error(t, err, "a create at the relayer is still in flight")
+	assert.Equal(t, 1, inFlight, "the caller is told how many are outstanding")
+
+	close(releaseCreate)
+
+	settled, cancelSettled := context.WithTimeout(context.Background(), 2*time.Second)
+	inFlight, err = s.WaitForInFlightCreates(settled)
+	cancelSettled()
+	require.NoError(t, err)
+	assert.Zero(t, inFlight)
+
+	<-mintDone
+	// By the time the wait returned, the create had already run its guard and
+	// revoked the session it made — which is what makes a sweep after this
+	// wait complete.
+	assert.Equal(t, []revokedSession{{topicID: "topic-1", sessionID: "session-1"}}, creator.revokes)
+	assert.Empty(t, ch.DeliveredSessions())
+}
+
+func TestWaitForInFlightCreates_ReturnsImmediatelyWhenNothingIsInFlight(t *testing.T) {
+	s := newTestService()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	inFlight, err := s.WaitForInFlightCreates(ctx)
+
+	require.NoError(t, err)
+	assert.Zero(t, inFlight)
+}
+
 func TestRevokeTopicSessions_RevokesEveryListedSession(t *testing.T) {
 	creator := &recordingSessionCreator{listIDs: []string{"session-1", "session-2"}}
 	s := newService(
