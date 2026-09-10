@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -886,13 +888,71 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
 		s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "failed")
 		cancelOutcome()
-		s.revokeAbandonedSession(topicID, session.SessionID)
+		// A failed send is not proof of non-delivery. Revoke only when the
+		// broker refused the message outright; otherwise the browser may
+		// already hold this session and revoking would cut off a site the
+		// owner approved.
+		if classifyDeliveryFailure(err) == deliveryNeverSent {
+			s.revokeAbandonedSession(topicID, session.SessionID)
+		} else {
+			s.logger.Warn("Left a possibly delivered mint pairing session in place after a failed browser delivery",
+				zap.Error(err),
+				zap.String("topicID", topicID),
+				zap.String("sessionID", session.SessionID),
+				zap.Bool("persistent", session.Persistent))
+		}
 		return false, fmt.Errorf("send mint success: %w", err)
 	}
 	outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
 	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "completed")
 	cancelOutcome()
 	return true, nil
+}
+
+// deliveryVerdict says what a failed browser delivery proves about whether the
+// browser could be holding the session.
+type deliveryVerdict int
+
+const (
+	// deliveryUnknown: the message may have reached the browser. A timeout, a
+	// transport error, or a broker 5xx all leave the send in doubt, so the
+	// session must be left alone.
+	deliveryUnknown deliveryVerdict = iota
+	// deliveryNeverSent: the broker refused the message before accepting it —
+	// the channel is gone, closed, or the request was rejected outright — so
+	// nothing was delivered.
+	deliveryNeverSent
+)
+
+// brokerStatusPattern reads the broker status out of a minter-client error.
+// The client returns unstructured errors, so its formatted status line is the
+// only positive evidence available; a typed error upstream would make this
+// structural.
+var brokerStatusPattern = regexp.MustCompile(`failed with status (\d{3})`)
+
+// classifyDeliveryFailure looks for proof that a failed SendMintSuccess never
+// reached the browser. It is deliberately one-sided: only a broker client-error
+// status counts as proof, and everything it does not positively recognize is
+// deliveryUnknown. Revoking a session the browser already holds silently cuts
+// off a site the owner approved, while leaving one behind costs at most a slot
+// the owner can clear from the app's paired-sites screen — and a timed session
+// expires on its own.
+func classifyDeliveryFailure(err error) deliveryVerdict {
+	if err == nil {
+		return deliveryUnknown
+	}
+	match := brokerStatusPattern.FindStringSubmatch(err.Error())
+	if match == nil {
+		return deliveryUnknown
+	}
+	status, convErr := strconv.Atoi(match[1])
+	if convErr != nil {
+		return deliveryUnknown
+	}
+	if status >= 400 && status < 500 {
+		return deliveryNeverSent
+	}
+	return deliveryUnknown
 }
 
 // revokeAbandonedSession returns a created session the browser never received.
@@ -1455,21 +1515,39 @@ func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topi
 	}
 	// The two session shapes stay separable end to end, and a reply that mixes
 	// them is malformed either way: an owner-kept session must carry no expiry
-	// (its zero ExpiresAt is what the minter client serializes as a null
-	// `expiresAt`), and a timed one must carry one. Failing here sends the
-	// browser a retryable session-create rejection instead of a session whose
-	// deadline is invented, missing, or silently dropped.
+	// at all — a present-but-zero `expiresAt` is a deadline the relayer failed
+	// to write, not a null one — and a timed session must carry a real expiry.
+	// Failing here sends the browser a retryable session-create rejection
+	// instead of a session whose deadline is invented, missing, or silently
+	// dropped. The relayer already committed the session, so it is revoked
+	// before the error returns: nothing the device refuses is left holding a
+	// slot in the topic's cap.
 	if session.Persistent {
-		if decoded.Session.ExpiresAt != nil && !decoded.Session.ExpiresAt.IsZero() {
-			return minter.MintResult{}, errors.New("relayer session response has an expiresAt for a persistent session")
+		if decoded.Session.ExpiresAt != nil {
+			return minter.MintResult{}, c.rejectAndRevoke(session.SessionID, topicID,
+				errors.New("relayer session response has an expiresAt for a persistent session"))
 		}
 		return session, nil
 	}
 	if decoded.Session.ExpiresAt == nil || decoded.Session.ExpiresAt.IsZero() {
-		return minter.MintResult{}, errors.New("relayer session response missing expiresAt for a non-persistent session")
+		return minter.MintResult{}, c.rejectAndRevoke(session.SessionID, topicID,
+			errors.New("relayer session response missing expiresAt for a non-persistent session"))
 	}
 	session.ExpiresAt = *decoded.Session.ExpiresAt
 	return session, nil
+}
+
+// rejectAndRevoke revokes a session the device is refusing and returns the
+// reason it refused it. A failed revoke is folded into the error rather than
+// hidden: the caller's session-create rejection is retryable either way, and
+// the leftover session is then visible in the app's paired-sites list.
+func (c *RelayerSessionCreator) rejectAndRevoke(sessionID string, topicID string, reason error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), sessionRevokeTimeout)
+	defer cancel()
+	if err := c.RevokeEphemeralSession(ctx, topicID, sessionID); err != nil {
+		return fmt.Errorf("%w (revoking the refused session failed: %v)", reason, err)
+	}
+	return reason
 }
 
 // RevokeEphemeralSession deletes one session on the relayer. A session the

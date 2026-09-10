@@ -325,8 +325,61 @@ func TestRelayerSessionCreator_PersistenceFollowsTheRelayerAnswer(t *testing.T) 
 	assert.False(t, session.ExpiresAt.IsZero())
 }
 
-func TestRelayerSessionCreator_RejectsAPersistentSessionCarryingAnExpiry(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+func TestRelayerSessionCreator_RefusesAndRevokesAContradictoryReply(t *testing.T) {
+	tests := []struct {
+		name       string
+		keepPaired bool
+		reply      string
+	}{
+		{
+			name:       "persistent with an expiry",
+			keepPaired: true,
+			reply:      `{"session":{"id":"session-1","persistent":true,"expiresAt":"2030-01-01T00:00:00Z"},"token":"browser-token"}`,
+		},
+		{
+			// A present-but-zero expiry is a deadline the relayer failed to
+			// write, not a null one, so it must not pass as persistent.
+			name:       "persistent with a zero expiry",
+			keepPaired: true,
+			reply:      `{"session":{"id":"session-1","persistent":true,"expiresAt":"0001-01-01T00:00:00Z"},"token":"browser-token"}`,
+		},
+		{
+			name:  "timed with no expiry",
+			reply: `{"session":{"id":"session-1","expiresAt":null},"token":"browser-token"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var revoked []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					revoked = append(revoked, r.URL.Path+"?topicID="+r.URL.Query().Get("topicID"))
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(tt.reply))
+			}))
+			defer server.Close()
+
+			creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+			_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, tt.keepPaired)
+
+			require.Error(t, err, "a contradictory relayer reply is refused")
+			assert.Contains(t, err.Error(), "expiresAt")
+			assert.Equal(t, []string{"/api/ephemeral-sessions/session-1?topicID=topic-1"}, revoked,
+				"the committed session is revoked, not left holding a slot")
+		})
+	}
+}
+
+func TestRelayerSessionCreator_ReportsAFailedRevokeOfARefusedSession(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"session":{"id":"session-1","persistent":true,"expiresAt":"2030-01-01T00:00:00Z"},"token":"browser-token"}`))
 	}))
@@ -335,22 +388,9 @@ func TestRelayerSessionCreator_RejectsAPersistentSessionCarryingAnExpiry(t *test
 	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
 	_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, true)
 
-	require.Error(t, err, "a persistent session with an expiry is a contradictory relayer answer")
-	assert.Contains(t, err.Error(), "expiresAt")
-}
-
-func TestRelayerSessionCreator_RejectsATimedSessionWithoutAnExpiry(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"session":{"id":"session-1","expiresAt":null},"token":"browser-token"}`))
-	}))
-	defer server.Close()
-
-	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
-	_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, false)
-
-	require.Error(t, err, "a non-persistent session with no expiry is a malformed relayer answer")
-	assert.Contains(t, err.Error(), "expiresAt")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expiresAt", "the refusal reason survives")
+	assert.Contains(t, err.Error(), "revoking the refused session failed")
 }
 
 func TestRelayerSessionCreator_RevokeEphemeralSession(t *testing.T) {
@@ -1820,11 +1860,12 @@ func TestCompleteDecision_RevokesTheSessionWhenTheTopicChangesAfterCreation(t *t
 	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
 }
 
-func TestCompleteDecision_RevokesTheSessionWhenBrowserDeliveryFails(t *testing.T) {
+func TestCompleteDecision_RevokesWhenTheBrokerRefusedTheMessage(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
 
-	ch := &fakeBrokerChannel{successErr: errors.New("broker unreachable")}
+	// A broker client-error status is proof the message was never accepted.
+	ch := &fakeBrokerChannel{successErr: errors.New("broker POST /v1/channels/ch_1/messages failed with status 410")}
 	creator := &recordingSessionCreator{}
 	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
 	s := newService(
@@ -1851,11 +1892,90 @@ func TestCompleteDecision_RevokesTheSessionWhenBrowserDeliveryFails(t *testing.T
 	require.Error(t, err)
 	assert.False(t, terminalSent)
 	assert.Equal(t, []revokedSession{{topicID: "topic-1", sessionID: "session-1"}}, creator.revokes,
-		"a session the browser never received is revoked, timed or not")
+		"a session the broker refused outright is revoked, timed or not")
 
 	outcome := <-relayerClient.sent
 	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
 	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
+}
+
+func TestCompleteDecision_LeavesTheSessionInPlaceWhenDeliveryIsIndeterminate(t *testing.T) {
+	tests := []struct {
+		name      string
+		sendErr   error
+		sessionID string
+	}{
+		{name: "timeout", sendErr: context.DeadlineExceeded},
+		{name: "transport error", sendErr: errors.New("dial tcp: connection reset by peer")},
+		{name: "broker server error", sendErr: errors.New("broker POST /v1/channels/ch_1/messages failed with status 503")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer state.ResetForTesting()
+			state.GetState().Relayer.TopicID = "topic-1"
+
+			core, logs := observer.New(zap.WarnLevel)
+			ch := &fakeBrokerChannel{successErr: tt.sendErr}
+			creator := &recordingSessionCreator{persistent: true}
+			relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+			s := newService(
+				Options{RelayerBaseURL: "https://relayer.example"},
+				nil,
+				creator,
+				relayerClient,
+				nil,
+				wrapper.NewJSON(),
+				zap.New(core),
+			).(*service)
+
+			_, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+				ChannelID: "ch_1",
+				MessageID: "msg_1",
+			}, "topic-1", "mpa_1", approvalDecisionRequest{
+				ApprovalRequestID: "mpa_1",
+				TopicID:           "topic-1",
+				ChannelID:         "ch_1",
+				RequestMessageID:  "msg_1",
+				Decision:          "approve",
+				KeepPaired:        true,
+			})
+
+			require.Error(t, err)
+			assert.Empty(t, creator.revokes,
+				"the browser may already hold this session, so it must not be revoked")
+
+			left := logs.FilterMessage("Left a possibly delivered mint pairing session in place after a failed browser delivery")
+			require.Equal(t, 1, left.Len())
+			assert.Equal(t, "session-1", left.All()[0].ContextMap()["sessionID"],
+				"the session id is logged so an abandoned session can be traced")
+
+			outcome := <-relayerClient.sent
+			assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
+		})
+	}
+}
+
+func TestClassifyDeliveryFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want deliveryVerdict
+	}{
+		{name: "nil", err: nil, want: deliveryUnknown},
+		{name: "channel gone", err: errors.New("broker POST /v1/channels/ch_1/messages failed with status 404"), want: deliveryNeverSent},
+		{name: "rejected outright", err: errors.New("broker POST /v1/channels/ch_1/messages failed with status 409"), want: deliveryNeverSent},
+		{name: "rate limited", err: errors.New("broker POST /v1/channels/ch_1/messages failed with status 429"), want: deliveryNeverSent},
+		{name: "server error", err: errors.New("broker POST /v1/channels/ch_1/messages failed with status 500"), want: deliveryUnknown},
+		{name: "timeout", err: context.DeadlineExceeded, want: deliveryUnknown},
+		{name: "unrecognized", err: errors.New("mint result token is required"), want: deliveryUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, classifyDeliveryFailure(tt.err))
+		})
+	}
 }
 
 func TestCompleteDecision_RevokeFailureIsLoggedAndChangesNothing(t *testing.T) {
@@ -1863,7 +1983,7 @@ func TestCompleteDecision_RevokeFailureIsLoggedAndChangesNothing(t *testing.T) {
 	state.GetState().Relayer.TopicID = "topic-1"
 
 	core, logs := observer.New(zap.WarnLevel)
-	ch := &fakeBrokerChannel{successErr: errors.New("broker unreachable")}
+	ch := &fakeBrokerChannel{successErr: errors.New("broker POST /v1/channels/ch_1/messages failed with status 410")}
 	creator := &recordingSessionCreator{revokeErr: errors.New("relayer unreachable")}
 	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
 	s := newService(

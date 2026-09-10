@@ -1443,11 +1443,18 @@ The mint-pairing flow adds an approval decision message from
    when the owner removes the site from the app's paired-sites screen.
 6. On rejection or terminal failure, `feral-controld` sends encrypted
    `mint_rejected` to the browser. If the session was already created when the
-   failure landed, `feral-controld` also revokes it through
+   failure landed, `feral-controld` revokes it through
    `DELETE /api/ephemeral-sessions/{sessionID}?topicID=...` — best effort,
-   logged on failure — so a session no browser holds does not linger. This
-   matters most for an owner-kept session: it has no TTL to clean it up and
-   would hold one of the topic's persistent-session slots for good.
+   logged on failure — but only when the browser provably never received it:
+   the device topic changed before the send, or the broker refused the message
+   outright (a client-error status). A failed send that leaves delivery in
+   doubt — a timeout, a transport error, a broker 5xx — is **not** revoked: the
+   browser may already hold that session, so `feral-controld` logs it with the
+   session id and leaves it alone. A timed session then expires on its own; an
+   owner-kept one appears in the app's paired-sites list, where the owner can
+   remove it. `feral-controld` also revokes a session it refuses as
+   contradictory (see the session-shape rules above), so a reply it will not
+   deliver never holds one of the topic's persistent-session slots.
 
 `ff-controller` must not receive raw browser session tokens or DP1 playlist
 content.
