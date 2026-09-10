@@ -69,6 +69,18 @@ const (
 	// Apply it only after excluding the active setup AP so that temporary
 	// network never consumes a destination slot.
 	maxDisplayedSSIDs = 9
+	// accessLogBurst and accessLogPerMinute bound the per-request access line
+	// (see withLimits). A setup session's legitimate traffic is a handful of
+	// requests per phone, so a 40-line burst refilling at 30 lines a minute
+	// covers every real run while capping what a client on the open subnet can
+	// write into controld.log — which rotates on time, not size.
+	accessLogBurst     = 40
+	accessLogPerMinute = 30
+	// maxLoggedPathBytes and maxLoggedUserAgentBytes bound the two
+	// client-controlled fields of that line. A real portal path is under 40
+	// bytes and the longest OS probe agent under 100.
+	maxLoggedPathBytes      = 128
+	maxLoggedUserAgentBytes = 160
 	// manualSSIDOption is the form value for the picker's manual-entry branch.
 	// Its ASCII value is longer than an SSID's 32-byte maximum, so it cannot
 	// collide with a real scanned network and unambiguously selects the manual
@@ -178,14 +190,138 @@ type Config struct {
 	// withLimits chokepoint. Deliberately the OPPOSITE classification to
 	// ActivityObserved: it proves only that a device is attached to the AP
 	// and talking to us, not that a human acted. The provisioning machine
-	// consumes it for the recheck cadence's attached-phone deferral ONLY
-	// (short recheck phases must not kick a phone that has joined the AP
-	// but not yet submitted anything); the bounded session policies keep
-	// the probes-never-count rule above. Same calling contract as
+	// consumes it for the recheck cadence's attached-phone deferral (short
+	// recheck phases must not kick a phone that has joined the AP but not
+	// yet submitted anything) and, for Apple clients only, for the
+	// portal-address QR repaint (feral-file#3515); the bounded session
+	// policies keep the probes-never-count rule above. The ClientKind is
+	// read off the request's User-Agent (see ClassifyClient). The picker
+	// page's post-hand-off /status watcher (marked with the watcherHeader)
+	// is NOT counted: it is this portal's script on a page whose user has
+	// moved on, and a tab left open would otherwise pin the recheck deferral
+	// to its ceiling and hold the address-QR phase open after the phone that
+	// caused it has gone. The picker's pre-hand-off polls are unmarked and
+	// DO count — an open picker is a human mid-setup. Same calling contract as
 	// ActivityObserved: request goroutines, internally synchronized,
 	// non-blocking.
-	TrafficObserved func()
+	//
+	// remoteIP is the host part of the request's RemoteAddr (the whole
+	// RemoteAddr when it does not parse), which the machine resolves through
+	// the kernel's neighbor table to the station address of the phone that
+	// raised the address QR: departure is only a repaint trigger when the
+	// station that LEFT is that phone, and an aggregate count cannot say so
+	// while a second device is on the hotspot (review bot on 6ba6f96).
+	TrafficObserved func(kind ClientKind, remoteIP string)
 	Logger          *zap.Logger
+}
+
+// watcherHeader marks a /status request issued by the picker page AFTER it
+// has handed off (templates/index.html). Requests carrying it are served
+// normally but excluded from TrafficObserved — see Config.TrafficObserved.
+const watcherHeader = "X-Setup-Watcher"
+
+// ClientKind is the coarse identity of the device behind a portal request,
+// read off its User-Agent. Only Apple is distinguished: iOS and macOS captive
+// probes announce themselves ("CaptiveNetworkSupport-… wispr"), and the
+// on-screen portal-address QR repaint exists for exactly that platform —
+// iOS will not present its captive sheet while the Camera app that scanned
+// the join code stays in front. Android's probe carries a generic desktop
+// user agent, and on Android the repaint is a dead end anyway: Google
+// Camera's QR join hands off to Wi-Fi Settings (nothing is looking at the
+// screen), and a phone with cellular data keeps cellular as its default
+// route while the hotspot is unvalidated, so a browser opened on the
+// hotspot address never reaches it (field trial 2026-09-07, Pixel). Android
+// users take the OS's own "Tap to sign in" path, which binds to the hotspot.
+type ClientKind int
+
+const (
+	// ClientUnknown: everything that does not identify as Apple.
+	ClientUnknown ClientKind = iota
+	// ClientApple: an iOS/macOS captive probe or captive-sheet fetch.
+	ClientApple
+)
+
+// String is the log form of a ClientKind, named for the constant.
+func (k ClientKind) String() string {
+	if k == ClientApple {
+		return "apple"
+	}
+	return "unknown"
+}
+
+// remoteIP is the host part of a request's RemoteAddr, the form the kernel's
+// neighbor table is keyed by. An address that does not parse is passed
+// through as-is: the resolver simply finds nothing for it, which is the same
+// outcome as an empty string and keeps the raw value visible.
+func remoteIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
+
+// ClassifyClient maps a User-Agent to a ClientKind.
+func ClassifyClient(userAgent string) ClientKind {
+	if strings.Contains(userAgent, "CaptiveNetworkSupport") {
+		return ClientApple
+	}
+	return ClientUnknown
+}
+
+// accessLimiter is the token bucket that bounds the per-request access line.
+// It counts what it drops so a flood is reported as one number on the next
+// line that gets through, rather than as silence. now is a field so tests can
+// advance the refill without sleeping.
+type accessLimiter struct {
+	now func() time.Time
+
+	mu         sync.Mutex
+	tokens     float64
+	last       time.Time
+	suppressed int
+}
+
+func newAccessLimiter() *accessLimiter {
+	return &accessLimiter{now: time.Now, tokens: accessLogBurst}
+}
+
+// allow reports whether this request may emit an access line and, when it
+// may, how many lines were suppressed since the last emitted one (reset by
+// the report, so each suppressed count is claimed exactly once).
+func (l *accessLimiter) allow() (bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	if l.last.IsZero() {
+		l.last = now
+	}
+	if elapsed := now.Sub(l.last); elapsed > 0 {
+		l.tokens += elapsed.Minutes() * accessLogPerMinute
+		if l.tokens > accessLogBurst {
+			l.tokens = accessLogBurst
+		}
+		l.last = now
+	}
+	if l.tokens < 1 {
+		l.suppressed++
+		return false, 0
+	}
+	l.tokens--
+	suppressed := l.suppressed
+	l.suppressed = 0
+	return true, suppressed
+}
+
+// truncate bounds a client-controlled field to n bytes. The marker keeps a
+// cut value from being read as the whole thing; byte truncation can split a
+// multi-byte rune, which the log encoder renders as a replacement character —
+// acceptable for a field that exists only to identify the client.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // Server is the captive-portal HTTP server.
@@ -195,6 +331,8 @@ type Server struct {
 	mux    *http.ServeMux
 	// reqSlots is the in-flight request cap (see maxInflightRequests).
 	reqSlots chan struct{}
+	// access bounds the per-request access line (see withLimits).
+	access *accessLimiter
 
 	mu   sync.Mutex
 	http *http.Server
@@ -213,6 +351,7 @@ func NewServer(cfg Config) *Server {
 		logger:   logger,
 		mux:      http.NewServeMux(),
 		reqSlots: make(chan struct{}, maxInflightRequests),
+		access:   newAccessLimiter(),
 	}
 	s.routes()
 	return s
@@ -233,8 +372,8 @@ func (s *Server) withLimits(next http.Handler) http.Handler {
 		// Observed BEFORE the in-flight cap: a saturated portal is still
 		// hard evidence a device is attached, and the deferral this feeds
 		// must not lapse because the phone was too chatty.
-		if s.cfg.TrafficObserved != nil {
-			s.cfg.TrafficObserved()
+		if s.cfg.TrafficObserved != nil && r.Header.Get(watcherHeader) == "" {
+			s.cfg.TrafficObserved(ClassifyClient(r.UserAgent()), remoteIP(r.RemoteAddr))
 		}
 		select {
 		case s.reqSlots <- struct{}{}:
@@ -242,6 +381,38 @@ func (s *Server) withLimits(next http.Handler) http.Handler {
 		default:
 			http.Error(w, "busy", http.StatusTooManyRequests)
 			return
+		}
+		// One access line per admitted request, bounded. The portal sees a
+		// handful of requests per setup (the OS probe, the page, its assets,
+		// the submission), and which of them arrived — and with which
+		// User-Agent — is the only evidence for why the attached-phase
+		// repaint did or did not fire. Field run 2026-09-09
+		// (feral-file#3515): three trials showed no repaint and the log
+		// could not say whether the phone's probe had reached the portal at
+		// all; the cause was a different controld binary running under a
+		// runtime unit override, which this line would have exposed in one
+		// run. The bound (review bot on 6ba6f96): the portal is
+		// unauthenticated on an open subnet and controld.log rotates on time,
+		// not size, so at most accessLogBurst (40) lines may be emitted,
+		// refilling at accessLogPerMinute (30) a minute; path is truncated to
+		// 128 bytes and User-Agent to 160; requests the in-flight cap sheds
+		// with 429 are not logged at all (the cap's own saturation is the
+		// evidence there); and a flood is reported as the suppressed count on
+		// the next line that gets through. Host, query, and the client
+		// address are omitted (only the request kind is identifying enough
+		// to be useful).
+		if ok, suppressed := s.access.allow(); ok {
+			fields := []zap.Field{
+				zap.String("method", r.Method),
+				zap.String("path", truncate(r.URL.Path, maxLoggedPathBytes)),
+				zap.String("client", ClassifyClient(r.UserAgent()).String()),
+				zap.String("user_agent", truncate(r.UserAgent(), maxLoggedUserAgentBytes)),
+				zap.Bool("watcher", r.Header.Get(watcherHeader) != ""),
+			}
+			if suppressed > 0 {
+				fields = append(fields, zap.Int("suppressed", suppressed))
+			}
+			s.logger.Info("portal: request", fields...)
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 		next.ServeHTTP(w, r)
@@ -505,8 +676,10 @@ func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
 		s.render(w, "rescan_confirm.html", nil)
 	case http.MethodPost:
 		// Info on receipt: the submission must be traceable in production logs
-		// even when the machine-side bounce log is missing.
-		s.logger.Info("portal: rescan submitted", zap.String("remote_addr", r.RemoteAddr))
+		// even when the machine-side bounce log is missing. The classified
+		// client kind carries the diagnosis; the client's address is a device
+		// identifier and stays out of the log.
+		s.logger.Info("portal: rescan submitted", zap.String("client", ClassifyClient(r.UserAgent()).String()))
 		if s.cfg.Rescan != nil {
 			if err := s.cfg.Rescan(); err != nil {
 				s.logger.Info("portal: rescan request rejected", zap.Error(err))

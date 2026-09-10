@@ -154,6 +154,25 @@ const (
 	// The notifier answers it with a narrating-guarded hide, so the error
 	// panel cannot strand over artwork.
 	ReasonSetupErrorCleared = "setup-error-cleared"
+
+	// ReasonAPClientAttached marks the repeat StateAPActive announcement the
+	// machine emits once the FIRST device talks to the captive portal after a
+	// raise — the evidence that a phone joined the setup hotspot. It is not a
+	// transition (state and lastReason are untouched; the flight recorder
+	// never sees it); the wiring notifier reads Detail.ClientAttached, not
+	// this reason, to swap the on-screen join QR for the portal-address QR.
+	ReasonAPClientAttached = "ap-client-attached"
+	// ReasonAPClientIdle marks the reverse repaint: the attached phase has
+	// seen no portal traffic for attachedIdleReset, so the join QR is
+	// painted again (rearmAttachedClientIfIdle). Likewise not a transition.
+	ReasonAPClientIdle = "ap-client-idle"
+	// ReasonAPClientLeft marks the other reverse repaint: the phone that
+	// attached is no longer associated with the hotspot (station poll,
+	// applyStationPoll), so the join QR is painted again within seconds —
+	// the case a phone that joined, probed, and dropped the network would
+	// otherwise leave on the portal-address QR until the silence backstop.
+	// Likewise not a transition.
+	ReasonAPClientLeft = "ap-client-left"
 )
 
 // Detail is the side-channel context published alongside a State change: enough
@@ -174,6 +193,28 @@ type Detail struct {
 	// NetworkManager reports an address, and is empty otherwise. Using the
 	// on-link address gives the narration UI a DNS-independent recovery path.
 	PortalURL string
+	// ClientAttached is true ONLY on the repeat StateAPActive announcement
+	// (ReasonAPClientAttached) the machine emits after the first portal
+	// request of a raise: a device has joined the setup hotspot and is
+	// probing or fetching the portal. It carries the same SSID/PSK/PortalURL
+	// as the raise announcement so the narration surface can repaint the
+	// softap_qr panel in its attached phase (a portal-address QR the phone's
+	// still-open camera can scan) without re-deriving the credentials.
+	ClientAttached bool
+	// JoinFailure is the user-facing message of the join that just failed,
+	// carried on the AP-up announcements that follow it (the re-raise and
+	// the idle re-arm) so the screen can say WHY the join QR is back. The
+	// join_failed narration itself is overwritten by the re-raise's scanning
+	// panel within a millisecond, so without this the reason is never
+	// visible on the device (field run 2026-09-07). Empty when the last
+	// outcome is not a failure.
+	JoinFailure string
+	// ClientLeft is true ONLY on the ReasonAPClientLeft repaint: the phone
+	// that attached has left the hotspot, so the screen can say why the join
+	// QR is back. Carried separately from JoinFailure because a failure line
+	// can still be current from the raise's own history; the notifier lets
+	// the more recent event win.
+	ClientLeft bool
 	// Reason is a short machine-readable cause (e.g. "auth-failure",
 	// "sustained-offline", "unprovisioned").
 	Reason string
@@ -326,6 +367,19 @@ type Config struct {
 
 	// Notifier is optional.
 	Notifier Notifier
+
+	// Stations is optional: the kernel's view of who is associated with the
+	// setup hotspot, polled while the screen shows the portal-address QR so a
+	// phone that left hands the screen back to the join QR within seconds
+	// (applyStationPoll). Nil disables the poll; the portal-silence re-arm
+	// (attachedIdleReset) then remains the only way back.
+	Stations softap.StationCounter
+
+	// NeighborMAC resolves the IP a portal request came from to that device's
+	// station address, so the poll above can track the phone that raised the
+	// address QR rather than the size of the station list. Nil uses
+	// softap.NeighborMAC (the kernel's neighbor table); tests inject a map.
+	NeighborMAC func(ip string) (string, bool)
 
 	// TransitionObserver, when set, is told every machine state/reason
 	// change, INCLUDING the silent legs the Notifier's change-dedupe hides —
@@ -492,6 +546,81 @@ type Machine struct {
 	apUp       bool
 	apInfo     softap.Info
 	portalSrv  PortalServer
+	// apClientSeen latches the first portal request of the current raise (set
+	// by observePortalTraffic, cleared wherever apInfo is), so the
+	// ReasonAPClientAttached repaint fires once per raise: a phone that keeps
+	// probing must not repaint the panel on every request, and a re-raise
+	// (join failure, recheck blink) — whose fresh softap_qr paint is the join
+	// QR again — must re-arm it because the phone has to re-associate. It
+	// also re-arms on portal silence (attachedIdleReset, onTick): under the
+	// unbounded out-of-box session a raise can stand for hours, and a phone
+	// that left must not leave an unattended screen on a code only an
+	// associated device can use.
+	apClientSeen bool
+	// apAttachPending latches an Apple attach whose repaint is waiting on the
+	// hotspot address: both the post-bind lookup and the attach-time retry
+	// came back empty. The iOS Camera path makes ONE probe and then waits
+	// for foreground UI, so there is no "next probe" to retry on — the loop's
+	// tick retries the bounded lookup instead (retryPendingAttach) until it
+	// succeeds or this raise ends. Cleared with the latch on every raise and
+	// teardown.
+	apAttachPending bool
+	// apAttachPaintedAt records when the attached phase (the portal-address
+	// QR) was last painted for this raise, so the idle re-arm measures
+	// silence from the LATER of the last portal traffic and that paint. A
+	// pending attach whose address lookup only succeeds after
+	// attachedIdleReset of silence would otherwise have its fresh repaint
+	// undone by the idle re-arm on the very same tick: the first Apple
+	// request stamps lastPortalTraffic, the address arrives minutes later,
+	// and the join QR would replace the portal-address QR the instant it
+	// went up (review bot on 1d98968). Zero when the attached phase is not
+	// painted.
+	apAttachPaintedAt time.Time
+	// apRaiseGen counts latch re-arms (every actual raise). evPortalClient
+	// carries the generation it was queued under; the loop's select can
+	// let a tick's blink tear the AP down and re-raise it before a queued
+	// event drains, and a stale event must not repaint the fresh raise —
+	// whose hotspot no phone has joined yet — with the portal-address QR.
+	apRaiseGen uint64
+	// stations answers "who is still associated" for the attached phase;
+	// nil when the wiring provides none (see Config.Stations).
+	stations softap.StationCounter
+	// neighborMAC resolves apAttachIP to apAttachMAC (see Config.NeighborMAC).
+	neighborMAC func(ip string) (string, bool)
+	// apAttachIP is the source IP of the request that armed apClientSeen, and
+	// apAttachMAC the station address it resolves to — the identity of the
+	// phone the portal-address QR is up for. Set on the raise's first Apple
+	// request (observePortalTraffic) and lazily resolved by the poll
+	// goroutine; both are cleared with the latch, because a new attach is a
+	// new phone. The MAC is a device identifier and is never logged.
+	apAttachIP  string
+	apAttachMAC string
+	// apStationWatchGen is the raise generation the running station-poll
+	// goroutine belongs to (0: none running). The loop starts one per
+	// attached raise (ensureStationWatcher) and the goroutine exits on its
+	// own once its raise no longer wants it; a stale goroutine that has not
+	// noticed yet must not be mistaken for the new raise's watcher, hence
+	// the generation rather than a bool.
+	apStationWatchGen uint64
+	// apStationZero counts consecutive polls that did not see the attached
+	// phone among the AP's stations while the attached phase is painted;
+	// stationLeftPolls of them are the "phone left" verdict (one absent read
+	// can be a transient). "The attached phone" is apAttachMAC when the
+	// neighbor table has resolved it, and any station at all until then — the
+	// aggregate is the weaker fallback the identity rule replaces as soon as
+	// it can answer. Reset by any poll that sees the phone, by any unknown
+	// read, at attach, and with the latch: "consecutive" means known reads
+	// with nothing in between, because a failed query says nothing about
+	// whether the phone is still there and must not count as half a
+	// departure.
+	apStationZero int
+	// apStationUnknown counts consecutive polls whose count was unknown
+	// (query failed, no AP interface, timeout); stationUnknownGiveUp of them
+	// switch the poll off for this raise (apStationWatchOff) so a broken
+	// query does not burn a goroutine for hours — the silence backstop still
+	// applies. Reset by any known read, at attach, and with the latch.
+	apStationUnknown  int
+	apStationWatchOff bool
 	// apDownPending records a failed softap.Down: the persisted hotspot profile
 	// may still exist (possibly still broadcasting) even though apUp is false.
 	// ensureAPDown retries the deletion on every reconcile until it succeeds,
@@ -753,6 +882,16 @@ const (
 	evRescan
 	evClaim
 	evUserSetup
+	// evPortalClient: the first portal request of a raise landed
+	// (observePortalTraffic). Handled on the loop goroutine because the
+	// Notifier contract is single-goroutine — the wiring notifier's
+	// narration ownership flag is unsynchronized by design.
+	evPortalClient
+	// evStationPoll: one reading of the AP's station list from the
+	// station-poll goroutine (watchAttachedStations). Bookkeeping and the
+	// repaint it may cause run on the loop goroutine for the same
+	// single-goroutine Notifier reason as evPortalClient.
+	evStationPoll
 )
 
 type event struct {
@@ -762,6 +901,15 @@ type event struct {
 	psk     string
 	hidden  bool
 	claimed bool
+	// gen is the apRaiseGen the evPortalClient event was queued under, so
+	// the loop can drop one that outlived its raise (see
+	// applyPortalClientAttached).
+	gen uint64
+	// present/known carry an evStationPoll reading: whether the attached
+	// phone was among the AP's stations, and whether the station list was
+	// known at all.
+	present bool
+	known   bool
 }
 
 // New builds a Machine, applying defaults.
@@ -793,6 +941,10 @@ func New(cfg Config) *Machine {
 	if windowSamples < 1 {
 		windowSamples = 1
 	}
+	neighborMAC := cfg.NeighborMAC
+	if neighborMAC == nil {
+		neighborMAC = softap.NeighborMAC
+	}
 	// The claim snapshot defaults to CLAIMED (constraint 8's fail-safe
 	// direction — never auto-raise over a possibly claimed exhibition frame);
 	// Start seeds it from InitialClaimed once the persisted state is loaded.
@@ -804,6 +956,8 @@ func New(cfg Config) *Machine {
 		clock:              cfg.Clock,
 		logger:             logger,
 		notifier:           cfg.Notifier,
+		stations:           cfg.Stations,
+		neighborMAC:        neighborMAC,
 		transitionObserver: cfg.TransitionObserver,
 		activeLink:         cfg.ActiveLink,
 		activeLinkDetail:   cfg.ActiveLinkDetail,
@@ -926,6 +1080,8 @@ func (m *Machine) loop(ctx context.Context) {
 	m.apUp = false
 	m.portalSrv = nil
 	m.apInfo = softap.Info{}
+	m.clearAttachLatchLocked()
+	m.resetStationPollLocked()
 	m.mu.Unlock()
 	if leftoverSrv != nil {
 		stopCtx, cancel := context.WithTimeout(context.Background(), portalStopTimeout)
@@ -1014,10 +1170,19 @@ func (m *Machine) loop(ctx context.Context) {
 				m.applyClaim(ctx, ev.claimed)
 			case evUserSetup:
 				m.applyUserSetup(ctx)
+			case evPortalClient:
+				m.applyPortalClientAttached(ctx, ev.gen)
+			case evStationPoll:
+				m.applyStationPoll(ev.gen, ev.present, ev.known)
 			}
 		case <-ticker.C():
 			m.onTick(ctx)
 		}
+		// After every event and tick, not inside the handlers: the attach
+		// can land through applyPortalClientAttached or the tick's
+		// retryPendingAttach, and tests drive those directly without a loop
+		// to own a goroutine.
+		m.ensureStationWatcher(ctx)
 	}
 }
 
@@ -1593,6 +1758,9 @@ func (m *Machine) onTick(ctx context.Context) {
 			m.onConnectivity(ctx, online, false)
 		}
 	}
+
+	m.retryPendingAttach(ctx)
+	m.rearmAttachedClientIfIdle()
 
 	m.mu.Lock()
 	st := m.state
@@ -2340,6 +2508,19 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		return err
 	}
 
+	// Re-arm the attached-client latch BEFORE the portal can accept a request:
+	// on the rescan/re-raise paths the phone's captive probe races srv.Start
+	// (see the PortalURL note below), and a probe landing between Start and
+	// the apInfo publish must still count as this raise's first client.
+	// applyPortalClientAttached tolerates that ordering — the loop processes
+	// the queued event only after this function has published the raise.
+	m.mu.Lock()
+	m.clearAttachLatchLocked()
+	m.resetStationPollLocked()
+	m.apRaiseGen++
+	raiseGen := m.apRaiseGen
+	m.mu.Unlock()
+
 	srv := m.newPortal(portal.Config{
 		Addr:   m.portalAddr,
 		APSSID: info.SSID,
@@ -2351,9 +2532,15 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		// portal classifies (action handlers only), the machine timestamps.
 		ActivityObserved: m.observePortalActivity,
 		// ANY portal request — probes included — feeds the recheck-only
-		// attached-phone deferral (see sessionExpiryDue for the scope).
-		TrafficObserved: m.observePortalTraffic,
-		Logger:          m.logger,
+		// attached-phone deferral; Apple clients additionally arm the
+		// portal-address QR repaint (see observePortalTraffic). Bound to
+		// THIS raise's generation at construction: a request still in flight
+		// on the old listener across a bounded stop and a re-raise must not
+		// stamp traffic or consume the latch of a hotspot no phone has joined.
+		TrafficObserved: func(kind portal.ClientKind, remoteIP string) {
+			m.observePortalTraffic(raiseGen, kind, remoteIP)
+		},
+		Logger: m.logger,
 	})
 	if err := srv.Start(); err != nil {
 		// The AP is up but the portal could not bind. Tear the radio hotspot back
@@ -2386,6 +2573,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	m.apUp = true
 	m.apInfo = info
 	m.portalSrv = srv
+	joinFailure := m.lastJoinFailureLocked()
 	m.mu.Unlock()
 	m.clearAPRaiseFailures()
 	// Every successful raise (re-)arms the session phase timer under the
@@ -2404,8 +2592,9 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	//
 	// info.PortalURL is single-shot BY ACCEPTED TRADE, not oversight: it is
 	// read once per raise (above, 3 s bound, after the portal bind) and
-	// published only through THIS notify — apInfo carries a copy but nothing
-	// reads it back today, so there is no latch to self-heal from. If that
+	// published only through THIS notify and the attached-client repaint
+	// (applyPortalClientAttached re-reads apInfo's copy verbatim), so there
+	// is no latch to self-heal from. If that
 	// one lookup missed (NM slow to publish IP4.ADDRESS), the TV omits the
 	// manual-address fallback line until the next actual raise. The AP,
 	// captive flow, and portal are all unaffected (the lookup is fail-open),
@@ -2413,13 +2602,389 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	// that is itself only a fallback. Do not assume this self-heals when
 	// editing here; if the field misses often, add the retry then.
 	m.notify(StateAPActive, Detail{
-		SSID:      info.SSID,
-		PSK:       info.PSK,
-		PortalURL: info.PortalURL,
-		Reason:    "ap-active",
-		Message:   "Scan the QR code to set up Wi-Fi",
+		SSID:        info.SSID,
+		PSK:         info.PSK,
+		PortalURL:   info.PortalURL,
+		JoinFailure: joinFailure,
+		Reason:      "ap-active",
+		Message:     "Scan the QR code to set up Wi-Fi",
 	})
 	return nil
+}
+
+// lastJoinFailureLocked returns the user-facing message of the last join
+// attempt when it failed, else "". Caller holds mu. Feeds Detail.JoinFailure
+// on the AP-up announcements; the status itself is reset by the next submit
+// or rescan, so the line lives exactly as long as the failure is current.
+func (m *Machine) lastJoinFailureLocked() string {
+	if m.status.State == portal.JoinFailed {
+		return m.status.Message
+	}
+	return ""
+}
+
+// applyPortalClientAttached handles evPortalClient on the loop goroutine: the
+// first device of this raise has talked to the portal, so re-announce
+// StateAPActive with ClientAttached set. The wiring notifier repaints
+// softap_qr in its attached phase — a QR carrying the portal address instead
+// of the Wi-Fi join payload — because iOS does not auto-present the captive
+// sheet while the Camera app that scanned the join QR stays in front (it
+// waits for a "Wi-Fi app" such as Safari or Settings to come forward;
+// feral-file/feral-file#3515). The phone's camera is still pointed at the
+// screen, so the swapped code hands it a Safari link without any app-switch
+// instruction; Safari coming forward also releases the native sheet.
+//
+// Guarded on the raise the event was queued under (gen): a probe can queue
+// it on a portal that is torn down — and possibly re-raised — before the
+// loop drains it (join bounce, recheck blink, exit), and a fresh raise's
+// hotspot has no phone on it yet, so a stale event must repaint nothing;
+// that raise's own first request re-arms and repaints. When the raise never
+// learned its address (the post-bind lookup in ensureAPUp is single-shot
+// and fail-open), the lookup is retried HERE: the address is what the
+// repaint exists to show, so a raise that missed it must not stay on the
+// join QR for its whole lifetime. A retry that still finds nothing latches
+// apAttachPending and the loop's tick keeps retrying (retryPendingAttach) —
+// the iOS Camera path sends one probe and then waits, so "the next probe"
+// is not a retry trigger that exists. The announcement is a repaint, not a
+// transition: state, lastReason, and the flight recorder are untouched.
+func (m *Machine) applyPortalClientAttached(ctx context.Context, gen uint64) {
+	m.mu.Lock()
+	up := m.apUp && m.state == StateAPActive && gen == m.apRaiseGen
+	info := m.apInfo
+	m.mu.Unlock()
+	if !up || info.SSID == "" {
+		return
+	}
+	if info.PortalURL == "" {
+		url := m.ap.PortalURL(ctx)
+		m.mu.Lock()
+		current := gen == m.apRaiseGen
+		if current && url != "" {
+			m.apInfo.PortalURL = url
+		} else if current {
+			m.apAttachPending = true
+		}
+		m.mu.Unlock()
+		if !current {
+			return
+		}
+		if url == "" {
+			m.logger.Info("provisioning: client attached to the setup AP, but no portal address to show yet; retrying on the tick", zap.String("ssid", info.SSID))
+			return
+		}
+		info.PortalURL = url
+	}
+	m.mu.Lock()
+	m.apAttachPending = false
+	m.apAttachPaintedAt = m.clock.Now()
+	m.mu.Unlock()
+	m.logger.Info("provisioning: first client attached to the setup AP", zap.String("ssid", info.SSID))
+	m.notify(StateAPActive, Detail{
+		SSID:           info.SSID,
+		PSK:            info.PSK,
+		PortalURL:      info.PortalURL,
+		ClientAttached: true,
+		Reason:         ReasonAPClientAttached,
+		Message:        "Phone connected to the setup Wi-Fi; scan the QR code to open setup",
+	})
+}
+
+// attachedIdleReset is the portal silence after which a raise that painted
+// the attached phase goes back to the join QR. A phone on the portal page is
+// idle for at most the time it takes to type a password; a phone that
+// dismissed the sheet and dropped the no-internet network never speaks
+// again, and under the unbounded out-of-box session no re-raise would ever
+// repaint the join QR for the next person at the screen. Generous rather
+// than tight: flipping back while someone is still reading the form costs
+// nothing (they are already on the portal), while flipping early on a slow
+// typist just repaints — the next probe re-attaches. The silence is measured
+// from the LATER of the last portal traffic and the attached-phase paint
+// (apAttachPaintedAt), so a repaint always gets a full window of its own: an
+// attach whose address only arrives late must not be undone by traffic that
+// was already stale when it was painted.
+const attachedIdleReset = 3 * time.Minute
+
+// retryPendingAttach runs every tick on the loop goroutine: an Apple client
+// attached to a raise whose address is still unknown (apAttachPending)
+// gets the bounded NetworkManager lookup retried, and the attached repaint
+// once it succeeds. Bounded by the raise: teardown clears the flag.
+func (m *Machine) retryPendingAttach(ctx context.Context) {
+	m.mu.Lock()
+	pending := m.apAttachPending && m.apUp && m.state == StateAPActive
+	gen := m.apRaiseGen
+	m.mu.Unlock()
+	if !pending {
+		return
+	}
+	m.applyPortalClientAttached(ctx, gen)
+}
+
+// rearmAttachedClientIfIdle runs every tick on the loop goroutine: once the
+// attached phase has been painted and the portal has been silent for
+// attachedIdleReset, re-arm the latch and repaint the join QR (a plain
+// ap-active announcement, same credentials). The silence is measured from the
+// later of the last portal traffic and the attached-phase paint
+// (apAttachPaintedAt), so a repaint whose address arrived late keeps the
+// portal-address QR for a full window instead of being undone by the same
+// tick that painted it. Ticks only, never a request goroutine — the Notifier
+// contract is single-goroutine.
+func (m *Machine) rearmAttachedClientIfIdle() {
+	m.mu.Lock()
+	ref := m.lastPortalTraffic
+	if m.apAttachPaintedAt.After(ref) {
+		ref = m.apAttachPaintedAt
+	}
+	idle := m.apUp && m.state == StateAPActive && m.apClientSeen &&
+		!ref.IsZero() &&
+		m.clock.Now().Sub(ref) >= attachedIdleReset
+	info := m.apInfo
+	joinFailure := m.lastJoinFailureLocked()
+	if idle {
+		// Both latches: a pending attach (address still unknown) whose
+		// phone has since gone silent must not have a later tick's retry
+		// paint the address QR for nobody, with no idle reset left to undo
+		// it — the tick retry is bounded by the latch it belongs to.
+		m.clearAttachLatchLocked()
+	}
+	m.mu.Unlock()
+	if !idle || info.SSID == "" {
+		return
+	}
+	m.logger.Info("provisioning: setup AP client idle; showing the join QR again", zap.String("ssid", info.SSID))
+	m.notify(StateAPActive, Detail{
+		SSID:        info.SSID,
+		PSK:         info.PSK,
+		PortalURL:   info.PortalURL,
+		JoinFailure: joinFailure,
+		Reason:      ReasonAPClientIdle,
+		Message:     "Scan the QR code to set up Wi-Fi",
+	})
+}
+
+// Station poll (the attached phase's "is the phone still here" check).
+const (
+	// stationPollInterval is the cadence of the associated-station read
+	// while the portal-address QR is up. Two seconds with stationLeftPolls
+	// consecutive reads missing the phone puts the join QR back 4–6 s after it
+	// drops — "within seconds" against the 3-minute silence backstop, and
+	// slow enough that the poll is invisible next to the AP's own beacons.
+	stationPollInterval = 2 * time.Second
+	// stationPollTimeout bounds one kernel read; a read that outlives it is
+	// reported unknown by the counter and counted toward the give-up.
+	stationPollTimeout = 1500 * time.Millisecond
+	// stationLeftPolls is how many consecutive reads without the attached
+	// phone mean "left".
+	stationLeftPolls = 2
+	// stationUnknownGiveUp is how many consecutive unknown reads switch the
+	// poll off for the raise.
+	stationUnknownGiveUp = 5
+)
+
+// clearAttachLatchLocked hands the attached-phase latch back: the phase is no
+// longer painted for anybody, so the pending retry, the paint stamp, and the
+// identity of the phone it was painted for all go with it. A later attach is
+// a different phone (or the same one re-associating with a new lease), and
+// keeping the old identity would have the poll watch for a station that is
+// never coming back. Caller holds mu.
+func (m *Machine) clearAttachLatchLocked() {
+	m.apClientSeen = false
+	m.apAttachPending = false
+	m.apAttachPaintedAt = time.Time{}
+	m.apAttachIP = ""
+	m.apAttachMAC = ""
+}
+
+// resetStationPollLocked clears the poll's per-raise counters. Caller holds
+// mu. The watcher goroutine itself is not touched here: it notices the
+// generation or latch change on its next tick and exits.
+func (m *Machine) resetStationPollLocked() {
+	m.apStationZero = 0
+	m.apStationUnknown = 0
+	m.apStationWatchOff = false
+}
+
+// stationWatchWantedLocked reports whether the current raise wants the
+// station poll running: a counter is wired, the AP is up in its active
+// state, an Apple client has attached (the latch that paints the
+// portal-address QR), and the poll has not given up. Caller holds mu.
+func (m *Machine) stationWatchWantedLocked() bool {
+	return m.stations != nil && m.apUp && m.state == StateAPActive &&
+		m.apClientSeen && !m.apStationWatchOff
+}
+
+// ensureStationWatcher runs on the loop goroutine after every event and
+// tick: when the current raise wants the station poll and no goroutine is
+// watching THIS raise, start one. Idempotent per raise; a goroutine left
+// over from a previous raise exits on its own (watchAttachedStations).
+func (m *Machine) ensureStationWatcher(ctx context.Context) {
+	m.mu.Lock()
+	gen := m.apRaiseGen
+	start := m.stationWatchWantedLocked() && m.apStationWatchGen != gen
+	if start {
+		m.apStationWatchGen = gen
+	}
+	m.mu.Unlock()
+	if !start {
+		return
+	}
+	go m.watchAttachedStations(ctx, gen)
+}
+
+// watchAttachedStations is the station-poll goroutine for one raise. Real
+// time rather than the machine clock: the poll is a side channel with no
+// sample semantics, and the loop's ticker is the only wrapper.Ticker the
+// tests can drive. Each reading is handed to the loop as evStationPoll
+// (non-blocking, like the portal's attach event: a full buffer drops a
+// reading, and the next one is two seconds away). The kernel read happens
+// HERE, never on the loop, so a stalled query cannot stall the machine.
+func (m *Machine) watchAttachedStations(ctx context.Context, gen uint64) {
+	defer func() {
+		m.mu.Lock()
+		if m.apStationWatchGen == gen {
+			m.apStationWatchGen = 0
+		}
+		m.mu.Unlock()
+	}()
+	t := time.NewTicker(stationPollInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		present, known, wanted := m.readAttachedPresence(ctx, gen)
+		if !wanted {
+			return
+		}
+		select {
+		case m.events <- event{kind: evStationPoll, gen: gen, present: present, known: known}:
+		default:
+			m.logger.Warn("provisioning: event queue full, dropping a station poll reading")
+		}
+	}
+}
+
+// readAttachedPresence is one tick of the poll: resolve the attached phone's
+// station address if the neighbor table can answer yet, read the AP's station
+// list, and report whether that phone is on it. wanted is false when the
+// raise no longer wants the poll — the caller's cue to stop.
+//
+// The question is deliberately "is THAT phone associated", not "is anyone":
+// with a second device on the hotspot (another phone, a laptop, a watch), an
+// aggregate count never reaches zero when the phone that raised the address
+// QR walks away, and that other device's own portal traffic keeps the silence
+// backstop from firing too (review bot on 6ba6f96). Until the neighbor table
+// has an answer — the first probe can land before the ARP entry is complete —
+// the aggregate is the fallback, which is the behavior this replaces.
+func (m *Machine) readAttachedPresence(ctx context.Context, gen uint64) (present, known, wanted bool) {
+	m.mu.Lock()
+	wanted = gen == m.apRaiseGen && m.stationWatchWantedLocked()
+	ip, mac := m.apAttachIP, m.apAttachMAC
+	m.mu.Unlock()
+	if !wanted {
+		return false, false, false
+	}
+	if mac == "" && ip != "" && m.neighborMAC != nil {
+		if resolved, ok := m.neighborMAC(ip); ok {
+			mac = resolved
+			m.mu.Lock()
+			// Only for the raise that asked: a teardown or a fresh attach
+			// under the read owns the field now.
+			if gen == m.apRaiseGen && m.apAttachIP == ip && m.apAttachMAC == "" {
+				m.apAttachMAC = mac
+			} else {
+				mac = m.apAttachMAC
+			}
+			m.mu.Unlock()
+			// Both addresses — the phone's address on the hotspot and the
+			// hardware address it resolved to — are device identifiers and
+			// stay out of the log; that the resolution succeeded is what the
+			// log needs to say.
+			m.logger.Info("provisioning: attached phone identified")
+		}
+	}
+
+	pollCtx, cancel := context.WithTimeout(ctx, stationPollTimeout)
+	macs, ok := m.stations.AttachedStations(pollCtx)
+	cancel()
+	if !ok {
+		return false, false, true
+	}
+	if mac == "" {
+		return len(macs) > 0, true, true
+	}
+	for _, sta := range macs {
+		if strings.EqualFold(sta, mac) {
+			return true, true, true
+		}
+	}
+	return false, true, true
+}
+
+// applyStationPoll handles one evStationPoll on the loop goroutine. A
+// reading from another raise, or one landing after the latch cleared, is
+// dropped. Consecutive reads that do not see the attached phone
+// (stationLeftPolls) mean it left: hand the latch back and paint the join QR
+// again with ClientLeft set, so the screen shows the code the next scan needs
+// and says why. Consecutive unknown reads (stationUnknownGiveUp) switch the poll off
+// for the raise; the silence re-arm remains. Like the idle re-arm, this is a
+// repaint, not a transition.
+func (m *Machine) applyStationPoll(gen uint64, present, known bool) {
+	m.mu.Lock()
+	if gen != m.apRaiseGen || !m.stationWatchWantedLocked() {
+		m.mu.Unlock()
+		return
+	}
+	left, gaveUp := m.recordStationPollLocked(present, known)
+	if left {
+		m.clearAttachLatchLocked()
+		m.resetStationPollLocked()
+	}
+	info := m.apInfo
+	joinFailure := m.lastJoinFailureLocked()
+	m.mu.Unlock()
+	if gaveUp {
+		m.logger.Warn("provisioning: station poll gave up for this raise; the portal-silence re-arm remains", zap.String("ssid", info.SSID))
+		return
+	}
+	if !left || info.SSID == "" {
+		return
+	}
+	m.logger.Info("provisioning: attached phone left the setup AP; showing the join QR again", zap.String("ssid", info.SSID))
+	m.notify(StateAPActive, Detail{
+		SSID:        info.SSID,
+		PSK:         info.PSK,
+		PortalURL:   info.PortalURL,
+		JoinFailure: joinFailure,
+		ClientLeft:  true,
+		Reason:      ReasonAPClientLeft,
+		Message:     "Scan the QR code to set up Wi-Fi",
+	})
+}
+
+// recordStationPollLocked folds one reading into the streak counters and
+// reports the verdicts it produces. Caller holds mu.
+func (m *Machine) recordStationPollLocked(present, known bool) (left, gaveUp bool) {
+	switch {
+	case !known:
+		m.apStationZero = 0
+		m.apStationUnknown++
+		if m.apStationUnknown >= stationUnknownGiveUp {
+			m.apStationWatchOff = true
+			return false, true
+		}
+	case present:
+		m.apStationZero = 0
+		m.apStationUnknown = 0
+	default:
+		m.apStationUnknown = 0
+		m.apStationZero++
+		if m.apStationZero >= stationLeftPolls {
+			return true, false
+		}
+	}
+	return false, false
 }
 
 // ensureAPDown tears the portal + AP down if up, and reports whether the AP
@@ -2469,6 +3034,8 @@ func (m *Machine) ensureAPDown(ctx context.Context) bool {
 	m.apUp = false
 	m.portalSrv = nil
 	m.apInfo = softap.Info{}
+	m.clearAttachLatchLocked()
+	m.resetStationPollLocked()
 	m.apDownPending = !downOK
 	m.mu.Unlock()
 	if downOK {

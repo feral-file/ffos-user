@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/portal"
 	"github.com/feral-file/ffos-user/components/feral-controld/wifictl"
 )
 
@@ -203,14 +204,14 @@ func TestRecheckAttachedPhoneDeferral(t *testing.T) {
 
 	// Probes keep arriving: 4 minutes pass — twice the rung — with no blink.
 	for i := 0; i < 16; i++ {
-		traffic()
+		traffic(portal.ClientUnknown, otherIP)
 		h.tick(ctx)
 	}
 	assert.Equal(t, 0, blinks(), "attached-phone traffic defers the blink")
 
 	// Probes never stop: the ceiling (rung + 15m) fires the blink anyway.
 	for i := 0; i < 53; i++ {
-		traffic()
+		traffic(portal.ClientUnknown, otherIP)
 		h.tick(ctx)
 	}
 	assert.Equal(t, 1, blinks(), "the deferral ceiling bounds an idle attached phone")
@@ -308,7 +309,7 @@ func TestRecheckDeferralHoldsAtProbeCadenceInsideWindow(t *testing.T) {
 	// window: 5 minutes pass — well past the rung — with no blink.
 	for i := 0; i < 20; i++ {
 		if i%6 == 0 {
-			traffic()
+			traffic(portal.ClientUnknown, otherIP)
 		}
 		h.tick(ctx)
 	}
@@ -327,7 +328,7 @@ func TestRecheckDeferralLapsesWhenProbesGoQuiet(t *testing.T) {
 
 	// One probe at phase start, then silence: by the rung's expiry the
 	// window has lapsed and the blink proceeds — best-effort, not a pin.
-	traffic()
+	traffic(portal.ClientUnknown, otherIP)
 	h.tickN(ctx, 8)
 	assert.Equal(t, 1, countReason(h, StateOfflineRetrying, ReasonAPRecheck),
 		"a quiet phone is treated as absent")

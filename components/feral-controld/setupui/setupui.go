@@ -254,6 +254,49 @@ func (s *Service) ShowSoftAPQR(ssid string, psk string, portalURL string) {
 	s.push(req)
 }
 
+// ShowSoftAPPortalQR narrates the attached phase of the soft-AP step: a phone
+// has joined the setup Wi-Fi (the portal saw its first request), so the panel
+// should swap the join QR for one carrying the portal address the phone's
+// still-open camera can scan straight into its browser. Same state and
+// fields as ShowSoftAPQR plus `client_attached: true`; a player that predates
+// the field ignores it and keeps the join QR up (the pre-#3515 screen), so no
+// send-time downgrade is needed. portalURL is optional here too — without it
+// the player has no address to encode and stays on the join QR by design.
+func (s *Service) ShowSoftAPPortalQR(ssid string, psk string, portalURL string) {
+	req := map[string]any{
+		"state":           stateSoftAPQR,
+		"ssid":            ssid,
+		"client_attached": true,
+	}
+	if strings.TrimSpace(psk) != "" {
+		req["password"] = psk
+	}
+	if strings.TrimSpace(portalURL) != "" {
+		req["portal_url"] = portalURL
+	}
+	s.push(req)
+}
+
+// ShowSoftAPQRRetry narrates the join QR coming back after a failed join:
+// same payload as ShowSoftAPQR plus `reason`, the failure's user-facing
+// message, which the player shows under the title so the screen says why
+// the code is back (the preceding join_failed paint lives a millisecond).
+// Players that predate the field ignore it and paint the plain join QR.
+func (s *Service) ShowSoftAPQRRetry(ssid string, psk string, portalURL string, reason string) {
+	req := map[string]any{
+		"state":  stateSoftAPQR,
+		"ssid":   ssid,
+		"reason": reason,
+	}
+	if strings.TrimSpace(psk) != "" {
+		req["password"] = psk
+	}
+	if strings.TrimSpace(portalURL) != "" {
+		req["portal_url"] = portalURL
+	}
+	s.push(req)
+}
+
 // ShowScanning narrates the pre-AP Wi-Fi scan: the device is searching for
 // nearby networks and will advertise its setup hotspot once the scan
 // completes. Extension state; older players render nothing (see
