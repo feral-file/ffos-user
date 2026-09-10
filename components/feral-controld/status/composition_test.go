@@ -2,6 +2,7 @@ package status
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -11,7 +12,7 @@ func TestCompositionRoundTrip(t *testing.T) {
 	for _, margin := range []string{`"12%"`, `24`, `0`} {
 		t.Run(margin, func(t *testing.T) {
 			raw := []byte(`{"ok":true,"index":0,"items":[],"deviceSettings":{
-				"showingKey":"0|work-a|https://example.com/a.png",
+				"showingKey":"71f1273d-4d1d-4a9a-b487-41a4a2275b03",
 				"compositionRevision":3,"scaling":"fill","margin":` + margin + `,"background":"#AABBCC"}}`)
 			var status PlayerStatus
 			if err := json.Unmarshal(raw, &status); err != nil {
@@ -55,5 +56,27 @@ func TestAbsentCompositionStaysAbsent(t *testing.T) {
 	}
 	if string(encoded) != `{"scaling":"fit"}` {
 		t.Fatalf("invented composition fields: %s", encoded)
+	}
+}
+
+// The player generates a source-free UUID before status crosses the typed
+// bridge. Notification trimming must also remove the signed item source.
+func TestCompositionNotificationDoesNotExposeSource(t *testing.T) {
+	const signedSource = "https://cdn.example.com/work.png?signature=private-access-token"
+	raw := []byte(`{"items":[{"source":"` + signedSource + `"}],"deviceSettings":{
+        "showingKey":"71f1273d-4d1d-4a9a-b487-41a4a2275b03","margin":"10%"}}`)
+	var status PlayerStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal((&poller{}).lightweightPlayerStatus(&status))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), signedSource) || strings.Contains(string(encoded), "private-access-token") {
+		t.Fatalf("notification exposes source credentials: %s", encoded)
+	}
+	if status.DeviceSettings.ShowingKey == nil || *status.DeviceSettings.ShowingKey != "71f1273d-4d1d-4a9a-b487-41a4a2275b03" {
+		t.Fatal("notification dropped the opaque showing UUID")
 	}
 }

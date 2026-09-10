@@ -48,6 +48,7 @@ type PlayerStatus struct {
 		// Composition is the player's committed showing after DP-1 merging
 		// and ephemeral Control Center writes, not persisted machine defaults.
 		// Keep margin's DP-1 number (pixels) or string (CSS) representation.
+		// ShowingKey is a random player-generated UUID, never a source URL.
 		ShowingKey          *string         `json:"showingKey,omitempty"`
 		CompositionRevision *uint64         `json:"compositionRevision,omitempty"`
 		Margin              json.RawMessage `json:"margin,omitempty"`
