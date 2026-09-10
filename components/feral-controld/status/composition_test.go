@@ -80,3 +80,26 @@ func TestCompositionNotificationDoesNotExposeSource(t *testing.T) {
 		t.Fatal("notification dropped the opaque showing UUID")
 	}
 }
+
+// A daemon update can run with an older player. Never trust that producer
+// to have adopted the source-free showing identity before broadcasting it.
+func TestNotificationOmitsInvalidShowingKeys(t *testing.T) {
+	for _, key := range []string{"", "invalid", "0|work-a|https://cdn.example.com/work.png?signature=private-token"} {
+		t.Run(key, func(t *testing.T) {
+			var status PlayerStatus
+			if err := json.Unmarshal([]byte(`{"deviceSettings":{"showingKey":"`+key+`","margin":"10%"}}`), &status); err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal((&poller{}).lightweightPlayerStatus(&status))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), "showingKey") || strings.Contains(string(encoded), "private-token") {
+				t.Fatalf("notification exposes an invalid showing key: %s", encoded)
+			}
+			if string(status.DeviceSettings.Margin) != `"10%"` {
+				t.Fatal("discarded unrelated composition data")
+			}
+		})
+	}
+}
