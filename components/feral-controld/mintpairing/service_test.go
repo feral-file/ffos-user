@@ -131,6 +131,73 @@ func TestHandleApprovalDecision_RejectsMismatches(t *testing.T) {
 	}
 }
 
+func TestHandleApprovalDecision_KeepPairedTravelsWithTheApproval(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	s := newTestService()
+	pending := &pendingApproval{
+		approvalRequestID: "mpa_1",
+		topicID:           "topic-1",
+		channelID:         "ch_1",
+		requestMessageID:  "msg_1",
+		expiresAt:         time.Now().Add(time.Minute),
+		decisionCh:        make(chan approvalDecisionRequest, 1),
+	}
+	s.registerPending(pending)
+
+	args := validDecisionArgs("mpa_1", "topic-1", "ch_1", "msg_1")
+	args["keepPaired"] = true
+
+	result, err := s.HandleApprovalDecision(context.Background(), args)
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", result.(approvalResponse).Status)
+
+	select {
+	case decision := <-pending.decisionCh:
+		assert.True(t, decision.KeepPaired)
+	default:
+		t.Fatal("expected accepted decision to be delivered")
+	}
+
+	// The same decision replayed is idempotent; the same approval with the
+	// owner's keep choice flipped is a different decision, not a duplicate.
+	result, err = s.HandleApprovalDecision(context.Background(), args)
+	require.NoError(t, err)
+	assert.Equal(t, "already_accepted", result.(approvalResponse).Status)
+
+	delete(args, "keepPaired")
+	result, err = s.HandleApprovalDecision(context.Background(), args)
+	require.NoError(t, err)
+	resp := result.(approvalResponse)
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "already_decided", resp.Error.Code)
+}
+
+func TestParseDecision_KeepPairedDefaultsOffAndOnlyAppliesToApprovals(t *testing.T) {
+	s := newTestService()
+
+	args := validDecisionArgs("mpa_1", "topic-1", "ch_1", "msg_1")
+	decision, err := s.parseDecision(args)
+	require.NoError(t, err)
+	assert.False(t, decision.KeepPaired, "keepPaired defaults to false")
+
+	args["keepPaired"] = true
+	decision, err = s.parseDecision(args)
+	require.NoError(t, err)
+	assert.True(t, decision.KeepPaired)
+
+	args["decision"] = "reject"
+	decision, err = s.parseDecision(args)
+	require.NoError(t, err)
+	assert.False(t, decision.KeepPaired, "keepPaired is meaningless on a rejection")
+
+	args["decision"] = "approve"
+	args["keepPaired"] = "yes"
+	_, err = s.parseDecision(args)
+	require.Error(t, err, "keepPaired must be a boolean")
+}
+
 func TestRelayerSessionCreator_CreateEphemeralSession(t *testing.T) {
 	var seenRequest struct {
 		Path        string
@@ -158,7 +225,7 @@ func TestRelayerSessionCreator_CreateEphemeralSession(t *testing.T) {
 			Label:     "Gallery laptop",
 		},
 		RequestedExpiresInSeconds: 3600,
-	})
+	}, false)
 
 	require.NoError(t, err)
 	assert.Equal(t, "session-1", result.SessionID)
@@ -209,12 +276,52 @@ func TestRelayerSessionCreator_AppliesControldOwnedSessionTTLPolicy(t *testing.T
 			creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
 			_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{
 				RequestedExpiresInSeconds: tt.requested,
-			})
+			}, false)
 
 			require.NoError(t, err)
 			assert.Equal(t, float64(tt.want), body["expiresInSeconds"])
 		})
 	}
+}
+
+func TestRelayerSessionCreator_KeepPairedAsksForAPersistentSessionWithoutTTL(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"session":{"id":"session-1","persistent":true,"expiresAt":null},"token":"browser-token"}`))
+	}))
+	defer server.Close()
+
+	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+	session, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{
+		BrowserInfo:               minter.BrowserInfo{Name: "Chrome", Label: "Gallery laptop"},
+		RequestedExpiresInSeconds: 300,
+	}, true)
+
+	require.NoError(t, err)
+	assert.Equal(t, true, body["persistent"])
+	assert.NotContains(t, body, "expiresInSeconds", "an owner-kept session carries no TTL")
+	assert.Equal(t, "Gallery laptop", body["label"])
+	assert.True(t, session.Persistent)
+	assert.True(t, session.ExpiresAt.IsZero(), "a persistent session never expires")
+	assert.Equal(t, "browser-token", session.Token)
+}
+
+func TestRelayerSessionCreator_PersistenceFollowsTheRelayerAnswer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&map[string]any{}))
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"session":{"id":"session-1","expiresAt":"2030-01-01T00:00:00Z"},"token":"browser-token"}`))
+	}))
+	defer server.Close()
+
+	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+	session, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{}, true)
+
+	require.NoError(t, err)
+	assert.False(t, session.Persistent, "a relayer that ignored persistent minted an expiring session")
+	assert.False(t, session.ExpiresAt.IsZero())
 }
 
 func TestRelayerHTTPBaseString_NormalizesWebSocketEndpointToOrigin(t *testing.T) {
@@ -1595,6 +1702,92 @@ func TestCompleteDecision_RejectsStaleTopicBeforeCreatingSession(t *testing.T) {
 	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
 }
 
+func TestCompleteDecision_KeepPairedDeliversAPersistentSessionWithNoExpiry(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{}
+	creator := &recordingSessionCreator{persistent: true}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		relayerClient,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+		ChannelID: "ch_1",
+		MessageID: "msg_1",
+	}, "topic-1", "mpa_1", approvalDecisionRequest{
+		ApprovalRequestID: "mpa_1",
+		TopicID:           "topic-1",
+		ChannelID:         "ch_1",
+		RequestMessageID:  "msg_1",
+		Decision:          "approve",
+		KeepPaired:        true,
+	})
+
+	require.NoError(t, err)
+	assert.True(t, terminalSent)
+	assert.Equal(t, []bool{true}, creator.keepPairedRequests)
+
+	delivered := ch.DeliveredSessions()
+	require.Len(t, delivered, 1)
+	assert.True(t, delivered[0].Persistent)
+	assert.True(t, delivered[0].ExpiresAt.IsZero(), "an owner-kept session is delivered without an expiry")
+	assert.Equal(t, "https://relayer.example", delivered[0].RelayerBaseURL)
+
+	outcome := <-relayerClient.sent
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
+}
+
+func TestCompleteDecision_WithoutKeepPairedDeliversAnExpiringSession(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{}
+	creator := &recordingSessionCreator{}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		relayerClient,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+		ChannelID: "ch_1",
+		MessageID: "msg_1",
+	}, "topic-1", "mpa_1", approvalDecisionRequest{
+		ApprovalRequestID: "mpa_1",
+		TopicID:           "topic-1",
+		ChannelID:         "ch_1",
+		RequestMessageID:  "msg_1",
+		Decision:          "approve",
+	})
+
+	require.NoError(t, err)
+	assert.True(t, terminalSent)
+	assert.Equal(t, []bool{false}, creator.keepPairedRequests)
+
+	delivered := ch.DeliveredSessions()
+	require.Len(t, delivered, 1)
+	assert.False(t, delivered[0].Persistent)
+	assert.False(t, delivered[0].ExpiresAt.IsZero())
+
+	outcome := <-relayerClient.sent
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
+}
+
 func TestWaitForBrowserAndApproval_RejectsIfTopicChangesAfterApproval(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -1824,22 +2017,29 @@ func (f *fakeBrokerStarter) ReceivedOptions() minter.StartChannelOptions {
 }
 
 type fakeBrokerChannel struct {
-	mu               sync.Mutex
-	channelID        string
-	pairingCode      string
-	expiresAt        time.Time
-	request          *minter.MintRequest
-	rejectionSent    chan struct{}
-	rejectionStarted chan struct{}
-	rejectionRelease chan struct{}
-	successSent      chan struct{}
-	closed           chan struct{}
-	rejectionDelay   time.Duration
-	ignoredSeq       int64
-	pollAfterSeqs    []int64
-	successCount     int
-	closeCount       int
-	rejectionReasons []string
+	mu                sync.Mutex
+	channelID         string
+	pairingCode       string
+	expiresAt         time.Time
+	request           *minter.MintRequest
+	rejectionSent     chan struct{}
+	rejectionStarted  chan struct{}
+	rejectionRelease  chan struct{}
+	successSent       chan struct{}
+	closed            chan struct{}
+	rejectionDelay    time.Duration
+	ignoredSeq        int64
+	pollAfterSeqs     []int64
+	successCount      int
+	closeCount        int
+	rejectionReasons  []string
+	deliveredSessions []mintedSession
+}
+
+func (f *fakeBrokerChannel) DeliveredSessions() []mintedSession {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]mintedSession(nil), f.deliveredSessions...)
 }
 
 func (f *fakeBrokerChannel) PairingDisplay() minter.PairingDisplay {
@@ -1871,10 +2071,11 @@ func (f *fakeBrokerChannel) PollMintRequest(_ context.Context, afterSeq int64) (
 	return request, request.Seq, nil
 }
 
-func (f *fakeBrokerChannel) SendMintSuccess(context.Context, minter.MintRequest, minter.MintResult) (*minter.SendMessageResult, error) {
+func (f *fakeBrokerChannel) SendMintSuccess(_ context.Context, _ minter.MintRequest, session mintedSession) (*minter.SendMessageResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.successCount++
+	f.deliveredSessions = append(f.deliveredSessions, session)
 	if f.successSent != nil {
 		select {
 		case f.successSent <- struct{}{}:
@@ -1943,15 +2144,29 @@ func (f *fakeBrokerChannel) resolvedChannelID() string {
 }
 
 type recordingSessionCreator struct {
-	calls int
+	calls              int
+	keepPairedRequests []bool
+	persistent         bool
 }
 
-func (r *recordingSessionCreator) CreateEphemeralSession(context.Context, string, minter.MintRequest) (minter.MintResult, error) {
+func (r *recordingSessionCreator) CreateEphemeralSession(_ context.Context, _ string, _ minter.MintRequest, keepPaired bool) (mintedSession, error) {
 	r.calls++
-	return minter.MintResult{
-		SessionID: "session-1",
-		Token:     "browser-token",
-		ExpiresAt: time.Now().Add(time.Hour),
+	r.keepPairedRequests = append(r.keepPairedRequests, keepPaired)
+	if r.persistent {
+		return mintedSession{
+			MintResult: minter.MintResult{
+				SessionID: "session-1",
+				Token:     "browser-token",
+			},
+			Persistent: true,
+		}, nil
+	}
+	return mintedSession{
+		MintResult: minter.MintResult{
+			SessionID: "session-1",
+			Token:     "browser-token",
+			ExpiresAt: time.Now().Add(time.Hour),
+		},
 	}, nil
 }
 
@@ -1962,7 +2177,7 @@ type fakeSessionCreator struct {
 	err     error
 }
 
-func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string, _ minter.MintRequest) (minter.MintResult, error) {
+func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string, _ minter.MintRequest, _ bool) (mintedSession, error) {
 	if f.started != nil {
 		select {
 		case f.started <- struct{}{}:
@@ -1972,7 +2187,7 @@ func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string
 	if f.release != nil {
 		select {
 		case <-ctx.Done():
-			return minter.MintResult{}, ctx.Err()
+			return mintedSession{}, ctx.Err()
 		case <-f.release:
 		}
 	}
@@ -1981,17 +2196,19 @@ func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
-			return minter.MintResult{}, ctx.Err()
+			return mintedSession{}, ctx.Err()
 		case <-timer.C:
 		}
 	}
 	if f.err != nil {
-		return minter.MintResult{}, f.err
+		return mintedSession{}, f.err
 	}
-	return minter.MintResult{
-		SessionID: "session-1",
-		Token:     "browser-token",
-		ExpiresAt: time.Now().Add(time.Hour),
+	return mintedSession{
+		MintResult: minter.MintResult{
+			SessionID: "session-1",
+			Token:     "browser-token",
+			ExpiresAt: time.Now().Add(time.Hour),
+		},
 	}, nil
 }
 

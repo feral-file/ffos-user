@@ -1434,9 +1434,13 @@ The mint-pairing flow adds an approval decision message from
 3. A controller client sends `mintPairingApprovalDecision` inbound to
    `feral-controld`.
 4. `feral-controld` accepts exactly one valid decision.
-5. On approval, `feral-controld` creates an ephemeral browser session through
+5. On approval, `feral-controld` creates a browser session through
    `ff-relayer` and sends the raw token only inside encrypted
-   `mint_succeeded` to the browser.
+   `mint_succeeded` to the browser. An approval with `keepPaired` creates an
+   owner-kept session instead: `feral-controld` sends `persistent: true` to
+   `ff-relayer`, sends no `expiresInSeconds`, and the delivered session carries
+   `persistent: true` with a null `expiresAt`. An owner-kept session ends only
+   when the owner removes the site from the app's paired-sites screen.
 6. On rejection or terminal failure, `feral-controld` sends encrypted
    `mint_rejected` to the browser.
 
@@ -1592,7 +1596,9 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
 will request from `ff-relayer` if the controller approves. `feral-controld`
 owns this policy: omitted or non-positive requests default to 3600 seconds,
 requests below 90 seconds are raised to 90 seconds, and requests above 86400
-seconds are capped at 86400 seconds.
+seconds are capped at 86400 seconds. Both fields are moot when the
+controller approves with `keepPaired`: an owner-kept session has no TTL and the
+browser's request is ignored.
 
 ### mintPairingApprovalDecision
 
@@ -1612,6 +1618,7 @@ Approve example:
       "channelID": "ch_pQ9Yab...",
       "requestMessageID": "msg_2WaF8D7xV9zJvdm8SK5LSA",
       "decision": "approve",
+      "keepPaired": true,
       "decidedAt": "2026-06-16T03:00:20Z",
       "controller": {
         "clientID": "ios_abc123",
@@ -1655,6 +1662,10 @@ Required fields:
 
 Optional fields:
 
+- `keepPaired`: meaningful for `approve`, ignored for `reject`, default
+  `false`. `true` mints an owner-kept session: `persistent: true` to
+  `ff-relayer`, no `expiresInSeconds`, and a delivered session with
+  `persistent: true` and a null `expiresAt`
 - `reason`: required for `reject`, ignored for `approve`
 - `retryable`: meaningful for `reject`, default `false`
 - `decidedAt`
@@ -1716,7 +1727,7 @@ Error cases:
 | Channel/request mismatch | `channelID` or `requestMessageID` differs from pending request | `ok: false`, `request_mismatch`, `retryable: false` | Keep waiting until timeout |
 | Expired decision | Request deadline passed before valid decision | `ok: false`, `expired`, `retryable: false` | Encrypted `mint_rejected` with `approval_expired` |
 | Duplicate same decision | Same accepted decision delivered again | `ok: true`, `status: "already_accepted"` | No duplicate minting |
-| Conflicting duplicate decision | Different terminal decision after one was accepted | `ok: false`, `already_decided`, `retryable: false` | No change |
+| Conflicting duplicate decision | Different terminal decision, or the same decision with a different `keepPaired`, after one was accepted | `ok: false`, `already_decided`, `retryable: false` | No change |
 | Controller rejects | Valid `decision: "reject"` | `ok: true`, `status: "accepted"` | Encrypted `mint_rejected` with controller reason or `rejected_by_user` |
 | Topic changes after approval | Current device topic no longer matches the approval request topic before relayer session creation or browser delivery | Optional outcome `failed`; ACK remains accepted | Encrypted `mint_rejected` with `topic_changed` |
 | Session creation fails after approval | `ff-relayer` ephemeral-session creation fails | Optional outcome `failed`; ACK remains accepted | Encrypted `mint_rejected` with `session_create_failed` |

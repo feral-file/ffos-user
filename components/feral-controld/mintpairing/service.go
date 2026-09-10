@@ -159,14 +159,26 @@ type brokerStarter interface {
 }
 
 type sessionCreator interface {
-	CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest) (minter.MintResult, error)
+	CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest, keepPaired bool) (mintedSession, error)
+}
+
+// mintedSession is the created browser session as feral-controld knows it: the
+// minter result the browser is handed plus the owner-kept flag the minter
+// result type has no field for. A persistent session carries a zero ExpiresAt
+// — the device-side convention for "never expires" (see formatOptionalTime) —
+// so any expiry check added here must read Persistent before it reads
+// ExpiresAt. An owner-kept session ends only when the owner removes it from
+// the app's paired-sites screen, never on a clock.
+type mintedSession struct {
+	minter.MintResult
+	Persistent bool
 }
 
 type brokerChannel interface {
 	PairingDisplay() minter.PairingDisplay
 	MinterPublicKeyJWK() minter.PublicJWK
 	PollMintRequest(ctx context.Context, afterSeq int64) (*minter.MintRequest, int64, error)
-	SendMintSuccess(ctx context.Context, request minter.MintRequest, result minter.MintResult) (*minter.SendMessageResult, error)
+	SendMintSuccess(ctx context.Context, request minter.MintRequest, session mintedSession) (*minter.SendMessageResult, error)
 	SendMintRejection(ctx context.Context, request minter.MintRequest, rejection minter.MintRejection) (*minter.SendMessageResult, error)
 	Close(ctx context.Context) error
 }
@@ -194,8 +206,16 @@ func (b brokerChannelAdapter) PollMintRequest(ctx context.Context, afterSeq int6
 	return request, maxInt64(afterSeq, request.Seq), nil
 }
 
-func (b brokerChannelAdapter) SendMintSuccess(ctx context.Context, request minter.MintRequest, result minter.MintResult) (*minter.SendMessageResult, error) {
-	return b.channel.SendMintSuccess(ctx, request, result)
+// SendMintSuccess hands the created session to the minter client, which
+// encrypts it for the browser. The delivered payload must carry
+// `persistent: true` and a null `expiresAt` for an owner-kept session; the
+// pinned minter client's session payload has neither field yet, so the flag
+// stops at this seam and a persistent session reaches the client with a zero
+// ExpiresAt. The field lands with the ff-art-computer-handoff change that adds
+// `Persistent` to the minter result, and this method is the only place that
+// then needs to set it.
+func (b brokerChannelAdapter) SendMintSuccess(ctx context.Context, request minter.MintRequest, session mintedSession) (*minter.SendMessageResult, error) {
+	return b.channel.SendMintSuccess(ctx, request, session.MintResult)
 }
 
 func (b brokerChannelAdapter) SendMintRejection(ctx context.Context, request minter.MintRequest, rejection minter.MintRejection) (*minter.SendMessageResult, error) {
@@ -274,6 +294,7 @@ type approvalDecisionRequest struct {
 	ChannelID         string         `json:"channelID"`
 	RequestMessageID  string         `json:"requestMessageID"`
 	Decision          string         `json:"decision"`
+	KeepPaired        bool           `json:"keepPaired,omitempty"`
 	Reason            string         `json:"reason,omitempty"`
 	Retryable         bool           `json:"retryable,omitempty"`
 	DecidedAt         string         `json:"decidedAt,omitempty"`
@@ -651,6 +672,11 @@ func (s *service) parseDecision(args map[string]any) (approvalDecisionRequest, e
 	switch decision.Decision {
 	case "approve":
 	case "reject":
+		// keepPaired only means anything for an approval: there is no session
+		// to keep behind a rejection. Normalizing it here also keeps decision
+		// replay comparison honest — a rejection replayed with the flag set is
+		// the same decision, not a conflicting one.
+		decision.KeepPaired = false
 		if strings.TrimSpace(decision.Reason) == "" {
 			decision.Reason = "rejected_by_user"
 		}
@@ -846,7 +872,7 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 	}
 
 	sessionCtx, cancelSession := context.WithTimeout(ctx, wrapper.HTTPClientTimeout)
-	result, err := s.sessionCreator.CreateEphemeralSession(sessionCtx, topicID, request)
+	session, err := s.sessionCreator.CreateEphemeralSession(sessionCtx, topicID, request, decision.KeepPaired)
 	cancelSession()
 	if err != nil {
 		sendErr := s.sendTerminalRejectionAndOutcome(channel, request, approvalRequestID, "session_create_failed", true, "failed")
@@ -858,11 +884,11 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 	if !currentRelayerTopicMatches(topicID) {
 		return s.rejectTopicChanged(channel, request, topicID, approvalRequestID)
 	}
-	if result.RelayerBaseURL == "" {
-		result.RelayerBaseURL = s.opts.RelayerBaseURL
+	if session.RelayerBaseURL == "" {
+		session.RelayerBaseURL = s.opts.RelayerBaseURL
 	}
 	successCtx, cancelSuccess := context.WithTimeout(context.Background(), wrapper.HTTPClientTimeout)
-	_, err = channel.SendMintSuccess(successCtx, request, result)
+	_, err = channel.SendMintSuccess(successCtx, request, session)
 	cancelSuccess()
 	if err != nil {
 		outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
@@ -1263,7 +1289,8 @@ func sameDecision(a approvalDecisionRequest, b approvalDecisionRequest) bool {
 		a.TopicID == b.TopicID &&
 		a.ChannelID == b.ChannelID &&
 		a.RequestMessageID == b.RequestMessageID &&
-		a.Decision == b.Decision
+		a.Decision == b.Decision &&
+		a.KeepPaired == b.KeepPaired
 }
 
 func sleepContext(ctx context.Context, d time.Duration) bool {
@@ -1335,16 +1362,21 @@ func NewRelayerSessionCreator(baseURL string, apiKey string, httpClient wrapper.
 	}
 }
 
-func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest) (minter.MintResult, error) {
+// CreateEphemeralSession mints one browser session on the relayer. With
+// keepPaired the device asks for an owner-kept session: it sends
+// `persistent: true`, omits `expiresInSeconds` entirely, and ignores the
+// browser's requestedExpiresInSeconds — the owner's choice outranks the site's
+// request. Without it the controld-owned TTL policy applies unchanged.
+func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest, keepPaired bool) (mintedSession, error) {
 	if c.httpClient == nil {
-		return minter.MintResult{}, errors.New("http client is required")
+		return mintedSession{}, errors.New("http client is required")
 	}
 	if strings.TrimSpace(c.baseURL) == "" {
-		return minter.MintResult{}, errors.New("relayer base URL is required")
+		return mintedSession{}, errors.New("relayer base URL is required")
 	}
 	endpoint, err := url.Parse(c.baseURL + "/api/ephemeral-sessions")
 	if err != nil {
-		return minter.MintResult{}, fmt.Errorf("parse relayer session URL: %w", err)
+		return mintedSession{}, fmt.Errorf("parse relayer session URL: %w", err)
 	}
 	q := endpoint.Query()
 	q.Set("topicID", topicID)
@@ -1354,15 +1386,19 @@ func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topi
 		"browserName":      request.BrowserInfo.Name,
 		"browserUserAgent": request.BrowserInfo.UserAgent,
 		"label":            request.BrowserInfo.Label,
-		"expiresInSeconds": effectiveSessionTTLSeconds(request.RequestedExpiresInSeconds),
+	}
+	if keepPaired {
+		body["persistent"] = true
+	} else {
+		body["expiresInSeconds"] = effectiveSessionTTLSeconds(request.RequestedExpiresInSeconds)
 	}
 	raw, err := c.json.Marshal(body)
 	if err != nil {
-		return minter.MintResult{}, fmt.Errorf("marshal relayer session request: %w", err)
+		return mintedSession{}, fmt.Errorf("marshal relayer session request: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(raw))
 	if err != nil {
-		return minter.MintResult{}, fmt.Errorf("build relayer session request: %w", err)
+		return mintedSession{}, fmt.Errorf("build relayer session request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "feral-controld")
@@ -1372,34 +1408,45 @@ func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topi
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return minter.MintResult{}, fmt.Errorf("post relayer session request: %w", err)
+		return mintedSession{}, fmt.Errorf("post relayer session request: %w", err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return minter.MintResult{}, fmt.Errorf("relayer session request failed with status %d", resp.StatusCode)
+		return mintedSession{}, fmt.Errorf("relayer session request failed with status %d", resp.StatusCode)
 	}
 
 	var decoded struct {
 		Session struct {
-			ID        string    `json:"id"`
-			ExpiresAt time.Time `json:"expiresAt"`
+			ID         string     `json:"id"`
+			ExpiresAt  *time.Time `json:"expiresAt"`
+			Persistent bool       `json:"persistent"`
 		} `json:"session"`
 		Token string `json:"token"`
 	}
 	if err := c.json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return minter.MintResult{}, fmt.Errorf("decode relayer session response: %w", err)
+		return mintedSession{}, fmt.Errorf("decode relayer session response: %w", err)
 	}
 	if decoded.Session.ID == "" || decoded.Token == "" {
-		return minter.MintResult{}, errors.New("relayer session response missing session id or token")
+		return mintedSession{}, errors.New("relayer session response missing session id or token")
 	}
-	return minter.MintResult{
-		SessionID:      decoded.Session.ID,
-		Token:          decoded.Token,
-		ExpiresAt:      decoded.Session.ExpiresAt,
-		RelayerBaseURL: c.baseURL,
-	}, nil
+	// The relayer's answer decides, not the device's request: a relayer that
+	// does not honor `persistent` returns an ordinary expiring session, and the
+	// device must deliver it as one rather than promise the browser a session
+	// that will quietly die.
+	session := mintedSession{
+		MintResult: minter.MintResult{
+			SessionID:      decoded.Session.ID,
+			Token:          decoded.Token,
+			RelayerBaseURL: c.baseURL,
+		},
+		Persistent: decoded.Session.Persistent,
+	}
+	if !session.Persistent && decoded.Session.ExpiresAt != nil {
+		session.ExpiresAt = *decoded.Session.ExpiresAt
+	}
+	return session, nil
 }
 
 func effectiveSessionTTLSeconds(requested int) int {
