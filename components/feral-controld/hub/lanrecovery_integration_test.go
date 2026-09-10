@@ -198,16 +198,20 @@ func TestLANRecovery_OfflineCommandPipeline(t *testing.T) {
 		var saveCount int
 		var savedTopic string
 		sm := mocks.NewMockStateManager(gomock.NewController(t))
-		// factoryReset now clears the claim through state.ClearClaim() (a
-		// single atomic mutate+save) rather than a separate GetState()+Save();
-		// mutate the same `seeded` pointer so the in-memory assertion below
-		// still observes the clear.
-		sm.EXPECT().ClearClaim().DoAndReturn(func() (bool, error) {
+		// factoryReset rotates the topic through state.InvalidateRelayerTopic()
+		// (one atomic mutate+save that also hands back the outgoing topic, so
+		// the browser-session sweep can run against it) and then clears the
+		// rest of the claim through state.ClearClaim(). Mutate the same
+		// `seeded` pointer so the in-memory assertion below still observes the
+		// rotation.
+		sm.EXPECT().InvalidateRelayerTopic().DoAndReturn(func() (string, bool, error) {
 			saveCount++
+			outgoing := seeded.Relayer.TopicID
 			seeded.Relayer.TopicID = ""
 			savedTopic = seeded.Relayer.TopicID
-			return true, nil
+			return outgoing, true, nil
 		}).AnyTimes()
+		sm.EXPECT().ClearClaim().Return(true, nil).AnyTimes()
 		state.InjectStateManagerForTesting(sm)
 		defer state.ResetForTesting()
 

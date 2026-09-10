@@ -9,9 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,13 +32,18 @@ import (
 )
 
 const (
-	defaultIdleTTL            = 5 * time.Minute
-	defaultPollInterval       = 500 * time.Millisecond
-	defaultApprovalTimeout    = 5 * time.Minute
-	minSessionTTLSeconds      = 90
-	defaultSessionTTLSeconds  = 3600
-	maxSessionTTLSeconds      = 86400
-	terminalOperationTimeout  = 750 * time.Millisecond
+	defaultIdleTTL           = 5 * time.Minute
+	defaultPollInterval      = 500 * time.Millisecond
+	defaultApprovalTimeout   = 5 * time.Minute
+	minSessionTTLSeconds     = 90
+	defaultSessionTTLSeconds = 3600
+	maxSessionTTLSeconds     = 86400
+	terminalOperationTimeout = 750 * time.Millisecond
+	sessionRevokeTimeout     = 1500 * time.Millisecond
+	// maxSessionListBytes bounds the relayer's session list. The cap is far
+	// above a topic's session cap and exists so a wrong or hostile response
+	// cannot be read into memory unbounded.
+	maxSessionListBytes       = 1 << 20
 	displayRecoveryTimeout    = 500 * time.Millisecond
 	stopCleanupTimeout        = 1500 * time.Millisecond
 	channelCloseTimeout       = 500 * time.Millisecond
@@ -101,6 +109,32 @@ type Service interface {
 	// before Start; nil (never called) preserves pre-session behavior
 	// exactly — the sends never park.
 	SetSession(session NavigationSession)
+	// RevokeTopicSessions revokes every browser session the relayer holds for
+	// topicID and reports how many it revoked. Factory reset calls it before
+	// the claim is cleared: a session minted under the old topic otherwise
+	// outlives the claim it belongs to, and nothing on the re-claimed device
+	// can reach it afterwards. Best effort by contract — the error says what
+	// could not be revoked, and the caller decides whether that stops it.
+	RevokeTopicSessions(ctx context.Context, topicID string) (int, error)
+	// WaitForInFlightCreates blocks until every session creation already sent
+	// to the relayer has finished its post-create guard — including the revoke
+	// that guard performs when the claim moved under it — or until ctx
+	// expires. It reports how many were still in flight when it gave up.
+	//
+	// Factory reset waits on this between invalidating the claim and sweeping
+	// the topic: a POST already in flight can commit a session AFTER the
+	// sweep has enumerated, and the only thing that then knows about that
+	// session is the create call itself.
+	WaitForInFlightCreates(ctx context.Context) (int, error)
+	// CloseActivePairing ends any pairing session in progress and waits for
+	// its worker to exit, or until ctx expires. closed reports whether there
+	// was one to close.
+	//
+	// Factory reset calls it right after invalidating the claim: the pairing
+	// worker keeps polling the broker on a socket the device still holds, and
+	// a request arriving after the wipe has begun belongs to a claim that is
+	// gone.
+	CloseActivePairing(ctx context.Context) (closed bool, err error)
 }
 
 // NavigationSession is the narrow slice of playersession.Session the display
@@ -140,6 +174,21 @@ type service struct {
 	pending           map[string]*pendingApproval
 	doneMap           map[string]completedApproval
 
+	// starting is a pairing start whose broker call is in flight and whose
+	// session has not been published yet. Without it a reset landing in that
+	// window finds nothing to close, and the start it did not see goes on to
+	// paint a QR code and register a worker for a claim that is gone.
+	starting *startingPairing
+
+	// creates counts session creations in flight at the relayer. See
+	// createGate and WaitForInFlightCreates.
+	creates *createGate
+
+	// afterCreateAdmission runs immediately after a decision is admitted to
+	// the create gate and before its topic-guard check. Test-only seam for the
+	// reset-lands-in-that-window case; nil everywhere else.
+	afterCreateAdmission func()
+
 	// session, when set (SetSession), is the playersession.Session the
 	// display sends park against while a recovery navigation is pending
 	// — same generation-snapshot park discipline setupui.Service gets
@@ -154,12 +203,111 @@ type service struct {
 	navigationParkTimeout      time.Duration
 }
 
+// createGate counts session creations that have been handed to the relayer and
+// have not yet finished their post-create guard. It exists for one caller:
+// factory reset has to know when it is safe to enumerate the relayer's
+// sessions, and a create still in flight can commit one after the enumeration.
+//
+// It is a counter with a broadcast rather than a sync.WaitGroup because waiters
+// and new creates overlap freely here — a WaitGroup forbids an Add that races
+// its own Wait from zero, which is exactly what a reset landing between two
+// approvals would do.
+type createGate struct {
+	mu      sync.Mutex
+	count   int
+	drained chan struct{}
+}
+
+func newCreateGate() *createGate {
+	gate := &createGate{drained: make(chan struct{})}
+	close(gate.drained) // nothing in flight yet
+	return gate
+}
+
+func (g *createGate) enter() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.count == 0 {
+		g.drained = make(chan struct{})
+	}
+	g.count++
+}
+
+func (g *createGate) leave() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.count == 0 {
+		return
+	}
+	g.count--
+	if g.count == 0 {
+		close(g.drained)
+	}
+}
+
+// wait blocks until nothing is in flight or ctx expires, reporting the count
+// still in flight in the second case.
+func (g *createGate) wait(ctx context.Context) (int, error) {
+	g.mu.Lock()
+	drained := g.drained
+	g.mu.Unlock()
+
+	select {
+	case <-drained:
+		return 0, nil
+	case <-ctx.Done():
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return g.count, ctx.Err()
+	}
+}
+
 type brokerStarter interface {
 	StartChannel(ctx context.Context, opts minter.StartChannelOptions) (brokerChannel, error)
 }
 
 type sessionCreator interface {
-	CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest) (minter.MintResult, error)
+	CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest, lifetime sessionLifetime) (minter.MintResult, error)
+	RevokeEphemeralSession(ctx context.Context, topicID string, sessionID string) error
+	ListEphemeralSessionIDs(ctx context.Context, topicID string) ([]string, error)
+}
+
+// sessionLifetime is what the device asks the relayer to mint for one approved
+// request. It is decided from the owner's decision and the requester's declared
+// capability together — never from the decision alone.
+type sessionLifetime int
+
+const (
+	// lifetimeTimed: the ordinary session, under the controld-owned TTL policy
+	// applied to the browser's requested lifetime.
+	lifetimeTimed sessionLifetime = iota
+	// lifetimePersistent: the owner asked to keep the site paired and the
+	// requester declared it can hold a session with no expiry.
+	lifetimePersistent
+	// lifetimeTimedFallbackRequester: the owner asked to keep the site paired
+	// but the requester never declared the capability — every client released
+	// before owner-kept sessions existed requires a real expiresAt and cannot
+	// parse a session without one. Handing it a persistent session would break
+	// the page outright, so it gets the longest timed session instead and the
+	// owner has to re-approve when it lapses.
+	lifetimeTimedFallbackRequester
+)
+
+// deliveredOutcomeLifetime names the shape for the controller's approval
+// outcome. It reads the session the browser actually received, never the one
+// that was requested: a persistent ask answered by a relayer with a timed
+// session is a timed session, and saying otherwise would have the app tell the
+// owner a site is kept when it expires. requested only distinguishes WHY a
+// timed session is timed — the capability fallback names itself so the app can
+// correct copy it already showed.
+func deliveredOutcomeLifetime(requested sessionLifetime, session minter.MintResult) string {
+	if session.Persistent {
+		return "persistent"
+	}
+	if requested == lifetimeTimedFallbackRequester {
+		return "timed_fallback_requester"
+	}
+	return "timed"
 }
 
 type brokerChannel interface {
@@ -194,6 +342,11 @@ func (b brokerChannelAdapter) PollMintRequest(ctx context.Context, afterSeq int6
 	return request, maxInt64(afterSeq, request.Seq), nil
 }
 
+// SendMintSuccess hands the created session to the minter client, which
+// encrypts it for the browser: `persistent: true` with a null `expiresAt` for
+// an owner-kept session, an ordinary expiry for a timed one. The client
+// refuses a non-persistent result with no expiry, so the browser can never be
+// handed a session whose deadline is missing or invented.
 func (b brokerChannelAdapter) SendMintSuccess(ctx context.Context, request minter.MintRequest, result minter.MintResult) (*minter.SendMessageResult, error) {
 	return b.channel.SendMintSuccess(ctx, request, result)
 }
@@ -218,15 +371,28 @@ func (b realBrokerStarter) StartChannel(ctx context.Context, opts minter.StartCh
 	return brokerChannelAdapter{channel: channel}, nil
 }
 
+// startingPairing is the cancellable in-progress state of one pairing start:
+// the broker call can be canceled through cancel, and done reports when the
+// start has finished either way.
+type startingPairing struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 type pendingApproval struct {
 	approvalRequestID string
-	topicID           string
-	channelID         string
-	requestMessageID  string
-	browserName       string
-	expiresAt         time.Time
-	decisionCh        chan approvalDecisionRequest
-	accepted          *approvalDecisionRequest
+	// guard is the claim this pairing began under: the topic id AND the
+	// generation. Keeping only the id would let a pairing survive its own
+	// claim — clear the topic and re-claim onto the same id (a factory reset
+	// and re-pair) and every id comparison still passes, so the approval the
+	// previous owner started would mint a session under the new owner's claim.
+	guard            topicGuard
+	channelID        string
+	requestMessageID string
+	browserName      string
+	expiresAt        time.Time
+	decisionCh       chan approvalDecisionRequest
+	accepted         *approvalDecisionRequest
 }
 
 type activePairing struct {
@@ -278,6 +444,14 @@ type approvalDecisionRequest struct {
 	Retryable         bool           `json:"retryable,omitempty"`
 	DecidedAt         string         `json:"decidedAt,omitempty"`
 	Controller        map[string]any `json:"controller,omitempty"`
+
+	// KeepPairedRaw holds the wire value so an absent flag stays
+	// distinguishable from an explicit null: decoding straight into a bool
+	// turns `"keepPaired": null` into a silent false, which reads as "the
+	// owner chose not to keep this site" when the controller in fact sent
+	// something malformed. parseDecision resolves it into KeepPaired.
+	KeepPairedRaw json.RawMessage `json:"keepPaired,omitempty"`
+	KeepPaired    bool            `json:"-"`
 }
 
 type approvalResponse struct {
@@ -328,6 +502,7 @@ func newService(
 		logger:         logger,
 		pending:        make(map[string]*pendingApproval),
 		doneMap:        make(map[string]completedApproval),
+		creates:        newCreateGate(),
 	}
 }
 
@@ -457,8 +632,8 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 		}
 		return commandError("invalid_config", "mint pairing player contract is not valid", false), nil
 	}
-	topicID := strings.TrimSpace(state.ClaimSnapshot().TopicID)
-	if topicID == "" {
+	startGuard := currentTopicGuard()
+	if startGuard.topicID == "" {
 		return commandError("topic_not_ready", "relayer topic is not ready", true), nil
 	}
 
@@ -506,7 +681,16 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 		zap.Duration("idleTTL", s.opts.IdleTTL),
 		zap.Bool("shortCodeRequested", true),
 	)
-	channel, err := s.broker.StartChannel(displayCtx, minter.StartChannelOptions{
+	// The broker call is the window a reset cannot otherwise see: nothing is
+	// published yet, so there is no active session to close. Register the
+	// start as cancellable in-progress state first.
+	startCtx, cancelStart := context.WithCancel(displayCtx)
+	defer cancelStart()
+	starting := &startingPairing{cancel: cancelStart, done: make(chan struct{})}
+	s.registerStarting(starting)
+	defer s.finishStarting(starting)
+
+	channel, err := s.broker.StartChannel(startCtx, minter.StartChannelOptions{
 		BrokerBaseURL:      s.opts.BrokerBaseURL,
 		IdleTTL:            s.opts.IdleTTL,
 		ShortCodeRequested: true,
@@ -514,6 +698,18 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	if err != nil {
 		s.logger.Warn("Failed to start mint pairing broker channel", zap.Error(err))
 		return commandError("broker_unavailable", "failed to start mint pairing broker channel", true), nil
+	}
+
+	// A channel can come back after the claim it was started for is gone — a
+	// reset that landed mid-call, or a re-claim. Close it before anything is
+	// painted or published: an overlay and a registered worker are exactly
+	// what the reset was tearing down.
+	if !startGuard.sameAs(currentTopicGuard()) {
+		s.closeChannel(channel)
+		s.logger.Warn("Dropping a mint pairing channel that outlived its claim",
+			zap.String("channelID", channel.PairingDisplay().ChannelID),
+			zap.String("startedForTopicID", startGuard.topicID))
+		return commandError("topic_changed", "the relayer topic changed while the pairing session was starting", true), nil
 	}
 
 	display := channel.PairingDisplay()
@@ -547,13 +743,29 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	}
 	s.logger.Info("Displayed mint pairing code", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
 
+	// The display can block, and a reset landing while it does would find a
+	// start it must wait for but no session to close — and this publish would
+	// then hand a worker to a claim that is already gone. Check once more,
+	// with the code already on screen, and take it back down if it moved.
+	if !startGuard.sameAs(currentTopicGuard()) {
+		sessionCancel()
+		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
+		if restoreDisplay {
+			s.restoreDefaultDisplay(active.channelID, displayGeneration)
+		}
+		s.closeChannel(channel)
+		s.logger.Warn("Dropping a mint pairing session whose claim went while its code was displayed",
+			pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+		return commandError("topic_changed", "the relayer topic changed while the pairing session was starting", true), nil
+	}
+
 	s.mu.Lock()
 	s.active = active
 	s.mu.Unlock()
 
 	// The broker approval session must outlive the initiating RPC. sessionCtx is
 	// still bounded by service shutdown and the broker pairing expiry.
-	go s.waitForBrowserAndApproval(sessionCtx, active, topicID) //nolint:gosec
+	go s.waitForBrowserAndApproval(sessionCtx, active, startGuard) //nolint:gosec
 
 	return startPairingResponse{
 		OK:          true,
@@ -614,7 +826,10 @@ func (s *service) HandleApprovalDecision(ctx context.Context, args map[string]an
 		s.mu.Unlock()
 		return approvalError(decision.ApprovalRequestID, "expired", "approval request expired", false), nil
 	}
-	if decision.TopicID != pending.topicID || decision.TopicID != state.ClaimSnapshot().TopicID {
+	// The decision must name the pairing's topic, and that pairing's claim must
+	// still be the live one. A claim cleared and re-taken onto the same topic
+	// id is a different pairing: the id matches, the generation does not.
+	if decision.TopicID != pending.guard.topicID || !pending.guard.sameAs(currentTopicGuard()) {
 		s.mu.Unlock()
 		return approvalError(decision.ApprovalRequestID, "topic_mismatch", "approval decision does not match this device topic", false), nil
 	}
@@ -648,9 +863,17 @@ func (s *service) parseDecision(args map[string]any) (approvalDecisionRequest, e
 	if decision.ApprovalRequestID == "" || decision.TopicID == "" || decision.ChannelID == "" || decision.RequestMessageID == "" {
 		return decision, errors.New("approvalRequestID, topicID, channelID, and requestMessageID are required")
 	}
+	if err := s.resolveKeepPaired(&decision); err != nil {
+		return decision, err
+	}
 	switch decision.Decision {
 	case "approve":
 	case "reject":
+		// keepPaired only means anything for an approval: there is no session
+		// to keep behind a rejection. Normalizing it here also keeps decision
+		// replay comparison honest — a rejection replayed with the flag set is
+		// the same decision, not a conflicting one.
+		decision.KeepPaired = false
 		if strings.TrimSpace(decision.Reason) == "" {
 			decision.Reason = "rejected_by_user"
 		}
@@ -660,7 +883,30 @@ func (s *service) parseDecision(args map[string]any) (approvalDecisionRequest, e
 	return decision, nil
 }
 
-func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activePairing, topicID string) {
+// resolveKeepPaired reads the wire value into KeepPaired. Absent is false;
+// only a literal true or false is accepted, so a null or a "true" string is a
+// malformed decision rather than a silent no.
+func (s *service) resolveKeepPaired(decision *approvalDecisionRequest) error {
+	raw := bytes.TrimSpace(decision.KeepPairedRaw)
+	if len(raw) == 0 {
+		decision.KeepPaired = false
+		return nil
+	}
+	// A JSON null unmarshals into a bool without error, leaving it false — the
+	// exact silent "the owner did not ask to keep this site" this check exists
+	// to prevent — so it is rejected by value before the decode.
+	if bytes.Equal(raw, []byte("null")) {
+		return errors.New("keepPaired must be true or false")
+	}
+	var keepPaired bool
+	if err := s.json.Unmarshal(raw, &keepPaired); err != nil {
+		return errors.New("keepPaired must be true or false")
+	}
+	decision.KeepPaired = keepPaired
+	return nil
+}
+
+func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activePairing, guard topicGuard) {
 	terminalSent := false
 	refreshAfterClose := false
 	defer func() {
@@ -696,6 +942,21 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		return
 	}
 
+	// The claim can go while this worker sits in its poll: a factory reset
+	// clears the topic, and the socket this device still holds belongs to a
+	// claim that no longer exists. Drop the request before it touches
+	// anything the owner can see — no screen, no controller notification —
+	// because both would be a previous owner's pairing surfacing on a device
+	// mid-wipe.
+	if !guard.sameAs(currentTopicGuard()) {
+		s.logger.Warn("Dropping mint pairing request: the claim this pairing began under is gone",
+			zap.String("channelID", request.ChannelID),
+			zap.String("requestMessageID", request.MessageID),
+			zap.String("origin", request.Origin),
+			zap.String("pairedForTopicID", guard.topicID))
+		return
+	}
+
 	approvalRequestID, err := newApprovalRequestID()
 	if err != nil {
 		s.logger.Warn("Failed to create mint pairing approval request id", zap.Error(err), zap.String("channelID", active.channelID))
@@ -707,7 +968,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	}
 	pending := &pendingApproval{
 		approvalRequestID: approvalRequestID,
-		topicID:           topicID,
+		guard:             guard,
 		channelID:         request.ChannelID,
 		requestMessageID:  request.MessageID,
 		browserName:       browserDisplayName(request.BrowserInfo),
@@ -722,7 +983,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		s.logger.Warn("Failed to display mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
 	}
 
-	if err := s.sendApprovalRequest(ctx, approvalRequestID, topicID, *request, active.channel.MinterPublicKeyJWK(), expiresAt); err != nil {
+	if err := s.sendApprovalRequest(ctx, approvalRequestID, guard.topicID, *request, active.channel.MinterPublicKeyJWK(), expiresAt); err != nil {
 		_, sendErr := active.channel.SendMintRejection(ctx, *request, minter.MintRejection{Reason: "approval_unavailable", Retryable: true})
 		if sendErr != nil {
 			s.logger.Warn("Failed to send approval request and browser rejection", zap.Error(errors.Join(err, sendErr)), zap.String("channelID", active.channelID))
@@ -740,7 +1001,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	case <-ctx.Done():
 		if !time.Now().Before(expiresAt) {
 			if decision, ok := s.acceptedDecision(pending); ok {
-				terminalSent, err = s.completeDecisionWithBoundedContexts(context.Background(), active.channel, *request, topicID, approvalRequestID, decision)
+				terminalSent, err = s.completeDecisionWithBoundedContexts(context.Background(), active.channel, *request, guard, approvalRequestID, decision)
 				if err != nil {
 					s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
 				}
@@ -753,7 +1014,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		return
 	case <-expireTimer.C:
 		if decision, ok := s.acceptedDecision(pending); ok {
-			terminalSent, err = s.completeDecisionWithBoundedContexts(context.Background(), active.channel, *request, topicID, approvalRequestID, decision)
+			terminalSent, err = s.completeDecisionWithBoundedContexts(context.Background(), active.channel, *request, guard, approvalRequestID, decision)
 			if err != nil {
 				s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
 			}
@@ -761,7 +1022,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		}
 		terminalSent = s.sendApprovalExpired(active, *request, approvalRequestID)
 	case decision := <-pending.decisionCh:
-		terminalSent, err = s.completeDecisionWithBoundedContexts(context.Background(), active.channel, *request, topicID, approvalRequestID, decision)
+		terminalSent, err = s.completeDecisionWithBoundedContexts(context.Background(), active.channel, *request, guard, approvalRequestID, decision)
 		if err != nil {
 			s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
 		}
@@ -772,7 +1033,7 @@ func (s *service) sendApprovalCancelled(active *activePairing, request minter.Mi
 	terminalCtx, cancel := context.WithTimeout(context.Background(), terminalOperationTimeout)
 	defer cancel()
 	_, err := active.channel.SendMintRejection(terminalCtx, request, minter.MintRejection{Reason: approvalCancellationStatus, Retryable: true})
-	s.sendApprovalOutcome(terminalCtx, approvalRequestID, request.ChannelID, request.MessageID, approvalCancellationStatus)
+	s.sendApprovalOutcome(terminalCtx, approvalRequestID, request.ChannelID, request.MessageID, approvalCancellationStatus, "")
 	if err != nil {
 		s.logger.Warn("Failed to send mint pairing cancellation to browser", zap.Error(err), zap.String("channelID", active.channelID))
 	}
@@ -786,7 +1047,7 @@ func (s *service) sendApprovalExpired(active *activePairing, request minter.Mint
 	terminalCtx, cancel := context.WithTimeout(context.Background(), terminalOperationTimeout)
 	defer cancel()
 	_, err := active.channel.SendMintRejection(terminalCtx, request, minter.MintRejection{Reason: "approval_expired", Retryable: true})
-	s.sendApprovalOutcome(terminalCtx, approvalRequestID, request.ChannelID, request.MessageID, "expired")
+	s.sendApprovalOutcome(terminalCtx, approvalRequestID, request.ChannelID, request.MessageID, "expired", "")
 	if err != nil {
 		s.logger.Warn("Failed to send mint pairing expiration to browser", zap.Error(err), zap.String("channelID", active.channelID))
 		return false
@@ -794,8 +1055,8 @@ func (s *service) sendApprovalExpired(active *activePairing, request minter.Mint
 	return true
 }
 
-func (s *service) completeDecisionWithBoundedContexts(parentCtx context.Context, channel brokerChannel, request minter.MintRequest, topicID string, approvalRequestID string, decision approvalDecisionRequest) (bool, error) {
-	return s.completeDecision(parentCtx, channel, request, topicID, approvalRequestID, decision)
+func (s *service) completeDecisionWithBoundedContexts(parentCtx context.Context, channel brokerChannel, request minter.MintRequest, guard topicGuard, approvalRequestID string, decision approvalDecisionRequest) (bool, error) {
+	return s.completeDecision(parentCtx, channel, request, guard, approvalRequestID, decision)
 }
 
 func (s *service) acceptedDecision(pending *pendingApproval) (approvalDecisionRequest, bool) {
@@ -824,7 +1085,11 @@ func (s *service) waitForMintRequest(ctx context.Context, channel brokerChannel)
 	}
 }
 
-func (s *service) completeDecision(ctx context.Context, channel brokerChannel, request minter.MintRequest, topicID string, approvalRequestID string, decision approvalDecisionRequest) (bool, error) {
+// completeDecision carries the guard the pairing began under, not just its
+// topic id: every check below asks "is this still the same claim?", which a
+// topic id alone cannot answer once a topic can be cleared and re-issued.
+func (s *service) completeDecision(ctx context.Context, channel brokerChannel, request minter.MintRequest, guard topicGuard, approvalRequestID string, decision approvalDecisionRequest) (bool, error) {
+	topicID := guard.topicID
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -841,12 +1106,42 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		s.logger.Warn("Failed to display mint pairing token creation status", zap.Error(err), zap.String("channelID", request.ChannelID))
 	}
 
-	if !currentRelayerTopicMatches(topicID) {
+	// Admission comes BEFORE the guard check, not after it. A factory reset
+	// that lands in between would otherwise find the gate drained, sweep an
+	// empty topic, and only then would this mint POST — leaving a session
+	// whose sole remaining owner is a process the reset is about to reboot.
+	// From here the creation counts as in flight until this path either
+	// decides not to POST at all or has finished its post-create guard,
+	// revoke included. releaseCreate is called as early as that contract
+	// allows; the defer is the safety net for the early returns.
+	s.creates.enter()
+	createReleased := false
+	releaseCreate := func() {
+		if createReleased {
+			return
+		}
+		createReleased = true
+		s.creates.leave()
+	}
+	defer releaseCreate()
+
+	// afterCreateAdmission is a test-only seam: it exists so a test can land a
+	// factory reset in the window this admission was moved to cover. Nil in
+	// every production wiring.
+	if s.afterCreateAdmission != nil {
+		s.afterCreateAdmission()
+	}
+
+	if !guard.sameAs(currentTopicGuard()) {
+		// No POST will happen, so nothing is in flight any more.
+		releaseCreate()
 		return s.rejectTopicChanged(channel, request, topicID, approvalRequestID)
 	}
 
+	lifetime := s.sessionLifetimeFor(decision, request)
+
 	sessionCtx, cancelSession := context.WithTimeout(ctx, wrapper.HTTPClientTimeout)
-	result, err := s.sessionCreator.CreateEphemeralSession(sessionCtx, topicID, request)
+	session, err := s.sessionCreator.CreateEphemeralSession(sessionCtx, topicID, request, lifetime)
 	cancelSession()
 	if err != nil {
 		sendErr := s.sendTerminalRejectionAndOutcome(channel, request, approvalRequestID, "session_create_failed", true, "failed")
@@ -855,25 +1150,234 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		}
 		return true, fmt.Errorf("create session: %w", err)
 	}
-	if !currentRelayerTopicMatches(topicID) {
-		return s.rejectTopicChanged(channel, request, topicID, approvalRequestID)
+	// Still the same claim the pairing began under? The session was minted for
+	// it, and the answer is re-checked once more after delivery, because this
+	// check and the send cannot be one atomic step.
+	if !guard.sameAs(currentTopicGuard()) {
+		// The session exists on the relayer but no browser will ever hold it.
+		// Revoke after the terminal message so cleanup never delays what the
+		// browser is told.
+		terminalSent, topicErr := s.rejectTopicChanged(channel, request, topicID, approvalRequestID)
+		s.revokeAbandonedSession(topicID, session.SessionID)
+		return terminalSent, topicErr
 	}
-	if result.RelayerBaseURL == "" {
-		result.RelayerBaseURL = s.opts.RelayerBaseURL
+	// The guard has run and this session is accounted for: a reset waiting on
+	// in-flight creations can stop waiting on this one.
+	releaseCreate()
+	if session.RelayerBaseURL == "" {
+		session.RelayerBaseURL = s.opts.RelayerBaseURL
 	}
 	successCtx, cancelSuccess := context.WithTimeout(context.Background(), wrapper.HTTPClientTimeout)
-	_, err = channel.SendMintSuccess(successCtx, request, result)
+	_, err = channel.SendMintSuccess(successCtx, request, session)
 	cancelSuccess()
 	if err != nil {
 		outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
-		s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "failed")
+		s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "failed", "")
 		cancelOutcome()
+		// A failed send is not proof of non-delivery. Revoke only when the
+		// broker refused the message outright; otherwise the browser may
+		// already hold this session and revoking would cut off a site the
+		// owner approved.
+		if classifyDeliveryFailure(err) == deliveryNeverSent {
+			s.revokeAbandonedSession(topicID, session.SessionID)
+		} else {
+			s.logger.Warn("Left a possibly delivered mint pairing session in place after a failed browser delivery",
+				zap.Error(err),
+				zap.String("topicID", topicID),
+				zap.String("sessionID", session.SessionID),
+				zap.Bool("persistent", session.Persistent))
+		}
 		return false, fmt.Errorf("send mint success: %w", err)
 	}
+	// The topic can move between the last check and the send. Re-read it
+	// synchronously: if the topic this session was minted for is gone, the
+	// session is dead on the relayer's side of the pairing no matter who holds
+	// the token, so revoking it cannot cut off a valid pairing. The browser's
+	// terminal message is already delivered and is not taken back.
+	if after := currentTopicGuard(); !after.sameAs(guard) {
+		s.logger.Warn("Relayer topic changed while delivering a mint pairing session; revoking the session it was minted for",
+			zap.String("mintedForTopicID", topicID),
+			zap.String("currentTopicID", after.topicID),
+			zap.String("sessionID", session.SessionID),
+			zap.Bool("persistent", session.Persistent))
+		s.revokeAbandonedSession(topicID, session.SessionID)
+	}
+
 	outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
-	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "completed")
+	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "completed", deliveredOutcomeLifetime(lifetime, session))
 	cancelOutcome()
 	return true, nil
+}
+
+// sessionLifetimeFor reads the owner's decision against what the requester can
+// actually hold. A keepPaired approval for a requester that never declared
+// support is not an error and not a rejection: the owner still approved the
+// site, so it gets the longest timed session the policy allows.
+func (s *service) sessionLifetimeFor(decision approvalDecisionRequest, request minter.MintRequest) sessionLifetime {
+	if !decision.KeepPaired {
+		return lifetimeTimed
+	}
+	if request.SupportsPersistentSessions {
+		return lifetimePersistent
+	}
+	s.logger.Warn("Owner asked to keep this site paired, but the requester cannot hold a session without an expiry; minting the longest timed session instead",
+		zap.String("origin", request.Origin),
+		zap.String("channelID", request.ChannelID),
+		zap.Int("expiresInSeconds", maxSessionTTLSeconds))
+	return lifetimeTimedFallbackRequester
+}
+
+// deliveryVerdict says what a failed browser delivery proves about whether the
+// browser could be holding the session.
+type deliveryVerdict int
+
+const (
+	// deliveryUnknown: the message may have reached the browser. A timeout, a
+	// transport error, or a broker 5xx all leave the send in doubt, so the
+	// session must be left alone.
+	deliveryUnknown deliveryVerdict = iota
+	// deliveryNeverSent: the broker refused the message before accepting it —
+	// the channel is gone, closed, or the request was rejected outright — so
+	// nothing was delivered.
+	deliveryNeverSent
+)
+
+// brokerStatusPattern reads the broker status out of a minter-client error.
+// The client returns unstructured errors, so its formatted status line is the
+// only positive evidence available; a typed error upstream would make this
+// structural.
+var brokerStatusPattern = regexp.MustCompile(`failed with status (\d{3})`)
+
+// classifyDeliveryFailure looks for proof that a failed SendMintSuccess never
+// reached the browser. It is deliberately one-sided: only a broker client-error
+// status counts as proof, and everything it does not positively recognize is
+// deliveryUnknown. Revoking a session the browser already holds silently cuts
+// off a site the owner approved, while leaving one behind costs at most a slot
+// the owner can clear from the app's paired-sites screen — and a timed session
+// expires on its own.
+func classifyDeliveryFailure(err error) deliveryVerdict {
+	if err == nil {
+		return deliveryUnknown
+	}
+	match := brokerStatusPattern.FindStringSubmatch(err.Error())
+	if match == nil {
+		return deliveryUnknown
+	}
+	status, convErr := strconv.Atoi(match[1])
+	if convErr != nil {
+		return deliveryUnknown
+	}
+	if status >= 400 && status < 500 {
+		return deliveryNeverSent
+	}
+	return deliveryUnknown
+}
+
+// CloseActivePairing ends the pairing session in progress. See Service.
+func (s *service) CloseActivePairing(ctx context.Context) (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	// This loops rather than closing once: a start that was still inside its
+	// broker call can publish an active session while we wait for it to
+	// unwind, and that session is exactly what the reset came to close. Each
+	// pass takes whatever is registered now; the loop ends when a pass finds
+	// nothing (the command surface is already closed by the staged reset, so
+	// no new start can appear) or the caller's bound expires.
+	closedAny := false
+	for {
+		// A start still inside its broker call has published nothing to close,
+		// so it is canceled and awaited on its own: its channel is dropped by
+		// one of the guard re-checks around the call.
+		starting := s.cancelStartingPairing()
+		active := s.cancelActivePairing()
+		if starting == nil && active == nil {
+			return closedAny, nil
+		}
+		closedAny = true
+
+		if starting != nil {
+			s.logger.Info("Canceling a mint pairing start in progress: the claim it belongs to is gone")
+			select {
+			case <-starting.done:
+			case <-ctx.Done():
+				return true, ctx.Err()
+			}
+		}
+
+		if active != nil {
+			s.logger.Info("Closing active mint pairing session: the claim it belongs to is gone",
+				pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+			if active.done != nil {
+				// Waiting for the worker, not just canceling it: until it
+				// returns it can still be mid-display or mid-notification for
+				// the claim being wiped.
+				select {
+				case <-active.done:
+				case <-ctx.Done():
+					return true, ctx.Err()
+				}
+			}
+		}
+	}
+}
+
+// WaitForInFlightCreates blocks until nothing is mid-creation. See Service.
+func (s *service) WaitForInFlightCreates(ctx context.Context) (int, error) {
+	if s == nil || s.creates == nil {
+		return 0, nil
+	}
+	return s.creates.wait(ctx)
+}
+
+// RevokeTopicSessions revokes every session the relayer holds for topicID.
+// See Service. It keeps going after a failure so one unreachable session
+// cannot strand the rest, and reports the count it did revoke alongside the
+// joined failures.
+func (s *service) RevokeTopicSessions(ctx context.Context, topicID string) (int, error) {
+	if s == nil || s.sessionCreator == nil {
+		return 0, nil
+	}
+	// Deliberately NOT gated on opts.Enabled: a device can mint a kept session,
+	// be restarted with mint pairing turned off, and then be reset. The
+	// credential outlives the feature flag, so the sweep has to outlive it too.
+	// The only thing that keeps this off the network is having no topic.
+	if strings.TrimSpace(topicID) == "" {
+		return 0, nil
+	}
+	sessionIDs, err := s.sessionCreator.ListEphemeralSessionIDs(ctx, topicID)
+	if err != nil {
+		return 0, fmt.Errorf("list relayer sessions: %w", err)
+	}
+	revoked := 0
+	var failures []error
+	for _, sessionID := range sessionIDs {
+		if revokeErr := s.sessionCreator.RevokeEphemeralSession(ctx, topicID, sessionID); revokeErr != nil {
+			failures = append(failures, fmt.Errorf("revoke %s: %w", sessionID, revokeErr))
+			continue
+		}
+		revoked++
+	}
+	return revoked, errors.Join(failures...)
+}
+
+// revokeAbandonedSession returns a created session the browser never received.
+// Best effort by design: the browser already has its terminal message, so a
+// failed revoke is logged and changes nothing it was told. Leaving the session
+// behind is not harmless — a persistent one has no TTL to clean it up and
+// would hold one of the topic's owner-kept slots for good.
+func (s *service) revokeAbandonedSession(topicID string, sessionID string) {
+	if s.sessionCreator == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sessionRevokeTimeout)
+	defer cancel()
+	if err := s.sessionCreator.RevokeEphemeralSession(ctx, topicID, sessionID); err != nil {
+		s.logger.Warn("Failed to revoke abandoned mint pairing session",
+			zap.Error(err),
+			zap.String("topicID", topicID),
+			zap.String("sessionID", sessionID))
+	}
 }
 
 func (s *service) rejectTopicChanged(channel brokerChannel, request minter.MintRequest, expectedTopicID string, approvalRequestID string) (bool, error) {
@@ -894,7 +1398,7 @@ func (s *service) sendTerminalRejectionAndOutcome(channel brokerChannel, request
 	// budget so a canceled or exhausted session-creation context cannot hide
 	// the terminal state from both sides of the handoff.
 	outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
-	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, outcomeStatus)
+	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, outcomeStatus, "")
 	cancelOutcome()
 	return err
 }
@@ -903,8 +1407,25 @@ func currentRelayerTopicID() string {
 	return strings.TrimSpace(state.ClaimSnapshot().TopicID)
 }
 
-func currentRelayerTopicMatches(topicID string) bool {
-	return currentRelayerTopicID() == strings.TrimSpace(topicID)
+// topicGuard is a snapshot of which relayer topic this device answers to,
+// taken atomically. Comparing two guards catches a topic that was cleared and
+// reassigned between them — a factory reset and re-claim onto the same topic
+// id reads as unchanged by id alone, but moves the generation.
+type topicGuard struct {
+	topicID    string
+	generation uint64
+}
+
+func currentTopicGuard() topicGuard {
+	snapshot := state.ClaimSnapshot()
+	return topicGuard{
+		topicID:    strings.TrimSpace(snapshot.TopicID),
+		generation: snapshot.TopicGeneration,
+	}
+}
+
+func (g topicGuard) sameAs(other topicGuard) bool {
+	return g.topicID == other.topicID && g.generation == other.generation
 }
 
 func browserDisplayName(info minter.BrowserInfo) string {
@@ -918,17 +1439,18 @@ func browserDisplayName(info minter.BrowserInfo) string {
 
 func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID string, topicID string, request minter.MintRequest, minterPublicKey minter.PublicJWK, expiresAt time.Time) error {
 	msg := map[string]any{
-		"v":                         1,
-		"topicID":                   topicID,
-		"approvalRequestID":         approvalRequestID,
-		"channelID":                 request.ChannelID,
-		"requestMessageID":          request.MessageID,
-		"origin":                    request.Origin,
-		"browserInfo":               request.BrowserInfo,
-		"requestedExpiresInSeconds": request.RequestedExpiresInSeconds,
-		"effectiveExpiresInSeconds": effectiveSessionTTLSeconds(request.RequestedExpiresInSeconds),
-		"requestedAt":               time.Now().UTC().Format(time.RFC3339),
-		"expiresAt":                 expiresAt.UTC().Format(time.RFC3339),
+		"v":                          1,
+		"topicID":                    topicID,
+		"approvalRequestID":          approvalRequestID,
+		"channelID":                  request.ChannelID,
+		"requestMessageID":           request.MessageID,
+		"origin":                     request.Origin,
+		"browserInfo":                request.BrowserInfo,
+		"requestedExpiresInSeconds":  request.RequestedExpiresInSeconds,
+		"effectiveExpiresInSeconds":  effectiveSessionTTLSeconds(request.RequestedExpiresInSeconds),
+		"supportsPersistentSessions": request.SupportsPersistentSessions,
+		"requestedAt":                time.Now().UTC().Format(time.RFC3339),
+		"expiresAt":                  expiresAt.UTC().Format(time.RFC3339),
 		"challenge": map[string]any{
 			"algorithm":                   minter.Algorithm,
 			"browserPublicKeyFingerprint": fingerprintPublicJWK(request.BrowserPublicKeyJWK),
@@ -938,15 +1460,22 @@ func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID str
 	return s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST, approvalRequestID, msg, 10)
 }
 
-func (s *service) sendApprovalOutcome(ctx context.Context, approvalRequestID string, channelID string, requestMessageID string, status string) {
-	err := s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME, approvalRequestID, map[string]any{
+// sendApprovalOutcome reports the terminal state to the controller. lifetime is
+// the shape of the session the browser received and is empty for every outcome
+// that delivered none.
+func (s *service) sendApprovalOutcome(ctx context.Context, approvalRequestID string, channelID string, requestMessageID string, status string, lifetime string) {
+	message := map[string]any{
 		"v":                 1,
 		"approvalRequestID": approvalRequestID,
 		"channelID":         channelID,
 		"requestMessageID":  requestMessageID,
 		"status":            status,
 		"completedAt":       time.Now().UTC().Format(time.RFC3339),
-	}, 10)
+	}
+	if lifetime != "" {
+		message["lifetime"] = lifetime
+	}
+	err := s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME, approvalRequestID, message, 10)
 	if err != nil {
 		s.logger.Warn("Failed to send mint pairing approval outcome", zap.Error(err), zap.String("approvalRequestID", approvalRequestID))
 	}
@@ -991,6 +1520,38 @@ func (s *service) currentActive() (*activePairing, activePairingPhase, string) {
 		return nil, "", ""
 	}
 	return s.active, s.active.phase, s.active.browserName
+}
+
+func (s *service) registerStarting(starting *startingPairing) {
+	s.mu.Lock()
+	s.starting = starting
+	s.mu.Unlock()
+}
+
+// finishStarting clears the slot (if this start still owns it) and releases
+// anyone waiting on it. Called exactly once per start, on every exit path.
+func (s *service) finishStarting(starting *startingPairing) {
+	s.mu.Lock()
+	if s.starting == starting {
+		s.starting = nil
+	}
+	s.mu.Unlock()
+	close(starting.done)
+}
+
+// cancelStartingPairing cancels a start whose broker call is still in flight
+// and hands it back so the caller can wait for it to unwind.
+func (s *service) cancelStartingPairing() *startingPairing {
+	s.mu.Lock()
+	starting := s.starting
+	if starting != nil {
+		s.starting = nil
+	}
+	s.mu.Unlock()
+	if starting != nil {
+		starting.cancel()
+	}
+	return starting
 }
 
 func (s *service) cancelActivePairing() *activePairing {
@@ -1263,7 +1824,8 @@ func sameDecision(a approvalDecisionRequest, b approvalDecisionRequest) bool {
 		a.TopicID == b.TopicID &&
 		a.ChannelID == b.ChannelID &&
 		a.RequestMessageID == b.RequestMessageID &&
-		a.Decision == b.Decision
+		a.Decision == b.Decision &&
+		a.KeepPaired == b.KeepPaired
 }
 
 func sleepContext(ctx context.Context, d time.Duration) bool {
@@ -1335,7 +1897,13 @@ func NewRelayerSessionCreator(baseURL string, apiKey string, httpClient wrapper.
 	}
 }
 
-func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest) (minter.MintResult, error) {
+// CreateEphemeralSession mints one browser session on the relayer. A
+// persistent lifetime sends `persistent: true`, omits `expiresInSeconds`
+// entirely, and ignores the browser's requestedExpiresInSeconds — the owner's
+// choice outranks the site's request. The requester fallback asks for the
+// longest timed session instead of a persistent one. An ordinary timed
+// lifetime applies the controld-owned TTL policy unchanged.
+func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest, lifetime sessionLifetime) (minter.MintResult, error) {
 	if c.httpClient == nil {
 		return minter.MintResult{}, errors.New("http client is required")
 	}
@@ -1354,7 +1922,14 @@ func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topi
 		"browserName":      request.BrowserInfo.Name,
 		"browserUserAgent": request.BrowserInfo.UserAgent,
 		"label":            request.BrowserInfo.Label,
-		"expiresInSeconds": effectiveSessionTTLSeconds(request.RequestedExpiresInSeconds),
+	}
+	switch lifetime {
+	case lifetimePersistent:
+		body["persistent"] = true
+	case lifetimeTimedFallbackRequester:
+		body["expiresInSeconds"] = maxSessionTTLSeconds
+	default:
+		body["expiresInSeconds"] = effectiveSessionTTLSeconds(request.RequestedExpiresInSeconds)
 	}
 	raw, err := c.json.Marshal(body)
 	if err != nil {
@@ -1383,23 +1958,194 @@ func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topi
 
 	var decoded struct {
 		Session struct {
-			ID        string    `json:"id"`
-			ExpiresAt time.Time `json:"expiresAt"`
+			ID         string     `json:"id"`
+			ExpiresAt  *time.Time `json:"expiresAt"`
+			Persistent bool       `json:"persistent"`
 		} `json:"session"`
 		Token string `json:"token"`
 	}
 	if err := c.json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return minter.MintResult{}, fmt.Errorf("decode relayer session response: %w", err)
 	}
-	if decoded.Session.ID == "" || decoded.Token == "" {
-		return minter.MintResult{}, errors.New("relayer session response missing session id or token")
+	// An id with no token is still a session the relayer allocated. Split the
+	// two checks so the id can be revoked instead of stranded: from here on,
+	// every validation failure goes through rejectAndRevoke.
+	if decoded.Session.ID == "" {
+		return minter.MintResult{}, errors.New("relayer session response missing session id")
 	}
-	return minter.MintResult{
+	if decoded.Token == "" {
+		return minter.MintResult{}, c.rejectAndRevoke(decoded.Session.ID, topicID,
+			errors.New("relayer session response missing token"))
+	}
+	// The relayer's answer decides, not the device's request: a relayer that
+	// does not honor `persistent` returns an ordinary expiring session, and the
+	// device must deliver it as one rather than promise the browser a session
+	// that will quietly die.
+	session := minter.MintResult{
 		SessionID:      decoded.Session.ID,
 		Token:          decoded.Token,
-		ExpiresAt:      decoded.Session.ExpiresAt,
+		Persistent:     decoded.Session.Persistent,
 		RelayerBaseURL: c.baseURL,
-	}, nil
+	}
+	// The two session shapes stay separable end to end, and a reply that mixes
+	// them is malformed either way: an owner-kept session must carry no expiry
+	// at all — a present-but-zero `expiresAt` is a deadline the relayer failed
+	// to write, not a null one — and a timed session must carry a real expiry.
+	// Failing here sends the browser a retryable session-create rejection
+	// instead of a session whose deadline is invented, missing, or silently
+	// dropped. The relayer already committed the session, so it is revoked
+	// before the error returns: nothing the device refuses is left holding a
+	// slot in the topic's cap.
+	if session.Persistent {
+		// A relayer must not grant more than the device asked for. Only a
+		// persistent ASK may be answered with a kept session; anything else
+		// getting one back is a relayer bug or a swapped reply, and silently
+		// accepting it would pair a site forever that the owner never chose to
+		// keep. (The reverse — asking persistent and being handed a timed
+		// session — is the deliberate fallback above, not this case.)
+		if lifetime != lifetimePersistent {
+			return minter.MintResult{}, c.rejectAndRevoke(session.SessionID, topicID,
+				errors.New("relayer minted a persistent session for a request that did not ask to keep the site paired"))
+		}
+		if decoded.Session.ExpiresAt != nil {
+			return minter.MintResult{}, c.rejectAndRevoke(session.SessionID, topicID,
+				errors.New("relayer session response has an expiresAt for a persistent session"))
+		}
+		return session, nil
+	}
+	if decoded.Session.ExpiresAt == nil || decoded.Session.ExpiresAt.IsZero() {
+		return minter.MintResult{}, c.rejectAndRevoke(session.SessionID, topicID,
+			errors.New("relayer session response missing expiresAt for a non-persistent session"))
+	}
+	session.ExpiresAt = *decoded.Session.ExpiresAt
+	return session, nil
+}
+
+// rejectAndRevoke revokes a session the device is refusing and returns the
+// reason it refused it. A failed revoke is folded into the error rather than
+// hidden: the caller's session-create rejection is retryable either way, and
+// the leftover session is then visible in the app's paired-sites list.
+func (c *RelayerSessionCreator) rejectAndRevoke(sessionID string, topicID string, reason error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), sessionRevokeTimeout)
+	defer cancel()
+	if err := c.RevokeEphemeralSession(ctx, topicID, sessionID); err != nil {
+		return fmt.Errorf("%w (revoking the refused session failed: %w)", reason, err)
+	}
+	return reason
+}
+
+// ListEphemeralSessionIDs reads the ids of every session the relayer holds for
+// this topic. The list response is the app's paired-sites source, and it is
+// read here for the one job the device needs: knowing what to revoke. Both
+// wrapper shapes the relayer may return — an object with a sessions array, or
+// a bare array — decode, so a shape change on that side cannot silently leave
+// sessions behind.
+func (c *RelayerSessionCreator) ListEphemeralSessionIDs(ctx context.Context, topicID string) ([]string, error) {
+	if c.httpClient == nil {
+		return nil, errors.New("http client is required")
+	}
+	if strings.TrimSpace(c.baseURL) == "" {
+		return nil, errors.New("relayer base URL is required")
+	}
+	endpoint, err := url.Parse(c.baseURL + "/api/ephemeral-sessions")
+	if err != nil {
+		return nil, fmt.Errorf("parse relayer session list URL: %w", err)
+	}
+	q := endpoint.Query()
+	q.Set("topicID", topicID)
+	endpoint.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build relayer session list request: %w", err)
+	}
+	req.Header.Set("User-Agent", "feral-controld")
+	if apiKey := strings.TrimSpace(c.apiKey); apiKey != "" {
+		req.Header.Set("API-KEY", apiKey)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list relayer sessions: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("relayer session list failed with status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSessionListBytes))
+	if err != nil {
+		return nil, fmt.Errorf("read relayer session list: %w", err)
+	}
+
+	type sessionRecord struct {
+		ID string `json:"id"`
+	}
+	var wrapped struct {
+		Sessions []sessionRecord `json:"sessions"`
+	}
+	records := []sessionRecord(nil)
+	if err := c.json.Unmarshal(body, &wrapped); err == nil && wrapped.Sessions != nil {
+		records = wrapped.Sessions
+	} else if err := c.json.Unmarshal(body, &records); err != nil {
+		return nil, fmt.Errorf("decode relayer session list: %w", err)
+	}
+
+	ids := make([]string, 0, len(records))
+	for _, record := range records {
+		if id := strings.TrimSpace(record.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// RevokeEphemeralSession deletes one session on the relayer. A session the
+// relayer no longer has (404) is already in the state the caller wanted, so it
+// is not an error.
+func (c *RelayerSessionCreator) RevokeEphemeralSession(ctx context.Context, topicID string, sessionID string) error {
+	if c.httpClient == nil {
+		return errors.New("http client is required")
+	}
+	if strings.TrimSpace(c.baseURL) == "" {
+		return errors.New("relayer base URL is required")
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return errors.New("session id is required")
+	}
+	endpoint, err := url.Parse(c.baseURL + "/api/ephemeral-sessions/" + url.PathEscape(sessionID))
+	if err != nil {
+		return fmt.Errorf("parse relayer session revoke URL: %w", err)
+	}
+	q := endpoint.Query()
+	q.Set("topicID", topicID)
+	endpoint.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint.String(), nil)
+	if err != nil {
+		return fmt.Errorf("build relayer session revoke request: %w", err)
+	}
+	req.Header.Set("User-Agent", "feral-controld")
+	if apiKey := strings.TrimSpace(c.apiKey); apiKey != "" {
+		req.Header.Set("API-KEY", apiKey)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("delete relayer session: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("relayer session revoke failed with status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func effectiveSessionTTLSeconds(requested int) int {

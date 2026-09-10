@@ -78,6 +78,22 @@ func (mr *MockStateManagerMockRecorder) GetState() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetState", reflect.TypeOf((*MockStateManager)(nil).GetState))
 }
 
+// InvalidateRelayerTopic mocks base method.
+func (m *MockStateManager) InvalidateRelayerTopic() (string, bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "InvalidateRelayerTopic")
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(bool)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// InvalidateRelayerTopic indicates an expected call of InvalidateRelayerTopic.
+func (mr *MockStateManagerMockRecorder) InvalidateRelayerTopic() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InvalidateRelayerTopic", reflect.TypeOf((*MockStateManager)(nil).InvalidateRelayerTopic))
+}
+
 // Load mocks base method.
 func (m *MockStateManager) Load(arg0 *zap.Logger) (*state.State, error) {
 	m.ctrl.T.Helper()
