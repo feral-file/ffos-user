@@ -960,8 +960,12 @@ func initializeApp(
 	mintPairing := mintpairing.New(mintPairingOpts, relayer, cdp, httpClient, relayerAPIKey, json, logger)
 	// Factory reset ends the outgoing topic's browser sessions before it clears
 	// the claim: they live on the relayer, and an owner-kept one has no expiry
-	// to reclaim it.
-	devicectl.SetBrowserSessionCleanup(executor, mintPairing, logger)
+	// to reclaim it. Wired only when mint pairing is enabled — a device that
+	// cannot mint a session has none to clean up, and an unwired seam keeps
+	// the reset off the network entirely.
+	if mintPairingOpts.Enabled {
+		devicectl.SetBrowserSessionCleanup(executor, mintPairing, logger)
+	}
 
 	// Offline cache. Disabled by default (see config.OfflineCacheConfig's
 	// doc on why it defaults off) — offlineCache/kioskReplay/staticServer

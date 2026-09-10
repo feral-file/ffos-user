@@ -2159,7 +2159,7 @@ func TestWaitForInFlightCreates_ReturnsImmediatelyWhenNothingIsInFlight(t *testi
 func TestRevokeTopicSessions_RevokesEveryListedSession(t *testing.T) {
 	creator := &recordingSessionCreator{listIDs: []string{"session-1", "session-2"}}
 	s := newService(
-		Options{},
+		Options{Enabled: true},
 		nil,
 		creator,
 		nil,
@@ -2184,7 +2184,7 @@ func TestRevokeTopicSessions_KeepsGoingAfterAFailure(t *testing.T) {
 		revokeErr: errors.New("relayer unreachable"),
 	}
 	s := newService(
-		Options{},
+		Options{Enabled: true},
 		nil,
 		creator,
 		nil,
@@ -2200,10 +2200,30 @@ func TestRevokeTopicSessions_KeepsGoingAfterAFailure(t *testing.T) {
 	assert.Len(t, creator.revokes, 2, "one unreachable session must not strand the rest")
 }
 
-func TestRevokeTopicSessions_IsANoOpWithoutATopic(t *testing.T) {
+func TestRevokeTopicSessions_IsANoOpWhenMintPairingIsDisabled(t *testing.T) {
 	creator := &recordingSessionCreator{listIDs: []string{"session-1"}}
 	s := newService(
 		Options{},
+		nil,
+		creator,
+		nil,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	revoked, err := s.RevokeTopicSessions(context.Background(), "topic-1")
+
+	require.NoError(t, err)
+	assert.Zero(t, revoked)
+	assert.Empty(t, creator.revokes, "a device that never minted a session has nothing to sweep")
+	assert.Empty(t, creator.listIDsCalls, "and must not spend reset budget on a relayer round trip")
+}
+
+func TestRevokeTopicSessions_IsANoOpWithoutATopic(t *testing.T) {
+	creator := &recordingSessionCreator{listIDs: []string{"session-1"}}
+	s := newService(
+		Options{Enabled: true},
 		nil,
 		creator,
 		nil,
@@ -3022,6 +3042,133 @@ func TestWaitForBrowserAndApproval_DropsARequestArrivingAfterTheClaimIsGone(t *t
 // TestCloseActivePairing_EndsTheWorkerAndStopsLaterRequests: the reset closes
 // the pairing session it finds, and waits for the worker, so nothing is still
 // polling for the claim being wiped.
+// TestHandleStartPairingSession_ResetDuringTheBrokerCallLeavesNothingBehind:
+// a start that is still inside StartChannel has published nothing, so without
+// the in-progress slot a reset finds nothing to close — and the start it did
+// not see goes on to paint a QR code and register a worker for a claim that
+// is gone.
+func TestHandleStartPairingSession_ResetDuringTheBrokerCallLeavesNothingBehind(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	entered := make(chan struct{})
+	ch := &fakeBrokerChannel{pairingCode: "PAIR-123"}
+	starter := &fakeBrokerStarter{channel: ch, entered: entered, blockUntilCanceled: true}
+	cdpClient := &fakeCDP{}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		starter,
+		fakeSessionCreator{},
+		relayerClient,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	startResult := make(chan any, 1)
+	go func() {
+		result, err := s.HandleStartPairingSession(context.Background(), nil)
+		assert.NoError(t, err)
+		startResult <- result
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the broker call never started")
+	}
+
+	// The reset: it must SEE this start even though nothing is published.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	closed, err := s.CloseActivePairing(ctx)
+	require.NoError(t, err, "the start must unwind inside the reset's budget")
+	assert.True(t, closed, "a start in progress is something to close")
+
+	select {
+	case result := <-startResult:
+		assertCommandError(t, result, "broker_unavailable", true)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the canceled start never returned")
+	}
+
+	assert.Empty(t, cdpClient.displayRequestsSnapshot(), "a canceled start paints nothing")
+	s.mu.Lock()
+	active := s.active
+	starting := s.starting
+	s.mu.Unlock()
+	assert.Nil(t, active, "no worker may be registered for a claim being wiped")
+	assert.Nil(t, starting, "the in-progress slot is released")
+}
+
+// TestHandleStartPairingSession_DropsAChannelWhoseClaimMovedWhileStarting: the
+// broker call can succeed just as the claim goes. The channel is closed and
+// the start abandoned before anything is displayed or published.
+func TestHandleStartPairingSession_DropsAChannelWhoseClaimMovedWhileStarting(t *testing.T) {
+	defer state.ResetForTesting()
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+
+	ch := &fakeBrokerChannel{pairingCode: "PAIR-123", closed: make(chan struct{}, 1)}
+	starter := &fakeBrokerStarter{channel: ch}
+	// The claim is wiped while the broker call is in flight.
+	starter.beforeReturn = func() {
+		if _, _, err := state.InvalidateRelayerTopic(); err != nil {
+			t.Logf("InvalidateRelayerTopic save failed as expected in tests: %v", err)
+		}
+	}
+	cdpClient := &fakeCDP{}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		starter,
+		fakeSessionCreator{},
+		relayerClient,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertCommandError(t, result, "topic_changed", true)
+
+	select {
+	case <-ch.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the channel that outlived its claim was never closed")
+	}
+
+	assert.Empty(t, cdpClient.displayRequestsSnapshot(), "nothing is painted for a wiped claim")
+	s.mu.Lock()
+	active := s.active
+	s.mu.Unlock()
+	assert.Nil(t, active, "no worker is registered")
+	select {
+	case sent := <-relayerClient.sent:
+		t.Fatalf("nothing may be notified for a wiped claim: %v", sent)
+	default:
+	}
+}
+
 func TestCloseActivePairing_EndsTheWorkerAndStopsLaterRequests(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -3293,9 +3440,33 @@ type fakeBrokerStarter struct {
 	err             error
 	receivedOptions minter.StartChannelOptions
 	startCount      int
+	// entered is closed when StartChannel is entered; blockUntilCanceled
+	// makes it hang there until its context is canceled; beforeReturn runs
+	// just before a channel is handed back.
+	entered            chan struct{}
+	blockUntilCanceled bool
+	beforeReturn       func()
 }
 
-func (f *fakeBrokerStarter) StartChannel(_ context.Context, opts minter.StartChannelOptions) (brokerChannel, error) {
+func (f *fakeBrokerStarter) StartChannel(ctx context.Context, opts minter.StartChannelOptions) (brokerChannel, error) {
+	// The hooks run OUTSIDE the lock: they model the broker call being slow,
+	// and a test watching startCount must not be blocked by them.
+	f.mu.Lock()
+	entered := f.entered
+	blockUntilCanceled := f.blockUntilCanceled
+	beforeReturn := f.beforeReturn
+	f.mu.Unlock()
+	if entered != nil {
+		closeOnce(entered)
+	}
+	if blockUntilCanceled {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if beforeReturn != nil {
+		beforeReturn()
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.receivedOptions = opts
@@ -3468,17 +3639,19 @@ func (f *fakeBrokerChannel) resolvedChannelID() string {
 }
 
 type recordingSessionCreator struct {
-	calls      int
-	lifetimes  []sessionLifetime
-	persistent bool
-	onCreate   func()
-	revokes    []revokedSession
-	revokeErr  error
-	listIDs    []string
-	listErr    error
+	calls        int
+	lifetimes    []sessionLifetime
+	persistent   bool
+	onCreate     func()
+	revokes      []revokedSession
+	revokeErr    error
+	listIDs      []string
+	listErr      error
+	listIDsCalls []string
 }
 
-func (r *recordingSessionCreator) ListEphemeralSessionIDs(_ context.Context, _ string) ([]string, error) {
+func (r *recordingSessionCreator) ListEphemeralSessionIDs(_ context.Context, topicID string) ([]string, error) {
+	r.listIDsCalls = append(r.listIDsCalls, topicID)
 	return r.listIDs, r.listErr
 }
 

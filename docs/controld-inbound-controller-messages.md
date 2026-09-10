@@ -1528,7 +1528,8 @@ already listed the topic, and that session would survive the wipe. The sweep is
 bounded and best effort — a reset completes even if `ff-relayer` is unreachable,
 and what could not be revoked is logged at error level, because a session that
 survives is a live session against a device its previous owner no longer
-holds.
+holds. A device with mint pairing disabled has no sessions to end, so the whole
+cleanup is skipped rather than spending the budget on a relayer round trip.
 
 Implementation note: `feral-controld` embeds the temporary Go minter client from
 `ff-art-computer-handoff` for Mint Pairing Broker channels, encrypted browser

@@ -174,6 +174,12 @@ type service struct {
 	pending           map[string]*pendingApproval
 	doneMap           map[string]completedApproval
 
+	// starting is a pairing start whose broker call is in flight and whose
+	// session has not been published yet. Without it a reset landing in that
+	// window finds nothing to close, and the start it did not see goes on to
+	// paint a QR code and register a worker for a claim that is gone.
+	starting *startingPairing
+
 	// creates counts session creations in flight at the relayer. See
 	// createGate and WaitForInFlightCreates.
 	creates *createGate
@@ -363,6 +369,14 @@ func (b realBrokerStarter) StartChannel(ctx context.Context, opts minter.StartCh
 		return nil, err
 	}
 	return brokerChannelAdapter{channel: channel}, nil
+}
+
+// startingPairing is the cancellable in-progress state of one pairing start:
+// the broker call can be canceled through cancel, and done reports when the
+// start has finished either way.
+type startingPairing struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 type pendingApproval struct {
@@ -667,7 +681,16 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 		zap.Duration("idleTTL", s.opts.IdleTTL),
 		zap.Bool("shortCodeRequested", true),
 	)
-	channel, err := s.broker.StartChannel(displayCtx, minter.StartChannelOptions{
+	// The broker call is the window a reset cannot otherwise see: nothing is
+	// published yet, so there is no active session to close. Register the
+	// start as cancellable in-progress state first.
+	startCtx, cancelStart := context.WithCancel(displayCtx)
+	defer cancelStart()
+	starting := &startingPairing{cancel: cancelStart, done: make(chan struct{})}
+	s.registerStarting(starting)
+	defer s.finishStarting(starting)
+
+	channel, err := s.broker.StartChannel(startCtx, minter.StartChannelOptions{
 		BrokerBaseURL:      s.opts.BrokerBaseURL,
 		IdleTTL:            s.opts.IdleTTL,
 		ShortCodeRequested: true,
@@ -675,6 +698,18 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	if err != nil {
 		s.logger.Warn("Failed to start mint pairing broker channel", zap.Error(err))
 		return commandError("broker_unavailable", "failed to start mint pairing broker channel", true), nil
+	}
+
+	// A channel can come back after the claim it was started for is gone — a
+	// reset that landed mid-call, or a re-claim. Close it before anything is
+	// painted or published: an overlay and a registered worker are exactly
+	// what the reset was tearing down.
+	if !startGuard.sameAs(currentTopicGuard()) {
+		s.closeChannel(channel)
+		s.logger.Warn("Dropping a mint pairing channel that outlived its claim",
+			zap.String("channelID", channel.PairingDisplay().ChannelID),
+			zap.String("startedForTopicID", startGuard.topicID))
+		return commandError("topic_changed", "the relayer topic changed while the pairing session was starting", true), nil
 	}
 
 	display := channel.PairingDisplay()
@@ -1227,9 +1262,24 @@ func (s *service) CloseActivePairing(ctx context.Context) (bool, error) {
 	if s == nil {
 		return false, nil
 	}
+	// A start still inside its broker call has published nothing to close, so
+	// it is canceled and awaited on its own: its channel is dropped by the
+	// guard re-check that follows the call.
+	starting := s.cancelStartingPairing()
 	active := s.cancelActivePairing()
-	if active == nil {
+	if starting == nil && active == nil {
 		return false, nil
+	}
+	if starting != nil {
+		s.logger.Info("Canceling a mint pairing start in progress: the claim it belongs to is gone")
+		select {
+		case <-starting.done:
+		case <-ctx.Done():
+			return true, ctx.Err()
+		}
+	}
+	if active == nil {
+		return true, nil
 	}
 	s.logger.Info("Closing active mint pairing session: the claim it belongs to is gone",
 		pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
@@ -1260,6 +1310,13 @@ func (s *service) WaitForInFlightCreates(ctx context.Context) (int, error) {
 // joined failures.
 func (s *service) RevokeTopicSessions(ctx context.Context, topicID string) (int, error) {
 	if s == nil || s.sessionCreator == nil {
+		return 0, nil
+	}
+	// A device with mint pairing off has never minted a session, so there is
+	// nothing to list. The wiring skips this seam entirely on such a device;
+	// this is the backstop that keeps a stray call from spending a factory
+	// reset's budget on a relayer round trip.
+	if !s.opts.Enabled {
 		return 0, nil
 	}
 	if strings.TrimSpace(topicID) == "" {
@@ -1440,6 +1497,38 @@ func (s *service) currentActive() (*activePairing, activePairingPhase, string) {
 		return nil, "", ""
 	}
 	return s.active, s.active.phase, s.active.browserName
+}
+
+func (s *service) registerStarting(starting *startingPairing) {
+	s.mu.Lock()
+	s.starting = starting
+	s.mu.Unlock()
+}
+
+// finishStarting clears the slot (if this start still owns it) and releases
+// anyone waiting on it. Called exactly once per start, on every exit path.
+func (s *service) finishStarting(starting *startingPairing) {
+	s.mu.Lock()
+	if s.starting == starting {
+		s.starting = nil
+	}
+	s.mu.Unlock()
+	close(starting.done)
+}
+
+// cancelStartingPairing cancels a start whose broker call is still in flight
+// and hands it back so the caller can wait for it to unwind.
+func (s *service) cancelStartingPairing() *startingPairing {
+	s.mu.Lock()
+	starting := s.starting
+	if starting != nil {
+		s.starting = nil
+	}
+	s.mu.Unlock()
+	if starting != nil {
+		starting.cancel()
+	}
+	return starting
 }
 
 func (s *service) cancelActivePairing() *activePairing {
