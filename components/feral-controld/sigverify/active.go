@@ -133,8 +133,10 @@ func (a *Active) SetPendingUnverified() {
 //     current keeps the old document's verdict but becomes id-only. A reply
 //     naming the old id is a hit while it still shows and one naming the new
 //     id is a miss; a URL-only reply — which cannot say which document it
-//     describes — is a miss too, until a force cast or cutover sets a fresh
-//     slot.
+//     describes — is a miss too. Id-only is sticky: later soft refreshes
+//     leave the slot untouched, however their verdicts compare, because the
+//     ambiguity they would resolve against is still on screen. Only Set
+//     (force cast, cutover promotion) or a clear ends it.
 //   - identity cannot separate them (URL-only, or same id) and the verdict
 //     changed: current is cleared. Nothing may attest a status that is true
 //     of only one of two documents the poller cannot tell apart.
@@ -146,6 +148,12 @@ func (a *Active) ReconcileSoft(id, url string, status Status) {
 	if !a.current.set {
 		// Nothing was attested; a soft refresh cannot establish a first
 		// attestation either (the old, unattested document may still show).
+		return
+	}
+	if a.current.idOnly {
+		// Already unresolved: two documents with different verdicts may be
+		// on screen, and another acceptance does not say which. Only a
+		// force cast, a cutover, or player-owned replacement resolves it.
 		return
 	}
 	if a.current.status == status {

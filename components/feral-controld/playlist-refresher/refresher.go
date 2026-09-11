@@ -621,6 +621,19 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			default:
 				r.activeVerdict.ReconcileSoft(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
 			}
+			// The scheduler's cache now holds THIS document (Commit below),
+			// so every later cutover pushes its cohorts: restage pending to
+			// match, or a cutover would promote whatever an earlier
+			// deferred cast parked. Set above already dropped pending; the
+			// soft path did not. Skipped when the send failed: the snapshot
+			// is restored below and the prior pending stays true.
+			if schedulerMutated && r.scheduler.HasCache() {
+				if refreshVerdict != nil {
+					r.activeVerdict.SetPending(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
+				} else {
+					r.activeVerdict.SetPendingUnverified()
+				}
+			}
 		}
 		if schedulerMutated && sendErr != nil {
 			r.scheduler.Restore(schedulerSnapshot)

@@ -104,6 +104,30 @@ func TestActive_ReconcileSoft_DifferingIDsBecomeIDOnly(t *testing.T) {
 	assert.Equal(t, sigverify.StatusUnsigned, st)
 }
 
+// TestActive_ReconcileSoft_IDOnlyIsSticky: once the slot is id-only, a later
+// soft refresh — even one whose verdict equals the stored one — must not
+// restore the URL fallback: the differing-verdict document may still show.
+func TestActive_ReconcileSoft_IDOnlyIsSticky(t *testing.T) {
+	var a sigverify.Active
+	url := "https://example.com/p.json"
+	a.Set("A", url, sigverify.StatusValid)
+	a.ReconcileSoft("B", url, sigverify.StatusInvalid) // A→B, verdict changed: id-only
+	a.ReconcileSoft("C", url, sigverify.StatusValid)   // B→C accepted, B may still show
+
+	_, ok := a.Lookup("", url)
+	assert.False(t, ok, "URL-only reply while B may show: attest nothing")
+	_, ok = a.Lookup("C", url)
+	assert.False(t, ok)
+	st, ok := a.Lookup("A", url)
+	assert.True(t, ok, "a reply naming A is still A")
+	assert.Equal(t, sigverify.StatusValid, st)
+
+	a.Set("C", url, sigverify.StatusValid) // a force cast resolves it
+	st, ok = a.Lookup("", url)
+	assert.True(t, ok)
+	assert.Equal(t, sigverify.StatusValid, st)
+}
+
 // TestActive_ClearCurrentKeepsPending: player-owned replacement (reconnect,
 // default playback) drops what controld attested but not the schedule's
 // parked verdict, which the reconnect re-push promotes again.

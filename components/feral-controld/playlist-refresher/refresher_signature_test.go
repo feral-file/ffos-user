@@ -177,6 +177,16 @@ func TestRefresher_CachedFallback_ClearsSlot(t *testing.T) {
 // push observer performs (pinned separately in playlistschedule's tests).
 func futureOnlyRefresher(t *testing.T, ts *testSetup, offlineCache *mocks.MockOfflineCacheService) (refresher.Refresher, *sigverify.Active) {
 	t.Helper()
+	r, active := scheduledRefresher(t, ts, offlineCache)
+	// A future-only schedule is never sent by the refresher itself.
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Times(0)
+	return r, active
+}
+
+// scheduledRefresher is futureOnlyRefresher without the no-send expectation,
+// for schedules whose active cohort is non-empty and therefore pushed.
+func scheduledRefresher(t *testing.T, ts *testSetup, offlineCache *mocks.MockOfflineCacheService) (refresher.Refresher, *sigverify.Active) {
+	t.Helper()
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	setupBackgroundMocks(ts)
 	ts.mockClock.EXPECT().Now().Return(time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)).AnyTimes()
@@ -193,9 +203,61 @@ func futureOnlyRefresher(t *testing.T, ts *testSetup, offlineCache *mocks.MockOf
 	active := &sigverify.Active{}
 	refresher.SetSignatureVerification(r, active, logger)
 	sched.SetPushObserver(active.Promote)
-	// A future-only schedule is never sent by the refresher itself.
-	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Times(0)
 	return r, active
+}
+
+// TestRefresher_ActiveCohortRefresh_RestagesPending: a scheduled V2 whose
+// active cohort is non-empty is pushed (soft) AND replaces the schedule; the
+// pending slot must follow the schedule, or V2's next cutover would promote
+// the verdict a deferred V1 parked earlier.
+func TestRefresher_ActiveCohortRefresh_RestagesPending(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	r, active := scheduledRefresher(t, ts, nil)
+
+	playlistURL := "http://example.com/daily.json"
+	active.Set("showing", playlistURL, sigverify.StatusValid)
+	active.SetPending("v1", playlistURL, sigverify.StatusValid)
+	today, tomorrow := "2026-07-22T00:00:00Z", "2026-07-23T00:00:00Z"
+	v2 := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID: "v2",
+		Items: []dp1playlist.PlaylistItem{
+			{ID: "today", Source: "https://example.com/today", DisplayAt: &today},
+			{ID: "tomorrow", Source: "https://example.com/tomorrow", DisplayAt: &tomorrow},
+		},
+	}}
+	unsigned := sigverify.Verify([]byte(`{"dpVersion":"1.1.0","title":"v2","items":[]}`))
+	v2.Verification = &unsigned
+
+	sent := make(chan struct{}, 1)
+	ts.mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ts.ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(v2, nil).AnyTimes()
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(string, map[string]any) (any, error) {
+		select {
+		case sent <- struct{}{}:
+		default:
+		}
+		return playerOKResponse(), nil
+	}).AnyTimes()
+
+	r.Start()
+	select {
+	case <-sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresher never pushed the active cohort")
+	}
+	time.Sleep(200 * time.Millisecond)
+	r.Stop()
+
+	active.Promote() // the next cutover of V2's schedule
+	st, ok := active.Lookup("v2", "")
+	assert.True(t, ok, "the cutover promotes the document the schedule holds")
+	assert.Equal(t, sigverify.StatusUnsigned, st)
+	_, ok = active.Lookup("v1", "")
+	assert.False(t, ok, "the earlier deferred verdict must not survive the replacement")
 }
 
 func deferredSchedulePlaylist(id string) *dp1.Playlist {
