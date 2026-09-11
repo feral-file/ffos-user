@@ -93,6 +93,7 @@ const (
 	ReasonSignatureInvalid    = "signature invalid"
 	ReasonMalformed           = "malformed signature"
 	ReasonTooManySignatures   = "too many signatures"
+	ReasonDocumentTooLarge    = "document too large"
 	// ReasonUnverified marks an in-bounds entry that was never checked
 	// because a sibling entry tripped a bound and the document was refused
 	// before any cryptography ran.
@@ -113,6 +114,13 @@ const (
 	MaxRoleLen = 32
 	MaxKidLen  = 256
 )
+
+// MaxDocumentBytes bounds the document Verify will canonicalize at all.
+// Every ingress already caps its document at 4 MiB (hub body limit, dp1
+// fetch limit, relayer frame limit), so an honest document never trips it;
+// it exists so that this package's own cost bound does not depend on every
+// caller remembering theirs. Over the cap: invalid, no cryptography.
+const MaxDocumentBytes = 4 << 20
 
 // MaxSignatures bounds how many signatures[] entries Verify will even hand
 // to dp1-go. Every entry costs two JCS canonicalizations of the WHOLE
@@ -145,6 +153,9 @@ type signatureEnvelope struct {
 // typed struct that may have discarded unknown keys (see commandrouter's
 // dp1_call branch), and must verify BEFORE dynamic hydration rewrites items.
 func Verify(raw []byte) Verdict {
+	if len(raw) > MaxDocumentBytes {
+		return Verdict{Status: StatusInvalid, Reason: ReasonDocumentTooLarge}
+	}
 	var env signatureEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		// Not a JSON object at all. Reported as invalid rather than unsigned

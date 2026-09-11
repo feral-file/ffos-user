@@ -130,6 +130,30 @@ func TestPollPlayerStatus_NoLookupWired_OmitsSignatureStatus(t *testing.T) {
 	}
 }
 
+// TestPollPlayerStatus_DropsPlayerSuppliedSignatureStatus: the field is
+// controld-owned. A value the player put in its reply must not survive, on a
+// lookup miss or when no lookup is wired.
+func TestPollPlayerStatus_DropsPlayerSuppliedSignatureStatus(t *testing.T) {
+	for _, wired := range []bool{false, true} {
+		ws := &fakeWS{}
+		p := signatureTestPoller(map[string]any{
+			"ok":              true,
+			"index":           0,
+			"signatureStatus": "valid",
+			"playlist":        map[string]any{"id": "spoofed", "items": []any{}},
+		}, ws)
+		if wired {
+			p.SetVerificationLookup(func(string, string) (string, bool) { return "", false })
+		}
+
+		p.pollPlayerStatus(context.Background())
+
+		if got := sentPlayerStatus(t, ws); got.SignatureStatus != nil {
+			t.Fatalf("wired=%v: player-supplied signatureStatus leaked: %q", wired, *got.SignatureStatus)
+		}
+	}
+}
+
 // TestPollPlayerStatus_SignatureStatusDoesNotDefeatDedupe: a stable verdict
 // on an unchanged reply must hash identically, so the second poll sends
 // nothing — the annotation must never turn every poll into a notification.

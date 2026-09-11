@@ -2130,7 +2130,7 @@ identical cache state.
 |---|---|
 | §5 `repro` block | `assetsSHA256` is the optional, publisher-supplied completeness/verification signal; not consulted automatically today, but a future coverage cross-check could use it |
 | §8 Transport Profile | Confirms `file://`/offline transport is in-scope for DP-1 generally |
-| §7.1 Signing | `source` is never rewritten in `ItemRecord.Item` or the stored playlist document; replay interception keys on the original URL. Signatures verify against a JCS-canonicalized form (`dp1-go`'s `sign` package), not raw bytes, so re-serializing the resolved playlist through `dp1.DP1` (§5) does not affect signature validity even though it is not byte-identical to the original wire document |
+| §7.1 Signing | `source` is never rewritten in `ItemRecord.Item` or the stored playlist document; replay interception keys on the original URL. Signatures verify against a JCS-canonicalized form (`dp1-go`'s `sign` package), not raw bytes, so a re-serialization that preserves every signed field verifies identically even though it is not byte-identical — but the resolved playlist re-serialized through `dp1.DP1` (§5) does NOT qualify: dynamic hydration rewrites `items`, and the typed struct drops any field the pinned `dp1-go` does not model (see §6's JCS note). The cached hydrated copy is therefore never re-verified and carries no verdict; `feral-controld` verifies only the fetched or inline bytes before resolution (feral-file/ffos-user#307) |
 
 ## 8. Known limitations
 

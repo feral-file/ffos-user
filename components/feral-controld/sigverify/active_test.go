@@ -83,7 +83,7 @@ func TestActive_SetReplacesPreviousSlot(t *testing.T) {
 // after accepting a refresh:true push, so the slot must stay honest across
 // both phases (feral-file/ffos-user#339 review).
 
-func TestActive_ReconcileSoft_DifferingIDsLeaveCurrent(t *testing.T) {
+func TestActive_ReconcileSoft_DifferingIDsBecomeIDOnly(t *testing.T) {
 	var a sigverify.Active
 	url := "https://example.com/p.json"
 	a.Set("old", url, sigverify.StatusValid)
@@ -95,6 +95,31 @@ func TestActive_ReconcileSoft_DifferingIDsLeaveCurrent(t *testing.T) {
 	assert.Equal(t, sigverify.StatusValid, st)
 	_, ok = a.Lookup("new", url)
 	assert.False(t, ok, "once the new document shows, nothing attests for it")
+	_, ok = a.Lookup("", url)
+	assert.False(t, ok, "a URL-only reply cannot say which document it describes")
+
+	a.Set("fresh", url, sigverify.StatusUnsigned)
+	st, ok = a.Lookup("", url)
+	assert.True(t, ok, "a fresh cast restores the URL fallback")
+	assert.Equal(t, sigverify.StatusUnsigned, st)
+}
+
+// TestActive_ClearCurrentKeepsPending: player-owned replacement (reconnect,
+// default playback) drops what controld attested but not the schedule's
+// parked verdict, which the reconnect re-push promotes again.
+func TestActive_ClearCurrentKeepsPending(t *testing.T) {
+	var a sigverify.Active
+	a.Set("cur", "", sigverify.StatusValid)
+	a.SetPending("next", "", sigverify.StatusInvalid)
+
+	a.ClearCurrent()
+
+	_, ok := a.Lookup("cur", "")
+	assert.False(t, ok)
+	a.Promote()
+	st, ok := a.Lookup("next", "")
+	assert.True(t, ok)
+	assert.Equal(t, sigverify.StatusInvalid, st)
 }
 
 func TestActive_ReconcileSoft_SameStatusRefreshesIdentity(t *testing.T) {

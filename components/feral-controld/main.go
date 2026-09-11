@@ -758,6 +758,18 @@ func playlistRecomputeReconciler(scheduler playlistschedule.Scheduler) func(cont
 	}
 }
 
+// signatureVerdictResetReconciler drops the attested signature verdict when
+// the player (re)loads: it is showing its own default content, which controld
+// never verified (feral-file/ffos-user#307). Pending (a parked schedule
+// verdict) is kept — playlist-recompute re-pushes the schedule right after
+// this and its promotion restores the annotation, which is why this
+// reconciler must stay registered BEFORE playlist-recompute.
+func signatureVerdictResetReconciler(active *sigverify.Active) func(context.Context) {
+	return func(context.Context) {
+		active.ClearCurrent()
+	}
+}
+
 func statusForceRefreshReconciler(poller status.Poller) func(context.Context) {
 	return func(context.Context) {
 		poller.ForceRefresh()
@@ -1202,6 +1214,13 @@ func initializeApp(
 	// resync, boot-recovery retry, connectivity — replacing the five ad-hoc
 	// CDP-reconnect spawns run() used to do inline.
 	session.RegisterReconciler("sleep-invalidate", sleepInvalidateReconciler(executor, logger))
+	// A (re)loaded player shows its own default content, which controld
+	// never verified: drop the attested verdict. Registered BEFORE
+	// playlist-recompute on purpose — that reconciler's re-push promotes the
+	// schedule's parked verdict again, and it must not be wiped afterwards.
+	if sigVerifyEnabled {
+		session.RegisterReconciler("signature-verdict-reset", signatureVerdictResetReconciler(activeVerdict))
+	}
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))
 	}

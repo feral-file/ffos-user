@@ -752,6 +752,18 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
+		// clearVerdictForDefaultPlayback: an accepted displayDefaultPlaylist
+		// puts player-owned content on screen that controld never verified —
+		// or, with onlyIfNoPlaylist, may no-op. Either way controld can no
+		// longer vouch for what is showing, so current is cleared (omission,
+		// never a stale claim). Pending is kept: this command does not clear
+		// scheduler authority (see the case comment below).
+		clearVerdictForDefaultPlayback := func() {
+			if h.activeVerdict != nil && commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+				h.activeVerdict.ClearCurrent()
+			}
+		}
+
 		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the
 		// scheduler push lock with RecomputeNow so a stale timed push cannot land
 		// after a newer cast or OOM-recovery fallback.
@@ -824,6 +836,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
 			h.scheduler.WithPlayerPush(func() {
 				result, err = h.sendCDPRequest(command)
+				if err == nil && playerresponse.OK(result) {
+					clearVerdictForDefaultPlayback()
+				}
 			})
 		default:
 			if commandType == commands.CMD_DISPLAY_PLAYLIST {
@@ -843,6 +858,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// No scheduler ⇒ no push lock to be inside of; publishing
 				// right after the send is the tightest ordering available.
 				publishVerdict(false)
+				clearVerdictForDefaultPlayback()
 			}
 		}
 		if err != nil {

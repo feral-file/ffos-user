@@ -231,6 +231,31 @@ func TestCommandHandler_Process_DisplayPlaylist_LogsBoundedPlaylistID(t *testing
 	assert.LessOrEqual(t, len(logged.(string)), logger.MAX_FIELD_LENGTH)
 }
 
+// TestCommandHandler_Process_DisplayDefaultPlaylist_ClearsCurrentKeepsPending:
+// accepted default playback shows player-owned content controld never
+// verified, so the attested verdict is dropped; the schedule's parked verdict
+// survives because this command does not clear scheduler authority.
+func TestCommandHandler_Process_DisplayDefaultPlaylist_ClearsCurrentKeepsPending(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	active := wireVerification(ts)
+	active.Set("showing", "https://feed.example/p.json", sigverify.StatusValid)
+	active.SetPending("scheduled", "", sigverify.StatusInvalid)
+
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	_, err := ts.handler.Process(ts.ctx, commands.Command{Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST, Arguments: map[string]any{}})
+
+	require.NoError(t, err)
+	_, found := active.Lookup("showing", "https://feed.example/p.json")
+	assert.False(t, found, "default playback replaced the attested document")
+	active.Promote()
+	st, found := active.Lookup("scheduled", "")
+	assert.True(t, found, "the parked schedule verdict must survive")
+	assert.Equal(t, sigverify.StatusInvalid, st)
+}
+
 // TestCommandHandler_Process_DisplayPlaylist_NotWired_ReplyUntouched: without
 // SetSignatureVerification the reply is byte-for-byte the player's own, which
 // is the shape old firmware has and what a disabled config must produce.

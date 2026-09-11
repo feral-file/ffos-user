@@ -355,6 +355,21 @@ func TestVerify_OversizedEntry_RefusedBeforeCrypto(t *testing.T) {
 	assert.Equal(t, "agent signature invalid: malformed signature", v.Reason)
 }
 
+// TestVerify_DocumentOverCap_RefusedWithoutCrypto: the verifier's own size
+// bound, independent of the ingress caps that should already have refused
+// such a document.
+func TestVerify_DocumentOverCap_RefusedWithoutCrypto(t *testing.T) {
+	doc := unsignedDoc()
+	signWith(t, doc, newKey(t), dp1playlist.RoleFeed)
+	doc["summary"] = strings.Repeat("s", sigverify.MaxDocumentBytes)
+
+	v := sigverify.Verify(mustJSON(t, doc))
+
+	assert.Equal(t, sigverify.StatusInvalid, v.Status)
+	assert.Equal(t, sigverify.ReasonDocumentTooLarge, v.Reason)
+	assert.Nil(t, v.Signers)
+}
+
 func TestVerify_ReindentedDocument_StillValid(t *testing.T) {
 	var m map[string]any
 	require.NoError(t, json.Unmarshal(loadFeedFixture(t), &m))

@@ -389,6 +389,10 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 // deliberately silent: reporting a verdict for a playlist controld did not
 // verify would be worse than reporting none.
 func (s *poller) annotateSignatureStatus(playerStatus *PlayerStatus) {
+	// The reply was decoded straight into PlayerStatus, so a player (or a
+	// spoofed reply) could have supplied this field. It is controld-owned:
+	// drop whatever arrived and set it only from the lookup below.
+	playerStatus.SignatureStatus = nil
 	if s.verificationLookup == nil {
 		return
 	}

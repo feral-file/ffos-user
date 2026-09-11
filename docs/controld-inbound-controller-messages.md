@@ -476,9 +476,9 @@ bytes and the inline path verifies the re-marshaled `dp1_call` map (never
 the typed struct, which drops fields the signer covered). The offline
 cached-copy fallback carries NO verdict — the stored body is a typed,
 hydrated re-marshal, not the signed bytes — so a cast served from it omits
-the fields below. Bounds, all aimed at the unauthenticated LAN hub: a URL
-document larger than 4 MiB (the hub's own body limit) is refused before
-decoding; at most 16 `signatures[]` entries are verified and a document
+the fields below. Bounds, all aimed at untrusted ingress: a document larger than 4 MiB is
+refused before decoding on every path (hub body limit, relayer frame limit,
+URL fetch limit, and the verifier's own cap); at most 16 `signatures[]` entries are verified and a document
 with more is `invalid` (`too many signatures`) without any cryptography
 running; an entry whose `alg`, `role`, or `kid` exceeds 32/32/256 bytes makes the
 document `invalid` before any cryptography runs: that entry is reported as
