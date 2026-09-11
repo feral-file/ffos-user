@@ -848,6 +848,11 @@ func (h *handler) sendCDPRequest(command commands.Command) (interface{}, error) 
 			zap.Uint64("generation_before", genBefore), zap.Uint64("generation_after", genAfter))
 		return nil, fmt.Errorf("command reply raced a page navigation (generation changed from %d to %d); retry: %w", genBefore, genAfter, ErrGenerationRace)
 	}
+	// Direct status requests bypass the lightweight notification mapper. Apply
+	// the same showing-key privacy boundary before either hub or relayer egress.
+	if command.Type == "checkStatus" {
+		playerresponse.SanitizeShowingKey(result)
+	}
 
 	return result, nil
 }

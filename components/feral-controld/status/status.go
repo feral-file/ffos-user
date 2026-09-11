@@ -19,6 +19,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/drm"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
@@ -45,8 +46,16 @@ type PlayerStatus struct {
 	Ok             bool                        `json:"ok,omitempty"`
 	Error          *string                     `json:"error,omitempty"`
 	DeviceSettings *struct {
-		Scaling     *string `json:"scaling,omitempty"`
-		Orientation *string `json:"orientation,omitempty"`
+		// Composition is the player's committed showing after DP-1 merging
+		// and ephemeral Control Center writes, not persisted machine defaults.
+		// Keep margin's DP-1 number (pixels) or string (CSS) representation.
+		// ShowingKey is a random player-generated UUID, never a source URL.
+		ShowingKey          *string         `json:"showingKey,omitempty"`
+		CompositionRevision *uint64         `json:"compositionRevision,omitempty"`
+		Margin              json.RawMessage `json:"margin,omitempty"`
+		Background          *string         `json:"background,omitempty"`
+		Scaling             *string         `json:"scaling,omitempty"`
+		Orientation         *string         `json:"orientation,omitempty"`
 		// Device-level default playlist item duration in seconds, set via the
 		// updateDefaultDuration cast command. Absent means "auto" (no
 		// override). Must round-trip here or this typed re-marshal drops it
@@ -521,6 +530,13 @@ func (s *poller) lightweightPlayerStatus(playerStatus *PlayerStatus) *PlayerStat
 
 	playerStatus.Items = &items
 	playerStatus.Playlist = &dp1.Playlist{}
+	// An independently updated daemon may still hear the older source-bearing
+	// showing key. Only canonical UUIDs may cross either notification channel.
+	if settings := playerStatus.DeviceSettings; settings != nil && settings.ShowingKey != nil {
+		if !playerresponse.IsCanonicalShowingKey(*settings.ShowingKey) {
+			settings.ShowingKey = nil
+		}
+	}
 	// Stamp is the playersession generation carrier (§2.1 source 3), an
 	// internal implementation detail of this daemon — it must not leak onto
 	// the relayer-facing player_status payload.

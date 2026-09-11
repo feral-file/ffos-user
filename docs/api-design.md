@@ -179,6 +179,13 @@ All messages are JSON. The message envelope is:
   contract and on-disk design.
 - Otherwise → route to Chromium via CDP (`Runtime.evaluate`).
 
+On `checkStatus` replies, the command router removes noncanonical
+`deviceSettings.showingKey` values before both LAN and relayer responses.
+This shares the UUID rule used by `player_status` notifications: older player
+identities may contain signed source URLs. Other direct-response fields and
+the player's envelope remain intact; the reply is not projected through the
+lightweight notification schema.
+
 **Device-control relayer commands**
 
 The following command names are routed to `devicectl` and use the standard relayer/hub envelope (`command` plus `request`):
@@ -219,6 +226,7 @@ The `mintPairingApprovalDecision` command is a controller-to-controld approval r
 **Outbound notifications (`feral-controld`):** The device periodically pushes status notifications over the relayer WebSocket and local hub clients with an envelope that includes `notification_type` and a structured `message`. Mint-pairing approval notifications are relayer-only because the controller/mobile approval UI is reached through the relayer topic, not through the trusted-local hub socket. At minimum:
 
 - `player_status` — playback/UI state from Chromium via CDP `checkStatus` (cast command, playlist, pause, etc.). This is not a substitute for hardware or OS-level facts. It now includes a numeric `renderStatus` beside `index` so consumers can branch on stable render outcome codes: `0` pending, `1` loading, `2` ready, `3` failed. `renderStatus` is the authoritative artwork render outcome and should be forwarded unchanged by controller relays and notifications.
+  Current composition fields and their typed relay contract: [player composition status](player-composition-status.md).
 - `device_status` — device-oriented fields assembled by `status.DeviceStatus.GetStatus` (screen rotation, Wi‑Fi name, installed/latest version, volume, feature toggles, MAC info, best-effort `displayURL`, optional `sleepSchedule`, the always-present `deviceName` (empty when unnamed; see the device-name contract above), and the optional additive `lastOutage` summary `{start, end, class, count24h}` from the netlog flight recorder — attached inside `GetStatus` so the pushed feed and the pulled `getDeviceStatus` reply carry the same object; omitted until an outage has closed since process start, not persisted across restarts). The `displayURL` field is the top-level URL of the sole Chromium **page** debug target (DevTools `/json`), when exactly one such target exists; it is omitted when the URL cannot be resolved. Consumers that previously read a Chrome document URL from player payloads should use `device_status.message.displayURL` instead. When present, `sleepSchedule` follows the same **sleep vs. DDC** eventual-consistency rules as the `setSleepSchedule` / `sleepNow` / `wakeNow` contract above.
 - `mint_pairing_approval_request` — browser-session mint request details sent to controller/mobile approval UI, including browser information and the E2EE challenge.
 - `mint_pairing_approval_outcome` — terminal mint-pairing result used to clear controller/mobile approval UI.
