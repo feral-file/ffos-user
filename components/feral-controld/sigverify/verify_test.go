@@ -282,7 +282,7 @@ func TestVerify_TooManySignatures_RefusedWithoutCrypto(t *testing.T) {
 
 	assert.Equal(t, sigverify.StatusInvalid, v.Status)
 	assert.Nil(t, v.Signers)
-	assert.Equal(t, "too many signatures (17 > 16)", v.Reason)
+	assert.Equal(t, "too many signatures (> 16)", v.Reason)
 }
 
 // TestVerify_AtCap_StillVerified: exactly MaxSignatures entries are judged

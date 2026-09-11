@@ -510,6 +510,10 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 
 	var schedulerSnapshot playlistschedule.Snapshot
 	schedulerMutated := false
+	// Captured before the scheduler filters the playlist: the verdict and the
+	// identity belong to the document as resolved.
+	refreshVerdict := playlist.Verification
+	refreshPlaylistID := playlist.ID
 
 	// Send playlist to CDP
 	args := map[string]interface{}{
@@ -549,6 +553,18 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				// Keep the future schedule armed, but do not send an empty list:
 				// the player rejects it and cannot improve the current artwork.
 				r.scheduler.Commit()
+				// The schedule now holds THIS document; the cutover that
+				// eventually pushes it must promote this verdict, not the
+				// one a previous deferred cast parked (#307). An unverified
+				// replacement (cached copy) is staged as such so the
+				// promotion clears rather than inherits.
+				if r.activeVerdict != nil {
+					if refreshVerdict != nil {
+						r.activeVerdict.SetPending(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
+					} else {
+						r.activeVerdict.SetPendingUnverified()
+					}
+				}
 				return
 			}
 			effectiveForceCast = effectiveForceCast ||
@@ -595,8 +611,8 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		// send closure, i.e. under WithPlayerPush, so it is ordered against
 		// casts and cutovers (feral-file/ffos-user#307).
 		if sendErr == nil && r.activeVerdict != nil {
-			if v := playlist.Verification; v != nil {
-				r.activeVerdict.Set(playlist.ID, schedulerSource.PlaylistURL, v.Status)
+			if refreshVerdict != nil {
+				r.activeVerdict.Set(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
 			} else {
 				r.activeVerdict.Clear()
 			}

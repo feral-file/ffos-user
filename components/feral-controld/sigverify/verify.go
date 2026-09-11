@@ -26,6 +26,7 @@
 package sigverify
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -148,14 +149,16 @@ func Verify(raw []byte) Verdict {
 	}
 	legacy := env.Signature != ""
 
-	// Count entries BEFORE dp1-go touches the document (see MaxSignatures).
-	// A non-array here is left for dp1-go to classify as malformed below.
-	var rawEntries []json.RawMessage
-	if len(env.Signatures) > 0 && json.Unmarshal(env.Signatures, &rawEntries) == nil && len(rawEntries) > MaxSignatures {
+	// Count entries BEFORE dp1-go touches the document (see MaxSignatures),
+	// and without materializing them: the decoder stops at the first entry
+	// past the cap, so a hostile array costs at most MaxSignatures+1 small
+	// element copies, never one allocation per entry. A non-array is left
+	// for dp1-go to classify as malformed below.
+	if tooManySignatures(env.Signatures) {
 		return Verdict{
 			Status:        StatusInvalid,
 			LegacyPresent: legacy,
-			Reason:        fmt.Sprintf("%s (%d > %d)", ReasonTooManySignatures, len(rawEntries), MaxSignatures),
+			Reason:        fmt.Sprintf("%s (> %d)", ReasonTooManySignatures, MaxSignatures),
 		}
 	}
 
@@ -231,6 +234,32 @@ func Verify(raw []byte) Verdict {
 		firstFailure = "signature invalid: " + ReasonMalformed
 	}
 	return Verdict{Status: StatusInvalid, Signers: signers, LegacyPresent: legacy, Reason: firstFailure}
+}
+
+// tooManySignatures streams the signatures array and reports true as soon
+// as it sees more than MaxSignatures elements. Anything that is not an array
+// reports false so the caller's normal decode path classifies it.
+func tooManySignatures(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('[') {
+		return false
+	}
+	count := 0
+	for dec.More() {
+		var elem json.RawMessage
+		if err := dec.Decode(&elem); err != nil {
+			return false
+		}
+		count++
+		if count > MaxSignatures {
+			return true
+		}
+	}
+	return false
 }
 
 // classify maps a dp1-go per-entry verification error onto the reason

@@ -12,13 +12,19 @@ import "sync"
 //     other push. A push that reached the screen WITHOUT a verdict (the
 //     offline cached-copy fallback) clears it: a previous cast's verdict must
 //     never keep standing for bytes nobody verified, and both share the URL.
-//   - pending is the verdict of a displayAt-deferred cast whose first cohort
-//     has not reached the player yet. The previous playlist keeps showing, so
-//     current is left alone. Promote, called by the scheduler's push
-//     observer after a cohort push the player accepted, copies pending into
-//     current; it is idempotent so later cohorts of the same schedule are
-//     harmless. A fresh cast (Set/Clear) drops pending, since it replaced the
-//     schedule.
+//   - pending is the verdict of a displayAt-deferred cast (or a future-only
+//     refresh of the schedule) whose first cohort has not reached the player
+//     yet. The previous playlist keeps showing, so current is left alone.
+//     Promote, called by the scheduler's push observer after a cohort push
+//     the player accepted, copies pending into current; it is idempotent so
+//     later cohorts of the same schedule are harmless. A deferred document
+//     WITHOUT a verdict (the cached-copy fallback) parks an explicit
+//     "unverified" pending, so its promotion CLEARS current rather than
+//     letting an earlier document's verdict survive the cutover. Every
+//     producer that replaces the schedule must restage pending — the cast
+//     handler and the refresher's future-only path both do — or a cutover
+//     would promote the verdict of a document the schedule no longer holds.
+//     A fresh cast (Set/Clear) drops pending, since it replaced the schedule.
 //
 // Lookup consults current only, by playlist id first and URL second, because
 // that is what the player's checkStatus reply echoes back (playlist.id for
@@ -39,6 +45,9 @@ type slot struct {
 	id     string
 	url    string
 	status Status
+	// unverified marks a pending slot whose promotion must clear current:
+	// the scheduled document has no verdict. Never set on current.
+	unverified bool
 }
 
 func (s slot) matches(id, url string) bool {
@@ -79,20 +88,26 @@ func (a *Active) SetPending(id, url string, status Status) {
 	a.pending = slot{set: true, id: id, url: url, status: status}
 }
 
-// ClearPending drops a parked verdict (a deferred cast without a verdict —
-// the cached-copy fallback — replaced the schedule).
-func (a *Active) ClearPending() {
+// SetPendingUnverified parks "the scheduled document has no verdict" (a
+// deferred cast or future-only refresh served from the cached copy): when
+// its cohort reaches the player, Promote clears current instead of leaving
+// the previous document's verdict standing.
+func (a *Active) SetPendingUnverified() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.pending = slot{}
+	a.pending = slot{set: true, unverified: true}
 }
 
-// Promote makes the pending verdict current. Called once a scheduler-owned
+// Promote applies the pending state to current. Called once a scheduler-owned
 // push reached the player. No-op when nothing is pending; idempotent.
 func (a *Active) Promote() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.pending.set {
+	switch {
+	case !a.pending.set:
+	case a.pending.unverified:
+		a.current = slot{}
+	default:
 		a.current = a.pending
 	}
 }

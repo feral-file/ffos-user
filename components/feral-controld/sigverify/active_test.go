@@ -131,17 +131,40 @@ func TestActive_FreshCastDropsPending(t *testing.T) {
 	assert.Equal(t, sigverify.StatusValid, st)
 }
 
-func TestActive_ClearPendingLeavesCurrent(t *testing.T) {
+// TestActive_UnverifiedPendingClearsOnPromote: a scheduled document without
+// a verdict (cached copy) must not inherit the previous document's verdict
+// when its cohort reaches the screen — promotion clears current. Until the
+// cutover the showing document keeps its own.
+func TestActive_UnverifiedPendingClearsOnPromote(t *testing.T) {
 	var a sigverify.Active
-	a.Set("cur", "", sigverify.StatusValid)
-	a.SetPending("next", "", sigverify.StatusInvalid)
+	url := "https://example.com/p.json"
+	a.Set("cur", url, sigverify.StatusValid)
+	a.SetPendingUnverified()
 
-	a.ClearPending()
+	st, ok := a.Lookup("cur", url)
+	assert.True(t, ok)
+	assert.Equal(t, sigverify.StatusValid, st, "still showing until the cutover")
+
 	a.Promote()
 
-	st, ok := a.Lookup("cur", "")
+	_, ok = a.Lookup("cur", url)
+	assert.False(t, ok, "the unverified document is on screen now; nothing may vouch for it")
+}
+
+// TestActive_RestagedPendingReplacesEarlierPending: a future-only refresh
+// that replaces the schedule restages pending, so the cutover promotes the
+// document the schedule actually holds, not the one first deferred.
+func TestActive_RestagedPendingReplacesEarlierPending(t *testing.T) {
+	var a sigverify.Active
+	url := "https://example.com/p.json"
+	a.SetPending("v1", url, sigverify.StatusValid)
+	a.SetPending("v2", url, sigverify.StatusUnsigned)
+
+	a.Promote()
+
+	st, ok := a.Lookup("", url)
 	assert.True(t, ok)
-	assert.Equal(t, sigverify.StatusValid, st)
-	_, ok = a.Lookup("next", "")
+	assert.Equal(t, sigverify.StatusUnsigned, st)
+	_, ok = a.Lookup("v1", "")
 	assert.False(t, ok)
 }

@@ -727,18 +727,26 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// previous playlist keeps showing, and the scheduler's push observer
 		// promotes the pending verdict only when a cohort actually reaches
 		// the player (see sigverify.Active).
+		// Captured BEFORE the scheduler filters the playlist below: the
+		// verdict describes the document as resolved, and the identity is
+		// read from the same pre-filter document so it cannot drift.
+		var castVerdict *sigverify.Verdict
+		var castPlaylistID string
+		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil {
+			castVerdict = playlist.Verification
+			castPlaylistID = playlist.ID
+		}
 		publishVerdict := func(deferred bool) {
 			if h.activeVerdict == nil || commandType != commands.CMD_DISPLAY_PLAYLIST || playlist == nil {
 				return
 			}
-			v := playlist.Verification
 			switch {
-			case deferred && v != nil:
-				h.activeVerdict.SetPending(playlist.ID, schedulerSource.PlaylistURL, v.Status)
+			case deferred && castVerdict != nil:
+				h.activeVerdict.SetPending(castPlaylistID, schedulerSource.PlaylistURL, castVerdict.Status)
 			case deferred:
-				h.activeVerdict.ClearPending()
-			case v != nil:
-				h.activeVerdict.Set(playlist.ID, schedulerSource.PlaylistURL, v.Status)
+				h.activeVerdict.SetPendingUnverified()
+			case castVerdict != nil:
+				h.activeVerdict.Set(castPlaylistID, schedulerSource.PlaylistURL, castVerdict.Status)
 			default:
 				h.activeVerdict.Clear()
 			}

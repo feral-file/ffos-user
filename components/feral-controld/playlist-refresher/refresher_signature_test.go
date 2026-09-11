@@ -6,6 +6,7 @@ package refresher_test
 // carries no verdict.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -19,10 +20,15 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
+
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -113,6 +119,138 @@ func TestRefresher_CachedFallback_ClearsSlot(t *testing.T) {
 
 	_, found := active.Lookup("live-1", playlistURL)
 	assert.False(t, found, "the earlier verdict must not survive an unverified re-push of the same URL")
+}
+
+// futureOnlyRefresher builds a refresher over a REAL scheduler so a
+// future-only refresh takes the empty-active-set branch (schedule replaced,
+// nothing sent). The scheduler's timer is parked on ctx so no cutover fires
+// on its own; the test promotes explicitly, standing in for the cutover the
+// push observer performs (pinned separately in playlistschedule's tests).
+func futureOnlyRefresher(t *testing.T, ts *testSetup, offlineCache *mocks.MockOfflineCacheService) (refresher.Refresher, *sigverify.Active) {
+	t.Helper()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	setupBackgroundMocks(ts)
+	ts.mockClock.EXPECT().Now().Return(time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)).AnyTimes()
+	ts.mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() },
+	).AnyTimes()
+	sched := playlistschedule.New(ts.ctx, ts.mockCDP, ts.mockClock, func() *time.Location { return time.UTC }, logger)
+	t.Cleanup(sched.Stop)
+	var cache offlinecache.Service
+	if offlineCache != nil {
+		cache = offlineCache
+	}
+	r := refresher.New(ts.ctx, ts.mockDP1, ts.mockStatusPoller, ts.mockCDP, nil, cache, wrapper.NewJSON(), sched, ts.mockClock, logger)
+	active := &sigverify.Active{}
+	refresher.SetSignatureVerification(r, active, logger)
+	sched.SetPushObserver(active.Promote)
+	// A future-only schedule is never sent by the refresher itself.
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Times(0)
+	return r, active
+}
+
+func deferredSchedulePlaylist(id string) *dp1.Playlist {
+	displayAt := "2026-07-23T00:00:00Z"
+	return &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    id,
+		Items: []dp1playlist.PlaylistItem{{ID: "tomorrow", Source: "https://example.com/tomorrow", DisplayAt: &displayAt}},
+	}}
+}
+
+// TestRefresher_FutureOnlyRefresh_RestagesPending: a deferred V1 parked its
+// verdict as pending; a refresh replaces the schedule with future-only V2.
+// The cutover must promote V2's verdict, not V1's — the refresh restages.
+func TestRefresher_FutureOnlyRefresh_RestagesPending(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	r, active := futureOnlyRefresher(t, ts, nil)
+
+	playlistURL := "http://example.com/daily.json"
+	active.Set("showing", playlistURL, sigverify.StatusValid)
+	active.SetPending("v1", playlistURL, sigverify.StatusValid)
+	v2 := deferredSchedulePlaylist("v2")
+	unsigned := sigverify.Verify([]byte(`{"dpVersion":"1.1.0","title":"v2","items":[]}`))
+	v2.Verification = &unsigned
+
+	passed := make(chan struct{}, 1)
+	ts.mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ts.ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).DoAndReturn(
+		func(context.Context, string, bool) (*dp1.Playlist, error) {
+			select {
+			case passed <- struct{}{}:
+			default:
+			}
+			return v2, nil
+		}).AnyTimes()
+
+	r.Start()
+	select {
+	case <-passed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresher never resolved the playlist")
+	}
+	// Let the pass finish its (send-less) push section, then join it.
+	time.Sleep(200 * time.Millisecond)
+	r.Stop()
+
+	st, ok := active.Lookup("showing", playlistURL)
+	assert.True(t, ok, "before the cutover the showing document keeps its verdict")
+	assert.Equal(t, sigverify.StatusValid, st)
+
+	active.Promote()
+	st, ok = active.Lookup("", playlistURL)
+	assert.True(t, ok)
+	assert.Equal(t, sigverify.StatusUnsigned, st, "the cutover promotes V2, not the stale V1")
+	_, ok = active.Lookup("v1", "")
+	assert.False(t, ok)
+}
+
+// TestRefresher_FutureOnlyCachedFallback_ClearsOnPromote: the future-only
+// replacement came from the cached copy (no verdict). Its promotion must
+// clear, not inherit the showing document's verdict.
+func TestRefresher_FutureOnlyCachedFallback_ClearsOnPromote(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	mockOfflineCache := mocks.NewMockOfflineCacheService(ts.ctrl)
+	r, active := futureOnlyRefresher(t, ts, mockOfflineCache)
+
+	playlistURL := "http://example.com/daily.json"
+	active.Set("showing", playlistURL, sigverify.StatusValid)
+	cachedRaw := []byte(`{"dpVersion":"1.1.0","id":"v2-cached","title":"t","items":[{"id":"tomorrow","source":"https://example.com/tomorrow","displayAt":"2026-07-23T00:00:00Z"}]}`)
+
+	loaded := make(chan struct{}, 1)
+	ts.mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ts.ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(nil, errors.New("offline")).AnyTimes()
+	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).DoAndReturn(func(string) (json.RawMessage, error) {
+		select {
+		case loaded <- struct{}{}:
+		default:
+		}
+		return json.RawMessage(cachedRaw), nil
+	}).AnyTimes()
+
+	r.Start()
+	select {
+	case <-loaded:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresher never loaded the cached copy")
+	}
+	time.Sleep(200 * time.Millisecond)
+	r.Stop()
+
+	st, ok := active.Lookup("showing", playlistURL)
+	assert.True(t, ok, "before the cutover the showing document keeps its verdict")
+	assert.Equal(t, sigverify.StatusValid, st)
+
+	active.Promote()
+	_, ok = active.Lookup("showing", playlistURL)
+	assert.False(t, ok, "an unverified scheduled document must not inherit a verdict at cutover")
 }
 
 // TestRefresher_SetSignatureVerification_ForeignImplementationIsLeftAlone
