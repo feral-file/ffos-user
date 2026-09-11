@@ -30,6 +30,14 @@
 #                                                        plus an instruction
 #                                                        to hand the dispatch
 #                                                        to the human)
+#   unclassifiable                            -> deny  (any rerun; a numeric
+#                                                        workflow ID; a ref,
+#                                                        input, or workflow
+#                                                        name behind a shell
+#                                                        variable, substitution,
+#                                                        --input/--json/@file;
+#                                                        a REST dispatch with
+#                                                        no literal ref)
 #   anything else                             -> allow (no output at all)
 #
 # The decision is emitted on stdout in the calling tool's JSON dialect with
@@ -129,45 +137,106 @@ emit() { # $1 = deny|ask, $2 = reason (plain text, no quotes/backslashes)
 
 # --- Is this a guarded dispatch at all? -------------------------------------
 # Every publishing workflow_dispatch workflow in ffos, by file name or display
-# name. A numeric workflow ID cannot be recognised here; AGENTS.md forbids
-# dispatching by ID for exactly that reason. Keep in sync with
-# .github/workflows/ in ffos (verify.sh fails when a dispatchable workflow is
-# missing here).
+# name. Keep in sync with .github/workflows/ in ffos (verify.sh fails when a
+# dispatchable workflow is missing here).
 guarded_workflow_re='build-image-to-cf|pure-build-image-to-cf|build-image-from-tags|build ffos image|manual-build-components|manual build component|manual-build-feral-player|manual build local player package|manual-push-pacman-repo|manual update pacman repo db'
 # `gh workflow run ...` (CLI) or a REST dispatch (`gh api`/curl against
 # .../actions/workflows/<wf>/dispatches).
 dispatch_re='workflow[[:space:]]+run|/actions/workflows/[^[:space:]]+/dispatches'
+# Reruns: the CLI (`gh run rerun <id>`), and the REST endpoints behind it
+# (.../actions/runs/<id>/rerun, .../rerun-failed-jobs, .../actions/jobs/<id>/rerun).
+rerun_re='gh[[:space:]]+run[[:space:]]+(rerun|retry)|/actions/(runs|jobs)/[^[:space:]]+/rerun'
 
-# A rerun cannot be attributed to a branch from the command line alone, so it
-# is always escalated to the human rather than guessed at.
-if printf '%s' "$lc" | grep -Eq 'gh[[:space:]]+run[[:space:]]+(rerun|retry)'; then
-  emit ask "gh run rerun cannot be attributed to a branch from the command; confirm this is not a release or staging ffos publishing workflow (ISO build, package build, pacman repo push) (AGENTS.md: Release guardrail: ISO image builds)."
+unclassifiable() { # $1 = what could not be classified
+  emit deny "BLOCKED: $1, so this cannot be checked against the release guardrail and is refused (the guard fails closed). Rewrite the command with the workflow file name and literal --ref / -f values, or hand it to the human release operator (AGENTS.md: Release guardrail: ISO image builds)."
+}
+
+# A rerun restarts whatever the original run was, release publishing runs
+# included, and the target cannot be established from the command line. The
+# contract forbids agent reruns of publishing runs regardless of confirmation,
+# so this is a deny, not an ask: the human reruns from the Actions UI.
+if printf '%s' "$lc" | grep -Eq "$rerun_re"; then
+  emit deny "BLOCKED: agents may not rerun or retry GitHub Actions runs here. A rerun restarts the original run, which may be a release or staging publishing run, and the target cannot be established from the command. Hand the rerun to the human release operator (AGENTS.md: Release guardrail: ISO image builds)."
 fi
 
 if ! printf '%s' "$lc" | grep -Eq "$dispatch_re"; then
   exit 0
 fi
+
+# --- Which workflow? --------------------------------------------------------
+# A dispatch whose workflow cannot be named from the command (numeric workflow
+# ID, or a name coming from a shell variable / command substitution) cannot be
+# matched against the guarded list, so it is refused outright. AGENTS.md
+# forbids dispatching by ID for exactly this reason.
+wf_rest="$(printf '%s\n' "$lc" | sed -nE 's#.*/actions/workflows/([^/[:space:]]+)/dispatches.*#\1#p' | head -n 1)"
+if [[ "$wf_rest" =~ ^[0-9]+$ ]]; then
+  unclassifiable "the workflow is given by numeric ID"
+fi
+if printf '%s' "$wf_rest" | grep -q '[$`]'; then
+  unclassifiable "the workflow name comes from a shell variable or substitution"
+fi
+if printf '%s' "$lc" | grep -Eq 'workflow[[:space:]]+run'; then
+  # A bare token of 5+ digits anywhere after `workflow run` is a workflow ID
+  # (gh accepts the ID positionally, before or after the flags). Version
+  # inputs are `-f version=...` and never a bare token, so they do not trip this.
+  if printf '%s' "$lc" | sed -nE 's/.*workflow[[:space:]]+run(.*)/\1/p' | grep -Eq '(^|[[:space:]])[0-9]{5,}([[:space:]]|$)'; then
+    unclassifiable "the workflow is given by numeric ID"
+  fi
+  if ! printf '%s' "$lc" | grep -Eq "$guarded_workflow_re" && printf '%s' "$lc" | grep -q '[$`]'; then
+    unclassifiable "the workflow name may come from a shell variable or substitution"
+  fi
+fi
+
 if ! printf '%s' "$lc" | grep -Eq "$guarded_workflow_re"; then
   exit 0
+fi
+
+# --- Opaque inputs on a guarded dispatch ------------------------------------
+# The ref and inputs must be literal on the command line. A payload file
+# (`--input file`, `--input -`), gh's JSON-on-stdin mode (`--json`), an
+# `@file` field value, or any shell variable / command substitution can carry
+# ref=release or environment=Production where the guard cannot see it.
+if printf '%s' "$lc" | grep -Eq '(^|[[:space:]])--input([[:space:]=]|$)|(^|[[:space:]])--json([[:space:]]|$)|=@'; then
+  unclassifiable "the dispatch ref or inputs come from a file or stdin"
+fi
+if printf '%s' "$cmd" | grep -q '[$`]'; then
+  unclassifiable "the dispatch ref or inputs involve a shell variable or command substitution"
 fi
 
 # --- Which ref / environment is targeted? ----------------------------------
 q="[\"']?"
 ref=""
-# `--ref release`, `--ref=release`, `-r release`
-ref="$(printf '%s\n' "$lc" | sed -nE "s/.*(--ref[= ]|(^|[[:space:]])-r[[:space:]]+)${q}([a-z0-9._\\/-]+).*/\\3/p" | head -n 1)"
+# `--ref release`, `--ref=release`, `-r release`. Extracted from the ORIGINAL
+# case, not the lowercased copy: gh's `-R owner/repo` would otherwise read as
+# `-r owner/repo` and, appearing after `--ref`, win the greedy match.
+ref="$(printf '%s\n' "$cmd" | sed -nE "s/.*(--ref[= ]|(^|[[:space:]])-r[[:space:]]+)${q}([A-Za-z0-9._\\/-]+).*/\\3/p" | head -n 1)"
 if [[ -z "$ref" ]]; then
   # REST form: `-f ref=release`, `-F 'ref=release'`, `"ref": "release"`.
   # Anchored so `ffos_user_ref=...` is not mistaken for the dispatch ref.
   ref="$(printf '%s\n' "$lc" | sed -nE "s/.*(^|[[:space:]\"'{,])ref${q}[[:space:]]*[=:][[:space:]]*${q}([a-z0-9._\\/-]+).*/\\2/p" | head -n 1)"
 fi
-if [[ -z "$ref" ]] && printf '%s' "$lc" | grep -Eq 'workflow[[:space:]]+run'; then
-  # `gh workflow run` without --ref dispatches on the CURRENT branch.
-  # symbolic-ref (not rev-parse) so an unborn branch still resolves.
-  ref="$(git -C "$cwd" symbolic-ref --short -q HEAD 2>/dev/null || true)"
+ref="$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]')"
+if [[ -z "$ref" ]]; then
+  # A ref flag or key is present but did not parse to a plain literal.
+  if printf '%s' "$cmd" | grep -Eq -- '--ref|(^|[[:space:]])-r[[:space:]]' || \
+     printf '%s' "$lc" | grep -Eq "(^|[[:space:]\"'{,])ref${q}[[:space:]]*[=:]"; then
+    unclassifiable "the dispatch ref is not a plain literal"
+  fi
+  if printf '%s' "$lc" | grep -Eq 'workflow[[:space:]]+run'; then
+    # `gh workflow run` without --ref dispatches on the CURRENT branch.
+    # symbolic-ref (not rev-parse) so an unborn branch still resolves.
+    ref="$(git -C "$cwd" symbolic-ref --short -q HEAD 2>/dev/null || true)"
+  else
+    # A REST dispatch requires a ref; if it is not on the command line it is
+    # coming from somewhere the guard cannot see.
+    unclassifiable "the REST dispatch does not carry a literal ref"
+  fi
 fi
 
 environment="$(printf '%s\n' "$lc" | sed -nE "s/.*environment${q}[[:space:]]*[=:][[:space:]]*${q}(production|staging|development).*/\\1/p" | head -n 1)"
+if [[ -z "$environment" ]] && printf '%s' "$lc" | grep -Eq "environment${q}[[:space:]]*[=:]"; then
+  unclassifiable "the environment input is not one of the literal choices"
+fi
 
 # --- Decide -----------------------------------------------------------------
 if [[ "$ref" == "release" || "$environment" == "production" ]]; then

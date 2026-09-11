@@ -178,8 +178,14 @@ rule. Read it before running anything that touches GitHub Actions.
   release/Production dispatches everywhere. It prompts the user on
   staging/Staging where the tool has an "ask" decision (Claude Code, Cursor);
   Codex, Gemini, and OpenCode have none, so there staging is denied too and the
-  human dispatches it after the agent has shown the parameters. `gh run rerun`
-  is escalated the same way because a rerun cannot be attributed to a branch.
+  human dispatches it after the agent has shown the parameters. The guard
+  fails closed: reruns (`gh run rerun` and the REST rerun endpoints) are
+  denied outright because a rerun restarts whatever the original run was, and
+  so is any dispatch it cannot classify (a numeric workflow ID, a workflow
+  name or ref or input hidden behind a shell variable or substitution, a
+  payload from `--input`/`--json`/`@file`, a REST dispatch without a literal
+  ref, an `environment` value that is not one of the three choices). Rewrite
+  such a command with literal values or hand it to the human.
   `scripts/test-agent-iso-build-guard.sh` pins the decisions in every dialect
   and that each config still points at the guard; `make verify-scripts` runs it
   (`test-scripts.yaml` CI workflow). When the hook prompts, that prompt is the

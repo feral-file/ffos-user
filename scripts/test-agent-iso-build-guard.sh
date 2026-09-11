@@ -7,6 +7,10 @@
 # release/Production, ask for staging/Staging (deny plus a hand-over instruction for tools without an
 # ask primitive), silence for anything else. Also pins that every tool's hook
 # config still points at the guard. Run by the repository verify target.
+# The single-quoted commands below deliberately carry unexpanded `$VAR` and
+# `$(...)` text: they test that the guard refuses a dispatch whose ref or
+# inputs are hidden behind a shell variable or substitution.
+# shellcheck disable=SC2016
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -112,9 +116,41 @@ expect ask 'gh workflow run manual-push-pacman-repo.yaml --ref staging' "$develo
 expect ask 'gh workflow run manual-build-components.yaml --ref staging -f component=feral-watchdog' "$develop_dir"
 expect ask 'gh workflow run manual-build-feral-player.yaml -f environment=Staging' "$develop_dir"
 expect ask 'gh workflow run manual-push-pacman-repo.yaml -f environment=Staging' "$develop_dir"
-# A rerun cannot be attributed to a branch, so it is always escalated.
-expect ask 'gh run rerun 1234567890' "$develop_dir"
-expect ask 'gh run rerun 1234567890 --failed' "$develop_dir"
+# --- unclassifiable: the guard fails closed ---------------------------------
+# A rerun restarts the original run, which may be a publishing run, and the
+# contract forbids agent reruns regardless of confirmation: deny, not ask.
+expect deny 'gh run rerun 1234567890' "$develop_dir"
+expect deny 'gh run rerun 1234567890 --failed' "$develop_dir"
+expect deny 'gh run rerun --job 987654321' "$develop_dir"
+expect deny 'gh api -X POST repos/feral-file/ffos/actions/runs/1234567890/rerun' "$develop_dir"
+expect deny 'gh api -X POST repos/feral-file/ffos/actions/runs/1234567890/rerun-failed-jobs' "$develop_dir"
+expect deny 'gh api -X POST repos/feral-file/ffos/actions/jobs/987654321/rerun' "$develop_dir"
+# Numeric workflow IDs cannot be matched against the guarded list.
+expect deny 'gh workflow run 123456789 --ref release' "$develop_dir"
+expect deny 'gh workflow run 123456789 --ref develop' "$develop_dir"
+expect deny 'gh workflow run --ref develop 123456789' "$develop_dir"
+expect deny 'gh api repos/feral-file/ffos/actions/workflows/123456789/dispatches -f ref=develop' "$develop_dir"
+# Workflow name hidden behind a variable or substitution.
+expect deny 'gh workflow run $WF --ref develop' "$develop_dir"
+expect deny 'gh workflow run "$(cat wf.txt)" --ref develop' "$develop_dir"
+expect deny 'gh api repos/feral-file/ffos/actions/workflows/$WF/dispatches -f ref=develop' "$develop_dir"
+# Ref or inputs from a file, stdin, or a variable on a guarded workflow.
+expect deny 'gh api -X POST repos/feral-file/ffos/actions/workflows/build-image-to-cf.yml/dispatches --input release.json' "$develop_dir"
+expect deny 'gh api -X POST repos/feral-file/ffos/actions/workflows/build-image-to-cf.yml/dispatches --input -' "$develop_dir"
+expect deny 'gh workflow run build-image-to-cf.yml --json < params.json' "$develop_dir"
+expect deny 'gh workflow run build-image-to-cf.yml --ref develop -F environment=@env.txt' "$develop_dir"
+expect deny 'gh workflow run build-image-to-cf.yml --ref $BRANCH' "$develop_dir"
+expect deny 'gh workflow run build-image-to-cf.yml --ref "$(git branch --show-current)"' "$develop_dir"
+expect deny 'gh workflow run build-image-to-cf.yml --ref develop -f environment=$ENV' "$develop_dir"
+expect deny 'gh workflow run build-image-to-cf.yml --ref develop -f version=$VERSION' "$develop_dir"
+expect deny 'gh workflow run build-image-to-cf.yml --ref develop -f environment=Prod' "$develop_dir"
+# A REST dispatch with no literal ref on the command line.
+expect deny 'gh api -X POST repos/feral-file/ffos/actions/workflows/build-image-to-cf.yml/dispatches -f inputs[version]=2.0.4' "$develop_dir"
+# `-R owner/repo` after `--ref` must not be mistaken for `-r <ref>` once
+# lowercased (this was a live bypass).
+expect deny 'gh workflow run build-image-to-cf.yml --ref release -R feral-file/ffos' "$develop_dir"
+expect ask 'gh workflow run build-image-to-cf.yml --ref staging -R feral-file/ffos' "$develop_dir"
+expect allow 'gh workflow run build-image-to-cf.yml --ref develop -R feral-file/ffos' "$release_dir"
 
 # --- everything else: the hook stays silent --------------------------------
 expect allow 'gh workflow run build-image-to-cf.yml --ref develop -f version=0.0.1' "$develop_dir"
@@ -126,9 +162,15 @@ expect allow 'gh workflow run build-image-to-cf.yml --ref develop -f ffos_user_r
 expect allow 'gh workflow run manual-push-pacman-repo.yaml --ref develop -f environment=Development' "$develop_dir"
 expect allow 'gh workflow run manual-build-components.yaml --ref develop -f component=feral-controld' "$develop_dir"
 expect allow 'gh workflow run manual-build-feral-player.yaml --ref feat/player-bump' "$develop_dir"
-# Other workflows on release are not guarded.
+# Other workflows on release are not guarded, and literal inputs that are not
+# ref/environment are fine on them.
 expect allow 'gh workflow run test-scripts.yaml --ref release' "$develop_dir"
 expect allow 'gh workflow run verify.yml --ref release' "$release_dir"
+expect allow 'gh workflow run verify.yml --ref release -R feral-file/ffos' "$develop_dir"
+# Read-only run/job commands are not reruns.
+expect allow 'gh run view 1234567890 --json jobs' "$develop_dir"
+expect allow 'gh run watch 1234567890' "$develop_dir"
+expect allow 'gh api repos/feral-file/ffos/actions/runs/1234567890/jobs' "$develop_dir"
 # Read-only gh and ordinary shell are untouched.
 expect allow 'gh workflow list' "$release_dir"
 expect allow 'gh workflow view build-image-to-cf.yml --ref release' "$develop_dir"
