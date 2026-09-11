@@ -374,6 +374,74 @@ func TestCommandHandler_Process_DisplayPlaylist_Deferred_PendingUntilCutover(t *
 	assert.Equal(t, sigverify.StatusValid, st)
 }
 
+// TestCommandHandler_Process_ScheduledCast_SurvivesReconnectRepush: a
+// displayAt cast whose active cohort is non-empty is displayed at once AND
+// cached by the scheduler. After a player reload the reconnect reconciler
+// clears current and the scheduler re-pushes the same schedule; its
+// promotion must restore this cast's verdict — a static inline schedule
+// has no refresher pass that would restage it.
+func TestCommandHandler_Process_ScheduledCast_SurvivesReconnectRepush(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockClock.EXPECT().Now().Return(time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() },
+	).AnyTimes()
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
+	defer sched.Stop()
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	active := &sigverify.Active{}
+	commandrouter.SetSignatureVerification(handler, commandrouter.SignatureVerificationOptions{Active: active}, logger)
+	sched.SetPushObserver(active.Promote)
+
+	// Static inline schedule: one cohort active now, one tomorrow.
+	raw := []byte(`{"dpVersion":"1.1.0","id":"sched-1","title":"t","items":[]}`)
+	typed := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID: "sched-1",
+		Items: []dp1playlist.PlaylistItem{
+			{ID: "now", Source: "https://example.com/now", DisplayAt: strPtr("2026-09-10T00:00:00Z")},
+			{ID: "later", Source: "https://example.com/later", DisplayAt: strPtr("2026-09-13T00:00:00Z")},
+		},
+	}}
+	playlistMap := map[string]any{"marker": "inline"}
+	mockJSON.EXPECT().Marshal(playlistMap).Return(raw, nil).Times(1)
+	mockJSON.EXPECT().Unmarshal(raw, gomock.Any()).DoAndReturn(func(_ []byte, v any) error {
+		*(v.(**dp1.Playlist)) = typed
+		return nil
+	}).Times(1)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	_, err := handler.Process(ctx, commands.Command{Type: commands.CMD_DISPLAY_PLAYLIST, Arguments: map[string]any{"dp1_call": playlistMap}})
+	require.NoError(t, err)
+	st, ok := active.Lookup("sched-1", "")
+	require.True(t, ok)
+	assert.Equal(t, sigverify.StatusUnsigned, st)
+
+	// Player reloads: the reconnect reconciler clears current, then the
+	// scheduler's recompute re-pushes the cached schedule (observer → Promote).
+	active.ClearCurrent()
+	_, ok = active.Lookup("sched-1", "")
+	require.False(t, ok)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	sched.RecomputeNow(ctx)
+
+	st, ok = active.Lookup("sched-1", "")
+	assert.True(t, ok, "the re-pushed schedule restores its own verdict")
+	assert.Equal(t, sigverify.StatusUnsigned, st)
+}
+
 // TestCommandHandler_Process_DisplayPlaylist_PublishesInsidePushLock pins the
 // ordering rule: the slot is written inside the same WithPlayerPush critical
 // section as the send. Cast A's player reply starts cast B concurrently; B

@@ -750,6 +750,19 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			default:
 				h.activeVerdict.Clear()
 			}
+			// An immediately displayed SCHEDULED cast is also the document
+			// the scheduler will re-push later — the next cohort's cutover,
+			// or the reconnect recompute after the player reloads (which
+			// first cleared current). Those pushes promote pending, so the
+			// verdict must be parked there as well as set; a static inline
+			// schedule has no refresher pass that would restage it.
+			if !deferred && h.scheduler != nil && h.scheduler.HasCache() {
+				if castVerdict != nil {
+					h.activeVerdict.SetPending(castPlaylistID, schedulerSource.PlaylistURL, castVerdict.Status)
+				} else {
+					h.activeVerdict.SetPendingUnverified()
+				}
+			}
 		}
 
 		// clearVerdictForDefaultPlayback: an accepted displayDefaultPlaylist

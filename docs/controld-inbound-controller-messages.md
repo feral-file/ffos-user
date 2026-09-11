@@ -2221,11 +2221,16 @@ before — a request that ends up returning `offline_cache_error` above
 (every eligible item failed classification) persists neither, so a
 failed download can never leave a "last known good" offline fallback
 that looks like a successful one. This is not
-guaranteed to be byte-identical to whatever a publisher
-originally served (`dp1` resolution re-serializes the Go struct, so key
-order/whitespace can differ), but DP-1 signatures verify against a
-JCS-canonicalized form rather than raw bytes, so this does not affect
-signature validity — see `docs/offline-artwork-capture.md`.
+guaranteed to be byte-identical to whatever a publisher originally served
+(`dp1` resolution re-serializes the Go struct, so key order/whitespace can
+differ). DP-1 signatures verify against a JCS-canonicalized form rather
+than raw bytes, which neutralizes serialization differences ONLY while
+every signed field survives — and this copy does not qualify: dynamic
+hydration has rewritten `items`, and the typed struct drops any field the
+pinned `dp1-go` does not model. The cached copy therefore carries no
+signature verdict and is never re-verified; a `displayPlaylist` served
+from it omits `signatureStatus` (see that section and
+`docs/offline-artwork-capture.md` §6/§7.1).
 
 Error cases: `resolve_failed`, `offline_cache_error`.
 

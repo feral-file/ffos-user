@@ -158,6 +158,30 @@ func TestVerify_LegacyOnly_UnsignedAndFlagged(t *testing.T) {
 	assert.Equal(t, "unsigned; legacy signature ignored", v.Reason)
 }
 
+// TestVerify_EmptyLegacyString_StillFlagged: presence, not value, drives
+// the legacy flag — a v1.0 producer that emits "signature": "" is still a
+// legacy producer the controller should be told about.
+func TestVerify_EmptyLegacyString_StillFlagged(t *testing.T) {
+	doc := unsignedDoc()
+	doc["signature"] = ""
+
+	v := sigverify.Verify(mustJSON(t, doc))
+
+	assert.Equal(t, sigverify.StatusUnsigned, v.Status)
+	assert.True(t, v.LegacyPresent)
+	assert.Equal(t, "unsigned; legacy signature ignored", v.Reason)
+}
+
+func TestVerify_NullLegacy_NotFlagged(t *testing.T) {
+	doc := unsignedDoc()
+	doc["signature"] = nil
+
+	v := sigverify.Verify(mustJSON(t, doc))
+
+	assert.Equal(t, sigverify.StatusUnsigned, v.Status)
+	assert.False(t, v.LegacyPresent)
+}
+
 func TestVerify_NotJSON_Invalid(t *testing.T) {
 	v := sigverify.Verify([]byte("not json"))
 

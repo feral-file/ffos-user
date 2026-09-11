@@ -137,8 +137,24 @@ const MaxSignatures = 16
 // what dp1-go decodes itself: the legacy string, and the entries in document
 // order so Signers can be built.
 type signatureEnvelope struct {
-	Signature  string          `json:"signature"`
+	// Signature is raw so PRESENCE can be told apart from an empty string:
+	// the wire contract flags legacySignature whenever a v1.0 `signature`
+	// string is present, "" included.
+	Signature  json.RawMessage `json:"signature"`
 	Signatures json.RawMessage `json:"signatures"`
+}
+
+// legacyPresent reports whether the top-level `signature` field carried a
+// JSON string of any length. null or a non-string is not a legacy signature.
+func legacyPresent(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	// json.Unmarshal accepts null into a string without error, so the
+	// literal is inspected directly: only a string token counts.
+	if len(trimmed) == 0 || trimmed[0] != '"' {
+		return false
+	}
+	var s string
+	return json.Unmarshal(trimmed, &s) == nil
 }
 
 // Verify computes the verdict for raw, a complete DP-1 playlist document as
@@ -162,7 +178,7 @@ func Verify(raw []byte) Verdict {
 		// so a garbage document is never mistaken for an honest unsigned one.
 		return Verdict{Status: StatusInvalid, Reason: ReasonMalformed}
 	}
-	legacy := env.Signature != ""
+	legacy := legacyPresent(env.Signature)
 
 	// Count entries BEFORE dp1-go touches the document (see MaxSignatures),
 	// and without materializing them: the decoder stops at the first entry
