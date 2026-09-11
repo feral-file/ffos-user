@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "scripts/agent-iso-build-guard.sh --format cursor"
+      }
+    ]
+  }
+}
