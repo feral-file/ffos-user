@@ -196,12 +196,462 @@ func (c *pendingRebootClock) SleepContext(ctx context.Context, _ time.Duration) 
 // stagedResetExecutor builds an executor mid-factory-reset: the state manager
 // is injected, the reset unit's start is mocked with unitOK, and factoryReset
 // has run. Shared by the resetStaged tests below.
+// TestFactoryReset_InvalidatesTheClaimBeforeSweepingItsSessions: the order is
+// the whole fix. Sweeping first leaves a hole — an approval accepted a moment
+// before the reset can mint after the sweep listed the topic, and that session
+// would survive the wipe. Invalidating first moves the topic generation, so a
+// mint in flight fails its own guard and revokes what it made; the sweep then
+// only has to clean up what already existed.
+func TestFactoryReset_InvalidatesTheClaimBeforeSweepingItsSessions(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
+
+	step := 0
+	invalidatedAt := 0
+	clearedAt := 0
+	sm.EXPECT().InvalidateRelayerTopic().DoAndReturn(func() (string, bool, error) {
+		step++
+		invalidatedAt = step
+		return "topic-1", true, nil
+	})
+	sm.EXPECT().ClearClaim().DoAndReturn(func() (bool, error) {
+		step++
+		clearedAt = step
+		return true, nil
+	})
+
+	sweptAt := 0
+	sweptTopic := ""
+	e := resetExecutorWithRevoker(t, ctrl, func(_ context.Context, topicID string) (int, error) {
+		step++
+		sweptAt = step
+		sweptTopic = topicID
+		return 2, nil
+	})
+
+	_, err := e.factoryReset(context.Background())
+	require.NoError(t, err)
+
+	require.NotZero(t, sweptAt, "the sweep must happen")
+	assert.Equal(t, "topic-1", sweptTopic, "the sweep runs against the topic the invalidation handed back")
+	assert.Less(t, invalidatedAt, sweptAt, "a session minted during the sweep must already be invalid")
+	assert.Less(t, sweptAt, clearedAt)
+}
+
+// TestFactoryReset_WaitsForInFlightCreatesBeforeSweeping: a session-creation
+// POST already at the relayer can commit AFTER the sweep enumerates, and the
+// enumeration would never see it. The reset therefore waits for those creates
+// to return — by then each one has run its own guard, seen the invalidated
+// claim, and revoked itself — and only then sweeps.
+func TestFactoryReset_WaitsForInFlightCreatesBeforeSweeping(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
+	sm.EXPECT().InvalidateRelayerTopic().Return("topic-1", true, nil)
+	sm.EXPECT().ClearClaim().Return(true, nil)
+
+	waiting := make(chan struct{})
+	release := make(chan struct{})
+	swept := make(chan string, 1)
+	cleanup := fakeBrowserSessionCleanup{
+		wait: func(ctx context.Context) (int, error) {
+			close(waiting)
+			select {
+			case <-release:
+				return 0, nil
+			case <-ctx.Done():
+				return 1, ctx.Err()
+			}
+		},
+		revoke: func(_ context.Context, topicID string) (int, error) {
+			swept <- topicID
+			return 1, nil
+		},
+	}
+
+	e := resetExecutorWithCleanup(t, ctrl, cleanup, zap.NewNop())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, err := e.factoryReset(context.Background())
+		assert.NoError(t, err)
+	}()
+
+	select {
+	case <-waiting:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reset never waited for in-flight creates")
+	}
+
+	select {
+	case topicID := <-swept:
+		t.Fatalf("the sweep ran while a create was still in flight (topic %q)", topicID)
+	default:
+	}
+
+	close(release)
+
+	select {
+	case topicID := <-swept:
+		assert.Equal(t, "topic-1", topicID, "the sweep runs once the creates have settled")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the sweep never ran after the creates settled")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("factory reset never returned")
+	}
+}
+
+// TestFactoryReset_SweepsAnywayWhenTheInFlightWaitExpires: a create that never
+// returns must not hold a wipe. The reset gives up, logs what was still
+// outstanding — those are the sessions the sweep can miss — and sweeps.
+func TestFactoryReset_SweepsAnywayWhenTheInFlightWaitExpires(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
+	sm.EXPECT().InvalidateRelayerTopic().Return("topic-1", true, nil)
+	sm.EXPECT().ClearClaim().Return(true, nil)
+
+	sweptTopic := ""
+	cleanup := fakeBrowserSessionCleanup{
+		wait: func(context.Context) (int, error) {
+			return 2, context.DeadlineExceeded
+		},
+		revoke: func(_ context.Context, topicID string) (int, error) {
+			sweptTopic = topicID
+			return 1, errors.New("relayer unreachable")
+		},
+	}
+
+	core, logs := observer.New(zap.ErrorLevel)
+	e := resetExecutorWithCleanup(t, ctrl, cleanup, zap.New(core))
+
+	_, err := e.factoryReset(context.Background())
+	require.NoError(t, err, "a wipe is never blocked by this cleanup")
+	assert.Equal(t, "topic-1", sweptTopic, "the sweep still runs")
+
+	entries := logs.FilterMessage("Factory reset: gave up waiting for in-flight browser session creations; sessions they commit will survive the sweep")
+	require.Equal(t, 1, entries.Len())
+	assert.Equal(t, int64(2), entries.All()[0].ContextMap()["inFlight"],
+		"the log names how many creates were still outstanding")
+
+	// A sweep that also fails inside the budget is the other half of the same
+	// story, and must be just as loud.
+	swept := logs.FilterMessage("Factory reset: failed to revoke browser sessions for the outgoing topic; sessions may survive the reset")
+	require.Equal(t, 1, swept.Len())
+	assert.Equal(t, int64(1), swept.All()[0].ContextMap()["revoked"])
+	assert.True(t, e.ResetStaged(), "the reset still stages")
+}
+
+// TestFactoryReset_ClosesTheActivePairingBeforeAnythingElse: the pairing
+// worker polls the broker on a socket the device still holds. It is closed
+// first, before the wait and the sweep, so nothing is still listening for the
+// claim being wiped.
+func TestFactoryReset_ClosesTheActivePairingBeforeAnythingElse(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
+
+	step := 0
+	invalidatedAt, closedAt, waitedAt, sweptAt := 0, 0, 0, 0
+	sm.EXPECT().InvalidateRelayerTopic().DoAndReturn(func() (string, bool, error) {
+		step++
+		invalidatedAt = step
+		return "topic-1", true, nil
+	})
+	sm.EXPECT().ClearClaim().Return(true, nil)
+
+	cleanup := fakeBrowserSessionCleanup{
+		closePairing: func(ctx context.Context) (bool, error) {
+			step++
+			closedAt = step
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok, "the close must be bounded")
+			assert.LessOrEqual(t, time.Until(deadline), pairingCloseBudget)
+			return true, nil
+		},
+		wait: func(context.Context) (int, error) {
+			step++
+			waitedAt = step
+			return 0, nil
+		},
+		revoke: func(context.Context, string) (int, error) {
+			step++
+			sweptAt = step
+			return 1, nil
+		},
+	}
+
+	e := resetExecutorWithCleanup(t, ctrl, cleanup, zap.NewNop())
+
+	_, err := e.factoryReset(context.Background())
+	require.NoError(t, err)
+
+	assert.Less(t, invalidatedAt, closedAt, "the claim is invalidated before the pairing is closed")
+	assert.Less(t, closedAt, waitedAt, "the worker is gone before the reset waits on creations")
+	assert.Less(t, waitedAt, sweptAt)
+}
+
+// TestFactoryReset_CompletesWhenTheActivePairingWillNotClose: a worker that
+// will not exit must not hold a wipe; the reset logs and carries on, and the
+// worker's own topic check still drops anything it reads.
+func TestFactoryReset_CompletesWhenTheActivePairingWillNotClose(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
+	sm.EXPECT().InvalidateRelayerTopic().Return("topic-1", true, nil)
+	sm.EXPECT().ClearClaim().Return(true, nil)
+
+	swept := false
+	cleanup := fakeBrowserSessionCleanup{
+		closePairing: func(context.Context) (bool, error) {
+			return true, context.DeadlineExceeded
+		},
+		revoke: func(context.Context, string) (int, error) {
+			swept = true
+			return 1, nil
+		},
+	}
+
+	core, logs := observer.New(zap.ErrorLevel)
+	e := resetExecutorWithCleanup(t, ctrl, cleanup, zap.New(core))
+
+	result, err := e.factoryReset(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, CmdOK, result)
+	assert.True(t, swept, "the rest of the cleanup still runs")
+	assert.True(t, e.ResetStaged())
+	assert.Equal(t, 1, logs.FilterMessage("Factory reset: the active mint pairing session did not close in time").Len())
+}
+
+// TestFactoryReset_WithNoTopicStaysOffTheNetwork: having no topic is the only
+// thing that keeps the reset's cleanup off the relayer. There is nothing to
+// name, so there is nothing to list or revoke — but the local half still runs,
+// since a pairing in progress is worth closing either way.
+func TestFactoryReset_WithNoTopicStaysOffTheNetwork(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
+	sm.EXPECT().InvalidateRelayerTopic().Return("", false, nil)
+	sm.EXPECT().ClearClaim().Return(true, nil)
+
+	closed := false
+	swept := false
+	cleanup := fakeBrowserSessionCleanup{
+		closePairing: func(context.Context) (bool, error) {
+			closed = true
+			return false, nil
+		},
+		revoke: func(context.Context, string) (int, error) {
+			swept = true
+			return 0, nil
+		},
+	}
+
+	e := resetExecutorWithCleanup(t, ctrl, cleanup, zap.NewNop())
+
+	_, err := e.factoryReset(context.Background())
+	require.NoError(t, err)
+
+	assert.True(t, closed, "a pairing in progress is still closed")
+	assert.False(t, swept, "with no topic there is nothing to list or revoke")
+}
+
+// TestFactoryReset_CleanupSharesOneBudgetInsideTheHubWriteDeadline: the reset
+// is answered synchronously — over LAN that reply cannot start until this
+// returns, against the hub's 30s server write timeout — so the wait and the
+// sweep share one 20s budget rather than each having their own.
+func TestFactoryReset_CleanupSharesOneBudgetInsideTheHubWriteDeadline(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
+	sm.EXPECT().InvalidateRelayerTopic().Return("topic-1", true, nil)
+	sm.EXPECT().ClearClaim().Return(true, nil)
+
+	var waitBudget, sweepBudgetSeen time.Duration
+	var sweepDeadline time.Time
+	cleanup := fakeBrowserSessionCleanup{
+		wait: func(ctx context.Context) (int, error) {
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok, "the wait must be bounded")
+			waitBudget = time.Until(deadline)
+			return 0, nil
+		},
+		revoke: func(ctx context.Context, _ string) (int, error) {
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok, "the sweep must be bounded")
+			sweepDeadline = deadline
+			sweepBudgetSeen = time.Until(deadline)
+			return 1, nil
+		},
+	}
+
+	e := resetExecutorWithCleanup(t, ctrl, cleanup, zap.NewNop())
+
+	started := time.Now()
+	_, err := e.factoryReset(context.Background())
+	require.NoError(t, err)
+
+	assert.LessOrEqual(t, waitBudget, inFlightCreateWaitBudget, "the wait cannot exceed its own share")
+	assert.GreaterOrEqual(t, sweepBudgetSeen, minSweepBudget, "the sweep always gets a real chance")
+	assert.LessOrEqual(t, sweepDeadline.Sub(started), browserSessionCleanupBudget+time.Second,
+		"the sweep runs inside the budget the wait started, not a fresh one")
+	assert.Less(t, browserSessionCleanupBudget, hubWriteDeadlineForTest,
+		"the whole cleanup must fit inside the hub write deadline with margin")
+	assert.Less(t, time.Since(started), 2*time.Second, "a cleanup with nothing to do returns at once")
+}
+
+// hubWriteDeadlineForTest mirrors hub.WRITE_TIMEOUT. It is duplicated rather
+// than imported because hub imports devicectl, and the number is the reason
+// the cleanup budget is what it is.
+const hubWriteDeadlineForTest = 30 * time.Second
+
+func TestSweepBudget_FloorsAtAUsableDuration(t *testing.T) {
+	assert.Equal(t, minSweepBudget, sweepBudget(0), "an exhausted budget still buys a sweep")
+	assert.Equal(t, minSweepBudget, sweepBudget(-5*time.Second))
+	assert.Equal(t, 8*time.Second, sweepBudget(8*time.Second))
+}
+
+// TestFactoryReset_CompletesWhenSessionRevocationFails: an unreachable relayer
+// must not block a wipe. The sessions that survive are logged loudly by the
+// executor; the reset still stages.
+func TestFactoryReset_CompletesWhenSessionRevocationFails(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-1", Claimed: true}).AnyTimes()
+	sm.EXPECT().InvalidateRelayerTopic().Return("topic-1", true, nil)
+	sm.EXPECT().ClearClaim().Return(true, nil)
+
+	called := false
+	e := resetExecutorWithRevoker(t, ctrl, func(_ context.Context, _ string) (int, error) {
+		called = true
+		return 0, errors.New("relayer unreachable")
+	})
+
+	result, err := e.factoryReset(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, CmdOK, result)
+	assert.True(t, called)
+	assert.True(t, e.ResetStaged(), "the reset still stages")
+}
+
+// TestFactoryReset_WithoutARevokerBehavesAsBefore: mint pairing is optional,
+// and a device without it resets exactly the way it did before owner-kept
+// sessions existed.
+func TestFactoryReset_WithoutARevokerBehavesAsBefore(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	e, _, _ := stagedResetExecutor(t, ctrl, true)
+	assert.True(t, e.ResetStaged())
+}
+
+// fakeBrowserSessionCleanup is the mint-pairing seam factory reset drives:
+// wait for creations already at the relayer, then revoke what it holds.
+type fakeBrowserSessionCleanup struct {
+	closePairing func(ctx context.Context) (bool, error)
+	wait         func(ctx context.Context) (int, error)
+	revoke       func(ctx context.Context, topicID string) (int, error)
+}
+
+func (f fakeBrowserSessionCleanup) CloseActivePairing(ctx context.Context) (bool, error) {
+	if f.closePairing == nil {
+		return false, nil
+	}
+	return f.closePairing(ctx)
+}
+
+func (f fakeBrowserSessionCleanup) WaitForInFlightCreates(ctx context.Context) (int, error) {
+	if f.wait == nil {
+		return 0, nil
+	}
+	return f.wait(ctx)
+}
+
+func (f fakeBrowserSessionCleanup) RevokeTopicSessions(ctx context.Context, topicID string) (int, error) {
+	if f.revoke == nil {
+		return 0, nil
+	}
+	return f.revoke(ctx, topicID)
+}
+
+// resetExecutorWithRevoker builds the same executor stagedResetExecutor does,
+// with a successful reset unit and the browser-session cleanup wired.
+func resetExecutorWithRevoker(t *testing.T, ctrl *gomock.Controller, revoke func(ctx context.Context, topicID string) (int, error)) *executor {
+	t.Helper()
+	return resetExecutorWithCleanup(t, ctrl, fakeBrowserSessionCleanup{revoke: revoke}, zap.NewNop())
+}
+
+func resetExecutorWithCleanup(t *testing.T, ctrl *gomock.Controller, cleanup BrowserSessionCleanup, logger *zap.Logger) *executor {
+	t.Helper()
+
+	mockExec := mocks.NewMockExec(ctrl)
+	mockCmd := mocks.NewMockExecCmd(ctrl)
+	mockExec.EXPECT().
+		CommandContext(gomock.Any(), "systemctl", "start", "set-factory-boot.service").
+		Return(mockCmd)
+	mockCmd.EXPECT().CombinedOutput().Return([]byte(""), nil)
+
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
+
+	e := &executor{
+		logger:        logger,
+		exec:          mockExec,
+		os:            mockOS,
+		setupNarrator: &narratorSpy{},
+		json:          wrapper.NewJSON(),
+		clock:         &pendingRebootClock{},
+	}
+	e.setBrowserSessionCleanup(cleanup)
+	return e
+}
+
 func stagedResetExecutor(t *testing.T, ctrl *gomock.Controller, unitOK bool) (*executor, *narratorSpy, *mocks.MockStateManager) {
 	t.Helper()
 
 	sm := mocks.NewMockStateManager(ctrl)
 	state.InjectStateManagerForTesting(sm)
 	t.Cleanup(state.ResetForTesting) // don't leave a finished mock as the global manager
+	sm.EXPECT().InvalidateRelayerTopic().Return("topic-1", true, nil)
 	sm.EXPECT().ClearClaim().Return(true, nil)
 	// Unclaimed for the rest of the test: the reset just cleared the claim,
 	// which is exactly what arms the flows resetStaged guards.
@@ -309,6 +759,7 @@ func TestFactoryReset_StuckResetWatchdogArms(t *testing.T) {
 	sm := mocks.NewMockStateManager(ctrl)
 	state.InjectStateManagerForTesting(sm)
 	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().InvalidateRelayerTopic().Return("topic-1", true, nil)
 	sm.EXPECT().ClearClaim().Return(true, nil)
 	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
 

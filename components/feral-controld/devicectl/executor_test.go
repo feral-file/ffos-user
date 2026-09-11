@@ -4597,6 +4597,9 @@ func TestExecutor_FactoryReset_StartsServiceAndRotatesTopic(t *testing.T) {
 	// are pinned by state_test.go's TestStateManager_ClearClaim_* — this test
 	// only needs to verify factoryReset calls through to ClearClaim.
 	ts.mockStateManager.EXPECT().
+		InvalidateRelayerTopic().
+		Return("topic-1", true, nil)
+	ts.mockStateManager.EXPECT().
 		ClearClaim().
 		Return(true, nil)
 
@@ -4653,6 +4656,9 @@ func TestExecutor_FactoryReset_UnitFailureStillClearsClaim(t *testing.T) {
 		Marshal(cmd.Arguments).
 		Return([]byte(`{}`), nil)
 
+	ts.mockStateManager.EXPECT().
+		InvalidateRelayerTopic().
+		Return("topic-1", true, nil)
 	ts.mockStateManager.EXPECT().
 		ClearClaim().
 		Return(true, nil)

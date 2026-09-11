@@ -14,10 +14,12 @@ package offlinecache
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	go_http "net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,6 +44,106 @@ func probeOneSource(t *testing.T, prober SourceProber, source string) SourceProb
 	results := prober.ProbeSources(context.Background(), []string{source})
 	require.Len(t, results, 1)
 	return results[0]
+}
+
+type blockingProbeHTTPClient struct {
+	entered chan struct{}
+	release chan struct{}
+	active  atomic.Int64
+	peak    atomic.Int64
+}
+
+func (c *blockingProbeHTTPClient) NewRequest(method string, url string, body io.Reader) (*go_http.Request, error) {
+	return go_http.NewRequest(method, url, body)
+}
+
+func (c *blockingProbeHTTPClient) Do(req *go_http.Request) (*go_http.Response, error) {
+	active := c.active.Add(1)
+	defer c.active.Add(-1)
+	for {
+		peak := c.peak.Load()
+		if active <= peak || c.peak.CompareAndSwap(peak, active) {
+			break
+		}
+	}
+	c.entered <- struct{}{}
+	select {
+	case <-c.release:
+		return &go_http.Response{
+			StatusCode: go_http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(go_http.Header),
+		}, nil
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	}
+}
+
+func (c *blockingProbeHTTPClient) Get(string) (*go_http.Response, error) {
+	panic("unexpected Get")
+}
+
+func (c *blockingProbeHTTPClient) Post(string, string, io.Reader) (*go_http.Response, error) {
+	panic("unexpected Post")
+}
+
+// TestSourceProber_HeaderBudgetIsSharedAcrossCalls proves that concurrent
+// ProbeSources calls share one request-admission budget. The command storm
+// gate is operator-configurable (and can be disabled), so the header-memory
+// safety bound must live at the resource it protects rather than relying on
+// any one gate configuration.
+func TestSourceProber_HeaderBudgetIsSharedAcrossCalls(t *testing.T) {
+	client := &blockingProbeHTTPClient{
+		entered: make(chan struct{}, 4),
+		release: make(chan struct{}, 4),
+	}
+	guard := sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}}
+	prober := newSourceProberWithHeaderSlots(
+		guard,
+		client,
+		2*probeHTTPSHeaderBudgetSlots,
+	)
+
+	var wg sync.WaitGroup
+	for call := 0; call < 2; call++ {
+		call := call
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			prober.ProbeSources(context.Background(), []string{
+				fmt.Sprintf("https://93.184.216.34/%d-a", call),
+				fmt.Sprintf("https://93.184.216.34/%d-b", call),
+			})
+		}()
+	}
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-client.entered:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for the admitted probes")
+		}
+	}
+	select {
+	case <-client.entered:
+		t.Fatal("a third probe entered before a header-budget slot was released")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	client.release <- struct{}{}
+	client.release <- struct{}{}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-client.entered:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for a queued probe to take a released slot")
+		}
+	}
+	client.release <- struct{}{}
+	client.release <- struct{}{}
+	wg.Wait()
+
+	assert.Equal(t, int64(2), client.peak.Load())
 }
 
 // TestSourceProber_ProbeIsOneRangedGET pins the probe's request shape: a

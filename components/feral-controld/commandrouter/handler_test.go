@@ -399,6 +399,18 @@ func (f *fakeMintPairingService) DisplayActive() bool { return false }
 
 func (f *fakeMintPairingService) SetSession(mintpairing.NavigationSession) {}
 
+func (f *fakeMintPairingService) RevokeTopicSessions(context.Context, string) (int, error) {
+	return 0, nil
+}
+
+func (f *fakeMintPairingService) WaitForInFlightCreates(context.Context) (int, error) {
+	return 0, nil
+}
+
+func (f *fakeMintPairingService) CloseActivePairing(context.Context) (bool, error) {
+	return false, nil
+}
+
 func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

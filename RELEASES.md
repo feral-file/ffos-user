@@ -12,6 +12,13 @@ An entry is the durable record that the release was cut on the full-image
 rail: it names the version and the exact `ffos` image-build dispatch that
 ships the units/scripts alongside the new binaries. Newest first.
 
+The dispatch itself is a human step. Coding agents must never dispatch a
+`release`/Production run of any `ffos` publishing workflow (image builds,
+manual component/player package builds, pacman repo push) and may dispatch a
+`staging` one only after
+explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
+enforced by `scripts/agent-iso-build-guard.sh`).
+
 ## 2.0.3 — full-image
 
 Everything on `develop` since the previous staging merge — four PRs

@@ -902,8 +902,14 @@ to a space, formatting characters removed, whitespace collapsed, truncated to
 32 runes), which may differ from what was sent. Controllers should adopt the
 returned value rather than echoing their own input.
 
-Clearing: send `{"name": ""}`. The record is removed from the display path and
-the unit falls back to its serial in both mDNS and status.
+Clearing: send `{"name": ""}`. The record is removed from the display path.
+**mDNS** falls back to the serial, so the unit still announces something a
+person can read. **Status does not**: `device_status.message.deviceName` is
+always present on firmware carrying this command and becomes the empty string,
+because its presence is the capability gate a controller uses to decide whether
+to offer renaming, and a serial there would be indistinguishable from a name
+somebody chose. A controller reading status for a cleared unit gets `""`, not
+the serial. This matches `docs/api-design.md`.
 
 Current error cases:
 
@@ -1428,14 +1434,112 @@ The mint-pairing flow adds an approval decision message from
 3. A controller client sends `mintPairingApprovalDecision` inbound to
    `feral-controld`.
 4. `feral-controld` accepts exactly one valid decision.
-5. On approval, `feral-controld` creates an ephemeral browser session through
+5. On approval, `feral-controld` creates a browser session through
    `ff-relayer` and sends the raw token only inside encrypted
-   `mint_succeeded` to the browser.
+   `mint_succeeded` to the browser. An approval with `keepPaired` asks for an
+   owner-kept session instead: `feral-controld` sends `persistent: true` to
+   `ff-relayer` and sends no `expiresInSeconds` — but only for a requester that
+   declared `supportsPersistentSessions` in its mint request. A requester that
+   did not (every client released before owner-kept sessions existed) requires
+   a real `expiresAt` and cannot parse a session without one, so a `keepPaired`
+   approval for it is minted as a timed session at the policy maximum (86400
+   seconds) instead, logged with the requesting origin. The approval is not
+   rejected — the owner still approved the site; it simply lapses and has to be
+   approved again. **The delivered session's shape follows the relayer's
+   answer, not the request.** When the relayer
+   mints the owner-kept session, the delivered session carries
+   `persistent: true` with a null `expiresAt` and ends only when the owner
+   removes the site from the app's paired-sites screen. When the relayer
+   answers with an ordinary timed session — an older relayer, or one that does
+   not honor `persistent` — `feral-controld` delivers exactly that: no
+   `persistent`, a real `expiresAt`, and a session that expires on its own. It
+   is never re-labelled as kept, because a session the relayer will expire must
+   not be presented as one that never will. Anything read from the delivered
+   session — the app's paired-sites row, its copy, the browser client's local
+   expiry — must follow the delivered shape rather than what was requested.
 6. On rejection or terminal failure, `feral-controld` sends encrypted
-   `mint_rejected` to the browser.
+   `mint_rejected` to the browser. If the session was already created when the
+   failure landed, `feral-controld` revokes it through
+   `DELETE /api/ephemeral-sessions/{sessionID}?topicID=...` — best effort,
+   logged on failure — but only when the browser provably never received it:
+   the device topic changed before the send, or the broker refused the message
+   outright (a client-error status). A failed send that leaves delivery in
+   doubt — a timeout, a transport error, a broker 5xx — is **not** revoked: the
+   browser may already hold that session, so `feral-controld` logs it with the
+   session id and leaves it alone. A timed session then expires on its own; an
+   owner-kept one appears in the app's paired-sites list, where the owner can
+   remove it. `feral-controld` also revokes a session it refuses as
+   contradictory (see the session-shape rules above), so a reply it will not
+   deliver never holds one of the topic's persistent-session slots — including
+   a reply that grants MORE than was asked: a `persistent` session for an
+   approval that did not send `keepPaired` is refused, never delivered.
+   One more revoke happens after a successful delivery: `feral-controld`
+   re-reads the relayer topic once the encrypted `mint_succeeded` has gone out,
+   and if the topic moved while it was being sent — reassigned, cleared, or
+   factory reset — it revokes the session, because the topic it was minted for
+   no longer exists. The browser's terminal message is not taken back and the
+   outcome still reports `completed`; the session simply no longer exists on
+   the relayer, and the site pairs again when the owner approves it under the
+   current topic.
 
 `ff-controller` must not receive raw browser session tokens or DP1 playlist
 content.
+
+Factory reset ends every browser session too, in this order:
+
+1. **Invalidate the claim.** `feral-controld` clears the persisted relayer
+   topic in one locked step that hands back the topic id. From that instant the
+   device's topic generation has moved, so any mint already in flight fails its
+   own guard check — before creation, or after delivery — and revokes the
+   session it made.
+2. **Close the pairing session in progress.** The pairing worker sits in a
+   broker poll on a socket the device still holds, so until it is gone a
+   browser request can still arrive for the claim being wiped. The reset closes
+   it and waits, boundedly, for the worker to exit; a pairing that is still
+   *starting* — its broker call in flight, nothing published yet — is canceled
+   and awaited the same way, and the close repeats until neither exists, since
+   a start it is waiting on can publish a session while it waits. Every one of
+   those surfaces also guards itself against the claim moving: a start whose
+   claim went while the broker answered closes its channel and returns
+   `topic_changed` rather than painting a code, the same check runs again once
+   the code is on screen (taking it back down instead of publishing a session
+   for a claim that went while it painted), and a request read after the claim
+   moved is dropped with a log — never displayed on the panel, never sent to a
+   controller.
+3. **Let creations already at `ff-relayer` settle.** A session-creation POST
+   sent a moment earlier can commit AFTER the sweep below has listed the topic,
+   and that listing would never see it. So the reset waits for those creations
+   to return — each one then runs its own guard, sees the invalidated claim,
+   and revokes the session it made. A decision counts as in flight from the
+   moment it is admitted — before it re-reads the claim, not after — so a reset
+   can never slip between that read and the POST. The wait is bounded: a create
+   that never returns must not hold a wipe, and giving up is logged at error
+   level with the number still outstanding, since those are exactly the
+   sessions the sweep can miss. This wait and the sweep below share ONE 20 s
+   budget with the close above (5 s closing, up to 12 s waiting, the remainder
+   for the sweep, never less than 3 s), because the reset is answered
+   synchronously: over LAN the reply cannot
+   start until the cleanup returns, against the hub's 30 s write timeout. A creation whose response is lost entirely is the relay
+   idempotency case — the device never learns the session id — tracked as
+   ff-relayer #20.
+4. **Sweep the topic.** It lists that topic's sessions
+   (`GET /api/ephemeral-sessions?topicID=...`) and revokes each one. Sessions
+   live on `ff-relayer`, keyed by topic, and an owner-kept one has no expiry to
+   reclaim it, so this is the last moment anything can end them: afterwards the
+   device cannot name the topic they belong to, and the re-claimed device's
+   paired-sites screen reads a new one.
+5. **Clear the rest of the claim.**
+
+The order is deliberate. Sweeping first would leave a hole: an approval
+accepted a moment before the reset could mint its session after the sweep had
+already listed the topic, and that session would survive the wipe. The sweep is
+bounded and best effort — a reset completes even if `ff-relayer` is unreachable,
+and what could not be revoked is logged at error level, because a session that
+survives is a live session against a device its previous owner no longer
+holds. The cleanup does NOT depend on mint pairing being enabled: a device can mint an
+owner-kept session, be restarted with the feature turned off, and only then be
+reset — the credential outlives the flag. Having no topic is the only thing
+that keeps the reset off the network, because then there is nothing to name.
 
 Implementation note: `feral-controld` embeds the temporary Go minter client from
 `ff-art-computer-handoff` for Mint Pairing Broker channels, encrypted browser
@@ -1570,6 +1674,7 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
     },
     "requestedExpiresInSeconds": 86400,
     "effectiveExpiresInSeconds": 86400,
+    "supportsPersistentSessions": true,
     "requestedAt": "2026-06-16T03:00:00Z",
     "expiresAt": "2026-06-16T03:05:00Z",
     "challenge": {
@@ -1586,7 +1691,15 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
 will request from `ff-relayer` if the controller approves. `feral-controld`
 owns this policy: omitted or non-positive requests default to 3600 seconds,
 requests below 90 seconds are raised to 90 seconds, and requests above 86400
-seconds are capped at 86400 seconds.
+seconds are capped at 86400 seconds. Both fields are moot when the
+controller approves with `keepPaired` and the requester can hold an owner-kept
+session: it has no TTL and the browser's request is ignored.
+
+`supportsPersistentSessions` says whether this requester declared that it can
+hold a session with no expiry. It is `false` for every client released before
+owner-kept sessions existed. A `keepPaired` approval for such a requester is
+minted as a timed session at 86400 seconds, so a controller may use this field
+to tell the owner up front that this site cannot be kept paired yet.
 
 ### mintPairingApprovalDecision
 
@@ -1606,6 +1719,7 @@ Approve example:
       "channelID": "ch_pQ9Yab...",
       "requestMessageID": "msg_2WaF8D7xV9zJvdm8SK5LSA",
       "decision": "approve",
+      "keepPaired": true,
       "decidedAt": "2026-06-16T03:00:20Z",
       "controller": {
         "clientID": "ios_abc123",
@@ -1649,6 +1763,15 @@ Required fields:
 
 Optional fields:
 
+- `keepPaired`: meaningful for `approve`, ignored for `reject`, default
+  `false` when absent. Only a literal `true` or `false` is accepted — `null`
+  or any non-boolean is `invalid_request`, never a silent `false`. `true` asks
+  for an owner-kept session: `persistent: true` to
+  `ff-relayer`, no `expiresInSeconds`. Two things can still make the delivered
+  session timed — a requester that did not declare
+  `supportsPersistentSessions` (minted at 86400 seconds instead) and a relayer
+  that answers with a timed session — so read the shape from what was
+  delivered, not from the request (see the flow above)
 - `reason`: required for `reject`, ignored for `approve`
 - `retryable`: meaningful for `reject`, default `false`
 - `decidedAt`
@@ -1704,13 +1827,13 @@ Error cases:
 
 | Case | Detection | controld response to controller | Browser result |
 |---|---|---|---|
-| Malformed decision payload | Missing required fields, invalid `decision`, non-object `request` | `ok: false`, `invalid_request`, `retryable: false` | Keep waiting until approval timeout |
+| Malformed decision payload | Missing required fields, invalid `decision`, non-object `request`, non-boolean `keepPaired` (`null` included) | `ok: false`, `invalid_request`, `retryable: false` | Keep waiting until approval timeout |
 | Unknown approval request | No pending request for `approvalRequestID` | `ok: false`, `not_found`, `retryable: false` | No change |
-| Topic mismatch | Decision `topicID` differs from current device topic | `ok: false`, `topic_mismatch`, `retryable: false` | Keep waiting until timeout |
+| Topic mismatch | Decision `topicID` differs from the current device topic, or the claim the pairing began under was cleared and re-taken (a factory reset and re-claim, even onto the same topic id) | `ok: false`, `topic_mismatch`, `retryable: false` | Keep waiting until timeout |
 | Channel/request mismatch | `channelID` or `requestMessageID` differs from pending request | `ok: false`, `request_mismatch`, `retryable: false` | Keep waiting until timeout |
 | Expired decision | Request deadline passed before valid decision | `ok: false`, `expired`, `retryable: false` | Encrypted `mint_rejected` with `approval_expired` |
 | Duplicate same decision | Same accepted decision delivered again | `ok: true`, `status: "already_accepted"` | No duplicate minting |
-| Conflicting duplicate decision | Different terminal decision after one was accepted | `ok: false`, `already_decided`, `retryable: false` | No change |
+| Conflicting duplicate decision | Different terminal decision, or the same decision with a different `keepPaired`, after one was accepted | `ok: false`, `already_decided`, `retryable: false` | No change |
 | Controller rejects | Valid `decision: "reject"` | `ok: true`, `status: "accepted"` | Encrypted `mint_rejected` with controller reason or `rejected_by_user` |
 | Topic changes after approval | Current device topic no longer matches the approval request topic before relayer session creation or browser delivery | Optional outcome `failed`; ACK remains accepted | Encrypted `mint_rejected` with `topic_changed` |
 | Session creation fails after approval | `ff-relayer` ephemeral-session creation fails | Optional outcome `failed`; ACK remains accepted | Encrypted `mint_rejected` with `session_create_failed` |
@@ -1746,10 +1869,25 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
     "channelID": "ch_pQ9Yab...",
     "requestMessageID": "msg_2WaF8D7xV9zJvdm8SK5LSA",
     "status": "completed",
+    "lifetime": "persistent",
     "completedAt": "2026-06-16T03:00:22Z"
   }
 }
 ```
+
+`lifetime` is present only on `completed` and is read from the session the
+browser actually received, never from what the approval asked for — a
+`keepPaired` approval answered by `ff-relayer` with a timed session reports
+`timed`. It names the shape:
+
+- `persistent`: an owner-kept session; it ends when the owner removes the site.
+- `timed`: an ordinary session with an expiry.
+- `timed_fallback_requester`: the owner approved with `keepPaired`, but the
+  requester had not declared `supportsPersistentSessions`, so it received a
+  timed session at 86400 seconds. A controller showing "kept until you remove
+  it" should correct that copy when it sees this value — as it should for a
+  plain `timed` after a `keepPaired` approval, which means `ff-relayer` did not
+  mint a kept session.
 
 Allowed `status` values:
 

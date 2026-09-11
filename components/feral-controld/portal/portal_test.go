@@ -17,6 +17,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // newTestServer builds a portal Server with in-memory seams and an httptest
@@ -444,8 +446,10 @@ func TestInflightCapRejectsExcessRequests(t *testing.T) {
 	t.Cleanup(releaseAll)
 
 	started := make(chan struct{}, maxInflightRequests)
+	core, observed := observer.New(zap.InfoLevel)
 	_, ts, client := newTestServer(t, Config{
 		APSSID: "FF1-abc",
+		Logger: zap.New(core),
 		Status: func() Status {
 			started <- struct{}{}
 			<-release
@@ -477,9 +481,137 @@ func TestInflightCapRejectsExcessRequests(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+	// A shed request writes no access line: the cap's own saturation is the
+	// evidence there, and logging what it rejects is what would let a
+	// sequential stream drive the log (review bot on 6ba6f96).
+	assert.Equal(t, maxInflightRequests, observed.FilterMessage("portal: request").Len(),
+		"only the admitted requests logged")
 
 	releaseAll()
 	wg.Wait()
+}
+
+// TestAccessLineTruncatesClientControlledFields: the path and User-Agent of
+// the access line are attacker-controlled and unbounded on the wire, so the
+// line carries bounded copies of both.
+func TestAccessLineTruncatesClientControlledFields(t *testing.T) {
+	core, observed := observer.New(zap.InfoLevel)
+	h := NewServer(Config{APSSID: "FF1-abc", Logger: zap.New(core)}).Handler()
+	req := httptest.NewRequest(http.MethodGet, "/"+strings.Repeat("a", 4000), nil)
+	req.Header.Set("User-Agent", strings.Repeat("u", 4000))
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	lines := observed.FilterMessage("portal: request").All()
+	require.Len(t, lines, 1)
+	fields := lines[0].ContextMap()
+	path, _ := fields["path"].(string)
+	agent, _ := fields["user_agent"].(string)
+	assert.Equal(t, maxLoggedPathBytes+len("…"), len(path), "the path is cut at its byte bound")
+	assert.True(t, strings.HasSuffix(path, "…"), "a cut value is marked")
+	assert.Equal(t, maxLoggedUserAgentBytes+len("…"), len(agent), "the agent is cut at its byte bound")
+	assert.True(t, strings.HasSuffix(agent, "…"))
+	assert.NotContains(t, fields, "suppressed", "nothing was dropped")
+
+	// A field inside the bound passes through whole.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/status", nil))
+	lines = observed.FilterMessage("portal: request").All()
+	require.Len(t, lines, 2)
+	assert.Equal(t, "/status", lines[1].ContextMap()["path"])
+}
+
+// TestAccessLineOmitsClientAddress: the portal client's address is a device
+// identifier and must not reach the log (review bot on 6eaaf14). The line
+// carries the classified client kind instead — which is what the attached-
+// phase repaint is diagnosed from — and nothing that names the phone. The
+// same holds for the /rescan submission line, which logged the address of
+// its own accord (review bot on 8e5a23d), so the sweep at the end covers
+// every line the portal emits, not just the access line.
+func TestAccessLineOmitsClientAddress(t *testing.T) {
+	core, observed := observer.New(zap.InfoLevel)
+	h := NewServer(Config{
+		APSSID: "FF1-abc",
+		Logger: zap.New(core),
+		Rescan: func() error { return nil },
+	}).Handler()
+
+	apple := httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil)
+	apple.Header.Set("User-Agent", "CaptiveNetworkSupport-355.200.27 wispr")
+	apple.RemoteAddr = "10.42.0.77:51000"
+	h.ServeHTTP(httptest.NewRecorder(), apple)
+
+	other := httptest.NewRequest(http.MethodGet, "/status", nil)
+	other.Header.Set("User-Agent", "Mozilla/5.0")
+	other.RemoteAddr = "10.42.0.78:51001"
+	h.ServeHTTP(httptest.NewRecorder(), other)
+
+	lines := observed.FilterMessage("portal: request").All()
+	require.Len(t, lines, 2)
+	for _, line := range lines {
+		fields := line.ContextMap()
+		assert.NotContains(t, fields, "remote_addr", "the client address stays out of the log")
+		require.Contains(t, fields, "client", "the classified client kind replaces it")
+		assert.NotContains(t, line.Message, "10.42.0.")
+	}
+	assert.Equal(t, "apple", lines[0].ContextMap()["client"])
+	assert.Equal(t, "unknown", lines[1].ContextMap()["client"])
+
+	// The rescan submission is logged on its own, outside the access line.
+	rescan := httptest.NewRequest(http.MethodPost, "/rescan", nil)
+	rescan.Header.Set("User-Agent", "CaptiveNetworkSupport-355.200.27 wispr")
+	rescan.RemoteAddr = "10.42.0.79:51002"
+	h.ServeHTTP(httptest.NewRecorder(), rescan)
+
+	submitted := observed.FilterMessage("portal: rescan submitted").All()
+	require.Len(t, submitted, 1)
+	assert.Equal(t, "apple", submitted[0].ContextMap()["client"], "the classified client kind replaces the address")
+
+	// Nothing the portal logged names the phone.
+	for _, line := range observed.All() {
+		assert.NotContains(t, line.ContextMap(), "remote_addr", "no portal line carries the client address")
+		assert.NotContains(t, line.Message, "10.42.0.")
+	}
+}
+
+// TestAccessLineIsRateLimitedAndReportsWhatItDropped: a client on the open
+// setup subnet can send a sequential stream, and controld.log rotates on time
+// rather than size — so the line is capped at accessLogBurst with an
+// accessLogPerMinute refill, and the flood it swallowed is reported as a
+// count on the next line rather than as silence.
+func TestAccessLineIsRateLimitedAndReportsWhatItDropped(t *testing.T) {
+	core, observed := observer.New(zap.InfoLevel)
+	s := NewServer(Config{APSSID: "FF1-abc", Logger: zap.New(core)})
+	now := time.Now()
+	s.access.now = func() time.Time { return now }
+	h := s.Handler()
+	get := func() {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/status", nil))
+	}
+	lines := func() int { return observed.FilterMessage("portal: request").Len() }
+
+	for i := 0; i < accessLogBurst; i++ {
+		get()
+	}
+	require.Equal(t, accessLogBurst, lines(), "the burst covers a whole setup session")
+
+	const flood = 25
+	for i := 0; i < flood; i++ {
+		get()
+	}
+	assert.Equal(t, accessLogBurst, lines(), "the burst spent, a stream of requests writes nothing")
+
+	// A minute of refill later the line resumes, carrying what the flood cost.
+	now = now.Add(time.Minute)
+	get()
+	all := observed.FilterMessage("portal: request").All()
+	require.Len(t, all, accessLogBurst+1)
+	assert.EqualValues(t, flood, all[len(all)-1].ContextMap()["suppressed"],
+		"a flood shows up as one number, not as silence")
+
+	// The count is claimed exactly once.
+	get()
+	all = observed.FilterMessage("portal: request").All()
+	require.Len(t, all, accessLogBurst+2)
+	assert.NotContains(t, all[len(all)-1].ContextMap(), "suppressed")
 }
 
 // TestSlowBodyClientIsDisconnected: wire-level slowloris guard. A client that
@@ -769,7 +901,7 @@ func TestTrafficObservedCountsEveryRequest(t *testing.T) {
 		Scan:             func(context.Context) ([]string, error) { return []string{"Net"}, nil },
 		Rescan:           func() error { return nil },
 		ActivityObserved: count(&activity),
-		TrafficObserved:  count(&traffic),
+		TrafficObserved:  func(ClientKind, string) { count(&traffic)() },
 	})
 
 	// The asset routes ride along: a browser auto-fetching the stylesheet or a
@@ -794,4 +926,135 @@ func TestTrafficObservedCountsEveryRequest(t *testing.T) {
 	assert.Equal(t, 6, traffic)
 	assert.Equal(t, 1, activity, "an action request counts as both")
 	mu.Unlock()
+}
+
+// TestIndexCarriesHandOffWatcher pins the picker's /status watcher (the
+// #3515 Safari hand-off): the page must poll /status and be able to turn
+// itself into the hand-off screen on a started join; a failed join never
+// hands off — it reloads an untouched picker for the banner and leaves a
+// touched one alone.
+func TestIndexCarriesHandOffWatcher(t *testing.T) {
+	srv := NewServer(Config{APSSID: "FF1-abc"})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	assert.Contains(t, body, "fetch('/status'")
+	assert.Contains(t, body, "st.state === 'joining' || st.state === 'succeeded'")
+	assert.Contains(t, body, "Setup continues on your Art Computer")
+	// A failed join reaching an UNTOUCHED picker reloads it so the server's
+	// failure banner appears (Safari was frozen under the sheet for the whole
+	// wrong-password round trip); a form holding input or focus stays.
+	assert.Contains(t, body, "if (st && st.state === 'failed' && renderedStatus !== 'failed' && !formTouched()) {")
+	assert.Contains(t, body, `<main data-status="idle">`, "an idle render stamps idle")
+	// The shapes the 2026-09-07 trials and audit forced (see the template
+	// comment): an immediate first poll, a bounded fetch, a visibility hook,
+	// the watcher header, HTTP errors not counted as misses, the form guard,
+	// and the post-hand-off return watch that reloads into the picker.
+	assert.Contains(t, body, "if (!main || !window.fetch || !window.AbortController) return;",
+		"no watcher without a bounded fetch — an unbounded poll would hang the return watch")
+	assert.Contains(t, body, "new AbortController()")
+	assert.NotContains(t, body, "return fetch('/status', opts);", "no unbounded fallback")
+	assert.Contains(t, body, "visibilitychange")
+	assert.Contains(t, body, "if (handedOff) opts.headers = { 'X-Setup-Watcher': '1' };",
+		"only post-hand-off polls are excluded from traffic; an open picker still counts as a human mid-setup")
+	assert.Contains(t, body, "if (!r.ok) { setTimeout(poll, 2000); return; }")
+	assert.Contains(t, body, "misses >= 3 && !formTouched()")
+	assert.Contains(t, body, "window.location.reload()")
+	// html/template elides JS comments in the served body, so the prose
+	// mention of the removed gate never reaches the client; pin the CODE.
+	assert.NotContains(t, body, "var answered", "a page served by the device needs no answered gate")
+	assert.Regexp(t, `\n    poll\(\);\n  \}\)\(\);`, body, "the first poll must run on load, not on a timer")
+}
+
+// TestWatcherPollsAreNotTraffic: the picker's post-hand-off /status watcher
+// must not register as an attached device talking — it would pin the
+// recheck deferral and the address-QR phase open on its own. (Pre-hand-off
+// polls carry no header and count; see the template.)
+func TestWatcherPollsAreNotTraffic(t *testing.T) {
+	var mu sync.Mutex
+	traffic := 0
+	h := NewServer(Config{APSSID: "FF1-abc", TrafficObserved: func(ClientKind, string) {
+		mu.Lock()
+		traffic++
+		mu.Unlock()
+	}}).Handler()
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	req.Header.Set(watcherHeader, "1")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "the watcher poll is still served")
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/status", nil))
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, traffic, "only the unmarked /status counted")
+}
+
+// TestTrafficObservedClassifiesAppleClients pins the ClientKind the seam
+// hands the machine: the iOS/macOS probe agent is Apple, everything else —
+// Android's generic desktop-looking probe agent included — is unknown.
+func TestTrafficObservedClassifiesAppleClients(t *testing.T) {
+	var mu sync.Mutex
+	var kinds []ClientKind
+	h := NewServer(Config{APSSID: "FF1-abc", TrafficObserved: func(k ClientKind, _ string) {
+		mu.Lock()
+		kinds = append(kinds, k)
+		mu.Unlock()
+	}}).Handler()
+	for _, ua := range []string{
+		"CaptiveNetworkSupport-514.160.1.0.1 wispr",
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.32 Safari/537.36",
+		"Dalvik/2.1.0 (Linux; U; Android 17; Pixel 8 Build/BP1A)",
+		"",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil)
+		if ua != "" {
+			req.Header.Set("User-Agent", ua)
+		}
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []ClientKind{ClientApple, ClientUnknown, ClientUnknown, ClientUnknown}, kinds)
+}
+
+// TestFailedPickerRenderStampsItsStatus: the picker rendered WITH the failure
+// banner must stamp data-status="failed" so its watcher does not reload
+// again on the same persisted outcome (the reload loop the review bot caught).
+func TestFailedPickerRenderStampsItsStatus(t *testing.T) {
+	srv := NewServer(Config{APSSID: "FF1-abc", Status: func() Status {
+		return Status{State: JoinFailed, SSID: "Home", Reason: "auth-failure", Message: "Wrong Wi-Fi password."}
+	}})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+	assert.Contains(t, body, `<main data-status="failed">`)
+	assert.Contains(t, body, "Wrong Wi-Fi password.", "the banner the reload exists to show")
+}
+
+// TestTrafficObservedCarriesTheClientIP: the seam hands the machine the host
+// part of RemoteAddr — the key the kernel's neighbor table is looked up by,
+// which is how the station poll tells the phone that raised the address QR
+// from any other device on the hotspot. An address that does not parse is
+// passed through rather than dropped.
+func TestTrafficObservedCarriesTheClientIP(t *testing.T) {
+	var mu sync.Mutex
+	var ips []string
+	h := NewServer(Config{APSSID: "FF1-abc", TrafficObserved: func(_ ClientKind, ip string) {
+		mu.Lock()
+		ips = append(ips, ip)
+		mu.Unlock()
+	}}).Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil)
+	req.RemoteAddr = "10.42.0.22:51234"
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	req = httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil)
+	req.RemoteAddr = "not-an-address"
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"10.42.0.22", "not-an-address"}, ips)
 }
