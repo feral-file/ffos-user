@@ -16,6 +16,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -74,6 +75,15 @@ type handler struct {
 	// would deadlock on that non-reentrant lock — re-check this before doing
 	// so, rather than trusting the sentence above.
 	recoverySession RecoverySession
+
+	// verifySignatures and activeVerdict are set together by
+	// SetSignatureVerification. verifySignatures gates the inline
+	// (dp1_call) and cached-copy verification this package performs itself;
+	// the URL path's verdict is attached by the dp1 package at fetch time
+	// and merely consumed here. activeVerdict may be nil even when
+	// verification is on.
+	verifySignatures bool
+	activeVerdict    *sigverify.Active
 }
 
 // RecoverySession is the narrow slice of playersession.Session the relayer's
@@ -148,6 +158,39 @@ func SetSourceProber(h Handler, prober offlinecache.SourceProber, logger *zap.Lo
 
 func (h *handler) setSourceProber(prober offlinecache.SourceProber) {
 	h.sourceProber = prober
+}
+
+// SignatureVerificationOptions is what SetSignatureVerification wires. A
+// struct rather than positional arguments so later phases (the persisted
+// mode, the player toast) extend it without another seam.
+type SignatureVerificationOptions struct {
+	// Active, when non-nil, receives the verdict of every playlist that
+	// actually reaches the player, for the status poller's player_status
+	// annotation (see sigverify.Active). Optional.
+	Active *sigverify.Active
+}
+
+// SetSignatureVerification turns on DP-1 signature verification of every
+// displayPlaylist cast (feral-file/ffos-user#307) on h, if h supports it —
+// the concrete *handler built by New, NOT the storm-protection gate wrapper,
+// so callers must wire it against the raw handler before NewGate wraps it
+// (SetSourceProber's contract). Not called ⇒ verification off: playlists
+// carry no verdict and replies carry no signatureStatus, which is exactly
+// the shape old firmware has.
+func SetSignatureVerification(h Handler, opts SignatureVerificationOptions, logger *zap.Logger) {
+	setter, ok := h.(interface {
+		setSignatureVerification(SignatureVerificationOptions)
+	})
+	if !ok {
+		logger.Warn("Command handler does not support signature verification wiring")
+		return
+	}
+	setter.setSignatureVerification(opts)
+}
+
+func (h *handler) setSignatureVerification(opts SignatureVerificationOptions) {
+	h.verifySignatures = true
+	h.activeVerdict = opts.Active
 }
 
 func (h *handler) currentGeneration() uint64 {
@@ -403,10 +446,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// capture.md §6 and Service.CachedPlaylistForURL's
 					// doc). This is a "last known good" copy, not a live
 					// re-resolution: it will not reflect anything
-					// published at url after it was downloaded, and (by
-					// construction, since it can only exist if it was
-					// downloaded successfully before) was already
-					// signature-verified once at that time.
+					// published at url after it was downloaded, and it
+					// carries NO signature verdict — the saved body is a
+					// typed, hydrated re-marshal, not the signed bytes
+					// (see loadCachedPlaylistForURL's doc) — so the reply
+					// and player_status omit signatureStatus for it.
 					cachedPlaylist, cacheErr := h.loadCachedPlaylistForURL(url)
 					if cacheErr != nil {
 						return nil, err
@@ -434,6 +478,18 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
 				}
 
+				// Verify the map re-marshal, NOT the typed struct just
+				// decoded from it: the struct drops any field it does not
+				// know, and a signer covered every field, so verifying
+				// after the typed decode would misreport an honest
+				// document as tampered. JCS makes the map round-trip safe
+				// (sigverify's map round-trip test is the pin). Also before
+				// dynamic hydration below, which rewrites items.
+				if h.verifySignatures {
+					verdict := sigverify.Verify(playlistBytes)
+					playlist.Verification = &verdict
+				}
+
 				if playlist.HasDynamicContent() {
 					schedulerSource = playlistschedule.Source{DynamicPlaylist: playlist}
 					playlist, err = h.dp1.ProcessDynamicPlaylistForCast(ctx, *playlist)
@@ -445,6 +501,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 			default:
 				return nil, fmt.Errorf("unknown payload type")
+			}
+
+			// Signature verdict (#307), observation only in this phase: every
+			// cast still plays. Logged once here, reported on the reply and
+			// player_status below. nil when verification is off or the
+			// resolver returned a playlist without a verdict.
+			if playlist.Verification != nil {
+				h.logSignatureVerdict(playlist.Verification, playlist.ID, schedulerSource.PlaylistURL)
 			}
 
 			// Cast-time source preflight (#304). Without it, a cast whose
@@ -787,6 +851,27 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// label, not a wire contract change.
 			result = map[string]interface{}{
 				"message": map[string]interface{}{"ok": true, "recovered": "navigate"},
+			}
+		}
+
+		// Report the signature verdict on the accepted reply (both the
+		// deferred acceptance map and the player's own ok reply) and
+		// publish it for the status poller. Additive keys only: existing
+		// controllers decide success by ok and ignore the rest.
+		//
+		// Published on the displayAt-deferred acceptance too, deliberately:
+		// the scheduler's later cutover pushes cohorts of this same
+		// playlist with no hook here, and a static inline schedule is never
+		// re-pushed by the refresher either, so acceptance is the one point
+		// this verdict can be recorded for the screen it will reach. The
+		// cost is that the PREVIOUS playlist, still showing until the
+		// cutover, no longer matches the slot and loses its annotation for
+		// that window — a "not verified" omission, never a wrong verdict
+		// (see sigverify.Active's doc).
+		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil && playlist.Verification != nil && playerresponse.OK(result) {
+			result = annotateCastReply(result, playlist.Verification)
+			if h.activeVerdict != nil {
+				h.activeVerdict.Set(playlist.ID, schedulerSource.PlaylistURL, playlist.Verification.Status)
 			}
 		}
 

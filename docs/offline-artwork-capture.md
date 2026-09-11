@@ -1168,10 +1168,18 @@ dependency floor is `dp1-go v0.6.0`; the regression tests in
 `commandrouter/handler_test.go` and `commandrouter/offlinecache_test.go`
 pin it across both the player send and this persisted copy.
 
-`feral-controld` verifies no signatures itself — it imports no `dp1-go/sign`
-— so a field lost this way produces no error here. It surfaces downstream,
-as a verification failure in a consumer that does check, or simply as
-metadata that vanished somewhere between the publisher and the screen.
+`feral-controld` now does verify signatures (feral-file/ffos-user#307, the
+`sigverify` package over `dp1-go/sign`) — but deliberately on the bytes
+BEFORE this parse step (the fetched body, or the re-marshaled inline map),
+never on the re-serialized struct, precisely because of the field-loss
+limit above. So a field lost here still produces no verification error in
+the daemon; it surfaces downstream, as a verification failure in a consumer
+that checks the persisted copy, or simply as metadata that vanished
+somewhere between the publisher and the screen. For the same reason the
+cached copy is never verified when loaded as a fallback: its bytes are this
+re-serialization (of an already-hydrated playlist), so a verdict over them
+would be a false tamper claim against an honest publisher. A cast served
+from the cache reports no `signatureStatus` at all.
 
 There is deliberately **no** top-level manifest, no separate
 `capsules/{key}/assets/index.json`, and no `playlists/{id}/items.json`:
@@ -2063,9 +2071,13 @@ URL-recoverable, only ID-recoverable, same as before this fallback
 existed). The fallback playlist is a "last known good" copy: it does not
 reflect anything republished at that URL since it was downloaded, and —
 since it can only exist by having been downloaded successfully once
-before — was already signature-verified and fully DP-1-resolved
-(dynamic content materialized) at that time, so no further DP-1
-processing happens on the cached copy. If there is nothing to fall back
+before — was fully DP-1-resolved (dynamic content materialized) at that
+time, so no further DP-1 resolution happens on the cached copy. It was
+NOT signature-verified then (an earlier version of this sentence claimed
+so; nothing ever did), and it is not verified at load either: the stored
+body is a typed, hydrated re-marshal that cannot verify, so the fallback
+cast carries no signature verdict (feral-file/ffos-user#307; see §7.1's
+JCS note above). If there is nothing to fall back
 to (never downloaded, offline caching disabled, or the download was
 since cleared — `LoadPlaylistIDForURL` intentionally is not kept in
 lockstep with `DeletePlaylist`, see its doc), `displayPlaylist` reports

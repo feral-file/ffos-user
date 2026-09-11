@@ -469,6 +469,28 @@ fallback and does not clear controld's displayAt cache; with
 `onlyIfNoPlaylist`, a successful response may mean the player no-opped because
 content was already playing.
 
+**Signature verification (feral-file/ffos-user#307, verify-and-report).**
+Every `displayPlaylist` document is verified with dp1-go's DP-1 §7.1 verifier
+at accept time, before dynamic hydration: the URL path verifies the fetched
+bytes and the inline path verifies the re-marshaled `dp1_call` map (never
+the typed struct, which drops fields the signer covered). The offline
+cached-copy fallback carries NO verdict — the stored body is a typed,
+hydrated re-marshal, not the signed bytes — so a cast served from it omits
+the fields below. At most 16 `signatures[]` entries are verified; a
+document with more is `invalid` (`too many signatures`) without any
+cryptography running, a CPU bound for the unauthenticated hub. The outcome
+is one of three `signatureStatus` values: `valid`
+(every `signatures[]` entry verifies), `invalid` (signatures present, at
+least one fails: tampered content, placeholder or wrong-key signature,
+unsupported `alg`, malformed entry), or `unsigned` (no `signatures[]`; a
+legacy v1.0 `signature` string alone also counts as unsigned and is flagged).
+In this phase the verdict never changes what plays — every cast proceeds —
+it is reported on the reply below, in `player_status`, and in one log line
+per cast. Validity is cryptographic only: it proves the document is what the
+key named in each `kid` signed, not that the signer is trusted. The
+`signatureVerification.disabled` config flag skips verification entirely and
+omits every field below (the shape old firmware has).
+
 Playlist URL example:
 
 ```json
@@ -532,7 +554,9 @@ Dynamic DP1 example:
 ```
 
 Current success response: Chromium/player response from
-`window.handleCDPRequest(...)`, commonly:
+`window.handleCDPRequest(...)`, with the signature verdict merged in as
+additive keys beside `ok` (the displayAt-deferred acceptance
+`{"ok": true, "deferred": true}` carries them too):
 
 ```json
 {
@@ -540,11 +564,27 @@ Current success response: Chromium/player response from
   "messageID": "msg-display-1",
   "message": {
     "message": {
-      "ok": true
+      "ok": true,
+      "signatureStatus": "valid",
+      "signers": [
+        {"alg": "ed25519", "kid": "did:key:z6Mk…", "role": "feed", "ok": true}
+      ]
     }
   }
 }
 ```
+
+`signatureStatus` is `valid|invalid|unsigned`. `signers` lists every
+`signatures[]` entry (at most 16) in document order with its own `ok`, plus
+a `reason` on a failed entry (`payload_hash mismatch`, `signature invalid`,
+`unsupported alg <alg>`, `malformed signature`); it is omitted when
+unsigned or when the document exceeded the entry cap (`too many
+signatures (N > 16)` is then the document-level reason). `legacySignature: true` appears only when a v1.0 `signature`
+string was present. Kids are DIDs (public keys) and safe to relay; no field
+ever carries a URL. All three keys are absent when verification is disabled
+by config, when the cast was served from the offline cached copy, or on
+firmware that predates it — controllers must treat absence as "not
+verified", never as unsigned. `ok` alone still decides success.
 
 If offline caching is enabled and `playlistUrl` was previously used with
 `downloadPlaylist` for this exact URL, a live DP1 fetch/processing
@@ -579,6 +619,9 @@ Current error cases:
 - Player response is not `{"message":{"ok":true}}`; this records playback
   failure metrics but the raw player response is still returned if CDP
   succeeded.
+- A signature verdict of `invalid` or `unsigned` is NOT an error case in
+  this phase: the cast proceeds and the verdict is reported on the success
+  reply (see above).
 
 - Every resolved item source definitively unreachable (source preflight,
   #304), unless the playlist is `displayAt`-scheduled or has a cached

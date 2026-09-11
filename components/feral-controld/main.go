@@ -45,6 +45,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/softap"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -918,7 +919,17 @@ func initializeApp(
 	ffIndexer := ffindexer.New(httpClient, json, io, logger)
 
 	// DP1
-	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug)
+	// DP-1 signature verification (feral-file/ffos-user#307). Verdicts are
+	// computed on every fetched or inline playlist and reported on the cast
+	// reply and player_status; whether a verdict changes what plays is the
+	// per-device mode's business (later phase). The config flag is the kill
+	// switch for a verifier/canonicalization divergence (see
+	// config.SignatureVerificationConfig).
+	sigVerifyEnabled := config.Get().SignatureVerificationEnabled()
+	if !sigVerifyEnabled {
+		logger.Warn("DP-1 signature verification disabled by config; casts carry no signature verdict")
+	}
+	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug, sigVerifyEnabled)
 
 	// displayAt scheduler: filters playlists with displayAt items before CDP
 	// and advances them on timer / wake / CDP reconnect. Durable state stores
@@ -1062,6 +1073,18 @@ func initializeApp(
 	} else {
 		commandrouter.SetSourceProber(rawCmdHandler, offlinecache.NewSourceProber(net.DefaultResolver), logger)
 	}
+	// Signature verification wiring: the same Active slot feeds the raw
+	// handler (writes on cast), the refresher (writes on re-push, below)
+	// and the status poller (reads on every poll). Wired against the raw
+	// handler for the same reason as SetSourceProber above.
+	activeVerdict := &sigverify.Active{}
+	if sigVerifyEnabled {
+		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict}, logger)
+		poller.SetVerificationLookup(func(id, url string) (string, bool) {
+			st, ok := activeVerdict.Lookup(id, url)
+			return string(st), ok
+		})
+	}
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -1075,6 +1098,9 @@ func initializeApp(
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
+	if sigVerifyEnabled {
+		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
+	}
 
 	// Replay saturation invalidates Fetch-interception scope exactly the way
 	// a kiosk restart does: retireOnSaturation closes the root CDP session so

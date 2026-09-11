@@ -18,6 +18,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -136,6 +137,32 @@ type refresher struct {
 	// harmless: it just costs one redundant extra pass right after the
 	// next Start.
 	refreshChan chan struct{}
+
+	// activeVerdict mirrors commandrouter's (SetSignatureVerification): the
+	// refresher is the other producer of displayPlaylist pushes, so it
+	// re-publishes the verdict of what it re-pushed. The verdict itself is
+	// attached by dp1 at fetch time; the refresher computes none (its
+	// cached-copy fallback carries no verdict — see
+	// loadCachedPlaylistForURL). Set once before Start; read on the
+	// background goroutine only.
+	activeVerdict *sigverify.Active
+}
+
+// SetSignatureVerification wires the shared active-verdict slot onto r, if r
+// is the concrete refresher built by New (a foreign implementation logs and
+// is left alone, mirroring commandrouter.SetSignatureVerification). Must be
+// called before Start.
+func SetSignatureVerification(r Refresher, active *sigverify.Active, logger *zap.Logger) {
+	setter, ok := r.(interface{ setSignatureVerification(*sigverify.Active) })
+	if !ok {
+		logger.Warn("Playlist refresher does not support signature verification wiring")
+		return
+	}
+	setter.setSignatureVerification(active)
+}
+
+func (r *refresher) setSignatureVerification(active *sigverify.Active) {
+	r.activeVerdict = active
 }
 
 func New(
@@ -559,6 +586,14 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		if sendErr == nil && !playerresponse.OK(result) {
 			sendErr = errPlayerRejectedRefresh
 		}
+		// The re-pushed playlist is now what is on screen: re-publish its
+		// verdict so player_status keeps reporting the right one (a feed
+		// that re-signed or un-signed between passes changes it). A
+		// verdict-less playlist (verification off, or the cached-copy
+		// fallback) publishes nothing and leaves the slot as it was.
+		if sendErr == nil && r.activeVerdict != nil && playlist.Verification != nil {
+			r.activeVerdict.Set(playlist.ID, schedulerSource.PlaylistURL, playlist.Verification.Status)
+		}
 		if schedulerMutated && sendErr != nil {
 			r.scheduler.Restore(schedulerSnapshot)
 		} else if schedulerMutated {
@@ -794,13 +829,15 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 }
 
 // loadCachedPlaylistForURL mirrors commandrouter's handler.loadCachedPlaylistForURL
-// (see its doc): the raw body Service.CachedPlaylistForURL returns was already
-// fully resolved and signature-verified once, back when downloadPlaylist
-// originally saved it, so unmarshaling it here needs no further DP-1
-// processing. Returns an error whenever there is nothing to fall back to
-// (offline caching disabled, url was never downloaded, or the downloaded
-// copy has since been cleared), so the caller can report the original
-// live resolution error instead.
+// (see its doc, including why the returned playlist carries NO signature
+// verdict: the saved body is a typed, hydrated re-marshal, not the signed
+// bytes — feral-file/ffos-user#307): the raw body Service.CachedPlaylistForURL
+// returns was already fully resolved back when downloadPlaylist originally
+// saved it, so unmarshaling it here needs no further DP-1 resolution.
+// Returns an error whenever there is nothing to fall back to (offline
+// caching disabled, url was never downloaded, or the downloaded copy has
+// since been cleared), so the caller can report the original live
+// resolution error instead.
 func (r *refresher) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
 	if r.offlineCache == nil {
 		return nil, fmt.Errorf("offline cache: disabled, no cached fallback for %s", url)

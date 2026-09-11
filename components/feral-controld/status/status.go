@@ -60,6 +60,16 @@ type PlayerStatus struct {
 	} `json:"deviceSettings,omitempty"`
 	LoopMode *LoopMode `json:"loopMode,omitempty"`
 	Shuffle  *bool     `json:"shuffle,omitempty"`
+	// SignatureStatus is controld-owned (the player never sends it): the DP-1
+	// signature verdict of the playlist currently on screen, "valid",
+	// "invalid", or "unsigned" (feral-file/ffos-user#307). Attached by
+	// pollPlayerStatus from the verification lookup when the reply's
+	// playlist id or URL matches the last cast controld verified; omitted
+	// when it cannot be matched (player-fetched default playlist, a cast
+	// from before this process started, verification disabled). A stable
+	// string that only changes on a cast, so it does not defeat the
+	// notification dedupe hash.
+	SignatureStatus *string `json:"signatureStatus,omitempty"`
 	// Stamp echoes window.__ffosDocStamp back from CheckDeviceStatusReply — the
 	// playersession generation carrier (design doc §2.1 source 3), riding this
 	// EXISTING checkStatus round-trip rather than a second evaluate. Old
@@ -88,6 +98,14 @@ type Poller interface {
 	// time, before Start; nil is safe (no-op) and is what a build without a
 	// session leaves it as.
 	SetStampObserver(fn func(stamp string, present bool))
+	// SetVerificationLookup registers the function pollPlayerStatus asks for
+	// the on-screen playlist's signature verdict (see
+	// PlayerStatus.SignatureStatus). Called with the reply's playlist id and
+	// URL (either may be empty); a false return omits the field. Same
+	// set-once-before-Start, single-writer contract as SetStampObserver;
+	// nil is safe (no-op) and is what a build with verification disabled
+	// leaves it as.
+	SetVerificationLookup(fn func(id, url string) (string, bool))
 }
 
 // poller handles periodic polling of both player status via CDP and device status
@@ -137,6 +155,11 @@ type poller struct {
 	// a lock on the polling goroutine, same single-writer contract as
 	// displayConnected.
 	stampObserver func(stamp string, present bool)
+
+	// verificationLookup, when set (SetVerificationLookup), resolves the
+	// on-screen playlist's signature verdict. Same single-writer contract as
+	// stampObserver.
+	verificationLookup func(id, url string) (string, bool)
 }
 
 func NewPoller(
@@ -252,6 +275,10 @@ func (s *poller) SetStampObserver(fn func(stamp string, present bool)) {
 	s.stampObserver = fn
 }
 
+func (s *poller) SetVerificationLookup(fn func(id, url string) (string, bool)) {
+	s.verificationLookup = fn
+}
+
 func (s *poller) SuppressPlayerNotifications(suppress bool) {
 	s.Lock()
 	s.suppressPlayerNotifications = suppress
@@ -346,10 +373,35 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 		return
 	}
 
+	// Annotate BEFORE lightweightPlayerStatus blanks Playlist: the lookup
+	// keys are the reply's playlist id and URL, and id lives on that struct.
+	s.annotateSignatureStatus(playerStatus)
+
 	lightweightPlayerStatus := s.lightweightPlayerStatus(playerStatus)
 	s.logger.Debug("Sending lightweight player status", zap.Any("lightweightPlayerStatus_itemsLength", len(*lightweightPlayerStatus.Items)))
 
 	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, lightweightPlayerStatus)
+}
+
+// annotateSignatureStatus fills PlayerStatus.SignatureStatus from the
+// verification lookup, or leaves it nil (omitted) when nothing is wired or
+// the on-screen playlist is not the one controld last verified. A miss is
+// deliberately silent: reporting a verdict for a playlist controld did not
+// verify would be worse than reporting none.
+func (s *poller) annotateSignatureStatus(playerStatus *PlayerStatus) {
+	if s.verificationLookup == nil {
+		return
+	}
+	id, url := "", ""
+	if playerStatus.Playlist != nil {
+		id = playerStatus.Playlist.ID
+	}
+	if playerStatus.PlaylistURL != nil {
+		url = *playerStatus.PlaylistURL
+	}
+	if status, ok := s.verificationLookup(id, url); ok {
+		playerStatus.SignatureStatus = &status
+	}
 }
 
 func isPlayerPageURL(url string) bool {
