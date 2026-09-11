@@ -101,15 +101,37 @@ cwd="$(extract_field '.cwd')"
 [[ -n "$cmd" ]] || cmd="$payload"
 [[ -n "$cwd" ]] || cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
 
-# All matching is done on a lowercased copy: the workflow display name is
-# "Build FFOS Image", the `environment` choices are capitalised, and gh
-# accepts either. Branch names we compare against are lowercase anyway.
-lc="$(printf '%s' "$cmd" | tr '[:upper:]' '[:lower:]')"
+# --- Normalise shell quoting -------------------------------------------------
+# Classification must see the words gh would receive, not the source text:
+# "build-image-"to-cf.yml, re'l'ease, rel\ease, and a backslash-newline
+# continuation are all one literal word to the shell. So: join continuation
+# lines, resolve backslash escapes, and drop quote characters. Expansions
+# ($VAR, $(...), backticks, braces, globs) are NOT resolved; a dispatch that
+# carries one is refused further down. Stripping can only merge text, never
+# hide it, so it moves decisions towards deny, never towards allow. The
+# expansion checks run on the ORIGINAL text, where an escaped \$ still shows.
+norm="${cmd//\\$'\n'/}"
+norm="$(printf '%s' "$norm" | sed -e 's/\\\(.\)/\1/g' | tr -d "\"'")"
+# Lowercased copy for everything except ref extraction: the workflow display
+# name is "Build FFOS Image", the `environment` choices are capitalised, and
+# gh accepts either.
+lc="$(printf '%s' "$norm" | tr '[:upper:]' '[:lower:]')"
 
 no_prompt_note="This agent tool has no confirmation prompt, so the dispatch is blocked here: show the user the exact command and every input, and let the user dispatch it themselves."
 
+# Optional decision trace, one line per invocation: "<format> <decision>".
+# Set AGENT_ISO_GUARD_TRACE to a file path. Used by
+# scripts/verify-agent-hooks-e2e.sh to prove that a real agent client invoked
+# this hook (and in which dialect) rather than inferring it from config text.
+trace() { # $1 = decision
+  [[ -n "${AGENT_ISO_GUARD_TRACE:-}" ]] || return 0
+  printf '%s %s\n' "$format" "$1" >> "$AGENT_ISO_GUARD_TRACE" 2>/dev/null || true
+}
+allow() { trace allow; exit 0; }
+
 emit() { # $1 = deny|ask, $2 = reason (plain text, no quotes/backslashes)
   local decision="$1" reason="$2"
+  trace "$decision"
   case "$format" in
     claude)
       printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"%s","permissionDecisionReason":"%s"}}\n' \
@@ -143,9 +165,17 @@ guarded_workflow_re='build-image-to-cf|pure-build-image-to-cf|build-image-from-t
 # `gh workflow run ...` (CLI) or a REST dispatch (`gh api`/curl against
 # .../actions/workflows/<wf>/dispatches).
 dispatch_re='workflow[[:space:]]+run|/actions/workflows/[^[:space:]]+/dispatches'
-# Reruns: the CLI (`gh run rerun <id>`), and the REST endpoints behind it
-# (.../actions/runs/<id>/rerun, .../rerun-failed-jobs, .../actions/jobs/<id>/rerun).
-rerun_re='gh[[:space:]]+run[[:space:]]+(rerun|retry)|/actions/(runs|jobs)/[^[:space:]]+/rerun'
+# Reruns: the CLI `run rerun` / `run retry` subcommand, with any flags between
+# `run` and the verb (`gh run -R o/r rerun`) and without requiring `gh` to be
+# adjacent (`gh -R o/r run rerun`, `gh --repo o/r run rerun`); and the REST
+# endpoints behind it (.../actions/runs/<id>/rerun, .../rerun-failed-jobs,
+# .../actions/jobs/<id>/rerun).
+rerun_re='(^|[[:space:]])run([[:space:]]+-[^[:space:]]*([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+(rerun|retry)([[:space:]]|$)|/actions/(runs|jobs)/[^[:space:]]+/rerun'
+# Shell expansion characters. A dispatch or rerun whose text carries one may
+# name a different workflow, ref, or input than the text shows; the guard
+# does not evaluate them, so it refuses them. `[` is deliberately absent:
+# gh's REST form uses `-f inputs[version]=...`.
+expansion_re='[$`*?{}]'
 
 unclassifiable() { # $1 = what could not be classified
   emit deny "BLOCKED: $1, so this cannot be checked against the release guardrail and is refused (the guard fails closed). Rewrite the command with the workflow file name and literal --ref / -f values, or hand it to the human release operator (AGENTS.md: Release guardrail: ISO image builds)."
@@ -160,20 +190,20 @@ if printf '%s' "$lc" | grep -Eq "$rerun_re"; then
 fi
 
 if ! printf '%s' "$lc" | grep -Eq "$dispatch_re"; then
-  exit 0
+  allow
 fi
 
 # --- Which workflow? --------------------------------------------------------
 # A dispatch whose workflow cannot be named from the command (numeric workflow
-# ID, or a name coming from a shell variable / command substitution) cannot be
-# matched against the guarded list, so it is refused outright. AGENTS.md
-# forbids dispatching by ID for exactly this reason.
+# ID, or a name coming from a shell expansion) cannot be matched against the
+# guarded list, so it is refused outright. AGENTS.md forbids dispatching by ID
+# for exactly this reason.
 wf_rest="$(printf '%s\n' "$lc" | sed -nE 's#.*/actions/workflows/([^/[:space:]]+)/dispatches.*#\1#p' | head -n 1)"
 if [[ "$wf_rest" =~ ^[0-9]+$ ]]; then
   unclassifiable "the workflow is given by numeric ID"
 fi
-if printf '%s' "$wf_rest" | grep -q '[$`]'; then
-  unclassifiable "the workflow name comes from a shell variable or substitution"
+if printf '%s' "$wf_rest" | grep -Eq "$expansion_re"; then
+  unclassifiable "the workflow name comes from a shell expansion"
 fi
 if printf '%s' "$lc" | grep -Eq 'workflow[[:space:]]+run'; then
   # A bare token of 5+ digits anywhere after `workflow run` is a workflow ID
@@ -182,13 +212,13 @@ if printf '%s' "$lc" | grep -Eq 'workflow[[:space:]]+run'; then
   if printf '%s' "$lc" | sed -nE 's/.*workflow[[:space:]]+run(.*)/\1/p' | grep -Eq '(^|[[:space:]])[0-9]{5,}([[:space:]]|$)'; then
     unclassifiable "the workflow is given by numeric ID"
   fi
-  if ! printf '%s' "$lc" | grep -Eq "$guarded_workflow_re" && printf '%s' "$lc" | grep -q '[$`]'; then
-    unclassifiable "the workflow name may come from a shell variable or substitution"
+  if ! printf '%s' "$lc" | grep -Eq "$guarded_workflow_re" && printf '%s' "$cmd" | grep -Eq "$expansion_re"; then
+    unclassifiable "the workflow name may come from a shell expansion"
   fi
 fi
 
 if ! printf '%s' "$lc" | grep -Eq "$guarded_workflow_re"; then
-  exit 0
+  allow
 fi
 
 # --- Opaque inputs on a guarded dispatch ------------------------------------
@@ -199,27 +229,31 @@ fi
 if printf '%s' "$lc" | grep -Eq '(^|[[:space:]])--input([[:space:]=]|$)|(^|[[:space:]])--json([[:space:]]|$)|=@'; then
   unclassifiable "the dispatch ref or inputs come from a file or stdin"
 fi
-if printf '%s' "$cmd" | grep -q '[$`]'; then
-  unclassifiable "the dispatch ref or inputs involve a shell variable or command substitution"
+if printf '%s' "$cmd" | grep -Eq "$expansion_re"; then
+  unclassifiable "the dispatch ref or inputs involve a shell expansion"
 fi
 
 # --- Which ref / environment is targeted? ----------------------------------
-q="[\"']?"
+# Quotes are already stripped from $norm / $lc, so values are bare words here.
 ref=""
 # `--ref release`, `--ref=release`, `-r release`. Extracted from the ORIGINAL
 # case, not the lowercased copy: gh's `-R owner/repo` would otherwise read as
 # `-r owner/repo` and, appearing after `--ref`, win the greedy match.
-ref="$(printf '%s\n' "$cmd" | sed -nE "s/.*(--ref[= ]|(^|[[:space:]])-r[[:space:]]+)${q}([A-Za-z0-9._\\/-]+).*/\\3/p" | head -n 1)"
+ref="$(printf '%s\n' "$norm" | sed -nE "s/.*(--ref[=[:space:]]|(^|[[:space:]])-r[[:space:]]+)([A-Za-z0-9._\\/-]+).*/\\3/p" | head -n 1)"
 if [[ -z "$ref" ]]; then
-  # REST form: `-f ref=release`, `-F 'ref=release'`, `"ref": "release"`.
-  # Anchored so `ffos_user_ref=...` is not mistaken for the dispatch ref.
-  ref="$(printf '%s\n' "$lc" | sed -nE "s/.*(^|[[:space:]\"'{,])ref${q}[[:space:]]*[=:][[:space:]]*${q}([a-z0-9._\\/-]+).*/\\2/p" | head -n 1)"
+  # REST form: `-f ref=release`, `--field ref=release`, `"ref": "release"`
+  # (quotes gone). Anchored so `ffos_user_ref=...` is not mistaken for the
+  # dispatch ref.
+  ref="$(printf '%s\n' "$lc" | sed -nE "s/.*(^|[[:space:]{,])ref[[:space:]]*[=:][[:space:]]*([a-z0-9._\\/-]+).*/\\2/p" | head -n 1)"
 fi
 ref="$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]')"
+# A fully qualified branch ref names the same branch.
+ref="${ref#refs/heads/}"
+ref="${ref#heads/}"
 if [[ -z "$ref" ]]; then
   # A ref flag or key is present but did not parse to a plain literal.
-  if printf '%s' "$cmd" | grep -Eq -- '--ref|(^|[[:space:]])-r[[:space:]]' || \
-     printf '%s' "$lc" | grep -Eq "(^|[[:space:]\"'{,])ref${q}[[:space:]]*[=:]"; then
+  if printf '%s' "$norm" | grep -Eq -- '--ref|(^|[[:space:]])-r[[:space:]]' || \
+     printf '%s' "$lc" | grep -Eq "(^|[[:space:]{,])ref[[:space:]]*[=:]"; then
     unclassifiable "the dispatch ref is not a plain literal"
   fi
   if printf '%s' "$lc" | grep -Eq 'workflow[[:space:]]+run'; then
@@ -233,8 +267,8 @@ if [[ -z "$ref" ]]; then
   fi
 fi
 
-environment="$(printf '%s\n' "$lc" | sed -nE "s/.*environment${q}[[:space:]]*[=:][[:space:]]*${q}(production|staging|development).*/\\1/p" | head -n 1)"
-if [[ -z "$environment" ]] && printf '%s' "$lc" | grep -Eq "environment${q}[[:space:]]*[=:]"; then
+environment="$(printf '%s\n' "$lc" | sed -nE "s/.*environment\]?[[:space:]]*[=:][[:space:]]*(production|staging|development).*/\\1/p" | head -n 1)"
+if [[ -z "$environment" ]] && printf '%s' "$lc" | grep -Eq "environment\\]?[[:space:]]*[=:]"; then
   unclassifiable "the environment input is not one of the literal choices"
 fi
 
@@ -246,4 +280,4 @@ if [[ "$ref" == "staging" || "$environment" == "staging" ]]; then
   emit ask "This dispatches an ffos publishing workflow (ISO build, package build, or pacman repo push) on STAGING. Requires explicit user confirmation of these exact parameters before it runs (AGENTS.md: Release guardrail: ISO image builds)."
 fi
 
-exit 0
+allow
