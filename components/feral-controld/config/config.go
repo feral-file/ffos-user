@@ -44,6 +44,8 @@ type CommandStormConfig struct {
 	// Disabled turns the storm gate off entirely. Default (false) keeps it on.
 	Disabled bool `json:"disabled"`
 	// MaxConcurrent overrides the global in-flight command budget when > 0.
+	// Source-preflight parsing has a separate process-wide weighted admission
+	// budget and does not alter this command budget.
 	MaxConcurrent int64 `json:"maxConcurrent"`
 }
 

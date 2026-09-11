@@ -83,7 +83,12 @@ func (e *executor) setDeviceName(_ context.Context, args []byte) (interface{}, e
 
 	e.logger.Info("Device name set")
 
+	// `ok` is part of the published contract for this command
+	// (docs/controld-inbound-controller-messages.md), and the app treats a
+	// reply without it as malformed. The hub and the relayer forward this map
+	// unchanged, so it has to be carried here rather than added by a wrapper.
 	return map[string]interface{}{
+		"ok":         true,
 		"deviceName": stored,
 	}, nil
 }

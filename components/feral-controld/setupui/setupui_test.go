@@ -36,8 +36,8 @@ const validContract = `{
 // contractWithConnecting is the SHIPPING player manifest, loaded verbatim
 // from testdata/ffos-player-contract.json — a byte-for-byte copy of
 // ff-player `public/ffos-player-contract.json` on branch
-// feat/setup-display-connecting-state (PR feral-file/ff-player#275), kept in
-// lockstep by `cp`, the same convention as the DRM display-connected
+// fix/softap-portal-qr-on-attach (PR feral-file/ff-player#291, which adds
+// softap_qr's `client_attached`; previously PR #275), kept in lockstep by `cp`, the same convention as the DRM display-connected
 // predicate's mirrored copies (an inlined Go string cannot be byte-faithful:
 // the manifest's notes contain backticks). Deliberately the full file, not a
 // trimmed extract: the point is that the manifest these tests gate on is the
@@ -278,7 +278,28 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 			call:       func(s *Service) { s.ShowSoftAPQR("FF1-abc", "", "") },
 			wantState:  stateSoftAPQR,
 			wantFields: map[string]any{"ssid": "FF1-abc"},
-			absent:     []string{"password", "portal_url"},
+			absent:     []string{"password", "portal_url", "client_attached"},
+		},
+		{
+			name: "softap retry qr carries the failure reason",
+			call: func(s *Service) {
+				s.ShowSoftAPQRRetry("FF1-abc", "secret123", "http://10.42.0.1", "Wrong Wi-Fi password.")
+			},
+			wantState: stateSoftAPQR,
+			wantFields: map[string]any{
+				"ssid": "FF1-abc", "password": "secret123", "portal_url": "http://10.42.0.1",
+				"reason": "Wrong Wi-Fi password.",
+			},
+			absent: []string{"client_attached"},
+		},
+		{
+			name:      "softap portal qr flags the attached phase",
+			call:      func(s *Service) { s.ShowSoftAPPortalQR("FF1-abc", "secret123", "http://10.42.0.1") },
+			wantState: stateSoftAPQR,
+			wantFields: map[string]any{
+				"ssid": "FF1-abc", "password": "secret123", "portal_url": "http://10.42.0.1",
+				"client_attached": true,
+			},
 		},
 		{
 			name:      "scanning",
@@ -625,6 +646,10 @@ func TestShippingManifestDeclaresProsePayloads(t *testing.T) {
 	require.True(t, ok, "shipping manifest missing stateFields for %q", stateSoftAPQR)
 	assert.Contains(t, softAPFields.Optional, "portal_url",
 		"softap_qr must declare the direct portal fallback ShowSoftAPQR sends")
+	assert.Contains(t, softAPFields.Optional, "client_attached",
+		"softap_qr must declare the attached-phase flag ShowSoftAPPortalQR sends")
+	assert.Contains(t, softAPFields.Optional, "reason",
+		"softap_qr must declare the failure line ShowSoftAPQRRetry sends")
 }
 
 // TestShowCallersDoNotBlockOnManifestRead pins the notifier's non-blocking

@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	go_url "net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -112,9 +113,51 @@ type SourceProber interface {
 }
 
 type sourceProber struct {
-	httpClient wrapper.HTTPClient
-	guard      sourceGuard
+	httpClient  wrapper.HTTPClient
+	guard       sourceGuard
+	headerSlots *semaphore.Weighted
 }
+
+const (
+	// maxAggregateProbeHeaderBytes is the process-wide ceiling charged for
+	// peer-controlled TLS and response-header parsing during cast-time source
+	// preflights. It is independent of the operator-configurable command storm
+	// gate: disabling or widening that gate must not widen this bound.
+	maxAggregateProbeHeaderBytes int64 = 8 << 20
+
+	// The status-only probe parser accepts at most this many response bytes and
+	// fields across informational plus final header blocks. It discards fields
+	// through a fixed reader instead of materializing net/http's MIMEHeader map,
+	// so many tiny distinct names cannot amplify heap use.
+	maxProbeResponseHeaderBytes  int64 = 64 << 10
+	maxProbeResponseHeaderFields       = 128
+	maxProbeStatusLineBytes            = 1024
+	probeResponseReadBufferBytes       = 4 << 10
+	maxProbeHeaderBytesPerSlot         = maxProbeResponseHeaderBytes
+	maxProbeTLSHandshakeBytes    int64 = 64 << 10
+
+	// One budget unit charges four times the accepted response-header bytes.
+	// Plain HTTP spends one unit. HTTPS spends four: its entire peer handshake is
+	// capped at 64 KiB before crypto/tls can parse a certificate, and the 1 MiB
+	// charge leaves 16x that input for x509 structures, response parsing, fixed
+	// buffers, and allocator overhead. The semaphore accounts mixed HTTP/HTTPS
+	// waves in these units instead of pretending their parser costs are equal.
+	probeHeaderBudgetHeadroomFactor  int64 = 4
+	maxProbeHeaderBudgetBytesPerSlot       = probeHeaderBudgetHeadroomFactor *
+		maxProbeHeaderBytesPerSlot
+	probeHTTPSHeaderBudgetSlots int64 = 4
+	maxProbeHTTPSBudgetBytes          = probeHTTPSHeaderBudgetSlots *
+		maxProbeHeaderBudgetBytesPerSlot
+
+	// maxConcurrentHeaderProbes couples the aggregate ceiling to the guarded
+	// status parser's per-response budget. Every worker acquires one shared slot
+	// before it can issue the ranged GET and holds it until the response body is
+	// closed. With the current values, 32 units admit at most 32 HTTP parsers or
+	// eight TLS parsers inside the same 8 MiB envelope.
+	maxConcurrentHeaderProbes = maxAggregateProbeHeaderBytes / maxProbeHeaderBudgetBytesPerSlot
+)
+
+var processSourceProbeHeaderSlots = semaphore.NewWeighted(maxConcurrentHeaderProbes)
 
 // NewSourceProber builds the cast-time source prober. resolver is the
 // DNS seam the source guard uses — pass net.DefaultResolver in
@@ -123,7 +166,7 @@ type sourceProber struct {
 //
 // The HTTP client is built here rather than taken from the caller so
 // the one thing that must always be true — that these fetches ride the
-// guarded transport, never the daemon-wide client — cannot depend on
+// guarded status-only client, never the daemon-wide client — cannot depend on
 // every call site remembering it.
 func NewSourceProber(resolver AddrResolver) SourceProber {
 	guard := sourceGuard{resolver: resolver}
@@ -139,7 +182,24 @@ func NewSourceProber(resolver AddrResolver) SourceProber {
 // supplied directly, so a test can hand in a guard carrying the
 // isReserved override its httptest servers need.
 func newSourceProberWith(guard sourceGuard, httpClient wrapper.HTTPClient) SourceProber {
-	return &sourceProber{httpClient: httpClient, guard: guard}
+	return &sourceProber{
+		httpClient:  httpClient,
+		guard:       guard,
+		headerSlots: processSourceProbeHeaderSlots,
+	}
+}
+
+// newSourceProberWithHeaderSlots gives a white-box test its own small budget;
+// production constructors always share processSourceProbeHeaderSlots.
+func newSourceProberWithHeaderSlots(guard sourceGuard, httpClient wrapper.HTTPClient, slots int64) SourceProber {
+	if slots < 1 {
+		slots = 1
+	}
+	return &sourceProber{
+		httpClient:  httpClient,
+		guard:       guard,
+		headerSlots: semaphore.NewWeighted(slots),
+	}
 }
 
 // probeItemTimeout bounds ONE source's COMPLETE probe: probeOne derives
@@ -289,7 +349,7 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 					}
 					continue
 				}
-				results[i] = p.probeOne(ctx, sources[i])
+				results[i] = p.probeOneWithinHeaderBudget(ctx, sources[i])
 			}
 		}()
 	}
@@ -309,6 +369,32 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 		}
 	}
 	return results
+}
+
+// probeOneWithinHeaderBudget admits the only part of a source preflight that
+// can retain response headers. headerSlots is shared by every production
+// SourceProber instance, so concurrent casts cannot multiply the memory bound
+// by widening or disabling the command storm gate. Waiting past the phase
+// ceiling is Inconclusive, preserving the preflight's fail-open contract.
+func (p *sourceProber) probeOneWithinHeaderBudget(ctx context.Context, source string) SourceProbeResult {
+	weight := probeHeaderBudgetWeight(source)
+	if err := p.headerSlots.Acquire(ctx, weight); err != nil {
+		return SourceProbeResult{
+			Source:  redactSourceForLog(source),
+			Verdict: ProbeInconclusive,
+			Err:     err,
+		}
+	}
+	defer p.headerSlots.Release(weight)
+	return p.probeOne(ctx, source)
+}
+
+func probeHeaderBudgetWeight(source string) int64 {
+	u, err := go_url.Parse(source)
+	if err == nil && strings.EqualFold(u.Scheme, "https") {
+		return probeHTTPSHeaderBudgetSlots
+	}
+	return 1
 }
 
 // redactSourceForLog prepares a source URL for the daemon log: the query
@@ -460,22 +546,21 @@ func verdictForStatus(status int) SourceProbeVerdict {
 // verdict can disagree with the GET the artwork will get — origins
 // exist that 200 a HEAD and 4xx the GET, and vice versa), range-bounded
 // so the daemon never pulls an asset body just to read a status line.
-// Origins that ignore Range (200 with the full body) are still bounded:
-// the body is drained through a capped io.CopyN before the connection
-// is torn down — same shape as rangedGETClassify. Redirects are never
-// followed (the client returns the 3xx itself — see
-// NewSourceProber's client choice), so "single request" is literal: one
-// probed source is at most one outbound request, no matter what the
-// origin answers.
+// Origins that ignore Range (200 with the full body) are still bounded: the
+// status-only client scans and discards a bounded HTTP/1 header block, closes
+// the socket before the body, and returns an empty response shell. It never
+// constructs a header map or parses trailers. Redirects are never followed
+// because Location is discarded with every other field (the 3xx status itself
+// is the answer), so "single request" is literal: one probed source is at most
+// one outbound request, no matter what the origin answers.
 //
 // The Range header is the one deliberate deviation from
 // player-equivalence, kept because it is the bound on what a hostile
-// origin can make the daemon pull (CopyN caps what is read, but Range
-// is what tells a compliant origin not to send it; classify's probe
-// makes the same call, and its comment calls the alternative —
-// trusting Body.Close to abandon an unread stream — transport-
-// dependent). The verdict table pays for the deviation where it can
-// bite: 416, the one status Range itself can provoke, is Inconclusive.
+// origin can make the daemon receive (a compliant origin answers with at
+// most this range). The local read bound comes from closing the one-shot socket
+// immediately after the status-only header scan. The verdict table pays for
+// the deviation where it can bite: 416, the one status Range itself can
+// provoke, is Inconclusive.
 // Residual, accepted: an edge/WAF that 400s ranged or Go-UA requests
 // wholesale reads as dead; it only affects a cast when EVERY item sits
 // behind such an edge, and fail-open on 400 would give up the #304
@@ -493,8 +578,6 @@ func (p *sourceProber) rangedGETStatus(ctx context.Context, url string) (int, er
 		return 0, fmt.Errorf("source probe: GET request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-
-	_, _ = io.CopyN(io.Discard, resp.Body, ClassifyProbeRangeBytes)
 
 	// A 206 answer means the asset is loadable; StatusCode is already
 	// what verdictForStatus needs (206 < 400).
