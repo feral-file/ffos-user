@@ -11,7 +11,6 @@ import (
 	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
-	"github.com/google/uuid"
 
 	"go.uber.org/zap"
 
@@ -20,6 +19,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/drm"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
@@ -533,8 +533,7 @@ func (s *poller) lightweightPlayerStatus(playerStatus *PlayerStatus) *PlayerStat
 	// An independently updated daemon may still hear the older source-bearing
 	// showing key. Only canonical UUIDs may cross either notification channel.
 	if settings := playerStatus.DeviceSettings; settings != nil && settings.ShowingKey != nil {
-		key, err := uuid.Parse(*settings.ShowingKey)
-		if err != nil || key.String() != *settings.ShowingKey {
+		if !playerresponse.IsCanonicalShowingKey(*settings.ShowingKey) {
 			settings.ShowingKey = nil
 		}
 	}
