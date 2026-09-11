@@ -222,9 +222,11 @@ func TestCommandHandler_Process_DisplayPlaylist_NotWired_ReplyUntouched(t *testi
 // TestCommandHandler_Process_DisplayPlaylist_CachedFallback_NotVerified: the
 // offline cached copy is a typed, hydrated re-marshal, not the signed bytes,
 // so it carries NO verdict — the reply omits signatureStatus and the active
-// slot is left alone. The cached body here is byte-identical to the signed
-// fixture precisely to prove the loader does not judge it: if it did, this
-// would come back "valid".
+// slot is CLEARED, even though an earlier signed cast of the same URL had
+// seeded it: player_status must not vouch for bytes nobody verified. The
+// cached body here is byte-identical to the signed fixture precisely to
+// prove the loader does not judge it: if it did, this would come back
+// "valid".
 func TestCommandHandler_Process_DisplayPlaylist_CachedFallback_NotVerified(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -234,6 +236,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedFallback_NotVerified(t *te
 	active := wireVerification(ts)
 
 	playlistURL := "https://feed.example/p.json"
+	active.Set("cached-1", playlistURL, sigverify.StatusValid) // an earlier live cast of this URL
 	cachedRaw := signedFixture(t)
 	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL).Return(nil, errors.New("network unreachable")).Times(1)
 	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRaw), nil).Times(1)
@@ -251,16 +254,17 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedFallback_NotVerified(t *te
 
 	require.NoError(t, err)
 	assert.Equal(t, playerOkResponse(), result, "no verdict keys on a cached-copy cast")
-	_, found := active.Lookup("", playlistURL)
-	assert.False(t, found, "the slot must not describe an unverified cached copy")
+	_, found := active.Lookup("cached-1", playlistURL)
+	assert.False(t, found, "the seeded verdict must not survive an unverified push of the same URL")
 }
 
-// TestCommandHandler_Process_DisplayPlaylist_Deferred_ReportsAndPublishes: a
-// future-only displayAt cast is accepted without reaching the player yet.
-// The verdict is reported on the acceptance reply AND published to the
-// slot, because the scheduler's later cutover has no hook of its own — see
-// the publication comment in handler.go for the trade-off.
-func TestCommandHandler_Process_DisplayPlaylist_Deferred_ReportsAndPublishes(t *testing.T) {
+// TestCommandHandler_Process_DisplayPlaylist_Deferred_PendingUntilCutover: a
+// future-only displayAt cast is accepted without reaching the player. The
+// verdict is reported on the acceptance reply, the playlist still showing
+// keeps its own verdict (same URL, different document), and the new verdict
+// becomes visible only when the scheduler's push observer promotes it —
+// the cutover that proves the cohort reached the screen.
+func TestCommandHandler_Process_DisplayPlaylist_Deferred_PendingUntilCutover(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -282,8 +286,10 @@ func TestCommandHandler_Process_DisplayPlaylist_Deferred_ReportsAndPublishes(t *
 	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 	active := &sigverify.Active{}
 	commandrouter.SetSignatureVerification(handler, commandrouter.SignatureVerificationOptions{Active: active}, logger)
+	sched.SetPushObserver(active.Promote)
 
 	playlistURL := "https://example.com/future.json"
+	active.Set("showing", playlistURL, sigverify.StatusUnsigned) // the document on screen, same URL republished
 	verdict := sigverify.Verify(signedFixture(t))
 	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
 		ID:    "future-1",
@@ -299,7 +305,87 @@ func TestCommandHandler_Process_DisplayPlaylist_Deferred_ReportsAndPublishes(t *
 	assert.Equal(t, true, msg["ok"])
 	assert.Equal(t, true, msg["deferred"])
 	assert.Equal(t, "valid", msg["signatureStatus"])
-	st, found := active.Lookup("future-1", playlistURL)
-	assert.True(t, found, "the deferred playlist is what the cutover will show")
+	st, found := active.Lookup("showing", playlistURL)
+	assert.True(t, found, "the playlist still on screen keeps its own verdict")
+	assert.Equal(t, sigverify.StatusUnsigned, st)
+	_, found = active.Lookup("future-1", "")
+	assert.False(t, found, "the deferred document is not on screen yet")
+
+	// The scheduler's cutover push is what promotes it (its observer is
+	// exercised for real in playlistschedule's tests); here the promotion
+	// itself is what is pinned.
+	active.Promote()
+	st, found = active.Lookup("future-1", playlistURL)
+	assert.True(t, found)
 	assert.Equal(t, sigverify.StatusValid, st)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_PublishesInsidePushLock pins the
+// ordering rule: the slot is written inside the same WithPlayerPush critical
+// section as the send. Cast A's player reply starts cast B concurrently; B
+// can only send once A's closure has released the push lock, so if A's
+// publication were outside the lock B could observe the slot before A wrote
+// it. With the rule honored, B always sees A's verdict when B sends, and the
+// slot ends describing B.
+func TestCommandHandler_Process_DisplayPlaylist_PublishesInsidePushLock(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockClock.EXPECT().Now().Return(time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() },
+	).AnyTimes()
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	active := &sigverify.Active{}
+	commandrouter.SetSignatureVerification(handler, commandrouter.SignatureVerificationOptions{Active: active}, logger)
+
+	urlA, urlB := "https://feed.example/a.json", "https://feed.example/b.json"
+	valid := sigverify.Verify(signedFixture(t))
+	unsigned := sigverify.Verify([]byte(`{"dpVersion":"1.1.0","title":"b","items":[]}`))
+	playlistFor := func(id string, v sigverify.Verdict) *dp1.Playlist {
+		return &dp1.Playlist{Playlist: dp1playlist.Playlist{
+			ID:    id,
+			Items: []dp1playlist.PlaylistItem{{ID: "i", Source: "https://example.com/x"}},
+		}, Verification: &v}
+	}
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, urlA).Return(playlistFor("A", valid), nil).Times(1)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, urlB).Return(playlistFor("B", unsigned), nil).Times(1)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(2)
+
+	bDone := make(chan error, 1)
+	var bSawA bool
+	sends := 0
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(string, map[string]any) (any, error) {
+		sends++
+		switch sends {
+		case 1: // A's send: kick off B, which must queue behind A's push lock.
+			go func() {
+				_, err := handler.Process(ctx, displayPlaylistURLCommand(urlB))
+				bDone <- err
+			}()
+			time.Sleep(50 * time.Millisecond)
+		case 2: // B's send: A's closure has finished, so A must already be published.
+			_, bSawA = active.Lookup("A", urlA)
+		}
+		return playerOkResponse(), nil
+	}).Times(2)
+
+	_, err := handler.Process(ctx, displayPlaylistURLCommand(urlA))
+	require.NoError(t, err)
+	require.NoError(t, <-bDone)
+
+	assert.True(t, bSawA, "B's send ran after A's push lock released, so A's verdict must already be in the slot")
+	st, found := active.Lookup("B", urlB)
+	assert.True(t, found)
+	assert.Equal(t, sigverify.StatusUnsigned, st)
 }

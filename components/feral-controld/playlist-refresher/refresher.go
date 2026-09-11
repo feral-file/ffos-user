@@ -589,10 +589,17 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		// The re-pushed playlist is now what is on screen: re-publish its
 		// verdict so player_status keeps reporting the right one (a feed
 		// that re-signed or un-signed between passes changes it). A
-		// verdict-less playlist (verification off, or the cached-copy
-		// fallback) publishes nothing and leaves the slot as it was.
-		if sendErr == nil && r.activeVerdict != nil && playlist.Verification != nil {
-			r.activeVerdict.Set(playlist.ID, schedulerSource.PlaylistURL, playlist.Verification.Status)
+		// verdict-less re-push — the cached-copy fallback — CLEARS the slot:
+		// leaving a previous verdict standing for the same URL would let
+		// player_status vouch for bytes nobody verified. Runs inside the
+		// send closure, i.e. under WithPlayerPush, so it is ordered against
+		// casts and cutovers (feral-file/ffos-user#307).
+		if sendErr == nil && r.activeVerdict != nil {
+			if v := playlist.Verification; v != nil {
+				r.activeVerdict.Set(playlist.ID, schedulerSource.PlaylistURL, v.Status)
+			} else {
+				r.activeVerdict.Clear()
+			}
 		}
 		if schedulerMutated && sendErr != nil {
 			r.scheduler.Restore(schedulerSnapshot)

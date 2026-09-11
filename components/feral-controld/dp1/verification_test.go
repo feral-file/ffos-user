@@ -6,6 +6,7 @@ package dp1_test
 // playlist through hydration.
 
 import (
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -100,6 +101,31 @@ func TestDP1_ProcessPlaylistURL_VerdictSurvivesDynamicHydration(t *testing.T) {
 	assert.Len(t, result.Items, 2, "hydration replaced the items")
 	require.NotNil(t, result.Verification, "verdict must survive hydration")
 	assert.Equal(t, sigverify.StatusUnsigned, result.Verification.Status)
+}
+
+// TestDP1_ProcessPlaylistURL_BodyOverCap_Rejected pins the fetched-body bound:
+// the reader handed to ReadAll is limited to one byte past the cap, and a
+// body that fills it is refused before decoding or verification.
+func TestDP1_ProcessPlaylistURL_BodyOverCap_Rejected(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	url := "https://feed.example/huge.json"
+	ts.mockHTTP.EXPECT().Get(url).Return(createMockResponse(http.StatusOK, "{}"), nil)
+	ts.mockIO.EXPECT().
+		ReadAll(gomock.Any()).
+		DoAndReturn(func(r io.Reader) ([]byte, error) {
+			// Prove the reader is capped: draining it must stop at cap+1
+			// no matter how much the body offers.
+			n, _ := io.Copy(io.Discard, r)
+			assert.LessOrEqual(t, n, int64(dp1.MaxPlaylistBodyBytes+1))
+			return make([]byte, dp1.MaxPlaylistBodyBytes+1), nil
+		})
+
+	_, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "body exceeds")
 }
 
 // TestDP1_ProcessPlaylistURL_VerificationDisabled_NoVerdict: the config kill

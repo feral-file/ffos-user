@@ -2,56 +2,108 @@ package sigverify
 
 import "sync"
 
-// Active remembers the verdict of the playlist most recently ACCEPTED for
-// the screen, so the status poller can annotate player_status with a
-// signatureStatus for what is showing. It is a single slot, not a history:
-// the player shows one playlist at a time, and a cast that fails never
-// reaches Set. "Accepted" rather than "sent" on purpose: a displayAt-deferred
-// cast is recorded at acceptance because its later scheduler cutovers have
-// no hook of their own — see commandrouter's publication comment for the
-// trade-off (the previous playlist loses its annotation until the cutover).
+// Active remembers the signature verdict of the playlist on screen, so the
+// status poller can annotate player_status with a signatureStatus for it.
+// Two slots, no history:
 //
-// Lookup matches by playlist id first and URL second because that is what
-// the player's checkStatus reply echoes back (playlist.id for inline casts,
-// playlistURL for URL casts). A miss means "controld did not verify what is
-// on screen" — the player-fetched default playlist, the offline cached-copy
-// fallback (which carries no verdict), a cast from before this process
-// started, a still-showing playlist displaced from the slot by a pending
-// schedule — and the poller omits the field rather than guess. Omission is
-// always the safe direction: it can never assert a false verdict.
+//   - current is the verdict of the playlist last pushed to the player and
+//     accepted. Set by a cast or refresher re-push that reached the screen,
+//     inside the player-push critical section so it is ordered against every
+//     other push. A push that reached the screen WITHOUT a verdict (the
+//     offline cached-copy fallback) clears it: a previous cast's verdict must
+//     never keep standing for bytes nobody verified, and both share the URL.
+//   - pending is the verdict of a displayAt-deferred cast whose first cohort
+//     has not reached the player yet. The previous playlist keeps showing, so
+//     current is left alone. Promote, called by the scheduler's push
+//     observer after a cohort push the player accepted, copies pending into
+//     current; it is idempotent so later cohorts of the same schedule are
+//     harmless. A fresh cast (Set/Clear) drops pending, since it replaced the
+//     schedule.
+//
+// Lookup consults current only, by playlist id first and URL second, because
+// that is what the player's checkStatus reply echoes back (playlist.id for
+// inline casts, playlistURL for URL casts). A miss means "controld did not
+// verify what is on screen" — the player-fetched default playlist, the
+// cached-copy fallback, a cast from before this process started, a deferred
+// cast whose cutover has not happened — and the poller omits the field rather
+// than guess. Omission is always the safe direction: it can never assert a
+// verdict for a document other than the one it was computed on.
 type Active struct {
-	mu     sync.Mutex
+	mu      sync.Mutex
+	current slot
+	pending slot
+}
+
+type slot struct {
 	set    bool
 	id     string
 	url    string
 	status Status
 }
 
-// Set records the verdict for the playlist just pushed. Either id or url may
-// be empty; an entry with both empty is stored but can never be matched.
+func (s slot) matches(id, url string) bool {
+	if !s.set {
+		return false
+	}
+	// Empty keys never match, so an on-screen playlist with neither an id
+	// nor a URL is a miss rather than a false hit on an empty stored key.
+	if id != "" && id == s.id {
+		return true
+	}
+	return url != "" && url == s.url
+}
+
+// Set records the verdict of a playlist that just reached the player, and
+// drops any pending schedule verdict (the cast replaced the schedule).
 func (a *Active) Set(id, url string, status Status) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.set = true
-	a.id = id
-	a.url = url
-	a.status = status
+	a.current = slot{set: true, id: id, url: url, status: status}
+	a.pending = slot{}
 }
 
-// Lookup returns the stored status when id or url identifies the stored
-// playlist. Empty keys never match, so an on-screen playlist with neither an
-// id nor a URL is a miss rather than a false hit on an empty stored key.
+// Clear records that a playlist WITHOUT a verdict just reached the player:
+// nothing on screen is verified any more. Also drops any pending verdict.
+func (a *Active) Clear() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.current = slot{}
+	a.pending = slot{}
+}
+
+// SetPending parks the verdict of a displayAt-deferred cast until Promote.
+// current is untouched: the previous playlist is still what is showing.
+func (a *Active) SetPending(id, url string, status Status) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.pending = slot{set: true, id: id, url: url, status: status}
+}
+
+// ClearPending drops a parked verdict (a deferred cast without a verdict —
+// the cached-copy fallback — replaced the schedule).
+func (a *Active) ClearPending() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.pending = slot{}
+}
+
+// Promote makes the pending verdict current. Called once a scheduler-owned
+// push reached the player. No-op when nothing is pending; idempotent.
+func (a *Active) Promote() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pending.set {
+		a.current = a.pending
+	}
+}
+
+// Lookup returns the current status when id or url identifies the current
+// playlist. Pending is never consulted.
 func (a *Active) Lookup(id, url string) (Status, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !a.set {
-		return "", false
-	}
-	if id != "" && id == a.id {
-		return a.status, true
-	}
-	if url != "" && url == a.url {
-		return a.status, true
+	if a.current.matches(id, url) {
+		return a.current.status, true
 	}
 	return "", false
 }

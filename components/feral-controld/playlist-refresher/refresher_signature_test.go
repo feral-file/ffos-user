@@ -69,11 +69,12 @@ func TestRefresher_RepublishesVerdictAfterRefresh(t *testing.T) {
 	assert.Equal(t, sigverify.StatusValid, st)
 }
 
-// TestRefresher_CachedFallback_PublishesNothing mirrors commandrouter's rule:
-// the cached copy carries no verdict, so a re-push from it leaves the slot
-// untouched (here: never set). The cached body is the signed fixture itself,
-// so a loader that judged it would flip this test.
-func TestRefresher_CachedFallback_PublishesNothing(t *testing.T) {
+// TestRefresher_CachedFallback_ClearsSlot mirrors commandrouter's rule: the
+// cached copy carries no verdict, so a re-push from it CLEARS the slot an
+// earlier live fetch of the same URL had set — player_status must not keep
+// vouching for bytes nobody verified. The cached body is the signed fixture
+// itself, so a loader that judged it would flip this test.
+func TestRefresher_CachedFallback_ClearsSlot(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 	setupBackgroundMocks(ts)
@@ -85,6 +86,7 @@ func TestRefresher_CachedFallback_PublishesNothing(t *testing.T) {
 	refresher.SetSignatureVerification(r, active, logger)
 
 	playlistURL := "http://example.com/playlist.json"
+	active.Set("live-1", playlistURL, sigverify.StatusValid) // an earlier live pass of this URL
 	cachedRaw := signedFixture(t)
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
@@ -109,8 +111,8 @@ func TestRefresher_CachedFallback_PublishesNothing(t *testing.T) {
 	}
 	r.Stop()
 
-	_, found := active.Lookup("", playlistURL)
-	assert.False(t, found, "a cached copy has no verdict to publish")
+	_, found := active.Lookup("live-1", playlistURL)
+	assert.False(t, found, "the earlier verdict must not survive an unverified re-push of the same URL")
 }
 
 // TestRefresher_SetSignatureVerification_ForeignImplementationIsLeftAlone

@@ -476,10 +476,14 @@ bytes and the inline path verifies the re-marshaled `dp1_call` map (never
 the typed struct, which drops fields the signer covered). The offline
 cached-copy fallback carries NO verdict — the stored body is a typed,
 hydrated re-marshal, not the signed bytes — so a cast served from it omits
-the fields below. At most 16 `signatures[]` entries are verified; a
-document with more is `invalid` (`too many signatures`) without any
-cryptography running, a CPU bound for the unauthenticated hub. The outcome
-is one of three `signatureStatus` values: `valid`
+the fields below. Bounds, all aimed at the unauthenticated LAN hub: a URL
+document larger than 4 MiB (the hub's own body limit) is refused before
+decoding; at most 16 `signatures[]` entries are verified and a document
+with more is `invalid` (`too many signatures`) without any cryptography
+running; an entry whose `alg`, `role`, or `kid` exceeds 32/32/256 bytes is
+reported as `malformed signature` with the oversized field blanked and is
+never verified. The outcome is one of three `signatureStatus` values:
+`valid`
 (every `signatures[]` entry verifies), `invalid` (signatures present, at
 least one fails: tampered content, placeholder or wrong-key signature,
 unsupported `alg`, malformed entry), or `unsigned` (no `signatures[]`; a

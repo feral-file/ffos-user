@@ -416,6 +416,11 @@ func (t *trackingScheduler) ClearThenWithPlayerPush(fn func() bool) {
 	t.clearThenFn++
 	t.inner.ClearThenWithPlayerPush(fn)
 }
+
+// SetPushObserver satisfies the interface; the fake never pushes on its own,
+// so the observer is never called.
+func (t *trackingScheduler) SetPushObserver(func()) {}
+
 func (t *trackingScheduler) WithPlayerPush(fn func()) {
 	t.pushCalls++
 	t.inner.WithPlayerPush(fn)

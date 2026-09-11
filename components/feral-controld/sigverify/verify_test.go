@@ -299,6 +299,40 @@ func TestVerify_AtCap_StillVerified(t *testing.T) {
 	assert.Len(t, v.Signers, sigverify.MaxSignatures)
 }
 
+// TestVerify_OversizedKid_MalformedAndNotEchoed pins the field bounds: an
+// entry whose kid exceeds MaxKidLen is malformed, its kid is blanked so
+// nothing caster-sized reaches the reply or the log, and nothing is verified.
+func TestVerify_OversizedKid_MalformedAndNotEchoed(t *testing.T) {
+	doc := unsignedDoc()
+	signWith(t, doc, newKey(t), dp1playlist.RoleFeed)
+	entry := doc["signatures"].([]any)[0].(map[string]any)
+	entry["kid"] = "did:key:" + strings.Repeat("z", sigverify.MaxKidLen)
+
+	v := sigverify.Verify(mustJSON(t, doc))
+
+	assert.Equal(t, sigverify.StatusInvalid, v.Status)
+	require.Len(t, v.Signers, 1)
+	assert.Empty(t, v.Signers[0].Kid)
+	assert.Equal(t, "feed", v.Signers[0].Role, "in-bounds fields are kept")
+	assert.Equal(t, sigverify.ReasonMalformed, v.Signers[0].Reason)
+}
+
+// TestVerify_OversizedRole_InvalidDespiteValidCrypto: dp1-go never looks at
+// role, so a cryptographically valid entry with a megabyte role would come
+// back "valid" from the library. The bound must override that.
+func TestVerify_OversizedRole_InvalidDespiteValidCrypto(t *testing.T) {
+	doc := unsignedDoc()
+	signWith(t, doc, newKey(t), strings.Repeat("r", sigverify.MaxRoleLen+1))
+
+	v := sigverify.Verify(mustJSON(t, doc))
+
+	assert.Equal(t, sigverify.StatusInvalid, v.Status)
+	require.Len(t, v.Signers, 1)
+	assert.Empty(t, v.Signers[0].Role)
+	assert.Equal(t, sigverify.ReasonMalformed, v.Signers[0].Reason)
+	assert.Equal(t, "unknown-role signature invalid: malformed signature", v.Reason)
+}
+
 func TestVerify_ReindentedDocument_StillValid(t *testing.T) {
 	var m map[string]any
 	require.NoError(t, json.Unmarshal(loadFeedFixture(t), &m))

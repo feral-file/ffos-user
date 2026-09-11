@@ -1080,6 +1080,10 @@ func initializeApp(
 	activeVerdict := &sigverify.Active{}
 	if sigVerifyEnabled {
 		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict}, logger)
+		// A displayAt-deferred cast parks its verdict as pending; the
+		// scheduler's own cutover push is the only point that proves the
+		// cohort reached the screen, so that is where it is promoted.
+		playlistScheduler.SetPushObserver(activeVerdict.Promote)
 		poller.SetVerificationLookup(func(id, url string) (string, bool) {
 			st, ok := activeVerdict.Lookup(id, url)
 			return string(st), ok

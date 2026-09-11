@@ -715,6 +715,35 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
+		// publishVerdict records what this cast did to the screen in the
+		// active-verdict slot (#307). It MUST run inside the same player-push
+		// critical section as the send it describes: WithPlayerPush orders
+		// casts, refreshes, and scheduler cutovers, and a publication after
+		// the lock is released could land after a later cast's, leaving the
+		// slot describing a playlist that is no longer on screen. A cast
+		// without a verdict (the cached-copy fallback) CLEARS the slot rather
+		// than leaving a previous cast's verdict standing for the same URL.
+		// A displayAt-deferred acceptance parks the verdict as pending: the
+		// previous playlist keeps showing, and the scheduler's push observer
+		// promotes the pending verdict only when a cohort actually reaches
+		// the player (see sigverify.Active).
+		publishVerdict := func(deferred bool) {
+			if h.activeVerdict == nil || commandType != commands.CMD_DISPLAY_PLAYLIST || playlist == nil {
+				return
+			}
+			v := playlist.Verification
+			switch {
+			case deferred && v != nil:
+				h.activeVerdict.SetPending(playlist.ID, schedulerSource.PlaylistURL, v.Status)
+			case deferred:
+				h.activeVerdict.ClearPending()
+			case v != nil:
+				h.activeVerdict.Set(playlist.ID, schedulerSource.PlaylistURL, v.Status)
+			default:
+				h.activeVerdict.Clear()
+			}
+		}
+
 		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the
 		// scheduler push lock with RecomputeNow so a stale timed push cannot land
 		// after a newer cast or OOM-recovery fallback.
@@ -743,6 +772,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// the screen, so interception must stay pointed at the
 					// playlist that keeps displaying.
 					h.scheduler.Commit()
+					publishVerdict(true)
 					// A relayer RPC and hub request both need an explicit acceptance
 					// response even though no CDP write was valid. This also prevents
 					// playback metrics from treating the deferred schedule as a failure.
@@ -780,6 +810,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					h.scheduler.Restore(schedulerSnapshot)
 				} else {
 					h.scheduler.Commit()
+					publishVerdict(false)
 				}
 			})
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
@@ -800,6 +831,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				command.Arguments["dp1_call"] = playlist
 			}
 			result, err = h.sendCDPRequest(command)
+			if err == nil && playerresponse.OK(result) {
+				// No scheduler ⇒ no push lock to be inside of; publishing
+				// right after the send is the tightest ordering available.
+				publishVerdict(false)
+			}
 		}
 		if err != nil {
 			// No restore-on-error here: every CMD_DISPLAY_PLAYLIST failure path
@@ -855,24 +891,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		}
 
 		// Report the signature verdict on the accepted reply (both the
-		// deferred acceptance map and the player's own ok reply) and
-		// publish it for the status poller. Additive keys only: existing
-		// controllers decide success by ok and ignore the rest.
-		//
-		// Published on the displayAt-deferred acceptance too, deliberately:
-		// the scheduler's later cutover pushes cohorts of this same
-		// playlist with no hook here, and a static inline schedule is never
-		// re-pushed by the refresher either, so acceptance is the one point
-		// this verdict can be recorded for the screen it will reach. The
-		// cost is that the PREVIOUS playlist, still showing until the
-		// cutover, no longer matches the slot and loses its annotation for
-		// that window — a "not verified" omission, never a wrong verdict
-		// (see sigverify.Active's doc).
+		// deferred acceptance map and the player's own ok reply). Additive
+		// keys only: existing controllers decide success by ok and ignore
+		// the rest. The active-verdict slot was already updated inside the
+		// push critical section above (publishVerdict).
 		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil && playlist.Verification != nil && playerresponse.OK(result) {
 			result = annotateCastReply(result, playlist.Verification)
-			if h.activeVerdict != nil {
-				h.activeVerdict.Set(playlist.ID, schedulerSource.PlaylistURL, playlist.Verification.Status)
-			}
 		}
 
 		// Force refresh status poller

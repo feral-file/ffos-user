@@ -3,6 +3,7 @@ package dp1
 import (
 	"context"
 	"fmt"
+	goio "io"
 	"maps"
 	"net/http"
 	"strconv"
@@ -18,6 +19,15 @@ import (
 )
 
 const (
+	// MaxPlaylistBodyBytes bounds a playlist document fetched by URL, matching
+	// hub.MAX_REQUEST_BODY_BYTES for inline casts so both ingress paths admit
+	// the same worst-case document. It is read before decoding or signature
+	// verification: every signatures[] entry costs two JCS canonicalizations
+	// of the whole body, so an unbounded remote response — reachable by any
+	// LAN caller naming a URL — would otherwise buy CPU and memory the inline
+	// cap deliberately denies (feral-file/ffos-user#307).
+	MaxPlaylistBodyBytes = 4 << 20
+
 	DEFAULT_DURATION             = 300
 	MINIMAL_PLAYLIST_ITEMS_LIMIT = 50
 	MAX_PLAYLIST_ITEMS_LIMIT     = 255
@@ -359,9 +369,14 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
 		return Playlist{}, fmt.Errorf("fetch playlist failed: %s", resp.Status)
 	}
 
-	bytes, err := d.io.ReadAll(resp.Body)
+	// One byte past the cap is read on purpose: a body of exactly the cap is
+	// admitted, and the extra byte is what proves the response was larger.
+	bytes, err := d.io.ReadAll(goio.LimitReader(resp.Body, MaxPlaylistBodyBytes+1))
 	if err != nil {
 		return Playlist{}, err
+	}
+	if len(bytes) > MaxPlaylistBodyBytes {
+		return Playlist{}, fmt.Errorf("fetch playlist failed: body exceeds %d bytes", MaxPlaylistBodyBytes)
 	}
 
 	var playlist Playlist

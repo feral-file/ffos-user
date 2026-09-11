@@ -95,6 +95,20 @@ const (
 	reasonUnsupportedAlgFmt   = "unsupported alg %s"
 )
 
+// Signer field bounds. alg, kid, and role are copied from an untrusted
+// document into the cast reply and the log line, so their length must not
+// be the caster's choice: an entry past any of these is reported as
+// malformed with the oversized field blanked, verified by nothing, and the
+// document is invalid regardless of what dp1-go says about the other
+// entries (dp1-go does not look at role at all, so a valid signature with a
+// megabyte role would otherwise come back "valid"). A did:key is ~56 chars
+// and a did:pkh ~60; the DP-1 role and alg vocabularies are single words.
+const (
+	MaxAlgLen  = 32
+	MaxRoleLen = 32
+	MaxKidLen  = 256
+)
+
 // MaxSignatures bounds how many signatures[] entries Verify will even hand
 // to dp1-go. Every entry costs two JCS canonicalizations of the WHOLE
 // document (payload_hash check + signing digest), and the unauthenticated
@@ -168,8 +182,30 @@ func Verify(raw []byte) Verdict {
 
 	signers := make([]Signer, 0, len(entries))
 	firstFailure := ""
+	oversized := false
 	for _, e := range entries {
 		s := Signer{Alg: e.Alg, Kid: e.Kid, Role: e.Role, OK: true}
+		if s.Alg == "" || len(s.Alg) > MaxAlgLen || len(s.Kid) > MaxKidLen || len(s.Role) > MaxRoleLen {
+			// Blank exactly the fields that overflowed so nothing
+			// caster-sized is echoed, keep the rest for diagnosis.
+			if len(s.Alg) > MaxAlgLen {
+				s.Alg = ""
+			}
+			if len(s.Kid) > MaxKidLen {
+				s.Kid = ""
+			}
+			if len(s.Role) > MaxRoleLen {
+				s.Role = ""
+			}
+			s.OK = false
+			s.Reason = ReasonMalformed
+			oversized = true
+			if firstFailure == "" {
+				firstFailure = fmt.Sprintf("%s signature invalid: %s", roleOrUnknown(s.Role), s.Reason)
+			}
+			signers = append(signers, s)
+			continue
+		}
 		if !ok {
 			// Re-run per entry only on the failure path to label WHICH
 			// entries failed and why: VerifyPlaylistSignatures returns the
@@ -185,7 +221,7 @@ func Verify(raw []byte) Verdict {
 		}
 		signers = append(signers, s)
 	}
-	if ok {
+	if ok && !oversized {
 		return Verdict{Status: StatusValid, Signers: signers, LegacyPresent: legacy}
 	}
 	if firstFailure == "" {

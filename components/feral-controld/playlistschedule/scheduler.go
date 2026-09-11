@@ -95,6 +95,16 @@ type Scheduler interface {
 	// recomputes. Cast and refresh paths must wrap their displayPlaylist CDP
 	// send so a stale RecomputeNow cannot overwrite a newer cast mid-flight.
 	WithPlayerPush(fn func())
+	// SetPushObserver registers fn to run after every scheduler-owned push
+	// the player accepted (timer cutover, wake, CDP reconnect, retry), still
+	// under the player-push lock so it is ordered against cast/refresh
+	// sends. The one consumer today is signature verification's
+	// active-verdict slot: a displayAt-deferred cast parks its verdict as
+	// pending at acceptance, and this is the only point at which controld
+	// learns that cohort actually reached the screen
+	// (feral-file/ffos-user#307). Set once at wiring time before any push;
+	// nil (tests, verification disabled) is a no-op.
+	SetPushObserver(fn func())
 	// AuthorityToken changes whenever scheduler-owned playlist authority
 	// changes. Refreshers snapshot it before slow URL/dynamic resolution and
 	// re-check under WithPlayerPush so stale refresh results cannot overwrite a
@@ -156,6 +166,11 @@ type scheduler struct {
 	// must not push until the refresher fetches the source and prepares a fresh
 	// playlist.
 	restoredPending bool
+	// pushObserver, when set (SetPushObserver), runs after each accepted
+	// scheduler-owned push, inside push and therefore under pushMu. Written
+	// once before any push; read without a lock on the push path, same
+	// single-writer contract as status.poller's observers.
+	pushObserver func()
 	// source tracks the refreshable identity for scheduler-owned pushes. The
 	// full cached playlist supplies future items; source keeps player status
 	// tied to the controller/refresher URL that can be re-resolved later.
@@ -733,7 +748,14 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	if !playerresponse.OK(result) {
 		return fmt.Errorf("player rejected displayAt playlist")
 	}
+	if s.pushObserver != nil {
+		s.pushObserver()
+	}
 	return nil
+}
+
+func (s *scheduler) SetPushObserver(fn func()) {
+	s.pushObserver = fn
 }
 
 // HasDisplayAtSchedule reports whether a playlist carries at least one timed
