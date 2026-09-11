@@ -26,14 +26,33 @@ func TestActive_MatchesByID(t *testing.T) {
 	assert.Equal(t, sigverify.StatusInvalid, st)
 }
 
-func TestActive_MatchesByURLWhenIDDiffers(t *testing.T) {
+// TestActive_DifferentIDsSameURL_Miss pins that the URL never overrides a
+// known id: a document republished at the same URL is a different document,
+// and its status poll must not receive the earlier one's verdict.
+func TestActive_DifferentIDsSameURL_Miss(t *testing.T) {
 	var a sigverify.Active
 	a.Set("pl-1", "https://example.com/p.json", sigverify.StatusValid)
 
-	st, ok := a.Lookup("other", "https://example.com/p.json")
+	_, ok := a.Lookup("pl-2", "https://example.com/p.json")
 
+	assert.False(t, ok)
+}
+
+// TestActive_URLMatchesWhenEitherSideLacksID: the URL is the fallback
+// identity only when an id is missing on one side (URL casts whose reply
+// echoes no playlist.id, or a slot set without one).
+func TestActive_URLMatchesWhenEitherSideLacksID(t *testing.T) {
+	var a sigverify.Active
+	a.Set("pl-1", "https://example.com/p.json", sigverify.StatusValid)
+	st, ok := a.Lookup("", "https://example.com/p.json")
 	assert.True(t, ok)
 	assert.Equal(t, sigverify.StatusValid, st)
+
+	var b sigverify.Active
+	b.Set("", "https://example.com/p.json", sigverify.StatusInvalid)
+	st, ok = b.Lookup("pl-9", "https://example.com/p.json")
+	assert.True(t, ok)
+	assert.Equal(t, sigverify.StatusInvalid, st)
 }
 
 // TestActive_EmptyKeysNeverMatch pins the miss-over-false-hit rule: a stored

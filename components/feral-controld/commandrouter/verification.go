@@ -3,6 +3,8 @@ package commandrouter
 import (
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 )
 
@@ -61,8 +63,11 @@ func annotateCastReply(result any, v *sigverify.Verdict) any {
 // verdict greppable on a device: status, each signer's identity and outcome,
 // and the playlist identity. Warn for a false claim (invalid), Info
 // otherwise — an unsigned app cast is the ordinary case today and must not
-// page. Kids are DIDs (public keys), safe to log; the playlist URL is the
-// caster's own input and already logged by the cast path.
+// page. Kids are DIDs bounded by sigverify (MaxKidLen), safe to log; the
+// playlist URL is the caster's own input and already logged by the cast
+// path. The playlist id is caster-controlled and unbounded on the open hub
+// (a 4 MiB inline cast may carry a 4 MiB id), so it is cut to the daemon's
+// standard log-field cap before it reaches the journal.
 func (h *handler) logSignatureVerdict(v *sigverify.Verdict, playlistID, playlistURL string) {
 	source := "inline"
 	if playlistURL != "" {
@@ -70,7 +75,7 @@ func (h *handler) logSignatureVerdict(v *sigverify.Verdict, playlistID, playlist
 	}
 	fields := []zap.Field{
 		zap.String("signature_status", string(v.Status)),
-		zap.String("playlist_id", playlistID),
+		zap.ByteString("playlist_id", helper.TruncateBytes([]byte(playlistID), logger.MAX_FIELD_LENGTH)),
 		zap.String("source", source),
 		zap.Bool("legacy_signature", v.LegacyPresent),
 	}

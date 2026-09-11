@@ -26,9 +26,12 @@ import "sync"
 //     would promote the verdict of a document the schedule no longer holds.
 //     A fresh cast (Set/Clear) drops pending, since it replaced the schedule.
 //
-// Lookup consults current only, by playlist id first and URL second, because
-// that is what the player's checkStatus reply echoes back (playlist.id for
-// inline casts, playlistURL for URL casts). A miss means "controld did not
+// Lookup consults current only. Identity is the playlist id when both the
+// reply and the slot carry one — two documents republished at the same URL
+// have different ids, and the URL must not attribute one's verdict to the
+// other. The URL is consulted only when either side lacks an id (the
+// player's checkStatus reply echoes playlist.id for inline casts and
+// playlistURL for URL casts, not always both). A miss means "controld did not
 // verify what is on screen" — the player-fetched default playlist, the
 // cached-copy fallback, a cast from before this process started, a deferred
 // cast whose cutover has not happened — and the poller omits the field rather
@@ -54,11 +57,13 @@ func (s slot) matches(id, url string) bool {
 	if !s.set {
 		return false
 	}
+	// Both sides know the id: it decides, and a mismatch is a miss even on
+	// the same URL (a republished document is a different document).
+	if id != "" && s.id != "" {
+		return id == s.id
+	}
 	// Empty keys never match, so an on-screen playlist with neither an id
 	// nor a URL is a miss rather than a false hit on an empty stored key.
-	if id != "" && id == s.id {
-		return true
-	}
 	return url != "" && url == s.url
 }
 

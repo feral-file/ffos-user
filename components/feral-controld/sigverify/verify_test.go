@@ -333,6 +333,28 @@ func TestVerify_OversizedRole_InvalidDespiteValidCrypto(t *testing.T) {
 	assert.Equal(t, "unknown-role signature invalid: malformed signature", v.Reason)
 }
 
+// TestVerify_OversizedEntry_RefusedBeforeCrypto proves the bound is enforced
+// before dp1-go runs: the in-bounds sibling here carries a genuinely valid
+// signature, and if any verification had happened it would be OK=true. It
+// is reported as unverified instead.
+func TestVerify_OversizedEntry_RefusedBeforeCrypto(t *testing.T) {
+	doc := unsignedDoc()
+	signWith(t, doc, newKey(t), dp1playlist.RoleFeed)
+	signWith(t, doc, newKey(t), dp1playlist.RoleAgent)
+	agent := doc["signatures"].([]any)[1].(map[string]any)
+	agent["kid"] = "did:key:" + strings.Repeat("z", sigverify.MaxKidLen)
+
+	v := sigverify.Verify(mustJSON(t, doc))
+
+	assert.Equal(t, sigverify.StatusInvalid, v.Status)
+	require.Len(t, v.Signers, 2)
+	assert.False(t, v.Signers[0].OK)
+	assert.Equal(t, sigverify.ReasonUnverified, v.Signers[0].Reason, "the valid sibling must not have been verified")
+	assert.Equal(t, sigverify.ReasonMalformed, v.Signers[1].Reason)
+	assert.Empty(t, v.Signers[1].Kid)
+	assert.Equal(t, "agent signature invalid: malformed signature", v.Reason)
+}
+
 func TestVerify_ReindentedDocument_StillValid(t *testing.T) {
 	var m map[string]any
 	require.NoError(t, json.Unmarshal(loadFeedFixture(t), &m))

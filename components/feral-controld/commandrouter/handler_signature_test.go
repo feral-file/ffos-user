@@ -12,6 +12,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 
@@ -27,6 +29,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
@@ -200,6 +203,32 @@ func TestCommandHandler_Process_DisplayPlaylist_Inline_InvalidStillPlaysAndRepor
 	st, found := active.Lookup("pl-tampered", "")
 	assert.True(t, found)
 	assert.Equal(t, sigverify.StatusInvalid, st)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_LogsBoundedPlaylistID pins the
+// log-field cap: a caster-sized playlist id (the open hub admits 4 MiB
+// inline casts) must not reach the journal whole.
+func TestCommandHandler_Process_DisplayPlaylist_LogsBoundedPlaylistID(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	core, logs := observer.New(zap.InfoLevel)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, nil, nil, ts.mockJSON, zap.New(core))
+	wireVerification(ts)
+
+	hugeID := strings.Repeat("x", 1<<20)
+	raw := []byte(`{"dpVersion":"1.1.0","id":"` + hugeID + `","title":"t","items":[]}`)
+	command := inlineCast(ts, raw, inlineTyped(hugeID))
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	_, err := ts.handler.Process(ts.ctx, command)
+	require.NoError(t, err)
+
+	entries := logs.FilterMessage("displayPlaylist: playlist signature verdict").All()
+	require.Len(t, entries, 1)
+	logged, ok := entries[0].ContextMap()["playlist_id"]
+	require.True(t, ok)
+	assert.LessOrEqual(t, len(logged.(string)), logger.MAX_FIELD_LENGTH)
 }
 
 // TestCommandHandler_Process_DisplayPlaylist_NotWired_ReplyUntouched: without

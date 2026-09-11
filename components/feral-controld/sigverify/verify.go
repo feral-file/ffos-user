@@ -93,7 +93,11 @@ const (
 	ReasonSignatureInvalid    = "signature invalid"
 	ReasonMalformed           = "malformed signature"
 	ReasonTooManySignatures   = "too many signatures"
-	reasonUnsupportedAlgFmt   = "unsupported alg %s"
+	// ReasonUnverified marks an in-bounds entry that was never checked
+	// because a sibling entry tripped a bound and the document was refused
+	// before any cryptography ran.
+	ReasonUnverified        = "unverified"
+	reasonUnsupportedAlgFmt = "unsupported alg %s"
 )
 
 // Signer field bounds. alg, kid, and role are copied from an untrusted
@@ -162,6 +166,19 @@ func Verify(raw []byte) Verdict {
 		}
 	}
 
+	// Decode the (count-bounded) entries and enforce the field bounds BEFORE
+	// dp1-go sees the document: every dp1-go entry check costs two whole-
+	// document canonicalizations, and the bounds exist precisely so an
+	// oversized entry buys none of that. A decode failure or an empty array
+	// is left for dp1-go below, which classifies both the same way and does
+	// no cryptography on either.
+	var entries []dp1playlist.Signature
+	if uerr := json.Unmarshal(env.Signatures, &entries); uerr == nil && len(entries) > 0 {
+		if v, refused := refuseOversized(entries, legacy); refused {
+			return v
+		}
+	}
+
 	ok, _, err := sign.VerifyPlaylistSignatures(raw)
 	switch {
 	case errors.Is(err, sign.ErrNoSignatures):
@@ -174,41 +191,17 @@ func Verify(raw []byte) Verdict {
 		// signatures is present but not an array of signature objects.
 		return Verdict{Status: StatusInvalid, LegacyPresent: legacy, Reason: ReasonMalformed}
 	}
-
-	// dp1-go decoded this array a moment ago, so the projection cannot fail;
-	// guarded anyway so a library change surfaces as invalid, never as a
-	// nil deref.
-	var entries []dp1playlist.Signature
-	if uerr := json.Unmarshal(env.Signatures, &entries); uerr != nil || len(entries) == 0 {
+	if len(entries) == 0 {
+		// Cannot happen: dp1-go just decoded a non-empty array from the same
+		// bytes. Guarded so a library change surfaces as invalid, never as
+		// a silently valid verdict over entries this function never saw.
 		return Verdict{Status: StatusInvalid, LegacyPresent: legacy, Reason: ReasonMalformed}
 	}
 
 	signers := make([]Signer, 0, len(entries))
 	firstFailure := ""
-	oversized := false
 	for _, e := range entries {
 		s := Signer{Alg: e.Alg, Kid: e.Kid, Role: e.Role, OK: true}
-		if s.Alg == "" || len(s.Alg) > MaxAlgLen || len(s.Kid) > MaxKidLen || len(s.Role) > MaxRoleLen {
-			// Blank exactly the fields that overflowed so nothing
-			// caster-sized is echoed, keep the rest for diagnosis.
-			if len(s.Alg) > MaxAlgLen {
-				s.Alg = ""
-			}
-			if len(s.Kid) > MaxKidLen {
-				s.Kid = ""
-			}
-			if len(s.Role) > MaxRoleLen {
-				s.Role = ""
-			}
-			s.OK = false
-			s.Reason = ReasonMalformed
-			oversized = true
-			if firstFailure == "" {
-				firstFailure = fmt.Sprintf("%s signature invalid: %s", roleOrUnknown(s.Role), s.Reason)
-			}
-			signers = append(signers, s)
-			continue
-		}
 		if !ok {
 			// Re-run per entry only on the failure path to label WHICH
 			// entries failed and why: VerifyPlaylistSignatures returns the
@@ -224,7 +217,7 @@ func Verify(raw []byte) Verdict {
 		}
 		signers = append(signers, s)
 	}
-	if ok && !oversized {
+	if ok {
 		return Verdict{Status: StatusValid, Signers: signers, LegacyPresent: legacy}
 	}
 	if firstFailure == "" {
@@ -234,6 +227,42 @@ func Verify(raw []byte) Verdict {
 		firstFailure = "signature invalid: " + ReasonMalformed
 	}
 	return Verdict{Status: StatusInvalid, Signers: signers, LegacyPresent: legacy, Reason: firstFailure}
+}
+
+// refuseOversized reports the invalid verdict for a document in which any
+// entry exceeds a signer field bound, or (nil, false) when every entry is in
+// bounds. The oversized fields are blanked so nothing caster-sized is echoed;
+// in-bounds sibling entries are listed as unverified, because the document
+// is refused before any of them is checked.
+func refuseOversized(entries []dp1playlist.Signature, legacy bool) (Verdict, bool) {
+	refused := false
+	signers := make([]Signer, 0, len(entries))
+	firstFailure := ""
+	for _, e := range entries {
+		s := Signer{Alg: e.Alg, Kid: e.Kid, Role: e.Role, OK: false, Reason: ReasonUnverified}
+		over := s.Alg == "" || len(s.Alg) > MaxAlgLen || len(s.Kid) > MaxKidLen || len(s.Role) > MaxRoleLen
+		if over {
+			if len(s.Alg) > MaxAlgLen {
+				s.Alg = ""
+			}
+			if len(s.Kid) > MaxKidLen {
+				s.Kid = ""
+			}
+			if len(s.Role) > MaxRoleLen {
+				s.Role = ""
+			}
+			s.Reason = ReasonMalformed
+			refused = true
+			if firstFailure == "" {
+				firstFailure = fmt.Sprintf("%s signature invalid: %s", roleOrUnknown(s.Role), s.Reason)
+			}
+		}
+		signers = append(signers, s)
+	}
+	if !refused {
+		return Verdict{}, false
+	}
+	return Verdict{Status: StatusInvalid, Signers: signers, LegacyPresent: legacy, Reason: firstFailure}, true
 }
 
 // tooManySignatures streams the signatures array and reports true as soon
