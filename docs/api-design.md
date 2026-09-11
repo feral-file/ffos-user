@@ -179,6 +179,13 @@ All messages are JSON. The message envelope is:
   contract and on-disk design.
 - Otherwise → route to Chromium via CDP (`Runtime.evaluate`).
 
+On `checkStatus` replies, the command router removes noncanonical
+`deviceSettings.showingKey` values before both LAN and relayer responses.
+This shares the UUID rule used by `player_status` notifications: older player
+identities may contain signed source URLs. Other direct-response fields and
+the player's envelope remain intact; the reply is not projected through the
+lightweight notification schema.
+
 **Device-control relayer commands**
 
 The following command names are routed to `devicectl` and use the standard relayer/hub envelope (`command` plus `request`):
