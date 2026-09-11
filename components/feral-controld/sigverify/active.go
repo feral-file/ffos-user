@@ -103,6 +103,41 @@ func (a *Active) SetPendingUnverified() {
 	a.pending = slot{set: true, unverified: true}
 }
 
+// ReconcileSoft records the outcome of a SOFT refresh (refresh:true): the
+// player accepted the document but may keep the current item on screen
+// until it ends, so acceptance alone does not prove the new document is
+// showing. Three cases, each honest about that ambiguity:
+//
+//   - both documents carry ids and they differ: current is left alone. The
+//     reply's id tells the two phases apart on its own — a hit while the old
+//     document still shows, a miss (omission) once the new one does — until a
+//     force cast or the next pass establishes the new document.
+//   - identity cannot separate them (URL-only, or same id) but the verdict
+//     is unchanged: current is refreshed to the new identity. Whichever
+//     document is showing, the status reported is true of it.
+//   - identity cannot separate them and the verdict changed: current is
+//     cleared. Nothing may attest a status that is true of only one of two
+//     documents the poller cannot tell apart.
+//
+// A soft refresh never touches pending: it replaces no schedule.
+func (a *Active) ReconcileSoft(id, url string, status Status) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.current.set {
+		// Nothing was attested; a soft refresh cannot establish a first
+		// attestation either (the old, unattested document may still show).
+		return
+	}
+	if id != "" && a.current.id != "" && id != a.current.id {
+		return
+	}
+	if a.current.status == status {
+		a.current = slot{set: true, id: id, url: url, status: status}
+		return
+	}
+	a.current = slot{}
+}
+
 // Promote applies the pending state to current. Called once a scheduler-owned
 // push reached the player. No-op when nothing is pending; idempotent.
 func (a *Active) Promote() {

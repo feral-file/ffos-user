@@ -40,10 +40,12 @@ func signedFixture(t *testing.T) []byte {
 	return raw
 }
 
-// TestRefresher_RepublishesVerdictAfterRefresh: the resolver attaches the
-// verdict at fetch time; after a successful re-push the refresher writes it
-// to the shared slot so player_status keeps describing what is on screen.
-func TestRefresher_RepublishesVerdictAfterRefresh(t *testing.T) {
+// TestRefresher_SoftRefresh_ReconcilesWithoutAttestingOnAcceptance: a soft
+// refresh (refresh:true) may leave the old item on screen, so the slot is
+// reconciled, not overwritten. Here the URL-only slot held "unsigned" and
+// the refreshed document is valid: the poller cannot tell the two apart, so
+// the slot is cleared rather than attesting valid for whichever shows.
+func TestRefresher_SoftRefresh_ReconcilesWithoutAttestingOnAcceptance(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 	setupBackgroundMocks(ts)
@@ -51,6 +53,53 @@ func TestRefresher_RepublishesVerdictAfterRefresh(t *testing.T) {
 	refresher.SetSignatureVerification(ts.refresher, active, zaptest.NewLogger(t))
 
 	playlistURL := "http://example.com/playlist.json"
+	active.Set("", playlistURL, sigverify.StatusUnsigned)
+	verdict := sigverify.Verify(signedFixture(t))
+	require.Equal(t, sigverify.StatusValid, verdict.Status)
+	playlist := createMockPlaylistNoDynamic()
+	playlist.ID = ""
+	playlist.Verification = &verdict
+
+	sent := make(chan struct{}, 1)
+	ts.mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ts.ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).AnyTimes()
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(_ string, params map[string]any) (any, error) {
+		assert.Contains(t, params["expression"].(string), `"refresh":true`, "this pass must be a soft refresh")
+		select {
+		case sent <- struct{}{}:
+		default:
+		}
+		return playerOKResponse(), nil
+	}).AnyTimes()
+
+	ts.refresher.Start()
+	select {
+	case <-sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresher never re-pushed")
+	}
+	time.Sleep(200 * time.Millisecond)
+	ts.refresher.Stop()
+
+	_, found := active.Lookup("", playlistURL)
+	assert.False(t, found, "a changed verdict on a soft refresh must not be attested on acceptance")
+}
+
+// TestRefresher_SoftRefresh_SameVerdictKeepsAnnotation: when the refreshed
+// document carries the same verdict the slot already holds, the annotation
+// is kept — it is true of either document.
+func TestRefresher_SoftRefresh_SameVerdictKeepsAnnotation(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	setupBackgroundMocks(ts)
+	active := &sigverify.Active{}
+	refresher.SetSignatureVerification(ts.refresher, active, zaptest.NewLogger(t))
+
+	playlistURL := "http://example.com/playlist.json"
+	active.Set("pl-refreshed", playlistURL, sigverify.StatusValid)
 	verdict := sigverify.Verify(signedFixture(t))
 	require.Equal(t, sigverify.StatusValid, verdict.Status)
 	playlist := createMockPlaylistNoDynamic()

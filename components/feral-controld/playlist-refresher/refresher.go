@@ -602,19 +602,24 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		if sendErr == nil && !playerresponse.OK(result) {
 			sendErr = errPlayerRejectedRefresh
 		}
-		// The re-pushed playlist is now what is on screen: re-publish its
-		// verdict so player_status keeps reporting the right one (a feed
-		// that re-signed or un-signed between passes changes it). A
-		// verdict-less re-push — the cached-copy fallback — CLEARS the slot:
-		// leaving a previous verdict standing for the same URL would let
-		// player_status vouch for bytes nobody verified. Runs inside the
-		// send closure, i.e. under WithPlayerPush, so it is ordered against
-		// casts and cutovers (feral-file/ffos-user#307).
+		// Publish what this push did to the screen (#307), inside the send
+		// closure — under WithPlayerPush — so it is ordered against casts
+		// and cutovers. A force cast (now_display) replaces the artwork at
+		// once, so its verdict is published outright; a verdict-less push
+		// (the cached-copy fallback) CLEARS the slot rather than leaving a
+		// previous verdict standing for the same URL. A SOFT refresh
+		// (refresh:true) is different: the player may keep the current
+		// item on screen until it ends, so an ok reply does not prove the
+		// refreshed document is showing — ReconcileSoft keeps the slot
+		// honest across that ambiguity instead of attesting on acceptance.
 		if sendErr == nil && r.activeVerdict != nil {
-			if refreshVerdict != nil {
-				r.activeVerdict.Set(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
-			} else {
+			switch {
+			case refreshVerdict == nil:
 				r.activeVerdict.Clear()
+			case effectiveForceCast:
+				r.activeVerdict.Set(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
+			default:
+				r.activeVerdict.ReconcileSoft(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
 			}
 		}
 		if schedulerMutated && sendErr != nil {

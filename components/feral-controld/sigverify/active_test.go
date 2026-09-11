@@ -79,6 +79,69 @@ func TestActive_SetReplacesPreviousSlot(t *testing.T) {
 	assert.Equal(t, sigverify.StatusUnsigned, st)
 }
 
+// Soft-refresh reconciliation: the player may keep the old item on screen
+// after accepting a refresh:true push, so the slot must stay honest across
+// both phases (feral-file/ffos-user#339 review).
+
+func TestActive_ReconcileSoft_DifferingIDsLeaveCurrent(t *testing.T) {
+	var a sigverify.Active
+	url := "https://example.com/p.json"
+	a.Set("old", url, sigverify.StatusValid)
+
+	a.ReconcileSoft("new", url, sigverify.StatusInvalid)
+
+	st, ok := a.Lookup("old", url)
+	assert.True(t, ok, "while the old document still shows its verdict stands")
+	assert.Equal(t, sigverify.StatusValid, st)
+	_, ok = a.Lookup("new", url)
+	assert.False(t, ok, "once the new document shows, nothing attests for it")
+}
+
+func TestActive_ReconcileSoft_SameStatusRefreshesIdentity(t *testing.T) {
+	var a sigverify.Active
+	url := "https://example.com/p.json"
+	a.Set("", url, sigverify.StatusValid)
+
+	a.ReconcileSoft("", url, sigverify.StatusValid)
+
+	st, ok := a.Lookup("", url)
+	assert.True(t, ok, "whichever document shows, valid is true of it")
+	assert.Equal(t, sigverify.StatusValid, st)
+}
+
+func TestActive_ReconcileSoft_ChangedStatusURLOnlyClears(t *testing.T) {
+	var a sigverify.Active
+	url := "https://example.com/p.json"
+	a.Set("", url, sigverify.StatusValid)
+
+	a.ReconcileSoft("", url, sigverify.StatusUnsigned)
+
+	_, ok := a.Lookup("", url)
+	assert.False(t, ok, "two indistinguishable documents with different verdicts: attest nothing")
+}
+
+func TestActive_ReconcileSoft_NoCurrentStaysUnattested(t *testing.T) {
+	var a sigverify.Active
+
+	a.ReconcileSoft("id", "https://example.com/p.json", sigverify.StatusValid)
+
+	_, ok := a.Lookup("id", "https://example.com/p.json")
+	assert.False(t, ok)
+}
+
+func TestActive_ReconcileSoft_LeavesPending(t *testing.T) {
+	var a sigverify.Active
+	a.Set("cur", "", sigverify.StatusValid)
+	a.SetPending("next", "", sigverify.StatusInvalid)
+
+	a.ReconcileSoft("cur", "", sigverify.StatusValid)
+	a.Promote()
+
+	st, ok := a.Lookup("next", "")
+	assert.True(t, ok)
+	assert.Equal(t, sigverify.StatusInvalid, st)
+}
+
 // TestActive_ClearDropsCurrent: a verdict-less push (cached copy) for the
 // same URL must not leave the earlier verdict standing.
 func TestActive_ClearDropsCurrent(t *testing.T) {
