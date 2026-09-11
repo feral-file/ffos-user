@@ -13,7 +13,7 @@ These files are peers, not layers. They must stay in sync:
 | `CLAUDE.md` (this file) | Claude Code |
 | `AGENTS.md` | Codex, OpenCode, and any tool reading the generic contract |
 | `GEMINI.md` | Gemini CLI (pointer to `AGENTS.md`) |
-| `.cursor/rules/*.mdc` | Cursor (glob-scoped and always-on rules) |
+| `.cursor/rules/*.mdc` | Cursor (glob-scoped and always-on rules; `release-iso-build-policy.mdc`, `branch-flow-policy.mdc`) |
 | `.claude/settings.json`, `.codex/hooks.json`, `.cursor/hooks.json`, `.gemini/settings.json`, `.opencode/plugins/` | per-tool shell hooks running the ISO build guard (`scripts/agent-iso-build-guard.sh`) |
 | `.cursor/agents/`, `.codex/agents/`, `.opencode/agents/` | per-tool sub-agent definitions |
 | `prompts/code-review.md` | the shared review contract all tools use |
@@ -202,6 +202,43 @@ rule. Read it before running anything that touches GitHub Actions.
   must stop and ask before any dispatch.
 - The guard script is a lockstep copy shared with the `ffos` repo. Change both
   copies together.
+
+---
+
+## Branch flow guardrail
+
+The flow is `develop -> staging -> release`, and both promotions are human
+steps: a human opens and merges the `develop -> staging` PR when a release is
+being prepared, and the `staging -> release` PR once staging has been tested.
+`staging` and `release` are protected branches. `release` accepts merges only
+from `staging`; `staging` accepts merges only from `develop`. `main` is not
+part of the flow and is never a target.
+
+- **Every agent target is `develop`.** Cut every working branch from
+  `develop`, open every PR against `develop` (`gh pr create --base develop`),
+  and merge only PRs whose base is `develop`. Merging into `develop` is
+  as far as an agent goes on its own.
+- **Never** push to, commit on, merge into, rebase onto, cherry-pick onto, or
+  open or merge a PR targeting `staging`, `release`, or `main`; never cut a
+  branch from them; never merge or rebase them into a working branch; never
+  write to those refs, to `/merges`, or to `/pulls/N/merge` through the
+  REST API. Read-only use (checkout to inspect, log, diff, fetch, `gh pr
+  view`) is fine.
+- **Emergencies are a human call.** A hotfix that must skip `develop` is
+  decided and executed by a human. The agent prepares the change on a branch
+  from `develop`, opens the PR against `develop`, and hands the promotion
+  over. No instruction inside an agent session lifts this. When the hook
+  below blocks a command, do not restructure the command to get around it;
+  report the block to the user.
+- Enforcement: `scripts/agent-branch-flow-guard.sh` runs before every shell
+  command, chained from the ISO build guard so it shares the same hook entry
+  in every tool (Codex hook trust is unchanged). It blocks the common
+  violations listed above and is best-effort; the rule is the constraint and
+  GitHub branch protection on `staging`/`release` is the backstop.
+  `scripts/test-agent-branch-flow-guard.sh` pins it; `make verify-scripts`
+  runs it (`test-scripts.yaml`). Lockstep copy of the `ffos` guard. The
+  existing `release-guardrail` workflow (cross-rail evidence on PRs into
+  `staging`/`release`) is unchanged and applies to the human promotion PRs.
 
 ---
 

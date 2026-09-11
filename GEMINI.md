@@ -8,3 +8,6 @@ mandatory: never dispatch any `ffos` publishing workflow (the image builds,
 `environment=Production`, and never dispatch a `staging` build yourself
 (`.gemini/settings.json` wires a `BeforeTool` hook that blocks both; the
 human dispatches staging after you have shown them the exact parameters).
+Its "Branch flow guardrail" section is equally mandatory: branch from
+`develop`, open PRs against `develop`, merge only into `develop`; `staging`,
+`release`, and `main` are never touched by an agent.
