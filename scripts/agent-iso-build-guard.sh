@@ -127,7 +127,18 @@ trace() { # $1 = decision
   [[ -n "${AGENT_ISO_GUARD_TRACE:-}" ]] || return 0
   printf '%s %s\n' "$format" "$1" >> "$AGENT_ISO_GUARD_TRACE" 2>/dev/null || true
 }
-allow() { trace allow; exit 0; }
+# A command this guard allows is handed to the branch-flow guard (AGENTS.md
+# "Branch flow guardrail") so both rules share one hook entry per tool and
+# Codex hook trust covers both. Its own trace line replaces ours.
+allow() {
+  local next
+  next="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agent-branch-flow-guard.sh"
+  if [[ -x "$next" ]]; then
+    printf '%s' "$payload" | "$next" --format "$format"
+    exit $?
+  fi
+  trace allow; exit 0
+}
 
 emit() { # $1 = deny|ask, $2 = reason (plain text, no quotes/backslashes)
   local decision="$1" reason="$2"

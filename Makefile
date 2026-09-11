@@ -72,3 +72,4 @@ verify-scripts:
 	@./scripts/test-headless-startup-contract.sh
 	@./scripts/test-enable-wake-on-lan.sh
 	@./scripts/test-agent-iso-build-guard.sh
+	@./scripts/test-agent-branch-flow-guard.sh
