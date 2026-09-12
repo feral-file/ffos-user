@@ -478,6 +478,27 @@ func (e *executor) setSessionGeneration(fn func() uint64) {
 	e.sessionGeneration = fn
 }
 
+// SetVerdictInvalidator injects the function the executor calls immediately
+// before its own player-replacing CDP send (the claim-time
+// displayDefaultPlaylist), if exec is the concrete executor — mirroring
+// SetSessionGeneration's contract. The one consumer is signature
+// verification's active-verdict slot (sigverify.Active.ClearCurrent); it
+// is narrow on purpose so devicectl does not learn the slot's shape.
+func SetVerdictInvalidator(exec Executor, fn func(), logger *zap.Logger) {
+	setter, ok := exec.(interface{ setVerdictInvalidator(func()) })
+	if !ok {
+		logger.Warn("Executor does not support verdict invalidation wiring")
+		return
+	}
+	setter.setVerdictInvalidator(fn)
+}
+
+func (e *executor) setVerdictInvalidator(fn func()) {
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+	e.verdictInvalidator = fn
+}
+
 func (e *executor) currentGeneration() uint64 {
 	if e.sessionGeneration == nil {
 		return 0

@@ -1220,6 +1220,9 @@ func initializeApp(
 	// Pending is untouched: playlist-recompute's re-push promotes it again.
 	if sigVerifyEnabled {
 		session.SetGenerationHook(activeVerdict.ClearCurrent)
+		// The claim-time displayDefaultPlaylist bypasses commandrouter, so
+		// it gets the same pre-send invalidation by its own seam.
+		devicectl.SetVerdictInvalidator(executor, activeVerdict.ClearCurrent, logger)
 	}
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))
