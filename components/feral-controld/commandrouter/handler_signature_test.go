@@ -967,3 +967,59 @@ func TestCommandHandler_Process_Strict_ToastsRejectedAndDoesNotCast(t *testing.T
 	assert.True(t, commandrouter.IsSigInvalid(err))
 	assert.Equal(t, []sigverify.Notice{sigverify.NoticeRejected}, toast.notices)
 }
+
+// TestComposeInvalidator: the seams that replace displayed content outside the
+// cast path drop both the verdict and any queued toast (#307 round 4 F1).
+func TestComposeInvalidator(t *testing.T) {
+	var clearedVerdict int
+	toast := &fakeNotifier{}
+	inv := commandrouter.ComposeInvalidator(func() { clearedVerdict++ }, toast)
+
+	inv()
+
+	assert.Equal(t, 1, clearedVerdict)
+	assert.Equal(t, 1, toast.clears)
+
+	// nil notifier: verdict-only, no panic.
+	invNil := commandrouter.ComposeInvalidator(func() { clearedVerdict++ }, nil)
+	assert.NotPanics(t, invNil)
+	assert.Equal(t, 2, clearedVerdict)
+}
+
+// TestScheduledPushToaster: a cutover the current generation still owns emits
+// the gate's notice (or Clears when silent); a generation race across the send
+// Clears rather than toasting over the replacement (#307 round 4 F2).
+func TestScheduledPushToaster(t *testing.T) {
+	newToaster := func(notifier *fakeNotifier, gen, genStart uint64, notice sigverify.Notice, show bool) func(*dp1.Playlist) {
+		return commandrouter.ScheduledPushToaster(
+			notifier,
+			func() uint64 { return gen },
+			func() uint64 { return genStart },
+			func() (sigverify.Notice, bool) { return notice, show },
+		)
+	}
+
+	// Generation held, policy shows: Notify.
+	held := &fakeNotifier{}
+	newToaster(held, 7, 7, sigverify.NoticeUnsigned, true)(nil)
+	assert.Equal(t, []sigverify.Notice{sigverify.NoticeUnsigned}, held.notices)
+	assert.Equal(t, 0, held.clears)
+
+	// Generation held, policy silent (valid cohort): Clear.
+	silent := &fakeNotifier{}
+	newToaster(silent, 7, 7, "", false)(nil)
+	assert.Empty(t, silent.notices)
+	assert.Equal(t, 1, silent.clears)
+
+	// Generation raced across the send: Clear, never toast over the replacement.
+	raced := &fakeNotifier{}
+	newToaster(raced, 8, 7, sigverify.NoticeInvalid, true)(nil)
+	assert.Empty(t, raced.notices, "a generation-raced cutover must not toast")
+	assert.Equal(t, 1, raced.clears)
+
+	// nil notifier: no panic.
+	assert.NotPanics(t, func() {
+		commandrouter.ScheduledPushToaster(nil, func() uint64 { return 1 }, func() uint64 { return 1 },
+			func() (sigverify.Notice, bool) { return sigverify.NoticeInvalid, true })(nil)
+	})
+}

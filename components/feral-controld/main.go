@@ -1134,9 +1134,15 @@ func initializeApp(
 		// send and its accepted reply means the reply came from a page
 		// that is gone, and the new generation's own re-push promotes.
 		pushStarting, pushAccepted := activeVerdict.FencedPromoter(session.Generation)
+		// pushGenAtStart mirrors FencedPromoter's own fence for the toast: the
+		// generation captured as the cutover's send begins, re-checked in the
+		// toaster so a reply from a page that reloaded across the send toasts
+		// nothing over its replacement. Set/read under the scheduler's pushMu.
+		var pushGenAtStart uint64
 		playlistScheduler.SetPushObserver(func(phase playlistschedule.PushPhase) {
 			switch phase {
 			case playlistschedule.PushStarting:
+				pushGenAtStart = session.Generation()
 				pushStarting()
 			case playlistschedule.PushAccepted:
 				pushAccepted()
@@ -1175,13 +1181,12 @@ func initializeApp(
 		if toastable, ok := any(playlistScheduler).(interface {
 			SetPushToaster(func(*toastPlaylist))
 		}); ok {
-			toastable.SetPushToaster(func(*toastPlaylist) {
-				if pushShow {
-					toastDispatcher.Notify(pushNotice)
-				} else {
-					toastDispatcher.Clear()
-				}
-			})
+			toastable.SetPushToaster(commandrouter.ScheduledPushToaster(
+				toastDispatcher,
+				session.Generation,
+				func() uint64 { return pushGenAtStart },
+				func() (sigverify.Notice, bool) { return pushNotice, pushShow },
+			))
 		}
 		poller.SetVerificationLookup(func(id, url string) (string, bool) {
 			st, ok := activeVerdict.Lookup(id, url)
@@ -1328,10 +1333,17 @@ func initializeApp(
 	// would land after that round already re-attested the old verdict.
 	// Pending is untouched: playlist-recompute's re-push promotes it again.
 	if sigVerifyEnabled {
-		session.SetGenerationHook(activeVerdict.ClearCurrent)
+		// Both seams replace the on-screen document with content this verdict
+		// no longer describes (a page-reload generation bump; the claim-time
+		// player-owned default playlist), so each drops the attested verdict
+		// AND any queued toast, or a stale warning could land over the new
+		// artwork (feral-file/ffos-user#307). toastDispatcher is non-nil here
+		// (created in the sigVerifyEnabled block above).
+		invalidateDisplayed := commandrouter.ComposeInvalidator(activeVerdict.ClearCurrent, toastDispatcher)
+		session.SetGenerationHook(invalidateDisplayed)
 		// The claim-time displayDefaultPlaylist bypasses commandrouter, so
 		// it gets the same pre-send invalidation by its own seam.
-		devicectl.SetVerdictInvalidator(executor, activeVerdict.ClearCurrent, logger)
+		devicectl.SetVerdictInvalidator(executor, invalidateDisplayed, logger)
 	}
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))
