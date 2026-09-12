@@ -762,16 +762,15 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 	// device (e.g. mid-OTA with the updating narration up) must not wipe an
 	// unrelated overlay.
 	if !wasClaimed {
-		e.setupUI().Hide()
-		// First pair: put artwork on screen immediately instead of leaving the
-		// player idle until the cloud gets around to sending content. The claim
-		// QR only paints after the relayer topic-wait, so the device is online
-		// and the player's playlist fetch will succeed. Best-effort: the claim
-		// itself already landed and must not fail on a player hiccup.
-		if err := e.sendDisplayDefaultPlaylist(); err != nil {
-			e.logger.Warn("Failed to start default playlist after first pair",
-				zap.Error(err))
-		}
+		// First pair: hide the setup overlay and put artwork on screen
+		// immediately instead of leaving the player idle until the cloud sends
+		// content. Both run under the player-push lock behind ONE late reset
+		// re-check (firstClaimDisplay): a claim admitted before a factory reset
+		// staged must not erase the reset narration (Hide) or repaint over it
+		// (default playlist) once the reset has taken the shared lock and
+		// queued its narration (feral-file/ffos-user#307). Best-effort: the
+		// claim itself already landed and must not fail on a player hiccup.
+		e.firstClaimDisplay()
 	}
 
 	return CmdOK, nil
@@ -785,59 +784,97 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 // before the claim), and a force push would visibly restart it. The player
 // treats the flag as "make sure something is playing" and no-ops otherwise.
 func (e *executor) sendDisplayDefaultPlaylist() error {
-	if e.cdp == nil {
-		return fmt.Errorf("cdp client is not configured")
-	}
-
-	send := func() (interface{}, error) {
-		command := commands.Command{
-			Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
-			Arguments: map[string]any{
-				"onlyIfNoPlaylist": true,
-			},
-		}
-		payload, err := command.JSON()
-		if err != nil {
-			return nil, fmt.Errorf("marshal displayDefaultPlaylist payload: %w", err)
-		}
-
-		// This send bypasses commandrouter, so it must do what
-		// commandrouter does before every replacing send: drop the
-		// attested signature verdict. From the moment the send lands the
-		// player may be showing its own default content — bytes controld
-		// never verified — and a status round in that window must omit,
-		// never re-attest, the previous playlist's verdict
-		// (feral-file/ffos-user#307). Inside the push section, before the
-		// send, like every other producer.
-		e.sleepApplyMu.Lock()
-		invalidate := e.verdictInvalidator
-		e.sleepApplyMu.Unlock()
-		if invalidate != nil {
-			invalidate()
-		}
-
-		result, err := e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
-			"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("send displayDefaultPlaylist command to player: %w", err)
-		}
-		return result, nil
-	}
-
 	e.sleepApplyMu.Lock()
 	withPlayerPush := e.withPlayerPush
 	e.sleepApplyMu.Unlock()
 
 	var err error
+	run := func() {
+		// Late reset re-check inside the push section: the factory-reset
+		// narration write is serialized through this same lock, so a send
+		// admitted before the latch must drop here rather than repaint over
+		// the reset screen (feral-file/ffos-user#307).
+		if e.ResetStaged() {
+			e.logger.Warn("Skipping displayDefaultPlaylist: factory reset staged")
+			return
+		}
+		_, err = e.sendDefaultPlaylistLocked()
+	}
 	if withPlayerPush != nil {
-		withPlayerPush(func() {
-			_, err = send()
-		})
+		withPlayerPush(run)
 		return err
 	}
-	_, err = send()
+	run()
 	return err
+}
+
+// firstClaimDisplay hides the setup overlay and starts default playback on the
+// first pairing, both under the player-push lock behind ONE late ResetStaged
+// re-check. A claim admitted before a factory reset staged must not erase the
+// reset narration (Hide) or repaint over it (the default playlist) once the
+// reset has acquired the shared lock and queued its narration
+// (feral-file/ffos-user#307).
+func (e *executor) firstClaimDisplay() {
+	e.sleepApplyMu.Lock()
+	withPlayerPush := e.withPlayerPush
+	e.sleepApplyMu.Unlock()
+
+	run := func() {
+		if e.ResetStaged() {
+			e.logger.Warn("Skipping first-claim display: factory reset staged")
+			return
+		}
+		e.setupUI().Hide()
+		if _, err := e.sendDefaultPlaylistLocked(); err != nil {
+			e.logger.Warn("Failed to start default playlist after first pair", zap.Error(err))
+		}
+	}
+	if withPlayerPush != nil {
+		withPlayerPush(run)
+		return
+	}
+	run()
+}
+
+// sendDefaultPlaylistLocked performs the raw displayDefaultPlaylist send. The
+// caller MUST be inside the player-push section AND have re-checked
+// ResetStaged; it is the shared body of sendDisplayDefaultPlaylist and the
+// first-claim path.
+func (e *executor) sendDefaultPlaylistLocked() (interface{}, error) {
+	if e.cdp == nil {
+		return nil, fmt.Errorf("cdp client is not configured")
+	}
+	command := commands.Command{
+		Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
+		Arguments: map[string]any{
+			"onlyIfNoPlaylist": true,
+		},
+	}
+	payload, err := command.JSON()
+	if err != nil {
+		return nil, fmt.Errorf("marshal displayDefaultPlaylist payload: %w", err)
+	}
+
+	// This send bypasses commandrouter, so it must do what commandrouter does
+	// before every replacing send: drop the attested signature verdict. From
+	// the moment the send lands the player may be showing its own default
+	// content — bytes controld never verified — and a status round in that
+	// window must omit, never re-attest, the previous playlist's verdict
+	// (feral-file/ffos-user#307).
+	e.sleepApplyMu.Lock()
+	invalidate := e.verdictInvalidator
+	e.sleepApplyMu.Unlock()
+	if invalidate != nil {
+		invalidate()
+	}
+
+	result, err := e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
+		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("send displayDefaultPlaylist command to player: %w", err)
+	}
+	return result, nil
 }
 
 func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interface{}, error) {

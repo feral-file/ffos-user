@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
@@ -305,4 +306,58 @@ func TestShowFactoryResetNarration_DirectWhenUnwired(t *testing.T) {
 	e := &executor{logger: zap.NewNop(), setupNarrator: spy}
 	e.showFactoryResetNarration()
 	assert.Equal(t, []string{"factory_reset"}, spy.calls)
+}
+
+// TestSendDisplayDefaultPlaylist_SkippedWhenResetStaged: the claim-time
+// default-playlist send re-checks the reset latch inside the push lock, so a
+// send admitted before a reset staged does not repaint over the reset
+// narration (feral-file/ffos-user#307 review round 8).
+func TestSendDisplayDefaultPlaylist_SkippedWhenResetStaged(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockCDP := mocks.NewMockCDP(ctrl)
+	// No CDP Send: a write during a staged reset is an unexpected call.
+	pushed := 0
+	e := &executor{logger: zap.NewNop(), cdp: mockCDP}
+	e.setWithPlayerPush(func(fn func()) { pushed++; fn() })
+	e.resetStaged.Store(true)
+
+	require.NoError(t, e.sendDisplayDefaultPlaylist())
+	assert.Equal(t, 1, pushed, "the reset re-check runs inside the push section")
+}
+
+// TestFirstClaimDisplay_SkippedWhenResetStaged: a first-claim admitted before
+// a reset staged must neither hide the reset narration nor repaint over it.
+func TestFirstClaimDisplay_SkippedWhenResetStaged(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockCDP := mocks.NewMockCDP(ctrl)
+	// No CDP Send.
+	spy := &narratorSpy{}
+	pushed := 0
+	e := &executor{logger: zap.NewNop(), cdp: mockCDP, setupNarrator: spy}
+	e.setWithPlayerPush(func(fn func()) { pushed++; fn() })
+	e.resetStaged.Store(true)
+
+	e.firstClaimDisplay()
+
+	assert.Equal(t, 1, pushed, "the hide+send run inside one push section")
+	assert.Empty(t, spy.calls, "a staged reset must not hide the reset narration")
+}
+
+// TestFirstClaimDisplay_HidesAndSendsWhenNotStaged pins the normal path: with
+// no reset staged the overlay is hidden and default playback starts.
+func TestFirstClaimDisplay_HidesAndSendsWhenNotStaged(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(map[string]any{"message": map[string]any{"ok": true}}, nil).Times(1)
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), cdp: mockCDP, setupNarrator: spy}
+	e.setWithPlayerPush(func(fn func()) { fn() })
+
+	e.firstClaimDisplay()
+
+	assert.Equal(t, []string{"hide"}, spy.calls)
 }
