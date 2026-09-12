@@ -468,9 +468,23 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("playlist is not a map")
 				}
 
+				// The bytes the document is decoded from AND verified on.
+				// Preferred: the caller's own `dp1_call` token, kept
+				// verbatim by the ingress decoders (Command.RawArguments) —
+				// a signer covered exactly those bytes. Fallback: a
+				// re-marshal of the decoded map, only for commands built
+				// in-process (OOM recovery, tests) that never had a wire
+				// form. The fallback is lossy in a way a verifier feels:
+				// encoding/json HTML-escapes `&`/`<`/`>`, six bytes each,
+				// which can inflate the document past
+				// sigverify.MaxDocumentBytes and report an honest document
+				// as invalid — so the wire token wins. (Its float64
+				// rounding of large integers is absorbed by JCS, see
+				// commands.Command.RawArguments.)
 				var playlistBytes []byte
-				playlistBytes, err = h.json.Marshal(playlistMap)
-				if err != nil {
+				if raw, hasRaw := command.RawArgument("dp1_call"); hasRaw {
+					playlistBytes = raw
+				} else if playlistBytes, err = h.json.Marshal(playlistMap); err != nil {
 					return nil, fmt.Errorf("failed to marshal playlist: %w", err)
 				}
 
@@ -478,13 +492,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
 				}
 
-				// Verify the map re-marshal, NOT the typed struct just
-				// decoded from it: the struct drops any field it does not
-				// know, and a signer covered every field, so verifying
-				// after the typed decode would misreport an honest
-				// document as tampered. JCS makes the map round-trip safe
-				// (sigverify's map round-trip test is the pin). Also before
-				// dynamic hydration below, which rewrites items.
+				// Verify those bytes, NOT the typed struct just decoded from
+				// them: the struct drops any field it does not know, and a
+				// signer covered every field, so verifying after the typed
+				// decode would misreport an honest document as tampered.
+				// Also before dynamic hydration below, which rewrites items.
 				if h.verifySignatures {
 					verdict := sigverify.Verify(playlistBytes)
 					playlist.Verification = &verdict

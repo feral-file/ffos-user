@@ -8,6 +8,8 @@ package commandrouter_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"os"
@@ -24,6 +26,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
+	"github.com/display-protocol/dp1-go/sign"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
@@ -169,6 +172,62 @@ func TestCommandHandler_Process_DisplayPlaylist_Inline_VerifiesMarshaledBytes(t 
 
 	require.NoError(t, err)
 	assert.Equal(t, "valid", replyMessage(t, result)["signatureStatus"])
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_Inline_VerifiesWireTokenNotRemarshal
+// pins the ingress contract: when the command arrived over the wire, the
+// caller's own dp1_call token is what is decoded and verified — the map is
+// never re-marshaled. The document here is signed and dense with `&`: a
+// re-marshal would HTML-escape it sixfold past the verifier's size bound
+// and report an honest document as invalid.
+func TestCommandHandler_Process_DisplayPlaylist_Inline_VerifiesWireTokenNotRemarshal(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	active := wireVerification(ts)
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	doc := map[string]any{
+		"dpVersion": "1.1.0",
+		"id":        "amp-1",
+		"title":     strings.Repeat("&", sigverify.MaxDocumentBytes/5),
+		"items":     []any{map[string]any{"id": "i", "source": "https://example.com/a", "duration": 10, "license": "open"}},
+	}
+	unsignedBytes, err := json.Marshal(doc) // encoding/json escapes: NOT the wire form
+	require.NoError(t, err)
+	// Build the wire form by hand: unescaped, as a client would send it.
+	// (The escape sequence is assembled from bytes so no tooling can
+	// helpfully collapse it into a literal ampersand.)
+	jsonAmpEscape := string([]byte{'\\', 'u', '0', '0', '2', '6'})
+	require.Contains(t, string(unsignedBytes), jsonAmpEscape, "encoding/json escapes & on marshal")
+	wireDoc := []byte(strings.ReplaceAll(string(unsignedBytes), jsonAmpEscape, "&"))
+	entry, err := sign.SignMultiEd25519(wireDoc, priv, dp1playlist.RoleFeed, "2026-09-12T00:00:00Z")
+	require.NoError(t, err)
+	entryJSON, err := json.Marshal(entry)
+	require.NoError(t, err)
+	signedWire := []byte(strings.TrimSuffix(string(wireDoc), "}") + `,"signatures":[` + string(entryJSON) + `]}`)
+	require.Less(t, len(signedWire), sigverify.MaxDocumentBytes)
+	require.Equal(t, sigverify.StatusValid, sigverify.Verify(signedWire).Status, "fixture sanity")
+
+	var command commands.Command
+	require.NoError(t, json.Unmarshal([]byte(`{"command":"displayPlaylist","request":{"dp1_call":`+string(signedWire)+`}}`), &command))
+	// No Marshal expectation: a re-marshal is a test failure. Decode from
+	// the wire token, which must be byte-identical to what was sent.
+	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).DoAndReturn(func(b []byte, v any) error {
+		assert.Equal(t, signedWire, b)
+		*(v.(**dp1.Playlist)) = inlineTyped("amp-1")
+		return nil
+	}).Times(1)
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	require.NoError(t, err)
+	assert.Equal(t, "valid", replyMessage(t, result)["signatureStatus"])
+	st, ok := active.Lookup("amp-1", "")
+	assert.True(t, ok)
+	assert.Equal(t, sigverify.StatusValid, st)
 }
 
 // TestCommandHandler_Process_DisplayPlaylist_Inline_InvalidStillPlaysAndReports:

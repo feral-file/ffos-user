@@ -40,10 +40,13 @@ func TestVerify_LiveFeedFixture_Valid(t *testing.T) {
 	assert.Equal(t, sigverify.Signer{Alg: "ed25519", Kid: feedFixtureKid, Role: "feed", OK: true}, v.Signers[0])
 }
 
-// TestVerify_MapRoundTrip_StillValid is THE pin for the inline dp1_call path:
-// the LAN hub and relayer deliver the playlist as a generic map that
-// commandrouter re-marshals before verifying. JCS canonicalization must make
-// that byte-different document verify identically.
+// TestVerify_MapRoundTrip_StillValid pins that JCS canonicalization makes a
+// key-order/whitespace-different document verify identically — the property
+// commandrouter's in-process fallback (a re-marshaled map, used only when a
+// command has no wire form) relies on. The ingress paths themselves verify
+// the caller's wire token, for size reasons (see
+// TestVerify_BigIntegerToken_SurvivesMapRoundTrip for why not for numeric
+// ones).
 func TestVerify_MapRoundTrip_StillValid(t *testing.T) {
 	raw := loadFeedFixture(t)
 	var m map[string]any
@@ -392,6 +395,29 @@ func TestVerify_DocumentOverCap_RefusedWithoutCrypto(t *testing.T) {
 	assert.Equal(t, sigverify.StatusInvalid, v.Status)
 	assert.Equal(t, sigverify.ReasonDocumentTooLarge, v.Reason)
 	assert.Nil(t, v.Signers)
+}
+
+// TestVerify_BigIntegerToken_SurvivesMapRoundTrip documents a subtlety of
+// the ingress contract: a map round-trip rounds an integer past 2^53 to a
+// float64, yet the document still verifies, because JCS canonicalizes
+// numbers as ES6 doubles on BOTH sides — the signer's digest was already
+// computed over the rounded form. Numeric fidelity is therefore not why the
+// inline path verifies the wire token; size is (HTML escaping can inflate a
+// re-marshal past MaxDocumentBytes).
+func TestVerify_BigIntegerToken_SurvivesMapRoundTrip(t *testing.T) {
+	doc := `{"dpVersion":"1.1.0","id":"0f4a5f1e-3f39-4a4e-9c7e-6a2d7b4a1c11","title":"big","items":[{"id":"6f1c1d2e-1b2a-4c3d-8e9f-0a1b2c3d4e5f","source":"https://example.com/a","duration":9007199254740993,"license":"open"}]}`
+	entry, err := sign.SignMultiEd25519([]byte(doc), newKey(t), dp1playlist.RoleFeed, "2026-09-12T00:00:00Z")
+	require.NoError(t, err)
+	entryJSON := mustJSON(t, entry)
+	signed := []byte(strings.TrimSuffix(doc, "}") + `,"signatures":[` + string(entryJSON) + `]}`)
+
+	assert.Equal(t, sigverify.StatusValid, sigverify.Verify(signed).Status, "the wire token verifies")
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(signed, &m))
+	remarshaled := mustJSON(t, m)
+	assert.NotContains(t, string(remarshaled), "9007199254740993", "the round-trip did round the integer")
+	assert.Equal(t, sigverify.StatusValid, sigverify.Verify(remarshaled).Status, "and JCS makes that irrelevant to the digest")
 }
 
 func TestVerify_ReindentedDocument_StillValid(t *testing.T) {

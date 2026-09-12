@@ -472,8 +472,11 @@ content was already playing.
 **Signature verification (feral-file/ffos-user#307, verify-and-report).**
 Every `displayPlaylist` document is verified with dp1-go's DP-1 §7.1 verifier
 at accept time, before dynamic hydration: the URL path verifies the fetched
-bytes and the inline path verifies the re-marshaled `dp1_call` map (never
-the typed struct, which drops fields the signer covered). The offline
+bytes and the inline path verifies the caller's own `dp1_call` token exactly
+as it arrived — both ingress decoders retain the `request` object verbatim
+beside the decoded map — never a re-marshal of the map (whose HTML escaping
+of `&`/`<`/`>` can inflate a valid document past the 4 MiB verifier bound)
+and never the typed struct (which drops fields the signer covered). The offline
 cached-copy fallback carries NO verdict — the stored body is a typed,
 hydrated re-marshal, not the signed bytes — so a cast served from it omits
 the fields below. Bounds, all aimed at untrusted ingress: a document larger than 4 MiB is

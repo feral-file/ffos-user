@@ -85,6 +85,36 @@ type Message struct {
 	Command *string        `json:"command,omitempty"`
 	Request map[string]any `json:"request,omitempty"`
 	TopicID *string        `json:"topicID,omitempty"`
+	// RawRequest is the `request` token verbatim, for the same reason
+	// commands.Command.RawArguments exists: an inline DP-1 playlist must be
+	// signature-verified from the bytes the caller sent, not from a
+	// re-marshal whose HTML escaping can inflate it past the verifier's size
+	// bound (feral-file/ffos-user#307). Set by UnmarshalJSON only.
+	RawRequest json.RawMessage `json:"-"`
+}
+
+type messageWire struct {
+	Command *string        `json:"command,omitempty"`
+	Request map[string]any `json:"request,omitempty"`
+	TopicID *string        `json:"topicID,omitempty"`
+}
+
+// UnmarshalJSON decodes the message and retains the `request` token verbatim.
+func (m *Message) UnmarshalJSON(data []byte) error {
+	var w messageWire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	var tokens map[string]json.RawMessage
+	if err := json.Unmarshal(data, &tokens); err != nil {
+		return err
+	}
+	m.Command, m.Request, m.TopicID = w.Command, w.Request, w.TopicID
+	m.RawRequest = nil
+	if raw, ok := tokens["request"]; ok && len(raw) > 0 && string(raw) != "null" {
+		m.RawRequest = raw
+	}
+	return nil
 }
 
 type Response struct {

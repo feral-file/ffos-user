@@ -49,6 +49,67 @@ var deviceCtlCommands = map[Type]bool{
 type Command struct {
 	Type      Type           `json:"command,omitempty"` // FIXME: rename json key after decouple the player and relayer concepts
 	Arguments map[string]any `json:"request,omitempty"` // FIXME: rename json key after decouple the player and relayer concepts
+	// RawArguments is the `request` object exactly as it arrived on the
+	// wire, kept beside the decoded map (feral-file/ffos-user#307). The map
+	// is what handlers work with, but re-encoding it is not the caller's
+	// document: encoding/json HTML-escapes `&`/`<`/`>` (six bytes each), so
+	// a signed inline DP-1 playlist verified from a re-marshal of the map can
+	// inflate past the verifier's size bound and be reported as invalid when
+	// it is not. (Decoding also rounds integers past 2^53 to float64, which
+	// JCS canonicalization happens to absorb — the signer's digest is over
+	// the same ES6-number form — so size, not numeric fidelity, is the reason
+	// the original token is kept.)
+	// Populated only by UnmarshalJSON (both ingress paths decode through it);
+	// nil for commands built in-process, which have no wire form.
+	RawArguments json.RawMessage `json:"-"`
+}
+
+// commandWire is Command minus the custom decoder, so UnmarshalJSON can
+// decode the ordinary fields without recursing into itself.
+type commandWire struct {
+	Type      Type            `json:"command,omitempty"`
+	Arguments map[string]any  `json:"request,omitempty"`
+	Raw       json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON decodes the envelope and additionally retains the `request`
+// token verbatim in RawArguments. It reads the envelope twice (typed, then
+// as a map of raw tokens); both reads are bounded by the ingress body limit.
+func (c *Command) UnmarshalJSON(data []byte) error {
+	var w commandWire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	var tokens map[string]json.RawMessage
+	if err := json.Unmarshal(data, &tokens); err != nil {
+		return err
+	}
+	c.Type = w.Type
+	c.Arguments = w.Arguments
+	c.RawArguments = nil
+	if raw, ok := tokens["request"]; ok && len(raw) > 0 && string(raw) != "null" {
+		c.RawArguments = raw
+	}
+	return nil
+}
+
+// RawArgument returns the wire token for one key of `request`, when the
+// command arrived over the wire (RawArguments set) and the key was present.
+// The token is an exact byte slice of the original document: verify it,
+// never a re-marshal of Arguments.
+func (c Command) RawArgument(key string) (json.RawMessage, bool) {
+	if len(c.RawArguments) == 0 {
+		return nil, false
+	}
+	var tokens map[string]json.RawMessage
+	if err := json.Unmarshal(c.RawArguments, &tokens); err != nil {
+		return nil, false
+	}
+	raw, ok := tokens[key]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return nil, false
+	}
+	return raw, true
 }
 
 func (c Command) JSON() ([]byte, error) {
