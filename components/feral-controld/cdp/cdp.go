@@ -62,6 +62,13 @@ type CDP interface {
 	Start(ctx context.Context, onConnect func())
 	Send(method string, params map[string]interface{}) (interface{}, error)
 	NoLogSend(method string, params map[string]interface{}) (interface{}, error)
+	// NoLogSendWithin is NoLogSend with a caller-supplied cap on the write+read
+	// round trip, so a best-effort producer (the signature toast) holds c.mu
+	// for at most `timeout` instead of the full sendTimeout — a wedged player
+	// cannot let a toast monopolize CDP and starve casts/status. The effective
+	// deadline is min(timeout, sendTimeout); a non-positive timeout falls back
+	// to sendTimeout.
+	NoLogSendWithin(method string, params map[string]interface{}, timeout time.Duration) (interface{}, error)
 	PageNavigationURL(ctx context.Context) (string, error)
 	Close()
 	Initialized() bool
@@ -468,7 +475,17 @@ func (c *cdp) NoLogSend(method string, params map[string]interface{}) (interface
 	return c.send(method, params)
 }
 
+// NoLogSendWithin bounds the round-trip (and thus the c.mu hold) to
+// min(timeout, sendTimeout); see the interface doc.
+func (c *cdp) NoLogSendWithin(method string, params map[string]interface{}, timeout time.Duration) (interface{}, error) {
+	return c.sendWithin(method, params, timeout)
+}
+
 func (c *cdp) send(method string, params map[string]interface{}) (interface{}, error) {
+	return c.sendWithin(method, params, c.sendTimeout)
+}
+
+func (c *cdp) sendWithin(method string, params map[string]interface{}, timeout time.Duration) (interface{}, error) {
 	c.mu.Lock()
 	if c.conn == nil {
 		c.mu.Unlock()
@@ -502,7 +519,13 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 	// (see sendRequestTimeout). A socket that is writable but never replies — the
 	// post-kiosk-restart zombie — must surface as an error here, because a send failure
 	// is the only signal that wakes the connect loop to tear down and re-dial.
-	deadline := time.Now().Add(c.sendTimeout)
+	// timeout caps the hold for best-effort callers (NoLogSendWithin); it never
+	// EXTENDS past sendTimeout, and a non-positive value falls back to it.
+	effective := c.sendTimeout
+	if timeout > 0 && timeout < effective {
+		effective = timeout
+	}
+	deadline := time.Now().Add(effective)
 	if err := c.conn.SetWriteDeadline(deadline); err != nil {
 		c.mu.Unlock()
 		c.signalDrop()

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -89,10 +90,22 @@ func (s *sender) Show(ctx context.Context, notice sigverify.Notice) error {
 	if err != nil {
 		return err
 	}
-	result, err := s.cdp.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
+	// Bound the CDP round trip (and thus the shared c.mu hold) to the caller's
+	// deadline, so a best-effort toast to a wedged player cannot monopolize
+	// CDP and starve casts/status (feral-file/ffos-user#307). Default 2s when
+	// the context carries no deadline.
+	timeout := 2 * time.Second
+	if dl, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(dl); remaining > 0 {
+			timeout = remaining
+		} else {
+			return ctx.Err()
+		}
+	}
+	result, err := s.cdp.NoLogSendWithin(cdp.METHOD_EVALUATE, map[string]interface{}{
 		"expression":    "window.handleCDPRequest(" + string(payload) + ")",
 		"returnByValue": true,
-	})
+	}, timeout)
 	if err != nil {
 		return err
 	}
@@ -221,4 +234,88 @@ func normalizeEvaluationResult(result any) (map[string]any, error) {
 		return normalizeEvaluationResult(value)
 	}
 	return nil, fmt.Errorf("player toast returned unsupported Runtime.evaluate result: %v", rawResultMap)
+}
+
+// Notifier is the best-effort, non-blocking toast surface commandrouter, the
+// scheduler wiring, and the refresher submit to. Notify replaces any pending
+// notice (latest-wins); Clear drops a pending notice — a valid or silent
+// transition calls it so a stale warning never appears over newer artwork
+// (feral-file/ffos-user#307).
+type Notifier interface {
+	Notify(notice sigverify.Notice)
+	Clear()
+}
+
+// Dispatcher serializes toasts onto a single worker with a one-slot mailbox:
+// producers never block, at most one Show is ever in flight (so toasts cannot
+// pile up on CDP), and a later transition supersedes a queued earlier one.
+// Each send is bounded by timeout (via the Sender's context), so a wedged
+// player cannot hold CDP past it.
+type Dispatcher struct {
+	sender  Sender
+	logger  *zap.Logger
+	timeout time.Duration
+
+	mu      sync.Mutex
+	pending sigverify.Notice
+	has     bool
+
+	wake chan struct{}
+}
+
+// NewDispatcher starts the worker; it stops when ctx is done.
+func NewDispatcher(ctx context.Context, sender Sender, timeout time.Duration, logger *zap.Logger) *Dispatcher {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	d := &Dispatcher{sender: sender, logger: logger, timeout: timeout, wake: make(chan struct{}, 1)}
+	go d.run(ctx)
+	return d
+}
+
+// Notify queues notice as the pending toast, replacing any not-yet-sent one.
+// Non-blocking.
+func (d *Dispatcher) Notify(notice sigverify.Notice) {
+	d.mu.Lock()
+	d.pending = notice
+	d.has = true
+	d.mu.Unlock()
+	select {
+	case d.wake <- struct{}{}:
+	default:
+	}
+}
+
+// Clear drops a pending (not-yet-sent) notice. A valid or silent transition
+// calls it so an earlier warning does not surface over the new artwork.
+// Non-blocking; an already-dispatching send is not recalled (it is bounded).
+func (d *Dispatcher) Clear() {
+	d.mu.Lock()
+	d.has = false
+	d.mu.Unlock()
+}
+
+func (d *Dispatcher) run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.wake:
+			d.mu.Lock()
+			notice, has := d.pending, d.has
+			d.has = false
+			d.mu.Unlock()
+			if !has {
+				continue
+			}
+			sctx, cancel := context.WithTimeout(ctx, d.timeout)
+			if err := d.sender.Show(sctx, notice); err != nil {
+				d.logger.Debug("player toast not shown", zap.String("notice", string(notice)), zap.Error(err))
+			}
+			cancel()
+		}
+	}
 }

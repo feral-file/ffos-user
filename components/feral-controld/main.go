@@ -236,16 +236,10 @@ func main() {
 	}
 }
 
-// toastPlaylist aliases dp1.Playlist so the scheduler push-toaster callback
-// can be spelled inside run(), where the local dp1 service variable shadows
-// the dp1 package. newToastContext likewise bounds a best-effort scheduler
-// toast from file scope, where the context package is not shadowed by run()'s
-// context variable.
+// toastPlaylist aliases dp1.Playlist so the scheduler push gate/toaster
+// callbacks can be spelled inside run(), where the local dp1 service variable
+// shadows the dp1 package.
 type toastPlaylist = dp1.Playlist
-
-func newToastContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 2*time.Second)
-}
 
 func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// Load state. A load failure must NOT abort startup: controld is the sole
@@ -1108,6 +1102,9 @@ func initializeApp(
 		}
 		return mode
 	}
+	// Shared across the cast, scheduler and refresher wiring blocks below;
+	// created only when verification runs.
+	var toastDispatcher *playertoast.Dispatcher
 	if sigVerifyEnabled {
 		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict, Mode: verificationMode}, logger)
 		// The on-screen notice for a non-valid cast (notify) or a strict
@@ -1118,20 +1115,15 @@ func initializeApp(
 		// ff-player ships the contract (paired-rollout: the player bundle lands
 		// before this daemon). Copy is owned by the player; controld only names
 		// the notice.
+		// One shared toast surface: a single-slot dispatcher. Every producer
+		// (the cast path via SetPlayerToast, the scheduler hooks below, and the
+		// refresher) submits non-blocking; the dispatcher sends at most one
+		// bounded toast at a time and a newer transition supersedes a queued
+		// older one, so a wedged player never delays a cast and a stale warning
+		// never lands over newer artwork (feral-file/ffos-user#307).
 		toastSender := playertoast.New(cdp, setupui.DefaultContractPath, logger)
-		commandrouter.SetPlayerToast(rawCmdHandler, toastSender, logger)
-		// dispatchToast fires a scheduler-originated notice off the push
-		// goroutine — best-effort and decoupled, so a wedged player never
-		// stalls a cutover (the cast path decouples the same way in fireToast).
-		dispatchToast := func(notice sigverify.Notice) {
-			go func() {
-				tctx, cancel := newToastContext()
-				defer cancel()
-				if err := toastSender.Show(tctx, notice); err != nil {
-					logger.Debug("scheduler player toast not shown", zap.String("notice", string(notice)), zap.Error(err))
-				}
-			}()
-		}
+		toastDispatcher = playertoast.NewDispatcher(context, toastSender, 2*time.Second, logger)
+		commandrouter.SetPlayerToast(rawCmdHandler, toastDispatcher, logger)
 		// A displayAt-deferred cast parks its verdict as pending; the
 		// scheduler's own cutover push is the only point that proves the
 		// cohort reached the screen, so that is where it is promoted — and
@@ -1154,31 +1146,40 @@ func initializeApp(
 		// the cast-time verdict the scheduler's cached document still carries
 		// (cloned by pointer, never persisted), so a schedule accepted under
 		// notify cannot carry a non-valid cohort onto the screen after the
-		// owner switches to strict. A refusal reads the mode ONCE (in the gate)
-		// and, because strict is the only mode that refuses, always surfaces
-		// signature_rejected — bound to this refused cutover.
-		strictGate := commandrouter.StrictPushGate(verificationMode)
+		// owner switches to strict. The mode is read ONCE per cutover, here in
+		// the gate, and the notice it implies is carried to PushAccepted via
+		// pushNotice/pushShow — never re-read — so a concurrent mode change
+		// cannot let a cohort display under notify and then be labeled
+		// rejected, or suppress an expected notice. gate and toaster for one
+		// push both run under the scheduler's pushMu (one push at a time), so
+		// the shared fields need no lock.
+		var pushNotice sigverify.Notice
+		var pushShow bool
 		playlistScheduler.SetPushGate(func(p *toastPlaylist) error {
-			if err := strictGate(p); err != nil {
-				dispatchToast(sigverify.NoticeRejected)
+			mode := verificationMode() // the single read for this cutover
+			if err := commandrouter.StrictPushGate(func() sigverify.Mode { return mode })(p); err != nil {
+				pushShow = false // refused: PushAccepted will not fire for this push
+				toastDispatcher.Notify(sigverify.NoticeRejected)
 				return err
 			}
+			var status sigverify.Status
+			if p != nil && p.Verification != nil {
+				status = p.Verification.Status
+			}
+			pushNotice, pushShow = sigverify.ToastFor(mode, status)
 			return nil
 		})
-		// A cohort that actually reached the player (PushAccepted) toasts its
-		// own verdict under the mode at push time — the cutover, not the
-		// accepting cast, is the transition the notice describes. A valid
-		// cohort (or silent mode) toasts nothing (ToastFor).
+		// The cohort reached the player (PushAccepted): emit the notice the
+		// gate decided for THIS push, or Clear a pending stale one — the
+		// cutover, not the accepting cast, is the transition it describes.
 		if toastable, ok := any(playlistScheduler).(interface {
 			SetPushToaster(func(*toastPlaylist))
 		}); ok {
-			toastable.SetPushToaster(func(p *toastPlaylist) {
-				var status sigverify.Status
-				if p != nil && p.Verification != nil {
-					status = p.Verification.Status
-				}
-				if notice, show := sigverify.ToastFor(verificationMode(), status); show {
-					dispatchToast(notice)
+			toastable.SetPushToaster(func(*toastPlaylist) {
+				if pushShow {
+					toastDispatcher.Notify(pushNotice)
+				} else {
+					toastDispatcher.Clear()
 				}
 			})
 		}
@@ -1203,6 +1204,10 @@ func initializeApp(
 	if sigVerifyEnabled {
 		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
 		playlist_refresher.SetSignatureVerificationMode(playlistRefresher, verificationMode, logger)
+		// The refresher shares the one toast dispatcher: a strict refusal or an
+		// accepted force-cast of a re-resolved feed document surfaces the same
+		// notice the cast path would (feral-file/ffos-user#307).
+		playlist_refresher.SetRefresherToaster(playlistRefresher, toastDispatcher, logger)
 		// Same generation fence for the refresher's force casts.
 		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
 	}

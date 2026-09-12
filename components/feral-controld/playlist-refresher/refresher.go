@@ -17,6 +17,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
+	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -160,6 +161,11 @@ type refresher struct {
 	// refresher must not become the path around that refusal. nil ⇒ default
 	// (notify), which never skips.
 	verificationMode func() sigverify.Mode
+	// toast, when set (SetRefresherToaster), surfaces the signature notice for
+	// a feed-driven transition: a strict refusal, or an accepted force-cast of
+	// a re-resolved document. Non-blocking Notifier (the shared dispatcher);
+	// nil means no toast (feral-file/ffos-user#307).
+	toast playertoast.Notifier
 }
 
 // SetSignatureVerificationMode injects the mode getter onto r, if r is the
@@ -172,6 +178,38 @@ func SetSignatureVerificationMode(r Refresher, fn func() sigverify.Mode, logger 
 		return
 	}
 	setter.setSignatureVerificationMode(fn)
+}
+
+// SetRefresherToaster injects the shared toast surface onto r (if r is the
+// concrete refresher built by New), mirroring SetSignatureVerificationMode.
+func SetRefresherToaster(r Refresher, notifier playertoast.Notifier, logger *zap.Logger) {
+	setter, ok := r.(interface{ setToaster(playertoast.Notifier) })
+	if !ok {
+		logger.Warn("SetRefresherToaster: refresher does not support the toast seam")
+		return
+	}
+	setter.setToaster(notifier)
+}
+
+func (r *refresher) setToaster(notifier playertoast.Notifier) {
+	r.toast = notifier
+}
+
+// toastRefresh surfaces (or Clears) the notice for a feed transition under the
+// current mode. Non-blocking; bound to the transition the caller is at.
+func (r *refresher) toastRefresh(status sigverify.Status) {
+	if r.toast == nil {
+		return
+	}
+	mode := sigverify.DefaultMode
+	if r.verificationMode != nil {
+		mode = r.verificationMode()
+	}
+	if notice, ok := sigverify.ToastFor(mode, status); ok {
+		r.toast.Notify(notice)
+	} else {
+		r.toast.Clear()
+	}
 }
 
 func (r *refresher) setSignatureVerificationMode(fn func() sigverify.Mode) {
@@ -569,6 +607,13 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			}
 			r.logger.Warn("playlist refresh skipped by strict signature verification; current artwork left in place",
 				zap.String("kind", kind), zap.String("reason", reason))
+			// Strict refused this feed update: tell the wall (#307). Under
+			// strict a non-valid (or verdict-less) status toasts rejected.
+			var status sigverify.Status
+			if playlist.Verification != nil {
+				status = playlist.Verification.Status
+			}
+			r.toastRefresh(status)
 			return nil
 		}
 	}
@@ -731,6 +776,19 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				r.activeVerdict.Set(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
 			default:
 				// Soft refresh: already reconciled before the send.
+			}
+			// An accepted FORCE cast replaced the artwork with this
+			// re-resolved document, so its verdict now describes what is on
+			// screen: surface (or Clear) the notice, bound to this push and
+			// under the same lock. A soft refresh does not visibly replace
+			// content, and a page-moved force cast left the verdict
+			// unpublished above, so neither toasts here (#307).
+			if effectiveForceCast && r.currentGeneration() == generationBefore {
+				var status sigverify.Status
+				if refreshVerdict != nil {
+					status = refreshVerdict.Status
+				}
+				r.toastRefresh(status)
 			}
 			// The scheduler's cache now holds THIS document (Commit below),
 			// so every later cutover pushes its cohorts: restage pending to

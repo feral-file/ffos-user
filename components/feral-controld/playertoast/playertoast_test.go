@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -41,8 +42,8 @@ func TestShow_SendsTheNoticeAndValidatesOK(t *testing.T) {
 	defer ctrl.Finish()
 	mockCDP := mocks.NewMockCDP(ctrl)
 	var expr string
-	mockCDP.EXPECT().NoLogSend(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
-		func(_ string, params map[string]interface{}) (interface{}, error) {
+	mockCDP.EXPECT().NoLogSendWithin(cdp.METHOD_EVALUATE, gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}, _ time.Duration) (interface{}, error) {
 			expr, _ = params["expression"].(string)
 			assert.Equal(t, true, params["returnByValue"])
 			return okResult(), nil
@@ -64,7 +65,7 @@ func TestShow_PlayerRejection(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	mockCDP := mocks.NewMockCDP(ctrl)
-	mockCDP.EXPECT().NoLogSend(cdp.METHOD_EVALUATE, gomock.Any()).
+	mockCDP.EXPECT().NoLogSendWithin(cdp.METHOD_EVALUATE, gomock.Any(), gomock.Any()).
 		Return(map[string]any{"message": map[string]any{"ok": false}}, nil).Times(1)
 
 	s := playertoast.New(mockCDP, writeManifest(t, manifestWithToast), nil)
@@ -139,9 +140,112 @@ func TestShow_ShippingMirrorListsEveryNotice(t *testing.T) {
 	defer ctrl.Finish()
 	for _, notice := range []sigverify.Notice{sigverify.NoticeInvalid, sigverify.NoticeUnsigned, sigverify.NoticeRejected} {
 		mockCDP := mocks.NewMockCDP(ctrl)
-		mockCDP.EXPECT().NoLogSend(cdp.METHOD_EVALUATE, gomock.Any()).Return(okResult(), nil).Times(1)
+		mockCDP.EXPECT().NoLogSendWithin(cdp.METHOD_EVALUATE, gomock.Any(), gomock.Any()).Return(okResult(), nil).Times(1)
 		s := playertoast.New(mockCDP, filepath.Join("..", "setupui", "testdata", "ffos-player-contract.json"), nil)
 		assert.NoError(t, s.Show(context.Background(), notice), "mirror must list %q", notice)
 	}
 	_ = errors.New
+}
+
+// recordingSender is a Sender double for Dispatcher tests: it reports each
+// notice it is asked to show and can block inside Show to model an in-flight
+// send while later submissions arrive.
+type recordingSender struct {
+	shown   chan sigverify.Notice
+	entered chan struct{}
+	block   chan struct{}
+}
+
+func (r *recordingSender) Show(_ context.Context, n sigverify.Notice) error {
+	if r.entered != nil {
+		r.entered <- struct{}{}
+	}
+	if r.block != nil {
+		<-r.block
+	}
+	r.shown <- n
+	return nil
+}
+
+func awaitNotice(t *testing.T, ch chan sigverify.Notice) sigverify.Notice {
+	t.Helper()
+	select {
+	case n := <-ch:
+		return n
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatcher did not send a notice")
+		return ""
+	}
+}
+
+// TestDispatcher_NotifySends: a submitted notice reaches the sender.
+func TestDispatcher_NotifySends(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4)}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+
+	d.Notify(sigverify.NoticeUnsigned)
+	assert.Equal(t, sigverify.NoticeUnsigned, awaitNotice(t, rec.shown))
+}
+
+// TestDispatcher_LatestWins: while one send is in flight, a burst of
+// submissions collapses to the LAST one — a newer transition supersedes a
+// queued older one (feral-file/ffos-user#307).
+func TestDispatcher_LatestWins(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4), entered: make(chan struct{}, 1), block: make(chan struct{})}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+
+	d.Notify(sigverify.NoticeInvalid) // worker takes this and blocks in Show
+	<-rec.entered                     // ensure the worker is IN Show(invalid)
+	d.Notify(sigverify.NoticeUnsigned)
+	d.Notify(sigverify.NoticeRejected) // the latest queued
+	close(rec.block)                   // release the in-flight send
+
+	assert.Equal(t, sigverify.NoticeInvalid, awaitNotice(t, rec.shown), "the in-flight send completes")
+	assert.Equal(t, sigverify.NoticeRejected, awaitNotice(t, rec.shown), "then only the latest queued is sent")
+	// The superseded middle notice is never sent.
+	select {
+	case n := <-rec.shown:
+		t.Fatalf("a superseded notice was sent: %q", n)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestDispatcher_ClearDropsPending: Clear drops a not-yet-sent notice so a
+// valid/silent transition's supersede keeps a stale warning off the wall.
+func TestDispatcher_ClearDropsPending(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4), entered: make(chan struct{}, 1), block: make(chan struct{})}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+
+	d.Notify(sigverify.NoticeInvalid)  // worker takes this, blocks in Show
+	<-rec.entered                      // ensure the worker is IN Show(invalid)
+	d.Notify(sigverify.NoticeUnsigned) // queued
+	d.Clear()                          // drop the queued one
+	close(rec.block)
+
+	assert.Equal(t, sigverify.NoticeInvalid, awaitNotice(t, rec.shown))
+	select {
+	case n := <-rec.shown:
+		t.Fatalf("a cleared notice was sent: %q", n)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestDispatcher_StopsWithContext: the worker exits when its context is done.
+func TestDispatcher_StopsWithContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4)}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+	cancel()
+	// A submit after shutdown must not deadlock or panic; it simply may not send.
+	d.Notify(sigverify.NoticeInvalid)
+	select {
+	case <-rec.shown:
+	case <-time.After(150 * time.Millisecond):
+	}
 }

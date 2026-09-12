@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -136,6 +137,10 @@ func (f *fakeCDP) Start(context.Context, func()) {}
 
 func (f *fakeCDP) Send(string, map[string]interface{}) (interface{}, error) {
 	return nil, nil
+}
+
+func (f *fakeCDP) NoLogSendWithin(method string, params map[string]interface{}, _ time.Duration) (interface{}, error) {
+	return f.NoLogSend(method, params)
 }
 
 func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (interface{}, error) {

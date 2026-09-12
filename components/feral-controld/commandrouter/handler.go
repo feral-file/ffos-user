@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"go.uber.org/zap"
 
@@ -89,11 +88,13 @@ type handler struct {
 	verifySignatures bool
 	activeVerdict    *sigverify.Active
 	verificationMode func() sigverify.Mode
-	// playerToast, when set (SetPlayerToast), shows the signature-verification
-	// notice on the wall. Best-effort and capability-gated on the player
-	// manifest; nil (unwired, or an older player) means no toast, never a
-	// changed cast outcome (feral-file/ffos-user#307).
-	playerToast playertoast.Sender
+	// toast, when set (SetPlayerToast), surfaces the signature-verification
+	// notice on the wall. It is a non-blocking Notifier (a single-slot
+	// dispatcher): Notify queues the latest notice, Clear drops a pending one
+	// so a stale warning never shows over newer artwork. nil (unwired, or an
+	// older player) means no toast, never a changed cast outcome
+	// (feral-file/ffos-user#307).
+	toast playertoast.Notifier
 }
 
 // RecoverySession is the narrow slice of playersession.Session the relayer's
@@ -215,47 +216,38 @@ func (h *handler) currentVerificationMode() sigverify.Mode {
 	return h.verificationMode()
 }
 
-// SetPlayerToast wires the on-screen signature-notice sender onto h (if h is
+// SetPlayerToast wires the on-screen signature-notice surface onto h (if h is
 // the concrete handler built by New), mirroring SetSignatureVerification. Set
 // once at wiring time; nil leaves toasts off.
-func SetPlayerToast(h Handler, sender playertoast.Sender, logger *zap.Logger) {
-	setter, ok := h.(interface{ setPlayerToast(playertoast.Sender) })
+func SetPlayerToast(h Handler, notifier playertoast.Notifier, logger *zap.Logger) {
+	setter, ok := h.(interface{ setPlayerToast(playertoast.Notifier) })
 	if !ok {
 		logger.Warn("Command handler does not support player toast wiring")
 		return
 	}
-	setter.setPlayerToast(sender)
+	setter.setPlayerToast(notifier)
 }
 
-func (h *handler) setPlayerToast(sender playertoast.Sender) {
-	h.playerToast = sender
+func (h *handler) setPlayerToast(notifier playertoast.Notifier) {
+	h.toast = notifier
 }
 
-// fireToast shows the notice the (mode, status) policy calls for, if any. It
-// takes the mode as a SNAPSHOT — decided once at the transition it describes,
-// never re-read — so a concurrent setSignatureVerificationMode cannot relabel
-// a cast that already displayed or refused (feral-file/ffos-user#307). It is
-// decoupled from Process: a fresh background context bounds the dispatch and
-// the send runs on its own goroutine, so a wedged player (NoLogSend's own
-// round-trip deadline) can never delay the cast reply or the strict rejection.
-// Best-effort: a toast failure never changes a cast's outcome.
-func (h *handler) fireToast(mode sigverify.Mode, status sigverify.Status) {
-	if h.playerToast == nil {
+// toastFor surfaces the notice the (mode, status) policy calls for at a player
+// transition, or Clears a pending one when the policy is silent about this
+// transition (a valid or silent cast) so a stale warning never shows over the
+// new artwork. mode is a SNAPSHOT taken once at the transition (castMode), so
+// a concurrent setSignatureVerificationMode cannot relabel it. Submission is
+// non-blocking (the Notifier is a single-slot dispatcher), so Process never
+// waits on CDP (feral-file/ffos-user#307).
+func (h *handler) toastFor(mode sigverify.Mode, status sigverify.Status) {
+	if h.toast == nil {
 		return
 	}
-	notice, ok := sigverify.ToastFor(mode, status)
-	if !ok {
-		return
+	if notice, ok := sigverify.ToastFor(mode, status); ok {
+		h.toast.Notify(notice)
+	} else {
+		h.toast.Clear()
 	}
-	sender := h.playerToast
-	logger := h.logger
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := sender.Show(ctx, notice); err != nil {
-			logger.Debug("player toast not shown", zap.String("notice", string(notice)), zap.Error(err))
-		}
-	}()
 }
 
 // verdictStatus is the Status the toast policy keys on: a nil verdict (the
@@ -622,7 +614,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					err = rejection
 					// Strict refused the cast; tell the wall (best-effort,
 					// bound to this refusal decision).
-					h.fireToast(castMode, verdictStatus(playlist.Verification))
+					h.toastFor(castMode, verdictStatus(playlist.Verification))
 					return nil, err
 				}
 			}
@@ -996,7 +988,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// cannot slip in first (#307). Deferred (future-only)
 					// schedules take the empty-items branch above and do NOT
 					// toast here — their scheduler cutover carries the notice.
-					h.fireToast(castMode, verdictStatus(playlist.Verification))
+					h.toastFor(castMode, verdictStatus(playlist.Verification))
 				}
 			})
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
@@ -1030,7 +1022,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				publishVerdict(false)
 				clearVerdictForDefaultPlayback()
 				if commandType == commands.CMD_DISPLAY_PLAYLIST {
-					h.fireToast(castMode, verdictStatus(playlist.Verification))
+					h.toastFor(castMode, verdictStatus(playlist.Verification))
 				}
 			}
 		}
