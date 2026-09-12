@@ -909,8 +909,17 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// never a stale claim). Pending is kept: this command does not clear
 		// scheduler authority (see the case comment below).
 		clearVerdictForDefaultPlayback := func() {
-			if h.activeVerdict != nil && commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+			if commandType != commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+				return
+			}
+			if h.activeVerdict != nil {
 				h.activeVerdict.ClearCurrent()
+			}
+			// Player-owned default artwork replaced whatever a prior cast put
+			// up, so a signature warning queued for that cast must not still
+			// reach the wall over the default content (#307).
+			if h.toast != nil {
+				h.toast.Clear()
 			}
 		}
 

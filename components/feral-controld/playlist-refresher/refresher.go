@@ -195,15 +195,22 @@ func (r *refresher) setToaster(notifier playertoast.Notifier) {
 	r.toast = notifier
 }
 
+// currentMode is the verification-mode snapshot for one refresh pass — read
+// once and threaded through the strict gate and toastRefresh so a concurrent
+// setSignatureVerificationMode cannot relabel a transition mid-pass (#307).
+func (r *refresher) currentMode() sigverify.Mode {
+	if r.verificationMode == nil {
+		return sigverify.DefaultMode
+	}
+	return r.verificationMode()
+}
+
 // toastRefresh surfaces (or Clears) the notice for a feed transition under the
-// current mode. Non-blocking; bound to the transition the caller is at.
-func (r *refresher) toastRefresh(status sigverify.Status) {
+// SNAPSHOT mode the caller decided the transition with. Non-blocking; bound to
+// the transition the caller is at.
+func (r *refresher) toastRefresh(mode sigverify.Mode, status sigverify.Status) {
 	if r.toast == nil {
 		return
-	}
-	mode := sigverify.DefaultMode
-	if r.verificationMode != nil {
-		mode = r.verificationMode()
 	}
 	if notice, ok := sigverify.ToastFor(mode, status); ok {
 		r.toast.Notify(notice)
@@ -214,10 +221,6 @@ func (r *refresher) toastRefresh(status sigverify.Status) {
 
 func (r *refresher) setSignatureVerificationMode(fn func() sigverify.Mode) {
 	r.verificationMode = fn
-}
-
-func (r *refresher) strictMode() bool {
-	return r.verificationMode != nil && r.verificationMode() == sigverify.ModeStrict
 }
 
 // SetSessionGeneration injects the generation getter onto r, if r is the
@@ -599,7 +602,9 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	// is the verdict-less cached copy), leave the current artwork alone and
 	// let the next pass try again. Reported as a successful no-op pass: this
 	// is policy, not a fault, and must not drive the startup escalation.
-	if r.activeVerdict != nil && r.strictMode() {
+	// castMode is the ONE mode read for this pass, reused for the toast below.
+	castMode := r.currentMode()
+	if r.activeVerdict != nil && castMode == sigverify.ModeStrict {
 		if playlist.Verification == nil || playlist.Verification.Status != sigverify.StatusValid {
 			reason := "cached copy carries no verdict"
 			if playlist.Verification != nil {
@@ -613,7 +618,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			if playlist.Verification != nil {
 				status = playlist.Verification.Status
 			}
-			r.toastRefresh(status)
+			r.toastRefresh(castMode, status)
 			return nil
 		}
 	}
@@ -788,7 +793,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				if refreshVerdict != nil {
 					status = refreshVerdict.Status
 				}
-				r.toastRefresh(status)
+				r.toastRefresh(castMode, status)
 			}
 			// The scheduler's cache now holds THIS document (Commit below),
 			// so every later cutover pushes its cohorts: restage pending to

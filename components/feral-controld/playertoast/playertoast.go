@@ -259,6 +259,14 @@ type Dispatcher struct {
 	mu      sync.Mutex
 	pending sigverify.Notice
 	has     bool
+	// gen bumps on every Notify and Clear. The worker captures it at dequeue
+	// and re-checks it immediately before Show, so a Clear (or newer Notify)
+	// that lands after the dequeue but before the send still suppresses the
+	// stale notice — Clear invalidates just-dequeued work, not only queued
+	// work (feral-file/ffos-user#307). It cannot recall a send already in
+	// flight; the notice's own 5s auto-dismiss bounds that, and dismissing an
+	// on-screen toast would need a player dismiss contract (out of scope here).
+	gen uint64
 
 	wake chan struct{}
 }
@@ -282,6 +290,7 @@ func (d *Dispatcher) Notify(notice sigverify.Notice) {
 	d.mu.Lock()
 	d.pending = notice
 	d.has = true
+	d.gen++
 	d.mu.Unlock()
 	select {
 	case d.wake <- struct{}{}:
@@ -295,6 +304,7 @@ func (d *Dispatcher) Notify(notice sigverify.Notice) {
 func (d *Dispatcher) Clear() {
 	d.mu.Lock()
 	d.has = false
+	d.gen++
 	d.mu.Unlock()
 }
 
@@ -305,10 +315,19 @@ func (d *Dispatcher) run(ctx context.Context) {
 			return
 		case <-d.wake:
 			d.mu.Lock()
-			notice, has := d.pending, d.has
+			notice, has, gen := d.pending, d.has, d.gen
 			d.has = false
 			d.mu.Unlock()
 			if !has {
+				continue
+			}
+			// Re-check right before the send: a Clear or newer Notify since
+			// the dequeue has bumped gen, so this notice is stale and must not
+			// go out (the newer Notify will wake us again with its own).
+			d.mu.Lock()
+			superseded := d.gen != gen
+			d.mu.Unlock()
+			if superseded {
 				continue
 			}
 			sctx, cancel := context.WithTimeout(ctx, d.timeout)
