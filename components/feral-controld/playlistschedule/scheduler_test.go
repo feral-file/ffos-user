@@ -1613,3 +1613,33 @@ func TestResetFence_DropsCutoverImmediatelyBeforeWrite(t *testing.T) {
 
 	assert.False(t, sleepCalled.Load(), "a reset-blocked cutover must not arm the retry")
 }
+
+// TestResetFence_RefusedPushDoesNotFireObserver: the reset fence is evaluated
+// before PushStarting, so a reset-refused cutover never fires the observer
+// (which in production clears the active verdict) — the on-screen artwork's
+// verification status survives a failed/rolled-back reset
+// (feral-file/ffos-user#307 review round 7).
+func TestResetFence_RefusedPushDoesNotFireObserver(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	clock.EXPECT().Now().Return(time.Date(2026, 7, 22, 12, 0, 0, 0, loc)).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }).AnyTimes()
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+	// No Send: a push is an unexpected call.
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location { return loc },
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	defer sched.Stop()
+	var phases atomic.Int32
+	sched.SetPushObserver(func(playlistschedule.PushPhase) { phases.Add(1) })
+	sched.(interface{ SetResetFence(func() bool) }).SetResetFence(func() bool { return true })
+
+	_ = sched.Prepare(displayAtPlaylist(item("now", "2026-07-22T00:00:00Z")))
+	sched.RecomputeNow(context.Background())
+
+	assert.Equal(t, int32(0), phases.Load(), "a reset-refused push must not fire the observer")
+}

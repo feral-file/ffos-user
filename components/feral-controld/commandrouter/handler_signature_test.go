@@ -836,3 +836,81 @@ func TestStrictPushGate(t *testing.T) {
 	assert.NoError(t, gate(unsigned))
 	assert.NoError(t, commandrouter.StrictPushGate(nil)(unsigned), "unwired mode reader never refuses")
 }
+
+// TestCommandHandler_Process_DisplayPlaylist_RefusedWhenResetStagesDuringResolution:
+// a cast admitted before a factory reset staged must abort inside the
+// push-lock section (where the reset narration write is serialized) rather
+// than repaint over the reset screen (feral-file/ffos-user#307 review round 7).
+func TestCommandHandler_Process_DisplayPlaylist_RefusedWhenResetStagesDuringResolution(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+
+	mockExecutor := mocks.NewMockExecutor(ctrl)
+	// Admitted at accept time (first check false), then the reset stages
+	// before the push-lock section (every later check true).
+	gomock.InOrder(
+		mockExecutor.EXPECT().ResetStaged().Return(false),
+		mockExecutor.EXPECT().ResetStaged().Return(true).AnyTimes(),
+	)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockClock.EXPECT().Now().Return(time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() }).AnyTimes()
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
+	defer sched.Stop()
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+
+	playlistURL := "https://feed.example/p.json"
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    "pl-inflight",
+		Items: []dp1playlist.PlaylistItem{{ID: "i", Source: "https://example.com/a"}},
+	}}, nil).Times(1)
+	// No CDP Send: the push-lock recheck must abort before any write.
+
+	_, err := handler.Process(ctx, displayPlaylistURLCommand(playlistURL))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "factory reset in progress")
+	assert.False(t, sched.HasCache(), "a reset-aborted cast must not commit scheduler state")
+}
+
+// TestCommandHandler_Process_DisplayDefaultPlaylist_RefusedWhenResetStagesFirst:
+// the default-playlist path shares the same push lock, so a default cast
+// admitted before a reset staged must also drop inside the lock (#307).
+func TestCommandHandler_Process_DisplayDefaultPlaylist_RefusedWhenResetStagesFirst(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+
+	mockExecutor := mocks.NewMockExecutor(ctrl)
+	gomock.InOrder(
+		mockExecutor.EXPECT().ResetStaged().Return(false),
+		mockExecutor.EXPECT().ResetStaged().Return(true).AnyTimes(),
+	)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockClock.EXPECT().Now().Return(time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() }).AnyTimes()
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
+	defer sched.Stop()
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	// No CDP Send: the push-lock recheck must abort before any write.
+
+	_, err := handler.Process(ctx, commands.Command{Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST, Arguments: map[string]any{}})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "factory reset in progress")
+}

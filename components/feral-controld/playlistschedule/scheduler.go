@@ -812,17 +812,18 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 		}
 	}
 
-	if s.pushObserver != nil {
-		s.pushObserver(PushStarting)
-	}
-	// Reset fence, as late as possible and under pushMu: the reset latch is
-	// set asynchronously and can flip after the gate above, so re-ask right
-	// before the write. The factory-reset narration write is serialized
-	// through this same pushMu (executor.SetPlaybackFence), so even a push
-	// that slips past here writes BEFORE the narration acquires the lock, and
-	// the narration paints last; a later cutover sees the latch and drops.
+	// Reset fence BEFORE the observer, like the strict gate: a refused push
+	// must not fire PushStarting, which clears the active verdict — nothing
+	// is written, so nothing should be invalidated. It is still ordered
+	// against the reset narration write, which is serialized through this
+	// same pushMu that push() holds across the send: a push that passes here
+	// writes before the narration can acquire the lock, so the narration
+	// paints last, and a later cutover sees the latch and drops.
 	if s.resetFence != nil && s.resetFence() {
 		return fmt.Errorf("%w: factory reset staged", errPushRefused)
+	}
+	if s.pushObserver != nil {
+		s.pushObserver(PushStarting)
 	}
 	result, err := s.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
 		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),

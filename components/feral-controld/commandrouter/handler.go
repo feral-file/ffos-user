@@ -860,6 +860,18 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		switch {
 		case commandType == commands.CMD_DISPLAY_PLAYLIST && h.scheduler != nil:
 			h.scheduler.WithPlayerPush(func() {
+				// Re-check the reset latch INSIDE the push lock. This cast
+				// passed the accept-time guard, but a factory reset can stage
+				// during resolution, and the reset narration write is
+				// serialized through this same lock (executor.SetPlaybackFence);
+				// aborting here — before any scheduler mutation or CDP send —
+				// keeps an in-flight former-owner cast from repainting over the
+				// reset screen (feral-file/ffos-user#307). err is assigned so
+				// the deferred playback-failure accounting fires.
+				if h.executor.ResetStaged() {
+					err = fmt.Errorf("factory reset in progress: %s is not accepted", commandType)
+					return
+				}
 				schedulerSnapshot = h.scheduler.Snapshot()
 				// Filter displayAt playlists to the active set before the player
 				// sees them. The scheduler keeps the full list for timer/wake updates.
@@ -923,6 +935,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			})
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
 			h.scheduler.WithPlayerPush(func() {
+				// Same reset recheck as the displayPlaylist branch: a default
+				// cast admitted before a reset staged must not repaint over
+				// the reset narration once it acquires this lock (#307).
+				if h.executor.ResetStaged() {
+					err = fmt.Errorf("factory reset in progress: %s is not accepted", commandType)
+					return
+				}
 				invalidateVerdictBeforeSend()
 				result, err = h.sendCDPRequest(command)
 				if err == nil && playerresponse.OK(result) {
@@ -943,6 +962,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				command.Arguments["dp1_call"] = playlist
 			}
 			if commandType == commands.CMD_DISPLAY_PLAYLIST || commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+				// No scheduler is a test/degraded path (main always wires one),
+				// but keep the reset fence honest here too: refuse a display
+				// write once a reset has staged (#307).
+				if h.executor.ResetStaged() {
+					return nil, fmt.Errorf("factory reset in progress: %s is not accepted", commandType)
+				}
 				invalidateVerdictBeforeSend()
 			}
 			result, err = h.sendCDPRequest(command)
