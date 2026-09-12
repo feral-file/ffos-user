@@ -174,3 +174,29 @@ func TestSetSignatureVerificationMode_CompetingSettersSerialize(t *testing.T) {
 	}
 	assert.Equal(t, int32(2), writes.Load())
 }
+
+// TestSetSignatureVerificationMode_NotifiesObserverWithStoredMode: the
+// observer (main wires the scheduler's re-drive to it) fires after a
+// successful store with the stored mode, and never on a refused request.
+func TestSetSignatureVerificationMode_NotifiesObserverWithStoredMode(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().MkdirAll(gomock.Any(), gomock.Any()).Return(nil)
+	mockOS.EXPECT().WriteFile(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+	mockOS.EXPECT().Rename(gomock.Any(), gomock.Any()).Return(nil)
+	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON()}
+	var seen []sigverify.Mode
+	e.SetVerificationModeObserver(func(m sigverify.Mode) { seen = append(seen, m) })
+
+	_, err := e.setSignatureVerificationMode(context.Background(), []byte(`{"mode":"silent"}`))
+	require.NoError(t, err)
+	assert.Equal(t, []sigverify.Mode{sigverify.ModeSilent}, seen)
+
+	_, err = e.setSignatureVerificationMode(context.Background(), []byte(`{"mode":"loud"}`))
+	require.Error(t, err)
+	e.resetStaged.Store(true)
+	_, err = e.setSignatureVerificationMode(context.Background(), []byte(`{"mode":"notify"}`))
+	require.Error(t, err)
+	assert.Equal(t, []sigverify.Mode{sigverify.ModeSilent}, seen, "a refused request notifies nobody")
+}

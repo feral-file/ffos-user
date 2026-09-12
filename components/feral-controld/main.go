@@ -1210,6 +1210,19 @@ func initializeApp(
 	executor.SetDeviceNameObserver(func(name string) {
 		mediator.SetDeviceName(name)
 	})
+	// Relaxing the verification mode re-drives a displayAt cutover the
+	// scheduler's push gate refused under strict: that refusal arms no retry
+	// and, past the schedule's final boundary, leaves no timer, so without
+	// this the wall would hold the pre-cutover cohort until an unrelated
+	// wake or reconnect. RecomputeIfStale pushes only a cohort not yet
+	// delivered — a mode change never re-casts what is already on screen —
+	// and under strict the gate would refuse again, so it is not asked.
+	executor.SetVerificationModeObserver(func(mode sigverify.Mode) {
+		if mode == sigverify.ModeStrict {
+			return
+		}
+		playlistScheduler.RecomputeIfStale(context)
+	})
 
 	executor.SetClaimObserver(func(claimed bool) {
 		mediator.SetClaimed(claimed)

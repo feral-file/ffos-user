@@ -10,6 +10,7 @@ import (
 
 	commands "github.com/feral-file/ffos-user/components/feral-controld/commands"
 	setupui "github.com/feral-file/ffos-user/components/feral-controld/setupui"
+	sigverify "github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	gomock "github.com/golang/mock/gomock"
 )
 
@@ -111,6 +112,18 @@ func (m *MockExecutor) SetSetupUI(ui *setupui.Service) {
 func (mr *MockExecutorMockRecorder) SetSetupUI(ui interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSetupUI", reflect.TypeOf((*MockExecutor)(nil).SetSetupUI), ui)
+}
+
+// SetVerificationModeObserver mocks base method.
+func (m *MockExecutor) SetVerificationModeObserver(observer func(sigverify.Mode)) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetVerificationModeObserver", observer)
+}
+
+// SetVerificationModeObserver indicates an expected call of SetVerificationModeObserver.
+func (mr *MockExecutorMockRecorder) SetVerificationModeObserver(observer interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetVerificationModeObserver", reflect.TypeOf((*MockExecutor)(nil).SetVerificationModeObserver), observer)
 }
 
 // MocksetupNarrator is a mock of setupNarrator interface.

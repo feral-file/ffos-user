@@ -23,6 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -71,6 +72,13 @@ type Executor interface {
 	// Register time, so the advertised name only changes if something
 	// re-registers — the same constraint SetClaimObserver exists for.
 	SetDeviceNameObserver(observer func(name string))
+	// SetVerificationModeObserver registers a callback invoked with the
+	// stored mode after a successful setSignatureVerificationMode. The cast
+	// path reads the record itself, so this exists for the one consumer
+	// that holds state decided under the OLD mode: the displayAt scheduler,
+	// whose refused cutover needs re-driving once the policy relaxes
+	// (feral-file/ffos-user#307). Set once at wiring time.
+	SetVerificationModeObserver(observer func(mode sigverify.Mode))
 	// SetSetupUI injects the process-wide setup-narration surface so the
 	// controld-owned claim/factory-reset/OTA-failure narration shares ONE
 	// setupui.Service with the provisioning domain. Set once at wiring time; the
@@ -104,6 +112,10 @@ type executor struct {
 	// the mDNS record can be re-registered with it. Same wiring discipline as
 	// claimObserver: set once before commands are served, so no lock.
 	nameObserver func(name string)
+
+	// modeObserver, when set, is notified after the signature verification
+	// mode is stored. Same wiring discipline as nameObserver.
+	modeObserver func(mode sigverify.Mode)
 
 	// deviceNameMu serializes every mutation of the device-name record and the
 	// observer notification that follows it. Both writers stage through one
@@ -540,6 +552,10 @@ func (e *executor) SetClaimObserver(observer func(claimed bool)) {
 
 func (e *executor) SetDeviceNameObserver(observer func(name string)) {
 	e.nameObserver = observer
+}
+
+func (e *executor) SetVerificationModeObserver(observer func(mode sigverify.Mode)) {
+	e.modeObserver = observer
 }
 
 // SetSetupUI injects the shared setup-narration surface so the controld-owned

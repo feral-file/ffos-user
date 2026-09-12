@@ -1060,6 +1060,12 @@ Example:
   offline cached copy. The owner opts into this knowingly.
 
 Current success response: `{"ok": true, "signatureVerificationMode": "strict"}`
+
+Changing to `silent` or `notify` also re-drives a displayAt cutover the
+scheduler refused while the mode was `strict` (a refusal arms no retry, and
+past the schedule's final boundary there is no timer), so the wall does not
+stay on the pre-cutover cohort until an unrelated wake. Only a cohort not yet
+delivered is pushed; a mode change never re-casts what is already on screen.
 — the stored value, which controllers should adopt. The record is
 `/home/feralfile/.state/signature-verification.json`, read on every cast, so
 the change applies to the next cast with no restart.

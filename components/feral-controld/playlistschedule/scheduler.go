@@ -67,6 +67,15 @@ type Scheduler interface {
 	// nothing is cached, or when a restart-restored source has not yet been
 	// refetched into an in-memory playlist.
 	RecomputeNow(ctx context.Context)
+	// RecomputeIfStale re-filters the cached playlist and pushes the active
+	// cohort ONLY if it differs from the one last delivered — no forced
+	// re-cast of what is already on screen. It exists for the push gate's
+	// refusal path: a refused cutover leaves lastActive untouched and arms
+	// no retry, and once the schedule's final boundary has passed there is
+	// no timer either, so relaxing the policy needs a trigger that re-drives
+	// exactly the undelivered cohort and nothing else. Same no-op conditions
+	// as RecomputeNow.
+	RecomputeIfStale(ctx context.Context)
 	// ResumePersisted arms timers and force-casts from the in-memory full
 	// playlist. It is used only after the refresher has reconstructed scheduler
 	// state from a fetched source or after a transient refresh failure while a
@@ -412,6 +421,10 @@ func (s *scheduler) PrepareWithSource(playlist *dp1.Playlist, source Source) *dp
 
 func (s *scheduler) RecomputeNow(ctx context.Context) {
 	s.recompute(ctx, true)
+}
+
+func (s *scheduler) RecomputeIfStale(ctx context.Context) {
+	s.recompute(ctx, false)
 }
 
 func (s *scheduler) ResumePersisted(ctx context.Context) {

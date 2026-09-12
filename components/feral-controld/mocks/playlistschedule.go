@@ -128,6 +128,18 @@ func (mr *MockPlaylistSchedulerMockRecorder) PrepareWithSource(playlist, source 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PrepareWithSource", reflect.TypeOf((*MockPlaylistScheduler)(nil).PrepareWithSource), playlist, source)
 }
 
+// RecomputeIfStale mocks base method.
+func (m *MockPlaylistScheduler) RecomputeIfStale(ctx context.Context) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "RecomputeIfStale", ctx)
+}
+
+// RecomputeIfStale indicates an expected call of RecomputeIfStale.
+func (mr *MockPlaylistSchedulerMockRecorder) RecomputeIfStale(ctx interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RecomputeIfStale", reflect.TypeOf((*MockPlaylistScheduler)(nil).RecomputeIfStale), ctx)
+}
+
 // RecomputeNow mocks base method.
 func (m *MockPlaylistScheduler) RecomputeNow(ctx context.Context) {
 	m.ctrl.T.Helper()

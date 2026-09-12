@@ -1456,3 +1456,62 @@ func TestPushGate_RefusedPushDoesNotFireTheObserver(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	assert.Equal(t, int32(0), phases.Load())
 }
+
+// TestPushGate_RelaxedPolicyRedrivesRefusedFinalCutover: the schedule's last
+// boundary is refused (no retry, and no timer past the final boundary), so
+// the only way the cohort reaches the screen is the policy-relaxation
+// trigger — which must push exactly the undelivered cohort, and nothing
+// when there is nothing undelivered.
+func TestPushGate_RelaxedPolicyRedrivesRefusedFinalCutover(t *testing.T) {
+	sched, cdpMock, releaseSleep, retryArmed, advance := gateSetup(t)
+	var refuse atomic.Bool
+	refuse.Store(true)
+	asked := make(chan struct{}, 4)
+	sched.SetPushGate(func(*dp1.Playlist) error {
+		asked <- struct{}{}
+		if refuse.Load() {
+			return errors.New("strict signature verification: unsigned")
+		}
+		return nil
+	})
+	pushed := make(chan struct{}, 2)
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.Contains(t, expr, "day23")
+			pushed <- struct{}{}
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(1)
+
+	_ = sched.Prepare(displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"), // the final boundary
+	))
+	advance()
+	close(releaseSleep)
+	select {
+	case <-asked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("gate was never asked at the cutover")
+	}
+	select {
+	case <-retryArmed:
+		t.Fatal("no retry after a refusal")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// The owner relaxes the policy: the setter's observer re-drives.
+	refuse.Store(false)
+	sched.RecomputeIfStale(context.Background())
+	select {
+	case <-pushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relaxing the policy must deliver the refused cohort")
+	}
+
+	// Delivered: a second relaxation (or any RecomputeIfStale) is a no-op —
+	// the Send expectation above is Times(1).
+	sched.RecomputeIfStale(context.Background())
+	time.Sleep(100 * time.Millisecond)
+}

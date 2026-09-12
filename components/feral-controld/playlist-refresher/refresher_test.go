@@ -1898,6 +1898,7 @@ func (f *fakePlaylistScheduler) ClearThenWithPlayerPush(fn func() bool) {
 // so the observer is never called.
 func (f *fakePlaylistScheduler) SetPushObserver(func(playlistschedule.PushPhase)) {}
 func (f *fakePlaylistScheduler) SetPushGate(func(*dp1.Playlist) error)            {}
+func (f *fakePlaylistScheduler) RecomputeIfStale(context.Context)                 {}
 
 func (f *fakePlaylistScheduler) WithPlayerPush(fn func()) {
 	f.mu.Lock()

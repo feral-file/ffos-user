@@ -26,12 +26,32 @@ func (e *executor) setSignatureVerificationMode(_ context.Context, args []byte) 
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	// One mutation lock for the record, shared with factory reset's clear —
-	// the device-name discipline, for the device-name reasons: two setters
-	// stage through the SAME .tmp path, so one could rename the other's
-	// bytes and then echo a mode the disk does not hold; and a setter
-	// admitted before a reset staged could land after the reset cleared the
-	// record, leaving a rolled-back unit under the previous owner's policy.
+	if err := e.storeVerificationMode(mode); err != nil {
+		return nil, err
+	}
+	e.logger.Info("Signature verification mode set", zap.String("mode", string(mode)))
+
+	// Notified OUTSIDE the record lock, unlike the device-name observer: what
+	// the lock orders is the disk, and the observer's consumer (the displayAt
+	// scheduler's re-drive) reads the mode from disk itself at push time and
+	// may spend a CDP round-trip — not something to hold a factory reset's
+	// clear behind. A clear that lands between the store and this notify is
+	// harmless: the scheduler's gate reads the record the clear left.
+	if e.modeObserver != nil {
+		e.modeObserver(mode)
+	}
+	return map[string]interface{}{"ok": true, "signatureVerificationMode": string(mode)}, nil
+}
+
+// storeVerificationMode is the locked half of the setter.
+//
+// One mutation lock for the record, shared with factory reset's clear — the
+// device-name discipline, for the device-name reasons: two setters stage
+// through the SAME .tmp path, so one could rename the other's bytes and then
+// echo a mode the disk does not hold; and a setter admitted before a reset
+// staged could land after the reset cleared the record, leaving a
+// rolled-back unit under the previous owner's policy.
+func (e *executor) storeVerificationMode(mode sigverify.Mode) error {
 	e.verificationModeMu.Lock()
 	defer e.verificationModeMu.Unlock()
 
@@ -40,14 +60,12 @@ func (e *executor) setSignatureVerificationMode(_ context.Context, args []byte) 
 	// resetStaged before it takes this lock, so a setter that loses the race
 	// sees the latch here.
 	if e.resetStaged.Load() {
-		return nil, fmt.Errorf("factory reset in progress")
+		return fmt.Errorf("factory reset in progress")
 	}
-
 	if err := sigverify.SaveMode(e.os, e.json, mode); err != nil {
-		return nil, fmt.Errorf("failed to persist signature verification mode: %w", err)
+		return fmt.Errorf("failed to persist signature verification mode: %w", err)
 	}
-	e.logger.Info("Signature verification mode set", zap.String("mode", string(mode)))
-	return map[string]interface{}{"ok": true, "signatureVerificationMode": string(mode)}, nil
+	return nil
 }
 
 // clearSignatureVerificationMode is factory reset's hand-on step for the
