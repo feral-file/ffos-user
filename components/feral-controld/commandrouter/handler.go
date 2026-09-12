@@ -808,6 +808,20 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					h.activeVerdict.SetPendingUnverified()
 				}
 			}
+			// Retain the verified inline dynamic document (verdict intact) so a
+			// strict refresh re-resolves THIS trusted source instead of the
+			// verdict-less player-status copy — a non-displayAt cast makes the
+			// scheduler drop its source, and player status has no verdict, so
+			// without this a valid inline dynamic playlist would refresh-skip
+			// forever under strict (feral-file/ffos-user#307). Cleared for any
+			// other cast, which is no longer the inline dynamic on screen.
+			if !deferred && h.scheduler != nil {
+				if schedulerSource.DynamicPlaylist != nil && schedulerSource.PlaylistURL == "" {
+					h.scheduler.SetInlineDynamicSource(schedulerSource.DynamicPlaylist)
+				} else {
+					h.scheduler.SetInlineDynamicSource(nil)
+				}
+			}
 		}
 
 		// invalidateVerdictBeforeSend runs immediately before any send that

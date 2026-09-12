@@ -836,3 +836,26 @@ func TestStrictPushGate(t *testing.T) {
 	assert.NoError(t, gate(unsigned))
 	assert.NoError(t, commandrouter.StrictPushGate(nil)(unsigned), "unwired mode reader never refuses")
 }
+
+// TestSchedulerPushGate: the composed scheduler gate blocks every cutover
+// while a factory reset is staged (regardless of mode or verdict, since the
+// reset clears the record and owns the screen), and otherwise applies the
+// strict decision (feral-file/ffos-user#307 review round 4).
+func TestSchedulerPushGate(t *testing.T) {
+	unsigned := &dp1.Playlist{Verification: &sigverify.Verdict{Status: sigverify.StatusUnsigned}}
+	valid := &dp1.Playlist{Verification: &sigverify.Verdict{Status: sigverify.StatusValid}}
+
+	blocked := commandrouter.SchedulerPushGate(func() bool { return true }, func() sigverify.Mode { return sigverify.ModeNotify })
+	for _, p := range []*dp1.Playlist{valid, unsigned, nil} {
+		err := blocked(p)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "factory reset staged")
+	}
+
+	strict := commandrouter.SchedulerPushGate(func() bool { return false }, func() sigverify.Mode { return sigverify.ModeStrict })
+	assert.NoError(t, strict(valid))
+	assert.Error(t, strict(unsigned))
+
+	assert.NoError(t, commandrouter.SchedulerPushGate(nil, func() sigverify.Mode { return sigverify.ModeNotify })(unsigned),
+		"nil resetStaged never blocks")
+}

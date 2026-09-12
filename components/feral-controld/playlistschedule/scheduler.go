@@ -133,6 +133,19 @@ type Scheduler interface {
 	// screen, not when the cast was admitted. Set once at wiring time before
 	// any push; nil is a no-op.
 	SetPushGate(fn func(playlist *dp1.Playlist) error)
+	// SetInlineDynamicSource retains the last inline dynamic playlist a cast
+	// accepted, WITH its signature verdict, or clears it with nil. A
+	// non-displayAt cast makes PrepareWithSource drop the scheduler source,
+	// and player status serializes without the verdict (dp1.Playlist.
+	// Verification is json:"-"), so without this a strict refresh would
+	// re-resolve a verdict-less copy and skip every dynamic update of a
+	// playlist that was accepted valid (feral-file/ffos-user#307). Survives
+	// the non-displayAt source clear precisely because it is a separate slot.
+	SetInlineDynamicSource(playlist *dp1.Playlist)
+	// InlineDynamicSource returns the retained verified inline dynamic
+	// document (a clone, verdict intact), or nil. The refresher prefers it
+	// over the player-status copy when the on-screen playlist id matches.
+	InlineDynamicSource() *dp1.Playlist
 	// AuthorityToken changes whenever scheduler-owned playlist authority
 	// changes. Refreshers snapshot it before slow URL/dynamic resolution and
 	// re-check under WithPlayerPush so stale refresh results cannot overwrite a
@@ -202,6 +215,10 @@ type scheduler struct {
 	// pushGate, when set (SetPushGate), is consulted inside push before the
 	// observer and the CDP send. Same single-writer contract as pushObserver.
 	pushGate func(*dp1.Playlist) error
+	// inlineDynamic is the retained verified inline dynamic source (see
+	// SetInlineDynamicSource). Guarded by mu; a separate slot from source so
+	// it outlives the non-displayAt source clear.
+	inlineDynamic *dp1.Playlist
 	// source tracks the refreshable identity for scheduler-owned pushes. The
 	// full cached playlist supplies future items; source keeps player status
 	// tied to the controller/refresher URL that can be re-resolved later.
@@ -827,6 +844,18 @@ func (s *scheduler) SetPushObserver(fn func(PushPhase)) {
 
 func (s *scheduler) SetPushGate(fn func(playlist *dp1.Playlist) error) {
 	s.pushGate = fn
+}
+
+func (s *scheduler) SetInlineDynamicSource(playlist *dp1.Playlist) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inlineDynamic = clonePlaylist(playlist)
+}
+
+func (s *scheduler) InlineDynamicSource() *dp1.Playlist {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return clonePlaylist(s.inlineDynamic)
 }
 
 // HasDisplayAtSchedule reports whether a playlist carries at least one timed

@@ -100,6 +100,20 @@ func (mr *MockPlaylistSchedulerMockRecorder) HasCache() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HasCache", reflect.TypeOf((*MockPlaylistScheduler)(nil).HasCache))
 }
 
+// InlineDynamicSource mocks base method.
+func (m *MockPlaylistScheduler) InlineDynamicSource() *dp1.Playlist {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "InlineDynamicSource")
+	ret0, _ := ret[0].(*dp1.Playlist)
+	return ret0
+}
+
+// InlineDynamicSource indicates an expected call of InlineDynamicSource.
+func (mr *MockPlaylistSchedulerMockRecorder) InlineDynamicSource() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InlineDynamicSource", reflect.TypeOf((*MockPlaylistScheduler)(nil).InlineDynamicSource))
+}
+
 // Prepare mocks base method.
 func (m *MockPlaylistScheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
 	m.ctrl.T.Helper()
@@ -188,6 +202,18 @@ func (m *MockPlaylistScheduler) ResumePersisted(ctx context.Context) {
 func (mr *MockPlaylistSchedulerMockRecorder) ResumePersisted(ctx interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResumePersisted", reflect.TypeOf((*MockPlaylistScheduler)(nil).ResumePersisted), ctx)
+}
+
+// SetInlineDynamicSource mocks base method.
+func (m *MockPlaylistScheduler) SetInlineDynamicSource(playlist *dp1.Playlist) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetInlineDynamicSource", playlist)
+}
+
+// SetInlineDynamicSource indicates an expected call of SetInlineDynamicSource.
+func (mr *MockPlaylistSchedulerMockRecorder) SetInlineDynamicSource(playlist interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetInlineDynamicSource", reflect.TypeOf((*MockPlaylistScheduler)(nil).SetInlineDynamicSource), playlist)
 }
 
 // SetPushGate mocks base method.

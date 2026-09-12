@@ -1515,3 +1515,63 @@ func TestPushGate_RelaxedPolicyRedrivesRefusedFinalCutover(t *testing.T) {
 	sched.RecomputeIfStale(context.Background())
 	time.Sleep(100 * time.Millisecond)
 }
+
+// TestPushGate_RefusalOnWakePathBlocksAndArmsNoRetry: the gate covers every
+// push origin, not just the timer — a RecomputeNow (wake/reconnect) push a
+// refusing gate rejects reaches neither CDP nor the retry path
+// (feral-file/ffos-user#307 review round 4).
+func TestPushGate_RefusalOnWakePathBlocksAndArmsNoRetry(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	clock.EXPECT().Now().Return(time.Date(2026, 7, 22, 12, 0, 0, 0, loc)).AnyTimes()
+	var sleepCalled atomic.Bool
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			sleepCalled.Store(true)
+			<-ctx.Done()
+			return ctx.Err()
+		}).AnyTimes()
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+	// No Send: a push is an unexpected call.
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location { return loc },
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	defer sched.Stop()
+	sched.SetPushGate(func(*dp1.Playlist) error { return errors.New("blocked") })
+
+	// One already-active item, no future boundary: Prepare arms no timer, so
+	// the only Sleep that could fire is a push retry.
+	_ = sched.Prepare(displayAtPlaylist(item("now", "2026-07-22T00:00:00Z")))
+	sched.RecomputeNow(context.Background()) // the wake/reconnect path
+
+	assert.False(t, sleepCalled.Load(), "a gate refusal on the wake path must not arm the cutover retry")
+}
+
+// TestInlineDynamicSource_RoundTripPreservesVerdict: the retained inline
+// dynamic slot returns a clone that keeps the signature verdict, and nil
+// clears it (feral-file/ffos-user#307).
+func TestInlineDynamicSource_RoundTripPreservesVerdict(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sched := playlistschedule.New(context.Background(), mocks.NewMockCDP(ctrl), mocks.NewMockClock(ctrl),
+		func() *time.Location { return time.UTC }, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	defer sched.Stop()
+
+	assert.Nil(t, sched.InlineDynamicSource())
+	sched.SetInlineDynamicSource(&dp1.Playlist{
+		Playlist:     dp1playlist.Playlist{ID: "d1", Items: []dp1playlist.PlaylistItem{{ID: "i"}}},
+		Verification: &sigverify.Verdict{Status: sigverify.StatusValid},
+	})
+
+	got := sched.InlineDynamicSource()
+	require.NotNil(t, got)
+	assert.Equal(t, "d1", got.ID)
+	require.NotNil(t, got.Verification)
+	assert.Equal(t, sigverify.StatusValid, got.Verification.Status)
+
+	sched.SetInlineDynamicSource(nil)
+	assert.Nil(t, sched.InlineDynamicSource())
+}

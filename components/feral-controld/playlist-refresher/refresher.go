@@ -487,6 +487,19 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL}
 		case playerStatus.Playlist != nil && playerStatus.Playlist.HasDynamicContent():
 			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist}
+			// Prefer the verified inline dynamic document the cast retained:
+			// player status drops the verdict (dp1.Playlist.Verification is
+			// json:"-"), so re-resolving its copy makes the strict check below
+			// treat every refresh as unverifiable and skip it. The retained
+			// source carries the verdict; ProcessDynamicPlaylist copies the
+			// struct by value, so the verdict survives hydration. Matched on
+			// id so a retained source from a superseded cast is never used
+			// (feral-file/ffos-user#307).
+			if r.scheduler != nil {
+				if retained := r.scheduler.InlineDynamicSource(); retained != nil && retained.ID == playerStatus.Playlist.ID {
+					schedulerSource = playlistschedule.Source{DynamicPlaylist: retained}
+				}
+			}
 		case playerStatus.Playlist != nil:
 			// Static inline player status only contains the filtered active set and
 			// no refreshable source identity, so it cannot rebuild future items.

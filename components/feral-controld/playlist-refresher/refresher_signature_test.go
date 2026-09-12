@@ -491,3 +491,80 @@ func TestRefresher_SetSignatureVerification_ForeignImplementationIsLeftAlone(t *
 		refresher.SetSignatureVerification(foreign, &sigverify.Active{}, zap.NewNop())
 	})
 }
+
+// TestRefresher_Strict_InlineDynamicUsesRetainedVerifiedSource is the
+// regression test for the strict inline-dynamic gap (feral-file/ffos-user#307
+// review round 4): a non-displayAt cast makes the scheduler drop its source,
+// and player status serializes without the verdict, so a strict refresh that
+// re-resolved the player-status copy would treat every dynamic update as
+// unverifiable and skip it. The cast retains the verified document; the
+// refresher must re-resolve THAT (verdict intact) and push the update.
+func TestRefresher_Strict_InlineDynamicUsesRetainedVerifiedSource(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	sched := &fakePlaylistScheduler{}
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), sched, mockClock, logger)
+	active := &sigverify.Active{}
+	refresher.SetSignatureVerification(r, active, logger)
+	refresher.SetSignatureVerificationMode(r, func() sigverify.Mode { return sigverify.ModeStrict }, zap.NewNop())
+
+	// Player status carries the dynamic inline playlist with NO verdict.
+	onScreen := createMockPlaylist()
+	onScreen.ID = "dyn-1"
+	onScreen.Verification = nil
+	require.True(t, onScreen.HasDynamicContent())
+	// The cast retained the verified document (same id, valid verdict).
+	retained := createMockPlaylist()
+	retained.ID = "dyn-1"
+	valid := sigverify.Verdict{Status: sigverify.StatusValid}
+	retained.Verification = &valid
+	sched.SetInlineDynamicSource(retained)
+
+	mockStatusPoller.EXPECT().FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, onScreen), nil).AnyTimes()
+
+	// The refresher must hand ProcessDynamicPlaylist the RETAINED document
+	// (verdict intact), not the verdict-less player-status copy; the value
+	// copy carries the verdict through hydration.
+	mockDP1.EXPECT().ProcessDynamicPlaylist(ctx, gomock.Any(), false).
+		DoAndReturn(func(_ context.Context, in dp1.Playlist, _ bool) (*dp1.Playlist, error) {
+			require.NotNil(t, in.Verification, "refresher must re-resolve the retained verified source")
+			assert.Equal(t, sigverify.StatusValid, in.Verification.Status)
+			out := in
+			return &out, nil
+		}).AnyTimes()
+
+	// Strict must NOT skip: the refresh reaches CDP.
+	pushed := make(chan struct{}, 1)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(string, map[string]interface{}) (interface{}, error) {
+			select {
+			case pushed <- struct{}{}:
+			default:
+			}
+			return playerOKResponse(), nil
+		}).AnyTimes()
+
+	r.Start()
+	select {
+	case <-pushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("strict refresh of a valid inline dynamic playlist must push, not skip")
+	}
+	r.Stop()
+}

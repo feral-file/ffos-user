@@ -421,6 +421,8 @@ func (t *trackingScheduler) ClearThenWithPlayerPush(fn func() bool) {
 // so the observer is never called.
 func (t *trackingScheduler) SetPushObserver(func(playlistschedule.PushPhase)) {}
 func (t *trackingScheduler) SetPushGate(func(*dp1.Playlist) error)            {}
+func (t *trackingScheduler) SetInlineDynamicSource(*dp1.Playlist)             {}
+func (t *trackingScheduler) InlineDynamicSource() *dp1.Playlist               { return nil }
 func (t *trackingScheduler) RecomputeIfStale(ctx context.Context)             { t.inner.RecomputeIfStale(ctx) }
 
 func (t *trackingScheduler) WithPlayerPush(fn func()) {

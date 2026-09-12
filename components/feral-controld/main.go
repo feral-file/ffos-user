@@ -1124,7 +1124,11 @@ func initializeApp(
 		// a restart-restored source is refetched, and so re-verified, before
 		// it can push again), so the gate reads the same verdict the cast
 		// reply reported.
-		playlistScheduler.SetPushGate(commandrouter.StrictPushGate(verificationMode))
+		// The push gate is a hard block while a factory reset is staged (that
+		// reset clears the mode record and owns the screen, so the strict
+		// check alone would read the restored default and let an in-flight
+		// cutover overwrite the reset narration), then the strict decision.
+		playlistScheduler.SetPushGate(commandrouter.SchedulerPushGate(executor.ResetStaged, verificationMode))
 		poller.SetVerificationLookup(func(id, url string) (string, bool) {
 			st, ok := activeVerdict.Lookup(id, url)
 			return string(st), ok

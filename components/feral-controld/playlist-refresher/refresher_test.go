@@ -1850,6 +1850,7 @@ type fakePlaylistScheduler struct {
 	restores        int
 	commits         int
 	source          playlistschedule.Source
+	inlineDynamic   *dp1.Playlist
 	restored        chan struct{}
 }
 
@@ -1898,7 +1899,17 @@ func (f *fakePlaylistScheduler) ClearThenWithPlayerPush(fn func() bool) {
 // so the observer is never called.
 func (f *fakePlaylistScheduler) SetPushObserver(func(playlistschedule.PushPhase)) {}
 func (f *fakePlaylistScheduler) SetPushGate(func(*dp1.Playlist) error)            {}
-func (f *fakePlaylistScheduler) RecomputeIfStale(context.Context)                 {}
+func (f *fakePlaylistScheduler) SetInlineDynamicSource(p *dp1.Playlist) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inlineDynamic = p
+}
+func (f *fakePlaylistScheduler) InlineDynamicSource() *dp1.Playlist {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inlineDynamic
+}
+func (f *fakePlaylistScheduler) RecomputeIfStale(context.Context) {}
 
 func (f *fakePlaylistScheduler) WithPlayerPush(fn func()) {
 	f.mu.Lock()
