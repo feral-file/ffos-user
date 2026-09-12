@@ -858,4 +858,19 @@ func TestSchedulerPushGate(t *testing.T) {
 
 	assert.NoError(t, commandrouter.SchedulerPushGate(nil, func() sigverify.Mode { return sigverify.ModeNotify })(unsigned),
 		"nil resetStaged never blocks")
+
+	// Verifier kill switch on: main wires the gate with a nil mode, so it is
+	// a reset-only fence — it still blocks every cutover during a staged
+	// reset (the reset narration must survive), and never refuses on policy.
+	staged := true
+	resetOnly := commandrouter.SchedulerPushGate(func() bool { return staged }, nil)
+	for _, p := range []*dp1.Playlist{valid, unsigned, nil} {
+		err := resetOnly(p)
+		require.Error(t, err, "a staged reset blocks the cutover even with verification disabled")
+		assert.Contains(t, err.Error(), "factory reset staged")
+	}
+	staged = false
+	for _, p := range []*dp1.Playlist{valid, unsigned, nil} {
+		assert.NoError(t, resetOnly(p), "with verification disabled and no reset, nothing is refused")
+	}
 }

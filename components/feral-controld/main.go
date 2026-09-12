@@ -1116,24 +1116,28 @@ func initializeApp(
 				pushAccepted()
 			}
 		})
-		// A scheduler-owned cutover (timer, wake, reconnect, retry) is judged
-		// against the mode AT PUSH TIME: a schedule accepted under notify
-		// must not carry a non-valid cohort onto the screen after the owner
-		// switches to strict. The scheduler's cached document keeps the
-		// verdict attached at cast time (cloned by pointer, never persisted:
-		// a restart-restored source is refetched, and so re-verified, before
-		// it can push again), so the gate reads the same verdict the cast
-		// reply reported.
-		// The push gate is a hard block while a factory reset is staged (that
-		// reset clears the mode record and owns the screen, so the strict
-		// check alone would read the restored default and let an in-flight
-		// cutover overwrite the reset narration), then the strict decision.
-		playlistScheduler.SetPushGate(commandrouter.SchedulerPushGate(executor.ResetStaged, verificationMode))
 		poller.SetVerificationLookup(func(id, url string) (string, bool) {
 			st, ok := activeVerdict.Lookup(id, url)
 			return string(st), ok
 		})
 	}
+
+	// The scheduler push gate is installed UNCONDITIONALLY as a factory-reset
+	// fence: a staged reset owns the screen and is about to reboot, so a
+	// timer/wake/reconnect/retry cutover must not overwrite the reset
+	// narration — and that must hold even with the verifier kill switch on,
+	// where none of the wiring above runs. Strict-mode enforcement is layered
+	// on only when verification runs: with a nil mode the gate refuses on the
+	// reset latch alone and never on signature policy. When strict IS active,
+	// the gate is also judged AT PUSH TIME against the cast-time verdict the
+	// scheduler's cached document still carries (cloned by pointer, never
+	// persisted), so a schedule accepted under notify cannot carry a non-valid
+	// cohort onto the screen after the owner switches to strict.
+	var pushGateMode func() sigverify.Mode
+	if sigVerifyEnabled {
+		pushGateMode = verificationMode
+	}
+	playlistScheduler.SetPushGate(commandrouter.SchedulerPushGate(executor.ResetStaged, pushGateMode))
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {

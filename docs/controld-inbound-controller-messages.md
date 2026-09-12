@@ -1063,36 +1063,31 @@ Example:
   no signature until app-side signing ships) and casts served from the
   offline cached copy. The owner opts into this knowingly.
 
-Current success response: `{"ok": true, "signatureVerificationMode": "strict"}`
+Current success response: `{"ok": true, "signatureVerificationMode": "strict"}` —
+the stored value, which controllers should adopt. The record is
+`/home/feralfile/.state/signature-verification.json`, read on every cast, so
+the change applies to the next cast with no restart.
 
 Changing to `silent` or `notify` also re-drives a displayAt cutover the
 scheduler refused while the mode was `strict` (a refusal arms no retry, and
 past the schedule's final boundary there is no timer), so the wall does not
 stay on the pre-cutover cohort until an unrelated wake. Only a cohort not yet
 delivered is pushed; a mode change never re-casts what is already on screen.
-A factory reset that rolls back does the same from the default it restored.
+A factory reset clears the record — a unit handed on returns to `notify` — and
+if it rolls back it re-drives the same way from that restored default.
 
-Error cases:
+Error cases — the request is rejected before anything is written, so no
+record changes and the stored mode (if any) still stands:
 
-- `invalid arguments: mode must be one of silent, notify, strict` — nothing
-  stored. The supplied value is never echoed.
-- `factory reset in progress` — nothing stored.
+- `invalid arguments: mode must be one of silent, notify, strict` — `mode` is
+  absent, not a string, or outside the vocabulary (case-sensitive). The
+  supplied value is never echoed.
+- `factory reset in progress` — a factory reset has staged.
 - `signature verification is disabled by device configuration; the mode
-  cannot be set` — the daemon's `signatureVerification.disabled` switch is
-  on, so no mode could be enforced; nothing stored, and `getDeviceStatus`
-  omits `signatureVerificationMode` in that state.
-— the stored value, which controllers should adopt. The record is
-`/home/feralfile/.state/signature-verification.json`, read on every cast, so
-the change applies to the next cast with no restart.
-
-Current error cases:
-
-- `mode` absent, not a string, or outside the vocabulary (case-sensitive) —
-  rejected as invalid arguments; nothing is written.
-- A factory reset has staged.
-- State directory creation, temp write, or rename fails.
-
-A factory reset clears the record: a unit handed on returns to `notify`.
+  cannot be set` — the daemon's `signatureVerification.disabled` switch is on,
+  so no mode could be enforced; `getDeviceStatus` also omits
+  `signatureVerificationMode` in that state.
+- a state-directory creation, temp write, or rename failure (I/O error).
 
 `setSignatureVerificationMode` is classified as a disruptive command in the
 storm gate (~1 per 5 s, deduped): a persisted write reachable from the
