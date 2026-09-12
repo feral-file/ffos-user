@@ -342,6 +342,13 @@ func TestDefaultGateConfig_ClassifiesCommands(t *testing.T) {
 	require.True(t, ok, "setDeviceName must be explicitly classified, not Default")
 	assert.True(t, rename.Dedupe)
 	assert.Less(t, rename.Rate, 1.0)
+
+	// setSignatureVerificationMode is the same class: a persisted write from
+	// the open hub whose value can refuse the device's primary function.
+	mode, ok := cfg.Policies[commands.CMD_SET_SIGNATURE_VERIFICATION_MODE]
+	require.True(t, ok, "setSignatureVerificationMode must be explicitly classified, not Default")
+	assert.True(t, mode.Dedupe)
+	assert.Less(t, mode.Rate, 1.0)
 }
 
 // TestDefaultGateConfig_ClassifiesOfflineCacheCommands is the regression

@@ -249,6 +249,14 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
+		// Strict-mode signature rejection (#307): the caller's document was
+		// refused by a policy the owner chose — a 422 with the sanitized
+		// reason, same as the dead-source rejection above.
+		if commandrouter.IsSigInvalid(err) {
+			h.logger.Warn("Cast rejected by strict signature verification", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
 		h.logger.Error("Failed to process cast request", zap.Error(err))
 		http.Error(w, "Failed to process cast request", http.StatusInternalServerError)
 		return

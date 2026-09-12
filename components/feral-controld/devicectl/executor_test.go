@@ -4607,6 +4607,8 @@ func TestExecutor_FactoryReset_StartsServiceAndRotatesTopic(t *testing.T) {
 	// Clear removes the staged temp first (resold-frame leak guard).
 	ts.mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
 	ts.mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
+	ts.mockOS.EXPECT().Remove(constants.SIGNATURE_VERIFICATION_FILE).Return(nil)
+	ts.mockOS.EXPECT().Remove(constants.SIGNATURE_VERIFICATION_FILE + ".tmp").Return(nil)
 
 	// The in-process reset starts the system reset unit directly.
 	ts.mockExec.EXPECT().
@@ -4667,6 +4669,8 @@ func TestExecutor_FactoryReset_UnitFailureStillClearsClaim(t *testing.T) {
 	// Clear removes the staged temp first (resold-frame leak guard).
 	ts.mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
 	ts.mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
+	ts.mockOS.EXPECT().Remove(constants.SIGNATURE_VERIFICATION_FILE).Return(nil)
+	ts.mockOS.EXPECT().Remove(constants.SIGNATURE_VERIFICATION_FILE + ".tmp").Return(nil)
 
 	ts.mockExec.EXPECT().
 		CommandContext(ts.ctx, "systemctl", "start", "set-factory-boot.service").

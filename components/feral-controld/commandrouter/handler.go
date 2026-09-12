@@ -11,6 +11,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
@@ -84,6 +86,7 @@ type handler struct {
 	// verification is on.
 	verifySignatures bool
 	activeVerdict    *sigverify.Active
+	verificationMode func() sigverify.Mode
 }
 
 // RecoverySession is the narrow slice of playersession.Session the relayer's
@@ -168,6 +171,10 @@ type SignatureVerificationOptions struct {
 	// actually reaches the player, for the status poller's player_status
 	// annotation (see sigverify.Active). Optional.
 	Active *sigverify.Active
+	// Mode, when non-nil, returns the owner's current verification mode
+	// (read from its persisted record on every cast, so a change from the
+	// app applies to the next cast with no restart). nil ⇒ DefaultMode.
+	Mode func() sigverify.Mode
 }
 
 // SetSignatureVerification turns on DP-1 signature verification of every
@@ -191,6 +198,14 @@ func SetSignatureVerification(h Handler, opts SignatureVerificationOptions, logg
 func (h *handler) setSignatureVerification(opts SignatureVerificationOptions) {
 	h.verifySignatures = true
 	h.activeVerdict = opts.Active
+	h.verificationMode = opts.Mode
+}
+
+func (h *handler) currentVerificationMode() sigverify.Mode {
+	if h.verificationMode == nil {
+		return sigverify.DefaultMode
+	}
+	return h.verificationMode()
 }
 
 func (h *handler) currentGeneration() uint64 {
@@ -515,12 +530,30 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				return nil, fmt.Errorf("unknown payload type")
 			}
 
-			// Signature verdict (#307), observation only in this phase: every
-			// cast still plays. Logged once here, reported on the reply and
-			// player_status below. nil when verification is off or the
-			// resolver returned a playlist without a verdict.
+			// Signature verdict (#307). Logged once here, reported on the
+			// reply and player_status below. nil when verification is off or
+			// the document could not be verified (the offline cached copy).
 			if playlist.Verification != nil {
 				h.logSignatureVerdict(playlist.Verification, playlist.ID, schedulerSource.PlaylistURL)
+			}
+
+			// Strict mode is the one place a verdict changes what plays:
+			// anything that is not proven valid is refused — unsigned,
+			// invalid, or unverifiable (a cached copy carries no verdict, and
+			// a strict device does not guess). Placed BEFORE the source
+			// preflight and BEFORE the playback lock and scheduler snapshot,
+			// so there is nothing to restore; err is ASSIGNED so the deferred
+			// playback-failure accounting above records the rejection, exactly
+			// like the preflight's own rejection. The previous artwork stays.
+			// Silent and notify never reach here: they report and play.
+			if h.verifySignatures && h.currentVerificationMode() == sigverify.ModeStrict {
+				if rejection := strictRejection(playlist.Verification); rejection != nil {
+					h.logger.Warn("displayPlaylist: cast rejected by strict signature verification",
+						zap.String("reason", rejection.Reason),
+						zap.String("playlist_id", string(helper.TruncateBytes([]byte(playlist.ID), logger.MAX_FIELD_LENGTH))))
+					err = rejection
+					return nil, err
+				}
 			}
 
 			// Cast-time source preflight (#304). Without it, a cast whose
@@ -773,6 +806,20 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					h.activeVerdict.SetPending(castPlaylistID, schedulerSource.PlaylistURL, castVerdict.Status)
 				} else {
 					h.activeVerdict.SetPendingUnverified()
+				}
+			}
+			// Retain the verified inline dynamic document (verdict intact) so a
+			// strict refresh re-resolves THIS trusted source instead of the
+			// verdict-less player-status copy — a non-displayAt cast makes the
+			// scheduler drop its source, and player status has no verdict, so
+			// without this a valid inline dynamic playlist would refresh-skip
+			// forever under strict (feral-file/ffos-user#307). Cleared for any
+			// other cast, which is no longer the inline dynamic on screen.
+			if !deferred && h.scheduler != nil {
+				if schedulerSource.DynamicPlaylist != nil && schedulerSource.PlaylistURL == "" {
+					h.scheduler.SetInlineDynamicSource(schedulerSource.DynamicPlaylist)
+				} else {
+					h.scheduler.SetInlineDynamicSource(nil)
 				}
 			}
 		}

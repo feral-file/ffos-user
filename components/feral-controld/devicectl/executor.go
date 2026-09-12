@@ -23,6 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -71,6 +72,19 @@ type Executor interface {
 	// Register time, so the advertised name only changes if something
 	// re-registers — the same constraint SetClaimObserver exists for.
 	SetDeviceNameObserver(observer func(name string))
+	// SetVerificationModeObserver registers a callback invoked with the
+	// stored mode after a successful setSignatureVerificationMode. The cast
+	// path reads the record itself, so this exists for the one consumer
+	// that holds state decided under the OLD mode: the displayAt scheduler,
+	// whose refused cutover needs re-driving once the policy relaxes
+	// (feral-file/ffos-user#307). Set once at wiring time.
+	SetVerificationModeObserver(observer func(mode sigverify.Mode))
+	// SetSignatureVerificationCapability tells the executor whether the
+	// verifier runs at all (the `signatureVerification.disabled` config
+	// switch). While it is off no mode can be enforced, so the setter
+	// refuses rather than store and acknowledge a policy nothing applies.
+	// Unset means "read the config", so tests pin it without a global.
+	SetSignatureVerificationCapability(enabled func() bool)
 	// SetSetupUI injects the process-wide setup-narration surface so the
 	// controld-owned claim/factory-reset/OTA-failure narration shares ONE
 	// setupui.Service with the provisioning domain. Set once at wiring time; the
@@ -105,12 +119,26 @@ type executor struct {
 	// claimObserver: set once before commands are served, so no lock.
 	nameObserver func(name string)
 
+	// modeObserver, when set, is notified after the signature verification
+	// mode is stored. Same wiring discipline as nameObserver.
+	modeObserver func(mode sigverify.Mode)
+	// verificationEnabled, when set (SetSignatureVerificationCapability),
+	// answers whether the verifier runs; nil reads the config.
+	verificationEnabled func() bool
+
 	// deviceNameMu serializes every mutation of the device-name record and the
 	// observer notification that follows it. Both writers stage through one
 	// shared temp path and both are reachable concurrently (a rename over the
 	// hub while a factory reset runs), so this is what keeps disk, mDNS, and
 	// status from disagreeing. See setDeviceName for the two races it closes.
 	deviceNameMu sync.Mutex
+
+	// verificationModeMu is deviceNameMu's twin for the signature
+	// verification mode record (feral-file/ffos-user#307): the setter and
+	// factory reset's clear stage through one .tmp path and are reachable
+	// concurrently, and a setter admitted before a reset staged must not
+	// land after the reset cleared the record. See setSignatureVerificationMode.
+	verificationModeMu sync.Mutex
 
 	// Add reference to StatusPoller to get metrics
 	statusPoller status.Poller
@@ -535,6 +563,14 @@ func (e *executor) SetDeviceNameObserver(observer func(name string)) {
 	e.nameObserver = observer
 }
 
+func (e *executor) SetVerificationModeObserver(observer func(mode sigverify.Mode)) {
+	e.modeObserver = observer
+}
+
+func (e *executor) SetSignatureVerificationCapability(enabled func() bool) {
+	e.verificationEnabled = enabled
+}
+
 // SetSetupUI injects the shared setup-narration surface so the controld-owned
 // claim/factory-reset/OTA-failure narration and the provisioning domain's
 // narration all flow through ONE setupui.Service — the same instance main wires
@@ -620,6 +656,8 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.setAnalyticsToggle(ctx, bytes)
 	case commands.CMD_BETA_FEATURES_TOGGLE:
 		result, err = e.setBetaFeaturesToggle(ctx, bytes)
+	case commands.CMD_SET_SIGNATURE_VERIFICATION_MODE:
+		result, err = e.setSignatureVerificationMode(ctx, bytes)
 	case commands.CMD_DEVICE_STATUS:
 		result, err = e.getDeviceStatus(ctx)
 	case commands.CMD_START_WIFI_SETUP:
@@ -2991,6 +3029,12 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	if err := e.clearDeviceName(); err != nil {
 		e.logger.Warn("Failed to clear device name during factory reset", zap.Error(err))
 	}
+	// The signature verification mode falls with the claim for the same
+	// hand-on reason: a previous owner's `strict` must not block the next
+	// owner's casts after a rolled-back reset. Best-effort like the name.
+	if err := e.clearSignatureVerificationMode(); err != nil {
+		e.logger.Warn("Failed to clear signature verification mode during factory reset", zap.Error(err))
+	}
 
 	// The process-lifetime pairing latch must fall with the persisted claim,
 	// or claimSettled() would still read true and withhold the claim QR after
@@ -3256,6 +3300,17 @@ func (e *executor) releaseStuckResetLatch(why string) {
 	e.logger.Warn("Releasing the staged factory-reset latch", zap.String("reason", why))
 	e.resetStaged.Store(false)
 	e.setupUI().HideIfShowing(setupui.StateFactoryReset)
+	// Factory reset cleared the signature-verification mode record (a resold
+	// unit returns to notify). A reset that rolls back — this release path,
+	// shared by reset-start failure and the stuck-reset watchdog — leaves that
+	// cleared record in effect, so a displayAt cutover the strict push gate
+	// refused before the reset (no retry armed, and past the final boundary no
+	// timer) has no other trigger. Re-drive under the now-effective on-disk
+	// mode, exactly as a setter-driven relaxation would (feral-file/ffos-user
+	// #307). Safe here precisely because the reset is NOT proceeding: the
+	// device is resuming normal operation, not painting a reset panel, so this
+	// is unrelated to the reset-narration playback fence tracked in #345.
+	e.notifyVerificationMode()
 }
 
 func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, error) {

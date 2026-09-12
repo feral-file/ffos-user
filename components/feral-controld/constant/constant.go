@@ -16,7 +16,12 @@ const (
 	// on the network and the key the registry, telemetry, and the owner-contact
 	// record all share. A label the owner can change must not be able to move it.
 	DEVICE_NAME_FILE = "/home/feralfile/.state/device-name.json"
-	CONFIG_FILE      = "/home/feralfile/.config/controld.json"
+	// SIGNATURE_VERIFICATION_FILE holds the owner-chosen DP-1 signature
+	// verification mode (feral-file/ffos-user#307). Its own JSON record, like
+	// the device name and the sleep schedule — not the claim state file,
+	// which the claim flow and factory reset rewrite wholesale.
+	SIGNATURE_VERIFICATION_FILE = "/home/feralfile/.state/signature-verification.json"
+	CONFIG_FILE                 = "/home/feralfile/.config/controld.json"
 
 	SSH_AUTHORIZED_KEYS_FILE = "/home/feralfile/.ssh/authorized_keys"
 	SSH_DISABLE_UNIT         = "ff1-ssh-disable"

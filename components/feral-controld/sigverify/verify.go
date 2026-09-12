@@ -87,19 +87,59 @@ type Verdict struct {
 
 // Reason vocabulary for a failed signer. Stable strings: they are returned
 // verbatim to casters (and, in strict mode, in the rejection message) and
-// asserted by tests, so treat a change as a wire change.
+// asserted by tests, so treat a change as a wire change. The set is CLOSED
+// on purpose — no reason ever interpolates a value the document supplied
+// (the unsupported algorithm's name lives in Signer.Alg, not here), which is
+// what lets PublicReason forward a signer reason unchanged.
 const (
 	ReasonPayloadHashMismatch = "payload_hash mismatch"
 	ReasonSignatureInvalid    = "signature invalid"
+	ReasonUnsupportedAlg      = "unsupported alg"
 	ReasonMalformed           = "malformed signature"
 	ReasonTooManySignatures   = "too many signatures"
 	ReasonDocumentTooLarge    = "document too large"
 	// ReasonUnverified marks an in-bounds entry that was never checked
 	// because a sibling entry tripped a bound and the document was refused
 	// before any cryptography ran.
-	ReasonUnverified        = "unverified"
-	reasonUnsupportedAlgFmt = "unsupported alg %s"
+	ReasonUnverified = "unverified"
+	// Document-level reasons for the unsigned verdict.
+	ReasonUnsigned       = "unsigned"
+	ReasonUnsignedLegacy = "unsigned; legacy signature ignored"
 )
+
+// PublicReason is the rejection reason safe to hand to a caller that is not
+// the device's owner (the hub's 422 body, the relayer's sigInvalid RPC).
+// Verdict.Reason names the failing signer by the ROLE string the document
+// itself supplied, and a hostile document can put anything within the
+// length bound there — a URL included — so it is for the device log and
+// the owner-facing cast reply only. This returns the classified failure
+// from the closed vocabulary above and nothing the document wrote:
+//
+//	valid    → ""
+//	unsigned → "unsigned" | "unsigned; legacy signature ignored"
+//	invalid  → "signature invalid: <signer reason>" for the first failed
+//	           signer, else the document-level reason (malformed, too
+//	           large, too many signatures) — all fixed text.
+func (v Verdict) PublicReason() string {
+	switch v.Status {
+	case StatusValid:
+		return ""
+	case StatusUnsigned:
+		if v.LegacyPresent {
+			return ReasonUnsignedLegacy
+		}
+		return ReasonUnsigned
+	}
+	for _, s := range v.Signers {
+		if !s.OK && s.Reason != ReasonUnverified {
+			return ReasonSignatureInvalid + ": " + s.Reason
+		}
+	}
+	if v.Reason == "" {
+		return ReasonMalformed
+	}
+	return v.Reason
+}
 
 // Signer field bounds. alg, kid, and role are copied from an untrusted
 // document into the cast reply and the log line, so their length must not
@@ -209,9 +249,9 @@ func Verify(raw []byte) Verdict {
 	ok, _, err := sign.VerifyPlaylistSignatures(raw)
 	switch {
 	case errors.Is(err, sign.ErrNoSignatures):
-		reason := "unsigned"
+		reason := ReasonUnsigned
 		if legacy {
-			reason = "unsigned; legacy signature ignored"
+			reason = ReasonUnsignedLegacy
 		}
 		return Verdict{Status: StatusUnsigned, LegacyPresent: legacy, Reason: reason}
 	case err != nil:
@@ -236,7 +276,7 @@ func Verify(raw []byte) Verdict {
 			// by value is more fragile than one extra verify per entry.
 			if verr := sign.VerifyMultiSignature(raw, e); verr != nil {
 				s.OK = false
-				s.Reason = classify(verr, e.Alg)
+				s.Reason = classify(verr)
 				if firstFailure == "" {
 					firstFailure = fmt.Sprintf("%s signature invalid: %s", roleOrUnknown(e.Role), s.Reason)
 				}
@@ -322,10 +362,10 @@ func tooManySignatures(raw json.RawMessage) bool {
 // vocabulary. Order matters: ErrSigInvalid wraps the base64 and length
 // failures too, and the payload-hash mismatch is a plain (unwrapped) error
 // in dp1-go v0.6.0, hence the string match — pinned by the tamper test.
-func classify(err error, alg string) string {
+func classify(err error) string {
 	switch {
 	case errors.Is(err, sign.ErrUnsupportedAlg):
-		return fmt.Sprintf(reasonUnsupportedAlgFmt, alg)
+		return ReasonUnsupportedAlg
 	case errors.Is(err, sign.ErrSigInvalid):
 		return ReasonSignatureInvalid
 	case strings.Contains(err.Error(), "payload_hash"):

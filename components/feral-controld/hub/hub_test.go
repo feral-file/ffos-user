@@ -24,6 +24,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -1427,4 +1428,48 @@ func TestHandleCast_StormProtection(t *testing.T) {
 	assert.Equal(t, 2, accepted, "only the burst of 2 is accepted")
 	assert.Equal(t, total-2, limited, "the rest are rejected with 429")
 	assert.Equal(t, int64(2), stub.calls.Load(), "shed commands never reach the inner handler")
+}
+
+// TestHub_HandleCast_SigInvalidReturns422: the strict-mode signature
+// rejection (#307) is the caller's problem to act on, so the LAN hub answers
+// 422 with the sanitized reason, like the dead-source rejection.
+func TestHub_HandleCast_SigInvalidReturns422(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	payload := commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": "https://example.com/secret/playlist.json"},
+	}
+
+	ts.mockJSONDec.EXPECT().
+		Decode(gomock.Any()).
+		DoAndReturn(func(p *commands.Command) error {
+			*p = payload
+			return nil
+		}).
+		Times(1)
+
+	ts.mockCmd.EXPECT().
+		Process(ts.ctx, gomock.Any()).
+		Return(nil, &commandrouter.SigInvalidError{Status: sigverify.StatusUnsigned, Reason: "unsigned"}).
+		Times(1)
+
+	ts.mockJSON.EXPECT().
+		NewDecoder(gomock.Any()).
+		Return(ts.mockJSONDec).
+		Times(1)
+
+	jsonPayload := `{"messageID":"test-sig","message":{"command":"displayPlaylist","request":{"playlistUrl":"https://example.com/secret/playlist.json"}}}`
+	req, err := http.NewRequest("POST", "/api/cast", strings.NewReader(jsonPayload))
+	assert.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	hubImpl := ts.hub.(*hub)
+	hubImpl.handleCast(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	assert.Contains(t, w.Body.String(), "sigInvalid: playlist rejected by strict signature verification (unsigned)")
+	assert.NotContains(t, w.Body.String(), "secret")
 }
