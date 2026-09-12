@@ -374,6 +374,63 @@ func TestRefresher_FutureOnlyCachedFallback_ClearsOnPromote(t *testing.T) {
 	assert.False(t, ok, "an unverified scheduled document must not inherit a verdict at cutover")
 }
 
+// TestRefresher_ForceCast_UnpublishedAcrossGenerationBump: the cold-cache
+// reconstruction of a scheduled playlist is a force cast; when the page
+// generation moves while the send is in flight, its accepted reply is for a
+// page that is gone, so the verdict is not published — but the schedule was
+// replaced, so pending is still restaged for the new page's re-push.
+func TestRefresher_ForceCast_UnpublishedAcrossGenerationBump(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	r, active := scheduledRefresher(t, ts, nil)
+	gen := uint64(1)
+	refresher.SetSessionGeneration(r, func() uint64 { return gen }, zap.NewNop())
+
+	playlistURL := "http://example.com/daily.json"
+	today, tomorrow := "2026-07-22T00:00:00Z", "2026-07-23T00:00:00Z"
+	v2 := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID: "v2",
+		Items: []dp1playlist.PlaylistItem{
+			{ID: "today", Source: "https://example.com/today", DisplayAt: &today},
+			{ID: "tomorrow", Source: "https://example.com/tomorrow", DisplayAt: &tomorrow},
+		},
+	}}
+	unsigned := sigverify.Verify([]byte(`{"dpVersion":"1.1.0","title":"v2","items":[]}`))
+	v2.Verification = &unsigned
+
+	sent := make(chan struct{}, 1)
+	ts.mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ts.ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(v2, nil).AnyTimes()
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(_ string, params map[string]any) (any, error) {
+		assert.Contains(t, params["expression"].(string), `"now_display"`, "cold-cache reconstruction is a force cast")
+		gen++ // the page reloads while the send is in flight
+		select {
+		case sent <- struct{}{}:
+		default:
+		}
+		return playerOKResponse(), nil
+	}).AnyTimes()
+
+	r.Start()
+	select {
+	case <-sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresher never force-cast")
+	}
+	time.Sleep(200 * time.Millisecond)
+	r.Stop()
+
+	_, ok := active.Lookup("v2", playlistURL)
+	assert.False(t, ok, "an accepted reply from a page that is gone publishes nothing")
+	active.Promote() // the new generation's re-push
+	st, ok := active.Lookup("v2", playlistURL)
+	assert.True(t, ok, "pending was restaged for the schedule the cache now holds")
+	assert.Equal(t, sigverify.StatusUnsigned, st)
+}
+
 // TestRefresher_SetSignatureVerification_ForeignImplementationIsLeftAlone
 // pins the setter's contract: a non-concrete Refresher logs and is untouched
 // rather than panicking.

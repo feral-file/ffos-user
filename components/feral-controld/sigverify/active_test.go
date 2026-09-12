@@ -128,6 +128,43 @@ func TestActive_ReconcileSoft_IDOnlyIsSticky(t *testing.T) {
 	assert.Equal(t, sigverify.StatusValid, st)
 }
 
+// TestActive_FencedPromoter_SkipsPromotionAcrossGenerationBump: a push whose
+// accepted reply arrives after the page generation moved was answered by a
+// page that is gone; promoting on it would attest for the new page.
+func TestActive_FencedPromoter_SkipsPromotionAcrossGenerationBump(t *testing.T) {
+	var a sigverify.Active
+	gen := uint64(1)
+	start, accepted := a.FencedPromoter(func() uint64 { return gen })
+	a.Set("showing", "", sigverify.StatusValid)
+	a.SetPending("next", "", sigverify.StatusInvalid)
+
+	start()
+	_, ok := a.Lookup("showing", "")
+	assert.False(t, ok, "start invalidates like every replacing send")
+	gen++ // a bump lands between the send and the reply
+	accepted()
+	_, ok = a.Lookup("next", "")
+	assert.False(t, ok, "no promotion on a reply for a page that is gone")
+
+	start() // the new generation's own re-push
+	accepted()
+	st, ok := a.Lookup("next", "")
+	assert.True(t, ok)
+	assert.Equal(t, sigverify.StatusInvalid, st)
+}
+
+func TestActive_FencedPromoter_NilGenerationIsUnfenced(t *testing.T) {
+	var a sigverify.Active
+	start, accepted := a.FencedPromoter(nil)
+	a.SetPending("next", "", sigverify.StatusValid)
+
+	start()
+	accepted()
+
+	_, ok := a.Lookup("next", "")
+	assert.True(t, ok)
+}
+
 // TestActive_ClearCurrentKeepsPending: player-owned replacement (reconnect,
 // default playback) drops what controld attested but not the schedule's
 // parked verdict, which the reconnect re-push promotes again.

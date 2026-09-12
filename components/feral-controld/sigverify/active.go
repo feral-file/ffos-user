@@ -181,6 +181,34 @@ func (a *Active) Promote() {
 	}
 }
 
+// FencedPromoter returns the pair of callbacks a scheduler-owned push drives
+// (start just before its CDP send, accepted after an accepted reply), with
+// the promotion fenced on the player-session generation: start clears
+// current and snapshots generation(); accepted promotes pending only if the
+// generation is unchanged. A bump in between (a stamp-mismatch poll, a
+// navigation, a reconnect) means the reply was for a page that is gone, so
+// the push is treated as unconfirmed — current stays cleared (the bump hook
+// cleared it too) and the new generation's own re-push promotes pending
+// afresh. generation may be nil (tests, a build without a session): the
+// fence is then a no-op. Mirrors commandrouter.sendCDPRequest's own
+// generation re-check for casts.
+func (a *Active) FencedPromoter(generation func() uint64) (start, accepted func()) {
+	var snapshot uint64
+	start = func() {
+		if generation != nil {
+			snapshot = generation()
+		}
+		a.ClearCurrent()
+	}
+	accepted = func() {
+		if generation != nil && generation() != snapshot {
+			return
+		}
+		a.Promote()
+	}
+	return start, accepted
+}
+
 // Lookup returns the current status when id or url identifies the current
 // playlist. Pending is never consulted.
 func (a *Active) Lookup(id, url string) (Status, bool) {

@@ -1086,12 +1086,16 @@ func initializeApp(
 		// the slot is invalidated as the push starts, so no status round
 		// between the player's swap and the promotion can match the
 		// previous document by URL.
+		// Promotion is fenced on the page generation: a bump between the
+		// send and its accepted reply means the reply came from a page
+		// that is gone, and the new generation's own re-push promotes.
+		pushStarting, pushAccepted := activeVerdict.FencedPromoter(session.Generation)
 		playlistScheduler.SetPushObserver(func(phase playlistschedule.PushPhase) {
 			switch phase {
 			case playlistschedule.PushStarting:
-				activeVerdict.ClearCurrent()
+				pushStarting()
 			case playlistschedule.PushAccepted:
-				activeVerdict.Promote()
+				pushAccepted()
 			}
 		})
 		poller.SetVerificationLookup(func(id, url string) (string, bool) {
@@ -1114,6 +1118,8 @@ func initializeApp(
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
 	if sigVerifyEnabled {
 		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
+		// Same generation fence for the refresher's force casts.
+		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
 	}
 
 	// Replay saturation invalidates Fetch-interception scope exactly the way
