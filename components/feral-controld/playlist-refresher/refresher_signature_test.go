@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -565,6 +566,208 @@ func TestRefresher_Strict_InlineDynamicUsesRetainedVerifiedSource(t *testing.T) 
 	case <-pushed:
 	case <-time.After(2 * time.Second):
 		t.Fatal("strict refresh of a valid inline dynamic playlist must push, not skip")
+	}
+	r.Stop()
+}
+
+// recordingNotifier is a goroutine-safe playertoast.Notifier double for the
+// refresher's background pass.
+type recordingNotifier struct {
+	mu       sync.Mutex
+	epoch    uint64
+	notified chan sigverify.Notice
+	cleared  chan struct{}
+}
+
+func newRecordingNotifier() *recordingNotifier {
+	return &recordingNotifier{notified: make(chan sigverify.Notice, 8), cleared: make(chan struct{}, 8)}
+}
+func (n *recordingNotifier) Notify(notice sigverify.Notice) {
+	n.mu.Lock()
+	n.epoch++
+	n.mu.Unlock()
+	select {
+	case n.notified <- notice:
+	default:
+	}
+}
+func (n *recordingNotifier) Clear() {
+	n.mu.Lock()
+	n.epoch++
+	n.mu.Unlock()
+	select {
+	case n.cleared <- struct{}{}:
+	default:
+	}
+}
+func (n *recordingNotifier) Epoch() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.epoch
+}
+func (n *recordingNotifier) ClearAndEpoch() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.epoch++
+	select {
+	case n.cleared <- struct{}{}:
+	default:
+	}
+	return n.epoch
+}
+func (n *recordingNotifier) NotifyIfEpoch(notice sigverify.Notice, epoch uint64) {
+	n.mu.Lock()
+	if n.epoch != epoch {
+		n.mu.Unlock()
+		return
+	}
+	n.epoch++
+	n.mu.Unlock()
+	select {
+	case n.notified <- notice:
+	default:
+	}
+}
+
+// TestRefresher_Strict_RefusalToastsRejected: a feed refresh refused under
+// strict surfaces signature_rejected on the wall (feral-file/ffos-user#307
+// phase 4, review round 2 F2).
+func TestRefresher_Strict_RefusalToastsRejected(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	setupBackgroundMocks(ts)
+	active := &sigverify.Active{}
+	refresher.SetSignatureVerification(ts.refresher, active, zaptest.NewLogger(t))
+	refresher.SetSignatureVerificationMode(ts.refresher, func() sigverify.Mode { return sigverify.ModeStrict }, zap.NewNop())
+	toast := newRecordingNotifier()
+	refresher.SetRefresherToaster(ts.refresher, toast, zap.NewNop())
+
+	playlistURL := "http://example.com/playlist.json"
+	active.Set("showing", playlistURL, sigverify.StatusValid)
+	unsigned := sigverify.Verify([]byte(`{"dpVersion":"1.1.0","title":"t","items":[]}`))
+	playlist := createMockPlaylistNoDynamic()
+	playlist.ID = "refreshed-unsigned"
+	playlist.Verification = &unsigned
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).AnyTimes()
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).AnyTimes()
+	// No CDP Send: strict refuses the refresh before any push.
+
+	ts.refresher.Start()
+	select {
+	case n := <-toast.notified:
+		assert.Equal(t, sigverify.NoticeRejected, n)
+	case <-time.After(2 * time.Second):
+		t.Fatal("strict refresh refusal did not toast")
+	}
+	ts.refresher.Stop()
+}
+
+// TestRefresher_Notify_ForceCastToastsUnsigned: an accepted force-cast of a
+// re-resolved non-valid feed document surfaces the notify notice (#307 phase
+// 4, review round 2 F2).
+func TestRefresher_Notify_ForceCastToastsUnsigned(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	r, _ := scheduledRefresher(t, ts, nil)
+	refresher.SetSignatureVerificationMode(r, func() sigverify.Mode { return sigverify.ModeNotify }, zap.NewNop())
+	toast := newRecordingNotifier()
+	refresher.SetRefresherToaster(r, toast, zap.NewNop())
+
+	playlistURL := "http://example.com/daily.json"
+	today, tomorrow := "2026-07-22T00:00:00Z", "2026-07-23T00:00:00Z"
+	v2 := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID: "v2",
+		Items: []dp1playlist.PlaylistItem{
+			{ID: "today", Source: "https://example.com/today", DisplayAt: &today},
+			{ID: "tomorrow", Source: "https://example.com/tomorrow", DisplayAt: &tomorrow},
+		},
+	}}
+	unsigned := sigverify.Verify([]byte(`{"dpVersion":"1.1.0","title":"v2","items":[]}`))
+	v2.Verification = &unsigned
+
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).AnyTimes()
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(v2, nil).AnyTimes()
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(_ string, params map[string]any) (any, error) {
+		assert.Contains(t, params["expression"].(string), `"now_display"`, "cold-cache reconstruction is a force cast")
+		return playerOKResponse(), nil
+	}).AnyTimes()
+
+	r.Start()
+	select {
+	case n := <-toast.notified:
+		assert.Equal(t, sigverify.NoticeUnsigned, n)
+	case <-time.After(2 * time.Second):
+		t.Fatal("accepted force-cast of an unsigned document did not toast")
+	}
+	r.Stop()
+}
+
+// TestRefresher_Strict_RefusalSuppressedWhenTransitionIntervened: if a newer
+// transition (cast, default playback, scheduler cutover, or a page-generation
+// bump) replaces the artwork while the feed resolves — advancing the
+// display-transition epoch — the strict refresh's rejection toast is dropped
+// rather than shown over the replacement (feral-file/ffos-user#307 round 6).
+func TestRefresher_Strict_RefusalSuppressedWhenTransitionIntervened(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	sched := &fakePlaylistScheduler{}
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), sched, mockClock, logger)
+	active := &sigverify.Active{}
+	refresher.SetSignatureVerification(r, active, logger)
+	refresher.SetSignatureVerificationMode(r, func() sigverify.Mode { return sigverify.ModeStrict }, zap.NewNop())
+	toast := newRecordingNotifier()
+	refresher.SetRefresherToaster(r, toast, zap.NewNop())
+
+	playlistURL := "http://example.com/playlist.json"
+	unsigned := sigverify.Verify([]byte(`{"dpVersion":"1.1.0","title":"t","items":[]}`))
+	playlist := createMockPlaylistNoDynamic()
+	playlist.ID = "refreshed-unsigned"
+	playlist.Verification = &unsigned
+	resolved := make(chan struct{}, 1)
+	mockStatusPoller.EXPECT().FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).AnyTimes()
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).DoAndReturn(
+		func(context.Context, string, bool) (*dp1.Playlist, error) {
+			// A newer transition replaces the artwork while this feed resolves,
+			// advancing the display-transition epoch (here via the notifier's
+			// own Clear, as a real pre-send invalidation would).
+			toast.Clear()
+			select {
+			case resolved <- struct{}{}:
+			default:
+			}
+			return playlist, nil
+		}).AnyTimes()
+	// No CDP Send: strict refuses before any push.
+
+	r.Start()
+	select {
+	case <-resolved:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresher never resolved")
+	}
+	// The rejection toast must be suppressed because authority changed.
+	select {
+	case n := <-toast.notified:
+		t.Fatalf("a stale strict rejection was toasted after authority changed: %q", n)
+	case <-time.After(250 * time.Millisecond):
 	}
 	r.Stop()
 }

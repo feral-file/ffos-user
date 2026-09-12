@@ -62,6 +62,18 @@ type CDP interface {
 	Start(ctx context.Context, onConnect func())
 	Send(method string, params map[string]interface{}) (interface{}, error)
 	NoLogSend(method string, params map[string]interface{}) (interface{}, error)
+	// NoLogSendWithin is the best-effort send for a producer that must never
+	// perturb the command/status path (the signature toast). It (a) caps the
+	// write+read round trip — and thus the c.mu hold — at min(timeout,
+	// sendTimeout), so a wedged player cannot let a toast monopolize CDP; (b)
+	// NEVER tears down the shared connection on its own timeout/error (a slow
+	// toast must not reset the session casts use — connection recovery is
+	// driven only by real sends); and (c) consults guard (may be nil) UNDER
+	// the write lock immediately before the write, so a caller can abandon a
+	// now-stale send atomically with respect to CDP submission — no newer
+	// cast's write can interleave between the check and this write. A false
+	// guard returns (nil, nil): nothing was sent.
+	NoLogSendWithin(method string, params map[string]interface{}, timeout time.Duration, guard func() bool) (interface{}, error)
 	PageNavigationURL(ctx context.Context) (string, error)
 	Close()
 	Initialized() bool
@@ -468,7 +480,22 @@ func (c *cdp) NoLogSend(method string, params map[string]interface{}) (interface
 	return c.send(method, params)
 }
 
+// NoLogSendWithin is the best-effort, guarded send; see the interface doc.
+func (c *cdp) NoLogSendWithin(method string, params map[string]interface{}, timeout time.Duration, guard func() bool) (interface{}, error) {
+	return c.sendWithin(method, params, timeout, false /* driveRecovery */, guard)
+}
+
 func (c *cdp) send(method string, params map[string]interface{}) (interface{}, error) {
+	return c.sendWithin(method, params, c.sendTimeout, true /* driveRecovery */, nil)
+}
+
+// sendWithin performs one CDP round trip. driveRecovery decides whether an
+// error signals the connect loop to tear down and re-dial (true for real
+// command/status sends — a failure there is the only teardown trigger; false
+// for best-effort toasts, which must never reset the shared session). guard,
+// when non-nil, is checked under the write lock immediately before the write;
+// a false result abandons the send (nil, nil) without writing.
+func (c *cdp) sendWithin(method string, params map[string]interface{}, timeout time.Duration, driveRecovery bool, guard func() bool) (interface{}, error) {
 	c.mu.Lock()
 	if c.conn == nil {
 		c.mu.Unlock()
@@ -498,22 +525,41 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 		c.mu.Unlock()
 		return nil, ErrCDPConnectionNotInitialized
 	}
+	// guard is the caller's last-moment validity check, HELD against this write
+	// lock: any newer real send serializes on c.mu, so if one replaced the
+	// artwork first, guard now observes that and abandons this (best-effort)
+	// send rather than letting a stale notice reach the player.
+	if guard != nil && !guard() {
+		c.mu.Unlock()
+		return nil, nil
+	}
 	// One deadline covers the whole write+read round-trip so the c.mu hold is bounded
 	// (see sendRequestTimeout). A socket that is writable but never replies — the
 	// post-kiosk-restart zombie — must surface as an error here, because a send failure
 	// is the only signal that wakes the connect loop to tear down and re-dial.
-	deadline := time.Now().Add(c.sendTimeout)
+	// timeout caps the hold for best-effort callers (NoLogSendWithin); it never
+	// EXTENDS past sendTimeout, and a non-positive value falls back to it.
+	effective := c.sendTimeout
+	if timeout > 0 && timeout < effective {
+		effective = timeout
+	}
+	deadline := time.Now().Add(effective)
 	if err := c.conn.SetWriteDeadline(deadline); err != nil {
 		c.mu.Unlock()
-		c.signalDrop()
+		if driveRecovery {
+			c.signalDrop()
+		}
 		return nil, fmt.Errorf("failed to set CDP write deadline: %w", err)
 	}
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.mu.Unlock()
 		// A write failure means the socket is dead (Chromium gone/restarting). Wake the
 		// connect loop to tear down and re-establish so later sends fail clean rather than
-		// hammering a dead conn.
-		c.signalDrop()
+		// hammering a dead conn — but only for real sends; a best-effort toast never
+		// drives recovery (its short deadline would tear down a merely slow session).
+		if driveRecovery {
+			c.signalDrop()
+		}
 		return nil, fmt.Errorf("CDP write error: %w", err)
 	}
 
@@ -522,13 +568,17 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 	// keep reading until we receive the evaluate response for this request.
 	if err := c.conn.SetReadDeadline(deadline); err != nil {
 		c.mu.Unlock()
-		c.signalDrop()
+		if driveRecovery {
+			c.signalDrop()
+		}
 		return nil, fmt.Errorf("failed to set CDP read deadline: %w", err)
 	}
 	_, response, err := c.readResponse(reqID)
 	if err != nil {
 		c.mu.Unlock()
-		c.signalDrop()
+		if driveRecovery {
+			c.signalDrop()
+		}
 		return nil, err
 	}
 	c.mu.Unlock()

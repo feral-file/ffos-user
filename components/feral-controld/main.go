@@ -39,6 +39,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
+	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
@@ -234,6 +235,11 @@ func main() {
 		app.Logger.Fatal("Failed to run app", zap.Error(err))
 	}
 }
+
+// toastPlaylist aliases dp1.Playlist so the scheduler push gate/toaster
+// callbacks can be spelled inside run(), where the local dp1 service variable
+// shadows the dp1 package.
+type toastPlaylist = dp1.Playlist
 
 func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// Load state. A load failure must NOT abort startup: controld is the sole
@@ -1096,8 +1102,28 @@ func initializeApp(
 		}
 		return mode
 	}
+	// Shared across the cast, scheduler and refresher wiring blocks below;
+	// created only when verification runs.
+	var toastDispatcher *playertoast.Dispatcher
 	if sigVerifyEnabled {
 		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict, Mode: verificationMode}, logger)
+		// The on-screen notice for a non-valid cast (notify) or a strict
+		// rejection. One sender, shared by the cast path (SetPlayerToast) and
+		// the scheduler cutover/refusal hooks below. Reads the player manifest
+		// at the shipping path on every send, so an older bundle without the
+		// playerToast contract degrades to "no toast" rather than an error;
+		// ff-player ships the contract (paired-rollout: the player bundle lands
+		// before this daemon). Copy is owned by the player; controld only names
+		// the notice.
+		// One shared toast surface: a single-slot dispatcher. Every producer
+		// (the cast path via SetPlayerToast, the scheduler hooks below, and the
+		// refresher) submits non-blocking; the dispatcher sends at most one
+		// bounded toast at a time and a newer transition supersedes a queued
+		// older one, so a wedged player never delays a cast and a stale warning
+		// never lands over newer artwork (feral-file/ffos-user#307).
+		toastSender := playertoast.New(cdp, setupui.DefaultContractPath, logger)
+		toastDispatcher = playertoast.NewDispatcher(context, toastSender, 2*time.Second, logger)
+		commandrouter.SetPlayerToast(rawCmdHandler, toastDispatcher, logger)
 		// A displayAt-deferred cast parks its verdict as pending; the
 		// scheduler's own cutover push is the only point that proves the
 		// cohort reached the screen, so that is where it is promoted — and
@@ -1108,10 +1134,22 @@ func initializeApp(
 		// send and its accepted reply means the reply came from a page
 		// that is gone, and the new generation's own re-push promotes.
 		pushStarting, pushAccepted := activeVerdict.FencedPromoter(session.Generation)
+		// pushGenAtStart mirrors FencedPromoter's own fence for the toast: the
+		// generation captured as the cutover's send begins, re-checked in the
+		// toaster so a reply from a page that reloaded across the send toasts
+		// nothing over its replacement. Set/read under the scheduler's pushMu.
+		var pushGenAtStart uint64
+		var pushSendEpoch uint64
 		playlistScheduler.SetPushObserver(func(phase playlistschedule.PushPhase) {
 			switch phase {
 			case playlistschedule.PushStarting:
+				pushGenAtStart = session.Generation()
 				pushStarting()
+				// Pre-send toast invalidation, paired with the verdict's:
+				// drop any queued warning before this cutover lands, and
+				// capture the epoch it creates so PushAccepted's notify is
+				// fenced to it (#307).
+				pushSendEpoch = toastDispatcher.ClearAndEpoch()
 			case playlistschedule.PushAccepted:
 				pushAccepted()
 			}
@@ -1120,8 +1158,43 @@ func initializeApp(
 		// the cast-time verdict the scheduler's cached document still carries
 		// (cloned by pointer, never persisted), so a schedule accepted under
 		// notify cannot carry a non-valid cohort onto the screen after the
-		// owner switches to strict.
-		playlistScheduler.SetPushGate(commandrouter.StrictPushGate(verificationMode))
+		// owner switches to strict. The mode is read ONCE per cutover, here in
+		// the gate, and the notice it implies is carried to PushAccepted via
+		// pushNotice/pushShow — never re-read — so a concurrent mode change
+		// cannot let a cohort display under notify and then be labeled
+		// rejected, or suppress an expected notice. gate and toaster for one
+		// push both run under the scheduler's pushMu (one push at a time), so
+		// the shared fields need no lock.
+		var pushNotice sigverify.Notice
+		var pushShow bool
+		playlistScheduler.SetPushGate(func(p *toastPlaylist) error {
+			mode := verificationMode() // the single read for this cutover
+			if err := commandrouter.StrictPushGate(func() sigverify.Mode { return mode })(p); err != nil {
+				pushShow = false // refused: PushAccepted will not fire for this push
+				toastDispatcher.Notify(sigverify.NoticeRejected)
+				return err
+			}
+			var status sigverify.Status
+			if p != nil && p.Verification != nil {
+				status = p.Verification.Status
+			}
+			pushNotice, pushShow = sigverify.ToastFor(mode, status)
+			return nil
+		})
+		// The cohort reached the player (PushAccepted): emit the notice the
+		// gate decided for THIS push, or Clear a pending stale one — the
+		// cutover, not the accepting cast, is the transition it describes.
+		if toastable, ok := any(playlistScheduler).(interface {
+			SetPushToaster(func(*toastPlaylist))
+		}); ok {
+			toastable.SetPushToaster(commandrouter.ScheduledPushToaster(
+				toastDispatcher,
+				session.Generation,
+				func() uint64 { return pushGenAtStart },
+				func() uint64 { return pushSendEpoch },
+				func() (sigverify.Notice, bool) { return pushNotice, pushShow },
+			))
+		}
 		poller.SetVerificationLookup(func(id, url string) (string, bool) {
 			st, ok := activeVerdict.Lookup(id, url)
 			return string(st), ok
@@ -1143,6 +1216,10 @@ func initializeApp(
 	if sigVerifyEnabled {
 		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
 		playlist_refresher.SetSignatureVerificationMode(playlistRefresher, verificationMode, logger)
+		// The refresher shares the one toast dispatcher: a strict refusal or an
+		// accepted force-cast of a re-resolved feed document surfaces the same
+		// notice the cast path would (feral-file/ffos-user#307).
+		playlist_refresher.SetRefresherToaster(playlistRefresher, toastDispatcher, logger)
 		// Same generation fence for the refresher's force casts.
 		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
 	}
@@ -1263,10 +1340,17 @@ func initializeApp(
 	// would land after that round already re-attested the old verdict.
 	// Pending is untouched: playlist-recompute's re-push promotes it again.
 	if sigVerifyEnabled {
-		session.SetGenerationHook(activeVerdict.ClearCurrent)
+		// Both seams replace the on-screen document with content this verdict
+		// no longer describes (a page-reload generation bump; the claim-time
+		// player-owned default playlist), so each drops the attested verdict
+		// AND any queued toast, or a stale warning could land over the new
+		// artwork (feral-file/ffos-user#307). toastDispatcher is non-nil here
+		// (created in the sigVerifyEnabled block above).
+		invalidateDisplayed := commandrouter.ComposeInvalidator(activeVerdict.ClearCurrent, toastDispatcher)
+		session.SetGenerationHook(invalidateDisplayed)
 		// The claim-time displayDefaultPlaylist bypasses commandrouter, so
 		// it gets the same pre-send invalidation by its own seam.
-		devicectl.SetVerdictInvalidator(executor, activeVerdict.ClearCurrent, logger)
+		devicectl.SetVerdictInvalidator(executor, invalidateDisplayed, logger)
 	}
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))

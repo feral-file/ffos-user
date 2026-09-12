@@ -17,6 +17,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
+	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -87,6 +88,13 @@ type handler struct {
 	verifySignatures bool
 	activeVerdict    *sigverify.Active
 	verificationMode func() sigverify.Mode
+	// toast, when set (SetPlayerToast), surfaces the signature-verification
+	// notice on the wall. It is a non-blocking Notifier (a single-slot
+	// dispatcher): Notify queues the latest notice, Clear drops a pending one
+	// so a stale warning never shows over newer artwork. nil (unwired, or an
+	// older player) means no toast, never a changed cast outcome
+	// (feral-file/ffos-user#307).
+	toast playertoast.Notifier
 }
 
 // RecoverySession is the narrow slice of playersession.Session the relayer's
@@ -206,6 +214,51 @@ func (h *handler) currentVerificationMode() sigverify.Mode {
 		return sigverify.DefaultMode
 	}
 	return h.verificationMode()
+}
+
+// SetPlayerToast wires the on-screen signature-notice surface onto h (if h is
+// the concrete handler built by New), mirroring SetSignatureVerification. Set
+// once at wiring time; nil leaves toasts off.
+func SetPlayerToast(h Handler, notifier playertoast.Notifier, logger *zap.Logger) {
+	setter, ok := h.(interface{ setPlayerToast(playertoast.Notifier) })
+	if !ok {
+		logger.Warn("Command handler does not support player toast wiring")
+		return
+	}
+	setter.setPlayerToast(notifier)
+}
+
+func (h *handler) setPlayerToast(notifier playertoast.Notifier) {
+	h.toast = notifier
+}
+
+// toastForEpoch surfaces the notice the (mode, status) policy calls for at an
+// accepted player transition, FENCED to the epoch the transition's pre-send
+// invalidation created: NotifyIfEpoch enqueues only if no newer transition
+// (a concurrent generation bump, say) advanced the epoch between the send and
+// this notify. A silent/valid transition Clears unconditionally (it only ever
+// supersedes). mode is the castMode snapshot, so a concurrent
+// setSignatureVerificationMode cannot relabel it. Non-blocking
+// (feral-file/ffos-user#307).
+func (h *handler) toastForEpoch(mode sigverify.Mode, status sigverify.Status, epoch uint64) {
+	if h.toast == nil {
+		return
+	}
+	if notice, ok := sigverify.ToastFor(mode, status); ok {
+		h.toast.NotifyIfEpoch(notice, epoch)
+	} else {
+		h.toast.Clear()
+	}
+}
+
+// verdictStatus is the Status the toast policy keys on: a nil verdict (the
+// offline cached copy) has no status, which under strict still toasts
+// "rejected" and under notify toasts nothing.
+func verdictStatus(v *sigverify.Verdict) sigverify.Status {
+	if v == nil {
+		return ""
+	}
+	return v.Status
 }
 
 func (h *handler) currentGeneration() uint64 {
@@ -356,6 +409,25 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var playlist *dp1.Playlist
 		var schedulerSnapshot playlistschedule.Snapshot
 		var schedulerSource playlistschedule.Source
+		// castMode is the verification mode snapshot for THIS cast, taken at
+		// the admission decision below and reused for the strict gate and any
+		// toast, so a concurrent mode change cannot relabel the cast (#307).
+		castMode := sigverify.DefaultMode
+		// toastEpoch fences a strict-refusal toast against a newer transition:
+		// this cast resolves (possibly slowly, for a URL) before it can refuse,
+		// and a newer cast/default/cutover could replace the artwork meanwhile.
+		// Snapshot the display-transition token now, BEFORE resolution, and
+		// emit the rejection only if it still holds (NotifyIfEpoch).
+		var toastEpoch uint64
+		if h.toast != nil {
+			toastEpoch = h.toast.Epoch()
+		}
+		// sendEpoch is captured by the pre-send invalidation (Clear) below and
+		// used by the post-send toast: a generation bump that Clears the toast
+		// after the send but before the notify advances the epoch past this,
+		// so the accepted-transition notice is dropped rather than shown over
+		// the reloaded page (feral-file/ffos-user#307).
+		var sendEpoch uint64
 		// replayScopeTouched records whether THIS request reached
 		// syncReplayScope (even a failed sync counts — it still bumps the
 		// playback generation). The corrective resync in the failure defer
@@ -546,12 +618,23 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// playback-failure accounting above records the rejection, exactly
 			// like the preflight's own rejection. The previous artwork stays.
 			// Silent and notify never reach here: they report and play.
-			if h.verifySignatures && h.currentVerificationMode() == sigverify.ModeStrict {
+			// Take the mode snapshot at this admission decision (see castMode).
+			if h.verifySignatures {
+				castMode = h.currentVerificationMode()
+			}
+			if h.verifySignatures && castMode == sigverify.ModeStrict {
 				if rejection := strictRejection(playlist.Verification); rejection != nil {
 					h.logger.Warn("displayPlaylist: cast rejected by strict signature verification",
 						zap.String("reason", rejection.Reason),
 						zap.String("playlist_id", string(helper.TruncateBytes([]byte(playlist.ID), logger.MAX_FIELD_LENGTH))))
 					err = rejection
+					// Strict refused the cast; tell the wall — but only if no
+					// newer transition replaced the artwork while this cast
+					// resolved (NotifyIfEpoch against the pre-resolution
+					// snapshot). Best-effort (#307).
+					if h.toast != nil {
+						h.toast.NotifyIfEpoch(sigverify.NoticeRejected, toastEpoch)
+					}
 					return nil, err
 				}
 			}
@@ -837,6 +920,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if h.activeVerdict != nil {
 				h.activeVerdict.ClearCurrent()
 			}
+			// Drop any queued toast as part of the SAME pre-send invalidation,
+			// under the push lock, and capture the epoch it created: this send
+			// is about to replace the artwork, so a stale warning must not
+			// show during the window before the post-send notify, and that
+			// notify (toastForEpoch) is fenced to this epoch (#307).
+			if h.toast != nil {
+				sendEpoch = h.toast.ClearAndEpoch()
+			}
 		}
 
 		// clearVerdictForDefaultPlayback: an accepted displayDefaultPlaylist
@@ -846,8 +937,17 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// never a stale claim). Pending is kept: this command does not clear
 		// scheduler authority (see the case comment below).
 		clearVerdictForDefaultPlayback := func() {
-			if h.activeVerdict != nil && commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+			if commandType != commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+				return
+			}
+			if h.activeVerdict != nil {
 				h.activeVerdict.ClearCurrent()
+			}
+			// Player-owned default artwork replaced whatever a prior cast put
+			// up, so a signature warning queued for that cast must not still
+			// reach the wall over the default content (#307).
+			if h.toast != nil {
+				h.toast.Clear()
 			}
 		}
 
@@ -919,6 +1019,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				} else {
 					h.scheduler.Commit()
 					publishVerdict(false)
+					// The player accepted this cohort: surface a non-valid
+					// verdict on the wall, INSIDE the push lock so the toast is
+					// ordered with the artwork it describes and a later cast
+					// cannot slip in first (#307). Deferred (future-only)
+					// schedules take the empty-items branch above and do NOT
+					// toast here — their scheduler cutover carries the notice.
+					h.toastForEpoch(castMode, verdictStatus(playlist.Verification), sendEpoch)
 				}
 			})
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
@@ -951,6 +1058,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// right after the send is the tightest ordering available.
 				publishVerdict(false)
 				clearVerdictForDefaultPlayback()
+				if commandType == commands.CMD_DISPLAY_PLAYLIST {
+					h.toastForEpoch(castMode, verdictStatus(playlist.Verification), sendEpoch)
+				}
 			}
 		}
 		if err != nil {

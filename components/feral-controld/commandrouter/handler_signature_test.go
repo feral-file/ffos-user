@@ -836,3 +836,261 @@ func TestStrictPushGate(t *testing.T) {
 	assert.NoError(t, gate(unsigned))
 	assert.NoError(t, commandrouter.StrictPushGate(nil)(unsigned), "unwired mode reader never refuses")
 }
+
+// fakeNotifier is a synchronous playertoast.Notifier double: commandrouter
+// submits toasts non-blocking (Notify) or supersedes a pending one (Clear), so
+// tests read recorded calls directly without waiting on a goroutine.
+type fakeNotifier struct {
+	notices []sigverify.Notice
+	clears  int
+	epoch   uint64
+}
+
+func (f *fakeNotifier) Notify(n sigverify.Notice) { f.epoch++; f.notices = append(f.notices, n) }
+func (f *fakeNotifier) Clear()                    { f.epoch++; f.clears++ }
+func (f *fakeNotifier) Epoch() uint64             { return f.epoch }
+func (f *fakeNotifier) ClearAndEpoch() uint64     { f.epoch++; f.clears++; return f.epoch }
+func (f *fakeNotifier) NotifyIfEpoch(n sigverify.Notice, epoch uint64) {
+	if f.epoch != epoch {
+		return
+	}
+	f.epoch++
+	f.notices = append(f.notices, n)
+}
+
+func unsignedInlineRaw() []byte {
+	return []byte(`{"dpVersion":"1.1.0","id":"app-1","title":"t","items":[{"id":"i","source":"https://example.com/a","duration":10,"license":"open"}]}`)
+}
+
+func tamperedSignedRaw(t *testing.T) []byte {
+	t.Helper()
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(signedFixture(t), &doc))
+	doc["title"] = "tampered"
+	raw, err := json.Marshal(doc)
+	require.NoError(t, err)
+	return raw
+}
+
+// TestCommandHandler_Process_Notify_UnsignedToastsUnsigned: under notify an
+// unsigned inline cast plays and the wall shows the "not signed" notice
+// (feral-file/ffos-user#307 phase 4).
+func TestCommandHandler_Process_Notify_UnsignedToastsUnsigned(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeNotify)
+	toast := &fakeNotifier{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	require.NoError(t, err)
+	assert.Equal(t, "unsigned", replyMessage(t, result)["signatureStatus"])
+	assert.Equal(t, []sigverify.Notice{sigverify.NoticeUnsigned}, toast.notices)
+}
+
+// TestCommandHandler_Process_Notify_InvalidToastsInvalid: under notify a
+// tampered inline cast plays and the wall shows the "could not be verified"
+// notice.
+func TestCommandHandler_Process_Notify_InvalidToastsInvalid(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeNotify)
+	toast := &fakeNotifier{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	command := inlineCast(ts, tamperedSignedRaw(t), inlineTyped("pl-tampered"))
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	require.NoError(t, err)
+	assert.Equal(t, "invalid", replyMessage(t, result)["signatureStatus"])
+	assert.Equal(t, []sigverify.Notice{sigverify.NoticeInvalid}, toast.notices)
+}
+
+// TestCommandHandler_Process_Silent_ClearsRatherThanToasts: silent plays and
+// reports, shows nothing, and supersedes any pending stale notice (Clear).
+func TestCommandHandler_Process_Silent_ClearsRatherThanToasts(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeSilent)
+	toast := &fakeNotifier{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	_, err := ts.handler.Process(ts.ctx, command)
+
+	require.NoError(t, err)
+	assert.Empty(t, toast.notices, "silent mode never toasts")
+	assert.GreaterOrEqual(t, toast.clears, 1, "a silent transition supersedes any pending stale notice (pre-send and/or post-send Clear)")
+}
+
+// TestCommandHandler_Process_Valid_ClearsPendingNotice: a valid cast shows
+// nothing but Clears, so a warning queued by an earlier non-valid cast never
+// lands over the new valid artwork.
+func TestCommandHandler_Process_Valid_ClearsPendingNotice(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeNotify)
+	toast := &fakeNotifier{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	verdict := sigverify.Verify(signedFixture(t))
+	playlistURL := "https://feed.example/p.json"
+	expectDisplayPlaylistSuccess(ts, playlistURL, &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    "pl-ok",
+		Items: []dp1playlist.PlaylistItem{{ID: "i", Source: "https://example.com/a"}},
+	}, Verification: &verdict})
+
+	_, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	require.NoError(t, err)
+	assert.Empty(t, toast.notices)
+	assert.GreaterOrEqual(t, toast.clears, 1, "a valid transition supersedes any pending stale notice (pre-send and/or post-send Clear)")
+}
+
+// TestCommandHandler_Process_Strict_ToastsRejectedAndDoesNotCast: strict
+// refuses the unsigned cast, sends nothing to the player as a cast, and
+// surfaces the "not shown" notice bound to the refusal.
+func TestCommandHandler_Process_Strict_ToastsRejectedAndDoesNotCast(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeStrict)
+	toast := &fakeNotifier{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
+	// No Send / ForceRefresh: the cast is refused before either.
+
+	_, err := ts.handler.Process(ts.ctx, command)
+
+	require.Error(t, err)
+	assert.True(t, commandrouter.IsSigInvalid(err))
+	assert.Equal(t, []sigverify.Notice{sigverify.NoticeRejected}, toast.notices)
+}
+
+// TestComposeInvalidator: the seams that replace displayed content outside the
+// cast path drop both the verdict and any queued toast (#307 round 4 F1).
+func TestComposeInvalidator(t *testing.T) {
+	var clearedVerdict int
+	toast := &fakeNotifier{}
+	inv := commandrouter.ComposeInvalidator(func() { clearedVerdict++ }, toast)
+
+	inv()
+
+	assert.Equal(t, 1, clearedVerdict)
+	assert.Equal(t, 1, toast.clears)
+
+	// nil notifier: verdict-only, no panic.
+	invNil := commandrouter.ComposeInvalidator(func() { clearedVerdict++ }, nil)
+	assert.NotPanics(t, invNil)
+	assert.Equal(t, 2, clearedVerdict)
+}
+
+// TestScheduledPushToaster: a cutover the current generation still owns emits
+// the gate's notice (or Clears when silent); a generation race across the send
+// Clears rather than toasting over the replacement (#307 round 4 F2).
+func TestScheduledPushToaster(t *testing.T) {
+	newToaster := func(notifier *fakeNotifier, gen, genStart uint64, notice sigverify.Notice, show bool) func(*dp1.Playlist) {
+		return commandrouter.ScheduledPushToaster(
+			notifier,
+			func() uint64 { return gen },
+			func() uint64 { return genStart },
+			func() uint64 { return notifier.Epoch() },
+			func() (sigverify.Notice, bool) { return notice, show },
+		)
+	}
+
+	// Generation held, policy shows: Notify.
+	held := &fakeNotifier{}
+	newToaster(held, 7, 7, sigverify.NoticeUnsigned, true)(nil)
+	assert.Equal(t, []sigverify.Notice{sigverify.NoticeUnsigned}, held.notices)
+	assert.Equal(t, 0, held.clears)
+
+	// Generation held, policy silent (valid cohort): Clear.
+	silent := &fakeNotifier{}
+	newToaster(silent, 7, 7, "", false)(nil)
+	assert.Empty(t, silent.notices)
+	assert.Equal(t, 1, silent.clears)
+
+	// Generation raced across the send: Clear, never toast over the replacement.
+	raced := &fakeNotifier{}
+	newToaster(raced, 8, 7, sigverify.NoticeInvalid, true)(nil)
+	assert.Empty(t, raced.notices, "a generation-raced cutover must not toast")
+	assert.Equal(t, 1, raced.clears)
+
+	// nil notifier: no panic.
+	assert.NotPanics(t, func() {
+		commandrouter.ScheduledPushToaster(nil, func() uint64 { return 1 }, func() uint64 { return 1 },
+			func() uint64 { return 1 },
+			func() (sigverify.Notice, bool) { return sigverify.NoticeInvalid, true })(nil)
+	})
+}
+
+// TestCommandHandler_Process_Strict_RefusalSuppressedWhenTransitionIntervened:
+// a strict URL cast that resolves slowly must not toast signature_rejected if
+// a newer transition replaced the artwork (advanced the display-transition
+// epoch) while it resolved (feral-file/ffos-user#307 round 6).
+func TestCommandHandler_Process_Strict_RefusalSuppressedWhenTransitionIntervened(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeStrict)
+	toast := &fakeNotifier{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	verdict := sigverify.Verify(tamperedSignedRaw(t)) // invalid
+	require.Equal(t, sigverify.StatusInvalid, verdict.Status)
+	playlistURL := "https://feed.example/p.json"
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL).DoAndReturn(
+		func(context.Context, string) (*dp1.Playlist, error) {
+			toast.Clear() // a newer transition lands while this cast resolves
+			return &dp1.Playlist{Playlist: dp1playlist.Playlist{
+				ID:    "pl-tampered",
+				Items: []dp1playlist.PlaylistItem{{ID: "i", Source: "https://example.com/a"}},
+			}, Verification: &verdict}, nil
+		}).Times(1)
+
+	_, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	require.Error(t, err)
+	assert.True(t, commandrouter.IsSigInvalid(err))
+	assert.Empty(t, toast.notices, "a superseded strict rejection must not toast")
+}
+
+// TestCommandHandler_Process_Notify_AcceptedToastSuppressedWhenTransitionIntervened:
+// an accepted notify cast whose toast would land after a newer transition
+// (here a Clear during the CDP send, as a generation bump would do) is
+// suppressed — the post-send notify is fenced to the epoch the pre-send
+// invalidation created (feral-file/ffos-user#307 round 7 F1).
+func TestCommandHandler_Process_Notify_AcceptedToastSuppressedWhenTransitionIntervened(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeNotify)
+	toast := &fakeNotifier{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(string, map[string]interface{}) (interface{}, error) {
+			// A newer transition lands between the pre-send invalidation and
+			// the post-send notify, advancing the display-transition epoch.
+			toast.Clear()
+			return playerOkResponse(), nil
+		}).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	require.NoError(t, err)
+	assert.Equal(t, "unsigned", replyMessage(t, result)["signatureStatus"])
+	assert.Empty(t, toast.notices, "a superseded accepted-transition toast must not fire")
+}

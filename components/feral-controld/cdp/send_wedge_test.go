@@ -106,3 +106,84 @@ func TestSend_WedgedSocketUnblocksAndSignalsDrop(t *testing.T) {
 		t.Fatal("Close deadlocked behind the send mutex")
 	}
 }
+
+// newWedgeClient builds a cdp client dialed to a real (silent) websocket, the
+// same fixture TestSend_WedgedSocketUnblocksAndSignalsDrop uses.
+func newWedgeClient(t *testing.T, onServerMessage func()) *cdp {
+	t.Helper()
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+			if onServerMessage != nil {
+				onServerMessage()
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c := &cdp{
+		dialer:        wrapper.NewWebSocketDialer(websocket.DefaultDialer),
+		io:            fakeIO{},
+		json:          fakeJSON{},
+		httpClient:    &wedgeHTTP{targetsJSON: fmt.Sprintf(`[{"type":"page","title":"kiosk","webSocketDebuggerUrl":"%s"}]`, wsURL)},
+		endpoint:      srv.URL,
+		doneChan:      make(chan struct{}),
+		reconnectCh:   make(chan struct{}, 1),
+		retryInterval: 10 * time.Millisecond,
+		sendTimeout:   200 * time.Millisecond,
+		logger:        zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)),
+	}
+	require.NoError(t, c.Init(context.Background()))
+	t.Cleanup(c.Close)
+	return c
+}
+
+// TestNoLogSendWithin_WedgedSocketDoesNotSignalDrop pins the best-effort
+// contract (feral-file/ffos-user#307 round 8 F1): a toast send whose short
+// deadline expires against a slow-but-alive player must NOT tear down the
+// shared connection — that would make later casts fail during reconnection.
+// A real send against the same socket does signal (TestSend_Wedged... above).
+func TestNoLogSendWithin_WedgedSocketDoesNotSignalDrop(t *testing.T) {
+	c := newWedgeClient(t, nil)
+
+	_, err := c.NoLogSendWithin("Runtime.evaluate", map[string]interface{}{"expression": "1"}, 100*time.Millisecond, nil)
+	require.Error(t, err, "the toast send still fails on its own deadline")
+
+	select {
+	case <-c.reconnectCh:
+		t.Fatal("a best-effort toast timeout must not signal a reconnect of the shared session")
+	default:
+	}
+}
+
+// TestNoLogSendWithin_GuardFalseAbandonsWithoutWrite pins F2: the guard is
+// consulted under the write lock, so a notice a newer transition superseded is
+// abandoned before anything reaches the socket.
+func TestNoLogSendWithin_GuardFalseAbandonsWithoutWrite(t *testing.T) {
+	gotMessage := make(chan struct{}, 1)
+	c := newWedgeClient(t, func() {
+		select {
+		case gotMessage <- struct{}{}:
+		default:
+		}
+	})
+
+	result, err := c.NoLogSendWithin("Runtime.evaluate", map[string]interface{}{"expression": "1"},
+		100*time.Millisecond, func() bool { return false })
+	require.NoError(t, err, "a guard-abandoned send is a no-op, not an error")
+	require.Nil(t, result)
+
+	select {
+	case <-gotMessage:
+		t.Fatal("a guard-false send must not write to the socket")
+	case <-time.After(150 * time.Millisecond):
+	}
+}

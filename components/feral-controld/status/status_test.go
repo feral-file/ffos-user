@@ -94,6 +94,13 @@ func (f *fakeCDP) Start(context.Context, func()) {}
 
 func (f *fakeCDP) Send(string, map[string]interface{}) (interface{}, error) { return nil, nil }
 
+func (f *fakeCDP) NoLogSendWithin(method string, params map[string]interface{}, _ time.Duration, guard func() bool) (interface{}, error) {
+	if guard != nil && !guard() {
+		return nil, nil
+	}
+	return f.NoLogSend(method, params)
+}
+
 func (f *fakeCDP) NoLogSend(string, map[string]interface{}) (interface{}, error) {
 	f.noLogSendCalls++
 	return f.noLogSendResult, f.noLogSendErr

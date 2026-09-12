@@ -129,6 +129,13 @@ func (f *fakeCDP) getEvalCount() int {
 	return f.evalCount
 }
 
+func (f *fakeCDP) NoLogSendWithin(method string, params map[string]interface{}, _ time.Duration, guard func() bool) (interface{}, error) {
+	if guard != nil && !guard() {
+		return nil, nil
+	}
+	return f.NoLogSend(method, params)
+}
+
 func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (interface{}, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
