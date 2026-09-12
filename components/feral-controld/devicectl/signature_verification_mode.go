@@ -40,25 +40,16 @@ func (e *executor) setSignatureVerificationMode(_ context.Context, args []byte) 
 	}
 	e.logger.Info("Signature verification mode set", zap.String("mode", string(mode)))
 
-	// Notified OUTSIDE the record lock, unlike the device-name observer: what
-	// the lock orders is the disk, and the observer's consumer (the displayAt
-	// scheduler's re-drive) reads the mode from disk itself at push time and
-	// may spend a CDP round-trip — not something to hold a factory reset's
-	// clear behind. Suppressed while a reset is staged (one that latched
-	// between the store and here): a scheduler push must not go out under
-	// the reset panel, and the latch release re-drives from the effective
-	// record if the reset rolls back (releaseStuckResetLatch).
-	if e.resetStaged.Load() {
-		e.logger.Info("Signature verification mode stored during a staged factory reset; re-drive deferred to the latch release")
-	} else {
-		e.notifyVerificationMode()
-	}
+	// Notified OUTSIDE the record lock: the observer's consumer (the displayAt
+	// scheduler's re-drive of a cutover the strict push gate refused) reads
+	// the mode from disk itself and may spend a CDP round-trip, which the
+	// record lock must not hold.
+	e.notifyVerificationMode()
 	return map[string]interface{}{"ok": true, "signatureVerificationMode": string(mode)}, nil
 }
 
 // notifyVerificationMode hands the observer the mode actually on disk (never
-// the mode a caller asked for): the setter's store and the reset's clear
-// both flow through here, and the consumer must act on what the cast path
+// the mode a caller asked for), so the consumer acts on what the cast path
 // will read. No-op when nothing is wired, and then the record is not read.
 func (e *executor) notifyVerificationMode() {
 	if e.modeObserver == nil {

@@ -126,14 +126,6 @@ type executor struct {
 	// answers whether the verifier runs; nil reads the config.
 	verificationEnabled func() bool
 
-	// playbackFence, when set (SetPlaybackFence), runs a callback under the
-	// scheduler's player-push lock. The factory-reset narration write uses it
-	// so it is serialized against every playlist writer (scheduler cutovers
-	// and the refresher, which drop when they see the reset latch), and paints
-	// last instead of being overwritten by an in-flight cutover or refresh
-	// (feral-file/ffos-user#307). nil runs the narration directly.
-	playbackFence func(func())
-
 	// deviceNameMu serializes every mutation of the device-name record and the
 	// observer notification that follows it. Both writers stage through one
 	// shared temp path and both are reachable concurrently (a rename over the
@@ -579,22 +571,6 @@ func (e *executor) SetSignatureVerificationCapability(enabled func() bool) {
 	e.verificationEnabled = enabled
 }
 
-// SetPlaybackFence injects the scheduler's player-push lock runner (see the
-// playbackFence field). Call once at wiring time.
-func (e *executor) SetPlaybackFence(fn func(func())) {
-	e.playbackFence = fn
-}
-
-// showFactoryResetNarration paints the reset panel under the playback fence
-// so it is ordered last against playlist writers; direct when unwired.
-func (e *executor) showFactoryResetNarration() {
-	if e.playbackFence != nil {
-		e.playbackFence(func() { e.setupUI().ShowFactoryReset() })
-		return
-	}
-	e.setupUI().ShowFactoryReset()
-}
-
 // SetSetupUI injects the shared setup-narration surface so the controld-owned
 // claim/factory-reset/OTA-failure narration and the provisioning domain's
 // narration all flow through ONE setupui.Service — the same instance main wires
@@ -762,15 +738,16 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 	// device (e.g. mid-OTA with the updating narration up) must not wipe an
 	// unrelated overlay.
 	if !wasClaimed {
-		// First pair: hide the setup overlay and put artwork on screen
-		// immediately instead of leaving the player idle until the cloud sends
-		// content. Both run under the player-push lock behind ONE late reset
-		// re-check (firstClaimDisplay): a claim admitted before a factory reset
-		// staged must not erase the reset narration (Hide) or repaint over it
-		// (default playlist) once the reset has taken the shared lock and
-		// queued its narration (feral-file/ffos-user#307). Best-effort: the
-		// claim itself already landed and must not fail on a player hiccup.
-		e.firstClaimDisplay()
+		e.setupUI().Hide()
+		// First pair: put artwork on screen immediately instead of leaving the
+		// player idle until the cloud gets around to sending content. The claim
+		// QR only paints after the relayer topic-wait, so the device is online
+		// and the player's playlist fetch will succeed. Best-effort: the claim
+		// itself already landed and must not fail on a player hiccup.
+		if err := e.sendDisplayDefaultPlaylist(); err != nil {
+			e.logger.Warn("Failed to start default playlist after first pair",
+				zap.Error(err))
+		}
 	}
 
 	return CmdOK, nil
@@ -784,97 +761,59 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 // before the claim), and a force push would visibly restart it. The player
 // treats the flag as "make sure something is playing" and no-ops otherwise.
 func (e *executor) sendDisplayDefaultPlaylist() error {
+	if e.cdp == nil {
+		return fmt.Errorf("cdp client is not configured")
+	}
+
+	send := func() (interface{}, error) {
+		command := commands.Command{
+			Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
+			Arguments: map[string]any{
+				"onlyIfNoPlaylist": true,
+			},
+		}
+		payload, err := command.JSON()
+		if err != nil {
+			return nil, fmt.Errorf("marshal displayDefaultPlaylist payload: %w", err)
+		}
+
+		// This send bypasses commandrouter, so it must do what
+		// commandrouter does before every replacing send: drop the
+		// attested signature verdict. From the moment the send lands the
+		// player may be showing its own default content — bytes controld
+		// never verified — and a status round in that window must omit,
+		// never re-attest, the previous playlist's verdict
+		// (feral-file/ffos-user#307). Inside the push section, before the
+		// send, like every other producer.
+		e.sleepApplyMu.Lock()
+		invalidate := e.verdictInvalidator
+		e.sleepApplyMu.Unlock()
+		if invalidate != nil {
+			invalidate()
+		}
+
+		result, err := e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
+			"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("send displayDefaultPlaylist command to player: %w", err)
+		}
+		return result, nil
+	}
+
 	e.sleepApplyMu.Lock()
 	withPlayerPush := e.withPlayerPush
 	e.sleepApplyMu.Unlock()
 
 	var err error
-	run := func() {
-		// Late reset re-check inside the push section: the factory-reset
-		// narration write is serialized through this same lock, so a send
-		// admitted before the latch must drop here rather than repaint over
-		// the reset screen (feral-file/ffos-user#307).
-		if e.ResetStaged() {
-			e.logger.Warn("Skipping displayDefaultPlaylist: factory reset staged")
-			return
-		}
-		_, err = e.sendDefaultPlaylistLocked()
-	}
 	if withPlayerPush != nil {
-		withPlayerPush(run)
+		withPlayerPush(func() {
+			_, err = send()
+		})
 		return err
 	}
-	run()
+	_, err = send()
 	return err
-}
-
-// firstClaimDisplay hides the setup overlay and starts default playback on the
-// first pairing, both under the player-push lock behind ONE late ResetStaged
-// re-check. A claim admitted before a factory reset staged must not erase the
-// reset narration (Hide) or repaint over it (the default playlist) once the
-// reset has acquired the shared lock and queued its narration
-// (feral-file/ffos-user#307).
-func (e *executor) firstClaimDisplay() {
-	e.sleepApplyMu.Lock()
-	withPlayerPush := e.withPlayerPush
-	e.sleepApplyMu.Unlock()
-
-	run := func() {
-		if e.ResetStaged() {
-			e.logger.Warn("Skipping first-claim display: factory reset staged")
-			return
-		}
-		e.setupUI().Hide()
-		if _, err := e.sendDefaultPlaylistLocked(); err != nil {
-			e.logger.Warn("Failed to start default playlist after first pair", zap.Error(err))
-		}
-	}
-	if withPlayerPush != nil {
-		withPlayerPush(run)
-		return
-	}
-	run()
-}
-
-// sendDefaultPlaylistLocked performs the raw displayDefaultPlaylist send. The
-// caller MUST be inside the player-push section AND have re-checked
-// ResetStaged; it is the shared body of sendDisplayDefaultPlaylist and the
-// first-claim path.
-func (e *executor) sendDefaultPlaylistLocked() (interface{}, error) {
-	if e.cdp == nil {
-		return nil, fmt.Errorf("cdp client is not configured")
-	}
-	command := commands.Command{
-		Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
-		Arguments: map[string]any{
-			"onlyIfNoPlaylist": true,
-		},
-	}
-	payload, err := command.JSON()
-	if err != nil {
-		return nil, fmt.Errorf("marshal displayDefaultPlaylist payload: %w", err)
-	}
-
-	// This send bypasses commandrouter, so it must do what commandrouter does
-	// before every replacing send: drop the attested signature verdict. From
-	// the moment the send lands the player may be showing its own default
-	// content — bytes controld never verified — and a status round in that
-	// window must omit, never re-attest, the previous playlist's verdict
-	// (feral-file/ffos-user#307).
-	e.sleepApplyMu.Lock()
-	invalidate := e.verdictInvalidator
-	e.sleepApplyMu.Unlock()
-	if invalidate != nil {
-		invalidate()
-	}
-
-	result, err := e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
-		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("send displayDefaultPlaylist command to player: %w", err)
-	}
-	return result, nil
 }
 
 func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interface{}, error) {
@@ -3305,7 +3244,7 @@ func (e *executor) factoryResetInProcess(ctx context.Context) (interface{}, erro
 	// block the reset. It is sent as an extension state ("factory_reset"): a
 	// current player accepts it with {ok:true} and renders nothing, so the panel
 	// only paints the confirmation once ff-player adds the state to its renderer.
-	e.showFactoryResetNarration()
+	e.setupUI().ShowFactoryReset()
 
 	out, err := e.exec.CommandContext(ctx, "systemctl", "start", "set-factory-boot.service").CombinedOutput()
 	if err != nil {
@@ -3361,13 +3300,6 @@ func (e *executor) releaseStuckResetLatch(why string) {
 	e.logger.Warn("Releasing the staged factory-reset latch", zap.String("reason", why))
 	e.resetStaged.Store(false)
 	e.setupUI().HideIfShowing(setupui.StateFactoryReset)
-	// The reset cleared the verification-mode record (hand-on) without
-	// telling anyone, and a setter that raced the latch had its observer
-	// suppressed — so the displayAt scheduler may still hold a cutover it
-	// refused under the previous owner's strict. Now that the unit lives on,
-	// re-drive from the mode actually on disk, exactly as a relaxation
-	// would (see setSignatureVerificationMode).
-	e.notifyVerificationMode()
 }
 
 func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, error) {

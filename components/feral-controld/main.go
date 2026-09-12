@@ -1127,23 +1127,6 @@ func initializeApp(
 			return string(st), ok
 		})
 	}
-
-	// Factory-reset playback fence, wired UNCONDITIONALLY (independent of the
-	// verifier kill switch): a staged reset owns the screen and is about to
-	// reboot, so no playlist write may repaint over its narration. Two halves,
-	// both needed to make it atomic: (1) every scheduler cutover re-asks the
-	// reset latch immediately before its CDP write (SetResetFence), and (2)
-	// the reset narration write itself runs under the scheduler's player-push
-	// lock (SetPlaybackFence), so an in-flight cutover or refresher pass
-	// finishes first and the narration paints last, while any writer that
-	// acquires the lock after the narration sees the latch and drops. The
-	// refresher gets the same latch below.
-	if fenced, ok := any(playlistScheduler).(interface{ SetResetFence(func() bool) }); ok {
-		fenced.SetResetFence(executor.ResetStaged)
-	}
-	if fenced, ok := executor.(interface{ SetPlaybackFence(func(func())) }); ok {
-		fenced.SetPlaybackFence(playlistScheduler.WithPlayerPush)
-	}
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -1163,11 +1146,6 @@ func initializeApp(
 		// Same generation fence for the refresher's force casts.
 		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
 	}
-	// The refresher honors the factory-reset latch too (unconditional, like
-	// the scheduler fence): its send runs under the same player-push lock, so
-	// dropping when the latch is set keeps it from repainting over the reset
-	// narration.
-	playlist_refresher.SetResetStaged(playlistRefresher, executor.ResetStaged, logger)
 
 	// Replay saturation invalidates Fetch-interception scope exactly the way
 	// a kiosk restart does: retireOnSaturation closes the root CDP session so

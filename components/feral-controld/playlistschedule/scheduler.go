@@ -215,10 +215,6 @@ type scheduler struct {
 	// pushGate, when set (SetPushGate), is consulted inside push before the
 	// observer and the CDP send. Same single-writer contract as pushObserver.
 	pushGate func(*dp1.Playlist) error
-	// resetFence, when set (SetResetFence), reports a staged factory reset;
-	// consulted immediately before each CDP write under pushMu. Single-writer
-	// contract like pushObserver.
-	resetFence func() bool
 	// inlineDynamic is the retained verified inline dynamic source (see
 	// SetInlineDynamicSource). Guarded by mu; a separate slot from source so
 	// it outlives the non-displayAt source clear.
@@ -812,16 +808,6 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 		}
 	}
 
-	// Reset fence BEFORE the observer, like the strict gate: a refused push
-	// must not fire PushStarting, which clears the active verdict — nothing
-	// is written, so nothing should be invalidated. It is still ordered
-	// against the reset narration write, which is serialized through this
-	// same pushMu that push() holds across the send: a push that passes here
-	// writes before the narration can acquire the lock, so the narration
-	// paints last, and a later cutover sees the latch and drops.
-	if s.resetFence != nil && s.resetFence() {
-		return fmt.Errorf("%w: factory reset staged", errPushRefused)
-	}
 	if s.pushObserver != nil {
 		s.pushObserver(PushStarting)
 	}
@@ -858,14 +844,6 @@ func (s *scheduler) SetPushObserver(fn func(PushPhase)) {
 
 func (s *scheduler) SetPushGate(fn func(playlist *dp1.Playlist) error) {
 	s.pushGate = fn
-}
-
-// SetResetFence installs the late reset-latch predicate (see the resetFence
-// field). Deliberately NOT on the Scheduler interface — a type-asserted seam
-// like the refresher's, so mocks and fakes stay untouched. Call once at
-// wiring time.
-func (s *scheduler) SetResetFence(fn func() bool) {
-	s.resetFence = fn
 }
 
 func (s *scheduler) SetInlineDynamicSource(playlist *dp1.Playlist) {

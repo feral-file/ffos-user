@@ -1073,8 +1073,7 @@ scheduler refused while the mode was `strict` (a refusal arms no retry, and
 past the schedule's final boundary there is no timer), so the wall does not
 stay on the pre-cutover cohort until an unrelated wake. Only a cohort not yet
 delivered is pushed; a mode change never re-casts what is already on screen.
-A factory reset clears the record — a unit handed on returns to `notify` — and
-if it rolls back it re-drives the same way from that restored default.
+A factory reset clears the record, so a unit handed on returns to `notify`.
 
 Error cases — the request is rejected before anything is written, so no
 record changes and the stored mode (if any) still stands:

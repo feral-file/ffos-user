@@ -568,39 +568,3 @@ func TestRefresher_Strict_InlineDynamicUsesRetainedVerifiedSource(t *testing.T) 
 	}
 	r.Stop()
 }
-
-// TestRefresher_SkipsSendWhileFactoryResetStaged: a refresher pass that finds
-// a staged factory reset must drop its send rather than repaint over the
-// reset narration; its send runs under the same player-push lock the
-// narration write is serialized through (feral-file/ffos-user#307).
-func TestRefresher_SkipsSendWhileFactoryResetStaged(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	setupBackgroundMocks(ts)
-	refresher.SetResetStaged(ts.refresher, func() bool { return true }, zap.NewNop())
-
-	playlistURL := "http://example.com/playlist.json"
-	resolved := make(chan struct{}, 1)
-	ts.mockStatusPoller.EXPECT().
-		FetchPlayerStatus(ts.ctx).
-		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
-		AnyTimes()
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).DoAndReturn(
-		func(context.Context, string, bool) (*dp1.Playlist, error) {
-			select {
-			case resolved <- struct{}{}:
-			default:
-			}
-			return createMockPlaylist(), nil
-		}).AnyTimes()
-	// No CDP Send expectation: a push during a staged reset is an unexpected call.
-
-	ts.refresher.Start()
-	select {
-	case <-resolved:
-	case <-time.After(2 * time.Second):
-		t.Fatal("refresher never resolved the playlist")
-	}
-	time.Sleep(150 * time.Millisecond)
-	ts.refresher.Stop()
-}
