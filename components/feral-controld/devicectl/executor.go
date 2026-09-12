@@ -620,6 +620,8 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.setAnalyticsToggle(ctx, bytes)
 	case commands.CMD_BETA_FEATURES_TOGGLE:
 		result, err = e.setBetaFeaturesToggle(ctx, bytes)
+	case commands.CMD_SET_SIGNATURE_VERIFICATION_MODE:
+		result, err = e.setSignatureVerificationMode(ctx, bytes)
 	case commands.CMD_DEVICE_STATUS:
 		result, err = e.getDeviceStatus(ctx)
 	case commands.CMD_START_WIFI_SETUP:
@@ -2990,6 +2992,12 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	// over it would trade a real outcome for a label.
 	if err := e.clearDeviceName(); err != nil {
 		e.logger.Warn("Failed to clear device name during factory reset", zap.Error(err))
+	}
+	// The signature verification mode falls with the claim for the same
+	// hand-on reason: a previous owner's `strict` must not block the next
+	// owner's casts after a rolled-back reset. Best-effort like the name.
+	if err := e.clearSignatureVerificationMode(); err != nil {
+		e.logger.Warn("Failed to clear signature verification mode during factory reset", zap.Error(err))
 	}
 
 	// The process-lifetime pairing latch must fall with the persisted claim,

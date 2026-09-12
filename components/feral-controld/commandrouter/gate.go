@@ -94,6 +94,12 @@ func DefaultGateConfig() GateConfig {
 		// persisted-write analog; renaming is a rare deliberate act, so
 		// ~1-per-5s cannot reject legitimate use.
 		commands.CMD_SET_DEVICE_NAME: disruptive,
+		// setSignatureVerificationMode is a persisted eMMC write reachable
+		// from the unauthenticated LAN hub, and its value governs whether
+		// the device's primary function is refused; alternating values
+		// defeats any unchanged-early-return. Same tier as the other
+		// persisted settings: choosing a policy is a rare deliberate act.
+		commands.CMD_SET_SIGNATURE_VERIFICATION_MODE: disruptive,
 
 		// User-initiated power toggles: loosely capped (executor coalesces).
 		commands.CMD_SLEEP_NOW: userAction,

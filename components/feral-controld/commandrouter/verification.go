@@ -91,3 +91,20 @@ func (h *handler) logSignatureVerdict(v *sigverify.Verdict, playlistID, playlist
 	}
 	h.logger.Info("displayPlaylist: playlist signature verdict", fields...)
 }
+
+// strictRejection returns the SigInvalidError strict mode raises for v, or
+// nil when v proves the document valid. A nil verdict is a rejection too: it
+// means the document could not be verified (today: the offline cached copy,
+// whose stored body is a hydrated re-marshal), and strict does not guess.
+// Restoring the offline fallback under strict needs the download-time
+// verdict persisted beside the cached record — the follow-up noted on
+// loadCachedPlaylistForURL.
+func strictRejection(v *sigverify.Verdict) *SigInvalidError {
+	if v == nil {
+		return &SigInvalidError{Reason: "cached copy carries no verdict"}
+	}
+	if v.Status == sigverify.StatusValid {
+		return nil
+	}
+	return &SigInvalidError{Status: v.Status, Reason: v.Reason}
+}

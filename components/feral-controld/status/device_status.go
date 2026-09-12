@@ -13,6 +13,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
@@ -156,6 +157,14 @@ type DeviceStatusResponse struct {
 	// key there would report "this firmware cannot be renamed" on every frame
 	// that simply has not been.
 	DeviceName string `json:"deviceName"`
+	// SignatureVerificationMode is the owner's DP-1 signature verification
+	// policy (feral-file/ffos-user#307): "silent", "notify", or "strict".
+	// Deliberately no omitempty, like Contract and DeviceName: its PRESENCE
+	// is the capability signal a controller gates the setting UI on, and
+	// the default ("notify") is the ordinary value on a unit nobody
+	// configured. Read through sigverify.LoadMode — the same reader the
+	// cast path uses — never a duplicated path constant.
+	SignatureVerificationMode string `json:"signatureVerificationMode"`
 	// SleepSchedule is derived from persisted schedule + wall clock (see sleepschedule).
 	// It reflects intended FF1 sleep mode; FFP panel DDC power may lag after transitions
 	// because controld aligns panel power asynchronously (best-effort, eventual vs. ddcPanelStatus).
@@ -173,6 +182,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	// Variables to collect results safely
 	var screenRotation, connectedWifi, installedVersion, latestVersion string
 	var analyticsDisabled, betaFeaturesEnabled bool
+	var signatureVerificationMode string
 	var volume *int
 	var isMuted *bool
 	var displayURL *string
@@ -330,6 +340,15 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		return nil
 	})
 
+	// Signature verification mode: a bad record loads as the default (the
+	// non-blocking policy), and the cast path logs that condition where it
+	// matters; here the reported value is what the cast path will apply.
+	g.Go(func() error {
+		mode, _ := sigverify.LoadMode(d.os, d.json)
+		signatureVerificationMode = string(mode)
+		return nil
+	})
+
 	// Get volume and mute status
 	g.Go(func() error {
 		// Get mute status
@@ -390,6 +409,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.IsMuted = isMuted
 	response.DisplayURL = displayURL
 	response.DeviceName = deviceName
+	response.SignatureVerificationMode = signatureVerificationMode
 	response.SleepSchedule = sleepScheduleStatus
 
 	// Get MAC info from config (fetched once at startup)

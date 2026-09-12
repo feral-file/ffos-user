@@ -14,6 +14,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -30,6 +31,7 @@ func expectDeviceStatusOSMocks(t *testing.T, mockOS *mocks.MockOS) {
 	mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, os.ErrNotExist).Times(1)
 	mockOS.EXPECT().ReadFile("/home/feralfile/.state/analytics-toggle-off").Return(nil, os.ErrNotExist).Times(1)
 	mockOS.EXPECT().ReadFile("/home/feralfile/.state/beta-features-toggle-on").Return(nil, os.ErrNotExist).Times(1)
+	mockOS.EXPECT().ReadFile(constants.SIGNATURE_VERIFICATION_FILE).Return(nil, os.ErrNotExist).Times(1)
 	mockOS.EXPECT().IsNotExist(gomock.Any()).DoAndReturn(func(err error) bool { return os.IsNotExist(err) }).AnyTimes()
 }
 
@@ -42,6 +44,7 @@ func expectDeviceStatusOSMocksSleepFile(t *testing.T, mockOS *mocks.MockOS, slee
 	mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, os.ErrNotExist).Times(1)
 	mockOS.EXPECT().ReadFile("/home/feralfile/.state/analytics-toggle-off").Return(nil, os.ErrNotExist).Times(1)
 	mockOS.EXPECT().ReadFile("/home/feralfile/.state/beta-features-toggle-on").Return(nil, os.ErrNotExist).Times(1)
+	mockOS.EXPECT().ReadFile(constants.SIGNATURE_VERIFICATION_FILE).Return(nil, os.ErrNotExist).Times(1)
 	mockOS.EXPECT().IsNotExist(gomock.Any()).DoAndReturn(func(err error) bool { return os.IsNotExist(err) }).AnyTimes()
 }
 
@@ -215,6 +218,7 @@ func TestGetStatus_DeviceName(t *testing.T) {
 	mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return([]byte(`{"name":"Living Room"}`), nil).Times(1)
 	mockOS.EXPECT().ReadFile("/home/feralfile/.state/analytics-toggle-off").Return(nil, os.ErrNotExist).Times(1)
 	mockOS.EXPECT().ReadFile("/home/feralfile/.state/beta-features-toggle-on").Return(nil, os.ErrNotExist).Times(1)
+	mockOS.EXPECT().ReadFile(constants.SIGNATURE_VERIFICATION_FILE).Return(nil, os.ErrNotExist).Times(1)
 	mockOS.EXPECT().IsNotExist(gomock.Any()).DoAndReturn(func(err error) bool { return os.IsNotExist(err) }).AnyTimes()
 	expectDeviceStatusExecMocks(t, mockExec, nmcliCmd, pamCmd)
 	mockCDP.EXPECT().PageNavigationURL(gomock.Any()).Return("", errors.New("cdp down")).Times(1)
@@ -223,4 +227,80 @@ func TestGetStatus_DeviceName(t *testing.T) {
 	resp, err := ds.GetStatus(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "Living Room", resp.DeviceName)
+}
+
+// TestGetStatus_SignatureVerificationMode_DefaultWhenRecordMissing: the field
+// is always present (presence = capability, like deviceName) and reads the
+// default policy when the owner has never chosen one (#307).
+func TestGetStatus_SignatureVerificationMode_DefaultWhenRecordMissing(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	mockOS := mocks.NewMockOS(ctrl)
+	mockExec := mocks.NewMockExec(ctrl)
+	mockHTTP := mocks.NewMockHTTPClient(ctrl)
+	mockIO := mocks.NewMockIO(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	nmcliCmd := mocks.NewMockExecCmd(ctrl)
+	pamCmd := mocks.NewMockExecCmd(ctrl)
+
+	expectDeviceStatusOSMocks(t, mockOS)
+	expectDeviceStatusExecMocks(t, mockExec, nmcliCmd, pamCmd)
+	mockCDP.EXPECT().PageNavigationURL(gomock.Any()).Return("", errors.New("no debug targets")).AnyTimes()
+
+	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, mockCDP)
+	resp, err := ds.GetStatus(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, string(sigverify.DefaultMode), resp.SignatureVerificationMode)
+
+	body, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"signatureVerificationMode":"notify"`)
+}
+
+// TestGetStatus_SignatureVerificationMode_ReadsStoredRecord: a stored choice
+// is echoed verbatim, and a corrupt record reads as the default rather than
+// hiding the field.
+func TestGetStatus_SignatureVerificationMode_ReadsStoredRecord(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+		want string
+	}{
+		{name: "strict stored", raw: []byte(`{"mode":"strict"}`), want: "strict"},
+		{name: "silent stored", raw: []byte(`{"mode":"silent"}`), want: "silent"},
+		{name: "corrupt record", raw: []byte(`{"mode":`), want: "notify"},
+		{name: "unknown mode", raw: []byte(`{"mode":"loud"}`), want: "notify"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctrl := gomock.NewController(t)
+			mockOS := mocks.NewMockOS(ctrl)
+			mockExec := mocks.NewMockExec(ctrl)
+			mockHTTP := mocks.NewMockHTTPClient(ctrl)
+			mockIO := mocks.NewMockIO(ctrl)
+			mockCDP := mocks.NewMockCDP(ctrl)
+			nmcliCmd := mocks.NewMockExecCmd(ctrl)
+			pamCmd := mocks.NewMockExecCmd(ctrl)
+
+			mockOS.EXPECT().ReadFile(constants.SCREEN_ORIENTATION_FILE).Return(nil, os.ErrNotExist).Times(1)
+			mockOS.EXPECT().ReadFile(constants.FF1_CONFIG_FILE).Return([]byte(testFF1ConfigJSON), nil).Times(1)
+			mockOS.EXPECT().ReadFile(constants.SLEEP_SCHEDULE_FILE).Return(nil, os.ErrNotExist).Times(1)
+			mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, os.ErrNotExist).Times(1)
+			mockOS.EXPECT().ReadFile("/home/feralfile/.state/analytics-toggle-off").Return(nil, os.ErrNotExist).Times(1)
+			mockOS.EXPECT().ReadFile("/home/feralfile/.state/beta-features-toggle-on").Return(nil, os.ErrNotExist).Times(1)
+			mockOS.EXPECT().ReadFile(constants.SIGNATURE_VERIFICATION_FILE).Return(tc.raw, nil).Times(1)
+			mockOS.EXPECT().IsNotExist(gomock.Any()).DoAndReturn(func(err error) bool { return os.IsNotExist(err) }).AnyTimes()
+			expectDeviceStatusExecMocks(t, mockExec, nmcliCmd, pamCmd)
+			mockCDP.EXPECT().PageNavigationURL(gomock.Any()).Return("", errors.New("no debug targets")).AnyTimes()
+
+			ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, mockCDP)
+			resp, err := ds.GetStatus(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, resp.SignatureVerificationMode)
+		})
+	}
 }

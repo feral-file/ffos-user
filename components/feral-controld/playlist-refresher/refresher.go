@@ -153,6 +153,33 @@ type refresher struct {
 	// already cleared the slot), and the new generation's reconciliation
 	// establishes a fresh verdict. Mirrors commandrouter.sendCDPRequest.
 	sessionGeneration func() uint64
+	// verificationMode, when set (SetSignatureVerificationMode), returns the
+	// owner's current mode. Under strict, a refresh whose re-fetched document
+	// is not proven valid is NOT pushed: the schedule may have been replaced
+	// by a document the owner would have refused at cast time, and the
+	// refresher must not become the path around that refusal. nil ⇒ default
+	// (notify), which never skips.
+	verificationMode func() sigverify.Mode
+}
+
+// SetSignatureVerificationMode injects the mode getter onto r, if r is the
+// concrete refresher built by New (mirroring SetSignatureVerification's
+// contract). Must be called before Start.
+func SetSignatureVerificationMode(r Refresher, fn func() sigverify.Mode, logger *zap.Logger) {
+	setter, ok := r.(interface{ setSignatureVerificationMode(func() sigverify.Mode) })
+	if !ok {
+		logger.Warn("Playlist refresher does not support signature verification mode wiring")
+		return
+	}
+	setter.setSignatureVerificationMode(fn)
+}
+
+func (r *refresher) setSignatureVerificationMode(fn func() sigverify.Mode) {
+	r.verificationMode = fn
+}
+
+func (r *refresher) strictMode() bool {
+	return r.verificationMode != nil && r.verificationMode() == sigverify.ModeStrict
 }
 
 // SetSessionGeneration injects the generation getter onto r, if r is the
@@ -512,6 +539,25 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	}
 	if err != nil {
 		return r.handleRefreshError(err, kind, schedulerSource)
+	}
+
+	// Strict mode (#307): the same refusal the cast path applies, at the
+	// same point — after resolution, before anything touches replay scope,
+	// the scheduler, or the player. A refresh is the feed's chance to
+	// replace what is showing; if the replacement is not proven valid (or
+	// is the verdict-less cached copy), leave the current artwork alone and
+	// let the next pass try again. Reported as a successful no-op pass: this
+	// is policy, not a fault, and must not drive the startup escalation.
+	if r.activeVerdict != nil && r.strictMode() {
+		if playlist.Verification == nil || playlist.Verification.Status != sigverify.StatusValid {
+			reason := "cached copy carries no verdict"
+			if playlist.Verification != nil {
+				reason = playlist.Verification.Reason
+			}
+			r.logger.Warn("playlist refresh skipped by strict signature verification; current artwork left in place",
+				zap.String("kind", kind), zap.String("reason", reason))
+			return nil
+		}
 	}
 
 	// Re-sync offline-cache replay scope before the re-send: this is the

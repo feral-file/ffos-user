@@ -7,6 +7,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 )
 
 // RateLimitedError is returned by the command storm gate when a command is
@@ -105,4 +106,32 @@ func (e *SourceUnreachableError) Error() string {
 func IsSourceUnreachable(err error) bool {
 	var sue *SourceUnreachableError
 	return errors.As(err, &sue)
+}
+
+// SigInvalidError is returned by the displayPlaylist path when the device's
+// signature verification mode is strict and the cast's DP-1 verdict is not
+// valid (feral-file/ffos-user#307). The name matches DP-1 core spec §14's
+// player error code, `sigInvalid`, for the same reason SourceUnreachableError
+// matches `sourceUnreachable`. Like it, the LAN hub and the relayer mediator
+// detect it to answer the caller with an actionable rejection.
+type SigInvalidError struct {
+	// Status is the verdict's status ("invalid" or "unsigned"), or "" when
+	// the document carried no verdict at all (the offline cached copy): a
+	// strict device cannot prove such a document either way.
+	Status sigverify.Status
+	// Reason is the verdict's caster-safe reason (role + reason vocabulary,
+	// never a URL or a kid), or the fixed cached-copy explanation.
+	Reason string
+}
+
+// Error renders the standardized rejection text returned verbatim to casters
+// on both ingress paths; Reason is already sanitized by sigverify.
+func (e *SigInvalidError) Error() string {
+	return fmt.Sprintf("sigInvalid: playlist rejected by strict signature verification (%s)", e.Reason)
+}
+
+// IsSigInvalid reports whether err is (or wraps) a SigInvalidError.
+func IsSigInvalid(err error) bool {
+	var sie *SigInvalidError
+	return errors.As(err, &sie)
 }

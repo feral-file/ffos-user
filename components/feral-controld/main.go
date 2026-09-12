@@ -1078,8 +1078,20 @@ func initializeApp(
 	// and the status poller (reads on every poll). Wired against the raw
 	// handler for the same reason as SetSourceProber above.
 	activeVerdict := &sigverify.Active{}
+	// The owner's mode is read from its record on every cast (one small file
+	// read next to a network-bound resolution), so a change from the app
+	// applies to the next cast with no restart and no cache to invalidate. A
+	// record that cannot be loaded applies the default and is logged, not
+	// cached, so the log names every cast it affected.
+	verificationMode := func() sigverify.Mode {
+		mode, err := sigverify.LoadMode(os, json)
+		if err != nil {
+			logger.Warn("Signature verification mode record unreadable; applying default", zap.String("default", string(sigverify.DefaultMode)), zap.Error(err))
+		}
+		return mode
+	}
 	if sigVerifyEnabled {
-		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict}, logger)
+		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict, Mode: verificationMode}, logger)
 		// A displayAt-deferred cast parks its verdict as pending; the
 		// scheduler's own cutover push is the only point that proves the
 		// cohort reached the screen, so that is where it is promoted — and
@@ -1118,6 +1130,7 @@ func initializeApp(
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
 	if sigVerifyEnabled {
 		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
+		playlist_refresher.SetSignatureVerificationMode(playlistRefresher, verificationMode, logger)
 		// Same generation fence for the refresher's force casts.
 		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
 	}

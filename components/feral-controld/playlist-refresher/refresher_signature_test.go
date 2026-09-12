@@ -431,6 +431,54 @@ func TestRefresher_ForceCast_UnpublishedAcrossGenerationBump(t *testing.T) {
 	assert.Equal(t, sigverify.StatusUnsigned, st)
 }
 
+// TestRefresher_Strict_SkipsNonValidRefresh: under strict, a re-fetched
+// document that is not proven valid is not pushed — the current artwork
+// stays and the pass is a successful no-op, so policy never drives the
+// startup escalation.
+func TestRefresher_Strict_SkipsNonValidRefresh(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	setupBackgroundMocks(ts)
+	active := &sigverify.Active{}
+	refresher.SetSignatureVerification(ts.refresher, active, zaptest.NewLogger(t))
+	refresher.SetSignatureVerificationMode(ts.refresher, func() sigverify.Mode { return sigverify.ModeStrict }, zap.NewNop())
+
+	playlistURL := "http://example.com/playlist.json"
+	active.Set("showing", playlistURL, sigverify.StatusValid)
+	unsigned := sigverify.Verify([]byte(`{"dpVersion":"1.1.0","title":"t","items":[]}`))
+	playlist := createMockPlaylistNoDynamic()
+	playlist.ID = "refreshed-unsigned"
+	playlist.Verification = &unsigned
+
+	resolved := make(chan struct{}, 1)
+	ts.mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ts.ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).DoAndReturn(
+		func(context.Context, string, bool) (*dp1.Playlist, error) {
+			select {
+			case resolved <- struct{}{}:
+			default:
+			}
+			return playlist, nil
+		}).AnyTimes()
+	// No CDP Send expectation: a push is an unexpected call.
+
+	ts.refresher.Start()
+	select {
+	case <-resolved:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresher never resolved the playlist")
+	}
+	time.Sleep(200 * time.Millisecond)
+	ts.refresher.Stop()
+
+	st, ok := active.Lookup("showing", playlistURL)
+	assert.True(t, ok, "the current artwork keeps playing and keeps its verdict")
+	assert.Equal(t, sigverify.StatusValid, st)
+}
+
 // TestRefresher_SetSignatureVerification_ForeignImplementationIsLeftAlone
 // pins the setter's contract: a non-concrete Refresher logs and is untouched
 // rather than panicking.
