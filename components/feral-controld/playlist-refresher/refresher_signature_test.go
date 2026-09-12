@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -572,6 +573,8 @@ func TestRefresher_Strict_InlineDynamicUsesRetainedVerifiedSource(t *testing.T) 
 // recordingNotifier is a goroutine-safe playertoast.Notifier double for the
 // refresher's background pass.
 type recordingNotifier struct {
+	mu       sync.Mutex
+	epoch    uint64
 	notified chan sigverify.Notice
 	cleared  chan struct{}
 }
@@ -580,14 +583,38 @@ func newRecordingNotifier() *recordingNotifier {
 	return &recordingNotifier{notified: make(chan sigverify.Notice, 8), cleared: make(chan struct{}, 8)}
 }
 func (n *recordingNotifier) Notify(notice sigverify.Notice) {
+	n.mu.Lock()
+	n.epoch++
+	n.mu.Unlock()
 	select {
 	case n.notified <- notice:
 	default:
 	}
 }
 func (n *recordingNotifier) Clear() {
+	n.mu.Lock()
+	n.epoch++
+	n.mu.Unlock()
 	select {
 	case n.cleared <- struct{}{}:
+	default:
+	}
+}
+func (n *recordingNotifier) Epoch() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.epoch
+}
+func (n *recordingNotifier) NotifyIfEpoch(notice sigverify.Notice, epoch uint64) {
+	n.mu.Lock()
+	if n.epoch != epoch {
+		n.mu.Unlock()
+		return
+	}
+	n.epoch++
+	n.mu.Unlock()
+	select {
+	case n.notified <- notice:
 	default:
 	}
 }
@@ -667,11 +694,12 @@ func TestRefresher_Notify_ForceCastToastsUnsigned(t *testing.T) {
 	r.Stop()
 }
 
-// TestRefresher_Strict_RefusalSuppressedWhenAuthorityChanged: if a newer cast
-// takes scheduler authority while the feed resolves, the strict refresh's
-// rejection toast is dropped rather than shown over the newer artwork
-// (feral-file/ffos-user#307 phase 4, review round 5 F2).
-func TestRefresher_Strict_RefusalSuppressedWhenAuthorityChanged(t *testing.T) {
+// TestRefresher_Strict_RefusalSuppressedWhenTransitionIntervened: if a newer
+// transition (cast, default playback, scheduler cutover, or a page-generation
+// bump) replaces the artwork while the feed resolves — advancing the
+// display-transition epoch — the strict refresh's rejection toast is dropped
+// rather than shown over the replacement (feral-file/ffos-user#307 round 6).
+func TestRefresher_Strict_RefusalSuppressedWhenTransitionIntervened(t *testing.T) {
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -689,9 +717,6 @@ func TestRefresher_Strict_RefusalSuppressedWhenAuthorityChanged(t *testing.T) {
 	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
 	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
-	// The fake scheduler starts at authority token 0; resolving the feed bumps
-	// it (a newer cast taking over), so the strict refusal's authority recheck
-	// no longer matches its snapshot.
 	sched := &fakePlaylistScheduler{}
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), sched, mockClock, logger)
 	active := &sigverify.Active{}
@@ -710,7 +735,10 @@ func TestRefresher_Strict_RefusalSuppressedWhenAuthorityChanged(t *testing.T) {
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).AnyTimes()
 	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).DoAndReturn(
 		func(context.Context, string, bool) (*dp1.Playlist, error) {
-			sched.AdvanceAuthority() // a newer cast takes authority while resolving
+			// A newer transition replaces the artwork while this feed resolves,
+			// advancing the display-transition epoch (here via the notifier's
+			// own Clear, as a real pre-send invalidation would).
+			toast.Clear()
 			select {
 			case resolved <- struct{}{}:
 			default:

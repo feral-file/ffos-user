@@ -412,6 +412,15 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// the admission decision below and reused for the strict gate and any
 		// toast, so a concurrent mode change cannot relabel the cast (#307).
 		castMode := sigverify.DefaultMode
+		// toastEpoch fences a strict-refusal toast against a newer transition:
+		// this cast resolves (possibly slowly, for a URL) before it can refuse,
+		// and a newer cast/default/cutover could replace the artwork meanwhile.
+		// Snapshot the display-transition token now, BEFORE resolution, and
+		// emit the rejection only if it still holds (NotifyIfEpoch).
+		var toastEpoch uint64
+		if h.toast != nil {
+			toastEpoch = h.toast.Epoch()
+		}
 		// replayScopeTouched records whether THIS request reached
 		// syncReplayScope (even a failed sync counts — it still bumps the
 		// playback generation). The corrective resync in the failure defer
@@ -612,9 +621,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						zap.String("reason", rejection.Reason),
 						zap.String("playlist_id", string(helper.TruncateBytes([]byte(playlist.ID), logger.MAX_FIELD_LENGTH))))
 					err = rejection
-					// Strict refused the cast; tell the wall (best-effort,
-					// bound to this refusal decision).
-					h.toastFor(castMode, verdictStatus(playlist.Verification))
+					// Strict refused the cast; tell the wall — but only if no
+					// newer transition replaced the artwork while this cast
+					// resolved (NotifyIfEpoch against the pre-resolution
+					// snapshot). Best-effort (#307).
+					if h.toast != nil {
+						h.toast.NotifyIfEpoch(sigverify.NoticeRejected, toastEpoch)
+					}
 					return nil, err
 				}
 			}

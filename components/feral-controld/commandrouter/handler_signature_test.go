@@ -843,10 +843,19 @@ func TestStrictPushGate(t *testing.T) {
 type fakeNotifier struct {
 	notices []sigverify.Notice
 	clears  int
+	epoch   uint64
 }
 
-func (f *fakeNotifier) Notify(n sigverify.Notice) { f.notices = append(f.notices, n) }
-func (f *fakeNotifier) Clear()                    { f.clears++ }
+func (f *fakeNotifier) Notify(n sigverify.Notice) { f.epoch++; f.notices = append(f.notices, n) }
+func (f *fakeNotifier) Clear()                    { f.epoch++; f.clears++ }
+func (f *fakeNotifier) Epoch() uint64             { return f.epoch }
+func (f *fakeNotifier) NotifyIfEpoch(n sigverify.Notice, epoch uint64) {
+	if f.epoch != epoch {
+		return
+	}
+	f.epoch++
+	f.notices = append(f.notices, n)
+}
 
 func unsignedInlineRaw() []byte {
 	return []byte(`{"dpVersion":"1.1.0","id":"app-1","title":"t","items":[{"id":"i","source":"https://example.com/a","duration":10,"license":"open"}]}`)
@@ -1022,4 +1031,34 @@ func TestScheduledPushToaster(t *testing.T) {
 		commandrouter.ScheduledPushToaster(nil, func() uint64 { return 1 }, func() uint64 { return 1 },
 			func() (sigverify.Notice, bool) { return sigverify.NoticeInvalid, true })(nil)
 	})
+}
+
+// TestCommandHandler_Process_Strict_RefusalSuppressedWhenTransitionIntervened:
+// a strict URL cast that resolves slowly must not toast signature_rejected if
+// a newer transition replaced the artwork (advanced the display-transition
+// epoch) while it resolved (feral-file/ffos-user#307 round 6).
+func TestCommandHandler_Process_Strict_RefusalSuppressedWhenTransitionIntervened(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeStrict)
+	toast := &fakeNotifier{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	verdict := sigverify.Verify(tamperedSignedRaw(t)) // invalid
+	require.Equal(t, sigverify.StatusInvalid, verdict.Status)
+	playlistURL := "https://feed.example/p.json"
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL).DoAndReturn(
+		func(context.Context, string) (*dp1.Playlist, error) {
+			toast.Clear() // a newer transition lands while this cast resolves
+			return &dp1.Playlist{Playlist: dp1playlist.Playlist{
+				ID:    "pl-tampered",
+				Items: []dp1playlist.PlaylistItem{{ID: "i", Source: "https://example.com/a"}},
+			}, Verification: &verdict}, nil
+		}).Times(1)
+
+	_, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	require.Error(t, err)
+	assert.True(t, commandrouter.IsSigInvalid(err))
+	assert.Empty(t, toast.notices, "a superseded strict rejection must not toast")
 }

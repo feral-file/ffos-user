@@ -205,25 +205,19 @@ func (r *refresher) currentMode() sigverify.Mode {
 	return r.verificationMode()
 }
 
-// toastStrictRefusal emits the strict-refusal notice, but only if this refresh
-// still holds scheduler authority. A newer valid cast can take authority (and
-// clear its own toast) while this feed resolves; rechecking under the
-// player-push lock drops the obsolete rejection rather than land it over the
-// newer artwork (feral-file/ffos-user#307).
-func (r *refresher) toastStrictRefusal(authorityToken uint64, mode sigverify.Mode, status sigverify.Status) {
+// toastStrictRefusal emits the strict-refusal notice only if no newer display
+// transition intervened since epoch was snapshotted (before this feed
+// resolved). NotifyIfEpoch is atomic against every Notify/Clear — a newer
+// cast, default playback, scheduler cutover, or generation bump all Clear the
+// toast and advance the epoch — so a stale rejection never lands over the
+// replacement (feral-file/ffos-user#307). This subsumes the old
+// scheduler-authority check, which missed generation bumps.
+func (r *refresher) toastStrictRefusal(epoch uint64, mode sigverify.Mode, status sigverify.Status) {
 	if r.toast == nil {
 		return
 	}
-	emit := func() {
-		if r.scheduler != nil && r.scheduler.AuthorityToken() != authorityToken {
-			return
-		}
-		r.toastRefresh(mode, status)
-	}
-	if r.scheduler != nil {
-		r.scheduler.WithPlayerPush(emit)
-	} else {
-		emit()
+	if notice, ok := sigverify.ToastFor(mode, status); ok {
+		r.toast.NotifyIfEpoch(notice, epoch)
 	}
 }
 
@@ -487,6 +481,16 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	if r.scheduler != nil {
 		authorityToken = r.scheduler.AuthorityToken()
 	}
+	// Snapshot the display-transition token BEFORE the (possibly slow) feed
+	// resolution, so a strict refusal decided afterward can be fenced against
+	// a newer cast, default playback, or generation bump that replaced the
+	// artwork meanwhile. The epoch advances on every such transition (each
+	// Clears the toast); scheduler authority alone would miss a page-generation
+	// bump that does not change authority (feral-file/ffos-user#307).
+	var toastEpoch uint64
+	if r.toast != nil {
+		toastEpoch = r.toast.Epoch()
+	}
 
 	// Revert replay's Fetch-interception scope to whatever the player
 	// actually still displays if this pass fails: the SyncPlaylist call
@@ -640,7 +644,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			if playlist.Verification != nil {
 				status = playlist.Verification.Status
 			}
-			r.toastStrictRefusal(authorityToken, castMode, status)
+			r.toastStrictRefusal(toastEpoch, castMode, status)
 			return nil
 		}
 	}

@@ -240,10 +240,20 @@ func normalizeEvaluationResult(result any) (map[string]any, error) {
 // scheduler wiring, and the refresher submit to. Notify replaces any pending
 // notice (latest-wins); Clear drops a pending notice — a valid or silent
 // transition calls it so a stale warning never appears over newer artwork
-// (feral-file/ffos-user#307).
+// (feral-file/ffos-user#307). Epoch/NotifyIfEpoch fence a notice decided after
+// a slow resolution (a strict refusal): the epoch is the monotonic
+// display-transition token — it advances on every Notify AND Clear, and every
+// locked pre-send invalidation and generation replacement Clears the toast, so
+// a caller that snapshots it before resolving and passes it to NotifyIfEpoch
+// enqueues only if no newer transition intervened.
 type Notifier interface {
 	Notify(notice sigverify.Notice)
 	Clear()
+	// Epoch returns the current display-transition token.
+	Epoch() uint64
+	// NotifyIfEpoch queues notice only if the token still equals epoch (no
+	// newer transition since the snapshot); otherwise it is a no-op.
+	NotifyIfEpoch(notice sigverify.Notice, epoch uint64)
 }
 
 // Dispatcher serializes toasts onto a single worker with a one-slot mailbox:
@@ -288,6 +298,34 @@ func NewDispatcher(ctx context.Context, sender Sender, timeout time.Duration, lo
 // Non-blocking.
 func (d *Dispatcher) Notify(notice sigverify.Notice) {
 	d.mu.Lock()
+	d.pending = notice
+	d.has = true
+	d.gen++
+	d.mu.Unlock()
+	select {
+	case d.wake <- struct{}{}:
+	default:
+	}
+}
+
+// Epoch returns the current display-transition token (the gen counter).
+func (d *Dispatcher) Epoch() uint64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.gen
+}
+
+// NotifyIfEpoch queues notice only if the token still equals epoch, i.e. no
+// Notify/Clear (and thus no pre-send invalidation or generation replacement)
+// intervened since the caller snapshotted it. Used to fence a strict-refusal
+// notice decided after a slow resolution against a newer transition that
+// already replaced the artwork (feral-file/ffos-user#307).
+func (d *Dispatcher) NotifyIfEpoch(notice sigverify.Notice, epoch uint64) {
+	d.mu.Lock()
+	if d.gen != epoch {
+		d.mu.Unlock()
+		return
+	}
 	d.pending = notice
 	d.has = true
 	d.gen++
