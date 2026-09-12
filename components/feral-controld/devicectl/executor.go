@@ -3300,6 +3300,17 @@ func (e *executor) releaseStuckResetLatch(why string) {
 	e.logger.Warn("Releasing the staged factory-reset latch", zap.String("reason", why))
 	e.resetStaged.Store(false)
 	e.setupUI().HideIfShowing(setupui.StateFactoryReset)
+	// Factory reset cleared the signature-verification mode record (a resold
+	// unit returns to notify). A reset that rolls back — this release path,
+	// shared by reset-start failure and the stuck-reset watchdog — leaves that
+	// cleared record in effect, so a displayAt cutover the strict push gate
+	// refused before the reset (no retry armed, and past the final boundary no
+	// timer) has no other trigger. Re-drive under the now-effective on-disk
+	// mode, exactly as a setter-driven relaxation would (feral-file/ffos-user
+	// #307). Safe here precisely because the reset is NOT proceeding: the
+	// device is resuming normal operation, not painting a reset panel, so this
+	// is unrelated to the reset-narration playback fence tracked in #345.
+	e.notifyVerificationMode()
 }
 
 func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, error) {

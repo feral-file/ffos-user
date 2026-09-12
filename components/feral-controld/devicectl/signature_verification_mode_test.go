@@ -220,3 +220,39 @@ func TestSetSignatureVerificationMode_RefusedWhileVerifierDisabled(t *testing.T)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "disabled by device configuration")
 }
+
+// TestReleaseStuckResetLatch_RedrivesUnderRestoredMode: a rolled-back factory
+// reset cleared the mode record, so the shared latch-release path (used by
+// both reset-start failure and the stuck-reset watchdog) re-drives the
+// scheduler under the now-effective on-disk mode — a strict-refused cutover
+// recovers instead of leaving the wall on stale artwork (#307).
+func TestReleaseStuckResetLatch_RedrivesUnderRestoredMode(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockOS := mocks.NewMockOS(ctrl)
+	// The reset cleared the record; LoadMode reads the default (notify).
+	mockOS.EXPECT().ReadFile(constants.SIGNATURE_VERIFICATION_FILE).Return(nil, os.ErrNotExist)
+	mockOS.EXPECT().IsNotExist(os.ErrNotExist).Return(true)
+	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON(), setupNarrator: &narratorSpy{}}
+	e.resetStaged.Store(true)
+	var seen []sigverify.Mode
+	e.SetVerificationModeObserver(func(m sigverify.Mode) { seen = append(seen, m) })
+
+	e.releaseStuckResetLatch("test")
+
+	assert.False(t, e.resetStaged.Load(), "the latch is released")
+	assert.Equal(t, []sigverify.Mode{sigverify.DefaultMode}, seen, "re-drive fires with the restored default mode")
+}
+
+// TestReleaseStuckResetLatch_NoObserverReadsNothing: with no observer wired
+// the release neither reads the record nor pushes.
+func TestReleaseStuckResetLatch_NoObserverReadsNothing(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	e := &executor{logger: zap.NewNop(), os: mocks.NewMockOS(ctrl), json: wrapper.NewJSON(), setupNarrator: &narratorSpy{}}
+	e.resetStaged.Store(true)
+
+	e.releaseStuckResetLatch("test")
+
+	assert.False(t, e.resetStaged.Load())
+}
