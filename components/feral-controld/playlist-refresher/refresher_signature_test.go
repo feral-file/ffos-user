@@ -666,3 +666,70 @@ func TestRefresher_Notify_ForceCastToastsUnsigned(t *testing.T) {
 	}
 	r.Stop()
 }
+
+// TestRefresher_Strict_RefusalSuppressedWhenAuthorityChanged: if a newer cast
+// takes scheduler authority while the feed resolves, the strict refresh's
+// rejection toast is dropped rather than shown over the newer artwork
+// (feral-file/ffos-user#307 phase 4, review round 5 F2).
+func TestRefresher_Strict_RefusalSuppressedWhenAuthorityChanged(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	// The fake scheduler starts at authority token 0; resolving the feed bumps
+	// it (a newer cast taking over), so the strict refusal's authority recheck
+	// no longer matches its snapshot.
+	sched := &fakePlaylistScheduler{}
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), sched, mockClock, logger)
+	active := &sigverify.Active{}
+	refresher.SetSignatureVerification(r, active, logger)
+	refresher.SetSignatureVerificationMode(r, func() sigverify.Mode { return sigverify.ModeStrict }, zap.NewNop())
+	toast := newRecordingNotifier()
+	refresher.SetRefresherToaster(r, toast, zap.NewNop())
+
+	playlistURL := "http://example.com/playlist.json"
+	unsigned := sigverify.Verify([]byte(`{"dpVersion":"1.1.0","title":"t","items":[]}`))
+	playlist := createMockPlaylistNoDynamic()
+	playlist.ID = "refreshed-unsigned"
+	playlist.Verification = &unsigned
+	resolved := make(chan struct{}, 1)
+	mockStatusPoller.EXPECT().FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).AnyTimes()
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).DoAndReturn(
+		func(context.Context, string, bool) (*dp1.Playlist, error) {
+			sched.AdvanceAuthority() // a newer cast takes authority while resolving
+			select {
+			case resolved <- struct{}{}:
+			default:
+			}
+			return playlist, nil
+		}).AnyTimes()
+	// No CDP Send: strict refuses before any push.
+
+	r.Start()
+	select {
+	case <-resolved:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresher never resolved")
+	}
+	// The rejection toast must be suppressed because authority changed.
+	select {
+	case n := <-toast.notified:
+		t.Fatalf("a stale strict rejection was toasted after authority changed: %q", n)
+	case <-time.After(250 * time.Millisecond):
+	}
+	r.Stop()
+}

@@ -205,6 +205,28 @@ func (r *refresher) currentMode() sigverify.Mode {
 	return r.verificationMode()
 }
 
+// toastStrictRefusal emits the strict-refusal notice, but only if this refresh
+// still holds scheduler authority. A newer valid cast can take authority (and
+// clear its own toast) while this feed resolves; rechecking under the
+// player-push lock drops the obsolete rejection rather than land it over the
+// newer artwork (feral-file/ffos-user#307).
+func (r *refresher) toastStrictRefusal(authorityToken uint64, mode sigverify.Mode, status sigverify.Status) {
+	if r.toast == nil {
+		return
+	}
+	emit := func() {
+		if r.scheduler != nil && r.scheduler.AuthorityToken() != authorityToken {
+			return
+		}
+		r.toastRefresh(mode, status)
+	}
+	if r.scheduler != nil {
+		r.scheduler.WithPlayerPush(emit)
+	} else {
+		emit()
+	}
+}
+
 // toastRefresh surfaces (or Clears) the notice for a feed transition under the
 // SNAPSHOT mode the caller decided the transition with. Non-blocking; bound to
 // the transition the caller is at.
@@ -618,7 +640,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			if playlist.Verification != nil {
 				status = playlist.Verification.Status
 			}
-			r.toastRefresh(castMode, status)
+			r.toastStrictRefusal(authorityToken, castMode, status)
 			return nil
 		}
 	}
@@ -744,6 +766,14 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			default:
 				r.activeVerdict.ReconcileSoft(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
 			}
+		}
+		// A force cast replaces the artwork, so drop any queued toast before
+		// the send lands, paired with the verdict invalidation above; the
+		// force-cast success below sets this document's own notice (#307). A
+		// soft refresh does not visibly replace content, so it leaves a
+		// warning for the still-displayed playlist alone.
+		if effectiveForceCast && r.toast != nil {
+			r.toast.Clear()
 		}
 		generationBefore := r.currentGeneration()
 		result, sendCDPErr := r.sendCDPRequest(command)

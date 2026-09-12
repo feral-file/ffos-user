@@ -921,7 +921,7 @@ func TestCommandHandler_Process_Silent_ClearsRatherThanToasts(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Empty(t, toast.notices, "silent mode never toasts")
-	assert.Equal(t, 1, toast.clears, "a silent transition supersedes any pending stale notice")
+	assert.GreaterOrEqual(t, toast.clears, 1, "a silent transition supersedes any pending stale notice (pre-send and/or post-send Clear)")
 }
 
 // TestCommandHandler_Process_Valid_ClearsPendingNotice: a valid cast shows
@@ -945,7 +945,7 @@ func TestCommandHandler_Process_Valid_ClearsPendingNotice(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Empty(t, toast.notices)
-	assert.Equal(t, 1, toast.clears)
+	assert.GreaterOrEqual(t, toast.clears, 1, "a valid transition supersedes any pending stale notice (pre-send and/or post-send Clear)")
 }
 
 // TestCommandHandler_Process_Strict_ToastsRejectedAndDoesNotCast: strict

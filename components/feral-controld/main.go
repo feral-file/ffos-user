@@ -1144,6 +1144,11 @@ func initializeApp(
 			case playlistschedule.PushStarting:
 				pushGenAtStart = session.Generation()
 				pushStarting()
+				// Pre-send toast invalidation, paired with the verdict's:
+				// this cutover is about to replace the artwork, so drop any
+				// queued warning before it lands. PushAccepted sets the
+				// cohort's own notice (#307).
+				toastDispatcher.Clear()
 			case playlistschedule.PushAccepted:
 				pushAccepted()
 			}

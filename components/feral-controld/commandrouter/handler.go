@@ -900,6 +900,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if h.activeVerdict != nil {
 				h.activeVerdict.ClearCurrent()
 			}
+			// Drop any queued toast as part of the SAME pre-send invalidation,
+			// under the push lock: this send is about to replace the artwork,
+			// so a stale warning must not begin showing during the window
+			// before the post-send Notify/Clear runs (#307). The correct
+			// notice for this send is set after it is accepted (toastFor).
+			if h.toast != nil {
+				h.toast.Clear()
+			}
 		}
 
 		// clearVerdictForDefaultPlayback: an accepted displayDefaultPlaylist
