@@ -837,16 +837,40 @@ func TestStrictPushGate(t *testing.T) {
 	assert.NoError(t, commandrouter.StrictPushGate(nil)(unsigned), "unwired mode reader never refuses")
 }
 
-// fakeToastSender records the notices commandrouter asks the player to show
-// and can inject a Show error to prove best-effort behavior.
+// fakeToastSender records the notices commandrouter asks the player to show.
+// commandrouter dispatches toasts on their own goroutine (best-effort,
+// decoupled from Process), so tests wait on a channel rather than reading a
+// slice.
 type fakeToastSender struct {
-	notices []sigverify.Notice
-	err     error
+	shown chan sigverify.Notice
+	err   error
 }
 
+func newFakeToast() *fakeToastSender { return &fakeToastSender{shown: make(chan sigverify.Notice, 8)} }
+
 func (f *fakeToastSender) Show(_ context.Context, n sigverify.Notice) error {
-	f.notices = append(f.notices, n)
+	f.shown <- n
 	return f.err
+}
+
+func (f *fakeToastSender) await(t *testing.T) sigverify.Notice {
+	t.Helper()
+	select {
+	case n := <-f.shown:
+		return n
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a player toast, none shown")
+		return ""
+	}
+}
+
+func (f *fakeToastSender) expectNone(t *testing.T) {
+	t.Helper()
+	select {
+	case n := <-f.shown:
+		t.Fatalf("expected no player toast, got %q", n)
+	case <-time.After(150 * time.Millisecond):
+	}
 }
 
 func unsignedInlineRaw() []byte {
@@ -870,7 +894,7 @@ func TestCommandHandler_Process_Notify_UnsignedToastsUnsigned(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 	wireVerificationWithMode(ts, sigverify.ModeNotify)
-	toast := &fakeToastSender{}
+	toast := newFakeToast()
 	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
 
 	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
@@ -881,7 +905,7 @@ func TestCommandHandler_Process_Notify_UnsignedToastsUnsigned(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "unsigned", replyMessage(t, result)["signatureStatus"])
-	assert.Equal(t, []sigverify.Notice{sigverify.NoticeUnsigned}, toast.notices)
+	assert.Equal(t, sigverify.NoticeUnsigned, toast.await(t))
 }
 
 // TestCommandHandler_Process_Notify_InvalidToastsInvalid: under notify a
@@ -891,7 +915,7 @@ func TestCommandHandler_Process_Notify_InvalidToastsInvalid(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 	wireVerificationWithMode(ts, sigverify.ModeNotify)
-	toast := &fakeToastSender{}
+	toast := newFakeToast()
 	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
 
 	command := inlineCast(ts, tamperedSignedRaw(t), inlineTyped("pl-tampered"))
@@ -902,7 +926,7 @@ func TestCommandHandler_Process_Notify_InvalidToastsInvalid(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "invalid", replyMessage(t, result)["signatureStatus"])
-	assert.Equal(t, []sigverify.Notice{sigverify.NoticeInvalid}, toast.notices)
+	assert.Equal(t, sigverify.NoticeInvalid, toast.await(t))
 }
 
 // TestCommandHandler_Process_Silent_NeverToasts: silent plays and reports but
@@ -911,7 +935,7 @@ func TestCommandHandler_Process_Silent_NeverToasts(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 	wireVerificationWithMode(ts, sigverify.ModeSilent)
-	toast := &fakeToastSender{}
+	toast := newFakeToast()
 	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
 
 	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
@@ -921,17 +945,17 @@ func TestCommandHandler_Process_Silent_NeverToasts(t *testing.T) {
 	_, err := ts.handler.Process(ts.ctx, command)
 
 	require.NoError(t, err)
-	assert.Empty(t, toast.notices, "silent mode never toasts")
+	toast.expectNone(t)
 }
 
 // TestCommandHandler_Process_Strict_ToastsRejectedAndDoesNotCast: strict
 // refuses the unsigned cast, sends nothing to the player as a cast, and shows
-// the "not shown" notice.
+// the "not shown" notice bound to the refusal.
 func TestCommandHandler_Process_Strict_ToastsRejectedAndDoesNotCast(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 	wireVerificationWithMode(ts, sigverify.ModeStrict)
-	toast := &fakeToastSender{}
+	toast := newFakeToast()
 	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
 
 	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
@@ -941,16 +965,18 @@ func TestCommandHandler_Process_Strict_ToastsRejectedAndDoesNotCast(t *testing.T
 
 	require.Error(t, err)
 	assert.True(t, commandrouter.IsSigInvalid(err))
-	assert.Equal(t, []sigverify.Notice{sigverify.NoticeRejected}, toast.notices)
+	assert.Equal(t, sigverify.NoticeRejected, toast.await(t))
 }
 
 // TestCommandHandler_Process_ToastFailureNeverFailsTheCast: a Show error is
-// swallowed — the notify cast still plays and reports success.
+// swallowed on the toast goroutine — the notify cast still plays and reports
+// success.
 func TestCommandHandler_Process_ToastFailureNeverFailsTheCast(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 	wireVerificationWithMode(ts, sigverify.ModeNotify)
-	toast := &fakeToastSender{err: errors.New("player hiccup")}
+	toast := newFakeToast()
+	toast.err = errors.New("player hiccup")
 	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
 
 	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
@@ -961,5 +987,5 @@ func TestCommandHandler_Process_ToastFailureNeverFailsTheCast(t *testing.T) {
 
 	require.NoError(t, err, "a toast failure must not fail the cast")
 	assert.Equal(t, "unsigned", replyMessage(t, result)["signatureStatus"])
-	assert.Equal(t, []sigverify.Notice{sigverify.NoticeUnsigned}, toast.notices)
+	assert.Equal(t, sigverify.NoticeUnsigned, toast.await(t))
 }

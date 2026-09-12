@@ -231,23 +231,31 @@ func (h *handler) setPlayerToast(sender playertoast.Sender) {
 	h.playerToast = sender
 }
 
-// maybeToast shows the notice the (mode, status) policy calls for, if any.
-// Best-effort by contract: a toast failure never changes a cast's outcome, so
-// the error is swallowed to a debug line. The sender logs an unsupported
-// player once itself. Bounded so a wedged player cannot stall the cast reply.
-func (h *handler) maybeToast(ctx context.Context, status sigverify.Status) {
+// fireToast shows the notice the (mode, status) policy calls for, if any. It
+// takes the mode as a SNAPSHOT — decided once at the transition it describes,
+// never re-read — so a concurrent setSignatureVerificationMode cannot relabel
+// a cast that already displayed or refused (feral-file/ffos-user#307). It is
+// decoupled from Process: a fresh background context bounds the dispatch and
+// the send runs on its own goroutine, so a wedged player (NoLogSend's own
+// round-trip deadline) can never delay the cast reply or the strict rejection.
+// Best-effort: a toast failure never changes a cast's outcome.
+func (h *handler) fireToast(mode sigverify.Mode, status sigverify.Status) {
 	if h.playerToast == nil {
 		return
 	}
-	notice, ok := sigverify.ToastFor(h.currentVerificationMode(), status)
+	notice, ok := sigverify.ToastFor(mode, status)
 	if !ok {
 		return
 	}
-	toastCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	if err := h.playerToast.Show(toastCtx, notice); err != nil {
-		h.logger.Debug("player toast not shown", zap.String("notice", string(notice)), zap.Error(err))
-	}
+	sender := h.playerToast
+	logger := h.logger
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := sender.Show(ctx, notice); err != nil {
+			logger.Debug("player toast not shown", zap.String("notice", string(notice)), zap.Error(err))
+		}
+	}()
 }
 
 // verdictStatus is the Status the toast policy keys on: a nil verdict (the
@@ -408,6 +416,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var playlist *dp1.Playlist
 		var schedulerSnapshot playlistschedule.Snapshot
 		var schedulerSource playlistschedule.Source
+		// castMode is the verification mode snapshot for THIS cast, taken at
+		// the admission decision below and reused for the strict gate and any
+		// toast, so a concurrent mode change cannot relabel the cast (#307).
+		castMode := sigverify.DefaultMode
 		// replayScopeTouched records whether THIS request reached
 		// syncReplayScope (even a failed sync counts — it still bumps the
 		// playback generation). The corrective resync in the failure defer
@@ -598,14 +610,19 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// playback-failure accounting above records the rejection, exactly
 			// like the preflight's own rejection. The previous artwork stays.
 			// Silent and notify never reach here: they report and play.
-			if h.verifySignatures && h.currentVerificationMode() == sigverify.ModeStrict {
+			// Take the mode snapshot at this admission decision (see castMode).
+			if h.verifySignatures {
+				castMode = h.currentVerificationMode()
+			}
+			if h.verifySignatures && castMode == sigverify.ModeStrict {
 				if rejection := strictRejection(playlist.Verification); rejection != nil {
 					h.logger.Warn("displayPlaylist: cast rejected by strict signature verification",
 						zap.String("reason", rejection.Reason),
 						zap.String("playlist_id", string(helper.TruncateBytes([]byte(playlist.ID), logger.MAX_FIELD_LENGTH))))
 					err = rejection
-					// Strict refused the cast; tell the wall (best-effort).
-					h.maybeToast(ctx, verdictStatus(playlist.Verification))
+					// Strict refused the cast; tell the wall (best-effort,
+					// bound to this refusal decision).
+					h.fireToast(castMode, verdictStatus(playlist.Verification))
 					return nil, err
 				}
 			}
@@ -973,6 +990,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				} else {
 					h.scheduler.Commit()
 					publishVerdict(false)
+					// The player accepted this cohort: surface a non-valid
+					// verdict on the wall, INSIDE the push lock so the toast is
+					// ordered with the artwork it describes and a later cast
+					// cannot slip in first (#307). Deferred (future-only)
+					// schedules take the empty-items branch above and do NOT
+					// toast here — their scheduler cutover carries the notice.
+					h.fireToast(castMode, verdictStatus(playlist.Verification))
 				}
 			})
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
@@ -1005,6 +1029,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// right after the send is the tightest ordering available.
 				publishVerdict(false)
 				clearVerdictForDefaultPlayback()
+				if commandType == commands.CMD_DISPLAY_PLAYLIST {
+					h.fireToast(castMode, verdictStatus(playlist.Verification))
+				}
 			}
 		}
 		if err != nil {
@@ -1067,14 +1094,6 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// push critical section above (publishVerdict).
 		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil && playlist.Verification != nil && playerresponse.OK(result) {
 			result = annotateCastReply(result, playlist.Verification)
-		}
-
-		// Notify (and silent) reach here: the cast played. Surface a non-valid
-		// verdict on the wall before the status refresh, so the toast rides
-		// the new artwork (feral-file/ffos-user#307). Best-effort; only when
-		// the player actually accepted the cast.
-		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil && playerresponse.OK(result) {
-			h.maybeToast(ctx, verdictStatus(playlist.Verification))
 		}
 
 		// Force refresh status poller

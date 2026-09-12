@@ -236,6 +236,17 @@ func main() {
 	}
 }
 
+// toastPlaylist aliases dp1.Playlist so the scheduler push-toaster callback
+// can be spelled inside run(), where the local dp1 service variable shadows
+// the dp1 package. newToastContext likewise bounds a best-effort scheduler
+// toast from file scope, where the context package is not shadowed by run()'s
+// context variable.
+type toastPlaylist = dp1.Playlist
+
+func newToastContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 2*time.Second)
+}
+
 func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// Load state. A load failure must NOT abort startup: controld is the sole
 	// SoftAP/LAN-recovery owner, so returning here would crash-loop the daemon
@@ -1100,12 +1111,27 @@ func initializeApp(
 	if sigVerifyEnabled {
 		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict, Mode: verificationMode}, logger)
 		// The on-screen notice for a non-valid cast (notify) or a strict
-		// rejection. Reads the player manifest at the shipping path on every
-		// send, so an older bundle without the playerToast contract degrades
-		// to "no toast" rather than an error; ff-player ships the contract
-		// (paired-rollout: the player bundle lands before this daemon). Copy
-		// is owned by the player; controld only names the notice.
-		commandrouter.SetPlayerToast(rawCmdHandler, playertoast.New(cdp, setupui.DefaultContractPath, logger), logger)
+		// rejection. One sender, shared by the cast path (SetPlayerToast) and
+		// the scheduler cutover/refusal hooks below. Reads the player manifest
+		// at the shipping path on every send, so an older bundle without the
+		// playerToast contract degrades to "no toast" rather than an error;
+		// ff-player ships the contract (paired-rollout: the player bundle lands
+		// before this daemon). Copy is owned by the player; controld only names
+		// the notice.
+		toastSender := playertoast.New(cdp, setupui.DefaultContractPath, logger)
+		commandrouter.SetPlayerToast(rawCmdHandler, toastSender, logger)
+		// dispatchToast fires a scheduler-originated notice off the push
+		// goroutine — best-effort and decoupled, so a wedged player never
+		// stalls a cutover (the cast path decouples the same way in fireToast).
+		dispatchToast := func(notice sigverify.Notice) {
+			go func() {
+				tctx, cancel := newToastContext()
+				defer cancel()
+				if err := toastSender.Show(tctx, notice); err != nil {
+					logger.Debug("scheduler player toast not shown", zap.String("notice", string(notice)), zap.Error(err))
+				}
+			}()
+		}
 		// A displayAt-deferred cast parks its verdict as pending; the
 		// scheduler's own cutover push is the only point that proves the
 		// cohort reached the screen, so that is where it is promoted — and
@@ -1128,8 +1154,34 @@ func initializeApp(
 		// the cast-time verdict the scheduler's cached document still carries
 		// (cloned by pointer, never persisted), so a schedule accepted under
 		// notify cannot carry a non-valid cohort onto the screen after the
-		// owner switches to strict.
-		playlistScheduler.SetPushGate(commandrouter.StrictPushGate(verificationMode))
+		// owner switches to strict. A refusal reads the mode ONCE (in the gate)
+		// and, because strict is the only mode that refuses, always surfaces
+		// signature_rejected — bound to this refused cutover.
+		strictGate := commandrouter.StrictPushGate(verificationMode)
+		playlistScheduler.SetPushGate(func(p *toastPlaylist) error {
+			if err := strictGate(p); err != nil {
+				dispatchToast(sigverify.NoticeRejected)
+				return err
+			}
+			return nil
+		})
+		// A cohort that actually reached the player (PushAccepted) toasts its
+		// own verdict under the mode at push time — the cutover, not the
+		// accepting cast, is the transition the notice describes. A valid
+		// cohort (or silent mode) toasts nothing (ToastFor).
+		if toastable, ok := any(playlistScheduler).(interface {
+			SetPushToaster(func(*toastPlaylist))
+		}); ok {
+			toastable.SetPushToaster(func(p *toastPlaylist) {
+				var status sigverify.Status
+				if p != nil && p.Verification != nil {
+					status = p.Verification.Status
+				}
+				if notice, show := sigverify.ToastFor(verificationMode(), status); show {
+					dispatchToast(notice)
+				}
+			})
+		}
 		poller.SetVerificationLookup(func(id, url string) (string, bool) {
 			st, ok := activeVerdict.Lookup(id, url)
 			return string(st), ok

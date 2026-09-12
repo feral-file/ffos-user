@@ -212,6 +212,12 @@ type scheduler struct {
 	// once before any push; read without a lock on the push path, same
 	// single-writer contract as status.poller's observers.
 	pushObserver func(PushPhase)
+	// pushToaster, when set (SetPushToaster), is handed the cohort a
+	// scheduler-owned push just delivered, at PushAccepted, so the on-screen
+	// signature notice rides the actual cutover rather than the accepting
+	// cast (feral-file/ffos-user#307). Same single-writer contract as
+	// pushObserver; the policy (mode + verdict → notice) lives in the wiring.
+	pushToaster func(*dp1.Playlist)
 	// pushGate, when set (SetPushGate), is consulted inside push before the
 	// observer and the CDP send. Same single-writer contract as pushObserver.
 	pushGate func(*dp1.Playlist) error
@@ -823,6 +829,11 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	if s.pushObserver != nil {
 		s.pushObserver(PushAccepted)
 	}
+	// The cohort is on screen now: surface its verdict on the wall, bound to
+	// this accepted cutover (feral-file/ffos-user#307).
+	if s.pushToaster != nil {
+		s.pushToaster(playlist)
+	}
 	return nil
 }
 
@@ -840,6 +851,13 @@ const (
 
 func (s *scheduler) SetPushObserver(fn func(PushPhase)) {
 	s.pushObserver = fn
+}
+
+// SetPushToaster registers the cohort-toast hook (see the pushToaster field).
+// Type-asserted seam like SetResetFence was, so mocks and fakes stay
+// untouched. Call once at wiring time.
+func (s *scheduler) SetPushToaster(fn func(*dp1.Playlist)) {
+	s.pushToaster = fn
 }
 
 func (s *scheduler) SetPushGate(fn func(playlist *dp1.Playlist) error) {
