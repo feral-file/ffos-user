@@ -36,6 +36,9 @@ const (
 	PING_INTERVAL     = 15 * time.Second
 	PONG_WAIT         = 3 * time.Second
 
+	// MAX_MESSAGE_BYTES caps one inbound relayer frame; mirrors
+	// hub.MAX_REQUEST_BODY_BYTES (not imported: relayer must not depend on hub).
+	MAX_MESSAGE_BYTES = 4 << 20
 	// WRITE_WAIT bounds how long any single websocket write may block. gorilla's
 	// WriteMessage/WriteJSON hold no internal timeout, so without a deadline a
 	// backpressured peer can park a write — and the connection mutex it holds —
@@ -82,6 +85,36 @@ type Message struct {
 	Command *string        `json:"command,omitempty"`
 	Request map[string]any `json:"request,omitempty"`
 	TopicID *string        `json:"topicID,omitempty"`
+	// RawRequest is the `request` token verbatim, for the same reason
+	// commands.Command.RawArguments exists: an inline DP-1 playlist must be
+	// signature-verified from the bytes the caller sent, not from a
+	// re-marshal whose HTML escaping can inflate it past the verifier's size
+	// bound (feral-file/ffos-user#307). Set by UnmarshalJSON only.
+	RawRequest json.RawMessage `json:"-"`
+}
+
+type messageWire struct {
+	Command *string        `json:"command,omitempty"`
+	Request map[string]any `json:"request,omitempty"`
+	TopicID *string        `json:"topicID,omitempty"`
+}
+
+// UnmarshalJSON decodes the message and retains the `request` token verbatim.
+func (m *Message) UnmarshalJSON(data []byte) error {
+	var w messageWire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	var tokens map[string]json.RawMessage
+	if err := json.Unmarshal(data, &tokens); err != nil {
+		return err
+	}
+	m.Command, m.Request, m.TopicID = w.Command, w.Request, w.TopicID
+	m.RawRequest = nil
+	if raw, ok := tokens["request"]; ok && len(raw) > 0 && string(raw) != "null" {
+		m.RawRequest = raw
+	}
+	return nil
 }
 
 type Response struct {
@@ -352,6 +385,17 @@ func (r *relayer) Connect(ctx context.Context) error {
 		return r.categorizeWebsocketError(err, resp)
 	}
 
+	// Bound every inbound frame BEFORE it is decoded. The relayer is the
+	// second ingress for displayPlaylist (the LAN hub is the first, capped by
+	// hub.MAX_REQUEST_BODY_BYTES; URL fetches by dp1.MaxPlaylistBodyBytes),
+	// and an inline playlist's cost downstream — JSON decode into a map, JCS
+	// canonicalization per signature entry — scales with its size, so an
+	// unbounded frame from a remote controller or a compromised relayer is
+	// an unbounded memory and CPU spend. Same limit as the hub so both paths
+	// admit the same worst-case document. gorilla returns ErrReadLimit on an
+	// oversized frame and the read loop reconnects, which is the right
+	// outcome for a peer that sends one.
+	conn.SetReadLimit(MAX_MESSAGE_BYTES)
 	r.conn = conn
 	// Stage-0/1 observability (docs/wan-outage-observability.md): connection
 	// state is exported event-driven from the three lifecycle sites (here,

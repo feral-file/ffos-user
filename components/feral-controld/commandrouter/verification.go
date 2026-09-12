@@ -1,0 +1,93 @@
+package commandrouter
+
+import (
+	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
+)
+
+// Reply keys for the signature verdict on a displayPlaylist acceptance
+// (feral-file/ffos-user#307). Additive, inside the same map that carries
+// ok — see docs/controld-inbound-controller-messages.md. Stable strings:
+// controllers read them.
+const (
+	replyKeySignatureStatus = "signatureStatus"
+	replyKeySigners         = "signers"
+	replyKeyLegacySignature = "legacySignature"
+)
+
+// annotateCastReply merges the verdict into the reply map the caller is
+// about to return: into "message" when the reply has the player's
+// {messageID, message:{ok...}} envelope (or the deferred acceptance built in
+// the same shape), else into the top level — mirroring how
+// playerresponse.OK locates ok. Anything that is not a map is returned
+// untouched; the verdict is reporting, never a reason to fail a reply.
+//
+// Mutates in place (the map is this process's own decode of the player's
+// reply, not shared) and returns it for call-site readability.
+func annotateCastReply(result any, v *sigverify.Verdict) any {
+	m, ok := result.(map[string]any)
+	if !ok || v == nil {
+		return result
+	}
+	target := m
+	if msg, ok := m["message"].(map[string]any); ok {
+		target = msg
+	}
+	target[replyKeySignatureStatus] = string(v.Status)
+	if len(v.Signers) > 0 {
+		signers := make([]any, 0, len(v.Signers))
+		for _, s := range v.Signers {
+			entry := map[string]any{
+				"alg":  s.Alg,
+				"kid":  s.Kid,
+				"role": s.Role,
+				"ok":   s.OK,
+			}
+			if s.Reason != "" {
+				entry["reason"] = s.Reason
+			}
+			signers = append(signers, entry)
+		}
+		target[replyKeySigners] = signers
+	}
+	if v.LegacyPresent {
+		target[replyKeyLegacySignature] = true
+	}
+	return m
+}
+
+// logSignatureVerdict writes the one structured line per cast that makes the
+// verdict greppable on a device: status, each signer's identity and outcome,
+// and the playlist identity. Warn for a false claim (invalid), Info
+// otherwise — an unsigned app cast is the ordinary case today and must not
+// page. Kids are DIDs bounded by sigverify (MaxKidLen), safe to log; the
+// playlist URL is the caster's own input and already logged by the cast
+// path. The playlist id is caster-controlled and unbounded on the open hub
+// (a 4 MiB inline cast may carry a 4 MiB id), so it is cut to the daemon's
+// standard log-field cap before it reaches the journal.
+func (h *handler) logSignatureVerdict(v *sigverify.Verdict, playlistID, playlistURL string) {
+	source := "inline"
+	if playlistURL != "" {
+		source = "url"
+	}
+	fields := []zap.Field{
+		zap.String("signature_status", string(v.Status)),
+		zap.ByteString("playlist_id", helper.TruncateBytes([]byte(playlistID), logger.MAX_FIELD_LENGTH)),
+		zap.String("source", source),
+		zap.Bool("legacy_signature", v.LegacyPresent),
+	}
+	if v.Reason != "" {
+		fields = append(fields, zap.String("reason", v.Reason))
+	}
+	if len(v.Signers) > 0 {
+		fields = append(fields, zap.Any("signers", v.Signers))
+	}
+	if v.Status == sigverify.StatusInvalid {
+		h.logger.Warn("displayPlaylist: playlist signature verification failed", fields...)
+		return
+	}
+	h.logger.Info("displayPlaylist: playlist signature verdict", fields...)
+}

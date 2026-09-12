@@ -43,6 +43,12 @@
     "disabled": false,
     "maxConcurrent": 0
   },
+  "sourceProbe": {
+    "disabled": false
+  },
+  "signatureVerification": {
+    "disabled": false
+  },
   "offlineCache": {
     "enabled": false,
     "resourceGate": {

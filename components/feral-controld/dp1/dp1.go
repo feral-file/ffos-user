@@ -3,6 +3,7 @@ package dp1
 import (
 	"context"
 	"fmt"
+	goio "io"
 	"maps"
 	"net/http"
 	"strconv"
@@ -13,10 +14,20 @@ import (
 	"go.uber.org/zap"
 
 	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 const (
+	// MaxPlaylistBodyBytes bounds a playlist document fetched by URL, matching
+	// hub.MAX_REQUEST_BODY_BYTES for inline casts so both ingress paths admit
+	// the same worst-case document. It is read before decoding or signature
+	// verification: every signatures[] entry costs two JCS canonicalizations
+	// of the whole body, so an unbounded remote response — reachable by any
+	// LAN caller naming a URL — would otherwise buy CPU and memory the inline
+	// cap deliberately denies (feral-file/ffos-user#307).
+	MaxPlaylistBodyBytes = 4 << 20
+
 	DEFAULT_DURATION             = 300
 	MINIMAL_PLAYLIST_ITEMS_LIMIT = 50
 	MAX_PLAYLIST_ITEMS_LIMIT     = 255
@@ -47,6 +58,16 @@ type Playlist struct {
 	dp1playlist.Playlist
 	// LEGACY: see LegacyDynamicQuery. Omit from JSON when using spec dynamicQuery only.
 	DynamicQueries []LegacyDynamicQuery `json:"dynamicQueries,omitempty"`
+	// Verification is the DP-1 signature verdict computed over the document
+	// bytes this playlist was decoded from (feral-file/ffos-user#307). nil
+	// means "not verified": verification disabled by config, or a playlist
+	// built in-process (tests, scheduler cohorts) rather than decoded from a
+	// document. `json:"-"` is load-bearing: the verdict must never ride the
+	// dp1_call payload to the player, the offline-cache record, or the
+	// player_status re-marshal — it is reported through explicit fields only.
+	// Hydration (ProcessDynamicPlaylist*) takes Playlist by value and copies
+	// the struct, so a verdict attached at decode time survives it.
+	Verification *sigverify.Verdict `json:"-"`
 }
 
 // HasDynamicContent returns true when the playlist requests dynamic item resolution (spec or legacy).
@@ -93,9 +114,12 @@ type dp1 struct {
 	logger     *zap.Logger
 	// debug mirrors controld --debug: relaxes dp1-go dynamicQuery endpoint policy (http:// and non-public hosts).
 	debug bool
+	// verify gates signature verification of fetched documents (see
+	// Playlist.Verification). Off only via config.SignatureVerificationConfig.
+	verify bool
 }
 
-func New(ffIndexer ffindexer.FFIndexer, httpClient wrapper.HTTPClient, json wrapper.JSON, io wrapper.IO, logger *zap.Logger, debug bool) DP1 {
+func New(ffIndexer ffindexer.FFIndexer, httpClient wrapper.HTTPClient, json wrapper.JSON, io wrapper.IO, logger *zap.Logger, debug, verify bool) DP1 {
 	return &dp1{
 		ffIndexer:  ffIndexer,
 		httpClient: httpClient,
@@ -103,6 +127,7 @@ func New(ffIndexer ffindexer.FFIndexer, httpClient wrapper.HTTPClient, json wrap
 		io:         io,
 		logger:     logger,
 		debug:      debug,
+		verify:     verify,
 	}
 }
 
@@ -344,15 +369,29 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
 		return Playlist{}, fmt.Errorf("fetch playlist failed: %s", resp.Status)
 	}
 
-	bytes, err := d.io.ReadAll(resp.Body)
+	// One byte past the cap is read on purpose: a body of exactly the cap is
+	// admitted, and the extra byte is what proves the response was larger.
+	bytes, err := d.io.ReadAll(goio.LimitReader(resp.Body, MaxPlaylistBodyBytes+1))
 	if err != nil {
 		return Playlist{}, err
+	}
+	if len(bytes) > MaxPlaylistBodyBytes {
+		return Playlist{}, fmt.Errorf("fetch playlist failed: body exceeds %d bytes", MaxPlaylistBodyBytes)
 	}
 
 	var playlist Playlist
 	err = d.json.Unmarshal(bytes, &playlist)
 	if err != nil {
 		return Playlist{}, err
+	}
+
+	// Verify the bytes as received, before anything reshapes the document:
+	// the typed unmarshal above may drop fields the signer covered, and the
+	// dynamic hydration every caller runs next rewrites items. Either would
+	// turn an honest signature into a payload_hash mismatch.
+	if d.verify {
+		verdict := sigverify.Verify(bytes)
+		playlist.Verification = &verdict
 	}
 
 	return playlist, nil
