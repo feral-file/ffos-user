@@ -340,7 +340,11 @@ func TestCommandHandler_Process_DisplayPlaylist_Deferred_PendingUntilCutover(t *
 	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 	active := &sigverify.Active{}
 	commandrouter.SetSignatureVerification(handler, commandrouter.SignatureVerificationOptions{Active: active}, logger)
-	sched.SetPushObserver(active.Promote)
+	sched.SetPushObserver(func(p playlistschedule.PushPhase) {
+		if p == playlistschedule.PushAccepted {
+			active.Promote()
+		}
+	})
 
 	playlistURL := "https://example.com/future.json"
 	active.Set("showing", playlistURL, sigverify.StatusUnsigned) // the document on screen, same URL republished
@@ -402,7 +406,14 @@ func TestCommandHandler_Process_ScheduledCast_SurvivesReconnectRepush(t *testing
 	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 	active := &sigverify.Active{}
 	commandrouter.SetSignatureVerification(handler, commandrouter.SignatureVerificationOptions{Active: active}, logger)
-	sched.SetPushObserver(active.Promote)
+	sched.SetPushObserver(func(p playlistschedule.PushPhase) {
+		switch p {
+		case playlistschedule.PushStarting:
+			active.ClearCurrent()
+		case playlistschedule.PushAccepted:
+			active.Promote()
+		}
+	})
 
 	// Static inline schedule: one cohort active now, one tomorrow.
 	raw := []byte(`{"dpVersion":"1.1.0","id":"sched-1","title":"t","items":[]}`)
@@ -442,13 +453,48 @@ func TestCommandHandler_Process_ScheduledCast_SurvivesReconnectRepush(t *testing
 	assert.Equal(t, sigverify.StatusUnsigned, st)
 }
 
+// TestCommandHandler_Process_DisplayPlaylist_InvalidatesBeforeSend pins the
+// pre-send invalidation: at the moment the CDP send runs — when the player
+// may already be showing the new document — the previous document's slot
+// (same URL) must already be gone, so a concurrent status round can only
+// omit, never re-attest the old verdict for the new document.
+func TestCommandHandler_Process_DisplayPlaylist_InvalidatesBeforeSend(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	active := wireVerification(ts)
+
+	playlistURL := "https://feed.example/p.json"
+	active.Set("", playlistURL, sigverify.StatusValid) // the previous document, URL-only identity
+	unsigned := sigverify.Verify([]byte(`{"dpVersion":"1.1.0","title":"t","items":[]}`))
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    "",
+		Items: []dp1playlist.PlaylistItem{{ID: "i", Source: "https://example.com/a"}},
+	}, Verification: &unsigned}, nil).Times(1)
+	var atSend bool
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(string, map[string]any) (any, error) {
+		_, atSend = active.Lookup("", playlistURL)
+		return playerOkResponse(), nil
+	}).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	_, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	require.NoError(t, err)
+	assert.False(t, atSend, "the previous verdict must be gone by the time the send runs")
+	st, ok := active.Lookup("", playlistURL)
+	assert.True(t, ok)
+	assert.Equal(t, sigverify.StatusUnsigned, st, "and the new one published after acceptance")
+}
+
 // TestCommandHandler_Process_DisplayPlaylist_PublishesInsidePushLock pins the
 // ordering rule: the slot is written inside the same WithPlayerPush critical
 // section as the send. Cast A's player reply starts cast B concurrently; B
-// can only send once A's closure has released the push lock, so if A's
-// publication were outside the lock B could observe the slot before A wrote
-// it. With the rule honored, B always sees A's verdict when B sends, and the
-// slot ends describing B.
+// can only send once A's closure has released the push lock. Two things
+// must then hold: at B's send the slot carries NO attestation (B's own
+// pre-send invalidation cleared A's — the window in which the player may
+// already show B is an omission), and the slot ends describing B. If A's
+// publication ran outside the lock it could land after B's and leave the
+// slot describing A.
 func TestCommandHandler_Process_DisplayPlaylist_PublishesInsidePushLock(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -485,7 +531,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PublishesInsidePushLock(t *testi
 	mockStatusPoller.EXPECT().ForceRefresh().Times(2)
 
 	bDone := make(chan error, 1)
-	var bSawA bool
+	var bSawAttestation bool
 	sends := 0
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(string, map[string]any) (any, error) {
 		sends++
@@ -496,8 +542,8 @@ func TestCommandHandler_Process_DisplayPlaylist_PublishesInsidePushLock(t *testi
 				bDone <- err
 			}()
 			time.Sleep(50 * time.Millisecond)
-		case 2: // B's send: A's closure has finished, so A must already be published.
-			_, bSawA = active.Lookup("A", urlA)
+		case 2: // B's send: A's closure has finished and B invalidated before sending.
+			_, bSawAttestation = active.Lookup("A", urlA)
 		}
 		return playerOkResponse(), nil
 	}).Times(2)
@@ -506,7 +552,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PublishesInsidePushLock(t *testi
 	require.NoError(t, err)
 	require.NoError(t, <-bDone)
 
-	assert.True(t, bSawA, "B's send ran after A's push lock released, so A's verdict must already be in the slot")
+	assert.False(t, bSawAttestation, "at B's send the slot must carry no attestation: B invalidated before sending")
 	st, found := active.Lookup("B", urlB)
 	assert.True(t, found)
 	assert.Equal(t, sigverify.StatusUnsigned, st)

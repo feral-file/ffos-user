@@ -68,6 +68,9 @@ func TestRefresher_SoftRefresh_ReconcilesWithoutAttestingOnAcceptance(t *testing
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).AnyTimes()
 	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(_ string, params map[string]any) (any, error) {
 		assert.Contains(t, params["expression"].(string), `"refresh":true`, "this pass must be a soft refresh")
+		if _, stillAttested := active.Lookup("", playlistURL); stillAttested {
+			t.Error("the slot must be reconciled BEFORE the send goes out")
+		}
 		select {
 		case sent <- struct{}{}:
 		default:
@@ -202,7 +205,14 @@ func scheduledRefresher(t *testing.T, ts *testSetup, offlineCache *mocks.MockOff
 	r := refresher.New(ts.ctx, ts.mockDP1, ts.mockStatusPoller, ts.mockCDP, nil, cache, wrapper.NewJSON(), sched, ts.mockClock, logger)
 	active := &sigverify.Active{}
 	refresher.SetSignatureVerification(r, active, logger)
-	sched.SetPushObserver(active.Promote)
+	sched.SetPushObserver(func(p playlistschedule.PushPhase) {
+		switch p {
+		case playlistschedule.PushStarting:
+			active.ClearCurrent()
+		case playlistschedule.PushAccepted:
+			active.Promote()
+		}
+	})
 	return r, active
 }
 

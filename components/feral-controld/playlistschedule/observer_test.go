@@ -17,8 +17,8 @@ import (
 
 // TestSetPushObserver_RunsAfterAcceptedPush pins the seam signature
 // verification's pending verdict relies on (feral-file/ffos-user#307): the
-// observer runs after a scheduler-owned push the player accepted, and not
-// after one it rejected.
+// observer sees PushStarting before every send and PushAccepted only after
+// one the player accepted.
 func TestSetPushObserver_RunsAfterAcceptedPush(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -37,8 +37,8 @@ func TestSetPushObserver_RunsAfterAcceptedPush(t *testing.T) {
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	defer sched.Stop()
 
-	observed := 0
-	sched.SetPushObserver(func() { observed++ })
+	var observed []playlistschedule.PushPhase
+	sched.SetPushObserver(func(p playlistschedule.PushPhase) { observed = append(observed, p) })
 
 	_ = sched.Prepare(displayAtPlaylist(
 		item("today", "2026-07-22T00:00:00Z"),
@@ -51,12 +51,12 @@ func TestSetPushObserver_RunsAfterAcceptedPush(t *testing.T) {
 		"message": map[string]any{"ok": true},
 	}, nil).Times(1)
 	sched.RecomputeNow(context.Background())
-	require.Equal(t, 1, observed)
+	require.Equal(t, []playlistschedule.PushPhase{playlistschedule.PushStarting, playlistschedule.PushAccepted}, observed)
 
-	// Rejected push: the cohort did not reach the screen, so no promotion.
+	// Rejected push: Starting fires (the send went out), Accepted does not.
 	cdpMock.EXPECT().Send(gomock.Any(), gomock.Any()).Return(map[string]any{
 		"message": map[string]any{"ok": false},
 	}, nil).Times(1)
 	sched.RecomputeNow(context.Background())
-	assert.Equal(t, 1, observed)
+	assert.Equal(t, []playlistschedule.PushPhase{playlistschedule.PushStarting, playlistschedule.PushAccepted, playlistschedule.PushStarting}, observed)
 }

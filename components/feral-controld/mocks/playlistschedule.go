@@ -179,7 +179,7 @@ func (mr *MockPlaylistSchedulerMockRecorder) ResumePersisted(ctx interface{}) *g
 }
 
 // SetPushObserver mocks base method.
-func (m *MockPlaylistScheduler) SetPushObserver(fn func()) {
+func (m *MockPlaylistScheduler) SetPushObserver(fn func(playlistschedule.PushPhase)) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "SetPushObserver", fn)
 }

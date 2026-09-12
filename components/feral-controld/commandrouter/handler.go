@@ -765,6 +765,21 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
+		// invalidateVerdictBeforeSend runs immediately before any send that
+		// can replace what is on screen. From the moment the send lands the
+		// player may be showing the new document, and the status poller —
+		// which WithPlayerPush does not block — could match the previous
+		// document's slot through the shared URL in the window before the
+		// accepted reply is processed. Clearing first makes that window an
+		// omission, never a false attestation; the publication after the
+		// reply then sets the new verdict. A failed send leaves the slot
+		// cleared, which is the safe direction.
+		invalidateVerdictBeforeSend := func() {
+			if h.activeVerdict != nil {
+				h.activeVerdict.ClearCurrent()
+			}
+		}
+
 		// clearVerdictForDefaultPlayback: an accepted displayDefaultPlaylist
 		// puts player-owned content on screen that controld never verified —
 		// or, with onlyIfNoPlaylist, may no-op. Either way controld can no
@@ -838,6 +853,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return
 				}
 				command.Arguments["dp1_call"] = playlist
+				invalidateVerdictBeforeSend()
 				result, err = h.sendCDPRequest(command)
 				if err != nil || !playerresponse.OK(result) {
 					h.scheduler.Restore(schedulerSnapshot)
@@ -848,6 +864,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			})
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
 			h.scheduler.WithPlayerPush(func() {
+				invalidateVerdictBeforeSend()
 				result, err = h.sendCDPRequest(command)
 				if err == nil && playerresponse.OK(result) {
 					clearVerdictForDefaultPlayback()
@@ -865,6 +882,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, err
 				}
 				command.Arguments["dp1_call"] = playlist
+			}
+			if commandType == commands.CMD_DISPLAY_PLAYLIST || commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+				invalidateVerdictBeforeSend()
 			}
 			result, err = h.sendCDPRequest(command)
 			if err == nil && playerresponse.OK(result) {

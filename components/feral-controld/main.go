@@ -758,18 +758,6 @@ func playlistRecomputeReconciler(scheduler playlistschedule.Scheduler) func(cont
 	}
 }
 
-// signatureVerdictResetReconciler drops the attested signature verdict when
-// the player (re)loads: it is showing its own default content, which controld
-// never verified (feral-file/ffos-user#307). Pending (a parked schedule
-// verdict) is kept — playlist-recompute re-pushes the schedule right after
-// this and its promotion restores the annotation, which is why this
-// reconciler must stay registered BEFORE playlist-recompute.
-func signatureVerdictResetReconciler(active *sigverify.Active) func(context.Context) {
-	return func(context.Context) {
-		active.ClearCurrent()
-	}
-}
-
 func statusForceRefreshReconciler(poller status.Poller) func(context.Context) {
 	return func(context.Context) {
 		poller.ForceRefresh()
@@ -1094,8 +1082,18 @@ func initializeApp(
 		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict}, logger)
 		// A displayAt-deferred cast parks its verdict as pending; the
 		// scheduler's own cutover push is the only point that proves the
-		// cohort reached the screen, so that is where it is promoted.
-		playlistScheduler.SetPushObserver(activeVerdict.Promote)
+		// cohort reached the screen, so that is where it is promoted — and
+		// the slot is invalidated as the push starts, so no status round
+		// between the player's swap and the promotion can match the
+		// previous document by URL.
+		playlistScheduler.SetPushObserver(func(phase playlistschedule.PushPhase) {
+			switch phase {
+			case playlistschedule.PushStarting:
+				activeVerdict.ClearCurrent()
+			case playlistschedule.PushAccepted:
+				activeVerdict.Promote()
+			}
+		})
 		poller.SetVerificationLookup(func(id, url string) (string, bool) {
 			st, ok := activeVerdict.Lookup(id, url)
 			return string(st), ok
@@ -1214,12 +1212,14 @@ func initializeApp(
 	// resync, boot-recovery retry, connectivity — replacing the five ad-hoc
 	// CDP-reconnect spawns run() used to do inline.
 	session.RegisterReconciler("sleep-invalidate", sleepInvalidateReconciler(executor, logger))
-	// A (re)loaded player shows its own default content, which controld
-	// never verified: drop the attested verdict. Registered BEFORE
-	// playlist-recompute on purpose — that reconciler's re-push promotes the
-	// schedule's parked verdict again, and it must not be wiped afterwards.
+	// A (re)loaded or replaced player document shows content controld did
+	// not just push: drop the attested verdict SYNCHRONOUSLY in the bump,
+	// not in a reconciler — the status round that detects a stamp mismatch
+	// bumps and then annotates in the same call, so an asynchronous reset
+	// would land after that round already re-attested the old verdict.
+	// Pending is untouched: playlist-recompute's re-push promotes it again.
 	if sigVerifyEnabled {
-		session.RegisterReconciler("signature-verdict-reset", signatureVerdictResetReconciler(activeVerdict))
+		session.SetGenerationHook(activeVerdict.ClearCurrent)
 	}
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))

@@ -591,6 +591,21 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		} else {
 			command.Arguments["dp1_call"] = playlist
 		}
+		// Invalidate BEFORE the send (#307): from the moment it lands the
+		// player may show the new document, and the status poller could
+		// match the previous one by URL before the reply is processed. A
+		// force cast clears outright and re-publishes below; a soft refresh
+		// reconciles now (the player may or may not swap, and acceptance
+		// will not say — see Active.ReconcileSoft); a verdict-less push
+		// clears. A failed send leaves the slot in that state: an omission.
+		if r.activeVerdict != nil {
+			switch {
+			case refreshVerdict == nil || effectiveForceCast:
+				r.activeVerdict.ClearCurrent()
+			default:
+				r.activeVerdict.ReconcileSoft(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
+			}
+		}
 		result, sendCDPErr := r.sendCDPRequest(command)
 		sendErr = sendCDPErr
 		// Transport success with ok:false (or a malformed body) must still
@@ -606,12 +621,10 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		// closure — under WithPlayerPush — so it is ordered against casts
 		// and cutovers. A force cast (now_display) replaces the artwork at
 		// once, so its verdict is published outright; a verdict-less push
-		// (the cached-copy fallback) CLEARS the slot rather than leaving a
-		// previous verdict standing for the same URL. A SOFT refresh
-		// (refresh:true) is different: the player may keep the current
-		// item on screen until it ends, so an ok reply does not prove the
-		// refreshed document is showing — ReconcileSoft keeps the slot
-		// honest across that ambiguity instead of attesting on acceptance.
+		// (the cached-copy fallback) CLEARS the slot (pending too) rather
+		// than leaving a previous verdict standing for the same URL. A SOFT
+		// refresh was reconciled before the send and nothing more is known
+		// after it.
 		if sendErr == nil && r.activeVerdict != nil {
 			switch {
 			case refreshVerdict == nil:
@@ -619,7 +632,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			case effectiveForceCast:
 				r.activeVerdict.Set(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
 			default:
-				r.activeVerdict.ReconcileSoft(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
+				// Soft refresh: already reconciled before the send.
 			}
 			// The scheduler's cache now holds THIS document (Commit below),
 			// so every later cutover pushes its cohorts: restage pending to

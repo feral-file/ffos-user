@@ -1896,7 +1896,7 @@ func (f *fakePlaylistScheduler) ClearThenWithPlayerPush(fn func() bool) {
 
 // SetPushObserver satisfies the interface; the fake never pushes on its own,
 // so the observer is never called.
-func (f *fakePlaylistScheduler) SetPushObserver(func()) {}
+func (f *fakePlaylistScheduler) SetPushObserver(func(playlistschedule.PushPhase)) {}
 
 func (f *fakePlaylistScheduler) WithPlayerPush(fn func()) {
 	f.mu.Lock()
