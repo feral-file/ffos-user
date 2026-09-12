@@ -836,3 +836,130 @@ func TestStrictPushGate(t *testing.T) {
 	assert.NoError(t, gate(unsigned))
 	assert.NoError(t, commandrouter.StrictPushGate(nil)(unsigned), "unwired mode reader never refuses")
 }
+
+// fakeToastSender records the notices commandrouter asks the player to show
+// and can inject a Show error to prove best-effort behavior.
+type fakeToastSender struct {
+	notices []sigverify.Notice
+	err     error
+}
+
+func (f *fakeToastSender) Show(_ context.Context, n sigverify.Notice) error {
+	f.notices = append(f.notices, n)
+	return f.err
+}
+
+func unsignedInlineRaw() []byte {
+	return []byte(`{"dpVersion":"1.1.0","id":"app-1","title":"t","items":[{"id":"i","source":"https://example.com/a","duration":10,"license":"open"}]}`)
+}
+
+func tamperedSignedRaw(t *testing.T) []byte {
+	t.Helper()
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(signedFixture(t), &doc))
+	doc["title"] = "tampered"
+	raw, err := json.Marshal(doc)
+	require.NoError(t, err)
+	return raw
+}
+
+// TestCommandHandler_Process_Notify_UnsignedToastsUnsigned: under notify an
+// unsigned inline cast plays and the wall shows the "not signed" notice
+// (feral-file/ffos-user#307 phase 4).
+func TestCommandHandler_Process_Notify_UnsignedToastsUnsigned(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeNotify)
+	toast := &fakeToastSender{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	require.NoError(t, err)
+	assert.Equal(t, "unsigned", replyMessage(t, result)["signatureStatus"])
+	assert.Equal(t, []sigverify.Notice{sigverify.NoticeUnsigned}, toast.notices)
+}
+
+// TestCommandHandler_Process_Notify_InvalidToastsInvalid: under notify a
+// tampered inline cast plays and the wall shows the "could not be verified"
+// notice.
+func TestCommandHandler_Process_Notify_InvalidToastsInvalid(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeNotify)
+	toast := &fakeToastSender{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	command := inlineCast(ts, tamperedSignedRaw(t), inlineTyped("pl-tampered"))
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	require.NoError(t, err)
+	assert.Equal(t, "invalid", replyMessage(t, result)["signatureStatus"])
+	assert.Equal(t, []sigverify.Notice{sigverify.NoticeInvalid}, toast.notices)
+}
+
+// TestCommandHandler_Process_Silent_NeverToasts: silent plays and reports but
+// shows nothing on the wall.
+func TestCommandHandler_Process_Silent_NeverToasts(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeSilent)
+	toast := &fakeToastSender{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	_, err := ts.handler.Process(ts.ctx, command)
+
+	require.NoError(t, err)
+	assert.Empty(t, toast.notices, "silent mode never toasts")
+}
+
+// TestCommandHandler_Process_Strict_ToastsRejectedAndDoesNotCast: strict
+// refuses the unsigned cast, sends nothing to the player as a cast, and shows
+// the "not shown" notice.
+func TestCommandHandler_Process_Strict_ToastsRejectedAndDoesNotCast(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeStrict)
+	toast := &fakeToastSender{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
+	// No Send / ForceRefresh: the cast is refused before either.
+
+	_, err := ts.handler.Process(ts.ctx, command)
+
+	require.Error(t, err)
+	assert.True(t, commandrouter.IsSigInvalid(err))
+	assert.Equal(t, []sigverify.Notice{sigverify.NoticeRejected}, toast.notices)
+}
+
+// TestCommandHandler_Process_ToastFailureNeverFailsTheCast: a Show error is
+// swallowed — the notify cast still plays and reports success.
+func TestCommandHandler_Process_ToastFailureNeverFailsTheCast(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeNotify)
+	toast := &fakeToastSender{err: errors.New("player hiccup")}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	require.NoError(t, err, "a toast failure must not fail the cast")
+	assert.Equal(t, "unsigned", replyMessage(t, result)["signatureStatus"])
+	assert.Equal(t, []sigverify.Notice{sigverify.NoticeUnsigned}, toast.notices)
+}

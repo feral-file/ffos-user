@@ -39,6 +39,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
+	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
@@ -1098,6 +1099,13 @@ func initializeApp(
 	}
 	if sigVerifyEnabled {
 		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict, Mode: verificationMode}, logger)
+		// The on-screen notice for a non-valid cast (notify) or a strict
+		// rejection. Reads the player manifest at the shipping path on every
+		// send, so an older bundle without the playerToast contract degrades
+		// to "no toast" rather than an error; ff-player ships the contract
+		// (paired-rollout: the player bundle lands before this daemon). Copy
+		// is owned by the player; controld only names the notice.
+		commandrouter.SetPlayerToast(rawCmdHandler, playertoast.New(cdp, setupui.DefaultContractPath, logger), logger)
 		// A displayAt-deferred cast parks its verdict as pending; the
 		// scheduler's own cutover push is the only point that proves the
 		// cohort reached the screen, so that is where it is promoted — and

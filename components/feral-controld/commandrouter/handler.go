@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
+	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -87,6 +89,11 @@ type handler struct {
 	verifySignatures bool
 	activeVerdict    *sigverify.Active
 	verificationMode func() sigverify.Mode
+	// playerToast, when set (SetPlayerToast), shows the signature-verification
+	// notice on the wall. Best-effort and capability-gated on the player
+	// manifest; nil (unwired, or an older player) means no toast, never a
+	// changed cast outcome (feral-file/ffos-user#307).
+	playerToast playertoast.Sender
 }
 
 // RecoverySession is the narrow slice of playersession.Session the relayer's
@@ -206,6 +213,51 @@ func (h *handler) currentVerificationMode() sigverify.Mode {
 		return sigverify.DefaultMode
 	}
 	return h.verificationMode()
+}
+
+// SetPlayerToast wires the on-screen signature-notice sender onto h (if h is
+// the concrete handler built by New), mirroring SetSignatureVerification. Set
+// once at wiring time; nil leaves toasts off.
+func SetPlayerToast(h Handler, sender playertoast.Sender, logger *zap.Logger) {
+	setter, ok := h.(interface{ setPlayerToast(playertoast.Sender) })
+	if !ok {
+		logger.Warn("Command handler does not support player toast wiring")
+		return
+	}
+	setter.setPlayerToast(sender)
+}
+
+func (h *handler) setPlayerToast(sender playertoast.Sender) {
+	h.playerToast = sender
+}
+
+// maybeToast shows the notice the (mode, status) policy calls for, if any.
+// Best-effort by contract: a toast failure never changes a cast's outcome, so
+// the error is swallowed to a debug line. The sender logs an unsupported
+// player once itself. Bounded so a wedged player cannot stall the cast reply.
+func (h *handler) maybeToast(ctx context.Context, status sigverify.Status) {
+	if h.playerToast == nil {
+		return
+	}
+	notice, ok := sigverify.ToastFor(h.currentVerificationMode(), status)
+	if !ok {
+		return
+	}
+	toastCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := h.playerToast.Show(toastCtx, notice); err != nil {
+		h.logger.Debug("player toast not shown", zap.String("notice", string(notice)), zap.Error(err))
+	}
+}
+
+// verdictStatus is the Status the toast policy keys on: a nil verdict (the
+// offline cached copy) has no status, which under strict still toasts
+// "rejected" and under notify toasts nothing.
+func verdictStatus(v *sigverify.Verdict) sigverify.Status {
+	if v == nil {
+		return ""
+	}
+	return v.Status
 }
 
 func (h *handler) currentGeneration() uint64 {
@@ -552,6 +604,8 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						zap.String("reason", rejection.Reason),
 						zap.String("playlist_id", string(helper.TruncateBytes([]byte(playlist.ID), logger.MAX_FIELD_LENGTH))))
 					err = rejection
+					// Strict refused the cast; tell the wall (best-effort).
+					h.maybeToast(ctx, verdictStatus(playlist.Verification))
 					return nil, err
 				}
 			}
@@ -1013,6 +1067,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// push critical section above (publishVerdict).
 		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil && playlist.Verification != nil && playerresponse.OK(result) {
 			result = annotateCastReply(result, playlist.Verification)
+		}
+
+		// Notify (and silent) reach here: the cast played. Surface a non-valid
+		// verdict on the wall before the status refresh, so the toast rides
+		// the new artwork (feral-file/ffos-user#307). Best-effort; only when
+		// the player actually accepted the cast.
+		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil && playerresponse.OK(result) {
+			h.maybeToast(ctx, verdictStatus(playlist.Verification))
 		}
 
 		// Force refresh status poller
