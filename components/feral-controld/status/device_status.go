@@ -52,6 +52,24 @@ type deviceStatus struct {
 	// deliberately not on the DeviceStatus interface, so mocks stay
 	// untouched).
 	lastOutage func() *LastOutage
+
+	// verificationEnabled, when wired (SetSignatureVerificationCapability),
+	// answers whether the DP-1 verifier runs; nil reads the config. Same
+	// type-asserted seam as lastOutage, for the same reason.
+	verificationEnabled func() bool
+}
+
+// SetSignatureVerificationCapability wires the verifier kill-switch state
+// (see the verificationEnabled field). Call before first use.
+func (d *deviceStatus) SetSignatureVerificationCapability(enabled func() bool) {
+	d.verificationEnabled = enabled
+}
+
+func (d *deviceStatus) signatureVerificationEnabled() bool {
+	if d.verificationEnabled != nil {
+		return d.verificationEnabled()
+	}
+	return config.Get().SignatureVerificationEnabled()
 }
 
 // SetLastOutageSource wires the netlog outage-summary source (see the
@@ -159,12 +177,15 @@ type DeviceStatusResponse struct {
 	DeviceName string `json:"deviceName"`
 	// SignatureVerificationMode is the owner's DP-1 signature verification
 	// policy (feral-file/ffos-user#307): "silent", "notify", or "strict".
-	// Deliberately no omitempty, like Contract and DeviceName: its PRESENCE
-	// is the capability signal a controller gates the setting UI on, and
-	// the default ("notify") is the ordinary value on a unit nobody
-	// configured. Read through sigverify.LoadMode — the same reader the
+	// Its PRESENCE is the capability signal a controller gates the setting
+	// UI on, and the default ("notify") is the ordinary value on a unit
+	// nobody configured, so it is present on every status — EXCEPT while
+	// the verifier is switched off by config (`signatureVerification.
+	// disabled`): then no mode is enforced and the field is omitted, so no
+	// controller can read an enforceable "strict" off a device that plays
+	// everything. Read through sigverify.LoadMode — the same reader the
 	// cast path uses — never a duplicated path constant.
-	SignatureVerificationMode string `json:"signatureVerificationMode"`
+	SignatureVerificationMode string `json:"signatureVerificationMode,omitempty"`
 	// SleepSchedule is derived from persisted schedule + wall clock (see sleepschedule).
 	// It reflects intended FF1 sleep mode; FFP panel DDC power may lag after transitions
 	// because controld aligns panel power asynchronously (best-effort, eventual vs. ddcPanelStatus).
@@ -343,7 +364,12 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	// Signature verification mode: a bad record loads as the default (the
 	// non-blocking policy), and the cast path logs that condition where it
 	// matters; here the reported value is what the cast path will apply.
+	// Omitted entirely while the verifier is off — nothing applies a mode
+	// then, and the record is not even read.
 	g.Go(func() error {
+		if !d.signatureVerificationEnabled() {
+			return nil
+		}
 		mode, _ := sigverify.LoadMode(d.os, d.json)
 		signatureVerificationMode = string(mode)
 		return nil

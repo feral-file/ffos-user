@@ -304,3 +304,40 @@ func TestGetStatus_SignatureVerificationMode_ReadsStoredRecord(t *testing.T) {
 		})
 	}
 }
+
+// TestGetStatus_SignatureVerificationMode_OmittedWhileVerifierDisabled: with
+// the config kill switch on no mode is enforced, so the field is absent (a
+// controller hides the setting) and the record is not read.
+func TestGetStatus_SignatureVerificationMode_OmittedWhileVerifierDisabled(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	mockOS := mocks.NewMockOS(ctrl)
+	mockExec := mocks.NewMockExec(ctrl)
+	mockHTTP := mocks.NewMockHTTPClient(ctrl)
+	mockIO := mocks.NewMockIO(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	nmcliCmd := mocks.NewMockExecCmd(ctrl)
+	pamCmd := mocks.NewMockExecCmd(ctrl)
+
+	// Every reader except the mode record.
+	mockOS.EXPECT().ReadFile(constants.SCREEN_ORIENTATION_FILE).Return(nil, os.ErrNotExist).Times(1)
+	mockOS.EXPECT().ReadFile(constants.FF1_CONFIG_FILE).Return([]byte(testFF1ConfigJSON), nil).Times(1)
+	mockOS.EXPECT().ReadFile(constants.SLEEP_SCHEDULE_FILE).Return(nil, os.ErrNotExist).Times(1)
+	mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, os.ErrNotExist).Times(1)
+	mockOS.EXPECT().ReadFile("/home/feralfile/.state/analytics-toggle-off").Return(nil, os.ErrNotExist).Times(1)
+	mockOS.EXPECT().ReadFile("/home/feralfile/.state/beta-features-toggle-on").Return(nil, os.ErrNotExist).Times(1)
+	mockOS.EXPECT().IsNotExist(gomock.Any()).DoAndReturn(func(err error) bool { return os.IsNotExist(err) }).AnyTimes()
+	expectDeviceStatusExecMocks(t, mockExec, nmcliCmd, pamCmd)
+	mockCDP.EXPECT().PageNavigationURL(gomock.Any()).Return("", errors.New("no debug targets")).AnyTimes()
+
+	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, mockCDP)
+	ds.(interface{ SetSignatureVerificationCapability(func() bool) }).SetSignatureVerificationCapability(func() bool { return false })
+	resp, err := ds.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "", resp.SignatureVerificationMode)
+
+	body, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), "signatureVerificationMode")
+}

@@ -114,6 +114,18 @@ func (mr *MockExecutorMockRecorder) SetSetupUI(ui interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSetupUI", reflect.TypeOf((*MockExecutor)(nil).SetSetupUI), ui)
 }
 
+// SetSignatureVerificationCapability mocks base method.
+func (m *MockExecutor) SetSignatureVerificationCapability(enabled func() bool) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetSignatureVerificationCapability", enabled)
+}
+
+// SetSignatureVerificationCapability indicates an expected call of SetSignatureVerificationCapability.
+func (mr *MockExecutorMockRecorder) SetSignatureVerificationCapability(enabled interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSignatureVerificationCapability", reflect.TypeOf((*MockExecutor)(nil).SetSignatureVerificationCapability), enabled)
+}
+
 // SetVerificationModeObserver mocks base method.
 func (m *MockExecutor) SetVerificationModeObserver(observer func(sigverify.Mode)) {
 	m.ctrl.T.Helper()

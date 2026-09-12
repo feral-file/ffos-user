@@ -85,7 +85,7 @@ send a standardized RPC error response over the relayer for most failures, so
 new inbound message families that require controller-visible errors must define
 their own response shape.
 
-There are two standardized exceptions. The first is **command-storm rejection**. When the device
+There are three standardized exceptions. The first is **command-storm rejection**. When the device
 sheds a command to protect itself from flooding (rate limit, concurrency
 budget, or relayer dispatch saturation — see feral-file/ffos-user#208), it
 sends an RPC response whose `message` body is:
@@ -298,10 +298,13 @@ Current success response example:
 
 `signatureVerificationMode` is the owner's DP-1 signature verification policy
 (see `setSignatureVerificationMode`): `silent`, `notify`, or `strict`. Like
-`deviceName` it is **always present** on firmware that supports it — its
-PRESENCE is the capability signal a controller gates the setting on — and it
-carries the default `notify` on a unit nobody configured. A record that cannot
-be read reports (and applies) that default.
+`deviceName` its PRESENCE is the capability signal a controller gates the
+setting on, and it carries the default `notify` on a unit nobody configured.
+A record that cannot be read reports (and applies) that default. It is
+**absent** while the daemon's `signatureVerification.disabled` config switch
+is on: the verifier is off, no mode can be enforced, and a controller must
+hide the setting rather than show a "strict" nothing applies
+(`setSignatureVerificationMode` refuses in that state too).
 
 `deviceName` is the owner-set display label (see `setDeviceName`). Like
 `contract`, it is **always present** on firmware that supports it and carries
@@ -690,9 +693,10 @@ Current error cases:
   verdict for every item (network errors, timeouts, 401/403/406/407/408/
   416/429, 5xx) fails open and the cast proceeds.
 
-Current relayer error response: the `sourceUnreachable` rejection above is
-standardized; all other processing failures remain non-standardized and are
-logged as command failures.
+Current relayer error response: the `sourceUnreachable` and strict-mode
+`sigInvalid` rejections above are standardized (both `ok:false` RPC bodies,
+both HTTP `422` on the LAN hub); all other processing failures remain
+non-standardized and are logged as command failures.
 
 ### displayDefaultPlaylist
 
@@ -1066,6 +1070,17 @@ scheduler refused while the mode was `strict` (a refusal arms no retry, and
 past the schedule's final boundary there is no timer), so the wall does not
 stay on the pre-cutover cohort until an unrelated wake. Only a cohort not yet
 delivered is pushed; a mode change never re-casts what is already on screen.
+A factory reset that rolls back does the same from the default it restored.
+
+Error cases:
+
+- `invalid arguments: mode must be one of silent, notify, strict` — nothing
+  stored. The supplied value is never echoed.
+- `factory reset in progress` — nothing stored.
+- `signature verification is disabled by device configuration; the mode
+  cannot be set` — the daemon's `signatureVerification.disabled` switch is
+  on, so no mode could be enforced; nothing stored, and `getDeviceStatus`
+  omits `signatureVerificationMode` in that state.
 — the stored value, which controllers should adopt. The record is
 `/home/feralfile/.state/signature-verification.json`, read on every cast, so
 the change applies to the next cast with no restart.

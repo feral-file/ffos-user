@@ -926,6 +926,12 @@ func initializeApp(
 	// switch for a verifier/canonicalization divergence (see
 	// config.SignatureVerificationConfig).
 	sigVerifyEnabled := config.Get().SignatureVerificationEnabled()
+	// The mode setting and its status field exist only while the verifier
+	// runs: with the kill switch on, nothing could enforce a stored mode.
+	executor.SetSignatureVerificationCapability(func() bool { return sigVerifyEnabled })
+	if ds, ok := deviceStatus.(interface{ SetSignatureVerificationCapability(func() bool) }); ok {
+		ds.SetSignatureVerificationCapability(func() bool { return sigVerifyEnabled })
+	}
 	if !sigVerifyEnabled {
 		logger.Warn("DP-1 signature verification disabled by config; casts carry no signature verdict")
 	}

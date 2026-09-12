@@ -185,6 +185,9 @@ func TestSetSignatureVerificationMode_NotifiesObserverWithStoredMode(t *testing.
 	mockOS.EXPECT().MkdirAll(gomock.Any(), gomock.Any()).Return(nil)
 	mockOS.EXPECT().WriteFile(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 	mockOS.EXPECT().Rename(gomock.Any(), gomock.Any()).Return(nil)
+	// The observer is handed the EFFECTIVE mode, read back from disk, not the
+	// value the caller passed — so the record read is expected.
+	mockOS.EXPECT().ReadFile(constants.SIGNATURE_VERIFICATION_FILE).Return([]byte(`{"mode":"silent"}`), nil)
 	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON()}
 	var seen []sigverify.Mode
 	e.SetVerificationModeObserver(func(m sigverify.Mode) { seen = append(seen, m) })
@@ -199,4 +202,75 @@ func TestSetSignatureVerificationMode_NotifiesObserverWithStoredMode(t *testing.
 	_, err = e.setSignatureVerificationMode(context.Background(), []byte(`{"mode":"notify"}`))
 	require.Error(t, err)
 	assert.Equal(t, []sigverify.Mode{sigverify.ModeSilent}, seen, "a refused request notifies nobody")
+}
+
+// TestSetSignatureVerificationMode_RefusedWhileVerifierDisabled: with the
+// config kill switch on, nothing enforces a mode, so nothing is stored,
+// acknowledged, or announced.
+func TestSetSignatureVerificationMode_RefusedWhileVerifierDisabled(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	e := &executor{logger: zap.NewNop(), os: mocks.NewMockOS(ctrl), json: wrapper.NewJSON()} // no disk access expected
+	e.SetSignatureVerificationCapability(func() bool { return false })
+	e.SetVerificationModeObserver(func(sigverify.Mode) { t.Fatal("no observer call for a refused request") })
+
+	result, err := e.setSignatureVerificationMode(context.Background(), []byte(`{"mode":"strict"}`))
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "disabled by device configuration")
+}
+
+// TestSetSignatureVerificationMode_ObserverSuppressedWhileResetStaged: a
+// reset that latches between the store and the notify wins — no scheduler
+// push goes out under the reset panel; the latch release re-drives instead.
+func TestSetSignatureVerificationMode_ObserverSuppressedWhileResetStaged(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockOS := mocks.NewMockOS(ctrl)
+	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON()}
+	mockOS.EXPECT().MkdirAll(gomock.Any(), gomock.Any()).Return(nil)
+	mockOS.EXPECT().WriteFile(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(string, []byte, os.FileMode) error {
+		e.resetStaged.Store(true) // the reset latches mid-store
+		return nil
+	})
+	mockOS.EXPECT().Rename(gomock.Any(), gomock.Any()).Return(nil)
+	e.SetVerificationModeObserver(func(sigverify.Mode) { t.Fatal("observer must not fire under a staged reset") })
+
+	_, err := e.setSignatureVerificationMode(context.Background(), []byte(`{"mode":"notify"}`))
+
+	require.NoError(t, err)
+}
+
+// TestReleaseStuckResetLatch_RedrivesFromTheEffectiveMode: a rolled-back
+// reset cleared the record, so the observer is handed the mode on disk (the
+// default), never the mode a racing setter asked for.
+func TestReleaseStuckResetLatch_RedrivesFromTheEffectiveMode(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(constants.SIGNATURE_VERIFICATION_FILE).Return(nil, os.ErrNotExist)
+	mockOS.EXPECT().IsNotExist(os.ErrNotExist).Return(true)
+	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON(), setupNarrator: &narratorSpy{}}
+	e.resetStaged.Store(true)
+	var seen []sigverify.Mode
+	e.SetVerificationModeObserver(func(m sigverify.Mode) { seen = append(seen, m) })
+
+	e.releaseStuckResetLatch("test")
+
+	assert.False(t, e.resetStaged.Load())
+	assert.Equal(t, []sigverify.Mode{sigverify.DefaultMode}, seen)
+}
+
+// TestReleaseStuckResetLatch_NoObserverReadsNothing keeps the existing
+// latch-release tests honest: without an observer the record is not read.
+func TestReleaseStuckResetLatch_NoObserverReadsNothing(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	e := &executor{logger: zap.NewNop(), os: mocks.NewMockOS(ctrl), json: wrapper.NewJSON(), setupNarrator: &narratorSpy{}}
+	e.resetStaged.Store(true)
+
+	e.releaseStuckResetLatch("test")
+
+	assert.False(t, e.resetStaged.Load())
 }

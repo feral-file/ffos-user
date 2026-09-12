@@ -79,6 +79,12 @@ type Executor interface {
 	// whose refused cutover needs re-driving once the policy relaxes
 	// (feral-file/ffos-user#307). Set once at wiring time.
 	SetVerificationModeObserver(observer func(mode sigverify.Mode))
+	// SetSignatureVerificationCapability tells the executor whether the
+	// verifier runs at all (the `signatureVerification.disabled` config
+	// switch). While it is off no mode can be enforced, so the setter
+	// refuses rather than store and acknowledge a policy nothing applies.
+	// Unset means "read the config", so tests pin it without a global.
+	SetSignatureVerificationCapability(enabled func() bool)
 	// SetSetupUI injects the process-wide setup-narration surface so the
 	// controld-owned claim/factory-reset/OTA-failure narration shares ONE
 	// setupui.Service with the provisioning domain. Set once at wiring time; the
@@ -116,6 +122,9 @@ type executor struct {
 	// modeObserver, when set, is notified after the signature verification
 	// mode is stored. Same wiring discipline as nameObserver.
 	modeObserver func(mode sigverify.Mode)
+	// verificationEnabled, when set (SetSignatureVerificationCapability),
+	// answers whether the verifier runs; nil reads the config.
+	verificationEnabled func() bool
 
 	// deviceNameMu serializes every mutation of the device-name record and the
 	// observer notification that follows it. Both writers stage through one
@@ -556,6 +565,10 @@ func (e *executor) SetDeviceNameObserver(observer func(name string)) {
 
 func (e *executor) SetVerificationModeObserver(observer func(mode sigverify.Mode)) {
 	e.modeObserver = observer
+}
+
+func (e *executor) SetSignatureVerificationCapability(enabled func() bool) {
+	e.verificationEnabled = enabled
 }
 
 // SetSetupUI injects the shared setup-narration surface so the controld-owned
@@ -3287,6 +3300,13 @@ func (e *executor) releaseStuckResetLatch(why string) {
 	e.logger.Warn("Releasing the staged factory-reset latch", zap.String("reason", why))
 	e.resetStaged.Store(false)
 	e.setupUI().HideIfShowing(setupui.StateFactoryReset)
+	// The reset cleared the verification-mode record (hand-on) without
+	// telling anyone, and a setter that raced the latch had its observer
+	// suppressed — so the displayAt scheduler may still hold a cutover it
+	// refused under the previous owner's strict. Now that the unit lives on,
+	// re-drive from the mode actually on disk, exactly as a relaxation
+	// would (see setSignatureVerificationMode).
+	e.notifyVerificationMode()
 }
 
 func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, error) {

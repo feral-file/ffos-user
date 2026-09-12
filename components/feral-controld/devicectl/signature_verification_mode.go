@@ -2,10 +2,12 @@ package devicectl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 )
 
@@ -25,6 +27,13 @@ func (e *executor) setSignatureVerificationMode(_ context.Context, args []byte) 
 	if err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
+	// With the verifier switched off by config nothing enforces a mode, so
+	// storing and acknowledging one would advertise a policy — strict, in
+	// particular — that no cast path applies. Refuse instead; device status
+	// omits the field for the same reason, so a controller hides the setting.
+	if !e.signatureVerificationEnabled() {
+		return nil, errors.New("signature verification is disabled by device configuration; the mode cannot be set")
+	}
 
 	if err := e.storeVerificationMode(mode); err != nil {
 		return nil, err
@@ -35,12 +44,40 @@ func (e *executor) setSignatureVerificationMode(_ context.Context, args []byte) 
 	// the lock orders is the disk, and the observer's consumer (the displayAt
 	// scheduler's re-drive) reads the mode from disk itself at push time and
 	// may spend a CDP round-trip — not something to hold a factory reset's
-	// clear behind. A clear that lands between the store and this notify is
-	// harmless: the scheduler's gate reads the record the clear left.
-	if e.modeObserver != nil {
-		e.modeObserver(mode)
+	// clear behind. Suppressed while a reset is staged (one that latched
+	// between the store and here): a scheduler push must not go out under
+	// the reset panel, and the latch release re-drives from the effective
+	// record if the reset rolls back (releaseStuckResetLatch).
+	if e.resetStaged.Load() {
+		e.logger.Info("Signature verification mode stored during a staged factory reset; re-drive deferred to the latch release")
+	} else {
+		e.notifyVerificationMode()
 	}
 	return map[string]interface{}{"ok": true, "signatureVerificationMode": string(mode)}, nil
+}
+
+// notifyVerificationMode hands the observer the mode actually on disk (never
+// the mode a caller asked for): the setter's store and the reset's clear
+// both flow through here, and the consumer must act on what the cast path
+// will read. No-op when nothing is wired, and then the record is not read.
+func (e *executor) notifyVerificationMode() {
+	if e.modeObserver == nil {
+		return
+	}
+	mode, err := sigverify.LoadMode(e.os, e.json)
+	if err != nil {
+		e.logger.Warn("Signature verification mode record unreadable; notifying the default", zap.Error(err))
+	}
+	e.modeObserver(mode)
+}
+
+// signatureVerificationEnabled reports whether the verifier runs; the
+// injected predicate wins so tests need no global config.
+func (e *executor) signatureVerificationEnabled() bool {
+	if e.verificationEnabled != nil {
+		return e.verificationEnabled()
+	}
+	return config.Get().SignatureVerificationEnabled()
 }
 
 // storeVerificationMode is the locked half of the setter.
