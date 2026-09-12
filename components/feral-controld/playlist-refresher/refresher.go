@@ -153,6 +153,9 @@ type refresher struct {
 	// already cleared the slot), and the new generation's reconciliation
 	// establishes a fresh verdict. Mirrors commandrouter.sendCDPRequest.
 	sessionGeneration func() uint64
+	// resetStaged, when set (SetResetStaged), reports a staged factory reset;
+	// a pending send drops rather than repaint over the reset narration.
+	resetStaged func() bool
 	// verificationMode, when set (SetSignatureVerificationMode), returns the
 	// owner's current mode. Under strict, a refresh whose re-fetched document
 	// is not proven valid is NOT pushed: the schedule may have been replaced
@@ -176,6 +179,27 @@ func SetSignatureVerificationMode(r Refresher, fn func() sigverify.Mode, logger 
 
 func (r *refresher) setSignatureVerificationMode(fn func() sigverify.Mode) {
 	r.verificationMode = fn
+}
+
+// SetResetStaged injects the factory-reset latch predicate onto r, if r is
+// the concrete refresher built by New (mirroring SetSignatureVerificationMode).
+// The refresher drops a pending send when a reset is staged so it never
+// repaints over the reset narration.
+func SetResetStaged(r Refresher, fn func() bool, logger *zap.Logger) {
+	setter, ok := r.(interface{ setResetStaged(func() bool) })
+	if !ok {
+		logger.Warn("SetResetStaged: refresher does not support the reset-staged seam")
+		return
+	}
+	setter.setResetStaged(fn)
+}
+
+func (r *refresher) setResetStaged(fn func() bool) {
+	r.resetStaged = fn
+}
+
+func (r *refresher) resetIsStaged() bool {
+	return r.resetStaged != nil && r.resetStaged()
 }
 
 func (r *refresher) strictMode() bool {
@@ -616,6 +640,18 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 
 	sendErr := error(nil)
 	send := func() {
+		// A staged factory reset owns the screen. This closure runs under the
+		// scheduler's player-push lock, the SAME lock the reset narration
+		// write is serialized through (executor.SetPlaybackFence), so a pass
+		// already holding the lock writes before the narration and the
+		// narration paints last; a pass that acquires the lock after the
+		// narration must see the latch here and drop, or it would repaint
+		// over the reset panel. Reported as a successful no-op pass, like the
+		// strict skip (feral-file/ffos-user#307).
+		if r.resetIsStaged() {
+			r.logger.Info("playlist refresh skipped: factory reset staged")
+			return
+		}
 		effectiveForceCast := forceCast
 		if r.scheduler != nil {
 			if r.scheduler.AuthorityToken() != authorityToken {

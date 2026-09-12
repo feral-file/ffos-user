@@ -126,6 +126,14 @@ type executor struct {
 	// answers whether the verifier runs; nil reads the config.
 	verificationEnabled func() bool
 
+	// playbackFence, when set (SetPlaybackFence), runs a callback under the
+	// scheduler's player-push lock. The factory-reset narration write uses it
+	// so it is serialized against every playlist writer (scheduler cutovers
+	// and the refresher, which drop when they see the reset latch), and paints
+	// last instead of being overwritten by an in-flight cutover or refresh
+	// (feral-file/ffos-user#307). nil runs the narration directly.
+	playbackFence func(func())
+
 	// deviceNameMu serializes every mutation of the device-name record and the
 	// observer notification that follows it. Both writers stage through one
 	// shared temp path and both are reachable concurrently (a rename over the
@@ -569,6 +577,22 @@ func (e *executor) SetVerificationModeObserver(observer func(mode sigverify.Mode
 
 func (e *executor) SetSignatureVerificationCapability(enabled func() bool) {
 	e.verificationEnabled = enabled
+}
+
+// SetPlaybackFence injects the scheduler's player-push lock runner (see the
+// playbackFence field). Call once at wiring time.
+func (e *executor) SetPlaybackFence(fn func(func())) {
+	e.playbackFence = fn
+}
+
+// showFactoryResetNarration paints the reset panel under the playback fence
+// so it is ordered last against playlist writers; direct when unwired.
+func (e *executor) showFactoryResetNarration() {
+	if e.playbackFence != nil {
+		e.playbackFence(func() { e.setupUI().ShowFactoryReset() })
+		return
+	}
+	e.setupUI().ShowFactoryReset()
 }
 
 // SetSetupUI injects the shared setup-narration surface so the controld-owned
@@ -3244,7 +3268,7 @@ func (e *executor) factoryResetInProcess(ctx context.Context) (interface{}, erro
 	// block the reset. It is sent as an extension state ("factory_reset"): a
 	// current player accepts it with {ok:true} and renders nothing, so the panel
 	// only paints the confirmation once ff-player adds the state to its renderer.
-	e.setupUI().ShowFactoryReset()
+	e.showFactoryResetNarration()
 
 	out, err := e.exec.CommandContext(ctx, "systemctl", "start", "set-factory-boot.service").CombinedOutput()
 	if err != nil {

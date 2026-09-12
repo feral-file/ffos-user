@@ -1116,28 +1116,34 @@ func initializeApp(
 				pushAccepted()
 			}
 		})
+		// Strict mode judges a scheduler-owned cutover AT PUSH TIME against
+		// the cast-time verdict the scheduler's cached document still carries
+		// (cloned by pointer, never persisted), so a schedule accepted under
+		// notify cannot carry a non-valid cohort onto the screen after the
+		// owner switches to strict.
+		playlistScheduler.SetPushGate(commandrouter.StrictPushGate(verificationMode))
 		poller.SetVerificationLookup(func(id, url string) (string, bool) {
 			st, ok := activeVerdict.Lookup(id, url)
 			return string(st), ok
 		})
 	}
 
-	// The scheduler push gate is installed UNCONDITIONALLY as a factory-reset
-	// fence: a staged reset owns the screen and is about to reboot, so a
-	// timer/wake/reconnect/retry cutover must not overwrite the reset
-	// narration — and that must hold even with the verifier kill switch on,
-	// where none of the wiring above runs. Strict-mode enforcement is layered
-	// on only when verification runs: with a nil mode the gate refuses on the
-	// reset latch alone and never on signature policy. When strict IS active,
-	// the gate is also judged AT PUSH TIME against the cast-time verdict the
-	// scheduler's cached document still carries (cloned by pointer, never
-	// persisted), so a schedule accepted under notify cannot carry a non-valid
-	// cohort onto the screen after the owner switches to strict.
-	var pushGateMode func() sigverify.Mode
-	if sigVerifyEnabled {
-		pushGateMode = verificationMode
+	// Factory-reset playback fence, wired UNCONDITIONALLY (independent of the
+	// verifier kill switch): a staged reset owns the screen and is about to
+	// reboot, so no playlist write may repaint over its narration. Two halves,
+	// both needed to make it atomic: (1) every scheduler cutover re-asks the
+	// reset latch immediately before its CDP write (SetResetFence), and (2)
+	// the reset narration write itself runs under the scheduler's player-push
+	// lock (SetPlaybackFence), so an in-flight cutover or refresher pass
+	// finishes first and the narration paints last, while any writer that
+	// acquires the lock after the narration sees the latch and drops. The
+	// refresher gets the same latch below.
+	if fenced, ok := any(playlistScheduler).(interface{ SetResetFence(func() bool) }); ok {
+		fenced.SetResetFence(executor.ResetStaged)
 	}
-	playlistScheduler.SetPushGate(commandrouter.SchedulerPushGate(executor.ResetStaged, pushGateMode))
+	if fenced, ok := executor.(interface{ SetPlaybackFence(func(func())) }); ok {
+		fenced.SetPlaybackFence(playlistScheduler.WithPlayerPush)
+	}
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -1157,6 +1163,11 @@ func initializeApp(
 		// Same generation fence for the refresher's force casts.
 		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
 	}
+	// The refresher honors the factory-reset latch too (unconditional, like
+	// the scheduler fence): its send runs under the same player-push lock, so
+	// dropping when the latch is set keeps it from repainting over the reset
+	// narration.
+	playlist_refresher.SetResetStaged(playlistRefresher, executor.ResetStaged, logger)
 
 	// Replay saturation invalidates Fetch-interception scope exactly the way
 	// a kiosk restart does: retireOnSaturation closes the root CDP session so

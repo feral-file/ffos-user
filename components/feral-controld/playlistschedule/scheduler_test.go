@@ -1575,3 +1575,41 @@ func TestInlineDynamicSource_RoundTripPreservesVerdict(t *testing.T) {
 	sched.SetInlineDynamicSource(nil)
 	assert.Nil(t, sched.InlineDynamicSource())
 }
+
+// TestResetFence_DropsCutoverImmediatelyBeforeWrite: the late reset fence
+// (SetResetFence) blocks a cutover that was admitted before the reset latched,
+// at the last point before the CDP write, and arms no retry — so a scheduled
+// cutover cannot repaint over the factory-reset narration
+// (feral-file/ffos-user#307 review round 6).
+func TestResetFence_DropsCutoverImmediatelyBeforeWrite(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	clock.EXPECT().Now().Return(time.Date(2026, 7, 22, 12, 0, 0, 0, loc)).AnyTimes()
+	var sleepCalled atomic.Bool
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			sleepCalled.Store(true)
+			<-ctx.Done()
+			return ctx.Err()
+		}).AnyTimes()
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+	// No Send: a push is an unexpected call.
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location { return loc },
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	defer sched.Stop()
+	var staged atomic.Bool
+	sched.(interface{ SetResetFence(func() bool) }).SetResetFence(func() bool { return staged.Load() })
+
+	// One already-active item, no future boundary: Prepare arms no timer.
+	_ = sched.Prepare(displayAtPlaylist(item("now", "2026-07-22T00:00:00Z")))
+	// The reset latches, then a wake recompute runs: the late fence drops the
+	// write.
+	staged.Store(true)
+	sched.RecomputeNow(context.Background())
+
+	assert.False(t, sleepCalled.Load(), "a reset-blocked cutover must not arm the retry")
+}

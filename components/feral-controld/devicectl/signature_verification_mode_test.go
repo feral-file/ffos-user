@@ -274,3 +274,35 @@ func TestReleaseStuckResetLatch_NoObserverReadsNothing(t *testing.T) {
 
 	assert.False(t, e.resetStaged.Load())
 }
+
+// TestShowFactoryResetNarration_RunsUnderPlaybackFence: the reset narration
+// write goes through the injected playback fence (the scheduler's player-push
+// lock), so it is ordered against playlist writers and paints last rather
+// than being overwritten by an in-flight cutover (feral-file/ffos-user#307).
+func TestShowFactoryResetNarration_RunsUnderPlaybackFence(t *testing.T) {
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy}
+	narratedInsideFence := false
+	fenceCalls := 0
+	e.SetPlaybackFence(func(fn func()) {
+		fenceCalls++
+		before := len(spy.calls)
+		fn()
+		narratedInsideFence = before == 0 && len(spy.calls) == 1
+	})
+
+	e.showFactoryResetNarration()
+
+	assert.Equal(t, 1, fenceCalls, "the narration must run through the fence")
+	assert.True(t, narratedInsideFence, "the narration write must happen inside the fence")
+	assert.Equal(t, []string{"factory_reset"}, spy.calls)
+}
+
+// TestShowFactoryResetNarration_DirectWhenUnwired: with no fence the narration
+// still paints (degraded/test path).
+func TestShowFactoryResetNarration_DirectWhenUnwired(t *testing.T) {
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy}
+	e.showFactoryResetNarration()
+	assert.Equal(t, []string{"factory_reset"}, spy.calls)
+}

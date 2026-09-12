@@ -1,7 +1,6 @@
 package commandrouter
 
 import (
-	"errors"
 	"fmt"
 
 	"go.uber.org/zap"
@@ -126,26 +125,6 @@ func strictRejection(v *sigverify.Verdict) *SigInvalidError {
 // before it can push again), so the gate reads the same verdict the cast
 // reply reported. The error text uses the public vocabulary only; it goes to
 // the scheduler's log, not to a caller.
-// SchedulerPushGate is the gate the displayAt scheduler consults before every
-// cutover (timer, wake, reconnect, retry) and every mode-relaxation re-drive.
-// It is a hard block while a factory reset is staged, THEN the strict-mode
-// decision. The reset block does not depend on the mode: a staged reset owns
-// the screen (the reset narration) and is about to reboot, and it clears the
-// mode record — so the strict gate alone would read the restored default
-// (notify) and wave an in-flight cutover through, overwriting the narration.
-// A blocked cutover holds the current active set and arms no retry; if the
-// reset rolls back, devicectl's latch release re-drives from the record then
-// on disk. resetStaged nil means "not wired" (never blocks).
-func SchedulerPushGate(resetStaged func() bool, mode func() sigverify.Mode) func(playlist *dp1.Playlist) error {
-	strict := StrictPushGate(mode)
-	return func(playlist *dp1.Playlist) error {
-		if resetStaged != nil && resetStaged() {
-			return errors.New("factory reset staged")
-		}
-		return strict(playlist)
-	}
-}
-
 func StrictPushGate(mode func() sigverify.Mode) func(playlist *dp1.Playlist) error {
 	return func(playlist *dp1.Playlist) error {
 		var verdict *sigverify.Verdict

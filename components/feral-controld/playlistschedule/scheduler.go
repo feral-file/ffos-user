@@ -215,6 +215,10 @@ type scheduler struct {
 	// pushGate, when set (SetPushGate), is consulted inside push before the
 	// observer and the CDP send. Same single-writer contract as pushObserver.
 	pushGate func(*dp1.Playlist) error
+	// resetFence, when set (SetResetFence), reports a staged factory reset;
+	// consulted immediately before each CDP write under pushMu. Single-writer
+	// contract like pushObserver.
+	resetFence func() bool
 	// inlineDynamic is the retained verified inline dynamic source (see
 	// SetInlineDynamicSource). Guarded by mu; a separate slot from source so
 	// it outlives the non-displayAt source clear.
@@ -811,6 +815,15 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	if s.pushObserver != nil {
 		s.pushObserver(PushStarting)
 	}
+	// Reset fence, as late as possible and under pushMu: the reset latch is
+	// set asynchronously and can flip after the gate above, so re-ask right
+	// before the write. The factory-reset narration write is serialized
+	// through this same pushMu (executor.SetPlaybackFence), so even a push
+	// that slips past here writes BEFORE the narration acquires the lock, and
+	// the narration paints last; a later cutover sees the latch and drops.
+	if s.resetFence != nil && s.resetFence() {
+		return fmt.Errorf("%w: factory reset staged", errPushRefused)
+	}
 	result, err := s.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
 		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
 	})
@@ -844,6 +857,14 @@ func (s *scheduler) SetPushObserver(fn func(PushPhase)) {
 
 func (s *scheduler) SetPushGate(fn func(playlist *dp1.Playlist) error) {
 	s.pushGate = fn
+}
+
+// SetResetFence installs the late reset-latch predicate (see the resetFence
+// field). Deliberately NOT on the Scheduler interface — a type-asserted seam
+// like the refresher's, so mocks and fakes stay untouched. Call once at
+// wiring time.
+func (s *scheduler) SetResetFence(fn func() bool) {
+	s.resetFence = fn
 }
 
 func (s *scheduler) SetInlineDynamicSource(playlist *dp1.Playlist) {
