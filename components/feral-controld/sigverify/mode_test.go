@@ -3,6 +3,7 @@ package sigverify_test
 import (
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/golang/mock/gomock"
@@ -121,4 +122,56 @@ func TestClearMode_LiveFailureDoesNotSkipTmp(t *testing.T) {
 	mockOS.EXPECT().Remove(constants.SIGNATURE_VERIFICATION_FILE + ".tmp").Return(nil)
 
 	assert.ErrorIs(t, sigverify.ClearMode(mockOS), eio)
+}
+
+// TestParseMode_ErrorNeverEchoesTheValue: the value is caller-sized (a LAN
+// request can carry megabytes in `mode`) and the error reaches logs and the
+// hub/relayer reply, so it must stay bounded regardless of input.
+func TestParseMode_ErrorNeverEchoesTheValue(t *testing.T) {
+	huge := strings.Repeat("x", 4<<20)
+
+	_, err := sigverify.ParseMode(huge)
+
+	require.ErrorIs(t, err, sigverify.ErrInvalidMode)
+	assert.Less(t, len(err.Error()), 100)
+	assert.NotContains(t, err.Error(), "xxxx")
+	_, err = sigverify.ParseMode("https://evil.example/leak")
+	assert.NotContains(t, err.Error(), "evil")
+}
+
+// TestLoadMode_EmptyRecordIsCorruption: an EXISTING empty record can only
+// come from a write lost in SaveMode's rename window, so it is a lost
+// setting to diagnose, not an unconfigured unit.
+func TestLoadMode_EmptyRecordIsCorruption(t *testing.T) {
+	for _, raw := range [][]byte{{}, []byte("  \n")} {
+		ctrl := gomock.NewController(t)
+		mockOS := mocks.NewMockOS(ctrl)
+		mockOS.EXPECT().ReadFile(constants.SIGNATURE_VERIFICATION_FILE).Return(raw, nil)
+
+		mode, err := sigverify.LoadMode(mockOS, wrapper.NewJSON())
+
+		assert.Equal(t, sigverify.DefaultMode, mode)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty record")
+		ctrl.Finish()
+	}
+}
+
+// TestMode_Allows is the whole policy table: only strict refuses, and it
+// refuses everything not proven valid, a missing verdict included.
+func TestMode_Allows(t *testing.T) {
+	valid := &sigverify.Verdict{Status: sigverify.StatusValid}
+	invalid := &sigverify.Verdict{Status: sigverify.StatusInvalid}
+	unsigned := &sigverify.Verdict{Status: sigverify.StatusUnsigned}
+	for _, tc := range []struct {
+		mode    sigverify.Mode
+		verdict *sigverify.Verdict
+		want    bool
+	}{
+		{sigverify.ModeSilent, valid, true}, {sigverify.ModeSilent, invalid, true}, {sigverify.ModeSilent, unsigned, true}, {sigverify.ModeSilent, nil, true},
+		{sigverify.ModeNotify, valid, true}, {sigverify.ModeNotify, invalid, true}, {sigverify.ModeNotify, unsigned, true}, {sigverify.ModeNotify, nil, true},
+		{sigverify.ModeStrict, valid, true}, {sigverify.ModeStrict, invalid, false}, {sigverify.ModeStrict, unsigned, false}, {sigverify.ModeStrict, nil, false},
+	} {
+		assert.Equal(t, tc.want, tc.mode.Allows(tc.verdict), "%s / %v", tc.mode, tc.verdict)
+	}
 }

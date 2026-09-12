@@ -112,6 +112,13 @@ type executor struct {
 	// status from disagreeing. See setDeviceName for the two races it closes.
 	deviceNameMu sync.Mutex
 
+	// verificationModeMu is deviceNameMu's twin for the signature
+	// verification mode record (feral-file/ffos-user#307): the setter and
+	// factory reset's clear stage through one .tmp path and are reachable
+	// concurrently, and a setter admitted before a reset staged must not
+	// land after the reset cleared the record. See setSignatureVerificationMode.
+	verificationModeMu sync.Mutex
+
 	// Add reference to StatusPoller to get metrics
 	statusPoller status.Poller
 

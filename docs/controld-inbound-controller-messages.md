@@ -148,17 +148,20 @@ response whose `message` body is:
   "ok": false,
   "error": "sigInvalid",
   "command": "displayPlaylist",
-  "message": "sigInvalid: playlist rejected by strict signature verification (feed signature invalid: payload_hash mismatch)",
+  "message": "sigInvalid: playlist rejected by strict signature verification (signature invalid: payload_hash mismatch)",
   "signatureStatus": "invalid"
 }
 ```
 
 `ok: false` is contractual. `signatureStatus` is `invalid` or `unsigned`, and
 absent when the document carried no verdict at all. The parenthesized reason
-is the verdict's own sanitized reason — a role and the reason vocabulary
-(`payload_hash mismatch`, `signature invalid`, `unsupported alg <alg>`,
-`malformed signature`), `unsigned`, `unsigned; legacy signature ignored`, or
-`cached copy carries no verdict` — never a URL or a key id. The LAN hub reports
+is drawn from a closed vocabulary: `signature invalid: <payload_hash mismatch
+| signature invalid | unsupported alg | malformed signature>`, `unsigned`,
+`unsigned; legacy signature ignored`, `malformed signature`, `document too
+large`, `too many signatures (> 16)`, or `cached copy carries no verdict`. It
+never contains anything the document itself supplied — no role, algorithm or
+key id string — and never a URL. (The owner-facing cast reply's `signers[]`
+is where the document's own `role`/`alg`/`kid` are reported.) The LAN hub reports
 the same condition as HTTP `422`, body = the same message text. The command
 was not applied and the previous artwork keeps playing. This is a policy
 outcome the owner chose, not "device busy": the caster must sign the document
@@ -629,7 +632,7 @@ additive keys beside `ok` (the displayAt-deferred acceptance
 `signatureStatus` is `valid|invalid|unsigned`. `signers` lists every
 `signatures[]` entry (at most 16) in document order with its own `ok`, plus
 a `reason` on a failed entry (`payload_hash mismatch`, `signature invalid`,
-`unsupported alg <alg>`, `malformed signature`); it is omitted when
+`unsupported alg` — the algorithm itself is in `alg` — `malformed signature`); it is omitted when
 unsigned or when the document exceeded the entry cap (`too many
 signatures (N > 16)` is then the document-level reason). `legacySignature: true` appears only when a v1.0 `signature`
 string was present. Kids are DIDs (public keys) and safe to relay; no field

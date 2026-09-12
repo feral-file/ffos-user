@@ -178,6 +178,18 @@ func (mr *MockPlaylistSchedulerMockRecorder) ResumePersisted(ctx interface{}) *g
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResumePersisted", reflect.TypeOf((*MockPlaylistScheduler)(nil).ResumePersisted), ctx)
 }
 
+// SetPushGate mocks base method.
+func (m *MockPlaylistScheduler) SetPushGate(fn func(*dp1.Playlist) error) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetPushGate", fn)
+}
+
+// SetPushGate indicates an expected call of SetPushGate.
+func (mr *MockPlaylistSchedulerMockRecorder) SetPushGate(fn interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetPushGate", reflect.TypeOf((*MockPlaylistScheduler)(nil).SetPushGate), fn)
+}
+
 // SetPushObserver mocks base method.
 func (m *MockPlaylistScheduler) SetPushObserver(fn func(playlistschedule.PushPhase)) {
 	m.ctrl.T.Helper()

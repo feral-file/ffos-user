@@ -6,7 +6,9 @@ package devicectl
 import (
 	"context"
 	"os"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -69,4 +71,106 @@ func TestClearSignatureVerificationMode_HandOnClearsBothPaths(t *testing.T) {
 
 	assert.NoError(t, e.clearSignatureVerificationMode())
 	_ = sigverify.DefaultMode
+}
+
+func TestSetSignatureVerificationMode_RefusesOnceAFactoryResetIsStaged(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	e := &executor{logger: zap.NewNop(), os: mocks.NewMockOS(ctrl), json: wrapper.NewJSON()}
+	e.resetStaged.Store(true)
+
+	_, err := e.setSignatureVerificationMode(context.Background(), []byte(`{"mode":"strict"}`))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "factory reset in progress")
+}
+
+// TestSetSignatureVerificationMode_LoserOfTheResetRaceSeesTheLatch: a setter
+// admitted before the reset staged, but reaching the record after the reset
+// took the lock, must not land behind the reset's clear.
+func TestSetSignatureVerificationMode_LoserOfTheResetRaceSeesTheLatch(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockOS := mocks.NewMockOS(ctrl)
+	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON()}
+
+	// The reset holds the record lock while it clears, and the setter is
+	// admitted (resetStaged still false) before that.
+	e.verificationModeMu.Lock()
+	setterDone := make(chan error, 1)
+	go func() {
+		_, err := e.setSignatureVerificationMode(context.Background(), []byte(`{"mode":"strict"}`))
+		setterDone <- err
+	}()
+	// Reset stages, then clears under the lock it already holds, then releases.
+	e.resetStaged.Store(true)
+	mockOS.EXPECT().Remove(constants.SIGNATURE_VERIFICATION_FILE).Return(nil)
+	mockOS.EXPECT().Remove(constants.SIGNATURE_VERIFICATION_FILE + ".tmp").Return(nil)
+	require.NoError(t, sigverify.ClearMode(mockOS))
+	e.verificationModeMu.Unlock()
+
+	select {
+	case err := <-setterDone:
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "factory reset in progress")
+	case <-time.After(2 * time.Second):
+		t.Fatal("setter never returned")
+	}
+	// No WriteFile/Rename expectation: the setter must not have touched disk.
+}
+
+// TestSetSignatureVerificationMode_CompetingSettersSerialize: both stage
+// through one .tmp path, so the second write must not begin until the first
+// rename has landed — otherwise one caller can echo a mode the disk does
+// not hold.
+func TestSetSignatureVerificationMode_CompetingSettersSerialize(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockOS := mocks.NewMockOS(ctrl)
+	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON()}
+
+	firstInWrite := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var writes atomic.Int32
+	mockOS.EXPECT().MkdirAll(gomock.Any(), gomock.Any()).Return(nil).Times(2)
+	gomock.InOrder(
+		mockOS.EXPECT().WriteFile(constants.SIGNATURE_VERIFICATION_FILE+".tmp", []byte(`{"mode":"strict"}`), gomock.Any()).
+			DoAndReturn(func(string, []byte, os.FileMode) error {
+				writes.Add(1)
+				close(firstInWrite)
+				<-releaseFirst
+				return nil
+			}),
+		mockOS.EXPECT().Rename(constants.SIGNATURE_VERIFICATION_FILE+".tmp", constants.SIGNATURE_VERIFICATION_FILE).Return(nil),
+		mockOS.EXPECT().WriteFile(constants.SIGNATURE_VERIFICATION_FILE+".tmp", []byte(`{"mode":"silent"}`), gomock.Any()).
+			DoAndReturn(func(string, []byte, os.FileMode) error { writes.Add(1); return nil }),
+		mockOS.EXPECT().Rename(constants.SIGNATURE_VERIFICATION_FILE+".tmp", constants.SIGNATURE_VERIFICATION_FILE).Return(nil),
+	)
+
+	results := make(chan map[string]interface{}, 2)
+	go func() {
+		r, err := e.setSignatureVerificationMode(context.Background(), []byte(`{"mode":"strict"}`))
+		require.NoError(t, err)
+		results <- r.(map[string]interface{})
+	}()
+	<-firstInWrite
+	go func() {
+		r, err := e.setSignatureVerificationMode(context.Background(), []byte(`{"mode":"silent"}`))
+		require.NoError(t, err)
+		results <- r.(map[string]interface{})
+	}()
+	// The second setter is blocked on the lock: its write has not started.
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, int32(1), writes.Load(), "the second write must wait for the first rename")
+	close(releaseFirst)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case r := <-results:
+			assert.Equal(t, true, r["ok"])
+		case <-time.After(2 * time.Second):
+			t.Fatal("a setter never returned")
+		}
+	}
+	assert.Equal(t, int32(2), writes.Load())
 }

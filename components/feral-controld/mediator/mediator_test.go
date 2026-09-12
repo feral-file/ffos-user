@@ -1549,7 +1549,7 @@ func TestMediator_HandleRelayerMessage_SigInvalid(t *testing.T) {
 
 	ts.mockCommandHandler.EXPECT().
 		Process(gomock.Any(), commands.Command{Type: commands.Type(cmd), Arguments: args}).
-		Return(nil, &commandrouter.SigInvalidError{Status: sigverify.StatusInvalid, Reason: "feed signature invalid: payload_hash mismatch"}).
+		Return(nil, &commandrouter.SigInvalidError{Status: sigverify.StatusInvalid, Reason: "signature invalid: payload_hash mismatch"}).
 		Times(1)
 
 	var sent relayer.Response
@@ -1581,7 +1581,7 @@ func TestMediator_HandleRelayerMessage_SigInvalid(t *testing.T) {
 		assert.Equal(t, cmd, msg["command"])
 		assert.Equal(t, "invalid", msg["signatureStatus"])
 		message, _ := msg["message"].(string)
-		assert.Equal(t, "sigInvalid: playlist rejected by strict signature verification (feed signature invalid: payload_hash mismatch)", message)
+		assert.Equal(t, "sigInvalid: playlist rejected by strict signature verification (signature invalid: payload_hash mismatch)", message)
 		assert.NotContains(t, message, "secret")
 	}
 }

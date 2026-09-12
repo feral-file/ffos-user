@@ -380,9 +380,10 @@ func TestCommandHandler_Process_Strict_InvalidURLRejectedSanitized(t *testing.T)
 
 	require.Error(t, err)
 	assert.True(t, commandrouter.IsSigInvalid(err))
-	assert.Contains(t, err.Error(), "feed signature invalid: payload_hash mismatch")
+	assert.Equal(t, "sigInvalid: playlist rejected by strict signature verification (signature invalid: payload_hash mismatch)", err.Error())
 	assert.NotContains(t, err.Error(), "secret-token")
 	assert.NotContains(t, err.Error(), "did:key")
+	assert.NotContains(t, err.Error(), "feed", "the document's own role string never reaches a caller")
 }
 
 // TestCommandHandler_Process_Strict_ValidPlays: strict only bites on
@@ -796,4 +797,42 @@ func TestCommandHandler_Process_DisplayPlaylist_PublishesInsidePushLock(t *testi
 	st, found := active.Lookup("B", urlB)
 	assert.True(t, found)
 	assert.Equal(t, sigverify.StatusUnsigned, st)
+}
+
+// TestStrictPushGate is the scheduler-side half of strict: the mode is read
+// when the gate is asked, so a schedule accepted under notify is refused at
+// its cutover once the owner has switched to strict, and allowed again when
+// they switch back. A verdict-less document is refused under strict.
+func TestStrictPushGate(t *testing.T) {
+	mode := sigverify.ModeNotify
+	gate := commandrouter.StrictPushGate(func() sigverify.Mode { return mode })
+	unsigned := &dp1.Playlist{Verification: &sigverify.Verdict{Status: sigverify.StatusUnsigned}}
+	valid := &dp1.Playlist{Verification: &sigverify.Verdict{Status: sigverify.StatusValid}}
+	tampered := &dp1.Playlist{Verification: &sigverify.Verdict{
+		Status:  sigverify.StatusInvalid,
+		Reason:  "https://evil.example/role signature invalid: payload_hash mismatch",
+		Signers: []sigverify.Signer{{Role: "https://evil.example/role", Reason: sigverify.ReasonPayloadHashMismatch}},
+	}}
+	noVerdict := &dp1.Playlist{}
+
+	assert.NoError(t, gate(unsigned), "notify never refuses")
+	assert.NoError(t, gate(noVerdict))
+
+	mode = sigverify.ModeStrict
+	err := gate(unsigned)
+	require.Error(t, err)
+	assert.Equal(t, "strict signature verification: unsigned", err.Error())
+	assert.NoError(t, gate(valid))
+	err = gate(tampered)
+	require.Error(t, err)
+	assert.Equal(t, "strict signature verification: signature invalid: payload_hash mismatch", err.Error())
+	assert.NotContains(t, err.Error(), "evil")
+	err = gate(noVerdict)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no verdict")
+	assert.Error(t, gate(nil))
+
+	mode = sigverify.ModeSilent
+	assert.NoError(t, gate(unsigned))
+	assert.NoError(t, commandrouter.StrictPushGate(nil)(unsigned), "unwired mode reader never refuses")
 }

@@ -271,7 +271,8 @@ func TestVerify_UnsupportedAlg_Invalid(t *testing.T) {
 
 	assert.Equal(t, sigverify.StatusInvalid, v.Status)
 	require.Len(t, v.Signers, 1)
-	assert.Equal(t, "unsupported alg ecdsa-p256", v.Signers[0].Reason)
+	assert.Equal(t, sigverify.ReasonUnsupportedAlg, v.Signers[0].Reason)
+	assert.Equal(t, "ecdsa-p256", v.Signers[0].Alg, "the algorithm's name is reported in alg, never interpolated into a reason")
 }
 
 // TestVerify_OneBadEntryFailsTheChain: DP-1 requires every listed signature
@@ -427,4 +428,43 @@ func TestVerify_ReindentedDocument_StillValid(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, sigverify.StatusValid, sigverify.Verify(pretty).Status)
+}
+
+// TestPublicReason_NeverEchoesDocumentStrings: role and alg are the
+// document's own text within a length bound, so a hostile document can put
+// a URL in either. Verdict.Reason names the role (for the log and the
+// owner's reply); PublicReason, which leaves the device in a strict
+// rejection, must carry only the closed vocabulary.
+func TestPublicReason_NeverEchoesDocumentStrings(t *testing.T) {
+	doc := unsignedDoc()
+	signWith(t, doc, newKey(t), dp1playlist.RoleFeed)
+	entry := doc["signatures"].([]any)[0].(map[string]any)
+	entry["role"] = "https://evil.example/r"
+	entry["alg"] = "https://evil.example/a"
+
+	v := sigverify.Verify(mustJSON(t, doc))
+
+	require.Equal(t, sigverify.StatusInvalid, v.Status)
+	assert.Contains(t, v.Reason, "https://evil.example/r", "the log-side reason names the role as written")
+	assert.Equal(t, "signature invalid: unsupported alg", v.PublicReason())
+	assert.NotContains(t, v.PublicReason(), "evil")
+}
+
+func TestPublicReason_Vocabulary(t *testing.T) {
+	// Tampered content: the first failed signer's classified reason.
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(loadFeedFixture(t), &doc))
+	doc["title"] = "tampered"
+	assert.Equal(t, "signature invalid: payload_hash mismatch", sigverify.Verify(mustJSON(t, doc)).PublicReason())
+
+	// Unsigned, with and without a legacy string.
+	assert.Equal(t, sigverify.ReasonUnsigned, sigverify.Verify(mustJSON(t, unsignedDoc())).PublicReason())
+	legacy := unsignedDoc()
+	legacy["signature"] = "ed25519:abc"
+	assert.Equal(t, sigverify.ReasonUnsignedLegacy, sigverify.Verify(mustJSON(t, legacy)).PublicReason())
+
+	// Document-level failures are fixed text already.
+	assert.Equal(t, sigverify.ReasonMalformed, sigverify.Verify([]byte("not json")).PublicReason())
+	assert.Equal(t, "", sigverify.Verify(loadFeedFixture(t)).PublicReason())
+	assert.Equal(t, sigverify.ReasonMalformed, sigverify.Verdict{Status: sigverify.StatusInvalid}.PublicReason(), "an invalid verdict with no detail still yields fixed text")
 }

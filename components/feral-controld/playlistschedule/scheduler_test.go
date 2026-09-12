@@ -2,6 +2,7 @@ package playlistschedule_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 )
 
 func TestPrepare_WithoutDisplayAt_PassthroughAndClearsCache(t *testing.T) {
@@ -1293,4 +1295,164 @@ func TestClearThenWithPlayerPush_BlocksInFlightRecomputeFromOverwriting(t *testi
 	defer mu.Unlock()
 	require.NotEmpty(t, pushedIDs)
 	assert.Equal(t, "replacement", pushedIDs[len(pushedIDs)-1], "replacement must win after clear")
+}
+
+// gateSetup arms a day22→day23 schedule whose timer is released by the test
+// and reports the CDP sends the scheduler makes.
+func gateSetup(t *testing.T) (sched playlistschedule.Scheduler, cdpMock *mocks.MockCDP, releaseSleep chan struct{}, retryArmed chan struct{}, advance func()) {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock = mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	t1 := time.Date(2026, 7, 23, 0, 0, 0, 0, loc)
+
+	var mu sync.Mutex
+	now := t0
+	clock.EXPECT().Now().DoAndReturn(func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}).AnyTimes()
+
+	releaseSleep = make(chan struct{})
+	retryArmed = make(chan struct{}, 4)
+	var sleeps atomic.Int32
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, d time.Duration) error {
+			// The first sleep is the day23 boundary; any later one is either
+			// the re-armed (no future boundary → none) timer or a push retry.
+			if sleeps.Add(1) > 1 {
+				select {
+				case retryArmed <- struct{}{}:
+				default:
+				}
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			select {
+			case <-releaseSleep:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	).AnyTimes()
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+
+	sched = playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	advance = func() {
+		mu.Lock()
+		now = t1
+		mu.Unlock()
+	}
+	return sched, cdpMock, releaseSleep, retryArmed, advance
+}
+
+// TestPushGate_RefusalHoldsCurrentSetAndArmsNoRetry: the gate is asked at
+// the cutover with the exact playlist about to be sent (its Verification
+// pointer intact), and a refusal reaches neither CDP nor the retry path —
+// a refusal is policy, not a transient failure.
+func TestPushGate_RefusalHoldsCurrentSetAndArmsNoRetry(t *testing.T) {
+	sched, cdpMock, releaseSleep, retryArmed, advance := gateSetup(t)
+	// No Send expectation: a push is an unexpected call.
+	_ = cdpMock
+
+	asked := make(chan *dp1.Playlist, 1)
+	sched.SetPushGate(func(p *dp1.Playlist) error {
+		asked <- p
+		return errors.New("strict signature verification: unsigned")
+	})
+
+	verdict := &sigverify.Verdict{Status: sigverify.StatusUnsigned}
+	full := displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	)
+	full.Verification = verdict
+	active := sched.Prepare(full)
+	require.Equal(t, []string{"day22"}, itemIDs(active.Items))
+
+	advance()
+	close(releaseSleep)
+
+	select {
+	case p := <-asked:
+		require.NotNil(t, p)
+		assert.Same(t, verdict, p.Verification, "the gate sees the cast-time verdict")
+		assert.Equal(t, []string{"day23"}, itemIDs(p.Items), "the gate sees the cohort about to be sent")
+	case <-time.After(2 * time.Second):
+		t.Fatal("gate was never asked")
+	}
+	select {
+	case <-retryArmed:
+		t.Fatal("a refusal must not arm the transient-failure retry")
+	case <-time.After(300 * time.Millisecond):
+	}
+	assert.True(t, sched.HasCache(), "the schedule stays for the next boundary/wake to ask again")
+}
+
+// TestPushGate_AllowedPushProceeds pins that the gate is a gate, not a
+// veto: a nil error lets the cutover reach the player as before.
+func TestPushGate_AllowedPushProceeds(t *testing.T) {
+	sched, cdpMock, releaseSleep, _, advance := gateSetup(t)
+	pushed := make(chan struct{}, 1)
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.Contains(t, expr, "day23")
+			pushed <- struct{}{}
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(1)
+	sched.SetPushGate(func(*dp1.Playlist) error { return nil })
+
+	_ = sched.Prepare(displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	))
+	advance()
+	close(releaseSleep)
+
+	select {
+	case <-pushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the gated push")
+	}
+}
+
+// TestPushGate_RefusedPushDoesNotFireTheObserver: the observer's
+// PushStarting invalidates the on-screen verdict; a push that never starts
+// must not do that.
+func TestPushGate_RefusedPushDoesNotFireTheObserver(t *testing.T) {
+	sched, _, releaseSleep, _, advance := gateSetup(t)
+	var phases atomic.Int32
+	sched.SetPushObserver(func(playlistschedule.PushPhase) { phases.Add(1) })
+	gated := make(chan struct{}, 1)
+	sched.SetPushGate(func(*dp1.Playlist) error {
+		select {
+		case gated <- struct{}{}:
+		default:
+		}
+		return errors.New("refused")
+	})
+
+	_ = sched.Prepare(displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	))
+	advance()
+	close(releaseSleep)
+	select {
+	case <-gated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("gate was never asked")
+	}
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, int32(0), phases.Load())
 }

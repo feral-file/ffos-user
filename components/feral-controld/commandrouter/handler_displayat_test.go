@@ -420,6 +420,7 @@ func (t *trackingScheduler) ClearThenWithPlayerPush(fn func() bool) {
 // SetPushObserver satisfies the interface; the fake never pushes on its own,
 // so the observer is never called.
 func (t *trackingScheduler) SetPushObserver(func(playlistschedule.PushPhase)) {}
+func (t *trackingScheduler) SetPushGate(func(*dp1.Playlist) error)            {}
 
 func (t *trackingScheduler) WithPlayerPush(fn func()) {
 	t.pushCalls++

@@ -119,13 +119,16 @@ type SigInvalidError struct {
 	// the document carried no verdict at all (the offline cached copy): a
 	// strict device cannot prove such a document either way.
 	Status sigverify.Status
-	// Reason is the verdict's caster-safe reason (role + reason vocabulary,
-	// never a URL or a kid), or the fixed cached-copy explanation.
+	// Reason is sigverify's PublicReason — the closed vocabulary only, never
+	// a string the document supplied (role, algorithm, key id) and never a
+	// URL — or the fixed cached-copy explanation. Verdict.Reason (which
+	// names the signer by its document-supplied role) must not be placed
+	// here: this text leaves the device on both ingress paths.
 	Reason string
 }
 
 // Error renders the standardized rejection text returned verbatim to casters
-// on both ingress paths; Reason is already sanitized by sigverify.
+// on both ingress paths; Reason is drawn from sigverify's public vocabulary.
 func (e *SigInvalidError) Error() string {
 	return fmt.Sprintf("sigInvalid: playlist rejected by strict signature verification (%s)", e.Reason)
 }

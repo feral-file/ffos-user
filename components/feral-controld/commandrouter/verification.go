@@ -1,8 +1,11 @@
 package commandrouter
 
 import (
+	"fmt"
+
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
@@ -96,6 +99,9 @@ func (h *handler) logSignatureVerdict(v *sigverify.Verdict, playlistID, playlist
 // nil when v proves the document valid. A nil verdict is a rejection too: it
 // means the document could not be verified (today: the offline cached copy,
 // whose stored body is a hydrated re-marshal), and strict does not guess.
+// The reason is Verdict.PublicReason, the closed vocabulary — never
+// Verdict.Reason, which carries the document's own role string and belongs
+// in the log and the owner's cast reply only.
 // Restoring the offline fallback under strict needs the download-time
 // verdict persisted beside the cached record — the follow-up noted on
 // loadCachedPlaylistForURL.
@@ -106,5 +112,32 @@ func strictRejection(v *sigverify.Verdict) *SigInvalidError {
 	if v.Status == sigverify.StatusValid {
 		return nil
 	}
-	return &SigInvalidError{Status: v.Status, Reason: v.Reason}
+	return &SigInvalidError{Status: v.Status, Reason: v.PublicReason()}
+}
+
+// StrictPushGate builds the scheduler's push gate (playlistschedule's
+// SetPushGate) from the owner's mode reader: a scheduler-owned cutover is
+// judged AT PUSH TIME through the same Mode.Allows predicate as a cast, so
+// a schedule accepted under notify cannot carry a non-valid cohort onto the
+// screen after the owner switches to strict. The scheduler's cached document
+// keeps the verdict attached at cast time (cloned by pointer, never
+// persisted: a restart-restored source is refetched, and so re-verified,
+// before it can push again), so the gate reads the same verdict the cast
+// reply reported. The error text uses the public vocabulary only; it goes to
+// the scheduler's log, not to a caller.
+func StrictPushGate(mode func() sigverify.Mode) func(playlist *dp1.Playlist) error {
+	return func(playlist *dp1.Playlist) error {
+		var verdict *sigverify.Verdict
+		if playlist != nil {
+			verdict = playlist.Verification
+		}
+		if mode == nil || mode().Allows(verdict) {
+			return nil
+		}
+		reason := "document carries no verdict"
+		if verdict != nil {
+			reason = verdict.PublicReason()
+		}
+		return fmt.Errorf("strict signature verification: %s", reason)
+	}
 }

@@ -25,6 +25,24 @@ func (e *executor) setSignatureVerificationMode(_ context.Context, args []byte) 
 	if err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
+
+	// One mutation lock for the record, shared with factory reset's clear —
+	// the device-name discipline, for the device-name reasons: two setters
+	// stage through the SAME .tmp path, so one could rename the other's
+	// bytes and then echo a mode the disk does not hold; and a setter
+	// admitted before a reset staged could land after the reset cleared the
+	// record, leaving a rolled-back unit under the previous owner's policy.
+	e.verificationModeMu.Lock()
+	defer e.verificationModeMu.Unlock()
+
+	// Re-checked INSIDE the lock: the router's reset check only proves no
+	// reset had staged when this request was admitted. factoryReset latches
+	// resetStaged before it takes this lock, so a setter that loses the race
+	// sees the latch here.
+	if e.resetStaged.Load() {
+		return nil, fmt.Errorf("factory reset in progress")
+	}
+
 	if err := sigverify.SaveMode(e.os, e.json, mode); err != nil {
 		return nil, fmt.Errorf("failed to persist signature verification mode: %w", err)
 	}
@@ -36,5 +54,7 @@ func (e *executor) setSignatureVerificationMode(_ context.Context, args []byte) 
 // mode record: a previous owner's `strict` must not silently block the next
 // owner's casts. Best-effort like the device-name clear beside it.
 func (e *executor) clearSignatureVerificationMode() error {
+	e.verificationModeMu.Lock()
+	defer e.verificationModeMu.Unlock()
 	return sigverify.ClearMode(e.os)
 }

@@ -1110,6 +1110,15 @@ func initializeApp(
 				pushAccepted()
 			}
 		})
+		// A scheduler-owned cutover (timer, wake, reconnect, retry) is judged
+		// against the mode AT PUSH TIME: a schedule accepted under notify
+		// must not carry a non-valid cohort onto the screen after the owner
+		// switches to strict. The scheduler's cached document keeps the
+		// verdict attached at cast time (cloned by pointer, never persisted:
+		// a restart-restored source is refetched, and so re-verified, before
+		// it can push again), so the gate reads the same verdict the cast
+		// reply reported.
+		playlistScheduler.SetPushGate(commandrouter.StrictPushGate(verificationMode))
 		poller.SetVerificationLookup(func(id, url string) (string, bool) {
 			st, ok := activeVerdict.Lookup(id, url)
 			return string(st), ok
