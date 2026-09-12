@@ -91,18 +91,18 @@ func (mr *MockCDPMockRecorder) NoLogSend(method, params interface{}) *gomock.Cal
 }
 
 // NoLogSendWithin mocks base method.
-func (m *MockCDP) NoLogSendWithin(method string, params map[string]interface{}, timeout time.Duration) (interface{}, error) {
+func (m *MockCDP) NoLogSendWithin(method string, params map[string]interface{}, timeout time.Duration, guard func() bool) (interface{}, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "NoLogSendWithin", method, params, timeout)
+	ret := m.ctrl.Call(m, "NoLogSendWithin", method, params, timeout, guard)
 	ret0, _ := ret[0].(interface{})
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // NoLogSendWithin indicates an expected call of NoLogSendWithin.
-func (mr *MockCDPMockRecorder) NoLogSendWithin(method, params, timeout interface{}) *gomock.Call {
+func (mr *MockCDPMockRecorder) NoLogSendWithin(method, params, timeout, guard interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NoLogSendWithin", reflect.TypeOf((*MockCDP)(nil).NoLogSendWithin), method, params, timeout)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NoLogSendWithin", reflect.TypeOf((*MockCDP)(nil).NoLogSendWithin), method, params, timeout, guard)
 }
 
 // PageNavigationURL mocks base method.

@@ -444,7 +444,10 @@ func (c *liveNoopCDP) PageNavigationURL(context.Context) (string, error) {
 func (c *liveNoopCDP) Close()            {}
 func (c *liveNoopCDP) Initialized() bool { return true }
 
-func (c *liveNoopCDP) NoLogSendWithin(method string, params map[string]interface{}, _ time.Duration) (interface{}, error) {
+func (c *liveNoopCDP) NoLogSendWithin(method string, params map[string]interface{}, _ time.Duration, guard func() bool) (interface{}, error) {
+	if guard != nil && !guard() {
+		return nil, nil
+	}
 	return c.NoLogSend(method, params)
 }
 

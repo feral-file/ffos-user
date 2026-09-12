@@ -108,7 +108,10 @@ func newFakeCDP() *fakeCDP {
 // decode are errors. Divergence here previously let an on-device-inert
 // readiness probe pass a green suite — keep this fake honest against
 // cdp.send's switch when adding evaluate shapes.
-func (f *fakeCDP) NoLogSendWithin(method string, params map[string]interface{}, _ time.Duration) (interface{}, error) {
+func (f *fakeCDP) NoLogSendWithin(method string, params map[string]interface{}, _ time.Duration, guard func() bool) (interface{}, error) {
+	if guard != nil && !guard() {
+		return nil, nil
+	}
 	return f.NoLogSend(method, params)
 }
 

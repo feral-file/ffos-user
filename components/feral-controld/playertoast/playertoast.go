@@ -107,16 +107,18 @@ func (s *sender) Show(ctx context.Context, notice sigverify.Notice, stillCurrent
 			return ctx.Err()
 		}
 	}
-	// Final re-check at the CDP handoff: the manifest read above can span the
-	// window in which a newer valid/silent transition Clears this notice, so
-	// abandon the send if it is no longer current (#307).
+	// Early out at the CDP handoff: the manifest read above can span the window
+	// in which a newer valid/silent transition Clears this notice. stillCurrent
+	// is also passed as the send GUARD, re-checked under CDP's write lock right
+	// before the write, so a newer cast's write cannot interleave between here
+	// and the toast's own write (#307).
 	if stillCurrent != nil && !stillCurrent() {
 		return nil
 	}
 	result, err := s.cdp.NoLogSendWithin(cdp.METHOD_EVALUATE, map[string]interface{}{
 		"expression":    "window.handleCDPRequest(" + string(payload) + ")",
 		"returnByValue": true,
-	}, timeout)
+	}, timeout, stillCurrent)
 	if err != nil {
 		return err
 	}

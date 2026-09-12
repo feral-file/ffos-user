@@ -42,8 +42,8 @@ func TestShow_SendsTheNoticeAndValidatesOK(t *testing.T) {
 	defer ctrl.Finish()
 	mockCDP := mocks.NewMockCDP(ctrl)
 	var expr string
-	mockCDP.EXPECT().NoLogSendWithin(cdp.METHOD_EVALUATE, gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ string, params map[string]interface{}, _ time.Duration) (interface{}, error) {
+	mockCDP.EXPECT().NoLogSendWithin(cdp.METHOD_EVALUATE, gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}, _ time.Duration, _ func() bool) (interface{}, error) {
 			expr, _ = params["expression"].(string)
 			assert.Equal(t, true, params["returnByValue"])
 			return okResult(), nil
@@ -65,7 +65,7 @@ func TestShow_PlayerRejection(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	mockCDP := mocks.NewMockCDP(ctrl)
-	mockCDP.EXPECT().NoLogSendWithin(cdp.METHOD_EVALUATE, gomock.Any(), gomock.Any()).
+	mockCDP.EXPECT().NoLogSendWithin(cdp.METHOD_EVALUATE, gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(map[string]any{"message": map[string]any{"ok": false}}, nil).Times(1)
 
 	s := playertoast.New(mockCDP, writeManifest(t, manifestWithToast), nil)
@@ -140,7 +140,7 @@ func TestShow_ShippingMirrorListsEveryNotice(t *testing.T) {
 	defer ctrl.Finish()
 	for _, notice := range []sigverify.Notice{sigverify.NoticeInvalid, sigverify.NoticeUnsigned, sigverify.NoticeRejected} {
 		mockCDP := mocks.NewMockCDP(ctrl)
-		mockCDP.EXPECT().NoLogSendWithin(cdp.METHOD_EVALUATE, gomock.Any(), gomock.Any()).Return(okResult(), nil).Times(1)
+		mockCDP.EXPECT().NoLogSendWithin(cdp.METHOD_EVALUATE, gomock.Any(), gomock.Any(), gomock.Any()).Return(okResult(), nil).Times(1)
 		s := playertoast.New(mockCDP, filepath.Join("..", "setupui", "testdata", "ffos-player-contract.json"), nil)
 		assert.NoError(t, s.Show(context.Background(), notice, nil), "mirror must list %q", notice)
 	}
