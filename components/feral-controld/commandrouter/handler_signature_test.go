@@ -849,6 +849,7 @@ type fakeNotifier struct {
 func (f *fakeNotifier) Notify(n sigverify.Notice) { f.epoch++; f.notices = append(f.notices, n) }
 func (f *fakeNotifier) Clear()                    { f.epoch++; f.clears++ }
 func (f *fakeNotifier) Epoch() uint64             { return f.epoch }
+func (f *fakeNotifier) ClearAndEpoch() uint64     { f.epoch++; f.clears++; return f.epoch }
 func (f *fakeNotifier) NotifyIfEpoch(n sigverify.Notice, epoch uint64) {
 	if f.epoch != epoch {
 		return
@@ -1004,6 +1005,7 @@ func TestScheduledPushToaster(t *testing.T) {
 			notifier,
 			func() uint64 { return gen },
 			func() uint64 { return genStart },
+			func() uint64 { return notifier.Epoch() },
 			func() (sigverify.Notice, bool) { return notice, show },
 		)
 	}
@@ -1029,6 +1031,7 @@ func TestScheduledPushToaster(t *testing.T) {
 	// nil notifier: no panic.
 	assert.NotPanics(t, func() {
 		commandrouter.ScheduledPushToaster(nil, func() uint64 { return 1 }, func() uint64 { return 1 },
+			func() uint64 { return 1 },
 			func() (sigverify.Notice, bool) { return sigverify.NoticeInvalid, true })(nil)
 	})
 }
@@ -1061,4 +1064,33 @@ func TestCommandHandler_Process_Strict_RefusalSuppressedWhenTransitionIntervened
 	require.Error(t, err)
 	assert.True(t, commandrouter.IsSigInvalid(err))
 	assert.Empty(t, toast.notices, "a superseded strict rejection must not toast")
+}
+
+// TestCommandHandler_Process_Notify_AcceptedToastSuppressedWhenTransitionIntervened:
+// an accepted notify cast whose toast would land after a newer transition
+// (here a Clear during the CDP send, as a generation bump would do) is
+// suppressed — the post-send notify is fenced to the epoch the pre-send
+// invalidation created (feral-file/ffos-user#307 round 7 F1).
+func TestCommandHandler_Process_Notify_AcceptedToastSuppressedWhenTransitionIntervened(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeNotify)
+	toast := &fakeNotifier{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(string, map[string]interface{}) (interface{}, error) {
+			// A newer transition lands between the pre-send invalidation and
+			// the post-send notify, advancing the display-transition epoch.
+			toast.Clear()
+			return playerOkResponse(), nil
+		}).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	require.NoError(t, err)
+	assert.Equal(t, "unsigned", replyMessage(t, result)["signatureStatus"])
+	assert.Empty(t, toast.notices, "a superseded accepted-transition toast must not fire")
 }

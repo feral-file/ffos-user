@@ -605,6 +605,16 @@ func (n *recordingNotifier) Epoch() uint64 {
 	defer n.mu.Unlock()
 	return n.epoch
 }
+func (n *recordingNotifier) ClearAndEpoch() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.epoch++
+	select {
+	case n.cleared <- struct{}{}:
+	default:
+	}
+	return n.epoch
+}
 func (n *recordingNotifier) NotifyIfEpoch(notice sigverify.Notice, epoch uint64) {
 	n.mu.Lock()
 	if n.epoch != epoch {

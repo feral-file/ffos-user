@@ -196,7 +196,7 @@ func (r *refresher) setToaster(notifier playertoast.Notifier) {
 }
 
 // currentMode is the verification-mode snapshot for one refresh pass — read
-// once and threaded through the strict gate and toastRefresh so a concurrent
+// once and threaded through the strict gate and the toast so a concurrent
 // setSignatureVerificationMode cannot relabel a transition mid-pass (#307).
 func (r *refresher) currentMode() sigverify.Mode {
 	if r.verificationMode == nil {
@@ -218,20 +218,6 @@ func (r *refresher) toastStrictRefusal(epoch uint64, mode sigverify.Mode, status
 	}
 	if notice, ok := sigverify.ToastFor(mode, status); ok {
 		r.toast.NotifyIfEpoch(notice, epoch)
-	}
-}
-
-// toastRefresh surfaces (or Clears) the notice for a feed transition under the
-// SNAPSHOT mode the caller decided the transition with. Non-blocking; bound to
-// the transition the caller is at.
-func (r *refresher) toastRefresh(mode sigverify.Mode, status sigverify.Status) {
-	if r.toast == nil {
-		return
-	}
-	if notice, ok := sigverify.ToastFor(mode, status); ok {
-		r.toast.Notify(notice)
-	} else {
-		r.toast.Clear()
 	}
 }
 
@@ -776,8 +762,9 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		// force-cast success below sets this document's own notice (#307). A
 		// soft refresh does not visibly replace content, so it leaves a
 		// warning for the still-displayed playlist alone.
+		var forceCastEpoch uint64
 		if effectiveForceCast && r.toast != nil {
-			r.toast.Clear()
+			forceCastEpoch = r.toast.ClearAndEpoch()
 		}
 		generationBefore := r.currentGeneration()
 		result, sendCDPErr := r.sendCDPRequest(command)
@@ -822,12 +809,18 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			// under the same lock. A soft refresh does not visibly replace
 			// content, and a page-moved force cast left the verdict
 			// unpublished above, so neither toasts here (#307).
-			if effectiveForceCast && r.currentGeneration() == generationBefore {
+			if effectiveForceCast && r.currentGeneration() == generationBefore && r.toast != nil {
 				var status sigverify.Status
 				if refreshVerdict != nil {
 					status = refreshVerdict.Status
 				}
-				r.toastRefresh(castMode, status)
+				// Fenced to the epoch this force cast's pre-send Clear created,
+				// so a transition between the accepted send and here drops it.
+				if notice, ok := sigverify.ToastFor(castMode, status); ok {
+					r.toast.NotifyIfEpoch(notice, forceCastEpoch)
+				} else {
+					r.toast.Clear()
+				}
 			}
 			// The scheduler's cache now holds THIS document (Commit below),
 			// so every later cutover pushes its cohorts: restage pending to

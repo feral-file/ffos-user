@@ -38,7 +38,12 @@ var ErrContractUnreadable = errors.New("player contract unreadable")
 // Sender shows a signature-verification notice on the player. commandrouter
 // holds one and calls it best-effort.
 type Sender interface {
-	Show(ctx context.Context, notice sigverify.Notice) error
+	// Show renders notice. stillCurrent (may be nil) is consulted once more
+	// AFTER the manifest is read/validated and immediately before the CDP
+	// send; a false return abandons the send, so a Clear during the manifest
+	// read does not let an obsolete notice reach the wall
+	// (feral-file/ffos-user#307).
+	Show(ctx context.Context, notice sigverify.Notice, stillCurrent func() bool) error
 }
 
 // New builds a Sender that reads the player contract at manifestPath on every
@@ -66,7 +71,7 @@ type sender struct {
 // player predates the feature, ErrContractUnreadable on a transient manifest
 // read failure, or a send/response error. Every one is best-effort to the
 // caller: the cast outcome does not depend on it.
-func (s *sender) Show(ctx context.Context, notice sigverify.Notice) error {
+func (s *sender) Show(ctx context.Context, notice sigverify.Notice, stillCurrent func() bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -101,6 +106,12 @@ func (s *sender) Show(ctx context.Context, notice sigverify.Notice) error {
 		} else {
 			return ctx.Err()
 		}
+	}
+	// Final re-check at the CDP handoff: the manifest read above can span the
+	// window in which a newer valid/silent transition Clears this notice, so
+	// abandon the send if it is no longer current (#307).
+	if stillCurrent != nil && !stillCurrent() {
+		return nil
 	}
 	result, err := s.cdp.NoLogSendWithin(cdp.METHOD_EVALUATE, map[string]interface{}{
 		"expression":    "window.handleCDPRequest(" + string(payload) + ")",
@@ -254,6 +265,12 @@ type Notifier interface {
 	// NotifyIfEpoch queues notice only if the token still equals epoch (no
 	// newer transition since the snapshot); otherwise it is a no-op.
 	NotifyIfEpoch(notice sigverify.Notice, epoch uint64)
+	// ClearAndEpoch drops any pending notice and returns the token AFTER the
+	// bump, so a replacing path can capture the epoch its own pre-send
+	// invalidation created and pass it to NotifyIfEpoch after acceptance —
+	// closing the window where a generation bump lands between a path's check
+	// and its Notify.
+	ClearAndEpoch() uint64
 }
 
 // Dispatcher serializes toasts onto a single worker with a one-slot mailbox:
@@ -315,6 +332,15 @@ func (d *Dispatcher) Epoch() uint64 {
 	return d.gen
 }
 
+// ClearAndEpoch drops any pending notice and returns the token after the bump.
+func (d *Dispatcher) ClearAndEpoch() uint64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.has = false
+	d.gen++
+	return d.gen
+}
+
 // NotifyIfEpoch queues notice only if the token still equals epoch, i.e. no
 // Notify/Clear (and thus no pre-send invalidation or generation replacement)
 // intervened since the caller snapshotted it. Used to fence a strict-refusal
@@ -369,7 +395,9 @@ func (d *Dispatcher) run(ctx context.Context) {
 				continue
 			}
 			sctx, cancel := context.WithTimeout(ctx, d.timeout)
-			if err := d.sender.Show(sctx, notice); err != nil {
+			// stillCurrent lets Show abandon the send at the CDP handoff if a
+			// newer transition advanced the epoch while Show read the manifest.
+			if err := d.sender.Show(sctx, notice, func() bool { return d.Epoch() == gen }); err != nil {
 				d.logger.Debug("player toast not shown", zap.String("notice", string(notice)), zap.Error(err))
 			}
 			cancel()

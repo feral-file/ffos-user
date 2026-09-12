@@ -232,19 +232,20 @@ func (h *handler) setPlayerToast(notifier playertoast.Notifier) {
 	h.toast = notifier
 }
 
-// toastFor surfaces the notice the (mode, status) policy calls for at a player
-// transition, or Clears a pending one when the policy is silent about this
-// transition (a valid or silent cast) so a stale warning never shows over the
-// new artwork. mode is a SNAPSHOT taken once at the transition (castMode), so
-// a concurrent setSignatureVerificationMode cannot relabel it. Submission is
-// non-blocking (the Notifier is a single-slot dispatcher), so Process never
-// waits on CDP (feral-file/ffos-user#307).
-func (h *handler) toastFor(mode sigverify.Mode, status sigverify.Status) {
+// toastForEpoch surfaces the notice the (mode, status) policy calls for at an
+// accepted player transition, FENCED to the epoch the transition's pre-send
+// invalidation created: NotifyIfEpoch enqueues only if no newer transition
+// (a concurrent generation bump, say) advanced the epoch between the send and
+// this notify. A silent/valid transition Clears unconditionally (it only ever
+// supersedes). mode is the castMode snapshot, so a concurrent
+// setSignatureVerificationMode cannot relabel it. Non-blocking
+// (feral-file/ffos-user#307).
+func (h *handler) toastForEpoch(mode sigverify.Mode, status sigverify.Status, epoch uint64) {
 	if h.toast == nil {
 		return
 	}
 	if notice, ok := sigverify.ToastFor(mode, status); ok {
-		h.toast.Notify(notice)
+		h.toast.NotifyIfEpoch(notice, epoch)
 	} else {
 		h.toast.Clear()
 	}
@@ -421,6 +422,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		if h.toast != nil {
 			toastEpoch = h.toast.Epoch()
 		}
+		// sendEpoch is captured by the pre-send invalidation (Clear) below and
+		// used by the post-send toast: a generation bump that Clears the toast
+		// after the send but before the notify advances the epoch past this,
+		// so the accepted-transition notice is dropped rather than shown over
+		// the reloaded page (feral-file/ffos-user#307).
+		var sendEpoch uint64
 		// replayScopeTouched records whether THIS request reached
 		// syncReplayScope (even a failed sync counts — it still bumps the
 		// playback generation). The corrective resync in the failure defer
@@ -914,12 +921,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				h.activeVerdict.ClearCurrent()
 			}
 			// Drop any queued toast as part of the SAME pre-send invalidation,
-			// under the push lock: this send is about to replace the artwork,
-			// so a stale warning must not begin showing during the window
-			// before the post-send Notify/Clear runs (#307). The correct
-			// notice for this send is set after it is accepted (toastFor).
+			// under the push lock, and capture the epoch it created: this send
+			// is about to replace the artwork, so a stale warning must not
+			// show during the window before the post-send notify, and that
+			// notify (toastForEpoch) is fenced to this epoch (#307).
 			if h.toast != nil {
-				h.toast.Clear()
+				sendEpoch = h.toast.ClearAndEpoch()
 			}
 		}
 
@@ -1018,7 +1025,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// cannot slip in first (#307). Deferred (future-only)
 					// schedules take the empty-items branch above and do NOT
 					// toast here — their scheduler cutover carries the notice.
-					h.toastFor(castMode, verdictStatus(playlist.Verification))
+					h.toastForEpoch(castMode, verdictStatus(playlist.Verification), sendEpoch)
 				}
 			})
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
@@ -1052,7 +1059,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				publishVerdict(false)
 				clearVerdictForDefaultPlayback()
 				if commandType == commands.CMD_DISPLAY_PLAYLIST {
-					h.toastFor(castMode, verdictStatus(playlist.Verification))
+					h.toastForEpoch(castMode, verdictStatus(playlist.Verification), sendEpoch)
 				}
 			}
 		}

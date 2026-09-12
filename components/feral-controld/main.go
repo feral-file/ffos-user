@@ -1139,16 +1139,17 @@ func initializeApp(
 		// toaster so a reply from a page that reloaded across the send toasts
 		// nothing over its replacement. Set/read under the scheduler's pushMu.
 		var pushGenAtStart uint64
+		var pushSendEpoch uint64
 		playlistScheduler.SetPushObserver(func(phase playlistschedule.PushPhase) {
 			switch phase {
 			case playlistschedule.PushStarting:
 				pushGenAtStart = session.Generation()
 				pushStarting()
 				// Pre-send toast invalidation, paired with the verdict's:
-				// this cutover is about to replace the artwork, so drop any
-				// queued warning before it lands. PushAccepted sets the
-				// cohort's own notice (#307).
-				toastDispatcher.Clear()
+				// drop any queued warning before this cutover lands, and
+				// capture the epoch it creates so PushAccepted's notify is
+				// fenced to it (#307).
+				pushSendEpoch = toastDispatcher.ClearAndEpoch()
 			case playlistschedule.PushAccepted:
 				pushAccepted()
 			}
@@ -1190,6 +1191,7 @@ func initializeApp(
 				toastDispatcher,
 				session.Generation,
 				func() uint64 { return pushGenAtStart },
+				func() uint64 { return pushSendEpoch },
 				func() (sigverify.Notice, bool) { return pushNotice, pushShow },
 			))
 		}

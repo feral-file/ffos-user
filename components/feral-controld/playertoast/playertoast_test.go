@@ -50,7 +50,7 @@ func TestShow_SendsTheNoticeAndValidatesOK(t *testing.T) {
 		}).Times(1)
 
 	s := playertoast.New(mockCDP, writeManifest(t, manifestWithToast), nil)
-	require.NoError(t, s.Show(context.Background(), sigverify.NoticeInvalid))
+	require.NoError(t, s.Show(context.Background(), sigverify.NoticeInvalid, nil))
 
 	assert.True(t, strings.HasPrefix(expr, "window.handleCDPRequest("))
 	payload := strings.TrimSuffix(strings.TrimPrefix(expr, "window.handleCDPRequest("), ")")
@@ -69,7 +69,7 @@ func TestShow_PlayerRejection(t *testing.T) {
 		Return(map[string]any{"message": map[string]any{"ok": false}}, nil).Times(1)
 
 	s := playertoast.New(mockCDP, writeManifest(t, manifestWithToast), nil)
-	err := s.Show(context.Background(), sigverify.NoticeUnsigned)
+	err := s.Show(context.Background(), sigverify.NoticeUnsigned, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rejected")
 }
@@ -82,7 +82,7 @@ func TestShow_UnsupportedWhenContractAbsent(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl) // any NoLogSend is an unexpected call
 
 	s := playertoast.New(mockCDP, writeManifest(t, `{"contracts":{"setupDisplay":{"version":1}}}`), nil)
-	err := s.Show(context.Background(), sigverify.NoticeInvalid)
+	err := s.Show(context.Background(), sigverify.NoticeInvalid, nil)
 	assert.ErrorIs(t, err, playertoast.ErrUnsupported)
 }
 
@@ -95,13 +95,13 @@ func TestShow_UnreadableManifestIsTransient(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl)
 
 	s := playertoast.New(mockCDP, filepath.Join(t.TempDir(), "missing.json"), nil)
-	err := s.Show(context.Background(), sigverify.NoticeInvalid)
+	err := s.Show(context.Background(), sigverify.NoticeInvalid, nil)
 	assert.ErrorIs(t, err, playertoast.ErrContractUnreadable)
 	assert.NotErrorIs(t, err, playertoast.ErrUnsupported)
 
 	// A torn (undecodable) write is unreadable too, not "unsupported".
 	s2 := playertoast.New(mockCDP, writeManifest(t, `{"contracts":`), nil)
-	assert.ErrorIs(t, s2.Show(context.Background(), sigverify.NoticeInvalid), playertoast.ErrContractUnreadable)
+	assert.ErrorIs(t, s2.Show(context.Background(), sigverify.NoticeInvalid, nil), playertoast.ErrContractUnreadable)
 }
 
 // TestShow_NoticeNotListed: the contract is present but does not list the
@@ -114,7 +114,7 @@ func TestShow_NoticeNotListed(t *testing.T) {
 	body := `{"contracts":{"playerToast":{"version":1,"requestKey":"request","states":["signature_invalid"],"acceptedResponse":{"ok":true}}}}`
 
 	s := playertoast.New(mockCDP, writeManifest(t, body), nil)
-	err := s.Show(context.Background(), sigverify.NoticeRejected)
+	err := s.Show(context.Background(), sigverify.NoticeRejected, nil)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, playertoast.ErrUnsupported)
 	assert.Contains(t, err.Error(), "not listed")
@@ -129,7 +129,7 @@ func TestShow_CanceledContext(t *testing.T) {
 	cancel()
 
 	s := playertoast.New(mockCDP, writeManifest(t, manifestWithToast), nil)
-	assert.ErrorIs(t, s.Show(ctx, sigverify.NoticeInvalid), context.Canceled)
+	assert.ErrorIs(t, s.Show(ctx, sigverify.NoticeInvalid, nil), context.Canceled)
 }
 
 // TestShow_ShippingMirrorListsEveryNotice pins the daemon's manifest mirror
@@ -142,7 +142,7 @@ func TestShow_ShippingMirrorListsEveryNotice(t *testing.T) {
 		mockCDP := mocks.NewMockCDP(ctrl)
 		mockCDP.EXPECT().NoLogSendWithin(cdp.METHOD_EVALUATE, gomock.Any(), gomock.Any()).Return(okResult(), nil).Times(1)
 		s := playertoast.New(mockCDP, filepath.Join("..", "setupui", "testdata", "ffos-player-contract.json"), nil)
-		assert.NoError(t, s.Show(context.Background(), notice), "mirror must list %q", notice)
+		assert.NoError(t, s.Show(context.Background(), notice, nil), "mirror must list %q", notice)
 	}
 	_ = errors.New
 }
@@ -156,12 +156,17 @@ type recordingSender struct {
 	block   chan struct{}
 }
 
-func (r *recordingSender) Show(_ context.Context, n sigverify.Notice) error {
+func (r *recordingSender) Show(_ context.Context, n sigverify.Notice, stillCurrent func() bool) error {
 	if r.entered != nil {
 		r.entered <- struct{}{}
 	}
 	if r.block != nil {
 		<-r.block
+	}
+	// Model the real sender's CDP-handoff re-check: a Clear during the (here,
+	// blocked) manifest-read window abandons the send.
+	if stillCurrent != nil && !stillCurrent() {
+		return nil
 	}
 	r.shown <- n
 	return nil
@@ -204,9 +209,9 @@ func TestDispatcher_LatestWins(t *testing.T) {
 	d.Notify(sigverify.NoticeRejected) // the latest queued
 	close(rec.block)                   // release the in-flight send
 
-	assert.Equal(t, sigverify.NoticeInvalid, awaitNotice(t, rec.shown), "the in-flight send completes")
-	assert.Equal(t, sigverify.NoticeRejected, awaitNotice(t, rec.shown), "then only the latest queued is sent")
-	// The superseded middle notice is never sent.
+	// The in-flight Invalid was superseded while sending, so it is abandoned at
+	// its CDP-handoff re-check; only the latest queued notice is delivered.
+	assert.Equal(t, sigverify.NoticeRejected, awaitNotice(t, rec.shown), "only the latest is sent")
 	select {
 	case n := <-rec.shown:
 		t.Fatalf("a superseded notice was sent: %q", n)
@@ -228,11 +233,12 @@ func TestDispatcher_ClearDropsPending(t *testing.T) {
 	d.Clear()                          // drop the queued one
 	close(rec.block)
 
-	assert.Equal(t, sigverify.NoticeInvalid, awaitNotice(t, rec.shown))
+	// The in-flight Invalid is superseded and abandoned at its handoff, and the
+	// queued Unsigned was Cleared: nothing reaches the wall.
 	select {
 	case n := <-rec.shown:
-		t.Fatalf("a cleared notice was sent: %q", n)
-	case <-time.After(150 * time.Millisecond):
+		t.Fatalf("a superseded or cleared notice was sent: %q", n)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 
@@ -248,4 +254,59 @@ func TestDispatcher_StopsWithContext(t *testing.T) {
 	case <-rec.shown:
 	case <-time.After(150 * time.Millisecond):
 	}
+}
+
+// TestDispatcher_NotifyIfEpoch_StaleIsNoop: a notice fenced to an epoch that a
+// later Clear/Notify has advanced past is dropped (the F1 interleaving:
+// a Clear between an epoch snapshot and the notify).
+func TestDispatcher_NotifyIfEpoch_StaleIsNoop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4)}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+
+	epoch := d.Epoch()
+	d.Clear() // a newer transition advances the epoch
+	d.NotifyIfEpoch(sigverify.NoticeInvalid, epoch)
+	select {
+	case n := <-rec.shown:
+		t.Fatalf("a stale-epoch notice was sent: %q", n)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// Fenced to the CURRENT epoch, it is sent.
+	d.NotifyIfEpoch(sigverify.NoticeUnsigned, d.Epoch())
+	assert.Equal(t, sigverify.NoticeUnsigned, awaitNotice(t, rec.shown))
+}
+
+// TestDispatcher_ClearDuringSendAbandons: a Clear that lands while a dequeued
+// notice is in Show (before the CDP handoff) abandons the send, so an obsolete
+// warning never reaches the wall (F2).
+func TestDispatcher_ClearDuringSendAbandons(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4), entered: make(chan struct{}, 1), block: make(chan struct{})}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+
+	d.Notify(sigverify.NoticeInvalid) // worker dequeues and enters Show
+	<-rec.entered
+	d.Clear()        // a newer valid/silent transition supersedes it
+	close(rec.block) // Show reaches its CDP-handoff re-check and abandons
+
+	select {
+	case n := <-rec.shown:
+		t.Fatalf("an abandoned notice was sent: %q", n)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestShow_AbandonsWhenNotCurrent: the real sender skips the CDP send when
+// stillCurrent reports the notice was superseded during manifest validation.
+func TestShow_AbandonsWhenNotCurrent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockCDP := mocks.NewMockCDP(ctrl) // any NoLogSendWithin is an unexpected call
+
+	s := playertoast.New(mockCDP, writeManifest(t, manifestWithToast), nil)
+	assert.NoError(t, s.Show(context.Background(), sigverify.NoticeInvalid, func() bool { return false }))
 }
