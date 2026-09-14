@@ -1130,6 +1130,70 @@ func TestCommandHandler_Process_Strict_RefusalSuppressedWhenTransitionIntervened
 	assert.Empty(t, toast.notices, "a superseded strict rejection must not toast")
 }
 
+// TestCommandHandler_Process_Strict_RefusalSuppressedWhenAuthorityChanged: a
+// future-only displayAt cast that lands while a slow strict URL cast resolves
+// takes scheduler authority and returns deferred with no CDP write and no
+// toast Clear, so the display-transition epoch does not move. The older
+// cast's rejection must still not toast: its source has been superseded
+// (feral-file/ffos-user#307 round 13).
+func TestCommandHandler_Process_Strict_RefusalSuppressedWhenAuthorityChanged(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error {
+			<-c.Done()
+			return c.Err()
+		}).AnyTimes()
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
+	defer sched.Stop()
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	ts := &testSetup{ctrl: ctrl, ctx: ctx, mockExecutor: mockExecutor, mockCDP: mockCDP, mockDP1: mockDP1,
+		mockJSON: mockJSON, mockStatusPoller: mockStatusPoller, handler: handler, logger: logger}
+	wireVerificationWithMode(ts, sigverify.ModeStrict)
+	toast := &fakeNotifier{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	verdict := sigverify.Verify(tamperedSignedRaw(t)) // invalid
+	require.Equal(t, sigverify.StatusInvalid, verdict.Status)
+	playlistURL := "https://feed.example/p.json"
+	// The concurrent future-only cast: under the scheduler push lock it takes
+	// authority for another source and commits — a deferred acceptance that
+	// writes nothing to the player and Clears no toast.
+	future := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Title: "Future",
+		Items: []dp1playlist.PlaylistItem{{ID: "later", Source: "https://example.com/later.html", DisplayAt: strPtr("2026-07-23T00:00:00Z")}},
+	}}
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).DoAndReturn(
+		func(context.Context, string) (*dp1.Playlist, error) {
+			sched.WithPlayerPush(func() {
+				active := sched.PrepareWithSource(future, playlistschedule.Source{PlaylistURL: "https://feed.example/other.json"})
+				require.NotNil(t, active)
+				require.Empty(t, active.Items, "the schedule is future-only: nothing is sent now")
+				sched.Commit()
+			})
+			return &dp1.Playlist{Playlist: dp1playlist.Playlist{
+				ID:    "pl-tampered",
+				Items: []dp1playlist.PlaylistItem{{ID: "i", Source: "https://example.com/a"}},
+			}, Verification: &verdict}, nil
+		}).Times(1)
+
+	_, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+
+	require.Error(t, err)
+	assert.True(t, commandrouter.IsSigInvalid(err))
+	assert.Empty(t, toast.notices, "a strict rejection for a source the scheduler already replaced must not toast")
+}
+
 // TestCommandHandler_Process_Notify_AcceptedToastSuppressedWhenTransitionIntervened:
 // an accepted notify cast whose toast would land after a newer transition
 // (here a Clear during the CDP send, as a generation bump would do) is

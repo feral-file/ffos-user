@@ -422,6 +422,16 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		if h.toast != nil {
 			toastEpoch = h.toast.Epoch()
 		}
+		// castAuthority is the second fence for that same refusal: a
+		// future-only displayAt cast that lands while this one resolves
+		// takes scheduler authority, commits and returns deferred WITHOUT a
+		// CDP write or a toast Clear, so the epoch does not move. Sampled
+		// before resolution and rechecked under WithPlayerPush at the
+		// refusal, exactly as the refresher fences its own (#307).
+		var castAuthority uint64
+		if h.scheduler != nil {
+			castAuthority = h.scheduler.AuthorityToken()
+		}
 		// sendEpoch is captured by the pre-send invalidation (Clear) below and
 		// used by the post-send toast: a generation bump that Clears the toast
 		// after the send but before the notify advances the epoch past this,
@@ -631,9 +641,27 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// Strict refused the cast; tell the wall — but only if no
 					// newer transition replaced the artwork while this cast
 					// resolved (NotifyIfEpoch against the pre-resolution
-					// snapshot). Best-effort (#307).
+					// snapshot) AND scheduler authority still belongs to it
+					// (see castAuthority). The authority check runs under the
+					// scheduler push lock so it orders against the cast that
+					// takes authority rather than racing it; NotifyIfEpoch is
+					// non-blocking, so nothing waits under the lock. No lock
+					// is held here yet (LockPlayback and the send's own
+					// WithPlayerPush come later), so this cannot nest.
+					// Best-effort (#307).
 					if h.toast != nil {
-						h.toast.NotifyIfEpoch(sigverify.NoticeRejected, toastEpoch)
+						refuse := func() {
+							if h.scheduler != nil && h.scheduler.AuthorityToken() != castAuthority {
+								h.logger.Debug("displayPlaylist: strict refusal notice dropped; playlist authority changed during resolution")
+								return
+							}
+							h.toast.NotifyIfEpoch(sigverify.NoticeRejected, toastEpoch)
+						}
+						if h.scheduler != nil {
+							h.scheduler.WithPlayerPush(refuse)
+						} else {
+							refuse()
+						}
 					}
 					return nil, err
 				}
