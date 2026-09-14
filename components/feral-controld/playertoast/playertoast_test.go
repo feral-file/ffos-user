@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 )
@@ -408,4 +410,150 @@ func TestDispatcher_ClearDuringSendAbandons(t *testing.T) {
 		t.Fatalf("an abandoned notice was sent: %q", n)
 	case <-time.After(200 * time.Millisecond):
 	}
+}
+
+// fakeNav models the playersession slice the dispatcher parks on: a pending
+// flag, the in-flight navigation's target generation, the current generation,
+// and handler readiness.
+type fakeNav struct {
+	mu      sync.Mutex
+	pending bool
+	target  uint64
+	gen     uint64
+	ready   bool
+}
+
+func (f *fakeNav) set(fn func(*fakeNav)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn(f)
+}
+
+func (f *fakeNav) NavigationPending() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pending
+}
+
+func (f *fakeNav) StageReady(playersession.Stage) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ready
+}
+
+func (f *fakeNav) Generation() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gen
+}
+
+func (f *fakeNav) NavigationTargetGeneration() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.target
+}
+
+func assertNoNotice(t *testing.T, ch chan sigverify.Notice, within time.Duration, msg string) {
+	t.Helper()
+	select {
+	case n := <-ch:
+		t.Fatalf("%s: got %q", msg, n)
+	case <-time.After(within):
+	}
+}
+
+// TestDispatcher_ParksWhileNavigationPending: a notice queued while a recovery
+// navigation is pending (armed before its gate probes, before any generation
+// bump) waits, and goes out once the navigation is no longer pending
+// (feral-file/ffos-user#307 round 11; player-session-recovery §3.2).
+func TestDispatcher_ParksWhileNavigationPending(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4)}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+	nav := &fakeNav{pending: true}
+	d.SetNavigationSession(nav, 5*time.Millisecond, time.Second)
+
+	d.Notify(sigverify.NoticeInvalid)
+	assertNoNotice(t, rec.shown, 100*time.Millisecond, "sent during a pending navigation")
+
+	nav.set(func(f *fakeNav) { f.pending = false })
+	assert.Equal(t, sigverify.NoticeInvalid, awaitNotice(t, rec.shown))
+}
+
+// TestDispatcher_ParkExitsOnceTargetGenerationReady: NavigationPending stays
+// true through the settle window, so the park must exit on the in-flight
+// navigation's target generation being current and handler-ready — a bare
+// !NavigationPending() would stall (and, at the handoff, drop) the send.
+func TestDispatcher_ParkExitsOnceTargetGenerationReady(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4)}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+	nav := &fakeNav{pending: true, gen: 6}
+	d.SetNavigationSession(nav, 5*time.Millisecond, time.Second)
+
+	d.Notify(sigverify.NoticeUnsigned)
+	assertNoNotice(t, rec.shown, 50*time.Millisecond, "sent before the target generation was ready")
+
+	nav.set(func(f *fakeNav) { f.target, f.gen, f.ready = 7, 7, true }) // still pending: settle window
+	assert.Equal(t, sigverify.NoticeUnsigned, awaitNotice(t, rec.shown))
+}
+
+// TestDispatcher_ClearDuringParkSupersedes: the post-navigation generation
+// hook Clears the dispatcher; a notice parked across it is stale and must not
+// go out when the navigation finishes — the worker stays live for the next.
+func TestDispatcher_ClearDuringParkSupersedes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4)}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+	nav := &fakeNav{pending: true}
+	d.SetNavigationSession(nav, 5*time.Millisecond, time.Second)
+
+	d.Notify(sigverify.NoticeRejected)
+	time.Sleep(30 * time.Millisecond) // let the worker dequeue and park
+	d.Clear()                         // the generation hook, as the page is replaced
+	nav.set(func(f *fakeNav) { f.pending = false })
+	assertNoNotice(t, rec.shown, 150*time.Millisecond, "a notice superseded during the park went out")
+
+	d.Notify(sigverify.NoticeInvalid)
+	assert.Equal(t, sigverify.NoticeInvalid, awaitNotice(t, rec.shown))
+}
+
+// TestDispatcher_ParkTimeoutDrops: a navigation that never settles (a page
+// that never installs its handler) cannot hold the worker; past the park
+// timeout the notice is dropped, not delivered, and the worker keeps serving.
+func TestDispatcher_ParkTimeoutDrops(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4)}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+	nav := &fakeNav{pending: true}
+	d.SetNavigationSession(nav, 5*time.Millisecond, 40*time.Millisecond)
+
+	d.Notify(sigverify.NoticeInvalid)
+	assertNoNotice(t, rec.shown, 200*time.Millisecond, "a timed-out park delivered the notice")
+
+	nav.set(func(f *fakeNav) { f.pending = false })
+	d.Notify(sigverify.NoticeUnsigned)
+	assert.Equal(t, sigverify.NoticeUnsigned, awaitNotice(t, rec.shown))
+}
+
+// TestDispatcher_NavigationArmedDuringSendAbandons: a navigation that arms
+// while Show is in flight (after the park, during the manifest read or dial)
+// is caught by the handoff predicate — nothing reaches the player.
+func TestDispatcher_NavigationArmedDuringSendAbandons(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4), entered: make(chan struct{}, 1), block: make(chan struct{})}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+	nav := &fakeNav{}
+	d.SetNavigationSession(nav, 5*time.Millisecond, time.Second)
+
+	d.Notify(sigverify.NoticeInvalid)
+	<-rec.entered // Show is in flight, past the park
+	nav.set(func(f *fakeNav) { f.pending = true })
+	close(rec.block)
+	assertNoNotice(t, rec.shown, 150*time.Millisecond, "a send with a navigation armed mid-flight reached the player")
 }

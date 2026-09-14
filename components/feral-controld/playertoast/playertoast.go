@@ -33,6 +33,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 )
 
@@ -332,15 +333,53 @@ type Notifier interface {
 	ClearAndEpoch() uint64
 }
 
+// NavigationSession is the slice of playersession.Session the dispatcher
+// consults to honor the NavigationPending park contract
+// (docs/player-session-recovery.md §3.2). A recovery navigation arms
+// NavigationPending BEFORE its gate probes and bumps the generation (which
+// Clears this dispatcher through the generation hook) only once Page.navigate
+// succeeds, so epoch fencing alone leaves that pre-bump window open: a queued
+// notice could evaluate over a page about to be replaced. Consumer-owned,
+// mirroring setupui.NavigationSession; *playersession.Session satisfies it.
+type NavigationSession interface {
+	NavigationPending() bool
+	StageReady(st playersession.Stage) bool
+	Generation() uint64
+	// NavigationTargetGeneration is the generation the in-flight navigation
+	// bumped to, 0 before that bump — the park's exit key (see §3.2).
+	NavigationTargetGeneration() uint64
+}
+
+// defaultNavigationParkPollInterval / defaultNavigationParkTimeout bound the
+// worker's park while a navigation is pending — the same values setupui's
+// narration park uses. Past the timeout the notice is DROPPED (unlike
+// narration, which delivers best-effort): a page whose handler never installs
+// cannot render a toast, and a bounded park keeps a broken page from holding
+// the worker for the process.
+const (
+	defaultNavigationParkPollInterval = 100 * time.Millisecond
+	defaultNavigationParkTimeout      = 15 * time.Second
+)
+
 // Dispatcher serializes toasts onto a single worker with a one-slot mailbox:
 // producers never block, at most one Show is ever in flight (so toasts cannot
 // pile up on CDP), and a later transition supersedes a queued earlier one.
 // Each send is bounded by timeout (via the Sender's context), so a wedged
-// player cannot hold the toast's own session past it.
+// player cannot hold the toast's own session past it. With a
+// NavigationSession set, the worker parks before each send until a pending
+// recovery navigation settles and drops at the CDP handoff if one arms
+// during the send (§3.2).
 type Dispatcher struct {
 	sender  Sender
 	logger  *zap.Logger
 	timeout time.Duration
+
+	// nav, when set, is consulted before every send (park) and at the CDP
+	// handoff (drop). parkPoll/parkTimeout bound the park. Guarded by mu:
+	// set once at wiring, read by the worker.
+	nav         NavigationSession
+	parkPoll    time.Duration
+	parkTimeout time.Duration
 
 	mu      sync.Mutex
 	pending sigverify.Notice
@@ -368,6 +407,65 @@ func NewDispatcher(ctx context.Context, sender Sender, timeout time.Duration, lo
 	d := &Dispatcher{sender: sender, logger: logger, timeout: timeout, wake: make(chan struct{}, 1)}
 	go d.run(ctx)
 	return d
+}
+
+// SetNavigationSession makes the worker honor the NavigationPending park
+// contract against nav. pollInterval and parkTimeout bound the park; zero
+// selects the defaults.
+func (d *Dispatcher) SetNavigationSession(nav NavigationSession, pollInterval, parkTimeout time.Duration) {
+	if pollInterval <= 0 {
+		pollInterval = defaultNavigationParkPollInterval
+	}
+	if parkTimeout <= 0 {
+		parkTimeout = defaultNavigationParkTimeout
+	}
+	d.mu.Lock()
+	d.nav, d.parkPoll, d.parkTimeout = nav, pollInterval, parkTimeout
+	d.mu.Unlock()
+}
+
+// navigationSettled reports whether a send may proceed as far as navigation
+// is concerned: none pending, or the in-flight one already bumped to the
+// current generation and that generation's handler is ready. That second
+// clause matters: NavigationPending stays true through the post-bump settle
+// window, so a bare !NavigationPending() would stall every send entered
+// after the bump and drop the very notice the park just waited for (§3.2).
+func (d *Dispatcher) navigationSettled() bool {
+	d.mu.Lock()
+	nav := d.nav
+	d.mu.Unlock()
+	if nav == nil || !nav.NavigationPending() {
+		return true
+	}
+	target := nav.NavigationTargetGeneration()
+	return target != 0 && target == nav.Generation() && nav.StageReady(playersession.StageHandler)
+}
+
+// parkForNavigation waits, bounded, for a pending recovery navigation to
+// settle before a send. It returns false when the notice must be dropped:
+// ctx ended, or the park timed out (see defaultNavigationParkTimeout).
+func (d *Dispatcher) parkForNavigation(ctx context.Context) bool {
+	if d.navigationSettled() {
+		return true
+	}
+	d.mu.Lock()
+	interval, timeout := d.parkPoll, d.parkTimeout
+	d.mu.Unlock()
+	deadline := time.Now().Add(timeout)
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for !d.navigationSettled() {
+		if time.Now().After(deadline) {
+			d.logger.Debug("player toast dropped: navigation still pending past the park timeout")
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-tick.C:
+		}
+	}
+	return true
 }
 
 // Notify queues notice as the pending toast, replacing any not-yet-sent one.
@@ -444,6 +542,11 @@ func (d *Dispatcher) run(ctx context.Context) {
 			if !has {
 				continue
 			}
+			// Park BEFORE the epoch re-check, so a Clear that lands during
+			// the park (the post-navigation generation hook) is seen below.
+			if !d.parkForNavigation(ctx) {
+				continue
+			}
 			// Re-check right before the send: a Clear or newer Notify since
 			// the dequeue has bumped gen, so this notice is stale and must not
 			// go out (the newer Notify will wake us again with its own).
@@ -455,8 +558,10 @@ func (d *Dispatcher) run(ctx context.Context) {
 			}
 			sctx, cancel := context.WithTimeout(ctx, d.timeout)
 			// stillCurrent lets Show abandon the send at the CDP handoff if a
-			// newer transition advanced the epoch while Show read the manifest.
-			if err := d.sender.Show(sctx, notice, func() bool { return d.Epoch() == gen }); err != nil {
+			// newer transition advanced the epoch while Show read the manifest
+			// or dialed, or a recovery navigation armed meanwhile (§3.2).
+			stillCurrent := func() bool { return d.Epoch() == gen && d.navigationSettled() }
+			if err := d.sender.Show(sctx, notice, stillCurrent); err != nil {
 				d.logger.Debug("player toast not shown", zap.String("notice", string(notice)), zap.Error(err))
 			}
 			cancel()

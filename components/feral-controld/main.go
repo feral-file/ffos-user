@@ -1146,6 +1146,13 @@ func initializeApp(
 			newToastSessionDialer(cdpEndpoint, httpClient, webSocketDialer, json, io, logger),
 			setupui.DefaultContractPath, logger)
 		toastDispatcher = playertoast.NewDispatcher(context, toastSender, 2*time.Second, logger)
+		// Honor the NavigationPending park contract (player-session-recovery
+		// §3.2) like every other off-lane producer: a recovery navigation arms
+		// before its gate probes and bumps the generation (which Clears the
+		// dispatcher) only once Page.navigate succeeds, so the worker parks on
+		// the session before each send and drops at the handoff if one arms
+		// during it. Defaults for the park bounds.
+		toastDispatcher.SetNavigationSession(session, 0, 0)
 		commandrouter.SetPlayerToast(rawCmdHandler, toastDispatcher, logger)
 		// A displayAt-deferred cast parks its verdict as pending; the
 		// scheduler's own cutover push is the only point that proves the
