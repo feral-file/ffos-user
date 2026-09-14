@@ -920,7 +920,7 @@ func TestCommandHandler_Process_PlayRecentlyPlayed_ReentersDisplayPlaylist(t *te
 	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
 
 	result, err := handler.Process(ctx, commands.Command{
-		Type: commands.CMD_PLAY_RECENTLY_PLAYED,
+		Type:      commands.CMD_PLAY_RECENTLY_PLAYED,
 		Arguments: map[string]interface{}{"recordId": "rp-42"},
 	})
 	require.NoError(t, err)

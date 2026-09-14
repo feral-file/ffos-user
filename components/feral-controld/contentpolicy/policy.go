@@ -57,7 +57,12 @@ func (p Policy) Allows(item dp1playlist.PlaylistItem, origin Context) bool {
 	if item.ContentRating != nil && *item.ContentRating == "mature" {
 		return false
 	}
-	return !(item.ContentRating == nil && origin == ContextCurated && p.BlockUnratedCurated)
+	// An unrated item is withheld only when the operator gate is on and the item
+	// came from a curated source; unrated personal content stays admissible.
+	if item.ContentRating == nil && origin == ContextCurated && p.BlockUnratedCurated {
+		return false
+	}
+	return true
 }
 
 // Filter creates an internal playback projection. When items are removed its
@@ -119,7 +124,7 @@ func Fallback(path string, blockUnratedCurated bool) *Store {
 func Open(path string, blockUnratedCurated bool) (*Store, error) {
 	s := &Store{path: path, policy: Default()}
 	s.policy.BlockUnratedCurated = blockUnratedCurated
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // G304: production passes the fixed constant.CONTENT_POLICY_FILE; tests inject their own t.TempDir path.
 	if err == nil {
 		if err := jsonUnmarshalStrict(b, &s.policy); err != nil {
 			return nil, fmt.Errorf("load content policy: %w", err)
@@ -171,7 +176,9 @@ func persistAtomic(path string, p Policy) error {
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(tmp, os.O_RDWR, 0o600)
+	// Reopened only to fsync the bytes just written; the path is this store's
+	// own fixed policy file plus a ".tmp" suffix, never a caller-supplied name.
+	f, err := os.OpenFile(tmp, os.O_RDWR, 0o600) //nolint:gosec // G304: derived from constant.CONTENT_POLICY_FILE (t.TempDir in tests).
 	if err != nil {
 		return err
 	}
