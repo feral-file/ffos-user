@@ -557,3 +557,58 @@ func TestDispatcher_NavigationArmedDuringSendAbandons(t *testing.T) {
 	close(rec.block)
 	assertNoNotice(t, rec.shown, 150*time.Millisecond, "a send with a navigation armed mid-flight reached the player")
 }
+
+// TestDispatcher_GuardedNotice_SendsWhileGuardHolds: a guarded notice whose
+// predicate keeps holding is delivered like an unguarded one.
+func TestDispatcher_GuardedNotice_SendsWhileGuardHolds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4)}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+
+	d.NotifyIfEpochGuarded(sigverify.NoticeRejected, d.Epoch(), func() bool { return true })
+	assert.Equal(t, sigverify.NoticeRejected, awaitNotice(t, rec.shown))
+}
+
+// TestDispatcher_GuardedNotice_DropsBeforeDialWhenGuardFails: a guard that
+// stopped holding by the time the worker dequeues (a future-only cast took
+// scheduler authority after the queue — no Clear, so the epoch is unchanged)
+// drops the notice without a send, and the worker keeps serving
+// (feral-file/ffos-user#307 round 14).
+func TestDispatcher_GuardedNotice_DropsBeforeDialWhenGuardFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4)}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+
+	d.NotifyIfEpochGuarded(sigverify.NoticeRejected, d.Epoch(), func() bool { return false })
+	assertNoNotice(t, rec.shown, 150*time.Millisecond, "a notice whose guard failed was sent")
+
+	d.Notify(sigverify.NoticeInvalid)
+	assert.Equal(t, sigverify.NoticeInvalid, awaitNotice(t, rec.shown))
+}
+
+// TestDispatcher_GuardedNotice_AbandonsAtHandoffWhenGuardFails: the guard is
+// re-run inside the handoff predicate, so authority moving while Show is in
+// flight (after the pre-dial check) still abandons the evaluate.
+func TestDispatcher_GuardedNotice_AbandonsAtHandoffWhenGuardFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &recordingSender{shown: make(chan sigverify.Notice, 4), entered: make(chan struct{}, 1), block: make(chan struct{})}
+	d := playertoast.NewDispatcher(ctx, rec, time.Second, nil)
+
+	var mu sync.Mutex
+	held := true
+	guard := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return held
+	}
+	d.NotifyIfEpochGuarded(sigverify.NoticeRejected, d.Epoch(), guard)
+	<-rec.entered // past the pre-dial check, Show in flight
+	mu.Lock()
+	held = false
+	mu.Unlock()
+	close(rec.block)
+	assertNoNotice(t, rec.shown, 150*time.Millisecond, "a notice whose guard failed mid-send reached the player")
+}

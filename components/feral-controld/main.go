@@ -1203,7 +1203,7 @@ func initializeApp(
 		// overwritten — the gate runs before PushStarting and has no send
 		// epoch of its own.
 		playlistScheduler.SetPushGate(commandrouter.ScheduledPushGate(
-			toastDispatcher, verificationMode,
+			toastDispatcher, verificationMode, playlistScheduler.AuthorityToken,
 			func(notice sigverify.Notice, show bool) { pushNotice, pushShow = notice, show },
 		))
 		// The cohort reached the player (PushAccepted): emit the notice the

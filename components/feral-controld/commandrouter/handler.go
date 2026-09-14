@@ -650,12 +650,20 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// WithPlayerPush come later), so this cannot nest.
 					// Best-effort (#307).
 					if h.toast != nil {
+						// authorityHeld travels WITH the notice: the dispatcher
+						// re-runs it before dialing and at the evaluate, so a
+						// future-only cast that takes authority AFTER this
+						// queue (no player write, no Clear — invisible to the
+						// epoch) still drops it at the handoff.
+						authorityHeld := func() bool {
+							return h.scheduler == nil || h.scheduler.AuthorityToken() == castAuthority
+						}
 						refuse := func() {
-							if h.scheduler != nil && h.scheduler.AuthorityToken() != castAuthority {
+							if !authorityHeld() {
 								h.logger.Debug("displayPlaylist: strict refusal notice dropped; playlist authority changed during resolution")
 								return
 							}
-							h.toast.NotifyIfEpoch(sigverify.NoticeRejected, toastEpoch)
+							h.toast.NotifyIfEpochGuarded(sigverify.NoticeRejected, toastEpoch, authorityHeld)
 						}
 						if h.scheduler != nil {
 							h.scheduler.WithPlayerPush(refuse)

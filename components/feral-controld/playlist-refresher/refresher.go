@@ -210,14 +210,16 @@ func (r *refresher) currentMode() sigverify.Mode {
 // resolved). NotifyIfEpoch is atomic against every Notify/Clear — a newer
 // cast, default playback, scheduler cutover, or generation bump all Clear the
 // toast and advance the epoch — so a stale rejection never lands over the
-// replacement (feral-file/ffos-user#307). This subsumes the old
-// scheduler-authority check, which missed generation bumps.
-func (r *refresher) toastStrictRefusal(epoch uint64, mode sigverify.Mode, status sigverify.Status) {
+// replacement (feral-file/ffos-user#307). The epoch does NOT see a
+// future-only scheduled cast taking scheduler authority (no write, no
+// Clear), so authorityHeld travels with the notice and the dispatcher
+// re-runs it at the handoff.
+func (r *refresher) toastStrictRefusal(epoch uint64, mode sigverify.Mode, status sigverify.Status, authorityHeld func() bool) {
 	if r.toast == nil {
 		return
 	}
 	if notice, ok := sigverify.ToastFor(mode, status); ok {
-		r.toast.NotifyIfEpoch(notice, epoch)
+		r.toast.NotifyIfEpochGuarded(notice, epoch, authorityHeld)
 	}
 }
 
@@ -641,12 +643,16 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			// the send closure rechecks authority under, so it orders
 			// against that cast's own authority change rather than racing
 			// it (feral-file/ffos-user#307).
+			authorityHeld := func() bool {
+				return r.scheduler == nil || r.scheduler.AuthorityToken() == authorityToken
+			}
 			refuse := func() {
-				if r.scheduler != nil && r.scheduler.AuthorityToken() != authorityToken {
+				if !authorityHeld() {
 					r.logger.Debug("Strict refusal notice dropped: playlist authority changed during refresh resolution")
 					return
 				}
-				r.toastStrictRefusal(toastEpoch, castMode, status)
+				// authorityHeld also rides with the notice to its handoff.
+				r.toastStrictRefusal(toastEpoch, castMode, status, authorityHeld)
 			}
 			if r.scheduler != nil {
 				r.scheduler.WithPlayerPush(refuse)

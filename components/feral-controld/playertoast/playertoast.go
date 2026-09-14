@@ -331,6 +331,16 @@ type Notifier interface {
 	// closing the window where a generation bump lands between a path's check
 	// and its Notify.
 	ClearAndEpoch() uint64
+	// NotifyIfEpochGuarded is NotifyIfEpoch with a validity predicate the
+	// notice carries to its handoff: the worker re-evaluates valid (may be
+	// nil) before dialing and again immediately before the evaluate, and
+	// drops the notice when it reports false. It exists for the one
+	// transition the epoch cannot see — a future-only scheduled cast takes
+	// scheduler authority with no player write and no Clear — so a
+	// strict-refusal producer passes "authority still held" and the
+	// freshness check travels with the notice instead of stopping at queue
+	// time (feral-file/ffos-user#307).
+	NotifyIfEpochGuarded(notice sigverify.Notice, epoch uint64, valid func() bool)
 }
 
 // NavigationSession is the slice of playersession.Session the dispatcher
@@ -384,6 +394,9 @@ type Dispatcher struct {
 	mu      sync.Mutex
 	pending sigverify.Notice
 	has     bool
+	// pendingGuard is the validity predicate queued with pending (nil for an
+	// unguarded notice); dequeued with it and re-run at the handoff.
+	pendingGuard func() bool
 	// gen bumps on every Notify and Clear. The worker captures it at dequeue
 	// and re-checks it immediately before Show, so a Clear (or newer Notify)
 	// that lands after the dequeue but before the send still suppresses the
@@ -473,6 +486,7 @@ func (d *Dispatcher) parkForNavigation(ctx context.Context) bool {
 func (d *Dispatcher) Notify(notice sigverify.Notice) {
 	d.mu.Lock()
 	d.pending = notice
+	d.pendingGuard = nil
 	d.has = true
 	d.gen++
 	d.mu.Unlock()
@@ -504,12 +518,19 @@ func (d *Dispatcher) ClearAndEpoch() uint64 {
 // notice decided after a slow resolution against a newer transition that
 // already replaced the artwork (feral-file/ffos-user#307).
 func (d *Dispatcher) NotifyIfEpoch(notice sigverify.Notice, epoch uint64) {
+	d.NotifyIfEpochGuarded(notice, epoch, nil)
+}
+
+// NotifyIfEpochGuarded queues notice under the epoch fence and attaches
+// valid, re-evaluated by the worker before the dial and at the handoff.
+func (d *Dispatcher) NotifyIfEpochGuarded(notice sigverify.Notice, epoch uint64, valid func() bool) {
 	d.mu.Lock()
 	if d.gen != epoch {
 		d.mu.Unlock()
 		return
 	}
 	d.pending = notice
+	d.pendingGuard = valid
 	d.has = true
 	d.gen++
 	d.mu.Unlock()
@@ -536,11 +557,14 @@ func (d *Dispatcher) run(ctx context.Context) {
 			return
 		case <-d.wake:
 			d.mu.Lock()
-			notice, has, gen := d.pending, d.has, d.gen
+			notice, has, gen, guard := d.pending, d.has, d.gen, d.pendingGuard
 			d.has = false
 			d.mu.Unlock()
 			if !has {
 				continue
+			}
+			if guard == nil {
+				guard = func() bool { return true }
 			}
 			// Park BEFORE the epoch re-check, so a Clear that lands during
 			// the park (the post-navigation generation hook) is seen below.
@@ -556,11 +580,20 @@ func (d *Dispatcher) run(ctx context.Context) {
 			if superseded {
 				continue
 			}
+			// The notice's own validity (scheduler authority for a strict
+			// refusal) — checked before dialing so a dead notice costs no
+			// session, and again inside stillCurrent at the handoff.
+			if !guard() {
+				d.logger.Debug("player toast dropped: its guard no longer holds", zap.String("notice", string(notice)))
+				continue
+			}
 			sctx, cancel := context.WithTimeout(ctx, d.timeout)
 			// stillCurrent lets Show abandon the send at the CDP handoff if a
 			// newer transition advanced the epoch while Show read the manifest
-			// or dialed, or a recovery navigation armed meanwhile (§3.2).
-			stillCurrent := func() bool { return d.Epoch() == gen && d.navigationSettled() }
+			// or dialed, a recovery navigation armed meanwhile (§3.2), or the
+			// notice's guard stopped holding (a future-only cast took
+			// authority after the queue).
+			stillCurrent := func() bool { return d.Epoch() == gen && d.navigationSettled() && guard() }
 			if err := d.sender.Show(sctx, notice, stillCurrent); err != nil {
 				d.logger.Debug("player toast not shown", zap.String("notice", string(notice)), zap.Error(err))
 			}

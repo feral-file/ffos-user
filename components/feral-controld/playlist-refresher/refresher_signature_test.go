@@ -577,6 +577,14 @@ type recordingNotifier struct {
 	epoch    uint64
 	notified chan sigverify.Notice
 	cleared  chan struct{}
+	// guard is the handoff predicate queued with the last guarded notice.
+	guard func() bool
+}
+
+func (n *recordingNotifier) lastGuard() func() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.guard
 }
 
 func newRecordingNotifier() *recordingNotifier {
@@ -616,12 +624,16 @@ func (n *recordingNotifier) ClearAndEpoch() uint64 {
 	return n.epoch
 }
 func (n *recordingNotifier) NotifyIfEpoch(notice sigverify.Notice, epoch uint64) {
+	n.NotifyIfEpochGuarded(notice, epoch, nil)
+}
+func (n *recordingNotifier) NotifyIfEpochGuarded(notice sigverify.Notice, epoch uint64, valid func() bool) {
 	n.mu.Lock()
 	if n.epoch != epoch {
 		n.mu.Unlock()
 		return
 	}
 	n.epoch++
+	n.guard = valid
 	n.mu.Unlock()
 	select {
 	case n.notified <- notice:
@@ -838,4 +850,60 @@ func TestRefresher_Strict_RefusalSuppressedWhenAuthorityChanged(t *testing.T) {
 	case <-time.After(250 * time.Millisecond):
 	}
 	r.Stop()
+}
+
+// TestRefresher_Strict_RefusalGuardTracksAuthority: a strict-refresh refusal
+// queued with authority intact carries a handoff guard that stops holding
+// once a future-only scheduled cast takes authority afterwards
+// (feral-file/ffos-user#307 round 14).
+func TestRefresher_Strict_RefusalGuardTracksAuthority(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	sched := &fakePlaylistScheduler{}
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), sched, mockClock, logger)
+	refresher.SetSignatureVerification(r, &sigverify.Active{}, logger)
+	refresher.SetSignatureVerificationMode(r, func() sigverify.Mode { return sigverify.ModeStrict }, zap.NewNop())
+	toast := newRecordingNotifier()
+	refresher.SetRefresherToaster(r, toast, zap.NewNop())
+
+	playlistURL := "http://example.com/playlist.json"
+	unsigned := sigverify.Verify([]byte(`{"dpVersion":"1.1.0","title":"t","items":[]}`))
+	playlist := createMockPlaylistNoDynamic()
+	playlist.ID = "refreshed-unsigned"
+	playlist.Verification = &unsigned
+	mockStatusPoller.EXPECT().FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).AnyTimes()
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).Return(playlist, nil).AnyTimes()
+
+	r.Start()
+	select {
+	case n := <-toast.notified:
+		require.Equal(t, sigverify.NoticeRejected, n)
+	case <-time.After(2 * time.Second):
+		t.Fatal("strict refusal was not toasted with authority intact")
+	}
+	r.Stop()
+	guard := toast.lastGuard()
+	require.NotNil(t, guard, "a strict-refresh refusal must carry its authority guard")
+	assert.True(t, guard(), "the guard holds while authority is unchanged")
+
+	// A future-only scheduled cast takes authority after the queue (no send,
+	// no Clear): the queued notice's guard must now report stale.
+	sched.PrepareWithSource(createMockPlaylistNoDynamic(), playlistschedule.Source{})
+	assert.False(t, guard(), "the handoff guard must drop the notice once authority moved")
 }

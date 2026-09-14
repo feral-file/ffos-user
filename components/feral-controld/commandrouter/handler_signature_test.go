@@ -844,6 +844,9 @@ type fakeNotifier struct {
 	notices []sigverify.Notice
 	clears  int
 	epoch   uint64
+	// guards records the handoff predicate queued with each guarded notice
+	// (nil for an unguarded one), index-aligned with notices.
+	guards []func() bool
 }
 
 func (f *fakeNotifier) Notify(n sigverify.Notice) { f.epoch++; f.notices = append(f.notices, n) }
@@ -851,11 +854,15 @@ func (f *fakeNotifier) Clear()                    { f.epoch++; f.clears++ }
 func (f *fakeNotifier) Epoch() uint64             { return f.epoch }
 func (f *fakeNotifier) ClearAndEpoch() uint64     { f.epoch++; f.clears++; return f.epoch }
 func (f *fakeNotifier) NotifyIfEpoch(n sigverify.Notice, epoch uint64) {
+	f.NotifyIfEpochGuarded(n, epoch, nil)
+}
+func (f *fakeNotifier) NotifyIfEpochGuarded(n sigverify.Notice, epoch uint64, valid func() bool) {
 	if f.epoch != epoch {
 		return
 	}
 	f.epoch++
 	f.notices = append(f.notices, n)
+	f.guards = append(f.guards, valid)
 }
 
 func unsignedInlineRaw() []byte {
@@ -1049,22 +1056,32 @@ func TestScheduledPushGate(t *testing.T) {
 		show   bool
 		calls  int
 	}
+	var authority uint64 = 40
+	authorityFn := func() uint64 { return authority }
 	newGate := func(n *fakeNotifier, mode func() sigverify.Mode) (func(*dp1.Playlist) error, *decision) {
 		d := &decision{}
-		return commandrouter.ScheduledPushGate(n, mode, func(notice sigverify.Notice, show bool) {
+		return commandrouter.ScheduledPushGate(n, mode, authorityFn, func(notice sigverify.Notice, show bool) {
 			d.notice, d.show, d.calls = notice, show, d.calls+1
 		}), d
 	}
 	strict := func() sigverify.Mode { return sigverify.ModeStrict }
 
-	// Strict refusal, no interleaving: signature_rejected is queued and the
-	// caller learns PushAccepted will not fire.
+	// Strict refusal, no interleaving: signature_rejected is queued with an
+	// authority guard, and the caller learns PushAccepted will not fire.
 	refused := &fakeNotifier{}
 	gate, d := newGate(refused, strict)
 	require.Error(t, gate(unsigned))
 	assert.Equal(t, []sigverify.Notice{sigverify.NoticeRejected}, refused.notices)
 	assert.Equal(t, 1, d.calls)
 	assert.False(t, d.show)
+	// The guard tracks scheduler authority to the handoff: it holds now and
+	// stops holding once a future-only cast takes authority (round 14).
+	require.Len(t, refused.guards, 1)
+	require.NotNil(t, refused.guards[0])
+	assert.True(t, refused.guards[0]())
+	authority++
+	assert.False(t, refused.guards[0](), "a refusal notice must drop at the handoff once authority moved")
+	authority = 40
 
 	// Strict refusal with a transition (generation hook Clear) landing while
 	// the mode is read: the refusal notice is superseded, never queued.
@@ -1093,10 +1110,10 @@ func TestScheduledPushGate(t *testing.T) {
 	require.NoError(t, gate(valid))
 	assert.False(t, d.show)
 
-	// nil notifier (untyped, as main would pass when the toast is unwired):
-	// gates, no panic.
+	// nil notifier (untyped, as main would pass when the toast is unwired)
+	// and nil authority: gates, no panic.
 	assert.NotPanics(t, func() {
-		_ = commandrouter.ScheduledPushGate(nil, strict, func(sigverify.Notice, bool) {})(unsigned)
+		_ = commandrouter.ScheduledPushGate(nil, strict, nil, func(sigverify.Notice, bool) {})(unsigned)
 	})
 }
 
@@ -1192,6 +1209,66 @@ func TestCommandHandler_Process_Strict_RefusalSuppressedWhenAuthorityChanged(t *
 	require.Error(t, err)
 	assert.True(t, commandrouter.IsSigInvalid(err))
 	assert.Empty(t, toast.notices, "a strict rejection for a source the scheduler already replaced must not toast")
+}
+
+// TestCommandHandler_Process_Strict_RefusalGuardTracksAuthority: a strict
+// refusal queued with authority intact carries a handoff guard that stops
+// holding the moment a future-only cast takes scheduler authority afterwards
+// — the case the epoch cannot see, closed at the dispatcher's handoff
+// (feral-file/ffos-user#307 round 14).
+func TestCommandHandler_Process_Strict_RefusalGuardTracksAuthority(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockClock.EXPECT().Now().Return(time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error {
+			<-c.Done()
+			return c.Err()
+		}).AnyTimes()
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
+	defer sched.Stop()
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	ts := &testSetup{ctrl: ctrl, ctx: ctx, mockExecutor: mockExecutor, mockCDP: mockCDP, mockDP1: mockDP1,
+		mockJSON: mockJSON, mockStatusPoller: mockStatusPoller, handler: handler, logger: logger}
+	wireVerificationWithMode(ts, sigverify.ModeStrict)
+	toast := &fakeNotifier{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	verdict := sigverify.Verify(tamperedSignedRaw(t)) // invalid
+	playlistURL := "https://feed.example/p.json"
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    "pl-tampered",
+		Items: []dp1playlist.PlaylistItem{{ID: "i", Source: "https://example.com/a"}},
+	}, Verification: &verdict}, nil).Times(1)
+
+	_, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
+	require.Error(t, err)
+	assert.True(t, commandrouter.IsSigInvalid(err))
+	require.Equal(t, []sigverify.Notice{sigverify.NoticeRejected}, toast.notices, "authority intact: the refusal is queued")
+	require.Len(t, toast.guards, 1)
+	require.NotNil(t, toast.guards[0], "a strict refusal must carry its authority guard")
+	assert.True(t, toast.guards[0](), "the guard holds while authority is unchanged")
+
+	// The future-only cast lands after the queue, before the handoff: it
+	// takes authority under the push lock and commits with no write and no
+	// Clear. The queued notice's guard must now report stale.
+	future := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Title: "Future",
+		Items: []dp1playlist.PlaylistItem{{ID: "later", Source: "https://example.com/later.html", DisplayAt: strPtr("2026-07-23T00:00:00Z")}},
+	}}
+	sched.WithPlayerPush(func() {
+		require.NotNil(t, sched.PrepareWithSource(future, playlistschedule.Source{PlaylistURL: "https://feed.example/other.json"}))
+		sched.Commit()
+	})
+	assert.False(t, toast.guards[0](), "the handoff guard must drop the notice once authority moved")
 }
 
 // TestCommandHandler_Process_Notify_AcceptedToastSuppressedWhenTransitionIntervened:

@@ -170,23 +170,31 @@ func ComposeInvalidator(clearVerdict func(), notifier playertoast.Notifier) func
 // send epoch of its own, and a generation hook (page reload/replacement)
 // that Clears the notifier while the mode is read would otherwise be
 // overwritten by a raw Notify — a rejection for an obsolete cutover over
-// unrelated artwork (feral-file/ffos-user#307). A nil notifier gates without
-// toasting.
+// unrelated artwork (feral-file/ffos-user#307). authority (may be nil) is
+// the scheduler's AuthorityToken: snapshotted with the epoch, it rides with
+// the refusal notice as its handoff guard, so a future-only cast that takes
+// authority after the queue (no write, no Clear — invisible to the epoch)
+// still drops it. A nil notifier gates without toasting.
 func ScheduledPushGate(
 	notifier playertoast.Notifier,
 	mode func() sigverify.Mode,
+	authority func() uint64,
 	decided func(notice sigverify.Notice, show bool),
 ) func(*dp1.Playlist) error {
 	return func(p *dp1.Playlist) error {
-		var epoch uint64
+		var epoch, auth uint64
 		if notifier != nil {
 			epoch = notifier.Epoch()
+		}
+		if authority != nil {
+			auth = authority()
 		}
 		m := mode() // the single read for this cutover
 		if err := StrictPushGate(func() sigverify.Mode { return m })(p); err != nil {
 			decided("", false) // refused: PushAccepted will not fire for this push
 			if notifier != nil {
-				notifier.NotifyIfEpoch(sigverify.NoticeRejected, epoch)
+				authorityHeld := func() bool { return authority == nil || authority() == auth }
+				notifier.NotifyIfEpochGuarded(sigverify.NoticeRejected, epoch, authorityHeld)
 			}
 			return err
 		}
