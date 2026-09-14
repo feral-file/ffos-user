@@ -242,3 +242,62 @@ func TestSetContentPolicyInstallsTheSchedulerProjector(t *testing.T) {
 	_, empty = sched.projector(allMature, "curated")
 	require.True(t, empty)
 }
+
+// A player that predates these commands answers the unknown command with a bare
+// {"ok":false}. That must read as "this device cannot do it" — the same
+// classification the history commands already give it — not as a temporary
+// store or synchronization failure, which is what the app retries.
+func TestContentPolicyClassifiesALegacyPlayerReplyAsUnsupported(t *testing.T) {
+	h, player, _ := newPolicyHandler(t)
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			return map[string]interface{}{"message": map[string]interface{}{"ok": false}}, nil
+		}).Times(1)
+
+	result, err := h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_GET_CONTENT_POLICY, Arguments: map[string]any{},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "unsupported", result.(map[string]interface{})["error"])
+}
+
+// A modern player that answers ok:true with a policy that does not match is a
+// synchronization failure, not a missing capability.
+func TestContentPolicyKeepsAMismatchedAckUnavailable(t *testing.T) {
+	h, player, _ := newPolicyHandler(t)
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok": true, "active": true,
+				"contentPolicy": map[string]interface{}{"version": float64(1), "showMatureContent": true, "strictPersonal": false, "blockUnratedCurated": false},
+			}}, nil
+		}).Times(1)
+
+	result, err := h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_GET_CONTENT_POLICY, Arguments: map[string]any{},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "contentPolicyUnavailable", result.(map[string]interface{})["error"])
+}
+
+// Omitting contentContext means curated, but the documented contract allows
+// only "curated" and "personal" when the field is PRESENT. An explicit "" or
+// null is a malformed request and must be told so, not silently widened into
+// the default audience.
+func TestDisplayPlaylistRejectsAnExplicitlyEmptyContentContext(t *testing.T) {
+	dp1Call := map[string]interface{}{
+		"dpVersion": "1.1.0", "title": "x",
+		"items": []interface{}{map[string]interface{}{"source": "https://a"}},
+	}
+	for name, value := range map[string]any{"empty string": "", "null": nil} {
+		t.Run(name, func(t *testing.T) {
+			h, _, _ := newPolicyHandler(t)
+			// No player.EXPECT(): the rejection happens before any CDP send.
+			_, err := h.Process(context.Background(), commands.Command{
+				Type:      commands.CMD_DISPLAY_PLAYLIST,
+				Arguments: map[string]any{"dp1_call": dp1Call, "contentContext": value},
+			})
+			require.ErrorContains(t, err, "contentContext")
+		})
+	}
+}

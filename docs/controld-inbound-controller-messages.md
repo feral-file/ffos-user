@@ -2753,7 +2753,11 @@ defaults but answers `contentPolicyUnavailable` — it never presents defaults a
 the owner's saved setting.
 
 Error cases: `invalidRequest`, `unsupported` (older player),
-`contentPolicyUnavailable`.
+`contentPolicyUnavailable`. A player that predates these commands answers the
+unknown command with a bare `{"ok":false}`; controld classifies that shape as
+`unsupported`, the same way it classifies the legacy history reply. A transport
+failure, or a modern player whose acknowledged policy does not match, stays
+`contentPolicyUnavailable` — the app retries one and not the other.
 
 ### setContentPolicy
 
@@ -2776,8 +2780,13 @@ Error cases: `invalidRequest`, `unsupported`, `contentPolicyUnavailable`.
 ### Content policy effect on playlists
 
 `displayPlaylist` takes an optional `contentContext`, whose only valid present
-values are `curated` and `personal`; an absent field means `curated`. The device
-filters the playlist against its policy before casting:
+values are `curated` and `personal`; an absent field means `curated`. Present
+but empty (`""`) or `null` is **rejected**, not treated as absent: at public
+ingress that is a malformed request, and silently widening it into the default
+audience would hide the client bug. (Scheduler state persisted before this
+field existed omits the key entirely, which stays compatible.)
+
+The device filters the playlist against its policy before casting:
 
 - A `mature`-labelled item is withheld unless `showMatureContent` is on, or the
   cast is `personal` and `strictPersonal` is off.
