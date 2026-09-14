@@ -301,3 +301,64 @@ func TestDisplayPlaylistRejectsAnExplicitlyEmptyContentContext(t *testing.T) {
 		})
 	}
 }
+
+// barrierScheduler records whether a callback ran inside WithPlayerPush, which
+// is the barrier that keeps a policy activation from being acknowledged while a
+// scheduler cutover already holding pushMu is still in flight with the old
+// policy's cohort.
+type barrierScheduler struct {
+	playlistschedule.Scheduler
+	inPush  bool
+	entered bool
+}
+
+func (b *barrierScheduler) SetProjector(playlistschedule.Projector) {}
+func (b *barrierScheduler) WithPlayerPush(fn func()) {
+	b.entered = true
+	b.inPush = true
+	fn()
+	b.inPush = false
+}
+
+// The durable write AND the player acknowledgement must both happen under the
+// player-push lock. Otherwise a timer push that already snapshotted the old
+// policy can deliver its cohort after setContentPolicy has answered active:true.
+func TestSetContentPolicySerializesWithSchedulerPushes(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	player := mocks.NewMockCDP(ctrl)
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	require.NoError(t, err)
+	sched := &barrierScheduler{}
+	h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl),
+		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, sched, wrapper.NewJSON(), zaptest.NewLogger(t))
+	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			require.True(t, sched.inPush, "the player acknowledgement escaped the player-push barrier")
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok": true, "active": true,
+				"contentPolicy": map[string]interface{}{"version": float64(1), "showMatureContent": true, "strictPersonal": false, "blockUnratedCurated": false},
+			}}, nil
+		}).Times(1)
+
+	result, err := h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_SET_CONTENT_POLICY, Arguments: map[string]any{"showMatureContent": true, "strictPersonal": false},
+	})
+	require.NoError(t, err)
+	require.True(t, sched.entered, "setContentPolicy did not take the player-push lock")
+	require.Equal(t, true, result.(map[string]interface{})["active"])
+}
+
+// getRecentlyPlayed takes no arguments; a non-empty request is rejected before
+// dispatch for the same dedupe-key reason getContentPolicy rejects one.
+func TestGetRecentlyPlayedRejectsANonEmptyRequest(t *testing.T) {
+	h, _, _ := newPolicyHandler(t)
+	// No player.EXPECT(): the rejection must happen before any CDP send.
+	result, err := h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_GET_RECENTLY_PLAYED, Arguments: map[string]any{"nonce": 1},
+	})
+	require.NoError(t, err)
+	require.Equal(t, false, result.(map[string]interface{})["ok"])
+	require.Contains(t, result.(map[string]interface{})["error"], "no arguments")
+}

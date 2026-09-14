@@ -2679,7 +2679,9 @@ daemon owns the reply shape rather than passing the player's answer through.
 Purpose: list the works this device actually rendered, newest first, so the
 owner can put back a work they replaced without knowing its title or artist.
 
-Request: `{}` — no fields.
+Request: `{}` — no fields, and a **non-empty request is rejected** rather than
+forwarded, for the same storm-gate reason as `getContentPolicy` below: the
+gate's dedupe key is command type plus arguments.
 
 The history is device-owned. The player appends a record only at a *successful
 render*, which is why the list includes automatic playlist advances and

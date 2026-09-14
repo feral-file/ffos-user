@@ -327,6 +327,18 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 	// reply with bare ok:false for this unknown command, which is an explicit
 	// unsupported capability rather than a false empty history.
 	if commandType == commands.CMD_GET_RECENTLY_PLAYED {
+		// Takes no arguments, and a non-empty request is rejected rather than
+		// forwarded, for the same reason getContentPolicy rejects one: the
+		// storm gate's dedupe key is type+arguments, so junk arguments let one
+		// LAN caller mint unlimited distinct keys and hold a global command
+		// slot each while the serialized CDP request runs (gate.go).
+		if len(command.Arguments) != 0 {
+			return map[string]interface{}{
+				"ok":     false,
+				"status": "error",
+				"error":  "getRecentlyPlayed takes no arguments",
+			}, nil
+		}
 		result, err := h.sendCDPRequest(command)
 		if err != nil {
 			return nil, err
@@ -1010,16 +1022,22 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 		if !okShow || !okStrict {
 			return policyFailure("invalidRequest"), nil
 		}
-		var err error
-		policy, err = h.contentPolicy.UpdateLocked(show, strict)
-		if err != nil {
-			return policyFailure("contentPolicyUnavailable"), nil
+		// Serialized against scheduler-owned pushes, not just against casts.
+		// A timer push holding pushMu has already read the old policy through
+		// the lock-free Snapshot and built its payload; without this barrier
+		// setContentPolicy could persist, be acknowledged, and answer
+		// active:true while that pending cutover still delivered the old
+		// cohort. The lock order is the same one displayPlaylist uses — policy
+		// store, then pushMu — and the projector deliberately takes no store
+		// lock, so it cannot invert (see playlistschedule.Projector).
+		var reply interface{}
+		update := func() { reply = h.applyContentPolicyLocked(show, strict) }
+		if h.scheduler != nil {
+			h.scheduler.WithPlayerPush(update)
+		} else {
+			update()
 		}
-		result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": policy})
-		if err != nil || !policyAckMatches(result, policy) {
-			return policyFailure(policyFailureCode(result, err)), nil
-		}
-		return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}, nil
+		return reply, nil
 	}
 	// getContentPolicy takes no arguments. Rejecting a non-empty request is not
 	// pedantry: the storm gate's dedupe key is type+arguments, so silently
@@ -1038,6 +1056,22 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 		return policyFailure(policyFailureCode(result, err)), nil
 	}
 	return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}, nil
+}
+
+// applyContentPolicyLocked persists the requested policy and reconciles the
+// player. The caller holds the content-policy store lock, and — when a
+// scheduler exists — the player-push lock, so no cutover can interleave
+// between the durable write and its acknowledgement.
+func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
+	policy, err := h.contentPolicy.UpdateLocked(show, strict)
+	if err != nil {
+		return policyFailure("contentPolicyUnavailable")
+	}
+	result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": policy})
+	if err != nil || !policyAckMatches(result, policy) {
+		return policyFailure(policyFailureCode(result, err))
+	}
+	return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}
 }
 
 func policyFailure(code string) interface{} {
