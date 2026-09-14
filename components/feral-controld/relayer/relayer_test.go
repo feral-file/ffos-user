@@ -1945,16 +1945,19 @@ func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
 	ts.mockDialer.EXPECT().
 		DialContext(ts.ctx, gomock.Any(), nil).
 		Return(nil, nil, permanentErr).
-		Times(1)
+		AnyTimes()
 
-	// Expect os.Exit(1) to be called when reconnection fails with PermanentError
-	exitCalled := make(chan struct{})
-	ts.mockOS.EXPECT().
-		Exit(1).
-		DoAndReturn(func(code int) {
-			close(exitCalled)
+	// Expect background retry loop sleep when reconnection fails instead of os.Exit(1)
+	sleepCalled := make(chan struct{})
+	var sleepOnce sync.Once
+	ts.mockClock.EXPECT().
+		Sleep(gomock.Any()).
+		DoAndReturn(func(d time.Duration) {
+			sleepOnce.Do(func() {
+				close(sleepCalled)
+			})
 		}).
-		Times(1)
+		AnyTimes()
 
 	// Test - Connect (this automatically starts background message reading)
 	err := ts.client.Connect(ts.ctx)
@@ -1968,11 +1971,11 @@ func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
 		t.Fatal("Expected ReadMessage error to occur within timeout")
 	}
 
-	// Wait for os.Exit(1) to be called
+	// Wait for background sleep to be called (proving daemon does NOT exit)
 	select {
-	case <-exitCalled:
-		// Exit was called as expected
+	case <-sleepCalled:
+		// Background retry sleep occurred as expected without process exit
 	case <-time.After(5 * time.Second):
-		t.Fatal("Expected os.Exit(1) to be called within timeout")
+		t.Fatal("Expected background retry sleep to occur within timeout")
 	}
 }
