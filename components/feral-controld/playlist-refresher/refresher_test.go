@@ -1930,6 +1930,8 @@ func (f *fakePlaylistScheduler) Restore(playlistschedule.Snapshot) {
 		}
 	}
 }
+func (f *fakePlaylistScheduler) SetProjector(playlistschedule.Projector) {}
+
 func (f *fakePlaylistScheduler) HasCache() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

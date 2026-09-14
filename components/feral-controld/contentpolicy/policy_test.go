@@ -80,3 +80,69 @@ func TestStorePersistsAtomicallyAndOperatorOwnsAuditGate(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+func TestFallbackStoreIsNotDurableUntilAWriteRepairsIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	s := Fallback(path, false)
+	s.Lock()
+	durable := s.DurableLocked()
+	s.Unlock()
+	if durable {
+		// A store built from an unreadable file must not claim the values it is
+		// admitting on are the owner's saved setting.
+		t.Fatal("fallback store reports durable")
+	}
+
+	s.Lock()
+	// Identical-to-default values: the skip-unchanged shortcut must NOT apply
+	// here, because this write is what repairs the store.
+	_, err := s.UpdateLocked(false, false)
+	durable = s.DurableLocked()
+	s.Unlock()
+	if err != nil || !durable {
+		t.Fatalf("err=%v durable=%v", err, durable)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("repairing write did not reach disk: %v", err)
+	}
+}
+
+func TestUpdateLockedSkipsTheFlashWriteWhenNothingChanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	s, err := Open(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Lock()
+	if _, err := s.UpdateLocked(true, true); err != nil {
+		s.Unlock()
+		t.Fatal(err)
+	}
+	s.Unlock()
+
+	// Removing the file makes a second durable write observable: if the
+	// unchanged set still wrote, the file comes back.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	s.Lock()
+	got, err := s.UpdateLocked(true, true)
+	s.Unlock()
+	if err != nil || !got.ShowMatureContent || !got.StrictPersonal {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an unchanged set still rewrote the policy file: %v", err)
+	}
+
+	// A real change must still be written.
+	s.Lock()
+	_, err = s.UpdateLocked(false, true)
+	s.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("changed set did not reach disk: %v", err)
+	}
+}

@@ -89,7 +89,32 @@ func SetContentPolicy(h Handler, policy *contentpolicy.Store, logger *zap.Logger
 	setter.setContentPolicy(policy)
 }
 
-func (h *handler) setContentPolicy(policy *contentpolicy.Store) { h.contentPolicy = policy }
+func (h *handler) setContentPolicy(policy *contentpolicy.Store) {
+	h.contentPolicy = policy
+	if h.scheduler == nil || policy == nil {
+		return
+	}
+	// A displayAt cutover is the one cast this router does not mediate: it
+	// replays a later cohort of a document that was policy-filtered once, when
+	// it was cast. Without this projection a policy tightened afterwards would
+	// never reach those cohorts. Reads the store's lock-free Snapshot because
+	// this runs on the scheduler's push path — see playlistschedule.Projector.
+	h.scheduler.SetProjector(func(playlist *dp1.Playlist, contentContext string) (*dp1.Playlist, bool) {
+		origin, err := contentpolicy.NormalizeContext(contentContext)
+		if err != nil {
+			origin = contentpolicy.ContextCurated
+		}
+		projected, empty, projectErr := policy.Snapshot().Project(&playlist.Playlist, origin)
+		if projectErr != nil {
+			// Fail open on a malformed cache rather than silently blanking a
+			// scheduled wall: the router already validated this document.
+			return playlist, false
+		}
+		out := *playlist
+		out.Playlist = *projected
+		return &out, empty
+	})
+}
 
 func SyncContentPolicy(h Handler) error {
 	target, ok := h.(*handler)
@@ -365,11 +390,24 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		if defaults, ok := playerMessage["defaults"].(map[string]interface{}); ok {
 			dp1Call["defaults"] = defaults
 		}
+		// The record carries the context the work actually played under. The
+		// replay must re-enter displayPlaylist with that same context, or a
+		// work that played as "personal" under strictPersonal:false is
+		// re-admitted as "curated" and filtered out — History would offer a
+		// work it can never put back. An unrecognized stored value falls back
+		// to the strict curated default rather than failing the replay.
+		replayArgs := map[string]interface{}{"dp1_call": dp1Call}
+		if recorded, ok := playerMessage["contentContext"].(string); ok && recorded != "" {
+			if normalized, ctxErr := contentpolicy.NormalizeContext(recorded); ctxErr == nil {
+				replayArgs["contentContext"] = string(normalized)
+			} else {
+				h.logger.Warn("recently played record has an unrecognized content context; replaying as curated",
+					zap.String("contentContext", recorded))
+			}
+		}
 		result, err := h.Process(ctx, commands.Command{
-			Type: commands.CMD_DISPLAY_PLAYLIST,
-			Arguments: map[string]interface{}{
-				"dp1_call": dp1Call,
-			},
+			Type:      commands.CMD_DISPLAY_PLAYLIST,
+			Arguments: replayArgs,
 		})
 		if err != nil {
 			return nil, err
@@ -977,6 +1015,18 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 			return policyFailure(policyFailureCode(result)), nil
 		}
 		return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}, nil
+	}
+	// getContentPolicy takes no arguments. Rejecting a non-empty request is not
+	// pedantry: the storm gate's dedupe key is type+arguments, so silently
+	// ignoring junk arguments would let one LAN caller mint unlimited distinct
+	// keys and defeat the query-tier dedupe that bounds this command (gate.go).
+	if len(command.Arguments) != 0 {
+		return policyFailure("invalidRequest"), nil
+	}
+	// A store that could not read its file keeps admitting on safe defaults,
+	// but it must not present those defaults as the saved user setting.
+	if !h.contentPolicy.DurableLocked() {
+		return policyFailure("contentPolicyUnavailable"), nil
 	}
 	result, err := h.sendContentPolicyCDP(commands.CMD_GET_CONTENT_POLICY, map[string]interface{}{})
 	if err != nil || !policyAckMatches(result, policy) {

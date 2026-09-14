@@ -658,15 +658,27 @@ func currentBlockedByRefresh(playerStatus *status.PlayerStatus, fresh *dp1.Playl
 		return true
 	}
 	current := (*items)[*playerStatus.Index]
-	for _, item := range fresh.Items {
-		same := current.ID != "" && item.ID == current.ID
-		if !same && current.ID == "" {
-			same = item.Source == current.Source
-		}
-		if same {
-			return !policy.Allows(item, origin)
+	// Prefer the item ID, which is the exact identity.
+	if current.ID != "" {
+		for _, item := range fresh.Items {
+			if item.ID == current.ID {
+				return !policy.Allows(item, origin)
+			}
 		}
 	}
+	// Then fall back to the source URL. A refreshed feed can re-mint IDs while
+	// the artwork behind a source is unchanged; without this fallback, a work
+	// that keeps its source but gains a "mature" label on refresh matches
+	// nothing, and the current frame is never retired.
+	if current.Source != "" {
+		for _, item := range fresh.Items {
+			if item.Source == current.Source {
+				return !policy.Allows(item, origin)
+			}
+		}
+	}
+	// Genuinely absent from the fresh set: the refresh itself replaces the
+	// frame, so there is nothing to retire here.
 	return false
 }
 

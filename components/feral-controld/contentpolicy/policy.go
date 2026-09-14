@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 )
@@ -111,18 +112,52 @@ type Store struct {
 	mu     sync.Mutex
 	path   string
 	policy Policy
+	// durable is false while the on-disk policy could not be read. Admission
+	// keeps running on safe defaults, but the RPCs must not claim the saved
+	// user setting is in force, because it is unknown. A successful
+	// UpdateLocked writes the file and repairs the state.
+	durable bool
+	// snap is a lock-free copy of policy for readers that MUST NOT take mu.
+	// Load-bearing, not an optimization: the command handler holds mu for the
+	// whole displayPlaylist call, including the scheduler's WithPlayerPush, so
+	// a scheduler-owned push that took mu to read the policy would invert the
+	// lock order (mu -> pushMu here, pushMu -> mu there) and deadlock. Written
+	// only under mu, so it never goes backwards.
+	snap atomic.Pointer[Policy]
+}
+
+// Snapshot returns the current policy WITHOUT taking the store lock, for
+// readers on the scheduler's push path. See the snap field for why that path
+// must not take mu.
+func (s *Store) Snapshot() Policy {
+	if p := s.snap.Load(); p != nil {
+		return *p
+	}
+	return Default()
+}
+
+func (s *Store) publishSnapshot() {
+	p := s.policy
+	s.snap.Store(&p)
 }
 
 // Fallback keeps safe default admission active when the authoritative file is
-// unreadable. Policy RPCs remain unavailable because callers keep the load error.
+// unreadable. The store reports itself non-durable so getContentPolicy answers
+// contentPolicyUnavailable rather than presenting defaults as the saved setting.
 func Fallback(path string, blockUnratedCurated bool) *Store {
 	p := Default()
 	p.BlockUnratedCurated = blockUnratedCurated
-	return &Store{path: path, policy: p}
+	s := &Store{path: path, policy: p}
+	s.publishSnapshot()
+	return s
 }
 
+// DurableLocked reports whether the policy in memory came from (or has since
+// been written to) the durable file.
+func (s *Store) DurableLocked() bool { return s.durable }
+
 func Open(path string, blockUnratedCurated bool) (*Store, error) {
-	s := &Store{path: path, policy: Default()}
+	s := &Store{path: path, policy: Default(), durable: true}
 	s.policy.BlockUnratedCurated = blockUnratedCurated
 	b, err := os.ReadFile(path) //nolint:gosec // G304: production passes the fixed constant.CONTENT_POLICY_FILE; tests inject their own t.TempDir path.
 	if err == nil {
@@ -138,6 +173,7 @@ func Open(path string, blockUnratedCurated bool) (*Store, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read content policy: %w", err)
 	}
+	s.publishSnapshot()
 	return s, nil
 }
 
@@ -149,10 +185,18 @@ func (s *Store) UpdateLocked(showMature, strictPersonal bool) (Policy, error) {
 	next := s.policy
 	next.ShowMatureContent = showMature
 	next.StrictPersonal = strictPersonal
+	// A repeated identical set must not cost a flash write. Skipped only when
+	// the file is already the source of truth: on a non-durable store the same
+	// values still have to be written, because that write is what repairs it.
+	if s.durable && next == s.policy {
+		return s.policy, nil
+	}
 	if err := persistAtomic(s.path, next); err != nil {
 		return Policy{}, err
 	}
 	s.policy = next
+	s.durable = true
+	s.publishSnapshot()
 	return next, nil
 }
 

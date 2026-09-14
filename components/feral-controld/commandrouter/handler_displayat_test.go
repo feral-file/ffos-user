@@ -420,12 +420,13 @@ func (t *trackingScheduler) WithPlayerPush(fn func()) {
 	t.pushCalls++
 	t.inner.WithPlayerPush(fn)
 }
-func (t *trackingScheduler) AuthorityToken() uint64              { return t.inner.AuthorityToken() }
-func (t *trackingScheduler) Commit()                             { t.inner.Commit() }
-func (t *trackingScheduler) Snapshot() playlistschedule.Snapshot { return t.inner.Snapshot() }
-func (t *trackingScheduler) Restore(s playlistschedule.Snapshot) { t.inner.Restore(s) }
-func (t *trackingScheduler) HasCache() bool                      { return t.inner.HasCache() }
-func (t *trackingScheduler) RestoredPending() bool               { return t.inner.RestoredPending() }
+func (t *trackingScheduler) AuthorityToken() uint64                    { return t.inner.AuthorityToken() }
+func (t *trackingScheduler) Commit()                                   { t.inner.Commit() }
+func (t *trackingScheduler) Snapshot() playlistschedule.Snapshot       { return t.inner.Snapshot() }
+func (t *trackingScheduler) Restore(s playlistschedule.Snapshot)       { t.inner.Restore(s) }
+func (t *trackingScheduler) HasCache() bool                            { return t.inner.HasCache() }
+func (t *trackingScheduler) SetProjector(p playlistschedule.Projector) { t.inner.SetProjector(p) }
+func (t *trackingScheduler) RestoredPending() bool                     { return t.inner.RestoredPending() }
 func (t *trackingScheduler) SourceMatches(s playlistschedule.Source) bool {
 	return t.inner.SourceMatches(s)
 }

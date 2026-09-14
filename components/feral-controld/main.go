@@ -1054,10 +1054,7 @@ func initializeApp(
 	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
 	// must never be shed by external client traffic, so it bypasses the gate.
 	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, offlineCache, kioskReplay, playlistScheduler, json, logger)
-	blockUnratedCurated := false
-	if cfg := config.Get().ContentPolicy; cfg != nil {
-		blockUnratedCurated = cfg.BlockUnratedCurated
-	}
+	blockUnratedCurated := config.Get().ContentPolicyTuning(logger).BlockUnratedCurated
 	policyStore, policyErr := contentpolicy.Open(constants.CONTENT_POLICY_FILE, blockUnratedCurated)
 	if policyErr != nil {
 		logger.Error("content policy store unreadable; using safe defaults until a durable update succeeds", zap.Error(policyErr))

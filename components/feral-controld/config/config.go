@@ -213,12 +213,20 @@ type Config struct {
 	// ON: the hub is the BLE-replacement recovery channel, so it must run
 	// unless an operator explicitly sets "enableHub": false. Read via
 	// HubEnabled(), never directly.
-	EnableHub     *bool                `json:"enableHub"`
-	CommandStorm  *CommandStormConfig  `json:"commandStorm,omitempty"`
-	SourceProbe   *SourceProbeConfig   `json:"sourceProbe,omitempty"`
-	OfflineCache  *OfflineCacheConfig  `json:"offlineCache,omitempty"`
-	Netlog        *NetlogConfig        `json:"netlog,omitempty"`
-	ContentPolicy *ContentPolicyConfig `json:"contentPolicy,omitempty"`
+	EnableHub    *bool               `json:"enableHub"`
+	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
+	SourceProbe  *SourceProbeConfig  `json:"sourceProbe,omitempty"`
+	OfflineCache *OfflineCacheConfig `json:"offlineCache,omitempty"`
+	Netlog       *NetlogConfig       `json:"netlog,omitempty"`
+	// ContentPolicy carries the operator-only unrated-archive audit gate as RAW
+	// bytes, decoded permissively by ContentPolicyTuning() — same treatment,
+	// and the same reason, as GatewayUserAgent and Provisioning below. As a
+	// typed struct, one hand-edited typo that is still valid JSON
+	// (`{"blockUnratedCurated": "true"}`) failed the top-level unmarshal, which
+	// made config.Load fail, which is FATAL under Restart=always: an unbounded
+	// crash loop that takes the LAN hub, captive portal, provisioning and
+	// claiming down with it, over one optional block.
+	ContentPolicy json.RawMessage `json:"contentPolicy,omitempty"`
 	// GatewayUserAgent scopes the kiosk User-Agent rewrite (see the
 	// uarewrite package), carried as RAW bytes and decoded permissively by
 	// GatewayUserAgentTuning() — same treatment, and the same reason, as
@@ -258,6 +266,27 @@ type Config struct {
 // ContentPolicyConfig contains the operator-only unrated archive audit gate.
 type ContentPolicyConfig struct {
 	BlockUnratedCurated bool `json:"blockUnratedCurated"`
+}
+
+// ContentPolicyTuning decodes the raw contentPolicy block permissively: an
+// absent block, or one that decodes to the wrong shape, yields the zero value
+// (gate inactive) — see the ContentPolicy field for why this must never fail
+// the load. The gate can only ever be turned ON by a well-formed block, which
+// is the safe direction: the failure mode of ignoring a typo is that an
+// operator audit gate stays off, not that the daemon stops booting.
+func (c *Config) ContentPolicyTuning(logger *zap.Logger) ContentPolicyConfig {
+	var t ContentPolicyConfig
+	if len(c.ContentPolicy) == 0 {
+		return t
+	}
+	if err := json.Unmarshal(c.ContentPolicy, &t); err != nil {
+		if logger != nil {
+			logger.Warn("contentPolicy config block malformed; leaving the unrated-archive gate inactive",
+				zap.Error(err), zap.String("raw", string(c.ContentPolicy)))
+		}
+		return ContentPolicyConfig{}
+	}
+	return t
 }
 
 // HubEnabled reports whether the LAN hub should run. It defaults ON: only an

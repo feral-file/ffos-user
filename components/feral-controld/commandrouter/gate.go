@@ -94,6 +94,15 @@ func DefaultGateConfig() GateConfig {
 		// persisted-write analog; renaming is a rare deliberate act, so
 		// ~1-per-5s cannot reject legitimate use.
 		commands.CMD_SET_DEVICE_NAME: disruptive,
+		// setContentPolicy is a persisted .state write (fsync'd file + parent
+		// dir) plus a CDP round trip taken under the policy-store lock, and it
+		// is reachable from the unauthenticated LAN hub. Same persisted-write
+		// tier as setSleepSchedule and setDeviceName; changing the audience
+		// setting is a rare deliberate act, so ~1-per-5s cannot reject
+		// legitimate use. handleContentPolicy additionally skips the durable
+		// write when the requested values already match, so a repeated
+		// identical set costs no flash write at all.
+		commands.CMD_SET_CONTENT_POLICY: disruptive,
 
 		// User-initiated power toggles: loosely capped (executor coalesces).
 		commands.CMD_SLEEP_NOW: userAction,
@@ -157,6 +166,15 @@ func DefaultGateConfig() GateConfig {
 		commands.CMD_DDC_PANEL_STATUS:         query,
 		commands.CMD_GET_OFFLINE_CACHE_STATUS: query,
 		commands.CMD_GET_RECENTLY_PLAYED:      query,
+		// getContentPolicy holds the content-policy store lock across a CDP
+		// round trip, so at the unlisted Default (10/s, burst 20, no dedupe) an
+		// unauthenticated LAN caller could park every global concurrency slot
+		// on policy reads while the player is slow. Dedupe is what makes the
+		// query tier bite here, and dedupe keys on type+arguments — which is
+		// why handleContentPolicy now REJECTS a non-empty get request instead
+		// of ignoring it: otherwise a caller mints unlimited distinct keys
+		// ({"a":1}, {"a":2}, ...) that each miss the dedupe and take a slot.
+		commands.CMD_GET_CONTENT_POLICY: query,
 
 		// High-frequency input events: shared generous budget.
 		commands.CMD_KEYBOARD_EVENT:             input,

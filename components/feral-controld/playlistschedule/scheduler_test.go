@@ -1295,3 +1295,128 @@ func TestClearThenWithPlayerPush_BlocksInFlightRecomputeFromOverwriting(t *testi
 	require.NotEmpty(t, pushedIDs)
 	assert.Equal(t, "replacement", pushedIDs[len(pushedIDs)-1], "replacement must win after clear")
 }
+
+// contentContext is optional, and its only valid present values are "curated"
+// and "personal". A schedule persisted before the field existed decodes with an
+// empty string, so the timer push must OMIT it rather than send "": an upgraded
+// device would otherwise push an invalid value on its first cutover.
+func TestPush_OmitsContentContextWhenTheRestoredSourceHasNone(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	cdpMock.EXPECT().Initialized().Return(true).Times(1)
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.NotContains(t, expr, "contentContext")
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(1)
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	_ = sched.PrepareWithSource(displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	), playlistschedule.Source{})
+	sched.RecomputeNow(context.Background())
+}
+
+// A displayAt cutover is the one cast the command router does not mediate: it
+// replays a later cohort of a document the router filtered once, at cast time.
+// The push-time projection is what makes a policy tightened AFTER that cast
+// reach those later cohorts, instead of a work blocked at 23:59 reappearing at
+// midnight.
+func TestPush_ReappliesTheContentPolicyProjectionAtCutover(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	cdpMock.EXPECT().Initialized().Return(true).Times(1)
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.NotContains(t, expr, "day22", "the projection's removal must reach the player")
+			assert.Contains(t, expr, "kept")
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(1)
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	sched.SetProjector(func(p *dp1.Playlist, _ string) (*dp1.Playlist, bool) {
+		out := *p
+		out.Items = []dp1playlist.PlaylistItem{{ID: "kept", Source: "https://kept"}}
+		return &out, false
+	})
+	_ = sched.Prepare(displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	))
+	sched.RecomputeNow(context.Background())
+}
+
+// An empty projection must be DROPPED, not sent: the player rejects an empty
+// displayPlaylist, and a cutover the policy refuses is not a delivery failure
+// to retry.
+func TestPush_DropsACutoverTheContentPolicyEmpties(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	cdpMock.EXPECT().Initialized().Return(true).Times(1)
+	// No Send expectation: an empty projection must never reach the player.
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	sched.SetProjector(func(p *dp1.Playlist, _ string) (*dp1.Playlist, bool) {
+		out := *p
+		out.Items = nil
+		return &out, true
+	})
+	_ = sched.Prepare(displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	))
+	sched.RecomputeNow(context.Background())
+}
