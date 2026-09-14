@@ -1181,8 +1181,8 @@ func initializeApp(
 		// the cast-time verdict the scheduler's cached document still carries
 		// (cloned by pointer, never persisted), so a schedule accepted under
 		// notify cannot carry a non-valid cohort onto the screen after the
-		// owner switches to strict. The mode is read ONCE per cutover, here in
-		// the gate, and the notice it implies is carried to PushAccepted via
+		// owner switches to strict. The mode is read ONCE per cutover, in the
+		// gate, and the notice it implies is carried to PushAccepted via
 		// pushNotice/pushShow — never re-read — so a concurrent mode change
 		// cannot let a cohort display under notify and then be labeled
 		// rejected, or suppress an expected notice. gate and toaster for one
@@ -1190,20 +1190,15 @@ func initializeApp(
 		// the shared fields need no lock.
 		var pushNotice sigverify.Notice
 		var pushShow bool
-		playlistScheduler.SetPushGate(func(p *toastPlaylist) error {
-			mode := verificationMode() // the single read for this cutover
-			if err := commandrouter.StrictPushGate(func() sigverify.Mode { return mode })(p); err != nil {
-				pushShow = false // refused: PushAccepted will not fire for this push
-				toastDispatcher.Notify(sigverify.NoticeRejected)
-				return err
-			}
-			var status sigverify.Status
-			if p != nil && p.Verification != nil {
-				status = p.Verification.Status
-			}
-			pushNotice, pushShow = sigverify.ToastFor(mode, status)
-			return nil
-		})
+		// A refusal's signature_rejected is fenced to the epoch the gate
+		// snapshots before its mode read (ScheduledPushGate), so a generation
+		// hook that Clears the toast mid-gate suppresses it rather than being
+		// overwritten — the gate runs before PushStarting and has no send
+		// epoch of its own.
+		playlistScheduler.SetPushGate(commandrouter.ScheduledPushGate(
+			toastDispatcher, verificationMode,
+			func(notice sigverify.Notice, show bool) { pushNotice, pushShow = notice, show },
+		))
 		// The cohort reached the player (PushAccepted): emit the notice the
 		// gate decided for THIS push, or Clear a pending stale one — the
 		// cutover, not the accepting cast, is the transition it describes.

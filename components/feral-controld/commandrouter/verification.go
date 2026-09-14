@@ -160,6 +160,45 @@ func ComposeInvalidator(clearVerdict func(), notifier playertoast.Notifier) func
 	}
 }
 
+// ScheduledPushGate builds the playlistschedule SetPushGate callback. Strict
+// mode judges a scheduler-owned cutover AT PUSH TIME against the cast-time
+// verdict its document carries; the mode is read ONCE here and the notice it
+// implies is handed to decided for PushAccepted, never re-read, so a
+// concurrent mode change cannot relabel a cohort. A refusal toasts
+// signature_rejected fenced to the display-transition epoch snapshotted
+// BEFORE the mode read: the gate runs before PushStarting, so it captures no
+// send epoch of its own, and a generation hook (page reload/replacement)
+// that Clears the notifier while the mode is read would otherwise be
+// overwritten by a raw Notify — a rejection for an obsolete cutover over
+// unrelated artwork (feral-file/ffos-user#307). A nil notifier gates without
+// toasting.
+func ScheduledPushGate(
+	notifier playertoast.Notifier,
+	mode func() sigverify.Mode,
+	decided func(notice sigverify.Notice, show bool),
+) func(*dp1.Playlist) error {
+	return func(p *dp1.Playlist) error {
+		var epoch uint64
+		if notifier != nil {
+			epoch = notifier.Epoch()
+		}
+		m := mode() // the single read for this cutover
+		if err := StrictPushGate(func() sigverify.Mode { return m })(p); err != nil {
+			decided("", false) // refused: PushAccepted will not fire for this push
+			if notifier != nil {
+				notifier.NotifyIfEpoch(sigverify.NoticeRejected, epoch)
+			}
+			return err
+		}
+		var status sigverify.Status
+		if p != nil && p.Verification != nil {
+			status = p.Verification.Status
+		}
+		decided(sigverify.ToastFor(m, status))
+		return nil
+	}
+}
+
 // ScheduledPushToaster builds the playlistschedule SetPushToaster callback. It
 // emits the gate's decided notice for a cutover the CURRENT generation still
 // owns, and Clears when the generation raced across the send (the accepted

@@ -1036,6 +1036,70 @@ func TestScheduledPushToaster(t *testing.T) {
 	})
 }
 
+// TestScheduledPushGate pins the scheduler gate's toast fencing
+// (feral-file/ffos-user#307 round 10): a strict refusal toasts
+// signature_rejected only if no display transition intervened while the mode
+// was read, and an accepted cohort hands its decided notice to the caller
+// without toasting (PushAccepted does that).
+func TestScheduledPushGate(t *testing.T) {
+	unsigned := &dp1.Playlist{Verification: &sigverify.Verdict{Status: sigverify.StatusUnsigned}}
+	valid := &dp1.Playlist{Verification: &sigverify.Verdict{Status: sigverify.StatusValid}}
+	type decision struct {
+		notice sigverify.Notice
+		show   bool
+		calls  int
+	}
+	newGate := func(n *fakeNotifier, mode func() sigverify.Mode) (func(*dp1.Playlist) error, *decision) {
+		d := &decision{}
+		return commandrouter.ScheduledPushGate(n, mode, func(notice sigverify.Notice, show bool) {
+			d.notice, d.show, d.calls = notice, show, d.calls+1
+		}), d
+	}
+	strict := func() sigverify.Mode { return sigverify.ModeStrict }
+
+	// Strict refusal, no interleaving: signature_rejected is queued and the
+	// caller learns PushAccepted will not fire.
+	refused := &fakeNotifier{}
+	gate, d := newGate(refused, strict)
+	require.Error(t, gate(unsigned))
+	assert.Equal(t, []sigverify.Notice{sigverify.NoticeRejected}, refused.notices)
+	assert.Equal(t, 1, d.calls)
+	assert.False(t, d.show)
+
+	// Strict refusal with a transition (generation hook Clear) landing while
+	// the mode is read: the refusal notice is superseded, never queued.
+	raced := &fakeNotifier{}
+	gate, d = newGate(raced, func() sigverify.Mode {
+		raced.Clear() // the page was replaced under us
+		return sigverify.ModeStrict
+	})
+	require.Error(t, gate(unsigned))
+	assert.Empty(t, raced.notices, "a refusal for an obsolete cutover must not toast over the replacement")
+	assert.Equal(t, 1, raced.clears)
+	assert.False(t, d.show)
+
+	// Accepted under notify: nothing toasted here; the decided notice is
+	// carried to PushAccepted.
+	accepted := &fakeNotifier{}
+	gate, d = newGate(accepted, func() sigverify.Mode { return sigverify.ModeNotify })
+	require.NoError(t, gate(unsigned))
+	assert.Empty(t, accepted.notices)
+	assert.Equal(t, 0, accepted.clears)
+	assert.Equal(t, sigverify.NoticeUnsigned, d.notice)
+	assert.True(t, d.show)
+
+	// Valid cohort under strict: allowed, and the decision is "show nothing".
+	gate, d = newGate(&fakeNotifier{}, strict)
+	require.NoError(t, gate(valid))
+	assert.False(t, d.show)
+
+	// nil notifier (untyped, as main would pass when the toast is unwired):
+	// gates, no panic.
+	assert.NotPanics(t, func() {
+		_ = commandrouter.ScheduledPushGate(nil, strict, func(sigverify.Notice, bool) {})(unsigned)
+	})
+}
+
 // TestCommandHandler_Process_Strict_RefusalSuppressedWhenTransitionIntervened:
 // a strict URL cast that resolves slowly must not toast signature_rejected if
 // a newer transition replaced the artwork (advanced the display-transition
