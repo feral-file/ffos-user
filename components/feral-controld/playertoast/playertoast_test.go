@@ -4,18 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
-	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 )
@@ -30,77 +29,175 @@ func writeManifest(t *testing.T, body string) string {
 	return path
 }
 
-func okResult() interface{} {
-	return map[string]any{"message": map[string]any{"ok": true}}
+// replyWith is the raw Runtime.evaluate result member a session hands back
+// when window.handleCDPRequest returned {messageID, message:{ok}} by value.
+func replyWith(ok bool) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"result":{"type":"object","value":{"messageID":"m1","message":{"ok":%t}}}}`, ok))
+}
+
+// fakeSession is the one-shot session a toast rides on: it records the
+// evaluate it was asked to send, the deadline it was sent under, and whether
+// it was closed afterwards.
+type fakeSession struct {
+	reply        json.RawMessage
+	err          error
+	sent         []map[string]interface{}
+	sendDeadline time.Time
+	closed       int
+}
+
+func (f *fakeSession) Send(ctx context.Context, method string, params map[string]interface{}) (json.RawMessage, error) {
+	if method != cdp.METHOD_EVALUATE {
+		return nil, fmt.Errorf("unexpected method %s", method)
+	}
+	f.sendDeadline, _ = ctx.Deadline()
+	f.sent = append(f.sent, params)
+	return f.reply, f.err
+}
+
+func (f *fakeSession) Close() error {
+	f.closed++
+	return nil
+}
+
+// fakeDialer hands out one fakeSession (or fails the dial) and counts dials.
+// onDial runs during the dial, modeling a transition that lands while the
+// dial is in flight.
+type fakeDialer struct {
+	session *fakeSession
+	err     error
+	dials   int
+	onDial  func()
+}
+
+func (d *fakeDialer) dial(context.Context) (playertoast.Session, error) {
+	d.dials++
+	if d.onDial != nil {
+		d.onDial()
+	}
+	if d.err != nil {
+		return nil, d.err
+	}
+	return d.session, nil
+}
+
+// neverDial fails the test if the sender reaches for a session at all.
+func neverDial(t *testing.T) playertoast.Dialer {
+	return func(context.Context) (playertoast.Session, error) {
+		t.Fatal("unexpected dial: the sender must decide before touching CDP")
+		return nil, nil
+	}
 }
 
 // TestShow_SendsTheNoticeAndValidatesOK: a listed notice reaches the player as
-// window.handleCDPRequest({command:"playerToast",request:{notice:...}}) and a
-// {ok:true} reply is a success.
+// window.handleCDPRequest({command:"playerToast",request:{notice:...}}) over
+// a session dialed for it, a {ok:true} reply is a success, and the session
+// is closed afterwards.
 func TestShow_SendsTheNoticeAndValidatesOK(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	mockCDP := mocks.NewMockCDP(ctrl)
-	var expr string
-	mockCDP.EXPECT().NoLogSendWithin(cdp.METHOD_EVALUATE, gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ string, params map[string]interface{}, _ time.Duration, _ func() bool) (interface{}, error) {
-			expr, _ = params["expression"].(string)
-			assert.Equal(t, true, params["returnByValue"])
-			return okResult(), nil
-		}).Times(1)
+	sess := &fakeSession{reply: replyWith(true)}
+	d := &fakeDialer{session: sess}
 
-	s := playertoast.New(mockCDP, writeManifest(t, manifestWithToast), nil)
+	s := playertoast.New(d.dial, writeManifest(t, manifestWithToast), nil)
 	require.NoError(t, s.Show(context.Background(), sigverify.NoticeInvalid, nil))
 
+	assert.Equal(t, 1, d.dials)
+	require.Len(t, sess.sent, 1)
+	assert.Equal(t, true, sess.sent[0]["returnByValue"])
+	expr, _ := sess.sent[0]["expression"].(string)
 	assert.True(t, strings.HasPrefix(expr, "window.handleCDPRequest("))
 	payload := strings.TrimSuffix(strings.TrimPrefix(expr, "window.handleCDPRequest("), ")")
 	var got map[string]any
 	require.NoError(t, json.Unmarshal([]byte(payload), &got))
 	assert.Equal(t, "playerToast", got["command"])
 	assert.Equal(t, map[string]any{"notice": "signature_invalid"}, got["request"])
+	assert.Equal(t, 1, sess.closed, "the one-shot session is closed after the send")
+	assert.False(t, sess.sendDeadline.IsZero(), "a caller without a deadline gets the default bound")
 }
 
-// TestShow_PlayerRejection is a transport-OK reply with ok:false.
-func TestShow_PlayerRejection(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	mockCDP := mocks.NewMockCDP(ctrl)
-	mockCDP.EXPECT().NoLogSendWithin(cdp.METHOD_EVALUATE, gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(map[string]any{"message": map[string]any{"ok": false}}, nil).Times(1)
+// TestShow_CallerDeadlineWins: a caller's own (tighter) deadline is the one
+// the dial and evaluate run under, not the default.
+func TestShow_CallerDeadlineWins(t *testing.T) {
+	sess := &fakeSession{reply: replyWith(true)}
+	d := &fakeDialer{session: sess}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	want, _ := ctx.Deadline()
 
-	s := playertoast.New(mockCDP, writeManifest(t, manifestWithToast), nil)
+	s := playertoast.New(d.dial, writeManifest(t, manifestWithToast), nil)
+	require.NoError(t, s.Show(ctx, sigverify.NoticeInvalid, nil))
+	assert.True(t, sess.sendDeadline.Equal(want), "evaluate ran under the caller's deadline")
+}
+
+// TestShow_PlayerRejection is a transport-OK reply with ok:false; the session
+// is still closed.
+func TestShow_PlayerRejection(t *testing.T) {
+	sess := &fakeSession{reply: replyWith(false)}
+	d := &fakeDialer{session: sess}
+
+	s := playertoast.New(d.dial, writeManifest(t, manifestWithToast), nil)
 	err := s.Show(context.Background(), sigverify.NoticeUnsigned, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rejected")
+	assert.Equal(t, 1, sess.closed)
+}
+
+// TestShow_EvaluateExceptionIsAnError: a thrown handleCDPRequest surfaces as
+// exceptionDetails in the raw result and is reported, not read as ok.
+func TestShow_EvaluateExceptionIsAnError(t *testing.T) {
+	sess := &fakeSession{reply: json.RawMessage(`{"result":{"type":"undefined"},"exceptionDetails":{"text":"Uncaught"}}`)}
+	d := &fakeDialer{session: sess}
+
+	s := playertoast.New(d.dial, writeManifest(t, manifestWithToast), nil)
+	err := s.Show(context.Background(), sigverify.NoticeInvalid, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exception")
+	assert.Equal(t, 1, sess.closed)
+}
+
+// TestShow_DialFailureIsReported: no kiosk page to dial (headless, Chromium
+// restarting) is an error the caller logs and drops — nothing else happens.
+func TestShow_DialFailureIsReported(t *testing.T) {
+	dialErr := errors.New("no page target found")
+	d := &fakeDialer{err: dialErr}
+
+	s := playertoast.New(d.dial, writeManifest(t, manifestWithToast), nil)
+	err := s.Show(context.Background(), sigverify.NoticeInvalid, nil)
+	assert.ErrorIs(t, err, dialErr)
+	assert.Equal(t, 1, d.dials)
+}
+
+// TestShow_SendFailureStillClosesSession: a failed evaluate never leaks the
+// session it was dialed on.
+func TestShow_SendFailureStillClosesSession(t *testing.T) {
+	sendErr := errors.New("cdp session closed")
+	sess := &fakeSession{err: sendErr}
+	d := &fakeDialer{session: sess}
+
+	s := playertoast.New(d.dial, writeManifest(t, manifestWithToast), nil)
+	err := s.Show(context.Background(), sigverify.NoticeInvalid, nil)
+	assert.ErrorIs(t, err, sendErr)
+	assert.Equal(t, 1, sess.closed)
 }
 
 // TestShow_UnsupportedWhenContractAbsent: an older player whose manifest
-// decodes but omits playerToast yields ErrUnsupported and never sends.
+// decodes but omits playerToast yields ErrUnsupported and never dials.
 func TestShow_UnsupportedWhenContractAbsent(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	mockCDP := mocks.NewMockCDP(ctrl) // any NoLogSend is an unexpected call
-
-	s := playertoast.New(mockCDP, writeManifest(t, `{"contracts":{"setupDisplay":{"version":1}}}`), nil)
+	s := playertoast.New(neverDial(t), writeManifest(t, `{"contracts":{"setupDisplay":{"version":1}}}`), nil)
 	err := s.Show(context.Background(), sigverify.NoticeInvalid, nil)
 	assert.ErrorIs(t, err, playertoast.ErrUnsupported)
 }
 
 // TestShow_UnreadableManifestIsTransient: a missing/torn manifest is
 // ErrContractUnreadable (re-checked next time), never ErrUnsupported, and
-// nothing is sent.
+// nothing is dialed.
 func TestShow_UnreadableManifestIsTransient(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	mockCDP := mocks.NewMockCDP(ctrl)
-
-	s := playertoast.New(mockCDP, filepath.Join(t.TempDir(), "missing.json"), nil)
+	s := playertoast.New(neverDial(t), filepath.Join(t.TempDir(), "missing.json"), nil)
 	err := s.Show(context.Background(), sigverify.NoticeInvalid, nil)
 	assert.ErrorIs(t, err, playertoast.ErrContractUnreadable)
 	assert.NotErrorIs(t, err, playertoast.ErrUnsupported)
 
 	// A torn (undecodable) write is unreadable too, not "unsupported".
-	s2 := playertoast.New(mockCDP, writeManifest(t, `{"contracts":`), nil)
+	s2 := playertoast.New(neverDial(t), writeManifest(t, `{"contracts":`), nil)
 	assert.ErrorIs(t, s2.Show(context.Background(), sigverify.NoticeInvalid, nil), playertoast.ErrContractUnreadable)
 }
 
@@ -108,27 +205,21 @@ func TestShow_UnreadableManifestIsTransient(t *testing.T) {
 // notice — a distinct error from ErrUnsupported (the notice set is closed and
 // should always be listed, so this guards a manifest/const drift).
 func TestShow_NoticeNotListed(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	mockCDP := mocks.NewMockCDP(ctrl)
 	body := `{"contracts":{"playerToast":{"version":1,"requestKey":"request","states":["signature_invalid"],"acceptedResponse":{"ok":true}}}}`
 
-	s := playertoast.New(mockCDP, writeManifest(t, body), nil)
+	s := playertoast.New(neverDial(t), writeManifest(t, body), nil)
 	err := s.Show(context.Background(), sigverify.NoticeRejected, nil)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, playertoast.ErrUnsupported)
 	assert.Contains(t, err.Error(), "not listed")
 }
 
-// TestShow_CanceledContext returns before touching the manifest or CDP.
+// TestShow_CanceledContext returns before touching the manifest or dialing.
 func TestShow_CanceledContext(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	mockCDP := mocks.NewMockCDP(ctrl)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	s := playertoast.New(mockCDP, writeManifest(t, manifestWithToast), nil)
+	s := playertoast.New(neverDial(t), writeManifest(t, manifestWithToast), nil)
 	assert.ErrorIs(t, s.Show(ctx, sigverify.NoticeInvalid, nil), context.Canceled)
 }
 
@@ -136,15 +227,34 @@ func TestShow_CanceledContext(t *testing.T) {
 // against the notice constants: every notice the policy can emit must be a
 // state the contract lists, or a real device would reject the send.
 func TestShow_ShippingMirrorListsEveryNotice(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
 	for _, notice := range []sigverify.Notice{sigverify.NoticeInvalid, sigverify.NoticeUnsigned, sigverify.NoticeRejected} {
-		mockCDP := mocks.NewMockCDP(ctrl)
-		mockCDP.EXPECT().NoLogSendWithin(cdp.METHOD_EVALUATE, gomock.Any(), gomock.Any(), gomock.Any()).Return(okResult(), nil).Times(1)
-		s := playertoast.New(mockCDP, filepath.Join("..", "setupui", "testdata", "ffos-player-contract.json"), nil)
+		d := &fakeDialer{session: &fakeSession{reply: replyWith(true)}}
+		s := playertoast.New(d.dial, filepath.Join("..", "setupui", "testdata", "ffos-player-contract.json"), nil)
 		assert.NoError(t, s.Show(context.Background(), notice, nil), "mirror must list %q", notice)
+		assert.Equal(t, 1, d.dials)
 	}
-	_ = errors.New
+}
+
+// TestShow_AbandonsWhenNotCurrent: a notice superseded during manifest
+// validation is abandoned before any dial.
+func TestShow_AbandonsWhenNotCurrent(t *testing.T) {
+	s := playertoast.New(neverDial(t), writeManifest(t, manifestWithToast), nil)
+	assert.NoError(t, s.Show(context.Background(), sigverify.NoticeInvalid, func() bool { return false }))
+}
+
+// TestShow_AbandonsAfterDialWhenSuperseded: the dial is the longest step, so
+// a transition that lands during it must still suppress the notice — the
+// sender re-checks after dialing, sends nothing, and closes the session.
+func TestShow_AbandonsAfterDialWhenSuperseded(t *testing.T) {
+	sess := &fakeSession{reply: replyWith(true)}
+	current := true
+	d := &fakeDialer{session: sess, onDial: func() { current = false }}
+
+	s := playertoast.New(d.dial, writeManifest(t, manifestWithToast), nil)
+	require.NoError(t, s.Show(context.Background(), sigverify.NoticeInvalid, func() bool { return current }))
+	assert.Equal(t, 1, d.dials)
+	assert.Empty(t, sess.sent, "a superseded notice must not reach the player")
+	assert.Equal(t, 1, sess.closed, "the session is still closed")
 }
 
 // recordingSender is a Sender double for Dispatcher tests: it reports each
@@ -298,15 +408,4 @@ func TestDispatcher_ClearDuringSendAbandons(t *testing.T) {
 		t.Fatalf("an abandoned notice was sent: %q", n)
 	case <-time.After(200 * time.Millisecond):
 	}
-}
-
-// TestShow_AbandonsWhenNotCurrent: the real sender skips the CDP send when
-// stillCurrent reports the notice was superseded during manifest validation.
-func TestShow_AbandonsWhenNotCurrent(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	mockCDP := mocks.NewMockCDP(ctrl) // any NoLogSendWithin is an unexpected call
-
-	s := playertoast.New(mockCDP, writeManifest(t, manifestWithToast), nil)
-	assert.NoError(t, s.Show(context.Background(), sigverify.NoticeInvalid, func() bool { return false }))
 }

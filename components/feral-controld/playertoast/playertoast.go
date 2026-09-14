@@ -4,6 +4,21 @@
 // gated on the player's own manifest — an older bundle that predates the
 // playerToast contract is degraded to "no toast", never an error the cast
 // path acts on.
+//
+// Transport: every toast rides its OWN short-lived CDP session to the kiosk
+// page (dial, one Runtime.evaluate, close), never the daemon's shared
+// synchronous cdp.CDP client. That client serializes one write+read behind a
+// single mutex with a socket-level deadline, so a toast on it could only ever
+// (a) hold the cast/status path for its deadline, (b) tear the shared session
+// down on its own timeout, or (c) leave a poisoned socket behind (gorilla
+// deadlines are sticky) for the next cast to trip on — one of the three for
+// every choice of deadline and recovery policy. An isolated session has none
+// of those coupling points: a slow or wedged player costs the toast its own
+// 2s and nothing else. Same precedent as offline-cache replay and the
+// User-Agent rewrite, which attach their own sessions beside the shared
+// client (Chromium DevTools accepts several clients per page target). The
+// per-toast dial is a loopback /json fetch plus a websocket handshake, once
+// per non-valid cast — noise next to the cast itself.
 package playertoast
 
 import (
@@ -25,6 +40,12 @@ import (
 // CDPRequestHandler string constant); the manifest key is the same word.
 const playerToastCommand = "playerToast"
 
+// defaultTimeout bounds one toast end to end (dial plus evaluate) when the
+// caller's context carries no deadline of its own. Short on purpose: a
+// best-effort notice must give up long before anyone could mistake it for a
+// stalled cast, and its session is its own, so nothing else waits on it.
+const defaultTimeout = 2 * time.Second
+
 // ErrUnsupported means the connected player's manifest DECODED but does not
 // carry (a usable) playerToast contract — the bundle genuinely predates the
 // feature. Distinct from ErrContractUnreadable, which is transient (boot
@@ -35,29 +56,44 @@ var ErrUnsupported = errors.New("player does not support playerToast")
 // ErrContractUnreadable marks a read/decode failure of the manifest.
 var ErrContractUnreadable = errors.New("player contract unreadable")
 
+// Session is the one-shot CDP session a toast rides on. Owned here (the
+// consumer) so this package does not import the offline-cache package that
+// implements it: offlinecache.CDPSession satisfies it and main wires the dial.
+type Session interface {
+	// Send issues one CDP command and returns the JSON-RPC result member;
+	// the reply wait is bounded by ctx.
+	Send(ctx context.Context, method string, params map[string]interface{}) (json.RawMessage, error)
+	// Close tears the session down. Idempotent.
+	Close() error
+}
+
+// Dialer opens a fresh Session to the kiosk page, bounded by ctx.
+type Dialer func(ctx context.Context) (Session, error)
+
 // Sender shows a signature-verification notice on the player. commandrouter
 // holds one and calls it best-effort.
 type Sender interface {
-	// Show renders notice. stillCurrent (may be nil) is consulted once more
-	// AFTER the manifest is read/validated and immediately before the CDP
-	// send; a false return abandons the send, so a Clear during the manifest
-	// read does not let an obsolete notice reach the wall
+	// Show renders notice. stillCurrent (may be nil) is consulted again
+	// AFTER the manifest is read/validated and AFTER the dial, immediately
+	// before the evaluate; a false return abandons the send, so a Clear
+	// during either wait does not let an obsolete notice reach the wall
 	// (feral-file/ffos-user#307).
 	Show(ctx context.Context, notice sigverify.Notice, stillCurrent func() bool) error
 }
 
 // New builds a Sender that reads the player contract at manifestPath on every
 // Show (the bundle can be OTA-replaced; the capability is never latched) and
-// sends over cdpClient. logger may be nil.
-func New(cdpClient cdp.CDP, manifestPath string, logger *zap.Logger) Sender {
+// sends each notice over a session it dials for that notice alone. logger may
+// be nil.
+func New(dial Dialer, manifestPath string, logger *zap.Logger) Sender {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &sender{cdp: cdpClient, manifestPath: manifestPath, logger: logger}
+	return &sender{dial: dial, manifestPath: manifestPath, logger: logger}
 }
 
 type sender struct {
-	cdp          cdp.CDP
+	dial         Dialer
 	manifestPath string
 	logger       *zap.Logger
 	// unsupportedOnce keeps the "player predates playerToast" note to one log
@@ -67,16 +103,16 @@ type sender struct {
 }
 
 // Show validates that the connected player lists notice in its playerToast
-// contract, then sends it. It returns ErrUnsupported (logged once) when the
-// player predates the feature, ErrContractUnreadable on a transient manifest
-// read failure, or a send/response error. Every one is best-effort to the
-// caller: the cast outcome does not depend on it.
+// contract, then dials a session and sends it. It returns ErrUnsupported
+// (logged once) when the player predates the feature, ErrContractUnreadable
+// on a transient manifest read failure, or a dial/send/response error. Every
+// one is best-effort to the caller: the cast outcome does not depend on it.
 func (s *sender) Show(ctx context.Context, notice sigverify.Notice, stillCurrent func() bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if s.cdp == nil {
-		return errors.New("cdp client is required")
+	if s.dial == nil {
+		return errors.New("session dialer is required")
 	}
 
 	if err := s.validate(notice); err != nil {
@@ -95,34 +131,44 @@ func (s *sender) Show(ctx context.Context, notice sigverify.Notice, stillCurrent
 	if err != nil {
 		return err
 	}
-	// Bound the CDP round trip (and thus the shared c.mu hold) to the caller's
-	// deadline, so a best-effort toast to a wedged player cannot monopolize
-	// CDP and starve casts/status (feral-file/ffos-user#307). Default 2s when
-	// the context carries no deadline.
-	timeout := 2 * time.Second
-	if dl, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(dl); remaining > 0 {
-			timeout = remaining
-		} else {
-			return ctx.Err()
-		}
+	// Bound dial and evaluate together. The dialer's own ceiling exists for
+	// capture/replay attach and is far too generous for a notice; WithTimeout
+	// keeps the sooner deadline, so a caller's tighter one still wins.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
+		defer cancel()
 	}
-	// Early out at the CDP handoff: the manifest read above can span the window
-	// in which a newer valid/silent transition Clears this notice. stillCurrent
-	// is also passed as the send GUARD, re-checked under CDP's write lock right
-	// before the write, so a newer cast's write cannot interleave between here
-	// and the toast's own write (#307).
+	// Early out before dialing: the manifest read above can span the window
+	// in which a newer valid/silent transition Clears this notice.
 	if stillCurrent != nil && !stillCurrent() {
 		return nil
 	}
-	result, err := s.cdp.NoLogSendWithin(cdp.METHOD_EVALUATE, map[string]interface{}{
+	session, err := s.dial(ctx)
+	if err != nil {
+		return fmt.Errorf("dial player session: %w", err)
+	}
+	defer func() {
+		if err := session.Close(); err != nil {
+			s.logger.Debug("player toast session close", zap.Error(err))
+		}
+	}()
+	// Re-check after the dial, the longest step. The toast has its own
+	// socket, so nothing serializes it against a cast's write on the shared
+	// client; this check narrows the stale-notice window to the evaluate
+	// itself (microseconds), and the notice self-dismisses in 5s regardless.
+	// Accepted trade-off for never coupling the toast to the cast socket.
+	if stillCurrent != nil && !stillCurrent() {
+		return nil
+	}
+	raw, err := session.Send(ctx, cdp.METHOD_EVALUATE, map[string]interface{}{
 		"expression":    "window.handleCDPRequest(" + string(payload) + ")",
 		"returnByValue": true,
-	}, timeout, stillCurrent)
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("send player toast: %w", err)
 	}
-	return validateResult(result)
+	return validateRaw(raw)
 }
 
 // validate reads the manifest and confirms it carries a version-1 playerToast
@@ -186,9 +232,20 @@ func readManifest(path string) (manifest, error) {
 	return m, nil
 }
 
+// validateRaw decodes the raw Runtime.evaluate result member the session
+// hands back ({"result":{"type","value"},"exceptionDetails"?}) and confirms
+// the player accepted the toast.
+func validateRaw(raw json.RawMessage) error {
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return fmt.Errorf("decode player toast reply: %w", err)
+	}
+	return validateResult(result)
+}
+
 // validateResult confirms the player accepted the toast ({ok:true}), peeling
-// the CDP Runtime.evaluate envelope the same way the mint-pairing display
-// does (the cdp client's post-processed shape plus the raw fallback).
+// the Runtime.evaluate envelope down to handleCDPRequest's {message:{ok}}
+// the same way the mint-pairing display does.
 func validateResult(result any) error {
 	response, err := normalizeEvaluationResult(result)
 	if err != nil {
@@ -279,7 +336,7 @@ type Notifier interface {
 // producers never block, at most one Show is ever in flight (so toasts cannot
 // pile up on CDP), and a later transition supersedes a queued earlier one.
 // Each send is bounded by timeout (via the Sender's context), so a wedged
-// player cannot hold CDP past it.
+// player cannot hold the toast's own session past it.
 type Dispatcher struct {
 	sender  Sender
 	logger  *zap.Logger

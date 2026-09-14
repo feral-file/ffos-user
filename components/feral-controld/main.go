@@ -241,6 +241,25 @@ func main() {
 // shadows the dp1 package.
 type toastPlaylist = dp1.Playlist
 
+// newToastSessionDialer gives the signature toast its own short-lived CDP
+// session per send — see playertoast's package doc for why it must never
+// share the synchronous cdp client with casts. It reuses the offline-cache
+// page dialer (the same /json discovery and event-driven session the kiosk
+// replay attaches with). File scope because run() shadows the context
+// package name.
+func newToastSessionDialer(
+	endpoint string,
+	httpClient wrapper.HTTPClient,
+	dialer wrapper.WebSocketDialer,
+	json wrapper.JSON,
+	io wrapper.IO,
+	logger *zap.Logger,
+) playertoast.Dialer {
+	return func(ctx context.Context) (playertoast.Session, error) {
+		return offlinecache.DialPageSession(ctx, endpoint, httpClient, dialer, json, io, logger)
+	}
+}
+
 func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// Load state. A load failure must NOT abort startup: controld is the sole
 	// SoftAP/LAN-recovery owner, so returning here would crash-loop the daemon
@@ -1120,8 +1139,12 @@ func initializeApp(
 		// refresher) submits non-blocking; the dispatcher sends at most one
 		// bounded toast at a time and a newer transition supersedes a queued
 		// older one, so a wedged player never delays a cast and a stale warning
-		// never lands over newer artwork (feral-file/ffos-user#307).
-		toastSender := playertoast.New(cdp, setupui.DefaultContractPath, logger)
+		// never lands over newer artwork (feral-file/ffos-user#307). Each
+		// send dials its own session to the kiosk page rather than riding the
+		// shared cdp client, so a slow player costs the toast alone, never a cast.
+		toastSender := playertoast.New(
+			newToastSessionDialer(cdpEndpoint, httpClient, webSocketDialer, json, io, logger),
+			setupui.DefaultContractPath, logger)
 		toastDispatcher = playertoast.NewDispatcher(context, toastSender, 2*time.Second, logger)
 		commandrouter.SetPlayerToast(rawCmdHandler, toastDispatcher, logger)
 		// A displayAt-deferred cast parks its verdict as pending; the
