@@ -763,10 +763,78 @@ func TestRefresher_Strict_RefusalSuppressedWhenTransitionIntervened(t *testing.T
 	case <-time.After(2 * time.Second):
 		t.Fatal("refresher never resolved")
 	}
-	// The rejection toast must be suppressed because authority changed.
+	// The rejection toast must be suppressed because the display-transition
+	// epoch advanced (the authority-token fence is pinned separately below).
 	select {
 	case n := <-toast.notified:
-		t.Fatalf("a stale strict rejection was toasted after authority changed: %q", n)
+		t.Fatalf("a stale strict rejection was toasted after the epoch advanced: %q", n)
+	case <-time.After(250 * time.Millisecond):
+	}
+	r.Stop()
+}
+
+// TestRefresher_Strict_RefusalSuppressedWhenAuthorityChanged: a future-only
+// scheduled cast takes scheduler authority for the URL WITHOUT a CDP send or
+// a toast Clear, so the display-transition epoch does not move. A slow strict
+// refresh of the now-superseded source must still not toast a rejection for
+// a feed the scheduler will never show (feral-file/ffos-user#307 round 12).
+func TestRefresher_Strict_RefusalSuppressedWhenAuthorityChanged(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	sched := &fakePlaylistScheduler{}
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), sched, mockClock, logger)
+	active := &sigverify.Active{}
+	refresher.SetSignatureVerification(r, active, logger)
+	refresher.SetSignatureVerificationMode(r, func() sigverify.Mode { return sigverify.ModeStrict }, zap.NewNop())
+	toast := newRecordingNotifier()
+	refresher.SetRefresherToaster(r, toast, zap.NewNop())
+
+	playlistURL := "http://example.com/playlist.json"
+	unsigned := sigverify.Verify([]byte(`{"dpVersion":"1.1.0","title":"t","items":[]}`))
+	playlist := createMockPlaylistNoDynamic()
+	playlist.ID = "refreshed-unsigned"
+	playlist.Verification = &unsigned
+	resolved := make(chan struct{}, 1)
+	mockStatusPoller.EXPECT().FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).AnyTimes()
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).DoAndReturn(
+		func(context.Context, string, bool) (*dp1.Playlist, error) {
+			// The concurrent future-only scheduled cast: it bumps the
+			// authority token inside the pass's sample window but sends
+			// nothing to the player and Clears no toast — the epoch stays.
+			sched.PrepareWithSource(createMockPlaylistNoDynamic(), playlistschedule.Source{})
+			select {
+			case resolved <- struct{}{}:
+			default:
+			}
+			return playlist, nil
+		}).AnyTimes()
+	// No CDP Send: strict refuses before any push.
+
+	r.Start()
+	select {
+	case <-resolved:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresher never resolved")
+	}
+	select {
+	case n := <-toast.notified:
+		t.Fatalf("a strict rejection was toasted for a source the scheduler already replaced: %q", n)
 	case <-time.After(250 * time.Millisecond):
 	}
 	r.Stop()

@@ -630,7 +630,29 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			if playlist.Verification != nil {
 				status = playlist.Verification.Status
 			}
-			r.toastStrictRefusal(toastEpoch, castMode, status)
+			// Fenced to BOTH tokens. The display-transition epoch (inside
+			// toastStrictRefusal) catches a cast, default playback or
+			// generation bump that replaced the artwork; the authority
+			// token catches a future-only scheduled cast, which takes
+			// scheduler authority for this URL WITHOUT a CDP send or toast
+			// Clear — so the epoch alone would let a slow refresh of the
+			// superseded source toast a rejection for a feed the scheduler
+			// will never show. Checked under WithPlayerPush, the same lock
+			// the send closure rechecks authority under, so it orders
+			// against that cast's own authority change rather than racing
+			// it (feral-file/ffos-user#307).
+			refuse := func() {
+				if r.scheduler != nil && r.scheduler.AuthorityToken() != authorityToken {
+					r.logger.Debug("Strict refusal notice dropped: playlist authority changed during refresh resolution")
+					return
+				}
+				r.toastStrictRefusal(toastEpoch, castMode, status)
+			}
+			if r.scheduler != nil {
+				r.scheduler.WithPlayerPush(refuse)
+			} else {
+				refuse()
+			}
 			return nil
 		}
 	}
