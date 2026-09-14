@@ -35,6 +35,25 @@ type Policy struct {
 
 func Default() Policy { return Policy{Version: Version} }
 
+// NormalizeRequestContext is NormalizeContext for PUBLIC ingress, where the
+// difference between an absent field and an explicitly empty one is real: the
+// documented contract is that omitting contentContext means curated, while its
+// only valid present values are "curated" and "personal". Treating an explicit
+// "" or null as omitted would silently widen a malformed controller request
+// into the default audience instead of telling the caller it is malformed.
+//
+// Internal callers (restored scheduler state, the refresher, replay) keep using
+// NormalizeContext: they carry a value, not a request.
+func NormalizeRequestContext(v any, present bool) (Context, error) {
+	if !present {
+		return ContextCurated, nil
+	}
+	if v == nil || v == "" {
+		return "", fmt.Errorf("contentContext must be %q or %q when present", ContextCurated, ContextPersonal)
+	}
+	return NormalizeContext(v)
+}
+
 func NormalizeContext(v any) (Context, error) {
 	if v == nil || v == "" {
 		return ContextCurated, nil

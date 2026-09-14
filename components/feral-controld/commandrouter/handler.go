@@ -620,7 +620,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				return nil, fmt.Errorf("unknown payload type")
 			}
 
-			contentContext, contextErr := contentpolicy.NormalizeContext(command.Arguments["contentContext"])
+			// Public ingress, so an explicitly supplied empty or null
+			// contentContext is a malformed request, not an omitted field —
+			// see NormalizeRequestContext. Restored scheduler state omits the
+			// key entirely, which stays compatible.
+			rawContext, hasContext := command.Arguments["contentContext"]
+			contentContext, contextErr := contentpolicy.NormalizeRequestContext(rawContext, hasContext)
 			if contextErr != nil {
 				return nil, contextErr
 			}
@@ -1012,7 +1017,7 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 		}
 		result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": policy})
 		if err != nil || !policyAckMatches(result, policy) {
-			return policyFailure(policyFailureCode(result)), nil
+			return policyFailure(policyFailureCode(result, err)), nil
 		}
 		return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}, nil
 	}
@@ -1030,7 +1035,7 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 	}
 	result, err := h.sendContentPolicyCDP(commands.CMD_GET_CONTENT_POLICY, map[string]interface{}{})
 	if err != nil || !policyAckMatches(result, policy) {
-		return policyFailure(policyFailureCode(result)), nil
+		return policyFailure(policyFailureCode(result, err)), nil
 	}
 	return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}, nil
 }
@@ -1039,13 +1044,37 @@ func policyFailure(code string) interface{} {
 	return map[string]interface{}{"ok": false, "error": code}
 }
 
-func policyFailureCode(result interface{}) string {
-	if m, ok := result.(map[string]interface{}); ok {
-		if msg, ok := m["message"].(map[string]interface{}); ok {
-			m = msg
-		}
-		if code, _ := m["error"].(string); code == "unsupported" {
-			return code
+// policyFailureCode classifies a player reply the same way recentPlayerReply
+// classifies the history commands, so the app can tell "this device cannot do
+// it" from "this device is temporarily out of sync".
+//
+// sendErr is the transport outcome and is decisive: a send that never reached
+// the player says nothing about its capabilities.
+//
+// A player that predates these commands answers the unknown command with a
+// bare {"ok":false} carrying no error code and no contentPolicy — identical
+// in shape to the legacy history reply — so that shape maps to unsupported.
+// Anything else (a modern failure code, or an ok reply whose policy does not
+// match) stays contentPolicyUnavailable.
+func policyFailureCode(result interface{}, sendErr error) string {
+	if sendErr != nil {
+		return "contentPolicyUnavailable"
+	}
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		return "contentPolicyUnavailable"
+	}
+	if msg, ok := m["message"].(map[string]interface{}); ok {
+		m = msg
+	}
+	if code, _ := m["error"].(string); code == "unsupported" {
+		return code
+	}
+	if okField, hasOK := m["ok"].(bool); hasOK && !okField {
+		_, hasError := m["error"]
+		_, hasPolicy := m["contentPolicy"]
+		if !hasError && !hasPolicy {
+			return "unsupported"
 		}
 	}
 	return "contentPolicyUnavailable"
