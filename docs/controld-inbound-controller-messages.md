@@ -66,10 +66,17 @@ for relayer topic assignment:
   until the current artwork duration ends. URL / dynamic playlist refresh still
   uses `refresh: true`, except the first scheduled reconstruction after a
   controld restart force-casts because scheduler ownership may need to be
-  restored from persisted state. Playlists without item-level `displayAt` are
-  otherwise forwarded unchanged.
+  restored from persisted state. Every cast is then filtered against the
+  device's content policy for the cast's `contentContext` before it reaches
+  CDP, so a playlist without item-level `displayAt` is forwarded unchanged only
+  when the policy admits all of its items (see "Content policy effect on
+  playlists" below).
 - `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
+- `getRecentlyPlayed`, `playRecentlyPlayed`, `getContentPolicy`, and
+  `setContentPolicy` are likewise handled by `feral-controld` as commandrouter
+  pre-CDP special cases (see "Recently Played and Content Policy Inbound
+  Messages" below).
 - `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`,
   `clearPlaylistCache`, and `getOfflineCacheStatus` are likewise handled by
   `feral-controld` as commandrouter pre-CDP special cases, owned by the
@@ -2660,6 +2667,133 @@ an unrelated event) will still report `ready`/`partial` for that same
 entire time. Clients should treat this notification as "this attempt's
 result", and use `getOfflineCacheStatus` as the source of truth for
 "is this item currently cached" when the two might disagree.
+
+## Recently Played and Content Policy Inbound Messages
+
+These four commands back the mobile app's **History** and **Content** screens
+(feral-file/ff-app#788). All four are commandrouter pre-CDP special cases: the
+daemon owns the reply shape rather than passing the player's answer through.
+
+### getRecentlyPlayed
+
+Purpose: list the works this device actually rendered, newest first, so the
+owner can put back a work they replaced without knowing its title or artist.
+
+Request: `{}` — no fields.
+
+The history is device-owned. The player appends a record only at a *successful
+render*, which is why the list includes automatic playlist advances and
+survives a player restart; a selected-but-never-rendered item produces no
+record. The reply carries only the bounded label snapshot (record ID,
+timestamp, item ID, title/artist/thumbnail). Item source and the full DP-1 item
+stay device-local and are never sent to a controller.
+
+```json
+{
+  "messageID": "msg-history-1",
+  "message": { "command": "getRecentlyPlayed", "request": {} }
+}
+```
+
+A player that predates this feature answers the unknown command with a bare
+`ok:false`. Controld classifies that as an explicit **`unsupported`** capability
+reply. It is never flattened into an empty history: "this device cannot do it"
+and "this device has played nothing yet" are different answers, and the app
+renders them differently.
+
+Error cases: `unsupported` (older player), plus transport errors. A transport
+failure is an error, never an empty list.
+
+### playRecentlyPlayed
+
+Purpose: put a listed work back on this device.
+
+Request: `{"recordId": "<opaque id from getRecentlyPlayed>"}`.
+
+The command never accepts a controller-supplied source. Controld resolves the
+opaque record on the device, rebuilds a one-work unsigned DP-1 call from the
+retained item, and re-enters its ordinary `displayPlaylist` path — which is what
+preserves scheduler ownership, playback/replay-scope locking, cast-time source
+preflight, and the content-policy gate. Extracting one item from a signed
+playlist invalidates that playlist's signature, so the rebuilt call carries no
+signature; only the work's `defaults` are preserved.
+
+The replay is re-admitted under **the content context the work was recorded
+under**, not the default. A work that played as `personal` is replayed as
+`personal`, so History cannot offer a work the policy gate then refuses.
+
+The acknowledgement names the requested occurrence and is bounded: it does not
+claim a successful wall render. Callers still wait for `player_status`,
+particularly when the same work is deliberately replayed twice.
+
+Error cases: `recordId is required`; an evicted, malformed, or unknown record;
+`contentBlocked` if policy refuses the rebuilt cast; plus every
+`displayPlaylist` error, since that is the path it re-enters. A source that was
+valid when recorded can still fail later during rendering; that is reported
+honestly rather than promised away.
+
+### getContentPolicy
+
+Purpose: read the device's durable audience policy for the app's Content
+screen.
+
+Request: `{}` — no fields, and a **non-empty request is rejected** with
+`invalidRequest` rather than ignored. This is a storm-gate contract, not
+pedantry: the gate deduplicates on command type plus arguments, so ignoring
+junk arguments would let one LAN caller mint unlimited distinct dedupe keys.
+
+```json
+{ "ok": true, "contentPolicy": { "version": 1, "showMatureContent": false, "strictPersonal": false, "blockUnratedCurated": false }, "active": true }
+```
+
+`active:true` is only ever returned when the durable store is readable **and**
+the current player generation returned a matching acknowledgement. If the
+policy file could not be read, the device keeps admitting content on safe
+defaults but answers `contentPolicyUnavailable` — it never presents defaults as
+the owner's saved setting.
+
+Error cases: `invalidRequest`, `unsupported` (older player),
+`contentPolicyUnavailable`.
+
+### setContentPolicy
+
+Purpose: change the audience policy from the app.
+
+Request: exactly `{"showMatureContent": bool, "strictPersonal": bool}`. Any
+other argument count, or a non-boolean value, is `invalidRequest`.
+
+`blockUnratedCurated` is **operator-owned** and cannot be set by a controller.
+It comes from the daemon's `contentPolicy` config block and is re-applied from
+that config on every boot, so neither a controller request nor a stale
+persisted file can turn it on or off.
+
+Success is reported only after the atomic durable write succeeds *and* the
+player returns a matching acknowledgement. A repeated identical set performs no
+durable write, so holding the toggle does not amplify flash writes.
+
+Error cases: `invalidRequest`, `unsupported`, `contentPolicyUnavailable`.
+
+### Content policy effect on playlists
+
+`displayPlaylist` takes an optional `contentContext`, whose only valid present
+values are `curated` and `personal`; an absent field means `curated`. The device
+filters the playlist against its policy before casting:
+
+- A `mature`-labelled item is withheld unless `showMatureContent` is on, or the
+  cast is `personal` and `strictPersonal` is off.
+- An *unrated* item is withheld only from a `curated` cast, and only while the
+  operator's `blockUnratedCurated` gate is on.
+- When any item is removed, the projection's signatures are cleared: the source
+  document's signature does not describe the projection. Rating fields
+  themselves remain signed in the source.
+- When the projection is empty, the cast is refused with `contentBlocked`
+  (HTTP 422 on the LAN hub, `"error":"contentBlocked"` over the relayer).
+
+A playlist carrying malformed content-rating extension fields is rejected as
+`playlistInvalid`. A malformed label is never silently treated as unrated.
+
+`retireBlockedCurrent:true` is a narrow daemon-to-player, refresh-only flag.
+Controllers do not send it.
 
 ## Response Shape Recommendation for New Inbound Commands
 
