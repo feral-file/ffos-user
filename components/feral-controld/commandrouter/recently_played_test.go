@@ -1,6 +1,10 @@
 package commandrouter
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 func TestRecentPlayerReply_ClassifiesOldPlayerAsUnsupported(t *testing.T) {
 	got := recentPlayerReply(map[string]interface{}{
@@ -168,5 +172,56 @@ func TestBoundedRecentlyPlayedReply_LeavesFailuresAlone(t *testing.T) {
 	message := got["message"].(map[string]interface{})
 	if message["status"] != "unsupported" || message["error"] == nil {
 		t.Fatalf("failure reply altered: %v", message)
+	}
+}
+
+// Rows alone are not a bound: the LAN hub accepts a 4 MiB inline playlist from
+// an unauthenticated caller, its metadata becomes retained history labels, and
+// those come back through this reply — so 200 rows can still be megabytes.
+func TestBoundedRecentlyPlayedReply_BoundsLabelBytes(t *testing.T) {
+	huge := strings.Repeat("A", 64*1024)
+	raw := make([]interface{}, 0, 8)
+	for i := 0; i < 8; i++ {
+		raw = append(raw, map[string]interface{}{
+			"recordId": "rp", "title": huge, "artist": huge, "thumbnailUrl": huge, "itemId": huge,
+		})
+	}
+	got := boundedRecentlyPlayedReply(map[string]interface{}{
+		"message": map[string]interface{}{"ok": true, "records": raw},
+	})
+	records := got["message"].(map[string]interface{})["records"].([]interface{})
+
+	total := 0
+	for _, entry := range records {
+		record := entry.(map[string]interface{})
+		for _, key := range []string{"recordId", "itemId", "title", "artist", "thumbnailUrl"} {
+			label, _ := record[key].(string)
+			if len(label) > maxRecentlyPlayedLabelBytes {
+				t.Fatalf("%s is %d bytes, over the per-field cap %d", key, len(label), maxRecentlyPlayedLabelBytes)
+			}
+			total += len(label)
+		}
+	}
+	if total > maxRecentlyPlayedReplyBytes+maxRecentlyPlayedLabelBytes*5 {
+		t.Fatalf("aggregate label payload %d exceeds the cap %d", total, maxRecentlyPlayedReplyBytes)
+	}
+	if len(records) == 0 {
+		t.Fatal("bounding must not empty the list")
+	}
+}
+
+// Truncation must not produce invalid UTF-8 on the wire.
+func TestTruncateLabel_KeepsValidUTF8(t *testing.T) {
+	label := strings.Repeat("é", maxRecentlyPlayedLabelBytes)
+	got := truncateLabel(label)
+	if len(got) > maxRecentlyPlayedLabelBytes {
+		t.Fatalf("truncated to %d bytes, over the cap", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("truncation split a rune")
+	}
+	short := "ok"
+	if truncateLabel(short) != short {
+		t.Fatal("a short label must be untouched")
 	}
 }

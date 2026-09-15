@@ -822,11 +822,17 @@ const contentPolicySyncAttempts = 3
 // accepting commands and needs a moment, not a long outage.
 const contentPolicySyncRetryDelay = 250 * time.Millisecond
 
-func contentPolicyReconciler(handler commandrouter.Handler, logger *zap.Logger) func(context.Context) {
+// policyRefresher is the narrow slice of the playlist refresher the content
+// policy reconciler needs: after a player restart it may have to re-send what
+// is on screen, nothing more.
+type policyRefresher interface{ ForceRefresh() }
+
+func contentPolicyReconciler(handler commandrouter.Handler, store *contentpolicy.Store, refresher policyRefresher, logger *zap.Logger) func(context.Context) {
 	return func(ctx context.Context) {
 		var err error
 		for attempt := 1; attempt <= contentPolicySyncAttempts; attempt++ {
 			if err = commandrouter.SyncContentPolicy(handler); err == nil {
+				forceRefreshAfterPolicySync(store, refresher, logger)
 				return
 			}
 			if attempt == contentPolicySyncAttempts {
@@ -845,6 +851,35 @@ func contentPolicyReconciler(handler commandrouter.Handler, logger *zap.Logger) 
 		logger.Warn("content policy unavailable for current player generation",
 			zap.Int("attempts", contentPolicySyncAttempts), zap.Error(err))
 	}
+}
+
+// forceRefreshAfterPolicySync re-sends the current playlist once the policy has
+// reached a freshly started player.
+//
+// Needed because the refresher does not wait for this reconciler: it sends as
+// soon as CDP reports initialized, so a restarted player can render a refresh
+// under ITS defaults before the owner's policy lands, and nothing re-sends
+// afterwards. A persisted showMatureContent:true then visibly fails until the
+// next periodic pass or cast.
+//
+// Deliberately conditional on the policy being non-default. An unconditional
+// force here would put a soft artwork refresh on EVERY generation bump — every
+// CDP connect, every recovery navigation, every stamp mismatch — which is
+// exactly the cost the replay-scope reconciler's guard exists to avoid. A
+// device still on defaults has nothing to correct: the player's own defaults
+// already agree.
+func forceRefreshAfterPolicySync(store *contentpolicy.Store, refresher policyRefresher, logger *zap.Logger) {
+	if store == nil || refresher == nil {
+		return
+	}
+	store.Lock()
+	active := store.CurrentLocked()
+	store.Unlock()
+	if active == contentpolicy.Default() {
+		return
+	}
+	logger.Info("content policy synced to a new player generation; re-sending current playlist")
+	refresher.ForceRefresh()
 }
 
 func bootRecoveryRetryReconciler(executor devicectl.Executor, logger *zap.Logger) func(context.Context) {
@@ -1228,7 +1263,7 @@ func initializeApp(
 	// a durable, acknowledged Content setting visibly failing after a player
 	// restart. Nothing re-pushes the scheduler when the policy syncs later.
 	if policyStore != nil {
-		session.RegisterReconciler("content-policy", contentPolicyReconciler(rawCmdHandler, logger))
+		session.RegisterReconciler("content-policy", contentPolicyReconciler(rawCmdHandler, policyStore, playlistRefresher, logger))
 	}
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))

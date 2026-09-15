@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
 	"go.uber.org/zap"
@@ -1430,6 +1431,32 @@ func recentPlayerReply(result interface{}) map[string]interface{} {
 // return an unbounded body.
 const maxRecentlyPlayedRecords = 200
 
+// maxRecentlyPlayedLabelBytes bounds one label field, and
+// maxRecentlyPlayedReplyBytes the whole reply's label payload. Rows alone are
+// not a bound: the LAN hub accepts a 4 MiB inline playlist from an
+// unauthenticated caller, its metadata becomes retained history labels, and
+// those come back through this reply — so 200 rows can still be megabytes.
+// Over-long labels are truncated rather than dropped, because a clipped title
+// still identifies the work for replay; once the aggregate cap is reached the
+// remaining rows are omitted, the same as the row cap.
+const (
+	maxRecentlyPlayedLabelBytes = 512
+	maxRecentlyPlayedReplyBytes = 128 * 1024
+)
+
+// truncateLabel clips s to at most maxRecentlyPlayedLabelBytes, on a rune
+// boundary so the result stays valid UTF-8 on the wire.
+func truncateLabel(s string) string {
+	if len(s) <= maxRecentlyPlayedLabelBytes {
+		return s
+	}
+	cut := maxRecentlyPlayedLabelBytes
+	for cut > 0 && !utf8.ValidString(s[:cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 // boundedRecentlyPlayedReply rebuilds a SUCCESSFUL getRecentlyPlayed reply from
 // a strict allow-list instead of forwarding whatever the player returned.
 //
@@ -1464,8 +1491,9 @@ func boundedRecentlyPlayedReply(response map[string]interface{}) map[string]inte
 	}
 	raw, _ := message["records"].([]interface{})
 	records := make([]interface{}, 0, len(raw))
+	labelBytes := 0
 	for _, entry := range raw {
-		if len(records) >= maxRecentlyPlayedRecords {
+		if len(records) >= maxRecentlyPlayedRecords || labelBytes >= maxRecentlyPlayedReplyBytes {
 			break
 		}
 		record, isRecord := entry.(map[string]interface{})
@@ -1478,7 +1506,8 @@ func boundedRecentlyPlayedReply(response map[string]interface{}) map[string]inte
 		if recordID == "" {
 			continue
 		}
-		bounded := map[string]interface{}{"recordId": recordID}
+		bounded := map[string]interface{}{"recordId": truncateLabel(recordID)}
+		labelBytes += len(recordID)
 		if playedAt, present := record["playedAtMs"].(float64); present {
 			bounded["playedAtMs"] = playedAt
 		}
@@ -1487,7 +1516,9 @@ func boundedRecentlyPlayedReply(response map[string]interface{}) map[string]inte
 		}
 		for _, key := range []string{"itemId", "title", "artist", "thumbnailUrl"} {
 			if label, present := record[key].(string); present && label != "" {
-				bounded[key] = label
+				clipped := truncateLabel(label)
+				bounded[key] = clipped
+				labelBytes += len(clipped)
 			}
 		}
 		records = append(records, bounded)

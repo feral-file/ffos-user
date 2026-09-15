@@ -2692,7 +2692,11 @@ record. The reply carries only the bounded label snapshot — `recordId`,
 DP-1 item stay device-local and are never sent to a controller.
 
 Controld rebuilds a successful reply from that allow-list rather than
-forwarding what the player returned, and caps the number of rows. The bound is
+forwarding what the player returned, and bounds it by **rows and by bytes** —
+each label is truncated to 512 bytes on a rune boundary, and the reply stops
+adding rows once its label payload reaches 128 KiB. Rows alone are not a bound:
+the LAN hub accepts a 4 MiB inline playlist, its metadata becomes retained
+history labels, and those come back through this reply. The bound is
 enforced on this side of CDP because item sources can be signed URLs carrying
 credentials in their query strings and this query is reachable from the
 unauthenticated LAN hub — a guarantee that held only while the player happened

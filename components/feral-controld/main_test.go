@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	stdos "os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
@@ -1631,4 +1633,56 @@ func TestReconcilerOrder_ContentPolicyBeforePlaylistRecompute(t *testing.T) {
 	if policyAt > recomputeAt {
 		t.Fatal("content-policy must be registered BEFORE playlist-recompute: a reconnect would otherwise push a scheduled cohort to a player still on default policy")
 	}
+}
+
+// fakePolicyRefresher records whether the reconciler asked for a re-send.
+type fakePolicyRefresher struct{ forced int }
+
+func (f *fakePolicyRefresher) ForceRefresh() { f.forced++ }
+
+// The refresher does not wait for the policy reconciler — it sends as soon as
+// CDP reports initialized — so a restarted player can render a refresh under
+// ITS defaults before the owner's policy lands, with nothing re-sending
+// afterwards. After a successful sync the current playlist is re-sent, but ONLY
+// when the policy differs from the defaults the player already has: an
+// unconditional force would put a soft artwork refresh on every generation
+// bump, which is the cost the replay-scope guard exists to avoid.
+func TestForceRefreshAfterPolicySync(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+
+	t.Run("default policy re-sends nothing", func(t *testing.T) {
+		store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+		require.NoError(t, err)
+		refresher := &fakePolicyRefresher{}
+		forceRefreshAfterPolicySync(store, refresher, logger)
+		assert.Equal(t, 0, refresher.forced, "a device on defaults has nothing to correct")
+	})
+
+	t.Run("a changed policy re-sends the current playlist", func(t *testing.T) {
+		store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+		require.NoError(t, err)
+		store.Lock()
+		_, err = store.UpdateLocked(true, false)
+		store.Unlock()
+		require.NoError(t, err)
+
+		refresher := &fakePolicyRefresher{}
+		forceRefreshAfterPolicySync(store, refresher, logger)
+		assert.Equal(t, 1, refresher.forced, "a player that just came up on defaults must be re-sent")
+	})
+
+	t.Run("operator gate alone still counts", func(t *testing.T) {
+		store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), true)
+		require.NoError(t, err)
+		refresher := &fakePolicyRefresher{}
+		forceRefreshAfterPolicySync(store, refresher, logger)
+		assert.Equal(t, 1, refresher.forced)
+	})
+
+	t.Run("nil refresher is a no-op", func(t *testing.T) {
+		store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+		require.NoError(t, err)
+		forceRefreshAfterPolicySync(store, nil, logger)
+		forceRefreshAfterPolicySync(nil, &fakePolicyRefresher{}, logger)
+	})
 }
