@@ -566,3 +566,55 @@ func TestDisplayPlaylistReprojectsAfterAPolicyChangeDuringPreflight(t *testing.T
 	require.NotContains(t, sent, "https://mature.example/b",
 		"a policy tightened during the probe must still govern the cast")
 }
+
+// LOCK ORDER. The cast path and the playlist-refresher both nest the content
+// policy store lock and the kiosk playback lock, and both are non-reentrant, so
+// they must take them in the SAME order or a concurrent cast and refresh can
+// deadlock permanently — no further policy update, refresh or playback command
+// until controld restarts. The refresher's order is policy, then LockPlayback
+// (processPlayingPlaylist), so the cast must match.
+//
+// Asserted with TryLock at the moment LockPlayback is called: a store lock that
+// is NOT free proves the cast already holds it, which is the invariant. No
+// timing, no sleeps.
+func TestDisplayPlaylistTakesThePolicyLockBeforeThePlaybackLock(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	player := mocks.NewMockCDP(ctrl)
+	poller := mocks.NewMockStatusPoller(ctrl)
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	require.NoError(t, err)
+
+	policyHeldAtPlaybackLock := false
+	replay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	replay.EXPECT().LockPlayback().Do(func() {
+		if store.TryLock() {
+			store.Unlock()
+			return
+		}
+		policyHeldAtPlaybackLock = true
+	}).Times(1)
+	replay.EXPECT().UnlockPlayback().AnyTimes()
+	replay.EXPECT().SyncPlaylist(gomock.Any(), gomock.Any()).Return(1, nil).AnyTimes()
+	replay.EXPECT().MarkPlaybackChanged().AnyTimes()
+
+	h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl), poller,
+		nil, nil, replay, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+		}).AnyTimes()
+	poller.EXPECT().ForceRefresh().AnyTimes()
+
+	_, err = h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]any{"dp1_call": map[string]interface{}{
+			"dpVersion": "1.1.0", "title": "x",
+			"items": []interface{}{map[string]interface{}{"source": "https://a.example/a"}},
+		}},
+	})
+	require.NoError(t, err)
+	require.True(t, policyHeldAtPlaybackLock,
+		"the cast took the playback lock before the policy lock; the refresher takes them the other way round, so the two can deadlock")
+}

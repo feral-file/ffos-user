@@ -196,8 +196,16 @@ func Open(path string, blockUnratedCurated bool) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) Lock()                 { s.mu.Lock() }
-func (s *Store) Unlock()               { s.mu.Unlock() }
+func (s *Store) Lock()   { s.mu.Lock() }
+func (s *Store) Unlock() { s.mu.Unlock() }
+
+// TryLock reports whether the store lock was free, acquiring it if so. It
+// exists so a caller can ASSERT lock state without blocking — specifically the
+// lock-order test that pins "content policy before the kiosk playback lock" on
+// the cast path. Do not use it to skip work: a policy read that silently
+// no-ops when the lock is busy would answer from a policy nobody applied.
+func (s *Store) TryLock() bool { return s.mu.TryLock() }
+
 func (s *Store) CurrentLocked() Policy { return s.policy }
 
 func (s *Store) UpdateLocked(showMature, strictPersonal bool) (Policy, error) {

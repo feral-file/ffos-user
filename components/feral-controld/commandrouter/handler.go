@@ -517,9 +517,6 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// record cleared between lookup and sync), so the installed
 		// scope's own count remains the final authority (#310 review).
 		var scopeSyncEnabled int
-		// castContentContext carries the normalized cast origin out to the
-		// reprojection below, which runs after the policy lock is reacquired.
-		castContentContext := contentpolicy.ContextCurated
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			delete(command.Arguments, "retireBlockedCurrent") // internal refresh-only signal
 			// The content-policy lock is taken further down, immediately before
@@ -689,7 +686,6 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if filterErr := filterUnderPolicy(); filterErr != nil {
 				return nil, filterErr
 			}
-			castContentContext = contentContext
 			command.Arguments["contentContext"] = string(contentContext)
 			schedulerSource.ContentContext = string(contentContext)
 
@@ -820,6 +816,39 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					zap.Int("budget", maxPreflightItems))
 			}
 
+			// Preflight is done, so reacquire the policy lock and hold it
+			// from here through the scheduler prepare and the player send —
+			// the ordering the policy contract needs. Reapply the projection
+			// under the policy in force NOW: one tightened while the probe ran
+			// must not be outrun by this cast. A policy RELAXED during the
+			// probe does not re-admit what was already filtered out, matching
+			// the rest of this path — those items were never probed, and a
+			// relaxed policy takes effect on the next cast, refresh or cutover.
+			//
+			// LOCK ORDER, load-bearing: content policy BEFORE the kiosk replay
+			// playback lock, which is acquired a few lines below. The
+			// playlist-refresher takes the same two in that order
+			// (processPlayingPlaylist: policy, then LockPlayback), and both are
+			// non-reentrant, so acquiring them the other way round here would
+			// let a concurrent cast and refresh deadlock permanently — no
+			// further policy update, refresh or playback command until
+			// controld restarts.
+			if h.contentPolicy != nil && playlist != nil {
+				h.contentPolicy.Lock()
+				defer h.contentPolicy.Unlock()
+				reprojected, filterErr := h.contentPolicy.FilterLocked(&playlist.Playlist, contentContext)
+				if filterErr != nil {
+					if errors.Is(filterErr, contentpolicy.ErrContentBlocked) {
+						err = &ContentBlockedError{}
+						return nil, err
+					}
+					err = filterErr
+					return nil, err
+				}
+				playlist.Playlist = *reprojected
+				command.Arguments["dp1_call"] = playlist
+			}
+
 			// Player CanvasService rejects displayPlaylist without a known
 			// intent.action ("Unknown DP1 action: undefined" → ok:false).
 			// Controller casts are force-display, same contract as
@@ -895,30 +924,6 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if err != nil {
 				h.logger.Warn("Failed to clear Chromium browser cache before artwork refresh", zap.Error(err))
 			}
-		}
-
-		// Preflight is done, so reacquire the policy lock and hold it from here
-		// through the scheduler prepare and the player send — the ordering the
-		// policy contract needs. Reapply the projection under the policy in
-		// force NOW: one tightened while the probe ran must not be outrun by
-		// this cast. A policy RELAXED during the probe does not re-admit what
-		// was already filtered out, matching the rest of this path — those
-		// items were never probed, and a relaxed policy takes effect on the
-		// next cast, refresh or cutover.
-		if commandType == commands.CMD_DISPLAY_PLAYLIST && h.contentPolicy != nil {
-			h.contentPolicy.Lock()
-			defer h.contentPolicy.Unlock()
-			reprojected, filterErr := h.contentPolicy.FilterLocked(&playlist.Playlist, castContentContext)
-			if filterErr != nil {
-				if errors.Is(filterErr, contentpolicy.ErrContentBlocked) {
-					err = &ContentBlockedError{}
-					return nil, err
-				}
-				err = filterErr
-				return nil, err
-			}
-			playlist.Playlist = *reprojected
-			command.Arguments["dp1_call"] = playlist
 		}
 
 		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the
