@@ -62,7 +62,6 @@ func TestStorePersistsAtomicallyAndOperatorOwnsAuditGate(t *testing.T) {
 	}
 	s.Lock()
 	got, err := s.UpdateLocked(true, true)
-	s.PromoteLocked()
 	s.Unlock()
 	if err != nil || !got.BlockUnratedCurated {
 		t.Fatalf("got=%+v err=%v", got, err)
@@ -98,7 +97,6 @@ func TestFallbackStoreIsNotDurableUntilAWriteRepairsIt(t *testing.T) {
 	// Identical-to-default values: the skip-unchanged shortcut must NOT apply
 	// here, because this write is what repairs the store.
 	_, err := s.UpdateLocked(false, false)
-	s.PromoteLocked()
 	durable = s.DurableLocked()
 	s.Unlock()
 	if err != nil || !durable {
@@ -188,5 +186,37 @@ func TestOpenAcceptsACompletePolicyFile(t *testing.T) {
 	s.Unlock()
 	if !got.ShowMatureContent || !got.StrictPersonal || !durable {
 		t.Fatalf("got %+v durable=%v", got, durable)
+	}
+}
+
+// Unknown fields must be IGNORED, like every other state-file reader in this
+// component. A newer build that adds a field must not make an older one reject
+// the file and discard the owner's saved policy on a rollback. Completeness of
+// the known v1 fields is still required.
+func TestOpenIgnoresUnknownFieldsButStillRequiresTheKnownOnes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	body := `{"version":1,"showMatureContent":true,"strictPersonal":false,"blockUnratedCurated":false,"somethingNewer":{"a":1}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path, false)
+	if err != nil {
+		t.Fatalf("an additive field must not discard the saved policy: %v", err)
+	}
+	s.Lock()
+	got := s.CurrentLocked()
+	s.Unlock()
+	if !got.ShowMatureContent {
+		t.Fatalf("saved policy lost: %+v", got)
+	}
+
+	// Trailing data is still rejected: that is a truncated or doubled write,
+	// not an additive field.
+	twice := filepath.Join(t.TempDir(), "twice.json")
+	if err := os.WriteFile(twice, []byte(body+body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(twice, false); err == nil {
+		t.Fatal("trailing JSON must still be a load failure")
 	}
 }

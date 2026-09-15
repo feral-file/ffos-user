@@ -149,11 +149,7 @@ func SyncContentPolicy(h Handler) error {
 // syncContentPolicyLocked is SyncContentPolicy's body. The caller holds the
 // content-policy store lock and, when a scheduler exists, the player-push lock.
 func (h *handler) syncContentPolicyLocked() error {
-	// Pushes the owner's INTENT, which is what a player generation must end up
-	// mirroring — including an update whose original acknowledgement failed.
-	// A match promotes it into admission, which is the only way a policy
-	// becomes effective.
-	p := h.contentPolicy.DesiredLocked()
+	p := h.contentPolicy.CurrentLocked()
 	result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": p})
 	if err != nil {
 		return err
@@ -161,7 +157,6 @@ func (h *handler) syncContentPolicyLocked() error {
 	if !policyAckMatches(result, p) {
 		return errors.New("player content policy acknowledgement mismatch")
 	}
-	h.contentPolicy.PromoteLocked()
 	return nil
 }
 
@@ -1187,12 +1182,6 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 	if !h.contentPolicy.DurableLocked() {
 		return policyFailure("contentPolicyUnavailable"), nil
 	}
-	// A durable update still waiting for a player acknowledgement is not active
-	// by definition, and reporting the active-but-superseded values as the
-	// current setting would contradict what the owner just saved.
-	if h.contentPolicy.PendingLocked() {
-		return policyFailure("contentPolicyUnavailable"), nil
-	}
 	result, err := h.sendContentPolicyCDP(commands.CMD_GET_CONTENT_POLICY, map[string]interface{}{})
 	if err != nil || !policyAckMatches(result, policy) {
 		return policyFailure(policyFailureCode(result, err)), nil
@@ -1205,21 +1194,25 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 // scheduler exists — the player-push lock, so no cutover can interleave
 // between the durable write and its acknowledgement.
 func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
-	// The durable write records the owner's intent; it does NOT change what the
-	// device admits. Only a matching acknowledgement from the current player
-	// generation promotes it, so a caller told this failed is never left with a
-	// device that quietly changed its admission behavior anyway. The intent
-	// survives on disk and SyncContentPolicy re-pushes it on the next player
-	// generation.
-	desired, err := h.contentPolicy.UpdateLocked(show, strict)
+	// Acknowledgement FIRST, then the durable write. Persisting first and then
+	// discovering the player refused would leave a caller told this failed with
+	// a device that had nevertheless changed what it admits — and since the file
+	// is the only thing a restart restores, the refused policy would come back
+	// as the active one on the next boot. Only acknowledged values are ever
+	// written, so neither is possible and there is no second persisted state to
+	// reconcile.
+	candidate := h.contentPolicy.CandidateLocked(show, strict)
+	result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": candidate})
+	if err != nil || !policyAckMatches(result, candidate) {
+		return policyFailure(policyFailureCode(result, err))
+	}
+	// The player accepted. If the write now fails, the daemon keeps the old
+	// policy and says so; the next reconnect sync re-pushes the stored policy
+	// and puts the player back in step.
+	policy, err := h.contentPolicy.UpdateLocked(show, strict)
 	if err != nil {
 		return policyFailure("contentPolicyUnavailable")
 	}
-	result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": desired})
-	if err != nil || !policyAckMatches(result, desired) {
-		return policyFailure(policyFailureCode(result, err))
-	}
-	policy := h.contentPolicy.PromoteLocked()
 	return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}
 }
 

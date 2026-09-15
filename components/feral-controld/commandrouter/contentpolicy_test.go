@@ -2,6 +2,7 @@ package commandrouter_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -230,7 +231,6 @@ func TestSetContentPolicyInstallsTheSchedulerProjector(t *testing.T) {
 	// A policy change is picked up without re-installing the projector.
 	store.Lock()
 	_, err = store.UpdateLocked(false, true)
-	store.PromoteLocked() // stands in for the player acknowledgement
 	store.Unlock()
 	require.NoError(t, err)
 	projected, empty = sched.projector(cohort, "personal")
@@ -530,7 +530,6 @@ func TestDisplayPlaylistReprojectsAfterAPolicyChangeDuringPreflight(t *testing.T
 	// Start permissive so the mature item survives the first filter.
 	store.Lock()
 	_, err = store.UpdateLocked(true, false)
-	store.PromoteLocked() // stands in for the player acknowledgement
 	store.Unlock()
 	require.NoError(t, err)
 
@@ -541,7 +540,6 @@ func TestDisplayPlaylistReprojectsAfterAPolicyChangeDuringPreflight(t *testing.T
 		// The owner turns mature content off while the probe is running.
 		store.Lock()
 		_, updateErr := store.UpdateLocked(false, false)
-		store.PromoteLocked() // stands in for the player acknowledgement
 		store.Unlock()
 		require.NoError(t, updateErr)
 	}}, zaptest.NewLogger(t))
@@ -661,7 +659,6 @@ func TestDisplayPlaylistRejectsWhenTheProjectionLeavesOnlyDeadSources(t *testing
 	require.NoError(t, err)
 	store.Lock()
 	_, err = store.UpdateLocked(true, false) // mature allowed, so the live item survives the first filter
-	store.PromoteLocked()                    // stands in for the player acknowledgement
 	store.Unlock()
 	require.NoError(t, err)
 
@@ -681,7 +678,6 @@ func TestDisplayPlaylistRejectsWhenTheProjectionLeavesOnlyDeadSources(t *testing
 			// which removes the one reachable item.
 			store.Lock()
 			_, updateErr := store.UpdateLocked(false, false)
-			store.PromoteLocked() // stands in for the player acknowledgement
 			store.Unlock()
 			require.NoError(t, updateErr)
 		},
@@ -723,21 +719,20 @@ func (p *verdictProber) ProbeSources(_ context.Context, sources []string) []offl
 	return out
 }
 
-// A durable update whose player acknowledgement fails must NOT change what the
-// device admits. The owner's intent survives on disk and SyncContentPolicy
-// re-pushes it, but admission stays on the last acknowledged policy — otherwise
-// a caller told the update failed is left with a device that quietly changed
-// its behavior anyway.
-func TestSetContentPolicyDoesNotAdmitAnUnacknowledgedPolicy(t *testing.T) {
+// A set whose player acknowledgement fails must change nothing: not admission,
+// not the lock-free snapshot the scheduler projector reads, and not the file —
+// because the file is the only thing a restart restores, so a refused policy
+// written now would come back as the active one on the next boot.
+func TestSetContentPolicyPersistsNothingWithoutAnAcknowledgement(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	player := mocks.NewMockCDP(ctrl)
-	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	path := filepath.Join(t.TempDir(), "policy.json")
+	store, err := contentpolicy.Open(path, false)
 	require.NoError(t, err)
 	h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl),
 		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
-	// The player never acknowledges the new values.
 	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, _ map[string]interface{}) (interface{}, error) {
 			return map[string]interface{}{"message": map[string]interface{}{"ok": false, "error": "busy"}}, nil
@@ -750,14 +745,14 @@ func TestSetContentPolicyDoesNotAdmitAnUnacknowledgedPolicy(t *testing.T) {
 	require.Equal(t, false, result.(map[string]interface{})["ok"])
 
 	store.Lock()
-	active, desired, pending := store.CurrentLocked(), store.DesiredLocked(), store.PendingLocked()
+	active := store.CurrentLocked()
 	store.Unlock()
-	require.False(t, active.ShowMatureContent, "a failed update must not change admission")
-	require.True(t, desired.ShowMatureContent, "the owner's intent must survive for the next sync")
-	require.True(t, pending)
+	require.False(t, active.ShowMatureContent, "a refused update must not change admission")
 	require.False(t, store.Snapshot().ShowMatureContent, "the scheduler projector must not see it either")
+	_, statErr := os.Stat(path)
+	require.True(t, os.IsNotExist(statErr), "a refused update must not reach the file a restart restores")
 
-	// A later reconnect sync that IS acknowledged promotes it.
+	// An acknowledged set does commit.
 	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, _ map[string]interface{}) (interface{}, error) {
 			return map[string]interface{}{"message": map[string]interface{}{
@@ -765,10 +760,14 @@ func TestSetContentPolicyDoesNotAdmitAnUnacknowledgedPolicy(t *testing.T) {
 				"contentPolicy": map[string]interface{}{"version": float64(1), "showMatureContent": true, "strictPersonal": false, "blockUnratedCurated": false},
 			}}, nil
 		}).Times(1)
-	require.NoError(t, commandrouter.SyncContentPolicy(h))
+	result, err = h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_SET_CONTENT_POLICY, Arguments: map[string]any{"showMatureContent": true, "strictPersonal": false},
+	})
+	require.NoError(t, err)
+	require.Equal(t, true, result.(map[string]interface{})["active"])
 	store.Lock()
-	active, pending = store.CurrentLocked(), store.PendingLocked()
+	active = store.CurrentLocked()
 	store.Unlock()
-	require.True(t, active.ShowMatureContent, "a matching acknowledgement must promote the intent")
-	require.False(t, pending)
+	require.True(t, active.ShowMatureContent)
+	require.FileExists(t, path)
 }

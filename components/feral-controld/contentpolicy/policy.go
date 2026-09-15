@@ -130,16 +130,12 @@ func (p Policy) Project(in *dp1playlist.Playlist, origin Context) (*dp1playlist.
 type Store struct {
 	mu   sync.Mutex
 	path string
-	// policy is the ACTIVE admission policy: the one casts, refreshes and
-	// scheduler cutovers are filtered against. It changes only when the player
-	// has acknowledged the same values, so the daemon never enforces a policy
-	// the caller was told did not take effect.
+	// policy is the acknowledged admission policy: the one casts, refreshes and
+	// scheduler cutovers are filtered against, and the only thing this file ever
+	// holds. A value the player has not acknowledged is never written and never
+	// enforced, so there is no second state to keep, to persist, or to restore
+	// after a restart.
 	policy Policy
-	// desired is the owner's durable intent — what UpdateLocked wrote to disk.
-	// It equals policy in the normal case and leads it only between a durable
-	// write and the acknowledgement that promotes it, which is also what
-	// SyncContentPolicy re-pushes on the next player generation.
-	desired Policy
 	// durable is false while the on-disk policy could not be read. Admission
 	// keeps running on safe defaults, but the RPCs must not claim the saved
 	// user setting is in force, because it is unknown. A successful
@@ -175,7 +171,7 @@ func (s *Store) publishSnapshot() {
 func Fallback(path string, blockUnratedCurated bool) *Store {
 	p := Default()
 	p.BlockUnratedCurated = blockUnratedCurated
-	s := &Store{path: path, policy: p, desired: p}
+	s := &Store{path: path, policy: p}
 	s.publishSnapshot()
 	return s
 }
@@ -184,21 +180,14 @@ func Fallback(path string, blockUnratedCurated bool) *Store {
 // been written to) the durable file.
 func (s *Store) DurableLocked() bool { return s.durable }
 
-// DesiredLocked returns the owner's durable intent, which is what gets pushed
-// to a player generation. Use CurrentLocked for admission decisions.
-func (s *Store) DesiredLocked() Policy { return s.desired }
-
-// PendingLocked reports whether a durable update is still waiting for a player
-// acknowledgement to promote it into admission.
-func (s *Store) PendingLocked() bool { return s.desired != s.policy }
-
-// PromoteLocked makes the durable intent the active admission policy. Callers
-// invoke it only after the current player generation acknowledged exactly these
-// values — that acknowledgement is the whole point of the split.
-func (s *Store) PromoteLocked() Policy {
-	s.policy = s.desired
-	s.publishSnapshot()
-	return s.policy
+// CandidateLocked builds the policy a set request is asking for WITHOUT
+// changing or persisting anything. The caller sends this to the player and only
+// commits it once the current generation acknowledges exactly these values.
+func (s *Store) CandidateLocked(showMature, strictPersonal bool) Policy {
+	next := s.policy
+	next.ShowMatureContent = showMature
+	next.StrictPersonal = strictPersonal
+	return next
 }
 
 // wirePolicy is the on-disk shape decoded into ZERO values, with every field a
@@ -260,10 +249,6 @@ func Open(path string, blockUnratedCurated bool) (*Store, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read content policy: %w", err)
 	}
-	// At boot the stored policy is both the intent and the active one: it is
-	// the owner's setting, and there is no earlier acknowledged value to hold
-	// on to. SyncContentPolicy pushes it to the player as it comes up.
-	s.desired = s.policy
 	s.publishSnapshot()
 	return s, nil
 }
@@ -280,25 +265,33 @@ func (s *Store) TryLock() bool { return s.mu.TryLock() }
 
 func (s *Store) CurrentLocked() Policy { return s.policy }
 
-// UpdateLocked records the owner's intent durably. It deliberately does NOT
-// change the active admission policy: PromoteLocked does that, after the player
-// acknowledges the same values. Otherwise a caller told the update failed would
-// still find the device admitting content by the new rules.
+// UpdateLocked commits a policy the player has ALREADY acknowledged: it writes
+// the file and makes the values the active admission policy.
+//
+// Called after the acknowledgement, never before. Persisting first and then
+// discovering the player refused would leave a caller told the update failed
+// with a device that had nevertheless changed its admission behavior — and a
+// restart would then promote that refused policy, since the file is the only
+// thing a restart can restore. Writing only acknowledged values keeps those two
+// impossible without a second persisted state to reconcile.
+//
+// If the write fails after the player accepted, the daemon keeps the old policy
+// and reports the failure; the next reconnect sync re-pushes the stored policy
+// and puts the player back in step.
 func (s *Store) UpdateLocked(showMature, strictPersonal bool) (Policy, error) {
-	next := s.desired
-	next.ShowMatureContent = showMature
-	next.StrictPersonal = strictPersonal
+	next := s.CandidateLocked(showMature, strictPersonal)
 	// A repeated identical set must not cost a flash write. Skipped only when
 	// the file is already the source of truth: on a non-durable store the same
 	// values still have to be written, because that write is what repairs it.
-	if s.durable && next == s.desired {
-		return s.desired, nil
+	if s.durable && next == s.policy {
+		return s.policy, nil
 	}
 	if err := persistAtomic(s.path, next); err != nil {
 		return Policy{}, err
 	}
-	s.desired = next
+	s.policy = next
 	s.durable = true
+	s.publishSnapshot()
 	return next, nil
 }
 

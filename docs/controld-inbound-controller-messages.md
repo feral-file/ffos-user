@@ -2796,13 +2796,14 @@ Success is reported only after the atomic durable write succeeds *and* the
 player returns a matching acknowledgement. A repeated identical set performs no
 durable write, so holding the toggle does not amplify flash writes.
 
-The durable write records the owner's **intent**; it does not by itself change
-what the device admits. Only a matching acknowledgement promotes it into
-admission, so a caller told the update failed is never left with a device that
-quietly changed its filtering anyway. The intent survives on disk and is
-re-pushed on the next player generation; until it is acknowledged,
-`getContentPolicy` answers `contentPolicyUnavailable` rather than reporting
-either value as the setting in force.
+The order is **acknowledgement first, then the durable write**. Only values the
+current player generation has accepted are ever written or enforced, so a caller
+told the update failed is never left with a device that quietly changed its
+filtering — and since the file is the only thing a restart restores, a refused
+policy cannot come back as the active one after a reboot. If the write fails
+after the player accepted, the device keeps its previous policy and reports the
+failure; the next reconnect sync re-pushes the stored policy and puts the player
+back in step.
 
 Error cases: `invalidRequest`, `unsupported`, `contentPolicyUnavailable`.
 
