@@ -2816,6 +2816,13 @@ Success is reported only after the atomic durable write succeeds *and* the
 player returns a matching acknowledgement. A repeated identical set performs no
 durable write, so holding the toggle does not amplify flash writes.
 
+A factory reset clears the content policy along with the claim and the device
+name, and pushes the default to the player. On the success path the file is
+discarded with the subvolume anyway; this is for the rollback path, so a resold
+device cannot inherit the previous owner's admission rules. The operator-owned
+`blockUnratedCurated` gate survives, because it is device configuration rather
+than an owner setting.
+
 The order is **acknowledgement first, then the durable write**. Only values the
 current player generation has accepted are ever written or enforced, so a caller
 told the update failed is never left with a device that quietly changed its
@@ -2823,7 +2830,9 @@ filtering — and since the file is the only thing a restart restores, a refused
 policy cannot come back as the active one after a reboot. If the write fails
 after the player accepted, the device keeps its previous policy and reports the
 failure; the next reconnect sync re-pushes the stored policy and puts the player
-back in step.
+back in step. If the write lands but its directory entry cannot be confirmed
+durable even on retry, the reply is `contentPolicyUnavailable` rather than
+success — a restart could still revert it, and `ok:true` means saved.
 
 Error cases: `invalidRequest`, `unsupported`, `contentPolicyUnavailable`.
 

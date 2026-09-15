@@ -71,6 +71,15 @@ type Executor interface {
 	// Register time, so the advertised name only changes if something
 	// re-registers — the same constraint SetClaimObserver exists for.
 	SetDeviceNameObserver(observer func(name string))
+
+	// SetContentPolicyResetter registers the callback that returns the device's
+	// content policy to defaults during a factory reset. Owner-specific state,
+	// so it falls with the claim for the same rollback reason the device name
+	// does: a reset that rolls back must not leave a resold frame enforcing the
+	// previous owner's audience settings. A seam rather than a direct call
+	// because the executor must not depend on the policy store or the command
+	// router. Set once at wiring time.
+	SetContentPolicyResetter(reset func() error)
 	// SetSetupUI injects the process-wide setup-narration surface so the
 	// controld-owned claim/factory-reset/OTA-failure narration shares ONE
 	// setupui.Service with the provisioning domain. Set once at wiring time; the
@@ -99,6 +108,9 @@ type executor struct {
 	// claimObserver, when set, is notified on claim-state transitions. Set once
 	// at wiring time before commands are served, so it needs no lock.
 	claimObserver func(claimed bool)
+	// contentPolicyResetter, when set, restores default content policy during a
+	// factory reset. See SetContentPolicyResetter.
+	contentPolicyResetter func() error
 
 	// nameObserver, when set, is notified after the device name is stored so
 	// the mDNS record can be re-registered with it. Same wiring discipline as
@@ -524,6 +536,10 @@ func New(
 
 func (e *executor) SetClaimObserver(observer func(claimed bool)) {
 	e.claimObserver = observer
+}
+
+func (e *executor) SetContentPolicyResetter(reset func() error) {
+	e.contentPolicyResetter = reset
 }
 
 func (e *executor) SetDeviceNameObserver(observer func(name string)) {
@@ -2970,6 +2986,19 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	// over it would trade a real outcome for a label.
 	if err := e.clearDeviceName(); err != nil {
 		e.logger.Warn("Failed to clear device name during factory reset", zap.Error(err))
+	}
+
+	// The content policy is the owner's audience setting, so it falls with the
+	// claim for exactly the rollback reason above: on the success path the
+	// durable file is discarded with the subvolume, but a reset that rolls back
+	// would otherwise hand a resold frame the previous owner's admission rules
+	// — including a mature-content allowance the next owner never chose.
+	// Best-effort, like the device name: failing the reset over it would trade
+	// a real outcome for a setting the success path erases anyway.
+	if e.contentPolicyResetter != nil {
+		if err := e.contentPolicyResetter(); err != nil {
+			e.logger.Warn("Failed to reset content policy during factory reset", zap.Error(err))
+		}
 	}
 
 	// The process-lifetime pairing latch must fall with the persisted claim,

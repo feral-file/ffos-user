@@ -284,3 +284,52 @@ func TestErrDurabilityUncertainIsDistinctFromAFailedWrite(t *testing.T) {
 		t.Fatal("an uncommitted write must not change the active policy")
 	}
 }
+
+// The owner's audience setting falls with the claim on a factory reset: a reset
+// that rolls back must not hand a resold frame the previous owner's admission
+// rules. The operator gate survives, because it comes from device
+// configuration, not from the owner being removed.
+func TestResetLockedClearsTheOwnerSettingAndKeepsTheOperatorGate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	s, err := Open(path, true) // operator gate on
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Lock()
+	if _, err := s.UpdateLocked(true, true); err != nil {
+		s.Unlock()
+		t.Fatal(err)
+	}
+	s.Unlock()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("setup did not persist: %v", err)
+	}
+
+	s.Lock()
+	after, err := s.ResetLocked()
+	snapshot := s.Snapshot()
+	s.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ShowMatureContent || after.StrictPersonal {
+		t.Fatalf("owner setting survived the reset: %+v", after)
+	}
+	if !after.BlockUnratedCurated {
+		t.Fatal("the operator gate is device configuration and must survive")
+	}
+	if snapshot != after {
+		t.Fatalf("the lock-free snapshot still reads %+v", snapshot)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the durable file must be gone so the next boot starts clean: %v", err)
+	}
+
+	// Reset on a device that never wrote a policy is not an error.
+	s.Lock()
+	_, err = s.ResetLocked()
+	s.Unlock()
+	if err != nil {
+		t.Fatalf("reset with no file present: %v", err)
+	}
+}

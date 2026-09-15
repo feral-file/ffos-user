@@ -89,6 +89,18 @@ func (mr *MockExecutorMockRecorder) SetClaimObserver(observer interface{}) *gomo
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetClaimObserver", reflect.TypeOf((*MockExecutor)(nil).SetClaimObserver), observer)
 }
 
+// SetContentPolicyResetter mocks base method.
+func (m *MockExecutor) SetContentPolicyResetter(reset func() error) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetContentPolicyResetter", reset)
+}
+
+// SetContentPolicyResetter indicates an expected call of SetContentPolicyResetter.
+func (mr *MockExecutorMockRecorder) SetContentPolicyResetter(reset interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetContentPolicyResetter", reflect.TypeOf((*MockExecutor)(nil).SetContentPolicyResetter), reset)
+}
+
 // SetDeviceNameObserver mocks base method.
 func (m *MockExecutor) SetDeviceNameObserver(observer func(string)) {
 	m.ctrl.T.Helper()

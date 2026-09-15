@@ -329,3 +329,44 @@ func TestStaticInlineRefreshLeavesAnUnknownContextAlone(t *testing.T) {
 		t.Fatalf("an unknown context must not be reclassified as curated; sent=%s", *sent)
 	}
 }
+
+// authoritySpyScheduler reports a token that has MOVED since the pass started,
+// standing in for a newer cast completing while this refresh was projecting.
+type authoritySpyScheduler struct {
+	playlistschedule.Scheduler
+	pushed bool
+}
+
+func (s *authoritySpyScheduler) Source() playlistschedule.Source { return playlistschedule.Source{} }
+func (s *authoritySpyScheduler) RestoredPending() bool           { return false }
+func (s *authoritySpyScheduler) AuthorityToken() uint64 {
+	if s.pushed {
+		return 2 // moved by the time the send closure runs
+	}
+	return 1
+}
+func (s *authoritySpyScheduler) WithPlayerPush(fn func()) {
+	s.pushed = true
+	fn()
+}
+func (s *authoritySpyScheduler) SetProjector(playlistschedule.Projector) {}
+
+// The inline policy re-send is built from a status read taken BEFORE the
+// projection, so it must run under the scheduler push lock and re-check the
+// authority token: a cast that completed in between would otherwise be
+// overwritten by this stale playlist, restoring the previous artwork and its
+// offline-replay scope.
+func TestStaticInlineRefreshSkipsWhenPlaylistAuthorityMoved(t *testing.T) {
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, sent := newInlineRefresher(t, "curated", store)
+	r.scheduler = &authoritySpyScheduler{}
+	if err := r.processPlayingPlaylist(false); err != nil {
+		t.Fatal(err)
+	}
+	if *sent != "" {
+		t.Fatalf("a newer cast must not be overwritten by a stale policy re-send; sent=%s", *sent)
+	}
+}

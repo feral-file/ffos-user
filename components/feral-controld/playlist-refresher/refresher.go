@@ -463,7 +463,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	}
 
 	if staticInline != nil {
-		return r.refreshStaticInline(staticInline, staticInlineContext, contextUnknown, playerStatus)
+		return r.refreshStaticInline(staticInline, staticInlineContext, contextUnknown, playerStatus, authorityToken)
 	}
 
 	var playlist *dp1.Playlist
@@ -699,7 +699,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 // removed are simply not there to restore. That needs the daemon to retain the
 // original document, the same retained-state change deferred for scheduled
 // playlists.
-func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext string, contextUnknown bool, playerStatus *status.PlayerStatus) error {
+func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext string, contextUnknown bool, playerStatus *status.PlayerStatus, authorityToken uint64) error {
 	if r.contentPolicy == nil || contextUnknown {
 		if contextUnknown {
 			r.logger.Warn("Player status omits contentContext; leaving this inline playlist unprojected rather than reclassifying it as curated")
@@ -731,11 +731,6 @@ func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext strin
 		r.logger.Warn("Inline playlist is all blocked by the content policy; retiring current content")
 	}
 
-	if r.kioskReplay != nil {
-		r.kioskReplay.LockPlayback()
-		defer r.kioskReplay.UnlockPlayback()
-		r.syncReplayScopeLocked(&out)
-	}
 	if !r.cdp.Initialized() {
 		return errCDPNotReady
 	}
@@ -750,14 +745,38 @@ func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext strin
 	if retire {
 		command.Arguments["retireBlockedCurrent"] = true
 	}
-	result, sendErr := r.sendCDPRequest(command)
-	if sendErr != nil {
-		return sendErr
+
+	// Serialized against every other authoritative display, exactly like the
+	// ordinary refresh send below. This re-send is built from a status read
+	// taken BEFORE the projection above, so without the push lock and the
+	// authority re-check a cast that completed in between would be overwritten
+	// by this stale playlist — and its offline-replay scope with it.
+	var sendErr error
+	send := func() {
+		if r.scheduler != nil && r.scheduler.AuthorityToken() != authorityToken {
+			r.logger.Debug("Skipping obsolete inline policy re-send: playlist authority changed")
+			return
+		}
+		if r.kioskReplay != nil {
+			r.kioskReplay.LockPlayback()
+			defer r.kioskReplay.UnlockPlayback()
+			r.syncReplayScopeLocked(&out)
+		}
+		result, sendCDPErr := r.sendCDPRequest(command)
+		if sendCDPErr != nil {
+			sendErr = sendCDPErr
+			return
+		}
+		if !playerresponse.OK(result) {
+			sendErr = errPlayerRejectedRefresh
+		}
 	}
-	if !playerresponse.OK(result) {
-		return errPlayerRejectedRefresh
+	if r.scheduler != nil {
+		r.scheduler.WithPlayerPush(send)
+	} else {
+		send()
 	}
-	return nil
+	return sendErr
 }
 
 // syncStaticInlineScope is the pre-existing behavior for this shape: keep

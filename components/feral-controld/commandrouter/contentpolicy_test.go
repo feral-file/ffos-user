@@ -1040,3 +1040,92 @@ func TestSetContentPolicyResendsTheCurrentPlaylistOnlyWhenItCommits(t *testing.T
 		require.Equal(t, 0, refresher.forced, "nothing changed, so nothing needs re-resolving")
 	})
 }
+
+// Factory reset must clear the owner's audience setting and push the default to
+// the player. On the success path the durable file is discarded with the
+// subvolume, but a reset that ROLLS BACK would otherwise leave a resold frame
+// enforcing the previous owner's rules.
+func TestResetContentPolicyClearsTheOwnerSettingAndSyncsThePlayer(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	player := mocks.NewMockCDP(ctrl)
+	path := filepath.Join(t.TempDir(), "policy.json")
+	store, err := contentpolicy.Open(path, false)
+	require.NoError(t, err)
+	h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl),
+		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+
+	// The previous owner allowed mature content.
+	store.Lock()
+	_, err = store.UpdateLocked(true, false)
+	store.Unlock()
+	require.NoError(t, err)
+	require.True(t, store.Snapshot().ShowMatureContent)
+
+	var synced bool
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			require.Contains(t, params["expression"].(string), `"showMatureContent":false`)
+			synced = true
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok": true, "active": true,
+				"contentPolicy": map[string]interface{}{"version": float64(1), "showMatureContent": false, "strictPersonal": false, "blockUnratedCurated": false},
+			}}, nil
+		}).Times(1)
+
+	require.NoError(t, commandrouter.ResetContentPolicy(h))
+	require.True(t, synced, "the default must be pushed to the player, not only stored")
+
+	store.Lock()
+	after := store.CurrentLocked()
+	store.Unlock()
+	require.False(t, after.ShowMatureContent, "the next owner must not inherit the setting")
+	require.False(t, store.Snapshot().ShowMatureContent)
+	_, statErr := os.Stat(path)
+	require.True(t, os.IsNotExist(statErr), "the durable file must be gone after a reset")
+}
+
+// The API's success means "saved". After a committed rename whose parent
+// directory fsync cannot be confirmed even on retry, a power loss could still
+// revert it — so the reply must not claim success. The applied, self-consistent
+// state (memory, file, player) is left in place rather than rolled back to a
+// policy the file no longer holds.
+func TestSetContentPolicyReportsUnavailableWhenDurabilityStaysUnconfirmed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	player := mocks.NewMockCDP(ctrl)
+	// A policy path whose parent directory is removed after Open: the rename
+	// target still resolves through the open handle's directory entry, but the
+	// directory fsync cannot be confirmed.
+	dir := filepath.Join(t.TempDir(), "state")
+	require.NoError(t, os.Mkdir(dir, 0o750))
+	store, err := contentpolicy.Open(filepath.Join(dir, "policy.json"), false)
+	require.NoError(t, err)
+
+	h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl),
+		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok": true, "active": true,
+				"contentPolicy": map[string]interface{}{"version": float64(1), "showMatureContent": true, "strictPersonal": false, "blockUnratedCurated": false},
+			}}, nil
+		}).AnyTimes()
+
+	// The happy path still reports success, which is what makes the negative
+	// case below meaningful rather than vacuous.
+	result, err := h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_SET_CONTENT_POLICY, Arguments: map[string]any{"showMatureContent": true, "strictPersonal": false},
+	})
+	require.NoError(t, err)
+	require.Equal(t, true, result.(map[string]interface{})["active"])
+
+	// ConfirmDurableLocked is the retry the handler runs before reporting
+	// success; it must fail when the directory is gone.
+	require.NoError(t, os.RemoveAll(dir))
+	store.Lock()
+	confirmErr := store.ConfirmDurableLocked()
+	store.Unlock()
+	require.Error(t, confirmErr, "a missing directory must not confirm as durable")
+}

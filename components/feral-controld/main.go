@@ -1164,6 +1164,11 @@ func initializeApp(
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
 	playlist_refresher.SetContentPolicy(playlistRefresher, policyStore)
 	commandrouter.SetPolicyRefresher(rawCmdHandler, playlistRefresher, logger)
+	// The owner's content policy falls with the claim on a factory reset, for
+	// the same rollback reason the device name does (see factoryReset).
+	executor.SetContentPolicyResetter(func() error {
+		return commandrouter.ResetContentPolicy(rawCmdHandler)
+	})
 
 	// Replay saturation invalidates Fetch-interception scope exactly the way
 	// a kiosk restart does: retireOnSaturation closes the root CDP session so

@@ -161,6 +161,33 @@ func (h *handler) setContentPolicy(policy *contentpolicy.Store) {
 //
 // Lock order is the same one displayPlaylist and setContentPolicy use: content
 // policy store, then pushMu.
+// ResetContentPolicy returns the device to default content policy and pushes
+// that default to the current player generation. Used by factory reset: the
+// owner's audience setting falls with the claim.
+//
+// The durable reset stands even if the player cannot be reached — the point is
+// that the NEXT owner does not inherit the setting, and a player that comes up
+// later is synced by the reconnect reconciler.
+func ResetContentPolicy(h Handler) error {
+	target, ok := h.(*handler)
+	if !ok || target.contentPolicy == nil {
+		return errors.New("content policy unavailable")
+	}
+	target.contentPolicy.Lock()
+	defer target.contentPolicy.Unlock()
+	if _, err := target.contentPolicy.ResetLocked(); err != nil {
+		return err
+	}
+	var syncErr error
+	sync := func() { syncErr = target.syncContentPolicyLocked() }
+	if target.scheduler != nil {
+		target.scheduler.WithPlayerPush(sync)
+	} else {
+		sync()
+	}
+	return syncErr
+}
+
 func SyncContentPolicy(h Handler) error {
 	target, ok := h.(*handler)
 	if !ok || target.contentPolicy == nil {
@@ -1275,14 +1302,22 @@ func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
 		}
 	}()
 	if errors.Is(err, contentpolicy.ErrDurabilityUncertain) {
-		// The file IS in place — only the parent directory entry's durability
-		// is unconfirmed — so the update took effect and the store has already
-		// committed it. Reporting failure here would be the inconsistency this
-		// guards against: a restart would come up on the new policy while the
-		// caller was told it did not apply.
-		h.logger.Error("content policy written but its directory entry may not be durable", zap.Error(err))
+		// The file IS in place and every surface agrees on it — memory, the
+		// snapshot, and the player. What is unconfirmed is only whether the
+		// directory entry survives a power loss, so retry that fsync before
+		// deciding what to report.
 		committed = true
-		return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}
+		if confirmErr := h.contentPolicy.ConfirmDurableLocked(); confirmErr == nil {
+			return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}
+		} else {
+			// Still unconfirmed. The API's success means "saved", and a restart
+			// could still revert this, so do not claim it: report unavailable
+			// and leave the applied, self-consistent state in place rather than
+			// rolling the player back to a policy the file no longer holds.
+			h.logger.Error("content policy written but its directory entry could not be made durable; reporting unavailable",
+				zap.Error(err), zap.NamedError("confirm", confirmErr))
+			return policyFailure("contentPolicyUnavailable")
+		}
 	}
 	if err != nil {
 		previous := h.contentPolicy.CurrentLocked()

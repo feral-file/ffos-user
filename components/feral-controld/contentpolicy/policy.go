@@ -187,6 +187,40 @@ func Fallback(path string, blockUnratedCurated bool) *Store {
 // been written to) the durable file.
 func (s *Store) DurableLocked() bool { return s.durable }
 
+// ResetLocked returns the store to factory defaults and removes the durable
+// file, for a factory reset. The operator-owned audit gate is preserved: it
+// comes from device configuration, not from the owner being removed.
+//
+// The file is deleted rather than rewritten with defaults, so the next boot
+// takes the same path as a device that has never had a policy written.
+func (s *Store) ResetLocked() (Policy, error) {
+	next := Default()
+	next.BlockUnratedCurated = s.policy.BlockUnratedCurated
+	if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Policy{}, fmt.Errorf("remove content policy: %w", err)
+	}
+	s.policy = next
+	s.durable = true
+	s.publishSnapshot()
+	return next, nil
+}
+
+// ConfirmDurableLocked re-attempts the parent-directory fsync that makes an
+// already-renamed policy file survive a power loss. It exists so a caller that
+// saw ErrDurabilityUncertain can retry before deciding what to report: the
+// content is in place either way, and this is the only thing still unconfirmed.
+func (s *Store) ConfirmDurableLocked() error {
+	dir, err := os.Open(filepath.Dir(s.path)) //nolint:gosec // G304: the policy file's own parent directory.
+	if err != nil {
+		return err
+	}
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		return err
+	}
+	return dir.Close()
+}
+
 // CandidateLocked builds the policy a set request is asking for WITHOUT
 // changing or persisting anything. The caller sends this to the player and only
 // commits it once the current generation acknowledges exactly these values.
