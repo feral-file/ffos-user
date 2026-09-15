@@ -220,3 +220,67 @@ func TestOpenIgnoresUnknownFieldsButStillRequiresTheKnownOnes(t *testing.T) {
 		t.Fatal("trailing JSON must still be a load failure")
 	}
 }
+
+// Once the rename lands, the file holds the new values and a restart would load
+// them — so memory must agree even if the parent-directory fsync afterwards
+// fails. Reporting that as a failed update is the inconsistency: the caller
+// would be told it did not apply, and a reboot would apply it.
+func TestUpdateLockedCommitsWhenOnlyDirectoryDurabilityIsUncertain(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	s, err := Open(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.Lock()
+	got, err := s.UpdateLocked(true, true)
+	s.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ShowMatureContent || !got.StrictPersonal {
+		t.Fatalf("got %+v", got)
+	}
+
+	// Whatever persistAtomic reports after the rename, the file and memory must
+	// describe the same policy — that is the invariant the split return exists
+	// for, and it is what a restart depends on.
+	reloaded, err := Open(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded.Lock()
+	stored := reloaded.CurrentLocked()
+	reloaded.Unlock()
+	s.Lock()
+	inMemory := s.CurrentLocked()
+	s.Unlock()
+	if stored != inMemory {
+		t.Fatalf("file %+v and memory %+v disagree", stored, inMemory)
+	}
+}
+
+func TestErrDurabilityUncertainIsDistinctFromAFailedWrite(t *testing.T) {
+	// A write that never commits must NOT read as merely uncertain durability:
+	// the handler treats the latter as success.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	if err := os.Mkdir(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	s := Fallback(path, false)
+	s.Lock()
+	_, err := s.UpdateLocked(true, false)
+	active := s.CurrentLocked()
+	s.Unlock()
+	if err == nil {
+		t.Fatal("an uncommitted write must report an error")
+	}
+	if errors.Is(err, ErrDurabilityUncertain) {
+		t.Fatalf("an uncommitted write must not be classified as uncertain durability: %v", err)
+	}
+	if active.ShowMatureContent {
+		t.Fatal("an uncommitted write must not change the active policy")
+	}
+}

@@ -24,6 +24,13 @@ const (
 
 var ErrContentBlocked = errors.New("contentBlocked")
 
+// ErrDurabilityUncertain marks a write whose rename COMMITTED but whose parent
+// directory could not be fsynced afterwards. The new values are in the file and
+// in memory; only their survival across a power loss before the directory entry
+// reaches disk is in doubt. Callers treat it as success and log it, because the
+// alternative — reporting failure — is the inconsistency, not the fix.
+var ErrDurabilityUncertain = errors.New("content policy directory durability unconfirmed")
+
 // Policy is the complete device/player mirror contract. BlockUnratedCurated
 // is an operator audit gate and must not be populated from a controller request.
 type Policy struct {
@@ -299,12 +306,20 @@ func (s *Store) UpdateLocked(showMature, strictPersonal bool) (Policy, error) {
 	if s.durable && next == s.policy {
 		return s.policy, nil
 	}
-	if err := persistAtomic(s.path, next); err != nil {
+	committed, err := persistAtomic(s.path, next)
+	if !committed {
 		return Policy{}, err
 	}
+	// The rename succeeded, so the file already holds these values and a
+	// restart would load them. Memory must agree, or the daemon would keep
+	// admitting by the old policy while the file says otherwise — and the
+	// caller would be told an update failed that a reboot then applies.
 	s.policy = next
 	s.durable = true
 	s.publishSnapshot()
+	if err != nil {
+		return next, fmt.Errorf("%w: %w", ErrDurabilityUncertain, err)
+	}
 	return next, nil
 }
 
@@ -316,41 +331,48 @@ func (s *Store) ProjectLocked(in *dp1playlist.Playlist, origin Context) (*dp1pla
 	return s.policy.Project(in, origin)
 }
 
-func persistAtomic(path string, p Policy) error {
+// persistAtomic writes p to path. committed reports whether the rename that
+// makes the new content visible has happened: once it has, the file holds p
+// regardless of what the parent-directory fsync afterwards does, and the caller
+// must not treat the update as not applied.
+func persistAtomic(path string, p Policy) (committed bool, err error) {
 	b, err := jsonMarshal(p)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
+		return false, err
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
+		return false, err
 	}
 	// Reopened only to fsync the bytes just written; the path is this store's
 	// own fixed policy file plus a ".tmp" suffix, never a caller-supplied name.
 	f, err := os.OpenFile(tmp, os.O_RDWR, 0o600) //nolint:gosec // G304: derived from constant.CONTENT_POLICY_FILE (t.TempDir in tests).
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err = f.Sync(); err != nil {
 		_ = f.Close()
-		return err
+		return false, err
 	}
 	if err = f.Close(); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return err
+		return false, err
 	}
-	dir, err := os.Open(filepath.Dir(path))
+	// Past this point the new content IS what the path resolves to. Everything
+	// below only makes that visible entry durable across a power loss, so its
+	// failures are reported WITH committed=true.
+	dir, err := os.Open(filepath.Dir(path)) //nolint:gosec // G304: the policy file's own parent directory.
 	if err != nil {
-		return err
+		return true, err
 	}
 	if err = dir.Sync(); err != nil {
 		_ = dir.Close()
-		return err
+		return true, err
 	}
-	return dir.Close()
+	return true, dir.Close()
 }

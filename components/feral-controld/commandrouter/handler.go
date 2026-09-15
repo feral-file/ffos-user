@@ -784,9 +784,19 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						zap.Int("items", len(sources)))
 				} else {
 					probeResults := h.sourceProber.ProbeSources(ctx, sources)
+					// Keyed by the RAW source, taken from the input slice by
+					// index, NOT by result.Source: that field is
+					// query-redacted and truncated for the daemon log (see
+					// SourceProbeResult's doc), so keying on it would miss
+					// every signed URL — and a miss makes the re-check below
+					// fail open and forward a cast already proven dead.
+					// ProbeSources returns one result per source in input
+					// order, which is what makes the index safe.
 					probeVerdicts = make(map[string]offlinecache.SourceProbeResult, len(probeResults))
-					for _, r := range probeResults {
-						probeVerdicts[r.Source] = r
+					for i, r := range probeResults {
+						if i < len(sources) {
+							probeVerdicts[sources[i]] = r
+						}
 					}
 					// Per-item log detail is capped: the hub accepts a 4 MiB
 					// playlist with no item cap, so an all-dead hostile cast
@@ -1219,6 +1229,15 @@ func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
 	// long as the device stays up. Put the player back on the stored policy
 	// immediately, under the barriers already held here.
 	policy, err := h.contentPolicy.UpdateLocked(show, strict)
+	if errors.Is(err, contentpolicy.ErrDurabilityUncertain) {
+		// The file IS in place — only the parent directory entry's durability
+		// is unconfirmed — so the update took effect and the store has already
+		// committed it. Reporting failure here would be the inconsistency this
+		// guards against: a restart would come up on the new policy while the
+		// caller was told it did not apply.
+		h.logger.Error("content policy written but its directory entry may not be durable", zap.Error(err))
+		return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}
+	}
 	if err != nil {
 		previous := h.contentPolicy.CurrentLocked()
 		rollback, rollbackErr := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": previous})

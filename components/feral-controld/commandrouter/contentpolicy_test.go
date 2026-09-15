@@ -707,6 +707,9 @@ func TestDisplayPlaylistRejectsWhenTheProjectionLeavesOnlyDeadSources(t *testing
 type verdictProber struct {
 	verdicts map[string]offlinecache.SourceProbeVerdict
 	during   func()
+	// redactSources mimics the real prober, whose Source field is
+	// query-redacted and truncated for the daemon log.
+	redactSources bool
 }
 
 func (p *verdictProber) ProbeSources(_ context.Context, sources []string) []offlinecache.SourceProbeResult {
@@ -715,7 +718,13 @@ func (p *verdictProber) ProbeSources(_ context.Context, sources []string) []offl
 	}
 	out := make([]offlinecache.SourceProbeResult, 0, len(sources))
 	for _, s := range sources {
-		out = append(out, offlinecache.SourceProbeResult{Source: s, Verdict: p.verdicts[s]})
+		reported := s
+		if p.redactSources {
+			if cut := strings.IndexByte(reported, '?'); cut >= 0 {
+				reported = reported[:cut] + "?<redacted>"
+			}
+		}
+		out = append(out, offlinecache.SourceProbeResult{Source: reported, Verdict: p.verdicts[s]})
 	}
 	return out
 }
@@ -888,4 +897,59 @@ func TestSetContentPolicyRestoresThePlayerWhenTheWriteFails(t *testing.T) {
 	active := broken.CurrentLocked()
 	broken.Unlock()
 	require.False(t, active.ShowMatureContent, "a failed write must leave the daemon on its stored policy")
+}
+
+// SourceProbeResult.Source is query-redacted and truncated for the daemon log,
+// so the final-policy re-check must key its retained verdicts by the RAW source
+// it probed. Keying on the result field made every signed URL miss its own
+// verdict, and a miss makes the re-check fail open — forwarding exactly the
+// known-dead cast it exists to stop.
+func TestDisplayPlaylistRechecksSignedURLsAfterTheProjection(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	player := mocks.NewMockCDP(ctrl)
+	poller := mocks.NewMockStatusPoller(ctrl)
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	require.NoError(t, err)
+	store.Lock()
+	_, err = store.UpdateLocked(true, false) // mature allowed, so the live item survives the first filter
+	store.Unlock()
+	require.NoError(t, err)
+
+	h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl), poller,
+		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+
+	// Both sources carry query strings, which is what the log redaction strips.
+	const live = "https://live.example/mature.html?token=abc123&sig=deadbeef"
+	const dead = "https://dead.example/general.html?token=zzz999&sig=cafebabe"
+	commandrouter.SetSourceProber(h, &verdictProber{
+		verdicts: map[string]offlinecache.SourceProbeVerdict{
+			live: offlinecache.ProbeAlive,
+			dead: offlinecache.ProbeDead,
+		},
+		redactSources: true,
+		during: func() {
+			store.Lock()
+			_, updateErr := store.UpdateLocked(false, false)
+			store.Unlock()
+			require.NoError(t, updateErr)
+		},
+	}, zaptest.NewLogger(t))
+
+	// No player.EXPECT(): the known-dead remainder must not be cast.
+	poller.EXPECT().ForceRefresh().AnyTimes()
+
+	_, err = h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]any{"dp1_call": map[string]interface{}{
+			"dpVersion": "1.1.0", "title": "x",
+			"items": []interface{}{
+				map[string]interface{}{"source": live, "contentRating": "mature"},
+				map[string]interface{}{"source": dead, "contentRating": "general"},
+			},
+		}},
+	})
+	require.Error(t, err)
+	var unreachable *commandrouter.SourceUnreachableError
+	require.ErrorAs(t, err, &unreachable)
 }
