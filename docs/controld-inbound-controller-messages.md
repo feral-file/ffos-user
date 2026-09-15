@@ -2814,6 +2814,14 @@ The device filters the playlist against its policy before casting:
 A playlist carrying malformed content-rating extension fields is rejected as
 `playlistInvalid`. A malformed label is never silently treated as unrated.
 
+The context survives refresh. When a periodic refresh has to rebuild the source
+from player status and that status omits `contentContext` — only a player
+predating this feature does — the origin is treated as **unknown** and that
+refresh is left unprojected, rather than reclassified as `curated`. Guessing
+`curated` would strip the mature items an owner deliberately cast as
+`personal`. Such a player has no policy mirror of its own either
+(`setContentPolicy` answers `unsupported`).
+
 `retireBlockedCurrent:true` is a narrow daemon-to-player, refresh-only flag.
 Controllers do not send it.
 

@@ -399,6 +399,12 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	// than returned from inside it.
 	var staticInline *dp1.Playlist
 	var playerStatus *status.PlayerStatus
+	// contextUnknown marks a source rebuilt from a player status that omitted
+	// contentContext. Only a player predating this feature does that: the router
+	// sets the field on every cast it forwards, so a current player always
+	// echoes one. See the projection guard below for why it is not just
+	// defaulted to curated.
+	contextUnknown := false
 
 	if schedulerSource.IsZero() {
 		// No scheduler-owned source exists, so the player remains the source of
@@ -420,8 +426,10 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 
 		switch {
 		case playerStatus.PlaylistURL != nil:
+			contextUnknown = playerStatus.ContentContext == ""
 			schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL, ContentContext: playerStatus.ContentContext}
 		case playerStatus.Playlist != nil && playerStatus.Playlist.HasDynamicContent():
+			contextUnknown = playerStatus.ContentContext == ""
 			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist, ContentContext: playerStatus.ContentContext}
 		case playerStatus.Playlist != nil:
 			// Static inline player status only contains the filtered active set and
@@ -488,7 +496,19 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		defer r.contentPolicy.Unlock()
 	}
 	retireBlockedCurrent := false
-	if r.contentPolicy != nil {
+	// A source rebuilt from a status with no contentContext carries an UNKNOWN
+	// origin, not a curated one. Defaulting it to curated silently reclassifies
+	// a cast the owner made as personal, so the first refresh would strip the
+	// mature items they deliberately put on the wall — the opposite of the
+	// documented guarantee that context survives refresh. Leave the playlist as
+	// the cast admitted it instead. A player this old has no policy mirror of
+	// its own either (setContentPolicy answers unsupported), so there is no
+	// enforcement being bypassed here that ever worked on it.
+	if contextUnknown {
+		r.logger.Warn("Player status omits contentContext; leaving this refresh unprojected rather than reclassifying the cast as curated",
+			zap.String("source", schedulerSource.PlaylistURL))
+	}
+	if r.contentPolicy != nil && !contextUnknown {
 		var blocked bool
 		projected, blocked, projectErr := r.contentPolicy.ProjectLocked(&playlist.Playlist, contentContext)
 		if projectErr != nil {
