@@ -262,7 +262,7 @@ func (w *streamWriter) Close() error {
 		case <-w.workerDone:
 		case <-time.After(100 * time.Millisecond):
 		}
-		return fmt.Errorf("Cloudflare log flush exceeded %s shutdown budget", budget)
+		return fmt.Errorf("cloudflare log flush exceeded %s shutdown budget", budget)
 	}
 }
 
