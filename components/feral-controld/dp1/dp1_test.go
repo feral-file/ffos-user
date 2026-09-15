@@ -1354,8 +1354,11 @@ func TestDP1_ProcessDynamicPlaylist_RejectsWrongTypedResolvedRatings(t *testing.
 
 	_, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist)
 	require.Error(t, err)
-	assert.ErrorContains(t, err, "invalid playlist item")
+	// Pointer only — the validator's own message, which can quote the offending
+	// value, must not survive into an error returned to a caster.
 	assert.ErrorContains(t, err, "contentRating")
+	assert.NotContains(t, err.Error(), "invalid playlist item",
+		"dp1-go's message must not be carried through verbatim")
 	// Malformed CONTENT from a resolver must reach the transports as the
 	// documented playlistInvalid classification, the same as a malformed inline
 	// or fetched document — not as a generic 500.

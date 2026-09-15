@@ -3,6 +3,7 @@ package commandrouter_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1311,4 +1312,44 @@ func TestDisplayPlaylistAppliesTheUnratedGateToAnUnknownRatingString(t *testing.
 	require.Error(t, err)
 	require.True(t, commandrouter.IsContentBlocked(err),
 		"the unrated-curated gate must treat an unknown label as unrated, got %v", err)
+}
+
+// dp1-go's format assertions print the offending VALUE whole, and the hub and
+// the relayer return err.Error() verbatim — so wrapping that message handed a
+// caster the source URL, query credentials and all. The error carries JSON
+// pointers only.
+func TestPlaylistInvalidCarriesThePathNotTheValue(t *testing.T) {
+	h, _, _ := newPolicyHandler(t)
+	const signed = "/media/a?token=SECRET&sig=deadbeef"
+
+	// A source that fails the schema's format assertion: the validator's
+	// message names it, which is exactly what must not escape.
+	_, err := h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]any{"dp1_call": map[string]interface{}{
+			"dpVersion": "1.1.0", "title": "x",
+			"items": []interface{}{
+				map[string]interface{}{"source": signed, "contentRating": 123},
+			},
+		}},
+	})
+	require.Error(t, err)
+	require.True(t, commandrouter.IsPlaylistInvalid(err))
+
+	text := err.Error()
+	require.NotContains(t, text, "SECRET", "the offending value reached the caster: %s", text)
+	require.NotContains(t, text, "token=", "a query string reached the caster: %s", text)
+	require.NotContains(t, text, "/media/a", "the source path reached the caster: %s", text)
+	// The pointer is what a caster needs to fix its own document.
+	require.Contains(t, text, "/items/0/contentRating", "the failing field must be named: %s", text)
+}
+
+// The extractor is an allow-list, so a message it does not recognize yields no
+// locations rather than leaking one.
+func TestValidationPointersDropsAnythingUnrecognized(t *testing.T) {
+	require.Empty(t, dp1.ValidationPointers(nil))
+	require.Empty(t, dp1.ValidationPointers(errors.New("at 'https://cdn/x?token=SECRET' is not valid")),
+		"a value in the 'at' position is not a pointer and must be dropped")
+	require.Equal(t, []string{"/items/0/source"},
+		dp1.ValidationPointers(errors.New("validation failed\n- at '/items/0/source': '/media/a?token=SECRET' is not valid 'uri'")))
 }

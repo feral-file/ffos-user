@@ -126,14 +126,22 @@ func IsContentBlocked(err error) bool {
 // answer the documented invalid-input classification instead of a generic
 // server error, the same way ContentBlockedError is carried.
 type PlaylistInvalidError struct {
-	Reason string
+	// Locations are the JSON pointers the validator objected to, e.g.
+	// "/items/0/contentRating". POINTERS ONLY — never the offending value.
+	//
+	// dp1-go's format assertions print the value whole ("'https://x?token=…'
+	// is not valid 'uri'"), and this text is returned verbatim to LAN and
+	// relayer callers, so carrying its message through would hand a caster
+	// another caster's signed source. The path says which field is wrong,
+	// which is all a caster needs to fix its own document.
+	Locations []string
 }
 
 func (e *PlaylistInvalidError) Error() string {
-	if e == nil || e.Reason == "" {
+	if e == nil || len(e.Locations) == 0 {
 		return "playlistInvalid"
 	}
-	return "playlistInvalid: " + e.Reason
+	return "playlistInvalid: at " + strings.Join(e.Locations, ", ")
 }
 
 func IsPlaylistInvalid(err error) bool {

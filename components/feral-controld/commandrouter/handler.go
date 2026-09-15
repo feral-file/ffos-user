@@ -240,6 +240,33 @@ func (h *handler) syncContentPolicyLocked() error {
 	return nil
 }
 
+// retainedReplayKey marks the recursive displayPlaylist a recently-played
+// replay issues. A context key rather than a command argument on purpose: the
+// recursive call re-enters Process, so an argument would have to survive
+// ingress — and anything that survives ingress is settable by an unauthenticated
+// LAN caller, which would hand them a switch for turning signature enforcement
+// off.
+type retainedReplayKey struct{}
+
+// withRetainedReplay marks ctx as carrying a device-derived replay.
+func withRetainedReplay(ctx context.Context) context.Context {
+	return context.WithValue(ctx, retainedReplayKey{}, true)
+}
+
+// isRetainedReplay reports whether this cast is the daemon replaying a document
+// it already accepted once.
+//
+// Such a document is rebuilt locally from a retained item: one work, no
+// signature, and no publisher to have signed it. Verifying it asks a question
+// with only one possible answer — "unsigned" — so without this every History tap
+// would raise the signature notice on the wall, and a strict device would refuse
+// to replay its own history entirely. The provenance check already happened when
+// the work was first cast; this is the same bytes coming back.
+func isRetainedReplay(ctx context.Context) bool {
+	marked, _ := ctx.Value(retainedReplayKey{}).(bool)
+	return marked
+}
+
 // RecoverySession is the narrow slice of playersession.Session the relayer's
 // refreshArtwork recovery path needs. Consumer-owned, mirroring
 // setupui.NavigationSession and devicectl.BootRecoverySession;
@@ -630,7 +657,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					zap.String("contentContext", recorded))
 			}
 		}
-		result, err := h.Process(ctx, commands.Command{
+		result, err := h.Process(withRetainedReplay(ctx), commands.Command{
 			Type:      commands.CMD_DISPLAY_PLAYLIST,
 			Arguments: replayArgs,
 		})
@@ -882,7 +909,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// exactly the malformed-label case the contract classifies as
 				// playlistInvalid.
 				if err = contentrating.ValidatePlaylistFragment(playlistBytes); err != nil {
-					err = &PlaylistInvalidError{Reason: err.Error()}
+					// Pointers only: the validator's message can quote the
+					// offending value, and this error is returned verbatim to
+					// the caster on both transports.
+					err = &PlaylistInvalidError{Locations: dp1.ValidationPointers(err)}
 					return nil, err
 				}
 				if err = h.json.Unmarshal(playlistBytes, &playlist); err != nil {
@@ -932,7 +962,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if h.verifySignatures {
 				castMode = h.currentVerificationMode()
 			}
-			if h.verifySignatures && castMode == sigverify.ModeStrict {
+			if h.verifySignatures && castMode == sigverify.ModeStrict && !isRetainedReplay(ctx) {
 				if rejection := strictRejection(playlist.Verification); rejection != nil {
 					h.logger.Warn("displayPlaylist: cast rejected by strict signature verification",
 						zap.String("reason", rejection.Reason),
@@ -1469,7 +1499,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// cannot slip in first (#307). Deferred (future-only)
 					// schedules take the empty-items branch above and do NOT
 					// toast here — their scheduler cutover carries the notice.
-					h.toastForEpoch(castMode, verdictStatus(playlist.Verification), sendEpoch)
+					if !isRetainedReplay(ctx) {
+						h.toastForEpoch(castMode, verdictStatus(playlist.Verification), sendEpoch)
+					}
 				}
 			})
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
@@ -1503,7 +1535,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				publishVerdict(false)
 				clearVerdictForDefaultPlayback()
 				if commandType == commands.CMD_DISPLAY_PLAYLIST {
-					h.toastForEpoch(castMode, verdictStatus(playlist.Verification), sendEpoch)
+					if !isRetainedReplay(ctx) {
+						h.toastForEpoch(castMode, verdictStatus(playlist.Verification), sendEpoch)
+					}
 				}
 			}
 		}
@@ -1944,11 +1978,18 @@ func sanitizeErrorText(text string) string {
 		if !strings.Contains(field, "://") {
 			continue
 		}
-		if cut := strings.IndexByte(field, '?'); cut >= 0 {
-			fields[i] = field[:cut] + "?<redacted>"
-		}
+		fields[i] = stripURLQuery(field)
 	}
 	return truncateLabel(strings.Join(fields, " "))
+}
+
+// stripURLQuery removes a URL's query string, where a signed URL carries its
+// credentials, and leaves the path — the part that identifies the resource.
+func stripURLQuery(url string) string {
+	if cut := strings.IndexByte(url, '?'); cut >= 0 {
+		return url[:cut] + "?<redacted>"
+	}
+	return url
 }
 
 // maxRecentlyPlayedRecords bounds how many history rows leave the daemon. The
@@ -2053,12 +2094,21 @@ func boundedRecentlyPlayedReply(response map[string]interface{}) map[string]inte
 		if isActive, present := record["isActive"].(bool); present {
 			bounded["isActive"] = isActive
 		}
-		for _, key := range []string{"itemId", "title", "artist", "thumbnailUrl"} {
+		for _, key := range []string{"itemId", "title", "artist"} {
 			if label, present := record[key].(string); present && label != "" {
 				clipped := truncateLabel(label)
 				bounded[key] = clipped
 				labelBytes += len(clipped)
 			}
+		}
+		// thumbnailUrl is a URL like any item source, so its query string gets
+		// stripped the same way: a signed thumbnail carries credentials there
+		// too, and this reply is reachable from the unauthenticated LAN hub.
+		// The path survives, which is what the app renders from.
+		if thumb, present := record["thumbnailUrl"].(string); present && thumb != "" {
+			clipped := truncateLabel(stripURLQuery(thumb))
+			bounded["thumbnailUrl"] = clipped
+			labelBytes += len(clipped)
 		}
 		records = append(records, bounded)
 	}

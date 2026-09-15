@@ -2859,7 +2859,8 @@ The history is device-owned. The player appends a record only at a *successful
 render*, which is why the list includes automatic playlist advances and
 survives a player restart; a selected-but-never-rendered item produces no
 record. The reply carries only the bounded label snapshot — `recordId`,
-`playedAtMs`, `isActive`, `itemId`, `title`, `artist`, `thumbnailUrl`, plus
+`playedAtMs`, `isActive`, `itemId`, `title`, `artist`, `thumbnailUrl` (query
+string stripped, like any other URL the device hands out), plus
 `status`, `activeOccurrenceKnown` and `incomplete`. Item source and the full
 DP-1 item stay device-local and are never sent to a controller.
 
@@ -2915,6 +2916,13 @@ Request: exactly `{"recordId": "<opaque id from getRecentlyPlayed>"}`. Any
 other field is rejected rather than ignored — the storm gate dedupes on the
 whole arguments map while this command uses only `recordId`, so an ignored
 extra field would miss dedupe and repeat the same resolve-and-replay work.
+
+A replay is **not** re-verified against the signature policy. The document is
+rebuilt on the device from a retained item — one work, no signature, no
+publisher to have signed it — so verifying it could only ever answer
+"unsigned": without this, every History tap would raise the signature notice on
+the wall, and a strict device could not replay its own history at all. The
+provenance check happened when the work was first cast.
 
 The command never accepts a controller-supplied source. Controld resolves the
 opaque record on the device, rebuilds a one-work unsigned DP-1 call from the
@@ -3064,7 +3072,10 @@ exactly the same terms.
 
 A `contentRating` of the wrong **type** is different and still fails closed: it
 cannot decode as a rating at all, so the playlist is rejected as
-`playlistInvalid`. The
+`playlistInvalid`. That rejection names the failing field by **JSON pointer
+only** — `playlistInvalid: at /items/0/contentRating` — never the offending
+value: the underlying validator prints the value whole, and this text is
+returned verbatim to LAN and relayer callers. The
 rejection is carried as a typed error to both transports — HTTP 422 on the LAN
 hub, `"error":"playlistInvalid"` over the relayer — for inline `dp1_call` and
 for fetched `playlistUrl` documents alike. Inline bytes are validated before

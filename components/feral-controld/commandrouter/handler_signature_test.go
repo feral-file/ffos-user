@@ -1299,3 +1299,84 @@ func TestCommandHandler_Process_Notify_AcceptedToastSuppressedWhenTransitionInte
 	assert.Equal(t, "unsigned", replyMessage(t, result)["signatureStatus"])
 	assert.Empty(t, toast.notices, "a superseded accepted-transition toast must not fire")
 }
+
+// replayWithVerification drives a full playRecentlyPlayed under a wired
+// verifier: the resolver hands back a retained item, and the recursive
+// displayPlaylist that follows is the cast under test.
+func replayWithVerification(t *testing.T, mode sigverify.Mode) (*fakeNotifier, interface{}, error) {
+	t.Helper()
+	ts := setup(t)
+	t.Cleanup(ts.teardown)
+	wireVerificationWithMode(ts, mode)
+	toast := &fakeNotifier{}
+	commandrouter.SetPlayerToast(ts.handler, toast, ts.logger)
+
+	// The replay rebuilds a one-item document and re-enters the inline path, so
+	// the JSON seam is exercised exactly as a normal inline cast would.
+	raw := unsignedInlineRaw()
+	ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return(raw, nil).AnyTimes()
+	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ []byte, v any) error {
+			*(v.(**dp1.Playlist)) = inlineTyped("replayed")
+			return nil
+		}).AnyTimes()
+
+	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			if strings.Contains(params["expression"].(string), "resolveRecentlyPlayed") {
+				return map[string]interface{}{"message": map[string]interface{}{
+					"ok": true, "status": "ok",
+					"item": map[string]interface{}{
+						"id": "retained", "source": "https://example.test/retained", "license": "open",
+					},
+				}}, nil
+			}
+			return playerOkResponse(), nil
+		}).AnyTimes()
+	ts.mockStatusPoller.EXPECT().ForceRefresh().AnyTimes()
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_PLAY_RECENTLY_PLAYED,
+		Arguments: map[string]interface{}{"recordId": "rp-1"},
+	})
+	return toast, result, err
+}
+
+// A replay is the daemon re-casting a document it already accepted: one work
+// rebuilt from a retained item, with no signature and no publisher to have
+// signed it. Verifying it can only ever answer "unsigned", so without the
+// device-derived marker every History tap would raise the signature notice on
+// the wall — with verification and the toast both on by default.
+func TestCommandHandler_Replay_DoesNotToastTheRebuiltDocument(t *testing.T) {
+	toast, _, err := replayWithVerification(t, sigverify.ModeNotify)
+	require.NoError(t, err)
+	assert.Empty(t, toast.notices,
+		"replaying a retained work must not raise a signature notice; the provenance check happened at the original cast")
+}
+
+// And in strict mode the same document must not be refused, or a strict device
+// could not replay its own history at all.
+func TestCommandHandler_Replay_IsNotRefusedByStrictVerification(t *testing.T) {
+	toast, result, err := replayWithVerification(t, sigverify.ModeStrict)
+	require.NoError(t, err, "strict must not refuse the daemon's own replay")
+	require.False(t, commandrouter.IsSigInvalid(err))
+	require.NotNil(t, result)
+	assert.Equal(t, "rp-1", result.(map[string]interface{})["recordId"])
+	assert.Empty(t, toast.notices)
+}
+
+// The marker must not be reachable from the wire: a caller cannot switch
+// verification off by naming it in the request.
+func TestCommandHandler_Replay_MarkerIsNotSettableByACaller(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	wireVerificationWithMode(ts, sigverify.ModeStrict)
+
+	command := inlineCast(ts, unsignedInlineRaw(), inlineTyped("app-1"))
+	for _, forged := range []string{"replayOfRetained", "retainedReplay", "isRetainedReplay"} {
+		command.Arguments[forged] = true
+	}
+	_, err := ts.handler.Process(ts.ctx, command)
+	require.Error(t, err, "an ordinary unsigned cast must still be refused under strict")
+	assert.True(t, commandrouter.IsSigInvalid(err))
+}

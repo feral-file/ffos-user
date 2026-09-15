@@ -1824,3 +1824,95 @@ func TestPushToaster_FiresWithCohortOnAcceptedCutover(t *testing.T) {
 		t.Fatal("push toaster was not called on the accepted cutover")
 	}
 }
+
+// recompute records lastActive as the PROJECTION, so a comparison against the
+// raw cached set can never match again once a tighten hides an item the cached
+// document still contains. Every Restore — every failed cast, every rejected
+// refresh — then armed a retry that force-cast the same cohort seconds later
+// and restarted the artwork, with nothing to stop it.
+//
+// Asserted through the retry's EFFECT rather than its bookkeeping: with the
+// backoff sleep returning immediately, an armed retry force-casts and produces
+// another send. Counting the arming directly would race the goroutine.
+func TestRestore_DoesNotArmARetryWhenOnlyTheProjectionHidItems(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			return nil // a retry's backoff elapses at once
+		},
+	).AnyTimes()
+
+	sent := make(chan struct{}, 16)
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			sent <- struct{}{}
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	t.Cleanup(sched.Stop)
+
+	blocking := false
+	sched.SetProjector(func(p *dp1.Playlist, _ string) (*dp1.Playlist, bool) {
+		out := *p
+		out.Items = nil
+		for _, entry := range p.Items {
+			if blocking && entry.ID == "blocked" {
+				continue
+			}
+			out.Items = append(out.Items, entry)
+		}
+		return &out, len(out.Items) == 0
+	})
+
+	_ = sched.PrepareWithSource(displayAtPlaylist(
+		item("blocked", "2026-07-22T00:00:00Z"),
+		item("allowed", "2026-07-22T00:00:00Z"),
+	), playlistschedule.Source{ContentContext: "curated"})
+	sched.RecomputeNow(context.Background())
+	drain(t, sent, "the first cutover")
+
+	// The owner tightens: the cached document is unchanged, only the projection
+	// now hides an item — and that projection is what lastActive records.
+	blocking = true
+	sched.RecomputeNow(context.Background())
+	drain(t, sent, "the tighten")
+
+	// A failed cast restores the snapshot. Nothing has diverged from what the
+	// player holds, so no retry may fire.
+	snapshot := sched.Snapshot()
+	sched.Restore(snapshot)
+
+	select {
+	case <-sent:
+		t.Fatal("Restore armed a push retry: it force-cast the same cohort and would restart the artwork")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// drain waits for one expected send so the next assertion starts from a clean
+// channel.
+func drain(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s never reached the player", what)
+	}
+}

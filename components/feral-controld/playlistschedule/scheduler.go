@@ -634,6 +634,30 @@ func (s *scheduler) snapshotLocked() Snapshot {
 	}
 }
 
+// projectedItemsLocked returns the items a push of active would actually send:
+// the content-policy projection when one is installed, the raw items otherwise.
+// It is what lastActive records, so it is what any comparison against
+// lastActive has to use.
+//
+// The projector takes no store lock (it reads a lock-free snapshot — see
+// Projector), so calling it under mu is safe.
+func (s *scheduler) projectedItemsLocked(active *dp1.Playlist) []dp1playlist.PlaylistItem {
+	if s.projector == nil || active == nil {
+		if active == nil {
+			return nil
+		}
+		return active.Items
+	}
+	projected, empty := s.projector(active, s.source.ContentContext)
+	if empty {
+		return nil
+	}
+	if projected == nil {
+		return active.Items
+	}
+	return projected.Items
+}
+
 func (s *scheduler) restoreLocked(snapshot Snapshot) {
 	if s.cancelTimer != nil {
 		s.cancelTimer()
@@ -658,8 +682,17 @@ func (s *scheduler) restoreLocked(snapshot Snapshot) {
 		// push retry whenever the restored cache's active set, computed as of
 		// now, has not actually reached the player, so the outstanding cutover
 		// keeps resending instead of silently sticking on stale playback.
-		if active := s.activeLocked(); len(active.Items) > 0 && !reflect.DeepEqual(active.Items, s.lastActive) {
-			s.armPushRetryLocked()
+		//
+		// Compare what would be SENT, not the raw cached set: recompute records
+		// lastActive as the PROJECTION (see its comparison), so after a policy
+		// tighten hides an item still present in the cached document the two can
+		// never match again. That mismatch made every Restore — every failed
+		// cast, every rejected refresh — arm a retry that force-cast the same
+		// cohort seconds later and restarted the artwork, indefinitely.
+		if active := s.activeLocked(); len(active.Items) > 0 {
+			if sent := s.projectedItemsLocked(active); len(sent) > 0 && !reflect.DeepEqual(sent, s.lastActive) {
+				s.armPushRetryLocked()
+			}
 		}
 	}
 	if s.restoredPending && s.full == nil && !s.source.IsZero() {

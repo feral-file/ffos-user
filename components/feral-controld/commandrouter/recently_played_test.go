@@ -301,3 +301,35 @@ func TestSanitizeErrorText_RedactsCredentialsAndKeepsThePath(t *testing.T) {
 		t.Fatal("plain text must not be mangled")
 	}
 }
+
+// A thumbnail is a URL like any item source, so a signed one carries its
+// credentials in the query string — and this reply is reachable from the
+// unauthenticated LAN hub. The path survives, which is what the app renders.
+func TestBoundedRecentlyPlayedReply_StripsThumbnailCredentials(t *testing.T) {
+	got := boundedRecentlyPlayedReply(map[string]interface{}{
+		"message": map[string]interface{}{
+			"ok": true,
+			"records": []interface{}{map[string]interface{}{
+				"recordId":     "rp-1",
+				"title":        "T",
+				"thumbnailUrl": "https://cdn.example/thumb/small.jpg?token=secret&sig=deadbeef",
+			}},
+		},
+	})
+	record := got["message"].(map[string]interface{})["records"].([]interface{})[0].(map[string]interface{})
+	thumb, _ := record["thumbnailUrl"].(string)
+	if strings.Contains(thumb, "token=secret") || strings.Contains(thumb, "sig=deadbeef") {
+		t.Fatalf("a signed thumbnail's credentials reached the caller: %q", thumb)
+	}
+	if !strings.Contains(thumb, "https://cdn.example/thumb/small.jpg") {
+		t.Fatalf("the thumbnail path must survive: %q", thumb)
+	}
+	// And nothing anywhere in the serialized reply carries them.
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "token=secret") {
+		t.Fatalf("credentials survived elsewhere in the reply: %s", encoded)
+	}
+}

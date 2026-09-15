@@ -20,6 +20,44 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
+// ValidationPointers extracts the JSON pointers a jsonschema failure names and
+// discards everything else about it.
+//
+// Deliberately an allow-list of one shape — the pointer after "at '" — rather
+// than a redaction of known-bad substrings: anything the extractor does not
+// recognize is dropped, so a future validator message cannot leak by wording
+// this does not anticipate. A pointer is structural (indices and field names
+// from the schema), never document content, which matters because dp1-go's
+// format assertions print the offending VALUE whole and these errors are
+// returned verbatim to casters on both transports.
+func ValidationPointers(err error) []string {
+	if err == nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(err.Error(), "at '") {
+		end := strings.IndexByte(part, '\'')
+		if end <= 0 {
+			continue
+		}
+		pointer := part[:end]
+		// A pointer is "/a/0/b" or "" (the document root). Anything else is
+		// not one, so it is not reported.
+		if pointer != "" && !strings.HasPrefix(pointer, "/") {
+			continue
+		}
+		if pointer == "" {
+			pointer = "/"
+		}
+		if !seen[pointer] {
+			seen[pointer] = true
+			out = append(out, pointer)
+		}
+	}
+	return out
+}
+
 // ErrPlaylistInvalid marks a fetched DP-1 document whose content-rating
 // extension fields are present but malformed. errors.Is-able so the command
 // router can carry it to the transports as the documented playlistInvalid
@@ -239,7 +277,7 @@ func classifyHydrationError(err error) error {
 	if err == nil || !strings.Contains(err.Error(), dp1ItemValidationMarker) {
 		return err
 	}
-	return fmt.Errorf("%w: dynamic item: %w", ErrPlaylistInvalid, err)
+	return fmt.Errorf("%w: dynamic item at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
 }
 
 func hasDisplayAtItems(items []dp1playlist.PlaylistItem) bool {
@@ -425,7 +463,7 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
 	// applies the same rule at admission. A document is never refused for
 	// carrying a label we do not recognize.
 	if err := contentrating.ValidatePlaylistFragment(bytes); err != nil {
-		return Playlist{}, fmt.Errorf("%w: content rating extension: %w", ErrPlaylistInvalid, err)
+		return Playlist{}, fmt.Errorf("%w: content rating extension at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
 	}
 
 	var playlist Playlist
