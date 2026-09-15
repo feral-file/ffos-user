@@ -62,6 +62,7 @@ func TestStorePersistsAtomicallyAndOperatorOwnsAuditGate(t *testing.T) {
 	}
 	s.Lock()
 	got, err := s.UpdateLocked(true, true)
+	s.PromoteLocked()
 	s.Unlock()
 	if err != nil || !got.BlockUnratedCurated {
 		t.Fatalf("got=%+v err=%v", got, err)
@@ -97,6 +98,7 @@ func TestFallbackStoreIsNotDurableUntilAWriteRepairsIt(t *testing.T) {
 	// Identical-to-default values: the skip-unchanged shortcut must NOT apply
 	// here, because this write is what repairs the store.
 	_, err := s.UpdateLocked(false, false)
+	s.PromoteLocked()
 	durable = s.DurableLocked()
 	s.Unlock()
 	if err != nil || !durable {

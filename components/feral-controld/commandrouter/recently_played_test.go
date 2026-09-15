@@ -96,3 +96,77 @@ func TestIsBareLegacyFailure_RequiresTheExactShape(t *testing.T) {
 		}
 	}
 }
+
+// The daemon owns this reply shape. Item sources and the full retained DP-1
+// item are device-local — they can be signed URLs carrying credentials — and
+// this query is reachable from the unauthenticated LAN hub, so the reply is
+// rebuilt from an allow-list rather than forwarded as the player returned it.
+func TestBoundedRecentlyPlayedReply_DropsEverythingOutsideTheContract(t *testing.T) {
+	got := boundedRecentlyPlayedReply(map[string]interface{}{
+		"message": map[string]interface{}{
+			"ok": true, "status": "ok",
+			"activeOccurrenceKnown": true, "incomplete": false,
+			"secretDeviceField": "leaked",
+			"records": []interface{}{map[string]interface{}{
+				"recordId": "rp-1", "playedAtMs": float64(17), "isActive": true,
+				"itemId": "work-1", "title": "T", "artist": "A", "thumbnailUrl": "https://thumb",
+				"source":         "https://cdn.example/signed?token=secret",
+				"item":           map[string]interface{}{"source": "https://cdn.example/signed?token=secret"},
+				"inlineManifest": map[string]interface{}{"big": "payload"},
+			}},
+		},
+	})
+	message := got["message"].(map[string]interface{})
+	if _, leaked := message["secretDeviceField"]; leaked {
+		t.Fatalf("unknown top-level field forwarded: %v", message)
+	}
+	records := message["records"].([]interface{})
+	if len(records) != 1 {
+		t.Fatalf("records = %v", records)
+	}
+	record := records[0].(map[string]interface{})
+	for _, forbidden := range []string{"source", "item", "inlineManifest"} {
+		if _, leaked := record[forbidden]; leaked {
+			t.Fatalf("%q reached the controller: %v", forbidden, record)
+		}
+	}
+	for key, want := range map[string]interface{}{
+		"recordId": "rp-1", "playedAtMs": float64(17), "isActive": true,
+		"itemId": "work-1", "title": "T", "artist": "A", "thumbnailUrl": "https://thumb",
+	} {
+		if record[key] != want {
+			t.Fatalf("%s = %v, want %v", key, record[key], want)
+		}
+	}
+	if message["activeOccurrenceKnown"] != true || message["incomplete"] != false || message["status"] != "ok" {
+		t.Fatalf("documented fields lost: %v", message)
+	}
+}
+
+func TestBoundedRecentlyPlayedReply_BoundsAndSkipsUnusableRows(t *testing.T) {
+	raw := make([]interface{}, 0, maxRecentlyPlayedRecords+10)
+	raw = append(raw, "not a record", map[string]interface{}{"title": "no id"})
+	for i := 0; i < maxRecentlyPlayedRecords+5; i++ {
+		raw = append(raw, map[string]interface{}{"recordId": "rp"})
+	}
+	got := boundedRecentlyPlayedReply(map[string]interface{}{
+		"message": map[string]interface{}{"ok": true, "records": raw},
+	})
+	records := got["message"].(map[string]interface{})["records"].([]interface{})
+	if len(records) != maxRecentlyPlayedRecords {
+		t.Fatalf("records = %d, want the cap %d", len(records), maxRecentlyPlayedRecords)
+	}
+}
+
+// Failures are recentPlayerReply's job; this must leave them exactly as
+// classified rather than rebuilding them into a success shape.
+func TestBoundedRecentlyPlayedReply_LeavesFailuresAlone(t *testing.T) {
+	in := map[string]interface{}{"message": map[string]interface{}{
+		"ok": false, "status": "unsupported", "error": "Recently played is not supported by this player",
+	}}
+	got := boundedRecentlyPlayedReply(in)
+	message := got["message"].(map[string]interface{})
+	if message["status"] != "unsupported" || message["error"] == nil {
+		t.Fatalf("failure reply altered: %v", message)
+	}
+}

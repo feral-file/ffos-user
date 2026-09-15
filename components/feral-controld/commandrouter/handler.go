@@ -149,7 +149,11 @@ func SyncContentPolicy(h Handler) error {
 // syncContentPolicyLocked is SyncContentPolicy's body. The caller holds the
 // content-policy store lock and, when a scheduler exists, the player-push lock.
 func (h *handler) syncContentPolicyLocked() error {
-	p := h.contentPolicy.CurrentLocked()
+	// Pushes the owner's INTENT, which is what a player generation must end up
+	// mirroring — including an update whose original acknowledgement failed.
+	// A match promotes it into admission, which is the only way a policy
+	// becomes effective.
+	p := h.contentPolicy.DesiredLocked()
 	result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": p})
 	if err != nil {
 		return err
@@ -157,6 +161,7 @@ func (h *handler) syncContentPolicyLocked() error {
 	if !policyAckMatches(result, p) {
 		return errors.New("player content policy acknowledgement mismatch")
 	}
+	h.contentPolicy.PromoteLocked()
 	return nil
 }
 
@@ -369,7 +374,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		if err != nil {
 			return nil, err
 		}
-		return recentPlayerReply(result), nil
+		return boundedRecentlyPlayedReply(recentPlayerReply(result)), nil
 	}
 	if commandType == commands.CMD_RESOLVE_RECENTLY_PLAYED {
 		return map[string]interface{}{
@@ -1182,6 +1187,12 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 	if !h.contentPolicy.DurableLocked() {
 		return policyFailure("contentPolicyUnavailable"), nil
 	}
+	// A durable update still waiting for a player acknowledgement is not active
+	// by definition, and reporting the active-but-superseded values as the
+	// current setting would contradict what the owner just saved.
+	if h.contentPolicy.PendingLocked() {
+		return policyFailure("contentPolicyUnavailable"), nil
+	}
 	result, err := h.sendContentPolicyCDP(commands.CMD_GET_CONTENT_POLICY, map[string]interface{}{})
 	if err != nil || !policyAckMatches(result, policy) {
 		return policyFailure(policyFailureCode(result, err)), nil
@@ -1194,14 +1205,21 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 // scheduler exists — the player-push lock, so no cutover can interleave
 // between the durable write and its acknowledgement.
 func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
-	policy, err := h.contentPolicy.UpdateLocked(show, strict)
+	// The durable write records the owner's intent; it does NOT change what the
+	// device admits. Only a matching acknowledgement from the current player
+	// generation promotes it, so a caller told this failed is never left with a
+	// device that quietly changed its admission behavior anyway. The intent
+	// survives on disk and SyncContentPolicy re-pushes it on the next player
+	// generation.
+	desired, err := h.contentPolicy.UpdateLocked(show, strict)
 	if err != nil {
 		return policyFailure("contentPolicyUnavailable")
 	}
-	result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": policy})
-	if err != nil || !policyAckMatches(result, policy) {
+	result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": desired})
+	if err != nil || !policyAckMatches(result, desired) {
 		return policyFailure(policyFailureCode(result, err))
 	}
+	policy := h.contentPolicy.PromoteLocked()
 	return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}
 }
 
@@ -1354,6 +1372,78 @@ func recentPlayerReply(result interface{}) map[string]interface{} {
 		}
 	}
 	return response
+}
+
+// maxRecentlyPlayedRecords bounds how many history rows leave the daemon. The
+// player retains 50; this is generous headroom, not a contract, and exists so a
+// misbehaving or replaced player cannot make an unauthenticated LAN request
+// return an unbounded body.
+const maxRecentlyPlayedRecords = 200
+
+// boundedRecentlyPlayedReply rebuilds a SUCCESSFUL getRecentlyPlayed reply from
+// a strict allow-list instead of forwarding whatever the player returned.
+//
+// The documented contract is that this query exposes only a bounded label
+// snapshot: record id, timestamp, active flag, item id, title, artist,
+// thumbnail. Item sources and the full retained DP-1 item stay device-local —
+// they can be signed URLs carrying credentials in their query strings, and this
+// reply is reachable from the unauthenticated LAN hub. Forwarding the player's
+// object verbatim made that contract true only for as long as the player
+// happened to honor it; a daemon that OWNS the shape cannot be widened by a
+// change on the other side of CDP.
+//
+// Failures are left to recentPlayerReply, which has already classified them:
+// only ok:true replies are rebuilt here.
+func boundedRecentlyPlayedReply(response map[string]interface{}) map[string]interface{} {
+	message, ok := response["message"].(map[string]interface{})
+	if !ok {
+		return response
+	}
+	if okValue, _ := message["ok"].(bool); !okValue {
+		return response
+	}
+
+	bounded := map[string]interface{}{"ok": true}
+	if status, present := message["status"].(string); present {
+		bounded["status"] = status
+	}
+	for _, key := range []string{"activeOccurrenceKnown", "incomplete"} {
+		if flag, present := message[key].(bool); present {
+			bounded[key] = flag
+		}
+	}
+	raw, _ := message["records"].([]interface{})
+	records := make([]interface{}, 0, len(raw))
+	for _, entry := range raw {
+		if len(records) >= maxRecentlyPlayedRecords {
+			break
+		}
+		record, isRecord := entry.(map[string]interface{})
+		if !isRecord {
+			continue
+		}
+		// recordId is the replay handle; a row without one is unusable, and
+		// dropping it is better than handing the app a row it cannot play.
+		recordID, _ := record["recordId"].(string)
+		if recordID == "" {
+			continue
+		}
+		bounded := map[string]interface{}{"recordId": recordID}
+		if playedAt, present := record["playedAtMs"].(float64); present {
+			bounded["playedAtMs"] = playedAt
+		}
+		if isActive, present := record["isActive"].(bool); present {
+			bounded["isActive"] = isActive
+		}
+		for _, key := range []string{"itemId", "title", "artist", "thumbnailUrl"} {
+			if label, present := record[key].(string); present && label != "" {
+				bounded[key] = label
+			}
+		}
+		records = append(records, bounded)
+	}
+	bounded["records"] = records
+	return map[string]interface{}{"message": bounded}
 }
 
 // isBareLegacyFailure reports whether an unwrapped reply is EXACTLY {"ok":false}

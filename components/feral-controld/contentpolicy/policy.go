@@ -128,9 +128,18 @@ func (p Policy) Project(in *dp1playlist.Playlist, origin Context) (*dp1playlist.
 // across the player's acknowledgement makes the accepted policy and casts one
 // order instead of two independently-racing views.
 type Store struct {
-	mu     sync.Mutex
-	path   string
+	mu   sync.Mutex
+	path string
+	// policy is the ACTIVE admission policy: the one casts, refreshes and
+	// scheduler cutovers are filtered against. It changes only when the player
+	// has acknowledged the same values, so the daemon never enforces a policy
+	// the caller was told did not take effect.
 	policy Policy
+	// desired is the owner's durable intent — what UpdateLocked wrote to disk.
+	// It equals policy in the normal case and leads it only between a durable
+	// write and the acknowledgement that promotes it, which is also what
+	// SyncContentPolicy re-pushes on the next player generation.
+	desired Policy
 	// durable is false while the on-disk policy could not be read. Admission
 	// keeps running on safe defaults, but the RPCs must not claim the saved
 	// user setting is in force, because it is unknown. A successful
@@ -166,7 +175,7 @@ func (s *Store) publishSnapshot() {
 func Fallback(path string, blockUnratedCurated bool) *Store {
 	p := Default()
 	p.BlockUnratedCurated = blockUnratedCurated
-	s := &Store{path: path, policy: p}
+	s := &Store{path: path, policy: p, desired: p}
 	s.publishSnapshot()
 	return s
 }
@@ -174,6 +183,23 @@ func Fallback(path string, blockUnratedCurated bool) *Store {
 // DurableLocked reports whether the policy in memory came from (or has since
 // been written to) the durable file.
 func (s *Store) DurableLocked() bool { return s.durable }
+
+// DesiredLocked returns the owner's durable intent, which is what gets pushed
+// to a player generation. Use CurrentLocked for admission decisions.
+func (s *Store) DesiredLocked() Policy { return s.desired }
+
+// PendingLocked reports whether a durable update is still waiting for a player
+// acknowledgement to promote it into admission.
+func (s *Store) PendingLocked() bool { return s.desired != s.policy }
+
+// PromoteLocked makes the durable intent the active admission policy. Callers
+// invoke it only after the current player generation acknowledged exactly these
+// values — that acknowledgement is the whole point of the split.
+func (s *Store) PromoteLocked() Policy {
+	s.policy = s.desired
+	s.publishSnapshot()
+	return s.policy
+}
 
 // wirePolicy is the on-disk shape decoded into ZERO values, with every field a
 // pointer so "absent" is distinguishable from "false".
@@ -234,6 +260,10 @@ func Open(path string, blockUnratedCurated bool) (*Store, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read content policy: %w", err)
 	}
+	// At boot the stored policy is both the intent and the active one: it is
+	// the owner's setting, and there is no earlier acknowledged value to hold
+	// on to. SyncContentPolicy pushes it to the player as it comes up.
+	s.desired = s.policy
 	s.publishSnapshot()
 	return s, nil
 }
@@ -250,22 +280,25 @@ func (s *Store) TryLock() bool { return s.mu.TryLock() }
 
 func (s *Store) CurrentLocked() Policy { return s.policy }
 
+// UpdateLocked records the owner's intent durably. It deliberately does NOT
+// change the active admission policy: PromoteLocked does that, after the player
+// acknowledges the same values. Otherwise a caller told the update failed would
+// still find the device admitting content by the new rules.
 func (s *Store) UpdateLocked(showMature, strictPersonal bool) (Policy, error) {
-	next := s.policy
+	next := s.desired
 	next.ShowMatureContent = showMature
 	next.StrictPersonal = strictPersonal
 	// A repeated identical set must not cost a flash write. Skipped only when
 	// the file is already the source of truth: on a non-durable store the same
 	// values still have to be written, because that write is what repairs it.
-	if s.durable && next == s.policy {
-		return s.policy, nil
+	if s.durable && next == s.desired {
+		return s.desired, nil
 	}
 	if err := persistAtomic(s.path, next); err != nil {
 		return Policy{}, err
 	}
-	s.policy = next
+	s.desired = next
 	s.durable = true
-	s.publishSnapshot()
 	return next, nil
 }
 

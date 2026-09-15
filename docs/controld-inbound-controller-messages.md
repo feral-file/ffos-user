@@ -2686,9 +2686,17 @@ gate's dedupe key is command type plus arguments.
 The history is device-owned. The player appends a record only at a *successful
 render*, which is why the list includes automatic playlist advances and
 survives a player restart; a selected-but-never-rendered item produces no
-record. The reply carries only the bounded label snapshot (record ID,
-timestamp, item ID, title/artist/thumbnail). Item source and the full DP-1 item
-stay device-local and are never sent to a controller.
+record. The reply carries only the bounded label snapshot — `recordId`,
+`playedAtMs`, `isActive`, `itemId`, `title`, `artist`, `thumbnailUrl`, plus
+`status`, `activeOccurrenceKnown` and `incomplete`. Item source and the full
+DP-1 item stay device-local and are never sent to a controller.
+
+Controld rebuilds a successful reply from that allow-list rather than
+forwarding what the player returned, and caps the number of rows. The bound is
+enforced on this side of CDP because item sources can be signed URLs carrying
+credentials in their query strings and this query is reachable from the
+unauthenticated LAN hub — a guarantee that held only while the player happened
+to honor it would not be a guarantee.
 
 ```json
 {
@@ -2787,6 +2795,14 @@ persisted file can turn it on or off.
 Success is reported only after the atomic durable write succeeds *and* the
 player returns a matching acknowledgement. A repeated identical set performs no
 durable write, so holding the toggle does not amplify flash writes.
+
+The durable write records the owner's **intent**; it does not by itself change
+what the device admits. Only a matching acknowledgement promotes it into
+admission, so a caller told the update failed is never left with a device that
+quietly changed its filtering anyway. The intent survives on disk and is
+re-pushed on the next player generation; until it is acknowledged,
+`getContentPolicy` answers `contentPolicyUnavailable` rather than reporting
+either value as the setting in force.
 
 Error cases: `invalidRequest`, `unsupported`, `contentPolicyUnavailable`.
 
