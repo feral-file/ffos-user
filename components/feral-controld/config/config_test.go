@@ -87,8 +87,8 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 			"endpoint": "wss://relay.feralfile.com",
 			"apiKey": "test-api-key"
 		},
-		"sentry": {
-			"dsn": "https://test@sentry.io/123",
+		"logStreaming": {
+			"sampleRate": 1,
 			"environment": "test"
 		}
 	}`
@@ -115,8 +115,7 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 				Endpoint: "wss://relay.feralfile.com",
 				APIKey:   "test-api-key",
 			}
-			cfg.SentryConfig = &logger.SentryConfig{
-				DSN:         "https://test@sentry.io/123",
+			cfg.LogStreaming = &logger.StreamingConfig{
 				Environment: "test",
 			}
 			return nil
@@ -135,8 +134,7 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 	assert.Equal(t, "http://localhost:9222", result.CDPConfig.Endpoint)
 	assert.Equal(t, "wss://relay.feralfile.com", result.RelayerConfig.Endpoint)
 	assert.Equal(t, "test-api-key", result.RelayerConfig.APIKey)
-	assert.Equal(t, "https://test@sentry.io/123", result.SentryConfig.DSN)
-	assert.Equal(t, "test", result.SentryConfig.Environment)
+	assert.Equal(t, "test", result.LogStreaming.Environment)
 
 	// Verify MAC info is populated as a map
 	assert.NotNil(t, result.MACInfo)
@@ -173,7 +171,6 @@ func TestConfigManager_Load_Success_AlreadyLoaded(t *testing.T) {
 				Endpoint: "http://localhost:9222",
 			}
 			cfg.RelayerConfig = &config.RelayerConfig{}
-			cfg.SentryConfig = &logger.SentryConfig{}
 			return nil
 		}).
 		Times(1)
@@ -281,12 +278,10 @@ func TestConfigManager_Get_InitialCall(t *testing.T) {
 	assert.NotNil(t, result)
 	assert.NotNil(t, result.CDPConfig)
 	assert.NotNil(t, result.RelayerConfig)
-	assert.NotNil(t, result.SentryConfig)
+	assert.Nil(t, result.LogStreaming)
 	assert.Empty(t, result.CDPConfig.Endpoint)
 	assert.Empty(t, result.RelayerConfig.Endpoint)
 	assert.Empty(t, result.RelayerConfig.APIKey)
-	assert.Empty(t, result.SentryConfig.DSN)
-	assert.Empty(t, result.SentryConfig.Environment)
 }
 
 func TestConfigManager_Get_AfterLoad(t *testing.T) {
@@ -323,7 +318,6 @@ func TestConfigManager_Get_AfterLoad(t *testing.T) {
 			cfg.RelayerConfig = &config.RelayerConfig{
 				Endpoint: "wss://relay.feralfile.com",
 			}
-			cfg.SentryConfig = &logger.SentryConfig{}
 			return nil
 		}).
 		Times(1)
@@ -366,7 +360,7 @@ func TestConfigManager_ConcurrentGet(t *testing.T) {
 		assert.NotNil(t, result)
 		assert.NotNil(t, result.CDPConfig)
 		assert.NotNil(t, result.RelayerConfig)
-		assert.NotNil(t, result.SentryConfig)
+		assert.Nil(t, result.LogStreaming)
 		assert.Empty(t, result.CDPConfig.Endpoint)
 		assert.Empty(t, result.RelayerConfig.Endpoint)
 		configs = append(configs, result)
@@ -418,7 +412,6 @@ func TestConfigManager_ConcurrentLoad(t *testing.T) {
 			cfg.RelayerConfig = &config.RelayerConfig{
 				Endpoint: "wss://concurrent-relay.test.com",
 			}
-			cfg.SentryConfig = &logger.SentryConfig{}
 			return nil
 		}).
 		Times(1)
@@ -495,7 +488,6 @@ func TestConfig_Load_Success(t *testing.T) {
 				Endpoint: "http://global-test:9222",
 			}
 			cfg.RelayerConfig = &config.RelayerConfig{}
-			cfg.SentryConfig = &logger.SentryConfig{}
 			return nil
 		}).
 		Times(1)
@@ -524,7 +516,7 @@ func TestConfig_Get_Success(t *testing.T) {
 	assert.NotNil(t, result)
 	assert.NotNil(t, result.CDPConfig)
 	assert.NotNil(t, result.RelayerConfig)
-	assert.NotNil(t, result.SentryConfig)
+	assert.Nil(t, result.LogStreaming)
 	assert.Empty(t, result.CDPConfig.Endpoint)
 	assert.Empty(t, result.RelayerConfig.Endpoint)
 }

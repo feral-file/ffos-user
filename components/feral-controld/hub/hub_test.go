@@ -1172,7 +1172,6 @@ func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
-
 	var got map[string]any
 	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 	assert.Equal(t, "ff1-abc", got["device_id"])

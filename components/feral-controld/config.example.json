@@ -13,13 +13,11 @@
     "pollIntervalMillis": 500,
     "approvalTimeoutSeconds": 300
   },
-  "sentry": {
-    "dsn": "https://YOUR_SENTRY_DSN@o0.ingest.sentry.io/0",
-    "debug": "false",
-    "sample_rate": "1.0",
+  "logStreaming": {
+    "sampleRate": 1,
     "environment": "production",
-    "release": "feral-controld@1.0.0",
-    "repository": "organization/repository-name"
+    "idleTimeoutSeconds": 5,
+    "maxBatchDurationSeconds": 60
   },
   "provisioning": {
     "setupIncompleteDisabled": false,
