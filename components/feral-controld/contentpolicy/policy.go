@@ -207,6 +207,19 @@ type wirePolicy struct {
 	BlockUnratedCurated *bool `json:"blockUnratedCurated"`
 }
 
+// ParseComplete decodes a v1 policy object and requires EVERY field to be
+// present. Exported for the player-acknowledgement check, which must not accept
+// a partial reply: decoding into a plain Policy, `{"version":1}` alone comes
+// back as the all-false default and compares equal to it, so a player that
+// echoed nothing would look like it had acknowledged the default policy.
+func ParseComplete(b []byte) (Policy, error) {
+	var wire wirePolicy
+	if err := jsonUnmarshalStrict(b, &wire); err != nil {
+		return Policy{}, err
+	}
+	return wire.policy()
+}
+
 func (w wirePolicy) policy() (Policy, error) {
 	switch {
 	case w.Version == nil:

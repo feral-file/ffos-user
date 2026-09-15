@@ -1324,12 +1324,20 @@ func policyAckMatches(result interface{}, want contentpolicy.Policy) bool {
 	if !okValue || !active {
 		return false
 	}
-	b, err := json.Marshal(m["contentPolicy"])
+	// The acknowledgement must carry a COMPLETE v1 policy. Decoding into a
+	// plain Policy made `{"version":1}` decode to the all-false default, which
+	// compares equal to it — so a player that echoed nothing at all would look
+	// like it had acknowledged the default policy and let it be committed.
+	raw, present := m["contentPolicy"]
+	if !present {
+		return false
+	}
+	b, err := json.Marshal(raw)
 	if err != nil {
 		return false
 	}
-	var got contentpolicy.Policy
-	if err := json.Unmarshal(b, &got); err != nil {
+	got, err := contentpolicy.ParseComplete(b)
+	if err != nil {
 		return false
 	}
 	return got == want

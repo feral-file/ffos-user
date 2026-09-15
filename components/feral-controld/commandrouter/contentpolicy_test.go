@@ -771,3 +771,44 @@ func TestSetContentPolicyPersistsNothingWithoutAnAcknowledgement(t *testing.T) {
 	require.True(t, active.ShowMatureContent)
 	require.FileExists(t, path)
 }
+
+// An acknowledgement must carry a COMPLETE v1 policy. Decoding into a plain
+// Policy made {"version":1} come back as the all-false default and compare
+// equal to it, so a player echoing nothing looked like it had acknowledged the
+// default policy — and that would commit it.
+func TestSetContentPolicyRejectsAPartialAcknowledgement(t *testing.T) {
+	for name, ack := range map[string]interface{}{
+		"version only":    map[string]interface{}{"version": float64(1)},
+		"missing a field": map[string]interface{}{"version": float64(1), "showMatureContent": false, "strictPersonal": false},
+		"absent entirely": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			player := mocks.NewMockCDP(ctrl)
+			path := filepath.Join(t.TempDir(), "policy.json")
+			store, err := contentpolicy.Open(path, false)
+			require.NoError(t, err)
+			h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl),
+				mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+			commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+
+			player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+				func(_ string, _ map[string]interface{}) (interface{}, error) {
+					message := map[string]interface{}{"ok": true, "active": true}
+					if ack != nil {
+						message["contentPolicy"] = ack
+					}
+					return map[string]interface{}{"message": message}, nil
+				}).Times(1)
+
+			// Setting the DEFAULT values, which is what a partial reply decodes to.
+			result, err := h.Process(context.Background(), commands.Command{
+				Type: commands.CMD_SET_CONTENT_POLICY, Arguments: map[string]any{"showMatureContent": false, "strictPersonal": false},
+			})
+			require.NoError(t, err)
+			require.Equal(t, false, result.(map[string]interface{})["ok"], "a partial acknowledgement must not commit a policy")
+			_, statErr := os.Stat(path)
+			require.True(t, os.IsNotExist(statErr), "nothing may be persisted on a partial acknowledgement")
+		})
+	}
+}
