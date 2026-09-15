@@ -1210,3 +1210,43 @@ func TestPlayRecentlyPlayedBoundsAFailedResolve(t *testing.T) {
 	// distinguishable from a missing capability.
 	require.Contains(t, string(encoded), "record source unreachable")
 }
+
+// A DISPLAY failure on the replay path is player-authored text about a retained
+// item, so it can quote that item's signed source. Truncation alone left the
+// query credentials intact; the acknowledgement's error must be sanitized the
+// same way the history failure replies are.
+func TestPlayRecentlyPlayedSanitizesADisplayError(t *testing.T) {
+	h, player, poller := newPolicyHandlerWithPoller(t)
+	poller.EXPECT().ForceRefresh().AnyTimes()
+
+	const signed = "https://cdn.example/work.html?token=secret&sig=deadbeef"
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok": true, "status": "ok",
+				"item": map[string]interface{}{"id": "retained", "source": signed},
+			}}, nil
+		}).Times(1)
+	// The display attempt fails and names the source it could not load.
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok":    false,
+				"error": "render failed for " + signed + " after 3 tries",
+			}}, nil
+		}).Times(1)
+
+	result, err := h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_PLAY_RECENTLY_PLAYED, Arguments: map[string]any{"recordId": "rp-11"},
+	})
+	require.NoError(t, err)
+
+	encoded, err := json.Marshal(result)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "token=secret",
+		"a display error leaked the retained item's credentials: %s", encoded)
+	require.NotContains(t, string(encoded), "sig=deadbeef")
+	// The operator-useful part survives.
+	require.Contains(t, string(encoded), "render failed")
+	require.Contains(t, string(encoded), "cdn.example/work.html")
+}

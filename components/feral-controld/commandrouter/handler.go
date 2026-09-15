@@ -1899,10 +1899,17 @@ func boundedReplayAck(result interface{}) map[string]interface{} {
 	if okValue, present := message["ok"].(bool); present {
 		bounded["ok"] = okValue
 	}
-	for _, key := range []string{"status", "error"} {
-		if value, present := message[key].(string); present && value != "" {
-			bounded[key] = truncateLabel(value)
-		}
+	if status, present := message["status"].(string); present && status != "" {
+		bounded["status"] = truncateLabel(status)
+	}
+	// SANITIZED, not merely truncated. This error is player-authored and this
+	// path replays a RETAINED item whose source can be a signed URL — a display
+	// failure that quotes it would carry its query credentials to an
+	// unauthenticated LAN caller, which is the boundary this whole command
+	// exists to hold. Same treatment boundedFailureReply gives the history
+	// replies; truncation alone kept the credentials intact.
+	if reason, present := message["error"].(string); present && reason != "" {
+		bounded["error"] = sanitizeErrorText(reason)
 	}
 	return bounded
 }
