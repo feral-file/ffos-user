@@ -1322,12 +1322,11 @@ func assertGraphQLHydration(t *testing.T, req *http.Request, wantLimit, wantOffs
 // pins that the classification still reaches the transports.
 //
 // Note the value under test is a NUMBER, not an unknown string. An unrecognized
-// STRING is no longer a rejection case: DP-1 §3.3 (display-protocol/dp1#52)
+// STRING is not a rejection case at all: DP-1 §3.3 (display-protocol/dp1#52)
 // settles that a rating this build does not know is treated as unrated and the
-// document is never refused for it. Only a non-string remains schema-invalid.
-// The pinned dp1-go still enforces the old enum, so an unknown string is
-// rejected at ingress until that drops; the policy layer already implements the
-// new rule (contentpolicy.Policy.Allows).
+// document is never refused for it. Only a non-string remains schema-invalid —
+// see TestDisplayPlaylistAcceptsAnUnknownRatingStringEndToEnd for the accepting
+// half of the same rule.
 func TestDP1_ProcessDynamicPlaylist_RejectsWrongTypedResolvedRatings(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

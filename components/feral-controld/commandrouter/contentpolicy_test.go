@@ -1250,3 +1250,65 @@ func TestPlayRecentlyPlayedSanitizesADisplayError(t *testing.T) {
 	require.Contains(t, string(encoded), "render failed")
 	require.Contains(t, string(encoded), "cdn.example/work.html")
 }
+
+// The accepting half of the rating rule, end to end through public ingress: an
+// unrecognized rating STRING is not a rejection at any boundary, and it plays —
+// the document passes the extension schema, survives the policy filter as
+// unrated, and reaches the player. DP-1 §3.3 (display-protocol/dp1#52).
+//
+// Paired with TestDisplayPlaylistClassifiesAWrongTypedRatingAsPlaylistInvalid,
+// which pins the other half: a non-string is still schema-invalid.
+func TestDisplayPlaylistAcceptsAnUnknownRatingStringEndToEnd(t *testing.T) {
+	h, player, poller := newPolicyHandlerWithPoller(t)
+	poller.EXPECT().ForceRefresh().AnyTimes()
+
+	var sent string
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			sent = params["expression"].(string)
+			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+		}).Times(1)
+
+	// Default policy: mature is hidden from a curated cast, so if "teen" were
+	// read as anything mature-like the item would not survive.
+	_, err := h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]any{"dp1_call": map[string]interface{}{
+			"dpVersion": "1.1.0", "title": "x",
+			"items": []interface{}{
+				map[string]interface{}{"source": "https://future.example/a", "contentRating": "teen"},
+			},
+		}},
+	})
+	require.NoError(t, err, "an unknown rating string must not be refused at ingress")
+	require.Contains(t, sent, "https://future.example/a",
+		"an unknown rating string must play as unrated, not be filtered out")
+}
+
+// And the operator gate still catches it, because an unknown label IS unrated —
+// the equivalence, asserted through the public path rather than only on the
+// policy matrix.
+func TestDisplayPlaylistAppliesTheUnratedGateToAnUnknownRatingString(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	player := mocks.NewMockCDP(ctrl)
+	// blockUnratedCurated is the operator gate, set from device config.
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), true)
+	require.NoError(t, err)
+	h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl),
+		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+
+	// No player.EXPECT(): every item is withheld, so the cast is blocked.
+	_, err = h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]any{"dp1_call": map[string]interface{}{
+			"dpVersion": "1.1.0", "title": "x",
+			"items": []interface{}{
+				map[string]interface{}{"source": "https://future.example/a", "contentRating": "teen"},
+			},
+		}},
+	})
+	require.Error(t, err)
+	require.True(t, commandrouter.IsContentBlocked(err),
+		"the unrated-curated gate must treat an unknown label as unrated, got %v", err)
+}

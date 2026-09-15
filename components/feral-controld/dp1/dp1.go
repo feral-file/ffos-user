@@ -419,12 +419,11 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
 	// refused before it is parsed.
 	//
 	// What this rejects is a rating of the wrong TYPE. An unrecognized rating
-	// STRING is not an error: DP-1 §3.3 (display-protocol/dp1#52) treats a
-	// rating this build does not know as unrated, and a document is never
-	// refused for carrying one — contentpolicy.Policy.Allows implements that.
-	// The pinned dp1-go still enforces the old closed enum here, so an unknown
-	// string is refused at this boundary until that pin moves to the revision
-	// that drops it.
+	// STRING is not an error anywhere on this path: DP-1 §3.3
+	// (display-protocol/dp1#52) treats a rating this build does not know as
+	// unrated, the schema accepts any string, and contentpolicy.Policy.Allows
+	// applies the same rule at admission. A document is never refused for
+	// carrying a label we do not recognize.
 	if err := contentrating.ValidatePlaylistFragment(bytes); err != nil {
 		return Playlist{}, fmt.Errorf("%w: content rating extension: %w", ErrPlaylistInvalid, err)
 	}
