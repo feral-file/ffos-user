@@ -1575,3 +1575,47 @@ func TestInlineDynamicSource_RoundTripPreservesVerdict(t *testing.T) {
 	sched.SetInlineDynamicSource(nil)
 	assert.Nil(t, sched.InlineDynamicSource())
 }
+
+// TestPushToaster_FiresWithCohortOnAcceptedCutover: the cohort toast rides the
+// accepted scheduler cutover (PushAccepted), carrying the cohort actually put
+// on screen with its cast-time verdict intact — so the wall notice describes
+// the cutover, not the accepting cast (feral-file/ffos-user#307 phase 4).
+func TestPushToaster_FiresWithCohortOnAcceptedCutover(t *testing.T) {
+	sched, cdpMock, releaseSleep, _, advance := gateSetup(t)
+	pushed := make(chan struct{}, 1)
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.Contains(t, expr, "day23")
+			pushed <- struct{}{}
+			return map[string]interface{}{"ok": true}, nil
+		}).Times(1)
+	toasted := make(chan *dp1.Playlist, 1)
+	sched.(interface{ SetPushToaster(func(*dp1.Playlist)) }).SetPushToaster(func(p *dp1.Playlist) {
+		toasted <- p
+	})
+
+	verdict := &sigverify.Verdict{Status: sigverify.StatusUnsigned}
+	full := displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	)
+	full.Verification = verdict
+	_ = sched.Prepare(full)
+	advance()
+	close(releaseSleep)
+
+	select {
+	case <-pushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the cutover push")
+	}
+	select {
+	case p := <-toasted:
+		require.NotNil(t, p)
+		assert.Same(t, verdict, p.Verification, "the toaster sees the cohort's cast-time verdict")
+		assert.Equal(t, []string{"day23"}, itemIDs(p.Items), "the toaster sees the cohort that reached the screen")
+	case <-time.After(2 * time.Second):
+		t.Fatal("push toaster was not called on the accepted cutover")
+	}
+}

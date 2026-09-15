@@ -8,6 +8,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 )
 
@@ -139,5 +140,103 @@ func StrictPushGate(mode func() sigverify.Mode) func(playlist *dp1.Playlist) err
 			reason = verdict.PublicReason()
 		}
 		return fmt.Errorf("strict signature verification: %s", reason)
+	}
+}
+
+// ComposeInvalidator returns a callback that drops BOTH the on-screen
+// signature verdict and any queued toast. It is for the seams that replace
+// displayed content OUTSIDE the cast path — a page-generation bump, or the
+// claim-time player-owned default playlist — where a warning queued for the
+// previous document must not land over the new artwork
+// (feral-file/ffos-user#307). A nil notifier clears the verdict only.
+func ComposeInvalidator(clearVerdict func(), notifier playertoast.Notifier) func() {
+	return func() {
+		if clearVerdict != nil {
+			clearVerdict()
+		}
+		if notifier != nil {
+			notifier.Clear()
+		}
+	}
+}
+
+// ScheduledPushGate builds the playlistschedule SetPushGate callback. Strict
+// mode judges a scheduler-owned cutover AT PUSH TIME against the cast-time
+// verdict its document carries; the mode is read ONCE here and the notice it
+// implies is handed to decided for PushAccepted, never re-read, so a
+// concurrent mode change cannot relabel a cohort. A refusal toasts
+// signature_rejected fenced to the display-transition epoch snapshotted
+// BEFORE the mode read: the gate runs before PushStarting, so it captures no
+// send epoch of its own, and a generation hook (page reload/replacement)
+// that Clears the notifier while the mode is read would otherwise be
+// overwritten by a raw Notify — a rejection for an obsolete cutover over
+// unrelated artwork (feral-file/ffos-user#307). authority (may be nil) is
+// the scheduler's AuthorityToken: snapshotted with the epoch, it rides with
+// the refusal notice as its handoff guard, so a future-only cast that takes
+// authority after the queue (no write, no Clear — invisible to the epoch)
+// still drops it. A nil notifier gates without toasting.
+func ScheduledPushGate(
+	notifier playertoast.Notifier,
+	mode func() sigverify.Mode,
+	authority func() uint64,
+	decided func(notice sigverify.Notice, show bool),
+) func(*dp1.Playlist) error {
+	return func(p *dp1.Playlist) error {
+		var epoch, auth uint64
+		if notifier != nil {
+			epoch = notifier.Epoch()
+		}
+		if authority != nil {
+			auth = authority()
+		}
+		m := mode() // the single read for this cutover
+		if err := StrictPushGate(func() sigverify.Mode { return m })(p); err != nil {
+			decided("", false) // refused: PushAccepted will not fire for this push
+			if notifier != nil {
+				authorityHeld := func() bool { return authority == nil || authority() == auth }
+				notifier.NotifyIfEpochGuarded(sigverify.NoticeRejected, epoch, authorityHeld)
+			}
+			return err
+		}
+		var status sigverify.Status
+		if p != nil && p.Verification != nil {
+			status = p.Verification.Status
+		}
+		decided(sigverify.ToastFor(m, status))
+		return nil
+	}
+}
+
+// ScheduledPushToaster builds the playlistschedule SetPushToaster callback. It
+// emits the gate's decided notice for a cutover the CURRENT generation still
+// owns, and Clears when the generation raced across the send (the accepted
+// reply is from a page that reloaded — the same fence FencedPromoter applies
+// to the verdict) or the policy is silent about this cohort. genNow, genStart,
+// sendEpoch, and decision are read at call time; the caller sets genStart/sendEpoch/decision under
+// the scheduler's push lock so one cutover's values are consistent.
+func ScheduledPushToaster(
+	notifier playertoast.Notifier,
+	genNow func() uint64,
+	genStart func() uint64,
+	sendEpoch func() uint64,
+	decision func() (notice sigverify.Notice, show bool),
+) func(*dp1.Playlist) {
+	return func(*dp1.Playlist) {
+		if notifier == nil {
+			return
+		}
+		if genNow() != genStart() {
+			notifier.Clear()
+			return
+		}
+		notice, show := decision()
+		if show {
+			// Fenced to the epoch this cutover's PushStarting invalidation
+			// created, so a transition between the accepted send and here
+			// (a generation bump) supersedes it rather than being overwritten.
+			notifier.NotifyIfEpoch(notice, sendEpoch())
+		} else {
+			notifier.Clear()
+		}
 	}
 }
