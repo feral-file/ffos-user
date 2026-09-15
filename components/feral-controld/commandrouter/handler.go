@@ -116,6 +116,19 @@ func (h *handler) setContentPolicy(policy *contentpolicy.Store) {
 	})
 }
 
+// SyncContentPolicy pushes the stored policy to the current player generation.
+// It runs on reconnect, when the player has just come up on ITS defaults.
+//
+// Serialized against scheduler-owned pushes, not only against casts: a due
+// timer or wake recompute holds pushMu and reads the lock-free policy snapshot,
+// so without this barrier it could deliver a cohort to the freshly defaulted
+// player before this acknowledgement lands — and the scheduler records that
+// cohort as delivered, so nothing replays it once the sync succeeds. An
+// acknowledged showMatureContent:true would then visibly fail after a player
+// restart until some later cast, refresh or cutover.
+//
+// Lock order is the same one displayPlaylist and setContentPolicy use: content
+// policy store, then pushMu.
 func SyncContentPolicy(h Handler) error {
 	target, ok := h.(*handler)
 	if !ok || target.contentPolicy == nil {
@@ -123,8 +136,21 @@ func SyncContentPolicy(h Handler) error {
 	}
 	target.contentPolicy.Lock()
 	defer target.contentPolicy.Unlock()
-	p := target.contentPolicy.CurrentLocked()
-	result, err := target.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": p})
+	var err error
+	sync := func() { err = target.syncContentPolicyLocked() }
+	if target.scheduler != nil {
+		target.scheduler.WithPlayerPush(sync)
+	} else {
+		sync()
+	}
+	return err
+}
+
+// syncContentPolicyLocked is SyncContentPolicy's body. The caller holds the
+// content-policy store lock and, when a scheduler exists, the player-push lock.
+func (h *handler) syncContentPolicyLocked() error {
+	p := h.contentPolicy.CurrentLocked()
+	result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": p})
 	if err != nil {
 		return err
 	}

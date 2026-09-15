@@ -618,3 +618,31 @@ func TestDisplayPlaylistTakesThePolicyLockBeforeThePlaybackLock(t *testing.T) {
 	require.True(t, policyHeldAtPlaybackLock,
 		"the cast took the playback lock before the policy lock; the refresher takes them the other way round, so the two can deadlock")
 }
+
+// The reconnect sync must take the player-push barrier too, not only the policy
+// lock. A due timer or wake recompute holds pushMu and reads the lock-free
+// policy snapshot, so without the barrier it can deliver a cohort to a player
+// that has just come up on ITS defaults — and the scheduler records that cohort
+// as delivered, so nothing replays it once the sync lands.
+func TestSyncContentPolicySerializesWithSchedulerPushes(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	player := mocks.NewMockCDP(ctrl)
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	require.NoError(t, err)
+	sched := &barrierScheduler{}
+	h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl),
+		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, sched, wrapper.NewJSON(), zaptest.NewLogger(t))
+	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			require.True(t, sched.inPush, "the reconnect policy acknowledgement escaped the player-push barrier")
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok": true, "active": true,
+				"contentPolicy": map[string]interface{}{"version": float64(1), "showMatureContent": false, "strictPersonal": false, "blockUnratedCurated": false},
+			}}, nil
+		}).Times(1)
+
+	require.NoError(t, commandrouter.SyncContentPolicy(h))
+	require.True(t, sched.entered, "SyncContentPolicy did not take the player-push lock")
+}
