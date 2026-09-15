@@ -18,6 +18,13 @@ not break existing unsigned feeds by introducing a signature migration.
 
 ## Constraints
 
+- **Only `mature` hides anything.** A `contentRating` this build does not
+  recognize is treated as unrated — nothing is assumed from a label the daemon
+  cannot interpret — and a document is never refused for carrying one (DP-1
+  §3.3, display-protocol/dp1#52, decided 2026-09-15). A rating of the wrong
+  *type* is still schema-invalid. An earlier revision of this plan read the
+  opposite, treating an unknown label as a reason to withhold; that is
+  superseded.
 - The daemon owns an atomic durable ContentPolicy v1 file; the player mirrors it.
 - A policy update is active only after a matching acknowledgement from the
   current player generation AND durable daemon storage — **in that order**. The

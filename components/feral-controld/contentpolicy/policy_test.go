@@ -334,40 +334,68 @@ func TestResetLockedClearsTheOwnerSettingAndKeepsTheOperatorGate(t *testing.T) {
 	}
 }
 
-// A present but unrecognized rating fails closed. Public ingress rejects such a
-// document outright, but a playlist read back from player status never went
-// through that validator, so an item retained from a pre-feature cast can carry
-// any string — and admitting it merely because it is not the exact word
-// "mature" would let a malformed label outlive a restrictive policy.
-func TestAllowsFailsClosedOnAnUnrecognizedRating(t *testing.T) {
-	bogus := contentrating.Rating("not-a-rating")
-	item := dp1playlist.PlaylistItem{Source: "https://a", ContentRating: &bogus}
+// An unrecognized rating is treated exactly as UNRATED: nothing is assumed from
+// a label the daemon does not know, only "mature" hides anything, and the
+// document is never refused for carrying one (DP-1 spec §3.3,
+// display-protocol/dp1#52; product decision 2026-09-15). This reverses an
+// earlier fail-closed reading.
+func TestAllowsTreatsAnUnrecognizedRatingAsUnrated(t *testing.T) {
+	future := contentrating.Rating("teen")
+	unknown := dp1playlist.PlaylistItem{Source: "https://a", ContentRating: &future}
+	unrated := dp1playlist.PlaylistItem{Source: "https://a"}
 
+	// Whatever the policy and origin, an unknown label behaves exactly as an
+	// absent one. Asserting the PAIR is the point: the rule is equivalence,
+	// not merely "it plays".
 	for name, p := range map[string]Policy{
-		"defaults":             Default(),
-		"mature allowed":       {Version: Version, ShowMatureContent: true},
-		"personal relaxed":     {Version: Version},
-		"audit gate on":        {Version: Version, BlockUnratedCurated: true},
-		"everything permitted": {Version: Version, ShowMatureContent: true, StrictPersonal: false},
+		"defaults":         Default(),
+		"mature allowed":   {Version: Version, ShowMatureContent: true},
+		"strict personal":  {Version: Version, StrictPersonal: true},
+		"audit gate on":    {Version: Version, BlockUnratedCurated: true},
+		"gate plus mature": {Version: Version, ShowMatureContent: true, BlockUnratedCurated: true},
 	} {
 		for _, origin := range []Context{ContextCurated, ContextPersonal} {
-			if p.Allows(item, origin) {
-				t.Fatalf("%s/%s admitted a malformed rating", name, origin)
+			if got, want := p.Allows(unknown, origin), p.Allows(unrated, origin); got != want {
+				t.Fatalf("%s/%s: unknown label = %v, unrated = %v; they must agree", name, origin, got, want)
 			}
 		}
 	}
 
-	// The known values are unaffected.
+	// And under the defaults it plays, rather than being withheld as the
+	// previous fail-closed rule did.
+	if !Default().Allows(unknown, ContextCurated) {
+		t.Fatal("an unknown label must play as unrated under the default policy")
+	}
+	// The operator gate still catches it, because it IS unrated.
+	if (Policy{Version: Version, BlockUnratedCurated: true}).Allows(unknown, ContextCurated) {
+		t.Fatal("the unrated-curated audit gate must apply to an unknown label")
+	}
+}
+
+// Only "mature" hides anything — the other half of the same rule.
+func TestAllowsStillHidesMature(t *testing.T) {
 	general, mature := contentrating.RatingGeneral, contentrating.RatingMature
-	if !Default().Allows(dp1playlist.PlaylistItem{Source: "https://a", ContentRating: &general}, ContextCurated) {
-		t.Fatal("a general item must still be admitted")
+	matureItem := dp1playlist.PlaylistItem{Source: "https://a", ContentRating: &mature}
+	generalItem := dp1playlist.PlaylistItem{Source: "https://a", ContentRating: &general}
+
+	if Default().Allows(matureItem, ContextCurated) {
+		t.Fatal("a mature item must be hidden from a curated cast by default")
 	}
-	if !(Policy{Version: Version, ShowMatureContent: true}).Allows(
-		dp1playlist.PlaylistItem{Source: "https://a", ContentRating: &mature}, ContextCurated) {
-		t.Fatal("an explicitly allowed mature item must still be admitted")
+	if !(Policy{Version: Version, ShowMatureContent: true}).Allows(matureItem, ContextCurated) {
+		t.Fatal("an explicitly allowed mature item must play")
 	}
-	if !Default().Allows(dp1playlist.PlaylistItem{Source: "https://a"}, ContextCurated) {
-		t.Fatal("an unrated item must still be admitted while the audit gate is off")
+	if !Default().Allows(matureItem, ContextPersonal) {
+		t.Fatal("a personal cast admits mature while strictPersonal is off")
+	}
+	if (Policy{Version: Version, StrictPersonal: true}).Allows(matureItem, ContextPersonal) {
+		t.Fatal("strictPersonal must hide mature on a personal cast too")
+	}
+	if !Default().Allows(generalItem, ContextCurated) {
+		t.Fatal("a general item must play")
+	}
+	// general is RATED, so the unrated audit gate must not touch it.
+	if !(Policy{Version: Version, BlockUnratedCurated: true}).Allows(generalItem, ContextCurated) {
+		t.Fatal("the unrated gate must not withhold an explicitly general item")
 	}
 }
 

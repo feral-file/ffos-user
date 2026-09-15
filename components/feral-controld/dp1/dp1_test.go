@@ -1315,18 +1315,24 @@ func assertGraphQLHydration(t *testing.T, req *http.Request, wantLimit, wantOffs
 	assert.Contains(t, env.Query, "offset: "+wantOffset)
 }
 
-// A resolver's hydrated items must not be able to smuggle a malformed
-// contentRating past the policy matrix, which would be neither rejected nor
-// treated as mature. Controld adds no second validation pass for this: dp1-go's
+// A resolver's hydrated items must not smuggle a contentRating of the WRONG
+// TYPE past the policy matrix. Controld adds no second validation pass: dp1-go's
 // own hydration validates every item against the content-rating extension
 // overlay (see processDynamicPlaylistSpec's ACCEPTED FAIL-CLOSED note), and this
-// test pins that, so a dp1-go bump that dropped the overlay would be caught here
-// rather than silently opening the gate.
-func TestDP1_ProcessDynamicPlaylist_RejectsMalformedResolvedRatings(t *testing.T) {
+// pins that the classification still reaches the transports.
+//
+// Note the value under test is a NUMBER, not an unknown string. An unrecognized
+// STRING is no longer a rejection case: DP-1 §3.3 (display-protocol/dp1#52)
+// settles that a rating this build does not know is treated as unrated and the
+// document is never refused for it. Only a non-string remains schema-invalid.
+// The pinned dp1-go still enforces the old enum, so an unknown string is
+// rejected at ingress until that drops; the policy layer already implements the
+// new rule (contentpolicy.Policy.Allows).
+func TestDP1_ProcessDynamicPlaylist_RejectsWrongTypedResolvedRatings(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	body := `{"data":{"items":[{"id":"` + uuid.New().String() + `","title":"bad","source":"https://media.example/0","contentRating":"not-a-rating"}]}}`
+	body := `{"data":{"items":[{"id":"` + uuid.New().String() + `","title":"bad","source":"https://media.example/0","contentRating":123}]}}`
 	ts.mockHTTP.EXPECT().
 		Do(gomock.Any()).
 		DoAndReturn(func(_ *http.Request) (*http.Response, error) {

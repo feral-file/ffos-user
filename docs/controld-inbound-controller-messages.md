@@ -3046,12 +3046,17 @@ The device filters the playlist against its policy before casting:
   retiring the frame rather than leaving blocked content on screen because the
   only cohort that could replace it is the one the policy emptied.
 
-A playlist carrying malformed content-rating extension fields is rejected as
-`playlistInvalid`. A malformed label is never silently treated as unrated —
-and admission itself fails closed on one: an item whose `contentRating` is
-present but not a value this build recognizes is withheld regardless of the
-policy, because a playlist read back from player status never passed the
-ingress validator and could carry anything. The
+**Only `mature` hides anything.** A `contentRating` this build does not
+recognize is treated exactly as **unrated** — `general`, an absent rating, and
+any other string all take the same path — and a document is never refused for
+carrying one (DP-1 §3.3, display-protocol/dp1#52). Nothing is assumed from a
+label the daemon cannot interpret, so an unrated item is withheld only by the
+operator's `blockUnratedCurated` gate, and an unknown label is withheld on
+exactly the same terms.
+
+A `contentRating` of the wrong **type** is different and still fails closed: it
+cannot decode as a rating at all, so the playlist is rejected as
+`playlistInvalid`. The
 rejection is carried as a typed error to both transports — HTTP 422 on the LAN
 hub, `"error":"playlistInvalid"` over the relayer — for inline `dp1_call` and
 for fetched `playlistUrl` documents alike. Inline bytes are validated before

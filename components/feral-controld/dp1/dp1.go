@@ -229,7 +229,7 @@ func (d *dp1) processDynamicPlaylist(ctx context.Context, playlist Playlist, min
 // The fragility is bounded and fails in the safe direction: if dp1-go's wording
 // changes, a malformed item falls back to the generic error this code returned
 // before, never to a wrong classification. TestDP1_ProcessDynamicPlaylist_
-// RejectsMalformedResolvedRatings pins the behavior.
+// RejectsWrongTypedResolvedRatings pins the behavior.
 const dp1ItemValidationMarker = "invalid playlist item"
 
 // classifyHydrationError marks a resolver's malformed CONTENT as
@@ -412,12 +412,19 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
 	if len(bytes) > MaxPlaylistBodyBytes {
 		return Playlist{}, fmt.Errorf("fetch playlist failed: body exceeds %d bytes", MaxPlaylistBodyBytes)
 	}
-	// This ingestion path validates any present content-rating extension fields
-	// before they can become policy input. The fragment validator needs no core
-	// signature — it is structural — so it applies whatever the signature
-	// verification mode decides about the document itself; malformed-present
-	// labels are playlistInvalid, never silently unrated. Ordered after the size
-	// cap so an oversized body is refused before it is parsed.
+	// This ingestion path structurally validates any present content-rating
+	// extension fields. The fragment validator needs no core signature, so it
+	// applies whatever the signature verification mode decides about the
+	// document itself. Ordered after the size cap so an oversized body is
+	// refused before it is parsed.
+	//
+	// What this rejects is a rating of the wrong TYPE. An unrecognized rating
+	// STRING is not an error: DP-1 §3.3 (display-protocol/dp1#52) treats a
+	// rating this build does not know as unrated, and a document is never
+	// refused for carrying one — contentpolicy.Policy.Allows implements that.
+	// The pinned dp1-go still enforces the old closed enum here, so an unknown
+	// string is refused at this boundary until that pin moves to the revision
+	// that drops it.
 	if err := contentrating.ValidatePlaylistFragment(bytes); err != nil {
 		return Playlist{}, fmt.Errorf("%w: content rating extension: %w", ErrPlaylistInvalid, err)
 	}

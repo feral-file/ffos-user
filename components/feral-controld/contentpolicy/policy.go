@@ -79,41 +79,37 @@ func NormalizeContext(v any) (Context, error) {
 }
 
 func (p Policy) Allows(item dp1playlist.PlaylistItem, origin Context) bool {
-	// A present but UNRECOGNIZED rating fails closed, and is checked before any
-	// allowance below. Public ingress rejects such a document outright
-	// (playlistInvalid), but a playlist read back from player status never went
-	// through that validator — an item retained from a pre-feature cast can
-	// carry any string. Admitting it because it merely is not the exact word
-	// "mature" would let a malformed label outlive a restrictive policy
-	// indefinitely, which is the opposite of "a malformed label is never
-	// silently treated as unrated".
+	// Only "mature" hides anything. A rating this build does not recognize is
+	// treated exactly as UNRATED — nothing is assumed from a label the daemon
+	// cannot interpret, and a document is never refused for carrying one
+	// (DP-1 spec §3.3, display-protocol/dp1#52; Sean's decision 2026-09-15).
 	//
-	// This is stricter than the player's mirror, deliberately and safely: the
-	// daemon filters before sending, so a withheld item never reaches the
-	// player at all. Divergence only matters in the other direction — the
-	// daemon admitting what the player withholds.
-	if item.ContentRating != nil && !isKnownRating(*item.ContentRating) {
-		return false
-	}
+	// So "general", an absent rating, and any other string all take the same
+	// path below. A non-string value is a different matter and still fails
+	// closed: it cannot decode into the Rating type at all, so it never
+	// reaches this function — the document is schema-invalid at ingress.
 	if p.ShowMatureContent || (origin == ContextPersonal && !p.StrictPersonal) {
 		return true
 	}
 	if item.ContentRating != nil && *item.ContentRating == "mature" {
 		return false
 	}
-	// An unrated item is withheld only when the operator gate is on and the item
-	// came from a curated source; unrated personal content stays admissible.
-	if item.ContentRating == nil && origin == ContextCurated && p.BlockUnratedCurated {
+	// An UNRATED item is withheld only when the operator gate is on and the
+	// item came from a curated source; unrated personal content stays
+	// admissible. "Unrated" means no rating OR any rating that is not one this
+	// build understands — see the rule at the top of this function.
+	if !isRated(item.ContentRating) && origin == ContextCurated && p.BlockUnratedCurated {
 		return false
 	}
 	return true
 }
 
-// isKnownRating reports whether r is a content-rating value this build
-// understands. Kept next to Allows rather than inlined so the fail-closed rule
-// has one definition.
-func isKnownRating(r contentrating.Rating) bool {
-	return r == contentrating.RatingGeneral || r == contentrating.RatingMature
+// isRated reports whether the item carries a rating this build can act on.
+// Anything else — absent, or a string from a newer spec revision — is unrated,
+// which is the whole of the rule: the daemon assumes nothing from a label it
+// does not know.
+func isRated(r *contentrating.Rating) bool {
+	return r != nil && (*r == contentrating.RatingGeneral || *r == contentrating.RatingMature)
 }
 
 // Filter creates an internal playback projection. When items are removed its
