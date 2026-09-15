@@ -696,3 +696,14 @@ func (p *provisioningStatusProvider) Status(ctx context.Context) hub.StatusInfo 
 	}
 	return info
 }
+
+// FF1DeviceID preserves the base provider's hostname-only logging identity
+// through this status decorator. It deliberately does not reuse Status,
+// whose legacy pairing contract may fall back to a controller ID.
+func (p *provisioningStatusProvider) FF1DeviceID() string {
+	provider, ok := p.base.(hub.FF1IdentityProvider)
+	if !ok {
+		return ""
+	}
+	return provider.FF1DeviceID()
+}
