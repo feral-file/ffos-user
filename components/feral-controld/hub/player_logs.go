@@ -82,10 +82,12 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var deviceID string
-	if h.statusProvider != nil {
-		deviceID = strings.TrimSpace(h.statusProvider.Status(r.Context()).DeviceID)
+	identityProvider, ok := h.statusProvider.(FF1IdentityProvider)
+	if !ok {
+		http.Error(w, "Device identity unavailable", http.StatusServiceUnavailable)
+		return
 	}
+	deviceID := strings.TrimSpace(identityProvider.FF1DeviceID())
 	if deviceID == "" {
 		http.Error(w, "Device identity unavailable", http.StatusServiceUnavailable)
 		return
