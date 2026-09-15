@@ -517,6 +517,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// record cleared between lookup and sync), so the installed
 		// scope's own count remains the final authority (#310 review).
 		var scopeSyncEnabled int
+		// castContentContext carries the normalized cast origin out to the
+		// reprojection below, which runs after the policy lock is reacquired.
+		castContentContext := contentpolicy.ContextCurated
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			delete(command.Arguments, "retireBlockedCurrent") // internal refresh-only signal
 			// The content-policy lock is taken further down, immediately before
@@ -657,23 +660,36 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if contextErr != nil {
 				return nil, contextErr
 			}
-			// Resolution is done; take the policy lock now and hold it through
-			// the filter, the scheduler prepare and the player send (see the
-			// note where this branch begins).
-			if h.contentPolicy != nil {
+			// Filter under the policy lock, then RELEASE it: the source
+			// preflight below is network-bound (a 10s phase ceiling, and up to
+			// four heavy casts can be admitted at once), and holding this lock
+			// across it would make History and Content controls wait on
+			// whatever an unauthenticated LAN caller's playlist origin chooses
+			// to do. Filtering still happens BEFORE probing, as the plan
+			// requires — only the waiting moved out of the lock. The lock is
+			// reacquired below, before the scheduler prepare and player send,
+			// and the projection is reapplied there under the policy in force
+			// at that moment.
+			filterUnderPolicy := func() error {
+				if h.contentPolicy == nil {
+					return nil
+				}
 				h.contentPolicy.Lock()
 				defer h.contentPolicy.Unlock()
-			}
-			if h.contentPolicy != nil {
 				filtered, filterErr := h.contentPolicy.FilterLocked(&playlist.Playlist, contentContext)
 				if filterErr != nil {
 					if errors.Is(filterErr, contentpolicy.ErrContentBlocked) {
-						return nil, &ContentBlockedError{}
+						return &ContentBlockedError{}
 					}
-					return nil, filterErr
+					return filterErr
 				}
 				playlist.Playlist = *filtered
+				return nil
 			}
+			if filterErr := filterUnderPolicy(); filterErr != nil {
+				return nil, filterErr
+			}
+			castContentContext = contentContext
 			command.Arguments["contentContext"] = string(contentContext)
 			schedulerSource.ContentContext = string(contentContext)
 
@@ -881,6 +897,30 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
+		// Preflight is done, so reacquire the policy lock and hold it from here
+		// through the scheduler prepare and the player send — the ordering the
+		// policy contract needs. Reapply the projection under the policy in
+		// force NOW: one tightened while the probe ran must not be outrun by
+		// this cast. A policy RELAXED during the probe does not re-admit what
+		// was already filtered out, matching the rest of this path — those
+		// items were never probed, and a relaxed policy takes effect on the
+		// next cast, refresh or cutover.
+		if commandType == commands.CMD_DISPLAY_PLAYLIST && h.contentPolicy != nil {
+			h.contentPolicy.Lock()
+			defer h.contentPolicy.Unlock()
+			reprojected, filterErr := h.contentPolicy.FilterLocked(&playlist.Playlist, castContentContext)
+			if filterErr != nil {
+				if errors.Is(filterErr, contentpolicy.ErrContentBlocked) {
+					err = &ContentBlockedError{}
+					return nil, err
+				}
+				err = filterErr
+				return nil, err
+			}
+			playlist.Playlist = *reprojected
+			command.Arguments["dp1_call"] = playlist
+		}
+
 		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the
 		// scheduler push lock with RecomputeNow so a stale timed push cannot land
 		// after a newer cast or OOM-recovery fallback.
@@ -1033,18 +1073,34 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 	if h.contentPolicy == nil {
 		return policyFailure("contentPolicyUnavailable"), nil
 	}
-	h.contentPolicy.Lock()
-	defer h.contentPolicy.Unlock()
-	policy := h.contentPolicy.CurrentLocked()
+	// Argument validation happens BEFORE the lock. A malformed request is
+	// rejected on its own shape, so it must not queue behind a cast that is
+	// holding the policy lock — otherwise the cheapest possible bad request
+	// still pays a cast's latency.
+	var show, strict bool
 	if command.Type == commands.CMD_SET_CONTENT_POLICY {
 		if len(command.Arguments) != 2 {
 			return policyFailure("invalidRequest"), nil
 		}
-		show, okShow := command.Arguments["showMatureContent"].(bool)
-		strict, okStrict := command.Arguments["strictPersonal"].(bool)
+		var okShow, okStrict bool
+		show, okShow = command.Arguments["showMatureContent"].(bool)
+		strict, okStrict = command.Arguments["strictPersonal"].(bool)
 		if !okShow || !okStrict {
 			return policyFailure("invalidRequest"), nil
 		}
+	} else if len(command.Arguments) != 0 {
+		// getContentPolicy takes no arguments. Rejecting a non-empty request is
+		// not pedantry: the storm gate's dedupe key is type+arguments, so
+		// silently ignoring junk arguments would let one LAN caller mint
+		// unlimited distinct keys and defeat the query-tier dedupe that bounds
+		// this command (gate.go).
+		return policyFailure("invalidRequest"), nil
+	}
+
+	h.contentPolicy.Lock()
+	defer h.contentPolicy.Unlock()
+	policy := h.contentPolicy.CurrentLocked()
+	if command.Type == commands.CMD_SET_CONTENT_POLICY {
 		// Serialized against scheduler-owned pushes, not just against casts.
 		// A timer push holding pushMu has already read the old policy through
 		// the lock-free Snapshot and built its payload; without this barrier
@@ -1061,13 +1117,6 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 			update()
 		}
 		return reply, nil
-	}
-	// getContentPolicy takes no arguments. Rejecting a non-empty request is not
-	// pedantry: the storm gate's dedupe key is type+arguments, so silently
-	// ignoring junk arguments would let one LAN caller mint unlimited distinct
-	// keys and defeat the query-tier dedupe that bounds this command (gate.go).
-	if len(command.Arguments) != 0 {
-		return policyFailure("invalidRequest"), nil
 	}
 	// A store that could not read its file keeps admitting on safe defaults,
 	// but it must not present those defaults as the saved user setting.

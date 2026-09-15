@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	stdos "os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1600,4 +1601,34 @@ func TestInitializeAppGatewayUserAgentKeepsUsableHosts(t *testing.T) {
 
 	require.NotNil(t, app)
 	assert.NotNil(t, app.UARewrite, "one bad entry must not disable the whole rewrite")
+}
+
+// TestReconcilerOrder_ContentPolicyBeforePlaylistRecompute pins the ORDER of two
+// registrations in initializeApp, because registration order is the execution
+// order on every generation-ready and the two reconcilers are not independent.
+//
+// A freshly initialized player starts on default content policy. If
+// playlist-recompute runs first, its force-pushed cohort is filtered by the
+// player against those defaults, and nothing re-pushes the scheduler when
+// content-policy syncs a moment later — so a durable, acknowledged
+// showMatureContent setting visibly fails after a player restart until some
+// later cast, refresh or cutover.
+//
+// Asserted against the source rather than a live session because the session
+// exposes no way to read back its registration order; this is the same
+// source-inspection approach as importlint_test.go.
+func TestReconcilerOrder_ContentPolicyBeforePlaylistRecompute(t *testing.T) {
+	source, err := stdos.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	policyAt := strings.Index(text, `session.RegisterReconciler("content-policy"`)
+	recomputeAt := strings.Index(text, `session.RegisterReconciler("playlist-recompute"`)
+	if policyAt < 0 || recomputeAt < 0 {
+		t.Fatalf("reconciler registrations not found (content-policy=%d playlist-recompute=%d)", policyAt, recomputeAt)
+	}
+	if policyAt > recomputeAt {
+		t.Fatal("content-policy must be registered BEFORE playlist-recompute: a reconnect would otherwise push a scheduled cohort to a player still on default policy")
+	}
 }

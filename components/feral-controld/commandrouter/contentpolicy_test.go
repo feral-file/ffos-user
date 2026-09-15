@@ -19,6 +19,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -450,4 +451,118 @@ func TestDisplayPlaylistDoesNotHoldThePolicyLockAcrossResolution(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, lockFree, "the policy lock was held through playlist resolution")
+}
+
+// stallingProber stands in for a slow playlist origin during the cast-time
+// source preflight, which is the other network-bound stretch the policy lock
+// must not span.
+type stallingProber struct {
+	during func()
+}
+
+func (p *stallingProber) ProbeSources(_ context.Context, sources []string) []offlinecache.SourceProbeResult {
+	p.during()
+	out := make([]offlinecache.SourceProbeResult, 0, len(sources))
+	for _, s := range sources {
+		out = append(out, offlinecache.SourceProbeResult{Source: s})
+	}
+	return out
+}
+
+// The policy lock must not span the source preflight either: the probe has a
+// 10s phase ceiling and several heavy casts can be admitted at once, so holding
+// it there makes the History and Content controls wait on whatever an
+// unauthenticated caller's origin decides to do.
+func TestDisplayPlaylistDoesNotHoldThePolicyLockAcrossSourcePreflight(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	player := mocks.NewMockCDP(ctrl)
+	poller := mocks.NewMockStatusPoller(ctrl)
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	require.NoError(t, err)
+	h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl), poller,
+		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+
+	lockFree := false
+	commandrouter.SetSourceProber(h, &stallingProber{during: func() {
+		acquired := make(chan struct{})
+		go func() {
+			store.Lock()
+			_ = store.CurrentLocked()
+			store.Unlock()
+			close(acquired)
+		}()
+		select {
+		case <-acquired:
+			lockFree = true
+		case <-time.After(3 * time.Second):
+			lockFree = false
+		}
+	}}, zaptest.NewLogger(t))
+
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+		}).AnyTimes()
+	poller.EXPECT().ForceRefresh().AnyTimes()
+
+	_, err = h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]any{"dp1_call": map[string]interface{}{
+			"dpVersion": "1.1.0", "title": "x",
+			"items": []interface{}{map[string]interface{}{"source": "https://slow.example/a"}},
+		}},
+	})
+	require.NoError(t, err)
+	require.True(t, lockFree, "the policy lock was held through the source preflight")
+}
+
+// Releasing the lock for the probe must not let a cast outrun a policy
+// tightened while that probe ran: the projection is reapplied under the policy
+// in force at send time.
+func TestDisplayPlaylistReprojectsAfterAPolicyChangeDuringPreflight(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	player := mocks.NewMockCDP(ctrl)
+	poller := mocks.NewMockStatusPoller(ctrl)
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	require.NoError(t, err)
+	// Start permissive so the mature item survives the first filter.
+	store.Lock()
+	_, err = store.UpdateLocked(true, false)
+	store.Unlock()
+	require.NoError(t, err)
+
+	h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl), poller,
+		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+	commandrouter.SetSourceProber(h, &stallingProber{during: func() {
+		// The owner turns mature content off while the probe is running.
+		store.Lock()
+		_, updateErr := store.UpdateLocked(false, false)
+		store.Unlock()
+		require.NoError(t, updateErr)
+	}}, zaptest.NewLogger(t))
+
+	var sent string
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			sent = params["expression"].(string)
+			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+		}).AnyTimes()
+	poller.EXPECT().ForceRefresh().AnyTimes()
+
+	_, err = h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]any{"dp1_call": map[string]interface{}{
+			"dpVersion": "1.1.0", "title": "x",
+			"items": []interface{}{
+				map[string]interface{}{"source": "https://ok.example/a"},
+				map[string]interface{}{"source": "https://mature.example/b", "contentRating": "mature"},
+			},
+		}},
+	})
+	require.NoError(t, err)
+	require.Contains(t, sent, "https://ok.example/a")
+	require.NotContains(t, sent, "https://mature.example/b",
+		"a policy tightened during the probe must still govern the cast")
 }

@@ -1184,19 +1184,25 @@ func initializeApp(
 
 	// Wire every off-lane producer to the session (design doc §4), now that
 	// they all exist. Registration ORDER is the reconciler execution order on
-	// every generation-ready: sleep invalidate+poke, playlist recompute,
-	// status force-refresh, setup-narration resync, offline-cache replay-scope
-	// resync, boot-recovery retry, connectivity — replacing the five ad-hoc
-	// CDP-reconnect spawns run() used to do inline.
+	// every generation-ready: sleep invalidate+poke, content policy, playlist
+	// recompute, status force-refresh, setup-narration resync, offline-cache
+	// replay-scope resync, boot-recovery retry, connectivity — replacing the
+	// five ad-hoc CDP-reconnect spawns run() used to do inline.
 	session.RegisterReconciler("sleep-invalidate", sleepInvalidateReconciler(executor, logger))
+	// Content policy MUST reconcile before playlist-recompute. A freshly
+	// initialized player starts on default policy, so a recompute that
+	// force-pushes a scheduled cohort first would have its mature items
+	// withheld by the player until some later cast, refresh or cutover —
+	// a durable, acknowledged Content setting visibly failing after a player
+	// restart. Nothing re-pushes the scheduler when the policy syncs later.
+	if policyStore != nil {
+		session.RegisterReconciler("content-policy", contentPolicyReconciler(rawCmdHandler, logger))
+	}
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))
 	}
 	session.RegisterReconciler("status-force-refresh", statusForceRefreshReconciler(poller))
 	session.RegisterReconciler("setupui-resync", setupUIResyncReconciler(setupNarrator))
-	if policyStore != nil {
-		session.RegisterReconciler("content-policy", contentPolicyReconciler(rawCmdHandler, logger))
-	}
 	// Guarded on kioskReplay, not on the refresher. This is not an
 	// optimization: ForceRefresh signals a full processPlayingPlaylist pass,
 	// which re-resolves the playlist over the network and re-sends
