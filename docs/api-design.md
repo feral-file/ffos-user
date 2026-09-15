@@ -23,10 +23,12 @@ URLs, Wi-Fi identifiers, MAC addresses, and command payloads, so they remain in
 the local journal. Message sanitization strips URL credentials/query strings
 and recognizable credential assignments before upload.
 
-The player reads its device ID from `GET http://127.0.0.1:1111/api/status`.
-That route returns `Access-Control-Allow-Origin` only for the bundled player's
-`http://127.0.0.1:8080` origin; this is an additive response header and does not
-change the status payload.
+The bundled player posts its already-sessionized records to
+`POST http://127.0.0.1:1111/api/logs`. The route accepts only loopback requests
+with Origin `http://127.0.0.1:8080`, validates the narrow browser payload, and
+overwrites both `service` and `device_id` before forwarding it to Cloudflare.
+The browser therefore neither owns device attribution nor depends on public
+Cloudflare CORS configuration.
 
 ---
 
