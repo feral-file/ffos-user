@@ -2698,13 +2698,21 @@ stay device-local and are never sent to a controller.
 ```
 
 A player that predates this feature answers the unknown command with a bare
-`ok:false`. Controld classifies that as an explicit **`unsupported`** capability
-reply. It is never flattened into an empty history: "this device cannot do it"
-and "this device has played nothing yet" are different answers, and the app
-renders them differently.
+`ok:false` — no `status`, no `error`, nothing else. Controld classifies exactly
+that shape as an explicit **`unsupported`** capability reply. It is never
+flattened into an empty history: "this device cannot do it" and "this device
+has played nothing yet" are different answers, and the app renders them
+differently.
 
-Error cases: `unsupported` (older player), plus transport errors. A transport
-failure is an error, never an empty list.
+A failure that carries any explanation of its own (an `error`, a code, or a
+result field) is a modern player failing for a real reason — an evicted or
+malformed record, say. Controld gives it `status: "error"` and keeps the
+player's own error rather than relabelling it `unsupported`, so a retryable
+failure is not reported as a missing capability.
+
+Error cases: `unsupported` (older player), `error` (a real player-side
+failure), plus transport errors. A transport failure is an error, never an
+empty list.
 
 ### playRecentlyPlayed
 

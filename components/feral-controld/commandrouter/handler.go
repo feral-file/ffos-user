@@ -1173,12 +1173,33 @@ func recentPlayerReply(result interface{}) map[string]interface{} {
 	}
 	if okValue, _ := message["ok"].(bool); !okValue {
 		if _, hasStatus := message["status"]; !hasStatus {
-			// ff-player before #729 has only the generic unknown-command reply.
-			message["status"] = "unsupported"
-			message["error"] = "Recently played is not supported by this player"
+			if isBareLegacyFailure(message) {
+				// ff-player before #729 has only the generic unknown-command
+				// reply: ok:false and nothing else.
+				message["status"] = "unsupported"
+				message["error"] = "Recently played is not supported by this player"
+			} else {
+				// A modern player that failed and said why. Give it the
+				// explicit error status and KEEP its own error: calling an
+				// evicted or malformed record "unsupported" would tell the app
+				// the device cannot do this at all, when the right answer is a
+				// real, possibly retryable failure.
+				message["status"] = "error"
+			}
 		}
 	}
 	return response
+}
+
+// isBareLegacyFailure reports whether a false reply carries no explanation of
+// any kind, which is the only shape that identifies a pre-#729 player.
+func isBareLegacyFailure(message map[string]interface{}) bool {
+	for _, key := range []string{"error", "errorCode", "code", "reason", "records", "item"} {
+		if _, present := message[key]; present {
+			return false
+		}
+	}
+	return true
 }
 
 // ensureDisplayPlaylistIntent sets intent.action=now_display when the cast
