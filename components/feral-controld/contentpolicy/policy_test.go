@@ -146,3 +146,45 @@ func TestUpdateLockedSkipsTheFlashWriteWhenNothingChanged(t *testing.T) {
 		t.Fatalf("changed set did not reach disk: %v", err)
 	}
 }
+
+// A truncated or half-written state file must not silently reset the owner's
+// saved policy and then be reported active. Decoding into an already-defaulted
+// policy accepted all of these, because the defaults filled in whatever the
+// file omitted and the version check passed on the default's own version.
+func TestOpenRejectsAnIncompletePolicyFile(t *testing.T) {
+	for name, body := range map[string]string{
+		"null":            `null`,
+		"empty object":    `{}`,
+		"version only":    `{"version":1}`,
+		"missing a field": `{"version":1,"showMatureContent":true,"strictPersonal":false}`,
+		"wrong version":   `{"version":2,"showMatureContent":false,"strictPersonal":false,"blockUnratedCurated":false}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "policy.json")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(path, false); err == nil {
+				t.Fatal("an incomplete policy file must be a load failure, not a silent reset")
+			}
+		})
+	}
+}
+
+func TestOpenAcceptsACompletePolicyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	body := `{"version":1,"showMatureContent":true,"strictPersonal":true,"blockUnratedCurated":false}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Lock()
+	got, durable := s.CurrentLocked(), s.DurableLocked()
+	s.Unlock()
+	if !got.ShowMatureContent || !got.StrictPersonal || !durable {
+		t.Fatalf("got %+v durable=%v", got, durable)
+	}
+}

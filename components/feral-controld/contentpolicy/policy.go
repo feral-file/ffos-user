@@ -175,17 +175,59 @@ func Fallback(path string, blockUnratedCurated bool) *Store {
 // been written to) the durable file.
 func (s *Store) DurableLocked() bool { return s.durable }
 
+// wirePolicy is the on-disk shape decoded into ZERO values, with every field a
+// pointer so "absent" is distinguishable from "false".
+//
+// Decoding straight into an already-defaulted Policy accepted `null`, `{}` and
+// `{"version":1}` as valid: the defaults supplied whatever the file omitted,
+// and the version check passed because the default already carried version 1.
+// A truncated or half-written state file would then silently reset the owner's
+// saved policy AND be reported active. A complete object is now required, and
+// anything short of one is a load failure, which surfaces as
+// contentPolicyUnavailable.
+type wirePolicy struct {
+	Version             *int  `json:"version"`
+	ShowMatureContent   *bool `json:"showMatureContent"`
+	StrictPersonal      *bool `json:"strictPersonal"`
+	BlockUnratedCurated *bool `json:"blockUnratedCurated"`
+}
+
+func (w wirePolicy) policy() (Policy, error) {
+	switch {
+	case w.Version == nil:
+		return Policy{}, fmt.Errorf("content policy is missing version")
+	case w.ShowMatureContent == nil:
+		return Policy{}, fmt.Errorf("content policy is missing showMatureContent")
+	case w.StrictPersonal == nil:
+		return Policy{}, fmt.Errorf("content policy is missing strictPersonal")
+	case w.BlockUnratedCurated == nil:
+		return Policy{}, fmt.Errorf("content policy is missing blockUnratedCurated")
+	}
+	if *w.Version != Version {
+		return Policy{}, fmt.Errorf("unsupported content policy version %d", *w.Version)
+	}
+	return Policy{
+		Version:             *w.Version,
+		ShowMatureContent:   *w.ShowMatureContent,
+		StrictPersonal:      *w.StrictPersonal,
+		BlockUnratedCurated: *w.BlockUnratedCurated,
+	}, nil
+}
+
 func Open(path string, blockUnratedCurated bool) (*Store, error) {
 	s := &Store{path: path, policy: Default(), durable: true}
 	s.policy.BlockUnratedCurated = blockUnratedCurated
 	b, err := os.ReadFile(path) //nolint:gosec // G304: production passes the fixed constant.CONTENT_POLICY_FILE; tests inject their own t.TempDir path.
 	if err == nil {
-		if err := jsonUnmarshalStrict(b, &s.policy); err != nil {
+		var wire wirePolicy
+		if err := jsonUnmarshalStrict(b, &wire); err != nil {
 			return nil, fmt.Errorf("load content policy: %w", err)
 		}
-		if s.policy.Version != Version {
-			return nil, fmt.Errorf("unsupported content policy version %d", s.policy.Version)
+		stored, err := wire.policy()
+		if err != nil {
+			return nil, fmt.Errorf("load content policy: %w", err)
 		}
+		s.policy = stored
 		// Operator configuration, not the controller or stale persisted state,
 		// owns this gate on every boot.
 		s.policy.BlockUnratedCurated = blockUnratedCurated

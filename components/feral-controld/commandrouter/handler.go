@@ -543,6 +543,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// record cleared between lookup and sync), so the installed
 		// scope's own count remains the final authority (#310 review).
 		var scopeSyncEnabled int
+		// probeVerdicts retains the preflight's per-source answers so the final
+		// projection can be re-checked against them without re-probing. See the
+		// re-check below the reprojection.
+		var probeVerdicts map[string]offlinecache.SourceProbeResult
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			delete(command.Arguments, "retireBlockedCurrent") // internal refresh-only signal
 			// The content-policy lock is taken further down, immediately before
@@ -773,6 +777,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						zap.Int("items", len(sources)))
 				} else {
 					probeResults := h.sourceProber.ProbeSources(ctx, sources)
+					probeVerdicts = make(map[string]offlinecache.SourceProbeResult, len(probeResults))
+					for _, r := range probeResults {
+						probeVerdicts[r.Source] = r
+					}
 					// Per-item log detail is capped: the hub accepts a 4 MiB
 					// playlist with no item cap, so an all-dead hostile cast
 					// must not be able to mint one log line per item on a
@@ -871,8 +879,28 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					err = filterErr
 					return nil, err
 				}
+				removed := len(reprojected.Items) != len(playlist.Items)
 				playlist.Playlist = *reprojected
 				command.Arguments["dp1_call"] = playlist
+				// A policy tightened while the probe ran can remove the very
+				// item whose reachability made this cast acceptable, leaving
+				// only sources already proven dead. Re-check the retained
+				// verdicts against the final set rather than re-probing: the
+				// answers are seconds old and the items are a subset of the
+				// ones probed.
+				if removed && !rescuedByCache {
+					if deadResults, allDead := allSourcesDead(playlist, probeVerdicts); allDead {
+						if h.offlineCache != nil && h.kioskReplay != nil && h.offlineCache.HasReplayableItem(playlistSources(playlist)...) {
+							rescuedByCache = true
+							rescueProbeResults = deadResults
+							h.logger.Warn("displayPlaylist: the policy projection left only unreachable sources but cached captures exist; casting for offline replay",
+								zap.Int("items", len(playlist.Items)))
+						} else {
+							err = &SourceUnreachableError{Results: deadResults}
+							return nil, err
+						}
+					}
+				}
 			}
 
 			// Player CanvasService rejects displayPlaylist without a known
@@ -1175,6 +1203,39 @@ func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
 		return policyFailure(policyFailureCode(result, err))
 	}
 	return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}
+}
+
+// allSourcesDead reports whether EVERY item left in playlist has a retained
+// preflight verdict and every one of those verdicts is definitively dead. A
+// single item with no verdict (never probed, or the preflight was skipped)
+// makes it false: this must only ever reject a cast the preflight itself would
+// have rejected, never one it never judged.
+func allSourcesDead(playlist *dp1.Playlist, verdicts map[string]offlinecache.SourceProbeResult) ([]offlinecache.SourceProbeResult, bool) {
+	if playlist == nil || len(playlist.Items) == 0 || len(verdicts) == 0 {
+		return nil, false
+	}
+	results := make([]offlinecache.SourceProbeResult, 0, len(playlist.Items))
+	for _, item := range playlist.Items {
+		r, probed := verdicts[item.Source]
+		if !probed || r.Verdict != offlinecache.ProbeDead {
+			return nil, false
+		}
+		results = append(results, r)
+	}
+	return results, true
+}
+
+// playlistSources lists the item source URLs of playlist, the cache's identity
+// for a replay lookup.
+func playlistSources(playlist *dp1.Playlist) []string {
+	if playlist == nil {
+		return nil
+	}
+	sources := make([]string, 0, len(playlist.Items))
+	for _, item := range playlist.Items {
+		sources = append(sources, item.Source)
+	}
+	return sources
 }
 
 func policyFailure(code string) interface{} {

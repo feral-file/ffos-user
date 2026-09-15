@@ -646,3 +646,74 @@ func TestSyncContentPolicySerializesWithSchedulerPushes(t *testing.T) {
 	require.NoError(t, commandrouter.SyncContentPolicy(h))
 	require.True(t, sched.entered, "SyncContentPolicy did not take the player-push lock")
 }
+
+// A policy tightened while the probe runs can remove the very item whose
+// reachability made the cast acceptable, leaving only sources already proven
+// dead. The cast must not then report success with nothing renderable on it.
+func TestDisplayPlaylistRejectsWhenTheProjectionLeavesOnlyDeadSources(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	player := mocks.NewMockCDP(ctrl)
+	poller := mocks.NewMockStatusPoller(ctrl)
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	require.NoError(t, err)
+	store.Lock()
+	_, err = store.UpdateLocked(true, false) // mature allowed, so the live item survives the first filter
+	store.Unlock()
+	require.NoError(t, err)
+
+	h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl), poller,
+		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+
+	const live = "https://live.example/mature"
+	const dead = "https://dead.example/general"
+	commandrouter.SetSourceProber(h, &verdictProber{
+		verdicts: map[string]offlinecache.SourceProbeVerdict{
+			live: offlinecache.ProbeAlive,
+			dead: offlinecache.ProbeDead,
+		},
+		during: func() {
+			// The owner turns mature content off while the probe is running,
+			// which removes the one reachable item.
+			store.Lock()
+			_, updateErr := store.UpdateLocked(false, false)
+			store.Unlock()
+			require.NoError(t, updateErr)
+		},
+	}, zaptest.NewLogger(t))
+
+	// No player.EXPECT(): nothing renderable must reach the player.
+	poller.EXPECT().ForceRefresh().AnyTimes()
+
+	_, err = h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]any{"dp1_call": map[string]interface{}{
+			"dpVersion": "1.1.0", "title": "x",
+			"items": []interface{}{
+				map[string]interface{}{"source": live, "contentRating": "mature"},
+				map[string]interface{}{"source": dead, "contentRating": "general"},
+			},
+		}},
+	})
+	require.Error(t, err)
+	var unreachable *commandrouter.SourceUnreachableError
+	require.ErrorAs(t, err, &unreachable)
+}
+
+// verdictProber answers a fixed verdict per source and runs during() while the
+// probe is "in flight".
+type verdictProber struct {
+	verdicts map[string]offlinecache.SourceProbeVerdict
+	during   func()
+}
+
+func (p *verdictProber) ProbeSources(_ context.Context, sources []string) []offlinecache.SourceProbeResult {
+	if p.during != nil {
+		p.during()
+	}
+	out := make([]offlinecache.SourceProbeResult, 0, len(sources))
+	for _, s := range sources {
+		out = append(out, offlinecache.SourceProbeResult{Source: s, Verdict: p.verdicts[s]})
+	}
+	return out
+}
