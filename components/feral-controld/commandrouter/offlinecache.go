@@ -621,14 +621,27 @@ func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[stri
 
 // loadCachedPlaylistForURL is handler.go's displayPlaylist-by-URL offline
 // fallback: the raw body it returns was already fully resolved (dynamic
-// content materialized) and signature-verified once, back when
-// downloadPlaylist originally saved it — see Service.CachedPlaylistForURL
-// and DownloadPlaylist's docs — so unmarshaling it here needs no further
-// DP-1 processing. Returns an error whenever there is nothing to fall
-// back to (offline caching disabled, url was never downloaded, the
-// downloaded copy has since been cleared, or the saved body is
-// unexpectedly malformed), so the caller can report the original live
-// resolution error instead.
+// content materialized) back when downloadPlaylist originally saved it —
+// see Service.CachedPlaylistForURL and DownloadPlaylist's docs — so
+// unmarshaling it here needs no further DP-1 resolution.
+//
+// The returned playlist carries NO signature verdict (Verification stays
+// nil, so the reply and player_status omit signatureStatus: "not
+// verified"). It cannot honestly carry one: the saved body is
+// handleDownloadPlaylist's json.Marshal of the typed, already-hydrated
+// *dp1.Playlist, not the bytes the publisher signed — a dynamic playlist's
+// items were rewritten by resolution, and even a static one only verifies
+// while the pinned dp1-go happens to model every field it carries. Judging
+// those bytes would report honest documents as tampered on the exact path
+// the offline cache exists for (feral-file/ffos-user#307 review). An
+// earlier version of this comment claimed the copy was "signature-verified
+// once" at download time; nothing ever did. Persisting the download-time
+// verdict alongside the record is the follow-up that would close this.
+//
+// Returns an error whenever there is nothing to fall back to (offline
+// caching disabled, url was never downloaded, the downloaded copy has
+// since been cleared, or the saved body is unexpectedly malformed), so the
+// caller can report the original live resolution error instead.
 func (h *handler) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
 	if h.offlineCache == nil {
 		return nil, fmt.Errorf("offline cache: disabled, no cached fallback for %s", url)

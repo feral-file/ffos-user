@@ -72,6 +72,12 @@ func setup(t *testing.T) *testSetup {
 		Return(nil).
 		AnyTimes()
 
+	// Every dialed connection is read-limited before use (inbound frame
+	// bound, feral-file/ffos-user#307); pin the exact value here once.
+	mockConn.EXPECT().
+		SetReadLimit(int64(relayer.MAX_MESSAGE_BYTES)).
+		AnyTimes()
+
 	client := relayer.New("ws://localhost:8080", "test-api-key", mockDialer, mockRandomizer, mockClock, mockOS, mockJSON, logger)
 
 	return &testSetup{
@@ -1366,6 +1372,9 @@ func TestClient_ReceiveMessage_Error(t *testing.T) {
 	// Expect second conn to set pong handler
 	mockConn2.EXPECT().
 		SetPongHandler(gomock.Any()).
+		Times(1)
+	mockConn2.EXPECT().
+		SetReadLimit(int64(relayer.MAX_MESSAGE_BYTES)).
 		Times(1)
 
 	// Expect second conn to write ping

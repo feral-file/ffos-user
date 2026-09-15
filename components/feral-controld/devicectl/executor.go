@@ -494,6 +494,11 @@ type executor struct {
 	// session (design doc §4 generation re-check contract). nil reads as
 	// generation 0 always, which never appears to move.
 	sessionGeneration func() uint64
+	// verdictInvalidator, when set (SetVerdictInvalidator), clears the
+	// signature verification active-verdict slot's current entry before the
+	// claim-time displayDefaultPlaylist send (see sendDisplayDefaultPlaylist).
+	// Guarded by sleepApplyMu like sessionGeneration.
+	verdictInvalidator func()
 }
 
 func New(
@@ -732,6 +737,21 @@ func (e *executor) sendDisplayDefaultPlaylist() error {
 		payload, err := command.JSON()
 		if err != nil {
 			return nil, fmt.Errorf("marshal displayDefaultPlaylist payload: %w", err)
+		}
+
+		// This send bypasses commandrouter, so it must do what
+		// commandrouter does before every replacing send: drop the
+		// attested signature verdict. From the moment the send lands the
+		// player may be showing its own default content — bytes controld
+		// never verified — and a status round in that window must omit,
+		// never re-attest, the previous playlist's verdict
+		// (feral-file/ffos-user#307). Inside the push section, before the
+		// send, like every other producer.
+		e.sleepApplyMu.Lock()
+		invalidate := e.verdictInvalidator
+		e.sleepApplyMu.Unlock()
+		if invalidate != nil {
+			invalidate()
 		}
 
 		result, err := e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{

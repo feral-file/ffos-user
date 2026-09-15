@@ -68,6 +68,26 @@ type SourceProbeConfig struct {
 	Disabled bool `json:"disabled"`
 }
 
+// SignatureVerificationConfig tunes DP-1 playlist signature verification on
+// the displayPlaylist path (feral-file/ffos-user#307). Follows
+// SourceProbeConfig's optional-section + Disabled opt-out convention, and for
+// the same reason: today the verdict is report-only, but the planned
+// per-device strict mode (a later phase) will turn an always-accept command
+// into one that can REFUSE the device's primary function, on the word of a
+// verifier (dp1-go + JCS canonicalization) whose accepted residual is a
+// document class that canonicalizes differently on the device than on the
+// signer. Shipping the switch with the verifier means that residual, if it
+// materializes on the fleet, is a config edit rather than a package rollback
+// — and even report-only, a systematically false "invalid" on the fleet is
+// worth being able to silence.
+type SignatureVerificationConfig struct {
+	// Disabled skips verification entirely: no verdict is computed and the
+	// signatureStatus fields are omitted from every reply and notification
+	// (indistinguishable from old firmware). Default (false) keeps
+	// verification on.
+	Disabled bool `json:"disabled"`
+}
+
 // OfflineCacheConfig tunes the offlinecache package (see
 // components/feral-controld/offlinecache and docs/offline-artwork-capture.md).
 // All fields besides Enabled are optional; zero/empty values fall back to
@@ -216,8 +236,11 @@ type Config struct {
 	EnableHub    *bool               `json:"enableHub"`
 	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
 	SourceProbe  *SourceProbeConfig  `json:"sourceProbe,omitempty"`
-	OfflineCache *OfflineCacheConfig `json:"offlineCache,omitempty"`
-	Netlog       *NetlogConfig       `json:"netlog,omitempty"`
+	// SignatureVerification is nil-safe: an absent section keeps
+	// verification on. Read via SignatureVerificationEnabled().
+	SignatureVerification *SignatureVerificationConfig `json:"signatureVerification,omitempty"`
+	OfflineCache          *OfflineCacheConfig          `json:"offlineCache,omitempty"`
+	Netlog                *NetlogConfig                `json:"netlog,omitempty"`
 	// GatewayUserAgent scopes the kiosk User-Agent rewrite (see the
 	// uarewrite package), carried as RAW bytes and decoded permissively by
 	// GatewayUserAgentTuning() — same treatment, and the same reason, as
@@ -258,6 +281,14 @@ type Config struct {
 // explicit "enableHub": false disables it.
 func (c *Config) HubEnabled() bool {
 	return c.EnableHub == nil || *c.EnableHub
+}
+
+// SignatureVerificationEnabled reports whether DP-1 signature verification
+// runs. It defaults ON: only an explicit "signatureVerification": {"disabled":
+// true} turns it off (see SignatureVerificationConfig for why the switch
+// exists at all).
+func (c *Config) SignatureVerificationEnabled() bool {
+	return c.SignatureVerification == nil || !c.SignatureVerification.Disabled
 }
 
 // GatewayUserAgentConfig scopes the kiosk User-Agent rewrite that keeps

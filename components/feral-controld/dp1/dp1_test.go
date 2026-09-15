@@ -47,7 +47,7 @@ func setup(t *testing.T) *testSetup {
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
 
-	client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger, false)
+	client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger, false, true)
 
 	return &testSetup{
 		ctrl:          ctrl,

@@ -45,6 +45,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/softap"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -918,7 +919,17 @@ func initializeApp(
 	ffIndexer := ffindexer.New(httpClient, json, io, logger)
 
 	// DP1
-	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug)
+	// DP-1 signature verification (feral-file/ffos-user#307). Verdicts are
+	// computed on every fetched or inline playlist and reported on the cast
+	// reply and player_status; whether a verdict changes what plays is the
+	// per-device mode's business (later phase). The config flag is the kill
+	// switch for a verifier/canonicalization divergence (see
+	// config.SignatureVerificationConfig).
+	sigVerifyEnabled := config.Get().SignatureVerificationEnabled()
+	if !sigVerifyEnabled {
+		logger.Warn("DP-1 signature verification disabled by config; casts carry no signature verdict")
+	}
+	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug, sigVerifyEnabled)
 
 	// displayAt scheduler: filters playlists with displayAt items before CDP
 	// and advances them on timer / wake / CDP reconnect. Durable state stores
@@ -1062,6 +1073,36 @@ func initializeApp(
 	} else {
 		commandrouter.SetSourceProber(rawCmdHandler, offlinecache.NewSourceProber(net.DefaultResolver), logger)
 	}
+	// Signature verification wiring: the same Active slot feeds the raw
+	// handler (writes on cast), the refresher (writes on re-push, below)
+	// and the status poller (reads on every poll). Wired against the raw
+	// handler for the same reason as SetSourceProber above.
+	activeVerdict := &sigverify.Active{}
+	if sigVerifyEnabled {
+		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict}, logger)
+		// A displayAt-deferred cast parks its verdict as pending; the
+		// scheduler's own cutover push is the only point that proves the
+		// cohort reached the screen, so that is where it is promoted — and
+		// the slot is invalidated as the push starts, so no status round
+		// between the player's swap and the promotion can match the
+		// previous document by URL.
+		// Promotion is fenced on the page generation: a bump between the
+		// send and its accepted reply means the reply came from a page
+		// that is gone, and the new generation's own re-push promotes.
+		pushStarting, pushAccepted := activeVerdict.FencedPromoter(session.Generation)
+		playlistScheduler.SetPushObserver(func(phase playlistschedule.PushPhase) {
+			switch phase {
+			case playlistschedule.PushStarting:
+				pushStarting()
+			case playlistschedule.PushAccepted:
+				pushAccepted()
+			}
+		})
+		poller.SetVerificationLookup(func(id, url string) (string, bool) {
+			st, ok := activeVerdict.Lookup(id, url)
+			return string(st), ok
+		})
+	}
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -1075,6 +1116,11 @@ func initializeApp(
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
+	if sigVerifyEnabled {
+		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
+		// Same generation fence for the refresher's force casts.
+		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
+	}
 
 	// Replay saturation invalidates Fetch-interception scope exactly the way
 	// a kiosk restart does: retireOnSaturation closes the root CDP session so
@@ -1172,6 +1218,18 @@ func initializeApp(
 	// resync, boot-recovery retry, connectivity — replacing the five ad-hoc
 	// CDP-reconnect spawns run() used to do inline.
 	session.RegisterReconciler("sleep-invalidate", sleepInvalidateReconciler(executor, logger))
+	// A (re)loaded or replaced player document shows content controld did
+	// not just push: drop the attested verdict SYNCHRONOUSLY in the bump,
+	// not in a reconciler — the status round that detects a stamp mismatch
+	// bumps and then annotates in the same call, so an asynchronous reset
+	// would land after that round already re-attested the old verdict.
+	// Pending is untouched: playlist-recompute's re-push promotes it again.
+	if sigVerifyEnabled {
+		session.SetGenerationHook(activeVerdict.ClearCurrent)
+		// The claim-time displayDefaultPlaylist bypasses commandrouter, so
+		// it gets the same pre-send invalidation by its own seam.
+		devicectl.SetVerdictInvalidator(executor, activeVerdict.ClearCurrent, logger)
+	}
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -74,6 +75,15 @@ type handler struct {
 	// would deadlock on that non-reentrant lock — re-check this before doing
 	// so, rather than trusting the sentence above.
 	recoverySession RecoverySession
+
+	// verifySignatures and activeVerdict are set together by
+	// SetSignatureVerification. verifySignatures gates the inline
+	// (dp1_call) and cached-copy verification this package performs itself;
+	// the URL path's verdict is attached by the dp1 package at fetch time
+	// and merely consumed here. activeVerdict may be nil even when
+	// verification is on.
+	verifySignatures bool
+	activeVerdict    *sigverify.Active
 }
 
 // RecoverySession is the narrow slice of playersession.Session the relayer's
@@ -148,6 +158,39 @@ func SetSourceProber(h Handler, prober offlinecache.SourceProber, logger *zap.Lo
 
 func (h *handler) setSourceProber(prober offlinecache.SourceProber) {
 	h.sourceProber = prober
+}
+
+// SignatureVerificationOptions is what SetSignatureVerification wires. A
+// struct rather than positional arguments so later phases (the persisted
+// mode, the player toast) extend it without another seam.
+type SignatureVerificationOptions struct {
+	// Active, when non-nil, receives the verdict of every playlist that
+	// actually reaches the player, for the status poller's player_status
+	// annotation (see sigverify.Active). Optional.
+	Active *sigverify.Active
+}
+
+// SetSignatureVerification turns on DP-1 signature verification of every
+// displayPlaylist cast (feral-file/ffos-user#307) on h, if h supports it —
+// the concrete *handler built by New, NOT the storm-protection gate wrapper,
+// so callers must wire it against the raw handler before NewGate wraps it
+// (SetSourceProber's contract). Not called ⇒ verification off: playlists
+// carry no verdict and replies carry no signatureStatus, which is exactly
+// the shape old firmware has.
+func SetSignatureVerification(h Handler, opts SignatureVerificationOptions, logger *zap.Logger) {
+	setter, ok := h.(interface {
+		setSignatureVerification(SignatureVerificationOptions)
+	})
+	if !ok {
+		logger.Warn("Command handler does not support signature verification wiring")
+		return
+	}
+	setter.setSignatureVerification(opts)
+}
+
+func (h *handler) setSignatureVerification(opts SignatureVerificationOptions) {
+	h.verifySignatures = true
+	h.activeVerdict = opts.Active
 }
 
 func (h *handler) currentGeneration() uint64 {
@@ -403,10 +446,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// capture.md §6 and Service.CachedPlaylistForURL's
 					// doc). This is a "last known good" copy, not a live
 					// re-resolution: it will not reflect anything
-					// published at url after it was downloaded, and (by
-					// construction, since it can only exist if it was
-					// downloaded successfully before) was already
-					// signature-verified once at that time.
+					// published at url after it was downloaded, and it
+					// carries NO signature verdict — the saved body is a
+					// typed, hydrated re-marshal, not the signed bytes
+					// (see loadCachedPlaylistForURL's doc) — so the reply
+					// and player_status omit signatureStatus for it.
 					cachedPlaylist, cacheErr := h.loadCachedPlaylistForURL(url)
 					if cacheErr != nil {
 						return nil, err
@@ -424,14 +468,38 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("playlist is not a map")
 				}
 
+				// The bytes the document is decoded from AND verified on.
+				// Preferred: the caller's own `dp1_call` token, kept
+				// verbatim by the ingress decoders (Command.RawArguments) —
+				// a signer covered exactly those bytes. Fallback: a
+				// re-marshal of the decoded map, only for commands built
+				// in-process (OOM recovery, tests) that never had a wire
+				// form. The fallback is lossy in a way a verifier feels:
+				// encoding/json HTML-escapes `&`/`<`/`>`, six bytes each,
+				// which can inflate the document past
+				// sigverify.MaxDocumentBytes and report an honest document
+				// as invalid — so the wire token wins. (Its float64
+				// rounding of large integers is absorbed by JCS, see
+				// commands.Command.RawArguments.)
 				var playlistBytes []byte
-				playlistBytes, err = h.json.Marshal(playlistMap)
-				if err != nil {
+				if raw, hasRaw := command.RawArgument("dp1_call"); hasRaw {
+					playlistBytes = raw
+				} else if playlistBytes, err = h.json.Marshal(playlistMap); err != nil {
 					return nil, fmt.Errorf("failed to marshal playlist: %w", err)
 				}
 
 				if err = h.json.Unmarshal(playlistBytes, &playlist); err != nil {
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
+				}
+
+				// Verify those bytes, NOT the typed struct just decoded from
+				// them: the struct drops any field it does not know, and a
+				// signer covered every field, so verifying after the typed
+				// decode would misreport an honest document as tampered.
+				// Also before dynamic hydration below, which rewrites items.
+				if h.verifySignatures {
+					verdict := sigverify.Verify(playlistBytes)
+					playlist.Verification = &verdict
 				}
 
 				if playlist.HasDynamicContent() {
@@ -445,6 +513,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 			default:
 				return nil, fmt.Errorf("unknown payload type")
+			}
+
+			// Signature verdict (#307), observation only in this phase: every
+			// cast still plays. Logged once here, reported on the reply and
+			// player_status below. nil when verification is off or the
+			// resolver returned a playlist without a verdict.
+			if playlist.Verification != nil {
+				h.logSignatureVerdict(playlist.Verification, playlist.ID, schedulerSource.PlaylistURL)
 			}
 
 			// Cast-time source preflight (#304). Without it, a cast whose
@@ -651,6 +727,83 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
+		// publishVerdict records what this cast did to the screen in the
+		// active-verdict slot (#307). It MUST run inside the same player-push
+		// critical section as the send it describes: WithPlayerPush orders
+		// casts, refreshes, and scheduler cutovers, and a publication after
+		// the lock is released could land after a later cast's, leaving the
+		// slot describing a playlist that is no longer on screen. A cast
+		// without a verdict (the cached-copy fallback) CLEARS the slot rather
+		// than leaving a previous cast's verdict standing for the same URL.
+		// A displayAt-deferred acceptance parks the verdict as pending: the
+		// previous playlist keeps showing, and the scheduler's push observer
+		// promotes the pending verdict only when a cohort actually reaches
+		// the player (see sigverify.Active).
+		// Captured BEFORE the scheduler filters the playlist below: the
+		// verdict describes the document as resolved, and the identity is
+		// read from the same pre-filter document so it cannot drift.
+		var castVerdict *sigverify.Verdict
+		var castPlaylistID string
+		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil {
+			castVerdict = playlist.Verification
+			castPlaylistID = playlist.ID
+		}
+		publishVerdict := func(deferred bool) {
+			if h.activeVerdict == nil || commandType != commands.CMD_DISPLAY_PLAYLIST || playlist == nil {
+				return
+			}
+			switch {
+			case deferred && castVerdict != nil:
+				h.activeVerdict.SetPending(castPlaylistID, schedulerSource.PlaylistURL, castVerdict.Status)
+			case deferred:
+				h.activeVerdict.SetPendingUnverified()
+			case castVerdict != nil:
+				h.activeVerdict.Set(castPlaylistID, schedulerSource.PlaylistURL, castVerdict.Status)
+			default:
+				h.activeVerdict.Clear()
+			}
+			// An immediately displayed SCHEDULED cast is also the document
+			// the scheduler will re-push later — the next cohort's cutover,
+			// or the reconnect recompute after the player reloads (which
+			// first cleared current). Those pushes promote pending, so the
+			// verdict must be parked there as well as set; a static inline
+			// schedule has no refresher pass that would restage it.
+			if !deferred && h.scheduler != nil && h.scheduler.HasCache() {
+				if castVerdict != nil {
+					h.activeVerdict.SetPending(castPlaylistID, schedulerSource.PlaylistURL, castVerdict.Status)
+				} else {
+					h.activeVerdict.SetPendingUnverified()
+				}
+			}
+		}
+
+		// invalidateVerdictBeforeSend runs immediately before any send that
+		// can replace what is on screen. From the moment the send lands the
+		// player may be showing the new document, and the status poller —
+		// which WithPlayerPush does not block — could match the previous
+		// document's slot through the shared URL in the window before the
+		// accepted reply is processed. Clearing first makes that window an
+		// omission, never a false attestation; the publication after the
+		// reply then sets the new verdict. A failed send leaves the slot
+		// cleared, which is the safe direction.
+		invalidateVerdictBeforeSend := func() {
+			if h.activeVerdict != nil {
+				h.activeVerdict.ClearCurrent()
+			}
+		}
+
+		// clearVerdictForDefaultPlayback: an accepted displayDefaultPlaylist
+		// puts player-owned content on screen that controld never verified —
+		// or, with onlyIfNoPlaylist, may no-op. Either way controld can no
+		// longer vouch for what is showing, so current is cleared (omission,
+		// never a stale claim). Pending is kept: this command does not clear
+		// scheduler authority (see the case comment below).
+		clearVerdictForDefaultPlayback := func() {
+			if h.activeVerdict != nil && commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+				h.activeVerdict.ClearCurrent()
+			}
+		}
+
 		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the
 		// scheduler push lock with RecomputeNow so a stale timed push cannot land
 		// after a newer cast or OOM-recovery fallback.
@@ -679,6 +832,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// the screen, so interception must stay pointed at the
 					// playlist that keeps displaying.
 					h.scheduler.Commit()
+					publishVerdict(true)
 					// A relayer RPC and hub request both need an explicit acceptance
 					// response even though no CDP write was valid. This also prevents
 					// playback metrics from treating the deferred schedule as a failure.
@@ -711,16 +865,22 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return
 				}
 				command.Arguments["dp1_call"] = playlist
+				invalidateVerdictBeforeSend()
 				result, err = h.sendCDPRequest(command)
 				if err != nil || !playerresponse.OK(result) {
 					h.scheduler.Restore(schedulerSnapshot)
 				} else {
 					h.scheduler.Commit()
+					publishVerdict(false)
 				}
 			})
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
 			h.scheduler.WithPlayerPush(func() {
+				invalidateVerdictBeforeSend()
 				result, err = h.sendCDPRequest(command)
+				if err == nil && playerresponse.OK(result) {
+					clearVerdictForDefaultPlayback()
+				}
 			})
 		default:
 			if commandType == commands.CMD_DISPLAY_PLAYLIST {
@@ -735,7 +895,16 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				}
 				command.Arguments["dp1_call"] = playlist
 			}
+			if commandType == commands.CMD_DISPLAY_PLAYLIST || commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+				invalidateVerdictBeforeSend()
+			}
 			result, err = h.sendCDPRequest(command)
+			if err == nil && playerresponse.OK(result) {
+				// No scheduler ⇒ no push lock to be inside of; publishing
+				// right after the send is the tightest ordering available.
+				publishVerdict(false)
+				clearVerdictForDefaultPlayback()
+			}
 		}
 		if err != nil {
 			// No restore-on-error here: every CMD_DISPLAY_PLAYLIST failure path
@@ -788,6 +957,15 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			result = map[string]interface{}{
 				"message": map[string]interface{}{"ok": true, "recovered": "navigate"},
 			}
+		}
+
+		// Report the signature verdict on the accepted reply (both the
+		// deferred acceptance map and the player's own ok reply). Additive
+		// keys only: existing controllers decide success by ok and ignore
+		// the rest. The active-verdict slot was already updated inside the
+		// push critical section above (publishVerdict).
+		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil && playlist.Verification != nil && playerresponse.OK(result) {
+			result = annotateCastReply(result, playlist.Verification)
 		}
 
 		// Force refresh status poller

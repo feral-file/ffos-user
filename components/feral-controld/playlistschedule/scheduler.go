@@ -95,6 +95,18 @@ type Scheduler interface {
 	// recomputes. Cast and refresh paths must wrap their displayPlaylist CDP
 	// send so a stale RecomputeNow cannot overwrite a newer cast mid-flight.
 	WithPlayerPush(fn func())
+	// SetPushObserver registers fn to run around every scheduler-owned push
+	// (timer cutover, wake, CDP reconnect, retry), under the player-push
+	// lock so it is ordered against cast/refresh sends: once with
+	// PushStarting just before the CDP send, and once with PushAccepted
+	// after a reply the player accepted (never after a rejection). The one
+	// consumer today is signature verification's active-verdict slot: it
+	// invalidates at PushStarting — the player may be showing the new
+	// cohort from the moment the send lands — and promotes the parked
+	// verdict at PushAccepted, the only point at which controld learns the
+	// cohort actually reached the screen (feral-file/ffos-user#307). Set
+	// once at wiring time before any push; nil is a no-op.
+	SetPushObserver(fn func(PushPhase))
 	// AuthorityToken changes whenever scheduler-owned playlist authority
 	// changes. Refreshers snapshot it before slow URL/dynamic resolution and
 	// re-check under WithPlayerPush so stale refresh results cannot overwrite a
@@ -156,6 +168,11 @@ type scheduler struct {
 	// must not push until the refresher fetches the source and prepares a fresh
 	// playlist.
 	restoredPending bool
+	// pushObserver, when set (SetPushObserver), runs around each
+	// scheduler-owned push, inside push and therefore under pushMu. Written
+	// once before any push; read without a lock on the push path, same
+	// single-writer contract as status.poller's observers.
+	pushObserver func(PushPhase)
 	// source tracks the refreshable identity for scheduler-owned pushes. The
 	// full cached playlist supplies future items; source keeps player status
 	// tied to the controller/refresher URL that can be re-resolved later.
@@ -724,6 +741,9 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 		return errStopped
 	}
 
+	if s.pushObserver != nil {
+		s.pushObserver(PushStarting)
+	}
 	result, err := s.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
 		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
 	})
@@ -733,7 +753,26 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	if !playerresponse.OK(result) {
 		return fmt.Errorf("player rejected displayAt playlist")
 	}
+	if s.pushObserver != nil {
+		s.pushObserver(PushAccepted)
+	}
 	return nil
+}
+
+// PushPhase is the moment a push observer is invoked at (see
+// Scheduler.SetPushObserver).
+type PushPhase int
+
+const (
+	// PushStarting: the CDP send is about to go out; the player may show the
+	// new cohort from this moment on.
+	PushStarting PushPhase = iota
+	// PushAccepted: the player accepted the push.
+	PushAccepted
+)
+
+func (s *scheduler) SetPushObserver(fn func(PushPhase)) {
+	s.pushObserver = fn
 }
 
 // HasDisplayAtSchedule reports whether a playlist carries at least one timed

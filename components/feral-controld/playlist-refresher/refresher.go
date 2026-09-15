@@ -18,6 +18,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -136,6 +137,62 @@ type refresher struct {
 	// harmless: it just costs one redundant extra pass right after the
 	// next Start.
 	refreshChan chan struct{}
+
+	// activeVerdict mirrors commandrouter's (SetSignatureVerification): the
+	// refresher is the other producer of displayPlaylist pushes, so it
+	// re-publishes the verdict of what it re-pushed. The verdict itself is
+	// attached by dp1 at fetch time; the refresher computes none (its
+	// cached-copy fallback carries no verdict — see
+	// loadCachedPlaylistForURL). Set once before Start; read on the
+	// background goroutine only.
+	activeVerdict *sigverify.Active
+	// sessionGeneration, when set (SetSessionGeneration), is the
+	// playersession generation getter. A force cast's verdict is published
+	// only if the generation is unchanged across the send: a bump in between
+	// means the accepted reply came from a page that is gone (the bump hook
+	// already cleared the slot), and the new generation's reconciliation
+	// establishes a fresh verdict. Mirrors commandrouter.sendCDPRequest.
+	sessionGeneration func() uint64
+}
+
+// SetSessionGeneration injects the generation getter onto r, if r is the
+// concrete refresher built by New (mirroring SetSignatureVerification's
+// contract). Must be called before Start; nil leaves publication unfenced.
+func SetSessionGeneration(r Refresher, fn func() uint64, logger *zap.Logger) {
+	setter, ok := r.(interface{ setSessionGeneration(func() uint64) })
+	if !ok {
+		logger.Warn("Playlist refresher does not support session generation wiring")
+		return
+	}
+	setter.setSessionGeneration(fn)
+}
+
+func (r *refresher) setSessionGeneration(fn func() uint64) {
+	r.sessionGeneration = fn
+}
+
+func (r *refresher) currentGeneration() uint64 {
+	if r.sessionGeneration == nil {
+		return 0
+	}
+	return r.sessionGeneration()
+}
+
+// SetSignatureVerification wires the shared active-verdict slot onto r, if r
+// is the concrete refresher built by New (a foreign implementation logs and
+// is left alone, mirroring commandrouter.SetSignatureVerification). Must be
+// called before Start.
+func SetSignatureVerification(r Refresher, active *sigverify.Active, logger *zap.Logger) {
+	setter, ok := r.(interface{ setSignatureVerification(*sigverify.Active) })
+	if !ok {
+		logger.Warn("Playlist refresher does not support signature verification wiring")
+		return
+	}
+	setter.setSignatureVerification(active)
+}
+
+func (r *refresher) setSignatureVerification(active *sigverify.Active) {
+	r.activeVerdict = active
 }
 
 func New(
@@ -483,6 +540,10 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 
 	var schedulerSnapshot playlistschedule.Snapshot
 	schedulerMutated := false
+	// Captured before the scheduler filters the playlist: the verdict and the
+	// identity belong to the document as resolved.
+	refreshVerdict := playlist.Verification
+	refreshPlaylistID := playlist.ID
 
 	// Send playlist to CDP
 	args := map[string]interface{}{
@@ -522,6 +583,18 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				// Keep the future schedule armed, but do not send an empty list:
 				// the player rejects it and cannot improve the current artwork.
 				r.scheduler.Commit()
+				// The schedule now holds THIS document; the cutover that
+				// eventually pushes it must promote this verdict, not the
+				// one a previous deferred cast parked (#307). An unverified
+				// replacement (cached copy) is staged as such so the
+				// promotion clears rather than inherits.
+				if r.activeVerdict != nil {
+					if refreshVerdict != nil {
+						r.activeVerdict.SetPending(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
+					} else {
+						r.activeVerdict.SetPendingUnverified()
+					}
+				}
 				return
 			}
 			effectiveForceCast = effectiveForceCast ||
@@ -548,6 +621,22 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		} else {
 			command.Arguments["dp1_call"] = playlist
 		}
+		// Invalidate BEFORE the send (#307): from the moment it lands the
+		// player may show the new document, and the status poller could
+		// match the previous one by URL before the reply is processed. A
+		// force cast clears outright and re-publishes below; a soft refresh
+		// reconciles now (the player may or may not swap, and acceptance
+		// will not say — see Active.ReconcileSoft); a verdict-less push
+		// clears. A failed send leaves the slot in that state: an omission.
+		if r.activeVerdict != nil {
+			switch {
+			case refreshVerdict == nil || effectiveForceCast:
+				r.activeVerdict.ClearCurrent()
+			default:
+				r.activeVerdict.ReconcileSoft(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
+			}
+		}
+		generationBefore := r.currentGeneration()
 		result, sendCDPErr := r.sendCDPRequest(command)
 		sendErr = sendCDPErr
 		// Transport success with ok:false (or a malformed body) must still
@@ -558,6 +647,45 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		// not just on a transport failure.
 		if sendErr == nil && !playerresponse.OK(result) {
 			sendErr = errPlayerRejectedRefresh
+		}
+		// Publish what this push did to the screen (#307), inside the send
+		// closure — under WithPlayerPush — so it is ordered against casts
+		// and cutovers. A force cast (now_display) replaces the artwork at
+		// once, so its verdict is published outright; a verdict-less push
+		// (the cached-copy fallback) CLEARS the slot (pending too) rather
+		// than leaving a previous verdict standing for the same URL. A SOFT
+		// refresh was reconciled before the send and nothing more is known
+		// after it.
+		if sendErr == nil && r.activeVerdict != nil {
+			switch {
+			case refreshVerdict == nil:
+				r.activeVerdict.Clear()
+			case effectiveForceCast && r.currentGeneration() != generationBefore:
+				// The page moved under this send: its accepted reply
+				// belongs to a document that is gone. Leave current as
+				// the bump hook left it (cleared); the new generation's
+				// reconciliation re-pushes and publishes afresh. Pending
+				// is still restaged below — the scheduler cache moved
+				// regardless of the page.
+				r.logger.Info("playlist refresh: page generation changed across the send; verdict left unpublished")
+			case effectiveForceCast:
+				r.activeVerdict.Set(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
+			default:
+				// Soft refresh: already reconciled before the send.
+			}
+			// The scheduler's cache now holds THIS document (Commit below),
+			// so every later cutover pushes its cohorts: restage pending to
+			// match, or a cutover would promote whatever an earlier
+			// deferred cast parked. Set above already dropped pending; the
+			// soft path did not. Skipped when the send failed: the snapshot
+			// is restored below and the prior pending stays true.
+			if schedulerMutated && r.scheduler.HasCache() {
+				if refreshVerdict != nil {
+					r.activeVerdict.SetPending(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
+				} else {
+					r.activeVerdict.SetPendingUnverified()
+				}
+			}
 		}
 		if schedulerMutated && sendErr != nil {
 			r.scheduler.Restore(schedulerSnapshot)
@@ -794,13 +922,15 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 }
 
 // loadCachedPlaylistForURL mirrors commandrouter's handler.loadCachedPlaylistForURL
-// (see its doc): the raw body Service.CachedPlaylistForURL returns was already
-// fully resolved and signature-verified once, back when downloadPlaylist
-// originally saved it, so unmarshaling it here needs no further DP-1
-// processing. Returns an error whenever there is nothing to fall back to
-// (offline caching disabled, url was never downloaded, or the downloaded
-// copy has since been cleared), so the caller can report the original
-// live resolution error instead.
+// (see its doc, including why the returned playlist carries NO signature
+// verdict: the saved body is a typed, hydrated re-marshal, not the signed
+// bytes — feral-file/ffos-user#307): the raw body Service.CachedPlaylistForURL
+// returns was already fully resolved back when downloadPlaylist originally
+// saved it, so unmarshaling it here needs no further DP-1 resolution.
+// Returns an error whenever there is nothing to fall back to (offline
+// caching disabled, url was never downloaded, or the downloaded copy has
+// since been cleared), so the caller can report the original live
+// resolution error instead.
 func (r *refresher) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
 	if r.offlineCache == nil {
 		return nil, fmt.Errorf("offline cache: disabled, no cached fallback for %s", url)

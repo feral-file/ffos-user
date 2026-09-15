@@ -829,8 +829,9 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 			commandType = commands.Type(*payload.Message.Command)
 		}
 		command := commands.Command{
-			Type:      commandType,
-			Arguments: payload.Message.Request,
+			Type:         commandType,
+			Arguments:    payload.Message.Request,
+			RawArguments: payload.Message.RawRequest,
 		}
 		result, err := m.cmdHandler.Process(ctx, command)
 		if err != nil {
