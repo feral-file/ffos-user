@@ -1,0 +1,26 @@
+---
+description: Agents branch from develop and merge back into develop only; staging and release are promoted by humans
+globs:
+alwaysApply: true
+---
+
+# Branch flow guardrail
+
+The flow is `develop -> staging -> release`, and both promotions are human
+steps. `staging` and `release` are protected branches: `release` accepts
+merges only from `staging`, `staging` only from `develop`. `main` is not part
+of the flow and is never a target.
+
+- Cut every working branch from `develop`. Open every PR against `develop`
+  (`gh pr create --base develop`). Merge only PRs whose base is `develop`.
+- Never push to, commit on, merge into, rebase onto, or open or merge a PR
+  targeting `staging`, `release`, or `main`; never cut a branch from them;
+  never merge or rebase them into a working branch. Read-only use (checkout
+  to inspect, log, diff, fetch) is fine.
+- An emergency exception (hotfix straight to staging or release) is a human
+  decision executed by a human. Prepare the change on a branch from
+  `develop` and hand the promotion over; do not do it yourself.
+
+Full rule: `AGENTS.md`, "Branch flow guardrail". `scripts/agent-branch-flow-guard.sh`
+runs before every shell command (chained from the ISO build guard) and blocks
+the common violations; the rule, not the hook, is the constraint.

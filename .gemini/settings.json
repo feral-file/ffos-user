@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-iso-build-guard",
+            "description": "AGENTS.md Release guardrail: ISO image builds. Blocks release/Production ISO dispatches; staging must be dispatched by the human.",
+            "command": "\"$(git rev-parse --show-toplevel)/scripts/agent-iso-build-guard.sh\" --format gemini",
+            "timeout": 15000
+          }
+        ]
+      }
+    ]
+  }
+}

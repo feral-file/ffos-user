@@ -42,6 +42,22 @@ func setupCountFiles(t *testing.T, oomKillCount, handledCount int) func() {
 	}
 }
 
+// waitDone blocks until the recovery goroutine has fully exited. Every test
+// that starts a recovery must call this before returning: the recoverer logs
+// through the test-scoped zaptest logger, and a log line emitted after the
+// test function returns panics the whole package
+// ("Log in goroutine after Test... has completed"). Once it returns, the
+// handled-count file and mock calls are settled, so assertions after it
+// can be plain reads rather than polls.
+func waitDone(t *testing.T, r oomrecovery.Recoverer) {
+	t.Helper()
+	select {
+	case <-r.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovery goroutine did not finish in time")
+	}
+}
+
 func TestOOMRecovery_NoOOMEvent(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -63,8 +79,13 @@ func TestOOMRecovery_NoOOMEvent(t *testing.T) {
 	// No expectations on poller/handler — Start should return without doing anything.
 	r.Start(context.Background())
 
-	// Give a bit of time to ensure no goroutine was launched.
-	time.Sleep(50 * time.Millisecond)
+	// Done must already be closed: no goroutine was launched, so nothing
+	// is left to wait for.
+	select {
+	case <-r.Done():
+	default:
+		t.Fatal("Done should be closed synchronously when there is nothing to recover")
+	}
 }
 
 func TestOOMRecovery_ImmediateSuccess(t *testing.T) {
@@ -104,13 +125,11 @@ func TestOOMRecovery_ImmediateSuccess(t *testing.T) {
 
 	r.Start(context.Background())
 
-	require.Eventually(t, func() bool {
-		data, err := os.ReadFile(constants.CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE)
-		if err != nil {
-			return false
-		}
-		return string(data) == "4\n"
-	}, 2*time.Second, 10*time.Millisecond, "handled count file should be updated immediately")
+	waitDone(t, r)
+
+	data, err := os.ReadFile(constants.CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE)
+	require.NoError(t, err)
+	require.Equal(t, "4\n", string(data), "handled count file should be updated immediately")
 }
 
 func TestOOMRecovery_WaitsForPlayerThenSendsCommand(t *testing.T) {
@@ -155,13 +174,11 @@ func TestOOMRecovery_WaitsForPlayerThenSendsCommand(t *testing.T) {
 
 	r.Start(context.Background())
 
-	require.Eventually(t, func() bool {
-		data, err := os.ReadFile(constants.CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE)
-		if err != nil {
-			return false
-		}
-		return string(data) == "5\n"
-	}, 2*time.Second, 10*time.Millisecond, "handled count file should be updated to oom kill count")
+	waitDone(t, r)
+
+	data, err := os.ReadFile(constants.CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE)
+	require.NoError(t, err)
+	require.Equal(t, "5\n", string(data), "handled count file should be updated to oom kill count")
 }
 
 func TestOOMRecovery_MaxRetries(t *testing.T) {
@@ -194,13 +211,11 @@ func TestOOMRecovery_MaxRetries(t *testing.T) {
 
 	r.Start(context.Background())
 
-	require.Eventually(t, func() bool {
-		data, err := os.ReadFile(constants.CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE)
-		if err != nil {
-			return false
-		}
-		return string(data) == "7\n"
-	}, 2*time.Second, 10*time.Millisecond, "handled count file should be updated even on max retries")
+	waitDone(t, r)
+
+	data, err := os.ReadFile(constants.CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE)
+	require.NoError(t, err)
+	require.Equal(t, "7\n", string(data), "handled count file should be updated even on max retries")
 }
 
 func TestOOMRecovery_ContextCancellation(t *testing.T) {
@@ -234,11 +249,9 @@ func TestOOMRecovery_ContextCancellation(t *testing.T) {
 
 	time.AfterFunc(50*time.Millisecond, cancel)
 
-	require.Eventually(t, func() bool {
-		data, err := os.ReadFile(constants.CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE)
-		if err != nil {
-			return false
-		}
-		return string(data) == "2\n"
-	}, 2*time.Second, 10*time.Millisecond, "handled count file should be updated on context cancel")
+	waitDone(t, r)
+
+	data, err := os.ReadFile(constants.CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE)
+	require.NoError(t, err)
+	require.Equal(t, "2\n", string(data), "handled count file should be updated on context cancel")
 }

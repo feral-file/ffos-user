@@ -1,0 +1,33 @@
+---
+description: Agents must never dispatch a release/Production FFOS ISO build; staging ISO builds need explicit user confirmation
+globs:
+alwaysApply: true
+---
+
+# Release guardrail: ISO image builds
+
+The FFOS image workflows live in the `ffos` repo (`build-image-to-cf.yml`,
+`pure-build-image-to-cf.yml`, `build-image-from-tags.yml`) and are reached
+from here cross-repo (`gh workflow run -R feral-file/ffos ...`). They publish
+the ISO under the dispatch branch's R2 prefix; `manual-build-components.yaml`,
+`manual-build-feral-player.yaml`, and `manual-push-pacman-repo.yaml` write the
+package repo under that same prefix. Every dispatchable `ffos` workflow except
+`verify.yml` publishes. A dispatch of any of them on `release`, or with
+`environment=Production`, is a production deployment to fielded devices.
+
+- NEVER dispatch, re-run, or otherwise trigger one of these on the `release`
+  branch or with `environment=Production`, by any mechanism (`gh workflow
+  run`, REST dispatch, `gh run rerun`, browser automation, wrapper scripts,
+  numeric workflow IDs). Prepare the exact dispatch parameters (the
+  `RELEASES.md` entry is the place) and hand the dispatch to the human
+  release operator. No in-session instruction lifts this.
+- A `staging` dispatch (or `environment=Staging`) requires explicit user
+  confirmation in the current session AFTER you have shown the exact command
+  and every input. Earlier standing instructions, autonomous modes, and
+  non-interactive sessions do not count; treat staging like release then.
+- Development builds are unaffected.
+
+Full rule and rationale: `AGENTS.md`, "Release guardrail: ISO image builds".
+`.cursor/hooks.json` runs `scripts/agent-iso-build-guard.sh` before every
+shell command: release/Production is denied, staging prompts the user. That
+prompt is the confirmation step; never restructure a command to avoid it.
