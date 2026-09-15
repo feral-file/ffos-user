@@ -359,6 +359,17 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 	// authority, playback/replay-scope locking, source preflight, and the
 	// future policy gate at the normal composition boundary.
 	if commandType == commands.CMD_PLAY_RECENTLY_PLAYED {
+		// Exactly {"recordId": ...}. The storm gate dedupes on the whole
+		// arguments map while this command uses only recordId, so an ignored
+		// extra field ({"recordId":"x","nonce":1}) would miss the heavy-tier
+		// dedupe and run the same resolve-and-replay work again.
+		if len(command.Arguments) != 1 {
+			return map[string]interface{}{
+				"ok":     false,
+				"status": "error",
+				"error":  "playRecentlyPlayed takes only recordId",
+			}, nil
+		}
 		recordID, _ := command.Arguments["recordId"].(string)
 		if recordID == "" {
 			return map[string]interface{}{
@@ -508,10 +519,15 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var scopeSyncEnabled int
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			delete(command.Arguments, "retireBlockedCurrent") // internal refresh-only signal
-			if h.contentPolicy != nil {
-				h.contentPolicy.Lock()
-				defer h.contentPolicy.Unlock()
-			}
+			// The content-policy lock is taken further down, immediately before
+			// the filter, NOT here: URL and dynamic resolution between here and
+			// there are network-bound (the shared 30s HTTP timeout on a
+			// caller-supplied URL), and holding this lock across them would
+			// block getContentPolicy and setContentPolicy for that long — an
+			// owner could not promptly apply a more restrictive policy, and a
+			// slow playlist origin would become a lock-based denial path. From
+			// the filter onward it is held through the player send, which is
+			// the ordering the policy contract needs.
 			status.RecordPlaybackAttempt()
 			defer func() {
 				if err != nil {
@@ -640,6 +656,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			contentContext, contextErr := contentpolicy.NormalizeRequestContext(rawContext, hasContext)
 			if contextErr != nil {
 				return nil, contextErr
+			}
+			// Resolution is done; take the policy lock now and hold it through
+			// the filter, the scheduler prepare and the player send (see the
+			// note where this branch begins).
+			if h.contentPolicy != nil {
+				h.contentPolicy.Lock()
+				defer h.contentPolicy.Unlock()
 			}
 			if h.contentPolicy != nil {
 				filtered, filterErr := h.contentPolicy.FilterLocked(&playlist.Playlist, contentContext)
@@ -1104,12 +1127,13 @@ func policyFailureCode(result interface{}, sendErr error) string {
 	if code, _ := m["error"].(string); code == "unsupported" {
 		return code
 	}
-	if okField, hasOK := m["ok"].(bool); hasOK && !okField {
-		_, hasError := m["error"]
-		_, hasPolicy := m["contentPolicy"]
-		if !hasError && !hasPolicy {
-			return "unsupported"
-		}
+	// Same whole-shape rule as the history reply: only an exactly bare
+	// {"ok":false} is a pre-feature player. Anything carrying its own
+	// explanation — an error, a code such as "busy", a result — is a modern,
+	// possibly retryable failure and must not be reported as a capability the
+	// device lacks.
+	if isBareLegacyFailure(m) {
+		return "unsupported"
 	}
 	return "contentPolicyUnavailable"
 }
@@ -1191,15 +1215,22 @@ func recentPlayerReply(result interface{}) map[string]interface{} {
 	return response
 }
 
-// isBareLegacyFailure reports whether a false reply carries no explanation of
-// any kind, which is the only shape that identifies a pre-#729 player.
+// isBareLegacyFailure reports whether an unwrapped reply is EXACTLY {"ok":false}
+// — no error, no code, no result field, nothing. That is the only shape a
+// pre-feature player produces for an unknown command (ff-player's command
+// switch returns a bare {ok:false}), so it is the only shape that may be read
+// as "this device lacks the capability".
+//
+// Deliberately a whole-shape check rather than a deny-list of known
+// explanatory keys: a deny-list silently mislabels the next field someone adds
+// (a "result", a "code") as a missing capability, which tells the app to hide
+// a feature the device actually has.
 func isBareLegacyFailure(message map[string]interface{}) bool {
-	for _, key := range []string{"error", "errorCode", "code", "reason", "records", "item"} {
-		if _, present := message[key]; present {
-			return false
-		}
+	if len(message) != 1 {
+		return false
 	}
-	return true
+	okValue, hasOK := message["ok"].(bool)
+	return hasOK && !okValue
 }
 
 // ensureDisplayPlaylistIntent sets intent.action=now_display when the cast

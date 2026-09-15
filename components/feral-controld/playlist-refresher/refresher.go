@@ -338,10 +338,13 @@ func (r *refresher) logProcessFailure(err error) {
 // err is a named return so the deferred revert below can inspect the
 // pass's final outcome without a separate captured variable.
 func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
-	if r.contentPolicy != nil {
-		r.contentPolicy.Lock()
-		defer r.contentPolicy.Unlock()
-	}
+	// The content-policy lock is taken AFTER resolution, not here: URL and
+	// dynamic resolution below are network-bound (the shared 30s HTTP timeout),
+	// and holding this lock across them would block getContentPolicy and
+	// setContentPolicy for that long — an owner could not promptly apply a more
+	// restrictive policy, and a slow playlist origin would become a lock-based
+	// denial path. It is still held from the projection through the player send,
+	// which is the ordering the policy contract needs.
 	// FetchPlayerStatus and the final Send both need a live CDP connection; bail
 	// out before them while it is absent so headless boots do not poll Chromium
 	// that intentionally is not running. The connection can still drop between
@@ -477,6 +480,12 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	contentContext, contextErr := contentpolicy.NormalizeContext(schedulerSource.ContentContext)
 	if contextErr != nil {
 		return contextErr
+	}
+	// Resolution is done; take the policy lock now and hold it through the
+	// projection and the player send (see the note at the top of this function).
+	if r.contentPolicy != nil {
+		r.contentPolicy.Lock()
+		defer r.contentPolicy.Unlock()
 	}
 	retireBlockedCurrent := false
 	if r.contentPolicy != nil {

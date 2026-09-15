@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
@@ -361,4 +362,92 @@ func TestGetRecentlyPlayedRejectsANonEmptyRequest(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, false, result.(map[string]interface{})["ok"])
 	require.Contains(t, result.(map[string]interface{})["error"], "no arguments")
+}
+
+// A code-bearing policy failure is a modern player failing for a real reason;
+// only an exactly bare {"ok":false} means the capability is missing.
+func TestContentPolicyKeepsACodeBearingFailureUnavailable(t *testing.T) {
+	h, player, _ := newPolicyHandler(t)
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			return map[string]interface{}{"message": map[string]interface{}{"ok": false, "code": "busy"}}, nil
+		}).Times(1)
+
+	result, err := h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_GET_CONTENT_POLICY, Arguments: map[string]any{},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "contentPolicyUnavailable", result.(map[string]interface{})["error"])
+}
+
+// playRecentlyPlayed takes exactly {"recordId": ...}. The gate dedupes on the
+// whole arguments map while the command uses only recordId, so an ignored extra
+// field would miss the heavy-tier dedupe and repeat the resolve-and-replay work.
+func TestPlayRecentlyPlayedRejectsIgnoredFields(t *testing.T) {
+	h, _, _ := newPolicyHandler(t)
+	// No player.EXPECT(): the rejection must happen before any CDP send.
+	result, err := h.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_PLAY_RECENTLY_PLAYED,
+		Arguments: map[string]any{"recordId": "rp-1", "nonce": 1},
+	})
+	require.NoError(t, err)
+	require.Equal(t, false, result.(map[string]interface{})["ok"])
+	require.Contains(t, result.(map[string]interface{})["error"], "only recordId")
+}
+
+// The content-policy lock must NOT be held across playlist resolution: that is
+// network-bound on a caller-supplied URL, and holding it there would block an
+// owner from applying a more restrictive policy for as long as a slow origin
+// cares to stall.
+//
+// Probes the store lock directly rather than issuing a nested getContentPolicy:
+// a nested command that blocks would still be holding a mock when the test
+// ended. This goroutine only ever waits on a mutex the outer command releases.
+func TestDisplayPlaylistDoesNotHoldThePolicyLockAcrossResolution(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	player := mocks.NewMockCDP(ctrl)
+	poller := mocks.NewMockStatusPoller(ctrl)
+	dp1Mock := mocks.NewMockDP1(ctrl)
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	require.NoError(t, err)
+	h := commandrouter.New(newRoutableExecutor(ctrl), player, dp1Mock, poller,
+		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+
+	lockFree := false
+	dp1Mock.EXPECT().ProcessPlaylistURLForCast(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ string) (*dp1.Playlist, error) {
+			// Stands in for a slow origin: while "resolution" is in flight, the
+			// policy store must still be acquirable.
+			acquired := make(chan struct{})
+			go func() {
+				store.Lock()
+				// Acquiring it is the whole assertion; read something real so
+				// the critical section is not empty.
+				_ = store.CurrentLocked()
+				store.Unlock()
+				close(acquired)
+			}()
+			select {
+			case <-acquired:
+				lockFree = true
+			case <-time.After(3 * time.Second):
+				lockFree = false
+			}
+			return &dp1.Playlist{Playlist: dp1playlist.Playlist{
+				Items: []dp1playlist.PlaylistItem{{ID: "a", Source: "https://a"}},
+			}}, nil
+		}).Times(1)
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+		}).AnyTimes()
+	poller.EXPECT().ForceRefresh().AnyTimes()
+
+	_, err = h.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]any{"playlistUrl": "https://slow.example/feed.json"},
+	})
+	require.NoError(t, err)
+	require.True(t, lockFree, "the policy lock was held through playlist resolution")
 }

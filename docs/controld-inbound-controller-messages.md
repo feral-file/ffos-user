@@ -2718,7 +2718,10 @@ empty list.
 
 Purpose: put a listed work back on this device.
 
-Request: `{"recordId": "<opaque id from getRecentlyPlayed>"}`.
+Request: exactly `{"recordId": "<opaque id from getRecentlyPlayed>"}`. Any
+other field is rejected rather than ignored — the storm gate dedupes on the
+whole arguments map while this command uses only `recordId`, so an ignored
+extra field would miss dedupe and repeat the same resolve-and-replay work.
 
 The command never accepts a controller-supplied source. Controld resolves the
 opaque record on the device, rebuilds a one-work unsigned DP-1 call from the
