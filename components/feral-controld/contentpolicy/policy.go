@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/display-protocol/dp1-go/extension/contentrating"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 )
 
@@ -78,6 +79,22 @@ func NormalizeContext(v any) (Context, error) {
 }
 
 func (p Policy) Allows(item dp1playlist.PlaylistItem, origin Context) bool {
+	// A present but UNRECOGNIZED rating fails closed, and is checked before any
+	// allowance below. Public ingress rejects such a document outright
+	// (playlistInvalid), but a playlist read back from player status never went
+	// through that validator — an item retained from a pre-feature cast can
+	// carry any string. Admitting it because it merely is not the exact word
+	// "mature" would let a malformed label outlive a restrictive policy
+	// indefinitely, which is the opposite of "a malformed label is never
+	// silently treated as unrated".
+	//
+	// This is stricter than the player's mirror, deliberately and safely: the
+	// daemon filters before sending, so a withheld item never reaches the
+	// player at all. Divergence only matters in the other direction — the
+	// daemon admitting what the player withholds.
+	if item.ContentRating != nil && !isKnownRating(*item.ContentRating) {
+		return false
+	}
 	if p.ShowMatureContent || (origin == ContextPersonal && !p.StrictPersonal) {
 		return true
 	}
@@ -90,6 +107,13 @@ func (p Policy) Allows(item dp1playlist.PlaylistItem, origin Context) bool {
 		return false
 	}
 	return true
+}
+
+// isKnownRating reports whether r is a content-rating value this build
+// understands. Kept next to Allows rather than inlined so the fail-closed rule
+// has one definition.
+func isKnownRating(r contentrating.Rating) bool {
+	return r == contentrating.RatingGeneral || r == contentrating.RatingMature
 }
 
 // Filter creates an internal playback projection. When items are removed its
@@ -148,6 +172,12 @@ type Store struct {
 	// user setting is in force, because it is unknown. A successful
 	// UpdateLocked writes the file and repairs the state.
 	durable bool
+	// durabilityUnconfirmed is set when a write's rename COMMITTED but its
+	// parent-directory fsync did not. The values are in place and in memory,
+	// but a power loss could still restore the previous file — so the RPCs must
+	// not report the policy as saved until a confirmation succeeds. Cleared by
+	// ConfirmDurableLocked.
+	durabilityUnconfirmed bool
 	// snap is a lock-free copy of policy for readers that MUST NOT take mu.
 	// Load-bearing, not an optimization: the command handler holds mu for the
 	// whole displayPlaylist call, including the scheduler's WithPlayerPush, so
@@ -184,8 +214,11 @@ func Fallback(path string, blockUnratedCurated bool) *Store {
 }
 
 // DurableLocked reports whether the policy in memory came from (or has since
-// been written to) the durable file.
-func (s *Store) DurableLocked() bool { return s.durable }
+// been written to) the durable file AND that file's directory entry is
+// confirmed. An unconfirmed write reads as not durable, so every RPC that
+// reports the saved setting answers contentPolicyUnavailable until it is
+// confirmed — not just the write that first hit the problem.
+func (s *Store) DurableLocked() bool { return s.durable && !s.durabilityUnconfirmed }
 
 // ResetLocked returns the store to factory defaults and removes the durable
 // file, for a factory reset. The operator-owned audit gate is preserved: it
@@ -202,6 +235,16 @@ func (s *Store) ResetLocked() (Policy, error) {
 	s.policy = next
 	s.durable = true
 	s.publishSnapshot()
+	// The UNLINK has to be durable too, for the reason the reset exists: a
+	// power loss before the directory entry is flushed can bring the previous
+	// owner's file back, and a rolled-back reset would then enforce their
+	// audience policy on a resold device. An unconfirmed deletion keeps the
+	// store reporting unavailable rather than claiming the default is saved.
+	if err := syncDir(filepath.Dir(s.path)); err != nil {
+		s.durabilityUnconfirmed = true
+		return next, fmt.Errorf("%w: %w", ErrDurabilityUncertain, err)
+	}
+	s.durabilityUnconfirmed = false
 	return next, nil
 }
 
@@ -210,7 +253,16 @@ func (s *Store) ResetLocked() (Policy, error) {
 // saw ErrDurabilityUncertain can retry before deciding what to report: the
 // content is in place either way, and this is the only thing still unconfirmed.
 func (s *Store) ConfirmDurableLocked() error {
-	dir, err := os.Open(filepath.Dir(s.path)) //nolint:gosec // G304: the policy file's own parent directory.
+	if err := syncDir(filepath.Dir(s.path)); err != nil {
+		return err
+	}
+	s.durabilityUnconfirmed = false
+	return nil
+}
+
+// syncDir fsyncs a directory so a create or unlink within it is durable.
+func syncDir(path string) error {
+	dir, err := os.Open(path) //nolint:gosec // G304: the policy file's own parent directory.
 	if err != nil {
 		return err
 	}
@@ -352,8 +404,10 @@ func (s *Store) UpdateLocked(showMature, strictPersonal bool) (Policy, error) {
 	s.durable = true
 	s.publishSnapshot()
 	if err != nil {
+		s.durabilityUnconfirmed = true
 		return next, fmt.Errorf("%w: %w", ErrDurabilityUncertain, err)
 	}
+	s.durabilityUnconfirmed = false
 	return next, nil
 }
 

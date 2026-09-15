@@ -2832,7 +2832,11 @@ after the player accepted, the device keeps its previous policy and reports the
 failure; the next reconnect sync re-pushes the stored policy and puts the player
 back in step. If the write lands but its directory entry cannot be confirmed
 durable even on retry, the reply is `contentPolicyUnavailable` rather than
-success — a restart could still revert it, and `ok:true` means saved.
+success — a restart could still revert it, and `ok:true` means saved. That
+applies to later reads too: `getContentPolicy` keeps answering
+`contentPolicyUnavailable` until a confirmation succeeds, so the owner is never
+told the setting is safely saved while its directory entry is unconfirmed. The
+factory reset's deletion is made durable the same way.
 
 Error cases: `invalidRequest`, `unsupported`, `contentPolicyUnavailable`.
 
@@ -2858,7 +2862,11 @@ The device filters the playlist against its policy before casting:
   (HTTP 422 on the LAN hub, `"error":"contentBlocked"` over the relayer).
 
 A playlist carrying malformed content-rating extension fields is rejected as
-`playlistInvalid`. A malformed label is never silently treated as unrated. The
+`playlistInvalid`. A malformed label is never silently treated as unrated —
+and admission itself fails closed on one: an item whose `contentRating` is
+present but not a value this build recognizes is withheld regardless of the
+policy, because a playlist read back from player status never passed the
+ingress validator and could carry anything. The
 rejection is carried as a typed error to both transports — HTTP 422 on the LAN
 hub, `"error":"playlistInvalid"` over the relayer — for inline `dp1_call` and
 for fetched `playlistUrl` documents alike. Inline bytes are validated before

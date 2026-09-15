@@ -333,3 +333,117 @@ func TestResetLockedClearsTheOwnerSettingAndKeepsTheOperatorGate(t *testing.T) {
 		t.Fatalf("reset with no file present: %v", err)
 	}
 }
+
+// A present but unrecognized rating fails closed. Public ingress rejects such a
+// document outright, but a playlist read back from player status never went
+// through that validator, so an item retained from a pre-feature cast can carry
+// any string — and admitting it merely because it is not the exact word
+// "mature" would let a malformed label outlive a restrictive policy.
+func TestAllowsFailsClosedOnAnUnrecognizedRating(t *testing.T) {
+	bogus := contentrating.Rating("not-a-rating")
+	item := dp1playlist.PlaylistItem{Source: "https://a", ContentRating: &bogus}
+
+	for name, p := range map[string]Policy{
+		"defaults":             Default(),
+		"mature allowed":       {Version: Version, ShowMatureContent: true},
+		"personal relaxed":     {Version: Version},
+		"audit gate on":        {Version: Version, BlockUnratedCurated: true},
+		"everything permitted": {Version: Version, ShowMatureContent: true, StrictPersonal: false},
+	} {
+		for _, origin := range []Context{ContextCurated, ContextPersonal} {
+			if p.Allows(item, origin) {
+				t.Fatalf("%s/%s admitted a malformed rating", name, origin)
+			}
+		}
+	}
+
+	// The known values are unaffected.
+	general, mature := contentrating.RatingGeneral, contentrating.RatingMature
+	if !Default().Allows(dp1playlist.PlaylistItem{Source: "https://a", ContentRating: &general}, ContextCurated) {
+		t.Fatal("a general item must still be admitted")
+	}
+	if !(Policy{Version: Version, ShowMatureContent: true}).Allows(
+		dp1playlist.PlaylistItem{Source: "https://a", ContentRating: &mature}, ContextCurated) {
+		t.Fatal("an explicitly allowed mature item must still be admitted")
+	}
+	if !Default().Allows(dp1playlist.PlaylistItem{Source: "https://a"}, ContextCurated) {
+		t.Fatal("an unrated item must still be admitted while the audit gate is off")
+	}
+}
+
+// An unconfirmed directory fsync must keep EVERY read reporting unavailable,
+// not just the write that hit it: otherwise the next getContentPolicy tells the
+// owner the setting is saved while a power loss can still revert it.
+func TestDurabilityStaysUnconfirmedUntilItIsConfirmed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	s, err := Open(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.Lock()
+	if _, err := s.UpdateLocked(true, false); err != nil {
+		s.Unlock()
+		t.Fatal(err)
+	}
+	durable := s.DurableLocked()
+	s.Unlock()
+	if !durable {
+		t.Fatal("a fully confirmed write must read durable")
+	}
+
+	// Force the unconfirmed state the handler sees after a committed rename
+	// whose directory fsync failed.
+	s.Lock()
+	s.durabilityUnconfirmed = true
+	durable = s.DurableLocked()
+	s.Unlock()
+	if durable {
+		t.Fatal("an unconfirmed write must not read durable on a LATER call")
+	}
+
+	s.Lock()
+	confirmErr := s.ConfirmDurableLocked()
+	durable = s.DurableLocked()
+	s.Unlock()
+	if confirmErr != nil {
+		t.Fatal(confirmErr)
+	}
+	if !durable {
+		t.Fatal("a successful confirmation must restore durable reads")
+	}
+}
+
+// The reset's UNLINK has to be durable for the same reason the reset exists: a
+// power loss before the directory entry is flushed can bring the previous
+// owner's file back on a rolled-back reset.
+func TestResetLockedReportsUnconfirmedDeletion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	s, err := Open(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Lock()
+	if _, err := s.UpdateLocked(true, false); err != nil {
+		s.Unlock()
+		t.Fatal(err)
+	}
+	s.Unlock()
+
+	// A normal reset confirms, so the store reads durable afterwards.
+	s.Lock()
+	_, err = s.ResetLocked()
+	durable := s.DurableLocked()
+	s.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !durable {
+		t.Fatal("a confirmed reset must read durable")
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("the file must be gone: %v", statErr)
+	}
+}

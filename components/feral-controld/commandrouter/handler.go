@@ -1307,6 +1307,10 @@ func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
 		// directory entry survives a power loss, so retry that fsync before
 		// deciding what to report.
 		committed = true
+		// ConfirmDurableLocked clears the store's unconfirmed flag on success,
+		// which is what lets a later getContentPolicy report the policy as
+		// saved again. While it stays set, DurableLocked reads false and every
+		// RPC answers contentPolicyUnavailable — not just this one.
 		if confirmErr := h.contentPolicy.ConfirmDurableLocked(); confirmErr == nil {
 			return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}
 		} else {
