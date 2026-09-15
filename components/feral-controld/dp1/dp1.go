@@ -191,6 +191,32 @@ func (d *dp1) processDynamicPlaylist(ctx context.Context, playlist Playlist, min
 	return nil, fmt.Errorf("playlist has no dynamic query configuration")
 }
 
+// dp1ItemValidationMarker is the prefix dp1-go puts on a hydrated item that
+// fails its schema validation, content-rating overlay included.
+//
+// Matched as a STRING deliberately. dp1-go's validation sentinel
+// (dp1go.ErrValidation) lives in the module's ROOT package, and that package
+// imports its signing path: adding it as a direct import pulls go-ethereum,
+// gnark-crypto and ~30 related packages into this daemon and grows the binary
+// by ~1.4 MB (measured: 28.4 MB -> 29.8 MB), on a device where nothing else
+// needs any of it. That is a poor trade for classifying an error.
+//
+// The fragility is bounded and fails in the safe direction: if dp1-go's wording
+// changes, a malformed item falls back to the generic error this code returned
+// before, never to a wrong classification. TestDP1_ProcessDynamicPlaylist_
+// RejectsMalformedResolvedRatings pins the behavior.
+const dp1ItemValidationMarker = "invalid playlist item"
+
+// classifyHydrationError marks a resolver's malformed CONTENT as
+// playlistInvalid so the transports answer the documented classification;
+// transport and query failures stay generic.
+func classifyHydrationError(err error) error {
+	if err == nil || !strings.Contains(err.Error(), dp1ItemValidationMarker) {
+		return err
+	}
+	return fmt.Errorf("%w: dynamic item: %w", ErrPlaylistInvalid, err)
+}
+
 func hasDisplayAtItems(items []dp1playlist.PlaylistItem) bool {
 	for _, item := range items {
 		if item.DisplayAt != nil {
@@ -254,7 +280,7 @@ func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist,
 			client,
 			&dp1playlist.DynamicQueryFetchOptions{AllowInsecureHTTP: d.debug})
 		if err != nil {
-			return nil, err
+			return nil, classifyHydrationError(err)
 		}
 		accumulated = append(accumulated, batch...)
 		if maxItems > 0 && len(accumulated) >= maxItems {

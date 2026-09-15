@@ -953,3 +953,34 @@ func TestDisplayPlaylistRechecksSignedURLsAfterTheProjection(t *testing.T) {
 	var unreachable *commandrouter.SourceUnreachableError
 	require.ErrorAs(t, err, &unreachable)
 }
+
+// A schedule persisted before contentContext existed restores with an empty
+// value, which means "from before", not "curated" — the router sets the field
+// on every source it hands the scheduler. Projecting it as curated would strip
+// the mature items an owner scheduled as personal, at the first cutover after
+// an upgrade.
+func TestSchedulerProjectorLeavesALegacyCohortUnprojected(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	require.NoError(t, err)
+	sched := &capturingScheduler{}
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.NewMockCDP(ctrl), mocks.NewMockDP1(ctrl),
+		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, sched, wrapper.NewJSON(), zaptest.NewLogger(t))
+	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+	require.NotNil(t, sched.projector)
+
+	mature := contentrating.RatingMature
+	cohort := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{
+		{ID: "ok", Source: "https://ok"},
+		{ID: "mature", Source: "https://mature", ContentRating: &mature},
+	}}}
+
+	projected, empty := sched.projector(cohort, "")
+	require.False(t, empty)
+	require.Len(t, projected.Items, 2, "a pre-feature schedule must not be reclassified as curated")
+
+	// A known context still projects.
+	projected, empty = sched.projector(cohort, "curated")
+	require.False(t, empty)
+	require.Len(t, projected.Items, 1)
+}

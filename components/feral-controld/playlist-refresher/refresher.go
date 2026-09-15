@@ -388,6 +388,10 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	if r.scheduler != nil {
 		schedulerSource = r.scheduler.Source()
 	}
+	// A scheduler source restored from state written before contentContext
+	// existed carries an empty value. It is non-zero, so the player-status
+	// recovery below is skipped and nothing else would ever notice.
+	legacySchedulerSource := !schedulerSource.IsZero() && schedulerSource.ContentContext == ""
 
 	// staticInline is the "inline playlist with nothing dynamic to
 	// re-resolve" case. It never needs a CDP re-send (the playlist cannot
@@ -399,11 +403,13 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	// than returned from inside it.
 	var staticInline *dp1.Playlist
 	var playerStatus *status.PlayerStatus
-	// contextUnknown marks a source rebuilt from a player status that omitted
-	// contentContext. Only a player predating this feature does that: the router
-	// sets the field on every cast it forwards, so a current player always
-	// echoes one. See the projection guard below for why it is not just
-	// defaulted to curated.
+	// contextUnknown marks a source whose origin this daemon cannot know: a
+	// player status that omitted contentContext (only a player predating this
+	// feature does that), or a scheduler source persisted before the field
+	// existed. The router sets the field on every cast it forwards and on every
+	// source it hands the scheduler, so in both cases an empty value means
+	// "from before", never "curated". See the projection guard below for why it
+	// is not just defaulted.
 	contextUnknown := false
 
 	if schedulerSource.IsZero() {
@@ -489,6 +495,9 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	if contextErr != nil {
 		return contextErr
 	}
+	if legacySchedulerSource {
+		contextUnknown = true
+	}
 	// Resolution is done; take the policy lock now and hold it through the
 	// projection and the player send (see the note at the top of this function).
 	if r.contentPolicy != nil {
@@ -518,11 +527,15 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		// this refresh-only flag only when the fresh copy of that item is blocked,
 		// so it retires immediately instead of retaining a stale formerly-unrated frame.
 		if len(projected.Items) != len(playlist.Items) {
-			if playerStatus == nil {
-				// Scheduler-owned refreshes normally skip status. Sample it only
-				// when filtering changed the set, to distinguish the current item
-				// from some other blocked item without adding cost to ordinary ticks.
-				playerStatus, _ = r.statusPoller.FetchPlayerStatus(r.context)
+			// Sample status HERE, after resolution, not reuse whatever was read
+			// before it. Resolution is network-bound and playback keeps
+			// advancing during it, so a status read beforehand can name an item
+			// that is no longer on screen — and then retireBlockedCurrent is
+			// computed for the wrong item, leaving the actual blocked frame up.
+			// Only paid when filtering changed the set, so ordinary ticks are
+			// unaffected.
+			if fresh, statusErr := r.statusPoller.FetchPlayerStatus(r.context); statusErr == nil && fresh != nil {
+				playerStatus = fresh
 			}
 			retireBlockedCurrent = currentBlockedByRefresh(playerStatus, playlist, r.contentPolicy.CurrentLocked(), contentContext)
 		}

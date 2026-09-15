@@ -100,6 +100,16 @@ func (h *handler) setContentPolicy(policy *contentpolicy.Store) {
 	// never reach those cohorts. Reads the store's lock-free Snapshot because
 	// this runs on the scheduler's push path — see playlistschedule.Projector.
 	h.scheduler.SetProjector(func(playlist *dp1.Playlist, contentContext string) (*dp1.Playlist, bool) {
+		// An EMPTY context on a scheduler source means the schedule was
+		// persisted before this field existed, not that it was curated: the
+		// router sets the field on every source it hands the scheduler. Guessing
+		// curated here would strip the mature items an owner cast as personal
+		// at the first cutover after an upgrade, so the cohort is cast as the
+		// original cast admitted it — matching what the refresher does with the
+		// same signal.
+		if contentContext == "" {
+			return playlist, false
+		}
 		origin, err := contentpolicy.NormalizeContext(contentContext)
 		if err != nil {
 			origin = contentpolicy.ContextCurated

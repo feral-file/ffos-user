@@ -16,6 +16,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -166,4 +167,51 @@ func TestRefreshProjectsAKnownCuratedContext(t *testing.T) {
 	if !strings.Contains(*sent, "https://example.test/safe") {
 		t.Fatalf("the allowed item must still be cast; sent=%s", *sent)
 	}
+}
+
+// A display-at source persisted before contentContext existed restores with an
+// empty value. It is non-zero, so player-status recovery is skipped and nothing
+// else would notice — and defaulting it to curated strips the mature items an
+// owner scheduled as personal, at the first refresh after an upgrade.
+func TestRefreshLeavesALegacySchedulerSourceUnprojected(t *testing.T) {
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _, sent := newPolicyRefresher(t, "curated", store)
+	// A scheduler source from before the field existed takes precedence over
+	// player status, which is exactly why its emptiness has to be noticed here.
+	r.scheduler = &legacySourceScheduler{url: "https://example.test/feed.json"}
+	if err := r.processPlayingPlaylist(false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(*sent, "https://example.test/grown") {
+		t.Fatalf("a pre-feature scheduled source must not be reclassified as curated; sent=%s", *sent)
+	}
+}
+
+// legacySourceScheduler owns a source with no contentContext, the shape a
+// schedule persisted before this feature restores as.
+type legacySourceScheduler struct {
+	playlistschedule.Scheduler
+	url string
+}
+
+func (s *legacySourceScheduler) Source() playlistschedule.Source {
+	return playlistschedule.Source{PlaylistURL: s.url}
+}
+func (s *legacySourceScheduler) RestoredPending() bool                      { return false }
+func (s *legacySourceScheduler) SourceMatches(playlistschedule.Source) bool { return true }
+func (s *legacySourceScheduler) AuthorityToken() uint64                     { return 1 }
+func (s *legacySourceScheduler) WithPlayerPush(fn func())                   { fn() }
+func (s *legacySourceScheduler) SetProjector(playlistschedule.Projector)    {}
+func (s *legacySourceScheduler) Snapshot() playlistschedule.Snapshot {
+	return playlistschedule.Snapshot{}
+}
+func (s *legacySourceScheduler) Restore(playlistschedule.Snapshot)     {}
+func (s *legacySourceScheduler) Commit()                               {}
+func (s *legacySourceScheduler) HasCache() bool                        { return false }
+func (s *legacySourceScheduler) Prepare(p *dp1.Playlist) *dp1.Playlist { return p }
+func (s *legacySourceScheduler) PrepareWithSource(p *dp1.Playlist, _ playlistschedule.Source) *dp1.Playlist {
+	return p
 }

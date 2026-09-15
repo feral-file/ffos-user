@@ -1351,4 +1351,8 @@ func TestDP1_ProcessDynamicPlaylist_RejectsMalformedResolvedRatings(t *testing.T
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "invalid playlist item")
 	assert.ErrorContains(t, err, "contentRating")
+	// Malformed CONTENT from a resolver must reach the transports as the
+	// documented playlistInvalid classification, the same as a malformed inline
+	// or fetched document — not as a generic 500.
+	assert.ErrorIs(t, err, dp1.ErrPlaylistInvalid)
 }
