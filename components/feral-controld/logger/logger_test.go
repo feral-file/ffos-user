@@ -189,6 +189,7 @@ func TestCloudflareCoreBuildsPublicSafeFF1Record(t *testing.T) {
 func TestCloudflareCoreExcludesCommandPayloadAndSanitizesURLs(t *testing.T) {
 	w := &streamWriter{environment: "production", deviceID: "FF1-ABC", records: make(chan streamRecord, 1)}
 	core := &cloudflareCore{writer: w, level: zapcore.InfoLevel}
+	//nolint:gosec // Intentional fake credentials exercise public-log sanitization.
 	entry := zapcore.Entry{Time: time.Now(), Level: zapcore.InfoLevel, Message: "fetch https://user:pass@example.com/art?token=message-secret"}
 	require.NoError(t, core.Write(entry, []zapcore.Field{
 		{Key: "command", Type: zapcore.ByteStringType, Interface: []byte(`{"type":"uploadLogs","arguments":{"apiKey":"field-secret","title":"support"}}`)},

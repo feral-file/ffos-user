@@ -126,8 +126,12 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Log pipeline unavailable", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	_, copyErr := io.Copy(io.Discard, resp.Body)
+	closeErr := resp.Body.Close()
+	if copyErr != nil || closeErr != nil {
+		http.Error(w, "Log pipeline response failed", http.StatusBadGateway)
+		return
+	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		w.WriteHeader(resp.StatusCode)
 		return

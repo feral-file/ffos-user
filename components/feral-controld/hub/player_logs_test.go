@@ -37,6 +37,7 @@ func TestHandlePlayerLogsEnrichesAndForwardsSafeRecords(t *testing.T) {
 		logEndpoint:    upstream.URL,
 		logHTTPClient:  upstream.Client(),
 	}
+	//nolint:gosec // Intentional fake credentials exercise public-log sanitization.
 	body := `[{"timestamp":"2026-09-15T01:02:03.000Z","level":"error","environment":"production","message":"failed https://user:pass@example.com/art?token=private","context":{"session_id":"session-1"}}]`
 	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
