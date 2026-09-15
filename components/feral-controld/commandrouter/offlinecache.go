@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/display-protocol/dp1-go/extension/contentrating"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
 
@@ -649,6 +650,9 @@ func (h *handler) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
 	raw, err := h.offlineCache.CachedPlaylistForURL(url)
 	if err != nil {
 		return nil, fmt.Errorf("offline cache: no cached playlist for %s: %w", url, err)
+	}
+	if err := contentrating.ValidatePlaylistFragment(raw); err != nil {
+		return nil, fmt.Errorf("playlistInvalid: offline cache content rating for %s: %w", url, err)
 	}
 	var playlist *dp1.Playlist
 	if err := h.json.Unmarshal(raw, &playlist); err != nil {

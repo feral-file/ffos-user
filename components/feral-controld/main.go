@@ -23,6 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
@@ -832,6 +833,81 @@ func replayScopeResyncReconciler(refresher playlist_refresher.Refresher) func(co
 	}
 }
 
+// contentPolicySyncAttempts bounds the reconnect sync retry. Reconcilers run
+// SEQUENTIALLY in registration order and this one is registered before
+// playlist-recompute, so retrying here is what keeps a transient failure from
+// being followed by a scheduled cast to a player still on its own defaults —
+// a cohort the scheduler then records as delivered and never re-pushes. Bounded
+// rather than persistent: a player that is genuinely gone must not hold the
+// whole reconnect lane, and every other trigger (cast, refresh, cutover, the
+// next generation) re-syncs anyway.
+const contentPolicySyncAttempts = 3
+
+// contentPolicySyncRetryDelay spaces those attempts. Short: this runs inside the
+// reconnect lane, and the failure it is covering is a page that has just started
+// accepting commands and needs a moment, not a long outage.
+const contentPolicySyncRetryDelay = 250 * time.Millisecond
+
+// policyRefresher is the narrow slice of the playlist refresher the content
+// policy reconciler needs: after a player restart it may have to re-send what
+// is on screen, nothing more.
+type policyRefresher interface{ ForceRefresh() }
+
+func contentPolicyReconciler(handler commandrouter.Handler, store *contentpolicy.Store, refresher policyRefresher, logger *zap.Logger) func(context.Context) {
+	return func(ctx context.Context) {
+		var err error
+		for attempt := 1; attempt <= contentPolicySyncAttempts; attempt++ {
+			if err = commandrouter.SyncContentPolicy(handler); err == nil {
+				forceRefreshAfterPolicySync(store, refresher, logger)
+				return
+			}
+			if attempt == contentPolicySyncAttempts {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(contentPolicySyncRetryDelay):
+			}
+		}
+		// Left deliberately non-fatal: the scheduled cast that follows is still
+		// better than a blank wall, and it is filtered by the daemon either way.
+		// What this cannot do on its own is guarantee the PLAYER is in step —
+		// see the per-generation verification discussion on #349.
+		logger.Warn("content policy unavailable for current player generation",
+			zap.Int("attempts", contentPolicySyncAttempts), zap.Error(err))
+	}
+}
+
+// forceRefreshAfterPolicySync re-sends the current playlist once the policy has
+// reached a freshly started player.
+//
+// Needed because the refresher does not wait for this reconciler: it sends as
+// soon as CDP reports initialized, so a restarted player can render a refresh
+// under ITS defaults before the owner's policy lands, and nothing re-sends
+// afterwards. A persisted showMatureContent:true then visibly fails until the
+// next periodic pass or cast.
+//
+// Deliberately conditional on the policy being non-default. An unconditional
+// force here would put a soft artwork refresh on EVERY generation bump — every
+// CDP connect, every recovery navigation, every stamp mismatch — which is
+// exactly the cost the replay-scope reconciler's guard exists to avoid. A
+// device still on defaults has nothing to correct: the player's own defaults
+// already agree.
+func forceRefreshAfterPolicySync(store *contentpolicy.Store, refresher policyRefresher, logger *zap.Logger) {
+	if store == nil || refresher == nil {
+		return
+	}
+	store.Lock()
+	active := store.CurrentLocked()
+	store.Unlock()
+	if active == contentpolicy.Default() {
+		return
+	}
+	logger.Info("content policy synced to a new player generation; re-sending current playlist")
+	refresher.ForceRefresh()
+}
+
 func bootRecoveryRetryReconciler(executor devicectl.Executor, logger *zap.Logger) func(context.Context) {
 	return func(context.Context) {
 		devicectl.RetryBootRecovery(executor, logger)
@@ -1087,6 +1163,17 @@ func initializeApp(
 	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
 	// must never be shed by external client traffic, so it bypasses the gate.
 	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, offlineCache, kioskReplay, playlistScheduler, json, logger)
+	blockUnratedCurated := config.Get().ContentPolicyTuning(logger).BlockUnratedCurated
+	policyStore, policyErr := contentpolicy.Open(constants.CONTENT_POLICY_FILE, blockUnratedCurated)
+	if policyErr != nil {
+		logger.Error("content policy store unreadable; using safe defaults until a durable update succeeds", zap.Error(policyErr))
+		policyStore = contentpolicy.Fallback(constants.CONTENT_POLICY_FILE, blockUnratedCurated)
+	}
+	commandrouter.SetContentPolicy(rawCmdHandler, policyStore, logger)
+	// Wired below, once playlistRefresher exists: an accepted policy change has
+	// to re-resolve what is on screen, or the Content screen reports success
+	// while the display stays on the previous projection until the periodic
+	// refresh.
 	// Cast-time source preflight (#304): a displayPlaylist whose every item
 	// source definitively answers an HTTP error is rejected at accept time
 	// instead of being forwarded and self-reported as playing. Wired against
@@ -1238,6 +1325,13 @@ func initializeApp(
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
+	playlist_refresher.SetContentPolicy(playlistRefresher, policyStore)
+	commandrouter.SetPolicyRefresher(rawCmdHandler, playlistRefresher, logger)
+	// The owner's content policy falls with the claim on a factory reset, for
+	// the same rollback reason the device name does (see factoryReset).
+	executor.SetContentPolicyResetter(func() error {
+		return commandrouter.ResetContentPolicy(rawCmdHandler)
+	})
 	if sigVerifyEnabled {
 		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
 		playlist_refresher.SetSignatureVerificationMode(playlistRefresher, verificationMode, logger)
@@ -1353,11 +1447,20 @@ func initializeApp(
 
 	// Wire every off-lane producer to the session (design doc §4), now that
 	// they all exist. Registration ORDER is the reconciler execution order on
-	// every generation-ready: sleep invalidate+poke, playlist recompute,
-	// status force-refresh, setup-narration resync, offline-cache replay-scope
-	// resync, boot-recovery retry, connectivity — replacing the five ad-hoc
-	// CDP-reconnect spawns run() used to do inline.
+	// every generation-ready: sleep invalidate+poke, content policy, playlist
+	// recompute, status force-refresh, setup-narration resync, offline-cache
+	// replay-scope resync, boot-recovery retry, connectivity — replacing the
+	// five ad-hoc CDP-reconnect spawns run() used to do inline.
 	session.RegisterReconciler("sleep-invalidate", sleepInvalidateReconciler(executor, logger))
+	// Content policy MUST reconcile before playlist-recompute. A freshly
+	// initialized player starts on default policy, so a recompute that
+	// force-pushes a scheduled cohort first would have its mature items
+	// withheld by the player until some later cast, refresh or cutover —
+	// a durable, acknowledged Content setting visibly failing after a player
+	// restart. Nothing re-pushes the scheduler when the policy syncs later.
+	if policyStore != nil {
+		session.RegisterReconciler("content-policy", contentPolicyReconciler(rawCmdHandler, policyStore, playlistRefresher, logger))
+	}
 	// A (re)loaded or replaced player document shows content controld did
 	// not just push: drop the attested verdict SYNCHRONOUSLY in the bump,
 	// not in a reconciler — the status round that detects a stamp mismatch

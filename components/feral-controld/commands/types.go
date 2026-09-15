@@ -144,10 +144,18 @@ const (
 	CMD_SSH_ACCESS                 Type = "sshAccess"
 	CMD_DISPLAY_DEFAULT_PLAYLIST   Type = "displayDefaultPlaylist"
 	CMD_REFRESH_ARTWORK            Type = "refreshArtwork"
-	CMD_SET_SLEEP_SCHEDULE         Type = "setSleepSchedule"
-	CMD_SLEEP_NOW                  Type = "sleepNow"
-	CMD_WAKE_NOW                   Type = "wakeNow"
-	CMD_SET_SLEEP_MODE             Type = "setSleepMode"
+	// Recently played is a device-owned history. getRecentlyPlayed returns
+	// bounded presentation metadata only; playRecentlyPlayed resolves the
+	// opaque record locally then re-enters CMD_DISPLAY_PLAYLIST.
+	CMD_GET_RECENTLY_PLAYED  Type = "getRecentlyPlayed"
+	CMD_PLAY_RECENTLY_PLAYED Type = "playRecentlyPlayed"
+	// Internal only: its reply contains the device-retained DP-1 item rather
+	// than bounded list metadata, so the public router must refuse it.
+	CMD_RESOLVE_RECENTLY_PLAYED Type = "resolveRecentlyPlayed"
+	CMD_SET_SLEEP_SCHEDULE      Type = "setSleepSchedule"
+	CMD_SLEEP_NOW               Type = "sleepNow"
+	CMD_WAKE_NOW                Type = "wakeNow"
+	CMD_SET_SLEEP_MODE          Type = "setSleepMode"
 	// CMD_SET_DEVICE_NAME sets the owner-visible name for this unit. The name
 	// is a display label only — the serial stays the identity every other
 	// system keys on — and it is reported back in device status, which is the
@@ -192,6 +200,8 @@ const (
 	CMD_CLEAR_PLAYLIST_ITEM_CACHE Type = "clearPlaylistItemCache"
 	CMD_CLEAR_PLAYLIST_CACHE      Type = "clearPlaylistCache"
 	CMD_GET_OFFLINE_CACHE_STATUS  Type = "getOfflineCacheStatus"
+	CMD_GET_CONTENT_POLICY        Type = "getContentPolicy"
+	CMD_SET_CONTENT_POLICY        Type = "setContentPolicy"
 )
 
 func (c Type) DeviceCtlCommand() bool {

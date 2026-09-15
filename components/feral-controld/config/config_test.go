@@ -718,3 +718,32 @@ func TestGatewayUserAgentTuningNilLogger(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(`{"gatewayUserAgent":{"hosts":"bad"}}`), &c))
 	assert.NotPanics(t, func() { c.GatewayUserAgentTuning(nil) })
 }
+
+// TestContentPolicyTuningPermissiveDecode pins the same §3 config hazard rule
+// for the operator-only unrated-archive gate: a hand-edited typo that is still
+// valid JSON must leave the gate inactive and log, never fail config.Load —
+// which is FATAL under Restart=always and would take the LAN hub, captive
+// portal, provisioning and claiming down with it.
+func TestContentPolicyTuningPermissiveDecode(t *testing.T) {
+	t.Run("absent block leaves the gate inactive", func(t *testing.T) {
+		c := &config.Config{}
+		assert.Equal(t, config.ContentPolicyConfig{}, c.ContentPolicyTuning(zap.NewNop()))
+	})
+
+	t.Run("well-formed block decodes", func(t *testing.T) {
+		c := &config.Config{ContentPolicy: []byte(`{"blockUnratedCurated":true}`)}
+		assert.True(t, c.ContentPolicyTuning(zap.NewNop()).BlockUnratedCurated)
+	})
+
+	t.Run("wrong-typed value leaves the gate inactive without failing", func(t *testing.T) {
+		c := &config.Config{ContentPolicy: []byte(`{"blockUnratedCurated":"true"}`)}
+		assert.Equal(t, config.ContentPolicyConfig{}, c.ContentPolicyTuning(zap.NewNop()))
+	})
+
+	t.Run("wrong-typed block survives the whole-config parse", func(t *testing.T) {
+		var c config.Config
+		err := json.Unmarshal([]byte(`{"contentPolicy": {"blockUnratedCurated": "true"}, "enableHub": true}`), &c)
+		require.NoError(t, err, "a wrong-typed contentPolicy block must not fail the parse")
+		assert.Equal(t, config.ContentPolicyConfig{}, c.ContentPolicyTuning(zap.NewNop()))
+	})
+}

@@ -19,6 +19,12 @@ func TestSourceMatchesPlaylistURL(t *testing.T) {
 	assert.False(t, source.Matches(playlistschedule.Source{}))
 }
 
+func TestSourceMatchesIncludesContentContext(t *testing.T) {
+	source := playlistschedule.Source{PlaylistURL: "https://example.com/feed.json", ContentContext: "personal"}
+	assert.True(t, source.Matches(playlistschedule.Source{PlaylistURL: source.PlaylistURL, ContentContext: "personal"}))
+	assert.False(t, source.Matches(playlistschedule.Source{PlaylistURL: source.PlaylistURL, ContentContext: "curated"}))
+}
+
 func TestSourceMatchesDynamicPlaylistIdentityIgnoringResolvedItems(t *testing.T) {
 	query := &playlists.DynamicQuery{
 		Profile:  "graphql-v1",

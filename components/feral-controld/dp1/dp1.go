@@ -2,6 +2,7 @@ package dp1
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	goio "io"
 	"maps"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/display-protocol/dp1-go/extension/contentrating"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -17,6 +19,50 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
+
+// ValidationPointers extracts the JSON pointers a jsonschema failure names and
+// discards everything else about it.
+//
+// Deliberately an allow-list of one shape — the pointer after "at '" — rather
+// than a redaction of known-bad substrings: anything the extractor does not
+// recognize is dropped, so a future validator message cannot leak by wording
+// this does not anticipate. A pointer is structural (indices and field names
+// from the schema), never document content, which matters because dp1-go's
+// format assertions print the offending VALUE whole and these errors are
+// returned verbatim to casters on both transports.
+func ValidationPointers(err error) []string {
+	if err == nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(err.Error(), "at '") {
+		end := strings.IndexByte(part, '\'')
+		if end <= 0 {
+			continue
+		}
+		pointer := part[:end]
+		// A pointer is "/a/0/b" or "" (the document root). Anything else is
+		// not one, so it is not reported.
+		if pointer != "" && !strings.HasPrefix(pointer, "/") {
+			continue
+		}
+		if pointer == "" {
+			pointer = "/"
+		}
+		if !seen[pointer] {
+			seen[pointer] = true
+			out = append(out, pointer)
+		}
+	}
+	return out
+}
+
+// ErrPlaylistInvalid marks a fetched DP-1 document whose content-rating
+// extension fields are present but malformed. errors.Is-able so the command
+// router can carry it to the transports as the documented playlistInvalid
+// classification instead of a generic failure.
+var ErrPlaylistInvalid = errors.New("playlistInvalid")
 
 const (
 	// MaxPlaylistBodyBytes bounds a playlist document fetched by URL, matching
@@ -208,6 +254,32 @@ func (d *dp1) processDynamicPlaylist(ctx context.Context, playlist Playlist, min
 	return nil, fmt.Errorf("playlist has no dynamic query configuration")
 }
 
+// dp1ItemValidationMarker is the prefix dp1-go puts on a hydrated item that
+// fails its schema validation, content-rating overlay included.
+//
+// Matched as a STRING deliberately. dp1-go's validation sentinel
+// (dp1go.ErrValidation) lives in the module's ROOT package, and that package
+// imports its signing path: adding it as a direct import pulls go-ethereum,
+// gnark-crypto and ~30 related packages into this daemon and grows the binary
+// by ~1.4 MB (measured: 28.4 MB -> 29.8 MB), on a device where nothing else
+// needs any of it. That is a poor trade for classifying an error.
+//
+// The fragility is bounded and fails in the safe direction: if dp1-go's wording
+// changes, a malformed item falls back to the generic error this code returned
+// before, never to a wrong classification. TestDP1_ProcessDynamicPlaylist_
+// RejectsWrongTypedResolvedRatings pins the behavior.
+const dp1ItemValidationMarker = "invalid playlist item"
+
+// classifyHydrationError marks a resolver's malformed CONTENT as
+// playlistInvalid so the transports answer the documented classification;
+// transport and query failures stay generic.
+func classifyHydrationError(err error) error {
+	if err == nil || !strings.Contains(err.Error(), dp1ItemValidationMarker) {
+		return err
+	}
+	return fmt.Errorf("%w: dynamic item at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
+}
+
 func hasDisplayAtItems(items []dp1playlist.PlaylistItem) bool {
 	for _, item := range items {
 		if item.DisplayAt != nil {
@@ -271,7 +343,7 @@ func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist,
 			client,
 			&dp1playlist.DynamicQueryFetchOptions{AllowInsecureHTTP: d.debug})
 		if err != nil {
-			return nil, err
+			return nil, classifyHydrationError(err)
 		}
 		accumulated = append(accumulated, batch...)
 		if maxItems > 0 && len(accumulated) >= maxItems {
@@ -377,6 +449,21 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
 	}
 	if len(bytes) > MaxPlaylistBodyBytes {
 		return Playlist{}, fmt.Errorf("fetch playlist failed: body exceeds %d bytes", MaxPlaylistBodyBytes)
+	}
+	// This ingestion path structurally validates any present content-rating
+	// extension fields. The fragment validator needs no core signature, so it
+	// applies whatever the signature verification mode decides about the
+	// document itself. Ordered after the size cap so an oversized body is
+	// refused before it is parsed.
+	//
+	// What this rejects is a rating of the wrong TYPE. An unrecognized rating
+	// STRING is not an error anywhere on this path: DP-1 §3.3
+	// (display-protocol/dp1#52) treats a rating this build does not know as
+	// unrated, the schema accepts any string, and contentpolicy.Policy.Allows
+	// applies the same rule at admission. A document is never refused for
+	// carrying a label we do not recognize.
+	if err := contentrating.ValidatePlaylistFragment(bytes); err != nil {
+		return Playlist{}, fmt.Errorf("%w: content rating extension at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
 	}
 
 	var playlist Playlist

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 )
@@ -106,6 +107,51 @@ func (e *SourceUnreachableError) Error() string {
 func IsSourceUnreachable(err error) bool {
 	var sue *SourceUnreachableError
 	return errors.As(err, &sue)
+}
+
+type ContentBlockedError struct{}
+
+func (*ContentBlockedError) Error() string {
+	return "contentBlocked: no playlist item is allowed by the active content policy"
+}
+
+func IsContentBlocked(err error) bool {
+	var target *ContentBlockedError
+	return errors.As(err, &target)
+}
+
+// PlaylistInvalidError marks a cast rejected because the DP-1 document itself is
+// malformed — today, content-rating extension fields that are present but not
+// valid. Typed rather than a formatted string so the LAN hub and the relayer can
+// answer the documented invalid-input classification instead of a generic
+// server error, the same way ContentBlockedError is carried.
+type PlaylistInvalidError struct {
+	// Locations are the JSON pointers the validator objected to, e.g.
+	// "/items/0/contentRating". POINTERS ONLY — never the offending value.
+	//
+	// dp1-go's format assertions print the value whole ("'https://x?token=…'
+	// is not valid 'uri'"), and this text is returned verbatim to LAN and
+	// relayer callers, so carrying its message through would hand a caster
+	// another caster's signed source. The path says which field is wrong,
+	// which is all a caster needs to fix its own document.
+	Locations []string
+}
+
+func (e *PlaylistInvalidError) Error() string {
+	if e == nil || len(e.Locations) == 0 {
+		return "playlistInvalid"
+	}
+	return "playlistInvalid: at " + strings.Join(e.Locations, ", ")
+}
+
+func IsPlaylistInvalid(err error) bool {
+	var target *PlaylistInvalidError
+	if errors.As(err, &target) {
+		return true
+	}
+	// The URL/dynamic ingestion path validates inside dp1 and returns its own
+	// sentinel; both reach the transports as the same classification.
+	return errors.Is(err, dp1.ErrPlaylistInvalid)
 }
 
 // SigInvalidError is returned by the displayPlaylist path when the device's

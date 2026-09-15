@@ -249,6 +249,18 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
+		if commandrouter.IsContentBlocked(err) {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		// Malformed DP-1 is caller input, not a device fault: answer the
+		// documented classification rather than a 500 that tells the caster
+		// nothing about its own payload.
+		if commandrouter.IsPlaylistInvalid(err) {
+			h.logger.Warn("Cast rejected: playlist is invalid", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
 		// Strict-mode signature rejection (#307): the caller's document was
 		// refused by a policy the owner chose — a 422 with the sanitized
 		// reason, same as the dead-source rejection above.

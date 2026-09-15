@@ -159,12 +159,31 @@ type Scheduler interface {
 	Restore(Snapshot)
 	// HasCache reports whether a displayAt playlist is currently cached.
 	HasCache() bool
+	// SetProjector installs the content-policy projection applied to every
+	// scheduler-owned push. Optional; nil leaves pushes unprojected.
+	SetProjector(Projector)
 	// Stop latches shutdown and is not reversible: afterwards no recompute pass
 	// writes to the player and no new transition timer or push retry is armed.
 	// It returns without waiting for a CDP send that is already in flight; see
 	// the scheduler's stopped field for that trade-off.
 	Stop()
 }
+
+// Projector re-applies the device's CURRENT content policy to a scheduler-owned
+// active set just before it is cast, returning the admitted items and whether
+// the projection came out empty.
+//
+// It exists because a cutover is the one cast the command router does not
+// mediate: the router filters a playlist once, at cast time, and the scheduler
+// then replays cohorts of that cached document at each displayAt boundary. A
+// policy tightened after the cast would otherwise never reach those later
+// cohorts, so a work blocked at 23:59 would still appear at midnight.
+//
+// It MUST NOT take the content-policy store lock: the router holds that lock
+// for the whole displayPlaylist call, including WithPlayerPush, so taking it
+// from a push would invert the lock order against pushMu. Read the store's
+// lock-free Snapshot instead.
+type Projector func(playlist *dp1.Playlist, contentContext string) (projected *dp1.Playlist, empty bool)
 
 type Snapshot struct {
 	full            *dp1.Playlist
@@ -248,6 +267,10 @@ type scheduler struct {
 	// backoff and a bounded attempt ceiling.
 	pushRetryAttempt int
 
+	// projector re-applies the current content policy to every scheduler-owned
+	// push. Read under mu, called outside it (see Projector).
+	projector Projector
+
 	// stopped latches at Stop and gates player writes during shutdown.
 	// Canceling the timer contexts is not enough on its own: a timer or retry
 	// goroutine that already returned from SleepContext observes no context
@@ -309,6 +332,12 @@ func (s *scheduler) HasCache() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.full != nil
+}
+
+func (s *scheduler) SetProjector(p Projector) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.projector = p
 }
 
 func (s *scheduler) RestoredPending() bool {
@@ -492,6 +521,7 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 		gen := s.generation
 		active := s.activeLocked()
 		source := snapshotSource(s.source)
+		projector := s.projector
 		s.armTimerLocked()
 		if len(active.Items) == 0 {
 			// The player rejects an empty displayPlaylist. Keep the complete
@@ -502,11 +532,32 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 			s.logger.Debug("Skipping empty displayAt active set")
 			return
 		}
-		if !force && reflect.DeepEqual(active.Items, s.lastActive) {
-			s.mu.Unlock()
+		last := cloneItems(s.lastActive)
+		s.mu.Unlock()
+
+		// Compare what would actually be SENT, not the raw active set. The
+		// projection is what the player receives, and a policy tightened since
+		// the last push changes it while leaving the active set byte-identical —
+		// so comparing the raw set here skipped the very push that removes a
+		// newly blocked item, and the work stayed on screen until an unrelated
+		// cohort change. Matters most on the cached fallback after a resolution
+		// failure, where this early return is the only thing between a policy
+		// change and the wall.
+		//
+		// push() re-projects under its own read; doing it twice is pure and
+		// cheap, and keeps the send path's projection in one place.
+		sent := active.Items
+		if projector != nil {
+			if projected, empty := projector(active, source.ContentContext); projected != nil {
+				sent = projected.Items
+				if empty {
+					sent = nil
+				}
+			}
+		}
+		if !force && reflect.DeepEqual(sent, last) {
 			return
 		}
-		s.mu.Unlock()
 
 		if err := s.push(ctx, active, source); err != nil {
 			if errors.Is(err, errStopped) {
@@ -528,7 +579,9 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 			return
 		}
 		s.mu.Lock()
-		s.lastActive = cloneItems(active.Items)
+		// Records what was SENT (the projection), which is what the next pass
+		// compares against — see the comparison above.
+		s.lastActive = cloneItems(sent)
 		// A successful push clears any retry armed by a prior failure so it
 		// cannot resend a now-superseded active set later.
 		s.pushRetryAttempt = 0
@@ -581,6 +634,30 @@ func (s *scheduler) snapshotLocked() Snapshot {
 	}
 }
 
+// projectedItemsLocked returns the items a push of active would actually send:
+// the content-policy projection when one is installed, the raw items otherwise.
+// It is what lastActive records, so it is what any comparison against
+// lastActive has to use.
+//
+// The projector takes no store lock (it reads a lock-free snapshot — see
+// Projector), so calling it under mu is safe.
+func (s *scheduler) projectedItemsLocked(active *dp1.Playlist) []dp1playlist.PlaylistItem {
+	if s.projector == nil || active == nil {
+		if active == nil {
+			return nil
+		}
+		return active.Items
+	}
+	projected, empty := s.projector(active, s.source.ContentContext)
+	if empty {
+		return nil
+	}
+	if projected == nil {
+		return active.Items
+	}
+	return projected.Items
+}
+
 func (s *scheduler) restoreLocked(snapshot Snapshot) {
 	if s.cancelTimer != nil {
 		s.cancelTimer()
@@ -605,8 +682,17 @@ func (s *scheduler) restoreLocked(snapshot Snapshot) {
 		// push retry whenever the restored cache's active set, computed as of
 		// now, has not actually reached the player, so the outstanding cutover
 		// keeps resending instead of silently sticking on stale playback.
-		if active := s.activeLocked(); len(active.Items) > 0 && !reflect.DeepEqual(active.Items, s.lastActive) {
-			s.armPushRetryLocked()
+		//
+		// Compare what would be SENT, not the raw cached set: recompute records
+		// lastActive as the PROJECTION (see its comparison), so after a policy
+		// tighten hides an item still present in the cached document the two can
+		// never match again. That mismatch made every Restore — every failed
+		// cast, every rejected refresh — arm a retry that force-cast the same
+		// cohort seconds later and restarted the artwork, indefinitely.
+		if active := s.activeLocked(); len(active.Items) > 0 {
+			if sent := s.projectedItemsLocked(active); len(sent) > 0 && !reflect.DeepEqual(sent, s.lastActive) {
+				s.armPushRetryLocked()
+			}
 		}
 	}
 	if s.restoredPending && s.full == nil && !s.source.IsZero() {
@@ -774,6 +860,32 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 		return fmt.Errorf("cdp not connected")
 	}
 
+	// Re-apply the CURRENT content policy. The router filtered this document
+	// once, when it was cast; a policy tightened since then reaches these later
+	// cohorts only here (see Projector).
+	//
+	// An EMPTY projection is a retirement, not a no-op. Silently dropping it
+	// left the blocked frame on screen — the owner disables mature content,
+	// setContentPolicy reports success, and the work keeps playing because the
+	// only cohort that could replace it is the one the policy just emptied.
+	// The empty list therefore goes out WITH retireBlockedCurrent, which is the
+	// player's documented signal to retire the current item and black the
+	// display rather than an ordinary cast it would reject.
+	retireBlockedCurrent := false
+	s.mu.Lock()
+	projector := s.projector
+	s.mu.Unlock()
+	if projector != nil {
+		projected, empty := projector(playlist, source.ContentContext)
+		if projected != nil {
+			playlist = projected
+		}
+		if empty {
+			retireBlockedCurrent = true
+			s.logger.Info("displayAt cutover is fully blocked by the content policy; retiring the current frame")
+		}
+	}
+
 	// Force cast via now_display — never refresh:true. Player refreshPlaylist
 	// defers when the current item is absent from the new list (typical
 	// displayAt day/slot swap), which would miss the wall-clock threshold.
@@ -786,6 +898,17 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 			},
 			"dp1_call": playlist,
 		},
+	}
+	// contentContext is optional and its only valid present values are
+	// "curated" and "personal". A schedule persisted before this field existed
+	// decodes with an empty string, so it must be OMITTED rather than sent as
+	// "": an upgraded device would otherwise push an invalid value on its first
+	// cutover and the timer's whole wall-clock swap would be rejected.
+	if retireBlockedCurrent {
+		command.Arguments["retireBlockedCurrent"] = true
+	}
+	if source.ContentContext != "" {
+		command.Arguments["contentContext"] = source.ContentContext
 	}
 	if source.PlaylistURL != "" {
 		command.Arguments["playlistUrl"] = source.PlaylistURL

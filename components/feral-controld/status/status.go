@@ -38,6 +38,7 @@ type PlayerStatus struct {
 	Command        string                      `json:"castCommand,omitempty"`
 	PlaylistURL    *string                     `json:"playlistURL,omitempty"`
 	Playlist       *dp1.Playlist               `json:"playlist,omitempty"`
+	ContentContext string                      `json:"contentContext,omitempty"`
 	Index          *int                        `json:"index"`
 	RenderStatus   *int                        `json:"renderStatus,omitempty"`
 	IsPaused       *bool                       `json:"isPaused,omitempty"`

@@ -891,6 +891,18 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 				}
 				return m.relayer.Send(ctx, resp)
 			}
+			if commandrouter.IsContentBlocked(err) {
+				resp := relayer.Response{Type: "RPC", MessageID: payload.MessageID, Message: map[string]any{
+					"ok": false, "error": "contentBlocked", "command": commandType.String(), "message": err.Error(),
+				}}
+				return m.relayer.Send(ctx, resp)
+			}
+			if commandrouter.IsPlaylistInvalid(err) {
+				resp := relayer.Response{Type: "RPC", MessageID: payload.MessageID, Message: map[string]any{
+					"ok": false, "error": "playlistInvalid", "command": commandType.String(), "message": err.Error(),
+				}}
+				return m.relayer.Send(ctx, resp)
+			}
 			if commandrouter.IsSigInvalid(err) {
 				// Strict-mode signature rejection (#307): the owner asked for
 				// it, and the caster must learn its document was refused
