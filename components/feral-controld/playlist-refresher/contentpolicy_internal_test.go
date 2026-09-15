@@ -215,3 +215,117 @@ func (s *legacySourceScheduler) Prepare(p *dp1.Playlist) *dp1.Playlist { return 
 func (s *legacySourceScheduler) PrepareWithSource(p *dp1.Playlist, _ playlistschedule.Source) *dp1.Playlist {
 	return p
 }
+
+// newInlineRefresher builds a refresher whose player is displaying a STATIC
+// inline playlist: the shape an app cast usually takes, and the one with no
+// refreshable source to re-resolve.
+func newInlineRefresher(t *testing.T, statusContext string, store *contentpolicy.Store) (*refresher, *string) {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockPoller := mocks.NewMockStatusPoller(ctrl)
+
+	mature := contentrating.RatingMature
+	inline := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{
+		{ID: "safe", Source: "https://example.test/safe"},
+		{ID: "grown", Source: "https://example.test/grown", ContentRating: &mature},
+	}}}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockPoller.EXPECT().FetchPlayerStatus(gomock.Any()).DoAndReturn(
+		func(context.Context) (*status.PlayerStatus, error) {
+			index := 1 // the mature item is the one on screen
+			return &status.PlayerStatus{
+				Command:        string(commands.CMD_DISPLAY_PLAYLIST),
+				Playlist:       inline,
+				ContentContext: statusContext,
+				Index:          &index,
+			}, nil
+		}).AnyTimes()
+
+	var sent string
+	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			sent, _ = params["expression"].(string)
+			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+		}).AnyTimes()
+
+	r := &refresher{
+		context:       context.Background(),
+		cdp:           mockCDP,
+		statusPoller:  mockPoller,
+		dp1:           mocks.NewMockDP1(ctrl),
+		json:          wrapper.NewJSON(),
+		contentPolicy: store,
+		logger:        zaptest.NewLogger(t),
+	}
+	return r, &sent
+}
+
+// An inline cast has no source to re-resolve, so this path used to send
+// nothing. That left the one case the policy most needs to cover: an owner
+// turning mature content OFF while a mature work is on screen, with no later
+// refresh that would ever remove it.
+func TestStaticInlineRefreshRetiresNewlyBlockedContent(t *testing.T) {
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, sent := newInlineRefresher(t, "curated", store)
+	if err := r.processPlayingPlaylist(false); err != nil {
+		t.Fatal(err)
+	}
+	if *sent == "" {
+		t.Fatal("a newly blocked inline item must be re-sent without it, not left on screen")
+	}
+	if strings.Contains(*sent, "https://example.test/grown") {
+		t.Fatalf("the blocked item survived the projection; sent=%s", *sent)
+	}
+	if !strings.Contains(*sent, "https://example.test/safe") {
+		t.Fatalf("the allowed item must remain; sent=%s", *sent)
+	}
+	// The blocked item is the one on screen, so the player must be told to
+	// retire it rather than keep the frame it already committed.
+	if !strings.Contains(*sent, "retireBlockedCurrent") {
+		t.Fatalf("the current blocked frame must be retired; sent=%s", *sent)
+	}
+}
+
+// Nothing newly blocked must stay as cheap as it was before this path projected
+// at all: scope sync only, no CDP send.
+func TestStaticInlineRefreshSendsNothingWhenPolicyAdmitsEverything(t *testing.T) {
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Lock()
+	if _, err := store.UpdateLocked(true, false); err != nil { // mature allowed
+		store.Unlock()
+		t.Fatal(err)
+	}
+	store.Unlock()
+
+	r, sent := newInlineRefresher(t, "curated", store)
+	if err := r.processPlayingPlaylist(false); err != nil {
+		t.Fatal(err)
+	}
+	if *sent != "" {
+		t.Fatalf("an unchanged projection must not re-send; sent=%s", *sent)
+	}
+}
+
+// A player that omits contentContext leaves the origin unknown, and guessing
+// curated here would strip an owner's personal mature content off the wall.
+func TestStaticInlineRefreshLeavesAnUnknownContextAlone(t *testing.T) {
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, sent := newInlineRefresher(t, "", store)
+	if err := r.processPlayingPlaylist(false); err != nil {
+		t.Fatal(err)
+	}
+	if *sent != "" {
+		t.Fatalf("an unknown context must not be reclassified as curated; sent=%s", *sent)
+	}
+}

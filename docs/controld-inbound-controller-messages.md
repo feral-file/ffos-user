@@ -2805,6 +2805,13 @@ bring back items the previous projection removed, and disabling it leaves
 blocked items up, until something re-resolves. A refused change re-sends
 nothing.
 
+That applies to a **static inline** cast too — the shape an app cast usually
+takes, with no URL or dynamic query to re-resolve. A newly blocked item is
+removed and the player is told to retire it if it is the frame on screen.
+Restoring items a previous projection removed is the one thing this cannot do:
+the device holds only the filtered set that was cast, so relaxing a policy takes
+effect on the next cast rather than retroactively.
+
 Success is reported only after the atomic durable write succeeds *and* the
 player returns a matching acknowledgement. A repeated identical set performs no
 durable write, so holding the toggle does not amplify flash writes.

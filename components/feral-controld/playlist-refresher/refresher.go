@@ -402,6 +402,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	// notice. So it is carried out of the source-derivation switch rather
 	// than returned from inside it.
 	var staticInline *dp1.Playlist
+	var staticInlineContext string
 	var playerStatus *status.PlayerStatus
 	// contextUnknown marks a source whose origin this daemon cannot know: a
 	// player status that omitted contentContext (only a player predating this
@@ -440,8 +441,10 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		case playerStatus.Playlist != nil:
 			// Static inline player status only contains the filtered active set and
 			// no refreshable source identity, so it cannot rebuild future items.
-			r.logger.Debug("Playlist has no dynamic queries, skipping CDP resend")
+			r.logger.Debug("Playlist has no dynamic queries; no source to re-resolve")
+			contextUnknown = playerStatus.ContentContext == ""
 			staticInline = playerStatus.Playlist
+			staticInlineContext = playerStatus.ContentContext
 		default:
 			// A displayPlaylist status carrying neither a URL nor an inline playlist
 			// is the player's fresh-boot/unconfigured state (nothing assigned yet),
@@ -460,12 +463,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	}
 
 	if staticInline != nil {
-		if r.kioskReplay != nil {
-			r.kioskReplay.LockPlayback()
-			defer r.kioskReplay.UnlockPlayback()
-			r.syncReplayScopeLocked(staticInline)
-		}
-		return nil
+		return r.refreshStaticInline(staticInline, staticInlineContext, contextUnknown, playerStatus)
 	}
 
 	var playlist *dp1.Playlist
@@ -684,6 +682,94 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	// observes it.
 	err = sendErr
 	return err
+}
+
+// refreshStaticInline handles the one displayed shape with no refreshable
+// source: an inline playlist with nothing dynamic and no displayAt. It cannot
+// be re-resolved, so this path has always only re-synced replay scope.
+//
+// It must still apply the content policy. A cast from the app is usually
+// exactly this shape, so without it an owner who turns mature content OFF
+// watches the mature work stay on screen indefinitely — there is no later
+// refresh that would remove it, which is precisely the failure the policy
+// exists to prevent.
+//
+// What it CANNOT do is the relaxing direction: the player's status carries only
+// the already-filtered set that was cast, so items an earlier projection
+// removed are simply not there to restore. That needs the daemon to retain the
+// original document, the same retained-state change deferred for scheduled
+// playlists.
+func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext string, contextUnknown bool, playerStatus *status.PlayerStatus) error {
+	if r.contentPolicy == nil || contextUnknown {
+		if contextUnknown {
+			r.logger.Warn("Player status omits contentContext; leaving this inline playlist unprojected rather than reclassifying it as curated")
+		}
+		return r.syncStaticInlineScope(playlist)
+	}
+
+	origin, contextErr := contentpolicy.NormalizeContext(rawContext)
+	if contextErr != nil {
+		return contextErr
+	}
+
+	r.contentPolicy.Lock()
+	defer r.contentPolicy.Unlock()
+	projected, blocked, projectErr := r.contentPolicy.ProjectLocked(&playlist.Playlist, origin)
+	if projectErr != nil {
+		return projectErr
+	}
+	if len(projected.Items) == len(playlist.Items) {
+		// Nothing newly blocked: the common case, and it must stay as cheap as
+		// it was before this path did any projection at all.
+		return r.syncStaticInlineScope(playlist)
+	}
+
+	retire := currentBlockedByRefresh(playerStatus, playlist, r.contentPolicy.CurrentLocked(), origin)
+	out := *playlist
+	out.Playlist = *projected
+	if blocked {
+		r.logger.Warn("Inline playlist is all blocked by the content policy; retiring current content")
+	}
+
+	if r.kioskReplay != nil {
+		r.kioskReplay.LockPlayback()
+		defer r.kioskReplay.UnlockPlayback()
+		r.syncReplayScopeLocked(&out)
+	}
+	if !r.cdp.Initialized() {
+		return errCDPNotReady
+	}
+	command := commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{
+			"intent":         map[string]interface{}{"action": "now_display"},
+			"dp1_call":       &out,
+			"contentContext": string(origin),
+		},
+	}
+	if retire {
+		command.Arguments["retireBlockedCurrent"] = true
+	}
+	result, sendErr := r.sendCDPRequest(command)
+	if sendErr != nil {
+		return sendErr
+	}
+	if !playerresponse.OK(result) {
+		return errPlayerRejectedRefresh
+	}
+	return nil
+}
+
+// syncStaticInlineScope is the pre-existing behavior for this shape: keep
+// offline-replay scope coherent while the same playlist keeps looping, and send
+// nothing.
+func (r *refresher) syncStaticInlineScope(playlist *dp1.Playlist) error {
+	if r.kioskReplay != nil {
+		r.kioskReplay.LockPlayback()
+		defer r.kioskReplay.UnlockPlayback()
+		r.syncReplayScopeLocked(playlist)
+	}
+	return nil
 }
 
 func currentBlockedByRefresh(playerStatus *status.PlayerStatus, fresh *dp1.Playlist, policy contentpolicy.Policy, origin contentpolicy.Context) bool {
