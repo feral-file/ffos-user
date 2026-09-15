@@ -2986,6 +2986,14 @@ bring back items the previous projection removed, and disabling it leaves
 blocked items up, until something re-resolves. A refused change re-sends
 nothing.
 
+If the displayed source cannot be resolved at all — a 404 or an outage, with
+offline caching off and no scheduled cohort to fall back to — there is nothing
+to re-project, so the on-screen item is judged on its own rating instead and
+retired if the policy refuses it. The wall goes blank until the source returns,
+which is the accepted trade: a work the owner has just blocked must not keep
+playing. An item the policy has nothing to say about — unrated, or carrying a
+label this build does not recognize — is left alone.
+
 That applies to a **static inline** cast too — the shape an app cast usually
 takes, with no URL or dynamic query to re-resolve. A newly blocked item is
 removed and the player is told to retire it if it is the frame on screen.

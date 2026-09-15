@@ -2,6 +2,7 @@ package refresher
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -485,5 +486,112 @@ func TestRefreshSendsCuratedForALegacySource_KnownGap(t *testing.T) {
 	// And the daemon's own restraint still holds: it did not strip the item.
 	if !strings.Contains(*sent, "https://example.test/grown") {
 		t.Fatalf("controld must still leave an unknown-origin playlist unprojected; sent=%s", *sent)
+	}
+}
+
+// newUnresolvableSourceRefresher stands up the DEFAULT configuration for the
+// case the content policy exists to cover: offline caching OFF (no cached
+// fallback), a non-displayAt playlist (no scheduler cache), and a source whose
+// resolution fails. rating is what the player reports for the on-screen item.
+func newUnresolvableSourceRefresher(t *testing.T, rating *contentrating.Rating, store *contentpolicy.Store) (*refresher, *string) {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+
+	playlistURL := "https://example.test/gone.json"
+	index := 0
+	onScreen := []dp1playlist.PlaylistItem{{ID: "showing", Source: "https://example.test/showing", ContentRating: rating}}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockPoller.EXPECT().FetchPlayerStatus(gomock.Any()).DoAndReturn(
+		func(context.Context) (*status.PlayerStatus, error) {
+			return &status.PlayerStatus{
+				Command:        string(commands.CMD_DISPLAY_PLAYLIST),
+				PlaylistURL:    &playlistURL,
+				ContentContext: "curated",
+				Index:          &index,
+				Items:          &onScreen,
+			}, nil
+		}).AnyTimes()
+	// The source 404s and there is no offline cache to fall back to.
+	mockDP1.EXPECT().ProcessPlaylistURL(gomock.Any(), playlistURL, false).DoAndReturn(
+		func(context.Context, string, bool) (*dp1.Playlist, error) {
+			return nil, errors.New("fetch playlist failed: 404")
+		}).AnyTimes()
+
+	var sent string
+	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			sent, _ = params["expression"].(string)
+			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+		}).AnyTimes()
+
+	r := &refresher{
+		context:       context.Background(),
+		cdp:           mockCDP,
+		statusPoller:  mockPoller,
+		dp1:           mockDP1,
+		json:          wrapper.NewJSON(),
+		contentPolicy: store,
+		logger:        zaptest.NewLogger(t),
+	}
+	return r, &sent
+}
+
+// The feature's whole purpose: the owner turns mature off and the mature work
+// must leave the wall. With the source unreachable there is nothing to project
+// or re-send, and before this the pass returned early — Content reported
+// success while the blocked work kept playing for as long as the source stayed
+// down, which for a 404 is forever. A blank wall is the accepted trade.
+func TestRefreshRetiresABlockedFrameWhenTheSourceIsUnresolvable(t *testing.T) {
+	mature := contentrating.RatingMature
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, sent := newUnresolvableSourceRefresher(t, &mature, store)
+
+	// The refresh itself still fails — that is the point.
+	if err := r.processPlayingPlaylist(false); err == nil {
+		t.Fatal("an unresolvable source must still report the refresh failure")
+	}
+	if !strings.Contains(*sent, "retireBlockedCurrent") {
+		t.Fatalf("the blocked on-screen item must be retired; sent=%s", *sent)
+	}
+}
+
+// The mirror, and the reason this acts only on a rating it understands: an
+// unrated item is left alone. Nothing is assumed from the absence of a label,
+// so an unreachable source never blanks a wall on its own.
+func TestRefreshLeavesAnUnratedFrameAloneWhenTheSourceIsUnresolvable(t *testing.T) {
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, sent := newUnresolvableSourceRefresher(t, nil, store)
+	if err := r.processPlayingPlaylist(false); err == nil {
+		t.Fatal("an unresolvable source must still report the refresh failure")
+	}
+	if *sent != "" {
+		t.Fatalf("an unrated on-screen item must not be retired; sent=%s", *sent)
+	}
+}
+
+// A rating this build does not recognize is unrated, so it is left alone too —
+// the same equivalence the policy matrix asserts, at this boundary.
+func TestRefreshLeavesAnUnknownRatingAloneWhenTheSourceIsUnresolvable(t *testing.T) {
+	future := contentrating.Rating("teen")
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, sent := newUnresolvableSourceRefresher(t, &future, store)
+	if err := r.processPlayingPlaylist(false); err == nil {
+		t.Fatal("an unresolvable source must still report the refresh failure")
+	}
+	if *sent != "" {
+		t.Fatalf("an unknown rating must be treated as unrated and left alone; sent=%s", *sent)
 	}
 }

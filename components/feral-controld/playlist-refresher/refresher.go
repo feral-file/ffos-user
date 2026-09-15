@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
@@ -648,6 +649,19 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *schedulerSource.DynamicPlaylist, false)
 	}
 	if err != nil {
+		// The source cannot be re-resolved, so this pass will neither project
+		// nor re-send — and a policy tightened a moment ago would otherwise
+		// leave the blocked work on the wall for as long as the source stays
+		// unreachable, while the Content screen reported success. Offline
+		// caching defaults OFF, so on a stock device with a non-displayAt
+		// playlist there is no fallback here at all.
+		//
+		// Retire it from what the PLAYER holds, before the early return. No
+		// retained state: the on-screen item is judged on its own rating, the
+		// same predicate the successful path uses. A blank wall until the
+		// source returns is the accepted trade; a blocked work on the wall is
+		// not.
+		r.retireBlockedCurrentWithoutASource(schedulerSource)
 		return r.handleRefreshError(err, kind, schedulerSource)
 	}
 
@@ -1108,6 +1122,90 @@ func (r *refresher) syncStaticInlineScope(playlist *dp1.Playlist) error {
 		r.syncReplayScopeLocked(playlist)
 	}
 	return nil
+}
+
+// retireBlockedCurrentWithoutASource retires the on-screen item when the policy
+// refuses it and the source cannot be resolved to build a replacement.
+//
+// Acts ONLY on a rating it understands. An unrated item — or one carrying a
+// label from a newer spec revision — is left alone: nothing is assumed from a
+// label the daemon cannot interpret, so the operator's unrated gate does not
+// blank a wall from here either. An unknown content context is left alone for
+// the same reason it is left unprojected everywhere else.
+//
+// Sends under the player-push barrier with the authority re-check, like every
+// other send on this path, so a cast that landed while the resolution was
+// failing is not overwritten by this retirement.
+func (r *refresher) retireBlockedCurrentWithoutASource(source playlistschedule.Source) {
+	if r.contentPolicy == nil || source.ContentContext == "" {
+		return
+	}
+	origin, err := contentpolicy.NormalizeContext(source.ContentContext)
+	if err != nil {
+		return
+	}
+	playerStatus, statusErr := r.statusPoller.FetchPlayerStatus(r.context)
+	if statusErr != nil || playerStatus == nil {
+		return
+	}
+	item, ok := currentPlayerItem(playerStatus)
+	if !ok || !contentpolicy.Rated(item) {
+		return
+	}
+
+	r.contentPolicy.Lock()
+	allowed := r.contentPolicy.CurrentLocked().Allows(item, origin)
+	r.contentPolicy.Unlock()
+	if allowed {
+		return
+	}
+	if !r.cdp.Initialized() {
+		return
+	}
+
+	authorityToken := uint64(0)
+	if r.scheduler != nil {
+		authorityToken = r.scheduler.AuthorityToken()
+	}
+	send := func() {
+		if r.scheduler != nil && r.scheduler.AuthorityToken() != authorityToken {
+			return
+		}
+		r.logger.Warn("Retiring the on-screen item: the content policy refuses it and its source cannot be resolved",
+			zap.String("source", source.PlaylistURL))
+		command := commands.Command{
+			Type: commands.CMD_DISPLAY_PLAYLIST,
+			Arguments: map[string]interface{}{
+				"intent":               map[string]interface{}{"action": "now_display"},
+				"dp1_call":             &dp1.Playlist{Playlist: dp1playlist.Playlist{}},
+				"contentContext":       string(origin),
+				"retireBlockedCurrent": true,
+			},
+		}
+		if _, sendErr := r.sendCDPRequest(command); sendErr != nil {
+			r.logger.Warn("Failed to retire the blocked on-screen item", zap.Error(sendErr))
+		}
+	}
+	if r.scheduler != nil {
+		r.scheduler.WithPlayerPush(send)
+	} else {
+		send()
+	}
+}
+
+// currentPlayerItem returns the item the player reports as on screen.
+func currentPlayerItem(playerStatus *status.PlayerStatus) (dp1playlist.PlaylistItem, bool) {
+	if playerStatus == nil || playerStatus.Index == nil || *playerStatus.Index < 0 {
+		return dp1playlist.PlaylistItem{}, false
+	}
+	items := playerStatus.Items
+	if items == nil && playerStatus.Playlist != nil {
+		items = &playerStatus.Playlist.Items
+	}
+	if items == nil || *playerStatus.Index >= len(*items) {
+		return dp1playlist.PlaylistItem{}, false
+	}
+	return (*items)[*playerStatus.Index], true
 }
 
 // currentItemBlocked reports whether the item the player currently has on

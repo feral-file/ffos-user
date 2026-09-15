@@ -112,6 +112,12 @@ func isRated(r *contentrating.Rating) bool {
 	return r != nil && (*r == contentrating.RatingGeneral || *r == contentrating.RatingMature)
 }
 
+// Rated reports whether an item carries a rating this build can act on, for
+// callers that must distinguish "the policy refuses this item" from "the policy
+// has nothing to say about it". Retiring what is already on screen is the case:
+// it acts only on a rating it understands, and assumes nothing otherwise.
+func Rated(item dp1playlist.PlaylistItem) bool { return isRated(item.ContentRating) }
+
 // Filter creates an internal playback projection. When items are removed its
 // signatures are cleared: the source document's signatures do not describe
 // the projection, even though rating fields themselves remain signed in the source.
