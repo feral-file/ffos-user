@@ -876,15 +876,31 @@ func TestBootRecovery_BackoffTimerExpiresWhenBootWindowClosed(t *testing.T) {
 	// inline attempt deliberately never gates), scheduling a backoff timer.
 	mockCDP.EXPECT().Initialized().Return(false).AnyTimes()
 
+	// Hold the timer until the inline Deferred state has been observed. An
+	// instant clock lets the background expiry race that assertion in CI.
+	backoff := make(chan struct{})
+	mockClock := mocks.NewMockClock(ctrl)
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, _ time.Duration) error {
+			select {
+			case <-backoff:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+
 	e := settledExecutor(mockCDP)
-	e.clock = &instantClock{}
+	e.clock = mockClock
+	e.bootRecoveryDaemonCtx = t.Context()
 	e.bootLifecycleProbe = func() bool { return false } // window closed
 
 	e.MaybeRecoverPlayerOnBootOnline(context.Background())
 	assert.Equal(t, bootRecDeferred, e.bootRecoveryState, "the no-connection fast-fail must not gate on the window")
 
-	// The instant-clock backoff timer fires immediately; its re-entry must
-	// see the closed window and expire instead of attempting another round.
+	// Release the timer; re-entry must see the closed window and expire
+	// instead of attempting another round.
+	close(backoff)
 	awaitBootRecoveryState(t, e, bootRecExpired)
 	assert.Equal(t, 0, e.bootRecoveryAttempts, "no attempt must have executed")
 }
