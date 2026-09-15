@@ -532,7 +532,9 @@ if [ "$1" = "--user" ] && [ "$2" = "restart" ] && [ "$3" = "chromium-kiosk.servi
   bump "` + restartFile + `"; exit 0
 fi
 if [ "$1" = "--user" ] && [ "$2" = "stop" ] && [ "$3" = "chromium-kiosk.service" ]; then
-  bump "` + stopFile + `"; exit 0
+  bump "` + stopFile + `"
+  [ -e "` + stopFile + `.fail" ] && exit 1
+  exit 0
 fi
 if [ "$1" = "--user" ] && [ "$2" = "is-active" ] && [ "$3" = "chromium-kiosk.service" ]; then
   printf "inactive\n"; exit 3
@@ -869,6 +871,7 @@ func TestChromiumMonitorFallbackHoldAbandonedWhenHeadless(t *testing.T) {
 
 	monitor.mu.Lock()
 	monitor.fallbackSince = time.Now().Add(-(CHROMIUM_FALLBACK_HOLD + time.Second))
+	monitor.restartHistory = []time.Time{time.Now(), time.Now(), time.Now()}
 	monitor.mu.Unlock()
 
 	err := monitor.check(context.Background())
@@ -887,6 +890,12 @@ func TestChromiumMonitorFallbackHoldAbandonedWhenHeadless(t *testing.T) {
 	}
 	if !headless {
 		t.Fatal("monitor must latch headless after abandoning the hold")
+	}
+	monitor.mu.Lock()
+	history := len(monitor.restartHistory)
+	monitor.mu.Unlock()
+	if history != 0 {
+		t.Fatalf("abandoning the hold must forget the exhausted budget, got %d stamps", history)
 	}
 	if handler.isFallbackShown() {
 		t.Fatal("fallbackShown must be cleared so the reconnect path can restart the kiosk")
@@ -1011,5 +1020,88 @@ func TestChromiumMonitorFallbackBusyRetriesWithoutReboot(t *testing.T) {
 	monitor.mu.Unlock()
 	if !inFallback {
 		t.Fatal("expected hold armed after the retry")
+	}
+}
+
+// TestChromiumMonitorReconnectAfterAbandonedHoldRestartsKiosk pins the
+// customer-visible path behind forgetting the budget: unplug the display
+// during the error screen, plug it back within five minutes, wait out the
+// reconnect grace — the stopped kiosk must be RESTARTED, not shown a second
+// fallback because three stale stamps still sit inside the window.
+func TestChromiumMonitorReconnectAfterAbandonedHoldRestartsKiosk(t *testing.T) {
+	restartFile, _, fallbackFile, rebootFile := installFallbackStubs(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	handler := NewCommandHandler(zap.NewNop(), nil)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), handler)
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
+
+	monitor.mu.Lock()
+	monitor.fallbackSince = time.Now().Add(-time.Minute)
+	monitor.restartHistory = []time.Time{time.Now(), time.Now(), time.Now()}
+	monitor.mu.Unlock()
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure while headless")
+	}
+
+	// Display back; the reconnect grants a fresh grace, which we then let expire.
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against closed endpoint")
+	}
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + time.Minute))
+	monitor.mu.Unlock()
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against closed endpoint")
+	}
+	if got := readRestartCount(t, restartFile); got != "1" {
+		t.Fatalf("expected a kiosk restart after the reconnect grace, got %s", got)
+	}
+	if got := readRestartCount(t, fallbackFile); got != "0" {
+		t.Fatalf("reconnect must not re-enter the fallback, got %s", got)
+	}
+	if got := readRestartCount(t, rebootFile); got != "0" {
+		t.Fatalf("reconnect must not reboot, got %s", got)
+	}
+}
+
+// TestChromiumMonitorFallbackNotArmedWhenKioskStopFails pins that a failed
+// `systemctl --user stop chromium-kiosk.service` takes the immediate-reboot
+// path: cage would still own DRM, so plymouth could not render and a 15-minute
+// hold would sit on a frozen kiosk.
+func TestChromiumMonitorFallbackNotArmedWhenKioskStopFails(t *testing.T) {
+	_, stopFile, fallbackFile, rebootFile := installFallbackStubs(t)
+	if err := os.WriteFile(stopFile+".fail", nil, 0o600); err != nil {
+		t.Fatalf("failed to arm stop failure: %v", err)
+	}
+	endpoint := closedLocalHTTPEndpoint(t)
+	handler := NewCommandHandler(zap.NewNop(), nil)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), handler)
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + time.Minute))
+	monitor.restartHistory = []time.Time{time.Now(), time.Now()}
+	monitor.mu.Unlock()
+
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against closed endpoint")
+	}
+	if got := readRestartCount(t, fallbackFile); got != "0" {
+		t.Fatalf("fallback unit must not be started after a failed kiosk stop, got %s", got)
+	}
+	if got := readRestartCount(t, rebootFile); got != "1" {
+		t.Fatalf("expected the immediate reboot path, got %s reboots", got)
+	}
+	if handler.isFallbackShown() {
+		t.Fatal("fallbackShown must stay false after a failed stop")
+	}
+	monitor.mu.Lock()
+	inFallback := !monitor.fallbackSince.IsZero()
+	monitor.mu.Unlock()
+	if inFallback {
+		t.Fatal("hold must not be armed after a failed stop")
 	}
 }

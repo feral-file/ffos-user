@@ -113,6 +113,7 @@ func (c *CommandHandler) restartKiosk(ctx context.Context) {
 // watchdog ships on the package rail independently of the image — or sudo
 // refused); the kiosk has already been stopped by then, so holding for 15
 // minutes on a black screen would be strictly worse than the old behavior.
+// A failed kiosk stop is also unavailable: cage would still own DRM.
 // kioskFallbackBusy means nothing was done: a RAM/GPU restart held the lock.
 func (c *CommandHandler) showKioskFallback(ctx context.Context) kioskFallbackResult {
 	c.mu.Lock()
@@ -130,11 +131,15 @@ func (c *CommandHandler) showKioskFallback(ctx context.Context) kioskFallbackRes
 		c.mu.Unlock()
 	}()
 
+	// The stop must succeed before the screen is armed: with cage still
+	// holding DRM master a started plymouthd cannot render, and a 15-minute
+	// hold on a frozen kiosk would be worse than the immediate reboot.
 	stop := exec.CommandContext(ctx, "systemctl", "--user", "stop", "chromium-kiosk.service")
 	if output, err := stop.CombinedOutput(); err != nil {
 		c.logger.Error("Failed to stop chromium-kiosk service before fallback",
 			zap.Error(err),
 			zap.ByteString("output", output))
+		return kioskFallbackUnavailable
 	}
 
 	start := exec.CommandContext(ctx, "sudo", "-n", "systemctl", "start", KIOSK_FALLBACK_UNIT)

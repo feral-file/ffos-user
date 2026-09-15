@@ -47,12 +47,14 @@ The CDP Monitor is responsible for monitoring the health of the Chromium browser
   restarted the kiosk, an OTA fixed the bundle), the hold is dropped and the
   restart history reset; `chromium-kiosk.service` stops the fallback unit in
   its `ExecStartPre`, so any kiosk start clears the screen. If the fallback
-  unit cannot be started (older image without it, sudo refused) the monitor
-  reboots immediately instead of holding on a black screen; if a RAM/GPU
+  unit cannot be started (older image without it, sudo refused) or the
+  kiosk stop itself fails, the monitor reboots immediately instead of
+  holding on a black or frozen screen; if a RAM/GPU
   kiosk restart happens to hold the kiosk lock at that moment nothing is
   stopped and the next tick retries. Inside the hold
   the two exemptions below still apply: a display unplugged during the hold
-  abandons it (no reboot, ordinary headless suppression), and a developer on
+  abandons it and forgets the exhausted budget (no reboot; once a display
+  returns the reconnect grace restarts the kiosk), and a developer on
   another VT defers the reboot until tty1 is active again. RAM/GPU-triggered
   kiosk restarts are refused while the error screen is deliberately up.
 - **Developer console is exempt.** cage runs with `-s`, so a developer with a

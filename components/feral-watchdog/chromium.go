@@ -302,6 +302,11 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 	if !m.fallbackSince.IsZero() {
 		if !displayConnected {
 			m.fallbackSince = time.Time{}
+			// Forget the exhausted budget too: the kiosk is stopped, so once a
+			// display returns the reconnect grace must end in a kiosk RESTART,
+			// not in an immediate second fallback because three stale stamps
+			// are still inside the five-minute window.
+			m.restartHistory = m.restartHistory[:0]
 			m.headless = true
 			m.mu.Unlock()
 			m.commandHandler.clearKioskFallback()
