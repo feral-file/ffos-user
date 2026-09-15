@@ -79,6 +79,10 @@ type handler struct {
 	// so, rather than trusting the sentence above.
 	recoverySession RecoverySession
 	contentPolicy   *contentpolicy.Store
+	// policyRefresher re-sends the current playlist after an accepted policy
+	// change. nil (tests, a build wired before the seam) degrades to the old
+	// behavior: the change applies to the next cast or periodic refresh.
+	policyRefresher PolicyRefresher
 }
 
 func SetContentPolicy(h Handler, policy *contentpolicy.Store, logger *zap.Logger) {
@@ -89,6 +93,23 @@ func SetContentPolicy(h Handler, policy *contentpolicy.Store, logger *zap.Logger
 	}
 	setter.setContentPolicy(policy)
 }
+
+// PolicyRefresher is the narrow slice of the playlist refresher the policy path
+// needs: re-send what is on screen. Consumer-owned, like RecoverySession.
+type PolicyRefresher interface{ ForceRefresh() }
+
+// SetPolicyRefresher wires the re-send used after a policy change, if h
+// supports it (the concrete *handler built by New, not the gate wrapper).
+func SetPolicyRefresher(h Handler, refresher PolicyRefresher, logger *zap.Logger) {
+	setter, ok := h.(interface{ setPolicyRefresher(PolicyRefresher) })
+	if !ok {
+		logger.Warn("Command handler does not support policy refresher wiring")
+		return
+	}
+	setter.setPolicyRefresher(refresher)
+}
+
+func (h *handler) setPolicyRefresher(refresher PolicyRefresher) { h.policyRefresher = refresher }
 
 func (h *handler) setContentPolicy(policy *contentpolicy.Store) {
 	h.contentPolicy = policy
@@ -1240,6 +1261,19 @@ func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
 	// long as the device stays up. Put the player back on the stored policy
 	// immediately, under the barriers already held here.
 	policy, err := h.contentPolicy.UpdateLocked(show, strict)
+	// The playlist ON SCREEN was projected under the OLD policy. Enabling
+	// mature content cannot bring back items the previous projection removed,
+	// and disabling it leaves blocked items up, until something re-resolves —
+	// which otherwise means the periodic refresh, minutes later, while the
+	// Content screen has already reported success. ForceRefresh only signals a
+	// channel, so it is safe to call with this lock held; the pass it wakes
+	// takes the lock itself, after this returns.
+	committed := false
+	defer func() {
+		if committed && h.policyRefresher != nil {
+			h.policyRefresher.ForceRefresh()
+		}
+	}()
 	if errors.Is(err, contentpolicy.ErrDurabilityUncertain) {
 		// The file IS in place — only the parent directory entry's durability
 		// is unconfirmed — so the update took effect and the store has already
@@ -1247,6 +1281,7 @@ func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
 		// guards against: a restart would come up on the new policy while the
 		// caller was told it did not apply.
 		h.logger.Error("content policy written but its directory entry may not be durable", zap.Error(err))
+		committed = true
 		return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}
 	}
 	if err != nil {
@@ -1263,6 +1298,7 @@ func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
 		}
 		return policyFailure("contentPolicyUnavailable")
 	}
+	committed = true
 	return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}
 }
 
@@ -1442,6 +1478,11 @@ const maxRecentlyPlayedRecords = 200
 const (
 	maxRecentlyPlayedLabelBytes = 512
 	maxRecentlyPlayedReplyBytes = 128 * 1024
+	// maxRecentlyPlayedRecordIDBytes bounds the opaque replay handle. It is
+	// never truncated — see the loop below — so the bound has to drop the row
+	// instead, and it is generous: the player mints ids like
+	// "rp-1788892946764001".
+	maxRecentlyPlayedRecordIDBytes = 256
 )
 
 // truncateLabel clips s to at most maxRecentlyPlayedLabelBytes, on a rune
@@ -1500,13 +1541,17 @@ func boundedRecentlyPlayedReply(response map[string]interface{}) map[string]inte
 		if !isRecord {
 			continue
 		}
-		// recordId is the replay handle; a row without one is unusable, and
-		// dropping it is better than handing the app a row it cannot play.
+		// recordId is the replay handle, NOT a label: playRecentlyPlayed
+		// forwards it verbatim to the player's resolver, so truncating it
+		// would advertise a row that deterministically fails to play. It is
+		// passed through losslessly, and a value too long to be a plausible
+		// handle drops the row instead — an omitted row is honest, an
+		// unresolvable one is not.
 		recordID, _ := record["recordId"].(string)
-		if recordID == "" {
+		if recordID == "" || len(recordID) > maxRecentlyPlayedRecordIDBytes {
 			continue
 		}
-		bounded := map[string]interface{}{"recordId": truncateLabel(recordID)}
+		bounded := map[string]interface{}{"recordId": recordID}
 		labelBytes += len(recordID)
 		if playedAt, present := record["playedAtMs"].(float64); present {
 			bounded["playedAtMs"] = playedAt

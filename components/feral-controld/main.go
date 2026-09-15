@@ -1128,6 +1128,10 @@ func initializeApp(
 		policyStore = contentpolicy.Fallback(constants.CONTENT_POLICY_FILE, blockUnratedCurated)
 	}
 	commandrouter.SetContentPolicy(rawCmdHandler, policyStore, logger)
+	// Wired below, once playlistRefresher exists: an accepted policy change has
+	// to re-resolve what is on screen, or the Content screen reports success
+	// while the display stays on the previous projection until the periodic
+	// refresh.
 	// Cast-time source preflight (#304): a displayPlaylist whose every item
 	// source definitively answers an HTTP error is rejected at accept time
 	// instead of being forwarded and self-reported as playing. Wired against
@@ -1159,6 +1163,7 @@ func initializeApp(
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
 	playlist_refresher.SetContentPolicy(playlistRefresher, policyStore)
+	commandrouter.SetPolicyRefresher(rawCmdHandler, playlistRefresher, logger)
 
 	// Replay saturation invalidates Fetch-interception scope exactly the way
 	// a kiosk restart does: retireOnSaturation closes the root CDP session so

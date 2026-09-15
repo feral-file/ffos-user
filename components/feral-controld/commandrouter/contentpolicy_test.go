@@ -984,3 +984,59 @@ func TestSchedulerProjectorLeavesALegacyCohortUnprojected(t *testing.T) {
 	require.False(t, empty)
 	require.Len(t, projected.Items, 1)
 }
+
+// fakePolicyRefresher records the re-send an accepted policy change triggers.
+type fakePolicyRefresher struct{ forced int }
+
+func (f *fakePolicyRefresher) ForceRefresh() { f.forced++ }
+
+// The playlist on screen was projected under the OLD policy, so enabling mature
+// content cannot bring back what the previous projection removed until
+// something re-resolves. Without this the Content screen reports success while
+// the display stays unchanged until the periodic refresh, minutes later.
+func TestSetContentPolicyResendsTheCurrentPlaylistOnlyWhenItCommits(t *testing.T) {
+	newHandler := func(t *testing.T, ack bool) (commandrouter.Handler, *fakePolicyRefresher) {
+		t.Helper()
+		ctrl := gomock.NewController(t)
+		player := mocks.NewMockCDP(ctrl)
+		store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+		require.NoError(t, err)
+		h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl),
+			mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+		commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
+		refresher := &fakePolicyRefresher{}
+		commandrouter.SetPolicyRefresher(h, refresher, zaptest.NewLogger(t))
+
+		player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+			func(_ string, _ map[string]interface{}) (interface{}, error) {
+				if !ack {
+					return map[string]interface{}{"message": map[string]interface{}{"ok": false, "error": "busy"}}, nil
+				}
+				return map[string]interface{}{"message": map[string]interface{}{
+					"ok": true, "active": true,
+					"contentPolicy": map[string]interface{}{"version": float64(1), "showMatureContent": true, "strictPersonal": false, "blockUnratedCurated": false},
+				}}, nil
+			}).Times(1)
+		return h, refresher
+	}
+
+	t.Run("an accepted change re-sends", func(t *testing.T) {
+		h, refresher := newHandler(t, true)
+		result, err := h.Process(context.Background(), commands.Command{
+			Type: commands.CMD_SET_CONTENT_POLICY, Arguments: map[string]any{"showMatureContent": true, "strictPersonal": false},
+		})
+		require.NoError(t, err)
+		require.Equal(t, true, result.(map[string]interface{})["active"])
+		require.Equal(t, 1, refresher.forced)
+	})
+
+	t.Run("a refused change re-sends nothing", func(t *testing.T) {
+		h, refresher := newHandler(t, false)
+		result, err := h.Process(context.Background(), commands.Command{
+			Type: commands.CMD_SET_CONTENT_POLICY, Arguments: map[string]any{"showMatureContent": true, "strictPersonal": false},
+		})
+		require.NoError(t, err)
+		require.Equal(t, false, result.(map[string]interface{})["ok"])
+		require.Equal(t, 0, refresher.forced, "nothing changed, so nothing needs re-resolving")
+	})
+}

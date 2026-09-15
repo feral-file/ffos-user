@@ -2694,7 +2694,10 @@ DP-1 item stay device-local and are never sent to a controller.
 Controld rebuilds a successful reply from that allow-list rather than
 forwarding what the player returned, and bounds it by **rows and by bytes** —
 each label is truncated to 512 bytes on a rune boundary, and the reply stops
-adding rows once its label payload reaches 128 KiB. Rows alone are not a bound:
+adding rows once its label payload reaches 128 KiB. `recordId` is exempt from
+truncation — it is the opaque replay handle `playRecentlyPlayed` forwards
+verbatim, so clipping it would advertise a row that cannot play; a handle too
+long to be plausible drops its row instead. Rows alone are not a bound:
 the LAN hub accepts a 4 MiB inline playlist, its metadata becomes retained
 history labels, and those come back through this reply. The bound is
 enforced on this side of CDP because item sources can be signed URLs carrying
@@ -2795,6 +2798,12 @@ other argument count, or a non-boolean value, is `invalidRequest`.
 It comes from the daemon's `contentPolicy` config block and is re-applied from
 that config on every boot, so neither a controller request nor a stale
 persisted file can turn it on or off.
+
+An accepted change also re-sends the current playlist, because the playlist on
+screen was projected under the *old* policy: enabling mature content cannot
+bring back items the previous projection removed, and disabling it leaves
+blocked items up, until something re-resolves. A refused change re-sends
+nothing.
 
 Success is reported only after the atomic durable write succeeds *and* the
 player returns a matching acknowledgement. A repeated identical set performs no

@@ -225,3 +225,24 @@ func TestTruncateLabel_KeepsValidUTF8(t *testing.T) {
 		t.Fatal("a short label must be untouched")
 	}
 }
+
+// recordId is the opaque replay handle, not a label: playRecentlyPlayed
+// forwards it verbatim to the player's resolver. Truncating it would advertise
+// a row that deterministically fails to play, so it is passed through
+// losslessly and an implausibly long one drops its row instead.
+func TestBoundedRecentlyPlayedReply_NeverTruncatesTheReplayHandle(t *testing.T) {
+	oversized := "rp-" + strings.Repeat("9", maxRecentlyPlayedRecordIDBytes)
+	got := boundedRecentlyPlayedReply(map[string]interface{}{
+		"message": map[string]interface{}{"ok": true, "records": []interface{}{
+			map[string]interface{}{"recordId": "rp-1788892946764001", "title": "ok"},
+			map[string]interface{}{"recordId": oversized, "title": "unusable"},
+		}},
+	})
+	records := got["message"].(map[string]interface{})["records"].([]interface{})
+	if len(records) != 1 {
+		t.Fatalf("an unusable handle must drop its row, got %d rows", len(records))
+	}
+	if records[0].(map[string]interface{})["recordId"] != "rp-1788892946764001" {
+		t.Fatalf("handle altered: %v", records[0])
+	}
+}
