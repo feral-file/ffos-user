@@ -2,6 +2,7 @@ package commandrouter_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1128,4 +1129,51 @@ func TestSetContentPolicyReportsUnavailableWhenDurabilityStaysUnconfirmed(t *tes
 	confirmErr := store.ConfirmDurableLocked()
 	store.Unlock()
 	require.Error(t, confirmErr, "a missing directory must not confirm as durable")
+}
+
+// The replay acknowledgement is reduced to the documented fields before it
+// leaves the daemon. Same rule, same reason, as the history reply: this is
+// reachable from the unauthenticated LAN hub, and the thing being replayed is a
+// retained DP-1 item whose source can be a signed URL carrying credentials — so
+// a player acknowledgement that echoed the request must not carry it out.
+func TestPlayRecentlyPlayedBoundsThePlayerAcknowledgement(t *testing.T) {
+	h, player, poller := newPolicyHandlerWithPoller(t)
+	poller.EXPECT().ForceRefresh().Times(1)
+
+	const signed = "https://cdn.example/work.html?token=secret&sig=deadbeef"
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok": true, "status": "ok",
+				"item": map[string]interface{}{"id": "retained", "source": signed},
+			}}, nil
+		}).Times(1)
+	// The player echoes the whole request back in its acknowledgement.
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok":          true,
+				"request":     map[string]interface{}{"dp1_call": map[string]interface{}{"items": []interface{}{map[string]interface{}{"source": signed}}}},
+				"echo":        signed,
+				"diagnostics": map[string]interface{}{"lastSource": signed},
+			}}, nil
+		}).Times(1)
+
+	result, err := h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_PLAY_RECENTLY_PLAYED, Arguments: map[string]any{"recordId": "rp-9"},
+	})
+	require.NoError(t, err)
+
+	reply := result.(map[string]interface{})
+	require.Equal(t, "rp-9", reply["recordId"])
+	ack := reply["message"].(map[string]interface{})
+	require.Equal(t, true, ack["ok"], "acceptance must still be reported")
+	for _, forbidden := range []string{"request", "echo", "diagnostics", "item", "dp1_call"} {
+		_, leaked := ack[forbidden]
+		require.False(t, leaked, "%q escaped the replay acknowledgement: %v", forbidden, ack)
+	}
+	// Nothing anywhere in the serialized reply may carry the signed source.
+	encoded, err := json.Marshal(reply)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "token=secret")
 }

@@ -1420,3 +1420,78 @@ func TestPush_DropsACutoverTheContentPolicyEmpties(t *testing.T) {
 	))
 	sched.RecomputeNow(context.Background())
 }
+
+// The unchanged-set early return compares what would be SENT, not the raw
+// active set. A policy tightened since the last push leaves the active set
+// byte-identical while changing the projection, so comparing the raw set
+// skipped the very push that removes the newly blocked item — and it stayed on
+// screen until an unrelated cohort change. This is the path a cached fallback
+// after a resolution failure takes, where that early return is the only thing
+// between a policy change and the wall.
+func TestRecompute_PushesWhenOnlyTheProjectionChanged(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	sends := 0
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			sends++
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	// Permissive to begin with: the projection equals the active set.
+	blocking := false
+	sched.SetProjector(func(p *dp1.Playlist, _ string) (*dp1.Playlist, bool) {
+		if !blocking {
+			return p, false
+		}
+		out := *p
+		out.Items = nil
+		for _, entry := range p.Items {
+			if entry.ID != "blocked" {
+				out.Items = append(out.Items, entry)
+			}
+		}
+		return &out, len(out.Items) == 0
+	})
+
+	// TWO items active at `now`, so a tightened projection still has something
+	// to send. With a single active item the projection would be empty, which
+	// push() correctly DROPS — a different behavior from the one under test.
+	_ = sched.Prepare(displayAtPlaylist(
+		item("blocked", "2026-07-22T00:00:00Z"),
+		item("allowed", "2026-07-22T00:00:00Z"),
+	))
+	sched.RecomputeNow(context.Background())
+	require.Equal(t, 1, sends, "the first cutover must be pushed")
+
+	// ResumePersisted is the NON-forcing path — the one a cached fallback after
+	// a resolution failure takes, and the only one the unchanged-set early
+	// return governs. RecomputeNow force-casts, so it would not exercise it.
+	sched.ResumePersisted(context.Background())
+	require.Equal(t, 1, sends, "an unchanged projection must not re-push")
+
+	// Now the policy tightens. The ACTIVE set is byte-identical; only the
+	// projection differs, which is exactly the case that used to be skipped.
+	blocking = true
+	sched.ResumePersisted(context.Background())
+	require.Equal(t, 2, sends, "a tightened policy must reach the player even though the active set is unchanged")
+}

@@ -448,6 +448,7 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 		gen := s.generation
 		active := s.activeLocked()
 		source := snapshotSource(s.source)
+		projector := s.projector
 		s.armTimerLocked()
 		if len(active.Items) == 0 {
 			// The player rejects an empty displayPlaylist. Keep the complete
@@ -458,11 +459,32 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 			s.logger.Debug("Skipping empty displayAt active set")
 			return
 		}
-		if !force && reflect.DeepEqual(active.Items, s.lastActive) {
-			s.mu.Unlock()
+		last := cloneItems(s.lastActive)
+		s.mu.Unlock()
+
+		// Compare what would actually be SENT, not the raw active set. The
+		// projection is what the player receives, and a policy tightened since
+		// the last push changes it while leaving the active set byte-identical —
+		// so comparing the raw set here skipped the very push that removes a
+		// newly blocked item, and the work stayed on screen until an unrelated
+		// cohort change. Matters most on the cached fallback after a resolution
+		// failure, where this early return is the only thing between a policy
+		// change and the wall.
+		//
+		// push() re-projects under its own read; doing it twice is pure and
+		// cheap, and keeps the send path's projection in one place.
+		sent := active.Items
+		if projector != nil {
+			if projected, empty := projector(active, source.ContentContext); projected != nil {
+				sent = projected.Items
+				if empty {
+					sent = nil
+				}
+			}
+		}
+		if !force && reflect.DeepEqual(sent, last) {
 			return
 		}
-		s.mu.Unlock()
 
 		if err := s.push(ctx, active, source); err != nil {
 			if errors.Is(err, errStopped) {
@@ -476,7 +498,9 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 			return
 		}
 		s.mu.Lock()
-		s.lastActive = cloneItems(active.Items)
+		// Records what was SENT (the projection), which is what the next pass
+		// compares against — see the comparison above.
+		s.lastActive = cloneItems(sent)
 		// A successful push clears any retry armed by a prior failure so it
 		// cannot resend a now-superseded active set later.
 		s.pushRetryAttempt = 0

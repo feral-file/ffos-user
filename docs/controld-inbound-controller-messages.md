@@ -2750,8 +2750,11 @@ The replay is re-admitted under **the content context the work was recorded
 under**, not the default. A work that played as `personal` is replayed as
 `personal`, so History cannot offer a work the policy gate then refuses.
 
-The acknowledgement names the requested occurrence and is bounded: it does not
-claim a successful wall render. Callers still wait for `player_status`,
+The acknowledgement names the requested occurrence and is bounded — `ok`, and
+`status`/`error` when present, rebuilt from an allow-list rather than forwarded
+from the player. The retained item never leaves the device, so an
+acknowledgement that echoed the request must not carry its source out either.
+It does not claim a successful wall render. Callers still wait for `player_status`,
 particularly when the same work is deliberately replayed twice.
 
 Error cases: `recordId is required`; an evicted, malformed, or unknown record;

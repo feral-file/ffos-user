@@ -523,12 +523,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// The acknowledgement is bounded and names the requested occurrence;
 		// callers must still wait for status/render outcome, particularly when
 		// the same work is deliberately replayed twice.
-		if resultMessage, ok := result.(map[string]interface{}); ok {
-			if nested, ok := resultMessage["message"].(map[string]interface{}); ok {
-				return map[string]interface{}{"recordId": recordID, "message": nested}, nil
-			}
-		}
-		return map[string]interface{}{"recordId": recordID, "message": result}, nil
+		return map[string]interface{}{
+			"recordId": recordID,
+			"message":  boundedReplayAck(result),
+		}, nil
 	}
 
 	if commandType == commands.CMD_MINT_PAIRING_APPROVAL {
@@ -1498,6 +1496,39 @@ func recentPlayerReply(result interface{}) map[string]interface{} {
 		}
 	}
 	return response
+}
+
+// boundedReplayAck reduces the recursive displayPlaylist acknowledgement to the
+// documented fields before it leaves the daemon.
+//
+// Same rule, and the same reason, as boundedRecentlyPlayedReply: this reply is
+// reachable from the unauthenticated LAN hub, and the thing being replayed is a
+// RETAINED DP-1 item whose source can be a signed URL carrying credentials in
+// its query string. A player acknowledgement that echoed the request — or added
+// diagnostics — would hand exactly that to the caller, through the one command
+// whose whole design keeps the retained item device-local.
+//
+// Only ok/status/error survive. Anything else is dropped rather than
+// allow-listed later: the caller is told whether the replay was accepted, which
+// is all this reply ever promised.
+func boundedReplayAck(result interface{}) map[string]interface{} {
+	message, ok := result.(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{"ok": false}
+	}
+	if nested, isNested := message["message"].(map[string]interface{}); isNested {
+		message = nested
+	}
+	bounded := map[string]interface{}{"ok": false}
+	if okValue, present := message["ok"].(bool); present {
+		bounded["ok"] = okValue
+	}
+	for _, key := range []string{"status", "error"} {
+		if value, present := message[key].(string); present && value != "" {
+			bounded[key] = truncateLabel(value)
+		}
+	}
+	return bounded
 }
 
 // maxRecentlyPlayedRecords bounds how many history rows leave the daemon. The
