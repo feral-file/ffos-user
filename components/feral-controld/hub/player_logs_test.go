@@ -16,6 +16,12 @@ type fixedStatusProvider struct{ info StatusInfo }
 
 func (p fixedStatusProvider) Status(_ context.Context) StatusInfo { return p.info }
 
+func (p fixedStatusProvider) FF1DeviceID() string { return p.info.DeviceID }
+
+type statusOnlyProvider struct{ info StatusInfo }
+
+func (p statusOnlyProvider) Status(_ context.Context) StatusInfo { return p.info }
+
 func TestHandlePlayerLogsEnrichesAndForwardsSafeRecords(t *testing.T) {
 	var forwarded []playerLogRecord
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -111,4 +117,28 @@ func TestHandlePlayerLogsPropagatesUpstreamFailure(t *testing.T) {
 	h.handlePlayerLogs(w, req)
 
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+}
+
+func TestHandlePlayerLogsRejectsStatusControllerIDFallback(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	h := &hub{
+		statusProvider: statusOnlyProvider{info: StatusInfo{DeviceID: "phone-1"}},
+		logEndpoint:    upstream.URL,
+		logHTTPClient:  upstream.Client(),
+	}
+	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"hello","context":{"session_id":"session-1"}}]`
+	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Origin", playerOrigin)
+	w := httptest.NewRecorder()
+
+	h.handlePlayerLogs(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.False(t, called)
 }
