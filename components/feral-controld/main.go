@@ -807,11 +807,43 @@ func replayScopeResyncReconciler(refresher playlist_refresher.Refresher) func(co
 	}
 }
 
+// contentPolicySyncAttempts bounds the reconnect sync retry. Reconcilers run
+// SEQUENTIALLY in registration order and this one is registered before
+// playlist-recompute, so retrying here is what keeps a transient failure from
+// being followed by a scheduled cast to a player still on its own defaults —
+// a cohort the scheduler then records as delivered and never re-pushes. Bounded
+// rather than persistent: a player that is genuinely gone must not hold the
+// whole reconnect lane, and every other trigger (cast, refresh, cutover, the
+// next generation) re-syncs anyway.
+const contentPolicySyncAttempts = 3
+
+// contentPolicySyncRetryDelay spaces those attempts. Short: this runs inside the
+// reconnect lane, and the failure it is covering is a page that has just started
+// accepting commands and needs a moment, not a long outage.
+const contentPolicySyncRetryDelay = 250 * time.Millisecond
+
 func contentPolicyReconciler(handler commandrouter.Handler, logger *zap.Logger) func(context.Context) {
-	return func(context.Context) {
-		if err := commandrouter.SyncContentPolicy(handler); err != nil {
-			logger.Warn("content policy unavailable for current player generation", zap.Error(err))
+	return func(ctx context.Context) {
+		var err error
+		for attempt := 1; attempt <= contentPolicySyncAttempts; attempt++ {
+			if err = commandrouter.SyncContentPolicy(handler); err == nil {
+				return
+			}
+			if attempt == contentPolicySyncAttempts {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(contentPolicySyncRetryDelay):
+			}
 		}
+		// Left deliberately non-fatal: the scheduled cast that follows is still
+		// better than a blank wall, and it is filtered by the daemon either way.
+		// What this cannot do on its own is guarantee the PLAYER is in step —
+		// see the per-generation verification discussion on #349.
+		logger.Warn("content policy unavailable for current player generation",
+			zap.Int("attempts", contentPolicySyncAttempts), zap.Error(err))
 	}
 }
 

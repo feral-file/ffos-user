@@ -253,6 +253,14 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
+		// Malformed DP-1 is caller input, not a device fault: answer the
+		// documented classification rather than a 500 that tells the caster
+		// nothing about its own payload.
+		if commandrouter.IsPlaylistInvalid(err) {
+			h.logger.Warn("Cast rejected: playlist is invalid", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
 		h.logger.Error("Failed to process cast request", zap.Error(err))
 		http.Error(w, "Failed to process cast request", http.StatusInternalServerError)
 		return

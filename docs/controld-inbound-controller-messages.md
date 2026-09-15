@@ -2829,7 +2829,13 @@ The device filters the playlist against its policy before casting:
   (HTTP 422 on the LAN hub, `"error":"contentBlocked"` over the relayer).
 
 A playlist carrying malformed content-rating extension fields is rejected as
-`playlistInvalid`. A malformed label is never silently treated as unrated.
+`playlistInvalid`. A malformed label is never silently treated as unrated. The
+rejection is carried as a typed error to both transports — HTTP 422 on the LAN
+hub, `"error":"playlistInvalid"` over the relayer — for inline `dp1_call` and
+for fetched `playlistUrl` documents alike. Inline bytes are validated before
+they are decoded into typed structures, so a wrong-typed rating
+(`"contentRating": 123`) is classified rather than surfacing as a generic
+decode failure.
 
 The context survives refresh. When a periodic refresh has to rebuild the source
 from player status and that status omits `contentContext` — only a player

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 )
 
@@ -116,4 +117,30 @@ func (*ContentBlockedError) Error() string {
 func IsContentBlocked(err error) bool {
 	var target *ContentBlockedError
 	return errors.As(err, &target)
+}
+
+// PlaylistInvalidError marks a cast rejected because the DP-1 document itself is
+// malformed — today, content-rating extension fields that are present but not
+// valid. Typed rather than a formatted string so the LAN hub and the relayer can
+// answer the documented invalid-input classification instead of a generic
+// server error, the same way ContentBlockedError is carried.
+type PlaylistInvalidError struct {
+	Reason string
+}
+
+func (e *PlaylistInvalidError) Error() string {
+	if e == nil || e.Reason == "" {
+		return "playlistInvalid"
+	}
+	return "playlistInvalid: " + e.Reason
+}
+
+func IsPlaylistInvalid(err error) bool {
+	var target *PlaylistInvalidError
+	if errors.As(err, &target) {
+		return true
+	}
+	// The URL/dynamic ingestion path validates inside dp1 and returns its own
+	// sentinel; both reach the transports as the same classification.
+	return errors.Is(err, dp1.ErrPlaylistInvalid)
 }

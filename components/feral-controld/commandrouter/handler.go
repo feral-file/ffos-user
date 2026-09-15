@@ -658,11 +658,18 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("failed to marshal playlist: %w", err)
 				}
 
+				// Validate the RAW bytes before the typed decode. A
+				// wrong-typed rating (contentRating: 123) fails generic JSON
+				// decoding first, so ordering it the other way round reported
+				// "failed to unmarshal playlist" — a 500 to the hub — for
+				// exactly the malformed-label case the contract classifies as
+				// playlistInvalid.
+				if err = contentrating.ValidatePlaylistFragment(playlistBytes); err != nil {
+					err = &PlaylistInvalidError{Reason: err.Error()}
+					return nil, err
+				}
 				if err = h.json.Unmarshal(playlistBytes, &playlist); err != nil {
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
-				}
-				if err = contentrating.ValidatePlaylistFragment(playlistBytes); err != nil {
-					return nil, fmt.Errorf("playlistInvalid: content rating extension: %w", err)
 				}
 
 				if playlist.HasDynamicContent() {
@@ -1206,11 +1213,24 @@ func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
 	if err != nil || !policyAckMatches(result, candidate) {
 		return policyFailure(policyFailureCode(result, err))
 	}
-	// The player accepted. If the write now fails, the daemon keeps the old
-	// policy and says so; the next reconnect sync re-pushes the stored policy
-	// and puts the player back in step.
+	// The player accepted but the write may still fail. The daemon then keeps
+	// its old policy, so the player is the one out of step — and waiting for a
+	// reconnect to fix that leaves the two enforcement points diverged for as
+	// long as the device stays up. Put the player back on the stored policy
+	// immediately, under the barriers already held here.
 	policy, err := h.contentPolicy.UpdateLocked(show, strict)
 	if err != nil {
+		previous := h.contentPolicy.CurrentLocked()
+		rollback, rollbackErr := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": previous})
+		if rollbackErr != nil || !policyAckMatches(rollback, previous) {
+			// Could not confirm the restore; the player may still be on the
+			// rejected values until the next reconnect sync. Say unavailable
+			// either way, and leave evidence for that case specifically.
+			h.logger.Error("content policy write failed and the player could not be restored to the stored policy",
+				zap.Error(err), zap.NamedError("rollback", rollbackErr))
+		} else {
+			h.logger.Warn("content policy write failed; player restored to the stored policy", zap.Error(err))
+		}
 		return policyFailure("contentPolicyUnavailable")
 	}
 	return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}

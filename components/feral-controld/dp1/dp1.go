@@ -2,6 +2,7 @@ package dp1
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -16,6 +17,12 @@ import (
 	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
+
+// ErrPlaylistInvalid marks a fetched DP-1 document whose content-rating
+// extension fields are present but malformed. errors.Is-able so the command
+// router can carry it to the transports as the documented playlistInvalid
+// classification instead of a generic failure.
+var ErrPlaylistInvalid = errors.New("playlistInvalid")
 
 const (
 	DEFAULT_DURATION             = 300
@@ -354,7 +361,7 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
 	// can become policy input. The fragment validator needs no core signature;
 	// malformed-present labels are playlistInvalid, never silently unrated.
 	if err := contentrating.ValidatePlaylistFragment(bytes); err != nil {
-		return Playlist{}, fmt.Errorf("playlistInvalid: content rating extension: %w", err)
+		return Playlist{}, fmt.Errorf("%w: content rating extension: %w", ErrPlaylistInvalid, err)
 	}
 
 	var playlist Playlist

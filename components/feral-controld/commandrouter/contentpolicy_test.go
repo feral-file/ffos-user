@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -811,4 +812,80 @@ func TestSetContentPolicyRejectsAPartialAcknowledgement(t *testing.T) {
 			require.True(t, os.IsNotExist(statErr), "nothing may be persisted on a partial acknowledgement")
 		})
 	}
+}
+
+// A wrong-typed rating fails generic JSON decoding before the extension
+// validator ever sees it, so validating the raw bytes first is what makes this
+// the documented playlistInvalid classification instead of a generic failure
+// the caster cannot act on.
+func TestDisplayPlaylistClassifiesAWrongTypedRatingAsPlaylistInvalid(t *testing.T) {
+	for name, rating := range map[string]interface{}{
+		"number": float64(123),
+		"object": map[string]interface{}{"value": "mature"},
+		"null":   nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, _, _ := newPolicyHandler(t)
+			// No player.EXPECT(): an invalid document never reaches the player.
+			_, err := h.Process(context.Background(), commands.Command{
+				Type: commands.CMD_DISPLAY_PLAYLIST,
+				Arguments: map[string]any{"dp1_call": map[string]interface{}{
+					"dpVersion": "1.1.0", "title": "x",
+					"items": []interface{}{map[string]interface{}{"source": "https://a", "contentRating": rating}},
+				}},
+			})
+			require.Error(t, err)
+			require.True(t, commandrouter.IsPlaylistInvalid(err),
+				"a malformed rating must carry the playlistInvalid classification to the transports, got %v", err)
+		})
+	}
+}
+
+// After the player accepts but the durable write fails, the player is the one
+// out of step. Leaving it there until a reconnect keeps the two enforcement
+// points diverged for as long as the device stays up, so the stored policy is
+// restored immediately.
+func TestSetContentPolicyRestoresThePlayerWhenTheWriteFails(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	player := mocks.NewMockCDP(ctrl)
+	// A directory where the state file should be makes the atomic write fail.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	require.NoError(t, os.Mkdir(path, 0o750))
+
+	// Fallback rather than Open: Open would read the directory and fail. The
+	// store starts on defaults either way, which is what the restore must send.
+	broken := contentpolicy.Fallback(path, false)
+
+	h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl),
+		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+	commandrouter.SetContentPolicy(h, broken, zaptest.NewLogger(t))
+
+	var sentPolicies []bool
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			wantMature := strings.Contains(expr, `"showMatureContent":true`)
+			sentPolicies = append(sentPolicies, wantMature)
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok": true, "active": true,
+				"contentPolicy": map[string]interface{}{
+					"version": float64(1), "showMatureContent": wantMature,
+					"strictPersonal": false, "blockUnratedCurated": false,
+				},
+			}}, nil
+		}).Times(2)
+
+	result, err := h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_SET_CONTENT_POLICY, Arguments: map[string]any{"showMatureContent": true, "strictPersonal": false},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "contentPolicyUnavailable", result.(map[string]interface{})["error"])
+	require.Equal(t, []bool{true, false}, sentPolicies,
+		"the candidate must be sent, then the stored policy restored after the write failed")
+
+	broken.Lock()
+	active := broken.CurrentLocked()
+	broken.Unlock()
+	require.False(t, active.ShowMatureContent, "a failed write must leave the daemon on its stored policy")
 }
