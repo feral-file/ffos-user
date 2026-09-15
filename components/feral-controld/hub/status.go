@@ -108,6 +108,12 @@ func (h *hub) handleStatusV2(w http.ResponseWriter, r *http.Request) {
 // serveStatus renders the status snapshot LAN clients use to discover a
 // device's identity, LAN contract version, and claim/setup state.
 func (h *hub) serveStatus(w http.ResponseWriter, r *http.Request, contract string) {
+	// The FF player runs on loopback :8080 and reads this identity before it
+	// can upload browser logs. Limit CORS to that on-device origin rather than
+	// widening the LAN control surface for arbitrary web pages.
+	if r.Header.Get("Origin") == "http://127.0.0.1:8080" {
+		w.Header().Set("Access-Control-Allow-Origin", "http://127.0.0.1:8080")
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return

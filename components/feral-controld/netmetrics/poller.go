@@ -87,7 +87,7 @@ func (p *Poller) Stop() {
 // tick performs one telemetry read and publishes it. All failures degrade to
 // the honest encodings (LinkUnknown / absent station series) and are logged at
 // Debug: a flapping network would otherwise turn the poller itself into log —
-// and Sentry — noise (classified outage data is data, not errors).
+// and remote error-log noise (classified outage data is data, not errors).
 func (p *Poller) tick(ctx context.Context) {
 	wired, wifi, err := p.link.LinkTelemetry(ctx)
 	if err != nil {

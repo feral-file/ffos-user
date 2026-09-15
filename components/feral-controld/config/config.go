@@ -225,10 +225,10 @@ type NetlogConfig struct {
 
 // Configuration for all components
 type Config struct {
-	CDPConfig         *CDPConfig           `json:"cdp"`
-	RelayerConfig     *RelayerConfig       `json:"relayer"`
-	MintPairingConfig *MintPairingConfig   `json:"mintPairing"`
-	SentryConfig      *logger.SentryConfig `json:"sentry"`
+	CDPConfig         *CDPConfig              `json:"cdp"`
+	RelayerConfig     *RelayerConfig          `json:"relayer"`
+	MintPairingConfig *MintPairingConfig      `json:"mintPairing"`
+	LogStreaming      *logger.StreamingConfig `json:"logStreaming,omitempty"`
 	// EnableHub gates the LAN hub. It is a pointer so an absent key can default
 	// ON: the hub is the BLE-replacement recovery channel, so it must run
 	// unless an operator explicitly sets "enableHub": false. Read via
@@ -660,7 +660,7 @@ func (m *defaultConfigManager) Get() *Config {
 			CDPConfig:         &CDPConfig{},
 			RelayerConfig:     &RelayerConfig{},
 			MintPairingConfig: &MintPairingConfig{},
-			SentryConfig:      &logger.SentryConfig{},
+			LogStreaming:      nil,
 		}
 	}
 	return m.config

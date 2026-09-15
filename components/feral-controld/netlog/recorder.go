@@ -568,7 +568,7 @@ func (r *Recorder) flushDrops() {
 }
 
 // append writes one record; failures degrade to a Warn log (never Error —
-// see the package doc's Sentry rule) and never propagate to producers.
+// see the package doc's error-level rule) and never propagate to producers.
 func (r *Recorder) append(rec Record) {
 	if err := r.ring.Append(rec); err != nil {
 		r.logger.Warn("netlog: append failed", zap.String("kind", rec.Kind), zap.Error(err))

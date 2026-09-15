@@ -419,7 +419,6 @@ func (r *relayer) Connect(ctx context.Context) error {
 
 	// Set pong handler
 	conn.SetPongHandler(func(_ string) error {
-		r.logger.Debug("Received pong from relayer")
 		return conn.SetReadDeadline(time.Time{})
 	})
 
@@ -586,7 +585,6 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 				// deadline, then stop before command handlers see the control frame.
 				// Keepalive success is routine — only failures deserve loud logs.
 				if payload.Type == "pong" {
-					r.logger.Debug("Received application pong from relayer")
 					if err := conn.SetReadDeadline(time.Time{}); err != nil {
 						r.logger.Error("Failed to clear read deadline after pong", zap.Error(err))
 					}
@@ -793,11 +791,9 @@ func (r *relayer) ping() {
 	r.Lock()
 	defer r.Unlock()
 	if r.conn == nil {
-		r.logger.Info("Skipping relayer ping because connection is nil")
 		return
 	}
 
-	r.logger.Debug("Sending relayer ping")
 	deadline := r.clock.Now().Add(PONG_WAIT)
 
 	if err := r.conn.SetReadDeadline(deadline); err != nil {

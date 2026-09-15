@@ -14,7 +14,6 @@ import (
 
 	go_daemon "github.com/coreos/go-systemd/v22/daemon"
 	"github.com/feral-file/godbus"
-	"github.com/getsentry/sentry-go"
 	dbus_v5 "github.com/godbus/dbus/v5"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -172,21 +171,23 @@ func main() {
 		basicLogger.Fatal("Failed to load configuration", zap.Error(err))
 	}
 
-	// Create the final logger (with Sentry if configured)
+	// Network delivery is a best-effort tee: a bad endpoint or missing
+	// hostname must never prevent this recovery-critical daemon from starting
+	// with its local logger.
 	finalLogger := basicLogger
-	if config.SentryConfig.IsEnabled() {
-		sentryLogger, err := logger.AddSentry(finalLogger, *config.SentryConfig)
-		if err != nil {
-			finalLogger.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))
-		} else {
-			finalLogger = sentryLogger
-			finalLogger.Info("Sentry initialized successfully",
-				zap.String("environment", config.SentryConfig.Environment),
-				zap.String("release", config.SentryConfig.Release))
-			defer logger.FlushSentry(2 * time.Second)
-		}
+	streamedLogger, streamCloser, streamErr := logger.AddCloudflare(
+		basicLogger, config.LogStreaming, deviceIDFromHostname(), debug,
+	)
+	if streamErr != nil {
+		basicLogger.Error("Failed to initialize Cloudflare log streaming; using local logger", zap.Error(streamErr))
 	} else {
-		finalLogger.Info("Sentry not configured, using basic logger")
+		finalLogger = streamedLogger
+		defer func() {
+			if err := streamCloser.Close(); err != nil {
+				fmt.Fprintf(go_os.Stderr, "Failed to flush Cloudflare logs: %s\n", err)
+			}
+		}()
+		finalLogger.Info("Cloudflare log streaming initialized")
 	}
 
 	// Initialize app
@@ -222,9 +223,8 @@ func main() {
 		app.Clock.Sleep(SHUTDOWN_TIMEOUT)
 		app.Logger.Error("Shutdown timed out, forcing exit...",
 			zap.Duration("timeout", SHUTDOWN_TIMEOUT))
-
-		if config.SentryConfig.IsEnabled() {
-			sentry.Flush(1 * time.Second)
+		if streamErr == nil {
+			_ = streamCloser.Close()
 		}
 
 		app.OS.Exit(1)
@@ -261,6 +261,16 @@ func newToastSessionDialer(
 	}
 }
 
+func deviceIDFromHostname() string {
+	data, err := go_os.ReadFile(constants.HOSTNAME_FILE)
+	if err != nil || strings.TrimSpace(string(data)) == "" {
+		// Never upload under a fabricated shared identifier. AddCloudflare will
+		// reject the empty ID and leave local logging active.
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// Load state. A load failure must NOT abort startup: controld is the sole
 	// SoftAP/LAN-recovery owner, so returning here would crash-loop the daemon
@@ -291,11 +301,6 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		// re-pair" is NOT acceptable, because it would authorize an automatic
 		// setup-AP raise over a possibly claimed exhibition frame.
 		app.StateLoadKnown.Store(true)
-	}
-
-	// Set global topic ID in Sentry if available.
-	if claim := state.ClaimSnapshot(); conf.SentryConfig.IsEnabled() && claim.TopicID != "" {
-		logger.SetGlobalTopicID(claim.TopicID)
 	}
 
 	// Start watchdog

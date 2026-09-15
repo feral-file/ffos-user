@@ -16,7 +16,6 @@ import (
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
-	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -69,14 +68,13 @@ func orderIndex(list []string, s string) int {
 }
 
 type testSetup struct {
-	ctrl              *gomock.Controller
-	ctx               context.Context
-	cancel            context.CancelFunc
-	logger            *zap.Logger
-	app               *app
-	config            *config.Config
-	mockStateManager  *mocks.MockStateManager
-	mockLoggerManager *mocks.MockLoggerManager
+	ctrl             *gomock.Controller
+	ctx              context.Context
+	cancel           context.CancelFunc
+	logger           *zap.Logger
+	app              *app
+	config           *config.Config
+	mockStateManager *mocks.MockStateManager
 
 	// Mocked components
 	mockCDP          *mocks.MockCDP
@@ -111,33 +109,32 @@ func setup(t *testing.T) *testSetup {
 
 	// Create all mocks
 	ts := &testSetup{
-		ctrl:              ctrl,
-		ctx:               ctx,
-		cancel:            cancel,
-		logger:            l,
-		mockStateManager:  mocks.NewMockStateManager(ctrl),
-		mockLoggerManager: mocks.NewMockLoggerManager(ctrl),
-		mockCDP:           mocks.NewMockCDP(ctrl),
-		mockRelayer:       mocks.NewMockRelayer(ctrl),
-		mockDBus:          mocks.NewMockDBus(ctrl),
-		mockMediator:      mocks.NewMockMediator(ctrl),
-		mockOOMRecoverer:  mocks.NewMockOOMRecoverer(ctrl),
-		mockExecutor:      mocks.NewMockExecutor(ctrl),
-		mockDeviceStatus:  mocks.NewMockDeviceStatus(ctrl),
-		mockStatusPoller:  mocks.NewMockStatusPoller(ctrl),
-		mockWatchdog:      mocks.NewMockWatchdog(ctrl),
-		mockRefresher:     mocks.NewMockRefresher(ctrl),
-		mockClock:         mocks.NewMockClock(ctrl),
-		mockOS:            mocks.NewMockOS(ctrl),
-		mockSignal:        mocks.NewMockSignal(ctrl),
-		mockDaemon:        mocks.NewMockDaemon(ctrl),
-		mockHTTPClient:    mocks.NewMockHTTPClient(ctrl),
-		mockIO:            mocks.NewMockIO(ctrl),
-		mockJSON:          mocks.NewMockJSON(ctrl),
-		mockRandom:        mocks.NewMockRandomizer(ctrl),
-		mockExec:          mocks.NewMockExec(ctrl),
-		mockMath:          mocks.NewMockMath(ctrl),
-		mockHub:           mocks.NewMockHub(ctrl),
+		ctrl:             ctrl,
+		ctx:              ctx,
+		cancel:           cancel,
+		logger:           l,
+		mockStateManager: mocks.NewMockStateManager(ctrl),
+		mockCDP:          mocks.NewMockCDP(ctrl),
+		mockRelayer:      mocks.NewMockRelayer(ctrl),
+		mockDBus:         mocks.NewMockDBus(ctrl),
+		mockMediator:     mocks.NewMockMediator(ctrl),
+		mockOOMRecoverer: mocks.NewMockOOMRecoverer(ctrl),
+		mockExecutor:     mocks.NewMockExecutor(ctrl),
+		mockDeviceStatus: mocks.NewMockDeviceStatus(ctrl),
+		mockStatusPoller: mocks.NewMockStatusPoller(ctrl),
+		mockWatchdog:     mocks.NewMockWatchdog(ctrl),
+		mockRefresher:    mocks.NewMockRefresher(ctrl),
+		mockClock:        mocks.NewMockClock(ctrl),
+		mockOS:           mocks.NewMockOS(ctrl),
+		mockSignal:       mocks.NewMockSignal(ctrl),
+		mockDaemon:       mocks.NewMockDaemon(ctrl),
+		mockHTTPClient:   mocks.NewMockHTTPClient(ctrl),
+		mockIO:           mocks.NewMockIO(ctrl),
+		mockJSON:         mocks.NewMockJSON(ctrl),
+		mockRandom:       mocks.NewMockRandomizer(ctrl),
+		mockExec:         mocks.NewMockExec(ctrl),
+		mockMath:         mocks.NewMockMath(ctrl),
+		mockHub:          mocks.NewMockHub(ctrl),
 	}
 
 	// Create test config
@@ -148,10 +145,6 @@ func setup(t *testing.T) *testSetup {
 		RelayerConfig: &config.RelayerConfig{
 			Endpoint: "wss://test.relay.com",
 			APIKey:   "test-api-key",
-		},
-		SentryConfig: &logger.SentryConfig{
-			DSN:         "",
-			Environment: "test",
 		},
 		EnableHub: boolPtr(true),
 	}
@@ -187,14 +180,11 @@ func setup(t *testing.T) *testSetup {
 
 	// Inject mock state manager
 	state.InjectStateManagerForTesting(ts.mockStateManager)
-	logger.InjectLoggerManagerForTesting(ts.mockLoggerManager)
-
 	return ts
 }
 
 func (ts *testSetup) teardown() {
 	state.ResetForTesting()
-	logger.ResetForTesting()
 	ts.cancel()
 	ts.ctrl.Finish()
 }
@@ -207,7 +197,7 @@ func TestApp_Run_Success(t *testing.T) {
 		setupFunc func(*testSetup)
 	}{
 		{
-			name: "successful startup without sentry",
+			name: "successful startup without relayer connection",
 			setupFunc: func(ts *testSetup) {
 				// Mock successful state loading
 				ts.mockStateManager.EXPECT().
@@ -276,11 +266,8 @@ func TestApp_Run_Success(t *testing.T) {
 			},
 		},
 		{
-			name: "successful startup with sentry and relayer connection",
+			name: "successful startup with relayer connection",
 			setupFunc: func(ts *testSetup) {
-				// Enable Sentry in config
-				ts.config.SentryConfig.DSN = "https://test@sentry.io/123"
-
 				// Mock state with topic ID
 				ts.mockStateManager.EXPECT().
 					Load(ts.logger).
@@ -291,9 +278,6 @@ func TestApp_Run_Success(t *testing.T) {
 					ClaimSnapshot().
 					Return(state.ClaimInfo{TopicID: "test-topic-123", TopicReady: true}).
 					AnyTimes()
-
-				// Mock logger manager set global topic ID
-				ts.mockLoggerManager.EXPECT().SetGlobalTopicID("test-topic-123")
 
 				// CDP now connects in the background and never gates startup: run() calls
 				// Start (fire-and-forget) and Close on shutdown.

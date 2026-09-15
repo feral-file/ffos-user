@@ -448,12 +448,10 @@ func (r *refresher) Stop() {
 	r.logger.Info("Refresher stopped")
 }
 
-// logProcessFailure logs one failed refresh pass. CDP absence stays at Debug:
-// it is the normal headless/mid-reconnect state, and both retry loops would
-// otherwise emit an Error every interval for hours on a monitor-less device.
+// logProcessFailure logs one failed refresh pass. CDP absence is the normal
+// headless/mid-reconnect state, so the periodic retry remains quiet.
 func (r *refresher) logProcessFailure(err error) {
 	if errors.Is(err, errCDPNotReady) || errors.Is(err, cdp.ErrCDPConnectionNotInitialized) {
-		r.logger.Debug("Skipping playlist refresh: CDP not connected")
 		return
 	}
 	r.logger.Error("Failed to process playing playlist", zap.Error(err))
@@ -567,7 +565,6 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		}
 
 		if playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
-			r.logger.Debug("Player command is not display any playlist", zap.String("command", string(playerStatus.Command)))
 			return nil
 		}
 
@@ -604,7 +601,6 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		case playerStatus.Playlist != nil:
 			// Static inline player status only contains the filtered active set and
 			// no refreshable source identity, so it cannot rebuild future items.
-			r.logger.Debug("Playlist has no dynamic queries; no source to re-resolve")
 			contextUnknown = playerStatus.ContentContext == ""
 			staticInline = playerStatus.Playlist
 			staticInlineContext = playerStatus.ContentContext
@@ -620,7 +616,6 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			// (which returns an error instead, for
 			// resyncKioskReplayScopeToCurrentDisplay's best-effort caller where an
 			// error is simply logged and swallowed).
-			r.logger.Debug("Player has no playlist URL or playlist; nothing to refresh")
 			return nil
 		}
 	}
