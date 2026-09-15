@@ -370,3 +370,85 @@ func TestStaticInlineRefreshSkipsWhenPlaylistAuthorityMoved(t *testing.T) {
 		t.Fatalf("a newer cast must not be overwritten by a stale policy re-send; sent=%s", *sent)
 	}
 }
+
+// An item that DISAPPEARS from the source feed during the same refresh matches
+// nothing in the refreshed set, so the projection is unchanged and the old
+// membership-gated check never looked at it — while a soft refresh defers
+// precisely when its current item is absent from the new list. The blocked
+// frame therefore stayed on screen indefinitely after mature content was
+// disabled. Retirement is now judged from the item the player actually has.
+func TestRefreshRetiresABlockedCurrentItemThatLeftTheFeed(t *testing.T) {
+	general, mature := contentrating.RatingGeneral, contentrating.RatingMature
+	ctrl := gomock.NewController(t)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+
+	playlistURL := "https://example.test/feed.json"
+	index := 0
+	// On screen: a mature item. It is NOT in the refreshed feed below.
+	onScreen := []dp1playlist.PlaylistItem{{ID: "gone", Source: "https://example.test/gone", ContentRating: &mature}}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockPoller.EXPECT().FetchPlayerStatus(gomock.Any()).DoAndReturn(
+		func(context.Context) (*status.PlayerStatus, error) {
+			return &status.PlayerStatus{
+				Command:        string(commands.CMD_DISPLAY_PLAYLIST),
+				PlaylistURL:    &playlistURL,
+				ContentContext: "curated",
+				Index:          &index,
+				Items:          &onScreen,
+			}, nil
+		}).AnyTimes()
+	// The refreshed feed has replaced that item entirely: nothing is projected
+	// away, so a membership-gated check sees no change at all.
+	mockDP1.EXPECT().ProcessPlaylistURL(gomock.Any(), playlistURL, false).DoAndReturn(
+		func(context.Context, string, bool) (*dp1.Playlist, error) {
+			return &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{
+				{ID: "fresh", Source: "https://example.test/fresh", ContentRating: &general},
+			}}}, nil
+		}).AnyTimes()
+
+	var sent string
+	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			sent, _ = params["expression"].(string)
+			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+		}).AnyTimes()
+
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &refresher{
+		context:       context.Background(),
+		cdp:           mockCDP,
+		statusPoller:  mockPoller,
+		dp1:           mockDP1,
+		json:          wrapper.NewJSON(),
+		contentPolicy: store,
+		logger:        zaptest.NewLogger(t),
+	}
+	if err := r.processPlayingPlaylist(false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sent, "retireBlockedCurrent") {
+		t.Fatalf("a blocked frame absent from the refreshed feed must still be retired; sent=%s", sent)
+	}
+}
+
+// The mirror case: an allowed current item must not be retired just because
+// this pass ran, or every refresh would restart playback.
+func TestRefreshDoesNotRetireAnAllowedCurrentItem(t *testing.T) {
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _, sent := newPolicyRefresher(t, "personal", store)
+	if err := r.processPlayingPlaylist(false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(*sent, "retireBlockedCurrent") {
+		t.Fatalf("an allowed current item must not be retired; sent=%s", *sent)
+	}
+}

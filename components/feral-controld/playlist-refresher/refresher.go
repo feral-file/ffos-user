@@ -521,22 +521,26 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		if projectErr != nil {
 			return projectErr
 		}
-		// A removed item may be the one currently on screen. The player receives
-		// this refresh-only flag only when the fresh copy of that item is blocked,
-		// so it retires immediately instead of retaining a stale formerly-unrated frame.
-		if len(projected.Items) != len(playlist.Items) {
-			// Sample status HERE, after resolution, not reuse whatever was read
-			// before it. Resolution is network-bound and playback keeps
-			// advancing during it, so a status read beforehand can name an item
-			// that is no longer on screen — and then retireBlockedCurrent is
-			// computed for the wrong item, leaving the actual blocked frame up.
-			// Only paid when filtering changed the set, so ordinary ticks are
-			// unaffected.
-			if fresh, statusErr := r.statusPoller.FetchPlayerStatus(r.context); statusErr == nil && fresh != nil {
-				playerStatus = fresh
-			}
-			retireBlockedCurrent = currentBlockedByRefresh(playerStatus, playlist, r.contentPolicy.CurrentLocked(), contentContext)
+		// Whether the current frame must be retired is decided from the item the
+		// player actually has on screen, NOT from the refreshed set's contents.
+		//
+		// Sample status HERE, after resolution: it is network-bound and playback
+		// keeps advancing during it, so a read taken beforehand can name an item
+		// that has since been replaced. The status poller is already polling on
+		// its own short interval, so this is not a new cost of consequence.
+		if fresh, statusErr := r.statusPoller.FetchPlayerStatus(r.context); statusErr == nil && fresh != nil {
+			playerStatus = fresh
 		}
+		activePolicy := r.contentPolicy.CurrentLocked()
+		// Two independent reasons to retire, and the second is why membership in
+		// the refreshed feed cannot be the gate: an item that DISAPPEARS from the
+		// source feed during this refresh matches nothing, so the projection is
+		// unchanged and the old code never even looked — while a soft refresh
+		// defers precisely when its current item is absent from the new list,
+		// leaving that blocked frame on screen indefinitely.
+		retireBlockedCurrent = currentItemBlocked(playerStatus, activePolicy, contentContext) ||
+			(len(projected.Items) != len(playlist.Items) &&
+				currentBlockedByRefresh(playerStatus, playlist, activePolicy, contentContext))
 		playlist.Playlist = *projected
 		if blocked {
 			r.logger.Warn("Playlist refresh is all blocked; retiring current content")
@@ -789,6 +793,29 @@ func (r *refresher) syncStaticInlineScope(playlist *dp1.Playlist) error {
 		r.syncReplayScopeLocked(playlist)
 	}
 	return nil
+}
+
+// currentItemBlocked reports whether the item the player currently has on
+// screen is refused by policy, judged on ITS OWN terms — no reference to any
+// refreshed playlist. That independence is the point: an item can be blocked
+// and simultaneously absent from the refreshed feed, which is exactly when a
+// soft refresh defers and leaves it displayed.
+//
+// Unknown current identity returns false here: currentBlockedByRefresh already
+// fails safe for that case against the refreshed set, and guessing "blocked"
+// from no information would retire healthy frames on every pass.
+func currentItemBlocked(playerStatus *status.PlayerStatus, policy contentpolicy.Policy, origin contentpolicy.Context) bool {
+	if playerStatus == nil || playerStatus.Index == nil || *playerStatus.Index < 0 {
+		return false
+	}
+	items := playerStatus.Items
+	if items == nil && playerStatus.Playlist != nil {
+		items = &playerStatus.Playlist.Items
+	}
+	if items == nil || *playerStatus.Index >= len(*items) {
+		return false
+	}
+	return !policy.Allows((*items)[*playerStatus.Index], origin)
 }
 
 func currentBlockedByRefresh(playerStatus *status.PlayerStatus, fresh *dp1.Playlist, policy contentpolicy.Policy, origin contentpolicy.Context) bool {

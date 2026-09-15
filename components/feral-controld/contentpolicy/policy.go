@@ -387,9 +387,13 @@ func (s *Store) CurrentLocked() Policy { return s.policy }
 func (s *Store) UpdateLocked(showMature, strictPersonal bool) (Policy, error) {
 	next := s.CandidateLocked(showMature, strictPersonal)
 	// A repeated identical set must not cost a flash write. Skipped only when
-	// the file is already the source of truth: on a non-durable store the same
-	// values still have to be written, because that write is what repairs it.
-	if s.durable && next == s.policy {
+	// the file is already the source of truth, which is DurableLocked rather
+	// than the raw durable flag: while a previous write's directory entry is
+	// unconfirmed the file is not yet authoritative, so an identical set has to
+	// fall through and re-persist — that rewrite and its fsync ARE the retry,
+	// and taking the shortcut instead would report the setting as saved while a
+	// power loss could still revert it.
+	if s.DurableLocked() && next == s.policy {
 		return s.policy, nil
 	}
 	committed, err := persistAtomic(s.path, next)

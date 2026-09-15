@@ -447,3 +447,49 @@ func TestResetLockedReportsUnconfirmedDeletion(t *testing.T) {
 		t.Fatalf("the file must be gone: %v", statErr)
 	}
 }
+
+// While a previous write's directory entry is unconfirmed the file is not yet
+// authoritative, so a repeated IDENTICAL set must not take the unchanged-write
+// shortcut: that rewrite and its fsync are the retry. Taking the shortcut would
+// report the setting as saved while a power loss could still revert it.
+func TestUpdateLockedRetriesWhileDurabilityIsUnconfirmed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	s, err := Open(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Lock()
+	if _, err := s.UpdateLocked(true, false); err != nil {
+		s.Unlock()
+		t.Fatal(err)
+	}
+	s.Unlock()
+
+	// Enter the state a committed rename with a failed directory fsync leaves.
+	s.Lock()
+	s.durabilityUnconfirmed = true
+	s.Unlock()
+
+	// Removing the file makes the retry observable: the shortcut would leave it
+	// missing, while a real re-persist puts it back.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	s.Lock()
+	got, err := s.UpdateLocked(true, false) // identical values
+	durable := s.DurableLocked()
+	s.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ShowMatureContent {
+		t.Fatalf("got %+v", got)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("an identical set while unconfirmed must re-persist: %v", statErr)
+	}
+	if !durable {
+		t.Fatal("a successful re-persist must clear the unconfirmed state")
+	}
+}
