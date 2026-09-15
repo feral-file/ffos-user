@@ -17,6 +17,24 @@ const (
 	SYSTEMD_SERVICE_STATUS_ACTIVE   SystemdServiceStatus = "active"
 	SYSTEMD_SERVICE_STATUS_FAILED   SystemdServiceStatus = "failed"
 	SYSTEMD_SERVICE_STATUS_INACTIVE SystemdServiceStatus = "inactive"
+
+	// KIOSK_FALLBACK_UNIT is the ffos system unit that shows the stable
+	// "Something went wrong..." screen (plymouth on the free DRM device) once
+	// the Chromium restart budget is exhausted. chromium-kiosk.service stops
+	// it in ExecStartPre, so any kiosk start clears the screen again.
+	KIOSK_FALLBACK_UNIT = "feral-kiosk-fallback.service"
+)
+
+// kioskFallbackResult is the outcome of showKioskFallback. The three cases
+// need different policy: shown arms the hold, unavailable means the kiosk was
+// stopped but no screen came up (reboot now), busy means nothing happened at
+// all because another kiosk operation held the lock (retry next tick).
+type kioskFallbackResult int
+
+const (
+	kioskFallbackShown kioskFallbackResult = iota
+	kioskFallbackUnavailable
+	kioskFallbackBusy
 )
 
 type SystemdServiceStatus string
@@ -27,11 +45,22 @@ func (s SystemdServiceStatus) AsPointer() *SystemdServiceStatus {
 
 // CommandHandler implements system health checking and remediation actions
 type CommandHandler struct {
-	logger            *zap.Logger
-	vmagentClient     *VmagentClient
-	mu                sync.Mutex
-	isRestartingKiosk bool
-	isCleaningDisk    bool
+	logger         *zap.Logger
+	vmagentClient  *VmagentClient
+	mu             sync.Mutex
+	isCleaningDisk bool
+	// kioskOpInFlight serializes every operation on chromium-kiosk.service
+	// (restartKiosk, showKioskFallback): the RAM and GPU handlers restart the
+	// kiosk from their own goroutines, and a restart interleaved with the
+	// fallback sequence would leave plymouth holding DRM master under a
+	// crash-looping kiosk.
+	kioskOpInFlight bool
+	// fallbackShown is true while feral-kiosk-fallback.service is up on
+	// purpose (Chromium restart budget exhausted). restartKiosk refuses while
+	// it is set — the kiosk was stopped deliberately and its ExecStartPre
+	// would erase the customer's error screen — until the Chromium monitor
+	// clears it (recovery, or the hold abandoned for headless).
+	fallbackShown bool
 }
 
 func NewCommandHandler(logger *zap.Logger, vmagentClient *VmagentClient) *CommandHandler {
@@ -41,20 +70,27 @@ func NewCommandHandler(logger *zap.Logger, vmagentClient *VmagentClient) *Comman
 	}
 }
 
-// restartKiosk attempts to restart the chromium-kiosk service
+// restartKiosk attempts to restart the chromium-kiosk service. It is a no-op
+// while another kiosk operation is in flight and while the fallback screen is
+// deliberately showing (see fallbackShown).
 func (c *CommandHandler) restartKiosk(ctx context.Context) {
 	c.mu.Lock()
-	if c.isRestartingKiosk {
+	if c.kioskOpInFlight {
 		c.mu.Unlock()
 		return
 	}
+	if c.fallbackShown {
+		c.mu.Unlock()
+		c.logger.Info("Kiosk restart refused: fallback screen is showing after Chromium restart budget exhaustion")
+		return
+	}
 
-	c.isRestartingKiosk = true
+	c.kioskOpInFlight = true
 	c.mu.Unlock()
 
 	defer func() {
 		c.mu.Lock()
-		c.isRestartingKiosk = false
+		c.kioskOpInFlight = false
 		c.mu.Unlock()
 	}()
 
@@ -66,6 +102,72 @@ func (c *CommandHandler) restartKiosk(ctx context.Context) {
 	} else {
 		c.logger.Info("Successfully restarted chromium-kiosk service")
 	}
+}
+
+// showKioskFallback stops the kiosk and starts the fallback screen unit,
+// reporting the outcome (see kioskFallbackResult). The kiosk must be stopped
+// first: cage holds DRM master and plymouth cannot draw beside it, and a
+// kiosk left in Restart=always would tear the screen down again on its next
+// attempt. kioskFallbackUnavailable means the caller must fall back to the
+// immediate reboot (the unit is absent on images that predate it — the
+// watchdog ships on the package rail independently of the image — or sudo
+// refused); the kiosk has already been stopped by then, so holding for 15
+// minutes on a black screen would be strictly worse than the old behavior.
+// kioskFallbackBusy means nothing was done: a RAM/GPU restart held the lock.
+func (c *CommandHandler) showKioskFallback(ctx context.Context) kioskFallbackResult {
+	c.mu.Lock()
+	if c.kioskOpInFlight {
+		c.mu.Unlock()
+		c.logger.Warn("Kiosk fallback not shown: another kiosk operation is in flight")
+		return kioskFallbackBusy
+	}
+	c.kioskOpInFlight = true
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		c.kioskOpInFlight = false
+		c.mu.Unlock()
+	}()
+
+	stop := exec.CommandContext(ctx, "systemctl", "--user", "stop", "chromium-kiosk.service")
+	if output, err := stop.CombinedOutput(); err != nil {
+		c.logger.Error("Failed to stop chromium-kiosk service before fallback",
+			zap.Error(err),
+			zap.ByteString("output", output))
+	}
+
+	start := exec.CommandContext(ctx, "sudo", "-n", "systemctl", "start", KIOSK_FALLBACK_UNIT)
+	if output, err := start.CombinedOutput(); err != nil {
+		c.logger.Error("Failed to start kiosk fallback screen",
+			zap.String("unit", KIOSK_FALLBACK_UNIT),
+			zap.Error(err),
+			zap.ByteString("output", output))
+		return kioskFallbackUnavailable
+	}
+	c.mu.Lock()
+	c.fallbackShown = true
+	c.mu.Unlock()
+	c.logger.Warn("Kiosk fallback screen shown", zap.String("unit", KIOSK_FALLBACK_UNIT))
+	return kioskFallbackShown
+}
+
+// clearKioskFallback forgets that the fallback screen is up, re-enabling
+// restartKiosk. Called by the Chromium monitor when Chromium recovers during
+// the hold, when the hold ends in a reboot, or when the hold is abandoned
+// because the display went away. It does not stop the unit: the kiosk's own
+// ExecStartPre does that on the next start.
+func (c *CommandHandler) clearKioskFallback() {
+	c.mu.Lock()
+	c.fallbackShown = false
+	c.mu.Unlock()
+}
+
+// isFallbackShown reports whether the fallback screen is deliberately up.
+func (c *CommandHandler) isFallbackShown() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fallbackShown
 }
 
 // isKioskActivating reports whether chromium-kiosk.service is currently in
