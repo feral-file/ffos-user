@@ -1177,3 +1177,36 @@ func TestPlayRecentlyPlayedBoundsThePlayerAcknowledgement(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(encoded), "token=secret")
 }
+
+// A FAILED replay must not carry the retained item out either. The resolver
+// failure path returned the player's classified message directly, so a modern
+// failure naming or echoing the record escaped the same boundary the success
+// path is bounded for.
+func TestPlayRecentlyPlayedBoundsAFailedResolve(t *testing.T) {
+	h, player, _ := newPolicyHandler(t)
+	const signed = "https://cdn.example/work.html?token=secret&sig=deadbeef"
+
+	// No second Send: a failed resolve never reaches displayPlaylist.
+	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok": false, "status": "error",
+				"error": "record source unreachable: " + signed,
+				"item":  map[string]interface{}{"id": "retained", "source": signed},
+			}}, nil
+		}).Times(1)
+
+	result, err := h.Process(context.Background(), commands.Command{
+		Type: commands.CMD_PLAY_RECENTLY_PLAYED, Arguments: map[string]any{"recordId": "rp-5"},
+	})
+	require.NoError(t, err)
+
+	encoded, err := json.Marshal(result)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "token=secret",
+		"a failed replay leaked the retained item's credentials: %s", encoded)
+	require.NotContains(t, string(encoded), `"item"`)
+	// The reason still reaches the app, which is what makes an evicted record
+	// distinguishable from a missing capability.
+	require.Contains(t, string(encoded), "record source unreachable")
+}

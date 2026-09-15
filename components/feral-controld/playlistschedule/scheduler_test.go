@@ -1383,10 +1383,13 @@ func TestPush_ReappliesTheContentPolicyProjectionAtCutover(t *testing.T) {
 	sched.RecomputeNow(context.Background())
 }
 
-// An empty projection must be DROPPED, not sent: the player rejects an empty
-// displayPlaylist, and a cutover the policy refuses is not a delivery failure
-// to retry.
-func TestPush_DropsACutoverTheContentPolicyEmpties(t *testing.T) {
+// An empty projection is a RETIREMENT, not a no-op. Dropping it silently left
+// the blocked frame on screen: the owner disables mature content,
+// setContentPolicy reports success, and the work keeps playing because the only
+// cohort that could replace it is the one the policy just emptied. The empty
+// list goes out with retireBlockedCurrent, the player's documented signal to
+// retire the current item rather than an ordinary cast it would reject.
+func TestPush_RetiresACutoverTheContentPolicyEmpties(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -1403,7 +1406,15 @@ func TestPush_DropsACutoverTheContentPolicyEmpties(t *testing.T) {
 	).AnyTimes()
 
 	cdpMock.EXPECT().Initialized().Return(true).Times(1)
-	// No Send expectation: an empty projection must never reach the player.
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.Contains(t, expr, "retireBlockedCurrent",
+				"a fully blocked cohort must retire the current frame, not vanish")
+			assert.NotContains(t, expr, "day22", "no blocked item may be sent")
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(1)
 
 	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
 		return loc
@@ -1421,13 +1432,6 @@ func TestPush_DropsACutoverTheContentPolicyEmpties(t *testing.T) {
 	sched.RecomputeNow(context.Background())
 }
 
-// The unchanged-set early return compares what would be SENT, not the raw
-// active set. A policy tightened since the last push leaves the active set
-// byte-identical while changing the projection, so comparing the raw set
-// skipped the very push that removes the newly blocked item — and it stayed on
-// screen until an unrelated cohort change. This is the path a cached fallback
-// after a resolution failure takes, where that early return is the only thing
-// between a policy change and the wall.
 func TestRecompute_PushesWhenOnlyTheProjectionChanged(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

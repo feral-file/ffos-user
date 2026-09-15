@@ -452,3 +452,38 @@ func TestRefreshDoesNotRetireAnAllowedCurrentItem(t *testing.T) {
 		t.Fatalf("an allowed current item must not be retired; sent=%s", *sent)
 	}
 }
+
+// PINS A KNOWN, OPEN GAP — see the legacy-context discussion on
+// feral-file/ffos-user#349.
+//
+// controld leaves a pre-feature source unprojected, but the value it puts on
+// the wire is still "curated" (NormalizeContext("") normalizes it), and a
+// CURRENT player applies its own mirror to that. So the daemon's restraint does
+// not reach the player, and a legacy personal schedule can have mature items
+// withheld there.
+//
+// This asserts the player-facing context deliberately, so the gap is visible in
+// code rather than only in a thread: whoever migrates legacy sources (recovering
+// and persisting the original origin) will see this fail and must decide what
+// the wire value becomes. Every deferral-based alternative was measured and
+// rejected — deferring the send stops playlist refreshing on every device still
+// running a pre-feature player.
+func TestRefreshSendsCuratedForALegacySource_KnownGap(t *testing.T) {
+	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Status omits contentContext, which is how a pre-feature origin reaches
+	// the refresher.
+	r, _, sent := newPolicyRefresher(t, "", store)
+	if err := r.processPlayingPlaylist(false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(*sent, `"contentContext":"curated"`) {
+		t.Fatalf("the player-facing context for a legacy source changed; if that was intentional, this gap may now be closed — sent=%s", *sent)
+	}
+	// And the daemon's own restraint still holds: it did not strip the item.
+	if !strings.Contains(*sent, "https://example.test/grown") {
+		t.Fatalf("controld must still leave an unknown-origin playlist unprojected; sent=%s", *sent)
+	}
+}

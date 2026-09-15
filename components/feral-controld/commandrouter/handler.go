@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
@@ -472,7 +473,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		}
 		message := recentPlayerReply(resolved)
 		if !playerresponse.OK(message) {
-			return message, nil
+			// Bounded for the same reason the success path is: a failed
+			// resolve can name or echo the retained item it could not replay.
+			resolvedMessage, _ := message["message"].(map[string]interface{})
+			if resolvedMessage == nil {
+				resolvedMessage = map[string]interface{}{"ok": false, "status": "error"}
+			}
+			return map[string]interface{}{"message": boundedFailureReply(resolvedMessage)}, nil
 		}
 		playerMessage, ok := message["message"].(map[string]interface{})
 		if !ok {
@@ -1531,6 +1538,43 @@ func boundedReplayAck(result interface{}) map[string]interface{} {
 	return bounded
 }
 
+// boundedFailureReply reduces a failed history/replay reply to the documented
+// safe fields. The player's own explanation is kept — it is what distinguishes
+// an evicted record from a missing capability — but sanitized, because that
+// text is player-authored and can name the source it failed on.
+func boundedFailureReply(message map[string]interface{}) map[string]interface{} {
+	bounded := map[string]interface{}{"ok": false}
+	if status, present := message["status"].(string); present && status != "" {
+		bounded["status"] = truncateLabel(status)
+	}
+	if reason, present := message["error"].(string); present && reason != "" {
+		bounded["error"] = sanitizeErrorText(reason)
+	}
+	return bounded
+}
+
+// sanitizeErrorText strips query strings out of any URL inside player-authored
+// error text and truncates the result.
+//
+// The controller contract requires sanitized error messages, and item sources
+// are exactly what these failures tend to name: a signed CDN URL carries its
+// credentials in the query string, so forwarding "cannot load
+// https://cdn/...?token=..." through the LAN API would leak the very thing the
+// history API keeps device-local. The path is kept, since that is the useful
+// part for an operator.
+func sanitizeErrorText(text string) string {
+	fields := strings.Fields(text)
+	for i, field := range fields {
+		if !strings.Contains(field, "://") {
+			continue
+		}
+		if cut := strings.IndexByte(field, '?'); cut >= 0 {
+			fields[i] = field[:cut] + "?<redacted>"
+		}
+	}
+	return truncateLabel(strings.Join(fields, " "))
+}
+
 // maxRecentlyPlayedRecords bounds how many history rows leave the daemon. The
 // player retains 50; this is generous headroom, not a contract, and exists so a
 // misbehaving or replaced player cannot make an unauthenticated LAN request
@@ -1585,10 +1629,14 @@ func truncateLabel(s string) string {
 func boundedRecentlyPlayedReply(response map[string]interface{}) map[string]interface{} {
 	message, ok := response["message"].(map[string]interface{})
 	if !ok {
-		return response
+		return map[string]interface{}{"message": map[string]interface{}{"ok": false, "status": "error"}}
 	}
 	if okValue, _ := message["ok"].(bool); !okValue {
-		return response
+		// Failures are rebuilt too. recentPlayerReply only CLASSIFIES them, so
+		// a modern player's failure could still carry a retained item, record
+		// or diagnostic field — and that is the same signed-URL exposure the
+		// success path is bounded for, on the same unauthenticated LAN API.
+		return map[string]interface{}{"message": boundedFailureReply(message)}
 	}
 
 	bounded := map[string]interface{}{"ok": true}

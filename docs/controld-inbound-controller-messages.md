@@ -2729,6 +2729,12 @@ Error cases: `unsupported` (older player), `error` (a real player-side
 failure), plus transport errors. A transport failure is an error, never an
 empty list.
 
+Failure replies are rebuilt from the allow-list too — `ok`, `status` and
+`error` only — and the player's explanation is sanitized: query strings are
+stripped from any URL it names. A failure is exactly where a player tends to
+quote the source it could not load, and a signed CDN URL carries its
+credentials there.
+
 ### playRecentlyPlayed
 
 Purpose: put a listed work back on this device.
@@ -2862,7 +2868,11 @@ The device filters the playlist against its policy before casting:
   document's signature does not describe the projection. Rating fields
   themselves remain signed in the source.
 - When the projection is empty, the cast is refused with `contentBlocked`
-  (HTTP 422 on the LAN hub, `"error":"contentBlocked"` over the relayer).
+  (HTTP 422 on the LAN hub, `"error":"contentBlocked"` over the relayer). A
+  scheduled **cutover** whose cohort projects empty is different: there is no
+  caller to refuse, so the empty list is sent with `retireBlockedCurrent` —
+  retiring the frame rather than leaving blocked content on screen because the
+  only cohort that could replace it is the one the policy emptied.
 
 A playlist carrying malformed content-rating extension fields is rejected as
 `playlistInvalid`. A malformed label is never silently treated as unrated —

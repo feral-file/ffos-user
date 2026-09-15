@@ -748,20 +748,27 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 
 	// Re-apply the CURRENT content policy. The router filtered this document
 	// once, when it was cast; a policy tightened since then reaches these later
-	// cohorts only here (see Projector). An empty projection is dropped rather
-	// than sent: the player rejects an empty displayPlaylist, and a cutover the
-	// policy refuses must not be retried as if the link had failed.
+	// cohorts only here (see Projector).
+	//
+	// An EMPTY projection is a retirement, not a no-op. Silently dropping it
+	// left the blocked frame on screen — the owner disables mature content,
+	// setContentPolicy reports success, and the work keeps playing because the
+	// only cohort that could replace it is the one the policy just emptied.
+	// The empty list therefore goes out WITH retireBlockedCurrent, which is the
+	// player's documented signal to retire the current item and black the
+	// display rather than an ordinary cast it would reject.
+	retireBlockedCurrent := false
 	s.mu.Lock()
 	projector := s.projector
 	s.mu.Unlock()
 	if projector != nil {
 		projected, empty := projector(playlist, source.ContentContext)
-		if empty {
-			s.logger.Info("Dropped displayAt cutover: content policy admits none of its items")
-			return nil
-		}
 		if projected != nil {
 			playlist = projected
+		}
+		if empty {
+			retireBlockedCurrent = true
+			s.logger.Info("displayAt cutover is fully blocked by the content policy; retiring the current frame")
 		}
 	}
 
@@ -783,6 +790,9 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	// decodes with an empty string, so it must be OMITTED rather than sent as
 	// "": an upgraded device would otherwise push an invalid value on its first
 	// cutover and the timer's whole wall-clock swap would be rejected.
+	if retireBlockedCurrent {
+		command.Arguments["retireBlockedCurrent"] = true
+	}
 	if source.ContentContext != "" {
 		command.Arguments["contentContext"] = source.ContentContext
 	}

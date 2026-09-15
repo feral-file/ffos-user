@@ -1,6 +1,7 @@
 package commandrouter
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -244,5 +245,59 @@ func TestBoundedRecentlyPlayedReply_NeverTruncatesTheReplayHandle(t *testing.T) 
 	}
 	if records[0].(map[string]interface{})["recordId"] != "rp-1788892946764001" {
 		t.Fatalf("handle altered: %v", records[0])
+	}
+}
+
+// Failure replies are rebuilt from the allow-list too. recentPlayerReply only
+// CLASSIFIES a failure, so a modern player's failure could otherwise carry a
+// retained item, record or diagnostic field out through the unauthenticated LAN
+// API — the same signed-URL exposure the success path is bounded for.
+func TestBoundedRecentlyPlayedReply_BoundsFailuresToo(t *testing.T) {
+	const signed = "https://cdn.example/work.html?token=secret&sig=deadbeef"
+	got := boundedRecentlyPlayedReply(map[string]interface{}{
+		"message": map[string]interface{}{
+			"ok": false, "status": "error",
+			"error":       "could not replay " + signed,
+			"item":        map[string]interface{}{"source": signed},
+			"records":     []interface{}{map[string]interface{}{"source": signed}},
+			"diagnostics": map[string]interface{}{"lastSource": signed},
+		},
+	})
+	message := got["message"].(map[string]interface{})
+	for _, forbidden := range []string{"item", "records", "diagnostics"} {
+		if _, leaked := message[forbidden]; leaked {
+			t.Fatalf("%q escaped a FAILURE reply: %v", forbidden, message)
+		}
+	}
+	if message["status"] != "error" {
+		t.Fatalf("the classification must survive: %v", message)
+	}
+	// The player's explanation is kept, but its credentials are not.
+	reason, _ := message["error"].(string)
+	if !strings.Contains(reason, "could not replay") {
+		t.Fatalf("the player's explanation must survive: %q", reason)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "token=secret") {
+		t.Fatalf("a signed URL's credentials escaped a failure reply: %s", encoded)
+	}
+}
+
+func TestSanitizeErrorText_RedactsCredentialsAndKeepsThePath(t *testing.T) {
+	got := sanitizeErrorText("cannot load https://cdn.example/a/b.html?token=secret&sig=x after 3 tries")
+	if strings.Contains(got, "token=secret") {
+		t.Fatalf("credentials survived: %q", got)
+	}
+	for _, keep := range []string{"cannot load", "https://cdn.example/a/b.html", "after 3 tries"} {
+		if !strings.Contains(got, keep) {
+			t.Fatalf("%q lost from %q", keep, got)
+		}
+	}
+	// Text with no URL is untouched apart from whitespace normalization.
+	if sanitizeErrorText("Recently played record is unavailable") != "Recently played record is unavailable" {
+		t.Fatal("plain text must not be mangled")
 	}
 }
