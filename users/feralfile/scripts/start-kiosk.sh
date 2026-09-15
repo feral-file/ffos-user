@@ -77,6 +77,32 @@ wait_for_display() {
 
 wait_for_display
 
+# Developer console guard (ffos#126). The kiosk owns VT1 only: cage runs with
+# -s so a developer with a keyboard can Ctrl+Alt+F2 to the password-protected
+# getty@tty2, and seatd hands a starting cage whichever VT is active. Without
+# this wait a kiosk (re)start (Restart=always after Alt+F4, a watchdog restart)
+# would take over the developer's VT within seconds. Wait until tty1 is active
+# again (Alt+F1 from the text console). feral-watchdog consults the same file
+# and suppresses escalation while it does not read tty1; the two predicates
+# must not diverge. Fail open when the file is unreadable (no VT subsystem).
+wait_for_vt1() {
+    local announced=0 active
+    while true; do
+        if ! active=$(cat /sys/class/tty/tty0/active 2>/dev/null); then
+            echo "$(date '+%F %T') [INFO] No readable VT state, starting kiosk (fail open)"
+            return 0
+        fi
+        [ "$active" = "tty1" ] && return
+        if [ "$announced" -eq 0 ]; then
+            echo "$(date '+%F %T') [INFO] $active is active (developer console?), waiting for tty1 before starting kiosk"
+            announced=1
+        fi
+        sleep 2
+    done
+}
+
+wait_for_vt1
+
 # Chromium's HTTP cache can outlive a player-bundle swap and poison the app
 # shell: heuristically cached route HTML and negative (404) chunk responses
 # captured while a swap is in flight survive kiosk restarts and full reboots
@@ -188,8 +214,9 @@ clear_chromium_cache_on_bundle_change
 /home/feralfile/scripts/cdp-ready-check.sh &
 
 # Start cage with bash, which auto-detects the active output, applies the saved
-# rotation, and starts Chromium.
-exec cage -- /bin/bash -c "
+# rotation, and starts Chromium. -s allows VT switching (developer console on
+# tty2, see wait_for_vt1 above); cage forbids it by default.
+exec cage -s -- /bin/bash -c "
     # Rotation must never gate the browser launch: the old code joined it with
     # '&&', so any wlr-randr error left the kiosk with no Chromium and
     # Restart=always looping. But it also must not give up on the first error —
