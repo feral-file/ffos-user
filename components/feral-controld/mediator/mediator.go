@@ -2,6 +2,7 @@ package mediator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -829,8 +830,9 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 			commandType = commands.Type(*payload.Message.Command)
 		}
 		command := commands.Command{
-			Type:      commandType,
-			Arguments: payload.Message.Request,
+			Type:         commandType,
+			Arguments:    payload.Message.Request,
+			RawArguments: payload.Message.RawRequest,
 		}
 		result, err := m.cmdHandler.Process(ctx, command)
 		if err != nil {
@@ -899,6 +901,34 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 				resp := relayer.Response{Type: "RPC", MessageID: payload.MessageID, Message: map[string]any{
 					"ok": false, "error": "playlistInvalid", "command": commandType.String(), "message": err.Error(),
 				}}
+				return m.relayer.Send(ctx, resp)
+			}
+			if commandrouter.IsSigInvalid(err) {
+				// Strict-mode signature rejection (#307): the owner asked for
+				// it, and the caster must learn its document was refused
+				// rather than time out. Same envelope discipline as
+				// sourceUnreachable; the message is already sanitized (role
+				// and reason vocabulary only, never a URL or a kid).
+				var sie *commandrouter.SigInvalidError
+				_ = errors.As(err, &sie)
+				m.logger.Warn("Cast rejected by strict signature verification",
+					zap.String("command", commandType.String()),
+					zap.Error(err),
+				)
+				body := map[string]any{
+					"ok":      false,
+					"error":   "sigInvalid",
+					"command": commandType.String(),
+					"message": err.Error(),
+				}
+				if sie != nil && sie.Status != "" {
+					body["signatureStatus"] = string(sie.Status)
+				}
+				resp := relayer.Response{
+					Type:      "RPC",
+					MessageID: payload.MessageID,
+					Message:   body,
+				}
 				return m.relayer.Send(ctx, resp)
 			}
 			m.logger.Error("Failed to process command", zap.Error(err))

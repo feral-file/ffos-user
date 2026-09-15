@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +24,7 @@ func TestChromiumMonitorFirstFailureUsesStartupGrace(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	// Pin a connected display so these escalation invariants are exercised for
 	// the reason under test (grace/hang), not accidentally suppressed by the
 	// host's real DRM state on a Linux CI box.
@@ -47,6 +50,7 @@ func TestChromiumMonitorColdBootGraceSuppressesManyFailures(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	// Pin a connected display so these escalation invariants are exercised for
 	// the reason under test (grace/hang), not accidentally suppressed by the
 	// host's real DRM state on a Linux CI box.
@@ -72,6 +76,7 @@ func TestChromiumMonitorColdBootGraceExpiryTriggersRestart(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	// Pin a connected display so these escalation invariants are exercised for
 	// the reason under test (grace/hang), not accidentally suppressed by the
 	// host's real DRM state on a Linux CI box.
@@ -103,6 +108,7 @@ func TestChromiumMonitorPostRestartReentersStartupGrace(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	// Pin a connected display so these escalation invariants are exercised for
 	// the reason under test (grace/hang), not accidentally suppressed by the
 	// host's real DRM state on a Linux CI box.
@@ -153,6 +159,7 @@ func TestChromiumMonitorPostConnectHangTriggersRestart(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	// Pin a connected display so these escalation invariants are exercised for
 	// the reason under test (grace/hang), not accidentally suppressed by the
 	// host's real DRM state on a Linux CI box.
@@ -181,6 +188,7 @@ func TestChromiumMonitorActivatingKioskDefersRestart(t *testing.T) {
 	countFile := installActivatingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	// Pin a connected display so these escalation invariants are exercised for
 	// the reason under test (grace/hang), not accidentally suppressed by the
 	// host's real DRM state on a Linux CI box.
@@ -392,6 +400,7 @@ func TestChromiumMonitorHeadlessSuppressesEscalation(t *testing.T) {
 	restartFile, rebootFile := installCountingSystemctlWithReboot(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
 
 	// Worst case: grace expired and two restarts already banked in-window, so a
@@ -423,6 +432,7 @@ func TestChromiumMonitorUnknownDisplayFailsOpen(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = t.TempDir() // empty -> glob matches nothing -> fail open
 
 	monitor.mu.Lock()
@@ -446,6 +456,7 @@ func TestChromiumMonitorDisplayReconnectReanchorsGrace(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 
 	// Phase 1 — headless with grace already expired: no restart, latch headless.
 	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
@@ -494,5 +505,603 @@ func TestChromiumMonitorDisplayReconnectReanchorsGrace(t *testing.T) {
 	}
 	if got := readRestartCount(t, countFile); got != "1" {
 		t.Fatalf("escalation must resume after fresh grace expires, got %s", got)
+	}
+}
+
+// installFallbackStubs installs fake `systemctl` and `sudo` binaries that
+// count the four commands the Chromium escalation path can issue: kiosk
+// restart, kiosk stop, fallback-unit start (via `sudo -n`) and reboot (via
+// `sudo`). Returns the counter files in that order.
+func installFallbackStubs(t *testing.T) (restartFile, stopFile, fallbackFile, rebootFile string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	restartFile = filepath.Join(dir, "restart-count")
+	stopFile = filepath.Join(dir, "stop-count")
+	fallbackFile = filepath.Join(dir, "fallback-count")
+	rebootFile = filepath.Join(dir, "reboot-count")
+	for _, f := range []string{restartFile, stopFile, fallbackFile, rebootFile} {
+		if err := os.WriteFile(f, []byte("0\n"), 0o600); err != nil {
+			t.Fatalf("failed to seed counter %s: %v", f, err)
+		}
+	}
+
+	systemctlScript := `#!/bin/sh
+bump() { c="$(cat "$1")"; c=$((c + 1)); printf "%s\n" "$c" > "$1"; }
+if [ "$1" = "--user" ] && [ "$2" = "restart" ] && [ "$3" = "chromium-kiosk.service" ]; then
+  bump "` + restartFile + `"; exit 0
+fi
+if [ "$1" = "--user" ] && [ "$2" = "stop" ] && [ "$3" = "chromium-kiosk.service" ]; then
+  bump "` + stopFile + `"
+  [ -e "` + stopFile + `.fail" ] && exit 1
+  exit 0
+fi
+if [ "$1" = "--user" ] && [ "$2" = "is-active" ] && [ "$3" = "chromium-kiosk.service" ]; then
+  printf "inactive\n"; exit 3
+fi
+exit 0
+`
+	// #nosec G306 -- test helper script must be executable.
+	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(systemctlScript), 0o755); err != nil {
+		t.Fatalf("failed to create fake systemctl: %v", err)
+	}
+
+	sudoScript := `#!/bin/sh
+bump() { c="$(cat "$1")"; c=$((c + 1)); printf "%s\n" "$c" > "$1"; }
+if [ "$1" = "-n" ] && [ "$2" = "systemctl" ] && [ "$3" = "start" ] && [ "$4" = "` + KIOSK_FALLBACK_UNIT + `" ]; then
+  bump "` + fallbackFile + `"
+  # An image without the unit: creating <fallbackFile>.fail in a test makes
+  # the start fail the way systemctl start does for an unknown unit.
+  [ -e "` + fallbackFile + `.fail" ] && exit 5
+  exit 0
+fi
+if [ "$1" = "systemctl" ] && [ "$2" = "reboot" ]; then
+  bump "` + rebootFile + `"; exit 0
+fi
+exit 0
+`
+	// #nosec G306 -- test helper script must be executable.
+	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(sudoScript), 0o755); err != nil {
+		t.Fatalf("failed to create fake sudo: %v", err)
+	}
+
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return restartFile, stopFile, fallbackFile, rebootFile
+}
+
+// TestChromiumMonitorDevConsoleSuppressesEscalation pins the developer-console
+// gate: with a display connected but tty2 active (a developer on getty@tty2),
+// a dead CDP endpoint must produce no kiosk restart, no fallback and no reboot
+// even with the grace expired and the budget one restart from exhaustion —
+// start-kiosk.sh's wait_for_vt1 is holding cage back on purpose.
+func TestChromiumMonitorDevConsoleSuppressesEscalation(t *testing.T) {
+	restartFile, stopFile, fallbackFile, rebootFile := installFallbackStubs(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty2")
+
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + time.Minute))
+	monitor.restartHistory = []time.Time{time.Now(), time.Now()}
+	monitor.mu.Unlock()
+
+	for i := 0; i < 5; i++ {
+		err := monitor.check(context.Background())
+		if err == nil {
+			t.Fatalf("check %d: expected failure against closed endpoint", i)
+		}
+		if !strings.Contains(err.Error(), errChromiumHeadless.Error()) {
+			t.Fatalf("check %d: developer-console failure must be tagged expected, got %v", i, err)
+		}
+	}
+	for name, f := range map[string]string{"restart": restartFile, "stop": stopFile, "fallback": fallbackFile, "reboot": rebootFile} {
+		if got := readRestartCount(t, f); got != "0" {
+			t.Fatalf("developer console must suppress %s, got %s", name, got)
+		}
+	}
+	monitor.mu.Lock()
+	devConsole := monitor.devConsole
+	history := len(monitor.restartHistory)
+	monitor.mu.Unlock()
+	if !devConsole {
+		t.Fatal("expected developer-console latch set")
+	}
+	if history != 2 {
+		t.Fatalf("developer console must not accumulate restart history, got %d", history)
+	}
+}
+
+// TestChromiumMonitorDevConsoleReturnReanchorsGrace pins the return path: when
+// tty1 becomes active again the monitor grants a fresh startup grace (cage is
+// only now allowed to start) instead of restarting on the stale monitorStart,
+// and escalates normally once that fresh grace expires.
+func TestChromiumMonitorDevConsoleReturnReanchorsGrace(t *testing.T) {
+	restartFile, _, _, _ := installFallbackStubs(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+
+	// Phase 1 — developer on tty2, grace long expired: suppressed.
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty2")
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + time.Minute))
+	monitor.mu.Unlock()
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("phase1: expected failure against closed endpoint")
+	}
+	if got := readRestartCount(t, restartFile); got != "0" {
+		t.Fatalf("phase1 must not restart, got %s", got)
+	}
+
+	// Phase 2 — back on tty1: fresh grace, no instant restart.
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("phase2: expected failure against closed endpoint")
+	}
+	if got := readRestartCount(t, restartFile); got != "0" {
+		t.Fatalf("return to tty1 must grant fresh grace, got %s restarts", got)
+	}
+	monitor.mu.Lock()
+	sinceStart := time.Since(monitor.monitorStart)
+	devConsole := monitor.devConsole
+	hasEver := monitor.hasEverConnected
+	monitor.mu.Unlock()
+	if sinceStart > CHROMIUM_STARTUP_GRACE {
+		t.Fatalf("expected monitorStart re-anchored within grace, elapsed %v", sinceStart)
+	}
+	if devConsole || hasEver {
+		t.Fatalf("expected latch cleared and pre-connect mode, devConsole=%v hasEver=%v", devConsole, hasEver)
+	}
+
+	// Phase 3 — fresh grace expires: escalation resumes.
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + 30*time.Second))
+	monitor.mu.Unlock()
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("phase3: expected failure against closed endpoint")
+	}
+	if got := readRestartCount(t, restartFile); got != "1" {
+		t.Fatalf("escalation must resume after fresh grace expires, got %s", got)
+	}
+}
+
+// TestChromiumMonitorBudgetExhaustionShowsFallback pins the new escalation
+// end: the restart that exhausts the 3-in-5-minutes budget must stop the
+// kiosk and start feral-kiosk-fallback.service instead of rebooting, enter the
+// fallback hold, and keep every later failed check quiet (no restart, no
+// reboot) while the hold runs.
+func TestChromiumMonitorBudgetExhaustionShowsFallback(t *testing.T) {
+	restartFile, stopFile, fallbackFile, rebootFile := installFallbackStubs(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + time.Minute))
+	monitor.restartHistory = []time.Time{time.Now(), time.Now()}
+	monitor.mu.Unlock()
+
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against closed endpoint")
+	}
+	if got := readRestartCount(t, restartFile); got != "0" {
+		t.Fatalf("budget exhaustion must not restart the kiosk, got %s", got)
+	}
+	if got := readRestartCount(t, stopFile); got != "1" {
+		t.Fatalf("expected kiosk stopped once before fallback, got %s", got)
+	}
+	if got := readRestartCount(t, fallbackFile); got != "1" {
+		t.Fatalf("expected fallback unit started once, got %s", got)
+	}
+	if got := readRestartCount(t, rebootFile); got != "0" {
+		t.Fatalf("budget exhaustion must not reboot immediately, got %s", got)
+	}
+	monitor.mu.Lock()
+	inFallback := !monitor.fallbackSince.IsZero()
+	monitor.mu.Unlock()
+	if !inFallback {
+		t.Fatal("expected fallback hold to be armed")
+	}
+
+	// During the hold every failed check is expected and quiet.
+	for i := 0; i < 5; i++ {
+		err := monitor.check(context.Background())
+		if err == nil {
+			t.Fatalf("hold check %d: expected failure against closed endpoint", i)
+		}
+		if !strings.Contains(err.Error(), errChromiumHeadless.Error()) {
+			t.Fatalf("hold check %d: failure must be tagged expected, got %v", i, err)
+		}
+	}
+	for name, f := range map[string]string{"restart": restartFile, "stop": stopFile, "fallback": fallbackFile, "reboot": rebootFile} {
+		want := "0"
+		if name == "stop" || name == "fallback" {
+			want = "1"
+		}
+		if got := readRestartCount(t, f); got != want {
+			t.Fatalf("during hold %s count = %s, want %s", name, got, want)
+		}
+	}
+}
+
+// TestChromiumMonitorFallbackHoldExpiryRebootsOnce pins the end of the hold:
+// once CHROMIUM_FALLBACK_HOLD has elapsed the monitor reboots exactly once and
+// leaves the hold, so a reboot command that fails cannot re-fire every tick.
+func TestChromiumMonitorFallbackHoldExpiryRebootsOnce(t *testing.T) {
+	restartFile, _, fallbackFile, rebootFile := installFallbackStubs(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+
+	monitor.mu.Lock()
+	monitor.fallbackSince = time.Now().Add(-(CHROMIUM_FALLBACK_HOLD + time.Second))
+	// Grace still fresh, so the post-reboot ladder does not restart in this test.
+	monitor.monitorStart = time.Now()
+	monitor.mu.Unlock()
+
+	for i := 0; i < 3; i++ {
+		if err := monitor.check(context.Background()); err == nil {
+			t.Fatalf("check %d: expected failure against closed endpoint", i)
+		}
+	}
+	if got := readRestartCount(t, rebootFile); got != "1" {
+		t.Fatalf("expected exactly one reboot after hold expiry, got %s", got)
+	}
+	if got := readRestartCount(t, fallbackFile); got != "0" {
+		t.Fatalf("hold expiry must not re-show fallback, got %s", got)
+	}
+	if got := readRestartCount(t, restartFile); got != "0" {
+		t.Fatalf("fresh grace after hold must not restart, got %s", got)
+	}
+	monitor.mu.Lock()
+	inFallback := !monitor.fallbackSince.IsZero()
+	monitor.mu.Unlock()
+	if inFallback {
+		t.Fatal("expected fallback hold cleared after reboot was issued")
+	}
+}
+
+// TestChromiumMonitorRecoveryDuringFallbackClearsState pins recovery: a
+// successful check while the fallback screen is up (manual kiosk restart, OTA)
+// clears the hold and forgets the exhausted budget, so a later fault gets the
+// full restart ladder rather than an instant fallback.
+func TestChromiumMonitorRecoveryDuringFallbackClearsState(t *testing.T) {
+	_, _, _, rebootFile := installFallbackStubs(t)
+	endpoint, closeServer := okLocalHTTPEndpoint(t)
+	defer closeServer()
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+
+	monitor.mu.Lock()
+	monitor.fallbackSince = time.Now().Add(-time.Minute)
+	monitor.restartHistory = []time.Time{time.Now(), time.Now(), time.Now()}
+	monitor.mu.Unlock()
+
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+	monitor.mu.Lock()
+	inFallback := !monitor.fallbackSince.IsZero()
+	history := len(monitor.restartHistory)
+	hasEver := monitor.hasEverConnected
+	monitor.mu.Unlock()
+	if inFallback {
+		t.Fatal("expected fallback hold cleared on recovery")
+	}
+	if history != 0 {
+		t.Fatalf("expected restart history reset on recovery, got %d", history)
+	}
+	if !hasEver {
+		t.Fatal("expected post-connect mode after a successful check")
+	}
+	if got := readRestartCount(t, rebootFile); got != "0" {
+		t.Fatalf("recovery must not reboot, got %s", got)
+	}
+}
+
+// okLocalHTTPEndpoint serves 200 on /json/version so recovery paths can be
+// exercised; the returned func shuts the server down.
+func okLocalHTTPEndpoint(t *testing.T) (string, func()) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"Browser":"test"}`))
+	}))
+	return server.URL, server.Close
+}
+
+// TestChromiumMonitorFallbackUnavailableRebootsImmediately pins the version-skew
+// path: the watchdog ships on the package rail, the fallback unit on the image
+// rail, so on an image that predates the unit `systemctl start` fails. The
+// kiosk has already been stopped by then, so the monitor must reboot at once
+// (the pre-fallback behavior) instead of holding 15 minutes on a black screen.
+func TestChromiumMonitorFallbackUnavailableRebootsImmediately(t *testing.T) {
+	restartFile, stopFile, fallbackFile, rebootFile := installFallbackStubs(t)
+	if err := os.WriteFile(fallbackFile+".fail", nil, 0o600); err != nil {
+		t.Fatalf("failed to arm fallback failure: %v", err)
+	}
+	endpoint := closedLocalHTTPEndpoint(t)
+	handler := NewCommandHandler(zap.NewNop(), nil)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), handler)
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + time.Minute))
+	monitor.restartHistory = []time.Time{time.Now(), time.Now()}
+	monitor.mu.Unlock()
+
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against closed endpoint")
+	}
+	for name, want := range map[string]string{restartFile: "0", stopFile: "1", fallbackFile: "1", rebootFile: "1"} {
+		if got := readRestartCount(t, name); got != want {
+			t.Fatalf("%s count = %s, want %s", filepath.Base(name), got, want)
+		}
+	}
+	monitor.mu.Lock()
+	inFallback := !monitor.fallbackSince.IsZero()
+	monitor.mu.Unlock()
+	if inFallback {
+		t.Fatal("hold must not be armed when the fallback screen failed to start")
+	}
+	if handler.isFallbackShown() {
+		t.Fatal("fallbackShown must stay false when the unit failed to start")
+	}
+}
+
+// TestChromiumMonitorFallbackHoldAbandonedWhenHeadless pins the display-gate
+// invariant inside the hold: a monitor unplugged while the error screen is up
+// must not end in a reboot; the hold is dropped, the monitor goes headless,
+// and restartKiosk is allowed again so the reconnect path can relaunch.
+func TestChromiumMonitorFallbackHoldAbandonedWhenHeadless(t *testing.T) {
+	_, _, _, rebootFile := installFallbackStubs(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	handler := NewCommandHandler(zap.NewNop(), nil)
+	handler.mu.Lock()
+	handler.fallbackShown = true
+	handler.mu.Unlock()
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), handler)
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
+
+	monitor.mu.Lock()
+	monitor.fallbackSince = time.Now().Add(-(CHROMIUM_FALLBACK_HOLD + time.Second))
+	monitor.restartHistory = []time.Time{time.Now(), time.Now(), time.Now()}
+	monitor.mu.Unlock()
+
+	err := monitor.check(context.Background())
+	if err == nil || !strings.Contains(err.Error(), errChromiumHeadless.Error()) {
+		t.Fatalf("expected an expected-tagged failure, got %v", err)
+	}
+	if got := readRestartCount(t, rebootFile); got != "0" {
+		t.Fatalf("headless during hold must not reboot, got %s", got)
+	}
+	monitor.mu.Lock()
+	inFallback := !monitor.fallbackSince.IsZero()
+	headless := monitor.headless
+	monitor.mu.Unlock()
+	if inFallback {
+		t.Fatal("hold must be abandoned when the display goes away")
+	}
+	if !headless {
+		t.Fatal("monitor must latch headless after abandoning the hold")
+	}
+	monitor.mu.Lock()
+	history := len(monitor.restartHistory)
+	monitor.mu.Unlock()
+	if history != 0 {
+		t.Fatalf("abandoning the hold must forget the exhausted budget, got %d stamps", history)
+	}
+	if handler.isFallbackShown() {
+		t.Fatal("fallbackShown must be cleared so the reconnect path can restart the kiosk")
+	}
+}
+
+// TestChromiumMonitorFallbackHoldDefersRebootForDevConsole pins that a
+// developer on tty2 while the error screen is up (the exact moment the console
+// exists for) is not rebooted out of their shell: an expired hold is
+// re-anchored while another VT is active and a full hold starts over on tty1.
+func TestChromiumMonitorFallbackHoldDefersRebootForDevConsole(t *testing.T) {
+	_, _, _, rebootFile := installFallbackStubs(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty2")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+
+	monitor.mu.Lock()
+	monitor.fallbackSince = time.Now().Add(-(CHROMIUM_FALLBACK_HOLD + time.Second))
+	monitor.mu.Unlock()
+
+	for i := 0; i < 3; i++ {
+		err := monitor.check(context.Background())
+		if err == nil || !strings.Contains(err.Error(), errChromiumHeadless.Error()) {
+			t.Fatalf("check %d: expected an expected-tagged failure, got %v", i, err)
+		}
+	}
+	if got := readRestartCount(t, rebootFile); got != "0" {
+		t.Fatalf("developer console during hold must defer the reboot, got %s reboots", got)
+	}
+	monitor.mu.Lock()
+	since := monitor.fallbackSince
+	monitor.mu.Unlock()
+	if since.IsZero() || time.Since(since) > time.Minute {
+		t.Fatalf("hold must stay armed and re-anchored while tty2 is active, fallbackSince=%v", since)
+	}
+
+	// Back on tty1 with the (re-anchored) hold still running: no reboot yet.
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against closed endpoint")
+	}
+	if got := readRestartCount(t, rebootFile); got != "0" {
+		t.Fatalf("re-anchored hold must not reboot immediately on return to tty1, got %s", got)
+	}
+}
+
+// TestCommandHandlerRestartKioskRefusedWhileFallbackShown pins the RAM/GPU
+// handler interaction: their restartKiosk calls must not run the kiosk's
+// ExecStartPre (which stops the fallback unit) while the error screen is
+// deliberately up, and must work again once the monitor clears it.
+func TestCommandHandlerRestartKioskRefusedWhileFallbackShown(t *testing.T) {
+	restartFile, _, _, _ := installFallbackStubs(t)
+	handler := NewCommandHandler(zap.NewNop(), nil)
+	if got := handler.showKioskFallback(context.Background()); got != kioskFallbackShown {
+		t.Fatalf("expected fallback screen to be shown by the stub, got %v", got)
+	}
+	if !handler.isFallbackShown() {
+		t.Fatal("expected fallbackShown after a successful show")
+	}
+	handler.restartKiosk(context.Background())
+	if got := readRestartCount(t, restartFile); got != "0" {
+		t.Fatalf("restartKiosk must be refused while the fallback is showing, got %s", got)
+	}
+	handler.clearKioskFallback()
+	handler.restartKiosk(context.Background())
+	if got := readRestartCount(t, restartFile); got != "1" {
+		t.Fatalf("restartKiosk must work again after clearKioskFallback, got %s", got)
+	}
+}
+
+// TestChromiumMonitorFallbackBusyRetriesWithoutReboot pins the contention
+// path: if a RAM/GPU kiosk restart holds the kiosk lock at the moment the
+// budget is exhausted, nothing was stopped, so the monitor must neither reboot
+// nor arm the hold; the next tick retries once the lock is free.
+func TestChromiumMonitorFallbackBusyRetriesWithoutReboot(t *testing.T) {
+	restartFile, stopFile, fallbackFile, rebootFile := installFallbackStubs(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	handler := NewCommandHandler(zap.NewNop(), nil)
+	handler.mu.Lock()
+	handler.kioskOpInFlight = true
+	handler.mu.Unlock()
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), handler)
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + time.Minute))
+	monitor.restartHistory = []time.Time{time.Now(), time.Now()}
+	monitor.mu.Unlock()
+
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against closed endpoint")
+	}
+	for name, f := range map[string]string{"restart": restartFile, "stop": stopFile, "fallback": fallbackFile, "reboot": rebootFile} {
+		if got := readRestartCount(t, f); got != "0" {
+			t.Fatalf("busy path must do nothing, %s count = %s", name, got)
+		}
+	}
+	monitor.mu.Lock()
+	inFallback := !monitor.fallbackSince.IsZero()
+	monitor.mu.Unlock()
+	if inFallback {
+		t.Fatal("hold must not be armed while the fallback could not be shown")
+	}
+
+	// Lock released: the next tick shows the screen and arms the hold.
+	handler.mu.Lock()
+	handler.kioskOpInFlight = false
+	handler.mu.Unlock()
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against closed endpoint")
+	}
+	if got := readRestartCount(t, fallbackFile); got != "1" {
+		t.Fatalf("expected fallback shown on retry, got %s", got)
+	}
+	if got := readRestartCount(t, rebootFile); got != "0" {
+		t.Fatalf("retry must not reboot, got %s", got)
+	}
+	monitor.mu.Lock()
+	inFallback = !monitor.fallbackSince.IsZero()
+	monitor.mu.Unlock()
+	if !inFallback {
+		t.Fatal("expected hold armed after the retry")
+	}
+}
+
+// TestChromiumMonitorReconnectAfterAbandonedHoldRestartsKiosk pins the
+// customer-visible path behind forgetting the budget: unplug the display
+// during the error screen, plug it back within five minutes, wait out the
+// reconnect grace — the stopped kiosk must be RESTARTED, not shown a second
+// fallback because three stale stamps still sit inside the window.
+func TestChromiumMonitorReconnectAfterAbandonedHoldRestartsKiosk(t *testing.T) {
+	restartFile, _, fallbackFile, rebootFile := installFallbackStubs(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	handler := NewCommandHandler(zap.NewNop(), nil)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), handler)
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
+
+	monitor.mu.Lock()
+	monitor.fallbackSince = time.Now().Add(-time.Minute)
+	monitor.restartHistory = []time.Time{time.Now(), time.Now(), time.Now()}
+	monitor.mu.Unlock()
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure while headless")
+	}
+
+	// Display back; the reconnect grants a fresh grace, which we then let expire.
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against closed endpoint")
+	}
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + time.Minute))
+	monitor.mu.Unlock()
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against closed endpoint")
+	}
+	if got := readRestartCount(t, restartFile); got != "1" {
+		t.Fatalf("expected a kiosk restart after the reconnect grace, got %s", got)
+	}
+	if got := readRestartCount(t, fallbackFile); got != "0" {
+		t.Fatalf("reconnect must not re-enter the fallback, got %s", got)
+	}
+	if got := readRestartCount(t, rebootFile); got != "0" {
+		t.Fatalf("reconnect must not reboot, got %s", got)
+	}
+}
+
+// TestChromiumMonitorFallbackNotArmedWhenKioskStopFails pins that a failed
+// `systemctl --user stop chromium-kiosk.service` takes the immediate-reboot
+// path: cage would still own DRM, so plymouth could not render and a 15-minute
+// hold would sit on a frozen kiosk.
+func TestChromiumMonitorFallbackNotArmedWhenKioskStopFails(t *testing.T) {
+	_, stopFile, fallbackFile, rebootFile := installFallbackStubs(t)
+	if err := os.WriteFile(stopFile+".fail", nil, 0o600); err != nil {
+		t.Fatalf("failed to arm stop failure: %v", err)
+	}
+	endpoint := closedLocalHTTPEndpoint(t)
+	handler := NewCommandHandler(zap.NewNop(), nil)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), handler)
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + time.Minute))
+	monitor.restartHistory = []time.Time{time.Now(), time.Now()}
+	monitor.mu.Unlock()
+
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against closed endpoint")
+	}
+	if got := readRestartCount(t, fallbackFile); got != "0" {
+		t.Fatalf("fallback unit must not be started after a failed kiosk stop, got %s", got)
+	}
+	if got := readRestartCount(t, rebootFile); got != "1" {
+		t.Fatalf("expected the immediate reboot path, got %s reboots", got)
+	}
+	if handler.isFallbackShown() {
+		t.Fatal("fallbackShown must stay false after a failed stop")
+	}
+	monitor.mu.Lock()
+	inFallback := !monitor.fallbackSince.IsZero()
+	monitor.mu.Unlock()
+	if inFallback {
+		t.Fatal("hold must not be armed after a failed stop")
 	}
 }

@@ -35,6 +35,11 @@ const (
 	pushRetryMaxAttempts = 5
 )
 
+// errPushRefused wraps a push-gate refusal (see Scheduler.SetPushGate) so
+// recompute can tell policy from a CDP failure: a refusal holds the current
+// active set and must not arm the transient-failure retry.
+var errPushRefused = errors.New("displayAt push refused by policy")
+
 // errStopped marks a push dropped because the scheduler is shutting down. It
 // must stay distinguishable from a genuine push failure: a stopped push must
 // never arm a retry, or Stop would spawn the very goroutine it is retiring.
@@ -62,6 +67,15 @@ type Scheduler interface {
 	// nothing is cached, or when a restart-restored source has not yet been
 	// refetched into an in-memory playlist.
 	RecomputeNow(ctx context.Context)
+	// RecomputeIfStale re-filters the cached playlist and pushes the active
+	// cohort ONLY if it differs from the one last delivered — no forced
+	// re-cast of what is already on screen. It exists for the push gate's
+	// refusal path: a refused cutover leaves lastActive untouched and arms
+	// no retry, and once the schedule's final boundary has passed there is
+	// no timer either, so relaxing the policy needs a trigger that re-drives
+	// exactly the undelivered cohort and nothing else. Same no-op conditions
+	// as RecomputeNow.
+	RecomputeIfStale(ctx context.Context)
 	// ResumePersisted arms timers and force-casts from the in-memory full
 	// playlist. It is used only after the refresher has reconstructed scheduler
 	// state from a fetched source or after a transient refresh failure while a
@@ -95,6 +109,43 @@ type Scheduler interface {
 	// recomputes. Cast and refresh paths must wrap their displayPlaylist CDP
 	// send so a stale RecomputeNow cannot overwrite a newer cast mid-flight.
 	WithPlayerPush(fn func())
+	// SetPushObserver registers fn to run around every scheduler-owned push
+	// (timer cutover, wake, CDP reconnect, retry), under the player-push
+	// lock so it is ordered against cast/refresh sends: once with
+	// PushStarting just before the CDP send, and once with PushAccepted
+	// after a reply the player accepted (never after a rejection). The one
+	// consumer today is signature verification's active-verdict slot: it
+	// invalidates at PushStarting — the player may be showing the new
+	// cohort from the moment the send lands — and promotes the parked
+	// verdict at PushAccepted, the only point at which controld learns the
+	// cohort actually reached the screen (feral-file/ffos-user#307). Set
+	// once at wiring time before any push; nil is a no-op.
+	SetPushObserver(fn func(PushPhase))
+	// SetPushGate registers fn to be asked, with the exact playlist about to
+	// be sent, before every scheduler-owned push (timer cutover, wake, CDP
+	// reconnect, retry). A non-nil error refuses the push: the player keeps
+	// its current active set, the schedule and its timer stay armed, and no
+	// retry is armed — a refusal is policy, not a transient failure, and the
+	// next boundary, wake or reconnect asks again. The one consumer is
+	// signature verification's strict mode (feral-file/ffos-user#307): the
+	// owner can switch to strict AFTER a schedule was accepted under notify,
+	// so eligibility must be decided when the cohort is about to reach the
+	// screen, not when the cast was admitted. Set once at wiring time before
+	// any push; nil is a no-op.
+	SetPushGate(fn func(playlist *dp1.Playlist) error)
+	// SetInlineDynamicSource retains the last inline dynamic playlist a cast
+	// accepted, WITH its signature verdict, or clears it with nil. A
+	// non-displayAt cast makes PrepareWithSource drop the scheduler source,
+	// and player status serializes without the verdict (dp1.Playlist.
+	// Verification is json:"-"), so without this a strict refresh would
+	// re-resolve a verdict-less copy and skip every dynamic update of a
+	// playlist that was accepted valid (feral-file/ffos-user#307). Survives
+	// the non-displayAt source clear precisely because it is a separate slot.
+	SetInlineDynamicSource(playlist *dp1.Playlist)
+	// InlineDynamicSource returns the retained verified inline dynamic
+	// document (a clone, verdict intact), or nil. The refresher prefers it
+	// over the player-status copy when the on-screen playlist id matches.
+	InlineDynamicSource() *dp1.Playlist
 	// AuthorityToken changes whenever scheduler-owned playlist authority
 	// changes. Refreshers snapshot it before slow URL/dynamic resolution and
 	// re-check under WithPlayerPush so stale refresh results cannot overwrite a
@@ -175,6 +226,24 @@ type scheduler struct {
 	// must not push until the refresher fetches the source and prepares a fresh
 	// playlist.
 	restoredPending bool
+	// pushObserver, when set (SetPushObserver), runs around each
+	// scheduler-owned push, inside push and therefore under pushMu. Written
+	// once before any push; read without a lock on the push path, same
+	// single-writer contract as status.poller's observers.
+	pushObserver func(PushPhase)
+	// pushToaster, when set (SetPushToaster), is handed the cohort a
+	// scheduler-owned push just delivered, at PushAccepted, so the on-screen
+	// signature notice rides the actual cutover rather than the accepting
+	// cast (feral-file/ffos-user#307). Same single-writer contract as
+	// pushObserver; the policy (mode + verdict → notice) lives in the wiring.
+	pushToaster func(*dp1.Playlist)
+	// pushGate, when set (SetPushGate), is consulted inside push before the
+	// observer and the CDP send. Same single-writer contract as pushObserver.
+	pushGate func(*dp1.Playlist) error
+	// inlineDynamic is the retained verified inline dynamic source (see
+	// SetInlineDynamicSource). Guarded by mu; a separate slot from source so
+	// it outlives the non-displayAt source clear.
+	inlineDynamic *dp1.Playlist
 	// source tracks the refreshable identity for scheduler-owned pushes. The
 	// full cached playlist supplies future items; source keeps player status
 	// tied to the controller/refresher URL that can be re-resolved later.
@@ -406,6 +475,10 @@ func (s *scheduler) RecomputeNow(ctx context.Context) {
 	s.recompute(ctx, true)
 }
 
+func (s *scheduler) RecomputeIfStale(ctx context.Context) {
+	s.recompute(ctx, false)
+}
+
 func (s *scheduler) ResumePersisted(ctx context.Context) {
 	if s.resumePersisted(ctx) {
 		// A transient source outage must not restart the current artwork just
@@ -489,6 +562,14 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 		if err := s.push(ctx, active, source); err != nil {
 			if errors.Is(err, errStopped) {
 				s.logger.Debug("Dropped displayAt push: scheduler stopped")
+				return
+			}
+			if errors.Is(err, errPushRefused) {
+				// Policy, not a fault: lastActive is left alone so the next
+				// timer/wake/reconnect recompute still sees the cohort as
+				// unsent and asks the gate again, but no retry is armed —
+				// a refusal does not clear itself with time.
+				s.logger.Warn("displayAt cutover refused; holding current active set", zap.Error(err))
 				return
 			}
 			s.logger.Warn("Failed to push recomputed displayAt playlist", zap.Error(err))
@@ -814,6 +895,18 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 		return errStopped
 	}
 
+	// Policy gate AFTER the stop latch and BEFORE the observer: a refused
+	// push never starts, so the observer's PushStarting invalidation of the
+	// on-screen verdict must not fire for it.
+	if s.pushGate != nil {
+		if gerr := s.pushGate(playlist); gerr != nil {
+			return fmt.Errorf("%w: %w", errPushRefused, gerr)
+		}
+	}
+
+	if s.pushObserver != nil {
+		s.pushObserver(PushStarting)
+	}
 	result, err := s.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
 		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
 	})
@@ -823,7 +916,54 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	if !playerresponse.OK(result) {
 		return fmt.Errorf("player rejected displayAt playlist")
 	}
+	if s.pushObserver != nil {
+		s.pushObserver(PushAccepted)
+	}
+	// The cohort is on screen now: surface its verdict on the wall, bound to
+	// this accepted cutover (feral-file/ffos-user#307).
+	if s.pushToaster != nil {
+		s.pushToaster(playlist)
+	}
 	return nil
+}
+
+// PushPhase is the moment a push observer is invoked at (see
+// Scheduler.SetPushObserver).
+type PushPhase int
+
+const (
+	// PushStarting: the CDP send is about to go out; the player may show the
+	// new cohort from this moment on.
+	PushStarting PushPhase = iota
+	// PushAccepted: the player accepted the push.
+	PushAccepted
+)
+
+func (s *scheduler) SetPushObserver(fn func(PushPhase)) {
+	s.pushObserver = fn
+}
+
+// SetPushToaster registers the cohort-toast hook (see the pushToaster field).
+// Type-asserted seam like SetResetFence was, so mocks and fakes stay
+// untouched. Call once at wiring time.
+func (s *scheduler) SetPushToaster(fn func(*dp1.Playlist)) {
+	s.pushToaster = fn
+}
+
+func (s *scheduler) SetPushGate(fn func(playlist *dp1.Playlist) error) {
+	s.pushGate = fn
+}
+
+func (s *scheduler) SetInlineDynamicSource(playlist *dp1.Playlist) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inlineDynamic = clonePlaylist(playlist)
+}
+
+func (s *scheduler) InlineDynamicSource() *dp1.Playlist {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return clonePlaylist(s.inlineDynamic)
 }
 
 // HasDisplayAtSchedule reports whether a playlist carries at least one timed

@@ -16,11 +16,15 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
+	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -84,6 +88,22 @@ type handler struct {
 	// change. nil (tests, a build wired before the seam) degrades to the old
 	// behavior: the change applies to the next cast or periodic refresh.
 	policyRefresher PolicyRefresher
+	// verifySignatures and activeVerdict are set together by
+	// SetSignatureVerification. verifySignatures gates the inline
+	// (dp1_call) and cached-copy verification this package performs itself;
+	// the URL path's verdict is attached by the dp1 package at fetch time
+	// and merely consumed here. activeVerdict may be nil even when
+	// verification is on.
+	verifySignatures bool
+	activeVerdict    *sigverify.Active
+	verificationMode func() sigverify.Mode
+	// toast, when set (SetPlayerToast), surfaces the signature-verification
+	// notice on the wall. It is a non-blocking Notifier (a single-slot
+	// dispatcher): Notify queues the latest notice, Clear drops a pending one
+	// so a stale warning never shows over newer artwork. nil (unwired, or an
+	// older player) means no toast, never a changed cast outcome
+	// (feral-file/ffos-user#307).
+	toast playertoast.Notifier
 }
 
 func SetContentPolicy(h Handler, policy *contentpolicy.Store, logger *zap.Logger) {
@@ -292,6 +312,96 @@ func SetSourceProber(h Handler, prober offlinecache.SourceProber, logger *zap.Lo
 
 func (h *handler) setSourceProber(prober offlinecache.SourceProber) {
 	h.sourceProber = prober
+}
+
+// SignatureVerificationOptions is what SetSignatureVerification wires. A
+// struct rather than positional arguments so later phases (the persisted
+// mode, the player toast) extend it without another seam.
+type SignatureVerificationOptions struct {
+	// Active, when non-nil, receives the verdict of every playlist that
+	// actually reaches the player, for the status poller's player_status
+	// annotation (see sigverify.Active). Optional.
+	Active *sigverify.Active
+	// Mode, when non-nil, returns the owner's current verification mode
+	// (read from its persisted record on every cast, so a change from the
+	// app applies to the next cast with no restart). nil ⇒ DefaultMode.
+	Mode func() sigverify.Mode
+}
+
+// SetSignatureVerification turns on DP-1 signature verification of every
+// displayPlaylist cast (feral-file/ffos-user#307) on h, if h supports it —
+// the concrete *handler built by New, NOT the storm-protection gate wrapper,
+// so callers must wire it against the raw handler before NewGate wraps it
+// (SetSourceProber's contract). Not called ⇒ verification off: playlists
+// carry no verdict and replies carry no signatureStatus, which is exactly
+// the shape old firmware has.
+func SetSignatureVerification(h Handler, opts SignatureVerificationOptions, logger *zap.Logger) {
+	setter, ok := h.(interface {
+		setSignatureVerification(SignatureVerificationOptions)
+	})
+	if !ok {
+		logger.Warn("Command handler does not support signature verification wiring")
+		return
+	}
+	setter.setSignatureVerification(opts)
+}
+
+func (h *handler) setSignatureVerification(opts SignatureVerificationOptions) {
+	h.verifySignatures = true
+	h.activeVerdict = opts.Active
+	h.verificationMode = opts.Mode
+}
+
+func (h *handler) currentVerificationMode() sigverify.Mode {
+	if h.verificationMode == nil {
+		return sigverify.DefaultMode
+	}
+	return h.verificationMode()
+}
+
+// SetPlayerToast wires the on-screen signature-notice surface onto h (if h is
+// the concrete handler built by New), mirroring SetSignatureVerification. Set
+// once at wiring time; nil leaves toasts off.
+func SetPlayerToast(h Handler, notifier playertoast.Notifier, logger *zap.Logger) {
+	setter, ok := h.(interface{ setPlayerToast(playertoast.Notifier) })
+	if !ok {
+		logger.Warn("Command handler does not support player toast wiring")
+		return
+	}
+	setter.setPlayerToast(notifier)
+}
+
+func (h *handler) setPlayerToast(notifier playertoast.Notifier) {
+	h.toast = notifier
+}
+
+// toastForEpoch surfaces the notice the (mode, status) policy calls for at an
+// accepted player transition, FENCED to the epoch the transition's pre-send
+// invalidation created: NotifyIfEpoch enqueues only if no newer transition
+// (a concurrent generation bump, say) advanced the epoch between the send and
+// this notify. A silent/valid transition Clears unconditionally (it only ever
+// supersedes). mode is the castMode snapshot, so a concurrent
+// setSignatureVerificationMode cannot relabel it. Non-blocking
+// (feral-file/ffos-user#307).
+func (h *handler) toastForEpoch(mode sigverify.Mode, status sigverify.Status, epoch uint64) {
+	if h.toast == nil {
+		return
+	}
+	if notice, ok := sigverify.ToastFor(mode, status); ok {
+		h.toast.NotifyIfEpoch(notice, epoch)
+	} else {
+		h.toast.Clear()
+	}
+}
+
+// verdictStatus is the Status the toast policy keys on: a nil verdict (the
+// offline cached copy) has no status, which under strict still toasts
+// "rejected" and under notify toasts nothing.
+func verdictStatus(v *sigverify.Verdict) sigverify.Status {
+	if v == nil {
+		return ""
+	}
+	return v.Status
 }
 
 func (h *handler) currentGeneration() uint64 {
@@ -575,6 +685,35 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var playlist *dp1.Playlist
 		var schedulerSnapshot playlistschedule.Snapshot
 		var schedulerSource playlistschedule.Source
+		// castMode is the verification mode snapshot for THIS cast, taken at
+		// the admission decision below and reused for the strict gate and any
+		// toast, so a concurrent mode change cannot relabel the cast (#307).
+		castMode := sigverify.DefaultMode
+		// toastEpoch fences a strict-refusal toast against a newer transition:
+		// this cast resolves (possibly slowly, for a URL) before it can refuse,
+		// and a newer cast/default/cutover could replace the artwork meanwhile.
+		// Snapshot the display-transition token now, BEFORE resolution, and
+		// emit the rejection only if it still holds (NotifyIfEpoch).
+		var toastEpoch uint64
+		if h.toast != nil {
+			toastEpoch = h.toast.Epoch()
+		}
+		// castAuthority is the second fence for that same refusal: a
+		// future-only displayAt cast that lands while this one resolves
+		// takes scheduler authority, commits and returns deferred WITHOUT a
+		// CDP write or a toast Clear, so the epoch does not move. Sampled
+		// before resolution and rechecked under WithPlayerPush at the
+		// refusal, exactly as the refresher fences its own (#307).
+		var castAuthority uint64
+		if h.scheduler != nil {
+			castAuthority = h.scheduler.AuthorityToken()
+		}
+		// sendEpoch is captured by the pre-send invalidation (Clear) below and
+		// used by the post-send toast: a generation bump that Clears the toast
+		// after the send but before the notify advances the epoch past this,
+		// so the accepted-transition notice is dropped rather than shown over
+		// the reloaded page (feral-file/ffos-user#307).
+		var sendEpoch uint64
 		// replayScopeTouched records whether THIS request reached
 		// syncReplayScope (even a failed sync counts — it still bumps the
 		// playback generation). The corrective resync in the failure defer
@@ -694,11 +833,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// capture.md §6 and Service.CachedPlaylistForURL's
 					// doc). This is a "last known good" copy, not a live
 					// re-resolution: it will not reflect anything
-					// published at url after it was downloaded, and (by
-					// construction, since it can only exist if it was
-					// downloaded successfully before) already crossed the
-					// daemon's source-trust boundary. Legacy controld does not
-					// cryptographically verify playlist signatures here.
+					// published at url after it was downloaded, and it
+					// carries NO signature verdict — the saved body is a
+					// typed, hydrated re-marshal, not the signed bytes
+					// (see loadCachedPlaylistForURL's doc) — so the reply
+					// and player_status omit signatureStatus for it.
 					cachedPlaylist, cacheErr := h.loadCachedPlaylistForURL(url)
 					if cacheErr != nil {
 						return nil, err
@@ -716,9 +855,23 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("playlist is not a map")
 				}
 
+				// The bytes the document is decoded from AND verified on.
+				// Preferred: the caller's own `dp1_call` token, kept
+				// verbatim by the ingress decoders (Command.RawArguments) —
+				// a signer covered exactly those bytes. Fallback: a
+				// re-marshal of the decoded map, only for commands built
+				// in-process (OOM recovery, tests) that never had a wire
+				// form. The fallback is lossy in a way a verifier feels:
+				// encoding/json HTML-escapes `&`/`<`/`>`, six bytes each,
+				// which can inflate the document past
+				// sigverify.MaxDocumentBytes and report an honest document
+				// as invalid — so the wire token wins. (Its float64
+				// rounding of large integers is absorbed by JCS, see
+				// commands.Command.RawArguments.)
 				var playlistBytes []byte
-				playlistBytes, err = h.json.Marshal(playlistMap)
-				if err != nil {
+				if raw, hasRaw := command.RawArgument("dp1_call"); hasRaw {
+					playlistBytes = raw
+				} else if playlistBytes, err = h.json.Marshal(playlistMap); err != nil {
 					return nil, fmt.Errorf("failed to marshal playlist: %w", err)
 				}
 
@@ -736,6 +889,16 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
 				}
 
+				// Verify those bytes, NOT the typed struct just decoded from
+				// them: the struct drops any field it does not know, and a
+				// signer covered every field, so verifying after the typed
+				// decode would misreport an honest document as tampered.
+				// Also before dynamic hydration below, which rewrites items.
+				if h.verifySignatures {
+					verdict := sigverify.Verify(playlistBytes)
+					playlist.Verification = &verdict
+				}
+
 				if playlist.HasDynamicContent() {
 					schedulerSource = playlistschedule.Source{DynamicPlaylist: playlist}
 					playlist, err = h.dp1.ProcessDynamicPlaylistForCast(ctx, *playlist)
@@ -747,6 +910,69 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 			default:
 				return nil, fmt.Errorf("unknown payload type")
+			}
+
+			// Signature verdict (#307). Logged once here, reported on the
+			// reply and player_status below. nil when verification is off or
+			// the document could not be verified (the offline cached copy).
+			if playlist.Verification != nil {
+				h.logSignatureVerdict(playlist.Verification, playlist.ID, schedulerSource.PlaylistURL)
+			}
+
+			// Strict mode is the one place a verdict changes what plays:
+			// anything that is not proven valid is refused — unsigned,
+			// invalid, or unverifiable (a cached copy carries no verdict, and
+			// a strict device does not guess). Placed BEFORE the source
+			// preflight and BEFORE the playback lock and scheduler snapshot,
+			// so there is nothing to restore; err is ASSIGNED so the deferred
+			// playback-failure accounting above records the rejection, exactly
+			// like the preflight's own rejection. The previous artwork stays.
+			// Silent and notify never reach here: they report and play.
+			// Take the mode snapshot at this admission decision (see castMode).
+			if h.verifySignatures {
+				castMode = h.currentVerificationMode()
+			}
+			if h.verifySignatures && castMode == sigverify.ModeStrict {
+				if rejection := strictRejection(playlist.Verification); rejection != nil {
+					h.logger.Warn("displayPlaylist: cast rejected by strict signature verification",
+						zap.String("reason", rejection.Reason),
+						zap.String("playlist_id", string(helper.TruncateBytes([]byte(playlist.ID), logger.MAX_FIELD_LENGTH))))
+					err = rejection
+					// Strict refused the cast; tell the wall — but only if no
+					// newer transition replaced the artwork while this cast
+					// resolved (NotifyIfEpoch against the pre-resolution
+					// snapshot) AND scheduler authority still belongs to it
+					// (see castAuthority). The authority check runs under the
+					// scheduler push lock so it orders against the cast that
+					// takes authority rather than racing it; NotifyIfEpoch is
+					// non-blocking, so nothing waits under the lock. No lock
+					// is held here yet (LockPlayback and the send's own
+					// WithPlayerPush come later), so this cannot nest.
+					// Best-effort (#307).
+					if h.toast != nil {
+						// authorityHeld travels WITH the notice: the dispatcher
+						// re-runs it before dialing and at the evaluate, so a
+						// future-only cast that takes authority AFTER this
+						// queue (no player write, no Clear — invisible to the
+						// epoch) still drops it at the handoff.
+						authorityHeld := func() bool {
+							return h.scheduler == nil || h.scheduler.AuthorityToken() == castAuthority
+						}
+						refuse := func() {
+							if !authorityHeld() {
+								h.logger.Debug("displayPlaylist: strict refusal notice dropped; playlist authority changed during resolution")
+								return
+							}
+							h.toast.NotifyIfEpochGuarded(sigverify.NoticeRejected, toastEpoch, authorityHeld)
+						}
+						if h.scheduler != nil {
+							h.scheduler.WithPlayerPush(refuse)
+						} else {
+							refuse()
+						}
+					}
+					return nil, err
+				}
 			}
 
 			// Public ingress, so an explicitly supplied empty or null
@@ -1061,6 +1287,114 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
+		// publishVerdict records what this cast did to the screen in the
+		// active-verdict slot (#307). It MUST run inside the same player-push
+		// critical section as the send it describes: WithPlayerPush orders
+		// casts, refreshes, and scheduler cutovers, and a publication after
+		// the lock is released could land after a later cast's, leaving the
+		// slot describing a playlist that is no longer on screen. A cast
+		// without a verdict (the cached-copy fallback) CLEARS the slot rather
+		// than leaving a previous cast's verdict standing for the same URL.
+		// A displayAt-deferred acceptance parks the verdict as pending: the
+		// previous playlist keeps showing, and the scheduler's push observer
+		// promotes the pending verdict only when a cohort actually reaches
+		// the player (see sigverify.Active).
+		// Captured BEFORE the scheduler filters the playlist below: the
+		// verdict describes the document as resolved, and the identity is
+		// read from the same pre-filter document so it cannot drift.
+		var castVerdict *sigverify.Verdict
+		var castPlaylistID string
+		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil {
+			castVerdict = playlist.Verification
+			castPlaylistID = playlist.ID
+		}
+		publishVerdict := func(deferred bool) {
+			if h.activeVerdict == nil || commandType != commands.CMD_DISPLAY_PLAYLIST || playlist == nil {
+				return
+			}
+			switch {
+			case deferred && castVerdict != nil:
+				h.activeVerdict.SetPending(castPlaylistID, schedulerSource.PlaylistURL, castVerdict.Status)
+			case deferred:
+				h.activeVerdict.SetPendingUnverified()
+			case castVerdict != nil:
+				h.activeVerdict.Set(castPlaylistID, schedulerSource.PlaylistURL, castVerdict.Status)
+			default:
+				h.activeVerdict.Clear()
+			}
+			// An immediately displayed SCHEDULED cast is also the document
+			// the scheduler will re-push later — the next cohort's cutover,
+			// or the reconnect recompute after the player reloads (which
+			// first cleared current). Those pushes promote pending, so the
+			// verdict must be parked there as well as set; a static inline
+			// schedule has no refresher pass that would restage it.
+			if !deferred && h.scheduler != nil && h.scheduler.HasCache() {
+				if castVerdict != nil {
+					h.activeVerdict.SetPending(castPlaylistID, schedulerSource.PlaylistURL, castVerdict.Status)
+				} else {
+					h.activeVerdict.SetPendingUnverified()
+				}
+			}
+			// Retain the verified inline dynamic document (verdict intact) so a
+			// strict refresh re-resolves THIS trusted source instead of the
+			// verdict-less player-status copy — a non-displayAt cast makes the
+			// scheduler drop its source, and player status has no verdict, so
+			// without this a valid inline dynamic playlist would refresh-skip
+			// forever under strict (feral-file/ffos-user#307). Cleared for any
+			// other cast, which is no longer the inline dynamic on screen.
+			if !deferred && h.scheduler != nil {
+				if schedulerSource.DynamicPlaylist != nil && schedulerSource.PlaylistURL == "" {
+					h.scheduler.SetInlineDynamicSource(schedulerSource.DynamicPlaylist)
+				} else {
+					h.scheduler.SetInlineDynamicSource(nil)
+				}
+			}
+		}
+
+		// invalidateVerdictBeforeSend runs immediately before any send that
+		// can replace what is on screen. From the moment the send lands the
+		// player may be showing the new document, and the status poller —
+		// which WithPlayerPush does not block — could match the previous
+		// document's slot through the shared URL in the window before the
+		// accepted reply is processed. Clearing first makes that window an
+		// omission, never a false attestation; the publication after the
+		// reply then sets the new verdict. A failed send leaves the slot
+		// cleared, which is the safe direction.
+		invalidateVerdictBeforeSend := func() {
+			if h.activeVerdict != nil {
+				h.activeVerdict.ClearCurrent()
+			}
+			// Drop any queued toast as part of the SAME pre-send invalidation,
+			// under the push lock, and capture the epoch it created: this send
+			// is about to replace the artwork, so a stale warning must not
+			// show during the window before the post-send notify, and that
+			// notify (toastForEpoch) is fenced to this epoch (#307).
+			if h.toast != nil {
+				sendEpoch = h.toast.ClearAndEpoch()
+			}
+		}
+
+		// clearVerdictForDefaultPlayback: an accepted displayDefaultPlaylist
+		// puts player-owned content on screen that controld never verified —
+		// or, with onlyIfNoPlaylist, may no-op. Either way controld can no
+		// longer vouch for what is showing, so current is cleared (omission,
+		// never a stale claim). Pending is kept: this command does not clear
+		// scheduler authority (see the case comment below).
+		clearVerdictForDefaultPlayback := func() {
+			if commandType != commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+				return
+			}
+			if h.activeVerdict != nil {
+				h.activeVerdict.ClearCurrent()
+			}
+			// Player-owned default artwork replaced whatever a prior cast put
+			// up, so a signature warning queued for that cast must not still
+			// reach the wall over the default content (#307).
+			if h.toast != nil {
+				h.toast.Clear()
+			}
+		}
+
 		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the
 		// scheduler push lock with RecomputeNow so a stale timed push cannot land
 		// after a newer cast or OOM-recovery fallback.
@@ -1089,6 +1423,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// the screen, so interception must stay pointed at the
 					// playlist that keeps displaying.
 					h.scheduler.Commit()
+					publishVerdict(true)
 					// A relayer RPC and hub request both need an explicit acceptance
 					// response even though no CDP write was valid. This also prevents
 					// playback metrics from treating the deferred schedule as a failure.
@@ -1121,16 +1456,29 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return
 				}
 				command.Arguments["dp1_call"] = playlist
+				invalidateVerdictBeforeSend()
 				result, err = h.sendCDPRequest(command)
 				if err != nil || !playerresponse.OK(result) {
 					h.scheduler.Restore(schedulerSnapshot)
 				} else {
 					h.scheduler.Commit()
+					publishVerdict(false)
+					// The player accepted this cohort: surface a non-valid
+					// verdict on the wall, INSIDE the push lock so the toast is
+					// ordered with the artwork it describes and a later cast
+					// cannot slip in first (#307). Deferred (future-only)
+					// schedules take the empty-items branch above and do NOT
+					// toast here — their scheduler cutover carries the notice.
+					h.toastForEpoch(castMode, verdictStatus(playlist.Verification), sendEpoch)
 				}
 			})
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
 			h.scheduler.WithPlayerPush(func() {
+				invalidateVerdictBeforeSend()
 				result, err = h.sendCDPRequest(command)
+				if err == nil && playerresponse.OK(result) {
+					clearVerdictForDefaultPlayback()
+				}
 			})
 		default:
 			if commandType == commands.CMD_DISPLAY_PLAYLIST {
@@ -1145,7 +1493,19 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				}
 				command.Arguments["dp1_call"] = playlist
 			}
+			if commandType == commands.CMD_DISPLAY_PLAYLIST || commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+				invalidateVerdictBeforeSend()
+			}
 			result, err = h.sendCDPRequest(command)
+			if err == nil && playerresponse.OK(result) {
+				// No scheduler ⇒ no push lock to be inside of; publishing
+				// right after the send is the tightest ordering available.
+				publishVerdict(false)
+				clearVerdictForDefaultPlayback()
+				if commandType == commands.CMD_DISPLAY_PLAYLIST {
+					h.toastForEpoch(castMode, verdictStatus(playlist.Verification), sendEpoch)
+				}
+			}
 		}
 		if err != nil {
 			// No restore-on-error here: every CMD_DISPLAY_PLAYLIST failure path
@@ -1198,6 +1558,15 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			result = map[string]interface{}{
 				"message": map[string]interface{}{"ok": true, "recovered": "navigate"},
 			}
+		}
+
+		// Report the signature verdict on the accepted reply (both the
+		// deferred acceptance map and the player's own ok reply). Additive
+		// keys only: existing controllers decide success by ok and ignore
+		// the rest. The active-verdict slot was already updated inside the
+		// push critical section above (publishVerdict).
+		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil && playlist.Verification != nil && playerresponse.OK(result) {
+			result = annotateCastReply(result, playlist.Verification)
 		}
 
 		// Force refresh status poller

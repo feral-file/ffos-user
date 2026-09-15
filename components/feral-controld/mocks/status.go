@@ -74,6 +74,18 @@ func (mr *MockStatusPollerMockRecorder) SetStampObserver(fn interface{}) *gomock
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetStampObserver", reflect.TypeOf((*MockStatusPoller)(nil).SetStampObserver), fn)
 }
 
+// SetVerificationLookup mocks base method.
+func (m *MockStatusPoller) SetVerificationLookup(fn func(string, string) (string, bool)) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetVerificationLookup", fn)
+}
+
+// SetVerificationLookup indicates an expected call of SetVerificationLookup.
+func (mr *MockStatusPollerMockRecorder) SetVerificationLookup(fn interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetVerificationLookup", reflect.TypeOf((*MockStatusPoller)(nil).SetVerificationLookup), fn)
+}
+
 // Start mocks base method.
 func (m *MockStatusPoller) Start(ctx context.Context) {
 	m.ctrl.T.Helper()

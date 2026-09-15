@@ -14,41 +14,103 @@ func (c Type) String() string {
 
 // Device control commands
 var deviceCtlCommands = map[Type]bool{
-	CMD_CONNECT:                    true,
-	CMD_SHOW_PAIRING_QR_CODE:       true,
-	CMD_PROFILE:                    true,
-	CMD_KEYBOARD_EVENT:             true,
-	CMD_MOUSE_DRAG_EVENT:           true,
-	CMD_MOUSE_TAP_EVENT:            true,
-	CMD_MOUSE_DOUBLE_TAP_EVENT:     true,
-	CMD_MOUSE_LONG_PRESS_EVENT:     true,
-	CMD_MOUSE_CLICK_AND_DRAG_EVENT: true,
-	CMD_ZOOM_GESTURE:               true,
-	CMD_SCREEN_ROTATION:            true,
-	CMD_SHUTDOWN:                   true,
-	CMD_REBOOT:                     true,
-	CMD_ANALYTICS_TOGGLE:           true,
-	CMD_BETA_FEATURES_TOGGLE:       true,
-	CMD_DEVICE_STATUS:              true,
-	CMD_UPDATE_TO_LATEST:           true,
-	CMD_FACTORY_RESET:              true,
-	CMD_UPLOAD_LOGS:                true,
-	CMD_SET_VOLUME:                 true,
-	CMD_TOGGLE_MUTE:                true,
-	CMD_SSH_ACCESS:                 true,
-	CMD_DDC_PANEL_CONTROL:          true,
-	CMD_DDC_PANEL_STATUS:           true,
-	CMD_SET_SLEEP_SCHEDULE:         true,
-	CMD_SET_DEVICE_NAME:            true,
-	CMD_SLEEP_NOW:                  true,
-	CMD_WAKE_NOW:                   true,
-	CMD_START_WIFI_SETUP:           true,
-	CMD_RUN_NETWORK_DIAGNOSTICS:    true,
+	CMD_CONNECT:                         true,
+	CMD_SHOW_PAIRING_QR_CODE:            true,
+	CMD_PROFILE:                         true,
+	CMD_KEYBOARD_EVENT:                  true,
+	CMD_MOUSE_DRAG_EVENT:                true,
+	CMD_MOUSE_TAP_EVENT:                 true,
+	CMD_MOUSE_DOUBLE_TAP_EVENT:          true,
+	CMD_MOUSE_LONG_PRESS_EVENT:          true,
+	CMD_MOUSE_CLICK_AND_DRAG_EVENT:      true,
+	CMD_ZOOM_GESTURE:                    true,
+	CMD_SCREEN_ROTATION:                 true,
+	CMD_SHUTDOWN:                        true,
+	CMD_REBOOT:                          true,
+	CMD_ANALYTICS_TOGGLE:                true,
+	CMD_BETA_FEATURES_TOGGLE:            true,
+	CMD_DEVICE_STATUS:                   true,
+	CMD_UPDATE_TO_LATEST:                true,
+	CMD_FACTORY_RESET:                   true,
+	CMD_UPLOAD_LOGS:                     true,
+	CMD_SET_VOLUME:                      true,
+	CMD_TOGGLE_MUTE:                     true,
+	CMD_SSH_ACCESS:                      true,
+	CMD_DDC_PANEL_CONTROL:               true,
+	CMD_DDC_PANEL_STATUS:                true,
+	CMD_SET_SLEEP_SCHEDULE:              true,
+	CMD_SET_DEVICE_NAME:                 true,
+	CMD_SET_SIGNATURE_VERIFICATION_MODE: true,
+	CMD_SLEEP_NOW:                       true,
+	CMD_WAKE_NOW:                        true,
+	CMD_START_WIFI_SETUP:                true,
+	CMD_RUN_NETWORK_DIAGNOSTICS:         true,
 }
 
 type Command struct {
 	Type      Type           `json:"command,omitempty"` // FIXME: rename json key after decouple the player and relayer concepts
 	Arguments map[string]any `json:"request,omitempty"` // FIXME: rename json key after decouple the player and relayer concepts
+	// RawArguments is the `request` object exactly as it arrived on the
+	// wire, kept beside the decoded map (feral-file/ffos-user#307). The map
+	// is what handlers work with, but re-encoding it is not the caller's
+	// document: encoding/json HTML-escapes `&`/`<`/`>` (six bytes each), so
+	// a signed inline DP-1 playlist verified from a re-marshal of the map can
+	// inflate past the verifier's size bound and be reported as invalid when
+	// it is not. (Decoding also rounds integers past 2^53 to float64, which
+	// JCS canonicalization happens to absorb — the signer's digest is over
+	// the same ES6-number form — so size, not numeric fidelity, is the reason
+	// the original token is kept.)
+	// Populated only by UnmarshalJSON (both ingress paths decode through it);
+	// nil for commands built in-process, which have no wire form.
+	RawArguments json.RawMessage `json:"-"`
+}
+
+// commandWire is Command minus the custom decoder, so UnmarshalJSON can
+// decode the ordinary fields without recursing into itself.
+type commandWire struct {
+	Type      Type            `json:"command,omitempty"`
+	Arguments map[string]any  `json:"request,omitempty"`
+	Raw       json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON decodes the envelope and additionally retains the `request`
+// token verbatim in RawArguments. It reads the envelope twice (typed, then
+// as a map of raw tokens); both reads are bounded by the ingress body limit.
+func (c *Command) UnmarshalJSON(data []byte) error {
+	var w commandWire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	var tokens map[string]json.RawMessage
+	if err := json.Unmarshal(data, &tokens); err != nil {
+		return err
+	}
+	c.Type = w.Type
+	c.Arguments = w.Arguments
+	c.RawArguments = nil
+	if raw, ok := tokens["request"]; ok && len(raw) > 0 && string(raw) != "null" {
+		c.RawArguments = raw
+	}
+	return nil
+}
+
+// RawArgument returns the wire token for one key of `request`, when the
+// command arrived over the wire (RawArguments set) and the key was present.
+// The token is an exact byte slice of the original document: verify it,
+// never a re-marshal of Arguments.
+func (c Command) RawArgument(key string) (json.RawMessage, bool) {
+	if len(c.RawArguments) == 0 {
+		return nil, false
+	}
+	var tokens map[string]json.RawMessage
+	if err := json.Unmarshal(c.RawArguments, &tokens); err != nil {
+		return nil, false
+	}
+	raw, ok := tokens[key]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return nil, false
+	}
+	return raw, true
 }
 
 func (c Command) JSON() ([]byte, error) {
@@ -100,6 +162,11 @@ const (
 	// capability gate: a controller offers renaming only to a frame whose
 	// status carries the field.
 	CMD_SET_DEVICE_NAME Type = "setDeviceName"
+	// CMD_SET_SIGNATURE_VERIFICATION_MODE sets the owner's DP-1 signature
+	// verification policy for displayPlaylist casts (feral-file/ffos-user#307):
+	// request {"mode": "silent"|"notify"|"strict"}. Persisted in its own
+	// state record; reported as device_status.signatureVerificationMode.
+	CMD_SET_SIGNATURE_VERIFICATION_MODE Type = "setSignatureVerificationMode"
 	// CMD_START_WIFI_SETUP puts the frame into its existing SoftAP setup mode
 	// on the app's request (docs/app-triggered-wifi-setup.md). The reply is
 	// produced BEFORE any radio work — raising the AP severs the link that
