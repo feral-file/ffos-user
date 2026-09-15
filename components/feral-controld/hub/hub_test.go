@@ -1167,11 +1167,13 @@ func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
 	h := New(ctx, mockWS, mockCmd, provider, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
 
 	req := httptest.NewRequest("GET", "/api/status", nil)
+	req.Header.Set("Origin", "http://127.0.0.1:8080")
 	w := httptest.NewRecorder()
 	h.withMiddleware("status", h.handleStatus)(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	assert.Equal(t, "http://127.0.0.1:8080", w.Header().Get("Access-Control-Allow-Origin"))
 
 	var got map[string]any
 	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))

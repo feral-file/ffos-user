@@ -863,7 +863,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 				// reply-less logger.Error fallthrough below, which the
 				// caller can only experience as its own RPC timeout. Warn,
 				// not Error: this is client input being rejected, not a
-				// daemon fault, and must not page through Sentry.
+				// daemon fault, and must not be promoted to an Error log.
 				m.logger.Warn("Cast rejected: no playlist item source is loadable",
 					zap.String("command", commandType.String()),
 					zap.Error(err),

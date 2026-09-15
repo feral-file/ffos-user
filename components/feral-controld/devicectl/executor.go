@@ -3359,10 +3359,10 @@ const logUploadTimeout = 10 * time.Minute
 // logUploadTimeout so the guard always releases.
 // selfInitiated selects the completion-failure log level: controller-initiated
 // uploads keep Error (a support engineer explicitly asked for this bundle and
-// the fire-and-forget reply makes Sentry the only failure signal), while the
+// the fire-and-forget reply makes the Error log the only failure signal), while the
 // AUTOMATIC netlog self-upload logs at Warn — it fires on freshly-healed,
 // often still-restricted networks where failure is routine, and the netlog
-// posture pins that outage-driven telemetry must not become Sentry noise (the
+// posture pins that outage-driven telemetry must not become remote error noise (the
 // ring records the attempt either way).
 func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundleID string, selfInitiated bool) (interface{}, error) {
 	if !e.tryStartLogUpload(ctx, apiKey, supportBundleID, selfInitiated) {

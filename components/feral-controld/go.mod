@@ -9,8 +9,6 @@ require (
 	github.com/display-protocol/dp1-go v0.6.1
 	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260910050001-beb0cdf76be2
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
-	github.com/feral-file/zapsentry v1.0.0
-	github.com/getsentry/sentry-go v0.33.0
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.6.0
