@@ -134,8 +134,9 @@ S3 PUT. And the `device_status` notification feed over the relayer.
   get current lease params only. Full renewal tracking would need NM D-Bus
   subscription (branch D). First release records lease snapshot + changes
   between snapshots, which is enough to catch churn.
-- **Sentry noise.** The recorder must not route through `logger.Error` (every
-  Error becomes a Sentry event). Classified outages are data, not errors.
+- **Remote-log noise.** The recorder must not route classified outages through
+  `logger.Error`. They are state observations, not application failures, and
+  elevating them distorts the streamed severity signal.
 - **Unknown: `/var/log` writability for the `feralfile` user.** If we later
   want the ring OTA-durable, provisioning a writable dir is a full-image
   change. Explicitly deferred.

@@ -211,7 +211,7 @@ func (c *cloudflareCore) Write(entry zapcore.Entry, fields []zapcore.Field) erro
 		Service:     "feral-controld",
 		Environment: c.writer.environment,
 		DeviceID:    c.writer.deviceID,
-		Message:     sanitizeMessage(entry.Message),
+		Message:     SanitizePublicMessage(entry.Message),
 		Logger:      entry.LoggerName,
 		emittedAt:   entry.Time,
 	}
@@ -421,7 +421,9 @@ func (w *streamWriter) upload(ctx context.Context, records []streamRecord) {
 	fmt.Fprintln(os.Stderr, "Cloudflare log upload failed after retries")
 }
 
-func sanitizeMessage(message string) string {
+// SanitizePublicMessage removes credentials and private URL components from a
+// free-form message before it crosses the device boundary.
+func SanitizePublicMessage(message string) string {
 	message = remoteURLPattern.ReplaceAllStringFunc(message, func(raw string) string {
 		trailing := ""
 		for len(raw) > 0 && strings.ContainsRune(".,);]", rune(raw[len(raw)-1])) {

@@ -16,7 +16,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
-	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	fflogger "github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -49,6 +49,8 @@ type hub struct {
 	json            wrapper.JSON
 	reqSlots        chan struct{}
 	screenshotSlots chan struct{}
+	logEndpoint     string
+	logHTTPClient   *http.Client
 
 	// contactObserver, when set, is invoked once per request on the counted
 	// control-plane routes (cast, status, status_v2) from a NON-loopback
@@ -106,6 +108,8 @@ func New(
 		// in one single-flight lifetime. The capturer's own slot ends when it
 		// returns and therefore cannot bound retained response images by itself.
 		screenshotSlots: make(chan struct{}, 1),
+		logEndpoint:     fflogger.DefaultStreamEndpoint,
+		logHTTPClient:   &http.Client{Timeout: 10 * time.Second},
 	}
 	h.routes()
 	return h
@@ -136,6 +140,7 @@ func (h *hub) routes() {
 	mux.HandleFunc("/api/notification", h.withMiddleware("notification", h.handleNotification))
 	mux.HandleFunc("/api/status", h.withMiddleware("status", h.handleStatus))
 	mux.HandleFunc("/api/v2/status", h.withMiddleware("status_v2", h.handleStatusV2))
+	mux.HandleFunc("/api/logs", h.withMiddleware("player_logs", h.handlePlayerLogs))
 	mux.HandleFunc("/api/screenshot", h.withMiddleware("screenshot", h.handleScreenshot))
 	mux.HandleFunc("/metrics", h.withMiddleware("metrics", metrics.ServeHTTP))
 
@@ -224,7 +229,7 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payloadJSON, _ := payload.JSON()
-	h.logger.Info("Received cast request", zap.ByteString("payload", helper.TruncateBytes(payloadJSON, logger.MAX_FIELD_LENGTH)))
+	h.logger.Info("Received cast request", zap.ByteString("payload", helper.TruncateBytes(payloadJSON, fflogger.MAX_FIELD_LENGTH)))
 
 	if payload.Type == "" {
 		http.Error(w, "Command type is required", http.StatusBadRequest)
