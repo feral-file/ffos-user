@@ -926,6 +926,12 @@ func initializeApp(
 	// switch for a verifier/canonicalization divergence (see
 	// config.SignatureVerificationConfig).
 	sigVerifyEnabled := config.Get().SignatureVerificationEnabled()
+	// The mode setting and its status field exist only while the verifier
+	// runs: with the kill switch on, nothing could enforce a stored mode.
+	executor.SetSignatureVerificationCapability(func() bool { return sigVerifyEnabled })
+	if ds, ok := deviceStatus.(interface{ SetSignatureVerificationCapability(func() bool) }); ok {
+		ds.SetSignatureVerificationCapability(func() bool { return sigVerifyEnabled })
+	}
 	if !sigVerifyEnabled {
 		logger.Warn("DP-1 signature verification disabled by config; casts carry no signature verdict")
 	}
@@ -1078,8 +1084,20 @@ func initializeApp(
 	// and the status poller (reads on every poll). Wired against the raw
 	// handler for the same reason as SetSourceProber above.
 	activeVerdict := &sigverify.Active{}
+	// The owner's mode is read from its record on every cast (one small file
+	// read next to a network-bound resolution), so a change from the app
+	// applies to the next cast with no restart and no cache to invalidate. A
+	// record that cannot be loaded applies the default and is logged, not
+	// cached, so the log names every cast it affected.
+	verificationMode := func() sigverify.Mode {
+		mode, err := sigverify.LoadMode(os, json)
+		if err != nil {
+			logger.Warn("Signature verification mode record unreadable; applying default", zap.String("default", string(sigverify.DefaultMode)), zap.Error(err))
+		}
+		return mode
+	}
 	if sigVerifyEnabled {
-		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict}, logger)
+		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict, Mode: verificationMode}, logger)
 		// A displayAt-deferred cast parks its verdict as pending; the
 		// scheduler's own cutover push is the only point that proves the
 		// cohort reached the screen, so that is where it is promoted — and
@@ -1098,6 +1116,12 @@ func initializeApp(
 				pushAccepted()
 			}
 		})
+		// Strict mode judges a scheduler-owned cutover AT PUSH TIME against
+		// the cast-time verdict the scheduler's cached document still carries
+		// (cloned by pointer, never persisted), so a schedule accepted under
+		// notify cannot carry a non-valid cohort onto the screen after the
+		// owner switches to strict.
+		playlistScheduler.SetPushGate(commandrouter.StrictPushGate(verificationMode))
 		poller.SetVerificationLookup(func(id, url string) (string, bool) {
 			st, ok := activeVerdict.Lookup(id, url)
 			return string(st), ok
@@ -1118,6 +1142,7 @@ func initializeApp(
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
 	if sigVerifyEnabled {
 		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
+		playlist_refresher.SetSignatureVerificationMode(playlistRefresher, verificationMode, logger)
 		// Same generation fence for the refresher's force casts.
 		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
 	}
@@ -1187,6 +1212,19 @@ func initializeApp(
 	// themselves. The advertised identity (TXT `id`) is untouched.
 	executor.SetDeviceNameObserver(func(name string) {
 		mediator.SetDeviceName(name)
+	})
+	// Relaxing the verification mode re-drives a displayAt cutover the
+	// scheduler's push gate refused under strict: that refusal arms no retry
+	// and, past the schedule's final boundary, leaves no timer, so without
+	// this the wall would hold the pre-cutover cohort until an unrelated
+	// wake or reconnect. RecomputeIfStale pushes only a cohort not yet
+	// delivered — a mode change never re-casts what is already on screen —
+	// and under strict the gate would refuse again, so it is not asked.
+	executor.SetVerificationModeObserver(func(mode sigverify.Mode) {
+		if mode == sigverify.ModeStrict {
+			return
+		}
+		playlistScheduler.RecomputeIfStale(context)
 	})
 
 	executor.SetClaimObserver(func(claimed bool) {

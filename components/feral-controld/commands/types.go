@@ -14,36 +14,37 @@ func (c Type) String() string {
 
 // Device control commands
 var deviceCtlCommands = map[Type]bool{
-	CMD_CONNECT:                    true,
-	CMD_SHOW_PAIRING_QR_CODE:       true,
-	CMD_PROFILE:                    true,
-	CMD_KEYBOARD_EVENT:             true,
-	CMD_MOUSE_DRAG_EVENT:           true,
-	CMD_MOUSE_TAP_EVENT:            true,
-	CMD_MOUSE_DOUBLE_TAP_EVENT:     true,
-	CMD_MOUSE_LONG_PRESS_EVENT:     true,
-	CMD_MOUSE_CLICK_AND_DRAG_EVENT: true,
-	CMD_ZOOM_GESTURE:               true,
-	CMD_SCREEN_ROTATION:            true,
-	CMD_SHUTDOWN:                   true,
-	CMD_REBOOT:                     true,
-	CMD_ANALYTICS_TOGGLE:           true,
-	CMD_BETA_FEATURES_TOGGLE:       true,
-	CMD_DEVICE_STATUS:              true,
-	CMD_UPDATE_TO_LATEST:           true,
-	CMD_FACTORY_RESET:              true,
-	CMD_UPLOAD_LOGS:                true,
-	CMD_SET_VOLUME:                 true,
-	CMD_TOGGLE_MUTE:                true,
-	CMD_SSH_ACCESS:                 true,
-	CMD_DDC_PANEL_CONTROL:          true,
-	CMD_DDC_PANEL_STATUS:           true,
-	CMD_SET_SLEEP_SCHEDULE:         true,
-	CMD_SET_DEVICE_NAME:            true,
-	CMD_SLEEP_NOW:                  true,
-	CMD_WAKE_NOW:                   true,
-	CMD_START_WIFI_SETUP:           true,
-	CMD_RUN_NETWORK_DIAGNOSTICS:    true,
+	CMD_CONNECT:                         true,
+	CMD_SHOW_PAIRING_QR_CODE:            true,
+	CMD_PROFILE:                         true,
+	CMD_KEYBOARD_EVENT:                  true,
+	CMD_MOUSE_DRAG_EVENT:                true,
+	CMD_MOUSE_TAP_EVENT:                 true,
+	CMD_MOUSE_DOUBLE_TAP_EVENT:          true,
+	CMD_MOUSE_LONG_PRESS_EVENT:          true,
+	CMD_MOUSE_CLICK_AND_DRAG_EVENT:      true,
+	CMD_ZOOM_GESTURE:                    true,
+	CMD_SCREEN_ROTATION:                 true,
+	CMD_SHUTDOWN:                        true,
+	CMD_REBOOT:                          true,
+	CMD_ANALYTICS_TOGGLE:                true,
+	CMD_BETA_FEATURES_TOGGLE:            true,
+	CMD_DEVICE_STATUS:                   true,
+	CMD_UPDATE_TO_LATEST:                true,
+	CMD_FACTORY_RESET:                   true,
+	CMD_UPLOAD_LOGS:                     true,
+	CMD_SET_VOLUME:                      true,
+	CMD_TOGGLE_MUTE:                     true,
+	CMD_SSH_ACCESS:                      true,
+	CMD_DDC_PANEL_CONTROL:               true,
+	CMD_DDC_PANEL_STATUS:                true,
+	CMD_SET_SLEEP_SCHEDULE:              true,
+	CMD_SET_DEVICE_NAME:                 true,
+	CMD_SET_SIGNATURE_VERIFICATION_MODE: true,
+	CMD_SLEEP_NOW:                       true,
+	CMD_WAKE_NOW:                        true,
+	CMD_START_WIFI_SETUP:                true,
+	CMD_RUN_NETWORK_DIAGNOSTICS:         true,
 }
 
 type Command struct {
@@ -153,6 +154,11 @@ const (
 	// capability gate: a controller offers renaming only to a frame whose
 	// status carries the field.
 	CMD_SET_DEVICE_NAME Type = "setDeviceName"
+	// CMD_SET_SIGNATURE_VERIFICATION_MODE sets the owner's DP-1 signature
+	// verification policy for displayPlaylist casts (feral-file/ffos-user#307):
+	// request {"mode": "silent"|"notify"|"strict"}. Persisted in its own
+	// state record; reported as device_status.signatureVerificationMode.
+	CMD_SET_SIGNATURE_VERIFICATION_MODE Type = "setSignatureVerificationMode"
 	// CMD_START_WIFI_SETUP puts the frame into its existing SoftAP setup mode
 	// on the app's request (docs/app-triggered-wifi-setup.md). The reply is
 	// produced BEFORE any radio work — raising the AP severs the link that
