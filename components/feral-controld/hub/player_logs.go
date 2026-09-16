@@ -2,6 +2,8 @@ package hub
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -107,7 +109,14 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	records := make([]playerLogRecord, 0, len(input))
+	sampler := h.logSessionSampler
+	if sampler == nil {
+		sampler = samplePlayerSession
+	}
 	for _, record := range input {
+		if !sampler(deviceID, record.Context["session_id"], h.logSampleRate) {
+			continue
+		}
 		records = append(records, playerLogRecord{
 			Timestamp:   record.Timestamp,
 			Level:       record.Level,
@@ -117,6 +126,10 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 			Message:     logger.SanitizePublicMessage(record.Message),
 			Context:     map[string]string{"session_id": record.Context["session_id"]},
 		})
+	}
+	if len(records) == 0 {
+		w.WriteHeader(http.StatusAccepted)
+		return
 	}
 
 	payload, err := marshalPlayerLogNDJSON(records)
@@ -147,6 +160,21 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// samplePlayerSession makes the sampling decision deterministic for the full
+// browser session, including when that session arrives in multiple batches.
+// Device identity scopes equal session IDs on different FF1s independently.
+func samplePlayerSession(deviceID, sessionID string, sampleRate float64) bool {
+	if sampleRate <= 0 {
+		return false
+	}
+	if sampleRate >= 1 {
+		return true
+	}
+	digest := sha256.Sum256([]byte(deviceID + "\x00" + sessionID))
+	value := binary.BigEndian.Uint64(digest[:8])
+	return float64(value)/float64(^uint64(0)) < sampleRate
 }
 
 func marshalPlayerLogNDJSON(records []playerLogRecord) ([]byte, error) {

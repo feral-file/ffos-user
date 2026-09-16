@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -32,11 +33,8 @@ func TestStreamingConfigNormalized(t *testing.T) {
 	assert.Equal(t, 0.0, *low.SampleRate)
 	assert.Equal(t, DefaultStreamEndpoint, StreamEndpoint(nil))
 	assert.Equal(t, "https://logs.example.test", StreamEndpoint(&StreamingConfig{Endpoint: "https://logs.example.test"}))
-	assert.False(t, StreamDeliveryEnabled(nil))
-	assert.False(t, StreamDeliveryEnabled(&StreamingConfig{SampleRate: floatPtr(1)}))
-	assert.True(t, StreamDeliveryEnabled(&StreamingConfig{APIKey: " test-token ", SampleRate: floatPtr(1)}))
 	assert.Equal(t, "test-token", StreamAPIKey(&StreamingConfig{APIKey: " test-token "}))
-	assert.False(t, StreamDeliveryEnabled(&StreamingConfig{SampleRate: floatPtr(0)}))
+	assert.Equal(t, 1.0, StreamSampleRate(&StreamingConfig{SampleRate: floatPtr(2)}))
 }
 
 func TestStreamWriterGroupsByIdleTimeout(t *testing.T) {
@@ -64,6 +62,37 @@ func TestStreamWriterGroupsByIdleTimeout(t *testing.T) {
 	require.Len(t, second, 1)
 	assert.NotEqual(t, firstID, second[0].Context["session_id"])
 	require.NoError(t, w.Close())
+}
+
+func TestAddCloudflareKeepsDebugRecordsLocal(t *testing.T) {
+	requests := make(chan []streamRecord, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- decodeStreamRecords(t, r)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	streamed, closer, err := AddCloudflare(zap.NewNop(), &StreamingConfig{
+		Endpoint:   server.URL,
+		APIKey:     "test-token",
+		SampleRate: floatPtr(1),
+	}, "FF1-1")
+	require.NoError(t, err)
+	streamed.Debug("periodic CDP diagnostic")
+	streamed.Info("meaningful activity")
+	require.NoError(t, closer.Close())
+
+	records := receiveRequest(t, requests)
+	require.Len(t, records, 1)
+	assert.Equal(t, "meaningful activity", records[0].Message)
+}
+
+func TestAddCloudflareRequiresAPIKey(t *testing.T) {
+	base := zap.NewNop()
+	streamed, closer, err := AddCloudflare(base, &StreamingConfig{SampleRate: floatPtr(1)}, "FF1-1")
+	assert.Same(t, base, streamed)
+	assert.Nil(t, closer)
+	require.ErrorContains(t, err, "API key is empty")
 }
 
 func TestStreamWriterCutsContinuousSessionAtMaximumDuration(t *testing.T) {
@@ -273,6 +302,8 @@ func TestSanitizePublicMessageRedactsCredentialForms(t *testing.T) {
 	tests := map[string]string{
 		"authorization header":     `Authorization: Bearer secret-token`,
 		"authorization whitespace": `Authorization Bearer top-secret`,
+		"standalone bearer":        `Bearer standalone-secret`,
+		"embedded basic":           `request Basic embedded-secret`,
 		"quoted JSON key":          `payload {"apiKey":"secret"}`,
 		"websocket userinfo":       `connect wss://user:secret@example.com/socket?token=query-secret`,
 	}
@@ -286,6 +317,8 @@ func TestSanitizePublicMessageRedactsCredentialForms(t *testing.T) {
 	}
 	assert.Equal(t, "[REDACTED_CREDENTIAL]", SanitizePublicMessage(tests["authorization header"]))
 	assert.Equal(t, "[REDACTED_CREDENTIAL]", SanitizePublicMessage(tests["authorization whitespace"]))
+	assert.Equal(t, "[REDACTED_CREDENTIAL]", SanitizePublicMessage(tests["standalone bearer"]))
+	assert.Equal(t, "request [REDACTED_CREDENTIAL]", SanitizePublicMessage(tests["embedded basic"]))
 	assert.Equal(t, "payload { [REDACTED_CREDENTIAL]", SanitizePublicMessage(tests["quoted JSON key"]))
 	assert.Equal(t, "connect wss://example.com/socket", SanitizePublicMessage(tests["websocket userinfo"]))
 }

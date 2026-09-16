@@ -177,7 +177,7 @@ func main() {
 	// with its local logger.
 	finalLogger := basicLogger
 	streamedLogger, streamCloser, streamErr := logger.AddCloudflare(
-		basicLogger, streamConfig, deviceIDFromHostname(), debug,
+		basicLogger, streamConfig, deviceIDFromHostname(),
 	)
 	if streamErr != nil {
 		basicLogger.Error("Failed to initialize Cloudflare log streaming; using local logger", zap.Error(streamErr))
@@ -199,7 +199,7 @@ func main() {
 		config.RelayerConfig.APIKey,
 		logger.StreamEndpoint(streamConfig),
 		logger.StreamAPIKey(streamConfig),
-		logger.StreamDeliveryEnabled(streamConfig),
+		logger.StreamSampleRate(streamConfig),
 		config.MintPairingConfig,
 		config.OfflineCache,
 		config.GatewayUserAgentTuning(finalLogger),
@@ -209,6 +209,15 @@ func main() {
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
 		})
+	if streamErr == nil {
+		if sink, ok := app.Relayer.(interface{ SetBeforeExit(func()) }); ok {
+			sink.SetBeforeExit(func() {
+				if err := streamCloser.Close(); err != nil {
+					fmt.Fprintf(go_os.Stderr, "Failed to flush Cloudflare logs before relayer exit: %s\n", err)
+				}
+			})
+		}
+	}
 
 	// Graceful shutdown cancels the app-lifetime context created in
 	// initializeApp (see app.Cancel).
@@ -941,7 +950,7 @@ func initializeApp(
 	relayerAPIKey string,
 	logStreamEndpoint string,
 	logStreamAPIKey string,
-	logStreamEnabled bool,
+	logStreamSampleRate float64,
 	mintPairingConfig *config.MintPairingConfig,
 	offlineCacheConfig *config.OfflineCacheConfig,
 	gatewayUserAgentConfig *config.GatewayUserAgentConfig,
@@ -1640,7 +1649,7 @@ func initializeApp(
 		snapshot: provMachine.Snapshot,
 	}
 	screenshotCapturer := screenshot.New(cdpEndpoint, httpClient, webSocketDialer)
-	hub := hub.NewWithLogDelivery(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger, logStreamEndpoint, logStreamAPIKey, logStreamEnabled)
+	hub := hub.NewWithLogDelivery(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger, logStreamEndpoint, logStreamAPIKey, logStreamSampleRate)
 	// Control-plane hub contact defers the escape policy's episode raise
 	// (§4.1): a phone with the app open must not have its link yanked. The
 	// hub filters (counted routes, non-loopback) and the machine timestamps.

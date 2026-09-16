@@ -43,6 +43,7 @@ func TestHandlePlayerLogsBrowserContract(t *testing.T) {
 		statusProvider: fixedStatusProvider{info: StatusInfo{DeviceID: "FF1-BROWSER"}},
 		logEndpoint:    "http://" + upstreamListener.Addr().String(),
 		logAPIKey:      "test-token",
+		logSampleRate:  1,
 		logHTTPClient:  &http.Client{Timeout: 5 * time.Second},
 	}
 	var preflights atomic.Int32

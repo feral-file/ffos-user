@@ -36,7 +36,7 @@ const (
 var (
 	remoteURLPattern       = regexp.MustCompile(`(?i)(?:https?|wss?)://[^\s"'<>]+`)
 	credentialStartPattern = regexp.MustCompile(
-		`(?i)(?:["']?\b(?:password|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|client[_-]?secret|private[_-]?key|authorization|cookie|dsn)\b["']?\s*[:=]|["']?\bauthorization\b["']?\s+(?:bearer|basic)\b)`,
+		`(?i)(?:["']?\b(?:password|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|client[_-]?secret|private[_-]?key|authorization|cookie|dsn)\b["']?\s*[:=]|["']?\bauthorization\b["']?\s+(?:bearer|basic)\b|(?:^|\s)\b(?:bearer|basic)\b\s+)`,
 	)
 )
 
@@ -64,12 +64,10 @@ func StreamAPIKey(config *StreamingConfig) string {
 	return strings.TrimSpace(config.normalized().APIKey)
 }
 
-// StreamDeliveryEnabled reports whether the resolved sampling policy permits
-// any remote delivery. The daemon logger and player proxy must use the same
-// decision so sampleRate: 0 is a complete device-level opt-out.
-func StreamDeliveryEnabled(config *StreamingConfig) bool {
-	cfg := config.normalized()
-	return *cfg.SampleRate > 0 && strings.TrimSpace(cfg.APIKey) != ""
+// StreamSampleRate returns the normalized session sampling rate shared by the
+// daemon writer and player proxy.
+func StreamSampleRate(config *StreamingConfig) float64 {
+	return *config.normalized().SampleRate
 }
 
 func (c *StreamingConfig) normalized() StreamingConfig {
@@ -161,7 +159,7 @@ type streamWriter struct {
 // AddCloudflare tees every enabled zap entry to the FF1 Pipeline without
 // putting network I/O on the caller's logging path. Close flushes the final
 // partial session during shutdown.
-func AddCloudflare(base *zap.Logger, config *StreamingConfig, deviceID string, debug bool) (*zap.Logger, io.Closer, error) {
+func AddCloudflare(base *zap.Logger, config *StreamingConfig, deviceID string) (*zap.Logger, io.Closer, error) {
 	if base == nil {
 		return nil, nil, fmt.Errorf("base logger is nil")
 	}
@@ -197,12 +195,10 @@ func AddCloudflare(base *zap.Logger, config *StreamingConfig, deviceID string, d
 	}
 	go writer.run()
 
-	minimumLevel := zapcore.InfoLevel
-	if debug {
-		minimumLevel = zapcore.DebugLevel
-	}
+	// Debug mode is a local diagnostic choice. Keeping the remote threshold at
+	// Info prevents periodic CDP debug records from manufacturing sessions.
 	core := &cloudflareCore{writer: writer, level: zap.LevelEnablerFunc(func(level zapcore.Level) bool {
-		return level >= minimumLevel
+		return level >= zapcore.InfoLevel
 	})}
 	return base.WithOptions(zap.WrapCore(func(existing zapcore.Core) zapcore.Core {
 		return zapcore.NewTee(existing, core)

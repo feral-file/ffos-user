@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -36,6 +37,7 @@ func TestHandlePlayerLogsEnrichesAndForwardsSafeRecords(t *testing.T) {
 		statusProvider: fixedStatusProvider{info: StatusInfo{DeviceID: " FF1-TEST "}},
 		logEndpoint:    upstream.URL,
 		logAPIKey:      "test-token",
+		logSampleRate:  1,
 		logHTTPClient:  upstream.Client(),
 	}
 	//nolint:gosec // Intentional fake credentials exercise public-log sanitization.
@@ -68,6 +70,7 @@ func TestHandlePlayerLogsRedactsCredentialBearingMessages(t *testing.T) {
 		statusProvider: fixedStatusProvider{info: StatusInfo{DeviceID: "FF1-TEST"}},
 		logEndpoint:    upstream.URL,
 		logAPIKey:      "test-token",
+		logSampleRate:  1,
 		logHTTPClient:  upstream.Client(),
 	}
 	//nolint:gosec // Intentional fake credentials exercise the proxy boundary.
@@ -75,7 +78,9 @@ func TestHandlePlayerLogsRedactsCredentialBearingMessages(t *testing.T) {
 		{"timestamp":"2026-09-15T01:02:03Z","level":"error","environment":"production","message":"Authorization: Bearer secret-token","context":{"session_id":"session-1"}},
 		{"timestamp":"2026-09-15T01:02:04Z","level":"error","environment":"production","message":"Authorization Bearer whitespace-secret","context":{"session_id":"session-1"}},
 		{"timestamp":"2026-09-15T01:02:05Z","level":"error","environment":"production","message":"payload {\"apiKey\":\"secret\"}","context":{"session_id":"session-1"}},
-		{"timestamp":"2026-09-15T01:02:06Z","level":"error","environment":"production","message":"connect wss://user:secret@example.com/socket?token=query-secret","context":{"session_id":"session-1"}}
+		{"timestamp":"2026-09-15T01:02:06Z","level":"error","environment":"production","message":"connect wss://user:secret@example.com/socket?token=query-secret","context":{"session_id":"session-1"}},
+		{"timestamp":"2026-09-15T01:02:07Z","level":"error","environment":"production","message":"Bearer standalone-secret","context":{"session_id":"session-1"}},
+		{"timestamp":"2026-09-15T01:02:08Z","level":"error","environment":"production","message":"request Basic embedded-secret","context":{"session_id":"session-1"}}
 	]`
 	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -87,7 +92,7 @@ func TestHandlePlayerLogsRedactsCredentialBearingMessages(t *testing.T) {
 	h.handlePlayerLogs(w, req)
 
 	assert.Equal(t, http.StatusAccepted, w.Code)
-	require.Len(t, forwarded, 4)
+	require.Len(t, forwarded, 6)
 	for _, record := range forwarded {
 		assert.NotContains(t, record.Message, "secret")
 		assert.NotContains(t, record.Message, "user:")
@@ -96,6 +101,55 @@ func TestHandlePlayerLogsRedactsCredentialBearingMessages(t *testing.T) {
 	assert.Equal(t, "[REDACTED_CREDENTIAL]", forwarded[1].Message)
 	assert.Equal(t, "payload { [REDACTED_CREDENTIAL]", forwarded[2].Message)
 	assert.Equal(t, "connect wss://example.com/socket", forwarded[3].Message)
+	assert.Equal(t, "[REDACTED_CREDENTIAL]", forwarded[4].Message)
+	assert.Equal(t, "request [REDACTED_CREDENTIAL]", forwarded[5].Message)
+}
+
+func TestHandlePlayerLogsSamplesWholeSessionsAcrossBatches(t *testing.T) {
+	forwarded := make(chan []playerLogRecord, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded <- decodePlayerLogRecords(t, r)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	keepSession, dropSession := "", ""
+	for i := 0; keepSession == "" || dropSession == ""; i++ {
+		candidate := fmt.Sprintf("session-%d", i)
+		if samplePlayerSession("FF1-TEST", candidate, 0.5) {
+			keepSession = candidate
+		} else {
+			dropSession = candidate
+		}
+	}
+	h := &hub{
+		statusProvider:    fixedStatusProvider{info: StatusInfo{DeviceID: "FF1-TEST"}},
+		logEndpoint:       upstream.URL,
+		logAPIKey:         "test-token",
+		logSampleRate:     0.5,
+		logSessionSampler: samplePlayerSession,
+		logHTTPClient:     upstream.Client(),
+	}
+
+	send := func(sessionID, message string) int {
+		body := fmt.Sprintf(`[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":%q,"context":{"session_id":%q}}]`, message, sessionID)
+		req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("Origin", playerOrigin)
+		w := httptest.NewRecorder()
+		h.handlePlayerLogs(w, req)
+		return w.Code
+	}
+
+	assert.Equal(t, http.StatusAccepted, send(dropSession, "drop one"))
+	assert.Equal(t, http.StatusAccepted, send(dropSession, "drop two"))
+	assert.Empty(t, forwarded, "a dropped session must stay dropped across batches")
+	assert.Equal(t, http.StatusAccepted, send(keepSession, "keep one"))
+	assert.Equal(t, http.StatusAccepted, send(keepSession, "keep two"))
+	assert.Equal(t, "keep one", (<-forwarded)[0].Message)
+	assert.Equal(t, "keep two", (<-forwarded)[0].Message)
+	assert.True(t, samplePlayerSession("FF1-TEST", keepSession, 0.5))
+	assert.False(t, samplePlayerSession("FF1-TEST", dropSession, 0.5))
 }
 
 func TestHandlePlayerLogsAllowsOnlyPlayerPreflightOnLoopback(t *testing.T) {
@@ -131,6 +185,7 @@ func TestHandlePlayerLogsRejectsInvalidRecordWithoutCallingUpstream(t *testing.T
 		statusProvider: fixedStatusProvider{info: StatusInfo{DeviceID: "FF1-TEST"}},
 		logEndpoint:    upstream.URL,
 		logAPIKey:      "test-token",
+		logSampleRate:  1,
 		logHTTPClient:  upstream.Client(),
 	}
 	body := `[{"timestamp":"not-a-time","level":"info","environment":"production","message":"hello","context":{"session_id":"session-1"}}]`
@@ -179,6 +234,7 @@ func TestHandlePlayerLogsPropagatesUpstreamFailure(t *testing.T) {
 		statusProvider: fixedStatusProvider{info: StatusInfo{DeviceID: "FF1-TEST"}},
 		logEndpoint:    upstream.URL,
 		logAPIKey:      "test-token",
+		logSampleRate:  1,
 		logHTTPClient:  upstream.Client(),
 	}
 	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"hello","context":{"session_id":"session-1"}}]`
@@ -203,6 +259,7 @@ func TestHandlePlayerLogsRejectsStatusControllerIDFallback(t *testing.T) {
 		statusProvider: statusOnlyProvider{info: StatusInfo{DeviceID: "phone-1"}},
 		logEndpoint:    upstream.URL,
 		logAPIKey:      "test-token",
+		logSampleRate:  1,
 		logHTTPClient:  upstream.Client(),
 	}
 	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"hello","context":{"session_id":"session-1"}}]`

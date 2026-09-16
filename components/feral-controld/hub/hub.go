@@ -52,6 +52,8 @@ type hub struct {
 	screenshotSlots     chan struct{}
 	logEndpoint         string
 	logAPIKey           string
+	logSampleRate       float64
+	logSessionSampler   func(deviceID, sessionID string, sampleRate float64) bool
 	logHTTPClient       *http.Client
 	logDeliveryDisabled bool
 
@@ -102,7 +104,7 @@ func NewWithLogEndpoint(
 	logger *zap.Logger,
 	logEndpoint string,
 ) Hub {
-	return NewWithLogDelivery(ctx, wsHandler, cmdHandler, statusProvider, capturer, server, json, logger, logEndpoint, "", true)
+	return NewWithLogDelivery(ctx, wsHandler, cmdHandler, statusProvider, capturer, server, json, logger, logEndpoint, "", 1)
 }
 
 // NewWithLogDelivery creates the hub with the resolved endpoint and upload
@@ -118,7 +120,7 @@ func NewWithLogDelivery(
 	logger *zap.Logger,
 	logEndpoint string,
 	logAPIKey string,
-	logDeliveryEnabled bool,
+	logSampleRate float64,
 ) Hub {
 	if server == nil {
 		httpServer := &http.Server{
@@ -133,6 +135,11 @@ func NewWithLogDelivery(
 	}
 	if strings.TrimSpace(logEndpoint) == "" {
 		logEndpoint = fflogger.DefaultStreamEndpoint
+	}
+	if logSampleRate < 0 {
+		logSampleRate = 0
+	} else if logSampleRate > 1 {
+		logSampleRate = 1
 	}
 	h := &hub{
 		ctx:            ctx,
@@ -150,8 +157,10 @@ func NewWithLogDelivery(
 		screenshotSlots:     make(chan struct{}, 1),
 		logEndpoint:         logEndpoint,
 		logAPIKey:           strings.TrimSpace(logAPIKey),
+		logSampleRate:       logSampleRate,
+		logSessionSampler:   samplePlayerSession,
 		logHTTPClient:       &http.Client{Timeout: 10 * time.Second},
-		logDeliveryDisabled: !logDeliveryEnabled || strings.TrimSpace(logAPIKey) == "",
+		logDeliveryDisabled: logSampleRate <= 0 || strings.TrimSpace(logAPIKey) == "",
 	}
 	h.routes()
 	return h
