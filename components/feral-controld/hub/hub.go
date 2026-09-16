@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -83,6 +84,22 @@ func New(
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Hub {
+	return NewWithLogEndpoint(ctx, wsHandler, cmdHandler, statusProvider, capturer, server, json, logger, "")
+}
+
+// NewWithLogEndpoint creates the hub with the same effective FF1 stream used
+// by the daemon logger, so player and controld records cannot split pipelines.
+func NewWithLogEndpoint(
+	ctx context.Context,
+	wsHandler ws.WS,
+	cmdHandler commandrouter.Handler,
+	statusProvider StatusProvider,
+	capturer screenshot.Capturer,
+	server wrapper.HTTPServer,
+	json wrapper.JSON,
+	logger *zap.Logger,
+	logEndpoint string,
+) Hub {
 	if server == nil {
 		httpServer := &http.Server{
 			Addr:              HUB_ADDRESS,
@@ -93,6 +110,9 @@ func New(
 			IdleTimeout:       IDLE_TIMEOUT,
 		}
 		server = wrapper.NewHTTPServer(httpServer)
+	}
+	if strings.TrimSpace(logEndpoint) == "" {
+		logEndpoint = fflogger.DefaultStreamEndpoint
 	}
 	h := &hub{
 		ctx:            ctx,
@@ -108,7 +128,7 @@ func New(
 		// in one single-flight lifetime. The capturer's own slot ends when it
 		// returns and therefore cannot bound retained response images by itself.
 		screenshotSlots: make(chan struct{}, 1),
-		logEndpoint:     fflogger.DefaultStreamEndpoint,
+		logEndpoint:     logEndpoint,
 		logHTTPClient:   &http.Client{Timeout: 10 * time.Second},
 	}
 	h.routes()

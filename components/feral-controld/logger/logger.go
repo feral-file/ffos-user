@@ -49,6 +49,12 @@ type StreamingConfig struct {
 	MaxBatchDurationSeconds int      `json:"maxBatchDurationSeconds,omitempty"`
 }
 
+// StreamEndpoint returns the effective upload endpoint shared by daemon and
+// player log delivery.
+func StreamEndpoint(config *StreamingConfig) string {
+	return config.normalized().Endpoint
+}
+
 func (c *StreamingConfig) normalized() StreamingConfig {
 	if c == nil {
 		one := 1.0
@@ -205,6 +211,9 @@ func (c *cloudflareCore) Check(entry zapcore.Entry, checked *zapcore.CheckedEntr
 }
 
 func (c *cloudflareCore) Write(entry zapcore.Entry, fields []zapcore.Field) error {
+	if isRoutineHubPoll(entry.Message, fields) {
+		return nil
+	}
 	record := streamRecord{
 		Timestamp:   entry.Time.UTC().Format(time.RFC3339Nano),
 		Level:       normalizeLevel(entry.Level),
@@ -227,6 +236,24 @@ func (c *cloudflareCore) Write(entry zapcore.Entry, fields []zapcore.Field) erro
 		// storms. Do not emit another log here or create a recursive flood.
 	}
 	return nil
+}
+
+func isRoutineHubPoll(message string, fields []zapcore.Field) bool {
+	if message != "Hub request served" {
+		return false
+	}
+	for _, field := range fields {
+		if field.Key != "route" || field.Type != zapcore.StringType {
+			continue
+		}
+		switch field.String {
+		case "metrics", "status", "status_v2":
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func (c *cloudflareCore) Sync() error { return nil }

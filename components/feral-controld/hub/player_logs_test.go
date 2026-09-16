@@ -42,11 +42,13 @@ func TestHandlePlayerLogsEnrichesAndForwardsSafeRecords(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
 	h.handlePlayerLogs(w, req)
 
 	assert.Equal(t, http.StatusAccepted, w.Code)
+	assert.Equal(t, playerOrigin, w.Header().Get("Access-Control-Allow-Origin"))
 	require.Len(t, forwarded, 1)
 	assert.Equal(t, "player", forwarded[0].Service)
 	assert.Equal(t, "FF1-TEST", forwarded[0].DeviceID)
@@ -75,6 +77,8 @@ func TestHandlePlayerLogsRedactsCredentialBearingMessages(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "content-type")
 	w := httptest.NewRecorder()
 
 	h.handlePlayerLogs(w, req)
@@ -102,6 +106,7 @@ func TestHandlePlayerLogsAllowsOnlyPlayerPreflightOnLoopback(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, w.Code)
 	assert.Equal(t, playerOrigin, w.Header().Get("Access-Control-Allow-Origin"))
 	assert.Equal(t, http.MethodPost, w.Header().Get("Access-Control-Allow-Methods"))
+	assert.Equal(t, "Content-Type", w.Header().Get("Access-Control-Allow-Headers"))
 
 	remote := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(`[]`))
 	remote.RemoteAddr = "192.0.2.1:12345"

@@ -29,6 +29,8 @@ func TestStreamingConfigNormalized(t *testing.T) {
 	assert.Equal(t, 1.0, *high.SampleRate)
 	low := (&StreamingConfig{SampleRate: floatPtr(-1)}).normalized()
 	assert.Equal(t, 0.0, *low.SampleRate)
+	assert.Equal(t, DefaultStreamEndpoint, StreamEndpoint(nil))
+	assert.Equal(t, "https://logs.example.test", StreamEndpoint(&StreamingConfig{Endpoint: "https://logs.example.test"}))
 }
 
 func TestStreamWriterGroupsByIdleTimeout(t *testing.T) {
@@ -200,6 +202,24 @@ func TestCloudflareCoreExcludesCommandPayloadAndSanitizesURLs(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(encoded), "field-secret")
 	assert.NotContains(t, string(encoded), "message-secret")
+}
+
+func TestCloudflareCoreExcludesRoutineHubPolls(t *testing.T) {
+	w := &streamWriter{environment: "production", deviceID: "FF1-ABC", records: make(chan streamRecord, 1)}
+	core := &cloudflareCore{writer: w, level: zapcore.InfoLevel}
+	entry := zapcore.Entry{Time: time.Now(), Level: zapcore.InfoLevel, Message: "Hub request served"}
+
+	for _, route := range []string{"metrics", "status", "status_v2"} {
+		require.NoError(t, core.Write(entry, []zapcore.Field{{
+			Key: "route", Type: zapcore.StringType, String: route,
+		}}))
+		assert.Empty(t, w.records, "route %s should stay out of the remote stream", route)
+	}
+
+	require.NoError(t, core.Write(entry, []zapcore.Field{{
+		Key: "route", Type: zapcore.StringType, String: "cast",
+	}}))
+	assert.Equal(t, "Hub request served", (<-w.records).Message)
 }
 
 func TestSanitizePublicMessageRedactsCredentialForms(t *testing.T) {
