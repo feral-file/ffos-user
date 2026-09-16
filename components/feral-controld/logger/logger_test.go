@@ -3,6 +3,7 @@ package logger
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -31,15 +32,17 @@ func TestStreamingConfigNormalized(t *testing.T) {
 	assert.Equal(t, 0.0, *low.SampleRate)
 	assert.Equal(t, DefaultStreamEndpoint, StreamEndpoint(nil))
 	assert.Equal(t, "https://logs.example.test", StreamEndpoint(&StreamingConfig{Endpoint: "https://logs.example.test"}))
-	assert.True(t, StreamDeliveryEnabled(nil))
+	assert.False(t, StreamDeliveryEnabled(nil))
+	assert.False(t, StreamDeliveryEnabled(&StreamingConfig{SampleRate: floatPtr(1)}))
+	assert.True(t, StreamDeliveryEnabled(&StreamingConfig{APIKey: " test-token ", SampleRate: floatPtr(1)}))
+	assert.Equal(t, "test-token", StreamAPIKey(&StreamingConfig{APIKey: " test-token "}))
 	assert.False(t, StreamDeliveryEnabled(&StreamingConfig{SampleRate: floatPtr(0)}))
 }
 
 func TestStreamWriterGroupsByIdleTimeout(t *testing.T) {
 	requests := make(chan []streamRecord, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var records []streamRecord
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&records))
+		records := decodeStreamRecords(t, r)
 		requests <- records
 		w.WriteHeader(http.StatusAccepted)
 	}))
@@ -66,8 +69,7 @@ func TestStreamWriterGroupsByIdleTimeout(t *testing.T) {
 func TestStreamWriterCutsContinuousSessionAtMaximumDuration(t *testing.T) {
 	requests := make(chan []streamRecord, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var records []streamRecord
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&records))
+		records := decodeStreamRecords(t, r)
 		requests <- records
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -88,9 +90,9 @@ func TestStreamWriterCutsContinuousSessionAtMaximumDuration(t *testing.T) {
 func TestStreamWriterSamplesOncePerSession(t *testing.T) {
 	requests := make(chan []streamRecord, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
-		var records []streamRecord
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&records))
+		assert.Equal(t, "application/x-ndjson", r.Header.Get("Content-Type"))
+		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
+		records := decodeStreamRecords(t, r)
 		requests <- records
 		w.WriteHeader(http.StatusAccepted)
 	}))
@@ -147,8 +149,7 @@ func TestStreamWriterCancelsSlowUploadAtShutdownBudget(t *testing.T) {
 func TestStreamWriterUsesEmissionTimeForIdleBoundary(t *testing.T) {
 	requests := make(chan []streamRecord, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var records []streamRecord
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&records))
+		records := decodeStreamRecords(t, r)
 		requests <- records
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -172,8 +173,7 @@ func TestStreamWriterUsesEmissionTimeForIdleBoundary(t *testing.T) {
 func TestStreamWriterDoesNotRewindSessionTimeForLateRecords(t *testing.T) {
 	requests := make(chan []streamRecord, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var records []streamRecord
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&records))
+		records := decodeStreamRecords(t, r)
 		requests <- records
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -293,13 +293,30 @@ func TestSanitizePublicMessageRedactsCredentialForms(t *testing.T) {
 func newTestWriter(endpoint string, idle, maximum time.Duration) *streamWriter {
 	uploadCtx, cancel := context.WithCancel(context.Background())
 	return &streamWriter{
-		endpoint: endpoint, environment: "test", deviceID: "FF1-1",
+		endpoint: endpoint, apiKey: "test-token", environment: "test", deviceID: "FF1-1",
 		sampleRate: 1, idleTimeout: idle, maxDuration: maximum,
 		closeBudget: shutdownFlushBudget,
 		httpClient:  &http.Client{Timeout: time.Second}, random: func() float64 { return 0 },
 		records: make(chan streamRecord, 16), done: make(chan struct{}), workerDone: make(chan struct{}),
 		uploads:   make(chan []streamRecord, 16),
 		uploadCtx: uploadCtx, cancel: cancel,
+	}
+}
+
+func decodeStreamRecords(t *testing.T, r *http.Request) []streamRecord {
+	t.Helper()
+	assert.Equal(t, "application/x-ndjson", r.Header.Get("Content-Type"))
+	assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
+	decoder := json.NewDecoder(r.Body)
+	var records []streamRecord
+	for {
+		var record streamRecord
+		err := decoder.Decode(&record)
+		if err == io.EOF {
+			return records
+		}
+		require.NoError(t, err)
+		records = append(records, record)
 	}
 }
 

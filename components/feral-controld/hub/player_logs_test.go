@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,8 +27,7 @@ func TestHandlePlayerLogsEnrichesAndForwardsSafeRecords(t *testing.T) {
 	var forwarded []playerLogRecord
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&forwarded))
+		forwarded = decodePlayerLogRecords(t, r)
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer upstream.Close()
@@ -35,6 +35,7 @@ func TestHandlePlayerLogsEnrichesAndForwardsSafeRecords(t *testing.T) {
 	h := &hub{
 		statusProvider: fixedStatusProvider{info: StatusInfo{DeviceID: " FF1-TEST "}},
 		logEndpoint:    upstream.URL,
+		logAPIKey:      "test-token",
 		logHTTPClient:  upstream.Client(),
 	}
 	//nolint:gosec // Intentional fake credentials exercise public-log sanitization.
@@ -59,13 +60,14 @@ func TestHandlePlayerLogsEnrichesAndForwardsSafeRecords(t *testing.T) {
 func TestHandlePlayerLogsRedactsCredentialBearingMessages(t *testing.T) {
 	var forwarded []playerLogRecord
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&forwarded))
+		forwarded = decodePlayerLogRecords(t, r)
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer upstream.Close()
 	h := &hub{
 		statusProvider: fixedStatusProvider{info: StatusInfo{DeviceID: "FF1-TEST"}},
 		logEndpoint:    upstream.URL,
+		logAPIKey:      "test-token",
 		logHTTPClient:  upstream.Client(),
 	}
 	//nolint:gosec // Intentional fake credentials exercise the proxy boundary.
@@ -128,6 +130,7 @@ func TestHandlePlayerLogsRejectsInvalidRecordWithoutCallingUpstream(t *testing.T
 	h := &hub{
 		statusProvider: fixedStatusProvider{info: StatusInfo{DeviceID: "FF1-TEST"}},
 		logEndpoint:    upstream.URL,
+		logAPIKey:      "test-token",
 		logHTTPClient:  upstream.Client(),
 	}
 	body := `[{"timestamp":"not-a-time","level":"info","environment":"production","message":"hello","context":{"session_id":"session-1"}}]`
@@ -175,6 +178,7 @@ func TestHandlePlayerLogsPropagatesUpstreamFailure(t *testing.T) {
 	h := &hub{
 		statusProvider: fixedStatusProvider{info: StatusInfo{DeviceID: "FF1-TEST"}},
 		logEndpoint:    upstream.URL,
+		logAPIKey:      "test-token",
 		logHTTPClient:  upstream.Client(),
 	}
 	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"hello","context":{"session_id":"session-1"}}]`
@@ -198,6 +202,7 @@ func TestHandlePlayerLogsRejectsStatusControllerIDFallback(t *testing.T) {
 	h := &hub{
 		statusProvider: statusOnlyProvider{info: StatusInfo{DeviceID: "phone-1"}},
 		logEndpoint:    upstream.URL,
+		logAPIKey:      "test-token",
 		logHTTPClient:  upstream.Client(),
 	}
 	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"hello","context":{"session_id":"session-1"}}]`
@@ -210,4 +215,21 @@ func TestHandlePlayerLogsRejectsStatusControllerIDFallback(t *testing.T) {
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.False(t, called)
+}
+
+func decodePlayerLogRecords(t *testing.T, r *http.Request) []playerLogRecord {
+	t.Helper()
+	assert.Equal(t, "application/x-ndjson", r.Header.Get("Content-Type"))
+	assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
+	decoder := json.NewDecoder(r.Body)
+	var records []playerLogRecord
+	for {
+		var record playerLogRecord
+		err := decoder.Decode(&record)
+		if err == io.EOF {
+			return records
+		}
+		require.NoError(t, err)
+		records = append(records, record)
+	}
 }

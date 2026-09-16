@@ -45,6 +45,7 @@ var (
 // sends that proportion of complete sessions. Zero explicitly disables upload.
 type StreamingConfig struct {
 	Endpoint                string   `json:"endpoint,omitempty"`
+	APIKey                  string   `json:"apiKey,omitempty"`
 	Environment             string   `json:"environment,omitempty"`
 	SampleRate              *float64 `json:"sampleRate,omitempty"`
 	IdleTimeoutSeconds      int      `json:"idleTimeoutSeconds,omitempty"`
@@ -57,11 +58,18 @@ func StreamEndpoint(config *StreamingConfig) string {
 	return config.normalized().Endpoint
 }
 
+// StreamAPIKey returns the credential used by both controld and the player
+// proxy. The key stays server-side and is never exposed to the browser bundle.
+func StreamAPIKey(config *StreamingConfig) string {
+	return strings.TrimSpace(config.normalized().APIKey)
+}
+
 // StreamDeliveryEnabled reports whether the resolved sampling policy permits
 // any remote delivery. The daemon logger and player proxy must use the same
 // decision so sampleRate: 0 is a complete device-level opt-out.
 func StreamDeliveryEnabled(config *StreamingConfig) bool {
-	return *config.normalized().SampleRate > 0
+	cfg := config.normalized()
+	return *cfg.SampleRate > 0 && strings.TrimSpace(cfg.APIKey) != ""
 }
 
 func (c *StreamingConfig) normalized() StreamingConfig {
@@ -132,6 +140,7 @@ type streamRecord struct {
 
 type streamWriter struct {
 	endpoint    string
+	apiKey      string
 	environment string
 	deviceID    string
 	sampleRate  float64
@@ -160,6 +169,9 @@ func AddCloudflare(base *zap.Logger, config *StreamingConfig, deviceID string, d
 	if *cfg.SampleRate == 0 {
 		return base, nopCloser{}, nil
 	}
+	if strings.TrimSpace(cfg.APIKey) == "" {
+		return base, nil, fmt.Errorf("cloudflare API key is empty")
+	}
 	if strings.TrimSpace(deviceID) == "" {
 		return base, nil, fmt.Errorf("device id is empty")
 	}
@@ -167,6 +179,7 @@ func AddCloudflare(base *zap.Logger, config *StreamingConfig, deviceID string, d
 	uploadCtx, cancel := context.WithCancel(context.Background())
 	writer := &streamWriter{
 		endpoint:    cfg.Endpoint,
+		apiKey:      strings.TrimSpace(cfg.APIKey),
 		environment: cfg.Environment,
 		deviceID:    deviceID,
 		sampleRate:  *cfg.SampleRate,
@@ -430,7 +443,7 @@ func (w *streamWriter) run() {
 }
 
 func (w *streamWriter) upload(ctx context.Context, records []streamRecord) {
-	payload, err := json.Marshal(records)
+	payload, err := marshalNDJSON(records)
 	if err != nil {
 		return
 	}
@@ -451,7 +464,8 @@ func (w *streamWriter) upload(ctx context.Context, records []streamRecord) {
 		if err != nil {
 			return
 		}
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+w.apiKey)
+		req.Header.Set("Content-Type", "application/x-ndjson")
 		resp, err := w.httpClient.Do(req)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, resp.Body)
@@ -474,6 +488,17 @@ func (w *streamWriter) upload(ctx context.Context, records []streamRecord) {
 		}
 	}
 	fmt.Fprintln(os.Stderr, "Cloudflare log upload failed after retries")
+}
+
+func marshalNDJSON(records []streamRecord) ([]byte, error) {
+	var payload bytes.Buffer
+	encoder := json.NewEncoder(&payload)
+	for _, record := range records {
+		if err := encoder.Encode(record); err != nil {
+			return nil, err
+		}
+	}
+	return payload.Bytes(), nil
 }
 
 // SanitizePublicMessage removes credentials and private URL components from a

@@ -2,7 +2,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -31,8 +30,7 @@ func TestHandlePlayerLogsBrowserContract(t *testing.T) {
 
 	forwarded := make(chan []playerLogRecord, 2)
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var records []playerLogRecord
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&records))
+		records := decodePlayerLogRecords(t, r)
 		forwarded <- records
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -44,6 +42,7 @@ func TestHandlePlayerLogsBrowserContract(t *testing.T) {
 	h := &hub{
 		statusProvider: fixedStatusProvider{info: StatusInfo{DeviceID: "FF1-BROWSER"}},
 		logEndpoint:    "http://" + upstreamListener.Addr().String(),
+		logAPIKey:      "test-token",
 		logHTTPClient:  &http.Client{Timeout: 5 * time.Second},
 	}
 	var preflights atomic.Int32

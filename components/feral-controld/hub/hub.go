@@ -51,6 +51,7 @@ type hub struct {
 	reqSlots            chan struct{}
 	screenshotSlots     chan struct{}
 	logEndpoint         string
+	logAPIKey           string
 	logHTTPClient       *http.Client
 	logDeliveryDisabled bool
 
@@ -101,7 +102,7 @@ func NewWithLogEndpoint(
 	logger *zap.Logger,
 	logEndpoint string,
 ) Hub {
-	return NewWithLogDelivery(ctx, wsHandler, cmdHandler, statusProvider, capturer, server, json, logger, logEndpoint, true)
+	return NewWithLogDelivery(ctx, wsHandler, cmdHandler, statusProvider, capturer, server, json, logger, logEndpoint, "", true)
 }
 
 // NewWithLogDelivery creates the hub with the resolved endpoint and upload
@@ -116,6 +117,7 @@ func NewWithLogDelivery(
 	json wrapper.JSON,
 	logger *zap.Logger,
 	logEndpoint string,
+	logAPIKey string,
 	logDeliveryEnabled bool,
 ) Hub {
 	if server == nil {
@@ -147,8 +149,9 @@ func NewWithLogDelivery(
 		// returns and therefore cannot bound retained response images by itself.
 		screenshotSlots:     make(chan struct{}, 1),
 		logEndpoint:         logEndpoint,
+		logAPIKey:           strings.TrimSpace(logAPIKey),
 		logHTTPClient:       &http.Client{Timeout: 10 * time.Second},
-		logDeliveryDisabled: !logDeliveryEnabled,
+		logDeliveryDisabled: !logDeliveryEnabled || strings.TrimSpace(logAPIKey) == "",
 	}
 	h.routes()
 	return h

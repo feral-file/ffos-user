@@ -119,7 +119,7 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	payload, err := json.Marshal(records)
+	payload, err := marshalPlayerLogNDJSON(records)
 	if err != nil {
 		http.Error(w, "Failed to encode logs", http.StatusInternalServerError)
 		return
@@ -129,7 +129,8 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Log pipeline unavailable", http.StatusBadGateway)
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+h.logAPIKey)
+	req.Header.Set("Content-Type", "application/x-ndjson")
 	resp, err := h.logHTTPClient.Do(req)
 	if err != nil {
 		http.Error(w, "Log pipeline unavailable", http.StatusBadGateway)
@@ -146,6 +147,17 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func marshalPlayerLogNDJSON(records []playerLogRecord) ([]byte, error) {
+	var payload bytes.Buffer
+	encoder := json.NewEncoder(&payload)
+	for _, record := range records {
+		if err := encoder.Encode(record); err != nil {
+			return nil, err
+		}
+	}
+	return payload.Bytes(), nil
 }
 
 // isStrictLoopbackAddr fails closed because this check guards device identity
