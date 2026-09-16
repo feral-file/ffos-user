@@ -278,7 +278,7 @@ func excludeFromRemoteStream(message string, fields []zapcore.Field) bool {
 			continue
 		}
 		switch field.String {
-		case "metrics", "status", "status_v2":
+		case "metrics", "status", "status_v2", "player_logs":
 			return true
 		default:
 			return false

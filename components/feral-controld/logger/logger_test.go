@@ -259,12 +259,12 @@ func TestCloudflareCoreExcludesCommandPayloadAndSanitizesURLs(t *testing.T) {
 	assert.NotContains(t, string(encoded), "message-secret")
 }
 
-func TestCloudflareCoreExcludesRoutineHubPolls(t *testing.T) {
+func TestCloudflareCoreExcludesRoutineHubTraffic(t *testing.T) {
 	w := &streamWriter{environment: "production", deviceID: "FF1-ABC", records: make(chan streamRecord, 1)}
 	core := &cloudflareCore{writer: w, level: zapcore.InfoLevel}
 	entry := zapcore.Entry{Time: time.Now(), Level: zapcore.InfoLevel, Message: "Hub request served"}
 
-	for _, route := range []string{"metrics", "status", "status_v2"} {
+	for _, route := range []string{"metrics", "status", "status_v2", "player_logs"} {
 		require.NoError(t, core.Write(entry, []zapcore.Field{{
 			Key: "route", Type: zapcore.StringType, String: route,
 		}}))
