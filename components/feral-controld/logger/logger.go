@@ -55,6 +55,13 @@ func StreamEndpoint(config *StreamingConfig) string {
 	return config.normalized().Endpoint
 }
 
+// StreamDeliveryEnabled reports whether the resolved sampling policy permits
+// any remote delivery. The daemon logger and player proxy must use the same
+// decision so sampleRate: 0 is a complete device-level opt-out.
+func StreamDeliveryEnabled(config *StreamingConfig) bool {
+	return *config.normalized().SampleRate > 0
+}
+
 func (c *StreamingConfig) normalized() StreamingConfig {
 	if c == nil {
 		one := 1.0
@@ -211,7 +218,7 @@ func (c *cloudflareCore) Check(entry zapcore.Entry, checked *zapcore.CheckedEntr
 }
 
 func (c *cloudflareCore) Write(entry zapcore.Entry, fields []zapcore.Field) error {
-	if isRoutineHubPoll(entry.Message, fields) {
+	if excludeFromRemoteStream(entry.Message, fields) {
 		return nil
 	}
 	record := streamRecord{
@@ -238,7 +245,20 @@ func (c *cloudflareCore) Write(entry zapcore.Entry, fields []zapcore.Field) erro
 	return nil
 }
 
-func isRoutineHubPoll(message string, fields []zapcore.Field) bool {
+func excludeFromRemoteStream(message string, fields []zapcore.Field) bool {
+	// Retry progress is useful in the local journal but occurs every few
+	// seconds during an outage. Streaming it would keep activity sessions open
+	// indefinitely and drown the terminal failure/recovery records.
+	switch message {
+	case "Connecting to Relayer",
+		"Relayer connection failed transiently, will retry",
+		"Sleeping before relayer retry",
+		"Relayer endpoint is busy, will retry",
+		"Unknown relayer connection error",
+		"Relayer dial failed":
+		return true
+	}
+
 	if message != "Hub request served" {
 		return false
 	}

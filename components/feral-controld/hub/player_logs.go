@@ -81,6 +81,19 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Log batch must contain 1 to 500 records", http.StatusBadRequest)
 		return
 	}
+	for _, record := range input {
+		if !validPlayerLog(record) {
+			http.Error(w, "Invalid log record", http.StatusBadRequest)
+			return
+		}
+	}
+	if h.logDeliveryDisabled {
+		// Preserve the player's best-effort contract while enforcing the same
+		// device-level opt-out as daemon logs. Validate first so this endpoint
+		// never becomes an unchecked local sink.
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 
 	identityProvider, ok := h.statusProvider.(FF1IdentityProvider)
 	if !ok {
@@ -95,10 +108,6 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 
 	records := make([]playerLogRecord, 0, len(input))
 	for _, record := range input {
-		if !validPlayerLog(record) {
-			http.Error(w, "Invalid log record", http.StatusBadRequest)
-			return
-		}
 		records = append(records, playerLogRecord{
 			Timestamp:   record.Timestamp,
 			Level:       record.Level,

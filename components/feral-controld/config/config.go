@@ -225,10 +225,13 @@ type NetlogConfig struct {
 
 // Configuration for all components
 type Config struct {
-	CDPConfig         *CDPConfig              `json:"cdp"`
-	RelayerConfig     *RelayerConfig          `json:"relayer"`
-	MintPairingConfig *MintPairingConfig      `json:"mintPairing"`
-	LogStreaming      *logger.StreamingConfig `json:"logStreaming,omitempty"`
+	CDPConfig         *CDPConfig         `json:"cdp"`
+	RelayerConfig     *RelayerConfig     `json:"relayer"`
+	MintPairingConfig *MintPairingConfig `json:"mintPairing"`
+	// LogStreaming is decoded permissively because telemetry is optional and
+	// must never crash-loop this recovery-critical daemon. Read it only via
+	// LogStreamingConfig.
+	LogStreaming json.RawMessage `json:"logStreaming,omitempty"`
 	// EnableHub gates the LAN hub. It is a pointer so an absent key can default
 	// ON: the hub is the BLE-replacement recovery channel, so it must run
 	// unless an operator explicitly sets "enableHub": false. Read via
@@ -310,6 +313,24 @@ func (c *Config) ContentPolicyTuning(logger *zap.Logger) ContentPolicyConfig {
 		return ContentPolicyConfig{}
 	}
 	return t
+}
+
+// LogStreamingConfig decodes optional remote-log settings without making a
+// malformed block fatal to the daemon. Invalid configuration fails closed to
+// local-only logging; an absent block retains the default upload-all policy.
+func (c *Config) LogStreamingConfig(log *zap.Logger) *logger.StreamingConfig {
+	if len(c.LogStreaming) == 0 || string(c.LogStreaming) == "null" {
+		return nil
+	}
+	var stream logger.StreamingConfig
+	if err := json.Unmarshal(c.LogStreaming, &stream); err != nil {
+		if log != nil {
+			log.Warn("logStreaming config block malformed; disabling remote delivery", zap.Error(err))
+		}
+		zero := 0.0
+		return &logger.StreamingConfig{SampleRate: &zero}
+	}
+	return &stream
 }
 
 // HubEnabled reports whether the LAN hub should run. It defaults ON: only an

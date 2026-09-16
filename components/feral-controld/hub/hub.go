@@ -40,18 +40,19 @@ type Hub interface {
 }
 
 type hub struct {
-	ctx             context.Context
-	logger          *zap.Logger
-	server          wrapper.HTTPServer
-	wsHandler       ws.WS
-	cmdHandler      commandrouter.Handler
-	statusProvider  StatusProvider
-	capturer        screenshot.Capturer
-	json            wrapper.JSON
-	reqSlots        chan struct{}
-	screenshotSlots chan struct{}
-	logEndpoint     string
-	logHTTPClient   *http.Client
+	ctx                 context.Context
+	logger              *zap.Logger
+	server              wrapper.HTTPServer
+	wsHandler           ws.WS
+	cmdHandler          commandrouter.Handler
+	statusProvider      StatusProvider
+	capturer            screenshot.Capturer
+	json                wrapper.JSON
+	reqSlots            chan struct{}
+	screenshotSlots     chan struct{}
+	logEndpoint         string
+	logHTTPClient       *http.Client
+	logDeliveryDisabled bool
 
 	// contactObserver, when set, is invoked once per request on the counted
 	// control-plane routes (cast, status, status_v2) from a NON-loopback
@@ -100,6 +101,23 @@ func NewWithLogEndpoint(
 	logger *zap.Logger,
 	logEndpoint string,
 ) Hub {
+	return NewWithLogDelivery(ctx, wsHandler, cmdHandler, statusProvider, capturer, server, json, logger, logEndpoint, true)
+}
+
+// NewWithLogDelivery creates the hub with the resolved endpoint and upload
+// policy shared by daemon logging and the player proxy.
+func NewWithLogDelivery(
+	ctx context.Context,
+	wsHandler ws.WS,
+	cmdHandler commandrouter.Handler,
+	statusProvider StatusProvider,
+	capturer screenshot.Capturer,
+	server wrapper.HTTPServer,
+	json wrapper.JSON,
+	logger *zap.Logger,
+	logEndpoint string,
+	logDeliveryEnabled bool,
+) Hub {
 	if server == nil {
 		httpServer := &http.Server{
 			Addr:              HUB_ADDRESS,
@@ -127,9 +145,10 @@ func NewWithLogEndpoint(
 		// Keep the renderer capture and its potentially backpressured HTTP write
 		// in one single-flight lifetime. The capturer's own slot ends when it
 		// returns and therefore cannot bound retained response images by itself.
-		screenshotSlots: make(chan struct{}, 1),
-		logEndpoint:     logEndpoint,
-		logHTTPClient:   &http.Client{Timeout: 10 * time.Second},
+		screenshotSlots:     make(chan struct{}, 1),
+		logEndpoint:         logEndpoint,
+		logHTTPClient:       &http.Client{Timeout: 10 * time.Second},
+		logDeliveryDisabled: !logDeliveryEnabled,
 	}
 	h.routes()
 	return h

@@ -170,13 +170,14 @@ func main() {
 	if err != nil {
 		basicLogger.Fatal("Failed to load configuration", zap.Error(err))
 	}
+	streamConfig := config.LogStreamingConfig(basicLogger)
 
 	// Network delivery is a best-effort tee: a bad endpoint or missing
 	// hostname must never prevent this recovery-critical daemon from starting
 	// with its local logger.
 	finalLogger := basicLogger
 	streamedLogger, streamCloser, streamErr := logger.AddCloudflare(
-		basicLogger, config.LogStreaming, deviceIDFromHostname(), debug,
+		basicLogger, streamConfig, deviceIDFromHostname(), debug,
 	)
 	if streamErr != nil {
 		basicLogger.Error("Failed to initialize Cloudflare log streaming; using local logger", zap.Error(streamErr))
@@ -196,7 +197,8 @@ func main() {
 		config.CDPConfig.Endpoint,
 		config.RelayerConfig.Endpoint,
 		config.RelayerConfig.APIKey,
-		logger.StreamEndpoint(config.LogStreaming),
+		logger.StreamEndpoint(streamConfig),
+		logger.StreamDeliveryEnabled(streamConfig),
 		config.MintPairingConfig,
 		config.OfflineCache,
 		config.GatewayUserAgentTuning(finalLogger),
@@ -937,6 +939,7 @@ func initializeApp(
 	relayerEndpoint string,
 	relayerAPIKey string,
 	logStreamEndpoint string,
+	logStreamEnabled bool,
 	mintPairingConfig *config.MintPairingConfig,
 	offlineCacheConfig *config.OfflineCacheConfig,
 	gatewayUserAgentConfig *config.GatewayUserAgentConfig,
@@ -1635,7 +1638,7 @@ func initializeApp(
 		snapshot: provMachine.Snapshot,
 	}
 	screenshotCapturer := screenshot.New(cdpEndpoint, httpClient, webSocketDialer)
-	hub := hub.NewWithLogEndpoint(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger, logStreamEndpoint)
+	hub := hub.NewWithLogDelivery(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger, logStreamEndpoint, logStreamEnabled)
 	// Control-plane hub contact defers the escape policy's episode raise
 	// (§4.1): a phone with the app open must not have its link yanked. The
 	// hub filters (counted routes, non-loopback) and the machine timestamps.

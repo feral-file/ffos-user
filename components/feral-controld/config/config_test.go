@@ -9,7 +9,6 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
-	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 
 	"github.com/golang/mock/gomock"
@@ -115,9 +114,7 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 				Endpoint: "wss://relay.feralfile.com",
 				APIKey:   "test-api-key",
 			}
-			cfg.LogStreaming = &logger.StreamingConfig{
-				Environment: "test",
-			}
+			cfg.LogStreaming = json.RawMessage(`{"environment":"test"}`)
 			return nil
 		}).
 		Times(1)
@@ -134,12 +131,38 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 	assert.Equal(t, "http://localhost:9222", result.CDPConfig.Endpoint)
 	assert.Equal(t, "wss://relay.feralfile.com", result.RelayerConfig.Endpoint)
 	assert.Equal(t, "test-api-key", result.RelayerConfig.APIKey)
-	assert.Equal(t, "test", result.LogStreaming.Environment)
+	assert.Equal(t, "test", result.LogStreamingConfig(ts.logger).Environment)
 
 	// Verify MAC info is populated as a map
 	assert.NotNil(t, result.MACInfo)
 	assert.Equal(t, "aa:bb:cc:dd:ee:ff", result.MACInfo["enp1s0"])
 	assert.Equal(t, "11:22:33:44:55:66", result.MACInfo["wlp2s0"])
+}
+
+func TestLogStreamingConfigIsPermissiveAndFailsClosed(t *testing.T) {
+	t.Run("valid block", func(t *testing.T) {
+		var c config.Config
+		require.NoError(t, json.Unmarshal([]byte(`{"logStreaming":{"environment":"test","sampleRate":0.25}}`), &c))
+		stream := c.LogStreamingConfig(zap.NewNop())
+		require.NotNil(t, stream)
+		assert.Equal(t, "test", stream.Environment)
+		require.NotNil(t, stream.SampleRate)
+		assert.Equal(t, 0.25, *stream.SampleRate)
+	})
+
+	t.Run("wrong typed optional field does not fail top-level parse", func(t *testing.T) {
+		var c config.Config
+		require.NoError(t, json.Unmarshal([]byte(`{"logStreaming":{"sampleRate":"all"}}`), &c))
+		stream := c.LogStreamingConfig(zaptest.NewLogger(t))
+		require.NotNil(t, stream)
+		require.NotNil(t, stream.SampleRate)
+		assert.Zero(t, *stream.SampleRate)
+	})
+
+	t.Run("absent block preserves upload-all default", func(t *testing.T) {
+		var c config.Config
+		assert.Nil(t, c.LogStreamingConfig(zap.NewNop()))
+	})
 }
 
 func TestConfigManager_Load_Success_AlreadyLoaded(t *testing.T) {

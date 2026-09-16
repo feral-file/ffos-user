@@ -140,6 +140,31 @@ func TestHandlePlayerLogsRejectsInvalidRecordWithoutCallingUpstream(t *testing.T
 	assert.False(t, called)
 }
 
+func TestHandlePlayerLogsAcceptsWithoutForwardingWhenDisabled(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	h := &hub{
+		statusProvider:      statusOnlyProvider{info: StatusInfo{DeviceID: "untrusted"}},
+		logEndpoint:         upstream.URL,
+		logHTTPClient:       upstream.Client(),
+		logDeliveryDisabled: true,
+	}
+	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"hello","context":{"session_id":"session-1"}}]`
+	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Origin", playerOrigin)
+	w := httptest.NewRecorder()
+
+	h.handlePlayerLogs(w, req)
+
+	assert.Equal(t, http.StatusAccepted, w.Code)
+	assert.False(t, called)
+}
+
 func TestHandlePlayerLogsPropagatesUpstreamFailure(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)

@@ -31,6 +31,8 @@ func TestStreamingConfigNormalized(t *testing.T) {
 	assert.Equal(t, 0.0, *low.SampleRate)
 	assert.Equal(t, DefaultStreamEndpoint, StreamEndpoint(nil))
 	assert.Equal(t, "https://logs.example.test", StreamEndpoint(&StreamingConfig{Endpoint: "https://logs.example.test"}))
+	assert.True(t, StreamDeliveryEnabled(nil))
+	assert.False(t, StreamDeliveryEnabled(&StreamingConfig{SampleRate: floatPtr(0)}))
 }
 
 func TestStreamWriterGroupsByIdleTimeout(t *testing.T) {
@@ -220,6 +222,26 @@ func TestCloudflareCoreExcludesRoutineHubPolls(t *testing.T) {
 		Key: "route", Type: zapcore.StringType, String: "cast",
 	}}))
 	assert.Equal(t, "Hub request served", (<-w.records).Message)
+}
+
+func TestCloudflareCoreExcludesRecurringRelayerRetries(t *testing.T) {
+	w := &streamWriter{environment: "production", deviceID: "FF1-ABC", records: make(chan streamRecord, 1)}
+	core := &cloudflareCore{writer: w, level: zapcore.InfoLevel}
+
+	for _, message := range []string{
+		"Connecting to Relayer",
+		"Relayer connection failed transiently, will retry",
+		"Sleeping before relayer retry",
+		"Relayer endpoint is busy, will retry",
+		"Unknown relayer connection error",
+		"Relayer dial failed",
+	} {
+		require.NoError(t, core.Write(zapcore.Entry{Time: time.Now(), Level: zapcore.InfoLevel, Message: message}, nil))
+		assert.Empty(t, w.records, "%q should stay out of the remote stream", message)
+	}
+
+	require.NoError(t, core.Write(zapcore.Entry{Time: time.Now(), Level: zapcore.InfoLevel, Message: "Connected to Relayer"}, nil))
+	assert.Equal(t, "Connected to Relayer", (<-w.records).Message)
 }
 
 func TestSanitizePublicMessageRedactsCredentialForms(t *testing.T) {
