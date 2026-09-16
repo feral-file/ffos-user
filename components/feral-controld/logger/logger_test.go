@@ -169,6 +169,30 @@ func TestStreamWriterUsesEmissionTimeForIdleBoundary(t *testing.T) {
 	require.NoError(t, w.Close())
 }
 
+func TestStreamWriterDoesNotRewindSessionTimeForLateRecords(t *testing.T) {
+	requests := make(chan []streamRecord, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var records []streamRecord
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&records))
+		requests <- records
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	w := newTestWriter(server.URL, 20*time.Millisecond, time.Second)
+	go w.run()
+	start := time.Now()
+	w.records <- streamRecord{Timestamp: start.Format(time.RFC3339Nano), emittedAt: start, Message: "first"}
+	w.records <- streamRecord{Timestamp: start.Add(-time.Minute).Format(time.RFC3339Nano), emittedAt: start.Add(-time.Minute), Message: "late older write"}
+	w.records <- streamRecord{Timestamp: start.Add(10 * time.Millisecond).Format(time.RFC3339Nano), emittedAt: start.Add(10 * time.Millisecond), Message: "current"}
+
+	got := receiveRequest(t, requests)
+	require.Len(t, got, 3)
+	assert.Equal(t, got[0].Context["session_id"], got[1].Context["session_id"])
+	assert.Equal(t, got[0].Context["session_id"], got[2].Context["session_id"])
+	require.NoError(t, w.Close())
+}
+
 func TestCloudflareCoreBuildsPublicSafeFF1Record(t *testing.T) {
 	w := &streamWriter{environment: "production", deviceID: "FF1-ABC", records: make(chan streamRecord, 1)}
 	core := &cloudflareCore{writer: w, level: zapcore.DebugLevel}
@@ -247,9 +271,10 @@ func TestCloudflareCoreExcludesRecurringRelayerRetries(t *testing.T) {
 func TestSanitizePublicMessageRedactsCredentialForms(t *testing.T) {
 	//nolint:gosec // Intentional fake credentials exercise public-log sanitization.
 	tests := map[string]string{
-		"authorization header": `Authorization: Bearer secret-token`,
-		"quoted JSON key":      `payload {"apiKey":"secret"}`,
-		"websocket userinfo":   `connect wss://user:secret@example.com/socket?token=query-secret`,
+		"authorization header":     `Authorization: Bearer secret-token`,
+		"authorization whitespace": `Authorization Bearer top-secret`,
+		"quoted JSON key":          `payload {"apiKey":"secret"}`,
+		"websocket userinfo":       `connect wss://user:secret@example.com/socket?token=query-secret`,
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -260,6 +285,7 @@ func TestSanitizePublicMessageRedactsCredentialForms(t *testing.T) {
 		})
 	}
 	assert.Equal(t, "[REDACTED_CREDENTIAL]", SanitizePublicMessage(tests["authorization header"]))
+	assert.Equal(t, "[REDACTED_CREDENTIAL]", SanitizePublicMessage(tests["authorization whitespace"]))
 	assert.Equal(t, "payload { [REDACTED_CREDENTIAL]", SanitizePublicMessage(tests["quoted JSON key"]))
 	assert.Equal(t, "connect wss://example.com/socket", SanitizePublicMessage(tests["websocket userinfo"]))
 }

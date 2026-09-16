@@ -35,7 +35,9 @@ const (
 
 var (
 	remoteURLPattern       = regexp.MustCompile(`(?i)(?:https?|wss?)://[^\s"'<>]+`)
-	credentialStartPattern = regexp.MustCompile(`(?i)["']?\b(?:password|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|client[_-]?secret|private[_-]?key|authorization|cookie|dsn)\b["']?\s*[:=]`)
+	credentialStartPattern = regexp.MustCompile(
+		`(?i)(?:["']?\b(?:password|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|client[_-]?secret|private[_-]?key|authorization|cookie|dsn)\b["']?\s*[:=]|["']?\bauthorization\b["']?\s+(?:bearer|basic)\b)`,
+	)
 )
 
 // StreamingConfig controls FF1 Cloudflare log delivery. Sampling is decided
@@ -364,6 +366,12 @@ func (w *streamWriter) run() {
 		}
 		if emittedAt.IsZero() {
 			emittedAt = time.Now()
+		}
+		// Concurrent zap writes can arrive out of timestamp order. Session time
+		// must only move forward; otherwise a delayed old entry rewinds the idle
+		// baseline and makes the following current entry split the session.
+		if !lastRecordAt.IsZero() && emittedAt.Before(lastRecordAt) {
+			emittedAt = lastRecordAt
 		}
 		if sessionID != "" && (emittedAt.Sub(lastRecordAt) >= w.idleTimeout || emittedAt.Sub(sessionStartedAt) >= w.maxDuration) {
 			flushChunk(true)

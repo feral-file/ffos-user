@@ -82,7 +82,13 @@ S3 PUT. And the `device_status` notification feed over the relayer.
   extends to every new gauge and status field: scrapes and polls read caches.
 - **Hub-contact observer exclusions stand.** `/metrics` and the WS are excluded
   from the SoftAP-raise deferral (`hub/hub.go:45-57`); new gauges change no
-  routes. **No new `:1111` routes at all** before #3471.
+  LAN-accessible routes. **No new LAN surface on `:1111`** before #3471. The
+  sole route-registration exception is `POST /api/logs`: it is a device-local
+  browser bridge whose handler rejects non-loopback peers before reading the
+  body and accepts only the fixed player Origin `http://127.0.0.1:8080`.
+  Because it is unreachable from the LAN, it does not bypass the shared
+  middleware authorization rollout; widening either check would violate this
+  exception and must wait for #3471.
 - **Edge + level connectivity pattern.** Any new consumer of
   `connectivity_change` must also reconcile off a level signal (the
   `mediator.go:597-623` pattern) or it will stick wrong after a missed edge.
