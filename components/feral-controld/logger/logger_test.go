@@ -34,6 +34,7 @@ func TestStreamingConfigNormalized(t *testing.T) {
 	assert.Equal(t, DefaultStreamEndpoint, StreamEndpoint(nil))
 	assert.Equal(t, "https://logs.example.test", StreamEndpoint(&StreamingConfig{Endpoint: "https://logs.example.test"}))
 	assert.Equal(t, "test-token", StreamAPIKey(&StreamingConfig{APIKey: " test-token "}))
+	assert.Equal(t, "trusted-test", StreamEnvironment(&StreamingConfig{Environment: "trusted-test"}))
 	assert.Equal(t, 1.0, StreamSampleRate(&StreamingConfig{SampleRate: floatPtr(2)}))
 }
 

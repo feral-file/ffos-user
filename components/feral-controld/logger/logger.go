@@ -64,6 +64,12 @@ func StreamAPIKey(config *StreamingConfig) string {
 	return strings.TrimSpace(config.normalized().APIKey)
 }
 
+// StreamEnvironment returns the trusted deployment label attached server-side
+// to both daemon and player records.
+func StreamEnvironment(config *StreamingConfig) string {
+	return config.normalized().Environment
+}
+
 // StreamSampleRate returns the normalized session sampling rate shared by the
 // daemon writer and player proxy.
 func StreamSampleRate(config *StreamingConfig) float64 {

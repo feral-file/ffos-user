@@ -43,6 +43,7 @@ func TestHandlePlayerLogsBrowserContract(t *testing.T) {
 		statusProvider: fixedStatusProvider{info: StatusInfo{DeviceID: "FF1-BROWSER"}},
 		logEndpoint:    "http://" + upstreamListener.Addr().String(),
 		logAPIKey:      "test-token",
+		logEnvironment: "test",
 		logSampleRate:  1,
 		logHTTPClient:  &http.Client{Timeout: 5 * time.Second},
 	}
@@ -116,7 +117,8 @@ fetch('http://127.0.0.1:1111/api/logs', {
 		require.Len(t, batch, 1)
 		assert.Equal(t, "player", batch[0].Service)
 		assert.Equal(t, "FF1-BROWSER", batch[0].DeviceID)
-		assert.Equal(t, "browser-contract", batch[0].Context["session_id"])
+		assert.Equal(t, "test", batch[0].Environment)
+		assert.Equal(t, derivePlayerSessionID("FF1-BROWSER", "browser-contract"), batch[0].Context["session_id"])
 		messages[batch[0].Message] = true
 	}
 	assert.True(t, messages["[AppContext] idle-flushed-json"])

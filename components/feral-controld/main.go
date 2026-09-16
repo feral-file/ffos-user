@@ -199,6 +199,7 @@ func main() {
 		config.RelayerConfig.APIKey,
 		logger.StreamEndpoint(streamConfig),
 		logger.StreamAPIKey(streamConfig),
+		logger.StreamEnvironment(streamConfig),
 		logger.StreamSampleRate(streamConfig),
 		config.MintPairingConfig,
 		config.OfflineCache,
@@ -950,6 +951,7 @@ func initializeApp(
 	relayerAPIKey string,
 	logStreamEndpoint string,
 	logStreamAPIKey string,
+	logStreamEnvironment string,
 	logStreamSampleRate float64,
 	mintPairingConfig *config.MintPairingConfig,
 	offlineCacheConfig *config.OfflineCacheConfig,
@@ -1649,7 +1651,7 @@ func initializeApp(
 		snapshot: provMachine.Snapshot,
 	}
 	screenshotCapturer := screenshot.New(cdpEndpoint, httpClient, webSocketDialer)
-	hub := hub.NewWithLogDelivery(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger, logStreamEndpoint, logStreamAPIKey, logStreamSampleRate)
+	hub := hub.NewWithLogDelivery(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger, logStreamEndpoint, logStreamAPIKey, logStreamEnvironment, logStreamSampleRate)
 	// Control-plane hub contact defers the escape policy's episode raise
 	// (§4.1): a phone with the app open must not have its link yanked. The
 	// hub filters (counted routes, non-loopback) and the machine timestamps.

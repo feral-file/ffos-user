@@ -26,9 +26,12 @@ and recognizable credential assignments before upload.
 The bundled player posts its already-sessionized records to
 `POST http://127.0.0.1:1111/api/logs`. The route accepts only loopback requests
 with Origin `http://127.0.0.1:8080`, validates the narrow browser payload, and
-overwrites both `service` and `device_id` before forwarding it to Cloudflare.
-The browser therefore neither owns device attribution nor depends on public
-Cloudflare CORS configuration.
+overwrites `service`, `device_id`, and `environment` before forwarding it to
+Cloudflare. The browser session ID is replaced with a stable opaque digest, so
+browser-controlled context never enters the public stream. Trace and debug
+records remain local; remote player delivery starts at Info. The browser
+therefore owns neither trusted attribution nor public Cloudflare credentials
+and does not depend on public Cloudflare CORS configuration.
 
 ---
 

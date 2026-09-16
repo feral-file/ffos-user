@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -114,17 +115,21 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 		sampler = samplePlayerSession
 	}
 	for _, record := range input {
-		if !sampler(deviceID, record.Context["session_id"], h.logSampleRate) {
+		if !remotePlayerLevelEnabled(record.Level) {
+			continue
+		}
+		derivedSessionID := derivePlayerSessionID(deviceID, record.Context["session_id"])
+		if !sampler(deviceID, derivedSessionID, h.logSampleRate) {
 			continue
 		}
 		records = append(records, playerLogRecord{
 			Timestamp:   record.Timestamp,
 			Level:       record.Level,
 			Service:     "player",
-			Environment: strings.TrimSpace(record.Environment),
+			Environment: h.logEnvironment,
 			DeviceID:    deviceID,
 			Message:     logger.SanitizePublicMessage(record.Message),
-			Context:     map[string]string{"session_id": record.Context["session_id"]},
+			Context:     map[string]string{"session_id": derivedSessionID},
 		})
 	}
 	if len(records) == 0 {
@@ -175,6 +180,20 @@ func samplePlayerSession(deviceID, sessionID string, sampleRate float64) bool {
 	digest := sha256.Sum256([]byte(deviceID + "\x00" + sessionID))
 	value := binary.BigEndian.Uint64(digest[:8])
 	return float64(value)/float64(^uint64(0)) < sampleRate
+}
+
+func derivePlayerSessionID(deviceID, browserSessionID string) string {
+	digest := sha256.Sum256([]byte(deviceID + "\x00" + browserSessionID))
+	return fmt.Sprintf("%x", digest[:16])
+}
+
+func remotePlayerLevelEnabled(level string) bool {
+	switch level {
+	case "info", "warn", "error", "fatal":
+		return true
+	default:
+		return false
+	}
 }
 
 func marshalPlayerLogNDJSON(records []playerLogRecord) ([]byte, error) {
