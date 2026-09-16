@@ -45,6 +45,8 @@ jobs:
 
       - name: Run local verification target
         run: make verify-feral-controld-test
+        env:
+          FFOS_REQUIRE_LOG_BROWSER: "1"
 
       - name: Generate coverage
         if: ${{ inputs.upload-coverage == true }}
