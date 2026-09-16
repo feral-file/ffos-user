@@ -34,8 +34,8 @@ const (
 )
 
 var (
-	remoteURLPattern  = regexp.MustCompile(`https?://[^\s"'<>]+`)
-	credentialPattern = regexp.MustCompile(`(?i)\b(password|secret|token|api[_-]?key|authorization|cookie|dsn)\s*[:=]\s*[^,\s;]+`)
+	remoteURLPattern       = regexp.MustCompile(`(?i)(?:https?|wss?)://[^\s"'<>]+`)
+	credentialStartPattern = regexp.MustCompile(`(?i)["']?\b(?:password|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|client[_-]?secret|private[_-]?key|authorization|cookie|dsn)\b["']?\s*[:=]`)
 )
 
 // StreamingConfig controls FF1 Cloudflare log delivery. Sampling is decided
@@ -439,5 +439,12 @@ func SanitizePublicMessage(message string) string {
 		parsed.Fragment = ""
 		return parsed.String() + trailing
 	})
-	return credentialPattern.ReplaceAllString(message, "$1=[REDACTED]")
+	if location := credentialStartPattern.FindStringIndex(message); location != nil {
+		prefix := strings.TrimSpace(message[:location[0]])
+		if prefix == "" {
+			return "[REDACTED_CREDENTIAL]"
+		}
+		return prefix + " [REDACTED_CREDENTIAL]"
+	}
+	return message
 }

@@ -54,6 +54,42 @@ func TestHandlePlayerLogsEnrichesAndForwardsSafeRecords(t *testing.T) {
 	assert.Equal(t, map[string]string{"session_id": "session-1"}, forwarded[0].Context)
 }
 
+func TestHandlePlayerLogsRedactsCredentialBearingMessages(t *testing.T) {
+	var forwarded []playerLogRecord
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&forwarded))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	h := &hub{
+		statusProvider: fixedStatusProvider{info: StatusInfo{DeviceID: "FF1-TEST"}},
+		logEndpoint:    upstream.URL,
+		logHTTPClient:  upstream.Client(),
+	}
+	//nolint:gosec // Intentional fake credentials exercise the proxy boundary.
+	body := `[
+		{"timestamp":"2026-09-15T01:02:03Z","level":"error","environment":"production","message":"Authorization: Bearer secret-token","context":{"session_id":"session-1"}},
+		{"timestamp":"2026-09-15T01:02:04Z","level":"error","environment":"production","message":"payload {\"apiKey\":\"secret\"}","context":{"session_id":"session-1"}},
+		{"timestamp":"2026-09-15T01:02:05Z","level":"error","environment":"production","message":"connect wss://user:secret@example.com/socket?token=query-secret","context":{"session_id":"session-1"}}
+	]`
+	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Origin", playerOrigin)
+	w := httptest.NewRecorder()
+
+	h.handlePlayerLogs(w, req)
+
+	assert.Equal(t, http.StatusAccepted, w.Code)
+	require.Len(t, forwarded, 3)
+	for _, record := range forwarded {
+		assert.NotContains(t, record.Message, "secret")
+		assert.NotContains(t, record.Message, "user:")
+	}
+	assert.Equal(t, "[REDACTED_CREDENTIAL]", forwarded[0].Message)
+	assert.Equal(t, "payload { [REDACTED_CREDENTIAL]", forwarded[1].Message)
+	assert.Equal(t, "connect wss://example.com/socket", forwarded[2].Message)
+}
+
 func TestHandlePlayerLogsAllowsOnlyPlayerPreflightOnLoopback(t *testing.T) {
 	h := &hub{}
 	req := httptest.NewRequest(http.MethodOptions, "/api/logs", nil)

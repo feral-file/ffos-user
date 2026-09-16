@@ -178,7 +178,7 @@ func TestCloudflareCoreBuildsPublicSafeFF1Record(t *testing.T) {
 	assert.Equal(t, "feral-controld", record.Service)
 	assert.Equal(t, "FF1-ABC", record.DeviceID)
 	assert.Equal(t, "error", record.Level)
-	assert.Equal(t, "failed apiKey=[REDACTED]", record.Message)
+	assert.Equal(t, "failed [REDACTED_CREDENTIAL]", record.Message)
 	assert.Nil(t, record.Structured)
 	encoded, err := json.Marshal(record)
 	require.NoError(t, err)
@@ -200,6 +200,26 @@ func TestCloudflareCoreExcludesCommandPayloadAndSanitizesURLs(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(encoded), "field-secret")
 	assert.NotContains(t, string(encoded), "message-secret")
+}
+
+func TestSanitizePublicMessageRedactsCredentialForms(t *testing.T) {
+	//nolint:gosec // Intentional fake credentials exercise public-log sanitization.
+	tests := map[string]string{
+		"authorization header": `Authorization: Bearer secret-token`,
+		"quoted JSON key":      `payload {"apiKey":"secret"}`,
+		"websocket userinfo":   `connect wss://user:secret@example.com/socket?token=query-secret`,
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := SanitizePublicMessage(input)
+			assert.NotContains(t, got, "secret")
+			assert.NotContains(t, got, "user:")
+			assert.NotContains(t, got, "token=query")
+		})
+	}
+	assert.Equal(t, "[REDACTED_CREDENTIAL]", SanitizePublicMessage(tests["authorization header"]))
+	assert.Equal(t, "payload { [REDACTED_CREDENTIAL]", SanitizePublicMessage(tests["quoted JSON key"]))
+	assert.Equal(t, "connect wss://example.com/socket", SanitizePublicMessage(tests["websocket userinfo"]))
 }
 
 func newTestWriter(endpoint string, idle, maximum time.Duration) *streamWriter {
