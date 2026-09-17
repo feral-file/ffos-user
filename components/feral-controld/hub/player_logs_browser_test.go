@@ -112,17 +112,17 @@ fetch('http://127.0.0.1:1111/api/logs', {
 	}
 
 	assert.Equal(t, int32(1), preflights.Load())
-	messages := map[string]bool{}
+	messageCount := 0
 	for _, batch := range batches {
 		require.Len(t, batch, 1)
 		assert.Equal(t, "player", batch[0].Service)
 		assert.Equal(t, "FF1-BROWSER", batch[0].DeviceID)
 		assert.Equal(t, "test", batch[0].Environment)
 		assert.Equal(t, derivePlayerSessionID("FF1-BROWSER", "browser-contract"), batch[0].Context["session_id"])
-		messages[batch[0].Message] = true
+		assert.Equal(t, "[AppContext]", batch[0].Message)
+		messageCount++
 	}
-	assert.True(t, messages["[AppContext] idle-flushed-json"])
-	assert.True(t, messages["[AppContext] pagehide-keepalive"])
+	assert.Equal(t, 2, messageCount)
 }
 
 func findChrome() string {

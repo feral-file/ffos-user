@@ -24,7 +24,7 @@ type statusOnlyProvider struct{ info StatusInfo }
 
 func (p statusOnlyProvider) Status(_ context.Context) StatusInfo { return p.info }
 
-func TestHandlePlayerLogsEnrichesAndForwardsSafeRecords(t *testing.T) {
+func TestHandlePlayerLogsEnrichesAndForwardsAllowlistedSource(t *testing.T) {
 	var forwarded []playerLogRecord
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
@@ -41,8 +41,8 @@ func TestHandlePlayerLogsEnrichesAndForwardsSafeRecords(t *testing.T) {
 		logSampleRate:  1,
 		logHTTPClient:  upstream.Client(),
 	}
-	//nolint:gosec // Intentional fake credentials exercise public-log sanitization.
-	body := `[{"timestamp":"2026-09-15T01:02:03.000Z","level":"error","environment":"browser-secret","message":"failed https://user:pass@example.com/art?token=private","context":{"session_id":"Bearer browser-secret"}}]`
+	//nolint:gosec // Intentional fake credentials exercise the public boundary.
+	body := `[{"timestamp":"2026-09-15T01:02:03.000Z","level":"error","environment":"browser-secret","message":"[AppContext] failed https://user:pass@example.com/art?token=private","context":{"session_id":"Bearer browser-secret"}}]`
 	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
@@ -57,12 +57,12 @@ func TestHandlePlayerLogsEnrichesAndForwardsSafeRecords(t *testing.T) {
 	assert.Equal(t, "player", forwarded[0].Service)
 	assert.Equal(t, "FF1-TEST", forwarded[0].DeviceID)
 	assert.Equal(t, "trusted-test", forwarded[0].Environment)
-	assert.Equal(t, "failed https://example.com/art", forwarded[0].Message)
+	assert.Equal(t, "[AppContext]", forwarded[0].Message)
 	assert.Equal(t, map[string]string{"session_id": derivePlayerSessionID("FF1-TEST", "Bearer browser-secret")}, forwarded[0].Context)
 	assert.NotContains(t, forwarded[0].Context["session_id"], "secret")
 }
 
-func TestHandlePlayerLogsRedactsCredentialBearingMessages(t *testing.T) {
+func TestHandlePlayerLogsDropsFreeFormDetailsFromAllowlistedSources(t *testing.T) {
 	var forwarded []playerLogRecord
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		forwarded = decodePlayerLogRecords(t, r)
@@ -79,12 +79,10 @@ func TestHandlePlayerLogsRedactsCredentialBearingMessages(t *testing.T) {
 	}
 	//nolint:gosec // Intentional fake credentials exercise the proxy boundary.
 	body := `[
-		{"timestamp":"2026-09-15T01:02:03Z","level":"error","environment":"production","message":"Authorization: Bearer secret-token","context":{"session_id":"session-1"}},
-		{"timestamp":"2026-09-15T01:02:04Z","level":"error","environment":"production","message":"Authorization Bearer whitespace-secret","context":{"session_id":"session-1"}},
-		{"timestamp":"2026-09-15T01:02:05Z","level":"error","environment":"production","message":"payload {\"apiKey\":\"secret\"}","context":{"session_id":"session-1"}},
-		{"timestamp":"2026-09-15T01:02:06Z","level":"error","environment":"production","message":"connect wss://user:secret@example.com/socket?token=query-secret","context":{"session_id":"session-1"}},
-		{"timestamp":"2026-09-15T01:02:07Z","level":"error","environment":"production","message":"Bearer standalone-secret","context":{"session_id":"session-1"}},
-		{"timestamp":"2026-09-15T01:02:08Z","level":"error","environment":"production","message":"request Basic embedded-secret","context":{"session_id":"session-1"}}
+		{"timestamp":"2026-09-15T01:02:03Z","level":"error","environment":"production","message":"[AppContext] password hunter2","context":{"session_id":"session-1"}},
+		{"timestamp":"2026-09-15T01:02:04Z","level":"error","environment":"production","message":"[AppContext] cookie session-value","context":{"session_id":"session-1"}},
+		{"timestamp":"2026-09-15T01:02:05Z","level":"error","environment":"production","message":"[AppContext] session_token=abc","context":{"session_id":"session-1"}},
+		{"timestamp":"2026-09-15T01:02:06Z","level":"error","environment":"production","message":"[AppContext] csrfToken=abc","context":{"session_id":"session-1"}}
 	]`
 	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -96,17 +94,10 @@ func TestHandlePlayerLogsRedactsCredentialBearingMessages(t *testing.T) {
 	h.handlePlayerLogs(w, req)
 
 	assert.Equal(t, http.StatusAccepted, w.Code)
-	require.Len(t, forwarded, 6)
+	require.Len(t, forwarded, 4)
 	for _, record := range forwarded {
-		assert.NotContains(t, record.Message, "secret")
-		assert.NotContains(t, record.Message, "user:")
+		assert.Equal(t, "[AppContext]", record.Message)
 	}
-	assert.Equal(t, "[REDACTED_CREDENTIAL]", forwarded[0].Message)
-	assert.Equal(t, "[REDACTED_CREDENTIAL]", forwarded[1].Message)
-	assert.Equal(t, "payload { [REDACTED_CREDENTIAL]", forwarded[2].Message)
-	assert.Equal(t, "connect wss://example.com/socket", forwarded[3].Message)
-	assert.Equal(t, "[REDACTED_CREDENTIAL]", forwarded[4].Message)
-	assert.Equal(t, "request [REDACTED_CREDENTIAL]", forwarded[5].Message)
 }
 
 func TestHandlePlayerLogsSamplesWholeSessionsAcrossBatches(t *testing.T) {
@@ -147,13 +138,13 @@ func TestHandlePlayerLogsSamplesWholeSessionsAcrossBatches(t *testing.T) {
 		return w.Code
 	}
 
-	assert.Equal(t, http.StatusAccepted, send(dropSession, "drop one"))
-	assert.Equal(t, http.StatusAccepted, send(dropSession, "drop two"))
+	assert.Equal(t, http.StatusAccepted, send(dropSession, "[AppContext] drop one"))
+	assert.Equal(t, http.StatusAccepted, send(dropSession, "[AppContext] drop two"))
 	assert.Empty(t, forwarded, "a dropped session must stay dropped across batches")
-	assert.Equal(t, http.StatusAccepted, send(keepSession, "keep one"))
-	assert.Equal(t, http.StatusAccepted, send(keepSession, "keep two"))
-	assert.Equal(t, "keep one", (<-forwarded)[0].Message)
-	assert.Equal(t, "keep two", (<-forwarded)[0].Message)
+	assert.Equal(t, http.StatusAccepted, send(keepSession, "[AppContext] keep one"))
+	assert.Equal(t, http.StatusAccepted, send(keepSession, "[AppContext] keep two"))
+	assert.Equal(t, "[AppContext]", (<-forwarded)[0].Message)
+	assert.Equal(t, "[AppContext]", (<-forwarded)[0].Message)
 	assert.True(t, samplePlayerSession("FF1-TEST", derivePlayerSessionID("FF1-TEST", keepSession), 0.5))
 	assert.False(t, samplePlayerSession("FF1-TEST", derivePlayerSessionID("FF1-TEST", dropSession), 0.5))
 }
@@ -174,8 +165,8 @@ func TestHandlePlayerLogsKeepsDebugAndTraceLocal(t *testing.T) {
 		logHTTPClient:  upstream.Client(),
 	}
 	body := `[
-		{"timestamp":"2026-09-15T01:02:03Z","level":"trace","environment":"browser-secret","message":"trace diagnostic","context":{"session_id":"session-1"}},
-		{"timestamp":"2026-09-15T01:02:04Z","level":"debug","environment":"browser-secret","message":"debug diagnostic","context":{"session_id":"session-1"}}
+		{"timestamp":"2026-09-15T01:02:03Z","level":"trace","environment":"browser-secret","message":"[AppContext] trace diagnostic","context":{"session_id":"session-1"}},
+		{"timestamp":"2026-09-15T01:02:04Z","level":"debug","environment":"browser-secret","message":"[AppContext] debug diagnostic","context":{"session_id":"session-1"}}
 	]`
 	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -225,7 +216,34 @@ func TestHandlePlayerLogsRejectsInvalidRecordWithoutCallingUpstream(t *testing.T
 		logSampleRate:  1,
 		logHTTPClient:  upstream.Client(),
 	}
-	body := `[{"timestamp":"not-a-time","level":"info","environment":"production","message":"hello","context":{"session_id":"session-1"}}]`
+	body := `[{"timestamp":"not-a-time","level":"info","environment":"production","message":"[AppContext] hello","context":{"session_id":"session-1"}}]`
+	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Origin", playerOrigin)
+	w := httptest.NewRecorder()
+
+	h.handlePlayerLogs(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.False(t, called)
+}
+
+func TestHandlePlayerLogsRejectsUnrecognizedMessageSource(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	h := &hub{
+		statusProvider: fixedStatusProvider{info: StatusInfo{DeviceID: "FF1-TEST"}},
+		logEndpoint:    upstream.URL,
+		logAPIKey:      "test-token",
+		logEnvironment: "trusted-test",
+		logSampleRate:  1,
+		logHTTPClient:  upstream.Client(),
+	}
+	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"password hunter2","context":{"session_id":"session-1"}}]`
 	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
@@ -264,7 +282,7 @@ func TestHandlePlayerLogsAcceptsWithoutForwardingWhenDisabled(t *testing.T) {
 		logHTTPClient:       upstream.Client(),
 		logDeliveryDisabled: true,
 	}
-	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"hello","context":{"session_id":"session-1"}}]`
+	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"[AppContext] hello","context":{"session_id":"session-1"}}]`
 	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
@@ -289,7 +307,7 @@ func TestHandlePlayerLogsPropagatesUpstreamFailure(t *testing.T) {
 		logSampleRate:  1,
 		logHTTPClient:  upstream.Client(),
 	}
-	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"hello","context":{"session_id":"session-1"}}]`
+	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"[AppContext] hello","context":{"session_id":"session-1"}}]`
 	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
@@ -315,7 +333,7 @@ func TestHandlePlayerLogsRejectsStatusControllerIDFallback(t *testing.T) {
 		logSampleRate:  1,
 		logHTTPClient:  upstream.Client(),
 	}
-	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"hello","context":{"session_id":"session-1"}}]`
+	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"[AppContext] hello","context":{"session_id":"session-1"}}]`
 	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)

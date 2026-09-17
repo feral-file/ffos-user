@@ -12,8 +12,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 )
 
 const (
@@ -26,6 +24,36 @@ const (
 	// shared hub middleware also caps every request at 4 MiB.
 	maxPlayerLogBodyBytes = 2 << 20
 )
+
+// playerLogSources is the server-side trust boundary for the browser log
+// bridge. The player applies the same allowlist before posting, but this route
+// is unauthenticated and must not trust a browser-supplied free-form message.
+// Only the component label crosses the public boundary; message details and
+// console arguments remain local because they may contain credentials or
+// signed media URLs.
+var playerLogSources = [...]string{
+	"[API]",
+	"[AppContext]",
+	"[AppWrapper]",
+	"[ArtworkPlayer]",
+	"[CanvasService]",
+	"[CAST]",
+	"[CDP Handler]",
+	"[CDP]",
+	"[ContentType]",
+	"[DeviceManager]",
+	"[DP1ScheduleService]",
+	"[DP1Service]",
+	"[ErrorNavigation]",
+	"[ErrorPage]",
+	"[GlobalError]",
+	"[IndexedDBStorage]",
+	"[MediaLoader]",
+	"[ModelViewer]",
+	"[PlaylistClient]",
+	"[useArtworkSettings]",
+	"[useCastInfo]",
+}
 
 type playerLogInput struct {
 	Timestamp   string            `json:"timestamp"`
@@ -123,6 +151,12 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 		if !remotePlayerLevelEnabled(record.Level) {
 			continue
 		}
+		message, ok := publicPlayerLogMessage(record.Message)
+		if !ok {
+			// validPlayerLog already enforces this. Keep the forwarding boundary
+			// fail-closed if validation and delivery are changed independently.
+			continue
+		}
 		derivedSessionID := derivePlayerSessionID(deviceID, record.Context["session_id"])
 		if !sampler(deviceID, derivedSessionID, h.logSampleRate) {
 			continue
@@ -133,7 +167,7 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 			Service:     "player",
 			Environment: h.logEnvironment,
 			DeviceID:    deviceID,
-			Message:     logger.SanitizePublicMessage(record.Message),
+			Message:     message,
 			Context:     map[string]string{"session_id": derivedSessionID},
 		})
 	}
@@ -235,8 +269,21 @@ func validPlayerLog(record playerLogInput) bool {
 	if strings.TrimSpace(record.Message) == "" || len(record.Message) > maxPlayerMessage {
 		return false
 	}
+	if _, ok := publicPlayerLogMessage(record.Message); !ok {
+		return false
+	}
 	sessionID := strings.TrimSpace(record.Context["session_id"])
 	return sessionID != "" && len(sessionID) <= maxPlayerFieldSize && len(record.Context) == 1
+}
+
+func publicPlayerLogMessage(message string) (string, bool) {
+	message = strings.TrimSpace(message)
+	for _, source := range playerLogSources {
+		if message == source || strings.HasPrefix(message, source+" ") {
+			return source, true
+		}
+	}
+	return "", false
 }
 
 func validPlayerLevel(level string) bool {
