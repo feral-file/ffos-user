@@ -142,12 +142,14 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 func TestLogStreamingConfigIsPermissiveAndFailsClosed(t *testing.T) {
 	t.Run("valid block", func(t *testing.T) {
 		var c config.Config
-		require.NoError(t, json.Unmarshal([]byte(`{"logStreaming":{"environment":"test","sampleRate":0.25}}`), &c))
+		require.NoError(t, json.Unmarshal([]byte(`{"logStreaming":{"environment":"test","sampleRate":0.25,"playerSampleRate":0.75}}`), &c))
 		stream := c.LogStreamingConfig(zap.NewNop())
 		require.NotNil(t, stream)
 		assert.Equal(t, "test", stream.Environment)
 		require.NotNil(t, stream.SampleRate)
+		require.NotNil(t, stream.PlayerSampleRate)
 		assert.Equal(t, 0.25, *stream.SampleRate)
+		assert.Equal(t, 0.75, *stream.PlayerSampleRate)
 	})
 
 	t.Run("wrong typed optional field does not fail top-level parse", func(t *testing.T) {

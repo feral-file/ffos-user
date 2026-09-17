@@ -8,8 +8,12 @@ Agents should treat these rules as stable constraints when adding, changing, or 
 `feral-controld` mirrors its emitted zap records to the public FF1 Cloudflare
 Pipeline Stream documented by the sibling `ff-logging` repository. Records use
 service `feral-controld` and the hostname-backed FF1 device ID. The optional
-`logStreaming.sampleRate` configuration is evaluated once per log session;
-absent defaults to `1`, and `0` disables remote delivery.
+`logStreaming.sampleRate` configures `feral-controld`, while
+`logStreaming.playerSampleRate` independently configures player sessions.
+Each value is evaluated once per log session, defaults to `1` when absent, and
+uses `0` to disable that service's remote delivery. The browser always hands
+complete player sessions to controld, so fractional values are never
+multiplied by a second client-side sampling decision.
 
 A log session ends after five seconds without a record or after one minute of
 continuous records, whichever happens first. Every record carries the shared

@@ -22,18 +22,27 @@ func TestStreamingConfigNormalized(t *testing.T) {
 
 	defaults := (*StreamingConfig)(nil).normalized()
 	require.NotNil(t, defaults.SampleRate)
+	require.NotNil(t, defaults.PlayerSampleRate)
 	assert.Equal(t, 1.0, *defaults.SampleRate)
+	assert.Equal(t, 1.0, *defaults.PlayerSampleRate)
 	assert.Equal(t, DefaultStreamEndpoint, defaults.Endpoint)
 
 	high := (&StreamingConfig{SampleRate: floatPtr(2)}).normalized()
 	assert.Equal(t, 1.0, *high.SampleRate)
 	low := (&StreamingConfig{SampleRate: floatPtr(-1)}).normalized()
 	assert.Equal(t, 0.0, *low.SampleRate)
+	independent := (&StreamingConfig{
+		SampleRate:       floatPtr(0.25),
+		PlayerSampleRate: floatPtr(2),
+	}).normalized()
+	assert.Equal(t, 0.25, *independent.SampleRate)
+	assert.Equal(t, 1.0, *independent.PlayerSampleRate)
 	assert.Equal(t, DefaultStreamEndpoint, StreamEndpoint(nil))
 	assert.Equal(t, "https://logs.example.test", StreamEndpoint(&StreamingConfig{Endpoint: "https://logs.example.test"}))
 	assert.Equal(t, "test-token", StreamAPIKey(&StreamingConfig{APIKey: " test-token "}))
 	assert.Equal(t, "trusted-test", StreamEnvironment(&StreamingConfig{Environment: "trusted-test"}))
 	assert.Equal(t, 1.0, StreamSampleRate(&StreamingConfig{SampleRate: floatPtr(2)}))
+	assert.Equal(t, 0.25, StreamPlayerSampleRate(&StreamingConfig{PlayerSampleRate: floatPtr(0.25)}))
 }
 
 func TestStreamWriterGroupsByIdleTimeout(t *testing.T) {

@@ -40,14 +40,15 @@ var (
 	)
 )
 
-// StreamingConfig controls FF1 Cloudflare log delivery. Sampling is decided
-// once per inactivity-bounded session: 1 sends every session, while a fraction
-// sends that proportion of complete sessions. Zero explicitly disables upload.
+// StreamingConfig controls FF1 Cloudflare log delivery. Each service has an
+// independent whole-session sampling rate so changing player volume cannot
+// silently change daemon observability, or vice versa.
 type StreamingConfig struct {
-	Endpoint    string   `json:"endpoint,omitempty"`
-	APIKey      string   `json:"apiKey,omitempty"`
-	Environment string   `json:"environment,omitempty"`
-	SampleRate  *float64 `json:"sampleRate,omitempty"`
+	Endpoint         string   `json:"endpoint,omitempty"`
+	APIKey           string   `json:"apiKey,omitempty"`
+	Environment      string   `json:"environment,omitempty"`
+	SampleRate       *float64 `json:"sampleRate,omitempty"`
+	PlayerSampleRate *float64 `json:"playerSampleRate,omitempty"`
 }
 
 // StreamEndpoint returns the effective upload endpoint shared by daemon and
@@ -68,19 +69,24 @@ func StreamEnvironment(config *StreamingConfig) string {
 	return config.normalized().Environment
 }
 
-// StreamSampleRate returns the normalized session sampling rate shared by the
-// daemon writer and player proxy.
+// StreamSampleRate returns the normalized daemon session sampling rate.
 func StreamSampleRate(config *StreamingConfig) float64 {
 	return *config.normalized().SampleRate
+}
+
+// StreamPlayerSampleRate returns the normalized player session sampling rate.
+func StreamPlayerSampleRate(config *StreamingConfig) float64 {
+	return *config.normalized().PlayerSampleRate
 }
 
 func (c *StreamingConfig) normalized() StreamingConfig {
 	if c == nil {
 		one := 1.0
 		return StreamingConfig{
-			Endpoint:    DefaultStreamEndpoint,
-			Environment: DefaultEnvironment,
-			SampleRate:  &one,
+			Endpoint:         DefaultStreamEndpoint,
+			Environment:      DefaultEnvironment,
+			SampleRate:       &one,
+			PlayerSampleRate: &one,
 		}
 	}
 	out := *c
@@ -99,6 +105,16 @@ func (c *StreamingConfig) normalized() StreamingConfig {
 	} else if *out.SampleRate > 1 {
 		one := 1.0
 		out.SampleRate = &one
+	}
+	if out.PlayerSampleRate == nil {
+		one := 1.0
+		out.PlayerSampleRate = &one
+	} else if *out.PlayerSampleRate < 0 {
+		zero := 0.0
+		out.PlayerSampleRate = &zero
+	} else if *out.PlayerSampleRate > 1 {
+		one := 1.0
+		out.PlayerSampleRate = &one
 	}
 	return out
 }
