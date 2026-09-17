@@ -21,6 +21,10 @@ const (
 	maxPlayerLogCount  = 500
 	maxPlayerMessage   = 2048
 	maxPlayerFieldSize = 64
+	// 500 maximum-size messages plus timestamps, fixed fields, and JSON
+	// framing fit below 2 MiB. Keep a route-specific ceiling even though the
+	// shared hub middleware also caps every request at 4 MiB.
+	maxPlayerLogBodyBytes = 2 << 20
 )
 
 type playerLogInput struct {
@@ -64,6 +68,7 @@ func (h *hub) handlePlayerLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxPlayerLogBodyBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	var input []playerLogInput

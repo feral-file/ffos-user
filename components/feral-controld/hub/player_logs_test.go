@@ -237,6 +237,20 @@ func TestHandlePlayerLogsRejectsInvalidRecordWithoutCallingUpstream(t *testing.T
 	assert.False(t, called)
 }
 
+func TestHandlePlayerLogsRejectsOversizedBodyBeforeJSONAllocation(t *testing.T) {
+	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"` +
+		strings.Repeat("x", maxPlayerLogBodyBytes) +
+		`","context":{"session_id":"session-1"}}]`
+	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Origin", playerOrigin)
+	w := httptest.NewRecorder()
+
+	(&hub{}).handlePlayerLogs(w, req)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+}
+
 func TestHandlePlayerLogsAcceptsWithoutForwardingWhenDisabled(t *testing.T) {
 	called := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

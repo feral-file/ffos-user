@@ -16,9 +16,7 @@
   "logStreaming": {
     "apiKey": "YOUR_CLOUDFLARE_PIPELINES_TOKEN",
     "sampleRate": 1,
-    "environment": "production",
-    "idleTimeoutSeconds": 5,
-    "maxBatchDurationSeconds": 60
+    "environment": "production"
   },
   "provisioning": {
     "setupIncompleteDisabled": false,

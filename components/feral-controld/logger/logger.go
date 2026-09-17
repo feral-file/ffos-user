@@ -44,12 +44,10 @@ var (
 // once per inactivity-bounded session: 1 sends every session, while a fraction
 // sends that proportion of complete sessions. Zero explicitly disables upload.
 type StreamingConfig struct {
-	Endpoint                string   `json:"endpoint,omitempty"`
-	APIKey                  string   `json:"apiKey,omitempty"`
-	Environment             string   `json:"environment,omitempty"`
-	SampleRate              *float64 `json:"sampleRate,omitempty"`
-	IdleTimeoutSeconds      int      `json:"idleTimeoutSeconds,omitempty"`
-	MaxBatchDurationSeconds int      `json:"maxBatchDurationSeconds,omitempty"`
+	Endpoint    string   `json:"endpoint,omitempty"`
+	APIKey      string   `json:"apiKey,omitempty"`
+	Environment string   `json:"environment,omitempty"`
+	SampleRate  *float64 `json:"sampleRate,omitempty"`
 }
 
 // StreamEndpoint returns the effective upload endpoint shared by daemon and
@@ -80,11 +78,9 @@ func (c *StreamingConfig) normalized() StreamingConfig {
 	if c == nil {
 		one := 1.0
 		return StreamingConfig{
-			Endpoint:                DefaultStreamEndpoint,
-			Environment:             DefaultEnvironment,
-			SampleRate:              &one,
-			IdleTimeoutSeconds:      int(DefaultIdleTimeout / time.Second),
-			MaxBatchDurationSeconds: int(DefaultMaxBatchDuration / time.Second),
+			Endpoint:    DefaultStreamEndpoint,
+			Environment: DefaultEnvironment,
+			SampleRate:  &one,
 		}
 	}
 	out := *c
@@ -103,12 +99,6 @@ func (c *StreamingConfig) normalized() StreamingConfig {
 	} else if *out.SampleRate > 1 {
 		one := 1.0
 		out.SampleRate = &one
-	}
-	if out.IdleTimeoutSeconds <= 0 {
-		out.IdleTimeoutSeconds = int(DefaultIdleTimeout / time.Second)
-	}
-	if out.MaxBatchDurationSeconds <= 0 {
-		out.MaxBatchDurationSeconds = int(DefaultMaxBatchDuration / time.Second)
 	}
 	return out
 }
@@ -187,8 +177,8 @@ func AddCloudflare(base *zap.Logger, config *StreamingConfig, deviceID string) (
 		environment: cfg.Environment,
 		deviceID:    deviceID,
 		sampleRate:  *cfg.SampleRate,
-		idleTimeout: time.Duration(cfg.IdleTimeoutSeconds) * time.Second,
-		maxDuration: time.Duration(cfg.MaxBatchDurationSeconds) * time.Second,
+		idleTimeout: DefaultIdleTimeout,
+		maxDuration: DefaultMaxBatchDuration,
 		closeBudget: shutdownFlushBudget,
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 		random:      rand.Float64,

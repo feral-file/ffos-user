@@ -24,8 +24,6 @@ func TestStreamingConfigNormalized(t *testing.T) {
 	require.NotNil(t, defaults.SampleRate)
 	assert.Equal(t, 1.0, *defaults.SampleRate)
 	assert.Equal(t, DefaultStreamEndpoint, defaults.Endpoint)
-	assert.Equal(t, int(DefaultIdleTimeout/time.Second), defaults.IdleTimeoutSeconds)
-	assert.Equal(t, int(DefaultMaxBatchDuration/time.Second), defaults.MaxBatchDurationSeconds)
 
 	high := (&StreamingConfig{SampleRate: floatPtr(2)}).normalized()
 	assert.Equal(t, 1.0, *high.SampleRate)
