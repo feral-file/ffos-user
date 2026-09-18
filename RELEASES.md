@@ -58,16 +58,60 @@ no seatd session, and the kiosk half here is inert or wedged.
 
 ### Release action
 
-Dispatch `build-image-to-cf.yml` in the `ffos` repo (human step) with:
+Two dispatches of `build-image-to-cf.yml` in the `ffos` repo, both a human
+step (agents must never dispatch the Production one, and may dispatch the
+Staging one only after explicit in-session confirmation). Every input is
+listed; the values are the ones the 2.0.6 release used (runs
+`ffos` 34590636630 Staging and 34594792824 Production), changed only where
+2.0.7 differs.
 
-- `version=2.0.7`
-- `ffos_user_ref=v2.0.7` (tag the staging merge of this release)
-- `ff_player_ref=<player release ref>`
-- `environment=Staging` for bench validation, `Production` for the fielded
-  release — dispatched from the matching `ffos` branch, which must contain
-  ffos#151.
-- `pacman_snapshot`, `dev_iso`, `soak-test`, and the `update_*` flags as the
-  release operator decides.
+**Precondition.** Both runs must be dispatched from an `ffos` branch that
+already contains ffos#151 (merged into `ffos` `develop` 2026-09-15), so
+`ffos` `develop -> staging` must be promoted before the Staging run and
+`staging -> release` before the Production run. See "Companion image change".
+
+1. Bench validation — run on the `ffos` `staging` branch:
+
+   | input | value |
+   |---|---|
+   | `version` | `2.0.7` |
+   | `soak-test` | `false` |
+   | `environment` | `Staging` |
+   | `pacman_snapshot` | `2026/07/13` |
+   | `ffos_user_ref` | `staging` |
+   | `ff_player_ref` | `main` |
+   | `dev_iso` | `false` |
+   | `update_min_version` | `true` |
+   | `update_required_version` | `false` |
+   | `update_recovery_version` | `false` |
+
+2. Fielded release — run on the `ffos` `release` branch, after the bench
+   round passes:
+
+   | input | value |
+   |---|---|
+   | `version` | `2.0.7` |
+   | `soak-test` | `false` |
+   | `environment` | `Production` |
+   | `pacman_snapshot` | `2026/07/13` |
+   | `ffos_user_ref` | `release` |
+   | `ff_player_ref` | `main` |
+   | `dev_iso` | `false` |
+   | `update_min_version` | `false` |
+   | `update_required_version` | `false` |
+   | `update_recovery_version` | `false` |
+
+`ffos_user_ref` is a branch name, matching what 2.0.6 actually dispatched —
+NOT the `v2.0.7` tag the 2.0.3 entry below describes. Both name the same tree
+at dispatch time, and the operator may pin `ffos_user_ref=v2.0.7` instead
+once the tag exists; recorded as branches here because that is the dispatch
+this ledger is evidence for.
+
+`update_min_version=true` on Staging and `false` on Production is deliberate
+and carried over from 2.0.6: the bench round moves `min_runtime_version` so
+bench devices are forced onto the new image, while the fielded rollout leaves
+the floor alone and lets devices update on the normal cadence. Raising the
+floor on a Production run strands every device below it.
 
 ### Why package-only is NOT permitted
 
