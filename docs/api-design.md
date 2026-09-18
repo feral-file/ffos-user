@@ -3,6 +3,40 @@
 This document defines the canonical API and protocol design direction for `ffos-user`.
 Agents should treat these rules as stable constraints when adding, changing, or removing any interface.
 
+## FF1 log streaming
+
+`feral-controld` mirrors its emitted zap records to the public FF1 Cloudflare
+Pipeline Stream documented by the sibling `ff-logging` repository. Records use
+service `feral-controld` and the hostname-backed FF1 device ID. The optional
+`logStreaming.sampleRate` configures `feral-controld`, while
+`logStreaming.playerSampleRate` independently configures player sessions.
+Each value is evaluated once per log session, defaults to `1` when absent, and
+uses `0` to disable that service's remote delivery. The browser always hands
+complete player sessions to controld, so fractional values are never
+multiplied by a second client-side sampling decision.
+
+A log session ends after five seconds without a record or after one minute of
+continuous records, whichever happens first. Every record carries the shared
+session ID in `context.session_id`. Routine heartbeat, ping/pong, and unchanged
+status-poll messages must not be logged because they would join otherwise
+independent activity into artificial long-running sessions.
+
+The public stream receives the stable log message, logger name, device ID, and
+session context, but not arbitrary zap fields. Those fields can contain signed
+URLs, Wi-Fi identifiers, MAC addresses, and command payloads, so they remain in
+the local journal. Message sanitization strips URL credentials/query strings
+and recognizable credential assignments before upload.
+
+The bundled player posts its already-sessionized records to
+`POST http://127.0.0.1:1111/api/logs`. The route accepts only loopback requests
+with Origin `http://127.0.0.1:8080`, validates the narrow browser payload, and
+overwrites `service`, `device_id`, and `environment` before forwarding it to
+Cloudflare. The browser session ID is replaced with a stable opaque digest, so
+browser-controlled context never enters the public stream. Trace and debug
+records remain local; remote player delivery starts at Info. The browser
+therefore owns neither trusted attribution nor public Cloudflare credentials
+and does not depend on public Cloudflare CORS configuration.
+
 ---
 
 ## Version posture and API v2 transition

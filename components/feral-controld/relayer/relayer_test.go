@@ -1958,9 +1958,18 @@ func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
 
 	// Expect os.Exit(1) to be called when reconnection fails with PermanentError
 	exitCalled := make(chan struct{})
+	flushCalled := make(chan struct{})
+	flushHook, ok := ts.client.(interface{ SetBeforeExit(func()) })
+	require.True(t, ok)
+	flushHook.SetBeforeExit(func() { close(flushCalled) })
 	ts.mockOS.EXPECT().
 		Exit(1).
 		DoAndReturn(func(code int) {
+			select {
+			case <-flushCalled:
+			default:
+				t.Error("expected stream flush before os.Exit")
+			}
 			close(exitCalled)
 		}).
 		Times(1)

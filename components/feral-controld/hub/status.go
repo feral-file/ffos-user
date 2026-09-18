@@ -37,6 +37,13 @@ type StatusProvider interface {
 	Status(ctx context.Context) StatusInfo
 }
 
+// FF1IdentityProvider supplies the hostname-backed hardware identity used for
+// remote log attribution. Unlike StatusProvider.Status, it must never fall
+// back to a paired controller ID.
+type FF1IdentityProvider interface {
+	FF1DeviceID() string
+}
+
 // StatusInfo is the device-specific half of the /api/status payload.
 type StatusInfo struct {
 	DeviceID string
@@ -206,12 +213,21 @@ func (p *stateStatusProvider) Status(ctx context.Context) StatusInfo {
 // deviceID prefers the hostname (the identity mDNS also advertises) and falls
 // back to the connected-device ID from the claim snapshot.
 func (p *stateStatusProvider) deviceID(claim state.ClaimInfo) string {
-	if hostnameBytes, err := p.os.ReadFile(constants.HOSTNAME_FILE); err == nil {
-		if hostname := strings.TrimSpace(string(hostnameBytes)); hostname != "" {
-			return hostname
-		}
+	if hostname := p.FF1DeviceID(); hostname != "" {
+		return hostname
 	}
 	return strings.TrimSpace(claim.DeviceID)
+}
+
+// FF1DeviceID returns only the device hostname. The status contract has a
+// controller-ID fallback for legacy pairing, but remote logs must never use
+// that fallback because it would misattribute a phone as the FF1 device.
+func (p *stateStatusProvider) FF1DeviceID() string {
+	hostnameBytes, err := p.os.ReadFile(constants.HOSTNAME_FILE)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(hostnameBytes))
 }
 
 // installedBuild reads the installed version and distribution branch from the

@@ -214,6 +214,9 @@ type relayer struct {
 	// BEFORE any Connect (same plain-field ordering contract as the hub's
 	// contactObserver); nil is a no-op.
 	connObserver func(connected bool, closeCode int)
+	// beforeExit seals best-effort telemetry before the process-level exit used
+	// for an unrecoverable reconnect failure. Set once before Connect.
+	beforeExit func()
 
 	// Logger
 	logger *zap.Logger
@@ -223,6 +226,12 @@ type relayer struct {
 // Call before the first Connect.
 func (r *relayer) SetConnectionObserver(fn func(connected bool, closeCode int)) {
 	r.connObserver = fn
+}
+
+// SetBeforeExit wires a bounded cleanup hook for the terminal reconnect path.
+// Call before the first Connect.
+func (r *relayer) SetBeforeExit(fn func()) {
+	r.beforeExit = fn
 }
 
 // observeConn forwards one lifecycle transition to the observer, if wired.
@@ -419,7 +428,6 @@ func (r *relayer) Connect(ctx context.Context) error {
 
 	// Set pong handler
 	conn.SetPongHandler(func(_ string) error {
-		r.logger.Debug("Received pong from relayer")
 		return conn.SetReadDeadline(time.Time{})
 	})
 
@@ -567,6 +575,9 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 						}
 						// Stop the program and let the systemd restart it
 						r.logger.Error("Failed to reconnect to Relayer, the controld will be restarted by systemd shortly", zap.Error(err))
+						if r.beforeExit != nil {
+							r.beforeExit()
+						}
 						r.os.Exit(1)
 					}
 					return
@@ -586,7 +597,6 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 				// deadline, then stop before command handlers see the control frame.
 				// Keepalive success is routine — only failures deserve loud logs.
 				if payload.Type == "pong" {
-					r.logger.Debug("Received application pong from relayer")
 					if err := conn.SetReadDeadline(time.Time{}); err != nil {
 						r.logger.Error("Failed to clear read deadline after pong", zap.Error(err))
 					}
@@ -793,11 +803,9 @@ func (r *relayer) ping() {
 	r.Lock()
 	defer r.Unlock()
 	if r.conn == nil {
-		r.logger.Info("Skipping relayer ping because connection is nil")
 		return
 	}
 
-	r.logger.Debug("Sending relayer ping")
 	deadline := r.clock.Now().Add(PONG_WAIT)
 
 	if err := r.conn.SetReadDeadline(deadline); err != nil {

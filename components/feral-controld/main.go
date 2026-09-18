@@ -14,7 +14,6 @@ import (
 
 	go_daemon "github.com/coreos/go-systemd/v22/daemon"
 	"github.com/feral-file/godbus"
-	"github.com/getsentry/sentry-go"
 	dbus_v5 "github.com/godbus/dbus/v5"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -171,22 +170,25 @@ func main() {
 	if err != nil {
 		basicLogger.Fatal("Failed to load configuration", zap.Error(err))
 	}
+	streamConfig := config.LogStreamingConfig(basicLogger)
 
-	// Create the final logger (with Sentry if configured)
+	// Network delivery is a best-effort tee: a bad endpoint or missing
+	// hostname must never prevent this recovery-critical daemon from starting
+	// with its local logger.
 	finalLogger := basicLogger
-	if config.SentryConfig.IsEnabled() {
-		sentryLogger, err := logger.AddSentry(finalLogger, *config.SentryConfig)
-		if err != nil {
-			finalLogger.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))
-		} else {
-			finalLogger = sentryLogger
-			finalLogger.Info("Sentry initialized successfully",
-				zap.String("environment", config.SentryConfig.Environment),
-				zap.String("release", config.SentryConfig.Release))
-			defer logger.FlushSentry(2 * time.Second)
-		}
+	streamedLogger, streamCloser, streamErr := logger.AddCloudflare(
+		basicLogger, streamConfig, deviceIDFromHostname(),
+	)
+	if streamErr != nil {
+		basicLogger.Error("Failed to initialize Cloudflare log streaming; using local logger", zap.Error(streamErr))
 	} else {
-		finalLogger.Info("Sentry not configured, using basic logger")
+		finalLogger = streamedLogger
+		defer func() {
+			if err := streamCloser.Close(); err != nil {
+				fmt.Fprintf(go_os.Stderr, "Failed to flush Cloudflare logs: %s\n", err)
+			}
+		}()
+		finalLogger.Info("Cloudflare log streaming initialized")
 	}
 
 	// Initialize app
@@ -195,6 +197,10 @@ func main() {
 		config.CDPConfig.Endpoint,
 		config.RelayerConfig.Endpoint,
 		config.RelayerConfig.APIKey,
+		logger.StreamEndpoint(streamConfig),
+		logger.StreamAPIKey(streamConfig),
+		logger.StreamEnvironment(streamConfig),
+		logger.StreamPlayerSampleRate(streamConfig),
 		config.MintPairingConfig,
 		config.OfflineCache,
 		config.GatewayUserAgentTuning(finalLogger),
@@ -204,6 +210,15 @@ func main() {
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
 		})
+	if streamErr == nil {
+		if sink, ok := app.Relayer.(interface{ SetBeforeExit(func()) }); ok {
+			sink.SetBeforeExit(func() {
+				if err := streamCloser.Close(); err != nil {
+					fmt.Fprintf(go_os.Stderr, "Failed to flush Cloudflare logs before relayer exit: %s\n", err)
+				}
+			})
+		}
+	}
 
 	// Graceful shutdown cancels the app-lifetime context created in
 	// initializeApp (see app.Cancel).
@@ -222,9 +237,8 @@ func main() {
 		app.Clock.Sleep(SHUTDOWN_TIMEOUT)
 		app.Logger.Error("Shutdown timed out, forcing exit...",
 			zap.Duration("timeout", SHUTDOWN_TIMEOUT))
-
-		if config.SentryConfig.IsEnabled() {
-			sentry.Flush(1 * time.Second)
+		if streamErr == nil {
+			_ = streamCloser.Close()
 		}
 
 		app.OS.Exit(1)
@@ -261,6 +275,16 @@ func newToastSessionDialer(
 	}
 }
 
+func deviceIDFromHostname() string {
+	data, err := go_os.ReadFile(constants.HOSTNAME_FILE)
+	if err != nil || strings.TrimSpace(string(data)) == "" {
+		// Never upload under a fabricated shared identifier. AddCloudflare will
+		// reject the empty ID and leave local logging active.
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// Load state. A load failure must NOT abort startup: controld is the sole
 	// SoftAP/LAN-recovery owner, so returning here would crash-loop the daemon
@@ -291,11 +315,6 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		// re-pair" is NOT acceptable, because it would authorize an automatic
 		// setup-AP raise over a possibly claimed exhibition frame.
 		app.StateLoadKnown.Store(true)
-	}
-
-	// Set global topic ID in Sentry if available.
-	if claim := state.ClaimSnapshot(); conf.SentryConfig.IsEnabled() && claim.TopicID != "" {
-		logger.SetGlobalTopicID(claim.TopicID)
 	}
 
 	// Start watchdog
@@ -930,6 +949,10 @@ func initializeApp(
 	cdpEndpoint string,
 	relayerEndpoint string,
 	relayerAPIKey string,
+	logStreamEndpoint string,
+	logStreamAPIKey string,
+	logStreamEnvironment string,
+	playerLogSampleRate float64,
 	mintPairingConfig *config.MintPairingConfig,
 	offlineCacheConfig *config.OfflineCacheConfig,
 	gatewayUserAgentConfig *config.GatewayUserAgentConfig,
@@ -1628,7 +1651,7 @@ func initializeApp(
 		snapshot: provMachine.Snapshot,
 	}
 	screenshotCapturer := screenshot.New(cdpEndpoint, httpClient, webSocketDialer)
-	hub := hub.New(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger)
+	hub := hub.NewWithLogDelivery(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger, logStreamEndpoint, logStreamAPIKey, logStreamEnvironment, playerLogSampleRate)
 	// Control-plane hub contact defers the escape policy's episode raise
 	// (§4.1): a phone with the app open must not have its link yanked. The
 	// hub filters (counted routes, non-loopback) and the machine timestamps.

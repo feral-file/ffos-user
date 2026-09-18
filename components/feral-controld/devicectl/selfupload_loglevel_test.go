@@ -1,11 +1,11 @@
 package devicectl
 
-// Pins the Sentry posture on the automatic netlog self-upload path
-// (docs/wan-outage-observability.md): every logger.Error becomes a Sentry
+// Pins the error-level posture on the automatic netlog self-upload path
+// (docs/wan-outage-observability.md): every logger.Error becomes a remotely streamed
 // event, and the self-upload fires on freshly-healed — often still
 // restricted — networks where a failed transfer is routine. The
 // controller-initiated command keeps Error (a support engineer explicitly
-// asked and the fire-and-forget reply makes Sentry the only failure signal).
+// asked and the fire-and-forget reply makes the Error log the only failure signal).
 
 import (
 	"context"
@@ -71,7 +71,7 @@ func TestSelfUploadLogs_FailureLogsWarnNotError(t *testing.T) {
 	waitUploadSettled(t, ex)
 
 	assert.Zero(t, observed.FilterLevelExact(zap.ErrorLevel).Len(),
-		"an automatic self-upload failure must not produce a Sentry-bound Error")
+		"an automatic self-upload failure must not produce a remotely streamed Error")
 	assert.NotZero(t, observed.FilterMessage("Netlog self-upload failed").Len(),
 		"the failure must still be visible at Warn")
 }
@@ -84,7 +84,7 @@ func TestUploadLogsCommand_FailureKeepsErrorLevel(t *testing.T) {
 	waitUploadSettled(t, ex)
 
 	assert.NotZero(t, observed.FilterMessage("In-process log upload failed").Len(),
-		"controller-initiated failures keep their Error-level Sentry signal")
+		"controller-initiated failures keep their Error-level remote signal")
 }
 
 // TestSelfUploadLogs_ReportsSlotAcquisition pins the seam contract the netlog
