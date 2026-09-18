@@ -82,7 +82,13 @@ S3 PUT. And the `device_status` notification feed over the relayer.
   extends to every new gauge and status field: scrapes and polls read caches.
 - **Hub-contact observer exclusions stand.** `/metrics` and the WS are excluded
   from the SoftAP-raise deferral (`hub/hub.go:45-57`); new gauges change no
-  routes. **No new `:1111` routes at all** before #3471.
+  LAN-accessible routes. **No new LAN surface on `:1111`** before #3471. The
+  sole route-registration exception is `POST /api/logs`: it is a device-local
+  browser bridge whose handler rejects non-loopback peers before reading the
+  body and accepts only the fixed player Origin `http://127.0.0.1:8080`.
+  Because it is unreachable from the LAN, it does not bypass the shared
+  middleware authorization rollout; widening either check would violate this
+  exception and must wait for #3471.
 - **Edge + level connectivity pattern.** Any new consumer of
   `connectivity_change` must also reconcile off a level signal (the
   `mediator.go:597-623` pattern) or it will stick wrong after a missed edge.
@@ -134,8 +140,9 @@ S3 PUT. And the `device_status` notification feed over the relayer.
   get current lease params only. Full renewal tracking would need NM D-Bus
   subscription (branch D). First release records lease snapshot + changes
   between snapshots, which is enough to catch churn.
-- **Sentry noise.** The recorder must not route through `logger.Error` (every
-  Error becomes a Sentry event). Classified outages are data, not errors.
+- **Remote-log noise.** The recorder must not route classified outages through
+  `logger.Error`. They are state observations, not application failures, and
+  elevating them distorts the streamed severity signal.
 - **Unknown: `/var/log` writability for the `feralfile` user.** If we later
   want the ring OTA-durable, provisioning a writable dir is a full-image
   change. Explicitly deferred.

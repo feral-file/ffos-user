@@ -2,20 +2,29 @@ package commandrouter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
+	"github.com/display-protocol/dp1-go/extension/contentrating"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
+	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -74,6 +83,188 @@ type handler struct {
 	// would deadlock on that non-reentrant lock — re-check this before doing
 	// so, rather than trusting the sentence above.
 	recoverySession RecoverySession
+	contentPolicy   *contentpolicy.Store
+	// policyRefresher re-sends the current playlist after an accepted policy
+	// change. nil (tests, a build wired before the seam) degrades to the old
+	// behavior: the change applies to the next cast or periodic refresh.
+	policyRefresher PolicyRefresher
+	// verifySignatures and activeVerdict are set together by
+	// SetSignatureVerification. verifySignatures gates the inline
+	// (dp1_call) and cached-copy verification this package performs itself;
+	// the URL path's verdict is attached by the dp1 package at fetch time
+	// and merely consumed here. activeVerdict may be nil even when
+	// verification is on.
+	verifySignatures bool
+	activeVerdict    *sigverify.Active
+	verificationMode func() sigverify.Mode
+	// toast, when set (SetPlayerToast), surfaces the signature-verification
+	// notice on the wall. It is a non-blocking Notifier (a single-slot
+	// dispatcher): Notify queues the latest notice, Clear drops a pending one
+	// so a stale warning never shows over newer artwork. nil (unwired, or an
+	// older player) means no toast, never a changed cast outcome
+	// (feral-file/ffos-user#307).
+	toast playertoast.Notifier
+}
+
+func SetContentPolicy(h Handler, policy *contentpolicy.Store, logger *zap.Logger) {
+	setter, ok := h.(interface{ setContentPolicy(*contentpolicy.Store) })
+	if !ok {
+		logger.Warn("Command handler does not support content policy wiring")
+		return
+	}
+	setter.setContentPolicy(policy)
+}
+
+// PolicyRefresher is the narrow slice of the playlist refresher the policy path
+// needs: re-send what is on screen. Consumer-owned, like RecoverySession.
+type PolicyRefresher interface{ ForceRefresh() }
+
+// SetPolicyRefresher wires the re-send used after a policy change, if h
+// supports it (the concrete *handler built by New, not the gate wrapper).
+func SetPolicyRefresher(h Handler, refresher PolicyRefresher, logger *zap.Logger) {
+	setter, ok := h.(interface{ setPolicyRefresher(PolicyRefresher) })
+	if !ok {
+		logger.Warn("Command handler does not support policy refresher wiring")
+		return
+	}
+	setter.setPolicyRefresher(refresher)
+}
+
+func (h *handler) setPolicyRefresher(refresher PolicyRefresher) { h.policyRefresher = refresher }
+
+func (h *handler) setContentPolicy(policy *contentpolicy.Store) {
+	h.contentPolicy = policy
+	if h.scheduler == nil || policy == nil {
+		return
+	}
+	// A displayAt cutover is the one cast this router does not mediate: it
+	// replays a later cohort of a document that was policy-filtered once, when
+	// it was cast. Without this projection a policy tightened afterwards would
+	// never reach those cohorts. Reads the store's lock-free Snapshot because
+	// this runs on the scheduler's push path — see playlistschedule.Projector.
+	h.scheduler.SetProjector(func(playlist *dp1.Playlist, contentContext string) (*dp1.Playlist, bool) {
+		// An EMPTY context on a scheduler source means the schedule was
+		// persisted before this field existed, not that it was curated: the
+		// router sets the field on every source it hands the scheduler. Guessing
+		// curated here would strip the mature items an owner cast as personal
+		// at the first cutover after an upgrade, so the cohort is cast as the
+		// original cast admitted it — matching what the refresher does with the
+		// same signal.
+		if contentContext == "" {
+			return playlist, false
+		}
+		origin, err := contentpolicy.NormalizeContext(contentContext)
+		if err != nil {
+			origin = contentpolicy.ContextCurated
+		}
+		projected, empty, projectErr := policy.Snapshot().Project(&playlist.Playlist, origin)
+		if projectErr != nil {
+			// Fail open on a malformed cache rather than silently blanking a
+			// scheduled wall: the router already validated this document.
+			return playlist, false
+		}
+		out := *playlist
+		out.Playlist = *projected
+		return &out, empty
+	})
+}
+
+// SyncContentPolicy pushes the stored policy to the current player generation.
+// It runs on reconnect, when the player has just come up on ITS defaults.
+//
+// Serialized against scheduler-owned pushes, not only against casts: a due
+// timer or wake recompute holds pushMu and reads the lock-free policy snapshot,
+// so without this barrier it could deliver a cohort to the freshly defaulted
+// player before this acknowledgement lands — and the scheduler records that
+// cohort as delivered, so nothing replays it once the sync succeeds. An
+// acknowledged showMatureContent:true would then visibly fail after a player
+// restart until some later cast, refresh or cutover.
+//
+// Lock order is the same one displayPlaylist and setContentPolicy use: content
+// policy store, then pushMu.
+// ResetContentPolicy returns the device to default content policy and pushes
+// that default to the current player generation. Used by factory reset: the
+// owner's audience setting falls with the claim.
+//
+// The durable reset stands even if the player cannot be reached — the point is
+// that the NEXT owner does not inherit the setting, and a player that comes up
+// later is synced by the reconnect reconciler.
+func ResetContentPolicy(h Handler) error {
+	target, ok := h.(*handler)
+	if !ok || target.contentPolicy == nil {
+		return errors.New("content policy unavailable")
+	}
+	target.contentPolicy.Lock()
+	defer target.contentPolicy.Unlock()
+	if _, err := target.contentPolicy.ResetLocked(); err != nil {
+		return err
+	}
+	var syncErr error
+	sync := func() { syncErr = target.syncContentPolicyLocked() }
+	if target.scheduler != nil {
+		target.scheduler.WithPlayerPush(sync)
+	} else {
+		sync()
+	}
+	return syncErr
+}
+
+func SyncContentPolicy(h Handler) error {
+	target, ok := h.(*handler)
+	if !ok || target.contentPolicy == nil {
+		return errors.New("content policy unavailable")
+	}
+	target.contentPolicy.Lock()
+	defer target.contentPolicy.Unlock()
+	var err error
+	sync := func() { err = target.syncContentPolicyLocked() }
+	if target.scheduler != nil {
+		target.scheduler.WithPlayerPush(sync)
+	} else {
+		sync()
+	}
+	return err
+}
+
+// syncContentPolicyLocked is SyncContentPolicy's body. The caller holds the
+// content-policy store lock and, when a scheduler exists, the player-push lock.
+func (h *handler) syncContentPolicyLocked() error {
+	p := h.contentPolicy.CurrentLocked()
+	result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": p})
+	if err != nil {
+		return err
+	}
+	if !policyAckMatches(result, p) {
+		return errors.New("player content policy acknowledgement mismatch")
+	}
+	return nil
+}
+
+// retainedReplayKey marks the recursive displayPlaylist a recently-played
+// replay issues. A context key rather than a command argument on purpose: the
+// recursive call re-enters Process, so an argument would have to survive
+// ingress — and anything that survives ingress is settable by an unauthenticated
+// LAN caller, which would hand them a switch for turning signature enforcement
+// off.
+type retainedReplayKey struct{}
+
+// withRetainedReplay marks ctx as carrying a device-derived replay.
+func withRetainedReplay(ctx context.Context) context.Context {
+	return context.WithValue(ctx, retainedReplayKey{}, true)
+}
+
+// isRetainedReplay reports whether this cast is the daemon replaying a document
+// it already accepted once.
+//
+// Such a document is rebuilt locally from a retained item: one work, no
+// signature, and no publisher to have signed it. Verifying it asks a question
+// with only one possible answer — "unsigned" — so without this every History tap
+// would raise the signature notice on the wall, and a strict device would refuse
+// to replay its own history entirely. The provenance check already happened when
+// the work was first cast; this is the same bytes coming back.
+func isRetainedReplay(ctx context.Context) bool {
+	marked, _ := ctx.Value(retainedReplayKey{}).(bool)
+	return marked
 }
 
 // RecoverySession is the narrow slice of playersession.Session the relayer's
@@ -150,6 +341,96 @@ func (h *handler) setSourceProber(prober offlinecache.SourceProber) {
 	h.sourceProber = prober
 }
 
+// SignatureVerificationOptions is what SetSignatureVerification wires. A
+// struct rather than positional arguments so later phases (the persisted
+// mode, the player toast) extend it without another seam.
+type SignatureVerificationOptions struct {
+	// Active, when non-nil, receives the verdict of every playlist that
+	// actually reaches the player, for the status poller's player_status
+	// annotation (see sigverify.Active). Optional.
+	Active *sigverify.Active
+	// Mode, when non-nil, returns the owner's current verification mode
+	// (read from its persisted record on every cast, so a change from the
+	// app applies to the next cast with no restart). nil ⇒ DefaultMode.
+	Mode func() sigverify.Mode
+}
+
+// SetSignatureVerification turns on DP-1 signature verification of every
+// displayPlaylist cast (feral-file/ffos-user#307) on h, if h supports it —
+// the concrete *handler built by New, NOT the storm-protection gate wrapper,
+// so callers must wire it against the raw handler before NewGate wraps it
+// (SetSourceProber's contract). Not called ⇒ verification off: playlists
+// carry no verdict and replies carry no signatureStatus, which is exactly
+// the shape old firmware has.
+func SetSignatureVerification(h Handler, opts SignatureVerificationOptions, logger *zap.Logger) {
+	setter, ok := h.(interface {
+		setSignatureVerification(SignatureVerificationOptions)
+	})
+	if !ok {
+		logger.Warn("Command handler does not support signature verification wiring")
+		return
+	}
+	setter.setSignatureVerification(opts)
+}
+
+func (h *handler) setSignatureVerification(opts SignatureVerificationOptions) {
+	h.verifySignatures = true
+	h.activeVerdict = opts.Active
+	h.verificationMode = opts.Mode
+}
+
+func (h *handler) currentVerificationMode() sigverify.Mode {
+	if h.verificationMode == nil {
+		return sigverify.DefaultMode
+	}
+	return h.verificationMode()
+}
+
+// SetPlayerToast wires the on-screen signature-notice surface onto h (if h is
+// the concrete handler built by New), mirroring SetSignatureVerification. Set
+// once at wiring time; nil leaves toasts off.
+func SetPlayerToast(h Handler, notifier playertoast.Notifier, logger *zap.Logger) {
+	setter, ok := h.(interface{ setPlayerToast(playertoast.Notifier) })
+	if !ok {
+		logger.Warn("Command handler does not support player toast wiring")
+		return
+	}
+	setter.setPlayerToast(notifier)
+}
+
+func (h *handler) setPlayerToast(notifier playertoast.Notifier) {
+	h.toast = notifier
+}
+
+// toastForEpoch surfaces the notice the (mode, status) policy calls for at an
+// accepted player transition, FENCED to the epoch the transition's pre-send
+// invalidation created: NotifyIfEpoch enqueues only if no newer transition
+// (a concurrent generation bump, say) advanced the epoch between the send and
+// this notify. A silent/valid transition Clears unconditionally (it only ever
+// supersedes). mode is the castMode snapshot, so a concurrent
+// setSignatureVerificationMode cannot relabel it. Non-blocking
+// (feral-file/ffos-user#307).
+func (h *handler) toastForEpoch(mode sigverify.Mode, status sigverify.Status, epoch uint64) {
+	if h.toast == nil {
+		return
+	}
+	if notice, ok := sigverify.ToastFor(mode, status); ok {
+		h.toast.NotifyIfEpoch(notice, epoch)
+	} else {
+		h.toast.Clear()
+	}
+}
+
+// verdictStatus is the Status the toast policy keys on: a nil verdict (the
+// offline cached copy) has no status, which under strict still toasts
+// "rejected" and under notify toasts nothing.
+func verdictStatus(v *sigverify.Verdict) sigverify.Status {
+	if v == nil {
+		return ""
+	}
+	return v.Status
+}
+
 func (h *handler) currentGeneration() uint64 {
 	if h.sessionGeneration == nil {
 		return 0
@@ -192,9 +473,10 @@ func New(
 // is already staged has nothing to add, and once the stuck-reset watchdog
 // releases the latch a retry is accepted normally again.
 var servedDuringFactoryReset = map[commands.Type]bool{
-	commands.CMD_DEVICE_STATUS:    true,
-	commands.CMD_PROFILE:          true, // == CMD_SYS_METRICS ("deviceMetrics")
-	commands.CMD_DDC_PANEL_STATUS: true,
+	commands.CMD_DEVICE_STATUS:      true,
+	commands.CMD_PROFILE:            true, // == CMD_SYS_METRICS ("deviceMetrics")
+	commands.CMD_DDC_PANEL_STATUS:   true,
+	commands.CMD_GET_CONTENT_POLICY: true,
 }
 
 // Process processes the command and returns the result
@@ -263,6 +545,134 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		return h.mintPairing.HandleClosePairingSession(ctx, command.Arguments)
 	}
 
+	// The player owns the retained, castable DP-1 item; the public history
+	// query deliberately exposes only its bounded label snapshot. Old players
+	// reply with bare ok:false for this unknown command, which is an explicit
+	// unsupported capability rather than a false empty history.
+	if commandType == commands.CMD_GET_RECENTLY_PLAYED {
+		// Takes no arguments, and a non-empty request is rejected rather than
+		// forwarded, for the same reason getContentPolicy rejects one: the
+		// storm gate's dedupe key is type+arguments, so junk arguments let one
+		// LAN caller mint unlimited distinct keys and hold a global command
+		// slot each while the serialized CDP request runs (gate.go).
+		if len(command.Arguments) != 0 {
+			return map[string]interface{}{
+				"ok":     false,
+				"status": "error",
+				"error":  "getRecentlyPlayed takes no arguments",
+			}, nil
+		}
+		result, err := h.sendCDPRequest(command)
+		if err != nil {
+			return nil, err
+		}
+		return boundedRecentlyPlayedReply(recentPlayerReply(result)), nil
+	}
+	if commandType == commands.CMD_RESOLVE_RECENTLY_PLAYED {
+		return map[string]interface{}{
+			"ok":     false,
+			"status": "error",
+			"error":  "resolveRecentlyPlayed is internal",
+		}, nil
+	}
+
+	// Replay never accepts a phone-supplied source. It resolves an opaque
+	// device-local record, rebuilds a one-work unsigned DP-1 call, then invokes
+	// this handler's ordinary displayPlaylist branch. That preserves scheduler
+	// authority, playback/replay-scope locking, source preflight, and the
+	// future policy gate at the normal composition boundary.
+	if commandType == commands.CMD_PLAY_RECENTLY_PLAYED {
+		// Exactly {"recordId": ...}. The storm gate dedupes on the whole
+		// arguments map while this command uses only recordId, so an ignored
+		// extra field ({"recordId":"x","nonce":1}) would miss the heavy-tier
+		// dedupe and run the same resolve-and-replay work again.
+		if len(command.Arguments) != 1 {
+			return map[string]interface{}{
+				"ok":     false,
+				"status": "error",
+				"error":  "playRecentlyPlayed takes only recordId",
+			}, nil
+		}
+		recordID, _ := command.Arguments["recordId"].(string)
+		if recordID == "" {
+			return map[string]interface{}{
+				"ok":     false,
+				"status": "error",
+				"error":  "recordId is required",
+			}, nil
+		}
+		resolved, err := h.sendCDPRequest(commands.Command{
+			Type:      commands.CMD_RESOLVE_RECENTLY_PLAYED,
+			Arguments: map[string]interface{}{"recordId": recordID},
+		})
+		if err != nil {
+			return nil, err
+		}
+		message := recentPlayerReply(resolved)
+		if !playerresponse.OK(message) {
+			// Bounded for the same reason the success path is: a failed
+			// resolve can name or echo the retained item it could not replay.
+			resolvedMessage, _ := message["message"].(map[string]interface{})
+			if resolvedMessage == nil {
+				resolvedMessage = map[string]interface{}{"ok": false, "status": "error"}
+			}
+			return map[string]interface{}{"message": boundedFailureReply(resolvedMessage)}, nil
+		}
+		playerMessage, ok := message["message"].(map[string]interface{})
+		if !ok {
+			return map[string]interface{}{"ok": false, "status": "error", "error": "invalid recently played reply"}, nil
+		}
+		item, ok := playerMessage["item"].(map[string]interface{})
+		if !ok {
+			return map[string]interface{}{"ok": false, "status": "error", "error": "recently played record has no item"}, nil
+		}
+		title, _ := item["title"].(string)
+		if title == "" {
+			title = "Recently played"
+		}
+		// Extracting one item invalidates the original full-playlist
+		// signature. Preserve only the applicable defaults, which carry
+		// artist-level controls for this work; machine settings remain owned by
+		// the player and are intentionally not snapshotted here.
+		dp1Call := map[string]interface{}{
+			"dpVersion": "1.0",
+			"title":     title,
+			"items":     []interface{}{item},
+		}
+		if defaults, ok := playerMessage["defaults"].(map[string]interface{}); ok {
+			dp1Call["defaults"] = defaults
+		}
+		// The record carries the context the work actually played under. The
+		// replay must re-enter displayPlaylist with that same context, or a
+		// work that played as "personal" under strictPersonal:false is
+		// re-admitted as "curated" and filtered out — History would offer a
+		// work it can never put back. An unrecognized stored value falls back
+		// to the strict curated default rather than failing the replay.
+		replayArgs := map[string]interface{}{"dp1_call": dp1Call}
+		if recorded, ok := playerMessage["contentContext"].(string); ok && recorded != "" {
+			if normalized, ctxErr := contentpolicy.NormalizeContext(recorded); ctxErr == nil {
+				replayArgs["contentContext"] = string(normalized)
+			} else {
+				h.logger.Warn("recently played record has an unrecognized content context; replaying as curated",
+					zap.String("contentContext", recorded))
+			}
+		}
+		result, err := h.Process(withRetainedReplay(ctx), commands.Command{
+			Type:      commands.CMD_DISPLAY_PLAYLIST,
+			Arguments: replayArgs,
+		})
+		if err != nil {
+			return nil, err
+		}
+		// The acknowledgement is bounded and names the requested occurrence;
+		// callers must still wait for status/render outcome, particularly when
+		// the same work is deliberately replayed twice.
+		return map[string]interface{}{
+			"recordId": recordID,
+			"message":  boundedReplayAck(result),
+		}, nil
+	}
+
 	if commandType == commands.CMD_MINT_PAIRING_APPROVAL {
 		if h.mintPairing == nil {
 			return map[string]any{
@@ -279,6 +689,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 	if isOfflineCacheCommand(commandType) {
 		return h.handleOfflineCacheCommand(ctx, commandType, command.Arguments)
+	}
+
+	if commandType == commands.CMD_GET_CONTENT_POLICY || commandType == commands.CMD_SET_CONTENT_POLICY {
+		return h.handleContentPolicy(command)
 	}
 
 	if commandType.DeviceCtlCommand() {
@@ -298,6 +712,35 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var playlist *dp1.Playlist
 		var schedulerSnapshot playlistschedule.Snapshot
 		var schedulerSource playlistschedule.Source
+		// castMode is the verification mode snapshot for THIS cast, taken at
+		// the admission decision below and reused for the strict gate and any
+		// toast, so a concurrent mode change cannot relabel the cast (#307).
+		castMode := sigverify.DefaultMode
+		// toastEpoch fences a strict-refusal toast against a newer transition:
+		// this cast resolves (possibly slowly, for a URL) before it can refuse,
+		// and a newer cast/default/cutover could replace the artwork meanwhile.
+		// Snapshot the display-transition token now, BEFORE resolution, and
+		// emit the rejection only if it still holds (NotifyIfEpoch).
+		var toastEpoch uint64
+		if h.toast != nil {
+			toastEpoch = h.toast.Epoch()
+		}
+		// castAuthority is the second fence for that same refusal: a
+		// future-only displayAt cast that lands while this one resolves
+		// takes scheduler authority, commits and returns deferred WITHOUT a
+		// CDP write or a toast Clear, so the epoch does not move. Sampled
+		// before resolution and rechecked under WithPlayerPush at the
+		// refusal, exactly as the refresher fences its own (#307).
+		var castAuthority uint64
+		if h.scheduler != nil {
+			castAuthority = h.scheduler.AuthorityToken()
+		}
+		// sendEpoch is captured by the pre-send invalidation (Clear) below and
+		// used by the post-send toast: a generation bump that Clears the toast
+		// after the send but before the notify advances the epoch past this,
+		// so the accepted-transition notice is dropped rather than shown over
+		// the reloaded page (feral-file/ffos-user#307).
+		var sendEpoch uint64
 		// replayScopeTouched records whether THIS request reached
 		// syncReplayScope (even a failed sync counts — it still bumps the
 		// playback generation). The corrective resync in the failure defer
@@ -330,7 +773,21 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// record cleared between lookup and sync), so the installed
 		// scope's own count remains the final authority (#310 review).
 		var scopeSyncEnabled int
+		// probeVerdicts retains the preflight's per-source answers so the final
+		// projection can be re-checked against them without re-probing. See the
+		// re-check below the reprojection.
+		var probeVerdicts map[string]offlinecache.SourceProbeResult
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
+			delete(command.Arguments, "retireBlockedCurrent") // internal refresh-only signal
+			// The content-policy lock is taken further down, immediately before
+			// the filter, NOT here: URL and dynamic resolution between here and
+			// there are network-bound (the shared 30s HTTP timeout on a
+			// caller-supplied URL), and holding this lock across them would
+			// block getContentPolicy and setContentPolicy for that long — an
+			// owner could not promptly apply a more restrictive policy, and a
+			// slow playlist origin would become a lock-based denial path. From
+			// the filter onward it is held through the player send, which is
+			// the ordering the policy contract needs.
 			status.RecordPlaybackAttempt()
 			defer func() {
 				if err != nil {
@@ -403,10 +860,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// capture.md §6 and Service.CachedPlaylistForURL's
 					// doc). This is a "last known good" copy, not a live
 					// re-resolution: it will not reflect anything
-					// published at url after it was downloaded, and (by
-					// construction, since it can only exist if it was
-					// downloaded successfully before) was already
-					// signature-verified once at that time.
+					// published at url after it was downloaded, and it
+					// carries NO signature verdict — the saved body is a
+					// typed, hydrated re-marshal, not the signed bytes
+					// (see loadCachedPlaylistForURL's doc) — so the reply
+					// and player_status omit signatureStatus for it.
 					cachedPlaylist, cacheErr := h.loadCachedPlaylistForURL(url)
 					if cacheErr != nil {
 						return nil, err
@@ -424,14 +882,51 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("playlist is not a map")
 				}
 
+				// The bytes the document is decoded from AND verified on.
+				// Preferred: the caller's own `dp1_call` token, kept
+				// verbatim by the ingress decoders (Command.RawArguments) —
+				// a signer covered exactly those bytes. Fallback: a
+				// re-marshal of the decoded map, only for commands built
+				// in-process (OOM recovery, tests) that never had a wire
+				// form. The fallback is lossy in a way a verifier feels:
+				// encoding/json HTML-escapes `&`/`<`/`>`, six bytes each,
+				// which can inflate the document past
+				// sigverify.MaxDocumentBytes and report an honest document
+				// as invalid — so the wire token wins. (Its float64
+				// rounding of large integers is absorbed by JCS, see
+				// commands.Command.RawArguments.)
 				var playlistBytes []byte
-				playlistBytes, err = h.json.Marshal(playlistMap)
-				if err != nil {
+				if raw, hasRaw := command.RawArgument("dp1_call"); hasRaw {
+					playlistBytes = raw
+				} else if playlistBytes, err = h.json.Marshal(playlistMap); err != nil {
 					return nil, fmt.Errorf("failed to marshal playlist: %w", err)
 				}
 
+				// Validate the RAW bytes before the typed decode. A
+				// wrong-typed rating (contentRating: 123) fails generic JSON
+				// decoding first, so ordering it the other way round reported
+				// "failed to unmarshal playlist" — a 500 to the hub — for
+				// exactly the malformed-label case the contract classifies as
+				// playlistInvalid.
+				if err = contentrating.ValidatePlaylistFragment(playlistBytes); err != nil {
+					// Pointers only: the validator's message can quote the
+					// offending value, and this error is returned verbatim to
+					// the caster on both transports.
+					err = &PlaylistInvalidError{Locations: dp1.ValidationPointers(err)}
+					return nil, err
+				}
 				if err = h.json.Unmarshal(playlistBytes, &playlist); err != nil {
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
+				}
+
+				// Verify those bytes, NOT the typed struct just decoded from
+				// them: the struct drops any field it does not know, and a
+				// signer covered every field, so verifying after the typed
+				// decode would misreport an honest document as tampered.
+				// Also before dynamic hydration below, which rewrites items.
+				if h.verifySignatures {
+					verdict := sigverify.Verify(playlistBytes)
+					playlist.Verification = &verdict
 				}
 
 				if playlist.HasDynamicContent() {
@@ -446,6 +941,110 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			default:
 				return nil, fmt.Errorf("unknown payload type")
 			}
+
+			// Signature verdict (#307). Logged once here, reported on the
+			// reply and player_status below. nil when verification is off or
+			// the document could not be verified (the offline cached copy).
+			if playlist.Verification != nil {
+				h.logSignatureVerdict(playlist.Verification, playlist.ID, schedulerSource.PlaylistURL)
+			}
+
+			// Strict mode is the one place a verdict changes what plays:
+			// anything that is not proven valid is refused — unsigned,
+			// invalid, or unverifiable (a cached copy carries no verdict, and
+			// a strict device does not guess). Placed BEFORE the source
+			// preflight and BEFORE the playback lock and scheduler snapshot,
+			// so there is nothing to restore; err is ASSIGNED so the deferred
+			// playback-failure accounting above records the rejection, exactly
+			// like the preflight's own rejection. The previous artwork stays.
+			// Silent and notify never reach here: they report and play.
+			// Take the mode snapshot at this admission decision (see castMode).
+			if h.verifySignatures {
+				castMode = h.currentVerificationMode()
+			}
+			if h.verifySignatures && castMode == sigverify.ModeStrict && !isRetainedReplay(ctx) {
+				if rejection := strictRejection(playlist.Verification); rejection != nil {
+					h.logger.Warn("displayPlaylist: cast rejected by strict signature verification",
+						zap.String("reason", rejection.Reason),
+						zap.String("playlist_id", string(helper.TruncateBytes([]byte(playlist.ID), logger.MAX_FIELD_LENGTH))))
+					err = rejection
+					// Strict refused the cast; tell the wall — but only if no
+					// newer transition replaced the artwork while this cast
+					// resolved (NotifyIfEpoch against the pre-resolution
+					// snapshot) AND scheduler authority still belongs to it
+					// (see castAuthority). The authority check runs under the
+					// scheduler push lock so it orders against the cast that
+					// takes authority rather than racing it; NotifyIfEpoch is
+					// non-blocking, so nothing waits under the lock. No lock
+					// is held here yet (LockPlayback and the send's own
+					// WithPlayerPush come later), so this cannot nest.
+					// Best-effort (#307).
+					if h.toast != nil {
+						// authorityHeld travels WITH the notice: the dispatcher
+						// re-runs it before dialing and at the evaluate, so a
+						// future-only cast that takes authority AFTER this
+						// queue (no player write, no Clear — invisible to the
+						// epoch) still drops it at the handoff.
+						authorityHeld := func() bool {
+							return h.scheduler == nil || h.scheduler.AuthorityToken() == castAuthority
+						}
+						refuse := func() {
+							if !authorityHeld() {
+								h.logger.Debug("displayPlaylist: strict refusal notice dropped; playlist authority changed during resolution")
+								return
+							}
+							h.toast.NotifyIfEpochGuarded(sigverify.NoticeRejected, toastEpoch, authorityHeld)
+						}
+						if h.scheduler != nil {
+							h.scheduler.WithPlayerPush(refuse)
+						} else {
+							refuse()
+						}
+					}
+					return nil, err
+				}
+			}
+
+			// Public ingress, so an explicitly supplied empty or null
+			// contentContext is a malformed request, not an omitted field —
+			// see NormalizeRequestContext. Restored scheduler state omits the
+			// key entirely, which stays compatible.
+			rawContext, hasContext := command.Arguments["contentContext"]
+			contentContext, contextErr := contentpolicy.NormalizeRequestContext(rawContext, hasContext)
+			if contextErr != nil {
+				return nil, contextErr
+			}
+			// Filter under the policy lock, then RELEASE it: the source
+			// preflight below is network-bound (a 10s phase ceiling, and up to
+			// four heavy casts can be admitted at once), and holding this lock
+			// across it would make History and Content controls wait on
+			// whatever an unauthenticated LAN caller's playlist origin chooses
+			// to do. Filtering still happens BEFORE probing, as the plan
+			// requires — only the waiting moved out of the lock. The lock is
+			// reacquired below, before the scheduler prepare and player send,
+			// and the projection is reapplied there under the policy in force
+			// at that moment.
+			filterUnderPolicy := func() error {
+				if h.contentPolicy == nil {
+					return nil
+				}
+				h.contentPolicy.Lock()
+				defer h.contentPolicy.Unlock()
+				filtered, filterErr := h.contentPolicy.FilterLocked(&playlist.Playlist, contentContext)
+				if filterErr != nil {
+					if errors.Is(filterErr, contentpolicy.ErrContentBlocked) {
+						return &ContentBlockedError{}
+					}
+					return filterErr
+				}
+				playlist.Playlist = *filtered
+				return nil
+			}
+			if filterErr := filterUnderPolicy(); filterErr != nil {
+				return nil, filterErr
+			}
+			command.Arguments["contentContext"] = string(contentContext)
+			schedulerSource.ContentContext = string(contentContext)
 
 			// Cast-time source preflight (#304). Without it, a cast whose
 			// every source 400s is forwarded, self-reported ok by the
@@ -505,6 +1104,20 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						zap.Int("items", len(sources)))
 				} else {
 					probeResults := h.sourceProber.ProbeSources(ctx, sources)
+					// Keyed by the RAW source, taken from the input slice by
+					// index, NOT by result.Source: that field is
+					// query-redacted and truncated for the daemon log (see
+					// SourceProbeResult's doc), so keying on it would miss
+					// every signed URL — and a miss makes the re-check below
+					// fail open and forward a cast already proven dead.
+					// ProbeSources returns one result per source in input
+					// order, which is what makes the index safe.
+					probeVerdicts = make(map[string]offlinecache.SourceProbeResult, len(probeResults))
+					for i, r := range probeResults {
+						if i < len(sources) {
+							probeVerdicts[sources[i]] = r
+						}
+					}
 					// Per-item log detail is capped: the hub accepts a 4 MiB
 					// playlist with no item cap, so an all-dead hostile cast
 					// must not be able to mint one log line per item on a
@@ -572,6 +1185,59 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				h.logger.Warn("displayPlaylist: playlist exceeds the preflight item budget; source preflight skipped",
 					zap.Int("items", len(playlist.Items)),
 					zap.Int("budget", maxPreflightItems))
+			}
+
+			// Preflight is done, so reacquire the policy lock and hold it
+			// from here through the scheduler prepare and the player send —
+			// the ordering the policy contract needs. Reapply the projection
+			// under the policy in force NOW: one tightened while the probe ran
+			// must not be outrun by this cast. A policy RELAXED during the
+			// probe does not re-admit what was already filtered out, matching
+			// the rest of this path — those items were never probed, and a
+			// relaxed policy takes effect on the next cast, refresh or cutover.
+			//
+			// LOCK ORDER, load-bearing: content policy BEFORE the kiosk replay
+			// playback lock, which is acquired a few lines below. The
+			// playlist-refresher takes the same two in that order
+			// (processPlayingPlaylist: policy, then LockPlayback), and both are
+			// non-reentrant, so acquiring them the other way round here would
+			// let a concurrent cast and refresh deadlock permanently — no
+			// further policy update, refresh or playback command until
+			// controld restarts.
+			if h.contentPolicy != nil && playlist != nil {
+				h.contentPolicy.Lock()
+				defer h.contentPolicy.Unlock()
+				reprojected, filterErr := h.contentPolicy.FilterLocked(&playlist.Playlist, contentContext)
+				if filterErr != nil {
+					if errors.Is(filterErr, contentpolicy.ErrContentBlocked) {
+						err = &ContentBlockedError{}
+						return nil, err
+					}
+					err = filterErr
+					return nil, err
+				}
+				removed := len(reprojected.Items) != len(playlist.Items)
+				playlist.Playlist = *reprojected
+				command.Arguments["dp1_call"] = playlist
+				// A policy tightened while the probe ran can remove the very
+				// item whose reachability made this cast acceptable, leaving
+				// only sources already proven dead. Re-check the retained
+				// verdicts against the final set rather than re-probing: the
+				// answers are seconds old and the items are a subset of the
+				// ones probed.
+				if removed && !rescuedByCache {
+					if deadResults, allDead := allSourcesDead(playlist, probeVerdicts); allDead {
+						if h.offlineCache != nil && h.kioskReplay != nil && h.offlineCache.HasReplayableItem(playlistSources(playlist)...) {
+							rescuedByCache = true
+							rescueProbeResults = deadResults
+							h.logger.Warn("displayPlaylist: the policy projection left only unreachable sources but cached captures exist; casting for offline replay",
+								zap.Int("items", len(playlist.Items)))
+						} else {
+							err = &SourceUnreachableError{Results: deadResults}
+							return nil, err
+						}
+					}
+				}
 			}
 
 			// Player CanvasService rejects displayPlaylist without a known
@@ -651,6 +1317,114 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
+		// publishVerdict records what this cast did to the screen in the
+		// active-verdict slot (#307). It MUST run inside the same player-push
+		// critical section as the send it describes: WithPlayerPush orders
+		// casts, refreshes, and scheduler cutovers, and a publication after
+		// the lock is released could land after a later cast's, leaving the
+		// slot describing a playlist that is no longer on screen. A cast
+		// without a verdict (the cached-copy fallback) CLEARS the slot rather
+		// than leaving a previous cast's verdict standing for the same URL.
+		// A displayAt-deferred acceptance parks the verdict as pending: the
+		// previous playlist keeps showing, and the scheduler's push observer
+		// promotes the pending verdict only when a cohort actually reaches
+		// the player (see sigverify.Active).
+		// Captured BEFORE the scheduler filters the playlist below: the
+		// verdict describes the document as resolved, and the identity is
+		// read from the same pre-filter document so it cannot drift.
+		var castVerdict *sigverify.Verdict
+		var castPlaylistID string
+		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil {
+			castVerdict = playlist.Verification
+			castPlaylistID = playlist.ID
+		}
+		publishVerdict := func(deferred bool) {
+			if h.activeVerdict == nil || commandType != commands.CMD_DISPLAY_PLAYLIST || playlist == nil {
+				return
+			}
+			switch {
+			case deferred && castVerdict != nil:
+				h.activeVerdict.SetPending(castPlaylistID, schedulerSource.PlaylistURL, castVerdict.Status)
+			case deferred:
+				h.activeVerdict.SetPendingUnverified()
+			case castVerdict != nil:
+				h.activeVerdict.Set(castPlaylistID, schedulerSource.PlaylistURL, castVerdict.Status)
+			default:
+				h.activeVerdict.Clear()
+			}
+			// An immediately displayed SCHEDULED cast is also the document
+			// the scheduler will re-push later — the next cohort's cutover,
+			// or the reconnect recompute after the player reloads (which
+			// first cleared current). Those pushes promote pending, so the
+			// verdict must be parked there as well as set; a static inline
+			// schedule has no refresher pass that would restage it.
+			if !deferred && h.scheduler != nil && h.scheduler.HasCache() {
+				if castVerdict != nil {
+					h.activeVerdict.SetPending(castPlaylistID, schedulerSource.PlaylistURL, castVerdict.Status)
+				} else {
+					h.activeVerdict.SetPendingUnverified()
+				}
+			}
+			// Retain the verified inline dynamic document (verdict intact) so a
+			// strict refresh re-resolves THIS trusted source instead of the
+			// verdict-less player-status copy — a non-displayAt cast makes the
+			// scheduler drop its source, and player status has no verdict, so
+			// without this a valid inline dynamic playlist would refresh-skip
+			// forever under strict (feral-file/ffos-user#307). Cleared for any
+			// other cast, which is no longer the inline dynamic on screen.
+			if !deferred && h.scheduler != nil {
+				if schedulerSource.DynamicPlaylist != nil && schedulerSource.PlaylistURL == "" {
+					h.scheduler.SetInlineDynamicSource(schedulerSource.DynamicPlaylist)
+				} else {
+					h.scheduler.SetInlineDynamicSource(nil)
+				}
+			}
+		}
+
+		// invalidateVerdictBeforeSend runs immediately before any send that
+		// can replace what is on screen. From the moment the send lands the
+		// player may be showing the new document, and the status poller —
+		// which WithPlayerPush does not block — could match the previous
+		// document's slot through the shared URL in the window before the
+		// accepted reply is processed. Clearing first makes that window an
+		// omission, never a false attestation; the publication after the
+		// reply then sets the new verdict. A failed send leaves the slot
+		// cleared, which is the safe direction.
+		invalidateVerdictBeforeSend := func() {
+			if h.activeVerdict != nil {
+				h.activeVerdict.ClearCurrent()
+			}
+			// Drop any queued toast as part of the SAME pre-send invalidation,
+			// under the push lock, and capture the epoch it created: this send
+			// is about to replace the artwork, so a stale warning must not
+			// show during the window before the post-send notify, and that
+			// notify (toastForEpoch) is fenced to this epoch (#307).
+			if h.toast != nil {
+				sendEpoch = h.toast.ClearAndEpoch()
+			}
+		}
+
+		// clearVerdictForDefaultPlayback: an accepted displayDefaultPlaylist
+		// puts player-owned content on screen that controld never verified —
+		// or, with onlyIfNoPlaylist, may no-op. Either way controld can no
+		// longer vouch for what is showing, so current is cleared (omission,
+		// never a stale claim). Pending is kept: this command does not clear
+		// scheduler authority (see the case comment below).
+		clearVerdictForDefaultPlayback := func() {
+			if commandType != commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+				return
+			}
+			if h.activeVerdict != nil {
+				h.activeVerdict.ClearCurrent()
+			}
+			// Player-owned default artwork replaced whatever a prior cast put
+			// up, so a signature warning queued for that cast must not still
+			// reach the wall over the default content (#307).
+			if h.toast != nil {
+				h.toast.Clear()
+			}
+		}
+
 		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the
 		// scheduler push lock with RecomputeNow so a stale timed push cannot land
 		// after a newer cast or OOM-recovery fallback.
@@ -679,6 +1453,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// the screen, so interception must stay pointed at the
 					// playlist that keeps displaying.
 					h.scheduler.Commit()
+					publishVerdict(true)
 					// A relayer RPC and hub request both need an explicit acceptance
 					// response even though no CDP write was valid. This also prevents
 					// playback metrics from treating the deferred schedule as a failure.
@@ -711,16 +1486,31 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return
 				}
 				command.Arguments["dp1_call"] = playlist
+				invalidateVerdictBeforeSend()
 				result, err = h.sendCDPRequest(command)
 				if err != nil || !playerresponse.OK(result) {
 					h.scheduler.Restore(schedulerSnapshot)
 				} else {
 					h.scheduler.Commit()
+					publishVerdict(false)
+					// The player accepted this cohort: surface a non-valid
+					// verdict on the wall, INSIDE the push lock so the toast is
+					// ordered with the artwork it describes and a later cast
+					// cannot slip in first (#307). Deferred (future-only)
+					// schedules take the empty-items branch above and do NOT
+					// toast here — their scheduler cutover carries the notice.
+					if !isRetainedReplay(ctx) {
+						h.toastForEpoch(castMode, verdictStatus(playlist.Verification), sendEpoch)
+					}
 				}
 			})
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
 			h.scheduler.WithPlayerPush(func() {
+				invalidateVerdictBeforeSend()
 				result, err = h.sendCDPRequest(command)
+				if err == nil && playerresponse.OK(result) {
+					clearVerdictForDefaultPlayback()
+				}
 			})
 		default:
 			if commandType == commands.CMD_DISPLAY_PLAYLIST {
@@ -735,7 +1525,21 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				}
 				command.Arguments["dp1_call"] = playlist
 			}
+			if commandType == commands.CMD_DISPLAY_PLAYLIST || commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+				invalidateVerdictBeforeSend()
+			}
 			result, err = h.sendCDPRequest(command)
+			if err == nil && playerresponse.OK(result) {
+				// No scheduler ⇒ no push lock to be inside of; publishing
+				// right after the send is the tightest ordering available.
+				publishVerdict(false)
+				clearVerdictForDefaultPlayback()
+				if commandType == commands.CMD_DISPLAY_PLAYLIST {
+					if !isRetainedReplay(ctx) {
+						h.toastForEpoch(castMode, verdictStatus(playlist.Verification), sendEpoch)
+					}
+				}
+			}
 		}
 		if err != nil {
 			// No restore-on-error here: every CMD_DISPLAY_PLAYLIST failure path
@@ -790,6 +1594,15 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
+		// Report the signature verdict on the accepted reply (both the
+		// deferred acceptance map and the player's own ok reply). Additive
+		// keys only: existing controllers decide success by ok and ignore
+		// the rest. The active-verdict slot was already updated inside the
+		// push critical section above (publishVerdict).
+		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil && playlist.Verification != nil && playerresponse.OK(result) {
+			result = annotateCastReply(result, playlist.Verification)
+		}
+
 		// Force refresh status poller
 		if h.statusPoller != nil {
 			h.statusPoller.ForceRefresh()
@@ -797,6 +1610,528 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 		return result, nil
 	}
+}
+
+func (h *handler) handleContentPolicy(command commands.Command) (interface{}, error) {
+	if h.contentPolicy == nil {
+		return policyFailure("contentPolicyUnavailable"), nil
+	}
+	// Argument validation happens BEFORE the lock. A malformed request is
+	// rejected on its own shape, so it must not queue behind a cast that is
+	// holding the policy lock — otherwise the cheapest possible bad request
+	// still pays a cast's latency.
+	var show, strict bool
+	if command.Type == commands.CMD_SET_CONTENT_POLICY {
+		if len(command.Arguments) != 2 {
+			return policyFailure("invalidRequest"), nil
+		}
+		var okShow, okStrict bool
+		show, okShow = command.Arguments["showMatureContent"].(bool)
+		strict, okStrict = command.Arguments["strictPersonal"].(bool)
+		if !okShow || !okStrict {
+			return policyFailure("invalidRequest"), nil
+		}
+	} else if len(command.Arguments) != 0 {
+		// getContentPolicy takes no arguments. Rejecting a non-empty request is
+		// not pedantry: the storm gate's dedupe key is type+arguments, so
+		// silently ignoring junk arguments would let one LAN caller mint
+		// unlimited distinct keys and defeat the query-tier dedupe that bounds
+		// this command (gate.go).
+		return policyFailure("invalidRequest"), nil
+	}
+
+	h.contentPolicy.Lock()
+	defer h.contentPolicy.Unlock()
+	policy := h.contentPolicy.CurrentLocked()
+	if command.Type == commands.CMD_SET_CONTENT_POLICY {
+		// Serialized against scheduler-owned pushes, not just against casts.
+		// A timer push holding pushMu has already read the old policy through
+		// the lock-free Snapshot and built its payload; without this barrier
+		// setContentPolicy could persist, be acknowledged, and answer
+		// active:true while that pending cutover still delivered the old
+		// cohort. The lock order is the same one displayPlaylist uses — policy
+		// store, then pushMu — and the projector deliberately takes no store
+		// lock, so it cannot invert (see playlistschedule.Projector).
+		var reply interface{}
+		update := func() { reply = h.applyContentPolicyLocked(show, strict) }
+		if h.scheduler != nil {
+			h.scheduler.WithPlayerPush(update)
+		} else {
+			update()
+		}
+		return reply, nil
+	}
+	// A store that could not read its file keeps admitting on safe defaults,
+	// but it must not present those defaults as the saved user setting.
+	if !h.contentPolicy.DurableLocked() {
+		return policyFailure("contentPolicyUnavailable"), nil
+	}
+	result, err := h.sendContentPolicyCDP(commands.CMD_GET_CONTENT_POLICY, map[string]interface{}{})
+	if err != nil || !policyAckMatches(result, policy) {
+		return policyFailure(policyFailureCode(result, err)), nil
+	}
+	return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}, nil
+}
+
+// applyContentPolicyLocked persists the requested policy and reconciles the
+// player. The caller holds the content-policy store lock, and — when a
+// scheduler exists — the player-push lock, so no cutover can interleave
+// between the durable write and its acknowledgement.
+func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
+	// Acknowledgement FIRST, then the durable write. Persisting first and then
+	// discovering the player refused would leave a caller told this failed with
+	// a device that had nevertheless changed what it admits — and since the file
+	// is the only thing a restart restores, the refused policy would come back
+	// as the active one on the next boot. Only acknowledged values are ever
+	// written, so neither is possible and there is no second persisted state to
+	// reconcile.
+	candidate := h.contentPolicy.CandidateLocked(show, strict)
+	result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": candidate})
+	if err != nil || !policyAckMatches(result, candidate) {
+		return policyFailure(policyFailureCode(result, err))
+	}
+	// The player accepted but the write may still fail. The daemon then keeps
+	// its old policy, so the player is the one out of step — and waiting for a
+	// reconnect to fix that leaves the two enforcement points diverged for as
+	// long as the device stays up. Put the player back on the stored policy
+	// immediately, under the barriers already held here.
+	policy, err := h.contentPolicy.UpdateLocked(show, strict)
+	// The playlist ON SCREEN was projected under the OLD policy. Enabling
+	// mature content cannot bring back items the previous projection removed,
+	// and disabling it leaves blocked items up, until something re-resolves —
+	// which otherwise means the periodic refresh, minutes later, while the
+	// Content screen has already reported success. ForceRefresh only signals a
+	// channel, so it is safe to call with this lock held; the pass it wakes
+	// takes the lock itself, after this returns.
+	committed := false
+	defer func() {
+		if committed && h.policyRefresher != nil {
+			h.policyRefresher.ForceRefresh()
+		}
+	}()
+	if errors.Is(err, contentpolicy.ErrDurabilityUncertain) {
+		// The file IS in place and every surface agrees on it — memory, the
+		// snapshot, and the player. What is unconfirmed is only whether the
+		// directory entry survives a power loss, so retry that fsync before
+		// deciding what to report.
+		committed = true
+		// ConfirmDurableLocked clears the store's unconfirmed flag on success,
+		// which is what lets a later getContentPolicy report the policy as
+		// saved again. While it stays set, DurableLocked reads false and every
+		// RPC answers contentPolicyUnavailable — not just this one.
+		if confirmErr := h.contentPolicy.ConfirmDurableLocked(); confirmErr == nil {
+			return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}
+		} else {
+			// Still unconfirmed. The API's success means "saved", and a restart
+			// could still revert this, so do not claim it: report unavailable
+			// and leave the applied, self-consistent state in place rather than
+			// rolling the player back to a policy the file no longer holds.
+			h.logger.Error("content policy written but its directory entry could not be made durable; reporting unavailable",
+				zap.Error(err), zap.NamedError("confirm", confirmErr))
+			return policyFailure("contentPolicyUnavailable")
+		}
+	}
+	if err != nil {
+		previous := h.contentPolicy.CurrentLocked()
+		rollback, rollbackErr := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": previous})
+		if rollbackErr != nil || !policyAckMatches(rollback, previous) {
+			// Could not confirm the restore; the player may still be on the
+			// rejected values until the next reconnect sync. Say unavailable
+			// either way, and leave evidence for that case specifically.
+			h.logger.Error("content policy write failed and the player could not be restored to the stored policy",
+				zap.Error(err), zap.NamedError("rollback", rollbackErr))
+		} else {
+			h.logger.Warn("content policy write failed; player restored to the stored policy", zap.Error(err))
+		}
+		return policyFailure("contentPolicyUnavailable")
+	}
+	committed = true
+	return map[string]interface{}{"ok": true, "contentPolicy": policy, "active": true}
+}
+
+// allSourcesDead reports whether EVERY item left in playlist has a retained
+// preflight verdict and every one of those verdicts is definitively dead. A
+// single item with no verdict (never probed, or the preflight was skipped)
+// makes it false: this must only ever reject a cast the preflight itself would
+// have rejected, never one it never judged.
+func allSourcesDead(playlist *dp1.Playlist, verdicts map[string]offlinecache.SourceProbeResult) ([]offlinecache.SourceProbeResult, bool) {
+	if playlist == nil || len(playlist.Items) == 0 || len(verdicts) == 0 {
+		return nil, false
+	}
+	results := make([]offlinecache.SourceProbeResult, 0, len(playlist.Items))
+	for _, item := range playlist.Items {
+		r, probed := verdicts[item.Source]
+		if !probed || r.Verdict != offlinecache.ProbeDead {
+			return nil, false
+		}
+		results = append(results, r)
+	}
+	return results, true
+}
+
+// playlistSources lists the item source URLs of playlist, the cache's identity
+// for a replay lookup.
+func playlistSources(playlist *dp1.Playlist) []string {
+	if playlist == nil {
+		return nil
+	}
+	sources := make([]string, 0, len(playlist.Items))
+	for _, item := range playlist.Items {
+		sources = append(sources, item.Source)
+	}
+	return sources
+}
+
+func policyFailure(code string) interface{} {
+	return map[string]interface{}{"ok": false, "error": code}
+}
+
+// policyFailureCode classifies a player reply the same way recentPlayerReply
+// classifies the history commands, so the app can tell "this device cannot do
+// it" from "this device is temporarily out of sync".
+//
+// sendErr is the transport outcome and is decisive: a send that never reached
+// the player says nothing about its capabilities.
+//
+// A player that predates these commands answers the unknown command with a
+// bare {"ok":false} carrying no error code and no contentPolicy — identical
+// in shape to the legacy history reply — so that shape maps to unsupported.
+// Anything else (a modern failure code, or an ok reply whose policy does not
+// match) stays contentPolicyUnavailable.
+func policyFailureCode(result interface{}, sendErr error) string {
+	if sendErr != nil {
+		return "contentPolicyUnavailable"
+	}
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		return "contentPolicyUnavailable"
+	}
+	if msg, ok := m["message"].(map[string]interface{}); ok {
+		m = msg
+	}
+	if code, _ := m["error"].(string); code == "unsupported" {
+		return code
+	}
+	// Same whole-shape rule as the history reply: only an exactly bare
+	// {"ok":false} is a pre-feature player. Anything carrying its own
+	// explanation — an error, a code such as "busy", a result — is a modern,
+	// possibly retryable failure and must not be reported as a capability the
+	// device lacks.
+	if isBareLegacyFailure(m) {
+		return "unsupported"
+	}
+	return "contentPolicyUnavailable"
+}
+
+func (h *handler) sendContentPolicyCDP(commandType commands.Type, request map[string]interface{}) (interface{}, error) {
+	cmd := commands.Command{Type: commandType, Arguments: request}
+	b, err := cmd.JSON()
+	if err != nil {
+		return nil, err
+	}
+	genBefore := h.currentGeneration()
+	result, err := h.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+		"expression":    fmt.Sprintf("window.handleCDPRequest(%s)", b),
+		"awaitPromise":  true,
+		"returnByValue": true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if genAfter := h.currentGeneration(); genAfter != genBefore {
+		return nil, fmt.Errorf("content policy acknowledgement raced player generation change: %w", ErrGenerationRace)
+	}
+	return result, nil
+}
+
+func policyAckMatches(result interface{}, want contentpolicy.Policy) bool {
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if msg, ok := m["message"].(map[string]interface{}); ok {
+		m = msg
+	}
+	okValue, _ := m["ok"].(bool)
+	active, _ := m["active"].(bool)
+	if !okValue || !active {
+		return false
+	}
+	// The acknowledgement must carry a COMPLETE v1 policy. Decoding into a
+	// plain Policy made `{"version":1}` decode to the all-false default, which
+	// compares equal to it — so a player that echoed nothing at all would look
+	// like it had acknowledged the default policy and let it be committed.
+	raw, present := m["contentPolicy"]
+	if !present {
+		return false
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return false
+	}
+	got, err := contentpolicy.ParseComplete(b)
+	if err != nil {
+		return false
+	}
+	return got == want
+}
+
+// recentPlayerReply normalizes the CDP envelope only enough to classify the
+// history capability. No raw DP-1 item is added to the public list response.
+func recentPlayerReply(result interface{}) map[string]interface{} {
+	response, ok := result.(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{"ok": false, "status": "error", "error": "invalid player reply"}
+	}
+	message, ok := response["message"].(map[string]interface{})
+	if !ok {
+		message = response
+		response = map[string]interface{}{"message": message}
+	}
+	if okValue, _ := message["ok"].(bool); !okValue {
+		if _, hasStatus := message["status"]; !hasStatus {
+			if isBareLegacyFailure(message) {
+				// ff-player before #729 has only the generic unknown-command
+				// reply: ok:false and nothing else.
+				message["status"] = "unsupported"
+				message["error"] = "Recently played is not supported by this player"
+			} else {
+				// A modern player that failed and said why. Give it the
+				// explicit error status and KEEP its own error: calling an
+				// evicted or malformed record "unsupported" would tell the app
+				// the device cannot do this at all, when the right answer is a
+				// real, possibly retryable failure.
+				message["status"] = "error"
+			}
+		}
+	}
+	return response
+}
+
+// boundedReplayAck reduces the recursive displayPlaylist acknowledgement to the
+// documented fields before it leaves the daemon.
+//
+// Same rule, and the same reason, as boundedRecentlyPlayedReply: this reply is
+// reachable from the unauthenticated LAN hub, and the thing being replayed is a
+// RETAINED DP-1 item whose source can be a signed URL carrying credentials in
+// its query string. A player acknowledgement that echoed the request — or added
+// diagnostics — would hand exactly that to the caller, through the one command
+// whose whole design keeps the retained item device-local.
+//
+// Only ok/status/error survive. Anything else is dropped rather than
+// allow-listed later: the caller is told whether the replay was accepted, which
+// is all this reply ever promised.
+func boundedReplayAck(result interface{}) map[string]interface{} {
+	message, ok := result.(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{"ok": false}
+	}
+	if nested, isNested := message["message"].(map[string]interface{}); isNested {
+		message = nested
+	}
+	bounded := map[string]interface{}{"ok": false}
+	if okValue, present := message["ok"].(bool); present {
+		bounded["ok"] = okValue
+	}
+	if status, present := message["status"].(string); present && status != "" {
+		bounded["status"] = truncateLabel(status)
+	}
+	// SANITIZED, not merely truncated. This error is player-authored and this
+	// path replays a RETAINED item whose source can be a signed URL — a display
+	// failure that quotes it would carry its query credentials to an
+	// unauthenticated LAN caller, which is the boundary this whole command
+	// exists to hold. Same treatment boundedFailureReply gives the history
+	// replies; truncation alone kept the credentials intact.
+	if reason, present := message["error"].(string); present && reason != "" {
+		bounded["error"] = sanitizeErrorText(reason)
+	}
+	return bounded
+}
+
+// boundedFailureReply reduces a failed history/replay reply to the documented
+// safe fields. The player's own explanation is kept — it is what distinguishes
+// an evicted record from a missing capability — but sanitized, because that
+// text is player-authored and can name the source it failed on.
+func boundedFailureReply(message map[string]interface{}) map[string]interface{} {
+	bounded := map[string]interface{}{"ok": false}
+	if status, present := message["status"].(string); present && status != "" {
+		bounded["status"] = truncateLabel(status)
+	}
+	if reason, present := message["error"].(string); present && reason != "" {
+		bounded["error"] = sanitizeErrorText(reason)
+	}
+	return bounded
+}
+
+// sanitizeErrorText strips query strings out of any URL inside player-authored
+// error text and truncates the result.
+//
+// The controller contract requires sanitized error messages, and item sources
+// are exactly what these failures tend to name: a signed CDN URL carries its
+// credentials in the query string, so forwarding "cannot load
+// https://cdn/...?token=..." through the LAN API would leak the very thing the
+// history API keeps device-local. The path is kept, since that is the useful
+// part for an operator.
+func sanitizeErrorText(text string) string {
+	fields := strings.Fields(text)
+	for i, field := range fields {
+		if !strings.Contains(field, "://") {
+			continue
+		}
+		fields[i] = stripURLQuery(field)
+	}
+	return truncateLabel(strings.Join(fields, " "))
+}
+
+// stripURLQuery removes a URL's query string, where a signed URL carries its
+// credentials, and leaves the path — the part that identifies the resource.
+func stripURLQuery(url string) string {
+	if cut := strings.IndexByte(url, '?'); cut >= 0 {
+		return url[:cut] + "?<redacted>"
+	}
+	return url
+}
+
+// maxRecentlyPlayedRecords bounds how many history rows leave the daemon. The
+// player retains 50; this is generous headroom, not a contract, and exists so a
+// misbehaving or replaced player cannot make an unauthenticated LAN request
+// return an unbounded body.
+const maxRecentlyPlayedRecords = 200
+
+// maxRecentlyPlayedLabelBytes bounds one label field, and
+// maxRecentlyPlayedReplyBytes the whole reply's label payload. Rows alone are
+// not a bound: the LAN hub accepts a 4 MiB inline playlist from an
+// unauthenticated caller, its metadata becomes retained history labels, and
+// those come back through this reply — so 200 rows can still be megabytes.
+// Over-long labels are truncated rather than dropped, because a clipped title
+// still identifies the work for replay; once the aggregate cap is reached the
+// remaining rows are omitted, the same as the row cap.
+const (
+	maxRecentlyPlayedLabelBytes = 512
+	maxRecentlyPlayedReplyBytes = 128 * 1024
+	// maxRecentlyPlayedRecordIDBytes bounds the opaque replay handle. It is
+	// never truncated — see the loop below — so the bound has to drop the row
+	// instead, and it is generous: the player mints ids like
+	// "rp-1788892946764001".
+	maxRecentlyPlayedRecordIDBytes = 256
+)
+
+// truncateLabel clips s to at most maxRecentlyPlayedLabelBytes, on a rune
+// boundary so the result stays valid UTF-8 on the wire.
+func truncateLabel(s string) string {
+	if len(s) <= maxRecentlyPlayedLabelBytes {
+		return s
+	}
+	cut := maxRecentlyPlayedLabelBytes
+	for cut > 0 && !utf8.ValidString(s[:cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// boundedRecentlyPlayedReply rebuilds a SUCCESSFUL getRecentlyPlayed reply from
+// a strict allow-list instead of forwarding whatever the player returned.
+//
+// The documented contract is that this query exposes only a bounded label
+// snapshot: record id, timestamp, active flag, item id, title, artist,
+// thumbnail. Item sources and the full retained DP-1 item stay device-local —
+// they can be signed URLs carrying credentials in their query strings, and this
+// reply is reachable from the unauthenticated LAN hub. Forwarding the player's
+// object verbatim made that contract true only for as long as the player
+// happened to honor it; a daemon that OWNS the shape cannot be widened by a
+// change on the other side of CDP.
+//
+// Failures are left to recentPlayerReply, which has already classified them:
+// only ok:true replies are rebuilt here.
+func boundedRecentlyPlayedReply(response map[string]interface{}) map[string]interface{} {
+	message, ok := response["message"].(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{"message": map[string]interface{}{"ok": false, "status": "error"}}
+	}
+	if okValue, _ := message["ok"].(bool); !okValue {
+		// Failures are rebuilt too. recentPlayerReply only CLASSIFIES them, so
+		// a modern player's failure could still carry a retained item, record
+		// or diagnostic field — and that is the same signed-URL exposure the
+		// success path is bounded for, on the same unauthenticated LAN API.
+		return map[string]interface{}{"message": boundedFailureReply(message)}
+	}
+
+	bounded := map[string]interface{}{"ok": true}
+	if status, present := message["status"].(string); present {
+		bounded["status"] = status
+	}
+	for _, key := range []string{"activeOccurrenceKnown", "incomplete"} {
+		if flag, present := message[key].(bool); present {
+			bounded[key] = flag
+		}
+	}
+	raw, _ := message["records"].([]interface{})
+	records := make([]interface{}, 0, len(raw))
+	labelBytes := 0
+	for _, entry := range raw {
+		if len(records) >= maxRecentlyPlayedRecords || labelBytes >= maxRecentlyPlayedReplyBytes {
+			break
+		}
+		record, isRecord := entry.(map[string]interface{})
+		if !isRecord {
+			continue
+		}
+		// recordId is the replay handle, NOT a label: playRecentlyPlayed
+		// forwards it verbatim to the player's resolver, so truncating it
+		// would advertise a row that deterministically fails to play. It is
+		// passed through losslessly, and a value too long to be a plausible
+		// handle drops the row instead — an omitted row is honest, an
+		// unresolvable one is not.
+		recordID, _ := record["recordId"].(string)
+		if recordID == "" || len(recordID) > maxRecentlyPlayedRecordIDBytes {
+			continue
+		}
+		bounded := map[string]interface{}{"recordId": recordID}
+		labelBytes += len(recordID)
+		if playedAt, present := record["playedAtMs"].(float64); present {
+			bounded["playedAtMs"] = playedAt
+		}
+		if isActive, present := record["isActive"].(bool); present {
+			bounded["isActive"] = isActive
+		}
+		for _, key := range []string{"itemId", "title", "artist"} {
+			if label, present := record[key].(string); present && label != "" {
+				clipped := truncateLabel(label)
+				bounded[key] = clipped
+				labelBytes += len(clipped)
+			}
+		}
+		// thumbnailUrl is a URL like any item source, so its query string gets
+		// stripped the same way: a signed thumbnail carries credentials there
+		// too, and this reply is reachable from the unauthenticated LAN hub.
+		// The path survives, which is what the app renders from.
+		if thumb, present := record["thumbnailUrl"].(string); present && thumb != "" {
+			clipped := truncateLabel(stripURLQuery(thumb))
+			bounded["thumbnailUrl"] = clipped
+			labelBytes += len(clipped)
+		}
+		records = append(records, bounded)
+	}
+	bounded["records"] = records
+	return map[string]interface{}{"message": bounded}
+}
+
+// isBareLegacyFailure reports whether an unwrapped reply is EXACTLY {"ok":false}
+// — no error, no code, no result field, nothing. That is the only shape a
+// pre-feature player produces for an unknown command (ff-player's command
+// switch returns a bare {ok:false}), so it is the only shape that may be read
+// as "this device lacks the capability".
+//
+// Deliberately a whole-shape check rather than a deny-list of known
+// explanatory keys: a deny-list silently mislabels the next field someone adds
+// (a "result", a "code") as a missing capability, which tells the app to hide
+// a feature the device actually has.
+func isBareLegacyFailure(message map[string]interface{}) bool {
+	if len(message) != 1 {
+		return false
+	}
+	okValue, hasOK := message["ok"].(bool)
+	return hasOK && !okValue
 }
 
 // ensureDisplayPlaylistIntent sets intent.action=now_display when the cast

@@ -10,14 +10,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/display-protocol/dp1-go/extension/contentrating"
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
+	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -118,9 +123,10 @@ type refresher struct {
 	// offlineCache backs the same cached-playlist-by-URL fallback
 	// commandrouter's resolveDisplayedPlaylist uses (see loadCachedPlaylistForURL
 	// below): also nil-able when offline caching is disabled/not wired.
-	offlineCache offlinecache.Service
-	json         wrapper.JSON
-	scheduler    playlistschedule.Scheduler
+	offlineCache  offlinecache.Service
+	json          wrapper.JSON
+	scheduler     playlistschedule.Scheduler
+	contentPolicy *contentpolicy.Store
 
 	clock  wrapper.Clock
 	logger *zap.Logger
@@ -136,6 +142,141 @@ type refresher struct {
 	// harmless: it just costs one redundant extra pass right after the
 	// next Start.
 	refreshChan chan struct{}
+
+	// activeVerdict mirrors commandrouter's (SetSignatureVerification): the
+	// refresher is the other producer of displayPlaylist pushes, so it
+	// re-publishes the verdict of what it re-pushed. The verdict itself is
+	// attached by dp1 at fetch time; the refresher computes none (its
+	// cached-copy fallback carries no verdict — see
+	// loadCachedPlaylistForURL). Set once before Start; read on the
+	// background goroutine only.
+	activeVerdict *sigverify.Active
+	// sessionGeneration, when set (SetSessionGeneration), is the
+	// playersession generation getter. A force cast's verdict is published
+	// only if the generation is unchanged across the send: a bump in between
+	// means the accepted reply came from a page that is gone (the bump hook
+	// already cleared the slot), and the new generation's reconciliation
+	// establishes a fresh verdict. Mirrors commandrouter.sendCDPRequest.
+	sessionGeneration func() uint64
+	// verificationMode, when set (SetSignatureVerificationMode), returns the
+	// owner's current mode. Under strict, a refresh whose re-fetched document
+	// is not proven valid is NOT pushed: the schedule may have been replaced
+	// by a document the owner would have refused at cast time, and the
+	// refresher must not become the path around that refusal. nil ⇒ default
+	// (notify), which never skips.
+	verificationMode func() sigverify.Mode
+	// toast, when set (SetRefresherToaster), surfaces the signature notice for
+	// a feed-driven transition: a strict refusal, or an accepted force-cast of
+	// a re-resolved document. Non-blocking Notifier (the shared dispatcher);
+	// nil means no toast (feral-file/ffos-user#307).
+	toast playertoast.Notifier
+}
+
+// SetSignatureVerificationMode injects the mode getter onto r, if r is the
+// concrete refresher built by New (mirroring SetSignatureVerification's
+// contract). Must be called before Start.
+func SetSignatureVerificationMode(r Refresher, fn func() sigverify.Mode, logger *zap.Logger) {
+	setter, ok := r.(interface{ setSignatureVerificationMode(func() sigverify.Mode) })
+	if !ok {
+		logger.Warn("Playlist refresher does not support signature verification mode wiring")
+		return
+	}
+	setter.setSignatureVerificationMode(fn)
+}
+
+// SetRefresherToaster injects the shared toast surface onto r (if r is the
+// concrete refresher built by New), mirroring SetSignatureVerificationMode.
+func SetRefresherToaster(r Refresher, notifier playertoast.Notifier, logger *zap.Logger) {
+	setter, ok := r.(interface{ setToaster(playertoast.Notifier) })
+	if !ok {
+		logger.Warn("SetRefresherToaster: refresher does not support the toast seam")
+		return
+	}
+	setter.setToaster(notifier)
+}
+
+func (r *refresher) setToaster(notifier playertoast.Notifier) {
+	r.toast = notifier
+}
+
+// currentMode is the verification-mode snapshot for one refresh pass — read
+// once and threaded through the strict gate and the toast so a concurrent
+// setSignatureVerificationMode cannot relabel a transition mid-pass (#307).
+func (r *refresher) currentMode() sigverify.Mode {
+	if r.verificationMode == nil {
+		return sigverify.DefaultMode
+	}
+	return r.verificationMode()
+}
+
+// toastStrictRefusal emits the strict-refusal notice only if no newer display
+// transition intervened since epoch was snapshotted (before this feed
+// resolved). NotifyIfEpoch is atomic against every Notify/Clear — a newer
+// cast, default playback, scheduler cutover, or generation bump all Clear the
+// toast and advance the epoch — so a stale rejection never lands over the
+// replacement (feral-file/ffos-user#307). The epoch does NOT see a
+// future-only scheduled cast taking scheduler authority (no write, no
+// Clear), so authorityHeld travels with the notice and the dispatcher
+// re-runs it at the handoff.
+func (r *refresher) toastStrictRefusal(epoch uint64, mode sigverify.Mode, status sigverify.Status, authorityHeld func() bool) {
+	if r.toast == nil {
+		return
+	}
+	if notice, ok := sigverify.ToastFor(mode, status); ok {
+		r.toast.NotifyIfEpochGuarded(notice, epoch, authorityHeld)
+	}
+}
+
+func (r *refresher) setSignatureVerificationMode(fn func() sigverify.Mode) {
+	r.verificationMode = fn
+}
+
+// SetSessionGeneration injects the generation getter onto r, if r is the
+// concrete refresher built by New (mirroring SetSignatureVerification's
+// contract). Must be called before Start; nil leaves publication unfenced.
+func SetSessionGeneration(r Refresher, fn func() uint64, logger *zap.Logger) {
+	setter, ok := r.(interface{ setSessionGeneration(func() uint64) })
+	if !ok {
+		logger.Warn("Playlist refresher does not support session generation wiring")
+		return
+	}
+	setter.setSessionGeneration(fn)
+}
+
+func (r *refresher) setSessionGeneration(fn func() uint64) {
+	r.sessionGeneration = fn
+}
+
+func (r *refresher) currentGeneration() uint64 {
+	if r.sessionGeneration == nil {
+		return 0
+	}
+	return r.sessionGeneration()
+}
+
+// SetSignatureVerification wires the shared active-verdict slot onto r, if r
+// is the concrete refresher built by New (a foreign implementation logs and
+// is left alone, mirroring commandrouter.SetSignatureVerification). Must be
+// called before Start.
+func SetSignatureVerification(r Refresher, active *sigverify.Active, logger *zap.Logger) {
+	setter, ok := r.(interface{ setSignatureVerification(*sigverify.Active) })
+	if !ok {
+		logger.Warn("Playlist refresher does not support signature verification wiring")
+		return
+	}
+	setter.setSignatureVerification(active)
+}
+
+func (r *refresher) setSignatureVerification(active *sigverify.Active) {
+	r.activeVerdict = active
+}
+
+// SetContentPolicy shares the command router's authoritative store/ordering
+// lock with refresh so a policy update cannot race an old-policy projection.
+func SetContentPolicy(r Refresher, policy *contentpolicy.Store) {
+	if target, ok := r.(*refresher); ok {
+		target.contentPolicy = policy
+	}
 }
 
 func New(
@@ -307,12 +448,10 @@ func (r *refresher) Stop() {
 	r.logger.Info("Refresher stopped")
 }
 
-// logProcessFailure logs one failed refresh pass. CDP absence stays at Debug:
-// it is the normal headless/mid-reconnect state, and both retry loops would
-// otherwise emit an Error every interval for hours on a monitor-less device.
+// logProcessFailure logs one failed refresh pass. CDP absence is the normal
+// headless/mid-reconnect state, so the periodic retry remains quiet.
 func (r *refresher) logProcessFailure(err error) {
 	if errors.Is(err, errCDPNotReady) || errors.Is(err, cdp.ErrCDPConnectionNotInitialized) {
-		r.logger.Debug("Skipping playlist refresh: CDP not connected")
 		return
 	}
 	r.logger.Error("Failed to process playing playlist", zap.Error(err))
@@ -327,6 +466,13 @@ func (r *refresher) logProcessFailure(err error) {
 // err is a named return so the deferred revert below can inspect the
 // pass's final outcome without a separate captured variable.
 func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
+	// The content-policy lock is taken AFTER resolution, not here: URL and
+	// dynamic resolution below are network-bound (the shared 30s HTTP timeout),
+	// and holding this lock across them would block getContentPolicy and
+	// setContentPolicy for that long — an owner could not promptly apply a more
+	// restrictive policy, and a slow playlist origin would become a lock-based
+	// denial path. It is still held from the projection through the player send,
+	// which is the ordering the policy contract needs.
 	// FetchPlayerStatus and the final Send both need a live CDP connection; bail
 	// out before them while it is absent so headless boots do not poll Chromium
 	// that intentionally is not running. The connection can still drop between
@@ -339,6 +485,16 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	var authorityToken uint64
 	if r.scheduler != nil {
 		authorityToken = r.scheduler.AuthorityToken()
+	}
+	// Snapshot the display-transition token BEFORE the (possibly slow) feed
+	// resolution, so a strict refusal decided afterward can be fenced against
+	// a newer cast, default playback, or generation bump that replaced the
+	// artwork meanwhile. The epoch advances on every such transition (each
+	// Clears the toast); scheduler authority alone would miss a page-generation
+	// bump that does not change authority (feral-file/ffos-user#307).
+	var toastEpoch uint64
+	if r.toast != nil {
+		toastEpoch = r.toast.Epoch()
 	}
 
 	// Revert replay's Fetch-interception scope to whatever the player
@@ -370,6 +526,10 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	if r.scheduler != nil {
 		schedulerSource = r.scheduler.Source()
 	}
+	// A scheduler source restored from state written before contentContext
+	// existed carries an empty value. It is non-zero, so the player-status
+	// recovery below is skipped and nothing else would ever notice.
+	legacySchedulerSource := !schedulerSource.IsZero() && schedulerSource.ContentContext == ""
 
 	// staticInline is the "inline playlist with nothing dynamic to
 	// re-resolve" case. It never needs a CDP re-send (the playlist cannot
@@ -380,11 +540,22 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	// notice. So it is carried out of the source-derivation switch rather
 	// than returned from inside it.
 	var staticInline *dp1.Playlist
+	var staticInlineContext string
+	var playerStatus *status.PlayerStatus
+	// contextUnknown marks a source whose origin this daemon cannot know: a
+	// player status that omitted contentContext (only a player predating this
+	// feature does that), or a scheduler source persisted before the field
+	// existed. The router sets the field on every cast it forwards and on every
+	// source it hands the scheduler, so in both cases an empty value means
+	// "from before", never "curated". See the projection guard below for why it
+	// is not just defaulted.
+	contextUnknown := false
 
 	if schedulerSource.IsZero() {
 		// No scheduler-owned source exists, so the player remains the source of
 		// truth for normal URL/dynamic refreshes.
-		playerStatus, statusErr := r.statusPoller.FetchPlayerStatus(r.context)
+		var statusErr error
+		playerStatus, statusErr = r.statusPoller.FetchPlayerStatus(r.context)
 		if statusErr != nil {
 			return statusErr
 		}
@@ -394,20 +565,45 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		}
 
 		if playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
-			r.logger.Debug("Player command is not display any playlist", zap.String("command", string(playerStatus.Command)))
 			return nil
 		}
 
 		switch {
 		case playerStatus.PlaylistURL != nil:
-			schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL}
+			contextUnknown = playerStatus.ContentContext == ""
+			schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL, ContentContext: playerStatus.ContentContext}
 		case playerStatus.Playlist != nil && playerStatus.Playlist.HasDynamicContent():
-			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist}
+			contextUnknown = playerStatus.ContentContext == ""
+			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist, ContentContext: playerStatus.ContentContext}
+			// Prefer the verified inline dynamic document the cast retained:
+			// player status drops the verdict (dp1.Playlist.Verification is
+			// json:"-"), so re-resolving its copy makes the strict check below
+			// treat every refresh as unverifiable and skip it. The retained
+			// source carries the verdict; ProcessDynamicPlaylist copies the
+			// struct by value, so the verdict survives hydration. Matched on
+			// id so a retained source from a superseded cast is never used
+			// (feral-file/ffos-user#307).
+			//
+			// The content context travels WITH it. The retained document is the
+			// same cast, so it is the same audience decision — rebuilding the
+			// source here without the context would silently reclassify a
+			// personal cast as curated on the first refresh, which is the one
+			// thing the unknown-origin handling below exists to prevent. The
+			// verdict is primary and unweakened; the context rides alongside.
+			if r.scheduler != nil {
+				if retained := r.scheduler.InlineDynamicSource(); retained != nil && retained.ID == playerStatus.Playlist.ID {
+					schedulerSource = playlistschedule.Source{
+						DynamicPlaylist: retained,
+						ContentContext:  playerStatus.ContentContext,
+					}
+				}
+			}
 		case playerStatus.Playlist != nil:
 			// Static inline player status only contains the filtered active set and
 			// no refreshable source identity, so it cannot rebuild future items.
-			r.logger.Debug("Playlist has no dynamic queries, skipping CDP resend")
+			contextUnknown = playerStatus.ContentContext == ""
 			staticInline = playerStatus.Playlist
+			staticInlineContext = playerStatus.ContentContext
 		default:
 			// A displayPlaylist status carrying neither a URL nor an inline playlist
 			// is the player's fresh-boot/unconfigured state (nothing assigned yet),
@@ -420,18 +616,12 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			// (which returns an error instead, for
 			// resyncKioskReplayScopeToCurrentDisplay's best-effort caller where an
 			// error is simply logged and swallowed).
-			r.logger.Debug("Player has no playlist URL or playlist; nothing to refresh")
 			return nil
 		}
 	}
 
 	if staticInline != nil {
-		if r.kioskReplay != nil {
-			r.kioskReplay.LockPlayback()
-			defer r.kioskReplay.UnlockPlayback()
-			r.syncReplayScopeLocked(staticInline)
-		}
-		return nil
+		return r.refreshStaticInline(staticInline, staticInlineContext, contextUnknown, playerStatus, authorityToken)
 	}
 
 	var playlist *dp1.Playlist
@@ -454,7 +644,132 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *schedulerSource.DynamicPlaylist, false)
 	}
 	if err != nil {
+		// The source cannot be re-resolved, so this pass will neither project
+		// nor re-send — and a policy tightened a moment ago would otherwise
+		// leave the blocked work on the wall for as long as the source stays
+		// unreachable, while the Content screen reported success. Offline
+		// caching defaults OFF, so on a stock device with a non-displayAt
+		// playlist there is no fallback here at all.
+		//
+		// Retire it from what the PLAYER holds, before the early return. No
+		// retained state: the on-screen item is judged on its own rating, the
+		// same predicate the successful path uses. A blank wall until the
+		// source returns is the accepted trade; a blocked work on the wall is
+		// not.
+		r.retireBlockedCurrentWithoutASource(schedulerSource)
 		return r.handleRefreshError(err, kind, schedulerSource)
+	}
+
+	// Strict mode (#307): the same refusal the cast path applies, at the
+	// same point — after resolution, before anything touches replay scope,
+	// the scheduler, or the player. A refresh is the feed's chance to
+	// replace what is showing; if the replacement is not proven valid (or
+	// is the verdict-less cached copy), leave the current artwork alone and
+	// let the next pass try again. Reported as a successful no-op pass: this
+	// is policy, not a fault, and must not drive the startup escalation.
+	// castMode is the ONE mode read for this pass, reused for the toast below.
+	castMode := r.currentMode()
+	if r.activeVerdict != nil && castMode == sigverify.ModeStrict {
+		if playlist.Verification == nil || playlist.Verification.Status != sigverify.StatusValid {
+			reason := "cached copy carries no verdict"
+			if playlist.Verification != nil {
+				reason = playlist.Verification.Reason
+			}
+			r.logger.Warn("playlist refresh skipped by strict signature verification; current artwork left in place",
+				zap.String("kind", kind), zap.String("reason", reason))
+			// Strict refused this feed update: tell the wall (#307). Under
+			// strict a non-valid (or verdict-less) status toasts rejected.
+			var status sigverify.Status
+			if playlist.Verification != nil {
+				status = playlist.Verification.Status
+			}
+			// Fenced to BOTH tokens. The display-transition epoch (inside
+			// toastStrictRefusal) catches a cast, default playback or
+			// generation bump that replaced the artwork; the authority
+			// token catches a future-only scheduled cast, which takes
+			// scheduler authority for this URL WITHOUT a CDP send or toast
+			// Clear — so the epoch alone would let a slow refresh of the
+			// superseded source toast a rejection for a feed the scheduler
+			// will never show. Checked under WithPlayerPush, the same lock
+			// the send closure rechecks authority under, so it orders
+			// against that cast's own authority change rather than racing
+			// it (feral-file/ffos-user#307).
+			authorityHeld := func() bool {
+				return r.scheduler == nil || r.scheduler.AuthorityToken() == authorityToken
+			}
+			refuse := func() {
+				if !authorityHeld() {
+					r.logger.Debug("Strict refusal notice dropped: playlist authority changed during refresh resolution")
+					return
+				}
+				// authorityHeld also rides with the notice to its handoff.
+				r.toastStrictRefusal(toastEpoch, castMode, status, authorityHeld)
+			}
+			if r.scheduler != nil {
+				r.scheduler.WithPlayerPush(refuse)
+			} else {
+				refuse()
+			}
+			return nil
+		}
+	}
+
+	contentContext, contextErr := contentpolicy.NormalizeContext(schedulerSource.ContentContext)
+	if contextErr != nil {
+		return contextErr
+	}
+	if legacySchedulerSource {
+		contextUnknown = true
+	}
+	// Resolution is done; take the policy lock now and hold it through the
+	// projection and the player send (see the note at the top of this function).
+	if r.contentPolicy != nil {
+		r.contentPolicy.Lock()
+		defer r.contentPolicy.Unlock()
+	}
+	retireBlockedCurrent := false
+	// A source rebuilt from a status with no contentContext carries an UNKNOWN
+	// origin, not a curated one. Defaulting it to curated silently reclassifies
+	// a cast the owner made as personal, so the first refresh would strip the
+	// mature items they deliberately put on the wall — the opposite of the
+	// documented guarantee that context survives refresh. Leave the playlist as
+	// the cast admitted it instead. A player this old has no policy mirror of
+	// its own either (setContentPolicy answers unsupported), so there is no
+	// enforcement being bypassed here that ever worked on it.
+	if contextUnknown {
+		r.logger.Warn("Player status omits contentContext; leaving this refresh unprojected rather than reclassifying the cast as curated",
+			zap.String("source", schedulerSource.PlaylistURL))
+	}
+	if r.contentPolicy != nil && !contextUnknown {
+		var blocked bool
+		projected, blocked, projectErr := r.contentPolicy.ProjectLocked(&playlist.Playlist, contentContext)
+		if projectErr != nil {
+			return projectErr
+		}
+		// Whether the current frame must be retired is decided from the item the
+		// player actually has on screen, NOT from the refreshed set's contents.
+		//
+		// Sample status HERE, after resolution: it is network-bound and playback
+		// keeps advancing during it, so a read taken beforehand can name an item
+		// that has since been replaced. The status poller is already polling on
+		// its own short interval, so this is not a new cost of consequence.
+		if fresh, statusErr := r.statusPoller.FetchPlayerStatus(r.context); statusErr == nil && fresh != nil {
+			playerStatus = fresh
+		}
+		activePolicy := r.contentPolicy.CurrentLocked()
+		// Two independent reasons to retire, and the second is why membership in
+		// the refreshed feed cannot be the gate: an item that DISAPPEARS from the
+		// source feed during this refresh matches nothing, so the projection is
+		// unchanged and the old code never even looked — while a soft refresh
+		// defers precisely when its current item is absent from the new list,
+		// leaving that blocked frame on screen indefinitely.
+		retireBlockedCurrent = currentItemBlocked(playerStatus, activePolicy, contentContext) ||
+			(len(projected.Items) != len(playlist.Items) &&
+				currentBlockedByRefresh(playerStatus, playlist, activePolicy, contentContext))
+		playlist.Playlist = *projected
+		if blocked {
+			r.logger.Warn("Playlist refresh is all blocked; retiring current content")
+		}
 	}
 
 	// Re-sync offline-cache replay scope before the re-send: this is the
@@ -483,11 +798,19 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 
 	var schedulerSnapshot playlistschedule.Snapshot
 	schedulerMutated := false
+	// Captured before the scheduler filters the playlist: the verdict and the
+	// identity belong to the document as resolved.
+	refreshVerdict := playlist.Verification
+	refreshPlaylistID := playlist.ID
 
 	// Send playlist to CDP
 	args := map[string]interface{}{
-		"dp1_call": playlist,
-		"refresh":  true,
+		"dp1_call":       playlist,
+		"refresh":        true,
+		"contentContext": string(contentContext),
+	}
+	if retireBlockedCurrent {
+		args["retireBlockedCurrent"] = true
 	}
 	command := commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -519,9 +842,35 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				return
 			}
 			if len(playlist.Items) == 0 {
+				if retireBlockedCurrent {
+					command.Arguments["dp1_call"] = playlist
+					result, sendCDPErr := r.sendCDPRequest(command)
+					sendErr = sendCDPErr
+					if sendErr == nil && !playerresponse.OK(result) {
+						sendErr = errPlayerRejectedRefresh
+					}
+					if sendErr != nil {
+						r.scheduler.Restore(schedulerSnapshot)
+					} else {
+						r.scheduler.Commit()
+					}
+					return
+				}
 				// Keep the future schedule armed, but do not send an empty list:
 				// the player rejects it and cannot improve the current artwork.
 				r.scheduler.Commit()
+				// The schedule now holds THIS document; the cutover that
+				// eventually pushes it must promote this verdict, not the
+				// one a previous deferred cast parked (#307). An unverified
+				// replacement (cached copy) is staged as such so the
+				// promotion clears rather than inherits.
+				if r.activeVerdict != nil {
+					if refreshVerdict != nil {
+						r.activeVerdict.SetPending(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
+					} else {
+						r.activeVerdict.SetPendingUnverified()
+					}
+				}
 				return
 			}
 			effectiveForceCast = effectiveForceCast ||
@@ -540,7 +889,11 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				"intent": map[string]interface{}{
 					"action": "now_display",
 				},
-				"dp1_call": playlist,
+				"dp1_call":       playlist,
+				"contentContext": string(contentContext),
+			}
+			if retireBlockedCurrent {
+				command.Arguments["retireBlockedCurrent"] = true
 			}
 			if schedulerSource.PlaylistURL != "" {
 				command.Arguments["playlistUrl"] = schedulerSource.PlaylistURL
@@ -548,6 +901,31 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		} else {
 			command.Arguments["dp1_call"] = playlist
 		}
+		// Invalidate BEFORE the send (#307): from the moment it lands the
+		// player may show the new document, and the status poller could
+		// match the previous one by URL before the reply is processed. A
+		// force cast clears outright and re-publishes below; a soft refresh
+		// reconciles now (the player may or may not swap, and acceptance
+		// will not say — see Active.ReconcileSoft); a verdict-less push
+		// clears. A failed send leaves the slot in that state: an omission.
+		if r.activeVerdict != nil {
+			switch {
+			case refreshVerdict == nil || effectiveForceCast:
+				r.activeVerdict.ClearCurrent()
+			default:
+				r.activeVerdict.ReconcileSoft(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
+			}
+		}
+		// A force cast replaces the artwork, so drop any queued toast before
+		// the send lands, paired with the verdict invalidation above; the
+		// force-cast success below sets this document's own notice (#307). A
+		// soft refresh does not visibly replace content, so it leaves a
+		// warning for the still-displayed playlist alone.
+		var forceCastEpoch uint64
+		if effectiveForceCast && r.toast != nil {
+			forceCastEpoch = r.toast.ClearAndEpoch()
+		}
+		generationBefore := r.currentGeneration()
 		result, sendCDPErr := r.sendCDPRequest(command)
 		sendErr = sendCDPErr
 		// Transport success with ok:false (or a malformed body) must still
@@ -558,6 +936,64 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		// not just on a transport failure.
 		if sendErr == nil && !playerresponse.OK(result) {
 			sendErr = errPlayerRejectedRefresh
+		}
+		// Publish what this push did to the screen (#307), inside the send
+		// closure — under WithPlayerPush — so it is ordered against casts
+		// and cutovers. A force cast (now_display) replaces the artwork at
+		// once, so its verdict is published outright; a verdict-less push
+		// (the cached-copy fallback) CLEARS the slot (pending too) rather
+		// than leaving a previous verdict standing for the same URL. A SOFT
+		// refresh was reconciled before the send and nothing more is known
+		// after it.
+		if sendErr == nil && r.activeVerdict != nil {
+			switch {
+			case refreshVerdict == nil:
+				r.activeVerdict.Clear()
+			case effectiveForceCast && r.currentGeneration() != generationBefore:
+				// The page moved under this send: its accepted reply
+				// belongs to a document that is gone. Leave current as
+				// the bump hook left it (cleared); the new generation's
+				// reconciliation re-pushes and publishes afresh. Pending
+				// is still restaged below — the scheduler cache moved
+				// regardless of the page.
+				r.logger.Info("playlist refresh: page generation changed across the send; verdict left unpublished")
+			case effectiveForceCast:
+				r.activeVerdict.Set(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
+			default:
+				// Soft refresh: already reconciled before the send.
+			}
+			// An accepted FORCE cast replaced the artwork with this
+			// re-resolved document, so its verdict now describes what is on
+			// screen: surface (or Clear) the notice, bound to this push and
+			// under the same lock. A soft refresh does not visibly replace
+			// content, and a page-moved force cast left the verdict
+			// unpublished above, so neither toasts here (#307).
+			if effectiveForceCast && r.currentGeneration() == generationBefore && r.toast != nil {
+				var status sigverify.Status
+				if refreshVerdict != nil {
+					status = refreshVerdict.Status
+				}
+				// Fenced to the epoch this force cast's pre-send Clear created,
+				// so a transition between the accepted send and here drops it.
+				if notice, ok := sigverify.ToastFor(castMode, status); ok {
+					r.toast.NotifyIfEpoch(notice, forceCastEpoch)
+				} else {
+					r.toast.Clear()
+				}
+			}
+			// The scheduler's cache now holds THIS document (Commit below),
+			// so every later cutover pushes its cohorts: restage pending to
+			// match, or a cutover would promote whatever an earlier
+			// deferred cast parked. Set above already dropped pending; the
+			// soft path did not. Skipped when the send failed: the snapshot
+			// is restored below and the prior pending stays true.
+			if schedulerMutated && r.scheduler.HasCache() {
+				if refreshVerdict != nil {
+					r.activeVerdict.SetPending(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
+				} else {
+					r.activeVerdict.SetPendingUnverified()
+				}
+			}
 		}
 		if schedulerMutated && sendErr != nil {
 			r.scheduler.Restore(schedulerSnapshot)
@@ -574,6 +1010,258 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	// observes it.
 	err = sendErr
 	return err
+}
+
+// refreshStaticInline handles the one displayed shape with no refreshable
+// source: an inline playlist with nothing dynamic and no displayAt. It cannot
+// be re-resolved, so this path has always only re-synced replay scope.
+//
+// It must still apply the content policy. A cast from the app is usually
+// exactly this shape, so without it an owner who turns mature content OFF
+// watches the mature work stay on screen indefinitely — there is no later
+// refresh that would remove it, which is precisely the failure the policy
+// exists to prevent.
+//
+// What it CANNOT do is the relaxing direction: the player's status carries only
+// the already-filtered set that was cast, so items an earlier projection
+// removed are simply not there to restore. That needs the daemon to retain the
+// original document, the same retained-state change deferred for scheduled
+// playlists.
+func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext string, contextUnknown bool, playerStatus *status.PlayerStatus, authorityToken uint64) error {
+	if r.contentPolicy == nil || contextUnknown {
+		if contextUnknown {
+			r.logger.Warn("Player status omits contentContext; leaving this inline playlist unprojected rather than reclassifying it as curated")
+		}
+		return r.syncStaticInlineScope(playlist)
+	}
+
+	origin, contextErr := contentpolicy.NormalizeContext(rawContext)
+	if contextErr != nil {
+		return contextErr
+	}
+
+	r.contentPolicy.Lock()
+	defer r.contentPolicy.Unlock()
+	projected, blocked, projectErr := r.contentPolicy.ProjectLocked(&playlist.Playlist, origin)
+	if projectErr != nil {
+		return projectErr
+	}
+	if len(projected.Items) == len(playlist.Items) {
+		// Nothing newly blocked: the common case, and it must stay as cheap as
+		// it was before this path did any projection at all.
+		return r.syncStaticInlineScope(playlist)
+	}
+
+	retire := currentBlockedByRefresh(playerStatus, playlist, r.contentPolicy.CurrentLocked(), origin)
+	out := *playlist
+	out.Playlist = *projected
+	if blocked {
+		r.logger.Warn("Inline playlist is all blocked by the content policy; retiring current content")
+	}
+
+	if !r.cdp.Initialized() {
+		return errCDPNotReady
+	}
+	command := commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{
+			"intent":         map[string]interface{}{"action": "now_display"},
+			"dp1_call":       &out,
+			"contentContext": string(origin),
+		},
+	}
+	if retire {
+		command.Arguments["retireBlockedCurrent"] = true
+	}
+
+	// Serialized against every other authoritative display, exactly like the
+	// ordinary refresh send below. This re-send is built from a status read
+	// taken BEFORE the projection above, so without the push lock and the
+	// authority re-check a cast that completed in between would be overwritten
+	// by this stale playlist — and its offline-replay scope with it.
+	var sendErr error
+	send := func() {
+		if r.scheduler != nil && r.scheduler.AuthorityToken() != authorityToken {
+			r.logger.Debug("Skipping obsolete inline policy re-send: playlist authority changed")
+			return
+		}
+		if r.kioskReplay != nil {
+			r.kioskReplay.LockPlayback()
+			defer r.kioskReplay.UnlockPlayback()
+			r.syncReplayScopeLocked(&out)
+		}
+		result, sendCDPErr := r.sendCDPRequest(command)
+		if sendCDPErr != nil {
+			sendErr = sendCDPErr
+			return
+		}
+		if !playerresponse.OK(result) {
+			sendErr = errPlayerRejectedRefresh
+		}
+	}
+	if r.scheduler != nil {
+		r.scheduler.WithPlayerPush(send)
+	} else {
+		send()
+	}
+	return sendErr
+}
+
+// syncStaticInlineScope is the pre-existing behavior for this shape: keep
+// offline-replay scope coherent while the same playlist keeps looping, and send
+// nothing.
+func (r *refresher) syncStaticInlineScope(playlist *dp1.Playlist) error {
+	if r.kioskReplay != nil {
+		r.kioskReplay.LockPlayback()
+		defer r.kioskReplay.UnlockPlayback()
+		r.syncReplayScopeLocked(playlist)
+	}
+	return nil
+}
+
+// retireBlockedCurrentWithoutASource retires the on-screen item when the policy
+// refuses it and the source cannot be resolved to build a replacement.
+//
+// Acts ONLY on a rating it understands. An unrated item — or one carrying a
+// label from a newer spec revision — is left alone: nothing is assumed from a
+// label the daemon cannot interpret, so the operator's unrated gate does not
+// blank a wall from here either. An unknown content context is left alone for
+// the same reason it is left unprojected everywhere else.
+//
+// Sends under the player-push barrier with the authority re-check, like every
+// other send on this path, so a cast that landed while the resolution was
+// failing is not overwritten by this retirement.
+func (r *refresher) retireBlockedCurrentWithoutASource(source playlistschedule.Source) {
+	if r.contentPolicy == nil || source.ContentContext == "" {
+		return
+	}
+	origin, err := contentpolicy.NormalizeContext(source.ContentContext)
+	if err != nil {
+		return
+	}
+	playerStatus, statusErr := r.statusPoller.FetchPlayerStatus(r.context)
+	if statusErr != nil || playerStatus == nil {
+		return
+	}
+	item, ok := currentPlayerItem(playerStatus)
+	if !ok || !contentpolicy.Rated(item) {
+		return
+	}
+
+	r.contentPolicy.Lock()
+	allowed := r.contentPolicy.CurrentLocked().Allows(item, origin)
+	r.contentPolicy.Unlock()
+	if allowed {
+		return
+	}
+	if !r.cdp.Initialized() {
+		return
+	}
+
+	authorityToken := uint64(0)
+	if r.scheduler != nil {
+		authorityToken = r.scheduler.AuthorityToken()
+	}
+	send := func() {
+		if r.scheduler != nil && r.scheduler.AuthorityToken() != authorityToken {
+			return
+		}
+		r.logger.Warn("Retiring the on-screen item: the content policy refuses it and its source cannot be resolved",
+			zap.String("source", source.PlaylistURL))
+		command := commands.Command{
+			Type: commands.CMD_DISPLAY_PLAYLIST,
+			Arguments: map[string]interface{}{
+				"intent":               map[string]interface{}{"action": "now_display"},
+				"dp1_call":             &dp1.Playlist{Playlist: dp1playlist.Playlist{}},
+				"contentContext":       string(origin),
+				"retireBlockedCurrent": true,
+			},
+		}
+		if _, sendErr := r.sendCDPRequest(command); sendErr != nil {
+			r.logger.Warn("Failed to retire the blocked on-screen item", zap.Error(sendErr))
+		}
+	}
+	if r.scheduler != nil {
+		r.scheduler.WithPlayerPush(send)
+	} else {
+		send()
+	}
+}
+
+// currentPlayerItem returns the item the player reports as on screen.
+func currentPlayerItem(playerStatus *status.PlayerStatus) (dp1playlist.PlaylistItem, bool) {
+	if playerStatus == nil || playerStatus.Index == nil || *playerStatus.Index < 0 {
+		return dp1playlist.PlaylistItem{}, false
+	}
+	items := playerStatus.Items
+	if items == nil && playerStatus.Playlist != nil {
+		items = &playerStatus.Playlist.Items
+	}
+	if items == nil || *playerStatus.Index >= len(*items) {
+		return dp1playlist.PlaylistItem{}, false
+	}
+	return (*items)[*playerStatus.Index], true
+}
+
+// currentItemBlocked reports whether the item the player currently has on
+// screen is refused by policy, judged on ITS OWN terms — no reference to any
+// refreshed playlist. That independence is the point: an item can be blocked
+// and simultaneously absent from the refreshed feed, which is exactly when a
+// soft refresh defers and leaves it displayed.
+//
+// Unknown current identity returns false here: currentBlockedByRefresh already
+// fails safe for that case against the refreshed set, and guessing "blocked"
+// from no information would retire healthy frames on every pass.
+func currentItemBlocked(playerStatus *status.PlayerStatus, policy contentpolicy.Policy, origin contentpolicy.Context) bool {
+	if playerStatus == nil || playerStatus.Index == nil || *playerStatus.Index < 0 {
+		return false
+	}
+	items := playerStatus.Items
+	if items == nil && playerStatus.Playlist != nil {
+		items = &playerStatus.Playlist.Items
+	}
+	if items == nil || *playerStatus.Index >= len(*items) {
+		return false
+	}
+	return !policy.Allows((*items)[*playerStatus.Index], origin)
+}
+
+func currentBlockedByRefresh(playerStatus *status.PlayerStatus, fresh *dp1.Playlist, policy contentpolicy.Policy, origin contentpolicy.Context) bool {
+	// Unknown current identity fails safe: the refresh changed the allowed set,
+	// so remounting is preferable to retaining a newly mature old frame.
+	if playerStatus == nil || playerStatus.Index == nil || *playerStatus.Index < 0 {
+		return true
+	}
+	items := playerStatus.Items
+	if items == nil && playerStatus.Playlist != nil {
+		items = &playerStatus.Playlist.Items
+	}
+	if items == nil || *playerStatus.Index >= len(*items) {
+		return true
+	}
+	current := (*items)[*playerStatus.Index]
+	// Prefer the item ID, which is the exact identity.
+	if current.ID != "" {
+		for _, item := range fresh.Items {
+			if item.ID == current.ID {
+				return !policy.Allows(item, origin)
+			}
+		}
+	}
+	// Then fall back to the source URL. A refreshed feed can re-mint IDs while
+	// the artwork behind a source is unchanged; without this fallback, a work
+	// that keeps its source but gains a "mature" label on refresh matches
+	// nothing, and the current frame is never retired.
+	if current.Source != "" {
+		for _, item := range fresh.Items {
+			if item.Source == current.Source {
+				return !policy.Allows(item, origin)
+			}
+		}
+	}
+	// Genuinely absent from the fresh set: the refresh itself replaces the
+	// frame, so there is nothing to retire here.
+	return false
 }
 
 // syncReplayScopeLocked points offline-cache replay at playlist's items and
@@ -794,13 +1482,15 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 }
 
 // loadCachedPlaylistForURL mirrors commandrouter's handler.loadCachedPlaylistForURL
-// (see its doc): the raw body Service.CachedPlaylistForURL returns was already
-// fully resolved and signature-verified once, back when downloadPlaylist
-// originally saved it, so unmarshaling it here needs no further DP-1
-// processing. Returns an error whenever there is nothing to fall back to
-// (offline caching disabled, url was never downloaded, or the downloaded
-// copy has since been cleared), so the caller can report the original
-// live resolution error instead.
+// (see its doc, including why the returned playlist carries NO signature
+// verdict: the saved body is a typed, hydrated re-marshal, not the signed
+// bytes — feral-file/ffos-user#307): the raw body Service.CachedPlaylistForURL
+// returns was already fully resolved back when downloadPlaylist originally
+// saved it, so unmarshaling it here needs no further DP-1 resolution.
+// Returns an error whenever there is nothing to fall back to (offline
+// caching disabled, url was never downloaded, or the downloaded copy has
+// since been cleared), so the caller can report the original live
+// resolution error instead.
 func (r *refresher) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
 	if r.offlineCache == nil {
 		return nil, fmt.Errorf("offline cache: disabled, no cached fallback for %s", url)
@@ -808,6 +1498,9 @@ func (r *refresher) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) 
 	raw, err := r.offlineCache.CachedPlaylistForURL(url)
 	if err != nil {
 		return nil, fmt.Errorf("offline cache: no cached playlist for %s: %w", url, err)
+	}
+	if err := contentrating.ValidatePlaylistFragment(raw); err != nil {
+		return nil, fmt.Errorf("playlistInvalid: offline cache content rating for %s: %w", url, err)
 	}
 	var playlist *dp1.Playlist
 	if err := r.json.Unmarshal(raw, &playlist); err != nil {

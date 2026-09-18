@@ -17,6 +17,10 @@
 #      failing open on it caused the headless Chromium restart storm) and only
 #      a sysfs with no readable status at all fails open (mirrors the watchdog
 #      display gate; the two predicates must not diverge).
+#   5. start-kiosk.sh launches `cage -s` and waits for tty1 to be the active VT
+#      (developer console on tty2, ffos#126) — same predicate as the watchdog's
+#      isKioskVTActive — and chromium-kiosk.service clears the watchdog's
+#      fallback screen unit before every launch.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -122,19 +126,19 @@ expect_proceed() {
   local case_name="$1"
   local expected="$2"
   local out_file="$tmp_dir/out.$$"
-  bash -c "source '$fn_file'; wait_for_display" > "$out_file" 2>&1 &
+  bash -c "source '$fn_file'; ${gate_fn:-wait_for_display}" > "$out_file" 2>&1 &
   local pid=$!
   local waited=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge 10 ]; then
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
-      fail "$case_name: wait_for_display still waiting after ${waited}s (must proceed)"
+      fail "$case_name: ${gate_fn:-wait_for_display} still waiting after ${waited}s (must proceed)"
     fi
     sleep 1
     waited=$((waited + 1))
   done
-  wait "$pid" || fail "$case_name: wait_for_display failed"
+  wait "$pid" || fail "$case_name: ${gate_fn:-wait_for_display} failed"
   local out
   out="$(tail -1 "$out_file")"
   case "$out" in
@@ -148,11 +152,11 @@ expect_proceed() {
 # which is exactly the headless restart storm this gate exists to prevent.
 expect_waiting() {
   local case_name="$1"
-  bash -c "source '$fn_file'; wait_for_display" >/dev/null 2>&1 &
+  bash -c "source '$fn_file'; ${gate_fn:-wait_for_display}" >/dev/null 2>&1 &
   local pid=$!
   sleep 2
   if ! kill -0 "$pid" 2>/dev/null; then
-    fail "$case_name: wait_for_display returned instead of waiting"
+    fail "$case_name: ${gate_fn:-wait_for_display} returned instead of waiting"
   fi
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
@@ -187,6 +191,52 @@ expect_waiting "unreadable alongside disconnected waits"
 rmdir "$drm_root/card0-HDMI-A-1/status"
 rm "$drm_root/card1-DP-1/status"
 expect_proceed "no readable status fails open" "fail open"
+
+# --- 4b. developer-console gate (ffos#126) -------------------------------------
+
+# cage runs with -s so a developer can Ctrl+Alt+F2 to getty@tty2. seatd hands a
+# starting cage whichever VT is active, so start-kiosk.sh must wait until tty1
+# is active again before launching; otherwise a kiosk (re)start steals the
+# developer's console. feral-watchdog reads the same file (display.go,
+# isKioskVTActive) and suppresses escalation while it does not read tty1 —
+# the two predicates must not diverge. Extracted verbatim like wait_for_display.
+grep -q '^exec cage -s -- ' "$kiosk_script" || \
+  fail "start-kiosk.sh must launch 'cage -s' (VT switching for the developer console)"
+vt_call_line="$(grep -n '^wait_for_vt1$' "$kiosk_script" | head -1 | cut -d: -f1 || true)"
+[ -n "$vt_call_line" ] || fail "start-kiosk.sh never calls wait_for_vt1"
+display_call_line="$(grep -n '^wait_for_display$' "$kiosk_script" | head -1 | cut -d: -f1 || true)"
+[ -n "$display_call_line" ] || fail "start-kiosk.sh never calls wait_for_display"
+[ "$display_call_line" -lt "$vt_call_line" ] || \
+  fail "wait_for_display (line $display_call_line) must run before wait_for_vt1 (line $vt_call_line)"
+
+tty_active="$tmp_dir/tty0-active"
+vt_fn_file="$tmp_dir/wait_for_vt1.sh"
+sed -n '/^wait_for_vt1() {/,/^}/p' "$kiosk_script" | \
+  sed "s|/sys/class/tty/tty0/active|$tty_active|" > "$vt_fn_file"
+grep -q 'wait_for_vt1() {' "$vt_fn_file" || fail "could not extract wait_for_vt1"
+fn_file="$vt_fn_file"
+gate_fn="wait_for_vt1"
+
+echo tty1 > "$tty_active"
+# A silent return is what proceeding looks like; the display gate logs
+# "Display connected" but the VT gate has nothing to announce on tty1.
+expect_proceed "tty1 active proceeds" ""
+
+# A developer on tty2 must hold the launch (the log line is the field
+# breadcrumb for "why is the kiosk not starting").
+echo tty2 > "$tty_active"
+expect_waiting "tty2 active waits"
+
+# Unreadable VT state (no VT subsystem, CI) fails open, same as the watchdog.
+rm -f "$tty_active"
+expect_proceed "no VT state fails open" "fail open"
+unset gate_fn
+
+# The fallback screen unit (ffos feral-kiosk-fallback.service, plymouth) holds
+# DRM master; every kiosk start must clear it or cage cannot come up after the
+# watchdog has shown it. Tolerant (`-`): the unit is absent on older images.
+assert_contains "$units_dir/chromium-kiosk.service" \
+  'ExecStartPre=-/usr/bin/sudo -n /usr/bin/systemctl stop feral-kiosk-fallback.service'
 
 # --- 5. player-bundle cache guard (#234) ---------------------------------------
 

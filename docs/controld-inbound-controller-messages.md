@@ -66,10 +66,17 @@ for relayer topic assignment:
   until the current artwork duration ends. URL / dynamic playlist refresh still
   uses `refresh: true`, except the first scheduled reconstruction after a
   controld restart force-casts because scheduler ownership may need to be
-  restored from persisted state. Playlists without item-level `displayAt` are
-  otherwise forwarded unchanged.
+  restored from persisted state. Every cast is then filtered against the
+  device's content policy for the cast's `contentContext` before it reaches
+  CDP, so a playlist without item-level `displayAt` is forwarded unchanged only
+  when the policy admits all of its items (see "Content policy effect on
+  playlists" below).
 - `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
+- `getRecentlyPlayed`, `playRecentlyPlayed`, `getContentPolicy`, and
+  `setContentPolicy` are likewise handled by `feral-controld` as commandrouter
+  pre-CDP special cases (see "Recently Played and Content Policy Inbound
+  Messages" below).
 - `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`,
   `clearPlaylistCache`, and `getOfflineCacheStatus` are likewise handled by
   `feral-controld` as commandrouter pre-CDP special cases, owned by the
@@ -85,7 +92,7 @@ send a standardized RPC error response over the relayer for most failures, so
 new inbound message families that require controller-visible errors must define
 their own response shape.
 
-There are two standardized exceptions. The first is **command-storm rejection**. When the device
+There are three standardized exceptions. The first is **command-storm rejection**. When the device
 sheds a command to protect itself from flooding (rate limit, concurrency
 budget, or relayer dispatch saturation — see feral-file/ffos-user#208), it
 sends an RPC response whose `message` body is:
@@ -134,6 +141,39 @@ without fixing the sources fails again. See the `displayPlaylist` section's
 source preflight notes for the conditions that are deliberately never
 rejected (scheduled playlists, cached captures, and every non-definitive
 probe outcome).
+
+The third is the **strict-mode signature rejection** on `displayPlaylist`
+(feral-file/ffos-user#307): when the device's signature verification mode is
+`strict` (see `setSignatureVerificationMode`) and the cast's DP-1 verdict is
+not `valid` — unsigned, invalid, or unverifiable (the offline cached copy
+carries no verdict) — the cast is rejected at accept time, before any
+preflight or player write, and the controller receives a reliable RPC
+response whose `message` body is:
+
+```json
+{
+  "ok": false,
+  "error": "sigInvalid",
+  "command": "displayPlaylist",
+  "message": "sigInvalid: playlist rejected by strict signature verification (signature invalid: payload_hash mismatch)",
+  "signatureStatus": "invalid"
+}
+```
+
+`ok: false` is contractual. `signatureStatus` is `invalid` or `unsigned`, and
+absent when the document carried no verdict at all. The parenthesized reason
+is drawn from a closed vocabulary: `signature invalid: <payload_hash mismatch
+| signature invalid | unsupported alg | malformed signature>`, `unsigned`,
+`unsigned; legacy signature ignored`, `malformed signature`, `document too
+large`, `too many signatures (> 16)`, or `cached copy carries no verdict`. It
+never contains anything the document itself supplied — no role, algorithm or
+key id string — and never a URL. (The owner-facing cast reply's `signers[]`
+is where the document's own `role`/`alg`/`kid` are reported.) The LAN hub reports
+the same condition as HTTP `422`, body = the same message text. The command
+was not applied and the previous artwork keeps playing. This is a policy
+outcome the owner chose, not "device busy": the caster must sign the document
+(or the owner must relax the mode) before retrying. `silent` and `notify`
+never reject.
 
 ## Shared Success Responses
 
@@ -257,10 +297,21 @@ Current success response example:
     "volume": 75,
     "isMuted": false,
     "displayURL": "http://127.0.0.1:8080/",
-    "deviceName": "Living Room"
+    "deviceName": "Living Room",
+    "signatureVerificationMode": "notify"
   }
 }
 ```
+
+`signatureVerificationMode` is the owner's DP-1 signature verification policy
+(see `setSignatureVerificationMode`): `silent`, `notify`, or `strict`. Like
+`deviceName` its PRESENCE is the capability signal a controller gates the
+setting on, and it carries the default `notify` on a unit nobody configured.
+A record that cannot be read reports (and applies) that default. It is
+**absent** while the daemon's `signatureVerification.disabled` config switch
+is on: the verifier is off, no mode can be enforced, and a controller must
+hide the setting rather than show a "strict" nothing applies
+(`setSignatureVerificationMode` refuses in that state too).
 
 `deviceName` is the owner-set display label (see `setDeviceName`). Like
 `contract`, it is **always present** on firmware that supports it and carries
@@ -469,6 +520,42 @@ fallback and does not clear controld's displayAt cache; with
 `onlyIfNoPlaylist`, a successful response may mean the player no-opped because
 content was already playing.
 
+**Signature verification (feral-file/ffos-user#307, verify-and-report).**
+Every `displayPlaylist` document is verified with dp1-go's DP-1 §7.1 verifier
+at accept time, before dynamic hydration: the URL path verifies the fetched
+bytes and the inline path verifies the caller's own `dp1_call` token exactly
+as it arrived — both ingress decoders retain the `request` object verbatim
+beside the decoded map — never a re-marshal of the map (whose HTML escaping
+of `&`/`<`/`>` can inflate a valid document past the 4 MiB verifier bound)
+and never the typed struct (which drops fields the signer covered). The offline
+cached-copy fallback carries NO verdict — the stored body is a typed,
+hydrated re-marshal, not the signed bytes — so a cast served from it omits
+the fields below. Bounds, all aimed at untrusted ingress: a document larger than 4 MiB is
+refused before decoding on every path (hub body limit, relayer frame limit,
+URL fetch limit, and the verifier's own cap); at most 16 `signatures[]` entries are verified and a document
+with more is `invalid` (`too many signatures`) without any cryptography
+running; an entry whose `alg`, `role`, or `kid` exceeds 32/32/256 bytes makes the
+document `invalid` before any cryptography runs: that entry is reported as
+`malformed signature` with the oversized field blanked, and its in-bounds
+siblings as `unverified`. The outcome is one of three `signatureStatus` values:
+`valid`
+(every `signatures[]` entry verifies), `invalid` (signatures present, at
+least one fails: tampered content, placeholder or wrong-key signature,
+unsupported `alg`, malformed entry), or `unsigned` (no `signatures[]`; a
+legacy v1.0 `signature` string alone also counts as unsigned and is flagged).
+What the verdict does is the owner's choice, the per-device **verification
+mode** (`setSignatureVerificationMode`, reported as
+`device_status.signatureVerificationMode`, default `notify`): under `silent`
+and `notify` every cast proceeds and the verdict is reported on the reply
+below, in `player_status`, and in one log line per cast (`notify` will
+additionally show it on the wall once the player toast ships); under `strict`
+anything not proven `valid` is rejected with the standardized `sigInvalid`
+envelope. Source kind never changes the outcome: an inline cast from the
+paired app is judged exactly like a playlist fetched by URL. Validity is cryptographic only: it proves the document is what the
+key named in each `kid` signed, not that the signer is trusted. The
+`signatureVerification.disabled` config flag skips verification entirely and
+omits every field below (the shape old firmware has).
+
 Playlist URL example:
 
 ```json
@@ -532,7 +619,9 @@ Dynamic DP1 example:
 ```
 
 Current success response: Chromium/player response from
-`window.handleCDPRequest(...)`, commonly:
+`window.handleCDPRequest(...)`, with the signature verdict merged in as
+additive keys beside `ok` (the displayAt-deferred acceptance
+`{"ok": true, "deferred": true}` carries them too):
 
 ```json
 {
@@ -540,11 +629,27 @@ Current success response: Chromium/player response from
   "messageID": "msg-display-1",
   "message": {
     "message": {
-      "ok": true
+      "ok": true,
+      "signatureStatus": "valid",
+      "signers": [
+        {"alg": "ed25519", "kid": "did:key:z6Mk…", "role": "feed", "ok": true}
+      ]
     }
   }
 }
 ```
+
+`signatureStatus` is `valid|invalid|unsigned`. `signers` lists every
+`signatures[]` entry (at most 16) in document order with its own `ok`, plus
+a `reason` on a failed entry (`payload_hash mismatch`, `signature invalid`,
+`unsupported alg` — the algorithm itself is in `alg` — `malformed signature`); it is omitted when
+unsigned or when the document exceeded the entry cap (`too many
+signatures (N > 16)` is then the document-level reason). `legacySignature: true` appears only when a v1.0 `signature`
+string was present. Kids are DIDs (public keys) and safe to relay; no field
+ever carries a URL. All three keys are absent when verification is disabled
+by config, when the cast was served from the offline cached copy, or on
+firmware that predates it — controllers must treat absence as "not
+verified", never as unsigned. `ok` alone still decides success.
 
 If offline caching is enabled and `playlistUrl` was previously used with
 `downloadPlaylist` for this exact URL, a live DP1 fetch/processing
@@ -579,6 +684,13 @@ Current error cases:
 - Player response is not `{"message":{"ok":true}}`; this records playback
   failure metrics but the raw player response is still returned if CDP
   succeeded.
+- A signature verdict of `invalid` or `unsigned` is an error case ONLY when
+  the device's verification mode is `strict`: standardized `sigInvalid`
+  rejection — see the standardized error envelopes near the top of this
+  document for the RPC body and the LAN hub's 422 mapping. Under `silent`
+  and `notify` the cast proceeds and the verdict is reported on the success
+  reply (see above). Under `strict` a cast served from the offline cached
+  copy is rejected too, since it carries no verdict.
 
 - Every resolved item source definitively unreachable (source preflight,
   #304), unless the playlist is `displayAt`-scheduled or has a cached
@@ -588,9 +700,10 @@ Current error cases:
   verdict for every item (network errors, timeouts, 401/403/406/407/408/
   416/429, 5xx) fails open and the cast proceeds.
 
-Current relayer error response: the `sourceUnreachable` rejection above is
-standardized; all other processing failures remain non-standardized and are
-logged as command failures.
+Current relayer error response: the `sourceUnreachable` and strict-mode
+`sigInvalid` rejections above are standardized (both `ok:false` RPC bodies,
+both HTTP `422` on the LAN hub); all other processing failures remain
+non-standardized and are logged as command failures.
 
 ### displayDefaultPlaylist
 
@@ -924,6 +1037,67 @@ Current error cases:
 (~1 per 5 s, deduped): every accepted change is a persisted write plus a
 full mDNS re-registration, so a flood of renames answers with the
 standardized command-storm rejection above rather than churning the LAN.
+
+Current relayer error response: none standardized; command failure is logged.
+
+### setSignatureVerificationMode
+
+Purpose: choose what a non-valid DP-1 signature verdict does to a
+`displayPlaylist` cast on this Art Computer (feral-file/ffos-user#307).
+
+Example:
+
+```json
+{
+  "messageID": "msg-sigmode-1",
+  "message": {
+    "command": "setSignatureVerificationMode",
+    "request": {
+      "mode": "strict"
+    }
+  }
+}
+```
+
+`mode` is exactly one of:
+
+- `silent` — every cast plays; the verdict is logged and reported only.
+- `notify` — every cast plays; a non-valid verdict is also shown on the wall
+  (once the player toast ships). The default.
+- `strict` — anything not proven `valid` is rejected with the standardized
+  `sigInvalid` envelope: unsigned, invalid, and unverifiable documents alike,
+  which today includes every cast the mobile app authors itself (they carry
+  no signature until app-side signing ships) and casts served from the
+  offline cached copy. The owner opts into this knowingly.
+
+Current success response: `{"ok": true, "signatureVerificationMode": "strict"}` —
+the stored value, which controllers should adopt. The record is
+`/home/feralfile/.state/signature-verification.json`, read on every cast, so
+the change applies to the next cast with no restart.
+
+Changing to `silent` or `notify` also re-drives a displayAt cutover the
+scheduler refused while the mode was `strict` (a refusal arms no retry, and
+past the schedule's final boundary there is no timer), so the wall does not
+stay on the pre-cutover cohort until an unrelated wake. Only a cohort not yet
+delivered is pushed; a mode change never re-casts what is already on screen.
+A factory reset clears the record, so a unit handed on returns to `notify`.
+
+Error cases — the request is rejected before anything is written, so no
+record changes and the stored mode (if any) still stands:
+
+- `invalid arguments: mode must be one of silent, notify, strict` — `mode` is
+  absent, not a string, or outside the vocabulary (case-sensitive). The
+  supplied value is never echoed.
+- `factory reset in progress` — a factory reset has staged.
+- `signature verification is disabled by device configuration; the mode
+  cannot be set` — the daemon's `signatureVerification.disabled` switch is on,
+  so no mode could be enforced; `getDeviceStatus` also omits
+  `signatureVerificationMode` in that state.
+- a state-directory creation, temp write, or rename failure (I/O error).
+
+`setSignatureVerificationMode` is classified as a disruptive command in the
+storm gate (~1 per 5 s, deduped): a persisted write reachable from the
+unauthenticated LAN hub whose value governs whether casts are refused.
 
 Current relayer error response: none standardized; command failure is logged.
 
@@ -2173,11 +2347,16 @@ before — a request that ends up returning `offline_cache_error` above
 (every eligible item failed classification) persists neither, so a
 failed download can never leave a "last known good" offline fallback
 that looks like a successful one. This is not
-guaranteed to be byte-identical to whatever a publisher
-originally served (`dp1` resolution re-serializes the Go struct, so key
-order/whitespace can differ), but DP-1 signatures verify against a
-JCS-canonicalized form rather than raw bytes, so this does not affect
-signature validity — see `docs/offline-artwork-capture.md`.
+guaranteed to be byte-identical to whatever a publisher originally served
+(`dp1` resolution re-serializes the Go struct, so key order/whitespace can
+differ). DP-1 signatures verify against a JCS-canonicalized form rather
+than raw bytes, which neutralizes serialization differences ONLY while
+every signed field survives — and this copy does not qualify: dynamic
+hydration has rewritten `items`, and the typed struct drops any field the
+pinned `dp1-go` does not model. The cached copy therefore carries no
+signature verdict and is never re-verified; a `displayPlaylist` served
+from it omits `signatureStatus` (see that section and
+`docs/offline-artwork-capture.md` §6/§7.1).
 
 Error cases: `resolve_failed`, `offline_cache_error`.
 
@@ -2660,6 +2839,260 @@ an unrelated event) will still report `ready`/`partial` for that same
 entire time. Clients should treat this notification as "this attempt's
 result", and use `getOfflineCacheStatus` as the source of truth for
 "is this item currently cached" when the two might disagree.
+
+## Recently Played and Content Policy Inbound Messages
+
+These four commands back the mobile app's **History** and **Content** screens
+(feral-file/ff-app#788). All four are commandrouter pre-CDP special cases: the
+daemon owns the reply shape rather than passing the player's answer through.
+
+### getRecentlyPlayed
+
+Purpose: list the works this device actually rendered, newest first, so the
+owner can put back a work they replaced without knowing its title or artist.
+
+Request: `{}` — no fields, and a **non-empty request is rejected** rather than
+forwarded, for the same storm-gate reason as `getContentPolicy` below: the
+gate's dedupe key is command type plus arguments.
+
+The history is device-owned. The player appends a record only at a *successful
+render*, which is why the list includes automatic playlist advances and
+survives a player restart; a selected-but-never-rendered item produces no
+record. The reply carries only the bounded label snapshot — `recordId`,
+`playedAtMs`, `isActive`, `itemId`, `title`, `artist`, `thumbnailUrl` (query
+string stripped, like any other URL the device hands out), plus
+`status`, `activeOccurrenceKnown` and `incomplete`. Item source and the full
+DP-1 item stay device-local and are never sent to a controller.
+
+Controld rebuilds a successful reply from that allow-list rather than
+forwarding what the player returned, and bounds it by **rows and by bytes** —
+each label is truncated to 512 bytes on a rune boundary, and the reply stops
+adding rows once its label payload reaches 128 KiB. `recordId` is exempt from
+truncation — it is the opaque replay handle `playRecentlyPlayed` forwards
+verbatim, so clipping it would advertise a row that cannot play; a handle too
+long to be plausible drops its row instead. Rows alone are not a bound:
+the LAN hub accepts a 4 MiB inline playlist, its metadata becomes retained
+history labels, and those come back through this reply. The bound is
+enforced on this side of CDP because item sources can be signed URLs carrying
+credentials in their query strings and this query is reachable from the
+unauthenticated LAN hub — a guarantee that held only while the player happened
+to honor it would not be a guarantee.
+
+```json
+{
+  "messageID": "msg-history-1",
+  "message": { "command": "getRecentlyPlayed", "request": {} }
+}
+```
+
+A player that predates this feature answers the unknown command with a bare
+`ok:false` — no `status`, no `error`, nothing else. Controld classifies exactly
+that shape as an explicit **`unsupported`** capability reply. It is never
+flattened into an empty history: "this device cannot do it" and "this device
+has played nothing yet" are different answers, and the app renders them
+differently.
+
+A failure that carries any explanation of its own (an `error`, a code, or a
+result field) is a modern player failing for a real reason — an evicted or
+malformed record, say. Controld gives it `status: "error"` and keeps the
+player's own error rather than relabelling it `unsupported`, so a retryable
+failure is not reported as a missing capability.
+
+Error cases: `unsupported` (older player), `error` (a real player-side
+failure), plus transport errors. A transport failure is an error, never an
+empty list.
+
+Failure replies are rebuilt from the allow-list too — `ok`, `status` and
+`error` only — and the player's explanation is sanitized: query strings are
+stripped from any URL it names. A failure is exactly where a player tends to
+quote the source it could not load, and a signed CDN URL carries its
+credentials there.
+
+### playRecentlyPlayed
+
+Purpose: put a listed work back on this device.
+
+Request: exactly `{"recordId": "<opaque id from getRecentlyPlayed>"}`. Any
+other field is rejected rather than ignored — the storm gate dedupes on the
+whole arguments map while this command uses only `recordId`, so an ignored
+extra field would miss dedupe and repeat the same resolve-and-replay work.
+
+A replay is **not** re-verified against the signature policy. The document is
+rebuilt on the device from a retained item — one work, no signature, no
+publisher to have signed it — so verifying it could only ever answer
+"unsigned": without this, every History tap would raise the signature notice on
+the wall, and a strict device could not replay its own history at all. The
+provenance check happened when the work was first cast.
+
+The command never accepts a controller-supplied source. Controld resolves the
+opaque record on the device, rebuilds a one-work unsigned DP-1 call from the
+retained item, and re-enters its ordinary `displayPlaylist` path — which is what
+preserves scheduler ownership, playback/replay-scope locking, cast-time source
+preflight, and the content-policy gate. Extracting one item from a signed
+playlist invalidates that playlist's signature, so the rebuilt call carries no
+signature; only the work's `defaults` are preserved.
+
+The replay is re-admitted under **the content context the work was recorded
+under**, not the default. A work that played as `personal` is replayed as
+`personal`, so History cannot offer a work the policy gate then refuses.
+
+The acknowledgement names the requested occurrence and is bounded — `ok`, and
+`status`/`error` when present, rebuilt from an allow-list rather than forwarded
+from the player. The retained item never leaves the device, so an
+acknowledgement that echoed the request must not carry its source out either.
+It does not claim a successful wall render. Callers still wait for `player_status`,
+particularly when the same work is deliberately replayed twice.
+
+Error cases: `recordId is required`; an evicted, malformed, or unknown record;
+`contentBlocked` if policy refuses the rebuilt cast; plus every
+`displayPlaylist` error, since that is the path it re-enters. A source that was
+valid when recorded can still fail later during rendering; that is reported
+honestly rather than promised away.
+
+### getContentPolicy
+
+Purpose: read the device's durable audience policy for the app's Content
+screen.
+
+Request: `{}` — no fields, and a **non-empty request is rejected** with
+`invalidRequest` rather than ignored. This is a storm-gate contract, not
+pedantry: the gate deduplicates on command type plus arguments, so ignoring
+junk arguments would let one LAN caller mint unlimited distinct dedupe keys.
+
+```json
+{ "ok": true, "contentPolicy": { "version": 1, "showMatureContent": false, "strictPersonal": false, "blockUnratedCurated": false }, "active": true }
+```
+
+`active:true` is only ever returned when the durable store is readable **and**
+the current player generation returned a matching acknowledgement. If the
+policy file could not be read, the device keeps admitting content on safe
+defaults but answers `contentPolicyUnavailable` — it never presents defaults as
+the owner's saved setting.
+
+Error cases: `invalidRequest`, `unsupported` (older player),
+`contentPolicyUnavailable`. A player that predates these commands answers the
+unknown command with a bare `{"ok":false}`; controld classifies that shape as
+`unsupported`, the same way it classifies the legacy history reply. A transport
+failure, or a modern player whose acknowledged policy does not match, stays
+`contentPolicyUnavailable` — the app retries one and not the other.
+
+### setContentPolicy
+
+Purpose: change the audience policy from the app.
+
+Request: exactly `{"showMatureContent": bool, "strictPersonal": bool}`. Any
+other argument count, or a non-boolean value, is `invalidRequest`.
+
+`blockUnratedCurated` is **operator-owned** and cannot be set by a controller.
+It comes from the daemon's `contentPolicy` config block and is re-applied from
+that config on every boot, so neither a controller request nor a stale
+persisted file can turn it on or off.
+
+An accepted change also re-sends the current playlist, because the playlist on
+screen was projected under the *old* policy: enabling mature content cannot
+bring back items the previous projection removed, and disabling it leaves
+blocked items up, until something re-resolves. A refused change re-sends
+nothing.
+
+If the displayed source cannot be resolved at all — a 404 or an outage, with
+offline caching off and no scheduled cohort to fall back to — there is nothing
+to re-project, so the on-screen item is judged on its own rating instead and
+retired if the policy refuses it. The wall goes blank until the source returns,
+which is the accepted trade: a work the owner has just blocked must not keep
+playing. An item the policy has nothing to say about — unrated, or carrying a
+label this build does not recognize — is left alone.
+
+That applies to a **static inline** cast too — the shape an app cast usually
+takes, with no URL or dynamic query to re-resolve. A newly blocked item is
+removed and the player is told to retire it if it is the frame on screen.
+Restoring items a previous projection removed is the one thing this cannot do:
+the device holds only the filtered set that was cast, so relaxing a policy takes
+effect on the next cast rather than retroactively.
+
+Success is reported only after the atomic durable write succeeds *and* the
+player returns a matching acknowledgement. A repeated identical set performs no
+durable write, so holding the toggle does not amplify flash writes.
+
+A factory reset clears the content policy along with the claim and the device
+name, and pushes the default to the player. On the success path the file is
+discarded with the subvolume anyway; this is for the rollback path, so a resold
+device cannot inherit the previous owner's admission rules. The operator-owned
+`blockUnratedCurated` gate survives, because it is device configuration rather
+than an owner setting.
+
+The order is **acknowledgement first, then the durable write**. Only values the
+current player generation has accepted are ever written or enforced, so a caller
+told the update failed is never left with a device that quietly changed its
+filtering — and since the file is the only thing a restart restores, a refused
+policy cannot come back as the active one after a reboot. If the write fails
+after the player accepted, the device keeps its previous policy and reports the
+failure; the next reconnect sync re-pushes the stored policy and puts the player
+back in step. If the write lands but its directory entry cannot be confirmed
+durable even on retry, the reply is `contentPolicyUnavailable` rather than
+success — a restart could still revert it, and `ok:true` means saved. That
+applies to later reads too: `getContentPolicy` keeps answering
+`contentPolicyUnavailable` until a confirmation succeeds, so the owner is never
+told the setting is safely saved while its directory entry is unconfirmed. The
+factory reset's deletion is made durable the same way.
+
+Error cases: `invalidRequest`, `unsupported`, `contentPolicyUnavailable`.
+
+### Content policy effect on playlists
+
+`displayPlaylist` takes an optional `contentContext`, whose only valid present
+values are `curated` and `personal`; an absent field means `curated`. Present
+but empty (`""`) or `null` is **rejected**, not treated as absent: at public
+ingress that is a malformed request, and silently widening it into the default
+audience would hide the client bug. (Scheduler state persisted before this
+field existed omits the key entirely, which stays compatible.)
+
+The device filters the playlist against its policy before casting:
+
+- A `mature`-labelled item is withheld unless `showMatureContent` is on, or the
+  cast is `personal` and `strictPersonal` is off.
+- An *unrated* item is withheld only from a `curated` cast, and only while the
+  operator's `blockUnratedCurated` gate is on.
+- When any item is removed, the projection's signatures are cleared: the source
+  document's signature does not describe the projection. Rating fields
+  themselves remain signed in the source.
+- When the projection is empty, the cast is refused with `contentBlocked`
+  (HTTP 422 on the LAN hub, `"error":"contentBlocked"` over the relayer). A
+  scheduled **cutover** whose cohort projects empty is different: there is no
+  caller to refuse, so the empty list is sent with `retireBlockedCurrent` —
+  retiring the frame rather than leaving blocked content on screen because the
+  only cohort that could replace it is the one the policy emptied.
+
+**Only `mature` hides anything.** A `contentRating` this build does not
+recognize is treated exactly as **unrated** — `general`, an absent rating, and
+any other string all take the same path — and a document is never refused for
+carrying one (DP-1 §3.3, display-protocol/dp1#52). Nothing is assumed from a
+label the daemon cannot interpret, so an unrated item is withheld only by the
+operator's `blockUnratedCurated` gate, and an unknown label is withheld on
+exactly the same terms.
+
+A `contentRating` of the wrong **type** is different and still fails closed: it
+cannot decode as a rating at all, so the playlist is rejected as
+`playlistInvalid`. That rejection names the failing field by **JSON pointer
+only** — `playlistInvalid: at /items/0/contentRating` — never the offending
+value: the underlying validator prints the value whole, and this text is
+returned verbatim to LAN and relayer callers. The
+rejection is carried as a typed error to both transports — HTTP 422 on the LAN
+hub, `"error":"playlistInvalid"` over the relayer — for inline `dp1_call` and
+for fetched `playlistUrl` documents alike. Inline bytes are validated before
+they are decoded into typed structures, so a wrong-typed rating
+(`"contentRating": 123`) is classified rather than surfacing as a generic
+decode failure.
+
+The context survives refresh. When a periodic refresh has to rebuild the source
+from player status and that status omits `contentContext` — only a player
+predating this feature does — the origin is treated as **unknown** and that
+refresh is left unprojected, rather than reclassified as `curated`. Guessing
+`curated` would strip the mature items an owner deliberately cast as
+`personal`. Such a player has no policy mirror of its own either
+(`setContentPolicy` answers `unsupported`).
+
+`retireBlockedCurrent:true` is a narrow daemon-to-player, refresh-only flag.
+Controllers do not send it.
 
 ## Response Shape Recommendation for New Inbound Commands
 

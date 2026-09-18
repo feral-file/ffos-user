@@ -3,6 +3,40 @@
 This document defines the canonical API and protocol design direction for `ffos-user`.
 Agents should treat these rules as stable constraints when adding, changing, or removing any interface.
 
+## FF1 log streaming
+
+`feral-controld` mirrors its emitted zap records to the public FF1 Cloudflare
+Pipeline Stream documented by the sibling `ff-logging` repository. Records use
+service `feral-controld` and the hostname-backed FF1 device ID. The optional
+`logStreaming.sampleRate` configures `feral-controld`, while
+`logStreaming.playerSampleRate` independently configures player sessions.
+Each value is evaluated once per log session, defaults to `1` when absent, and
+uses `0` to disable that service's remote delivery. The browser always hands
+complete player sessions to controld, so fractional values are never
+multiplied by a second client-side sampling decision.
+
+A log session ends after five seconds without a record or after one minute of
+continuous records, whichever happens first. Every record carries the shared
+session ID in `context.session_id`. Routine heartbeat, ping/pong, and unchanged
+status-poll messages must not be logged because they would join otherwise
+independent activity into artificial long-running sessions.
+
+The public stream receives the stable log message, logger name, device ID, and
+session context, but not arbitrary zap fields. Those fields can contain signed
+URLs, Wi-Fi identifiers, MAC addresses, and command payloads, so they remain in
+the local journal. Message sanitization strips URL credentials/query strings
+and recognizable credential assignments before upload.
+
+The bundled player posts its already-sessionized records to
+`POST http://127.0.0.1:1111/api/logs`. The route accepts only loopback requests
+with Origin `http://127.0.0.1:8080`, validates the narrow browser payload, and
+overwrites `service`, `device_id`, and `environment` before forwarding it to
+Cloudflare. The browser session ID is replaced with a stable opaque digest, so
+browser-controlled context never enters the public stream. Trace and debug
+records remain local; remote player delivery starts at Info. The browser
+therefore owns neither trusted attribution nor public Cloudflare credentials
+and does not depend on public Cloudflare CORS configuration.
+
 ---
 
 ## Version posture and API v2 transition
@@ -218,7 +252,7 @@ The `mintPairingApprovalDecision` command is a controller-to-controld approval r
 
 **Outbound notifications (`feral-controld`):** The device periodically pushes status notifications over the relayer WebSocket and local hub clients with an envelope that includes `notification_type` and a structured `message`. Mint-pairing approval notifications are relayer-only because the controller/mobile approval UI is reached through the relayer topic, not through the trusted-local hub socket. At minimum:
 
-- `player_status` — playback/UI state from Chromium via CDP `checkStatus` (cast command, playlist, pause, etc.). This is not a substitute for hardware or OS-level facts. It now includes a numeric `renderStatus` beside `index` so consumers can branch on stable render outcome codes: `0` pending, `1` loading, `2` ready, `3` failed. `renderStatus` is the authoritative artwork render outcome and should be forwarded unchanged by controller relays and notifications.
+- `player_status` — playback/UI state from Chromium via CDP `checkStatus` (cast command, playlist, pause, etc.). This is not a substitute for hardware or OS-level facts. It now includes a numeric `renderStatus` beside `index` so consumers can branch on stable render outcome codes: `0` pending, `1` loading, `2` ready, `3` failed. `renderStatus` is the authoritative artwork render outcome and should be forwarded unchanged by controller relays and notifications. It also carries an optional controld-owned `signatureStatus` (`valid|invalid|unsigned`, feral-file/ffos-user#307): the DP-1 signature verdict of the playlist controld last pushed, attached only when the reply identifies the playlist controld last pushed to the player with a verdict — by `playlist.id` when both sides carry one (a document republished at the same URL is a different document and never inherits), by `playlistURL` only when either side lacks an id —, and omitted otherwise (player-fetched default playlist, the offline cached-copy fallback — which also clears any earlier verdict for the same URL —, a cast from before this process started, verification disabled). A displayAt-deferred cast parks its verdict as pending until the scheduler's cutover push proves the cohort reached the screen; until then the still-showing playlist keeps its own annotation. Every producer that replaces the schedule restages pending (the refresher's future-only path included), and a scheduled document without a verdict is staged as "unverified" so its promotion clears the field rather than inheriting the previous document's. The refresher's soft refresh (`refresh: true`) may leave the previous item on screen after the player accepts, so it never attests on acceptance: the annotation is kept when the verdict is unchanged; when the two documents' ids differ and the verdict changed, the slot becomes id-only (a reply naming the old id still matches, a URL-only reply no longer does) and stays so across any later soft refresh until a force cast or cutover; otherwise it is cleared. Every refresh that replaces the scheduler's cache — future-only or with an active cohort — restages the pending verdict to the document the schedule now holds. Player-owned replacement — any player-session generation bump (CDP reconnect, navigation, stamp mismatch), cleared synchronously inside the bump so the very status round that detected it cannot re-attest, or an accepted `displayDefaultPlaylist` — clears the attested verdict too, preserving a parked schedule verdict that the re-push promotes again. Every producer that can replace the screen (cast, refresher, scheduler cutover, the claim-time default-playlist push) invalidates the slot immediately before its CDP send and publishes only after the accepted reply, so the window in which the player already shows the new document but controld has not yet judged the reply is an omission, never a stale claim; and publication is fenced on the player-session generation, so a reply that arrives after the page was replaced publishes nothing. The field is controld-owned: any `signatureStatus` a player reply carries is discarded before annotation. Absent means "not verified", never "unsigned".
 - `device_status` — device-oriented fields assembled by `status.DeviceStatus.GetStatus` (screen rotation, Wi‑Fi name, installed/latest version, volume, feature toggles, MAC info, best-effort `displayURL`, optional `sleepSchedule`, the always-present `deviceName` (empty when unnamed; see the device-name contract above), and the optional additive `lastOutage` summary `{start, end, class, count24h}` from the netlog flight recorder — attached inside `GetStatus` so the pushed feed and the pulled `getDeviceStatus` reply carry the same object; omitted until an outage has closed since process start, not persisted across restarts). The `displayURL` field is the top-level URL of the sole Chromium **page** debug target (DevTools `/json`), when exactly one such target exists; it is omitted when the URL cannot be resolved. Consumers that previously read a Chrome document URL from player payloads should use `device_status.message.displayURL` instead. When present, `sleepSchedule` follows the same **sleep vs. DDC** eventual-consistency rules as the `setSleepSchedule` / `sleepNow` / `wakeNow` contract above.
 - `mint_pairing_approval_request` — browser-session mint request details sent to controller/mobile approval UI, including browser information and the E2EE challenge.
 - `mint_pairing_approval_outcome` — terminal mint-pairing result used to clear controller/mobile approval UI.
@@ -362,15 +396,45 @@ follow the separate explicit gates above and in the migration plan.
 
 ## Error Payload Conventions
 
+### Content policy commands
+
+`getContentPolicy` accepts `{}`. `setContentPolicy` accepts exactly
+`{"showMatureContent":bool,"strictPersonal":bool}`; controllers cannot set the
+operator-owned `blockUnratedCurated` audit gate. Success is reported only after
+the daemon's atomic store is durable and the current player generation returns
+a matching awaited acknowledgement:
+
+```json
+{"ok":true,"contentPolicy":{"version":1,"showMatureContent":false,"strictPersonal":false,"blockUnratedCurated":false},"active":true}
+```
+
+Unsupported or unsynchronized players return `ok:false` with `unsupported` or
+`contentPolicyUnavailable`; they never return a false `active:true`. An optional
+`contentContext` on `displayPlaylist` is `curated` or `personal`; absence means
+`curated`. This context is outside the signed DP-1 document and is preserved by
+refresh and display-at scheduling. `retireBlockedCurrent:true` is a narrow
+daemon-to-player, refresh-only flag: it tells the player to retire a current
+item whose newly refreshed label is blocked, selecting an allowed replacement
+or blacking the display if the projection is empty. Controllers do not send it.
+
 ### D-Bus errors
 
 Use `dbus.NewError(message, []interface{}{})` for all D-Bus method errors. The first argument is a human-readable error message. The second is an empty slice (no additional error body values). Do not put structured data in the error body.
+
+### DP-1 signature verification contract notes
+
+`feral-controld` verifies every `displayPlaylist` document with dp1-go's §7.1 verifier, applies the owner's per-device mode (`silent`/`notify`/`strict`, persisted as its own JSON record like the device name, default `notify`), and reports a three-way verdict — `valid|invalid|unsigned` — on the cast reply (`signatureStatus`, `signers[]`, `legacySignature`) and on `player_status` (feral-file/ffos-user#307; wire shapes in [`controld-inbound-controller-messages.md`](controld-inbound-controller-messages.md)). Verification is over the JCS-canonical form, so re-marshaled bytes verify identically to wire bytes; a dropped field does not, which is why the inline path verifies the caller's original `dp1_call` token (retained verbatim by both ingress decoders as `Command.RawArguments`) rather than a re-marshal of the decoded map — `encoding/json` HTML-escapes `&`/`<`/`>`, which can inflate an honest document past the verifier's size bound; its float64 rounding of large integers is absorbed by JCS — or the typed struct, and why the offline cached copy — a typed, hydrated re-marshal — carries no verdict at all rather than a false one (persisting the download-time verdict beside the record is the follow-up). Bounds: every ingress caps the document at 4 MiB before decoding — the hub's request body, the relayer's websocket frame (`relayer.MAX_MESSAGE_BYTES`), and the URL fetch — and the verifier refuses anything larger on its own as well (`sigverify.MaxDocumentBytes`, defense in depth); verification stops at 16 `signatures[]` entries (counted by streaming the array and halting at the 17th, so the cap costs no per-entry allocation), and signer fields (`alg`/`role`/`kid`) past 32/32/256 bytes are blanked and reported as malformed before any cryptography runs (in-bounds siblings are reported as `unverified`) — so the unauthenticated hub cannot buy hours of JCS canonicalization or megabytes of log with one cast. The verdict is cryptographic only: it does not establish that the signer is one the device trusts. Trust anchoring is a later, separate layer; the reported `kid`s are its input.
+
+Two divergences from the v2 contract (`ff1-v2-api-contract.md` §10, §12.3) are recorded here rather than settled in code:
+
+- **Algorithms.** The v2 profile lists `ed25519` and `ecdsa-p256`. dp1-go v0.6.0 implements `ed25519` and `eip191` (did:pkh), and the production feed already carries an `eip191` signature. An `ecdsa-p256` entry therefore verifies as `unsupported alg` → `invalid` today. The profile or the library needs to move; until then the `signatureVerification.disabled` config flag is the remedy if such documents appear first.
+- **Vocabulary.** v2's `signatureStatus` is `verified|verification_pending|failed` and has no value for an unsigned document because v2 rejects those outright. The v1 surfaces use `valid|invalid|unsigned` (mapping valid→verified, invalid→failed); `unsigned` needs a v2 value to be proposed when v2 lands.
 
 ### Relayer errors
 
 Most command failures are not standardized: when an executor command fails, `controld` logs the error and does not send an explicit error response to the relayer unless the command protocol requires a reply. When adding new commands that need error responses, document the response shape in code comments near the command handler.
 
-**Command-storm rejection (standardized).** Command-storm protection (see below) is one of two paths with a defined controller-visible error envelope (the other is the dead-source cast rejection below). When the command router rejects a command (rate limit or concurrency budget) or the relayer sheds a command under dispatch saturation, the controller receives an RPC response whose `message` body is:
+**Command-storm rejection (standardized).** Command-storm protection (see below) is one of three paths with a defined controller-visible error envelope (the others are the dead-source cast rejection and the strict-mode signature rejection below). When the command router rejects a command (rate limit or concurrency budget) or the relayer sheds a command under dispatch saturation, the controller receives an RPC response whose `message` body is:
 
 ```json
 {
@@ -383,6 +447,8 @@ Most command failures are not standardized: when an executor command fails, `con
 The command-router rejection reply (rate limit / concurrency budget) is reliable. The relayer-side shed reply under **dispatch saturation** is **best-effort**: to avoid blocking its read loop under a sustained storm, the relayer drops the reply when its shed-response writers are all busy. Controllers must not rely on receiving it for that case and should fall back to a request timeout and retry.
 
 The LAN-hub ingress reports the same condition with HTTP `429 Too Many Requests`. Controllers should treat both as "device busy" and back off; the command was not applied.
+
+**Strict-mode signature rejection (standardized).** When the owner has set the device's DP-1 signature verification mode to `strict` (`setSignatureVerificationMode`; reported as `device_status.signatureVerificationMode`, default `notify`), a `displayPlaylist` whose verdict is not `valid` — unsigned, invalid, or the verdict-less offline cached copy — is rejected at accept time, before any preflight or player write, with an RPC `message` body of `{"ok": false, "error": "sigInvalid", "command": "displayPlaylist", "message": "sigInvalid: playlist rejected by strict signature verification (<reason>)", "signatureStatus": "invalid|unsigned"}` (`signatureStatus` absent for the cached copy). The reason is drawn from a closed vocabulary (the classified failure only) — never a string the document supplied (role, algorithm, key id) and never a URL. The LAN hub answers HTTP `422` with the same text. The command was not applied; the previous artwork keeps playing. `silent` and `notify` never reject; source kind (URL vs inline) never changes the outcome. The refresher applies the same rule to a re-fetched document under `strict`: it leaves the current artwork in place rather than becoming the path around the refusal. So does the displayAt scheduler, through its push gate, at the moment a cutover is about to be sent (timer, wake, reconnect, retry alike): the mode is read at push time, so a schedule accepted under `notify` cannot carry a non-valid cohort onto the screen after the owner switches to `strict`; the current active set holds and no retry is armed. Relaxing the mode re-drives it: the setter notifies the scheduler, which pushes only a cohort it has not yet delivered. While the `signatureVerification.disabled` switch is on the mode cannot be set (the setter refuses) and `device_status` omits `signatureVerificationMode`, so no controller can read an enforceable `strict` off a device whose verifier is off. The on-screen surface is ff-player's `playerToast` CDP command (a transient bottom-center notice, copy owned by the player, auto-dismissing): controld sends it best-effort and capability-gated on the player manifest — `notify` shows `signature_invalid`/`signature_unsigned` on the played cast, `strict` shows `signature_rejected` at the refusal, and `silent` (or a `valid` cast) shows nothing (`sigverify.ToastFor`); an older player bundle without the `playerToast` contract degrades to no toast. See `player-session-recovery.md` §9 for the paired rollout. Full shape in [`controld-inbound-controller-messages.md`](controld-inbound-controller-messages.md).
 
 **Dead-source cast rejection (standardized).** A `displayPlaylist` cast whose every resolved item source is definitively unreachable (an identity-independent HTTP 4xx answer, or a `data:` URI with malformed metadata (payload bytes are not validated)) is rejected at accept time instead of being forwarded to the player and reported as playing (feral-file/ffos-user#304). The controller receives a reliable RPC response (command-router path, never the best-effort shed path) whose `message` body is:
 

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -16,7 +17,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
-	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	fflogger "github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -39,16 +40,23 @@ type Hub interface {
 }
 
 type hub struct {
-	ctx             context.Context
-	logger          *zap.Logger
-	server          wrapper.HTTPServer
-	wsHandler       ws.WS
-	cmdHandler      commandrouter.Handler
-	statusProvider  StatusProvider
-	capturer        screenshot.Capturer
-	json            wrapper.JSON
-	reqSlots        chan struct{}
-	screenshotSlots chan struct{}
+	ctx                 context.Context
+	logger              *zap.Logger
+	server              wrapper.HTTPServer
+	wsHandler           ws.WS
+	cmdHandler          commandrouter.Handler
+	statusProvider      StatusProvider
+	capturer            screenshot.Capturer
+	json                wrapper.JSON
+	reqSlots            chan struct{}
+	screenshotSlots     chan struct{}
+	logEndpoint         string
+	logAPIKey           string
+	logEnvironment      string
+	logSampleRate       float64
+	logSessionSampler   func(deviceID, sessionID string, sampleRate float64) bool
+	logHTTPClient       *http.Client
+	logDeliveryDisabled bool
 
 	// contactObserver, when set, is invoked once per request on the counted
 	// control-plane routes (cast, status, status_v2) from a NON-loopback
@@ -81,6 +89,41 @@ func New(
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Hub {
+	return NewWithLogEndpoint(ctx, wsHandler, cmdHandler, statusProvider, capturer, server, json, logger, "")
+}
+
+// NewWithLogEndpoint creates the hub with the same effective FF1 stream used
+// by the daemon logger, so player and controld records cannot split pipelines.
+func NewWithLogEndpoint(
+	ctx context.Context,
+	wsHandler ws.WS,
+	cmdHandler commandrouter.Handler,
+	statusProvider StatusProvider,
+	capturer screenshot.Capturer,
+	server wrapper.HTTPServer,
+	json wrapper.JSON,
+	logger *zap.Logger,
+	logEndpoint string,
+) Hub {
+	return NewWithLogDelivery(ctx, wsHandler, cmdHandler, statusProvider, capturer, server, json, logger, logEndpoint, "", fflogger.DefaultEnvironment, 1)
+}
+
+// NewWithLogDelivery creates the hub with the resolved endpoint and upload
+// policy shared by daemon logging and the player proxy.
+func NewWithLogDelivery(
+	ctx context.Context,
+	wsHandler ws.WS,
+	cmdHandler commandrouter.Handler,
+	statusProvider StatusProvider,
+	capturer screenshot.Capturer,
+	server wrapper.HTTPServer,
+	json wrapper.JSON,
+	logger *zap.Logger,
+	logEndpoint string,
+	logAPIKey string,
+	logEnvironment string,
+	logSampleRate float64,
+) Hub {
 	if server == nil {
 		httpServer := &http.Server{
 			Addr:              HUB_ADDRESS,
@@ -91,6 +134,17 @@ func New(
 			IdleTimeout:       IDLE_TIMEOUT,
 		}
 		server = wrapper.NewHTTPServer(httpServer)
+	}
+	if strings.TrimSpace(logEndpoint) == "" {
+		logEndpoint = fflogger.DefaultStreamEndpoint
+	}
+	if strings.TrimSpace(logEnvironment) == "" {
+		logEnvironment = fflogger.DefaultEnvironment
+	}
+	if logSampleRate < 0 {
+		logSampleRate = 0
+	} else if logSampleRate > 1 {
+		logSampleRate = 1
 	}
 	h := &hub{
 		ctx:            ctx,
@@ -105,7 +159,14 @@ func New(
 		// Keep the renderer capture and its potentially backpressured HTTP write
 		// in one single-flight lifetime. The capturer's own slot ends when it
 		// returns and therefore cannot bound retained response images by itself.
-		screenshotSlots: make(chan struct{}, 1),
+		screenshotSlots:     make(chan struct{}, 1),
+		logEndpoint:         logEndpoint,
+		logAPIKey:           strings.TrimSpace(logAPIKey),
+		logEnvironment:      strings.TrimSpace(logEnvironment),
+		logSampleRate:       logSampleRate,
+		logSessionSampler:   samplePlayerSession,
+		logHTTPClient:       &http.Client{Timeout: 10 * time.Second},
+		logDeliveryDisabled: logSampleRate <= 0 || strings.TrimSpace(logAPIKey) == "",
 	}
 	h.routes()
 	return h
@@ -136,6 +197,7 @@ func (h *hub) routes() {
 	mux.HandleFunc("/api/notification", h.withMiddleware("notification", h.handleNotification))
 	mux.HandleFunc("/api/status", h.withMiddleware("status", h.handleStatus))
 	mux.HandleFunc("/api/v2/status", h.withMiddleware("status_v2", h.handleStatusV2))
+	mux.HandleFunc("/api/logs", h.withMiddleware("player_logs", h.handlePlayerLogs))
 	mux.HandleFunc("/api/screenshot", h.withMiddleware("screenshot", h.handleScreenshot))
 	mux.HandleFunc("/metrics", h.withMiddleware("metrics", metrics.ServeHTTP))
 
@@ -224,7 +286,7 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payloadJSON, _ := payload.JSON()
-	h.logger.Info("Received cast request", zap.ByteString("payload", helper.TruncateBytes(payloadJSON, logger.MAX_FIELD_LENGTH)))
+	h.logger.Info("Received cast request", zap.ByteString("payload", helper.TruncateBytes(payloadJSON, fflogger.MAX_FIELD_LENGTH)))
 
 	if payload.Type == "" {
 		http.Error(w, "Command type is required", http.StatusBadRequest)
@@ -246,6 +308,26 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		// (#304, the dead-link-cast bug this exists to surface).
 		if commandrouter.IsSourceUnreachable(err) {
 			h.logger.Warn("Cast rejected: no playlist item source is loadable", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		if commandrouter.IsContentBlocked(err) {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		// Malformed DP-1 is caller input, not a device fault: answer the
+		// documented classification rather than a 500 that tells the caster
+		// nothing about its own payload.
+		if commandrouter.IsPlaylistInvalid(err) {
+			h.logger.Warn("Cast rejected: playlist is invalid", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		// Strict-mode signature rejection (#307): the caller's document was
+		// refused by a policy the owner chose — a 422 with the sanitized
+		// reason, same as the dead-source rejection above.
+		if commandrouter.IsSigInvalid(err) {
+			h.logger.Warn("Cast rejected by strict signature verification", zap.Error(err))
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}

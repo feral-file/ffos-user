@@ -47,7 +47,7 @@ func setup(t *testing.T) *testSetup {
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
 
-	client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger, false)
+	client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger, false, true)
 
 	return &testSetup{
 		ctrl:          ctrl,
@@ -1313,4 +1313,54 @@ func assertGraphQLHydration(t *testing.T, req *http.Request, wantLimit, wantOffs
 	assert.NoError(t, json.Unmarshal(b, &env))
 	assert.Contains(t, env.Query, "limit: "+wantLimit)
 	assert.Contains(t, env.Query, "offset: "+wantOffset)
+}
+
+// A resolver's hydrated items must not smuggle a contentRating of the WRONG
+// TYPE past the policy matrix. Controld adds no second validation pass: dp1-go's
+// own hydration validates every item against the content-rating extension
+// overlay (see processDynamicPlaylistSpec's ACCEPTED FAIL-CLOSED note), and this
+// pins that the classification still reaches the transports.
+//
+// Note the value under test is a NUMBER, not an unknown string. An unrecognized
+// STRING is not a rejection case at all: DP-1 §3.3 (display-protocol/dp1#52)
+// settles that a rating this build does not know is treated as unrated and the
+// document is never refused for it. Only a non-string remains schema-invalid —
+// see TestDisplayPlaylistAcceptsAnUnknownRatingStringEndToEnd for the accepting
+// half of the same rule.
+func TestDP1_ProcessDynamicPlaylist_RejectsWrongTypedResolvedRatings(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	body := `{"data":{"items":[{"id":"` + uuid.New().String() + `","title":"bad","source":"https://media.example/0","contentRating":123}]}}`
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		DoAndReturn(func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}).AnyTimes()
+
+	playlist := dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			DynamicQuery: &playlists.DynamicQuery{
+				Profile:  dp1playlist.ProfileGraphQLV1,
+				Endpoint: "https://example.com/graphql",
+				Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
+				ResponseMapping: playlists.ResponseMapping{
+					ItemsPath:  "data.items",
+					ItemSchema: "dp1/1.0",
+				},
+			},
+		},
+	}
+
+	_, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist)
+	require.Error(t, err)
+	// Pointer only — the validator's own message, which can quote the offending
+	// value, must not survive into an error returned to a caster.
+	assert.ErrorContains(t, err, "contentRating")
+	assert.NotContains(t, err.Error(), "invalid playlist item",
+		"dp1-go's message must not be carried through verbatim")
+	// Malformed CONTENT from a resolver must reach the transports as the
+	// documented playlistInvalid classification, the same as a malformed inline
+	// or fetched document — not as a generic 500.
+	assert.ErrorIs(t, err, dp1.ErrPlaylistInvalid)
 }

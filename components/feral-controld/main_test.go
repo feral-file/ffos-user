@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	stdos "os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,8 +14,8 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
-	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -66,14 +68,13 @@ func orderIndex(list []string, s string) int {
 }
 
 type testSetup struct {
-	ctrl              *gomock.Controller
-	ctx               context.Context
-	cancel            context.CancelFunc
-	logger            *zap.Logger
-	app               *app
-	config            *config.Config
-	mockStateManager  *mocks.MockStateManager
-	mockLoggerManager *mocks.MockLoggerManager
+	ctrl             *gomock.Controller
+	ctx              context.Context
+	cancel           context.CancelFunc
+	logger           *zap.Logger
+	app              *app
+	config           *config.Config
+	mockStateManager *mocks.MockStateManager
 
 	// Mocked components
 	mockCDP          *mocks.MockCDP
@@ -108,33 +109,32 @@ func setup(t *testing.T) *testSetup {
 
 	// Create all mocks
 	ts := &testSetup{
-		ctrl:              ctrl,
-		ctx:               ctx,
-		cancel:            cancel,
-		logger:            l,
-		mockStateManager:  mocks.NewMockStateManager(ctrl),
-		mockLoggerManager: mocks.NewMockLoggerManager(ctrl),
-		mockCDP:           mocks.NewMockCDP(ctrl),
-		mockRelayer:       mocks.NewMockRelayer(ctrl),
-		mockDBus:          mocks.NewMockDBus(ctrl),
-		mockMediator:      mocks.NewMockMediator(ctrl),
-		mockOOMRecoverer:  mocks.NewMockOOMRecoverer(ctrl),
-		mockExecutor:      mocks.NewMockExecutor(ctrl),
-		mockDeviceStatus:  mocks.NewMockDeviceStatus(ctrl),
-		mockStatusPoller:  mocks.NewMockStatusPoller(ctrl),
-		mockWatchdog:      mocks.NewMockWatchdog(ctrl),
-		mockRefresher:     mocks.NewMockRefresher(ctrl),
-		mockClock:         mocks.NewMockClock(ctrl),
-		mockOS:            mocks.NewMockOS(ctrl),
-		mockSignal:        mocks.NewMockSignal(ctrl),
-		mockDaemon:        mocks.NewMockDaemon(ctrl),
-		mockHTTPClient:    mocks.NewMockHTTPClient(ctrl),
-		mockIO:            mocks.NewMockIO(ctrl),
-		mockJSON:          mocks.NewMockJSON(ctrl),
-		mockRandom:        mocks.NewMockRandomizer(ctrl),
-		mockExec:          mocks.NewMockExec(ctrl),
-		mockMath:          mocks.NewMockMath(ctrl),
-		mockHub:           mocks.NewMockHub(ctrl),
+		ctrl:             ctrl,
+		ctx:              ctx,
+		cancel:           cancel,
+		logger:           l,
+		mockStateManager: mocks.NewMockStateManager(ctrl),
+		mockCDP:          mocks.NewMockCDP(ctrl),
+		mockRelayer:      mocks.NewMockRelayer(ctrl),
+		mockDBus:         mocks.NewMockDBus(ctrl),
+		mockMediator:     mocks.NewMockMediator(ctrl),
+		mockOOMRecoverer: mocks.NewMockOOMRecoverer(ctrl),
+		mockExecutor:     mocks.NewMockExecutor(ctrl),
+		mockDeviceStatus: mocks.NewMockDeviceStatus(ctrl),
+		mockStatusPoller: mocks.NewMockStatusPoller(ctrl),
+		mockWatchdog:     mocks.NewMockWatchdog(ctrl),
+		mockRefresher:    mocks.NewMockRefresher(ctrl),
+		mockClock:        mocks.NewMockClock(ctrl),
+		mockOS:           mocks.NewMockOS(ctrl),
+		mockSignal:       mocks.NewMockSignal(ctrl),
+		mockDaemon:       mocks.NewMockDaemon(ctrl),
+		mockHTTPClient:   mocks.NewMockHTTPClient(ctrl),
+		mockIO:           mocks.NewMockIO(ctrl),
+		mockJSON:         mocks.NewMockJSON(ctrl),
+		mockRandom:       mocks.NewMockRandomizer(ctrl),
+		mockExec:         mocks.NewMockExec(ctrl),
+		mockMath:         mocks.NewMockMath(ctrl),
+		mockHub:          mocks.NewMockHub(ctrl),
 	}
 
 	// Create test config
@@ -145,10 +145,6 @@ func setup(t *testing.T) *testSetup {
 		RelayerConfig: &config.RelayerConfig{
 			Endpoint: "wss://test.relay.com",
 			APIKey:   "test-api-key",
-		},
-		SentryConfig: &logger.SentryConfig{
-			DSN:         "",
-			Environment: "test",
 		},
 		EnableHub: boolPtr(true),
 	}
@@ -184,14 +180,11 @@ func setup(t *testing.T) *testSetup {
 
 	// Inject mock state manager
 	state.InjectStateManagerForTesting(ts.mockStateManager)
-	logger.InjectLoggerManagerForTesting(ts.mockLoggerManager)
-
 	return ts
 }
 
 func (ts *testSetup) teardown() {
 	state.ResetForTesting()
-	logger.ResetForTesting()
 	ts.cancel()
 	ts.ctrl.Finish()
 }
@@ -204,7 +197,7 @@ func TestApp_Run_Success(t *testing.T) {
 		setupFunc func(*testSetup)
 	}{
 		{
-			name: "successful startup without sentry",
+			name: "successful startup without relayer connection",
 			setupFunc: func(ts *testSetup) {
 				// Mock successful state loading
 				ts.mockStateManager.EXPECT().
@@ -273,11 +266,8 @@ func TestApp_Run_Success(t *testing.T) {
 			},
 		},
 		{
-			name: "successful startup with sentry and relayer connection",
+			name: "successful startup with relayer connection",
 			setupFunc: func(ts *testSetup) {
-				// Enable Sentry in config
-				ts.config.SentryConfig.DSN = "https://test@sentry.io/123"
-
 				// Mock state with topic ID
 				ts.mockStateManager.EXPECT().
 					Load(ts.logger).
@@ -288,9 +278,6 @@ func TestApp_Run_Success(t *testing.T) {
 					ClaimSnapshot().
 					Return(state.ClaimInfo{TopicID: "test-topic-123", TopicReady: true}).
 					AnyTimes()
-
-				// Mock logger manager set global topic ID
-				ts.mockLoggerManager.EXPECT().SetGlobalTopicID("test-topic-123")
 
 				// CDP now connects in the background and never gates startup: run() calls
 				// Start (fire-and-forget) and Close on shutdown.
@@ -1251,6 +1238,10 @@ func TestInitializeApp(t *testing.T) {
 		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
+		"",
+		"test-log-key",
+		"test",
+		1,
 		nil,
 		nil,
 		// Gateway User-Agent config: absent, which is the fielded default
@@ -1334,6 +1325,10 @@ func TestInitializeApp_OfflineCacheEnabled(t *testing.T) {
 		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
+		"",
+		"test-log-key",
+		"test",
+		1,
 		nil,
 		&config.OfflineCacheConfig{Enabled: true, RootDir: t.TempDir()},
 		nil,
@@ -1527,6 +1522,10 @@ func TestInitializeAppGatewayUserAgentDisabled(t *testing.T) {
 		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
+		"",
+		"test-log-key",
+		"test",
+		1,
 		nil,
 		nil,
 		&config.GatewayUserAgentConfig{Enabled: &disabled},
@@ -1555,6 +1554,10 @@ func TestInitializeAppGatewayUserAgentInvalidHostsDegrades(t *testing.T) {
 		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
+		"",
+		"test-log-key",
+		"test",
+		1,
 		nil,
 		nil,
 		&config.GatewayUserAgentConfig{Hosts: []string{"https://"}},
@@ -1586,6 +1589,10 @@ func TestInitializeAppGatewayUserAgentKeepsUsableHosts(t *testing.T) {
 		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
+		"",
+		"test-log-key",
+		"test",
+		1,
 		nil,
 		nil,
 		&config.GatewayUserAgentConfig{
@@ -1600,4 +1607,86 @@ func TestInitializeAppGatewayUserAgentKeepsUsableHosts(t *testing.T) {
 
 	require.NotNil(t, app)
 	assert.NotNil(t, app.UARewrite, "one bad entry must not disable the whole rewrite")
+}
+
+// TestReconcilerOrder_ContentPolicyBeforePlaylistRecompute pins the ORDER of two
+// registrations in initializeApp, because registration order is the execution
+// order on every generation-ready and the two reconcilers are not independent.
+//
+// A freshly initialized player starts on default content policy. If
+// playlist-recompute runs first, its force-pushed cohort is filtered by the
+// player against those defaults, and nothing re-pushes the scheduler when
+// content-policy syncs a moment later — so a durable, acknowledged
+// showMatureContent setting visibly fails after a player restart until some
+// later cast, refresh or cutover.
+//
+// Asserted against the source rather than a live session because the session
+// exposes no way to read back its registration order; this is the same
+// source-inspection approach as importlint_test.go.
+func TestReconcilerOrder_ContentPolicyBeforePlaylistRecompute(t *testing.T) {
+	source, err := stdos.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	policyAt := strings.Index(text, `session.RegisterReconciler("content-policy"`)
+	recomputeAt := strings.Index(text, `session.RegisterReconciler("playlist-recompute"`)
+	if policyAt < 0 || recomputeAt < 0 {
+		t.Fatalf("reconciler registrations not found (content-policy=%d playlist-recompute=%d)", policyAt, recomputeAt)
+	}
+	if policyAt > recomputeAt {
+		t.Fatal("content-policy must be registered BEFORE playlist-recompute: a reconnect would otherwise push a scheduled cohort to a player still on default policy")
+	}
+}
+
+// fakePolicyRefresher records whether the reconciler asked for a re-send.
+type fakePolicyRefresher struct{ forced int }
+
+func (f *fakePolicyRefresher) ForceRefresh() { f.forced++ }
+
+// The refresher does not wait for the policy reconciler — it sends as soon as
+// CDP reports initialized — so a restarted player can render a refresh under
+// ITS defaults before the owner's policy lands, with nothing re-sending
+// afterwards. After a successful sync the current playlist is re-sent, but ONLY
+// when the policy differs from the defaults the player already has: an
+// unconditional force would put a soft artwork refresh on every generation
+// bump, which is the cost the replay-scope guard exists to avoid.
+func TestForceRefreshAfterPolicySync(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+
+	t.Run("default policy re-sends nothing", func(t *testing.T) {
+		store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+		require.NoError(t, err)
+		refresher := &fakePolicyRefresher{}
+		forceRefreshAfterPolicySync(store, refresher, logger)
+		assert.Equal(t, 0, refresher.forced, "a device on defaults has nothing to correct")
+	})
+
+	t.Run("a changed policy re-sends the current playlist", func(t *testing.T) {
+		store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+		require.NoError(t, err)
+		store.Lock()
+		_, err = store.UpdateLocked(true, false)
+		store.Unlock()
+		require.NoError(t, err)
+
+		refresher := &fakePolicyRefresher{}
+		forceRefreshAfterPolicySync(store, refresher, logger)
+		assert.Equal(t, 1, refresher.forced, "a player that just came up on defaults must be re-sent")
+	})
+
+	t.Run("operator gate alone still counts", func(t *testing.T) {
+		store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), true)
+		require.NoError(t, err)
+		refresher := &fakePolicyRefresher{}
+		forceRefreshAfterPolicySync(store, refresher, logger)
+		assert.Equal(t, 1, refresher.forced)
+	})
+
+	t.Run("nil refresher is a no-op", func(t *testing.T) {
+		store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+		require.NoError(t, err)
+		forceRefreshAfterPolicySync(store, nil, logger)
+		forceRefreshAfterPolicySync(nil, &fakePolicyRefresher{}, logger)
+	})
 }

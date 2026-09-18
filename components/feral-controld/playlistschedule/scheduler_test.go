@@ -2,6 +2,7 @@ package playlistschedule_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 )
 
 func TestPrepare_WithoutDisplayAt_PassthroughAndClearsCache(t *testing.T) {
@@ -645,6 +647,7 @@ func TestTimerFires_RecomputesAndPushesActiveSet(t *testing.T) {
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr, _ := params["expression"].(string)
 			assert.Contains(t, expr, `"action":"now_display"`)
+			assert.Contains(t, expr, `"contentContext":"personal"`)
 			assert.NotContains(t, expr, `"refresh":true`)
 			assert.Contains(t, expr, "day23")
 			pushed <- struct{}{}
@@ -660,7 +663,7 @@ func TestTimerFires_RecomputesAndPushesActiveSet(t *testing.T) {
 		item("day22", "2026-07-22T00:00:00Z"),
 		item("day23", "2026-07-23T00:00:00Z"),
 	)
-	active := sched.Prepare(full)
+	active := sched.PrepareWithSource(full, playlistschedule.Source{ContentContext: "personal"})
 	require.Equal(t, []string{"day22"}, itemIDs(active.Items))
 
 	<-sleepStarted
@@ -1293,4 +1296,623 @@ func TestClearThenWithPlayerPush_BlocksInFlightRecomputeFromOverwriting(t *testi
 	defer mu.Unlock()
 	require.NotEmpty(t, pushedIDs)
 	assert.Equal(t, "replacement", pushedIDs[len(pushedIDs)-1], "replacement must win after clear")
+}
+
+// contentContext is optional, and its only valid present values are "curated"
+// and "personal". A schedule persisted before the field existed decodes with an
+// empty string, so the timer push must OMIT it rather than send "": an upgraded
+// device would otherwise push an invalid value on its first cutover.
+func TestPush_OmitsContentContextWhenTheRestoredSourceHasNone(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	cdpMock.EXPECT().Initialized().Return(true).Times(1)
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.NotContains(t, expr, "contentContext")
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(1)
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	_ = sched.PrepareWithSource(displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	), playlistschedule.Source{})
+	sched.RecomputeNow(context.Background())
+}
+
+// A displayAt cutover is the one cast the command router does not mediate: it
+// replays a later cohort of a document the router filtered once, at cast time.
+// The push-time projection is what makes a policy tightened AFTER that cast
+// reach those later cohorts, instead of a work blocked at 23:59 reappearing at
+// midnight.
+func TestPush_ReappliesTheContentPolicyProjectionAtCutover(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	cdpMock.EXPECT().Initialized().Return(true).Times(1)
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.NotContains(t, expr, "day22", "the projection's removal must reach the player")
+			assert.Contains(t, expr, "kept")
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(1)
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	sched.SetProjector(func(p *dp1.Playlist, _ string) (*dp1.Playlist, bool) {
+		out := *p
+		out.Items = []dp1playlist.PlaylistItem{{ID: "kept", Source: "https://kept"}}
+		return &out, false
+	})
+	_ = sched.Prepare(displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	))
+	sched.RecomputeNow(context.Background())
+}
+
+// An empty projection is a RETIREMENT, not a no-op. Dropping it silently left
+// the blocked frame on screen: the owner disables mature content,
+// setContentPolicy reports success, and the work keeps playing because the only
+// cohort that could replace it is the one the policy just emptied. The empty
+// list goes out with retireBlockedCurrent, the player's documented signal to
+// retire the current item rather than an ordinary cast it would reject.
+func TestPush_RetiresACutoverTheContentPolicyEmpties(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	cdpMock.EXPECT().Initialized().Return(true).Times(1)
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.Contains(t, expr, "retireBlockedCurrent",
+				"a fully blocked cohort must retire the current frame, not vanish")
+			assert.NotContains(t, expr, "day22", "no blocked item may be sent")
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(1)
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	sched.SetProjector(func(p *dp1.Playlist, _ string) (*dp1.Playlist, bool) {
+		out := *p
+		out.Items = nil
+		return &out, true
+	})
+	_ = sched.Prepare(displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	))
+	sched.RecomputeNow(context.Background())
+}
+
+func TestRecompute_PushesWhenOnlyTheProjectionChanged(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	sends := 0
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			sends++
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	// Permissive to begin with: the projection equals the active set.
+	blocking := false
+	sched.SetProjector(func(p *dp1.Playlist, _ string) (*dp1.Playlist, bool) {
+		if !blocking {
+			return p, false
+		}
+		out := *p
+		out.Items = nil
+		for _, entry := range p.Items {
+			if entry.ID != "blocked" {
+				out.Items = append(out.Items, entry)
+			}
+		}
+		return &out, len(out.Items) == 0
+	})
+
+	// TWO items active at `now`, so a tightened projection still has something
+	// to send. With a single active item the projection would be empty, which
+	// push() correctly DROPS — a different behavior from the one under test.
+	_ = sched.Prepare(displayAtPlaylist(
+		item("blocked", "2026-07-22T00:00:00Z"),
+		item("allowed", "2026-07-22T00:00:00Z"),
+	))
+	sched.RecomputeNow(context.Background())
+	require.Equal(t, 1, sends, "the first cutover must be pushed")
+
+	// ResumePersisted is the NON-forcing path — the one a cached fallback after
+	// a resolution failure takes, and the only one the unchanged-set early
+	// return governs. RecomputeNow force-casts, so it would not exercise it.
+	sched.ResumePersisted(context.Background())
+	require.Equal(t, 1, sends, "an unchanged projection must not re-push")
+
+	// Now the policy tightens. The ACTIVE set is byte-identical; only the
+	// projection differs, which is exactly the case that used to be skipped.
+	blocking = true
+	sched.ResumePersisted(context.Background())
+	require.Equal(t, 2, sends, "a tightened policy must reach the player even though the active set is unchanged")
+}
+
+// gateSetup arms a day22→day23 schedule whose timer is released by the test
+// and reports the CDP sends the scheduler makes.
+func gateSetup(t *testing.T) (sched playlistschedule.Scheduler, cdpMock *mocks.MockCDP, releaseSleep chan struct{}, retryArmed chan struct{}, advance func()) {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock = mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	t1 := time.Date(2026, 7, 23, 0, 0, 0, 0, loc)
+
+	var mu sync.Mutex
+	now := t0
+	clock.EXPECT().Now().DoAndReturn(func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}).AnyTimes()
+
+	releaseSleep = make(chan struct{})
+	retryArmed = make(chan struct{}, 4)
+	var sleeps atomic.Int32
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, d time.Duration) error {
+			// The first sleep is the day23 boundary; any later one is either
+			// the re-armed (no future boundary → none) timer or a push retry.
+			if sleeps.Add(1) > 1 {
+				select {
+				case retryArmed <- struct{}{}:
+				default:
+				}
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			select {
+			case <-releaseSleep:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	).AnyTimes()
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+
+	sched = playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	advance = func() {
+		mu.Lock()
+		now = t1
+		mu.Unlock()
+	}
+	return sched, cdpMock, releaseSleep, retryArmed, advance
+}
+
+// TestPushGate_RefusalHoldsCurrentSetAndArmsNoRetry: the gate is asked at
+// the cutover with the exact playlist about to be sent (its Verification
+// pointer intact), and a refusal reaches neither CDP nor the retry path —
+// a refusal is policy, not a transient failure.
+func TestPushGate_RefusalHoldsCurrentSetAndArmsNoRetry(t *testing.T) {
+	sched, cdpMock, releaseSleep, retryArmed, advance := gateSetup(t)
+	// No Send expectation: a push is an unexpected call.
+	_ = cdpMock
+
+	asked := make(chan *dp1.Playlist, 1)
+	sched.SetPushGate(func(p *dp1.Playlist) error {
+		asked <- p
+		return errors.New("strict signature verification: unsigned")
+	})
+
+	verdict := &sigverify.Verdict{Status: sigverify.StatusUnsigned}
+	full := displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	)
+	full.Verification = verdict
+	active := sched.Prepare(full)
+	require.Equal(t, []string{"day22"}, itemIDs(active.Items))
+
+	advance()
+	close(releaseSleep)
+
+	select {
+	case p := <-asked:
+		require.NotNil(t, p)
+		assert.Same(t, verdict, p.Verification, "the gate sees the cast-time verdict")
+		assert.Equal(t, []string{"day23"}, itemIDs(p.Items), "the gate sees the cohort about to be sent")
+	case <-time.After(2 * time.Second):
+		t.Fatal("gate was never asked")
+	}
+	select {
+	case <-retryArmed:
+		t.Fatal("a refusal must not arm the transient-failure retry")
+	case <-time.After(300 * time.Millisecond):
+	}
+	assert.True(t, sched.HasCache(), "the schedule stays for the next boundary/wake to ask again")
+}
+
+// TestPushGate_AllowedPushProceeds pins that the gate is a gate, not a
+// veto: a nil error lets the cutover reach the player as before.
+func TestPushGate_AllowedPushProceeds(t *testing.T) {
+	sched, cdpMock, releaseSleep, _, advance := gateSetup(t)
+	pushed := make(chan struct{}, 1)
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.Contains(t, expr, "day23")
+			pushed <- struct{}{}
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(1)
+	sched.SetPushGate(func(*dp1.Playlist) error { return nil })
+
+	_ = sched.Prepare(displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	))
+	advance()
+	close(releaseSleep)
+
+	select {
+	case <-pushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the gated push")
+	}
+}
+
+// TestPushGate_RefusedPushDoesNotFireTheObserver: the observer's
+// PushStarting invalidates the on-screen verdict; a push that never starts
+// must not do that.
+func TestPushGate_RefusedPushDoesNotFireTheObserver(t *testing.T) {
+	sched, _, releaseSleep, _, advance := gateSetup(t)
+	var phases atomic.Int32
+	sched.SetPushObserver(func(playlistschedule.PushPhase) { phases.Add(1) })
+	gated := make(chan struct{}, 1)
+	sched.SetPushGate(func(*dp1.Playlist) error {
+		select {
+		case gated <- struct{}{}:
+		default:
+		}
+		return errors.New("refused")
+	})
+
+	_ = sched.Prepare(displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	))
+	advance()
+	close(releaseSleep)
+	select {
+	case <-gated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("gate was never asked")
+	}
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, int32(0), phases.Load())
+}
+
+// TestPushGate_RelaxedPolicyRedrivesRefusedFinalCutover: the schedule's last
+// boundary is refused (no retry, and no timer past the final boundary), so
+// the only way the cohort reaches the screen is the policy-relaxation
+// trigger — which must push exactly the undelivered cohort, and nothing
+// when there is nothing undelivered.
+func TestPushGate_RelaxedPolicyRedrivesRefusedFinalCutover(t *testing.T) {
+	sched, cdpMock, releaseSleep, retryArmed, advance := gateSetup(t)
+	var refuse atomic.Bool
+	refuse.Store(true)
+	asked := make(chan struct{}, 4)
+	sched.SetPushGate(func(*dp1.Playlist) error {
+		asked <- struct{}{}
+		if refuse.Load() {
+			return errors.New("strict signature verification: unsigned")
+		}
+		return nil
+	})
+	pushed := make(chan struct{}, 2)
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.Contains(t, expr, "day23")
+			pushed <- struct{}{}
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(1)
+
+	_ = sched.Prepare(displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"), // the final boundary
+	))
+	advance()
+	close(releaseSleep)
+	select {
+	case <-asked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("gate was never asked at the cutover")
+	}
+	select {
+	case <-retryArmed:
+		t.Fatal("no retry after a refusal")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// The owner relaxes the policy: the setter's observer re-drives.
+	refuse.Store(false)
+	sched.RecomputeIfStale(context.Background())
+	select {
+	case <-pushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relaxing the policy must deliver the refused cohort")
+	}
+
+	// Delivered: a second relaxation (or any RecomputeIfStale) is a no-op —
+	// the Send expectation above is Times(1).
+	sched.RecomputeIfStale(context.Background())
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestPushGate_RefusalOnWakePathBlocksAndArmsNoRetry: the gate covers every
+// push origin, not just the timer — a RecomputeNow (wake/reconnect) push a
+// refusing gate rejects reaches neither CDP nor the retry path
+// (feral-file/ffos-user#307 review round 4).
+func TestPushGate_RefusalOnWakePathBlocksAndArmsNoRetry(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	clock.EXPECT().Now().Return(time.Date(2026, 7, 22, 12, 0, 0, 0, loc)).AnyTimes()
+	var sleepCalled atomic.Bool
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			sleepCalled.Store(true)
+			<-ctx.Done()
+			return ctx.Err()
+		}).AnyTimes()
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+	// No Send: a push is an unexpected call.
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location { return loc },
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	defer sched.Stop()
+	sched.SetPushGate(func(*dp1.Playlist) error { return errors.New("blocked") })
+
+	// One already-active item, no future boundary: Prepare arms no timer, so
+	// the only Sleep that could fire is a push retry.
+	_ = sched.Prepare(displayAtPlaylist(item("now", "2026-07-22T00:00:00Z")))
+	sched.RecomputeNow(context.Background()) // the wake/reconnect path
+
+	assert.False(t, sleepCalled.Load(), "a gate refusal on the wake path must not arm the cutover retry")
+}
+
+// TestInlineDynamicSource_RoundTripPreservesVerdict: the retained inline
+// dynamic slot returns a clone that keeps the signature verdict, and nil
+// clears it (feral-file/ffos-user#307).
+func TestInlineDynamicSource_RoundTripPreservesVerdict(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sched := playlistschedule.New(context.Background(), mocks.NewMockCDP(ctrl), mocks.NewMockClock(ctrl),
+		func() *time.Location { return time.UTC }, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	defer sched.Stop()
+
+	assert.Nil(t, sched.InlineDynamicSource())
+	sched.SetInlineDynamicSource(&dp1.Playlist{
+		Playlist:     dp1playlist.Playlist{ID: "d1", Items: []dp1playlist.PlaylistItem{{ID: "i"}}},
+		Verification: &sigverify.Verdict{Status: sigverify.StatusValid},
+	})
+
+	got := sched.InlineDynamicSource()
+	require.NotNil(t, got)
+	assert.Equal(t, "d1", got.ID)
+	require.NotNil(t, got.Verification)
+	assert.Equal(t, sigverify.StatusValid, got.Verification.Status)
+
+	sched.SetInlineDynamicSource(nil)
+	assert.Nil(t, sched.InlineDynamicSource())
+}
+
+// TestPushToaster_FiresWithCohortOnAcceptedCutover: the cohort toast rides the
+// accepted scheduler cutover (PushAccepted), carrying the cohort actually put
+// on screen with its cast-time verdict intact — so the wall notice describes
+// the cutover, not the accepting cast (feral-file/ffos-user#307 phase 4).
+func TestPushToaster_FiresWithCohortOnAcceptedCutover(t *testing.T) {
+	sched, cdpMock, releaseSleep, _, advance := gateSetup(t)
+	pushed := make(chan struct{}, 1)
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.Contains(t, expr, "day23")
+			pushed <- struct{}{}
+			return map[string]interface{}{"ok": true}, nil
+		}).Times(1)
+	toasted := make(chan *dp1.Playlist, 1)
+	sched.(interface{ SetPushToaster(func(*dp1.Playlist)) }).SetPushToaster(func(p *dp1.Playlist) {
+		toasted <- p
+	})
+
+	verdict := &sigverify.Verdict{Status: sigverify.StatusUnsigned}
+	full := displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	)
+	full.Verification = verdict
+	_ = sched.Prepare(full)
+	advance()
+	close(releaseSleep)
+
+	select {
+	case <-pushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the cutover push")
+	}
+	select {
+	case p := <-toasted:
+		require.NotNil(t, p)
+		assert.Same(t, verdict, p.Verification, "the toaster sees the cohort's cast-time verdict")
+		assert.Equal(t, []string{"day23"}, itemIDs(p.Items), "the toaster sees the cohort that reached the screen")
+	case <-time.After(2 * time.Second):
+		t.Fatal("push toaster was not called on the accepted cutover")
+	}
+}
+
+// recompute records lastActive as the PROJECTION, so a comparison against the
+// raw cached set can never match again once a tighten hides an item the cached
+// document still contains. Every Restore — every failed cast, every rejected
+// refresh — then armed a retry that force-cast the same cohort seconds later
+// and restarted the artwork, with nothing to stop it.
+//
+// Asserted through the retry's EFFECT rather than its bookkeeping: with the
+// backoff sleep returning immediately, an armed retry force-casts and produces
+// another send. Counting the arming directly would race the goroutine.
+func TestRestore_DoesNotArmARetryWhenOnlyTheProjectionHidItems(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			return nil // a retry's backoff elapses at once
+		},
+	).AnyTimes()
+
+	sent := make(chan struct{}, 16)
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			sent <- struct{}{}
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	t.Cleanup(sched.Stop)
+
+	blocking := false
+	sched.SetProjector(func(p *dp1.Playlist, _ string) (*dp1.Playlist, bool) {
+		out := *p
+		out.Items = nil
+		for _, entry := range p.Items {
+			if blocking && entry.ID == "blocked" {
+				continue
+			}
+			out.Items = append(out.Items, entry)
+		}
+		return &out, len(out.Items) == 0
+	})
+
+	_ = sched.PrepareWithSource(displayAtPlaylist(
+		item("blocked", "2026-07-22T00:00:00Z"),
+		item("allowed", "2026-07-22T00:00:00Z"),
+	), playlistschedule.Source{ContentContext: "curated"})
+	sched.RecomputeNow(context.Background())
+	drain(t, sent, "the first cutover")
+
+	// The owner tightens: the cached document is unchanged, only the projection
+	// now hides an item — and that projection is what lastActive records.
+	blocking = true
+	sched.RecomputeNow(context.Background())
+	drain(t, sent, "the tighten")
+
+	// A failed cast restores the snapshot. Nothing has diverged from what the
+	// player holds, so no retry may fire.
+	snapshot := sched.Snapshot()
+	sched.Restore(snapshot)
+
+	select {
+	case <-sent:
+		t.Fatal("Restore armed a push retry: it force-cast the same cohort and would restart the artwork")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// drain waits for one expected send so the next assertion starts from a clean
+// channel.
+func drain(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s never reached the player", what)
+	}
 }

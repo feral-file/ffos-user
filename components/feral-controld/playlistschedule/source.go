@@ -9,6 +9,7 @@ import (
 type Source struct {
 	PlaylistURL     string        `json:"playlistUrl,omitempty"`
 	DynamicPlaylist *dp1.Playlist `json:"dynamicPlaylist,omitempty"`
+	ContentContext  string        `json:"contentContext,omitempty"`
 }
 
 func (s Source) IsZero() bool {
@@ -17,10 +18,10 @@ func (s Source) IsZero() bool {
 
 func (s Source) Matches(other Source) bool {
 	if s.PlaylistURL != "" || other.PlaylistURL != "" {
-		return s.PlaylistURL != "" && s.PlaylistURL == other.PlaylistURL
+		return s.PlaylistURL != "" && s.PlaylistURL == other.PlaylistURL && s.ContentContext == other.ContentContext
 	}
 	if s.DynamicPlaylist != nil || other.DynamicPlaylist != nil {
-		return dynamicPlaylistSourceMatches(s.DynamicPlaylist, other.DynamicPlaylist)
+		return s.ContentContext == other.ContentContext && dynamicPlaylistSourceMatches(s.DynamicPlaylist, other.DynamicPlaylist)
 	}
 	return false
 }
@@ -29,6 +30,7 @@ func snapshotSource(source Source) Source {
 	return Source{
 		PlaylistURL:     source.PlaylistURL,
 		DynamicPlaylist: cloneSourcePlaylist(source.DynamicPlaylist),
+		ContentContext:  source.ContentContext,
 	}
 }
 

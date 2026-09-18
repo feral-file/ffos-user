@@ -14,7 +14,6 @@ import (
 
 	go_daemon "github.com/coreos/go-systemd/v22/daemon"
 	"github.com/feral-file/godbus"
-	"github.com/getsentry/sentry-go"
 	dbus_v5 "github.com/godbus/dbus/v5"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -23,6 +22,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
@@ -39,12 +39,14 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
+	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/softap"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -168,22 +170,25 @@ func main() {
 	if err != nil {
 		basicLogger.Fatal("Failed to load configuration", zap.Error(err))
 	}
+	streamConfig := config.LogStreamingConfig(basicLogger)
 
-	// Create the final logger (with Sentry if configured)
+	// Network delivery is a best-effort tee: a bad endpoint or missing
+	// hostname must never prevent this recovery-critical daemon from starting
+	// with its local logger.
 	finalLogger := basicLogger
-	if config.SentryConfig.IsEnabled() {
-		sentryLogger, err := logger.AddSentry(finalLogger, *config.SentryConfig)
-		if err != nil {
-			finalLogger.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))
-		} else {
-			finalLogger = sentryLogger
-			finalLogger.Info("Sentry initialized successfully",
-				zap.String("environment", config.SentryConfig.Environment),
-				zap.String("release", config.SentryConfig.Release))
-			defer logger.FlushSentry(2 * time.Second)
-		}
+	streamedLogger, streamCloser, streamErr := logger.AddCloudflare(
+		basicLogger, streamConfig, deviceIDFromHostname(),
+	)
+	if streamErr != nil {
+		basicLogger.Error("Failed to initialize Cloudflare log streaming; using local logger", zap.Error(streamErr))
 	} else {
-		finalLogger.Info("Sentry not configured, using basic logger")
+		finalLogger = streamedLogger
+		defer func() {
+			if err := streamCloser.Close(); err != nil {
+				fmt.Fprintf(go_os.Stderr, "Failed to flush Cloudflare logs: %s\n", err)
+			}
+		}()
+		finalLogger.Info("Cloudflare log streaming initialized")
 	}
 
 	// Initialize app
@@ -192,6 +197,10 @@ func main() {
 		config.CDPConfig.Endpoint,
 		config.RelayerConfig.Endpoint,
 		config.RelayerConfig.APIKey,
+		logger.StreamEndpoint(streamConfig),
+		logger.StreamAPIKey(streamConfig),
+		logger.StreamEnvironment(streamConfig),
+		logger.StreamPlayerSampleRate(streamConfig),
 		config.MintPairingConfig,
 		config.OfflineCache,
 		config.GatewayUserAgentTuning(finalLogger),
@@ -201,6 +210,15 @@ func main() {
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
 		})
+	if streamErr == nil {
+		if sink, ok := app.Relayer.(interface{ SetBeforeExit(func()) }); ok {
+			sink.SetBeforeExit(func() {
+				if err := streamCloser.Close(); err != nil {
+					fmt.Fprintf(go_os.Stderr, "Failed to flush Cloudflare logs before relayer exit: %s\n", err)
+				}
+			})
+		}
+	}
 
 	// Graceful shutdown cancels the app-lifetime context created in
 	// initializeApp (see app.Cancel).
@@ -219,9 +237,8 @@ func main() {
 		app.Clock.Sleep(SHUTDOWN_TIMEOUT)
 		app.Logger.Error("Shutdown timed out, forcing exit...",
 			zap.Duration("timeout", SHUTDOWN_TIMEOUT))
-
-		if config.SentryConfig.IsEnabled() {
-			sentry.Flush(1 * time.Second)
+		if streamErr == nil {
+			_ = streamCloser.Close()
 		}
 
 		app.OS.Exit(1)
@@ -232,6 +249,40 @@ func main() {
 	if err != nil {
 		app.Logger.Fatal("Failed to run app", zap.Error(err))
 	}
+}
+
+// toastPlaylist aliases dp1.Playlist so the scheduler push gate/toaster
+// callbacks can be spelled inside run(), where the local dp1 service variable
+// shadows the dp1 package.
+type toastPlaylist = dp1.Playlist
+
+// newToastSessionDialer gives the signature toast its own short-lived CDP
+// session per send — see playertoast's package doc for why it must never
+// share the synchronous cdp client with casts. It reuses the offline-cache
+// page dialer (the same /json discovery and event-driven session the kiosk
+// replay attaches with). File scope because run() shadows the context
+// package name.
+func newToastSessionDialer(
+	endpoint string,
+	httpClient wrapper.HTTPClient,
+	dialer wrapper.WebSocketDialer,
+	json wrapper.JSON,
+	io wrapper.IO,
+	logger *zap.Logger,
+) playertoast.Dialer {
+	return func(ctx context.Context) (playertoast.Session, error) {
+		return offlinecache.DialPageSession(ctx, endpoint, httpClient, dialer, json, io, logger)
+	}
+}
+
+func deviceIDFromHostname() string {
+	data, err := go_os.ReadFile(constants.HOSTNAME_FILE)
+	if err != nil || strings.TrimSpace(string(data)) == "" {
+		// Never upload under a fabricated shared identifier. AddCloudflare will
+		// reject the empty ID and leave local logging active.
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func (app *app) run(ctx context.Context, conf *config.Config) error {
@@ -264,11 +315,6 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		// re-pair" is NOT acceptable, because it would authorize an automatic
 		// setup-AP raise over a possibly claimed exhibition frame.
 		app.StateLoadKnown.Store(true)
-	}
-
-	// Set global topic ID in Sentry if available.
-	if claim := state.ClaimSnapshot(); conf.SentryConfig.IsEnabled() && claim.TopicID != "" {
-		logger.SetGlobalTopicID(claim.TopicID)
 	}
 
 	// Start watchdog
@@ -806,6 +852,81 @@ func replayScopeResyncReconciler(refresher playlist_refresher.Refresher) func(co
 	}
 }
 
+// contentPolicySyncAttempts bounds the reconnect sync retry. Reconcilers run
+// SEQUENTIALLY in registration order and this one is registered before
+// playlist-recompute, so retrying here is what keeps a transient failure from
+// being followed by a scheduled cast to a player still on its own defaults —
+// a cohort the scheduler then records as delivered and never re-pushes. Bounded
+// rather than persistent: a player that is genuinely gone must not hold the
+// whole reconnect lane, and every other trigger (cast, refresh, cutover, the
+// next generation) re-syncs anyway.
+const contentPolicySyncAttempts = 3
+
+// contentPolicySyncRetryDelay spaces those attempts. Short: this runs inside the
+// reconnect lane, and the failure it is covering is a page that has just started
+// accepting commands and needs a moment, not a long outage.
+const contentPolicySyncRetryDelay = 250 * time.Millisecond
+
+// policyRefresher is the narrow slice of the playlist refresher the content
+// policy reconciler needs: after a player restart it may have to re-send what
+// is on screen, nothing more.
+type policyRefresher interface{ ForceRefresh() }
+
+func contentPolicyReconciler(handler commandrouter.Handler, store *contentpolicy.Store, refresher policyRefresher, logger *zap.Logger) func(context.Context) {
+	return func(ctx context.Context) {
+		var err error
+		for attempt := 1; attempt <= contentPolicySyncAttempts; attempt++ {
+			if err = commandrouter.SyncContentPolicy(handler); err == nil {
+				forceRefreshAfterPolicySync(store, refresher, logger)
+				return
+			}
+			if attempt == contentPolicySyncAttempts {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(contentPolicySyncRetryDelay):
+			}
+		}
+		// Left deliberately non-fatal: the scheduled cast that follows is still
+		// better than a blank wall, and it is filtered by the daemon either way.
+		// What this cannot do on its own is guarantee the PLAYER is in step —
+		// see the per-generation verification discussion on #349.
+		logger.Warn("content policy unavailable for current player generation",
+			zap.Int("attempts", contentPolicySyncAttempts), zap.Error(err))
+	}
+}
+
+// forceRefreshAfterPolicySync re-sends the current playlist once the policy has
+// reached a freshly started player.
+//
+// Needed because the refresher does not wait for this reconciler: it sends as
+// soon as CDP reports initialized, so a restarted player can render a refresh
+// under ITS defaults before the owner's policy lands, and nothing re-sends
+// afterwards. A persisted showMatureContent:true then visibly fails until the
+// next periodic pass or cast.
+//
+// Deliberately conditional on the policy being non-default. An unconditional
+// force here would put a soft artwork refresh on EVERY generation bump — every
+// CDP connect, every recovery navigation, every stamp mismatch — which is
+// exactly the cost the replay-scope reconciler's guard exists to avoid. A
+// device still on defaults has nothing to correct: the player's own defaults
+// already agree.
+func forceRefreshAfterPolicySync(store *contentpolicy.Store, refresher policyRefresher, logger *zap.Logger) {
+	if store == nil || refresher == nil {
+		return
+	}
+	store.Lock()
+	active := store.CurrentLocked()
+	store.Unlock()
+	if active == contentpolicy.Default() {
+		return
+	}
+	logger.Info("content policy synced to a new player generation; re-sending current playlist")
+	refresher.ForceRefresh()
+}
+
 func bootRecoveryRetryReconciler(executor devicectl.Executor, logger *zap.Logger) func(context.Context) {
 	return func(context.Context) {
 		devicectl.RetryBootRecovery(executor, logger)
@@ -828,6 +949,10 @@ func initializeApp(
 	cdpEndpoint string,
 	relayerEndpoint string,
 	relayerAPIKey string,
+	logStreamEndpoint string,
+	logStreamAPIKey string,
+	logStreamEnvironment string,
+	playerLogSampleRate float64,
 	mintPairingConfig *config.MintPairingConfig,
 	offlineCacheConfig *config.OfflineCacheConfig,
 	gatewayUserAgentConfig *config.GatewayUserAgentConfig,
@@ -918,7 +1043,23 @@ func initializeApp(
 	ffIndexer := ffindexer.New(httpClient, json, io, logger)
 
 	// DP1
-	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug)
+	// DP-1 signature verification (feral-file/ffos-user#307). Verdicts are
+	// computed on every fetched or inline playlist and reported on the cast
+	// reply and player_status; whether a verdict changes what plays is the
+	// per-device mode's business (later phase). The config flag is the kill
+	// switch for a verifier/canonicalization divergence (see
+	// config.SignatureVerificationConfig).
+	sigVerifyEnabled := config.Get().SignatureVerificationEnabled()
+	// The mode setting and its status field exist only while the verifier
+	// runs: with the kill switch on, nothing could enforce a stored mode.
+	executor.SetSignatureVerificationCapability(func() bool { return sigVerifyEnabled })
+	if ds, ok := deviceStatus.(interface{ SetSignatureVerificationCapability(func() bool) }); ok {
+		ds.SetSignatureVerificationCapability(func() bool { return sigVerifyEnabled })
+	}
+	if !sigVerifyEnabled {
+		logger.Warn("DP-1 signature verification disabled by config; casts carry no signature verdict")
+	}
+	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug, sigVerifyEnabled)
 
 	// displayAt scheduler: filters playlists with displayAt items before CDP
 	// and advances them on timer / wake / CDP reconnect. Durable state stores
@@ -1045,6 +1186,17 @@ func initializeApp(
 	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
 	// must never be shed by external client traffic, so it bypasses the gate.
 	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, offlineCache, kioskReplay, playlistScheduler, json, logger)
+	blockUnratedCurated := config.Get().ContentPolicyTuning(logger).BlockUnratedCurated
+	policyStore, policyErr := contentpolicy.Open(constants.CONTENT_POLICY_FILE, blockUnratedCurated)
+	if policyErr != nil {
+		logger.Error("content policy store unreadable; using safe defaults until a durable update succeeds", zap.Error(policyErr))
+		policyStore = contentpolicy.Fallback(constants.CONTENT_POLICY_FILE, blockUnratedCurated)
+	}
+	commandrouter.SetContentPolicy(rawCmdHandler, policyStore, logger)
+	// Wired below, once playlistRefresher exists: an accepted policy change has
+	// to re-resolve what is on screen, or the Content screen reports success
+	// while the display stays on the previous projection until the periodic
+	// refresh.
 	// Cast-time source preflight (#304): a displayPlaylist whose every item
 	// source definitively answers an HTTP error is rejected at accept time
 	// instead of being forwarded and self-reported as playing. Wired against
@@ -1062,6 +1214,127 @@ func initializeApp(
 	} else {
 		commandrouter.SetSourceProber(rawCmdHandler, offlinecache.NewSourceProber(net.DefaultResolver), logger)
 	}
+	// Signature verification wiring: the same Active slot feeds the raw
+	// handler (writes on cast), the refresher (writes on re-push, below)
+	// and the status poller (reads on every poll). Wired against the raw
+	// handler for the same reason as SetSourceProber above.
+	activeVerdict := &sigverify.Active{}
+	// The owner's mode is read from its record on every cast (one small file
+	// read next to a network-bound resolution), so a change from the app
+	// applies to the next cast with no restart and no cache to invalidate. A
+	// record that cannot be loaded applies the default and is logged, not
+	// cached, so the log names every cast it affected.
+	verificationMode := func() sigverify.Mode {
+		mode, err := sigverify.LoadMode(os, json)
+		if err != nil {
+			logger.Warn("Signature verification mode record unreadable; applying default", zap.String("default", string(sigverify.DefaultMode)), zap.Error(err))
+		}
+		return mode
+	}
+	// Shared across the cast, scheduler and refresher wiring blocks below;
+	// created only when verification runs.
+	var toastDispatcher *playertoast.Dispatcher
+	if sigVerifyEnabled {
+		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict, Mode: verificationMode}, logger)
+		// The on-screen notice for a non-valid cast (notify) or a strict
+		// rejection. One sender, shared by the cast path (SetPlayerToast) and
+		// the scheduler cutover/refusal hooks below. Reads the player manifest
+		// at the shipping path on every send, so an older bundle without the
+		// playerToast contract degrades to "no toast" rather than an error;
+		// ff-player ships the contract (paired-rollout: the player bundle lands
+		// before this daemon). Copy is owned by the player; controld only names
+		// the notice.
+		// One shared toast surface: a single-slot dispatcher. Every producer
+		// (the cast path via SetPlayerToast, the scheduler hooks below, and the
+		// refresher) submits non-blocking; the dispatcher sends at most one
+		// bounded toast at a time and a newer transition supersedes a queued
+		// older one, so a wedged player never delays a cast and a stale warning
+		// never lands over newer artwork (feral-file/ffos-user#307). Each
+		// send dials its own session to the kiosk page rather than riding the
+		// shared cdp client, so a slow player costs the toast alone, never a cast.
+		toastSender := playertoast.New(
+			newToastSessionDialer(cdpEndpoint, httpClient, webSocketDialer, json, io, logger),
+			setupui.DefaultContractPath, logger)
+		toastDispatcher = playertoast.NewDispatcher(context, toastSender, 2*time.Second, logger)
+		// Honor the NavigationPending park contract (player-session-recovery
+		// §3.2) like every other off-lane producer: a recovery navigation arms
+		// before its gate probes and bumps the generation (which Clears the
+		// dispatcher) only once Page.navigate succeeds, so the worker parks on
+		// the session before each send and drops at the handoff if one arms
+		// during it. Defaults for the park bounds.
+		toastDispatcher.SetNavigationSession(session, 0, 0)
+		commandrouter.SetPlayerToast(rawCmdHandler, toastDispatcher, logger)
+		// A displayAt-deferred cast parks its verdict as pending; the
+		// scheduler's own cutover push is the only point that proves the
+		// cohort reached the screen, so that is where it is promoted — and
+		// the slot is invalidated as the push starts, so no status round
+		// between the player's swap and the promotion can match the
+		// previous document by URL.
+		// Promotion is fenced on the page generation: a bump between the
+		// send and its accepted reply means the reply came from a page
+		// that is gone, and the new generation's own re-push promotes.
+		pushStarting, pushAccepted := activeVerdict.FencedPromoter(session.Generation)
+		// pushGenAtStart mirrors FencedPromoter's own fence for the toast: the
+		// generation captured as the cutover's send begins, re-checked in the
+		// toaster so a reply from a page that reloaded across the send toasts
+		// nothing over its replacement. Set/read under the scheduler's pushMu.
+		var pushGenAtStart uint64
+		var pushSendEpoch uint64
+		playlistScheduler.SetPushObserver(func(phase playlistschedule.PushPhase) {
+			switch phase {
+			case playlistschedule.PushStarting:
+				pushGenAtStart = session.Generation()
+				pushStarting()
+				// Pre-send toast invalidation, paired with the verdict's:
+				// drop any queued warning before this cutover lands, and
+				// capture the epoch it creates so PushAccepted's notify is
+				// fenced to it (#307).
+				pushSendEpoch = toastDispatcher.ClearAndEpoch()
+			case playlistschedule.PushAccepted:
+				pushAccepted()
+			}
+		})
+		// Strict mode judges a scheduler-owned cutover AT PUSH TIME against
+		// the cast-time verdict the scheduler's cached document still carries
+		// (cloned by pointer, never persisted), so a schedule accepted under
+		// notify cannot carry a non-valid cohort onto the screen after the
+		// owner switches to strict. The mode is read ONCE per cutover, in the
+		// gate, and the notice it implies is carried to PushAccepted via
+		// pushNotice/pushShow — never re-read — so a concurrent mode change
+		// cannot let a cohort display under notify and then be labeled
+		// rejected, or suppress an expected notice. gate and toaster for one
+		// push both run under the scheduler's pushMu (one push at a time), so
+		// the shared fields need no lock.
+		var pushNotice sigverify.Notice
+		var pushShow bool
+		// A refusal's signature_rejected is fenced to the epoch the gate
+		// snapshots before its mode read (ScheduledPushGate), so a generation
+		// hook that Clears the toast mid-gate suppresses it rather than being
+		// overwritten — the gate runs before PushStarting and has no send
+		// epoch of its own.
+		playlistScheduler.SetPushGate(commandrouter.ScheduledPushGate(
+			toastDispatcher, verificationMode, playlistScheduler.AuthorityToken,
+			func(notice sigverify.Notice, show bool) { pushNotice, pushShow = notice, show },
+		))
+		// The cohort reached the player (PushAccepted): emit the notice the
+		// gate decided for THIS push, or Clear a pending stale one — the
+		// cutover, not the accepting cast, is the transition it describes.
+		if toastable, ok := any(playlistScheduler).(interface {
+			SetPushToaster(func(*toastPlaylist))
+		}); ok {
+			toastable.SetPushToaster(commandrouter.ScheduledPushToaster(
+				toastDispatcher,
+				session.Generation,
+				func() uint64 { return pushGenAtStart },
+				func() uint64 { return pushSendEpoch },
+				func() (sigverify.Notice, bool) { return pushNotice, pushShow },
+			))
+		}
+		poller.SetVerificationLookup(func(id, url string) (string, bool) {
+			st, ok := activeVerdict.Lookup(id, url)
+			return string(st), ok
+		})
+	}
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -1075,6 +1348,23 @@ func initializeApp(
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
+	playlist_refresher.SetContentPolicy(playlistRefresher, policyStore)
+	commandrouter.SetPolicyRefresher(rawCmdHandler, playlistRefresher, logger)
+	// The owner's content policy falls with the claim on a factory reset, for
+	// the same rollback reason the device name does (see factoryReset).
+	executor.SetContentPolicyResetter(func() error {
+		return commandrouter.ResetContentPolicy(rawCmdHandler)
+	})
+	if sigVerifyEnabled {
+		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
+		playlist_refresher.SetSignatureVerificationMode(playlistRefresher, verificationMode, logger)
+		// The refresher shares the one toast dispatcher: a strict refusal or an
+		// accepted force-cast of a re-resolved feed document surfaces the same
+		// notice the cast path would (feral-file/ffos-user#307).
+		playlist_refresher.SetRefresherToaster(playlistRefresher, toastDispatcher, logger)
+		// Same generation fence for the refresher's force casts.
+		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
+	}
 
 	// Replay saturation invalidates Fetch-interception scope exactly the way
 	// a kiosk restart does: retireOnSaturation closes the root CDP session so
@@ -1142,6 +1432,19 @@ func initializeApp(
 	executor.SetDeviceNameObserver(func(name string) {
 		mediator.SetDeviceName(name)
 	})
+	// Relaxing the verification mode re-drives a displayAt cutover the
+	// scheduler's push gate refused under strict: that refusal arms no retry
+	// and, past the schedule's final boundary, leaves no timer, so without
+	// this the wall would hold the pre-cutover cohort until an unrelated
+	// wake or reconnect. RecomputeIfStale pushes only a cohort not yet
+	// delivered — a mode change never re-casts what is already on screen —
+	// and under strict the gate would refuse again, so it is not asked.
+	executor.SetVerificationModeObserver(func(mode sigverify.Mode) {
+		if mode == sigverify.ModeStrict {
+			return
+		}
+		playlistScheduler.RecomputeIfStale(context)
+	})
 
 	executor.SetClaimObserver(func(claimed bool) {
 		mediator.SetClaimed(claimed)
@@ -1167,11 +1470,39 @@ func initializeApp(
 
 	// Wire every off-lane producer to the session (design doc §4), now that
 	// they all exist. Registration ORDER is the reconciler execution order on
-	// every generation-ready: sleep invalidate+poke, playlist recompute,
-	// status force-refresh, setup-narration resync, offline-cache replay-scope
-	// resync, boot-recovery retry, connectivity — replacing the five ad-hoc
-	// CDP-reconnect spawns run() used to do inline.
+	// every generation-ready: sleep invalidate+poke, content policy, playlist
+	// recompute, status force-refresh, setup-narration resync, offline-cache
+	// replay-scope resync, boot-recovery retry, connectivity — replacing the
+	// five ad-hoc CDP-reconnect spawns run() used to do inline.
 	session.RegisterReconciler("sleep-invalidate", sleepInvalidateReconciler(executor, logger))
+	// Content policy MUST reconcile before playlist-recompute. A freshly
+	// initialized player starts on default policy, so a recompute that
+	// force-pushes a scheduled cohort first would have its mature items
+	// withheld by the player until some later cast, refresh or cutover —
+	// a durable, acknowledged Content setting visibly failing after a player
+	// restart. Nothing re-pushes the scheduler when the policy syncs later.
+	if policyStore != nil {
+		session.RegisterReconciler("content-policy", contentPolicyReconciler(rawCmdHandler, policyStore, playlistRefresher, logger))
+	}
+	// A (re)loaded or replaced player document shows content controld did
+	// not just push: drop the attested verdict SYNCHRONOUSLY in the bump,
+	// not in a reconciler — the status round that detects a stamp mismatch
+	// bumps and then annotates in the same call, so an asynchronous reset
+	// would land after that round already re-attested the old verdict.
+	// Pending is untouched: playlist-recompute's re-push promotes it again.
+	if sigVerifyEnabled {
+		// Both seams replace the on-screen document with content this verdict
+		// no longer describes (a page-reload generation bump; the claim-time
+		// player-owned default playlist), so each drops the attested verdict
+		// AND any queued toast, or a stale warning could land over the new
+		// artwork (feral-file/ffos-user#307). toastDispatcher is non-nil here
+		// (created in the sigVerifyEnabled block above).
+		invalidateDisplayed := commandrouter.ComposeInvalidator(activeVerdict.ClearCurrent, toastDispatcher)
+		session.SetGenerationHook(invalidateDisplayed)
+		// The claim-time displayDefaultPlaylist bypasses commandrouter, so
+		// it gets the same pre-send invalidation by its own seam.
+		devicectl.SetVerdictInvalidator(executor, invalidateDisplayed, logger)
+	}
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))
 	}
@@ -1320,7 +1651,7 @@ func initializeApp(
 		snapshot: provMachine.Snapshot,
 	}
 	screenshotCapturer := screenshot.New(cdpEndpoint, httpClient, webSocketDialer)
-	hub := hub.New(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger)
+	hub := hub.NewWithLogDelivery(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger, logStreamEndpoint, logStreamAPIKey, logStreamEnvironment, playerLogSampleRate)
 	// Control-plane hub contact defers the escape policy's episode raise
 	// (§4.1): a phone with the app open must not have its link yanked. The
 	// hub filters (counted routes, non-loopback) and the machine timestamps.

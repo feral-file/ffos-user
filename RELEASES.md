@@ -19,6 +19,111 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
+## 2.0.7 — full-image
+
+Everything on `develop` since the `v2.0.6` staging merge (staging PR #355):
+DP-1 signature verification and per-device verification mode (#339, #344),
+the player signature toast (#346), the console-less kiosk session
+(#351, ffos#126), history replay + device content policy (#349), and
+controld log streaming to Cloudflare (#352).
+
+### Cross-rail changes
+
+Image rail (`users/**`) — the kiosk half of ffos#126, which only ships here:
+
+- `scripts/start-kiosk.sh`: launches `cage -s` (VT switching allowed) and
+  waits in `wait_for_vt1` until tty1 is the active VT before starting cage.
+  seatd hands a starting cage whichever VT is active, so a kiosk restart
+  would otherwise steal a developer's `Ctrl+Alt+F2` console. Fails open with
+  a logged line when no VT state is readable.
+- `systemd-services/chromium-kiosk.service`: tolerant
+  `ExecStartPre=-/usr/bin/sudo -n /usr/bin/systemctl stop feral-kiosk-fallback.service`
+  — the plymouth "Something went wrong…" screen holds DRM master, so every
+  kiosk start must clear it first.
+- `.bash_profile`: comment recording that the tty1 branch is now only a
+  fallback for images without `feral-kiosk-startup.service`.
+
+Package rail (`components/**`): controld (signature verification, verification
+mode, toast dispatcher, content policy, history replay, log streaming) and
+feral-watchdog (developer-console gate + fallback-screen hold before reboot).
+
+### Companion image change
+
+The other half of ffos#126 is `ffos` PR #151 (`fix/126-kiosk-session`, merged
+into `ffos` `develop` on 2026-09-15): it removes the tty1 autologin shell,
+moves cage to seatd, and adds `feral-kiosk-fallback.service` plus the sudoers
+entry the `ExecStartPre` above depends on. **The image must be built from an
+`ffos` ref that contains it** — an image without it has no fallback unit and
+no seatd session, and the kiosk half here is inert or wedged.
+
+### Release action
+
+Two dispatches of `build-image-to-cf.yml` in the `ffos` repo, both a human
+step (agents must never dispatch the Production one, and may dispatch the
+Staging one only after explicit in-session confirmation). Every input is
+listed; the values are the ones the 2.0.6 release used (runs
+`ffos` 34590636630 Staging and 34594792824 Production), changed only where
+2.0.7 differs.
+
+**Precondition.** Both runs must be dispatched from an `ffos` branch that
+already contains ffos#151 (merged into `ffos` `develop` 2026-09-15), so
+`ffos` `develop -> staging` must be promoted before the Staging run and
+`staging -> release` before the Production run. See "Companion image change".
+
+1. Bench validation — run on the `ffos` `staging` branch:
+
+   | input | value |
+   |---|---|
+   | `version` | `2.0.7` |
+   | `soak-test` | `false` |
+   | `environment` | `Staging` |
+   | `pacman_snapshot` | `2026/07/13` |
+   | `ffos_user_ref` | `staging` |
+   | `ff_player_ref` | `main` |
+   | `dev_iso` | `false` |
+   | `update_min_version` | `true` |
+   | `update_required_version` | `false` |
+   | `update_recovery_version` | `false` |
+
+2. Fielded release — run on the `ffos` `release` branch, after the bench
+   round passes:
+
+   | input | value |
+   |---|---|
+   | `version` | `2.0.7` |
+   | `soak-test` | `false` |
+   | `environment` | `Production` |
+   | `pacman_snapshot` | `2026/07/13` |
+   | `ffos_user_ref` | `release` |
+   | `ff_player_ref` | `main` |
+   | `dev_iso` | `false` |
+   | `update_min_version` | `false` |
+   | `update_required_version` | `false` |
+   | `update_recovery_version` | `false` |
+
+`ffos_user_ref` is a branch name, matching what 2.0.6 actually dispatched —
+NOT the `v2.0.7` tag the 2.0.3 entry below describes. Both name the same tree
+at dispatch time, and the operator may pin `ffos_user_ref=v2.0.7` instead
+once the tag exists; recorded as branches here because that is the dispatch
+this ledger is evidence for.
+
+`update_min_version=true` on Staging and `false` on Production is deliberate
+and carried over from 2.0.6: the bench round moves `min_runtime_version` so
+bench devices are forced onto the new image, while the fielded rollout leaves
+the floor alone and lets devices update on the normal cadence. Raising the
+floor on a Production run strands every device below it.
+
+### Why package-only is NOT permitted
+
+The `cage -s` + `wait_for_vt1` kiosk change, the fallback-screen
+`ExecStartPre`, and the ffos-side session rework ship ONLY on the full-image
+rsync rail, and the new watchdog escalation path calls the unit they install.
+A package-only bump would put a watchdog that stops the kiosk and starts
+`feral-kiosk-fallback.service` on a device whose image has neither that unit
+nor the sudoers entry, and would leave the old autologin/cage session in
+place — the console-less kiosk fix would be silently absent while the
+watchdog's new reboot path runs against units that do not exist.
+
 ## 2.0.3 — full-image
 
 Everything on `develop` since the previous staging merge — four PRs

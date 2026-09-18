@@ -33,7 +33,40 @@ The CDP Monitor is responsible for monitoring the health of the Chromium browser
   again ~25 s into Chromium's cold start and exhaust the restart budget on
   healthy devices.
 - Recovery action: `systemctl --user restart chromium-kiosk.service`.
-- If 3 restarts occur within 5 minutes, triggers a system reboot.
+- If 3 restarts occur within 5 minutes the restart budget is exhausted. The
+  monitor then stops `chromium-kiosk.service`, starts the ffos system unit
+  `feral-kiosk-fallback.service` (plymouth on the free DRM device: black
+  screen, spinner, "Something went wrong...") via `sudo -n systemctl start`,
+  and **holds for 15 minutes** (`CHROMIUM_FALLBACK_HOLD`) before rebooting.
+  During the hold every failed check is expected and quiet. The reboot stays
+  the self-heal rail (a fresh boot clears transient faults and the nightly
+  updaters need boots), but the customer sees a stable error screen instead
+  of a black screen every ~5 minutes. The restart history is memory-only
+  (ffos-user#254), so after the reboot the cycle repeats: ~5 min of restarts,
+  then 15 min of fallback. If a check succeeds during the hold (an operator
+  restarted the kiosk, an OTA fixed the bundle), the hold is dropped and the
+  restart history reset; `chromium-kiosk.service` stops the fallback unit in
+  its `ExecStartPre`, so any kiosk start clears the screen. If the fallback
+  unit cannot be started (older image without it, sudo refused) or the
+  kiosk stop itself fails, the monitor reboots immediately instead of
+  holding on a black or frozen screen; if a RAM/GPU
+  kiosk restart happens to hold the kiosk lock at that moment nothing is
+  stopped and the next tick retries. Inside the hold
+  the two exemptions below still apply: a display unplugged during the hold
+  abandons it and forgets the exhausted budget (no reboot; once a display
+  returns the reconnect grace restarts the kiosk), and a developer on
+  another VT defers the reboot until tty1 is active again. RAM/GPU-triggered
+  kiosk restarts are refused while the error screen is deliberately up.
+- **Developer console is exempt.** cage runs with `-s`, so a developer with a
+  keyboard can Ctrl+Alt+F2 to the password-protected `getty@tty2`.
+  `start-kiosk.sh` (`wait_for_vt1`) refuses to launch cage while the active VT
+  is not `tty1` (seatd would hand cage the developer's VT), so Chromium is
+  legitimately absent. While `/sys/class/tty/tty0/active` is not `tty1` the
+  monitor suppresses escalation exactly like headless (no restart, no
+  restart-history accumulation, no fallback, no reboot) and logs the
+  transition once; returning to `tty1` re-arms the startup grace. The gate
+  fails open when the file is unreadable. The two predicates MUST stay
+  identical.
 - **Headless devices are exempt.** On a device with no monitor, the kiosk
   intentionally waits for a display before launching Chromium, so a missing
   `/json/version` is expected, not a failure. Escalation is suppressed (no
