@@ -19,6 +19,67 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
+## 2.0.7 — full-image
+
+Everything on `develop` since the `v2.0.6` staging merge (staging PR #355):
+DP-1 signature verification and per-device verification mode (#339, #344),
+the player signature toast (#346), the console-less kiosk session
+(#351, ffos#126), history replay + device content policy (#349), and
+controld log streaming to Cloudflare (#352).
+
+### Cross-rail changes
+
+Image rail (`users/**`) — the kiosk half of ffos#126, which only ships here:
+
+- `scripts/start-kiosk.sh`: launches `cage -s` (VT switching allowed) and
+  waits in `wait_for_vt1` until tty1 is the active VT before starting cage.
+  seatd hands a starting cage whichever VT is active, so a kiosk restart
+  would otherwise steal a developer's `Ctrl+Alt+F2` console. Fails open with
+  a logged line when no VT state is readable.
+- `systemd-services/chromium-kiosk.service`: tolerant
+  `ExecStartPre=-/usr/bin/sudo -n /usr/bin/systemctl stop feral-kiosk-fallback.service`
+  — the plymouth "Something went wrong…" screen holds DRM master, so every
+  kiosk start must clear it first.
+- `.bash_profile`: comment recording that the tty1 branch is now only a
+  fallback for images without `feral-kiosk-startup.service`.
+
+Package rail (`components/**`): controld (signature verification, verification
+mode, toast dispatcher, content policy, history replay, log streaming) and
+feral-watchdog (developer-console gate + fallback-screen hold before reboot).
+
+### Companion image change
+
+The other half of ffos#126 is `ffos` PR #151 (`fix/126-kiosk-session`, merged
+into `ffos` `develop` on 2026-09-15): it removes the tty1 autologin shell,
+moves cage to seatd, and adds `feral-kiosk-fallback.service` plus the sudoers
+entry the `ExecStartPre` above depends on. **The image must be built from an
+`ffos` ref that contains it** — an image without it has no fallback unit and
+no seatd session, and the kiosk half here is inert or wedged.
+
+### Release action
+
+Dispatch `build-image-to-cf.yml` in the `ffos` repo (human step) with:
+
+- `version=2.0.7`
+- `ffos_user_ref=v2.0.7` (tag the staging merge of this release)
+- `ff_player_ref=<player release ref>`
+- `environment=Staging` for bench validation, `Production` for the fielded
+  release — dispatched from the matching `ffos` branch, which must contain
+  ffos#151.
+- `pacman_snapshot`, `dev_iso`, `soak-test`, and the `update_*` flags as the
+  release operator decides.
+
+### Why package-only is NOT permitted
+
+The `cage -s` + `wait_for_vt1` kiosk change, the fallback-screen
+`ExecStartPre`, and the ffos-side session rework ship ONLY on the full-image
+rsync rail, and the new watchdog escalation path calls the unit they install.
+A package-only bump would put a watchdog that stops the kiosk and starts
+`feral-kiosk-fallback.service` on a device whose image has neither that unit
+nor the sudoers entry, and would leave the old autologin/cage session in
+place — the console-less kiosk fix would be silently absent while the
+watchdog's new reboot path runs against units that do not exist.
+
 ## 2.0.3 — full-image
 
 Everything on `develop` since the previous staging merge — four PRs
