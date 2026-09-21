@@ -38,6 +38,7 @@ type PlayerStatus struct {
 	Command        string                      `json:"castCommand,omitempty"`
 	PlaylistURL    *string                     `json:"playlistURL,omitempty"`
 	Playlist       *dp1.Playlist               `json:"playlist,omitempty"`
+	ContentContext string                      `json:"contentContext,omitempty"`
 	Index          *int                        `json:"index"`
 	RenderStatus   *int                        `json:"renderStatus,omitempty"`
 	IsPaused       *bool                       `json:"isPaused,omitempty"`
@@ -60,6 +61,16 @@ type PlayerStatus struct {
 	} `json:"deviceSettings,omitempty"`
 	LoopMode *LoopMode `json:"loopMode,omitempty"`
 	Shuffle  *bool     `json:"shuffle,omitempty"`
+	// SignatureStatus is controld-owned (the player never sends it): the DP-1
+	// signature verdict of the playlist currently on screen, "valid",
+	// "invalid", or "unsigned" (feral-file/ffos-user#307). Attached by
+	// pollPlayerStatus from the verification lookup when the reply's
+	// playlist id or URL matches the last cast controld verified; omitted
+	// when it cannot be matched (player-fetched default playlist, a cast
+	// from before this process started, verification disabled). A stable
+	// string that only changes on a cast, so it does not defeat the
+	// notification dedupe hash.
+	SignatureStatus *string `json:"signatureStatus,omitempty"`
 	// Stamp echoes window.__ffosDocStamp back from CheckDeviceStatusReply — the
 	// playersession generation carrier (design doc §2.1 source 3), riding this
 	// EXISTING checkStatus round-trip rather than a second evaluate. Old
@@ -88,6 +99,14 @@ type Poller interface {
 	// time, before Start; nil is safe (no-op) and is what a build without a
 	// session leaves it as.
 	SetStampObserver(fn func(stamp string, present bool))
+	// SetVerificationLookup registers the function pollPlayerStatus asks for
+	// the on-screen playlist's signature verdict (see
+	// PlayerStatus.SignatureStatus). Called with the reply's playlist id and
+	// URL (either may be empty); a false return omits the field. Same
+	// set-once-before-Start, single-writer contract as SetStampObserver;
+	// nil is safe (no-op) and is what a build with verification disabled
+	// leaves it as.
+	SetVerificationLookup(fn func(id, url string) (string, bool))
 }
 
 // poller handles periodic polling of both player status via CDP and device status
@@ -137,6 +156,11 @@ type poller struct {
 	// a lock on the polling goroutine, same single-writer contract as
 	// displayConnected.
 	stampObserver func(stamp string, present bool)
+
+	// verificationLookup, when set (SetVerificationLookup), resolves the
+	// on-screen playlist's signature verdict. Same single-writer contract as
+	// stampObserver.
+	verificationLookup func(id, url string) (string, bool)
 }
 
 func NewPoller(
@@ -252,6 +276,10 @@ func (s *poller) SetStampObserver(fn func(stamp string, present bool)) {
 	s.stampObserver = fn
 }
 
+func (s *poller) SetVerificationLookup(fn func(id, url string) (string, bool)) {
+	s.verificationLookup = fn
+}
+
 func (s *poller) SuppressPlayerNotifications(suppress bool) {
 	s.Lock()
 	s.suppressPlayerNotifications = suppress
@@ -273,12 +301,11 @@ func (s *poller) ForceRefresh() {
 func (s *poller) pollPlayerStatus(ctx context.Context) {
 	// While CDP is intentionally absent (headless boot with no monitor, or mid-reconnect
 	// after a kiosk/Chromium restart) every checkStatus send would fail at Error level and
-	// emit a player-status error notification each interval, flooding logs and Sentry. Skip
+	// emit a player-status error notification each interval, flooding logs. Skip
 	// the poll entirely in that state, but keep playback-duration accounting moving with a
 	// "not playing" sample so metrics do not freeze while disconnected.
 	if !s.cdp.Initialized() {
 		s.updateArtPlaybackMetrics(false, time.Now())
-		s.logger.Debug("Skipping player status poll: CDP not connected")
 		return
 	}
 
@@ -291,9 +318,6 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 		// Chromium on QR/setup screens while keeping playback-duration accounting
 		// moving forward with a "not playing" sample.
 		s.updateArtPlaybackMetrics(false, time.Now())
-		s.logger.Info("Skipping player status poll because Chromium is not on the player page",
-			zap.String("page_url", pageURL),
-		)
 		return
 	}
 
@@ -316,7 +340,6 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	// Handle nil playerStatus (CDP returned nil result when player is not playing in case showing QR code)
 	if playerStatus == nil {
 		s.updateArtPlaybackMetrics(false, now)
-		s.logger.Debug("Player status is nil, skipping notification")
 		return
 	}
 
@@ -342,14 +365,41 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	suppressed := s.suppressPlayerNotifications
 	s.RUnlock()
 	if suppressed {
-		s.logger.Debug("Player notifications suppressed (OOM recovery), skipping")
 		return
 	}
 
+	// Annotate BEFORE lightweightPlayerStatus blanks Playlist: the lookup
+	// keys are the reply's playlist id and URL, and id lives on that struct.
+	s.annotateSignatureStatus(playerStatus)
+
 	lightweightPlayerStatus := s.lightweightPlayerStatus(playerStatus)
-	s.logger.Debug("Sending lightweight player status", zap.Any("lightweightPlayerStatus_itemsLength", len(*lightweightPlayerStatus.Items)))
 
 	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, lightweightPlayerStatus)
+}
+
+// annotateSignatureStatus fills PlayerStatus.SignatureStatus from the
+// verification lookup, or leaves it nil (omitted) when nothing is wired or
+// the on-screen playlist is not the one controld last verified. A miss is
+// deliberately silent: reporting a verdict for a playlist controld did not
+// verify would be worse than reporting none.
+func (s *poller) annotateSignatureStatus(playerStatus *PlayerStatus) {
+	// The reply was decoded straight into PlayerStatus, so a player (or a
+	// spoofed reply) could have supplied this field. It is controld-owned:
+	// drop whatever arrived and set it only from the lookup below.
+	playerStatus.SignatureStatus = nil
+	if s.verificationLookup == nil {
+		return
+	}
+	id, url := "", ""
+	if playerStatus.Playlist != nil {
+		id = playerStatus.Playlist.ID
+	}
+	if playerStatus.PlaylistURL != nil {
+		url = *playerStatus.PlaylistURL
+	}
+	if status, ok := s.verificationLookup(id, url); ok {
+		playerStatus.SignatureStatus = &status
+	}
 }
 
 func isPlayerPageURL(url string) bool {
@@ -373,12 +423,6 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 	}
 
 	relayerConnected := s.relayer.IsConnected()
-	s.logger.Debug("Preparing notification delivery",
-		zap.String("notification_type", string(notificationType)),
-		zap.Bool("relayer_connected", relayerConnected),
-		zap.Bool("force_send", forceSend),
-		zap.Bool("hash_available", err == nil),
-	)
 
 	data := map[string]interface{}{
 		"type":                 "notification",
@@ -396,18 +440,9 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 					zap.Error(err),
 				)
 			} else {
-				s.logger.Info("Notification sent via relayer",
-					zap.String("notification_type", string(notificationType)),
-				)
 				s.updateStatusHash(s.lastRelayerStatusHashes, notificationType, currentHash)
 			}
-		} else {
-			s.logger.Debug("Relayer status unchanged, skipping relayer notification",
-				zap.String("notification_type", string(notificationType)))
 		}
-	} else {
-		s.logger.Debug("Relayer not connected, skipping relayer notification send",
-			zap.String("notification_type", string(notificationType)))
 	}
 
 	// Send the data via websocket
@@ -418,14 +453,8 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 				zap.Error(err),
 			)
 		} else {
-			s.logger.Info("Notification sent via websocket",
-				zap.String("notification_type", string(notificationType)),
-			)
 			s.updateStatusHash(s.lastWSStatusHashes, notificationType, currentHash)
 		}
-	} else {
-		s.logger.Debug("Websocket status unchanged, skipping websocket notification",
-			zap.String("notification_type", string(notificationType)))
 	}
 }
 
@@ -454,7 +483,7 @@ func (s *poller) FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error) {
 
 	if result == nil {
 		// FIXME: This should not happen, resolve the root cause
-		// We accept it for now to avoid flooding sentry with errors
+		// We accept it for now to avoid flooding error logs.
 		s.logger.Warn("CDP returned nil result for player status")
 		return nil, nil
 	}
@@ -531,15 +560,8 @@ func (s *poller) lightweightPlayerStatus(playerStatus *PlayerStatus) *PlayerStat
 func (s *poller) pollDeviceStatus(ctx context.Context) {
 	// Check if relayer is connected before polling
 	if !s.relayer.IsConnected() {
-		s.logger.Debug("Relayer not connected, skipping device status poll",
-			zap.Bool("relayer_connected", false),
-		)
 		return
 	}
-
-	s.logger.Debug("Polling device status",
-		zap.Bool("relayer_connected", true),
-	)
 
 	// Get device status using the shared function
 	deviceStatus, err := s.deviceStatus.GetStatus(ctx)
@@ -560,7 +582,6 @@ const ddcPollTimeout = 15 * time.Second
 
 func (s *poller) pollDDCStatus(ctx context.Context) {
 	if !s.relayer.IsConnected() {
-		s.logger.Debug("Relayer not connected, skipping DDC status poll")
 		return
 	}
 
@@ -590,7 +611,6 @@ func (s *poller) pollDDCStatus(ctx context.Context) {
 	// otherwise show stale values forever, because pre-gate code kept emitting
 	// an Errors-carrying status when the panel became unreadable.
 	if s.displayConnected != nil && !s.displayConnected() {
-		s.logger.Debug("Skipping DDC status poll: no display connected")
 		s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatusNoDisplay())
 		return
 	}
@@ -599,12 +619,9 @@ func (s *poller) pollDDCStatus(ctx context.Context) {
 	// re-probes on display changes and on a slow interval. Not a fault — stay
 	// quiet instead of logging every 5s round.
 	if !shouldPoll {
-		s.logger.Debug("Skipping DDC status poll: display does not support DDC/CI")
 		s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatusUnsupported())
 		return
 	}
-
-	s.logger.Debug("Polling DDC panel status")
 
 	ddcCtx, cancel := context.WithTimeout(ctx, ddcPollTimeout)
 	defer cancel()

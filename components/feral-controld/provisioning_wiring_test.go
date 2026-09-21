@@ -400,6 +400,17 @@ func TestSetupNotifierClaimContextObservesShutdown(t *testing.T) {
 type stubHubStatusBase struct{ info hub.StatusInfo }
 
 func (s stubHubStatusBase) Status(context.Context) hub.StatusInfo { return s.info }
+func (s stubHubStatusBase) FF1DeviceID() string                   { return s.info.DeviceID }
+
+func TestProvisioningStatusProviderForwardsFF1Identity(t *testing.T) {
+	provider := &provisioningStatusProvider{
+		base: stubHubStatusBase{info: hub.StatusInfo{DeviceID: "FF1-TEST"}},
+	}
+	var identityProvider hub.FF1IdentityProvider = provider
+	if got := identityProvider.FF1DeviceID(); got != "FF1-TEST" {
+		t.Fatalf("FF1DeviceID() = %q, want FF1-TEST", got)
+	}
+}
 
 // TestProvisioningStatusProviderSuppliesInternet: the wrapper must overlay the
 // live internet signal (claim-QR parity) onto the base payload, and leave it

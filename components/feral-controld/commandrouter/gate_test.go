@@ -342,6 +342,13 @@ func TestDefaultGateConfig_ClassifiesCommands(t *testing.T) {
 	require.True(t, ok, "setDeviceName must be explicitly classified, not Default")
 	assert.True(t, rename.Dedupe)
 	assert.Less(t, rename.Rate, 1.0)
+
+	// setSignatureVerificationMode is the same class: a persisted write from
+	// the open hub whose value can refuse the device's primary function.
+	mode, ok := cfg.Policies[commands.CMD_SET_SIGNATURE_VERIFICATION_MODE]
+	require.True(t, ok, "setSignatureVerificationMode must be explicitly classified, not Default")
+	assert.True(t, mode.Dedupe)
+	assert.Less(t, mode.Rate, 1.0)
 }
 
 // TestDefaultGateConfig_ClassifiesOfflineCacheCommands is the regression
@@ -376,4 +383,40 @@ func TestDefaultGateConfig_ClassifiesOfflineCacheCommands(t *testing.T) {
 	status := cfg.Policies[commands.CMD_GET_OFFLINE_CACHE_STATUS]
 	assert.NotEqual(t, cfg.Default.Rate, status.Rate, "getOfflineCacheStatus must not silently fall through to Default")
 	assert.Equal(t, query.Weight, status.Weight)
+}
+
+// TestDefaultGateConfig_ClassifiesHistoryAndPolicyCommands pins that all four
+// commands behind the app's History and Content screens are classified rather
+// than inheriting the generous Default. Both content-policy commands hold the
+// policy-store lock across a CDP round trip, and setContentPolicy also does a
+// persisted .state write, so Default (10/s, burst 20, no dedupe) would let one
+// unauthenticated LAN caller park the global concurrency budget on them.
+func TestDefaultGateConfig_ClassifiesHistoryAndPolicyCommands(t *testing.T) {
+	cfg := DefaultGateConfig()
+	query := cfg.Policies[commands.CMD_DEVICE_STATUS]
+	reboot := cfg.Policies[commands.CMD_REBOOT]
+
+	for _, cmd := range []commands.Type{
+		commands.CMD_GET_RECENTLY_PLAYED,
+		commands.CMD_PLAY_RECENTLY_PLAYED,
+		commands.CMD_GET_CONTENT_POLICY,
+		commands.CMD_SET_CONTENT_POLICY,
+	} {
+		p, ok := cfg.Policies[cmd]
+		require.True(t, ok, "%s must be explicitly classified, not Default", cmd)
+		assert.NotEqual(t, cfg.Default.Rate, p.Rate, "%s must not silently fall through to Default", cmd)
+	}
+
+	// Reading the policy is a cheap, dedupable query, same class as
+	// getDeviceStatus. Dedupe is what bounds it, which is why the handler
+	// rejects a non-empty get request instead of ignoring it.
+	get := cfg.Policies[commands.CMD_GET_CONTENT_POLICY]
+	assert.True(t, get.Dedupe)
+	assert.Equal(t, query.Weight, get.Weight)
+
+	// Writing it is a persisted flash write: the same tier as the other
+	// persisted-write commands, never looser than a reboot.
+	set := cfg.Policies[commands.CMD_SET_CONTENT_POLICY]
+	assert.True(t, set.Dedupe)
+	assert.LessOrEqual(t, set.Rate, reboot.Rate)
 }

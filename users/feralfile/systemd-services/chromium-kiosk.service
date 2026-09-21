@@ -6,6 +6,12 @@ Requires=feral-player.service
 [Service]
 Type=simple
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
+# feral-watchdog shows feral-kiosk-fallback.service (plymouth: spinner +
+# "Something went wrong...") once its restart budget is exhausted. Plymouth
+# holds DRM master, so every kiosk start clears it first. `-` because the unit
+# does not exist on images that predate it and sudo may be denied; either way
+# the kiosk must still start. The sudoers allowlist must keep this command.
+ExecStartPre=-/usr/bin/sudo -n /usr/bin/systemctl stop feral-kiosk-fallback.service
 ExecStart=/home/feralfile/scripts/start-kiosk.sh
 ExecStopPost=systemctl --user stop chromium-ready.target
 StandardOutput=append:/home/feralfile/.logs/chromium.log

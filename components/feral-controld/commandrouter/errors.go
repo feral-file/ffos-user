@@ -6,7 +6,9 @@ import (
 	"strings"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 )
 
 // RateLimitedError is returned by the command storm gate when a command is
@@ -105,4 +107,80 @@ func (e *SourceUnreachableError) Error() string {
 func IsSourceUnreachable(err error) bool {
 	var sue *SourceUnreachableError
 	return errors.As(err, &sue)
+}
+
+type ContentBlockedError struct{}
+
+func (*ContentBlockedError) Error() string {
+	return "contentBlocked: no playlist item is allowed by the active content policy"
+}
+
+func IsContentBlocked(err error) bool {
+	var target *ContentBlockedError
+	return errors.As(err, &target)
+}
+
+// PlaylistInvalidError marks a cast rejected because the DP-1 document itself is
+// malformed — today, content-rating extension fields that are present but not
+// valid. Typed rather than a formatted string so the LAN hub and the relayer can
+// answer the documented invalid-input classification instead of a generic
+// server error, the same way ContentBlockedError is carried.
+type PlaylistInvalidError struct {
+	// Locations are the JSON pointers the validator objected to, e.g.
+	// "/items/0/contentRating". POINTERS ONLY — never the offending value.
+	//
+	// dp1-go's format assertions print the value whole ("'https://x?token=…'
+	// is not valid 'uri'"), and this text is returned verbatim to LAN and
+	// relayer callers, so carrying its message through would hand a caster
+	// another caster's signed source. The path says which field is wrong,
+	// which is all a caster needs to fix its own document.
+	Locations []string
+}
+
+func (e *PlaylistInvalidError) Error() string {
+	if e == nil || len(e.Locations) == 0 {
+		return "playlistInvalid"
+	}
+	return "playlistInvalid: at " + strings.Join(e.Locations, ", ")
+}
+
+func IsPlaylistInvalid(err error) bool {
+	var target *PlaylistInvalidError
+	if errors.As(err, &target) {
+		return true
+	}
+	// The URL/dynamic ingestion path validates inside dp1 and returns its own
+	// sentinel; both reach the transports as the same classification.
+	return errors.Is(err, dp1.ErrPlaylistInvalid)
+}
+
+// SigInvalidError is returned by the displayPlaylist path when the device's
+// signature verification mode is strict and the cast's DP-1 verdict is not
+// valid (feral-file/ffos-user#307). The name matches DP-1 core spec §14's
+// player error code, `sigInvalid`, for the same reason SourceUnreachableError
+// matches `sourceUnreachable`. Like it, the LAN hub and the relayer mediator
+// detect it to answer the caller with an actionable rejection.
+type SigInvalidError struct {
+	// Status is the verdict's status ("invalid" or "unsigned"), or "" when
+	// the document carried no verdict at all (the offline cached copy): a
+	// strict device cannot prove such a document either way.
+	Status sigverify.Status
+	// Reason is sigverify's PublicReason — the closed vocabulary only, never
+	// a string the document supplied (role, algorithm, key id) and never a
+	// URL — or the fixed cached-copy explanation. Verdict.Reason (which
+	// names the signer by its document-supplied role) must not be placed
+	// here: this text leaves the device on both ingress paths.
+	Reason string
+}
+
+// Error renders the standardized rejection text returned verbatim to casters
+// on both ingress paths; Reason is drawn from sigverify's public vocabulary.
+func (e *SigInvalidError) Error() string {
+	return fmt.Sprintf("sigInvalid: playlist rejected by strict signature verification (%s)", e.Reason)
+}
+
+// IsSigInvalid reports whether err is (or wraps) a SigInvalidError.
+func IsSigInvalid(err error) bool {
+	var sie *SigInvalidError
+	return errors.As(err, &sie)
 }

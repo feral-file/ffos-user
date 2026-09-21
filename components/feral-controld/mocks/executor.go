@@ -10,6 +10,7 @@ import (
 
 	commands "github.com/feral-file/ffos-user/components/feral-controld/commands"
 	setupui "github.com/feral-file/ffos-user/components/feral-controld/setupui"
+	sigverify "github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	gomock "github.com/golang/mock/gomock"
 )
 
@@ -89,6 +90,18 @@ func (mr *MockExecutorMockRecorder) SetClaimObserver(observer interface{}) *gomo
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetClaimObserver", reflect.TypeOf((*MockExecutor)(nil).SetClaimObserver), observer)
 }
 
+// SetContentPolicyResetter mocks base method.
+func (m *MockExecutor) SetContentPolicyResetter(reset func() error) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetContentPolicyResetter", reset)
+}
+
+// SetContentPolicyResetter indicates an expected call of SetContentPolicyResetter.
+func (mr *MockExecutorMockRecorder) SetContentPolicyResetter(reset interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetContentPolicyResetter", reflect.TypeOf((*MockExecutor)(nil).SetContentPolicyResetter), reset)
+}
+
 // SetDeviceNameObserver mocks base method.
 func (m *MockExecutor) SetDeviceNameObserver(observer func(string)) {
 	m.ctrl.T.Helper()
@@ -111,6 +124,30 @@ func (m *MockExecutor) SetSetupUI(ui *setupui.Service) {
 func (mr *MockExecutorMockRecorder) SetSetupUI(ui interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSetupUI", reflect.TypeOf((*MockExecutor)(nil).SetSetupUI), ui)
+}
+
+// SetSignatureVerificationCapability mocks base method.
+func (m *MockExecutor) SetSignatureVerificationCapability(enabled func() bool) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetSignatureVerificationCapability", enabled)
+}
+
+// SetSignatureVerificationCapability indicates an expected call of SetSignatureVerificationCapability.
+func (mr *MockExecutorMockRecorder) SetSignatureVerificationCapability(enabled interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSignatureVerificationCapability", reflect.TypeOf((*MockExecutor)(nil).SetSignatureVerificationCapability), enabled)
+}
+
+// SetVerificationModeObserver mocks base method.
+func (m *MockExecutor) SetVerificationModeObserver(observer func(sigverify.Mode)) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetVerificationModeObserver", observer)
+}
+
+// SetVerificationModeObserver indicates an expected call of SetVerificationModeObserver.
+func (mr *MockExecutorMockRecorder) SetVerificationModeObserver(observer interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetVerificationModeObserver", reflect.TypeOf((*MockExecutor)(nil).SetVerificationModeObserver), observer)
 }
 
 // MocksetupNarrator is a mock of setupNarrator interface.

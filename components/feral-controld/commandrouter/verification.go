@@ -1,0 +1,242 @@
+package commandrouter
+
+import (
+	"fmt"
+
+	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
+	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
+)
+
+// Reply keys for the signature verdict on a displayPlaylist acceptance
+// (feral-file/ffos-user#307). Additive, inside the same map that carries
+// ok — see docs/controld-inbound-controller-messages.md. Stable strings:
+// controllers read them.
+const (
+	replyKeySignatureStatus = "signatureStatus"
+	replyKeySigners         = "signers"
+	replyKeyLegacySignature = "legacySignature"
+)
+
+// annotateCastReply merges the verdict into the reply map the caller is
+// about to return: into "message" when the reply has the player's
+// {messageID, message:{ok...}} envelope (or the deferred acceptance built in
+// the same shape), else into the top level — mirroring how
+// playerresponse.OK locates ok. Anything that is not a map is returned
+// untouched; the verdict is reporting, never a reason to fail a reply.
+//
+// Mutates in place (the map is this process's own decode of the player's
+// reply, not shared) and returns it for call-site readability.
+func annotateCastReply(result any, v *sigverify.Verdict) any {
+	m, ok := result.(map[string]any)
+	if !ok || v == nil {
+		return result
+	}
+	target := m
+	if msg, ok := m["message"].(map[string]any); ok {
+		target = msg
+	}
+	target[replyKeySignatureStatus] = string(v.Status)
+	if len(v.Signers) > 0 {
+		signers := make([]any, 0, len(v.Signers))
+		for _, s := range v.Signers {
+			entry := map[string]any{
+				"alg":  s.Alg,
+				"kid":  s.Kid,
+				"role": s.Role,
+				"ok":   s.OK,
+			}
+			if s.Reason != "" {
+				entry["reason"] = s.Reason
+			}
+			signers = append(signers, entry)
+		}
+		target[replyKeySigners] = signers
+	}
+	if v.LegacyPresent {
+		target[replyKeyLegacySignature] = true
+	}
+	return m
+}
+
+// logSignatureVerdict writes the one structured line per cast that makes the
+// verdict greppable on a device: status, each signer's identity and outcome,
+// and the playlist identity. Warn for a false claim (invalid), Info
+// otherwise — an unsigned app cast is the ordinary case today and must not
+// page. Kids are DIDs bounded by sigverify (MaxKidLen), safe to log; the
+// playlist URL is the caster's own input and already logged by the cast
+// path. The playlist id is caster-controlled and unbounded on the open hub
+// (a 4 MiB inline cast may carry a 4 MiB id), so it is cut to the daemon's
+// standard log-field cap before it reaches the journal.
+func (h *handler) logSignatureVerdict(v *sigverify.Verdict, playlistID, playlistURL string) {
+	source := "inline"
+	if playlistURL != "" {
+		source = "url"
+	}
+	fields := []zap.Field{
+		zap.String("signature_status", string(v.Status)),
+		zap.ByteString("playlist_id", helper.TruncateBytes([]byte(playlistID), logger.MAX_FIELD_LENGTH)),
+		zap.String("source", source),
+		zap.Bool("legacy_signature", v.LegacyPresent),
+	}
+	if v.Reason != "" {
+		fields = append(fields, zap.String("reason", v.Reason))
+	}
+	if len(v.Signers) > 0 {
+		fields = append(fields, zap.Any("signers", v.Signers))
+	}
+	if v.Status == sigverify.StatusInvalid {
+		h.logger.Warn("displayPlaylist: playlist signature verification failed", fields...)
+		return
+	}
+	h.logger.Info("displayPlaylist: playlist signature verdict", fields...)
+}
+
+// strictRejection returns the SigInvalidError strict mode raises for v, or
+// nil when v proves the document valid. A nil verdict is a rejection too: it
+// means the document could not be verified (today: the offline cached copy,
+// whose stored body is a hydrated re-marshal), and strict does not guess.
+// The reason is Verdict.PublicReason, the closed vocabulary — never
+// Verdict.Reason, which carries the document's own role string and belongs
+// in the log and the owner's cast reply only.
+// Restoring the offline fallback under strict needs the download-time
+// verdict persisted beside the cached record — the follow-up noted on
+// loadCachedPlaylistForURL.
+func strictRejection(v *sigverify.Verdict) *SigInvalidError {
+	if v == nil {
+		return &SigInvalidError{Reason: "cached copy carries no verdict"}
+	}
+	if v.Status == sigverify.StatusValid {
+		return nil
+	}
+	return &SigInvalidError{Status: v.Status, Reason: v.PublicReason()}
+}
+
+// StrictPushGate builds the scheduler's push gate (playlistschedule's
+// SetPushGate) from the owner's mode reader: a scheduler-owned cutover is
+// judged AT PUSH TIME through the same Mode.Allows predicate as a cast, so
+// a schedule accepted under notify cannot carry a non-valid cohort onto the
+// screen after the owner switches to strict. The scheduler's cached document
+// keeps the verdict attached at cast time (cloned by pointer, never
+// persisted: a restart-restored source is refetched, and so re-verified,
+// before it can push again), so the gate reads the same verdict the cast
+// reply reported. The error text uses the public vocabulary only; it goes to
+// the scheduler's log, not to a caller.
+func StrictPushGate(mode func() sigverify.Mode) func(playlist *dp1.Playlist) error {
+	return func(playlist *dp1.Playlist) error {
+		var verdict *sigverify.Verdict
+		if playlist != nil {
+			verdict = playlist.Verification
+		}
+		if mode == nil || mode().Allows(verdict) {
+			return nil
+		}
+		reason := "document carries no verdict"
+		if verdict != nil {
+			reason = verdict.PublicReason()
+		}
+		return fmt.Errorf("strict signature verification: %s", reason)
+	}
+}
+
+// ComposeInvalidator returns a callback that drops BOTH the on-screen
+// signature verdict and any queued toast. It is for the seams that replace
+// displayed content OUTSIDE the cast path — a page-generation bump, or the
+// claim-time player-owned default playlist — where a warning queued for the
+// previous document must not land over the new artwork
+// (feral-file/ffos-user#307). A nil notifier clears the verdict only.
+func ComposeInvalidator(clearVerdict func(), notifier playertoast.Notifier) func() {
+	return func() {
+		if clearVerdict != nil {
+			clearVerdict()
+		}
+		if notifier != nil {
+			notifier.Clear()
+		}
+	}
+}
+
+// ScheduledPushGate builds the playlistschedule SetPushGate callback. Strict
+// mode judges a scheduler-owned cutover AT PUSH TIME against the cast-time
+// verdict its document carries; the mode is read ONCE here and the notice it
+// implies is handed to decided for PushAccepted, never re-read, so a
+// concurrent mode change cannot relabel a cohort. A refusal toasts
+// signature_rejected fenced to the display-transition epoch snapshotted
+// BEFORE the mode read: the gate runs before PushStarting, so it captures no
+// send epoch of its own, and a generation hook (page reload/replacement)
+// that Clears the notifier while the mode is read would otherwise be
+// overwritten by a raw Notify — a rejection for an obsolete cutover over
+// unrelated artwork (feral-file/ffos-user#307). authority (may be nil) is
+// the scheduler's AuthorityToken: snapshotted with the epoch, it rides with
+// the refusal notice as its handoff guard, so a future-only cast that takes
+// authority after the queue (no write, no Clear — invisible to the epoch)
+// still drops it. A nil notifier gates without toasting.
+func ScheduledPushGate(
+	notifier playertoast.Notifier,
+	mode func() sigverify.Mode,
+	authority func() uint64,
+	decided func(notice sigverify.Notice, show bool),
+) func(*dp1.Playlist) error {
+	return func(p *dp1.Playlist) error {
+		var epoch, auth uint64
+		if notifier != nil {
+			epoch = notifier.Epoch()
+		}
+		if authority != nil {
+			auth = authority()
+		}
+		m := mode() // the single read for this cutover
+		if err := StrictPushGate(func() sigverify.Mode { return m })(p); err != nil {
+			decided("", false) // refused: PushAccepted will not fire for this push
+			if notifier != nil {
+				authorityHeld := func() bool { return authority == nil || authority() == auth }
+				notifier.NotifyIfEpochGuarded(sigverify.NoticeRejected, epoch, authorityHeld)
+			}
+			return err
+		}
+		var status sigverify.Status
+		if p != nil && p.Verification != nil {
+			status = p.Verification.Status
+		}
+		decided(sigverify.ToastFor(m, status))
+		return nil
+	}
+}
+
+// ScheduledPushToaster builds the playlistschedule SetPushToaster callback. It
+// emits the gate's decided notice for a cutover the CURRENT generation still
+// owns, and Clears when the generation raced across the send (the accepted
+// reply is from a page that reloaded — the same fence FencedPromoter applies
+// to the verdict) or the policy is silent about this cohort. genNow, genStart,
+// sendEpoch, and decision are read at call time; the caller sets genStart/sendEpoch/decision under
+// the scheduler's push lock so one cutover's values are consistent.
+func ScheduledPushToaster(
+	notifier playertoast.Notifier,
+	genNow func() uint64,
+	genStart func() uint64,
+	sendEpoch func() uint64,
+	decision func() (notice sigverify.Notice, show bool),
+) func(*dp1.Playlist) {
+	return func(*dp1.Playlist) {
+		if notifier == nil {
+			return
+		}
+		if genNow() != genStart() {
+			notifier.Clear()
+			return
+		}
+		notice, show := decision()
+		if show {
+			// Fenced to the epoch this cutover's PushStarting invalidation
+			// created, so a transition between the accepted send and here
+			// (a generation bump) supersedes it rather than being overwritten.
+			notifier.NotifyIfEpoch(notice, sendEpoch())
+		} else {
+			notifier.Clear()
+		}
+	}
+}

@@ -10,7 +10,7 @@
 //     reconnect decision; producers push events in and nothing reads netlog
 //     state except the status/diagnostics egress paths.
 //   - Classified outages are DATA, not errors: nothing here may log through
-//     logger.Error (every Error becomes a Sentry event, and a flapping WAN
+//     logger.Error (every Error is shipped remotely, and a flapping WAN
 //     would turn the recorder into the noise it exists to diagnose).
 //   - The ring rides every uploadLogs bundle: it lives under ~/.logs by
 //     default, zipLogs collects the effective ring directory FIRST with

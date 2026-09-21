@@ -61,3 +61,44 @@ func isDisplayConnected(sysfsRoot string) bool {
 	// environment is unknown, fail open.
 	return !sawReadable
 }
+
+// defaultTTYActiveFile is the sysfs file naming the active virtual terminal
+// (e.g. "tty1"). It is the same predicate wait_for_vt1 in
+// users/feralfile/scripts/start-kiosk.sh consults.
+const defaultTTYActiveFile = "/sys/class/tty/tty0/active"
+
+// kioskVT is the virtual terminal the kiosk owns. cage runs with -s (VT
+// switching allowed) so a developer with a keyboard can Ctrl+Alt+F2 to the
+// password-protected getty@tty2 console (ffos#126).
+const kioskVT = "tty1"
+
+// isKioskVTActive reports whether the kiosk's VT (tty1) is the active virtual
+// terminal. While a developer sits on another VT, start-kiosk.sh's wait_for_vt1
+// refuses to launch cage (it would otherwise be handed the developer's VT by
+// seatd), so Chromium may legitimately be absent and the watchdog must not
+// escalate. The two gates MUST keep the same predicate.
+//
+// FAIL OPEN: a missing or unreadable file (no VT subsystem, CI, unrecognized
+// sysfs) is treated as "kiosk VT active" so the watchdog is never silently
+// disabled on an unknown environment, mirroring isDisplayConnected.
+func isKioskVTActive(ttyActiveFile string) bool {
+	return kioskVTActive(readActiveVT(ttyActiveFile))
+}
+
+// kioskVTActive is THE predicate shared by isKioskVTActive (tests) and the
+// monitor's check path (which reads the file once and logs the same value):
+// unreadable fails open, otherwise the active VT must be the kiosk's.
+func kioskVTActive(vt string, readable bool) bool {
+	return !readable || vt == kioskVT
+}
+
+// readActiveVT returns the active virtual terminal name ("tty1") and whether
+// the file could be read at all. Callers that both decide and log use this so
+// the two see the same value.
+func readActiveVT(ttyActiveFile string) (string, bool) {
+	data, err := os.ReadFile(ttyActiveFile) // #nosec G304 -- fixed sysfs path, test-injectable.
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(data)), true
+}

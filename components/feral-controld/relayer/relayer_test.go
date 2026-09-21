@@ -72,6 +72,12 @@ func setup(t *testing.T) *testSetup {
 		Return(nil).
 		AnyTimes()
 
+	// Every dialed connection is read-limited before use (inbound frame
+	// bound, feral-file/ffos-user#307); pin the exact value here once.
+	mockConn.EXPECT().
+		SetReadLimit(int64(relayer.MAX_MESSAGE_BYTES)).
+		AnyTimes()
+
 	client := relayer.New("ws://localhost:8080", "test-api-key", mockDialer, mockRandomizer, mockClock, mockOS, mockJSON, logger)
 
 	return &testSetup{
@@ -1367,6 +1373,9 @@ func TestClient_ReceiveMessage_Error(t *testing.T) {
 	mockConn2.EXPECT().
 		SetPongHandler(gomock.Any()).
 		Times(1)
+	mockConn2.EXPECT().
+		SetReadLimit(int64(relayer.MAX_MESSAGE_BYTES)).
+		Times(1)
 
 	// Expect second conn to write ping
 	mockConn2.EXPECT().
@@ -1949,9 +1958,18 @@ func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
 
 	// Expect os.Exit(1) to be called when reconnection fails with PermanentError
 	exitCalled := make(chan struct{})
+	flushCalled := make(chan struct{})
+	flushHook, ok := ts.client.(interface{ SetBeforeExit(func()) })
+	require.True(t, ok)
+	flushHook.SetBeforeExit(func() { close(flushCalled) })
 	ts.mockOS.EXPECT().
 		Exit(1).
 		DoAndReturn(func(code int) {
+			select {
+			case <-flushCalled:
+			default:
+				t.Error("expected stream flush before os.Exit")
+			}
 			close(exitCalled)
 		}).
 		Times(1)

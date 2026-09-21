@@ -12,10 +12,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// errChromiumHeadless tags a failed health check that happened while no
-// display is connected. Headless devices deliberately do not run Chromium
-// (the kiosk waits for a display), so these failures are expected and the
-// monitor loop logs them at debug instead of warning every check interval.
+// errChromiumHeadless tags a failed health check that happened while Chromium
+// is expected to be absent: no display connected (the kiosk waits for one), a
+// developer VT other than tty1 active (start-kiosk.sh holds cage back), or the
+// fallback hold in progress (the kiosk was stopped on purpose). The monitor
+// loop logs these at debug instead of warning every check interval.
 var errChromiumHeadless = errors.New("chromium down while headless (expected)")
 
 const (
@@ -38,7 +39,18 @@ const (
 	CHROMIUM_STARTUP_GRACE          = 90 * time.Second
 	CHROMIUM_RESTART_HISTORY_SIZE   = 3 // Store the last 3 restarts
 	CHROMIUM_MAX_RESTARTS_WINDOW    = 5 * time.Minute
-	CHROMIUM_MAX_RESTARTS_THRESHOLD = 3 // 3 restarts within the window triggers reboot
+	CHROMIUM_MAX_RESTARTS_THRESHOLD = 3 // 3 restarts within the window exhausts the budget
+	// CHROMIUM_FALLBACK_HOLD is how long the fallback screen
+	// (feral-kiosk-fallback.service: black, spinner, "Something went wrong...")
+	// stays up after the restart budget is exhausted, before the reboot that
+	// used to happen immediately. The reboot remains the self-heal rail (a
+	// fresh boot clears transient faults and the nightly updaters need boots),
+	// but a customer must see a stable error screen instead of a black screen
+	// every ~5 minutes. restartHistory is memory-only (ffos-user#254), so after
+	// the reboot the cycle repeats: ~5 min of restarts, then this hold. That is
+	// bounded and mostly visible-error; persisting the budget across reboots
+	// is #254/#255 scope, not this policy.
+	CHROMIUM_FALLBACK_HOLD = 15 * time.Minute
 )
 
 // ChromiumMonitor monitors Chromium browser health via Chrome DevTools Protocol.
@@ -66,6 +78,17 @@ const (
 // reboot-budget accumulation). Detection FAILS OPEN only when no connector
 // status is readable at all, and a reconnect re-anchors the pre-connect grace
 // window.
+//
+// Developer-console gating works the same way: while the active VT is not
+// tty1 (a developer on getty@tty2 via Ctrl+Alt+F2), start-kiosk.sh refuses to
+// launch cage, so Chromium is legitimately absent and escalation is
+// suppressed; returning to tty1 re-anchors the grace window.
+//
+// Fallback hold: once the restart budget is exhausted the monitor no longer
+// reboots at once. It stops the kiosk, starts feral-kiosk-fallback.service
+// (a stable "Something went wrong..." screen) and holds for
+// CHROMIUM_FALLBACK_HOLD, then reboots. A successful check during the hold
+// (manual restart, OTA) clears the hold and the restart history.
 type ChromiumMonitor struct {
 	mu                 sync.Mutex
 	cdpEndpoint        string
@@ -86,6 +109,18 @@ type ChromiumMonitor struct {
 	// check after a display reappears re-anchors the startup-grace window so a
 	// just-plugged monitor gets the full grace instead of an instant restart.
 	headless bool
+
+	// ttyActiveFile is the sysfs file naming the active VT; a field so tests
+	// can inject a fixture. devConsole latches "we last observed a VT other
+	// than tty1 active" so the transition is logged once and the return to
+	// tty1 re-anchors the startup grace, exactly like the headless latch.
+	ttyActiveFile string
+	devConsole    bool
+
+	// fallbackSince is non-zero while the fallback screen is showing after
+	// the restart budget was exhausted; the hold ends in a reboot unless a
+	// check succeeds first.
+	fallbackSince time.Time
 }
 
 // NewChromiumMonitor creates a new Chromium monitor instance.
@@ -108,6 +143,7 @@ func NewChromiumMonitor(cdpEndpoint string, logger *zap.Logger, commandHandler *
 		monitorStart:     time.Now(),
 		commandHandler:   commandHandler,
 		drmSysfsRoot:     defaultDRMSysfsRoot,
+		ttyActiveFile:    defaultTTYActiveFile,
 	}
 }
 
@@ -194,10 +230,26 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 	m.lastSuccessfulResp = time.Now()
 	m.hasEverConnected = true
 	// A 200 proves a display is attached and Chromium is up. Clear the headless
-	// latch so a later genuine hang is escalated normally rather than being
-	// mistaken for a display reconnect and granted a fresh grace window.
+	// and developer-console latches so a later genuine hang is escalated
+	// normally rather than being mistaken for a reconnect and granted a fresh
+	// grace window.
 	m.headless = false
+	m.devConsole = false
+	// Chromium came back while the fallback screen was up (someone restarted
+	// the kiosk by hand, an OTA fixed the bundle): drop the hold and forget the
+	// exhausted budget so a later fault gets the full restart ladder again.
+	// The kiosk's ExecStartPre already stopped feral-kiosk-fallback.service.
+	recovered := !m.fallbackSince.IsZero()
+	if recovered {
+		m.fallbackSince = time.Time{}
+		m.restartHistory = m.restartHistory[:0]
+	}
 	m.mu.Unlock()
+
+	if recovered {
+		m.commandHandler.clearKioskFallback()
+		m.logger.Info("Chromium: recovered while fallback screen was showing; resuming normal monitoring")
+	}
 
 	return nil
 }
@@ -208,7 +260,8 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 // repeated on the next 5-second tick.
 //
 // It reports whether the failure happened while headless (no connected
-// display), so the caller can tag it as expected rather than warn-worthy.
+// display, a developer VT active, or the fallback hold in progress), so the
+// caller can tag it as expected rather than warn-worthy.
 //
 // The decision splits on hasEverConnected. Pre-connect, we wait through
 // CHROMIUM_STARTUP_GRACE; post-connect, the shorter CHROMIUM_HANG_THRESHOLD
@@ -224,8 +277,68 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 	// headless for hours cannot later trip the 3-restarts-in-5-minutes reboot
 	// budget. The read is done outside m.mu because it touches the filesystem.
 	displayConnected := isDisplayConnected(m.drmSysfsRoot)
+	// One read of the VT file per check so the decision and the log line
+	// below name the same VT.
+	activeVT, vtReadable := readActiveVT(m.ttyActiveFile)
+	onKioskVT := kioskVTActive(activeVT, vtReadable)
 
 	m.mu.Lock()
+	// Fallback hold: the kiosk was stopped on purpose and the error screen is
+	// up, so a failed check is expected. The hold ends in the reboot that used
+	// to be immediate, but the two suppression gates still apply inside it:
+	//   - no display: a headless device must never trip a reboot (the
+	//     invariant the display gate exists for), so the hold is abandoned and
+	//     the monitor drops into ordinary headless suppression; the kiosk
+	//     restarts normally once a display returns (fallbackShown is cleared
+	//     so restartKiosk is allowed again, and its ExecStartPre clears the
+	//     screen);
+	//   - developer console on another VT: the console is most needed exactly
+	//     when the kiosk has no picture, so the hold is re-anchored rather
+	//     than rebooting the developer out of their shell; a full hold
+	//     starts over once tty1 is active again.
+	// fallbackSince is reset before rebooting so a failed reboot command
+	// (sudo/systemctl outage) cannot re-fire every 5 s; it then drops into the
+	// normal restart ladder, which is acceptable.
+	if !m.fallbackSince.IsZero() {
+		if !displayConnected {
+			m.fallbackSince = time.Time{}
+			// Forget the exhausted budget too: the kiosk is stopped, so once a
+			// display returns the reconnect grace must end in a kiosk RESTART,
+			// not in an immediate second fallback because three stale stamps
+			// are still inside the five-minute window.
+			m.restartHistory = m.restartHistory[:0]
+			m.headless = true
+			m.mu.Unlock()
+			m.commandHandler.clearKioskFallback()
+			m.logger.Info("Chromium: display disconnected during fallback hold; abandoning the hold, suppressing escalation until a display reconnects")
+			return true
+		}
+		if !onKioskVT {
+			enteredDevConsole := !m.devConsole
+			m.devConsole = true
+			m.fallbackSince = time.Now()
+			m.mu.Unlock()
+			if enteredDevConsole {
+				m.logger.Info("Chromium: developer console active during fallback hold; deferring the reboot until tty1 is active",
+					zap.String("active_vt", activeVT))
+			}
+			return true
+		}
+		m.devConsole = false
+		held := time.Since(m.fallbackSince)
+		if held < CHROMIUM_FALLBACK_HOLD {
+			m.mu.Unlock()
+			return true
+		}
+		m.fallbackSince = time.Time{}
+		m.mu.Unlock()
+		m.commandHandler.clearKioskFallback()
+		m.logger.Error("Chromium: fallback hold elapsed, triggering system reboot",
+			zap.Duration("held", held),
+			zap.Duration("hold", CHROMIUM_FALLBACK_HOLD))
+		m.commandHandler.rebootSystem(ctx, CrashReasonChromiumCrash)
+		return true
+	}
 	if !displayConnected {
 		// Latch headless so the first check after a reconnect re-anchors grace.
 		// Log the transition once instead of warning every check interval.
@@ -237,14 +350,30 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 		}
 		return true
 	}
-	reconnected := m.headless
-	if m.headless {
-		// Display (re)appeared after a headless period. Escalation resumes, but
-		// with a FRESH pre-connect grace window: a just-plugged monitor must get
-		// the full CHROMIUM_STARTUP_GRACE for Chromium to cold-start, not an
-		// instant restart driven by the stale monitorStart from before it was
-		// unplugged.
+	if !onKioskVT {
+		// Developer console: a VT other than tty1 is active, so
+		// start-kiosk.sh's wait_for_vt1 holds cage back and Chromium is
+		// legitimately down. Same treatment as headless: no restart, no
+		// budget accumulation, transition logged once.
+		enteredDevConsole := !m.devConsole
+		m.devConsole = true
+		m.mu.Unlock()
+		if enteredDevConsole {
+			m.logger.Info("Chromium: developer console active; suppressing health-check escalation until tty1 is active",
+				zap.String("active_vt", activeVT))
+		}
+		return true
+	}
+	reconnected := m.headless || m.devConsole
+	if reconnected {
+		// Display (re)appeared after a headless period, or the developer
+		// returned to tty1. Escalation resumes, but with a FRESH pre-connect
+		// grace window: a just-plugged monitor (or a kiosk that wait_for_vt1
+		// only now lets start) must get the full CHROMIUM_STARTUP_GRACE for
+		// Chromium to cold-start, not an instant restart driven by the stale
+		// monitorStart from before.
 		m.headless = false
+		m.devConsole = false
 		m.hasEverConnected = false
 		m.monitorStart = time.Now()
 		m.lastSuccessfulResp = time.Time{}
@@ -255,7 +384,7 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 	m.mu.Unlock()
 
 	if reconnected {
-		m.logger.Info("Chromium: Display reconnected; resuming health-check escalation with a fresh startup grace",
+		m.logger.Info("Chromium: Display reconnected or developer console left; resuming health-check escalation with a fresh startup grace",
 			zap.Duration("startup_grace", CHROMIUM_STARTUP_GRACE))
 	}
 
@@ -311,8 +440,9 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 }
 
 // restartChromium issues a kiosk restart (or, if we've burned through the
-// restart budget, a full system reboot) and then drops the monitor back into
-// pre-connect mode.
+// restart budget, stops the kiosk and shows the fallback screen; the reboot
+// follows after CHROMIUM_FALLBACK_HOLD in checkHangState) and then drops the
+// monitor back into pre-connect mode.
 //
 // The pre-connect reset is load-bearing: Chromium will be unavailable for
 // longer than CHROMIUM_HANG_THRESHOLD after a kiosk restart, and without this
@@ -330,10 +460,29 @@ func (m *ChromiumMonitor) restartChromium(ctx context.Context) {
 		m.restartHistory = m.restartHistory[1:]
 	}
 
-	// Check if we need to trigger a reboot
+	// Budget exhausted: show the stable error screen instead of rebooting
+	// right away. No kiosk restart is issued — the fallback owns the display
+	// until the hold elapses (reboot) or a check succeeds (recovery). If the
+	// screen cannot be shown (unit absent on an older image, sudo refused),
+	// the kiosk has already been stopped, so reboot immediately exactly as
+	// before this policy rather than hold on a black screen.
 	if m.shouldTriggerReboot() {
-		m.logger.Error("Chromium: Too many chromium restarts in a short period, triggering system reboot")
-		m.commandHandler.rebootSystem(ctx, CrashReasonChromiumCrash)
+		m.logger.Error("Chromium: restart budget exhausted; showing fallback screen and holding before reboot",
+			zap.Int("restarts", len(m.restartHistory)),
+			zap.Duration("window", CHROMIUM_MAX_RESTARTS_WINDOW),
+			zap.Duration("hold", CHROMIUM_FALLBACK_HOLD))
+		switch m.commandHandler.showKioskFallback(ctx) {
+		case kioskFallbackShown:
+			m.fallbackSince = now
+		case kioskFallbackBusy:
+			// A RAM/GPU-triggered kiosk restart is in flight; nothing was
+			// stopped. Leave the budget exhausted and let the next tick
+			// retry once the other operation has cleared.
+			m.logger.Warn("Chromium: fallback screen deferred; another kiosk operation is in flight")
+		case kioskFallbackUnavailable:
+			m.logger.Error("Chromium: fallback screen unavailable; triggering system reboot now")
+			m.commandHandler.rebootSystem(ctx, CrashReasonChromiumCrash)
+		}
 		return
 	}
 
@@ -350,13 +499,14 @@ func (m *ChromiumMonitor) restartChromium(ctx context.Context) {
 	m.lastSuccessfulResp = time.Time{}
 }
 
-// shouldTriggerReboot determines if we should trigger a system reboot
-// based on the restart history
+// shouldTriggerReboot reports whether the restart budget is exhausted
+// (CHROMIUM_MAX_RESTARTS_THRESHOLD restarts within CHROMIUM_MAX_RESTARTS_WINDOW),
+// which now enters the fallback hold rather than rebooting immediately.
 func (m *ChromiumMonitor) shouldTriggerReboot() bool {
 	if len(m.restartHistory) < CHROMIUM_MAX_RESTARTS_THRESHOLD {
 		return false
 	}
 
-	// If the oldest of the recent restarts is within the window, we need to reboot
+	// If the oldest of the recent restarts is within the window, the budget is spent
 	return time.Since(m.restartHistory[0]) <= CHROMIUM_MAX_RESTARTS_WINDOW
 }
