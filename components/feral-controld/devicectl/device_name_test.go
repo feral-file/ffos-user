@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -198,6 +199,126 @@ func TestClearDeviceName_AnnouncesTheFallbackEvenWhenClearFails(t *testing.T) {
 		"the fallback must be announced even when the disk clear failed")
 }
 
+// TestSetDeviceName_RepaintsAShowingClaimQR pins the second half of the
+// rename bug: deviceDisplayName only resolves the name at paint time, and the
+// claim QR is painted once per online/topic transition, so a rename that
+// lands while it is showing must repaint the guidance text itself or the
+// screen keeps naming the old label after mDNS already moved on.
+func TestSetDeviceName_RepaintsAShowingClaimQR(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	e, _ := deviceNameExecutor(t, ctrl)
+	spy := &narratorSpy{}
+	e.setupNarrator = spy
+	spy.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
+
+	_, err := e.setDeviceName(context.Background(), []byte(`{"name":"Living Room"}`))
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"claim", "refresh_claim_name"}, spy.calls)
+	assert.Equal(t, "Living Room", spy.lastName)
+}
+
+// A clear through setDeviceName("") while the claim QR is showing repaints it
+// with the serial — the same fallback deviceDisplayName applies at paint time,
+// so the screen and the mDNS advertisement fall back together.
+func TestSetDeviceName_ClearRepaintsAShowingClaimQRWithTheSerial(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	e, _ := deviceNameExecutor(t, ctrl)
+	mockOS := e.os.(*mocks.MockOS)
+	mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("FF1-8EVTK3RE\n"), nil)
+	spy := &narratorSpy{}
+	e.setupNarrator = spy
+	spy.ShowClaimQR("https://claim.example/x", "Living Room")
+
+	_, err := e.setDeviceName(context.Background(), []byte(`{"name":""}`))
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"claim", "refresh_claim_name"}, spy.calls)
+	assert.Equal(t, "FF1-8EVTK3RE", spy.lastName)
+}
+
+// With no claim QR on screen a rename must not paint one: the refresh is a
+// no-op and the serial is not even read (no HOSTNAME_FILE expectation here —
+// gomock fails the test on an unexpected read).
+func TestSetDeviceName_DoesNotPaintAClaimQRThatIsNotShowing(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	e, _ := deviceNameExecutor(t, ctrl)
+	spy := &narratorSpy{}
+	e.setupNarrator = spy
+	spy.ShowReady()
+
+	_, err := e.setDeviceName(context.Background(), []byte(`{"name":""}`))
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"ready"}, spy.calls)
+}
+
+// TestClearDeviceName_DoesNotRepaintTheClaimQR pins the factory-reset side:
+// clearDeviceName runs after resetStaged latched and before factory_reset is
+// painted, so a repaint here would flash the serial and a rotated connect URL
+// over the reset narration. The spy is primed with a showing claim QR so a
+// repaint, if one fired, would be recorded.
+func TestClearDeviceName_DoesNotRepaintTheClaimQR(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
+	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON(), setupNarrator: spy}
+	spy.ShowClaimQR("https://claim.example/x", "Living Room")
+
+	require.NoError(t, e.clearDeviceName())
+
+	assert.Equal(t, []string{"claim"}, spy.calls)
+}
+
+// TestPaintClaimQR_WaitsForAnInFlightRename pins the paint-side lock: a paint
+// whose name read could otherwise land before a concurrent rename's Save, and
+// whose unconditional push then lands after that rename's refresh, must
+// instead wait for the rename to finish and paint the name it stored.
+func TestPaintClaimQR_WaitsForAnInFlightRename(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).
+		Return([]byte(`{"name":"Living Room"}`), nil)
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON(), setupNarrator: spy}
+
+	// A rename is mid-flight: it holds the record lock.
+	e.deviceNameMu.Lock()
+	painted := make(chan struct{})
+	go func() {
+		e.paintClaimQR("https://claim.example/x")
+		close(painted)
+	}()
+
+	select {
+	case <-painted:
+		t.Fatal("the paint must not read the name while a rename holds the lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	assert.Empty(t, spy.calls)
+
+	e.deviceNameMu.Unlock()
+	select {
+	case <-painted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the paint never ran after the rename released the lock")
+	}
+	assert.Equal(t, []string{"claim"}, spy.calls)
+	assert.Equal(t, "Living Room", spy.lastName)
+}
+
 // TestDeviceDisplayName_PrefersOwnerNameOverSerial pins the bug where the
 // claim QR's guidance text was built from deviceID() (the serial, read once
 // from /etc/hostname and never anything else) instead of the current owner
@@ -219,8 +340,11 @@ func TestDeviceDisplayName_PrefersOwnerNameOverSerial(t *testing.T) {
 
 // TestDeviceDisplayName_FallsBackToSerialWhenUnnamed covers the unnamed and
 // cleared-name cases: both must fall back to the serial, matching
-// resolveMDNSDeviceInfo's and status.device_status's own fallback so every
-// surface agrees on what an unnamed unit is called.
+// resolveMDNSDeviceInfo's own fallback so the claim-QR guidance and the mDNS
+// advertisement agree on what an unnamed unit is called. Only those two
+// surfaces fall back: status.device_status's deviceName deliberately stays ""
+// for an unnamed unit (its presence is the rename-capability signal, see
+// docs/api-design.md) and is not a third surface to match.
 func TestDeviceDisplayName_FallsBackToSerialWhenUnnamed(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
