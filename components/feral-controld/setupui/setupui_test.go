@@ -1246,6 +1246,90 @@ func TestHideIfShowing(t *testing.T) {
 	})
 }
 
+// TestRefreshClaimQRName pins the rename repaint: while the claim QR is the
+// current intent a refresh re-pushes claim_qr with the cached url and the
+// resolved name; any other intent (or none) is left alone and the resolver
+// never runs — the factory-reset clear reaches this path with the screen on
+// factory_reset and must not read the serial for nothing.
+func TestRefreshClaimQRName(t *testing.T) {
+	resolveTo := func(name string, ran *bool) func() string {
+		return func() string {
+			*ran = true
+			return name
+		}
+	}
+
+	t.Run("rewrites the name of a showing claim QR", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
+		// Let the paint reach CDP first: a refresh queued behind an unsent
+		// claim_qr coalesces into it (trailing same-state rule), which is
+		// also correct but would make the second delivery unobservable.
+		sender.waitForCalls(t, 1)
+		ran := false
+		svc.RefreshClaimQRName(resolveTo("Living Room", &ran))
+		sender.waitForCalls(t, 2)
+
+		assert.True(t, ran)
+		last := sender.lastRequest()
+		assert.Equal(t, stateClaimQR, last["state"])
+		assert.Equal(t, "https://claim.example/x", last["url"], "the url is carried over, not re-derived")
+		assert.Equal(t, "Living Room", last["device_name"])
+	})
+
+	t.Run("carries the url a concurrent repaint installed", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowClaimQR("https://claim.example/old-topic", "FF1-8EVTK3RE")
+		sender.waitForCalls(t, 1)
+		// A topic reassignment repaints the claim QR with a new url while
+		// the rename is resolving its name — the refresh must commit that
+		// url, not the one it saw before resolving.
+		svc.RefreshClaimQRName(func() string {
+			svc.ShowClaimQR("https://claim.example/new-topic", "FF1-8EVTK3RE")
+			return "Living Room"
+		})
+		assert.Eventually(t, func() bool {
+			last := sender.lastRequest()
+			return last != nil && last["device_name"] == "Living Room"
+		}, 2*time.Second, 10*time.Millisecond, "refreshed name never reached CDP")
+
+		last := sender.lastRequest()
+		assert.Equal(t, stateClaimQR, last["state"])
+		assert.Equal(t, "https://claim.example/new-topic", last["url"])
+	})
+
+	t.Run("yields to a concurrent narrator", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
+		svc.ShowUpdating(20) // OTA took the screen before the rename landed
+		ran := false
+		svc.RefreshClaimQRName(resolveTo("Living Room", &ran))
+		sender.waitForCalls(t, 2)
+
+		assert.False(t, ran, "the resolver must not run with no claim QR to refresh")
+		assert.Equal(t, stateUpdating, sender.lastRequest()["state"])
+		assert.Equal(t, 2, sender.callCount(), "no claim_qr may be re-delivered over updating")
+	})
+
+	t.Run("no intent: no push, no resolve", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		ran := false
+		svc.RefreshClaimQRName(resolveTo("Living Room", &ran))
+
+		assert.False(t, ran)
+		assert.Equal(t, 0, sender.callCount())
+		assert.False(t, svc.Narrating())
+	})
+}
+
 // fakeNavigationSession is a minimal, directly-controllable NavigationSession
 // double: tests flip pending/ready/generation to drive the worker's park loop
 // without a real playersession.Session.

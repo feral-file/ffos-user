@@ -44,6 +44,16 @@ func (s *narratorSpy) ShowClaimQR(url string, deviceName string) {
 	s.lastURL = url
 	s.lastName = deviceName
 }
+
+// RefreshClaimQRName mirrors setupui.Service: resolve runs, and the name is
+// recorded, only while the spy's current intent is the claim QR.
+func (s *narratorSpy) RefreshClaimQRName(resolve func() string) {
+	if len(s.calls) == 0 || s.calls[len(s.calls)-1] != "claim" {
+		return
+	}
+	s.calls = append(s.calls, "refresh_claim_name")
+	s.lastName = resolve()
+}
 func (s *narratorSpy) ShowReady()        { s.calls = append(s.calls, "ready") }
 func (s *narratorSpy) ShowFactoryReset() { s.calls = append(s.calls, "factory_reset") }
 func (s *narratorSpy) ShowJoinFailed(reason string) {

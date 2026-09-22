@@ -18,6 +18,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
@@ -964,8 +965,24 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return false, true, false
 	}
-	e.setupUI().ShowClaimQR(e.buildDeviceConnectURL(ctx), e.deviceID())
+	e.paintClaimQR(e.buildDeviceConnectURL(ctx))
 	return true, false, false
+}
+
+// paintClaimQR reads the display name and pushes the claim QR under
+// deviceNameMu — the same lock a rename holds across its own Save and
+// RefreshClaimQRName. Unlocked, a paint whose name read landed before a
+// concurrent rename's Save could push AFTER that rename's refresh, and
+// ShowClaimQR's unconditional push would put the pre-rename label back on
+// screen with nothing to repaint it until the next online/topic transition.
+// The url is built by the caller, outside the lock, so renames never queue
+// behind the connect-URL's own reads; the critical section is the name read
+// and the (non-blocking) push only. Lock edge deviceNameMu → setupui.mu is
+// the one setDeviceName already establishes, one-way.
+func (e *executor) paintClaimQR(url string) {
+	e.deviceNameMu.Lock()
+	defer e.deviceNameMu.Unlock()
+	e.setupUI().ShowClaimQR(url, e.deviceDisplayName())
 }
 
 // updateLadderFailureLatchedSince reports whether the OTA gate's failure latch
@@ -1006,6 +1023,7 @@ const (
 type setupNarrator interface {
 	ShowFinalizing()
 	ShowClaimQR(url string, deviceName string)
+	RefreshClaimQRName(resolve func() string)
 	ShowReady()
 	ShowFactoryReset()
 	ShowJoinFailed(reason string)
@@ -3514,6 +3532,37 @@ func (e *executor) deviceID() string {
 		return "FF1"
 	}
 	return id
+}
+
+// deviceDisplayName resolves the label the claim QR's guidance text names the
+// frame by: the owner-set name when one is stored, otherwise the serial
+// (deviceID). Mirrors resolveMDNSDeviceInfo's same fallback so the QR
+// guidance and the mDNS advertisement agree on what an unnamed (or
+// just-renamed) unit is called — a rename takes effect here on the next
+// claim-QR paint since this loads the record fresh rather than caching it,
+// unlike deviceID's hostname read it sits beside. (status.device_status's
+// deviceName field does NOT take this fallback: it deliberately reports ""
+// for an unnamed unit as a capability signal a controller gates rename UI
+// on, so it is not a third surface to match here.)
+// A read failure or corrupt record falls back to the serial rather than
+// erroring the claim flow over a cosmetic field.
+func (e *executor) deviceDisplayName() string {
+	record, err := devicename.Load(e.os, e.json)
+	if err != nil {
+		e.logger.Warn("Failed to read device name for claim QR", zap.Error(err))
+		return e.deviceID()
+	}
+	return e.displayNameFor(record.Name)
+}
+
+// displayNameFor applies deviceDisplayName's fallback to a name already in
+// hand — the stored form a rename or clear just wrote — so the paint-time
+// read and the rename-time repaint resolve an unnamed unit to the same label.
+func (e *executor) displayNameFor(storedName string) string {
+	if storedName != "" {
+		return storedName
+	}
+	return e.deviceID()
 }
 
 func (e *executor) setVolume(ctx context.Context, args []byte) (interface{}, error) {

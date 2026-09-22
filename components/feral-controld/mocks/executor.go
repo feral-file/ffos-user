@@ -201,6 +201,18 @@ func (mr *MocksetupNarratorMockRecorder) HideIfShowing(states ...interface{}) *g
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HideIfShowing", reflect.TypeOf((*MocksetupNarrator)(nil).HideIfShowing), states...)
 }
 
+// RefreshClaimQRName mocks base method.
+func (m *MocksetupNarrator) RefreshClaimQRName(resolve func() string) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "RefreshClaimQRName", resolve)
+}
+
+// RefreshClaimQRName indicates an expected call of RefreshClaimQRName.
+func (mr *MocksetupNarratorMockRecorder) RefreshClaimQRName(resolve interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RefreshClaimQRName", reflect.TypeOf((*MocksetupNarrator)(nil).RefreshClaimQRName), resolve)
+}
+
 // ShowClaimQR mocks base method.
 func (m *MocksetupNarrator) ShowClaimQR(url, deviceName string) {
 	m.ctrl.T.Helper()

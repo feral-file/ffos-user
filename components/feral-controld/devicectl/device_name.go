@@ -80,6 +80,15 @@ func (e *executor) setDeviceName(_ context.Context, args []byte) (interface{}, e
 	if e.nameObserver != nil {
 		e.nameObserver(stored)
 	}
+	// The claim QR is painted once per online/topic transition and then sits
+	// until the unit is claimed, so a rename made while it is showing must
+	// repaint the guidance text itself — mDNS just re-advertised the new
+	// label and the screen must not keep naming the old one. No-op unless
+	// claim_qr is the current narration (the resolver, and its serial read,
+	// run only then). Non-blocking push, so holding deviceNameMu across it
+	// is safe; the lock edge deviceNameMu → setupui.mu is one-way like the
+	// mediator edge above (setupui never calls back in).
+	e.setupUI().RefreshClaimQRName(func() string { return e.displayNameFor(stored) })
 
 	e.logger.Info("Device name set")
 
@@ -122,5 +131,11 @@ func (e *executor) clearDeviceName() error {
 	if e.nameObserver != nil {
 		e.nameObserver("")
 	}
+	// No claim-QR repaint here, unlike setDeviceName: the sole caller is
+	// factoryReset, which latches resetStaged before reaching this and paints
+	// factory_reset right after — a repaint now would briefly put the serial
+	// and an already-rotated connect URL over the reset narration (the
+	// invariant MaybeShowClaimQROnOnline's resetStaged check pins). A clear
+	// that comes through setDeviceName("") takes that path's repaint instead.
 	return err
 }
