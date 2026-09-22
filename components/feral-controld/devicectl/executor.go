@@ -18,6 +18,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
@@ -964,7 +965,7 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return false, true, false
 	}
-	e.setupUI().ShowClaimQR(e.buildDeviceConnectURL(ctx), e.deviceID())
+	e.setupUI().ShowClaimQR(e.buildDeviceConnectURL(ctx), e.deviceDisplayName())
 	return true, false, false
 }
 
@@ -3514,6 +3515,30 @@ func (e *executor) deviceID() string {
 		return "FF1"
 	}
 	return id
+}
+
+// deviceDisplayName resolves the label the claim QR's guidance text names the
+// frame by: the owner-set name when one is stored, otherwise the serial
+// (deviceID). Mirrors resolveMDNSDeviceInfo's same fallback so the QR
+// guidance and the mDNS advertisement agree on what an unnamed (or
+// just-renamed) unit is called — a rename takes effect here on the next
+// claim-QR paint since this loads the record fresh rather than caching it,
+// unlike deviceID's hostname read it sits beside. (status.device_status's
+// deviceName field does NOT take this fallback: it deliberately reports ""
+// for an unnamed unit as a capability signal a controller gates rename UI
+// on, so it is not a third surface to match here.)
+// A read failure or corrupt record falls back to the serial rather than
+// erroring the claim flow over a cosmetic field.
+func (e *executor) deviceDisplayName() string {
+	record, err := devicename.Load(e.os, e.json)
+	if err != nil {
+		e.logger.Warn("Failed to read device name for claim QR", zap.Error(err))
+		return e.deviceID()
+	}
+	if record.Name != "" {
+		return record.Name
+	}
+	return e.deviceID()
 }
 
 func (e *executor) setVolume(ctx context.Context, args []byte) (interface{}, error) {

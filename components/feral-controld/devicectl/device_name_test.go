@@ -197,3 +197,59 @@ func TestClearDeviceName_AnnouncesTheFallbackEvenWhenClearFails(t *testing.T) {
 	assert.Equal(t, []string{""}, announced,
 		"the fallback must be announced even when the disk clear failed")
 }
+
+// TestDeviceDisplayName_PrefersOwnerNameOverSerial pins the bug where the
+// claim QR's guidance text was built from deviceID() (the serial, read once
+// from /etc/hostname and never anything else) instead of the current owner
+// name: after a rename, mDNS and device status picked up the new name — both
+// go through devicename.Load — but the claim-QR text stayed on the serial
+// forever. deviceDisplayName must resolve the same record the rename wrote.
+func TestDeviceDisplayName_PrefersOwnerNameOverSerial(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).
+		Return([]byte(`{"name":"Living Room"}`), nil)
+
+	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON()}
+
+	assert.Equal(t, "Living Room", e.deviceDisplayName())
+}
+
+// TestDeviceDisplayName_FallsBackToSerialWhenUnnamed covers the unnamed and
+// cleared-name cases: both must fall back to the serial, matching
+// resolveMDNSDeviceInfo's and status.device_status's own fallback so every
+// surface agrees on what an unnamed unit is called.
+func TestDeviceDisplayName_FallsBackToSerialWhenUnnamed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).
+		Return(nil, errors.New("no such file"))
+	mockOS.EXPECT().IsNotExist(gomock.Any()).Return(true)
+	mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).
+		Return([]byte("FF1-8EVTK3RE\n"), nil)
+
+	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON()}
+
+	assert.Equal(t, "FF1-8EVTK3RE", e.deviceDisplayName())
+}
+
+// TestDeviceDisplayName_FallsBackToSerialOnCorruptRecord: a corrupt name
+// record must not error the claim QR over a cosmetic field.
+func TestDeviceDisplayName_FallsBackToSerialOnCorruptRecord(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).
+		Return([]byte("not json"), nil)
+	mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).
+		Return([]byte("FF1-8EVTK3RE\n"), nil)
+
+	e := &executor{logger: zap.NewNop(), os: mockOS, json: wrapper.NewJSON()}
+
+	assert.Equal(t, "FF1-8EVTK3RE", e.deviceDisplayName())
+}
