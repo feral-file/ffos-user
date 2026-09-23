@@ -352,9 +352,10 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 						Verdict: ProbeInconclusive,
 						Err:     ctx.Err(),
 					}
+					p.headerSlots.Release(probeHeaderBudgetWeight(sources[i]))
 					continue
 				}
-				results[i] = p.probeOneWithinHeaderBudget(ctx, sources[i])
+				results[i] = p.probeOne(ctx, sources[i])
 				if results[i].Verdict == ProbeAlive {
 					// This is an admission check, not a playlist health audit.
 					// One reachable source rules out rejecting the cast; waiting
@@ -363,10 +364,24 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 					// verdicts and cancel peers under the same resource bounds.
 					cancel()
 				}
+				p.headerSlots.Release(probeHeaderBudgetWeight(sources[i]))
 			}
 		}()
 	}
 	for _, i := range uniqueIndices {
+		// Reserve the shared header budget in playlist order before dispatch.
+		// Sixteen workers can otherwise race for only eight TLS slots: later
+		// slow sources may take them all while the first, reachable artwork
+		// waits for a timeout. Workers release every reservation, even if
+		// another source proves reachability before they start.
+		if err := p.headerSlots.Acquire(ctx, probeHeaderBudgetWeight(sources[i])); err != nil {
+			results[i] = SourceProbeResult{
+				Source:  redactSourceForLog(sources[i]),
+				Verdict: ProbeInconclusive,
+				Err:     err,
+			}
+			continue
+		}
 		indices <- i
 	}
 	close(indices)
@@ -382,24 +397,6 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 		}
 	}
 	return results
-}
-
-// probeOneWithinHeaderBudget admits the only part of a source preflight that
-// can retain response headers. headerSlots is shared by every production
-// SourceProber instance, so concurrent casts cannot multiply the memory bound
-// by widening or disabling the command storm gate. Waiting past the phase
-// ceiling is Inconclusive, preserving the preflight's fail-open contract.
-func (p *sourceProber) probeOneWithinHeaderBudget(ctx context.Context, source string) SourceProbeResult {
-	weight := probeHeaderBudgetWeight(source)
-	if err := p.headerSlots.Acquire(ctx, weight); err != nil {
-		return SourceProbeResult{
-			Source:  redactSourceForLog(source),
-			Verdict: ProbeInconclusive,
-			Err:     err,
-		}
-	}
-	defer p.headerSlots.Release(weight)
-	return p.probeOne(ctx, source)
 }
 
 func probeHeaderBudgetWeight(source string) int64 {
