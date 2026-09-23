@@ -103,12 +103,6 @@ func DefaultGateConfig() GateConfig {
 		// write when the requested values already match, so a repeated
 		// identical set costs no flash write at all.
 		commands.CMD_SET_CONTENT_POLICY: disruptive,
-		// setSignatureVerificationMode is a persisted eMMC write reachable
-		// from the unauthenticated LAN hub, and its value governs whether
-		// the device's primary function is refused; alternating values
-		// defeats any unchanged-early-return. Same tier as the other
-		// persisted settings: choosing a policy is a rare deliberate act.
-		commands.CMD_SET_SIGNATURE_VERIFICATION_MODE: disruptive,
 
 		// User-initiated power toggles: loosely capped (executor coalesces).
 		commands.CMD_SLEEP_NOW: userAction,

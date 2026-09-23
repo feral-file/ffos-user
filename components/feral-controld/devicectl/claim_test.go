@@ -642,8 +642,6 @@ func resetExecutorWithCleanup(t *testing.T, ctrl *gomock.Controller, cleanup Bro
 	mockOS := mocks.NewMockOS(ctrl)
 	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
 	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
-	mockOS.EXPECT().Remove(constants.SIGNATURE_VERIFICATION_FILE).Return(nil)
-	mockOS.EXPECT().Remove(constants.SIGNATURE_VERIFICATION_FILE + ".tmp").Return(nil)
 
 	e := &executor{
 		logger:        logger,
@@ -687,8 +685,6 @@ func stagedResetExecutor(t *testing.T, ctrl *gomock.Controller, unitOK bool) (*e
 	// Clear removes the staged temp first (resold-frame leak guard).
 	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
 	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
-	mockOS.EXPECT().Remove(constants.SIGNATURE_VERIFICATION_FILE).Return(nil)
-	mockOS.EXPECT().Remove(constants.SIGNATURE_VERIFICATION_FILE + ".tmp").Return(nil)
 
 	spy := &narratorSpy{}
 	e := &executor{
@@ -788,8 +784,6 @@ func TestFactoryReset_StuckResetWatchdogArms(t *testing.T) {
 	// Clear removes the staged temp first (resold-frame leak guard).
 	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
 	mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
-	mockOS.EXPECT().Remove(constants.SIGNATURE_VERIFICATION_FILE).Return(nil)
-	mockOS.EXPECT().Remove(constants.SIGNATURE_VERIFICATION_FILE + ".tmp").Return(nil)
 
 	// No narratorSpy here: the watchdog fires on its own goroutine, and the spy
 	// is not synchronized. The lazily-built real Service is.

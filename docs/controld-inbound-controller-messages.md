@@ -142,39 +142,6 @@ source preflight notes for the conditions that are deliberately never
 rejected (scheduled playlists, cached captures, and every non-definitive
 probe outcome).
 
-The third is the **strict-mode signature rejection** on `displayPlaylist`
-(feral-file/ffos-user#307): when the device's signature verification mode is
-`strict` (see `setSignatureVerificationMode`) and the cast's DP-1 verdict is
-not `valid` — unsigned, invalid, or unverifiable (the offline cached copy
-carries no verdict) — the cast is rejected at accept time, before any
-preflight or player write, and the controller receives a reliable RPC
-response whose `message` body is:
-
-```json
-{
-  "ok": false,
-  "error": "sigInvalid",
-  "command": "displayPlaylist",
-  "message": "sigInvalid: playlist rejected by strict signature verification (signature invalid: payload_hash mismatch)",
-  "signatureStatus": "invalid"
-}
-```
-
-`ok: false` is contractual. `signatureStatus` is `invalid` or `unsigned`, and
-absent when the document carried no verdict at all. The parenthesized reason
-is drawn from a closed vocabulary: `signature invalid: <payload_hash mismatch
-| signature invalid | unsupported alg | malformed signature>`, `unsigned`,
-`unsigned; legacy signature ignored`, `malformed signature`, `document too
-large`, `too many signatures (> 16)`, or `cached copy carries no verdict`. It
-never contains anything the document itself supplied — no role, algorithm or
-key id string — and never a URL. (The owner-facing cast reply's `signers[]`
-is where the document's own `role`/`alg`/`kid` are reported.) The LAN hub reports
-the same condition as HTTP `422`, body = the same message text. The command
-was not applied and the previous artwork keeps playing. This is a policy
-outcome the owner chose, not "device busy": the caster must sign the document
-(or the owner must relax the mode) before retrying. `silent` and `notify`
-never reject.
-
 ## Shared Success Responses
 
 Most side-effect commands return:
@@ -297,21 +264,10 @@ Current success response example:
     "volume": 75,
     "isMuted": false,
     "displayURL": "http://127.0.0.1:8080/",
-    "deviceName": "Living Room",
-    "signatureVerificationMode": "notify"
+    "deviceName": "Living Room"
   }
 }
 ```
-
-`signatureVerificationMode` is the owner's DP-1 signature verification policy
-(see `setSignatureVerificationMode`): `silent`, `notify`, or `strict`. Like
-`deviceName` its PRESENCE is the capability signal a controller gates the
-setting on, and it carries the default `notify` on a unit nobody configured.
-A record that cannot be read reports (and applies) that default. It is
-**absent** while the daemon's `signatureVerification.disabled` config switch
-is on: the verifier is off, no mode can be enforced, and a controller must
-hide the setting rather than show a "strict" nothing applies
-(`setSignatureVerificationMode` refuses in that state too).
 
 `deviceName` is the owner-set display label (see `setDeviceName`). Like
 `contract`, it is **always present** on firmware that supports it and carries
@@ -543,15 +499,15 @@ siblings as `unverified`. The outcome is one of three `signatureStatus` values:
 least one fails: tampered content, placeholder or wrong-key signature,
 unsupported `alg`, malformed entry), or `unsigned` (no `signatures[]`; a
 legacy v1.0 `signature` string alone also counts as unsigned and is flagged).
-What the verdict does is the owner's choice, the per-device **verification
-mode** (`setSignatureVerificationMode`, reported as
-`device_status.signatureVerificationMode`, default `notify`): under `silent`
-and `notify` every cast proceeds and the verdict is reported on the reply
-below, in `player_status`, and in one log line per cast (`notify` will
-additionally show it on the wall once the player toast ships); under `strict`
-anything not proven `valid` is rejected with the standardized `sigInvalid`
-envelope. Source kind never changes the outcome: an inline cast from the
-paired app is judged exactly like a playlist fetched by URL. Validity is cryptographic only: it proves the document is what the
+Verification is informational only: the cast reply, `player_status`, and device
+logs retain diagnostic verdicts, but signatures never block playback or trigger
+alerts. The silent/notify/strict modes and their setter are retired, and existing
+`signature-verification.json` records are ignored. `device_status` omits the
+mode field, which also hides the setting in older apps. Release this daemon
+before or with the phone change that removes the setting, so older Strict
+devices cannot be left with a hidden blocking preference.
+
+Validity is cryptographic only: it proves the document is what the
 key named in each `kid` signed, not that the signer is trusted. The
 `signatureVerification.disabled` config flag skips verification entirely and
 omits every field below (the shape old firmware has).
@@ -684,14 +640,6 @@ Current error cases:
 - Player response is not `{"message":{"ok":true}}`; this records playback
   failure metrics but the raw player response is still returned if CDP
   succeeded.
-- A signature verdict of `invalid` or `unsigned` is an error case ONLY when
-  the device's verification mode is `strict`: standardized `sigInvalid`
-  rejection — see the standardized error envelopes near the top of this
-  document for the RPC body and the LAN hub's 422 mapping. Under `silent`
-  and `notify` the cast proceeds and the verdict is reported on the success
-  reply (see above). Under `strict` a cast served from the offline cached
-  copy is rejected too, since it carries no verdict.
-
 - Every resolved item source definitively unreachable (source preflight,
   #304), unless the playlist is `displayAt`-scheduled or has a cached
   offline capture: standardized `sourceUnreachable` rejection — see the
@@ -704,9 +652,8 @@ Current error cases:
   health audit. Completed verdicts still govern a policy change that removes
   the reachable item; unprobed sources cannot be treated as dead.
 
-Current relayer error response: the `sourceUnreachable` and strict-mode
-`sigInvalid` rejections above are standardized (both `ok:false` RPC bodies,
-both HTTP `422` on the LAN hub); all other processing failures remain
+Current relayer error response: the `sourceUnreachable` rejection above is
+standardized (`ok:false` RPC body, HTTP `422` on the LAN hub); all other processing failures remain
 non-standardized and are logged as command failures.
 
 ### displayDefaultPlaylist
@@ -1041,67 +988,6 @@ Current error cases:
 (~1 per 5 s, deduped): every accepted change is a persisted write plus a
 full mDNS re-registration, so a flood of renames answers with the
 standardized command-storm rejection above rather than churning the LAN.
-
-Current relayer error response: none standardized; command failure is logged.
-
-### setSignatureVerificationMode
-
-Purpose: choose what a non-valid DP-1 signature verdict does to a
-`displayPlaylist` cast on this Art Computer (feral-file/ffos-user#307).
-
-Example:
-
-```json
-{
-  "messageID": "msg-sigmode-1",
-  "message": {
-    "command": "setSignatureVerificationMode",
-    "request": {
-      "mode": "strict"
-    }
-  }
-}
-```
-
-`mode` is exactly one of:
-
-- `silent` — every cast plays; the verdict is logged and reported only.
-- `notify` — every cast plays; a non-valid verdict is also shown on the wall
-  (once the player toast ships). The default.
-- `strict` — anything not proven `valid` is rejected with the standardized
-  `sigInvalid` envelope: unsigned, invalid, and unverifiable documents alike,
-  which today includes every cast the mobile app authors itself (they carry
-  no signature until app-side signing ships) and casts served from the
-  offline cached copy. The owner opts into this knowingly.
-
-Current success response: `{"ok": true, "signatureVerificationMode": "strict"}` —
-the stored value, which controllers should adopt. The record is
-`/home/feralfile/.state/signature-verification.json`, read on every cast, so
-the change applies to the next cast with no restart.
-
-Changing to `silent` or `notify` also re-drives a displayAt cutover the
-scheduler refused while the mode was `strict` (a refusal arms no retry, and
-past the schedule's final boundary there is no timer), so the wall does not
-stay on the pre-cutover cohort until an unrelated wake. Only a cohort not yet
-delivered is pushed; a mode change never re-casts what is already on screen.
-A factory reset clears the record, so a unit handed on returns to `notify`.
-
-Error cases — the request is rejected before anything is written, so no
-record changes and the stored mode (if any) still stands:
-
-- `invalid arguments: mode must be one of silent, notify, strict` — `mode` is
-  absent, not a string, or outside the vocabulary (case-sensitive). The
-  supplied value is never echoed.
-- `factory reset in progress` — a factory reset has staged.
-- `signature verification is disabled by device configuration; the mode
-  cannot be set` — the daemon's `signatureVerification.disabled` switch is on,
-  so no mode could be enforced; `getDeviceStatus` also omits
-  `signatureVerificationMode` in that state.
-- a state-directory creation, temp write, or rename failure (I/O error).
-
-`setSignatureVerificationMode` is classified as a disruptive command in the
-storm gate (~1 per 5 s, deduped): a persisted write reachable from the
-unauthenticated LAN hub whose value governs whether casts are refused.
 
 Current relayer error response: none standardized; command failure is logged.
 
@@ -2920,13 +2806,6 @@ Request: exactly `{"recordId": "<opaque id from getRecentlyPlayed>"}`. Any
 other field is rejected rather than ignored — the storm gate dedupes on the
 whole arguments map while this command uses only `recordId`, so an ignored
 extra field would miss dedupe and repeat the same resolve-and-replay work.
-
-A replay is **not** re-verified against the signature policy. The document is
-rebuilt on the device from a retained item — one work, no signature, no
-publisher to have signed it — so verifying it could only ever answer
-"unsigned": without this, every History tap would raise the signature notice on
-the wall, and a strict device could not replay its own history at all. The
-provenance check happened when the work was first cast.
 
 The command never accepts a controller-supplied source. Controld resolves the
 opaque record on the device, rebuilds a one-work unsigned DP-1 call from the

@@ -1898,7 +1898,6 @@ func (f *fakePlaylistScheduler) ClearThenWithPlayerPush(fn func() bool) {
 // SetPushObserver satisfies the interface; the fake never pushes on its own,
 // so the observer is never called.
 func (f *fakePlaylistScheduler) SetPushObserver(func(playlistschedule.PushPhase)) {}
-func (f *fakePlaylistScheduler) SetPushGate(func(*dp1.Playlist) error)            {}
 func (f *fakePlaylistScheduler) SetInlineDynamicSource(p *dp1.Playlist) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1909,7 +1908,6 @@ func (f *fakePlaylistScheduler) InlineDynamicSource() *dp1.Playlist {
 	defer f.mu.Unlock()
 	return f.inlineDynamic
 }
-func (f *fakePlaylistScheduler) RecomputeIfStale(context.Context) {}
 
 func (f *fakePlaylistScheduler) WithPlayerPush(fn func()) {
 	f.mu.Lock()
