@@ -33,3 +33,15 @@ The companion player regression proves that raw renderer identities become UUIDs
 before they enter composition status.
 
 Before broadcasting notifications, controld drops any showing key that is not a canonical UUID. This also protects mixed-version devices whose player still emits an older source-bearing identity. Other composition fields remain available.
+
+
+The separate optional `deviceSettings.framing` field is the saved Art Computer
+preference: `artwork`, `fit`, or `fill`. It survives the same typed decode and
+lightweight notification path, including when nothing is playing. Omission stays
+omission so the app can detect older firmware. It must not be derived from
+`scaling`, which describes the effective render after authored preferences,
+current-showing adjustments, and a permitted device framing override.
+The existing `updateDisplaySettings` command carries partial saved writes
+`{framing: "artwork" | "fit" | "fill", isSaved: true}` unchanged to the player;
+player storage owns persistence. `TestDeviceFramingRoundTrip` covers all three
+modes through the actual notification marshal independently of effective scaling.
