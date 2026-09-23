@@ -698,7 +698,11 @@ Current error cases:
   standardized error envelopes near the top of this document for the RPC body (`ok:false`, capped index+status detail)
   and the LAN hub's 422 mapping. Anything short of a definitive dead
   verdict for every item (network errors, timeouts, 401/403/406/407/408/
-  416/429, 5xx) fails open and the cast proceeds.
+  416/429, 5xx) fails open and the cast proceeds. The preflight stops after
+  its first reachable or inline source; unfinished probes are canceled and
+  remain inconclusive. It is an all-dead admission check, not a full playlist
+  health audit. Completed verdicts still govern a policy change that removes
+  the reachable item; unprobed sources cannot be treated as dead.
 
 Current relayer error response: the `sourceUnreachable` and strict-mode
 `sigInvalid` rejections above are standardized (both `ok:false` RPC bodies,
