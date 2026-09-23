@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
@@ -1103,7 +1104,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					h.logger.Debug("displayPlaylist: displayAt-scheduled playlist; source preflight skipped",
 						zap.Int("items", len(sources)))
 				} else {
+					probeStarted := time.Now()
 					probeResults := h.sourceProber.ProbeSources(ctx, sources)
+					h.logger.Info("displayPlaylist: source preflight completed",
+						zap.Int("items", len(sources)),
+						zap.Duration("duration", time.Since(probeStarted)))
 					// Keyed by the RAW source, taken from the input slice by
 					// index, NOT by result.Source: that field is
 					// query-redacted and truncated for the daemon log (see
@@ -1224,7 +1229,8 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// only sources already proven dead. Re-check the retained
 				// verdicts against the final set rather than re-probing: the
 				// answers are seconds old and the items are a subset of the
-				// ones probed.
+				// original set. Early acceptance may leave some Inconclusive:
+				// removing the reachable witness must not turn those into Dead.
 				if removed && !rescuedByCache {
 					if deadResults, allDead := allSourcesDead(playlist, probeVerdicts); allDead {
 						if h.offlineCache != nil && h.kioskReplay != nil && h.offlineCache.HasReplayableItem(playlistSources(playlist)...) {

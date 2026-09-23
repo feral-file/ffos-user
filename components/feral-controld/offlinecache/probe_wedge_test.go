@@ -70,7 +70,7 @@ func (c *blockingProbeHTTPClient) Do(req *go_http.Request) (*go_http.Response, e
 	select {
 	case <-c.release:
 		return &go_http.Response{
-			StatusCode: go_http.StatusOK,
+			StatusCode: go_http.StatusGone,
 			Body:       io.NopCloser(strings.NewReader("")),
 			Header:     make(go_http.Header),
 		}, nil
@@ -275,23 +275,25 @@ func TestSourceProber_OverlongSourceIsInconclusive(t *testing.T) {
 }
 
 func TestSourceProber_ResultsKeepInputOrder(t *testing.T) {
-	alive := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
-		w.WriteHeader(go_http.StatusOK)
+	missing := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
+		w.WriteHeader(go_http.StatusNotFound)
 	}))
-	defer alive.Close()
+	defer missing.Close()
 	dead := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
 		go_http.Error(w, "gone", go_http.StatusGone)
 	}))
 	defer dead.Close()
 
-	sources := []string{dead.URL, "data:text/plain,hi", alive.URL}
+	sources := []string{dead.URL, "data:text/plain", missing.URL}
 	results := newTestProber().ProbeSources(context.Background(), sources)
 
 	require.Len(t, results, 3)
 	assert.Equal(t, ProbeDead, results[0].Verdict)
 	assert.Equal(t, go_http.StatusGone, results[0].Status)
-	assert.Equal(t, ProbeInline, results[1].Verdict)
-	assert.Equal(t, ProbeAlive, results[2].Verdict)
+	assert.Equal(t, ProbeDead, results[1].Verdict)
+	assert.Equal(t, 0, results[1].Status)
+	assert.Equal(t, ProbeDead, results[2].Verdict)
+	assert.Equal(t, go_http.StatusNotFound, results[2].Status)
 }
 
 // TestSourceProber_SpentContextIsInconclusive pins the ceiling shape: a
@@ -453,7 +455,7 @@ func TestSourceProber_RedirectsAreAnswersNotFollowed(t *testing.T) {
 // TestSourceProber_RedirectChainCannotExceedBudget pins the request-count
 // arithmetic end to end: a full budget of sources, every one answering
 // with a redirect (the amplification shape from the #310 review), still
-// produces exactly maxProbeAttempts outbound requests — not
+// produces at most maxProbeAttempts outbound requests — not
 // maxProbeAttempts x maxSourceRedirects.
 func TestSourceProber_RedirectChainCannotExceedBudget(t *testing.T) {
 	var requests atomic.Int32
@@ -473,16 +475,21 @@ func TestSourceProber_RedirectChainCannotExceedBudget(t *testing.T) {
 	}
 	results := newTestProber().ProbeSources(context.Background(), sources)
 
-	assert.Equal(t, int32(maxProbeAttempts), requests.Load(),
+	assert.Positive(t, requests.Load())
+	assert.LessOrEqual(t, requests.Load(), int32(maxProbeAttempts),
 		"total outbound requests are bounded by the probe budget, redirects included")
 	require.Len(t, results, len(sources))
+	alive := 0
 	for i, r := range results {
-		if i < maxProbeAttempts {
-			assert.Equal(t, ProbeAlive, r.Verdict, "item %d: a redirect answer is alive", i)
+		if r.Verdict == ProbeAlive {
+			alive++
+			assert.Less(t, i, maxProbeAttempts)
+			assert.Equal(t, go_http.StatusMovedPermanently, r.Status)
 		} else {
-			assert.Equal(t, ProbeInconclusive, r.Verdict, "item %d: over budget", i)
+			assert.Equal(t, ProbeInconclusive, r.Verdict, "item %d: canceled or over budget", i)
 		}
 	}
+	assert.Positive(t, alive, "retain the redirect that allowed early acceptance")
 }
 
 // TestSourceProber_NoConnectionReuseAcrossProbes pins the #311 round-2

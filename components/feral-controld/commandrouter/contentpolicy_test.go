@@ -653,55 +653,72 @@ func TestSyncContentPolicySerializesWithSchedulerPushes(t *testing.T) {
 
 // A policy tightened while the probe runs can remove the very item whose
 // reachability made the cast acceptable, leaving only sources already proven
-// dead. The cast must not then report success with nothing renderable on it.
-func TestDisplayPlaylistRejectsWhenTheProjectionLeavesOnlyDeadSources(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	player := mocks.NewMockCDP(ctrl)
-	poller := mocks.NewMockStatusPoller(ctrl)
-	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
-	require.NoError(t, err)
-	store.Lock()
-	_, err = store.UpdateLocked(true, false) // mature allowed, so the live item survives the first filter
-	store.Unlock()
-	require.NoError(t, err)
-
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl), poller,
-		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
-	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
-
-	const live = "https://live.example/mature"
-	const dead = "https://dead.example/general"
-	commandrouter.SetSourceProber(h, &verdictProber{
-		verdicts: map[string]offlinecache.SourceProbeVerdict{
-			live: offlinecache.ProbeAlive,
-			dead: offlinecache.ProbeDead,
-		},
-		during: func() {
-			// The owner turns mature content off while the probe is running,
-			// which removes the one reachable item.
+// dead. Unknown sources after an early exit must continue to fail open.
+func TestDisplayPlaylistProjectionRechecksKnownSourceVerdicts(t *testing.T) {
+	for _, verdict := range []offlinecache.SourceProbeVerdict{offlinecache.ProbeDead, offlinecache.ProbeInconclusive} {
+		t.Run(string(verdict), func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			player := mocks.NewMockCDP(ctrl)
+			poller := mocks.NewMockStatusPoller(ctrl)
+			store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
+			require.NoError(t, err)
 			store.Lock()
-			_, updateErr := store.UpdateLocked(false, false)
+			_, err = store.UpdateLocked(true, false) // mature allowed, so the live item survives the first filter
 			store.Unlock()
-			require.NoError(t, updateErr)
-		},
-	}, zaptest.NewLogger(t))
+			require.NoError(t, err)
 
-	// No player.EXPECT(): nothing renderable must reach the player.
-	poller.EXPECT().ForceRefresh().AnyTimes()
+			h := commandrouter.New(newRoutableExecutor(ctrl), player, mocks.NewMockDP1(ctrl), poller,
+				nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+			commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
-	_, err = h.Process(context.Background(), commands.Command{
-		Type: commands.CMD_DISPLAY_PLAYLIST,
-		Arguments: map[string]any{"dp1_call": map[string]interface{}{
-			"dpVersion": "1.1.0", "title": "x",
-			"items": []interface{}{
-				map[string]interface{}{"source": live, "contentRating": "mature"},
-				map[string]interface{}{"source": dead, "contentRating": "general"},
-			},
-		}},
-	})
-	require.Error(t, err)
-	var unreachable *commandrouter.SourceUnreachableError
-	require.ErrorAs(t, err, &unreachable)
+			const live = "https://live.example/mature"
+			const dead = "https://dead.example/general"
+			commandrouter.SetSourceProber(h, &verdictProber{
+				verdicts: map[string]offlinecache.SourceProbeVerdict{
+					live: offlinecache.ProbeAlive,
+					dead: verdict,
+				},
+				during: func() {
+					// The owner turns mature content off while the probe is running,
+					// which removes the one reachable item.
+					store.Lock()
+					_, updateErr := store.UpdateLocked(false, false)
+					store.Unlock()
+					require.NoError(t, updateErr)
+				},
+			}, zaptest.NewLogger(t))
+
+			// A canceled source remains unknown; the filtered-out witness must
+			// never reach the player even on the fail-open path.
+			if verdict == offlinecache.ProbeInconclusive {
+				player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+					func(_ string, params map[string]interface{}) (interface{}, error) {
+						expression := params["expression"].(string)
+						require.Contains(t, expression, dead)
+						require.NotContains(t, expression, live)
+						return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+					})
+			}
+			poller.EXPECT().ForceRefresh().AnyTimes()
+
+			_, err = h.Process(context.Background(), commands.Command{
+				Type: commands.CMD_DISPLAY_PLAYLIST,
+				Arguments: map[string]any{"dp1_call": map[string]interface{}{
+					"dpVersion": "1.1.0", "title": "x",
+					"items": []interface{}{
+						map[string]interface{}{"source": live, "contentRating": "mature"},
+						map[string]interface{}{"source": dead, "contentRating": "general"},
+					},
+				}},
+			})
+			if verdict == offlinecache.ProbeDead {
+				var unreachable *commandrouter.SourceUnreachableError
+				require.ErrorAs(t, err, &unreachable)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 // verdictProber answers a fixed verdict per source and runs during() while the
