@@ -573,6 +573,50 @@ func (s *Service) ShowClaimQR(url string, deviceName string) {
 	s.push(req)
 }
 
+// RefreshClaimQRName rewrites only the device_name of the claim-QR narration
+// when claim_qr is the current intent; any other intent (or none) is left
+// untouched and resolve is never called. It exists because the claim QR is
+// painted once per online/topic transition and then sits until the unit is
+// claimed, while a rename can land at any time over the LAN hub — without
+// this the guidance text would name the old label until an unrelated
+// repaint, while mDNS already advertised the new one. The url is carried
+// over from the cached intent rather than re-derived: the rename path has no
+// claim context, and the QR itself did not change.
+//
+// resolve is a callback rather than a value so the caller's fallback read
+// (the serial from /etc/hostname) happens only when there is a claim QR to
+// refresh — a rename on a claimed unit, or with another narrator up, costs
+// no disk read. It runs outside s.mu so a slow read never stalls another
+// narrator's push; the final pushIf re-checks the intent, so a narrator that
+// took the screen in between is never overwritten (same conditional-push
+// semantics as HideIfShowing).
+//
+// The url is taken from the intent at commit time, inside pushIf's critical
+// section, never from the pre-resolve snapshot: a topic (re)assignment
+// re-paints claim_qr with a NEW device-connect url from its own goroutine,
+// and a rename racing it across the unlocked resolve gap would otherwise
+// commit the old url back over it — a QR the app cannot claim with, and
+// nothing repaints until the next unrelated transition.
+func (s *Service) RefreshClaimQRName(resolve func() string) {
+	s.mu.Lock()
+	showing := stringField(s.last, "state") == stateClaimQR
+	s.mu.Unlock()
+	if !showing {
+		return
+	}
+	req := map[string]any{"state": stateClaimQR}
+	if deviceName := resolve(); strings.TrimSpace(deviceName) != "" {
+		req["device_name"] = deviceName
+	}
+	s.pushIf(req, func(last map[string]any) bool {
+		if stringField(last, "state") != stateClaimQR {
+			return false
+		}
+		req["url"] = stringField(last, "url")
+		return true
+	})
+}
+
 // ShowReady narrates that setup completed successfully.
 func (s *Service) ShowReady() {
 	s.push(map[string]any{"state": stateReady})

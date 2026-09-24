@@ -39,7 +39,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
-	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
@@ -248,30 +247,6 @@ func main() {
 	err = app.run(ctx, config)
 	if err != nil {
 		app.Logger.Fatal("Failed to run app", zap.Error(err))
-	}
-}
-
-// toastPlaylist aliases dp1.Playlist so the scheduler push gate/toaster
-// callbacks can be spelled inside run(), where the local dp1 service variable
-// shadows the dp1 package.
-type toastPlaylist = dp1.Playlist
-
-// newToastSessionDialer gives the signature toast its own short-lived CDP
-// session per send — see playertoast's package doc for why it must never
-// share the synchronous cdp client with casts. It reuses the offline-cache
-// page dialer (the same /json discovery and event-driven session the kiosk
-// replay attaches with). File scope because run() shadows the context
-// package name.
-func newToastSessionDialer(
-	endpoint string,
-	httpClient wrapper.HTTPClient,
-	dialer wrapper.WebSocketDialer,
-	json wrapper.JSON,
-	io wrapper.IO,
-	logger *zap.Logger,
-) playertoast.Dialer {
-	return func(ctx context.Context) (playertoast.Session, error) {
-		return offlinecache.DialPageSession(ctx, endpoint, httpClient, dialer, json, io, logger)
 	}
 }
 
@@ -1045,17 +1020,11 @@ func initializeApp(
 	// DP1
 	// DP-1 signature verification (feral-file/ffos-user#307). Verdicts are
 	// computed on every fetched or inline playlist and reported on the cast
-	// reply and player_status; whether a verdict changes what plays is the
-	// per-device mode's business (later phase). The config flag is the kill
+	// reply and player_status for diagnostics, without changing what plays
+	// or showing notices. The config flag is the kill
 	// switch for a verifier/canonicalization divergence (see
 	// config.SignatureVerificationConfig).
 	sigVerifyEnabled := config.Get().SignatureVerificationEnabled()
-	// The mode setting and its status field exist only while the verifier
-	// runs: with the kill switch on, nothing could enforce a stored mode.
-	executor.SetSignatureVerificationCapability(func() bool { return sigVerifyEnabled })
-	if ds, ok := deviceStatus.(interface{ SetSignatureVerificationCapability(func() bool) }); ok {
-		ds.SetSignatureVerificationCapability(func() bool { return sigVerifyEnabled })
-	}
 	if !sigVerifyEnabled {
 		logger.Warn("DP-1 signature verification disabled by config; casts carry no signature verdict")
 	}
@@ -1219,51 +1188,8 @@ func initializeApp(
 	// and the status poller (reads on every poll). Wired against the raw
 	// handler for the same reason as SetSourceProber above.
 	activeVerdict := &sigverify.Active{}
-	// The owner's mode is read from its record on every cast (one small file
-	// read next to a network-bound resolution), so a change from the app
-	// applies to the next cast with no restart and no cache to invalidate. A
-	// record that cannot be loaded applies the default and is logged, not
-	// cached, so the log names every cast it affected.
-	verificationMode := func() sigverify.Mode {
-		mode, err := sigverify.LoadMode(os, json)
-		if err != nil {
-			logger.Warn("Signature verification mode record unreadable; applying default", zap.String("default", string(sigverify.DefaultMode)), zap.Error(err))
-		}
-		return mode
-	}
-	// Shared across the cast, scheduler and refresher wiring blocks below;
-	// created only when verification runs.
-	var toastDispatcher *playertoast.Dispatcher
 	if sigVerifyEnabled {
-		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict, Mode: verificationMode}, logger)
-		// The on-screen notice for a non-valid cast (notify) or a strict
-		// rejection. One sender, shared by the cast path (SetPlayerToast) and
-		// the scheduler cutover/refusal hooks below. Reads the player manifest
-		// at the shipping path on every send, so an older bundle without the
-		// playerToast contract degrades to "no toast" rather than an error;
-		// ff-player ships the contract (paired-rollout: the player bundle lands
-		// before this daemon). Copy is owned by the player; controld only names
-		// the notice.
-		// One shared toast surface: a single-slot dispatcher. Every producer
-		// (the cast path via SetPlayerToast, the scheduler hooks below, and the
-		// refresher) submits non-blocking; the dispatcher sends at most one
-		// bounded toast at a time and a newer transition supersedes a queued
-		// older one, so a wedged player never delays a cast and a stale warning
-		// never lands over newer artwork (feral-file/ffos-user#307). Each
-		// send dials its own session to the kiosk page rather than riding the
-		// shared cdp client, so a slow player costs the toast alone, never a cast.
-		toastSender := playertoast.New(
-			newToastSessionDialer(cdpEndpoint, httpClient, webSocketDialer, json, io, logger),
-			setupui.DefaultContractPath, logger)
-		toastDispatcher = playertoast.NewDispatcher(context, toastSender, 2*time.Second, logger)
-		// Honor the NavigationPending park contract (player-session-recovery
-		// §3.2) like every other off-lane producer: a recovery navigation arms
-		// before its gate probes and bumps the generation (which Clears the
-		// dispatcher) only once Page.navigate succeeds, so the worker parks on
-		// the session before each send and drops at the handoff if one arms
-		// during it. Defaults for the park bounds.
-		toastDispatcher.SetNavigationSession(session, 0, 0)
-		commandrouter.SetPlayerToast(rawCmdHandler, toastDispatcher, logger)
+		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict}, logger)
 		// A displayAt-deferred cast parks its verdict as pending; the
 		// scheduler's own cutover push is the only point that proves the
 		// cohort reached the screen, so that is where it is promoted — and
@@ -1274,62 +1200,14 @@ func initializeApp(
 		// send and its accepted reply means the reply came from a page
 		// that is gone, and the new generation's own re-push promotes.
 		pushStarting, pushAccepted := activeVerdict.FencedPromoter(session.Generation)
-		// pushGenAtStart mirrors FencedPromoter's own fence for the toast: the
-		// generation captured as the cutover's send begins, re-checked in the
-		// toaster so a reply from a page that reloaded across the send toasts
-		// nothing over its replacement. Set/read under the scheduler's pushMu.
-		var pushGenAtStart uint64
-		var pushSendEpoch uint64
 		playlistScheduler.SetPushObserver(func(phase playlistschedule.PushPhase) {
 			switch phase {
 			case playlistschedule.PushStarting:
-				pushGenAtStart = session.Generation()
 				pushStarting()
-				// Pre-send toast invalidation, paired with the verdict's:
-				// drop any queued warning before this cutover lands, and
-				// capture the epoch it creates so PushAccepted's notify is
-				// fenced to it (#307).
-				pushSendEpoch = toastDispatcher.ClearAndEpoch()
 			case playlistschedule.PushAccepted:
 				pushAccepted()
 			}
 		})
-		// Strict mode judges a scheduler-owned cutover AT PUSH TIME against
-		// the cast-time verdict the scheduler's cached document still carries
-		// (cloned by pointer, never persisted), so a schedule accepted under
-		// notify cannot carry a non-valid cohort onto the screen after the
-		// owner switches to strict. The mode is read ONCE per cutover, in the
-		// gate, and the notice it implies is carried to PushAccepted via
-		// pushNotice/pushShow — never re-read — so a concurrent mode change
-		// cannot let a cohort display under notify and then be labeled
-		// rejected, or suppress an expected notice. gate and toaster for one
-		// push both run under the scheduler's pushMu (one push at a time), so
-		// the shared fields need no lock.
-		var pushNotice sigverify.Notice
-		var pushShow bool
-		// A refusal's signature_rejected is fenced to the epoch the gate
-		// snapshots before its mode read (ScheduledPushGate), so a generation
-		// hook that Clears the toast mid-gate suppresses it rather than being
-		// overwritten — the gate runs before PushStarting and has no send
-		// epoch of its own.
-		playlistScheduler.SetPushGate(commandrouter.ScheduledPushGate(
-			toastDispatcher, verificationMode, playlistScheduler.AuthorityToken,
-			func(notice sigverify.Notice, show bool) { pushNotice, pushShow = notice, show },
-		))
-		// The cohort reached the player (PushAccepted): emit the notice the
-		// gate decided for THIS push, or Clear a pending stale one — the
-		// cutover, not the accepting cast, is the transition it describes.
-		if toastable, ok := any(playlistScheduler).(interface {
-			SetPushToaster(func(*toastPlaylist))
-		}); ok {
-			toastable.SetPushToaster(commandrouter.ScheduledPushToaster(
-				toastDispatcher,
-				session.Generation,
-				func() uint64 { return pushGenAtStart },
-				func() uint64 { return pushSendEpoch },
-				func() (sigverify.Notice, bool) { return pushNotice, pushShow },
-			))
-		}
 		poller.SetVerificationLookup(func(id, url string) (string, bool) {
 			st, ok := activeVerdict.Lookup(id, url)
 			return string(st), ok
@@ -1357,11 +1235,6 @@ func initializeApp(
 	})
 	if sigVerifyEnabled {
 		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
-		playlist_refresher.SetSignatureVerificationMode(playlistRefresher, verificationMode, logger)
-		// The refresher shares the one toast dispatcher: a strict refusal or an
-		// accepted force-cast of a re-resolved feed document surfaces the same
-		// notice the cast path would (feral-file/ffos-user#307).
-		playlist_refresher.SetRefresherToaster(playlistRefresher, toastDispatcher, logger)
 		// Same generation fence for the refresher's force casts.
 		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
 	}
@@ -1432,19 +1305,6 @@ func initializeApp(
 	executor.SetDeviceNameObserver(func(name string) {
 		mediator.SetDeviceName(name)
 	})
-	// Relaxing the verification mode re-drives a displayAt cutover the
-	// scheduler's push gate refused under strict: that refusal arms no retry
-	// and, past the schedule's final boundary, leaves no timer, so without
-	// this the wall would hold the pre-cutover cohort until an unrelated
-	// wake or reconnect. RecomputeIfStale pushes only a cohort not yet
-	// delivered — a mode change never re-casts what is already on screen —
-	// and under strict the gate would refuse again, so it is not asked.
-	executor.SetVerificationModeObserver(func(mode sigverify.Mode) {
-		if mode == sigverify.ModeStrict {
-			return
-		}
-		playlistScheduler.RecomputeIfStale(context)
-	})
 
 	executor.SetClaimObserver(func(claimed bool) {
 		mediator.SetClaimed(claimed)
@@ -1491,17 +1351,10 @@ func initializeApp(
 	// would land after that round already re-attested the old verdict.
 	// Pending is untouched: playlist-recompute's re-push promotes it again.
 	if sigVerifyEnabled {
-		// Both seams replace the on-screen document with content this verdict
-		// no longer describes (a page-reload generation bump; the claim-time
-		// player-owned default playlist), so each drops the attested verdict
-		// AND any queued toast, or a stale warning could land over the new
-		// artwork (feral-file/ffos-user#307). toastDispatcher is non-nil here
-		// (created in the sigVerifyEnabled block above).
-		invalidateDisplayed := commandrouter.ComposeInvalidator(activeVerdict.ClearCurrent, toastDispatcher)
-		session.SetGenerationHook(invalidateDisplayed)
+		session.SetGenerationHook(activeVerdict.ClearCurrent)
 		// The claim-time displayDefaultPlaylist bypasses commandrouter, so
 		// it gets the same pre-send invalidation by its own seam.
-		devicectl.SetVerdictInvalidator(executor, invalidateDisplayed, logger)
+		devicectl.SetVerdictInvalidator(executor, activeVerdict.ClearCurrent, logger)
 	}
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))

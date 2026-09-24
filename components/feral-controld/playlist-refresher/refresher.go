@@ -20,7 +20,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
-	"github.com/feral-file/ffos-user/components/feral-controld/playertoast"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -158,77 +157,6 @@ type refresher struct {
 	// already cleared the slot), and the new generation's reconciliation
 	// establishes a fresh verdict. Mirrors commandrouter.sendCDPRequest.
 	sessionGeneration func() uint64
-	// verificationMode, when set (SetSignatureVerificationMode), returns the
-	// owner's current mode. Under strict, a refresh whose re-fetched document
-	// is not proven valid is NOT pushed: the schedule may have been replaced
-	// by a document the owner would have refused at cast time, and the
-	// refresher must not become the path around that refusal. nil ⇒ default
-	// (notify), which never skips.
-	verificationMode func() sigverify.Mode
-	// toast, when set (SetRefresherToaster), surfaces the signature notice for
-	// a feed-driven transition: a strict refusal, or an accepted force-cast of
-	// a re-resolved document. Non-blocking Notifier (the shared dispatcher);
-	// nil means no toast (feral-file/ffos-user#307).
-	toast playertoast.Notifier
-}
-
-// SetSignatureVerificationMode injects the mode getter onto r, if r is the
-// concrete refresher built by New (mirroring SetSignatureVerification's
-// contract). Must be called before Start.
-func SetSignatureVerificationMode(r Refresher, fn func() sigverify.Mode, logger *zap.Logger) {
-	setter, ok := r.(interface{ setSignatureVerificationMode(func() sigverify.Mode) })
-	if !ok {
-		logger.Warn("Playlist refresher does not support signature verification mode wiring")
-		return
-	}
-	setter.setSignatureVerificationMode(fn)
-}
-
-// SetRefresherToaster injects the shared toast surface onto r (if r is the
-// concrete refresher built by New), mirroring SetSignatureVerificationMode.
-func SetRefresherToaster(r Refresher, notifier playertoast.Notifier, logger *zap.Logger) {
-	setter, ok := r.(interface{ setToaster(playertoast.Notifier) })
-	if !ok {
-		logger.Warn("SetRefresherToaster: refresher does not support the toast seam")
-		return
-	}
-	setter.setToaster(notifier)
-}
-
-func (r *refresher) setToaster(notifier playertoast.Notifier) {
-	r.toast = notifier
-}
-
-// currentMode is the verification-mode snapshot for one refresh pass — read
-// once and threaded through the strict gate and the toast so a concurrent
-// setSignatureVerificationMode cannot relabel a transition mid-pass (#307).
-func (r *refresher) currentMode() sigverify.Mode {
-	if r.verificationMode == nil {
-		return sigverify.DefaultMode
-	}
-	return r.verificationMode()
-}
-
-// toastStrictRefusal emits the strict-refusal notice only if no newer display
-// transition intervened since epoch was snapshotted (before this feed
-// resolved). NotifyIfEpoch is atomic against every Notify/Clear — a newer
-// cast, default playback, scheduler cutover, or generation bump all Clear the
-// toast and advance the epoch — so a stale rejection never lands over the
-// replacement (feral-file/ffos-user#307). The epoch does NOT see a
-// future-only scheduled cast taking scheduler authority (no write, no
-// Clear), so authorityHeld travels with the notice and the dispatcher
-// re-runs it at the handoff.
-func (r *refresher) toastStrictRefusal(epoch uint64, mode sigverify.Mode, status sigverify.Status, authorityHeld func() bool) {
-	if r.toast == nil {
-		return
-	}
-	if notice, ok := sigverify.ToastFor(mode, status); ok {
-		r.toast.NotifyIfEpochGuarded(notice, epoch, authorityHeld)
-	}
-}
-
-func (r *refresher) setSignatureVerificationMode(fn func() sigverify.Mode) {
-	r.verificationMode = fn
 }
 
 // SetSessionGeneration injects the generation getter onto r, if r is the
@@ -486,17 +414,6 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	if r.scheduler != nil {
 		authorityToken = r.scheduler.AuthorityToken()
 	}
-	// Snapshot the display-transition token BEFORE the (possibly slow) feed
-	// resolution, so a strict refusal decided afterward can be fenced against
-	// a newer cast, default playback, or generation bump that replaced the
-	// artwork meanwhile. The epoch advances on every such transition (each
-	// Clears the toast); scheduler authority alone would miss a page-generation
-	// bump that does not change authority (feral-file/ffos-user#307).
-	var toastEpoch uint64
-	if r.toast != nil {
-		toastEpoch = r.toast.Epoch()
-	}
-
 	// Revert replay's Fetch-interception scope to whatever the player
 	// actually still displays if this pass fails: the SyncPlaylist call
 	// further down commits the NEW playlist's scope before the CDP send
@@ -577,8 +494,8 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist, ContentContext: playerStatus.ContentContext}
 			// Prefer the verified inline dynamic document the cast retained:
 			// player status drops the verdict (dp1.Playlist.Verification is
-			// json:"-"), so re-resolving its copy makes the strict check below
-			// treat every refresh as unverifiable and skip it. The retained
+			// json:"-"), so re-resolving its copy loses the original verdict
+			// in diagnostics. The retained
 			// source carries the verdict; ProcessDynamicPlaylist copies the
 			// struct by value, so the verdict survives hydration. Matched on
 			// id so a retained source from a superseded cast is never used
@@ -658,60 +575,6 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		// not.
 		r.retireBlockedCurrentWithoutASource(schedulerSource)
 		return r.handleRefreshError(err, kind, schedulerSource)
-	}
-
-	// Strict mode (#307): the same refusal the cast path applies, at the
-	// same point — after resolution, before anything touches replay scope,
-	// the scheduler, or the player. A refresh is the feed's chance to
-	// replace what is showing; if the replacement is not proven valid (or
-	// is the verdict-less cached copy), leave the current artwork alone and
-	// let the next pass try again. Reported as a successful no-op pass: this
-	// is policy, not a fault, and must not drive the startup escalation.
-	// castMode is the ONE mode read for this pass, reused for the toast below.
-	castMode := r.currentMode()
-	if r.activeVerdict != nil && castMode == sigverify.ModeStrict {
-		if playlist.Verification == nil || playlist.Verification.Status != sigverify.StatusValid {
-			reason := "cached copy carries no verdict"
-			if playlist.Verification != nil {
-				reason = playlist.Verification.Reason
-			}
-			r.logger.Warn("playlist refresh skipped by strict signature verification; current artwork left in place",
-				zap.String("kind", kind), zap.String("reason", reason))
-			// Strict refused this feed update: tell the wall (#307). Under
-			// strict a non-valid (or verdict-less) status toasts rejected.
-			var status sigverify.Status
-			if playlist.Verification != nil {
-				status = playlist.Verification.Status
-			}
-			// Fenced to BOTH tokens. The display-transition epoch (inside
-			// toastStrictRefusal) catches a cast, default playback or
-			// generation bump that replaced the artwork; the authority
-			// token catches a future-only scheduled cast, which takes
-			// scheduler authority for this URL WITHOUT a CDP send or toast
-			// Clear — so the epoch alone would let a slow refresh of the
-			// superseded source toast a rejection for a feed the scheduler
-			// will never show. Checked under WithPlayerPush, the same lock
-			// the send closure rechecks authority under, so it orders
-			// against that cast's own authority change rather than racing
-			// it (feral-file/ffos-user#307).
-			authorityHeld := func() bool {
-				return r.scheduler == nil || r.scheduler.AuthorityToken() == authorityToken
-			}
-			refuse := func() {
-				if !authorityHeld() {
-					r.logger.Debug("Strict refusal notice dropped: playlist authority changed during refresh resolution")
-					return
-				}
-				// authorityHeld also rides with the notice to its handoff.
-				r.toastStrictRefusal(toastEpoch, castMode, status, authorityHeld)
-			}
-			if r.scheduler != nil {
-				r.scheduler.WithPlayerPush(refuse)
-			} else {
-				refuse()
-			}
-			return nil
-		}
 	}
 
 	contentContext, contextErr := contentpolicy.NormalizeContext(schedulerSource.ContentContext)
@@ -916,15 +779,6 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				r.activeVerdict.ReconcileSoft(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
 			}
 		}
-		// A force cast replaces the artwork, so drop any queued toast before
-		// the send lands, paired with the verdict invalidation above; the
-		// force-cast success below sets this document's own notice (#307). A
-		// soft refresh does not visibly replace content, so it leaves a
-		// warning for the still-displayed playlist alone.
-		var forceCastEpoch uint64
-		if effectiveForceCast && r.toast != nil {
-			forceCastEpoch = r.toast.ClearAndEpoch()
-		}
 		generationBefore := r.currentGeneration()
 		result, sendCDPErr := r.sendCDPRequest(command)
 		sendErr = sendCDPErr
@@ -961,25 +815,6 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				r.activeVerdict.Set(refreshPlaylistID, schedulerSource.PlaylistURL, refreshVerdict.Status)
 			default:
 				// Soft refresh: already reconciled before the send.
-			}
-			// An accepted FORCE cast replaced the artwork with this
-			// re-resolved document, so its verdict now describes what is on
-			// screen: surface (or Clear) the notice, bound to this push and
-			// under the same lock. A soft refresh does not visibly replace
-			// content, and a page-moved force cast left the verdict
-			// unpublished above, so neither toasts here (#307).
-			if effectiveForceCast && r.currentGeneration() == generationBefore && r.toast != nil {
-				var status sigverify.Status
-				if refreshVerdict != nil {
-					status = refreshVerdict.Status
-				}
-				// Fenced to the epoch this force cast's pre-send Clear created,
-				// so a transition between the accepted send and here drops it.
-				if notice, ok := sigverify.ToastFor(castMode, status); ok {
-					r.toast.NotifyIfEpoch(notice, forceCastEpoch)
-				} else {
-					r.toast.Clear()
-				}
 			}
 			// The scheduler's cache now holds THIS document (Commit below),
 			// so every later cutover pushes its cohorts: restage pending to

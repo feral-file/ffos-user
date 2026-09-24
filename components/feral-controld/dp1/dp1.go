@@ -452,8 +452,8 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
 	}
 	// This ingestion path structurally validates any present content-rating
 	// extension fields. The fragment validator needs no core signature, so it
-	// applies whatever the signature verification mode decides about the
-	// document itself. Ordered after the size cap so an oversized body is
+	// applies independently of the document's signature verdict. Ordered
+	// after the size cap so an oversized body is
 	// refused before it is parsed.
 	//
 	// What this rejects is a rating of the wrong TYPE. An unrecognized rating

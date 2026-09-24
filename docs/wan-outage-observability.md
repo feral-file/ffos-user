@@ -24,8 +24,8 @@ Verified in code 2026-08-12 (branch `fix/update-command-fire-and-forget`, which
 includes the merged recovery-UX work).
 
 **What "online" means today.** feral-sys-monitord owns internet reachability: a
-raw TCP dial to `8.8.8.8:443` / `8.8.4.4:443`, 5 s timeout, first success wins
-(`components/feral-sys-monitord/connectivity.go:23-26,260`). Adaptive cadence
+raw TCP dial to `8.8.8.8:443` / `8.8.4.4:443`, falling back to `223.5.5.5:443` / `1.12.12.12:443` only when the Google pair has not connected within 1 s or has already failed (feral-file#3539), 5 s total budget, first success wins
+(`components/feral-sys-monitord/connectivity.go`, `PRIMARY_PING_TARGETS` / `FALLBACK_PING_TARGETS` / `CheckConnectivity`). Adaptive cadence
 30 s online / 3 s offline. Published as one edge-triggered D-Bus bool
 (`connectivity_change`), self-healed by the ~2 s `sysmetrics` level signal.
 controld separately polls *link* state via `nmcli` (`status/linkcheck.go`) and
@@ -217,7 +217,10 @@ Per-seam, per the testing contract; all runnable via `make verify-go`.
   ticks); `runNetworkDiagnostics` command handler test via the executor's
   existing table, including the reply-before-probe/timeout semantics chosen.
 - **On-device bench (manual, gated before each stage ships):** pull the AP,
-  block DNS only, block 8.8.8.8 only, and portal-intercept on a bench network;
+  block DNS only, block 8.8.8.8 only, block every Google prefix while leaving the
+  rest of the internet open (the mainland-China case, feral-file#3539; since the
+  mainland fallback targets this must report ONLINE, not classify as an outage), and
+  portal-intercept on a bench network;
   confirm the four scenarios classify differently, the timeline appears in
   VictoriaMetrics after reconnect, and the recorder ring stays under cap after
   24 h of forced flapping.
