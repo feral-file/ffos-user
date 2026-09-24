@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -129,4 +131,40 @@ func TestConnectivityGenerationSwapConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 	c.Stop()
+}
+
+// TestCheckConnectivityOneRefusalDoesNotCancelASlowerSuccess: every target
+// dials in parallel and the verdict is any-success. Before this test the
+// per-target error was returned into the errgroup, which cancelled the shared
+// context on the FIRST failure and aborted every dial still in flight — a
+// target that refused fast (an egress rule, a blocked prefix answering RST)
+// turned a healthy network into "offline". The mainland-reachable targets
+// added for feral-file#3539 made that path routine on networks that block
+// exactly one family of resolvers, so the failure must stay local to its
+// target.
+func TestCheckConnectivityOneRefusalDoesNotCancelASlowerSuccess(t *testing.T) {
+	saved := PING_TARGET_ADDRESS
+	PING_TARGET_ADDRESS = []string{"refuses-fast", "succeeds-slowly"}
+	t.Cleanup(func() { PING_TARGET_ADDRESS = saved })
+
+	c := NewConnectivity(context.Background(), zap.NewNop())
+	c.dial = func(ctx context.Context, target string, _ time.Duration) (net.Conn, error) {
+		switch target {
+		case "refuses-fast":
+			return nil, errors.New("connect: connection refused")
+		default:
+			select {
+			case <-time.After(50 * time.Millisecond):
+				a, b := net.Pipe()
+				go func() { _ = b.Close() }()
+				return a, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+
+	ok, err := c.CheckConnectivity(time.Second)
+	require.NoError(t, err)
+	assert.True(t, ok, "one refused target must not cancel the dial that was about to succeed")
 }

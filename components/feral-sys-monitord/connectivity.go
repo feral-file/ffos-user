@@ -55,6 +55,13 @@ type Connectivity struct {
 	// deterministically without dialing real ping targets. Set once at
 	// construction, never mutated after.
 	probe func(timeout time.Duration) (bool, error)
+
+	// dial performs one TCP connect to a probe target. Defaults to a
+	// net.Dialer bounded by the per-target timeout; a seam so the
+	// one-refusal-must-not-cancel-a-success regression test can script a
+	// fast failure next to a slow success without real sockets. Set once at
+	// construction, never mutated after.
+	dial func(ctx context.Context, target string, timeout time.Duration) (net.Conn, error)
 }
 
 func NewConnectivity(ctx context.Context, logger *zap.Logger) *Connectivity {
@@ -65,6 +72,10 @@ func NewConnectivity(ctx context.Context, logger *zap.Logger) *Connectivity {
 		doneChan: make(chan struct{}),
 	}
 	c.probe = c.CheckConnectivity
+	c.dial = func(ctx context.Context, target string, timeout time.Duration) (net.Conn, error) {
+		dialer := net.Dialer{Timeout: timeout}
+		return dialer.DialContext(ctx, "tcp", target)
+	}
 	return c
 }
 
@@ -299,8 +310,7 @@ func (c *Connectivity) CheckConnectivity(timeout time.Duration) (bool, error) {
 		t := target
 		eg.Go(func() error {
 			before := time.Now()
-			dialer := net.Dialer{Timeout: timeout}
-			conn, err := dialer.DialContext(egCtx, "tcp", t)
+			conn, err := c.dial(egCtx, t, timeout)
 			after := time.Now()
 			c.logger.Debug("Connectivity check result", zap.String("target", t), zap.Duration("duration", after.Sub(before)), zap.Error(err))
 			if conn != nil {
@@ -311,15 +321,18 @@ func (c *Connectivity) CheckConnectivity(timeout time.Duration) (bool, error) {
 
 			resultChan <- targetResult{target: t, ok: err == nil}
 
-			return err
+			// Never propagate a per-target failure: errgroup cancels egCtx on
+			// the first non-nil return, which aborted every other dial still
+			// in flight. A target that refuses fast (an egress rule, a
+			// blocked prefix answering with RST) then turned a healthy
+			// network into "offline". Each target's outcome stands on its
+			// own; the verdict below is any-success.
+			return nil
 		})
 	}
 
-	err := eg.Wait()
-	if err != nil {
-		// We accept not being able to check connectivity and only log the warning
-		c.logger.Warn("Connectivity check failed", zap.Error(err))
-	}
+	// Wait returns nil by construction now; kept for the goroutine join.
+	_ = eg.Wait()
 
 	connected := false
 	successfulTarget := ""
