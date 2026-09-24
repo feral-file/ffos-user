@@ -18,12 +18,12 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
-	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -81,19 +81,6 @@ type Executor interface {
 	// because the executor must not depend on the policy store or the command
 	// router. Set once at wiring time.
 	SetContentPolicyResetter(reset func() error)
-	// SetVerificationModeObserver registers a callback invoked with the
-	// stored mode after a successful setSignatureVerificationMode. The cast
-	// path reads the record itself, so this exists for the one consumer
-	// that holds state decided under the OLD mode: the displayAt scheduler,
-	// whose refused cutover needs re-driving once the policy relaxes
-	// (feral-file/ffos-user#307). Set once at wiring time.
-	SetVerificationModeObserver(observer func(mode sigverify.Mode))
-	// SetSignatureVerificationCapability tells the executor whether the
-	// verifier runs at all (the `signatureVerification.disabled` config
-	// switch). While it is off no mode can be enforced, so the setter
-	// refuses rather than store and acknowledge a policy nothing applies.
-	// Unset means "read the config", so tests pin it without a global.
-	SetSignatureVerificationCapability(enabled func() bool)
 	// SetSetupUI injects the process-wide setup-narration surface so the
 	// controld-owned claim/factory-reset/OTA-failure narration shares ONE
 	// setupui.Service with the provisioning domain. Set once at wiring time; the
@@ -131,26 +118,12 @@ type executor struct {
 	// claimObserver: set once before commands are served, so no lock.
 	nameObserver func(name string)
 
-	// modeObserver, when set, is notified after the signature verification
-	// mode is stored. Same wiring discipline as nameObserver.
-	modeObserver func(mode sigverify.Mode)
-	// verificationEnabled, when set (SetSignatureVerificationCapability),
-	// answers whether the verifier runs; nil reads the config.
-	verificationEnabled func() bool
-
 	// deviceNameMu serializes every mutation of the device-name record and the
 	// observer notification that follows it. Both writers stage through one
 	// shared temp path and both are reachable concurrently (a rename over the
 	// hub while a factory reset runs), so this is what keeps disk, mDNS, and
 	// status from disagreeing. See setDeviceName for the two races it closes.
 	deviceNameMu sync.Mutex
-
-	// verificationModeMu is deviceNameMu's twin for the signature
-	// verification mode record (feral-file/ffos-user#307): the setter and
-	// factory reset's clear stage through one .tmp path and are reachable
-	// concurrently, and a setter admitted before a reset staged must not
-	// land after the reset cleared the record. See setSignatureVerificationMode.
-	verificationModeMu sync.Mutex
 
 	// Add reference to StatusPoller to get metrics
 	statusPoller status.Poller
@@ -579,14 +552,6 @@ func (e *executor) SetDeviceNameObserver(observer func(name string)) {
 	e.nameObserver = observer
 }
 
-func (e *executor) SetVerificationModeObserver(observer func(mode sigverify.Mode)) {
-	e.modeObserver = observer
-}
-
-func (e *executor) SetSignatureVerificationCapability(enabled func() bool) {
-	e.verificationEnabled = enabled
-}
-
 // SetSetupUI injects the shared setup-narration surface so the controld-owned
 // claim/factory-reset/OTA-failure narration and the provisioning domain's
 // narration all flow through ONE setupui.Service — the same instance main wires
@@ -672,8 +637,6 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.setAnalyticsToggle(ctx, bytes)
 	case commands.CMD_BETA_FEATURES_TOGGLE:
 		result, err = e.setBetaFeaturesToggle(ctx, bytes)
-	case commands.CMD_SET_SIGNATURE_VERIFICATION_MODE:
-		result, err = e.setSignatureVerificationMode(ctx, bytes)
 	case commands.CMD_DEVICE_STATUS:
 		result, err = e.getDeviceStatus(ctx)
 	case commands.CMD_START_WIFI_SETUP:
@@ -964,8 +927,24 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return false, true, false
 	}
-	e.setupUI().ShowClaimQR(e.buildDeviceConnectURL(ctx), e.deviceID())
+	e.paintClaimQR(e.buildDeviceConnectURL(ctx))
 	return true, false, false
+}
+
+// paintClaimQR reads the display name and pushes the claim QR under
+// deviceNameMu — the same lock a rename holds across its own Save and
+// RefreshClaimQRName. Unlocked, a paint whose name read landed before a
+// concurrent rename's Save could push AFTER that rename's refresh, and
+// ShowClaimQR's unconditional push would put the pre-rename label back on
+// screen with nothing to repaint it until the next online/topic transition.
+// The url is built by the caller, outside the lock, so renames never queue
+// behind the connect-URL's own reads; the critical section is the name read
+// and the (non-blocking) push only. Lock edge deviceNameMu → setupui.mu is
+// the one setDeviceName already establishes, one-way.
+func (e *executor) paintClaimQR(url string) {
+	e.deviceNameMu.Lock()
+	defer e.deviceNameMu.Unlock()
+	e.setupUI().ShowClaimQR(url, e.deviceDisplayName())
 }
 
 // updateLadderFailureLatchedSince reports whether the OTA gate's failure latch
@@ -1006,6 +985,7 @@ const (
 type setupNarrator interface {
 	ShowFinalizing()
 	ShowClaimQR(url string, deviceName string)
+	RefreshClaimQRName(resolve func() string)
 	ShowReady()
 	ShowFactoryReset()
 	ShowJoinFailed(reason string)
@@ -3045,13 +3025,6 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	if err := e.clearDeviceName(); err != nil {
 		e.logger.Warn("Failed to clear device name during factory reset", zap.Error(err))
 	}
-	// The signature verification mode falls with the claim for the same
-	// hand-on reason: a previous owner's `strict` must not block the next
-	// owner's casts after a rolled-back reset. Best-effort like the name.
-	if err := e.clearSignatureVerificationMode(); err != nil {
-		e.logger.Warn("Failed to clear signature verification mode during factory reset", zap.Error(err))
-	}
-
 	// The content policy is the owner's audience setting, so it falls with the
 	// claim for exactly the rollback reason above: on the success path the
 	// durable file is discarded with the subvolume, but a reset that rolls back
@@ -3329,17 +3302,7 @@ func (e *executor) releaseStuckResetLatch(why string) {
 	e.logger.Warn("Releasing the staged factory-reset latch", zap.String("reason", why))
 	e.resetStaged.Store(false)
 	e.setupUI().HideIfShowing(setupui.StateFactoryReset)
-	// Factory reset cleared the signature-verification mode record (a resold
-	// unit returns to notify). A reset that rolls back — this release path,
-	// shared by reset-start failure and the stuck-reset watchdog — leaves that
-	// cleared record in effect, so a displayAt cutover the strict push gate
-	// refused before the reset (no retry armed, and past the final boundary no
-	// timer) has no other trigger. Re-drive under the now-effective on-disk
-	// mode, exactly as a setter-driven relaxation would (feral-file/ffos-user
-	// #307). Safe here precisely because the reset is NOT proceeding: the
-	// device is resuming normal operation, not painting a reset panel, so this
-	// is unrelated to the reset-narration playback fence tracked in #345.
-	e.notifyVerificationMode()
+
 }
 
 func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, error) {
@@ -3514,6 +3477,37 @@ func (e *executor) deviceID() string {
 		return "FF1"
 	}
 	return id
+}
+
+// deviceDisplayName resolves the label the claim QR's guidance text names the
+// frame by: the owner-set name when one is stored, otherwise the serial
+// (deviceID). Mirrors resolveMDNSDeviceInfo's same fallback so the QR
+// guidance and the mDNS advertisement agree on what an unnamed (or
+// just-renamed) unit is called — a rename takes effect here on the next
+// claim-QR paint since this loads the record fresh rather than caching it,
+// unlike deviceID's hostname read it sits beside. (status.device_status's
+// deviceName field does NOT take this fallback: it deliberately reports ""
+// for an unnamed unit as a capability signal a controller gates rename UI
+// on, so it is not a third surface to match here.)
+// A read failure or corrupt record falls back to the serial rather than
+// erroring the claim flow over a cosmetic field.
+func (e *executor) deviceDisplayName() string {
+	record, err := devicename.Load(e.os, e.json)
+	if err != nil {
+		e.logger.Warn("Failed to read device name for claim QR", zap.Error(err))
+		return e.deviceID()
+	}
+	return e.displayNameFor(record.Name)
+}
+
+// displayNameFor applies deviceDisplayName's fallback to a name already in
+// hand — the stored form a rename or clear just wrote — so the paint-time
+// read and the rename-time repaint resolve an unnamed unit to the same label.
+func (e *executor) displayNameFor(storedName string) string {
+	if storedName != "" {
+		return storedName
+	}
+	return e.deviceID()
 }
 
 func (e *executor) setVolume(ctx context.Context, args []byte) (interface{}, error) {

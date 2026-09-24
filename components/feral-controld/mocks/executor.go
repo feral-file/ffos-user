@@ -10,7 +10,6 @@ import (
 
 	commands "github.com/feral-file/ffos-user/components/feral-controld/commands"
 	setupui "github.com/feral-file/ffos-user/components/feral-controld/setupui"
-	sigverify "github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	gomock "github.com/golang/mock/gomock"
 )
 
@@ -126,30 +125,6 @@ func (mr *MockExecutorMockRecorder) SetSetupUI(ui interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSetupUI", reflect.TypeOf((*MockExecutor)(nil).SetSetupUI), ui)
 }
 
-// SetSignatureVerificationCapability mocks base method.
-func (m *MockExecutor) SetSignatureVerificationCapability(enabled func() bool) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "SetSignatureVerificationCapability", enabled)
-}
-
-// SetSignatureVerificationCapability indicates an expected call of SetSignatureVerificationCapability.
-func (mr *MockExecutorMockRecorder) SetSignatureVerificationCapability(enabled interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSignatureVerificationCapability", reflect.TypeOf((*MockExecutor)(nil).SetSignatureVerificationCapability), enabled)
-}
-
-// SetVerificationModeObserver mocks base method.
-func (m *MockExecutor) SetVerificationModeObserver(observer func(sigverify.Mode)) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "SetVerificationModeObserver", observer)
-}
-
-// SetVerificationModeObserver indicates an expected call of SetVerificationModeObserver.
-func (mr *MockExecutorMockRecorder) SetVerificationModeObserver(observer interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetVerificationModeObserver", reflect.TypeOf((*MockExecutor)(nil).SetVerificationModeObserver), observer)
-}
-
 // MocksetupNarrator is a mock of setupNarrator interface.
 type MocksetupNarrator struct {
 	ctrl     *gomock.Controller
@@ -199,6 +174,18 @@ func (m *MocksetupNarrator) HideIfShowing(states ...string) {
 func (mr *MocksetupNarratorMockRecorder) HideIfShowing(states ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HideIfShowing", reflect.TypeOf((*MocksetupNarrator)(nil).HideIfShowing), states...)
+}
+
+// RefreshClaimQRName mocks base method.
+func (m *MocksetupNarrator) RefreshClaimQRName(resolve func() string) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "RefreshClaimQRName", resolve)
+}
+
+// RefreshClaimQRName indicates an expected call of RefreshClaimQRName.
+func (mr *MocksetupNarratorMockRecorder) RefreshClaimQRName(resolve interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RefreshClaimQRName", reflect.TypeOf((*MocksetupNarrator)(nil).RefreshClaimQRName), resolve)
 }
 
 // ShowClaimQR mocks base method.

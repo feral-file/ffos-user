@@ -104,8 +104,10 @@ type SourceProbeResult struct {
 
 //go:generate mockgen -source=probe.go -destination=../mocks/offlinecache_probe.go -package=mocks -mock_names=SourceProber=MockSourceProber
 type SourceProber interface {
-	// ProbeSources probes every source concurrently and returns one
-	// result per source, in input order. It never fails as a whole:
+	// ProbeSources probes sources concurrently until one is Alive or Inline,
+	// then cancels outstanding work: the cast cannot be all-dead. It returns
+	// one result per source, in input order; unstarted/canceled sources are
+	// Inconclusive, never fabricated Alive or Dead. It never fails as a whole:
 	// anything that prevents a definitive answer is that item's
 	// Inconclusive result, so the caller always gets a full slice back
 	// within probePhaseCeiling.
@@ -310,6 +312,9 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 		if isDataURI(source) {
 			firstIndex[key] = i
 			results[i] = p.probeOne(ctx, source)
+			if results[i].Verdict == ProbeInline {
+				cancel()
+			}
 			continue
 		}
 		if len(uniqueIndices) == maxProbeAttempts {
@@ -347,13 +352,36 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 						Verdict: ProbeInconclusive,
 						Err:     ctx.Err(),
 					}
+					p.headerSlots.Release(probeHeaderBudgetWeight(sources[i]))
 					continue
 				}
-				results[i] = p.probeOneWithinHeaderBudget(ctx, sources[i])
+				results[i] = p.probeOne(ctx, sources[i])
+				if results[i].Verdict == ProbeAlive {
+					// This is an admission check, not a playlist health audit.
+					// One reachable source rules out rejecting the cast; waiting
+					// for the rest made AB500 pay hundreds of TLS handshakes
+					// before the player even received it (#361). Keep completed
+					// verdicts and cancel peers under the same resource bounds.
+					cancel()
+				}
+				p.headerSlots.Release(probeHeaderBudgetWeight(sources[i]))
 			}
 		}()
 	}
 	for _, i := range uniqueIndices {
+		// Reserve the shared header budget in playlist order before dispatch.
+		// Sixteen workers can otherwise race for only eight TLS slots: later
+		// slow sources may take them all while the first, reachable artwork
+		// waits for a timeout. Workers release every reservation, even if
+		// another source proves reachability before they start.
+		if err := p.headerSlots.Acquire(ctx, probeHeaderBudgetWeight(sources[i])); err != nil {
+			results[i] = SourceProbeResult{
+				Source:  redactSourceForLog(sources[i]),
+				Verdict: ProbeInconclusive,
+				Err:     err,
+			}
+			continue
+		}
 		indices <- i
 	}
 	close(indices)
@@ -369,24 +397,6 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 		}
 	}
 	return results
-}
-
-// probeOneWithinHeaderBudget admits the only part of a source preflight that
-// can retain response headers. headerSlots is shared by every production
-// SourceProber instance, so concurrent casts cannot multiply the memory bound
-// by widening or disabling the command storm gate. Waiting past the phase
-// ceiling is Inconclusive, preserving the preflight's fail-open contract.
-func (p *sourceProber) probeOneWithinHeaderBudget(ctx context.Context, source string) SourceProbeResult {
-	weight := probeHeaderBudgetWeight(source)
-	if err := p.headerSlots.Acquire(ctx, weight); err != nil {
-		return SourceProbeResult{
-			Source:  redactSourceForLog(source),
-			Verdict: ProbeInconclusive,
-			Err:     err,
-		}
-	}
-	defer p.headerSlots.Release(weight)
-	return p.probeOne(ctx, source)
 }
 
 func probeHeaderBudgetWeight(source string) int64 {

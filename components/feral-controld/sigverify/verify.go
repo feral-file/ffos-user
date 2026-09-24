@@ -85,12 +85,9 @@ type Verdict struct {
 	Reason string
 }
 
-// Reason vocabulary for a failed signer. Stable strings: they are returned
-// verbatim to casters (and, in strict mode, in the rejection message) and
-// asserted by tests, so treat a change as a wire change. The set is CLOSED
-// on purpose — no reason ever interpolates a value the document supplied
-// (the unsupported algorithm's name lives in Signer.Alg, not here), which is
-// what lets PublicReason forward a signer reason unchanged.
+// Reason vocabulary for a failed signer. Stable strings returned in diagnostic
+// cast replies and asserted by tests. No signer reason interpolates document
+// text; the unsupported algorithm's name lives in Signer.Alg instead.
 const (
 	ReasonPayloadHashMismatch = "payload_hash mismatch"
 	ReasonSignatureInvalid    = "signature invalid"
@@ -106,40 +103,6 @@ const (
 	ReasonUnsigned       = "unsigned"
 	ReasonUnsignedLegacy = "unsigned; legacy signature ignored"
 )
-
-// PublicReason is the rejection reason safe to hand to a caller that is not
-// the device's owner (the hub's 422 body, the relayer's sigInvalid RPC).
-// Verdict.Reason names the failing signer by the ROLE string the document
-// itself supplied, and a hostile document can put anything within the
-// length bound there — a URL included — so it is for the device log and
-// the owner-facing cast reply only. This returns the classified failure
-// from the closed vocabulary above and nothing the document wrote:
-//
-//	valid    → ""
-//	unsigned → "unsigned" | "unsigned; legacy signature ignored"
-//	invalid  → "signature invalid: <signer reason>" for the first failed
-//	           signer, else the document-level reason (malformed, too
-//	           large, too many signatures) — all fixed text.
-func (v Verdict) PublicReason() string {
-	switch v.Status {
-	case StatusValid:
-		return ""
-	case StatusUnsigned:
-		if v.LegacyPresent {
-			return ReasonUnsignedLegacy
-		}
-		return ReasonUnsigned
-	}
-	for _, s := range v.Signers {
-		if !s.OK && s.Reason != ReasonUnverified {
-			return ReasonSignatureInvalid + ": " + s.Reason
-		}
-	}
-	if v.Reason == "" {
-		return ReasonMalformed
-	}
-	return v.Reason
-}
 
 // Signer field bounds. alg, kid, and role are copied from an untrusted
 // document into the cast reply and the log line, so their length must not

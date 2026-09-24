@@ -41,6 +41,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -52,7 +54,11 @@ jobs:
       - name: Install golangci-lint
         run: |
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.4.0
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 
       - name: Run local verification target
-        run: make verify-feral-controld-lint
+        env:
+          GO_LINT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        # The component's local default names develop. Detached CI checkouts
+        # must compare the actual PR/push base, including release hotfixes.
+        run: make verify-feral-controld-lint GOLANGCI_LINT_FLAGS="--new-from-merge-base=$GO_LINT_BASE"
