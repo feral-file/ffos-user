@@ -133,38 +133,168 @@ func TestConnectivityGenerationSwapConcurrent(t *testing.T) {
 	c.Stop()
 }
 
-// TestCheckConnectivityOneRefusalDoesNotCancelASlowerSuccess: every target
-// dials in parallel and the verdict is any-success. Before this test the
-// per-target error was returned into the errgroup, which cancelled the shared
-// context on the FIRST failure and aborted every dial still in flight — a
-// target that refused fast (an egress rule, a blocked prefix answering RST)
-// turned a healthy network into "offline". The mainland-reachable targets
-// added for feral-file#3539 made that path routine on networks that block
-// exactly one family of resolvers, so the failure must stay local to its
-// target.
-func TestCheckConnectivityOneRefusalDoesNotCancelASlowerSuccess(t *testing.T) {
-	saved := PING_TARGET_ADDRESS
-	PING_TARGET_ADDRESS = []string{"refuses-fast", "succeeds-slowly"}
-	t.Cleanup(func() { PING_TARGET_ADDRESS = saved })
+// scriptedDial is one target's behavior in the CheckConnectivity tests.
+type scriptedDial struct {
+	after   time.Duration // how long the dial takes; ignored when blackhole
+	succeed bool
+	// blackhole models a dropped SYN: the dial never answers and returns only
+	// when the check's context ends.
+	blackhole bool
+}
 
-	c := NewConnectivity(context.Background(), zap.NewNop())
-	c.dial = func(ctx context.Context, target string, _ time.Duration) (net.Conn, error) {
-		switch target {
-		case "refuses-fast":
-			return nil, errors.New("connect: connection refused")
-		default:
-			select {
-			case <-time.After(50 * time.Millisecond):
+// TestCheckConnectivityStaged pins the two-stage probe (feral-file#3539):
+// the fallback (mainland) targets are dialed only when the primary (Google)
+// stage has not succeeded, the first success returns without waiting for
+// blackholed peers, and one target's failure never cancels another's
+// success.
+func TestCheckConnectivityStaged(t *testing.T) {
+	const (
+		timeout       = 2 * time.Second
+		fallbackDelay = 500 * time.Millisecond
+	)
+	refuse := scriptedDial{}
+	blackhole := scriptedDial{blackhole: true}
+	ok := func(after time.Duration) scriptedDial { return scriptedDial{after: after, succeed: true} }
+
+	tests := []struct {
+		name          string
+		primary       map[string]scriptedDial
+		fallback      map[string]scriptedDial
+		wantConnected bool
+		wantFallback  bool          // whether any fallback target was dialed
+		maxElapsed    time.Duration // upper bound on the check's wall time
+	}{
+		{
+			name:          "primary answers: fallback never dialed",
+			primary:       map[string]scriptedDial{"p1": ok(0), "p2": ok(0)},
+			fallback:      map[string]scriptedDial{"f1": ok(0)},
+			wantConnected: true,
+			maxElapsed:    fallbackDelay / 2,
+		},
+		{
+			name:          "slow primary inside the delay: fallback never dialed",
+			primary:       map[string]scriptedDial{"p1": ok(50 * time.Millisecond), "p2": blackhole},
+			fallback:      map[string]scriptedDial{"f1": ok(0)},
+			wantConnected: true,
+			maxElapsed:    fallbackDelay,
+		},
+		{
+			name:          "first success returns without waiting for a blackholed peer",
+			primary:       map[string]scriptedDial{"p1": blackhole, "p2": ok(20 * time.Millisecond)},
+			fallback:      map[string]scriptedDial{"f1": ok(0)},
+			wantConnected: true,
+			maxElapsed:    fallbackDelay,
+		},
+		{
+			name:          "one fast refusal does not cancel a slower success",
+			primary:       map[string]scriptedDial{"p1": refuse, "p2": ok(50 * time.Millisecond)},
+			fallback:      map[string]scriptedDial{"f1": ok(0)},
+			wantConnected: true,
+			maxElapsed:    fallbackDelay,
+		},
+		{
+			name:          "primary blackholed (mainland): fallback after the delay",
+			primary:       map[string]scriptedDial{"p1": blackhole, "p2": blackhole},
+			fallback:      map[string]scriptedDial{"f1": blackhole, "f2": ok(10 * time.Millisecond)},
+			wantConnected: true,
+			wantFallback:  true,
+			maxElapsed:    fallbackDelay + timeout/4,
+		},
+		{
+			name:          "primary refused fast: fallback without waiting for the delay",
+			primary:       map[string]scriptedDial{"p1": refuse, "p2": refuse},
+			fallback:      map[string]scriptedDial{"f1": ok(0)},
+			wantConnected: true,
+			wantFallback:  true,
+			maxElapsed:    fallbackDelay / 2,
+		},
+		{
+			name:          "primary slow but working after fallback starts still counts",
+			primary:       map[string]scriptedDial{"p1": ok(fallbackDelay + 100*time.Millisecond)},
+			fallback:      map[string]scriptedDial{"f1": blackhole},
+			wantConnected: true,
+			wantFallback:  true,
+			maxElapsed:    timeout / 2,
+		},
+		{
+			name:          "everything refused: offline, no error",
+			primary:       map[string]scriptedDial{"p1": refuse, "p2": refuse},
+			fallback:      map[string]scriptedDial{"f1": refuse, "f2": refuse},
+			wantConnected: false,
+			wantFallback:  true,
+			maxElapsed:    fallbackDelay / 2,
+		},
+		{
+			name:          "everything blackholed: offline at the timeout, not beyond",
+			primary:       map[string]scriptedDial{"p1": blackhole},
+			fallback:      map[string]scriptedDial{"f1": blackhole},
+			wantConnected: false,
+			wantFallback:  true,
+			maxElapsed:    timeout + timeout/4,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			savedPrimary, savedFallback := PRIMARY_PING_TARGETS, FALLBACK_PING_TARGETS
+			PRIMARY_PING_TARGETS = mapKeys(tc.primary)
+			FALLBACK_PING_TARGETS = mapKeys(tc.fallback)
+			t.Cleanup(func() { PRIMARY_PING_TARGETS, FALLBACK_PING_TARGETS = savedPrimary, savedFallback })
+
+			var mu sync.Mutex
+			var dialed []string
+			c := NewConnectivity(context.Background(), zap.NewNop())
+			c.fallbackDelay = fallbackDelay
+			c.dial = func(ctx context.Context, target string, _ time.Duration) (net.Conn, error) {
+				mu.Lock()
+				dialed = append(dialed, target)
+				mu.Unlock()
+				script, found := tc.primary[target]
+				if !found {
+					script = tc.fallback[target]
+				}
+				if script.blackhole {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				select {
+				case <-time.After(script.after):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				if !script.succeed {
+					return nil, errors.New("connect: connection refused")
+				}
 				a, b := net.Pipe()
 				go func() { _ = b.Close() }()
 				return a, nil
-			case <-ctx.Done():
-				return nil, ctx.Err()
 			}
-		}
-	}
 
-	ok, err := c.CheckConnectivity(time.Second)
-	require.NoError(t, err)
-	assert.True(t, ok, "one refused target must not cancel the dial that was about to succeed")
+			start := time.Now()
+			connected, err := c.CheckConnectivity(timeout)
+			elapsed := time.Since(start)
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantConnected, connected)
+			assert.LessOrEqual(t, elapsed, tc.maxElapsed, "check took too long")
+
+			mu.Lock()
+			defer mu.Unlock()
+			usedFallback := false
+			for _, target := range dialed {
+				if _, isFallback := tc.fallback[target]; isFallback {
+					usedFallback = true
+				}
+			}
+			assert.Equal(t, tc.wantFallback, usedFallback, "fallback dialed = %v, dialed targets %v", usedFallback, dialed)
+		})
+	}
+}
+
+func mapKeys(m map[string]scriptedDial) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
