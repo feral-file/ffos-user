@@ -22,9 +22,21 @@ const (
 	PING_TIMEOUT = 5 * time.Second
 )
 
+// Reachability targets. CheckConnectivity dials all of them in parallel and
+// the first successful TCP connect wins, so adding a target can only turn a
+// false "offline" into "online", never the reverse. The Google pair is
+// unreachable from every mainland-China network (the firewall blocks the
+// prefixes outright), which left a device on working office Wi-Fi narrating
+// "no internet access" forever (feral-file#3539). The AliDNS and DNSPod
+// resolvers answer TCP 443 (their DoH endpoints) from inside and outside the
+// mainland. Keep the Google pair: a home network whose upstream blocks only
+// the Chinese resolvers should still report online, and the bench matrix in
+// docs/wan-outage-observability.md blocks each family separately.
 var PING_TARGET_ADDRESS = []string{
 	"8.8.8.8:443",
 	"8.8.4.4:443",
+	"223.5.5.5:443",
+	"1.12.12.12:443",
 }
 
 type ConnectivityHandler func(ctx context.Context, connected bool)
