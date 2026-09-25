@@ -7,7 +7,7 @@ require github.com/gorilla/websocket v1.5.3
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/display-protocol/dp1-go v0.6.2
-	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260910050001-beb0cdf76be2
+	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260925215950-2dcfaa962a19
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/golang/mock v1.6.0
@@ -63,6 +63,3 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/sync v0.22.0
 )
-
-// TEMPORARY: swapped for the merged play pseudo-version before PR
-replace github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go => /home/moskovich/Work/play-wt/site-initiated-broker/clients/ephemeral-token-minter/go
