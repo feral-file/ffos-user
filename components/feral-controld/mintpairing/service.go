@@ -363,6 +363,11 @@ func (b brokerChannelAdapter) PairingDisplay() minter.PairingDisplay {
 	return b.channel.PairingDisplay()
 }
 
+// ExpiresAt is the broker's current channel expiry as the minter last saw it.
+func (b brokerChannelAdapter) ExpiresAt() time.Time {
+	return b.channel.ExpiresAt()
+}
+
 func (b brokerChannelAdapter) MinterPublicKeyJWK() minter.PublicJWK {
 	return b.channel.MinterPublicKeyJWK()
 }
@@ -750,7 +755,7 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 					OK:        true,
 					Status:    "pending_approval",
 					ChannelID: active.channelID,
-					ExpiresAt: formatOptionalTime(active.expiresAt),
+					ExpiresAt: formatOptionalTime(s.expiryOf(active)),
 				}, nil
 			}
 			return commandError("site_pairing_active", "a site pairing is in progress", true), nil
@@ -1023,7 +1028,12 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 		expiresAt = time.Now().Add(s.opts.IdleTTL)
 	}
 
-	sessionCtx, sessionCancel := context.WithDeadline(runCtx, expiresAt)
+	// No deadline on the session context itself: a joined pairing's deadline
+	// moves with the broker's (see extendJoinedDeadline), so the worker
+	// enforces it with a derived context and the approval timer instead. The
+	// session context ends only on cancellation (replace, close, reset,
+	// shutdown).
+	sessionCtx, sessionCancel := context.WithCancel(runCtx)
 	active := &activePairing{
 		channel:        siteJoinedChannel{brokerChannel: joined.channel},
 		channelID:      channelID,
@@ -1055,6 +1065,44 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 		Origin:      joined.origin,
 		BrowserInfo: joined.browserInfo,
 	}, nil
+}
+
+// extendJoinedDeadline moves a joined pairing's deadline to the broker's
+// current channel expiry when that is later. The broker extends its idle
+// deadline on every accepted message and the minter tracks it; an earlier or
+// unreported value never shortens the deadline. Written under s.mu because
+// currentActive and the close paths read it there.
+func (s *service) extendJoinedDeadline(active *activePairing) {
+	if !active.joined {
+		return
+	}
+	reported := channelExpiresAt(active.channel)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if reported.After(active.expiresAt) {
+		active.expiresAt = reported
+	}
+}
+
+// channelExpiresAt reads the broker's current expiry from a channel that
+// reports one, or zero.
+func channelExpiresAt(channel brokerChannel) time.Time {
+	if joined, ok := channel.(siteJoinedChannel); ok {
+		channel = joined.brokerChannel
+	}
+	reporter, ok := channel.(interface{ ExpiresAt() time.Time })
+	if !ok {
+		return time.Time{}
+	}
+	return reporter.ExpiresAt()
+}
+
+// expiryOf reads a pairing's deadline under s.mu; a joined pairing's worker
+// may move it.
+func (s *service) expiryOf(active *activePairing) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return active.expiresAt
 }
 
 // siteJoinedChannel marks a channel the device joined rather than created.
@@ -1187,7 +1235,7 @@ func (s *service) HandleClosePairingSession(context.Context, map[string]any) (an
 	if active == nil {
 		return closePairingResponse{OK: true, Status: "not_started"}, nil
 	}
-	s.logger.Info("Closing active mint pairing session by request", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+	s.logger.Info("Closing active mint pairing session by request", pairingDisplayLogFields(active.channelID, active.pairingCode, s.expiryOf(active))...)
 	return closePairingResponse{OK: true, Status: "closed", ChannelID: active.channelID}, nil
 }
 
@@ -1332,7 +1380,15 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		}
 	}()
 
-	request, err := s.waitForMintRequest(ctx, active.channel)
+	waitCtx := ctx
+	if active.joined {
+		// The joined session context carries no deadline; the wait for the
+		// site's request is bounded by the channel expiry known at join.
+		var cancelWait context.CancelFunc
+		waitCtx, cancelWait = context.WithDeadline(ctx, active.expiresAt)
+		defer cancelWait()
+	}
+	request, err := s.waitForMintRequest(waitCtx, active.channel)
 	if reason, mismatched := attestationMismatch(err); mismatched {
 		// Not terminalSent even when a rejection went out: the channel is
 		// closed below, because nothing more should happen on it.
@@ -1365,6 +1421,10 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 			zap.String("pairedForTopicID", guard.topicID))
 		return
 	}
+
+	// The broker extended its idle deadline when it accepted the site's
+	// request; the approval wait must not end at the stale one.
+	s.extendJoinedDeadline(active)
 
 	approvalRequestID, err := newApprovalRequestID()
 	if err != nil {
@@ -1800,7 +1860,7 @@ func (s *service) CloseActivePairing(ctx context.Context) (bool, error) {
 
 		if active != nil {
 			s.logger.Info("Closing active mint pairing session: the claim it belongs to is gone",
-				pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+				pairingDisplayLogFields(active.channelID, active.pairingCode, s.expiryOf(active))...)
 			if active.done != nil {
 				// Waiting for the worker, not just canceling it: until it
 				// returns it can still be mid-display or mid-notification for

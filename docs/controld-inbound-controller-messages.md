@@ -1814,8 +1814,11 @@ same `reason`, the joined `channelID`, and the refused request's
 was ever sent; match it by `channelID` and `requestMessageID`), and then closes
 the channel.
 
-A joined pairing lives until the broker's channel expiry as reported at join,
-or for the device's idle TTL when the broker reports none.
+A joined pairing waits for the site's request until the broker's channel
+expiry as reported at join, or for the device's idle TTL when the broker
+reports none. The broker extends its idle deadline on every accepted message,
+so once the request arrives the deadline moves to the later of the two, and
+the approval wait (bounded by the approval timeout) runs to that.
 
 ### Outbound Approval Request
 
