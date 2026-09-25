@@ -1778,10 +1778,23 @@ cancelled the way `closeMintPairingSession` cancels it, including the
 `cancelled` rejection to its browser and approval outcome to the controller.
 This happens before the broker is called, so the replaced pairing is gone even
 if the join then fails; a start or another join still inside its broker call
-is cancelled rather than waited for. The same join sent twice
+is canceled rather than waited for. The same join sent twice
 (for example a LAN attempt whose reply was lost, retried over the relayer) is
 answered from the pairing it already made, without spending the single-use
 token again.
+
+A replaced pairing the owner had already approved is fenced by pairing
+identity, not only by claim: if its session has not been handed to the broker
+yet, it is not delivered (a session already created is revoked) and both its
+browser and the controller get the `cancelled` rejection and outcome. If the
+delivery is already in flight it cannot be recalled, so the join waits for it
+to finish before taking the active slot; if the join's own request ends first,
+it answers `replace_in_progress` (retryable).
+
+A joined pairing's lifetime is owned by its worker, which follows the broker's
+extended expiry. Other commands never expire it from its join-time deadline,
+so a retry or a `startMintPairingSession` that arrives while a poll is
+extending the deadline finds the pairing live.
 
 While a joined pairing waits for the site's request, `startMintPairingSession`
 answers `site_pairing_active` (retryable) instead of painting a code; once the
@@ -1795,6 +1808,8 @@ Error cases (`ok: false`):
 - `invalid_config`: the broker base URL is not configured.
 - `topic_not_ready`: device has no current relayer topic ID.
 - `topic_changed`: the claim changed while the device was joining.
+- `replace_in_progress` (retryable): the pairing being replaced was still
+  delivering its approved session when the join's request ended.
 - `code_not_found` (broker 404, not retryable): no channel for this code or
   token.
 - `code_expired` (broker 410, not retryable): the channel expired.

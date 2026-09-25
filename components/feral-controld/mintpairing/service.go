@@ -486,6 +486,12 @@ type activePairing struct {
 	// origin and browserInfo are what the broker attested at join time.
 	origin      string
 	browserInfo minter.BrowserInfo
+	// delivering is set (under s.mu) once a session delivery for this pairing
+	// has passed its identity fence. A replacement that finds it set waits for
+	// the worker to finish: the send cannot be taken back, and the new pairing
+	// must not start while it is in flight.
+	delivering bool
+
 	// joinCredential is a digest of the credential that joined the channel,
 	// so a retried join (a lost LAN reply retried over the relay) is answered
 	// from the pairing it already made instead of spending a single-use token
@@ -962,19 +968,35 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 	// a canceled start could still publish survives this. The replaced
 	// worker cancels its approval, hides its overlay and closes its channel;
 	// wait for that so the old browser hears its cancellation first.
-	if replaced := s.cancelActivePairing(); replaced != nil {
+	if replaced, delivering := s.cancelActivePairingForReplace(); replaced != nil {
 		s.logger.Info("Replacing the mint pairing in progress with a site join",
 			zap.String("replacedChannelID", replaced.channelID),
-			zap.Bool("replacedWasJoined", replaced.joined))
+			zap.Bool("replacedWasJoined", replaced.joined),
+			zap.Bool("replacedWasDelivering", delivering))
 		if replaced.done != nil {
-			timer := time.NewTimer(joinCloseWaitTimeout)
-			select {
-			case <-replaced.done:
-			case <-timer.C:
-				s.logger.Warn("Timed out waiting for the replaced mint pairing to clean up",
-					zap.String("replacedChannelID", replaced.channelID))
+			if delivering {
+				// A session the owner approved is already on its way to the
+				// replaced site and cannot be recalled. Wait for it to finish
+				// rather than start the new pairing beside it; the delivery
+				// itself is bounded by its own timeouts.
+				select {
+				case <-replaced.done:
+				case <-ctx.Done():
+					return commandError("replace_in_progress", "the pairing being replaced is still delivering its session", true), nil
+				}
+			} else {
+				// Anything short of delivery is fenced off by the replaced
+				// worker's identity checks, so this wait is only for its
+				// cleanup to go out first.
+				timer := time.NewTimer(joinCloseWaitTimeout)
+				select {
+				case <-replaced.done:
+				case <-timer.C:
+					s.logger.Warn("Timed out waiting for the replaced mint pairing to clean up",
+						zap.String("replacedChannelID", replaced.channelID))
+				}
+				timer.Stop()
 			}
-			timer.Stop()
 		}
 	}
 
@@ -1068,20 +1090,18 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 }
 
 // extendJoinedDeadline moves a joined pairing's deadline to the broker's
-// current channel expiry when that is later. The broker extends its idle
+// current channel expiry when that is later, and returns the deadline. The broker extends its idle
 // deadline on every accepted message and the minter tracks it; an earlier or
 // unreported value never shortens the deadline. Written under s.mu because
 // currentActive and the close paths read it there.
-func (s *service) extendJoinedDeadline(active *activePairing) {
-	if !active.joined {
-		return
-	}
+func (s *service) extendJoinedDeadline(active *activePairing) time.Time {
 	reported := channelExpiresAt(active.channel)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if reported.After(active.expiresAt) {
+	if active.joined && reported.After(active.expiresAt) {
 		active.expiresAt = reported
 	}
+	return active.expiresAt
 }
 
 // channelExpiresAt reads the broker's current expiry from a channel that
@@ -1380,15 +1400,13 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		}
 	}()
 
-	waitCtx := ctx
+	var request *minter.MintRequest
+	var err error
 	if active.joined {
-		// The joined session context carries no deadline; the wait for the
-		// site's request is bounded by the channel expiry known at join.
-		var cancelWait context.CancelFunc
-		waitCtx, cancelWait = context.WithDeadline(ctx, active.expiresAt)
-		defer cancelWait()
+		request, err = s.waitForJoinedMintRequest(ctx, active)
+	} else {
+		request, err = s.waitForMintRequest(ctx, active.channel)
 	}
-	request, err := s.waitForMintRequest(waitCtx, active.channel)
 	if reason, mismatched := attestationMismatch(err); mismatched {
 		// Not terminalSent even when a rejection went out: the channel is
 		// closed below, because nothing more should happen on it.
@@ -1472,7 +1490,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	case <-ctx.Done():
 		if !time.Now().Before(expiresAt) {
 			if decision, ok := s.acceptedDecision(pending); ok {
-				terminalSent, err = s.completeDecisionWithBoundedContexts(context.Background(), active.channel, *request, guard, approvalRequestID, decision)
+				terminalSent, err = s.completeDecisionFor(context.Background(), active, active.channel, *request, guard, approvalRequestID, decision)
 				if err != nil {
 					s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
 				}
@@ -1485,7 +1503,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		return
 	case <-expireTimer.C:
 		if decision, ok := s.acceptedDecision(pending); ok {
-			terminalSent, err = s.completeDecisionWithBoundedContexts(context.Background(), active.channel, *request, guard, approvalRequestID, decision)
+			terminalSent, err = s.completeDecisionFor(context.Background(), active, active.channel, *request, guard, approvalRequestID, decision)
 			if err != nil {
 				s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
 			}
@@ -1493,7 +1511,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		}
 		terminalSent = s.sendApprovalExpired(active, *request, approvalRequestID)
 	case decision := <-pending.decisionCh:
-		terminalSent, err = s.completeDecisionWithBoundedContexts(context.Background(), active.channel, *request, guard, approvalRequestID, decision)
+		terminalSent, err = s.completeDecisionFor(context.Background(), active, active.channel, *request, guard, approvalRequestID, decision)
 		if err != nil {
 			s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
 		}
@@ -1593,8 +1611,10 @@ func (s *service) sendApprovalExpired(active *activePairing, request minter.Mint
 	return true
 }
 
-func (s *service) completeDecisionWithBoundedContexts(parentCtx context.Context, channel brokerChannel, request minter.MintRequest, guard topicGuard, approvalRequestID string, decision approvalDecisionRequest) (bool, error) {
-	return s.completeDecision(parentCtx, channel, request, guard, approvalRequestID, decision)
+// completeDecision completes a decision for a pairing that is not registered
+// as the active one (no identity fence). The worker uses completeDecisionFor.
+func (s *service) completeDecision(ctx context.Context, channel brokerChannel, request minter.MintRequest, guard topicGuard, approvalRequestID string, decision approvalDecisionRequest) (bool, error) {
+	return s.completeDecisionFor(ctx, nil, channel, request, guard, approvalRequestID, decision)
 }
 
 func (s *service) acceptedDecision(pending *pendingApproval) (approvalDecisionRequest, bool) {
@@ -1604,6 +1624,25 @@ func (s *service) acceptedDecision(pending *pendingApproval) (approvalDecisionRe
 		return approvalDecisionRequest{}, false
 	}
 	return *pending.accepted, true
+}
+
+// waitForJoinedMintRequest waits for the site's request on a joined channel
+// until the channel's deadline. The joined session context carries none, and
+// the deadline is not fixed: when it passes, the broker expiry the minter last
+// saw is re-read, and the wait continues if the broker moved it.
+func (s *service) waitForJoinedMintRequest(ctx context.Context, active *activePairing) (*minter.MintRequest, error) {
+	for {
+		deadline := s.extendJoinedDeadline(active)
+		waitCtx, cancel := context.WithDeadline(ctx, deadline)
+		request, err := s.waitForMintRequest(waitCtx, active.channel)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			if s.extendJoinedDeadline(active).After(deadline) {
+				continue
+			}
+		}
+		return request, err
+	}
 }
 
 func (s *service) waitForMintRequest(ctx context.Context, channel brokerChannel) (*minter.MintRequest, error) {
@@ -1625,10 +1664,18 @@ func (s *service) waitForMintRequest(ctx context.Context, channel brokerChannel)
 	}
 }
 
-// completeDecision carries the guard the pairing began under, not just its
+// completeDecisionFor carries the guard the pairing began under, not just its
 // topic id: every check below asks "is this still the same claim?", which a
 // topic id alone cannot answer once a topic can be cleared and re-issued.
-func (s *service) completeDecision(ctx context.Context, channel brokerChannel, request minter.MintRequest, guard topicGuard, approvalRequestID string, decision approvalDecisionRequest) (bool, error) {
+//
+// active, when set, adds the pairing-identity fence: the claim can be
+// unchanged while the pairing itself was superseded (a join replacing it, a
+// close, a reset, shutdown). The decision runs on context.Background(), so
+// nothing else stops it; the fence is checked before the session is created
+// and again, atomically with marking delivery in flight, before it is sent.
+// A superseded site therefore never receives a session, and a replacement
+// that finds delivery already in flight waits for it (see delivering).
+func (s *service) completeDecisionFor(ctx context.Context, active *activePairing, channel brokerChannel, request minter.MintRequest, guard topicGuard, approvalRequestID string, decision approvalDecisionRequest) (bool, error) {
 	topicID := guard.topicID
 	if ctx == nil {
 		ctx = context.Background()
@@ -1680,6 +1727,11 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		return s.rejectTopicChanged(channel, request, topicID, approvalRequestID)
 	}
 
+	if active != nil && !s.isActive(active) {
+		releaseCreate()
+		return s.rejectSuperseded(channel, request, approvalRequestID)
+	}
+
 	lifetime := s.sessionLifetimeFor(decision, request)
 
 	sessionCtx, cancelSession := context.WithTimeout(ctx, wrapper.HTTPClientTimeout)
@@ -1702,6 +1754,14 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		terminalSent, topicErr := s.rejectTopicChanged(channel, request, topicID, approvalRequestID)
 		s.revokeAbandonedSession(topicID, session.SessionID)
 		return terminalSent, topicErr
+	}
+	// Last point at which the pairing can still be superseded without the
+	// browser possibly holding the session: the session exists but has not
+	// been sent, so revoking it is safe.
+	if active != nil && !s.beginDelivery(active) {
+		terminalSent, err := s.rejectSuperseded(channel, request, approvalRequestID)
+		s.revokeAbandonedSession(topicID, session.SessionID)
+		return terminalSent, err
 	}
 	// The guard has run and this session is accounted for: a reset waiting on
 	// in-flight creations can stop waiting on this one.
@@ -1933,6 +1993,42 @@ func (s *service) revokeAbandonedSession(topicID string, sessionID string) {
 	}
 }
 
+// isActive reports whether active is still the pairing in the single active
+// slot, i.e. nothing has replaced, closed or reset it.
+func (s *service) isActive(active *activePairing) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active == active
+}
+
+// beginDelivery marks a session delivery in flight for active if it is still
+// the active pairing, in one step under s.mu, so a replacement either sees the
+// mark and waits for the delivery, or has already superseded the pairing and
+// the delivery does not start.
+func (s *service) beginDelivery(active *activePairing) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active != active {
+		return false
+	}
+	active.delivering = true
+	return true
+}
+
+// rejectSuperseded ends an approved request whose pairing was superseded
+// before its session could be delivered: the browser and the app both hear
+// the approval cancellation status, as for any other canceled pending approval.
+func (s *service) rejectSuperseded(channel brokerChannel, request minter.MintRequest, approvalRequestID string) (bool, error) {
+	s.logger.Warn("Dropping an approved mint pairing request: its pairing was superseded before delivery",
+		zap.String("channelID", request.ChannelID),
+		zap.String("requestMessageID", request.MessageID))
+	err := s.sendTerminalRejectionAndOutcome(channel, request, approvalRequestID, approvalCancellationStatus, true, approvalCancellationStatus)
+	if err != nil {
+		return false, fmt.Errorf("send superseded rejection: %w", err)
+	}
+	return true, errors.New("mint pairing was superseded before the session was delivered")
+}
+
 func (s *service) rejectTopicChanged(channel brokerChannel, request minter.MintRequest, expectedTopicID string, approvalRequestID string) (bool, error) {
 	currentTopicID := currentRelayerTopicID()
 	err := s.sendTerminalRejectionAndOutcome(channel, request, approvalRequestID, "topic_changed", true, "failed")
@@ -2067,7 +2163,11 @@ func (s *service) currentActive() (*activePairing, activePairingPhase, string) {
 	if s.active == nil {
 		return nil, "", ""
 	}
-	if !s.active.expiresAt.IsZero() && time.Now().After(s.active.expiresAt) {
+	// A joined pairing's worker owns its lifetime: its deadline moves with the
+	// broker's (a poll in flight may be extending it right now), and the
+	// worker clears the slot when it ends. Expiring it here from a stale
+	// deadline would cancel a live pairing.
+	if !s.active.joined && !s.active.expiresAt.IsZero() && time.Now().After(s.active.expiresAt) {
 		s.active.cancel()
 		s.active = nil
 		return nil, "", ""
@@ -2105,6 +2205,21 @@ func (s *service) cancelStartingPairing() *startingPairing {
 		starting.cancel()
 	}
 	return starting
+}
+
+// cancelActivePairingForReplace is cancelActivePairing that also reports, read
+// in the same critical section, whether the pairing had a delivery in flight.
+func (s *service) cancelActivePairingForReplace() (*activePairing, bool) {
+	s.mu.Lock()
+	active := s.active
+	delivering := false
+	if active != nil {
+		delivering = active.delivering
+		s.active = nil
+		active.cancel()
+	}
+	s.mu.Unlock()
+	return active, delivering
 }
 
 func (s *service) cancelActivePairing() *activePairing {
