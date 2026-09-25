@@ -94,6 +94,11 @@ type Service interface {
 	Start(ctx context.Context)
 	Stop()
 	HandleStartPairingSession(ctx context.Context, args map[string]any) (any, error)
+	// HandleJoinPairingChannel joins a broker channel a site created
+	// (site-initiated pairing): the app hands over the channel's pairing
+	// token or short code, and the device becomes its minter. Nothing is
+	// painted on the panel for it. A join replaces any pairing in progress.
+	HandleJoinPairingChannel(ctx context.Context, args map[string]any) (any, error)
 	HandleClosePairingSession(ctx context.Context, args map[string]any) (any, error)
 	HandleApprovalDecision(ctx context.Context, args map[string]any) (any, error)
 	// DisplayActive reports whether THIS process currently owns the player
@@ -152,8 +157,11 @@ type NavigationSession interface {
 }
 
 type service struct {
-	opts           Options
-	broker         brokerStarter
+	opts   Options
+	broker brokerStarter
+	// joiner joins site-created channels. Nil when no joiner is wired; the
+	// join command then answers invalid_config.
+	joiner         brokerJoiner
 	sessionCreator sessionCreator
 	relayer        relayer.Relayer
 	cdp            cdp.CDP
@@ -265,6 +273,39 @@ func (g *createGate) wait(ctx context.Context) (int, error) {
 type brokerStarter interface {
 	StartChannel(ctx context.Context, opts minter.StartChannelOptions) (brokerChannel, error)
 }
+
+// brokerJoiner joins a channel a site created. It is the only seam the
+// site-initiated path uses to reach the minter library.
+type brokerJoiner interface {
+	JoinChannel(ctx context.Context, request joinChannelRequest) (joinedChannel, error)
+}
+
+// joinChannelRequest names the channel to join. Exactly one of PairingToken
+// (with ChannelID) or ShortCode is set.
+type joinChannelRequest struct {
+	BrokerBaseURL string
+	ChannelID     string
+	PairingToken  string
+	ShortCode     string
+}
+
+// joinedChannel is a channel this device joined plus what the broker attested
+// about the site that created it. origin is the site's HTTP Origin as the
+// broker recorded it at create time; the minter refuses a mint request that
+// claims any other (errOriginMismatch).
+type joinedChannel struct {
+	channel     brokerChannel
+	channelID   string
+	expiresAt   time.Time
+	origin      string
+	browserInfo minter.BrowserInfo
+}
+
+// errOriginMismatch is what a joined channel's PollMintRequest returns when the
+// decrypted mint request names an origin other than the one the broker
+// attested. The request is returned alongside it when the minter decoded one,
+// so the browser can be told why.
+var errOriginMismatch = errors.New("mint request origin does not match the attested origin")
 
 type sessionCreator interface {
 	CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest, lifetime sessionLifetime) (minter.MintResult, error)
@@ -405,6 +446,20 @@ type activePairing struct {
 	displayGen  uint64
 	cancel      context.CancelFunc
 	done        chan struct{}
+
+	// joined marks a site-initiated pairing: the device joined a channel the
+	// site created, so there is no code to show and the panel is never
+	// painted for it. The fields below are set only when joined is true.
+	joined bool
+	// origin and browserInfo are what the broker attested at join time.
+	origin      string
+	browserInfo minter.BrowserInfo
+	// joinCredential is a digest of the credential that joined the channel,
+	// so a retried join (a lost LAN reply retried over the relay) is answered
+	// from the pairing it already made instead of spending a single-use token
+	// a second time. A digest rather than the token: nothing here needs the
+	// token back.
+	joinCredential string
 }
 
 type completedApproval struct {
@@ -417,6 +472,10 @@ type activePairingPhase string
 const (
 	activePairingPhasePairingCode     activePairingPhase = "pairing_code"
 	activePairingPhasePendingApproval activePairingPhase = "pending_approval"
+	// activePairingPhaseJoined is a site-joined channel waiting for the site's
+	// mint request. Distinct from pairing_code so an expiry never "refreshes"
+	// it into a device-initiated channel with a QR on the panel.
+	activePairingPhaseJoined activePairingPhase = "joined"
 )
 
 type startPairingResponse struct {
@@ -425,6 +484,17 @@ type startPairingResponse struct {
 	ChannelID   string `json:"channelID"`
 	PairingCode string `json:"pairingCode,omitempty"`
 	ExpiresAt   string `json:"expiresAt,omitempty"`
+}
+
+// joinPairingResponse is the joinMintPairingChannel success reply. origin is
+// the broker-attested site origin the app shows the owner ("Connecting
+// artblocks.io to ...").
+type joinPairingResponse struct {
+	OK          bool               `json:"ok"`
+	Status      string             `json:"status"`
+	ChannelID   string             `json:"channelId"`
+	Origin      string             `json:"origin"`
+	BrowserInfo minter.BrowserInfo `json:"browserInfo"`
 }
 
 type closePairingResponse struct {
@@ -641,6 +711,20 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	defer s.startMu.Unlock()
 
 	if active, phase, browserName := s.currentActive(); active != nil {
+		// A site-joined pairing has nothing to show and no code to hand back.
+		// It is not replaced either: the site's pairing is the owner's newer
+		// intent, and a start is a request to re-show, not to start over.
+		if active.joined {
+			if phase == activePairingPhasePendingApproval {
+				return startPairingResponse{
+					OK:        true,
+					Status:    "pending_approval",
+					ChannelID: active.channelID,
+					ExpiresAt: formatOptionalTime(active.expiresAt),
+				}, nil
+			}
+			return commandError("site_pairing_active", "a site pairing is in progress", true), nil
+		}
 		if phase == activePairingPhasePendingApproval {
 			if err := s.showRequestReceived(ctx, active, browserName); err != nil {
 				s.logger.Warn("Failed to redisplay active mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
@@ -774,6 +858,282 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 		PairingCode: active.pairingCode,
 		ExpiresAt:   formatOptionalTime(active.expiresAt),
 	}, nil
+}
+
+// joinCloseWaitTimeout bounds how long a join waits for the pairing it
+// replaces to finish its own cleanup (approval cancellation to the old
+// browser, overlay hide, channel close) before publishing the new one.
+const joinCloseWaitTimeout = stopCleanupTimeout
+
+// HandleJoinPairingChannel joins a channel a site created. See Service.
+//
+// It reuses the device-initiated pairing's machinery from the point a channel
+// exists: the same single active slot, topic guard, starting-slot
+// registration (so a reset landing mid-join is seen), and the same worker.
+// What it does not do is paint: there is no code to show, and every overlay
+// call on this path is skipped rather than sent.
+func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]any) (any, error) {
+	if s == nil || !s.opts.Enabled {
+		return commandError("disabled", "mint pairing is not enabled", false), nil
+	}
+	join, err := parseJoinArgs(args)
+	if err != nil {
+		return commandError("invalid_request", err.Error(), false), nil
+	}
+	// The broker is always the device's own configured one. The app never
+	// names it: a controller able to point the device at another broker could
+	// have it mint for a channel nobody attested.
+	if strings.TrimSpace(s.opts.BrokerBaseURL) == "" || s.joiner == nil {
+		return commandError("invalid_config", "mint pairing broker is not configured", false), nil
+	}
+	startGuard := currentTopicGuard()
+	if startGuard.topicID == "" {
+		return commandError("topic_not_ready", "relayer topic is not ready", true), nil
+	}
+	credential := join.credentialDigest()
+
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+
+	// The same join arriving twice is one intent, not two: the app retries
+	// over the relay when a LAN reply is lost, and the token it sends was
+	// already spent on the first attempt.
+	if active, _, _ := s.currentActive(); active != nil && active.joined && active.joinCredential == credential {
+		return joinPairingResponse{
+			OK:          true,
+			Status:      "joined",
+			ChannelID:   active.channelID,
+			Origin:      active.origin,
+			BrowserInfo: active.browserInfo,
+		}, nil
+	}
+
+	runCtx := ctx
+	s.mu.Lock()
+	if s.ctx != nil {
+		runCtx = s.ctx
+	}
+	s.mu.Unlock()
+
+	joinCtx, cancelJoin := context.WithTimeout(ctx, wrapper.HTTPClientTimeout)
+	defer cancelJoin()
+	// Registered as a start for the same reason a start is: a reset landing
+	// during the broker call must find something to cancel and wait for.
+	starting := &startingPairing{cancel: cancelJoin, done: make(chan struct{})}
+	s.registerStarting(starting)
+	defer s.finishStarting(starting)
+
+	s.logger.Info("Joining site-created mint pairing channel",
+		zap.String("brokerBaseURL", s.opts.BrokerBaseURL),
+		zap.Bool("byShortCode", join.shortCode != ""),
+		zap.String("channelID", join.channelID))
+	joined, err := s.joiner.JoinChannel(joinCtx, joinChannelRequest{
+		BrokerBaseURL: s.opts.BrokerBaseURL,
+		ChannelID:     join.channelID,
+		PairingToken:  join.pairingToken,
+		ShortCode:     join.shortCode,
+	})
+	if err != nil {
+		if !startGuard.sameAs(currentTopicGuard()) {
+			return commandError("topic_changed", "the relayer topic changed while joining the pairing channel", true), nil
+		}
+		code, retryable := classifyJoinFailure(err)
+		s.logger.Warn("Failed to join site-created mint pairing channel", zap.Error(err), zap.String("code", code))
+		return commandError(code, joinFailureMessage(code), retryable), nil
+	}
+	if !startGuard.sameAs(currentTopicGuard()) {
+		s.closeChannel(joined.channel)
+		s.logger.Warn("Dropping a joined mint pairing channel that outlived its claim",
+			zap.String("channelID", joined.channelID),
+			zap.String("startedForTopicID", startGuard.topicID))
+		return commandError("topic_changed", "the relayer topic changed while joining the pairing channel", true), nil
+	}
+
+	channelID := joined.channelID
+	if channelID == "" {
+		channelID = join.channelID
+	}
+	expiresAt := joined.expiresAt
+	if expiresAt.IsZero() {
+		expiresAt = time.Now().Add(s.opts.IdleTTL)
+	}
+
+	// Replace, not refuse: a join is a fresh intent from the owner, and
+	// whatever was in progress (a device-initiated code on the panel, or an
+	// older site pairing) is the thing to drop. Its worker cancels its
+	// approval, hides its overlay and closes its channel; wait for that so
+	// the old browser hears its cancellation before the new pairing starts.
+	if replaced := s.cancelActivePairing(); replaced != nil {
+		s.logger.Info("Replacing the mint pairing in progress with a site-joined channel",
+			zap.String("replacedChannelID", replaced.channelID),
+			zap.Bool("replacedWasJoined", replaced.joined),
+			zap.String("channelID", channelID))
+		if replaced.done != nil {
+			timer := time.NewTimer(joinCloseWaitTimeout)
+			select {
+			case <-replaced.done:
+			case <-timer.C:
+				s.logger.Warn("Timed out waiting for the replaced mint pairing to clean up",
+					zap.String("replacedChannelID", replaced.channelID))
+			}
+			timer.Stop()
+		}
+	}
+
+	sessionCtx, sessionCancel := context.WithDeadline(runCtx, expiresAt)
+	active := &activePairing{
+		channel:        siteJoinedChannel{brokerChannel: joined.channel},
+		channelID:      channelID,
+		expiresAt:      expiresAt,
+		phase:          activePairingPhaseJoined,
+		cancel:         sessionCancel,
+		done:           make(chan struct{}),
+		joined:         true,
+		origin:         joined.origin,
+		browserInfo:    joined.browserInfo,
+		joinCredential: credential,
+	}
+
+	s.mu.Lock()
+	s.active = active
+	s.mu.Unlock()
+
+	s.logger.Info("Joined site-created mint pairing channel",
+		zap.String("channelID", channelID),
+		zap.String("origin", joined.origin),
+		zap.Time("expiresAt", expiresAt))
+
+	go s.waitForBrowserAndApproval(sessionCtx, active, startGuard) //nolint:gosec
+
+	return joinPairingResponse{
+		OK:          true,
+		Status:      "joined",
+		ChannelID:   channelID,
+		Origin:      joined.origin,
+		BrowserInfo: joined.browserInfo,
+	}, nil
+}
+
+// siteJoinedChannel marks a channel the device joined rather than created.
+// completeDecision only sees the channel, and this is how it knows not to
+// paint the "creating token" overlay for a pairing that never had one.
+type siteJoinedChannel struct {
+	brokerChannel
+}
+
+// paintsOverlay reports whether the panel shows anything for this channel's
+// pairing. Only device-initiated channels do.
+func paintsOverlay(channel brokerChannel) bool {
+	_, joined := channel.(siteJoinedChannel)
+	return !joined
+}
+
+type joinPairingArgs struct {
+	channelID    string
+	pairingToken string
+	shortCode    string
+}
+
+const maxJoinArgumentLength = 128
+
+// parseJoinArgs accepts exactly `{channelId, pairingToken}` or `{shortCode}`.
+// Any other key is refused rather than ignored: a broker URL in particular
+// must never be taken from the app.
+func parseJoinArgs(args map[string]any) (joinPairingArgs, error) {
+	var join joinPairingArgs
+	for key, raw := range args {
+		value, ok := raw.(string)
+		if !ok {
+			return join, fmt.Errorf("%s must be a string", key)
+		}
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > maxJoinArgumentLength {
+			return join, fmt.Errorf("%s must be a non-empty string of at most %d characters", key, maxJoinArgumentLength)
+		}
+		switch key {
+		case "channelId":
+			join.channelID = value
+		case "pairingToken":
+			join.pairingToken = value
+		case "shortCode":
+			join.shortCode = value
+		default:
+			return join, fmt.Errorf("unexpected argument %q", key)
+		}
+	}
+	switch {
+	case join.shortCode != "" && join.channelID == "" && join.pairingToken == "":
+		if !isDigits(join.shortCode) {
+			return join, errors.New("shortCode must be digits")
+		}
+	case join.shortCode == "" && join.channelID != "" && join.pairingToken != "":
+		if !strings.HasPrefix(join.channelID, "ch_") || !strings.HasPrefix(join.pairingToken, "pt_") {
+			return join, errors.New("channelId or pairingToken is malformed")
+		}
+	default:
+		return join, errors.New("either channelId with pairingToken, or shortCode alone, is required")
+	}
+	return join, nil
+}
+
+// credentialDigest identifies the credential without holding it.
+func (j joinPairingArgs) credentialDigest() string {
+	var raw string
+	if j.shortCode != "" {
+		raw = "code\x00" + j.shortCode
+	} else {
+		raw = "token\x00" + j.channelID + "\x00" + j.pairingToken
+	}
+	sum := sha256.Sum256([]byte(raw))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func isDigits(value string) bool {
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return value != ""
+}
+
+// classifyJoinFailure maps a failed join to the reply code the app turns into
+// a sentence. Only a broker status is evidence of what went wrong; a
+// transport error or anything unrecognized is a retryable broker_error.
+func classifyJoinFailure(err error) (code string, retryable bool) {
+	status, ok := brokerStatusCode(err)
+	if !ok {
+		return "broker_error", true
+	}
+	switch status {
+	case http.StatusNotFound:
+		return "code_not_found", false
+	case http.StatusGone:
+		return "code_expired", false
+	case http.StatusUnauthorized:
+		// The broker answers 401 for a pairing token or code that was
+		// already consumed by another join.
+		return "code_used", false
+	case http.StatusTooManyRequests:
+		return "rate_limited", true
+	default:
+		return "broker_error", true
+	}
+}
+
+func joinFailureMessage(code string) string {
+	switch code {
+	case "code_not_found":
+		return "the pairing code was not found"
+	case "code_expired":
+		return "the pairing code expired"
+	case "code_used":
+		return "the pairing code was already used"
+	case "rate_limited":
+		return "too many pairing attempts; try again shortly"
+	default:
+		return "failed to join the mint pairing channel"
+	}
 }
 
 func (s *service) HandleClosePairingSession(context.Context, map[string]any) (any, error) {
@@ -930,6 +1290,12 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	}()
 
 	request, err := s.waitForMintRequest(ctx, active.channel)
+	if errors.Is(err, errOriginMismatch) {
+		// Not terminalSent even when the rejection went out: the channel is
+		// closed below, because nothing more should happen on it.
+		s.rejectOriginMismatch(active, request, guard)
+		return
+	}
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && s.shouldRefreshExpiredPairing(active) {
 			refreshAfterClose = true
@@ -979,8 +1345,10 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	defer s.unregisterPending(approvalRequestID)
 	s.setActivePendingApproval(active, pending.browserName)
 
-	if err := s.showRequestReceived(ctx, active, pending.browserName); err != nil {
-		s.logger.Warn("Failed to display mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
+	if !active.joined {
+		if err := s.showRequestReceived(ctx, active, pending.browserName); err != nil {
+			s.logger.Warn("Failed to display mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
+		}
 	}
 
 	if err := s.sendApprovalRequest(ctx, approvalRequestID, guard.topicID, *request, active.channel.MinterPublicKeyJWK(), expiresAt); err != nil {
@@ -1029,6 +1397,56 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	}
 }
 
+// rejectOriginMismatch ends a joined pairing whose mint request claimed an
+// origin other than the one the broker attested when the site created the
+// channel. The owner is never asked: the app would show one site's name for
+// another's request. The browser gets a non-retryable rejection when the
+// minter decoded a request to answer, and the controller gets a cancelled
+// outcome naming the channel it joined, so the app can clear its "connecting"
+// state.
+func (s *service) rejectOriginMismatch(active *activePairing, request *minter.MintRequest, guard topicGuard) {
+	requestOrigin := ""
+	requestMessageID := ""
+	if request != nil {
+		requestOrigin = request.Origin
+		requestMessageID = request.MessageID
+	}
+	s.logger.Warn("Rejecting a mint request whose origin does not match the attested origin",
+		zap.String("channelID", active.channelID),
+		zap.String("attestedOrigin", active.origin),
+		zap.String("requestOrigin", requestOrigin))
+	// A claim that is gone hears nothing, as in the worker's own guard.
+	if !guard.sameAs(currentTopicGuard()) {
+		return
+	}
+	terminalCtx, cancel := context.WithTimeout(context.Background(), terminalOperationTimeout)
+	defer cancel()
+	if request != nil {
+		if _, err := active.channel.SendMintRejection(terminalCtx, *request, minter.MintRejection{Reason: "origin_mismatch", Retryable: false}); err != nil {
+			s.logger.Warn("Failed to send origin-mismatch rejection to browser", zap.Error(err), zap.String("channelID", active.channelID))
+		}
+	}
+	approvalRequestID, err := newApprovalRequestID()
+	if err != nil {
+		s.logger.Warn("Failed to create mint pairing approval request id", zap.Error(err), zap.String("channelID", active.channelID))
+		return
+	}
+	message := map[string]any{
+		"v":                 1,
+		"approvalRequestID": approvalRequestID,
+		"channelID":         active.channelID,
+		"status":            approvalCancellationStatus,
+		"reason":            "origin_mismatch",
+		"completedAt":       time.Now().UTC().Format(time.RFC3339),
+	}
+	if requestMessageID != "" {
+		message["requestMessageID"] = requestMessageID
+	}
+	if err := s.sendMintPairingNotification(terminalCtx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME, approvalRequestID, message, 10); err != nil {
+		s.logger.Warn("Failed to send mint pairing approval outcome", zap.Error(err), zap.String("approvalRequestID", approvalRequestID))
+	}
+}
+
 func (s *service) sendApprovalCancelled(active *activePairing, request minter.MintRequest, approvalRequestID string) bool {
 	terminalCtx, cancel := context.WithTimeout(context.Background(), terminalOperationTimeout)
 	defer cancel()
@@ -1073,7 +1491,9 @@ func (s *service) waitForMintRequest(ctx context.Context, channel brokerChannel)
 	for {
 		request, nextAfterSeq, err := channel.PollMintRequest(ctx, afterSeq)
 		if err != nil {
-			return nil, fmt.Errorf("poll mint request: %w", err)
+			// The request rides along with the error only for an origin
+			// mismatch, so the caller can answer the browser.
+			return request, fmt.Errorf("poll mint request: %w", err)
 		}
 		afterSeq = maxInt64(afterSeq, nextAfterSeq)
 		if request != nil {
@@ -1102,8 +1522,10 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		return err == nil, err
 	}
 
-	if err := qrdisplay.ShowCreatingToken(ctx, s.cdp, browserDisplayName(request.BrowserInfo)); err != nil {
-		s.logger.Warn("Failed to display mint pairing token creation status", zap.Error(err), zap.String("channelID", request.ChannelID))
+	if paintsOverlay(channel) {
+		if err := qrdisplay.ShowCreatingToken(ctx, s.cdp, browserDisplayName(request.BrowserInfo)); err != nil {
+			s.logger.Warn("Failed to display mint pairing token creation status", zap.Error(err), zap.String("channelID", request.ChannelID))
+		}
 	}
 
 	// Admission comes BEFORE the guard check, not after it. A factory reset
@@ -1256,21 +1678,27 @@ var brokerStatusPattern = regexp.MustCompile(`failed with status (\d{3})`)
 // the owner can clear from the app's paired-sites screen — and a timed session
 // expires on its own.
 func classifyDeliveryFailure(err error) deliveryVerdict {
-	if err == nil {
-		return deliveryUnknown
-	}
-	match := brokerStatusPattern.FindStringSubmatch(err.Error())
-	if match == nil {
-		return deliveryUnknown
-	}
-	status, convErr := strconv.Atoi(match[1])
-	if convErr != nil {
-		return deliveryUnknown
-	}
-	if status >= 400 && status < 500 {
+	status, ok := brokerStatusCode(err)
+	if ok && status >= 400 && status < 500 {
 		return deliveryNeverSent
 	}
 	return deliveryUnknown
+}
+
+// brokerStatusCode reads the HTTP status out of a minter-client broker error.
+func brokerStatusCode(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	match := brokerStatusPattern.FindStringSubmatch(err.Error())
+	if match == nil {
+		return 0, false
+	}
+	status, convErr := strconv.Atoi(match[1])
+	if convErr != nil {
+		return 0, false
+	}
+	return status, true
 }
 
 // CloseActivePairing ends the pairing session in progress. See Service.

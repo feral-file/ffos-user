@@ -363,12 +363,15 @@ func TestCommandHandler_Process_NewGestureCommandsRouteToExecutor(t *testing.T) 
 
 type fakeMintPairingService struct {
 	startCalls     int
+	joinCalls      int
 	closeCalls     int
 	approvalCalls  int
 	startArgs      map[string]any
+	joinArgs       map[string]any
 	closeArgs      map[string]any
 	approvalArgs   map[string]any
 	startResult    any
+	joinResult     any
 	closeResult    any
 	approvalResult any
 }
@@ -381,6 +384,12 @@ func (f *fakeMintPairingService) HandleStartPairingSession(_ context.Context, ar
 	f.startCalls++
 	f.startArgs = args
 	return f.startResult, nil
+}
+
+func (f *fakeMintPairingService) HandleJoinPairingChannel(_ context.Context, args map[string]any) (any, error) {
+	f.joinCalls++
+	f.joinArgs = args
+	return f.joinResult, nil
 }
 
 func (f *fakeMintPairingService) HandleClosePairingSession(_ context.Context, args map[string]any) (any, error) {
