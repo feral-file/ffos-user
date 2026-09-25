@@ -4120,7 +4120,7 @@ type fakeBrokerJoiner struct {
 	joined   joinedChannel
 	err      error
 	requests []joinChannelRequest
-	// entered is signalled on each call; release, when set, holds the call
+	// entered is signaled on each call; release, when set, holds the call
 	// until it is closed or the call's context ends.
 	entered chan struct{}
 	release chan struct{}
@@ -4373,7 +4373,7 @@ func TestHandleJoinPairingChannel_PreconditionErrors(t *testing.T) {
 
 // TestHandleJoinPairingChannel_ReplacesAPendingDeviceInitiatedPairing: a join
 // is the owner's newer intent. The device-initiated pairing in progress is
-// dropped the way any cancellation drops it — its browser hears "cancelled",
+// dropped the way any cancellation drops it — its browser hears "canceled",
 // the app hears the outcome, its overlay is hidden, its channel closed — and
 // only then does the joined pairing take the single active slot.
 func TestHandleJoinPairingChannel_ReplacesAPendingDeviceInitiatedPairing(t *testing.T) {
@@ -4479,7 +4479,7 @@ func TestHandleJoinPairingChannel_RetryOfTheSameJoinIsAnsweredFromThePairing(t *
 // TestHandleJoinPairingChannel_AttestationMismatchEndsThePairingWithoutAskingTheOwner:
 // a mint request that contradicts what the broker attested (another origin,
 // or another browser key) never reaches the approval sheet. The app gets a
-// cancelled outcome naming the reason, the channel and the refused request;
+// canceled outcome naming the reason, the channel and the refused request;
 // the site gets a non-retryable mint_rejected; and the channel is closed,
 // after the rejection.
 func TestHandleJoinPairingChannel_AttestationMismatchEndsThePairingWithoutAskingTheOwner(t *testing.T) {
@@ -4772,7 +4772,7 @@ func TestHandleJoinPairingChannel_DeadlineIsTheBrokerExpiry(t *testing.T) {
 
 // TestHandleJoinPairingChannel_ApprovalFollowsTheExtendedBrokerExpiry: the
 // broker extends a channel's idle deadline when it accepts the site's request,
-// so the approval wait runs to the later deadline instead of being cancelled
+// so the approval wait runs to the later deadline instead of being canceled
 // at the one known at join.
 func TestHandleJoinPairingChannel_ApprovalFollowsTheExtendedBrokerExpiry(t *testing.T) {
 	defer state.ResetForTesting()

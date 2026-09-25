@@ -50,7 +50,7 @@ const (
 	maxApprovalRequestIDBytes = 16
 	defaultPlayerContractPath = "/opt/feral/feral-player/ffos-player-contract.json"
 
-	approvalCancellationStatus = "cancelled" //nolint:misspell // Wire protocol status is documented with this spelling.
+	approvalCancellationStatus = "canceled" //nolint:misspell // Wire protocol status is documented with this spelling.
 )
 
 type Options struct {
@@ -448,7 +448,7 @@ type startingPairing struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	// joinCredential is set for a join in flight (see activePairing's), so a
-	// retry of the same join waits for it instead of cancelling it.
+	// retry of the same join waits for it instead of canceling it.
 	joinCredential string
 }
 
@@ -930,7 +930,7 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 	// A start or join still inside its broker call holds startMu. Cancel it
 	// rather than wait it out: this join supersedes it. The exception is the
 	// same join already in flight (the app's relay retry after a slow LAN
-	// attempt) — cancelling that would spend the token for nothing, so wait
+	// attempt) — canceling that would spend the token for nothing, so wait
 	// for it and answer from the pairing it makes.
 	s.mu.Lock()
 	sameJoinInFlight := s.starting != nil && s.starting.joinCredential == credential
@@ -959,7 +959,7 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 	// intent from the owner, and whatever was in progress (a device-initiated
 	// code on the panel, or an older site pairing) must not go on to mint
 	// while the join is in flight or after it fails. Holding startMu, nothing
-	// a cancelled start could still publish survives this. The replaced
+	// a canceled start could still publish survives this. The replaced
 	// worker cancels its approval, hides its overlay and closes its channel;
 	// wait for that so the old browser hears its cancellation first.
 	if replaced := s.cancelActivePairing(); replaced != nil {
@@ -1518,7 +1518,7 @@ func attestationMismatch(err error) (string, bool) {
 // contradicts what the broker attested when the site created the channel: a
 // different origin, or a different browser key. The owner is never asked: the
 // app would show one site's name for another's request. The controller gets a
-// cancelled outcome naming the channel and the refused request, so the app
+// canceled outcome naming the channel and the refused request, so the app
 // can match it and clear its "connecting" state. The browser gets a
 // non-retryable encrypted rejection naming the reason; the minter hands the
 // refused request back with the error for exactly this. The channel is closed
