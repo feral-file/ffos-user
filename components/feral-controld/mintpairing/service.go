@@ -292,8 +292,8 @@ type joinChannelRequest struct {
 // joinedChannel is a channel this device joined plus what the broker attested
 // about the site that created it. origin is the site's HTTP Origin as the
 // broker recorded it at create time; the minter refuses a mint request that
-// claims any other (minter.ErrOriginMismatch). expiresAt is zero when the
-// minter does not report it; the service then applies its own idle TTL.
+// claims any other (minter.ErrOriginMismatch). expiresAt is the broker's
+// channel expiry; when it is zero the service applies its own idle TTL.
 type joinedChannel struct {
 	channel     brokerChannel
 	channelID   string
@@ -370,6 +370,11 @@ func (b brokerChannelAdapter) MinterPublicKeyJWK() minter.PublicJWK {
 func (b brokerChannelAdapter) PollMintRequest(ctx context.Context, afterSeq int64) (*minter.MintRequest, int64, error) {
 	request, err := b.channel.PollMintRequest(ctx, afterSeq)
 	if err != nil {
+		// A joined channel hands back the refused request with an attestation
+		// mismatch so it can be answered; it is never a request to approve.
+		if _, mismatched := attestationMismatch(err); mismatched {
+			return request, afterSeq, err
+		}
 		return nil, afterSeq, err
 	}
 	if request == nil {
@@ -425,6 +430,7 @@ func (b realBrokerJoiner) JoinChannel(ctx context.Context, request joinChannelRe
 	return joinedChannel{
 		channel:     brokerChannelAdapter{channel: channel},
 		channelID:   channel.ChannelID(),
+		expiresAt:   channel.ExpiresAt(),
 		origin:      requester.Origin,
 		browserInfo: requester.BrowserInfo,
 	}, nil
@@ -1452,11 +1458,11 @@ func attestationMismatch(err error) (string, bool) {
 // contradicts what the broker attested when the site created the channel: a
 // different origin, or a different browser key. The owner is never asked: the
 // app would show one site's name for another's request. The controller gets a
-// cancelled outcome naming the channel it joined, so the app can clear its
-// "connecting" state. The browser gets a non-retryable rejection only when
-// the minter handed back a request to answer (today it does not: the refused
-// request is never decoded into one, so the site learns from the channel
-// closing).
+// cancelled outcome naming the channel and the refused request, so the app
+// can match it and clear its "connecting" state. The browser gets a
+// non-retryable encrypted rejection naming the reason; the minter hands the
+// refused request back with the error for exactly this. The channel is closed
+// afterwards by the worker.
 func (s *service) rejectAttestationMismatch(active *activePairing, request *minter.MintRequest, guard topicGuard, reason string) {
 	requestOrigin := ""
 	requestMessageID := ""

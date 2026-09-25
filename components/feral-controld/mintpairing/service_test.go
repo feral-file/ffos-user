@@ -3644,26 +3644,28 @@ func (f *fakeBrokerStarter) ReceivedOptions() minter.StartChannelOptions {
 }
 
 type fakeBrokerChannel struct {
-	mu                sync.Mutex
-	channelID         string
-	pairingCode       string
-	expiresAt         time.Time
-	request           *minter.MintRequest
-	rejectionSent     chan struct{}
-	rejectionStarted  chan struct{}
-	rejectionRelease  chan struct{}
-	successSent       chan struct{}
-	closed            chan struct{}
-	rejectionDelay    time.Duration
-	ignoredSeq        int64
-	pollAfterSeqs     []int64
-	successCount      int
-	closeCount        int
-	rejectionReasons  []string
-	deliveredSessions []minter.MintResult
-	successErr        error
-	// pollErr is returned, with no request, by the poll that would have
-	// returned the pending one — the minter's attestation-mismatch shape.
+	mu               sync.Mutex
+	channelID        string
+	pairingCode      string
+	expiresAt        time.Time
+	request          *minter.MintRequest
+	rejectionSent    chan struct{}
+	rejectionStarted chan struct{}
+	rejectionRelease chan struct{}
+	successSent      chan struct{}
+	closed           chan struct{}
+	rejectionDelay   time.Duration
+	ignoredSeq       int64
+	pollAfterSeqs    []int64
+	successCount     int
+	closeCount       int
+	rejectionReasons []string
+	// rejectionRetryable records each rejection's retryable flag, in order.
+	rejectionRetryable []bool
+	deliveredSessions  []minter.MintResult
+	successErr         error
+	// pollErr is returned together with the pending request — the minter's
+	// attestation-mismatch shape (the refused request rides along).
 	pollErr    error
 	onSend     func()
 	beforePoll func()
@@ -3713,7 +3715,7 @@ func (f *fakeBrokerChannel) PollMintRequest(_ context.Context, afterSeq int64) (
 	request := f.request
 	f.request = nil
 	if f.pollErr != nil {
-		return nil, afterSeq, f.pollErr
+		return request, afterSeq, f.pollErr
 	}
 	return request, request.Seq, nil
 }
@@ -3779,6 +3781,7 @@ func (f *fakeBrokerChannel) SendMintRejection(ctx context.Context, _ minter.Mint
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rejectionReasons = append(f.rejectionReasons, rejection.Reason)
+	f.rejectionRetryable = append(f.rejectionRetryable, rejection.Retryable)
 	if f.rejectionSent != nil {
 		select {
 		case f.rejectionSent <- struct{}{}:
@@ -4467,8 +4470,9 @@ func TestHandleJoinPairingChannel_RetryOfTheSameJoinIsAnsweredFromThePairing(t *
 // TestHandleJoinPairingChannel_AttestationMismatchEndsThePairingWithoutAskingTheOwner:
 // a mint request that contradicts what the broker attested (another origin,
 // or another browser key) never reaches the approval sheet. The app gets a
-// cancelled outcome naming the reason and the channel it joined, and the
-// channel is closed.
+// cancelled outcome naming the reason, the channel and the refused request;
+// the site gets a non-retryable mint_rejected; and the channel is closed,
+// after the rejection.
 func TestHandleJoinPairingChannel_AttestationMismatchEndsThePairingWithoutAskingTheOwner(t *testing.T) {
 	for _, tc := range []struct {
 		err    error
@@ -4503,13 +4507,17 @@ func TestHandleJoinPairingChannel_AttestationMismatchEndsThePairingWithoutAsking
 			assert.Equal(t, approvalCancellationStatus, message["status"])
 			assert.Equal(t, tc.reason, message["reason"])
 			assert.Equal(t, "ch_site", message["channelID"])
+			assert.Equal(t, "msg_1", message["requestMessageID"])
 
 			select {
 			case <-ch.closed:
 			case <-time.After(time.Second):
 				t.Fatal("the channel must be closed after an attestation mismatch")
 			}
-			assert.Empty(t, ch.RejectionReasons(), "the minter hands back no request to answer")
+			ch.mu.Lock()
+			assert.Equal(t, []string{tc.reason}, ch.rejectionReasons)
+			assert.Equal(t, []bool{false}, ch.rejectionRetryable)
+			ch.mu.Unlock()
 			select {
 			case extra := <-relayerClient.sent:
 				t.Fatalf("no approval request may be sent for a mismatched request, got %s", extra.NotificationType)
@@ -4589,7 +4597,13 @@ func TestCloseActivePairing_ClosesAJoinedPairing(t *testing.T) {
 	closed, err := s.CloseActivePairing(ctx)
 	require.NoError(t, err)
 	assert.True(t, closed)
-	assert.Equal(t, 1, ch.CloseCount())
+	// The worker signals done before its deferred channel close runs, so the
+	// close is awaited rather than counted immediately.
+	select {
+	case <-ch.closed:
+	case <-time.After(time.Second):
+		t.Fatal("the reset's close must close the joined broker channel")
+	}
 }
 
 func TestClassifyJoinFailure(t *testing.T) {
@@ -4711,4 +4725,38 @@ func TestHandleJoinPairingChannel_ARetryDoesNotCancelTheSameJoinInFlight(t *test
 		}
 	}
 	assert.Len(t, joiner.Requests(), 1, "the token is spent once")
+}
+
+// TestHandleJoinPairingChannel_DeadlineIsTheBrokerExpiry: the joined pairing
+// lives as long as the broker says the channel does, and falls back to the
+// device idle TTL only when the broker reports none.
+func TestHandleJoinPairingChannel_DeadlineIsTheBrokerExpiry(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	brokerExpiry := time.Now().Add(4 * time.Minute).Truncate(time.Second)
+	joined := joinedFor(&fakeBrokerChannel{channelID: "ch_site"}, "ch_site")
+	joined.expiresAt = brokerExpiry
+	joiner := &fakeBrokerJoiner{joined: joined}
+	s := newJoinTestService(t, joiner, nil, nil, &fakeCDP{})
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "111111"})
+	require.NoError(t, err)
+	s.mu.Lock()
+	assert.True(t, s.active.expiresAt.Equal(brokerExpiry), "got %s", s.active.expiresAt)
+	s.mu.Unlock()
+
+	unreported := joinedFor(&fakeBrokerChannel{channelID: "ch_other"}, "ch_other")
+	unreported.expiresAt = time.Time{}
+	joiner.mu.Lock()
+	joiner.joined = unreported
+	joiner.mu.Unlock()
+	before := time.Now()
+	_, err = s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "222222"})
+	require.NoError(t, err)
+	s.mu.Lock()
+	got := s.active.expiresAt
+	s.mu.Unlock()
+	assert.False(t, got.Before(before.Add(s.opts.IdleTTL)), "zero broker expiry falls back to the idle TTL")
+	assert.True(t, got.Before(time.Now().Add(s.opts.IdleTTL).Add(time.Second)))
 }

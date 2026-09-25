@@ -1806,12 +1806,16 @@ Error cases (`ok: false`):
 Attestation check: if the site's `mint_request` names an origin other than the
 attested one, or was encrypted with a browser key other than the one the broker
 returned at join, the minter refuses it and the owner is not asked.
-`feral-controld` sends the controller a `mint_pairing_approval_outcome` with
-`status: "cancelled"`, `reason: "origin_mismatch"` or
-`"browser_key_mismatch"`, and the joined `channelID` (its `approvalRequestID`
-is fresh, since no approval request was ever sent), and closes the channel.
-The minter does not hand back the refused request, so no encrypted
-`mint_rejected` goes to the browser; the site sees the channel close.
+`feral-controld` sends the browser an encrypted `mint_rejected` with reason
+`origin_mismatch` or `browser_key_mismatch` (not retryable), sends the
+controller a `mint_pairing_approval_outcome` with `status: "cancelled"`, the
+same `reason`, the joined `channelID`, and the refused request's
+`requestMessageID` (its `approvalRequestID` is fresh, since no approval request
+was ever sent; match it by `channelID` and `requestMessageID`), and then closes
+the channel.
+
+A joined pairing lives until the broker's channel expiry as reported at join,
+or for the device's idle TTL when the broker reports none.
 
 ### Outbound Approval Request
 
