@@ -4373,7 +4373,7 @@ func TestHandleJoinPairingChannel_PreconditionErrors(t *testing.T) {
 
 // TestHandleJoinPairingChannel_ReplacesAPendingDeviceInitiatedPairing: a join
 // is the owner's newer intent. The device-initiated pairing in progress is
-// dropped the way any cancellation drops it — its browser hears "canceled",
+// dropped the way any cancellation drops it — its browser hears "cancelled",
 // the app hears the outcome, its overlay is hidden, its channel closed — and
 // only then does the joined pairing take the single active slot.
 func TestHandleJoinPairingChannel_ReplacesAPendingDeviceInitiatedPairing(t *testing.T) {
@@ -5032,4 +5032,14 @@ func TestHandleJoinPairingChannel_AJoinedPairingEndsAtItsDeadline(t *testing.T) 
 	s.mu.Lock()
 	assert.Nil(t, s.active)
 	s.mu.Unlock()
+}
+
+// TestApprovalCancellationStatusWireLiteral pins the protocol value: the
+// controller contract (docs/controld-inbound-controller-messages.md) documents
+// the status as "cancelled", and a spelling "fix" once changed it under a lint
+// pass. Consumers match the literal, so it must never drift.
+func TestApprovalCancellationStatusWireLiteral(t *testing.T) {
+	if approvalCancellationStatus != "cancelled" { //nolint:misspell // wire literal
+		t.Fatalf("approvalCancellationStatus = %q, want the documented wire literal \"cancelled\"", approvalCancellationStatus)
+	}
 }

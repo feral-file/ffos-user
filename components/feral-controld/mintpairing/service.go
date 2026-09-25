@@ -50,7 +50,7 @@ const (
 	maxApprovalRequestIDBytes = 16
 	defaultPlayerContractPath = "/opt/feral/feral-player/ffos-player-contract.json"
 
-	approvalCancellationStatus = "canceled" //nolint:misspell // Wire protocol status is documented with this spelling.
+	approvalCancellationStatus = "cancelled" //nolint:misspell // Wire protocol status is documented with this spelling.
 )
 
 type Options struct {
