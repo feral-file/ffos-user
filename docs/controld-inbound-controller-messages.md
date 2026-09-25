@@ -1801,13 +1801,15 @@ Error cases (`ok: false`):
 - `rate_limited` (broker 429, retryable).
 - `broker_error` (retryable): any other broker failure or a transport error.
 
-Origin check: if the site's decrypted `mint_request` names an origin other than
-the attested one, the owner is not asked. `feral-controld` sends the browser an
-encrypted `mint_rejected` with reason `origin_mismatch` (not retryable), sends
-the controller a `mint_pairing_approval_outcome` with `status: "cancelled"`,
-`reason: "origin_mismatch"`, and the joined `channelID` (its
-`approvalRequestID` is fresh, since no approval request was ever sent), and
-closes the channel.
+Attestation check: if the site's `mint_request` names an origin other than the
+attested one, or was encrypted with a browser key other than the one the broker
+returned at join, the minter refuses it and the owner is not asked.
+`feral-controld` sends the controller a `mint_pairing_approval_outcome` with
+`status: "cancelled"`, `reason: "origin_mismatch"` or
+`"browser_key_mismatch"`, and the joined `channelID` (its `approvalRequestID`
+is fresh, since no approval request was ever sent), and closes the channel.
+The minter does not hand back the refused request, so no encrypted
+`mint_rejected` goes to the browser; the site sees the channel close.
 
 ### Outbound Approval Request
 
