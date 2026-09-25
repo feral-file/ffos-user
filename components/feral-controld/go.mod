@@ -63,3 +63,6 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/sync v0.22.0
 )
+
+// TEMPORARY: swapped for the merged play pseudo-version before PR
+replace github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go => /home/moskovich/Work/play-wt/site-initiated-broker/clients/ephemeral-token-minter/go
