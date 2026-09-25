@@ -71,7 +71,8 @@ for relayer topic assignment:
   CDP, so a playlist without item-level `displayAt` is forwarded unchanged only
   when the policy admits all of its items (see "Content policy effect on
   playlists" below).
-- `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
+- `startMintPairingSession`, `joinMintPairingChannel`,
+  `closeMintPairingSession`, and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
 - `getRecentlyPlayed`, `playRecentlyPlayed`, `getContentPolicy`, and
   `setContentPolicy` are likewise handled by `feral-controld` as commandrouter
@@ -1612,7 +1613,7 @@ requests, and encrypted browser results. Relayer approval dispatch and
 `feral-controld`; the minter library does not know relayer API keys, approval
 transport, or token minting policy. Runtime support is opt-in through
 `mintPairing.enabled` in `feral-controld` config and starts only after a
-controller sends `startMintPairingSession`.
+controller sends `startMintPairingSession` or `joinMintPairingChannel`.
 
 ### startMintPairingSession
 
@@ -1711,6 +1712,102 @@ failure. During process shutdown, terminal broker/relayer delivery and display
 cleanup are bounded so mint-pairing cleanup fits within `feral-controld`'s
 two-second forced-exit guard; if a terminal delivery exceeds that budget, it is
 logged and treated as best-effort.
+
+### joinMintPairingChannel
+
+Purpose: join a Mint Pairing Broker channel that a site created
+(site-initiated pairing). The site shows an app link, a QR code of it, or a
+six-digit code; the app brings the Art Computer to the channel by sending this
+command. The device joins on its own configured broker (`mintPairing.brokerBaseURL`),
+becomes the channel's minter, and from there runs the same flow as
+`startMintPairingSession`: the site's encrypted `mint_request` produces a
+`mint_pairing_approval_request`, the controller answers with
+`mintPairingApprovalDecision`, and the session is minted and delivered. Nothing
+is shown on the panel for a joined channel: no `mintPairingDisplay` call is
+made at any stage, including the terminal `hidden`.
+
+Arguments, exactly one of:
+
+```json
+{ "channelId": "ch_...", "pairingToken": "pt_..." }
+```
+
+```json
+{ "shortCode": "123456" }
+```
+
+No broker URL is accepted from the controller; any key other than these is
+refused with `invalid_request`.
+
+Example:
+
+```json
+{
+  "messageID": "msg-join-mint-pairing-1",
+  "message": {
+    "command": "joinMintPairingChannel",
+    "request": { "channelId": "ch_pQ9Yab...", "pairingToken": "pt_..." }
+  }
+}
+```
+
+Success response (flat on the LAN hub, wrapped in the RPC envelope over the
+relayer, exactly as `startMintPairingSession`):
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-join-mint-pairing-1",
+  "message": {
+    "ok": true,
+    "status": "joined",
+    "channelId": "ch_pQ9Yab...",
+    "origin": "https://www.artblocks.io",
+    "browserInfo": { "name": "Art Blocks", "label": "artblocks.io" }
+  }
+}
+```
+
+`origin` is the site origin the broker attested when the site created the
+channel (from the site's HTTP `Origin` header), not a value the site chose.
+The controller uses it for its "Connecting <site> to <device>" line.
+
+A join replaces any pairing in progress: a device-initiated pairing (its code
+on the panel, or a request pending approval) or an older joined channel is
+cancelled the way `closeMintPairingSession` cancels it, including the
+`cancelled` rejection to its browser and approval outcome to the controller,
+before the new channel takes the single active slot. The same join sent twice
+(for example a LAN attempt whose reply was lost, retried over the relayer) is
+answered from the pairing it already made, without spending the single-use
+token again.
+
+While a joined pairing waits for the site's request, `startMintPairingSession`
+answers `site_pairing_active` (retryable) instead of painting a code; once the
+request is pending approval it answers `pending_approval` without painting.
+`closeMintPairingSession` closes a joined pairing like any other.
+
+Error cases (`ok: false`):
+
+- `disabled`: `mintPairing.enabled` is false.
+- `invalid_request`: missing, extra, or malformed arguments.
+- `invalid_config`: the broker base URL is not configured.
+- `topic_not_ready`: device has no current relayer topic ID.
+- `topic_changed`: the claim changed while the device was joining.
+- `code_not_found` (broker 404, not retryable): no channel for this code or
+  token.
+- `code_expired` (broker 410, not retryable): the channel expired.
+- `code_used` (broker 401, not retryable): the token or code was already used
+  by another join.
+- `rate_limited` (broker 429, retryable).
+- `broker_error` (retryable): any other broker failure or a transport error.
+
+Origin check: if the site's decrypted `mint_request` names an origin other than
+the attested one, the owner is not asked. `feral-controld` sends the browser an
+encrypted `mint_rejected` with reason `origin_mismatch` (not retryable), sends
+the controller a `mint_pairing_approval_outcome` with `status: "cancelled"`,
+`reason: "origin_mismatch"`, and the joined `channelID` (its
+`approvalRequestID` is fresh, since no approval request was ever sent), and
+closes the channel.
 
 ### Outbound Approval Request
 
