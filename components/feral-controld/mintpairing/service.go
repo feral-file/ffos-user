@@ -436,6 +436,9 @@ func (b realBrokerJoiner) JoinChannel(ctx context.Context, request joinChannelRe
 type startingPairing struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+	// joinCredential is set for a join in flight (see activePairing's), so a
+	// retry of the same join waits for it instead of cancelling it.
+	joinCredential string
 }
 
 type pendingApproval struct {
@@ -913,6 +916,18 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 	}
 	credential := join.credentialDigest()
 
+	// A start or join still inside its broker call holds startMu. Cancel it
+	// rather than wait it out: this join supersedes it. The exception is the
+	// same join already in flight (the app's relay retry after a slow LAN
+	// attempt) — cancelling that would spend the token for nothing, so wait
+	// for it and answer from the pairing it makes.
+	s.mu.Lock()
+	sameJoinInFlight := s.starting != nil && s.starting.joinCredential == credential
+	s.mu.Unlock()
+	if !sameJoinInFlight {
+		s.cancelStartingPairing()
+	}
+
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
 
@@ -929,6 +944,29 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 		}, nil
 	}
 
+	// Replace, not refuse, and before the broker call: a join is a fresh
+	// intent from the owner, and whatever was in progress (a device-initiated
+	// code on the panel, or an older site pairing) must not go on to mint
+	// while the join is in flight or after it fails. Holding startMu, nothing
+	// a cancelled start could still publish survives this. The replaced
+	// worker cancels its approval, hides its overlay and closes its channel;
+	// wait for that so the old browser hears its cancellation first.
+	if replaced := s.cancelActivePairing(); replaced != nil {
+		s.logger.Info("Replacing the mint pairing in progress with a site join",
+			zap.String("replacedChannelID", replaced.channelID),
+			zap.Bool("replacedWasJoined", replaced.joined))
+		if replaced.done != nil {
+			timer := time.NewTimer(joinCloseWaitTimeout)
+			select {
+			case <-replaced.done:
+			case <-timer.C:
+				s.logger.Warn("Timed out waiting for the replaced mint pairing to clean up",
+					zap.String("replacedChannelID", replaced.channelID))
+			}
+			timer.Stop()
+		}
+	}
+
 	runCtx := ctx
 	s.mu.Lock()
 	if s.ctx != nil {
@@ -940,7 +978,7 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 	defer cancelJoin()
 	// Registered as a start for the same reason a start is: a reset landing
 	// during the broker call must find something to cancel and wait for.
-	starting := &startingPairing{cancel: cancelJoin, done: make(chan struct{})}
+	starting := &startingPairing{cancel: cancelJoin, done: make(chan struct{}), joinCredential: credential}
 	s.registerStarting(starting)
 	defer s.finishStarting(starting)
 
@@ -977,28 +1015,6 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 	expiresAt := joined.expiresAt
 	if expiresAt.IsZero() {
 		expiresAt = time.Now().Add(s.opts.IdleTTL)
-	}
-
-	// Replace, not refuse: a join is a fresh intent from the owner, and
-	// whatever was in progress (a device-initiated code on the panel, or an
-	// older site pairing) is the thing to drop. Its worker cancels its
-	// approval, hides its overlay and closes its channel; wait for that so
-	// the old browser hears its cancellation before the new pairing starts.
-	if replaced := s.cancelActivePairing(); replaced != nil {
-		s.logger.Info("Replacing the mint pairing in progress with a site-joined channel",
-			zap.String("replacedChannelID", replaced.channelID),
-			zap.Bool("replacedWasJoined", replaced.joined),
-			zap.String("channelID", channelID))
-		if replaced.done != nil {
-			timer := time.NewTimer(joinCloseWaitTimeout)
-			select {
-			case <-replaced.done:
-			case <-timer.C:
-				s.logger.Warn("Timed out waiting for the replaced mint pairing to clean up",
-					zap.String("replacedChannelID", replaced.channelID))
-			}
-			timer.Stop()
-		}
 	}
 
 	sessionCtx, sessionCancel := context.WithDeadline(runCtx, expiresAt)

@@ -1775,8 +1775,10 @@ The controller uses it for its "Connecting <site> to <device>" line.
 A join replaces any pairing in progress: a device-initiated pairing (its code
 on the panel, or a request pending approval) or an older joined channel is
 cancelled the way `closeMintPairingSession` cancels it, including the
-`cancelled` rejection to its browser and approval outcome to the controller,
-before the new channel takes the single active slot. The same join sent twice
+`cancelled` rejection to its browser and approval outcome to the controller.
+This happens before the broker is called, so the replaced pairing is gone even
+if the join then fails; a start or another join still inside its broker call
+is cancelled rather than waited for. The same join sent twice
 (for example a LAN attempt whose reply was lost, retried over the relayer) is
 answered from the pairing it already made, without spending the single-use
 token again.

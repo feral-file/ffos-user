@@ -4108,9 +4108,26 @@ type fakeBrokerJoiner struct {
 	joined   joinedChannel
 	err      error
 	requests []joinChannelRequest
+	// entered is signalled on each call; release, when set, holds the call
+	// until it is closed or the call's context ends.
+	entered chan struct{}
+	release chan struct{}
 }
 
-func (f *fakeBrokerJoiner) JoinChannel(_ context.Context, request joinChannelRequest) (joinedChannel, error) {
+func (f *fakeBrokerJoiner) JoinChannel(ctx context.Context, request joinChannelRequest) (joinedChannel, error) {
+	f.mu.Lock()
+	entered, release := f.entered, f.release
+	f.mu.Unlock()
+	if entered != nil {
+		entered <- struct{}{}
+	}
+	if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return joinedChannel{}, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, request)
@@ -4582,4 +4599,116 @@ func TestClassifyJoinFailure(t *testing.T) {
 	code, retryable = classifyJoinFailure(context.DeadlineExceeded)
 	assert.Equal(t, "broker_error", code)
 	assert.True(t, retryable)
+}
+
+// TestHandleJoinPairingChannel_ReplacesEvenWhenTheJoinFails: the replaced
+// pairing is dropped before the broker call, so a device-initiated approval
+// cannot go on minting while the join is in flight or after it fails.
+func TestHandleJoinPairingChannel_ReplacesEvenWhenTheJoinFails(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	oldChannel := &fakeBrokerChannel{channelID: "ch_old", pairingCode: "PAIR-123", closed: make(chan struct{}, 1)}
+	joiner := &fakeBrokerJoiner{err: errors.New("broker POST /v1/pairing-codes/resolve failed with status 410")}
+	cdpClient := &fakeCDP{}
+	s := newJoinTestService(t, joiner, &fakeBrokerStarter{channel: oldChannel}, nil, cdpClient)
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	require.True(t, result.(startPairingResponse).OK)
+
+	result, err = s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+	assertCommandError(t, result, "code_expired", false)
+
+	select {
+	case <-oldChannel.closed:
+	case <-time.After(time.Second):
+		t.Fatal("the replaced pairing's channel must be closed before the join is attempted")
+	}
+	assertEventuallyDisplayObserved(t, cdpClient, "hidden", "", "")
+	s.mu.Lock()
+	assert.Nil(t, s.active)
+	s.mu.Unlock()
+}
+
+// TestHandleJoinPairingChannel_CancelsAStartStillInItsBrokerCall: a join does
+// not wait out a start it supersedes.
+func TestHandleJoinPairingChannel_CancelsAStartStillInItsBrokerCall(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	starter := &fakeBrokerStarter{entered: make(chan struct{}), blockUntilCanceled: true}
+	ch := &fakeBrokerChannel{channelID: "ch_site"}
+	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site")}
+	cdpClient := &fakeCDP{}
+	s := newJoinTestService(t, joiner, starter, nil, cdpClient)
+
+	startResult := make(chan any, 1)
+	go func() {
+		result, _ := s.HandleStartPairingSession(context.Background(), nil)
+		startResult <- result
+	}()
+	<-starter.entered
+
+	joinDone := make(chan any, 1)
+	go func() {
+		result, _ := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+		joinDone <- result
+	}()
+	select {
+	case result := <-joinDone:
+		assert.Equal(t, "joined", result.(joinPairingResponse).Status)
+	case <-time.After(time.Second):
+		t.Fatal("the join waited out a start it supersedes")
+	}
+	select {
+	case result := <-startResult:
+		assertCommandError(t, result, "broker_unavailable", true)
+	case <-time.After(time.Second):
+		t.Fatal("the superseded start never returned")
+	}
+	assert.Empty(t, cdpClient.displayRequestsSnapshot())
+	s.mu.Lock()
+	assert.Equal(t, "ch_site", s.active.channelID)
+	s.mu.Unlock()
+}
+
+// TestHandleJoinPairingChannel_ARetryDoesNotCancelTheSameJoinInFlight: the
+// relay retry of a join whose LAN attempt is still in its broker call waits
+// for it and answers from the pairing it made, spending the token once.
+func TestHandleJoinPairingChannel_ARetryDoesNotCancelTheSameJoinInFlight(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{channelID: "ch_site"}
+	release := make(chan struct{})
+	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site"), entered: make(chan struct{}, 2), release: release}
+	s := newJoinTestService(t, joiner, nil, nil, &fakeCDP{})
+
+	args := map[string]any{"channelId": "ch_site", "pairingToken": "pt_secret"}
+	results := make(chan any, 2)
+	go func() {
+		result, _ := s.HandleJoinPairingChannel(context.Background(), args)
+		results <- result
+	}()
+	<-joiner.entered
+	go func() {
+		result, _ := s.HandleJoinPairingChannel(context.Background(), args)
+		results <- result
+	}()
+	time.Sleep(20 * time.Millisecond) // let the retry reach startMu
+	close(release)
+
+	for range 2 {
+		select {
+		case result := <-results:
+			resp, ok := result.(joinPairingResponse)
+			require.True(t, ok, "got %#v", result)
+			assert.Equal(t, "joined", resp.Status)
+		case <-time.After(time.Second):
+			t.Fatal("a join never returned")
+		}
+	}
+	assert.Len(t, joiner.Requests(), 1, "the token is spent once")
 }
