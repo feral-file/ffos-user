@@ -4124,16 +4124,21 @@ type fakeBrokerJoiner struct {
 	// until it is closed or the call's context ends.
 	entered chan struct{}
 	release chan struct{}
+	// ignoreCancel models a broker reply that arrives after the join's
+	// context was canceled: the call waits for release alone.
+	ignoreCancel bool
 }
 
 func (f *fakeBrokerJoiner) JoinChannel(ctx context.Context, request joinChannelRequest) (joinedChannel, error) {
 	f.mu.Lock()
-	entered, release := f.entered, f.release
+	entered, release, ignoreCancel := f.entered, f.release, f.ignoreCancel
 	f.mu.Unlock()
 	if entered != nil {
 		entered <- struct{}{}
 	}
-	if release != nil {
+	if release != nil && ignoreCancel {
+		<-release
+	} else if release != nil {
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -5041,5 +5046,150 @@ func TestHandleJoinPairingChannel_AJoinedPairingEndsAtItsDeadline(t *testing.T) 
 func TestApprovalCancellationStatusWireLiteral(t *testing.T) {
 	if approvalCancellationStatus != "cancelled" { //nolint:misspell // wire literal
 		t.Fatalf("approvalCancellationStatus = %q, want the documented double-l wire literal", approvalCancellationStatus)
+	}
+}
+
+// TestHandleClosePairingSession_CancelsAJoinInItsBrokerCall: a close landing
+// while the join is inside its broker call cancels it, and when the broker's
+// reply arrives anyway, the joined channel is closed rather than published —
+// no live pairing, no approval request.
+func TestHandleClosePairingSession_CancelsAJoinInItsBrokerCall(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		channelID: "ch_site",
+		request:   &minter.MintRequest{ChannelID: "ch_site", MessageID: "msg_1", Origin: testSiteOrigin},
+		closed:    make(chan struct{}, 1),
+	}
+	release := make(chan struct{})
+	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site"), entered: make(chan struct{}, 1), release: release, ignoreCancel: true}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newJoinTestService(t, joiner, nil, relayerClient, &fakeCDP{})
+
+	joinResult := make(chan any, 1)
+	go func() {
+		result, _ := s.HandleJoinPairingChannel(context.Background(), map[string]any{"channelId": "ch_site", "pairingToken": "pt_secret"})
+		joinResult <- result
+	}()
+	<-joiner.entered
+
+	closeResult := make(chan any, 1)
+	go func() {
+		result, _ := s.HandleClosePairingSession(context.Background(), nil)
+		closeResult <- result
+	}()
+	select {
+	case <-closeResult:
+		t.Fatal("the close must wait for the canceled join to unwind")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release) // the broker accepted the join after all
+
+	select {
+	case result := <-joinResult:
+		assertCommandError(t, result, "pairing_closed", false)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the canceled join never returned")
+	}
+	select {
+	case result := <-closeResult:
+		resp := result.(closePairingResponse)
+		assert.True(t, resp.OK)
+		assert.Equal(t, "closed", resp.Status)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the close never returned")
+	}
+	select {
+	case <-ch.closed:
+	case <-time.After(time.Second):
+		t.Fatal("a join accepted after the close must have its channel closed")
+	}
+	s.mu.Lock()
+	assert.Nil(t, s.active)
+	assert.Nil(t, s.starting)
+	s.mu.Unlock()
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case msg := <-relayerClient.sent:
+		t.Fatalf("a closed join must never ask for approval, got %s", msg.NotificationType)
+	default:
+	}
+}
+
+// TestHandleClosePairingSession_CancelsAStartInItsBrokerCall: the same for a
+// device-initiated start, which answers closed instead of not_started.
+func TestHandleClosePairingSession_CancelsAStartInItsBrokerCall(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	starter := &fakeBrokerStarter{entered: make(chan struct{}), blockUntilCanceled: true}
+	cdpClient := &fakeCDP{}
+	s := newJoinTestService(t, &fakeBrokerJoiner{}, starter, nil, cdpClient)
+
+	startResult := make(chan any, 1)
+	go func() {
+		result, _ := s.HandleStartPairingSession(context.Background(), nil)
+		startResult <- result
+	}()
+	<-starter.entered
+
+	result, err := s.HandleClosePairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, "closed", result.(closePairingResponse).Status)
+	select {
+	case <-startResult:
+	case <-time.After(time.Second):
+		t.Fatal("the canceled start never returned")
+	}
+	s.mu.Lock()
+	assert.Nil(t, s.active)
+	s.mu.Unlock()
+	assert.Empty(t, cdpClient.displayRequestsSnapshot())
+}
+
+// ctxCheckingRelayer refuses a send whose context has already ended, the way
+// a real transport does.
+type ctxCheckingRelayer struct{ fakeRelayer }
+
+func (r *ctxCheckingRelayer) Send(ctx context.Context, data interface{}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.fakeRelayer.Send(ctx, data)
+}
+
+// TestHandleJoinPairingChannel_MismatchOutcomeSurvivesASlowRejection: the
+// browser rejection may use its whole budget; the app's outcome has its own
+// and still goes out.
+func TestHandleJoinPairingChannel_MismatchOutcomeSurvivesASlowRejection(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		channelID:        "ch_site",
+		request:          &minter.MintRequest{ChannelID: "ch_site", MessageID: "msg_1"},
+		pollErr:          minter.ErrOriginMismatch,
+		rejectionRelease: make(chan struct{}), // never released: the rejection times out
+		closed:           make(chan struct{}, 1),
+	}
+	relayerClient := &ctxCheckingRelayer{fakeRelayer{sent: make(chan relayer.Response, 4)}}
+	s := newJoinTestService(t, &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site")}, nil, relayerClient, &fakeCDP{})
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+
+	select {
+	case outcome := <-relayerClient.sent:
+		assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+		assert.Equal(t, "origin_mismatch", outcome.Message.(map[string]any)["reason"])
+		assert.Equal(t, "msg_1", outcome.Message.(map[string]any)["requestMessageID"])
+	case <-time.After(3 * time.Second):
+		t.Fatal("the app's outcome must go out after a rejection that used its whole budget")
+	}
+	select {
+	case <-ch.closed:
+	case <-time.After(time.Second):
+		t.Fatal("the channel must still be closed")
 	}
 }

@@ -450,6 +450,11 @@ type startingPairing struct {
 	// joinCredential is set for a join in flight (see activePairing's), so a
 	// retry of the same join waits for it instead of canceling it.
 	joinCredential string
+	// canceled is set under s.mu when a close, a reset or a superseding join
+	// cancels this start. A broker reply can still arrive after the cancel;
+	// publishUnlessCanceled checks this in the same critical section as the
+	// publish, so a canceled start never becomes the active pairing.
+	canceled bool
 }
 
 type pendingApproval struct {
@@ -884,9 +889,19 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 		return commandError("topic_changed", "the relayer topic changed while the pairing session was starting", true), nil
 	}
 
-	s.mu.Lock()
-	s.active = active
-	s.mu.Unlock()
+	// A close landing during the broker call or the display canceled this
+	// start; the channel it got back anyway is taken down, not published.
+	if !s.publishUnlessCanceled(starting, active) {
+		sessionCancel()
+		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
+		if restoreDisplay {
+			s.restoreDefaultDisplay(active.channelID, displayGeneration)
+		}
+		s.closeChannel(channel)
+		s.logger.Info("Dropping a mint pairing start that was closed while it started",
+			pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+		return commandError("pairing_closed", "the pairing was closed while it was starting", false), nil
+	}
 
 	// The broker approval session must outlive the initiating RPC. sessionCtx is
 	// still bounded by service shutdown and the broker pairing expiry.
@@ -1029,6 +1044,9 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 		if !startGuard.sameAs(currentTopicGuard()) {
 			return commandError("topic_changed", "the relayer topic changed while joining the pairing channel", true), nil
 		}
+		if s.startCanceled(starting) {
+			return commandError("pairing_closed", "the pairing was closed while joining", false), nil
+		}
 		code, retryable := classifyJoinFailure(err)
 		s.logger.Warn("Failed to join site-created mint pairing channel", zap.Error(err), zap.String("code", code))
 		return commandError(code, joinFailureMessage(code), retryable), nil
@@ -1069,9 +1087,17 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 		joinCredential: credential,
 	}
 
-	s.mu.Lock()
-	s.active = active
-	s.mu.Unlock()
+	// A close (or a superseding join) that landed during the broker call
+	// canceled this join. The broker may have accepted it anyway: the join
+	// spent the credential, but the channel is closed rather than published,
+	// so no approval is ever asked for it.
+	if !s.publishUnlessCanceled(starting, active) {
+		sessionCancel()
+		s.closeChannel(joined.channel)
+		s.logger.Info("Dropping a joined mint pairing channel that was closed while joining",
+			zap.String("channelID", channelID))
+		return commandError("pairing_closed", "the pairing was closed while joining", false), nil
+	}
 
 	s.logger.Info("Joined site-created mint pairing channel",
 		zap.String("channelID", channelID),
@@ -1247,11 +1273,30 @@ func joinFailureMessage(code string) string {
 	}
 }
 
-func (s *service) HandleClosePairingSession(context.Context, map[string]any) (any, error) {
+func (s *service) HandleClosePairingSession(ctx context.Context, _ map[string]any) (any, error) {
 	if s == nil || !s.opts.Enabled {
 		return commandError("disabled", "mint pairing is not enabled", false), nil
 	}
+	// A start or join still inside its broker call exists only in the
+	// starting slot. Cancel it and wait for it to unwind, so the close means
+	// what it says: nothing it canceled publishes afterwards (see
+	// publishUnlessCanceled), and the reply is sent after that is settled.
+	starting := s.cancelStartingPairing()
 	active := s.cancelActivePairing()
+	if starting != nil {
+		timer := time.NewTimer(stopCleanupTimeout)
+		select {
+		case <-starting.done:
+		case <-ctx.Done():
+		case <-timer.C:
+			s.logger.Warn("Timed out waiting for a canceled mint pairing start to unwind")
+		}
+		timer.Stop()
+		if active == nil {
+			s.logger.Info("Closed a mint pairing start in progress by request")
+			return closePairingResponse{OK: true, Status: "closed"}, nil
+		}
+	}
 	if active == nil {
 		return closePairingResponse{OK: true, Status: "not_started"}, nil
 	}
@@ -1557,10 +1602,14 @@ func (s *service) rejectAttestationMismatch(active *activePairing, request *mint
 	if !guard.sameAs(currentTopicGuard()) {
 		return
 	}
-	terminalCtx, cancel := context.WithTimeout(context.Background(), terminalOperationTimeout)
-	defer cancel()
+	// The browser rejection and the controller outcome each get their own
+	// budget, as in sendTerminalRejectionAndOutcome: a slow broker must not
+	// leave the app's notice to go out on an expired context.
 	if request != nil {
-		if _, err := active.channel.SendMintRejection(terminalCtx, *request, minter.MintRejection{Reason: reason, Retryable: false}); err != nil {
+		rejectionCtx, cancelRejection := context.WithTimeout(context.Background(), terminalOperationTimeout)
+		_, err := active.channel.SendMintRejection(rejectionCtx, *request, minter.MintRejection{Reason: reason, Retryable: false})
+		cancelRejection()
+		if err != nil {
 			s.logger.Warn("Failed to send attestation-mismatch rejection to browser", zap.Error(err), zap.String("channelID", active.channelID))
 		}
 	}
@@ -1580,7 +1629,9 @@ func (s *service) rejectAttestationMismatch(active *activePairing, request *mint
 	if requestMessageID != "" {
 		message["requestMessageID"] = requestMessageID
 	}
-	if err := s.sendMintPairingNotification(terminalCtx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME, approvalRequestID, message, 10); err != nil {
+	outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
+	defer cancelOutcome()
+	if err := s.sendMintPairingNotification(outcomeCtx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME, approvalRequestID, message, 10); err != nil {
 		s.logger.Warn("Failed to send mint pairing approval outcome", zap.Error(err), zap.String("approvalRequestID", approvalRequestID))
 	}
 }
@@ -2199,6 +2250,7 @@ func (s *service) cancelStartingPairing() *startingPairing {
 	starting := s.starting
 	if starting != nil {
 		s.starting = nil
+		starting.canceled = true
 	}
 	s.mu.Unlock()
 	if starting != nil {
@@ -2220,6 +2272,24 @@ func (s *service) cancelActivePairingForReplace() (*activePairing, bool) {
 	}
 	s.mu.Unlock()
 	return active, delivering
+}
+
+// publishUnlessCanceled makes active the active pairing unless its start was
+// canceled, in one critical section with the cancel flag.
+func (s *service) publishUnlessCanceled(starting *startingPairing, active *activePairing) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if starting.canceled {
+		return false
+	}
+	s.active = active
+	return true
+}
+
+func (s *service) startCanceled(starting *startingPairing) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return starting.canceled
 }
 
 func (s *service) cancelActivePairing() *activePairing {

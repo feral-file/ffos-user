@@ -1810,6 +1810,13 @@ Error cases (`ok: false`):
 - `topic_changed`: the claim changed while the device was joining.
 - `replace_in_progress` (retryable): the pairing being replaced was still
   delivering its approved session when the join's request ended.
+- `pairing_closed` (not retryable): a `closeMintPairingSession` (or a newer
+  join) canceled this join while it was inside its broker call. If the broker
+  accepted the join anyway, the device closes that channel instead of
+  publishing it, so no approval is ever asked for it.
+
+`closeMintPairingSession` also reaches a start or join still inside its broker
+call: it cancels it, waits for it to unwind, and answers `closed`.
 - `code_not_found` (broker 404, not retryable): no channel for this code or
   token.
 - `code_expired` (broker 410, not retryable): the channel expired.
