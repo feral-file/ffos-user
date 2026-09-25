@@ -264,6 +264,47 @@ func TestCommandHandler_Process_StartMintPairingSessionRoutesToMintPairing(t *te
 	assert.Equal(t, 1, mintSvc.startCalls)
 }
 
+func TestCommandHandler_Process_JoinMintPairingChannelDisabled(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_JOIN_MINT_PAIRING_CHANNEL,
+		Arguments: map[string]interface{}{"shortCode": "123456"},
+	})
+
+	assert.NoError(t, err)
+	resp, ok := result.(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, false, resp["ok"])
+	errObj, ok := resp["error"].(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, "disabled", errObj["code"])
+}
+
+func TestCommandHandler_Process_JoinMintPairingChannelRoutesToMintPairing(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	assert.Equal(t, commands.Type("joinMintPairingChannel"), commands.CMD_JOIN_MINT_PAIRING_CHANNEL)
+
+	args := map[string]any{"channelId": "ch_1", "pairingToken": "pt_1"}
+	want := map[string]any{"ok": true, "status": "joined"}
+	mintSvc := &fakeMintPairingService{joinResult: want}
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_JOIN_MINT_PAIRING_CHANNEL,
+		Arguments: args,
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, result)
+	assert.Equal(t, args, mintSvc.joinArgs)
+	assert.Equal(t, 1, mintSvc.joinCalls)
+	assert.Equal(t, 0, mintSvc.startCalls)
+}
+
 func TestCommandHandler_Process_CloseMintPairingSessionDisabled(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -1736,6 +1777,7 @@ func TestCommandHandler_Process_StagedFactoryReset_RejectsEveryFamily(t *testing
 		commands.CMD_UPDATE_TO_LATEST,           // arms a competing bootctl one-shot
 		commands.CMD_SHOW_PAIRING_QR_CODE,       // paints the claim QR
 		commands.CMD_START_MINT_PAIRING_SESSION, // mint pairing: own overlay + token minting
+		commands.CMD_JOIN_MINT_PAIRING_CHANNEL,  // mint pairing: joins a broker channel + token minting
 		commands.CMD_DOWNLOAD_PLAYLIST,          // offline cache: writes under the root subvolume
 		commands.CMD_CLEAR_PLAYLIST_CACHE,       // offline cache: deletes under it
 		commands.CMD_FACTORY_RESET,              // a duplicate adds nothing while one is staged
