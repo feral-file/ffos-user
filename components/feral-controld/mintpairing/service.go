@@ -292,7 +292,8 @@ type joinChannelRequest struct {
 // joinedChannel is a channel this device joined plus what the broker attested
 // about the site that created it. origin is the site's HTTP Origin as the
 // broker recorded it at create time; the minter refuses a mint request that
-// claims any other (errOriginMismatch).
+// claims any other (minter.ErrOriginMismatch). expiresAt is zero when the
+// minter does not report it; the service then applies its own idle TTL.
 type joinedChannel struct {
 	channel     brokerChannel
 	channelID   string
@@ -300,12 +301,6 @@ type joinedChannel struct {
 	origin      string
 	browserInfo minter.BrowserInfo
 }
-
-// errOriginMismatch is what a joined channel's PollMintRequest returns when the
-// decrypted mint request names an origin other than the one the broker
-// attested. The request is returned alongside it when the minter decoded one,
-// so the browser can be told why.
-var errOriginMismatch = errors.New("mint request origin does not match the attested origin")
 
 type sessionCreator interface {
 	CreateEphemeralSession(ctx context.Context, topicID string, request minter.MintRequest, lifetime sessionLifetime) (minter.MintResult, error)
@@ -410,6 +405,29 @@ func (b realBrokerStarter) StartChannel(ctx context.Context, opts minter.StartCh
 		return nil, err
 	}
 	return brokerChannelAdapter{channel: channel}, nil
+}
+
+type realBrokerJoiner struct {
+	client *minter.Client
+}
+
+func (b realBrokerJoiner) JoinChannel(ctx context.Context, request joinChannelRequest) (joinedChannel, error) {
+	channel, err := b.client.JoinChannel(ctx, minter.JoinChannelOptions{
+		BrokerBaseURL: request.BrokerBaseURL,
+		ChannelID:     request.ChannelID,
+		PairingToken:  request.PairingToken,
+		ShortCode:     request.ShortCode,
+	})
+	if err != nil {
+		return joinedChannel{}, err
+	}
+	requester := channel.Requester()
+	return joinedChannel{
+		channel:     brokerChannelAdapter{channel: channel},
+		channelID:   channel.ChannelID(),
+		origin:      requester.Origin,
+		browserInfo: requester.BrowserInfo,
+	}, nil
 }
 
 // startingPairing is the cancellable in-progress state of one pairing start:
@@ -547,7 +565,10 @@ func New(
 	logger *zap.Logger,
 ) Service {
 	brokerHTTPClient := &http.Client{Timeout: wrapper.HTTPClientTimeout}
-	return newService(opts, realBrokerStarter{client: minter.NewClient(brokerHTTPClient)}, NewRelayerSessionCreator(opts.RelayerBaseURL, relayerAPIKey, httpClient, json), relayerClient, cdpClient, json, logger)
+	brokerClient := minter.NewClient(brokerHTTPClient)
+	svc := newService(opts, realBrokerStarter{client: brokerClient}, NewRelayerSessionCreator(opts.RelayerBaseURL, relayerAPIKey, httpClient, json), relayerClient, cdpClient, json, logger).(*service)
+	svc.joiner = realBrokerJoiner{client: brokerClient}
+	return svc
 }
 
 func newService(
@@ -1290,10 +1311,10 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	}()
 
 	request, err := s.waitForMintRequest(ctx, active.channel)
-	if errors.Is(err, errOriginMismatch) {
-		// Not terminalSent even when the rejection went out: the channel is
+	if reason, mismatched := attestationMismatch(err); mismatched {
+		// Not terminalSent even when a rejection went out: the channel is
 		// closed below, because nothing more should happen on it.
-		s.rejectOriginMismatch(active, request, guard)
+		s.rejectAttestationMismatch(active, request, guard, reason)
 		return
 	}
 	if err != nil {
@@ -1397,21 +1418,38 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	}
 }
 
-// rejectOriginMismatch ends a joined pairing whose mint request claimed an
-// origin other than the one the broker attested when the site created the
-// channel. The owner is never asked: the app would show one site's name for
-// another's request. The browser gets a non-retryable rejection when the
-// minter decoded a request to answer, and the controller gets a cancelled
-// outcome naming the channel it joined, so the app can clear its "connecting"
-// state.
-func (s *service) rejectOriginMismatch(active *activePairing, request *minter.MintRequest, guard topicGuard) {
+// attestationMismatch reports whether a joined channel's poll refused a mint
+// request because it contradicts what the broker attested at join time, and
+// names the reason sent onward.
+func attestationMismatch(err error) (string, bool) {
+	switch {
+	case errors.Is(err, minter.ErrOriginMismatch):
+		return "origin_mismatch", true
+	case errors.Is(err, minter.ErrBrowserKeyMismatch):
+		return "browser_key_mismatch", true
+	default:
+		return "", false
+	}
+}
+
+// rejectAttestationMismatch ends a joined pairing whose mint request
+// contradicts what the broker attested when the site created the channel: a
+// different origin, or a different browser key. The owner is never asked: the
+// app would show one site's name for another's request. The controller gets a
+// cancelled outcome naming the channel it joined, so the app can clear its
+// "connecting" state. The browser gets a non-retryable rejection only when
+// the minter handed back a request to answer (today it does not: the refused
+// request is never decoded into one, so the site learns from the channel
+// closing).
+func (s *service) rejectAttestationMismatch(active *activePairing, request *minter.MintRequest, guard topicGuard, reason string) {
 	requestOrigin := ""
 	requestMessageID := ""
 	if request != nil {
 		requestOrigin = request.Origin
 		requestMessageID = request.MessageID
 	}
-	s.logger.Warn("Rejecting a mint request whose origin does not match the attested origin",
+	s.logger.Warn("Rejecting a mint request that does not match what the broker attested",
+		zap.String("reason", reason),
 		zap.String("channelID", active.channelID),
 		zap.String("attestedOrigin", active.origin),
 		zap.String("requestOrigin", requestOrigin))
@@ -1422,8 +1460,8 @@ func (s *service) rejectOriginMismatch(active *activePairing, request *minter.Mi
 	terminalCtx, cancel := context.WithTimeout(context.Background(), terminalOperationTimeout)
 	defer cancel()
 	if request != nil {
-		if _, err := active.channel.SendMintRejection(terminalCtx, *request, minter.MintRejection{Reason: "origin_mismatch", Retryable: false}); err != nil {
-			s.logger.Warn("Failed to send origin-mismatch rejection to browser", zap.Error(err), zap.String("channelID", active.channelID))
+		if _, err := active.channel.SendMintRejection(terminalCtx, *request, minter.MintRejection{Reason: reason, Retryable: false}); err != nil {
+			s.logger.Warn("Failed to send attestation-mismatch rejection to browser", zap.Error(err), zap.String("channelID", active.channelID))
 		}
 	}
 	approvalRequestID, err := newApprovalRequestID()
@@ -1436,7 +1474,7 @@ func (s *service) rejectOriginMismatch(active *activePairing, request *minter.Mi
 		"approvalRequestID": approvalRequestID,
 		"channelID":         active.channelID,
 		"status":            approvalCancellationStatus,
-		"reason":            "origin_mismatch",
+		"reason":            reason,
 		"completedAt":       time.Now().UTC().Format(time.RFC3339),
 	}
 	if requestMessageID != "" {
@@ -1491,8 +1529,8 @@ func (s *service) waitForMintRequest(ctx context.Context, channel brokerChannel)
 	for {
 		request, nextAfterSeq, err := channel.PollMintRequest(ctx, afterSeq)
 		if err != nil {
-			// The request rides along with the error only for an origin
-			// mismatch, so the caller can answer the browser.
+			// Any request that rides along with an error is handed on, so an
+			// attestation mismatch can answer the browser when it has one.
 			return request, fmt.Errorf("poll mint request: %w", err)
 		}
 		afterSeq = maxInt64(afterSeq, nextAfterSeq)
@@ -1664,10 +1702,9 @@ const (
 	deliveryNeverSent
 )
 
-// brokerStatusPattern reads the broker status out of a minter-client error.
-// The client returns unstructured errors, so its formatted status line is the
-// only positive evidence available; a typed error upstream would make this
-// structural.
+// brokerStatusPattern reads the broker status out of a minter-client error
+// that is not a typed minter.BrokerError (the formatted status line, kept as
+// a fallback for errors wrapped as text).
 var brokerStatusPattern = regexp.MustCompile(`failed with status (\d{3})`)
 
 // classifyDeliveryFailure looks for proof that a failed SendMintSuccess never
@@ -1685,10 +1722,16 @@ func classifyDeliveryFailure(err error) deliveryVerdict {
 	return deliveryUnknown
 }
 
-// brokerStatusCode reads the HTTP status out of a minter-client broker error.
+// brokerStatusCode reads the HTTP status out of a minter-client broker error:
+// the typed minter.BrokerError when the client returns one, else its
+// formatted status line.
 func brokerStatusCode(err error) (int, bool) {
 	if err == nil {
 		return 0, false
+	}
+	var brokerErr *minter.BrokerError
+	if errors.As(err, &brokerErr) {
+		return brokerErr.StatusCode, true
 	}
 	match := brokerStatusPattern.FindStringSubmatch(err.Error())
 	if match == nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -3661,8 +3662,8 @@ type fakeBrokerChannel struct {
 	rejectionReasons  []string
 	deliveredSessions []minter.MintResult
 	successErr        error
-	// pollErr is returned with the pending request on the next poll that
-	// has one — the minter's origin-mismatch shape.
+	// pollErr is returned, with no request, by the poll that would have
+	// returned the pending one — the minter's attestation-mismatch shape.
 	pollErr    error
 	onSend     func()
 	beforePoll func()
@@ -3711,7 +3712,10 @@ func (f *fakeBrokerChannel) PollMintRequest(_ context.Context, afterSeq int64) (
 	}
 	request := f.request
 	f.request = nil
-	return request, request.Seq, f.pollErr
+	if f.pollErr != nil {
+		return nil, afterSeq, f.pollErr
+	}
+	return request, request.Seq, nil
 }
 
 func (f *fakeBrokerChannel) CloseCount() int {
@@ -4270,6 +4274,7 @@ func TestHandleJoinPairingChannel_MapsBrokerErrors(t *testing.T) {
 		{"bad request", errors.New("broker POST /v1/channels/ch_1/join failed with status 400"), "broker_error", true},
 		{"server error", errors.New("broker POST /v1/channels/ch_1/join failed with status 503"), "broker_error", true},
 		{"transport", errors.New("dial tcp: connection refused"), "broker_error", true},
+		{"typed broker error", fmt.Errorf("join: %w", &minter.BrokerError{Method: "POST", Path: "/v1/channels/ch_1/join", StatusCode: 410, Code: "expired"}), "code_expired", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			joiner := &fakeBrokerJoiner{err: tc.err}
@@ -4442,55 +4447,61 @@ func TestHandleJoinPairingChannel_RetryOfTheSameJoinIsAnsweredFromThePairing(t *
 	assert.Equal(t, 0, ch.CloseCount())
 }
 
-// TestHandleJoinPairingChannel_OriginMismatchRejectsWithoutAskingTheOwner: a
-// mint request naming another origin than the broker attested never reaches
-// the approval sheet. The site is told origin_mismatch, the app gets a
-// cancelled outcome for the channel it joined, and the channel is closed.
-func TestHandleJoinPairingChannel_OriginMismatchRejectsWithoutAskingTheOwner(t *testing.T) {
-	defer state.ResetForTesting()
-	state.GetState().Relayer.TopicID = "topic-1"
+// TestHandleJoinPairingChannel_AttestationMismatchEndsThePairingWithoutAskingTheOwner:
+// a mint request that contradicts what the broker attested (another origin,
+// or another browser key) never reaches the approval sheet. The app gets a
+// cancelled outcome naming the reason and the channel it joined, and the
+// channel is closed.
+func TestHandleJoinPairingChannel_AttestationMismatchEndsThePairingWithoutAskingTheOwner(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		reason string
+	}{
+		{fmt.Errorf("decode: %w", minter.ErrOriginMismatch), "origin_mismatch"},
+		{minter.ErrBrowserKeyMismatch, "browser_key_mismatch"},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			defer state.ResetForTesting()
+			state.GetState().Relayer.TopicID = "topic-1"
 
-	ch := &fakeBrokerChannel{
-		channelID: "ch_site",
-		request: &minter.MintRequest{
-			ChannelID:   "ch_site",
-			MessageID:   "msg_1",
-			Origin:      "https://impostor.example",
-			BrowserInfo: minter.BrowserInfo{Name: "Impostor"},
-		},
-		pollErr: errOriginMismatch,
-		closed:  make(chan struct{}, 1),
+			ch := &fakeBrokerChannel{
+				channelID: "ch_site",
+				request:   &minter.MintRequest{ChannelID: "ch_site", MessageID: "msg_1"},
+				pollErr:   tc.err,
+				closed:    make(chan struct{}, 1),
+			}
+			joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site")}
+			relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+			cdpClient := &fakeCDP{}
+			core, logs := observer.New(zap.WarnLevel)
+			s := newJoinTestService(t, joiner, nil, relayerClient, cdpClient)
+			s.logger = zap.New(core)
+
+			_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"channelId": "ch_site", "pairingToken": "pt_secret"})
+			require.NoError(t, err)
+
+			outcome := <-relayerClient.sent
+			assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+			message := outcome.Message.(map[string]any)
+			assert.Equal(t, approvalCancellationStatus, message["status"])
+			assert.Equal(t, tc.reason, message["reason"])
+			assert.Equal(t, "ch_site", message["channelID"])
+
+			select {
+			case <-ch.closed:
+			case <-time.After(time.Second):
+				t.Fatal("the channel must be closed after an attestation mismatch")
+			}
+			assert.Empty(t, ch.RejectionReasons(), "the minter hands back no request to answer")
+			select {
+			case extra := <-relayerClient.sent:
+				t.Fatalf("no approval request may be sent for a mismatched request, got %s", extra.NotificationType)
+			default:
+			}
+			assert.Empty(t, cdpClient.displayRequestsSnapshot())
+			assert.Equal(t, 1, logs.FilterMessageSnippet("does not match what the broker attested").Len())
+		})
 	}
-	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site")}
-	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
-	cdpClient := &fakeCDP{}
-	core, logs := observer.New(zap.WarnLevel)
-	s := newJoinTestService(t, joiner, nil, relayerClient, cdpClient)
-	s.logger = zap.New(core)
-
-	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"channelId": "ch_site", "pairingToken": "pt_secret"})
-	require.NoError(t, err)
-
-	outcome := <-relayerClient.sent
-	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
-	message := outcome.Message.(map[string]any)
-	assert.Equal(t, approvalCancellationStatus, message["status"])
-	assert.Equal(t, "origin_mismatch", message["reason"])
-	assert.Equal(t, "ch_site", message["channelID"])
-
-	select {
-	case <-ch.closed:
-	case <-time.After(time.Second):
-		t.Fatal("the channel must be closed after an origin mismatch")
-	}
-	assert.Equal(t, []string{"origin_mismatch"}, ch.RejectionReasons())
-	select {
-	case extra := <-relayerClient.sent:
-		t.Fatalf("no approval request may be sent for a mismatched origin, got %s", extra.NotificationType)
-	default:
-	}
-	assert.Empty(t, cdpClient.displayRequestsSnapshot())
-	assert.Equal(t, 1, logs.FilterMessageSnippet("origin does not match").Len())
 }
 
 func TestHandleClosePairingSession_ClosesAJoinedPairingWithoutPainting(t *testing.T) {
