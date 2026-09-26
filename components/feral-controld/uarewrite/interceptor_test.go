@@ -22,7 +22,7 @@ import (
 func testInterceptorWithClock(t *testing.T, hosts []string, clock wrapper.Clock) *Interceptor {
 	t.Helper()
 
-	policy, err := New(hosts, "feral-player/test")
+	policy, err := New(hosts, "feral-player/test", "")
 	require.NoError(t, err)
 
 	i := NewInterceptor(policy, "http://127.0.0.1:9222", nil, nil, wrapper.NewJSON(), nil, clock, zaptest.NewLogger(t))
@@ -33,7 +33,7 @@ func testInterceptorWithClock(t *testing.T, hosts []string, clock wrapper.Clock)
 func testInterceptor(t *testing.T, hosts []string) *Interceptor {
 	t.Helper()
 
-	policy, err := New(hosts, "feral-player/test")
+	policy, err := New(hosts, "feral-player/test", "")
 	require.NoError(t, err)
 
 	i := NewInterceptor(policy, "http://127.0.0.1:9222", nil, nil, wrapper.NewJSON(), nil, wrapper.NewClock(), zaptest.NewLogger(t))
@@ -682,4 +682,63 @@ func failingDial(err error) dialFunc {
 	return func(context.Context, string, wrapper.HTTPClient, wrapper.WebSocketDialer, wrapper.JSON, wrapper.IO, *zap.Logger) (offlinecache.CDPSession, error) {
 		return nil, err
 	}
+}
+
+// A content-addressed request to a retired gateway is answered with a `url`
+// override and NO header rewrite: Chromium fetches the bytes from the
+// replacement gateway under its own headers while the page keeps seeing the
+// original source. Sending both would ship an unmeasured User-Agent to an
+// origin that was never the problem.
+func TestProcessPausedRedirectsRetiredGatewayCIDPath(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	const cid = "QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A"
+
+	session := mocks.NewMockCDPSession(ctrl)
+	var got map[string]interface{}
+	session.EXPECT().
+		Send(gomock.Any(), "Fetch.continueRequest", gomock.Any()).
+		DoAndReturn(func(_ interface{}, _ string, args map[string]interface{}) (json.RawMessage, error) {
+			got = args
+			return nil, nil
+		})
+
+	i := testInterceptor(t, []string{"ipfs.io"})
+	i.processPaused(session, pausedEvent(t, "req-1", "https://ipfs.io/ipfs/"+cid+"/sunrise.gif?display_mode=fit",
+		map[string]string{"User-Agent": "Mozilla/5.0 Chrome/150", "Accept": "image/*"}, nil))
+
+	assert.Equal(t, "req-1", got["requestId"])
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cid+"/sunrise.gif?display_mode=fit", got["url"])
+	assert.NotContains(t, got, "headers",
+		"a redirected request must keep Chromium's own headers")
+}
+
+// The two rules are exclusive per request: the same host's non-CID paths
+// still get the User-Agent swap and no `url`.
+func TestProcessPausedKeepsUserAgentRuleForNonCIDPaths(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	session := mocks.NewMockCDPSession(ctrl)
+	var got map[string]interface{}
+	session.EXPECT().
+		Send(gomock.Any(), "Fetch.continueRequest", gomock.Any()).
+		DoAndReturn(func(_ interface{}, _ string, args map[string]interface{}) (json.RawMessage, error) {
+			got = args
+			return nil, nil
+		})
+
+	i := testInterceptor(t, []string{"ipfs.io"})
+	i.processPaused(session, pausedEvent(t, "req-2", "https://ipfs.io/ipns/example.com/x.png",
+		map[string]string{"User-Agent": "Mozilla/5.0 Chrome/150"}, nil))
+
+	assert.NotContains(t, got, "url")
+	ua, ok := headerValue(got, "User-Agent")
+	require.True(t, ok)
+	assert.Equal(t, "feral-player/test", ua)
 }

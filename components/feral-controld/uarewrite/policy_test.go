@@ -11,7 +11,7 @@ import (
 func TestNewDefaults(t *testing.T) {
 	t.Parallel()
 
-	p, err := New(nil, "")
+	p, err := New(nil, "", "")
 	if err != nil {
 		t.Fatalf("New(nil, \"\") = %v, want no error", err)
 	}
@@ -61,7 +61,7 @@ func TestNewHostNormalization(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			p, err := New(tt.in, "ua/1")
+			p, err := New(tt.in, "ua/1", "")
 			if tt.isErr {
 				if err == nil {
 					t.Fatalf("New(%v) = nil error, want an error", tt.in)
@@ -81,7 +81,7 @@ func TestNewHostNormalization(t *testing.T) {
 func TestMatches(t *testing.T) {
 	t.Parallel()
 
-	p, err := New([]string{"ipfs.io", "dweb.link"}, "ua/1")
+	p, err := New([]string{"ipfs.io", "dweb.link"}, "ua/1", "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestMatches(t *testing.T) {
 func TestFetchPatterns(t *testing.T) {
 	t.Parallel()
 
-	p, err := New([]string{"ipfs.io"}, "ua/1")
+	p, err := New([]string{"ipfs.io"}, "ua/1", "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestFetchPatternsCoverEveryURLThatMatches(t *testing.T) {
 		t.Run(shape.name, func(t *testing.T) {
 			t.Parallel()
 
-			p, err := New([]string{shape.config}, "ua/1")
+			p, err := New([]string{shape.config}, "ua/1", "")
 			if err != nil {
 				t.Fatalf("New(%q): %v", shape.config, err)
 			}
@@ -232,7 +232,7 @@ func TestAuthorityRoundTripsThroughURLParsing(t *testing.T) {
 		t.Run(shape.name, func(t *testing.T) {
 			t.Parallel()
 
-			p, err := New([]string{shape.config}, "ua/1")
+			p, err := New([]string{shape.config}, "ua/1", "")
 			if err != nil {
 				t.Fatalf("New(%q): %v", shape.config, err)
 			}
@@ -292,7 +292,7 @@ func globMatch(pattern, s string) bool {
 func TestFetchPatternsAreScopedNotCatchAll(t *testing.T) {
 	t.Parallel()
 
-	p, err := New([]string{"ipfs.io", "dweb.link"}, "ua/1")
+	p, err := New([]string{"ipfs.io", "dweb.link"}, "ua/1", "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -352,7 +352,7 @@ func TestNewRejectsGlobMetacharacters(t *testing.T) {
 		t.Run(entry, func(t *testing.T) {
 			t.Parallel()
 
-			p, err := New([]string{entry}, "ua/1")
+			p, err := New([]string{entry}, "ua/1", "")
 			if err == nil {
 				t.Fatalf("New(%q) accepted a glob host and emitted %v", entry, p.FetchPatterns())
 			}
@@ -367,7 +367,7 @@ func TestNewRejectsGlobMetacharacters(t *testing.T) {
 func TestAcceptedHostsNeverProduceOverreachingPatterns(t *testing.T) {
 	t.Parallel()
 
-	p, err := New([]string{"ipfs.io", "dweb.link", "127.0.0.1"}, "ua/1")
+	p, err := New([]string{"ipfs.io", "dweb.link", "127.0.0.1"}, "ua/1", "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -398,7 +398,7 @@ func TestNewAcceptsIPLiteralHosts(t *testing.T) {
 	t.Parallel()
 
 	for _, entry := range []string{"127.0.0.1", "192.168.31.151:8080", "[::1]", "http://[2001:db8::1]"} {
-		if _, err := New([]string{entry}, "ua/1"); err != nil {
+		if _, err := New([]string{entry}, "ua/1", ""); err != nil {
 			t.Errorf("New(%q) rejected a literal IP host: %v", entry, err)
 		}
 	}
@@ -408,7 +408,7 @@ func TestNewRejectsMalformedLabels(t *testing.T) {
 	t.Parallel()
 
 	for _, entry := range []string{"-ipfs.io", "ipfs-.io", "ipfs..io", "ipfs_gateway.io"} {
-		if _, err := New([]string{entry}, "ua/1"); err == nil {
+		if _, err := New([]string{entry}, "ua/1", ""); err == nil {
 			t.Errorf("New(%q) accepted a malformed host", entry)
 		}
 	}
@@ -417,7 +417,7 @@ func TestNewRejectsMalformedLabels(t *testing.T) {
 func TestRewriteHeaders(t *testing.T) {
 	t.Parallel()
 
-	p, err := New([]string{"ipfs.io"}, "feral-player/9.9")
+	p, err := New([]string{"ipfs.io"}, "feral-player/9.9", "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -498,7 +498,7 @@ func TestRewriteHeaders(t *testing.T) {
 func TestRewriteHeadersEmitsExactlyOneUserAgent(t *testing.T) {
 	t.Parallel()
 
-	p, err := New([]string{"ipfs.io"}, "ua/1")
+	p, err := New([]string{"ipfs.io"}, "ua/1", "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -529,7 +529,7 @@ func TestRewriteHeadersEmitsExactlyOneUserAgent(t *testing.T) {
 func TestRewriteHeadersDoesNotMutateInput(t *testing.T) {
 	t.Parallel()
 
-	p, err := New([]string{"ipfs.io"}, "ua/1")
+	p, err := New([]string{"ipfs.io"}, "ua/1", "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -563,7 +563,7 @@ func TestNewRejectsEntriesThatWouldTruncateSilently(t *testing.T) {
 		t.Run(entry, func(t *testing.T) {
 			t.Parallel()
 
-			p, err := New([]string{entry}, "ua/1")
+			p, err := New([]string{entry}, "ua/1", "")
 			if err == nil {
 				t.Fatalf("New(%q) accepted an entry that truncates to hosts %v", entry, p.Hosts())
 			}
@@ -630,7 +630,7 @@ func TestNewFromOperatorHostsSalvagesUsableEntries(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			p, rejected, err := NewFromOperatorHosts(tt.hosts, "feral-player/test")
+			p, rejected, err := NewFromOperatorHosts(tt.hosts, "feral-player/test", "")
 			if err != nil {
 				t.Fatalf("NewFromOperatorHosts: unexpected error: %v", err)
 			}
@@ -663,5 +663,162 @@ func TestNewFromOperatorHostsSalvagesUsableEntries(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A CID names its content, so any gateway can serve it; a retired gateway's
+// `/ipfs/<cid>` request is the one shape that can be sent elsewhere without
+// guessing. Everything else on the host must fall through to the UA rule.
+func TestRewriteURL(t *testing.T) {
+	t.Parallel()
+
+	const cidV0 = "QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A"
+	const cidV1 = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+
+	p, err := New([]string{"ipfs.io", "dweb.link"}, "ua/1", "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+		ok   bool
+	}{
+		{name: "cidv0 path", in: "https://ipfs.io/ipfs/" + cidV0,
+			want: "https://ipfs.filebase.io/ipfs/" + cidV0, ok: true},
+		{name: "cidv1 path with remainder", in: "https://dweb.link/ipfs/" + cidV1 + "/frames/001.png",
+			want: "https://ipfs.filebase.io/ipfs/" + cidV1 + "/frames/001.png", ok: true},
+		{name: "query survives byte-for-byte", in: "https://ipfs.io/ipfs/" + cidV1 + "/?fxhash=oo1&display_mode=fit",
+			want: "https://ipfs.filebase.io/ipfs/" + cidV1 + "/?fxhash=oo1&display_mode=fit", ok: true},
+		{name: "percent-encoding survives", in: "https://ipfs.io/ipfs/" + cidV0 + "/a%20b.gif",
+			want: "https://ipfs.filebase.io/ipfs/" + cidV0 + "/a%20b.gif", ok: true},
+		{name: "http source is upgraded to the replacement scheme", in: "http://ipfs.io/ipfs/" + cidV0,
+			want: "https://ipfs.filebase.io/ipfs/" + cidV0, ok: true},
+		{name: "non-default port still matches", in: "https://ipfs.io:8443/ipfs/" + cidV0,
+			want: "https://ipfs.filebase.io/ipfs/" + cidV0, ok: true},
+		{name: "fragment is dropped", in: "https://ipfs.io/ipfs/" + cidV0 + "#unique-3",
+			want: "https://ipfs.filebase.io/ipfs/" + cidV0, ok: true},
+		{name: "unlisted host", in: "https://gateway.pinata.cloud/ipfs/" + cidV0},
+		{name: "subdomain of a listed host is not the host", in: "https://" + cidV1 + ".ipfs.dweb.link/"},
+		{name: "ipns is not content-addressed", in: "https://ipfs.io/ipns/example.com/x.png"},
+		{name: "api path", in: "https://ipfs.io/api/v0/cat?arg=" + cidV0},
+		{name: "gateway static asset", in: "https://ipfs.io/static/logo.png"},
+		{name: "too short to be a cid", in: "https://ipfs.io/ipfs/QmAbc"},
+		{name: "cid with non-alphanumeric byte", in: "https://ipfs.io/ipfs/" + cidV0[:45] + "%2F"},
+		{name: "bare ipfs prefix", in: "https://ipfs.io/ipfs/"},
+		{name: "no host", in: "data:image/gif;base64,R0lGOD"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := p.RewriteURL(tt.in)
+			if ok != tt.ok {
+				t.Fatalf("RewriteURL(%q) ok = %v, want %v (got %q)", tt.in, ok, tt.ok, got)
+			}
+			if got != tt.want {
+				t.Errorf("RewriteURL(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// A rewritten URL must itself be outside the policy's scope, or the request
+// would be paused and rewritten again. New refuses that at construction so it
+// is a config error at startup, never a loop on a device.
+func TestNewRejectsReplacementThatIsAListedHost(t *testing.T) {
+	t.Parallel()
+
+	for _, gw := range []string{"https://ipfs.io", "https://IPFS.IO/ipfs/", "http://dweb.link:8080"} {
+		if _, err := New(nil, "", gw); err == nil {
+			t.Errorf("New(nil, \"\", %q) accepted a replacement inside its own host set", gw)
+		}
+	}
+	// And the rewrite target never lands on a listed host even when an
+	// operator narrows the list so the default is no longer in it.
+	p, err := New([]string{"ipfs.filebase.io"}, "", "https://ipfs.io")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, ok := p.RewriteURL("https://ipfs.filebase.io/ipfs/QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A"); !ok {
+		t.Fatal("a listed host with a CID path must rewrite")
+	}
+}
+
+func TestNewReplacementGatewayNormalization(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		in    string
+		want  string
+		isErr bool
+	}{
+		{name: "empty is the default", in: "", want: DefaultReplacementGateway},
+		{name: "trailing path is dropped", in: "https://gw.example/ipfs/", want: "https://gw.example"},
+		{name: "host is lower-cased, port kept", in: "https://GW.Example:8443", want: "https://gw.example:8443"},
+		{name: "surrounding space trimmed", in: "  https://gw.example  ", want: "https://gw.example"},
+		{name: "bare host has no scheme", in: "gw.example", isErr: true},
+		{name: "non-http scheme", in: "ipfs://gw.example", isErr: true},
+		{name: "query would be silently structured", in: "https://gw.example/?x=1", isErr: true},
+		{name: "fragment would be silently structured", in: "https://gw.example/#x", isErr: true},
+		{name: "credentials", in: "https://user:pw@gw.example", isErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			p, err := New(nil, "", tt.in)
+			if tt.isErr {
+				if err == nil {
+					t.Fatalf("New(nil, \"\", %q) = nil error, want an error", tt.in)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("New(nil, \"\", %q) = %v, want no error", tt.in, err)
+			}
+			if got := p.ReplacementGateway(); got != tt.want {
+				t.Errorf("ReplacementGateway() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The same salvage rule as the host list: a mistyped gateway is named and
+// dropped, and the default applies, because switching the CID rewrite OFF
+// over a typo would put the retired gateway's 429 back on screen.
+func TestNewFromOperatorHostsSalvagesBadReplacementGateway(t *testing.T) {
+	t.Parallel()
+
+	p, rejected, err := NewFromOperatorHosts([]string{"ipfs.io", "*.bad"}, "", "filebase.io/ipfs")
+	if err != nil {
+		t.Fatalf("NewFromOperatorHosts: %v", err)
+	}
+	if got := p.ReplacementGateway(); got != DefaultReplacementGateway {
+		t.Errorf("ReplacementGateway() = %q, want the default %q", got, DefaultReplacementGateway)
+	}
+	if got := p.Hosts(); !reflect.DeepEqual(got, []string{"ipfs.io"}) {
+		t.Errorf("Hosts() = %v, want the surviving operator entry only", got)
+	}
+	if want := []string{"*.bad", "replacementGateway=filebase.io/ipfs"}; !reflect.DeepEqual(rejected, want) {
+		t.Errorf("rejected = %v, want %v", rejected, want)
+	}
+
+	// A replacement that loops onto a listed host is an operator value too,
+	// and takes the same path.
+	p, rejected, err = NewFromOperatorHosts([]string{"ipfs.io"}, "", "https://ipfs.io")
+	if err != nil {
+		t.Fatalf("NewFromOperatorHosts: %v", err)
+	}
+	if got := p.ReplacementGateway(); got != DefaultReplacementGateway {
+		t.Errorf("ReplacementGateway() = %q, want the default %q", got, DefaultReplacementGateway)
+	}
+	if want := []string{"replacementGateway=https://ipfs.io"}; !reflect.DeepEqual(rejected, want) {
+		t.Errorf("rejected = %v, want %v", rejected, want)
 	}
 }
