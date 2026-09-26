@@ -37,8 +37,8 @@ github.com/ethereum/c-kzg-4844/v2 v2.1.6 h1:xQymkKCT5E2Jiaoqf3v4wsNgjZLY0lRSkZn2
 github.com/ethereum/c-kzg-4844/v2 v2.1.6/go.mod h1:8HMkUZ5JRv4hpw/XUrYWSQNAUzhHMg2UDb/U+5m+XNw=
 github.com/ethereum/go-ethereum v1.17.2 h1:ag6geu0kn8Hv5FLKTpH+Hm2DHD+iuFtuqKxEuwUsDOI=
 github.com/ethereum/go-ethereum v1.17.2/go.mod h1:KHcRXfGOUfUmKg51IhQ0IowiqZ6PqZf08CMtk0g5K1o=
-github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260910050001-beb0cdf76be2 h1:wz7OvMSdwt5gtPoU9oq18SxAWdUuC/qw/U/DV18rRI4=
-github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260910050001-beb0cdf76be2/go.mod h1:DFe4RDBxlyeXtf2oC133+FIUkbixzfeX8/b24JJQQjo=
+github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260925215950-2dcfaa962a19 h1:vtYpZj5HkFkn8IMs16NCPCFTgAfpDTKJeMK/pyGCL0E=
+github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260925215950-2dcfaa962a19/go.mod h1:DFe4RDBxlyeXtf2oC133+FIUkbixzfeX8/b24JJQQjo=
 github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7 h1:/INaxTD9dwqT1BvY5aED+QIRs+jWER4TSiSfJFCg0OU=
 github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7/go.mod h1:fJiQvR6JLa2TKwwzOoxKg+/qfjM2MeWxpjFhrleOEMA=
 github.com/ferranbt/fastssz v0.1.4 h1:OCDB+dYDEQDvAgtAGnTSidK1Pe2tW3nFV40XyMkTeDY=

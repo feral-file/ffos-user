@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -3643,26 +3644,34 @@ func (f *fakeBrokerStarter) ReceivedOptions() minter.StartChannelOptions {
 }
 
 type fakeBrokerChannel struct {
-	mu                sync.Mutex
-	channelID         string
-	pairingCode       string
-	expiresAt         time.Time
-	request           *minter.MintRequest
-	rejectionSent     chan struct{}
-	rejectionStarted  chan struct{}
-	rejectionRelease  chan struct{}
-	successSent       chan struct{}
-	closed            chan struct{}
-	rejectionDelay    time.Duration
-	ignoredSeq        int64
-	pollAfterSeqs     []int64
-	successCount      int
-	closeCount        int
-	rejectionReasons  []string
-	deliveredSessions []minter.MintResult
-	successErr        error
-	onSend            func()
-	beforePoll        func()
+	mu               sync.Mutex
+	channelID        string
+	pairingCode      string
+	expiresAt        time.Time
+	request          *minter.MintRequest
+	rejectionSent    chan struct{}
+	rejectionStarted chan struct{}
+	rejectionRelease chan struct{}
+	successSent      chan struct{}
+	closed           chan struct{}
+	rejectionDelay   time.Duration
+	ignoredSeq       int64
+	pollAfterSeqs    []int64
+	successCount     int
+	closeCount       int
+	rejectionReasons []string
+	// brokerExpiry is what ExpiresAt reports: the broker's current channel
+	// expiry as a joined channel's minter tracks it.
+	brokerExpiry time.Time
+	// rejectionRetryable records each rejection's retryable flag, in order.
+	rejectionRetryable []bool
+	deliveredSessions  []minter.MintResult
+	successErr         error
+	// pollErr is returned together with the pending request — the minter's
+	// attestation-mismatch shape (the refused request rides along).
+	pollErr    error
+	onSend     func()
+	beforePoll func()
 }
 
 func closeOnce(ch chan struct{}) {
@@ -3708,7 +3717,28 @@ func (f *fakeBrokerChannel) PollMintRequest(_ context.Context, afterSeq int64) (
 	}
 	request := f.request
 	f.request = nil
+	if f.pollErr != nil {
+		return request, afterSeq, f.pollErr
+	}
 	return request, request.Seq, nil
+}
+
+func (f *fakeBrokerChannel) ExpiresAt() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.brokerExpiry
+}
+
+func (f *fakeBrokerChannel) CloseCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closeCount
+}
+
+func (f *fakeBrokerChannel) RejectionReasons() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.rejectionReasons...)
 }
 
 func (f *fakeBrokerChannel) SendMintSuccess(_ context.Context, _ minter.MintRequest, session minter.MintResult) (*minter.SendMessageResult, error) {
@@ -3760,6 +3790,7 @@ func (f *fakeBrokerChannel) SendMintRejection(ctx context.Context, _ minter.Mint
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rejectionReasons = append(f.rejectionReasons, rejection.Reason)
+	f.rejectionRetryable = append(f.rejectionRetryable, rejection.Retryable)
 	if f.rejectionSent != nil {
 		select {
 		case f.rejectionSent <- struct{}{}:
@@ -4080,4 +4111,1085 @@ func writeValidPlayerContract(t *testing.T) string {
 	path := filepath.Join(t.TempDir(), "ffos-player-contract.json")
 	require.NoError(t, os.WriteFile(path, []byte(`{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}}}`), 0o600))
 	return path
+}
+
+// --- site-initiated pairing: joinMintPairingChannel ---
+
+type fakeBrokerJoiner struct {
+	mu       sync.Mutex
+	joined   joinedChannel
+	err      error
+	requests []joinChannelRequest
+	// entered is signaled on each call; release, when set, holds the call
+	// until it is closed or the call's context ends.
+	entered chan struct{}
+	release chan struct{}
+	// ignoreCancel models a broker reply that arrives after the join's
+	// context was canceled: the call waits for release alone.
+	ignoreCancel bool
+}
+
+func (f *fakeBrokerJoiner) JoinChannel(ctx context.Context, request joinChannelRequest) (joinedChannel, error) {
+	f.mu.Lock()
+	entered, release, ignoreCancel := f.entered, f.release, f.ignoreCancel
+	f.mu.Unlock()
+	if entered != nil {
+		entered <- struct{}{}
+	}
+	if release != nil && ignoreCancel {
+		<-release
+	} else if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return joinedChannel{}, ctx.Err()
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, request)
+	if f.err != nil {
+		return joinedChannel{}, f.err
+	}
+	return f.joined, nil
+}
+
+func (f *fakeBrokerJoiner) Requests() []joinChannelRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]joinChannelRequest(nil), f.requests...)
+}
+
+const testSiteOrigin = "https://www.artblocks.io"
+
+func newJoinTestService(t *testing.T, joiner *fakeBrokerJoiner, starter brokerStarter, relayerClient relayer.Relayer, cdpClient *fakeCDP) *service {
+	t.Helper()
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: 2 * time.Second,
+			PollInterval:    time.Millisecond,
+			IdleTTL:         time.Minute,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		starter,
+		fakeSessionCreator{},
+		relayerClient,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.joiner = joiner
+	s.Start(context.Background())
+	t.Cleanup(s.Stop)
+	return s
+}
+
+func joinedFor(ch *fakeBrokerChannel, channelID string) joinedChannel {
+	return joinedChannel{
+		channel:     ch,
+		channelID:   channelID,
+		expiresAt:   time.Now().Add(time.Minute),
+		origin:      testSiteOrigin,
+		browserInfo: minter.BrowserInfo{Name: "Art Blocks", Label: "artblocks.io"},
+	}
+}
+
+// TestHandleJoinPairingChannel_ByTokenRunsTheApprovalFlowWithoutPainting is
+// the whole site-initiated path: join, the flat reply, the site's mint
+// request going to the app for approval, the session delivered — and not one
+// mintPairingDisplay call, including no terminal "hidden".
+func TestHandleJoinPairingChannel_ByTokenRunsTheApprovalFlowWithoutPainting(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		channelID: "ch_site",
+		request: &minter.MintRequest{
+			ChannelID:   "ch_site",
+			MessageID:   "msg_1",
+			Origin:      testSiteOrigin,
+			BrowserInfo: minter.BrowserInfo{Name: "Art Blocks"},
+		},
+		successSent: make(chan struct{}, 1),
+	}
+	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site")}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	cdpClient := &fakeCDP{}
+	s := newJoinTestService(t, joiner, nil, relayerClient, cdpClient)
+
+	result, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{
+		"channelId":    "ch_site",
+		"pairingToken": "pt_secret",
+	})
+	require.NoError(t, err)
+	resp, ok := result.(joinPairingResponse)
+	require.True(t, ok, "got %#v", result)
+	assert.True(t, resp.OK)
+	assert.Equal(t, "joined", resp.Status)
+	assert.Equal(t, "ch_site", resp.ChannelID)
+	assert.Equal(t, testSiteOrigin, resp.Origin)
+	assert.Equal(t, "Art Blocks", resp.BrowserInfo.Name)
+
+	raw, err := json.Marshal(result)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"ok":true,"status":"joined","channelId":"ch_site","origin":"https://www.artblocks.io","browserInfo":{"name":"Art Blocks","label":"artblocks.io"}}`, string(raw))
+
+	requests := joiner.Requests()
+	require.Len(t, requests, 1)
+	assert.Equal(t, joinChannelRequest{BrokerBaseURL: "https://broker.example", ChannelID: "ch_site", PairingToken: "pt_secret"}, requests[0])
+
+	approval := <-relayerClient.sent
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
+	approvalMessage := approval.Message.(map[string]any)
+	assert.Equal(t, testSiteOrigin, approvalMessage["origin"])
+	approvalID := approvalMessage["approvalRequestID"].(string)
+
+	result, err = s.HandleApprovalDecision(context.Background(), validDecisionArgs(approvalID, "topic-1", "ch_site", "msg_1"))
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", result.(approvalResponse).Status)
+
+	outcome := <-relayerClient.sent
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
+	select {
+	case <-ch.successSent:
+	case <-time.After(time.Second):
+		t.Fatal("expected the session to be delivered to the site")
+	}
+
+	assert.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.active == nil
+	}, time.Second, time.Millisecond)
+	// Let any stray detached restore run before asserting nothing was painted.
+	time.Sleep(20 * time.Millisecond)
+	assert.Empty(t, cdpClient.displayRequestsSnapshot(), "a joined channel must never paint the panel")
+	assert.False(t, s.DisplayActive())
+}
+
+func TestHandleJoinPairingChannel_ByShortCode(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{channelID: "ch_resolved"}
+	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_resolved")}
+	cdpClient := &fakeCDP{}
+	s := newJoinTestService(t, joiner, nil, nil, cdpClient)
+
+	result, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": " 123456 "})
+	require.NoError(t, err)
+	resp := result.(joinPairingResponse)
+	assert.Equal(t, "joined", resp.Status)
+	assert.Equal(t, "ch_resolved", resp.ChannelID, "the channel id comes from the broker when the app only had a code")
+
+	requests := joiner.Requests()
+	require.Len(t, requests, 1)
+	assert.Equal(t, joinChannelRequest{BrokerBaseURL: "https://broker.example", ShortCode: "123456"}, requests[0])
+	assert.Empty(t, cdpClient.displayRequestsSnapshot())
+}
+
+func TestHandleJoinPairingChannel_MapsBrokerErrors(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	for _, tc := range []struct {
+		name      string
+		err       error
+		code      string
+		retryable bool
+	}{
+		{"not found", errors.New("broker POST /v1/pairing-codes/resolve failed with status 404"), "code_not_found", false},
+		{"expired", errors.New("broker POST /v1/channels/ch_1/join failed with status 410"), "code_expired", false},
+		{"consumed", errors.New("broker POST /v1/channels/ch_1/join failed with status 401"), "code_used", false},
+		{"rate limited", errors.New("broker POST /v1/pairing-codes/resolve failed with status 429"), "rate_limited", true},
+		{"bad request", errors.New("broker POST /v1/channels/ch_1/join failed with status 400"), "broker_error", true},
+		{"server error", errors.New("broker POST /v1/channels/ch_1/join failed with status 503"), "broker_error", true},
+		{"transport", errors.New("dial tcp: connection refused"), "broker_error", true},
+		{"typed broker error", fmt.Errorf("join: %w", &minter.BrokerError{Method: "POST", Path: "/v1/channels/ch_1/join", StatusCode: 410, Code: "expired"}), "code_expired", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			joiner := &fakeBrokerJoiner{err: tc.err}
+			s := newJoinTestService(t, joiner, nil, nil, &fakeCDP{})
+			result, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+			require.NoError(t, err)
+			assertCommandError(t, result, tc.code, tc.retryable)
+			s.mu.Lock()
+			assert.Nil(t, s.active)
+			assert.Nil(t, s.starting)
+			s.mu.Unlock()
+		})
+	}
+}
+
+func TestHandleJoinPairingChannel_RejectsMalformedArguments(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"nothing", nil},
+		{"broker url from the app", map[string]any{"shortCode": "123456", "brokerBaseUrl": "https://evil.example"}},
+		{"both forms", map[string]any{"shortCode": "123456", "channelId": "ch_1", "pairingToken": "pt_1"}},
+		{"token without channel", map[string]any{"pairingToken": "pt_1"}},
+		{"channel without token", map[string]any{"channelId": "ch_1"}},
+		{"non-string", map[string]any{"shortCode": float64(123456)}},
+		{"empty", map[string]any{"shortCode": "  "}},
+		{"letters in code", map[string]any{"shortCode": "12a456"}},
+		{"wrong prefixes", map[string]any{"channelId": "xx_1", "pairingToken": "pt_1"}},
+		{"too long", map[string]any{"channelId": "ch_1", "pairingToken": "pt_" + strings.Repeat("a", 200)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			joiner := &fakeBrokerJoiner{}
+			s := newJoinTestService(t, joiner, nil, nil, &fakeCDP{})
+			result, err := s.HandleJoinPairingChannel(context.Background(), tc.args)
+			require.NoError(t, err)
+			assertCommandError(t, result, "invalid_request", false)
+			assert.Empty(t, joiner.Requests(), "a malformed join must not reach the broker")
+		})
+	}
+}
+
+func TestHandleJoinPairingChannel_PreconditionErrors(t *testing.T) {
+	defer state.ResetForTesting()
+
+	disabled := newService(Options{}, nil, nil, nil, nil, wrapper.NewJSON(), zap.NewNop()).(*service)
+	result, err := disabled.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+	assertCommandError(t, result, "disabled", false)
+
+	noJoiner := newService(Options{Enabled: true, BrokerBaseURL: "https://broker.example"}, nil, nil, nil, nil, wrapper.NewJSON(), zap.NewNop()).(*service)
+	result, err = noJoiner.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+	assertCommandError(t, result, "invalid_config", false)
+
+	joiner := &fakeBrokerJoiner{}
+	s := newJoinTestService(t, joiner, nil, nil, &fakeCDP{})
+	state.GetState().Relayer.TopicID = ""
+	result, err = s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+	assertCommandError(t, result, "topic_not_ready", true)
+	assert.Empty(t, joiner.Requests())
+}
+
+// TestHandleJoinPairingChannel_ReplacesAPendingDeviceInitiatedPairing: a join
+// is the owner's newer intent. The device-initiated pairing in progress is
+// dropped the way any cancellation drops it — its browser hears the cancellation status,
+// the app hears the outcome, its overlay is hidden, its channel closed — and
+// only then does the joined pairing take the single active slot.
+func TestHandleJoinPairingChannel_ReplacesAPendingDeviceInitiatedPairing(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	oldChannel := &fakeBrokerChannel{
+		channelID:   "ch_old",
+		pairingCode: "PAIR-123",
+		request: &minter.MintRequest{
+			ChannelID:   "ch_old",
+			MessageID:   "msg_old",
+			Origin:      "https://gallery.example",
+			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
+		},
+		closed: make(chan struct{}, 1),
+	}
+	newChannel := &fakeBrokerChannel{channelID: "ch_site"}
+	joiner := &fakeBrokerJoiner{joined: joinedFor(newChannel, "ch_site")}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 8)}
+	cdpClient := &fakeCDP{}
+	s := newJoinTestService(t, joiner, &fakeBrokerStarter{channel: oldChannel}, relayerClient, cdpClient)
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	require.True(t, result.(startPairingResponse).OK)
+	approval := <-relayerClient.sent
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
+	assertEventuallyDisplayObserved(t, cdpClient, "request_received", "", "Chrome")
+
+	result, err = s.HandleJoinPairingChannel(context.Background(), map[string]any{"channelId": "ch_site", "pairingToken": "pt_secret"})
+	require.NoError(t, err)
+	assert.Equal(t, "joined", result.(joinPairingResponse).Status)
+
+	outcome := <-relayerClient.sent
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+	assert.Equal(t, approvalCancellationStatus, outcome.Message.(map[string]any)["status"])
+	assert.Equal(t, "ch_old", outcome.Message.(map[string]any)["channelID"])
+	assert.Contains(t, oldChannel.RejectionReasons(), approvalCancellationStatus)
+	assertEventuallyDisplayObserved(t, cdpClient, "hidden", "", "")
+
+	s.mu.Lock()
+	require.NotNil(t, s.active)
+	assert.True(t, s.active.joined)
+	assert.Equal(t, "ch_site", s.active.channelID)
+	s.mu.Unlock()
+	assert.False(t, s.DisplayActive(), "the joined pairing owns no overlay")
+}
+
+// TestHandleJoinPairingChannel_ReplacesAnOlderJoin: a second, different join
+// drops the first site's channel.
+func TestHandleJoinPairingChannel_ReplacesAnOlderJoin(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	first := &fakeBrokerChannel{channelID: "ch_first", closed: make(chan struct{}, 1)}
+	second := &fakeBrokerChannel{channelID: "ch_second"}
+	joiner := &fakeBrokerJoiner{joined: joinedFor(first, "ch_first")}
+	s := newJoinTestService(t, joiner, nil, nil, &fakeCDP{})
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "111111"})
+	require.NoError(t, err)
+
+	joiner.mu.Lock()
+	joiner.joined = joinedFor(second, "ch_second")
+	joiner.mu.Unlock()
+	result, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "222222"})
+	require.NoError(t, err)
+	assert.Equal(t, "ch_second", result.(joinPairingResponse).ChannelID)
+
+	select {
+	case <-first.closed:
+	case <-time.After(time.Second):
+		t.Fatal("the replaced site channel must be closed")
+	}
+	s.mu.Lock()
+	assert.Equal(t, "ch_second", s.active.channelID)
+	s.mu.Unlock()
+}
+
+// TestHandleJoinPairingChannel_RetryOfTheSameJoinIsAnsweredFromThePairing: the
+// app retries over the relay when a LAN reply is lost. The single-use token was
+// spent on the first attempt, so the retry must not reach the broker again.
+func TestHandleJoinPairingChannel_RetryOfTheSameJoinIsAnsweredFromThePairing(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{channelID: "ch_site"}
+	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site")}
+	s := newJoinTestService(t, joiner, nil, nil, &fakeCDP{})
+
+	args := map[string]any{"channelId": "ch_site", "pairingToken": "pt_secret"}
+	first, err := s.HandleJoinPairingChannel(context.Background(), args)
+	require.NoError(t, err)
+	second, err := s.HandleJoinPairingChannel(context.Background(), args)
+	require.NoError(t, err)
+
+	assert.Equal(t, first, second)
+	assert.Len(t, joiner.Requests(), 1)
+	assert.Equal(t, 0, ch.CloseCount())
+}
+
+// TestHandleJoinPairingChannel_AttestationMismatchEndsThePairingWithoutAskingTheOwner:
+// a mint request that contradicts what the broker attested (another origin,
+// or another browser key) never reaches the approval sheet. The app gets a
+// canceled outcome naming the reason, the channel and the refused request;
+// the site gets a non-retryable mint_rejected; and the channel is closed,
+// after the rejection.
+func TestHandleJoinPairingChannel_AttestationMismatchEndsThePairingWithoutAskingTheOwner(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		reason string
+	}{
+		{fmt.Errorf("decode: %w", minter.ErrOriginMismatch), "origin_mismatch"},
+		{minter.ErrBrowserKeyMismatch, "browser_key_mismatch"},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			defer state.ResetForTesting()
+			state.GetState().Relayer.TopicID = "topic-1"
+
+			ch := &fakeBrokerChannel{
+				channelID: "ch_site",
+				request:   &minter.MintRequest{ChannelID: "ch_site", MessageID: "msg_1"},
+				pollErr:   tc.err,
+				closed:    make(chan struct{}, 1),
+			}
+			joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site")}
+			relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+			cdpClient := &fakeCDP{}
+			core, logs := observer.New(zap.WarnLevel)
+			s := newJoinTestService(t, joiner, nil, relayerClient, cdpClient)
+			s.logger = zap.New(core)
+
+			_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"channelId": "ch_site", "pairingToken": "pt_secret"})
+			require.NoError(t, err)
+
+			outcome := <-relayerClient.sent
+			assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+			message := outcome.Message.(map[string]any)
+			assert.Equal(t, approvalCancellationStatus, message["status"])
+			assert.Equal(t, tc.reason, message["reason"])
+			assert.Equal(t, "ch_site", message["channelID"])
+			assert.Equal(t, "msg_1", message["requestMessageID"])
+
+			select {
+			case <-ch.closed:
+			case <-time.After(time.Second):
+				t.Fatal("the channel must be closed after an attestation mismatch")
+			}
+			ch.mu.Lock()
+			assert.Equal(t, []string{tc.reason}, ch.rejectionReasons)
+			assert.Equal(t, []bool{false}, ch.rejectionRetryable)
+			ch.mu.Unlock()
+			select {
+			case extra := <-relayerClient.sent:
+				t.Fatalf("no approval request may be sent for a mismatched request, got %s", extra.NotificationType)
+			default:
+			}
+			assert.Empty(t, cdpClient.displayRequestsSnapshot())
+			assert.Equal(t, 1, logs.FilterMessageSnippet("does not match what the broker attested").Len())
+		})
+	}
+}
+
+func TestHandleClosePairingSession_ClosesAJoinedPairingWithoutPainting(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{channelID: "ch_site", closed: make(chan struct{}, 1)}
+	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site")}
+	cdpClient := &fakeCDP{}
+	s := newJoinTestService(t, joiner, nil, nil, cdpClient)
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+
+	result, err := s.HandleClosePairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	resp := result.(closePairingResponse)
+	assert.Equal(t, "closed", resp.Status)
+	assert.Equal(t, "ch_site", resp.ChannelID)
+
+	select {
+	case <-ch.closed:
+	case <-time.After(time.Second):
+		t.Fatal("close must close the joined broker channel")
+	}
+	time.Sleep(20 * time.Millisecond)
+	assert.Empty(t, cdpClient.displayRequestsSnapshot(), "closing a joined pairing has nothing to hide")
+}
+
+// TestHandleStartPairingSession_LeavesAJoinedPairingAlone: the legacy card's
+// start while a site pairing waits must neither paint a code nor replace it.
+func TestHandleStartPairingSession_LeavesAJoinedPairingAlone(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{channelID: "ch_site"}
+	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site")}
+	starter := &fakeBrokerStarter{channel: &fakeBrokerChannel{pairingCode: "PAIR-123"}}
+	cdpClient := &fakeCDP{}
+	s := newJoinTestService(t, joiner, starter, nil, cdpClient)
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertCommandError(t, result, "site_pairing_active", true)
+	assert.Equal(t, 0, starter.StartCount())
+	assert.Empty(t, cdpClient.displayRequestsSnapshot())
+	assert.Equal(t, 0, ch.CloseCount())
+}
+
+// TestCloseActivePairing_ClosesAJoinedPairing: factory reset's close reaches
+// a joined pairing exactly as it reaches a device-initiated one.
+func TestCloseActivePairing_ClosesAJoinedPairing(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{channelID: "ch_site", closed: make(chan struct{}, 1)}
+	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site")}
+	s := newJoinTestService(t, joiner, nil, nil, &fakeCDP{})
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	closed, err := s.CloseActivePairing(ctx)
+	require.NoError(t, err)
+	assert.True(t, closed)
+	// The worker signals done before its deferred channel close runs, so the
+	// close is awaited rather than counted immediately.
+	select {
+	case <-ch.closed:
+	case <-time.After(time.Second):
+		t.Fatal("the reset's close must close the joined broker channel")
+	}
+}
+
+func TestClassifyJoinFailure(t *testing.T) {
+	code, retryable := classifyJoinFailure(errors.New("broker POST /v1/channels/ch_1/join failed with status 410"))
+	assert.Equal(t, "code_expired", code)
+	assert.False(t, retryable)
+	code, retryable = classifyJoinFailure(context.DeadlineExceeded)
+	assert.Equal(t, "broker_error", code)
+	assert.True(t, retryable)
+}
+
+// TestHandleJoinPairingChannel_ReplacesEvenWhenTheJoinFails: the replaced
+// pairing is dropped before the broker call, so a device-initiated approval
+// cannot go on minting while the join is in flight or after it fails.
+func TestHandleJoinPairingChannel_ReplacesEvenWhenTheJoinFails(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	oldChannel := &fakeBrokerChannel{channelID: "ch_old", pairingCode: "PAIR-123", closed: make(chan struct{}, 1)}
+	joiner := &fakeBrokerJoiner{err: errors.New("broker POST /v1/pairing-codes/resolve failed with status 410")}
+	cdpClient := &fakeCDP{}
+	s := newJoinTestService(t, joiner, &fakeBrokerStarter{channel: oldChannel}, nil, cdpClient)
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	require.True(t, result.(startPairingResponse).OK)
+
+	result, err = s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+	assertCommandError(t, result, "code_expired", false)
+
+	select {
+	case <-oldChannel.closed:
+	case <-time.After(time.Second):
+		t.Fatal("the replaced pairing's channel must be closed before the join is attempted")
+	}
+	assertEventuallyDisplayObserved(t, cdpClient, "hidden", "", "")
+	s.mu.Lock()
+	assert.Nil(t, s.active)
+	s.mu.Unlock()
+}
+
+// TestHandleJoinPairingChannel_CancelsAStartStillInItsBrokerCall: a join does
+// not wait out a start it supersedes.
+func TestHandleJoinPairingChannel_CancelsAStartStillInItsBrokerCall(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	starter := &fakeBrokerStarter{entered: make(chan struct{}), blockUntilCanceled: true}
+	ch := &fakeBrokerChannel{channelID: "ch_site"}
+	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site")}
+	cdpClient := &fakeCDP{}
+	s := newJoinTestService(t, joiner, starter, nil, cdpClient)
+
+	startResult := make(chan any, 1)
+	go func() {
+		result, _ := s.HandleStartPairingSession(context.Background(), nil)
+		startResult <- result
+	}()
+	<-starter.entered
+
+	joinDone := make(chan any, 1)
+	go func() {
+		result, _ := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+		joinDone <- result
+	}()
+	select {
+	case result := <-joinDone:
+		assert.Equal(t, "joined", result.(joinPairingResponse).Status)
+	case <-time.After(time.Second):
+		t.Fatal("the join waited out a start it supersedes")
+	}
+	select {
+	case result := <-startResult:
+		assertCommandError(t, result, "broker_unavailable", true)
+	case <-time.After(time.Second):
+		t.Fatal("the superseded start never returned")
+	}
+	assert.Empty(t, cdpClient.displayRequestsSnapshot())
+	s.mu.Lock()
+	assert.Equal(t, "ch_site", s.active.channelID)
+	s.mu.Unlock()
+}
+
+// TestHandleJoinPairingChannel_ARetryDoesNotCancelTheSameJoinInFlight: the
+// relay retry of a join whose LAN attempt is still in its broker call waits
+// for it and answers from the pairing it made, spending the token once.
+func TestHandleJoinPairingChannel_ARetryDoesNotCancelTheSameJoinInFlight(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{channelID: "ch_site"}
+	release := make(chan struct{})
+	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site"), entered: make(chan struct{}, 2), release: release}
+	s := newJoinTestService(t, joiner, nil, nil, &fakeCDP{})
+
+	args := map[string]any{"channelId": "ch_site", "pairingToken": "pt_secret"}
+	results := make(chan any, 2)
+	go func() {
+		result, _ := s.HandleJoinPairingChannel(context.Background(), args)
+		results <- result
+	}()
+	<-joiner.entered
+	go func() {
+		result, _ := s.HandleJoinPairingChannel(context.Background(), args)
+		results <- result
+	}()
+	time.Sleep(20 * time.Millisecond) // let the retry reach startMu
+	close(release)
+
+	for range 2 {
+		select {
+		case result := <-results:
+			resp, ok := result.(joinPairingResponse)
+			require.True(t, ok, "got %#v", result)
+			assert.Equal(t, "joined", resp.Status)
+		case <-time.After(time.Second):
+			t.Fatal("a join never returned")
+		}
+	}
+	assert.Len(t, joiner.Requests(), 1, "the token is spent once")
+}
+
+// TestHandleJoinPairingChannel_DeadlineIsTheBrokerExpiry: the joined pairing
+// lives as long as the broker says the channel does, and falls back to the
+// device idle TTL only when the broker reports none.
+func TestHandleJoinPairingChannel_DeadlineIsTheBrokerExpiry(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	brokerExpiry := time.Now().Add(4 * time.Minute).Truncate(time.Second)
+	joined := joinedFor(&fakeBrokerChannel{channelID: "ch_site"}, "ch_site")
+	joined.expiresAt = brokerExpiry
+	joiner := &fakeBrokerJoiner{joined: joined}
+	s := newJoinTestService(t, joiner, nil, nil, &fakeCDP{})
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "111111"})
+	require.NoError(t, err)
+	s.mu.Lock()
+	assert.True(t, s.active.expiresAt.Equal(brokerExpiry), "got %s", s.active.expiresAt)
+	s.mu.Unlock()
+
+	unreported := joinedFor(&fakeBrokerChannel{channelID: "ch_other"}, "ch_other")
+	unreported.expiresAt = time.Time{}
+	joiner.mu.Lock()
+	joiner.joined = unreported
+	joiner.mu.Unlock()
+	before := time.Now()
+	_, err = s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "222222"})
+	require.NoError(t, err)
+	s.mu.Lock()
+	got := s.active.expiresAt
+	s.mu.Unlock()
+	assert.False(t, got.Before(before.Add(s.opts.IdleTTL)), "zero broker expiry falls back to the idle TTL")
+	assert.True(t, got.Before(time.Now().Add(s.opts.IdleTTL).Add(time.Second)))
+}
+
+// TestHandleJoinPairingChannel_ApprovalFollowsTheExtendedBrokerExpiry: the
+// broker extends a channel's idle deadline when it accepts the site's request,
+// so the approval wait runs to the later deadline instead of being canceled
+// at the one known at join.
+func TestHandleJoinPairingChannel_ApprovalFollowsTheExtendedBrokerExpiry(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	joinExpiry := time.Now().Add(400 * time.Millisecond)
+	extended := time.Now().Add(time.Minute).Truncate(time.Second)
+	ch := &fakeBrokerChannel{
+		channelID: "ch_site",
+		request: &minter.MintRequest{
+			ChannelID:   "ch_site",
+			MessageID:   "msg_1",
+			Origin:      testSiteOrigin,
+			BrowserInfo: minter.BrowserInfo{Name: "Art Blocks"},
+		},
+		brokerExpiry: extended,
+		successSent:  make(chan struct{}, 1),
+	}
+	joined := joinedFor(ch, "ch_site")
+	joined.expiresAt = joinExpiry
+	joiner := &fakeBrokerJoiner{joined: joined}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newJoinTestService(t, joiner, nil, relayerClient, &fakeCDP{})
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"channelId": "ch_site", "pairingToken": "pt_secret"})
+	require.NoError(t, err)
+
+	approval := <-relayerClient.sent
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
+	approvalMessage := approval.Message.(map[string]any)
+	approvalExpiry, err := time.Parse(time.RFC3339, approvalMessage["expiresAt"].(string))
+	require.NoError(t, err)
+	assert.True(t, approvalExpiry.After(joinExpiry), "the approval deadline must not be capped at the join-time expiry")
+	s.mu.Lock()
+	assert.True(t, s.active.expiresAt.Equal(extended))
+	s.mu.Unlock()
+
+	// Decide after the join-time expiry has passed.
+	time.Sleep(time.Until(joinExpiry) + 200*time.Millisecond)
+	result, err := s.HandleApprovalDecision(context.Background(), validDecisionArgs(approvalMessage["approvalRequestID"].(string), "topic-1", "ch_site", "msg_1"))
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", result.(approvalResponse).Status)
+
+	outcome := <-relayerClient.sent
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
+}
+
+// TestHandleJoinPairingChannel_AnEarlierBrokerExpiryNeverShortensTheDeadline:
+// only a later reported expiry moves the deadline.
+func TestHandleJoinPairingChannel_AnEarlierBrokerExpiryNeverShortensTheDeadline(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	joinExpiry := time.Now().Add(time.Minute).Truncate(time.Second)
+	ch := &fakeBrokerChannel{
+		channelID:    "ch_site",
+		request:      &minter.MintRequest{ChannelID: "ch_site", MessageID: "msg_1", Origin: testSiteOrigin},
+		brokerExpiry: joinExpiry.Add(-30 * time.Second),
+	}
+	joined := joinedFor(ch, "ch_site")
+	joined.expiresAt = joinExpiry
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newJoinTestService(t, &fakeBrokerJoiner{joined: joined}, nil, relayerClient, &fakeCDP{})
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+	approval := <-relayerClient.sent
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
+	s.mu.Lock()
+	assert.True(t, s.active.expiresAt.Equal(joinExpiry))
+	s.mu.Unlock()
+}
+
+// pendingDeviceInitiatedPairing starts a device-initiated pairing whose browser
+// request is pending approval and returns its approval id.
+func pendingDeviceInitiatedPairing(t *testing.T, s *service, relayerClient *fakeRelayer) string {
+	t.Helper()
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	require.True(t, result.(startPairingResponse).OK)
+	approval := <-relayerClient.sent
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
+	return approval.Message.(map[string]any)["approvalRequestID"].(string)
+}
+
+// TestHandleJoinPairingChannel_FencesAnApprovedPairingMidCreate: the owner
+// approved the old pairing and its session is being created when a join
+// replaces it. The join does not wait the creation out, and the superseded
+// site never receives the session: it is revoked, and both sides hear
+// the approval cancellation status.
+func TestHandleJoinPairingChannel_FencesAnApprovedPairingMidCreate(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	oldChannel := &fakeBrokerChannel{
+		channelID:   "ch_old",
+		pairingCode: "PAIR-123",
+		request:     &minter.MintRequest{ChannelID: "ch_old", MessageID: "msg_old", Origin: "https://gallery.example"},
+	}
+	creator := fakeSessionCreator{started: make(chan struct{}, 1), release: make(chan struct{}), revoked: make(chan revokedSession, 1)}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 8)}
+	s := newJoinTestService(t, &fakeBrokerJoiner{joined: joinedFor(&fakeBrokerChannel{channelID: "ch_site"}, "ch_site")}, &fakeBrokerStarter{channel: oldChannel}, relayerClient, &fakeCDP{})
+	s.sessionCreator = creator
+
+	approvalID := pendingDeviceInitiatedPairing(t, s, relayerClient)
+	result, err := s.HandleApprovalDecision(context.Background(), validDecisionArgs(approvalID, "topic-1", "ch_old", "msg_old"))
+	require.NoError(t, err)
+	require.Equal(t, "accepted", result.(approvalResponse).Status)
+	<-creator.started // the session is being created for the old site
+
+	result, err = s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+	assert.Equal(t, "joined", result.(joinPairingResponse).Status)
+
+	close(creator.release) // the creation lands after the replacement
+	select {
+	case revoked := <-creator.revoked:
+		assert.Equal(t, "session-1", revoked.sessionID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the session created for a superseded pairing must be revoked")
+	}
+	outcome := <-relayerClient.sent
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+	assert.Equal(t, approvalCancellationStatus, outcome.Message.(map[string]any)["status"])
+	assert.Empty(t, oldChannel.DeliveredSessions(), "a superseded site must never receive a session")
+	assert.Contains(t, oldChannel.RejectionReasons(), approvalCancellationStatus)
+	s.mu.Lock()
+	assert.Equal(t, "ch_site", s.active.channelID)
+	s.mu.Unlock()
+}
+
+// TestHandleJoinPairingChannel_WaitsForADeliveryAlreadyInFlight: once the old
+// pairing's session is on its way it cannot be recalled, so the join waits
+// for it — past the ordinary cleanup bound — instead of starting beside it.
+func TestHandleJoinPairingChannel_WaitsForADeliveryAlreadyInFlight(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	sending := make(chan struct{}, 1)
+	releaseSend := make(chan struct{})
+	oldChannel := &fakeBrokerChannel{
+		channelID:   "ch_old",
+		pairingCode: "PAIR-123",
+		request:     &minter.MintRequest{ChannelID: "ch_old", MessageID: "msg_old", Origin: "https://gallery.example"},
+		onSend: func() {
+			sending <- struct{}{}
+			<-releaseSend
+		},
+	}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 8)}
+	s := newJoinTestService(t, &fakeBrokerJoiner{joined: joinedFor(&fakeBrokerChannel{channelID: "ch_site"}, "ch_site")}, &fakeBrokerStarter{channel: oldChannel}, relayerClient, &fakeCDP{})
+
+	approvalID := pendingDeviceInitiatedPairing(t, s, relayerClient)
+	_, err := s.HandleApprovalDecision(context.Background(), validDecisionArgs(approvalID, "topic-1", "ch_old", "msg_old"))
+	require.NoError(t, err)
+	<-sending // delivery to the old site has started
+
+	joinDone := make(chan any, 1)
+	go func() {
+		result, _ := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+		joinDone <- result
+	}()
+	select {
+	case <-joinDone:
+		t.Fatal("the join must not start beside a delivery in flight")
+	case <-time.After(joinCloseWaitTimeout + 300*time.Millisecond):
+	}
+	close(releaseSend)
+	select {
+	case result := <-joinDone:
+		assert.Equal(t, "joined", result.(joinPairingResponse).Status)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the join never followed the finished delivery")
+	}
+	outcome := <-relayerClient.sent
+	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
+	assert.Len(t, oldChannel.DeliveredSessions(), 1)
+}
+
+// TestHandleJoinPairingChannel_AJoinedPairingOutlivesItsJoinTimeDeadline: a
+// poll in flight can extend the broker's deadline before the worker sees the
+// new value. A retry or a legacy start in that window must find the pairing
+// live, not expire it from the join-time deadline; once the poll returns, the
+// worker keeps waiting to the broker's later expiry.
+func TestHandleJoinPairingChannel_AJoinedPairingOutlivesItsJoinTimeDeadline(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	joinExpiry := time.Now().Add(150 * time.Millisecond)
+	pollInFlight := make(chan struct{})
+	releasePoll := make(chan struct{})
+	ch := &fakeBrokerChannel{channelID: "ch_site", closed: make(chan struct{}, 1)}
+	held := false
+	// Called under ch.mu: the first poll is held open across the join-time
+	// deadline, and the broker extends its expiry while it is in flight.
+	ch.beforePoll = func() {
+		if held {
+			return
+		}
+		held = true
+		ch.brokerExpiry = time.Now().Add(time.Minute)
+		close(pollInFlight)
+		<-releasePoll
+	}
+	joined := joinedFor(ch, "ch_site")
+	joined.expiresAt = joinExpiry
+	joiner := &fakeBrokerJoiner{joined: joined}
+	starter := &fakeBrokerStarter{channel: &fakeBrokerChannel{pairingCode: "PAIR-123"}}
+	s := newJoinTestService(t, joiner, starter, nil, &fakeCDP{})
+
+	args := map[string]any{"channelId": "ch_site", "pairingToken": "pt_secret"}
+	_, err := s.HandleJoinPairingChannel(context.Background(), args)
+	require.NoError(t, err)
+	<-pollInFlight
+	time.Sleep(time.Until(joinExpiry) + 100*time.Millisecond) // past the join-time deadline, poll still in flight
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertCommandError(t, result, "site_pairing_active", true)
+	assert.Equal(t, 0, starter.StartCount())
+
+	result, err = s.HandleJoinPairingChannel(context.Background(), args)
+	require.NoError(t, err)
+	assert.Equal(t, "joined", result.(joinPairingResponse).Status)
+	assert.Len(t, joiner.Requests(), 1, "the retry is answered from the live pairing")
+
+	close(releasePoll)
+	time.Sleep(100 * time.Millisecond) // the worker sees the extension and keeps waiting
+	assert.Equal(t, 0, ch.CloseCount(), "the worker is still waiting on the extended deadline")
+	s.mu.Lock()
+	require.NotNil(t, s.active)
+	assert.Equal(t, "ch_site", s.active.channelID)
+	assert.True(t, s.active.expiresAt.After(time.Now().Add(30*time.Second)))
+	s.mu.Unlock()
+}
+
+// TestHandleJoinPairingChannel_AJoinedPairingEndsAtItsDeadline: the worker,
+// not currentActive, ends a joined pairing whose broker reports no later
+// expiry, and it clears the slot when it does.
+func TestHandleJoinPairingChannel_AJoinedPairingEndsAtItsDeadline(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{channelID: "ch_site", closed: make(chan struct{}, 1)}
+	joined := joinedFor(ch, "ch_site")
+	joined.expiresAt = time.Now().Add(100 * time.Millisecond)
+	s := newJoinTestService(t, &fakeBrokerJoiner{joined: joined}, nil, nil, &fakeCDP{})
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+	select {
+	case <-ch.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the joined pairing must end at its deadline")
+	}
+	s.mu.Lock()
+	assert.Nil(t, s.active)
+	s.mu.Unlock()
+}
+
+// TestApprovalCancellationStatusWireLiteral pins the protocol value: the
+// controller contract (docs/controld-inbound-controller-messages.md) documents
+// the status with the double-l spelling, and a spelling "fix" once changed it under a lint
+// pass. Consumers match the literal, so it must never drift.
+func TestApprovalCancellationStatusWireLiteral(t *testing.T) {
+	if approvalCancellationStatus != "cancelled" { //nolint:misspell // wire literal
+		t.Fatalf("approvalCancellationStatus = %q, want the documented double-l wire literal", approvalCancellationStatus)
+	}
+}
+
+// TestHandleClosePairingSession_CancelsAJoinInItsBrokerCall: a close landing
+// while the join is inside its broker call cancels it, and when the broker's
+// reply arrives anyway, the joined channel is closed rather than published —
+// no live pairing, no approval request.
+func TestHandleClosePairingSession_CancelsAJoinInItsBrokerCall(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		channelID: "ch_site",
+		request:   &minter.MintRequest{ChannelID: "ch_site", MessageID: "msg_1", Origin: testSiteOrigin},
+		closed:    make(chan struct{}, 1),
+	}
+	release := make(chan struct{})
+	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site"), entered: make(chan struct{}, 1), release: release, ignoreCancel: true}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newJoinTestService(t, joiner, nil, relayerClient, &fakeCDP{})
+
+	joinResult := make(chan any, 1)
+	go func() {
+		result, _ := s.HandleJoinPairingChannel(context.Background(), map[string]any{"channelId": "ch_site", "pairingToken": "pt_secret"})
+		joinResult <- result
+	}()
+	<-joiner.entered
+
+	closeResult := make(chan any, 1)
+	go func() {
+		result, _ := s.HandleClosePairingSession(context.Background(), nil)
+		closeResult <- result
+	}()
+	select {
+	case <-closeResult:
+		t.Fatal("the close must wait for the canceled join to unwind")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release) // the broker accepted the join after all
+
+	select {
+	case result := <-joinResult:
+		assertCommandError(t, result, "pairing_closed", false)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the canceled join never returned")
+	}
+	select {
+	case result := <-closeResult:
+		resp := result.(closePairingResponse)
+		assert.True(t, resp.OK)
+		assert.Equal(t, "closed", resp.Status)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the close never returned")
+	}
+	select {
+	case <-ch.closed:
+	case <-time.After(time.Second):
+		t.Fatal("a join accepted after the close must have its channel closed")
+	}
+	s.mu.Lock()
+	assert.Nil(t, s.active)
+	assert.Nil(t, s.starting)
+	s.mu.Unlock()
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case msg := <-relayerClient.sent:
+		t.Fatalf("a closed join must never ask for approval, got %s", msg.NotificationType)
+	default:
+	}
+}
+
+// TestHandleClosePairingSession_CancelsAStartInItsBrokerCall: the same for a
+// device-initiated start, which answers closed instead of not_started.
+func TestHandleClosePairingSession_CancelsAStartInItsBrokerCall(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	starter := &fakeBrokerStarter{entered: make(chan struct{}), blockUntilCanceled: true}
+	cdpClient := &fakeCDP{}
+	s := newJoinTestService(t, &fakeBrokerJoiner{}, starter, nil, cdpClient)
+
+	startResult := make(chan any, 1)
+	go func() {
+		result, _ := s.HandleStartPairingSession(context.Background(), nil)
+		startResult <- result
+	}()
+	<-starter.entered
+
+	result, err := s.HandleClosePairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, "closed", result.(closePairingResponse).Status)
+	select {
+	case <-startResult:
+	case <-time.After(time.Second):
+		t.Fatal("the canceled start never returned")
+	}
+	s.mu.Lock()
+	assert.Nil(t, s.active)
+	s.mu.Unlock()
+	assert.Empty(t, cdpClient.displayRequestsSnapshot())
+}
+
+// ctxCheckingRelayer refuses a send whose context has already ended, the way
+// a real transport does.
+type ctxCheckingRelayer struct{ fakeRelayer }
+
+func (r *ctxCheckingRelayer) Send(ctx context.Context, data interface{}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.fakeRelayer.Send(ctx, data)
+}
+
+// TestHandleJoinPairingChannel_MismatchOutcomeSurvivesASlowRejection: the
+// browser rejection may use its whole budget; the app's outcome has its own
+// and still goes out.
+func TestHandleJoinPairingChannel_MismatchOutcomeSurvivesASlowRejection(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		channelID:        "ch_site",
+		request:          &minter.MintRequest{ChannelID: "ch_site", MessageID: "msg_1"},
+		pollErr:          minter.ErrOriginMismatch,
+		rejectionRelease: make(chan struct{}), // never released: the rejection times out
+		closed:           make(chan struct{}, 1),
+	}
+	relayerClient := &ctxCheckingRelayer{fakeRelayer{sent: make(chan relayer.Response, 4)}}
+	s := newJoinTestService(t, &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site")}, nil, relayerClient, &fakeCDP{})
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+
+	select {
+	case outcome := <-relayerClient.sent:
+		assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+		assert.Equal(t, "origin_mismatch", outcome.Message.(map[string]any)["reason"])
+		assert.Equal(t, "msg_1", outcome.Message.(map[string]any)["requestMessageID"])
+	case <-time.After(3 * time.Second):
+		t.Fatal("the app's outcome must go out after a rejection that used its whole budget")
+	}
+	select {
+	case <-ch.closed:
+	case <-time.After(time.Second):
+		t.Fatal("the channel must still be closed")
+	}
 }
