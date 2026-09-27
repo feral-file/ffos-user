@@ -88,10 +88,13 @@ var DefaultHosts = []string{
 const DefaultReplacementGateway = "https://ipfs.filebase.io"
 
 // minCIDLength is the shortest path segment RewriteURL treats as a CID.
-// CIDv0 is exactly 46 base58 characters and CIDv1 in base32 is longer, so
-// anything shorter under `/ipfs/` is not content-addressed and is left
-// alone — mirrors ff-player's `isContentAddressed` so the two agree on what
-// a CID path is.
+// CIDv0 is exactly 46 base58 characters and a CIDv1 over a sha2-256 digest
+// is longer in every multibase a gateway path uses, so anything shorter
+// under `/ipfs/` is not content-addressed and is left alone — mirrors
+// ff-player's `isContentAddressed` so the two agree on what a CID path is.
+// A CIDv1 over an identity multihash can be shorter; those inline their
+// bytes and are not what an artwork source carries, so they stay on the
+// header rule rather than loosening the check for every API-ish path.
 const minCIDLength = 46
 
 // Policy answers "does this URL need its User-Agent replaced, and with
@@ -127,9 +130,14 @@ type Policy struct {
 //
 // replacementGateway is where CID paths on a matching host are sent (see
 // RewriteURL); empty uses DefaultReplacementGateway. It must parse as an
-// http(s) URL with a host, and that host must not itself be in hosts — a
-// replacement that the policy would pause and rewrite again is a loop, not
-// a fallback, and is rejected here rather than discovered on a device.
+// http(s) URL whose host passes the same literal-host check as hosts. It MAY
+// itself be a listed host: an operator who had already listed
+// `ipfs.filebase.io` for the User-Agent rule keeps that rule for it, and
+// RewriteURL never redirects a request to the host it is already on, so the
+// policy cannot loop. Rejecting that shape instead was tried and is worse —
+// a config that was valid before this rule existed would have switched the
+// whole interceptor off (main disables it on a construction error), taking
+// the ipfs.io User-Agent handling down with it.
 func New(hosts []string, userAgent string, replacementGateway string) (*Policy, error) {
 	if len(hosts) == 0 {
 		hosts = DefaultHosts
@@ -153,9 +161,6 @@ func New(hosts []string, userAgent string, replacementGateway string) (*Policy, 
 	}
 	if len(set) == 0 {
 		return nil, fmt.Errorf("uarewrite: host list resolved to no usable entries")
-	}
-	if _, loops := set[strings.ToLower(replacement.Hostname())]; loops {
-		return nil, fmt.Errorf("uarewrite: replacement gateway %q is itself a listed host", replacementGateway)
 	}
 
 	return &Policy{hosts: set, userAgent: ua, replacement: replacement}, nil
@@ -189,7 +194,9 @@ func New(hosts []string, userAgent string, replacementGateway string) (*Policy, 
 // mistyped gateway must not switch the CID rewrite off (which would put the
 // retired gateway's 429 back on screen with only a log line to say why), so
 // an unusable value is reported in the rejected list, spelled
-// "replacementGateway=<raw>", and the built-in default is used instead.
+// "replacementGateway=<raw>", and the built-in default is used instead. The
+// host-list error path is unchanged: only an unusable BUILT-IN list can
+// reach it, since a replacement that names a listed host is valid (see New).
 func NewFromOperatorHosts(hosts []string, userAgent string, replacementGateway string) (*Policy, []string, error) {
 	kept := make([]string, 0, len(hosts))
 	var rejected []string
@@ -273,6 +280,12 @@ func (p *Policy) RewriteURL(rawURL string) (string, bool) {
 	if !isCIDPath(u.EscapedPath()) {
 		return "", false
 	}
+	if strings.EqualFold(u.Hostname(), p.replacement.Hostname()) {
+		// Already on the replacement gateway (an operator listed it for
+		// the User-Agent rule). Redirecting it to itself would be a no-op
+		// at best; let the header rule handle it.
+		return "", false
+	}
 	out := url.URL{
 		Scheme:     p.replacement.Scheme,
 		Host:       p.replacement.Host,
@@ -288,7 +301,11 @@ func (p *Policy) RewriteURL(rawURL string) (string, bool) {
 // followed by `/...`. The CID check is shape-only (length and alphabet),
 // not a multihash decode: the goal is to refuse `/ipfs/` API-ish paths and
 // obvious junk, not to validate content addressing, which the replacement
-// gateway does for real.
+// gateway does for real. The alphabet is the union of the multibase
+// encodings a path-form gateway URL carries: base58btc (CIDv0), base32,
+// base36, base16, and base64url, whose `-` and `_` are the only
+// non-alphanumerics among them. A `%` (percent-encoding) or any other byte
+// means the segment is not a CID.
 func isCIDPath(escapedPath string) bool {
 	const prefix = "/ipfs/"
 	if !strings.HasPrefix(escapedPath, prefix) {
@@ -304,7 +321,7 @@ func isCIDPath(escapedPath string) bool {
 	}
 	for _, r := range cid {
 		isAlnum := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
-		if !isAlnum {
+		if !isAlnum && r != '-' && r != '_' {
 			return false
 		}
 	}
@@ -336,6 +353,12 @@ func normalizeReplacementGateway(raw string) (*url.URL, error) {
 	}
 	if u.User != nil {
 		return nil, fmt.Errorf("credentials are not supported")
+	}
+	// The same literal-host grammar as configured hosts: a gateway written
+	// as `ipfs_filebase.io` or `*.filebase.io` must be reported and fall to
+	// the default, not become the destination for every CID on the device.
+	if err := validateLiteralHost(strings.ToLower(u.Hostname())); err != nil {
+		return nil, err
 	}
 	return &url.URL{Scheme: u.Scheme, Host: strings.ToLower(u.Host)}, nil
 }

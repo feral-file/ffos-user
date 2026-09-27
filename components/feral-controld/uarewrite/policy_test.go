@@ -706,7 +706,9 @@ func TestRewriteURL(t *testing.T) {
 		{name: "api path", in: "https://ipfs.io/api/v0/cat?arg=" + cidV0},
 		{name: "gateway static asset", in: "https://ipfs.io/static/logo.png"},
 		{name: "too short to be a cid", in: "https://ipfs.io/ipfs/QmAbc"},
-		{name: "cid with non-alphanumeric byte", in: "https://ipfs.io/ipfs/" + cidV0[:45] + "%2F"},
+		{name: "base64url cid alphabet", in: "https://ipfs.io/ipfs/uAXASIB-_" + cidV1[10:],
+			want: "https://ipfs.filebase.io/ipfs/uAXASIB-_" + cidV1[10:], ok: true},
+		{name: "percent-encoded byte is not a cid", in: "https://ipfs.io/ipfs/" + cidV0[:45] + "%2F"},
 		{name: "bare ipfs prefix", in: "https://ipfs.io/ipfs/"},
 		{name: "no host", in: "data:image/gif;base64,R0lGOD"},
 	}
@@ -726,25 +728,33 @@ func TestRewriteURL(t *testing.T) {
 	}
 }
 
-// A rewritten URL must itself be outside the policy's scope, or the request
-// would be paused and rewritten again. New refuses that at construction so it
-// is a config error at startup, never a loop on a device.
-func TestNewRejectsReplacementThatIsAListedHost(t *testing.T) {
+// A replacement that is itself a listed host is a VALID configuration: an
+// operator who had already listed Filebase for the User-Agent rule before this
+// rule existed keeps that rule for it, other listed hosts still redirect, and
+// a request already on the replacement host is never redirected to itself.
+// Refusing this shape would have switched the whole interceptor off for a
+// config that was valid the day before.
+func TestReplacementThatIsAListedHostKeepsUserAgentRule(t *testing.T) {
 	t.Parallel()
 
-	for _, gw := range []string{"https://ipfs.io", "https://IPFS.IO/ipfs/", "http://dweb.link:8080"} {
-		if _, err := New(nil, "", gw); err == nil {
-			t.Errorf("New(nil, \"\", %q) accepted a replacement inside its own host set", gw)
-		}
-	}
-	// And the rewrite target never lands on a listed host even when an
-	// operator narrows the list so the default is no longer in it.
-	p, err := New([]string{"ipfs.filebase.io"}, "", "https://ipfs.io")
+	const cid = "QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A"
+
+	p, err := New([]string{"ipfs.io", "ipfs.filebase.io"}, "", "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, ok := p.RewriteURL("https://ipfs.filebase.io/ipfs/QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A"); !ok {
-		t.Fatal("a listed host with a CID path must rewrite")
+	if got, ok := p.RewriteURL("https://ipfs.io/ipfs/" + cid); !ok || got != "https://ipfs.filebase.io/ipfs/"+cid {
+		t.Errorf("ipfs.io must still redirect to the listed replacement, got %q ok=%v", got, ok)
+	}
+	if got, ok := p.RewriteURL("https://ipfs.filebase.io/ipfs/" + cid); ok {
+		t.Errorf("a request already on the replacement host must not redirect, got %q", got)
+	}
+	if !p.Matches("https://ipfs.filebase.io/ipfs/" + cid) {
+		t.Error("the replacement host stays in scope for the User-Agent rule")
+	}
+	// Explicit spelling of the same thing.
+	if _, err := New(nil, "", "https://IPFS.IO/ipfs/"); err != nil {
+		t.Errorf("a replacement inside the host set must construct: %v", err)
 	}
 }
 
@@ -765,7 +775,11 @@ func TestNewReplacementGatewayNormalization(t *testing.T) {
 		{name: "non-http scheme", in: "ipfs://gw.example", isErr: true},
 		{name: "query would be silently structured", in: "https://gw.example/?x=1", isErr: true},
 		{name: "fragment would be silently structured", in: "https://gw.example/#x", isErr: true},
-		{name: "credentials", in: "https://user:pw@gw.example", isErr: true},
+		{name: "credentials", in: "https://" + "user:pw@gw.example", isErr: true}, // split so gosec G101 does not read a fake credential as a real one
+		{name: "underscore is not a literal host", in: "https://ipfs_filebase.io", isErr: true},
+		{name: "wildcard is not a literal host", in: "https://*.filebase.io", isErr: true},
+		{name: "doubled dot", in: "https://ipfs..filebase.io", isErr: true},
+		{name: "ip literal", in: "http://192.0.2.10:8080", want: "http://192.0.2.10:8080"},
 	}
 
 	for _, tt := range tests {
@@ -809,16 +823,17 @@ func TestNewFromOperatorHostsSalvagesBadReplacementGateway(t *testing.T) {
 		t.Errorf("rejected = %v, want %v", rejected, want)
 	}
 
-	// A replacement that loops onto a listed host is an operator value too,
-	// and takes the same path.
-	p, rejected, err = NewFromOperatorHosts([]string{"ipfs.io"}, "", "https://ipfs.io")
+	// A gateway that parses but is not a literal host is an operator value
+	// too, and takes the same path rather than becoming every CID's
+	// destination.
+	p, rejected, err = NewFromOperatorHosts([]string{"ipfs.io"}, "", "https://ipfs_filebase.io")
 	if err != nil {
 		t.Fatalf("NewFromOperatorHosts: %v", err)
 	}
 	if got := p.ReplacementGateway(); got != DefaultReplacementGateway {
 		t.Errorf("ReplacementGateway() = %q, want the default %q", got, DefaultReplacementGateway)
 	}
-	if want := []string{"replacementGateway=https://ipfs.io"}; !reflect.DeepEqual(rejected, want) {
+	if want := []string{"replacementGateway=https://ipfs_filebase.io"}; !reflect.DeepEqual(rejected, want) {
 		t.Errorf("rejected = %v, want %v", rejected, want)
 	}
 }
