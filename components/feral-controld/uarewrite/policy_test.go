@@ -706,8 +706,13 @@ func TestRewriteURL(t *testing.T) {
 		{name: "api path", in: "https://ipfs.io/api/v0/cat?arg=" + cidV0},
 		{name: "gateway static asset", in: "https://ipfs.io/static/logo.png"},
 		{name: "too short to be a cid", in: "https://ipfs.io/ipfs/QmAbc"},
-		{name: "base64url cid alphabet", in: "https://ipfs.io/ipfs/uAXASIB-_" + cidV1[10:],
-			want: "https://ipfs.filebase.io/ipfs/uAXASIB-_" + cidV1[10:], ok: true},
+		{name: "base64url multibase", in: "https://ipfs.io/ipfs/" + cidV1B64,
+			want: "https://ipfs.filebase.io/ipfs/" + cidV1B64, ok: true},
+		{name: "short identity-multihash cid", in: "https://dweb.link/ipfs/" + cidShortIdentity,
+			want: "https://ipfs.filebase.io/ipfs/" + cidShortIdentity, ok: true},
+		{name: "sha1 multihash cid", in: "https://ipfs.io/ipfs/" + cidSha1 + "/x.png",
+			want: "https://ipfs.filebase.io/ipfs/" + cidSha1 + "/x.png", ok: true},
+		{name: "well-formed alphabet but not a cid", in: "https://ipfs.io/ipfs/" + badLenB32},
 		{name: "percent-encoded byte is not a cid", in: "https://ipfs.io/ipfs/" + cidV0[:45] + "%2F"},
 		{name: "bare ipfs prefix", in: "https://ipfs.io/ipfs/"},
 		{name: "no host", in: "data:image/gif;base64,R0lGOD"},
@@ -728,33 +733,55 @@ func TestRewriteURL(t *testing.T) {
 	}
 }
 
-// A replacement that is itself a listed host is a VALID configuration: an
-// operator who had already listed Filebase for the User-Agent rule before this
-// rule existed keeps that rule for it, other listed hosts still redirect, and
-// a request already on the replacement host is never redirected to itself.
-// Refusing this shape would have switched the whole interceptor off for a
-// config that was valid the day before.
-func TestReplacementThatIsAListedHostKeepsUserAgentRule(t *testing.T) {
+// A replacement that is itself a listed host cannot be the fallback: a listed
+// host is one that does not serve content, so dweb.link's CIDs redirected onto
+// ipfs.io would be the black artwork again. New refuses it; the operator path
+// salvages to the default and names the dropped value, and when the default is
+// listed too it keeps the header rule and turns the URL rule off — never the
+// whole interceptor.
+func TestListedReplacementIsSalvagedNeverDisabling(t *testing.T) {
 	t.Parallel()
 
 	const cid = "QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A"
 
-	p, err := New([]string{"ipfs.io", "ipfs.filebase.io"}, "", "")
+	for _, gw := range []string{"https://ipfs.io", "https://IPFS.IO/ipfs/", "http://dweb.link:8080"} {
+		if _, err := New(nil, "", gw); err == nil {
+			t.Errorf("New(nil, \"\", %q) accepted a listed host as the replacement", gw)
+		}
+	}
+
+	// Operator lists both retired hosts and points the replacement at one.
+	p, rejected, err := NewFromOperatorHosts([]string{"ipfs.io", "dweb.link"}, "", "https://ipfs.io")
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("NewFromOperatorHosts: %v", err)
 	}
-	if got, ok := p.RewriteURL("https://ipfs.io/ipfs/" + cid); !ok || got != "https://ipfs.filebase.io/ipfs/"+cid {
-		t.Errorf("ipfs.io must still redirect to the listed replacement, got %q ok=%v", got, ok)
+	if got, ok := p.RewriteURL("https://dweb.link/ipfs/" + cid); !ok || got != "https://ipfs.filebase.io/ipfs/"+cid {
+		t.Errorf("dweb.link CID must go to the default, got %q ok=%v", got, ok)
 	}
-	if got, ok := p.RewriteURL("https://ipfs.filebase.io/ipfs/" + cid); ok {
-		t.Errorf("a request already on the replacement host must not redirect, got %q", got)
+	if want := []string{"replacementGateway=https://ipfs.io"}; !reflect.DeepEqual(rejected, want) {
+		t.Errorf("rejected = %v, want %v", rejected, want)
 	}
-	if !p.Matches("https://ipfs.filebase.io/ipfs/" + cid) {
-		t.Error("the replacement host stays in scope for the User-Agent rule")
+
+	// Operator had listed Filebase for the header rule before the URL rule
+	// existed, and set no replacement: nothing is left to redirect to.
+	p, rejected, err = NewFromOperatorHosts([]string{"ipfs.io", "ipfs.filebase.io"}, "", "")
+	if err != nil {
+		t.Fatalf("NewFromOperatorHosts: %v (must never disable the interceptor)", err)
 	}
-	// Explicit spelling of the same thing.
-	if _, err := New(nil, "", "https://IPFS.IO/ipfs/"); err != nil {
-		t.Errorf("a replacement inside the host set must construct: %v", err)
+	if got := p.Hosts(); !reflect.DeepEqual(got, []string{"ipfs.filebase.io", "ipfs.io"}) {
+		t.Errorf("Hosts() = %v, want both operator hosts kept", got)
+	}
+	if _, ok := p.RewriteURL("https://ipfs.io/ipfs/" + cid); ok {
+		t.Error("with no usable replacement the URL rule must be off")
+	}
+	if p.ReplacementGateway() != "" {
+		t.Errorf("ReplacementGateway() = %q, want empty when the URL rule is off", p.ReplacementGateway())
+	}
+	if !p.Matches("https://ipfs.io/ipfs/"+cid) || !p.Matches("https://ipfs.filebase.io/ipfs/"+cid) {
+		t.Error("header rule must still cover every listed host")
+	}
+	if len(rejected) != 1 || !strings.Contains(rejected[0], "CID redirect off") {
+		t.Errorf("rejected = %v, want one entry saying the redirect is off", rejected)
 	}
 }
 

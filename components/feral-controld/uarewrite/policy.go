@@ -87,16 +87,6 @@ var DefaultHosts = []string{
 // host list is: the next gateway change must not need a release.
 const DefaultReplacementGateway = "https://ipfs.filebase.io"
 
-// minCIDLength is the shortest path segment RewriteURL treats as a CID.
-// CIDv0 is exactly 46 base58 characters and a CIDv1 over a sha2-256 digest
-// is longer in every multibase a gateway path uses, so anything shorter
-// under `/ipfs/` is not content-addressed and is left alone — mirrors
-// ff-player's `isContentAddressed` so the two agree on what a CID path is.
-// A CIDv1 over an identity multihash can be shorter; those inline their
-// bytes and are not what an artwork source carries, so they stay on the
-// header rule rather than loosening the check for every API-ish path.
-const minCIDLength = 46
-
 // Policy answers "does this URL need its User-Agent replaced, and with
 // what". It is immutable after construction and safe for concurrent use;
 // callers on the CDP request path hold no lock.
@@ -108,7 +98,9 @@ type Policy struct {
 	// returned by New.
 	userAgent string
 	// replacement is the gateway RewriteURL sends CID paths to, reduced to
-	// scheme and host. Never nil for a Policy returned by New.
+	// scheme and host. nil means the URL rule is OFF and every matching
+	// request takes the header rule; New never produces that, only
+	// NewFromOperatorHosts's last-resort salvage does (see there).
 	replacement *url.URL
 }
 
@@ -130,14 +122,13 @@ type Policy struct {
 //
 // replacementGateway is where CID paths on a matching host are sent (see
 // RewriteURL); empty uses DefaultReplacementGateway. It must parse as an
-// http(s) URL whose host passes the same literal-host check as hosts. It MAY
-// itself be a listed host: an operator who had already listed
-// `ipfs.filebase.io` for the User-Agent rule keeps that rule for it, and
-// RewriteURL never redirects a request to the host it is already on, so the
-// policy cannot loop. Rejecting that shape instead was tried and is worse —
-// a config that was valid before this rule existed would have switched the
-// whole interceptor off (main disables it on a construction error), taking
-// the ipfs.io User-Agent handling down with it.
+// http(s) URL whose host passes the same literal-host check as hosts, and
+// that host must NOT be in hosts: a listed host is by definition one that
+// does not serve content, so redirecting dweb.link's CIDs onto ipfs.io would
+// restore the black artwork this rule exists to fix. New reports that as an
+// error (the strict contract); the operator path salvages it instead — see
+// NewFromOperatorHosts for why a construction error is the wrong outcome
+// for a hand-edited value.
 func New(hosts []string, userAgent string, replacementGateway string) (*Policy, error) {
 	if len(hosts) == 0 {
 		hosts = DefaultHosts
@@ -161,6 +152,9 @@ func New(hosts []string, userAgent string, replacementGateway string) (*Policy, 
 	}
 	if len(set) == 0 {
 		return nil, fmt.Errorf("uarewrite: host list resolved to no usable entries")
+	}
+	if _, listed := set[strings.ToLower(replacement.Hostname())]; listed {
+		return nil, fmt.Errorf("uarewrite: replacement gateway %q is itself a listed host", replacementGateway)
 	}
 
 	return &Policy{hosts: set, userAgent: ua, replacement: replacement}, nil
@@ -191,12 +185,17 @@ func New(hosts []string, userAgent string, replacementGateway string) (*Policy, 
 // already decided, not scattered across the wiring.
 //
 // The replacement gateway gets the same tolerance for the same reason: a
-// mistyped gateway must not switch the CID rewrite off (which would put the
-// retired gateway's 429 back on screen with only a log line to say why), so
-// an unusable value is reported in the rejected list, spelled
-// "replacementGateway=<raw>", and the built-in default is used instead. The
-// host-list error path is unchanged: only an unusable BUILT-IN list can
-// reach it, since a replacement that names a listed host is valid (see New).
+// mistyped gateway, or one that names a listed (retired) host, must not
+// switch the CID rewrite off with only a log line to say why. An unusable
+// value is reported in the rejected list, spelled "replacementGateway=<raw>",
+// and the built-in default is used instead. If the DEFAULT is itself a
+// listed host (an operator who had listed Filebase for the header rule
+// before this rule existed), there is no gateway left to send CIDs to, so
+// the URL rule is turned off for this policy and that is reported the same
+// way — the interceptor stays up and the header rule keeps working for
+// every listed host, which is exactly what that config asked for before
+// the URL rule was born. Disabling the whole interceptor over it was the
+// previous behavior and the worse one.
 func NewFromOperatorHosts(hosts []string, userAgent string, replacementGateway string) (*Policy, []string, error) {
 	kept := make([]string, 0, len(hosts))
 	var rejected []string
@@ -209,19 +208,53 @@ func NewFromOperatorHosts(hosts []string, userAgent string, replacementGateway s
 	}
 
 	// New maps an empty list to DefaultHosts, so the all-rejected case needs
-	// no special handling here. An error now means the BUILT-IN list is
-	// unusable, which is a programming error, not operator input.
+	// no special handling here.
 	policy, err := New(kept, userAgent, replacementGateway)
-	if err != nil && strings.TrimSpace(replacementGateway) != "" {
-		// Retry with the default before concluding the host list itself is
-		// broken: the salvage contract is "one bad operator value drops
-		// only that value", and the gateway is an operator value too.
+	if err == nil {
+		return policy, rejected, nil
+	}
+	if strings.TrimSpace(replacementGateway) != "" {
+		rejected = append(rejected, "replacementGateway="+replacementGateway)
 		if retry, rerr := New(kept, userAgent, ""); rerr == nil {
-			rejected = append(rejected, "replacementGateway="+replacementGateway)
 			return retry, rejected, nil
 		}
 	}
-	return policy, rejected, err
+	// The default replacement is unusable too, which can only mean it is a
+	// listed host (it is a constant that passes every other check). Keep
+	// the header rule; drop the URL rule; say so.
+	if noURL, nerr := newHeaderOnly(kept, userAgent); nerr == nil {
+		rejected = append(rejected, "replacementGateway="+DefaultReplacementGateway+" (listed host; CID redirect off)")
+		return noURL, rejected, nil
+	}
+	// An error now means the BUILT-IN host list is unusable, which is a
+	// programming error, not operator input.
+	return nil, rejected, err
+}
+
+// newHeaderOnly builds a Policy with the URL rule off. Reached only through
+// NewFromOperatorHosts's last-resort salvage; see there.
+func newHeaderOnly(hosts []string, userAgent string) (*Policy, error) {
+	p, err := New(hosts, userAgent, "")
+	if err == nil {
+		return p, nil
+	}
+	// New failed on the replacement check; rebuild without it.
+	if len(hosts) == 0 {
+		hosts = DefaultHosts
+	}
+	ua := strings.TrimSpace(userAgent)
+	if ua == "" {
+		ua = DefaultUserAgent
+	}
+	set := make(map[string]struct{}, len(hosts))
+	for _, raw := range hosts {
+		host, herr := normalizeHost(raw)
+		if herr != nil {
+			return nil, herr
+		}
+		set[host] = struct{}{}
+	}
+	return &Policy{hosts: set, userAgent: ua, replacement: nil}, nil
 }
 
 // UserAgent is the replacement token to send for a matching request.
@@ -241,6 +274,9 @@ func (p *Policy) Hosts() []string {
 // ReplacementGateway is the origin CID paths are redirected to, as
 // "scheme://host", for logging and test assertions.
 func (p *Policy) ReplacementGateway() string {
+	if p.replacement == nil {
+		return ""
+	}
 	return p.replacement.Scheme + "://" + p.replacement.Host
 }
 
@@ -270,7 +306,7 @@ func (p *Policy) ReplacementGateway() string {
 // sending an unusual agent to an origin nobody measured is how artworks
 // that render today start failing.
 func (p *Policy) RewriteURL(rawURL string) (string, bool) {
-	if !p.Matches(rawURL) {
+	if p.replacement == nil || !p.Matches(rawURL) {
 		return "", false
 	}
 	u, err := url.Parse(rawURL)
@@ -278,12 +314,6 @@ func (p *Policy) RewriteURL(rawURL string) (string, bool) {
 		return "", false
 	}
 	if !isCIDPath(u.EscapedPath()) {
-		return "", false
-	}
-	if strings.EqualFold(u.Hostname(), p.replacement.Hostname()) {
-		// Already on the replacement gateway (an operator listed it for
-		// the User-Agent rule). Redirecting it to itself would be a no-op
-		// at best; let the header rule handle it.
 		return "", false
 	}
 	out := url.URL{
@@ -298,14 +328,8 @@ func (p *Policy) RewriteURL(rawURL string) (string, bool) {
 }
 
 // isCIDPath reports whether an escaped URL path is `/ipfs/<cid>` optionally
-// followed by `/...`. The CID check is shape-only (length and alphabet),
-// not a multihash decode: the goal is to refuse `/ipfs/` API-ish paths and
-// obvious junk, not to validate content addressing, which the replacement
-// gateway does for real. The alphabet is the union of the multibase
-// encodings a path-form gateway URL carries: base58btc (CIDv0), base32,
-// base36, base16, and base64url, whose `-` and `_` are the only
-// non-alphanumerics among them. A `%` (percent-encoding) or any other byte
-// means the segment is not a CID.
+// followed by `/...`, where <cid> parses as a CID (see isCID). A `%` in the
+// segment means percent-encoding, which no CID alphabet contains.
 func isCIDPath(escapedPath string) bool {
 	const prefix = "/ipfs/"
 	if !strings.HasPrefix(escapedPath, prefix) {
@@ -316,16 +340,7 @@ func isCIDPath(escapedPath string) bool {
 	if i := strings.IndexByte(rest, '/'); i >= 0 {
 		cid = rest[:i]
 	}
-	if len(cid) < minCIDLength {
-		return false
-	}
-	for _, r := range cid {
-		isAlnum := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
-		if !isAlnum && r != '-' && r != '_' {
-			return false
-		}
-	}
-	return true
+	return isCID(cid)
 }
 
 // normalizeReplacementGateway reduces an operator-written gateway to scheme

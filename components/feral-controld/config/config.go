@@ -383,9 +383,12 @@ type GatewayUserAgentConfig struct {
 	// only through an in-browser service worker (see uarewrite.RewriteURL).
 	// Scheme and host, e.g. "https://ipfs.filebase.io"; a trailing path is
 	// tolerated and dropped. Empty uses uarewrite.DefaultReplacementGateway.
-	// An unusable value is DROPPED and named in an Error log, and the
-	// default applies — same salvage rule as Hosts. It must not name one of
-	// Hosts: that would be a loop, and is rejected the same way.
+	// An unusable value, including one that names one of Hosts (a listed
+	// host does not serve content, so it cannot be the fallback), is
+	// DROPPED and named in an Error log, and the default applies — same
+	// salvage rule as Hosts. If the default is itself listed, the CID
+	// redirect is turned off and the User-Agent rule alone remains, which
+	// is also logged. The interceptor is never disabled over this field.
 	ReplacementGateway string `json:"replacementGateway,omitempty"`
 }
 
