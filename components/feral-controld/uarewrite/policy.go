@@ -46,6 +46,7 @@ import (
 	"net"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -374,6 +375,15 @@ func normalizeReplacementGateway(raw string) (*url.URL, error) {
 	// the default, not become the destination for every CID on the device.
 	if err := validateLiteralHost(strings.ToLower(u.Hostname())); err != nil {
 		return nil, err
+	}
+	// url.Parse only rejects a non-numeric port; "99999" parses and would
+	// become the destination of every CID request. Bound it here so a port
+	// typo takes the salvage path like any other unusable value.
+	if port := u.Port(); port != "" {
+		n, perr := strconv.Atoi(port)
+		if perr != nil || n < 1 || n > 65535 {
+			return nil, fmt.Errorf("port %q is not in 1-65535", port)
+		}
 	}
 	return &url.URL{Scheme: u.Scheme, Host: strings.ToLower(u.Host)}, nil
 }

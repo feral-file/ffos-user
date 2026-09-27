@@ -807,6 +807,11 @@ func TestNewReplacementGatewayNormalization(t *testing.T) {
 		{name: "wildcard is not a literal host", in: "https://*.filebase.io", isErr: true},
 		{name: "doubled dot", in: "https://ipfs..filebase.io", isErr: true},
 		{name: "ip literal", in: "http://192.0.2.10:8080", want: "http://192.0.2.10:8080"},
+		{name: "port upper bound", in: "https://gw.example:65535", want: "https://gw.example:65535"},
+		{name: "port lower bound", in: "https://gw.example:1", want: "https://gw.example:1"},
+		{name: "port zero", in: "https://gw.example:0", isErr: true},
+		{name: "port above 65535", in: "https://gw.example:99999", isErr: true},
+		{name: "port not numeric", in: "https://gw.example:http", isErr: true},
 	}
 
 	for _, tt := range tests {
@@ -848,6 +853,12 @@ func TestNewFromOperatorHostsSalvagesBadReplacementGateway(t *testing.T) {
 	}
 	if want := []string{"*.bad", "replacementGateway=filebase.io/ipfs"}; !reflect.DeepEqual(rejected, want) {
 		t.Errorf("rejected = %v, want %v", rejected, want)
+	}
+
+	// A port typo takes the same path rather than becoming every CID's
+	// destination.
+	if q, rej, qerr := NewFromOperatorHosts([]string{"ipfs.io"}, "", "https://gw.example:99999"); qerr != nil || q.ReplacementGateway() != DefaultReplacementGateway || len(rej) != 1 {
+		t.Errorf("port typo: err=%v rejected=%v", qerr, rej)
 	}
 
 	// A gateway that parses but is not a literal host is an operator value

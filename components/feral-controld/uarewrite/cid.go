@@ -21,8 +21,9 @@ import (
 // below, and the varint reader is a dozen lines.
 //
 // Multibase prefixes accepted: `b` base32 (the form every gateway emits),
-// `k` base36, `f`/`F` base16, `u` base64url, `z` base58btc. Anything else is
-// not a CID we would meet in an artwork URL and stays on the header rule.
+// `v` base32hex, `k` base36, `f`/`F` base16, `u` base64url, `z` base58btc.
+// Anything else is not a CID we would meet in an artwork URL and stays on
+// the header rule.
 func isCID(s string) bool {
 	if len(s) < 2 {
 		return false
@@ -38,6 +39,10 @@ func isCID(s string) bool {
 		raw, ok = decodeBase32Lower(s[1:])
 	case s[0] == 'B':
 		raw, ok = decodeBase32Lower(strings.ToLower(s[1:]))
+	case s[0] == 'v':
+		raw, ok = decodeBase32HexLower(s[1:])
+	case s[0] == 'V':
+		raw, ok = decodeBase32HexLower(strings.ToLower(s[1:]))
 	case s[0] == 'k':
 		raw, ok = decodeBigBase(s[1:], "0123456789abcdefghijklmnopqrstuvwxyz")
 	case s[0] == 'f' || s[0] == 'F':
@@ -107,6 +112,13 @@ var base32Lower = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPad
 
 func decodeBase32Lower(s string) ([]byte, bool) {
 	b, err := base32Lower.DecodeString(s)
+	return b, err == nil
+}
+
+var base32HexLower = base32.NewEncoding("0123456789abcdefghijklmnopqrstuv").WithPadding(base32.NoPadding)
+
+func decodeBase32HexLower(s string) ([]byte, bool) {
+	b, err := base32HexLower.DecodeString(s)
 	return b, err == nil
 }
 
