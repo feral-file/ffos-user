@@ -20,12 +20,19 @@ import (
 // dependency: the multibase alphabets a gateway path can carry are the five
 // below, and the varint reader is a dozen lines.
 //
-// Multibase prefixes accepted: `b` base32 (the form every gateway emits),
-// `v` base32hex, `k` base36, `f`/`F` base16, `u` base64url, `z` base58btc.
+// Multibase prefixes accepted: `b`/`B` base32 (the form every gateway emits),
+// `v`/`V` base32hex, `k`/`K` base36, `f`/`F` base16, `u` base64url, `z` base58btc.
 // Anything else is not a CID we would meet in an artwork URL and stays on
 // the header rule.
+// maxCIDLength bounds the segment before any decoding. The longest CID an
+// artwork URL can realistically carry is a base16 CIDv1 over a 64-byte
+// digest (about 140 characters); a playlist body is untrusted LAN input and
+// the base36/base58 decoders are big-integer loops, so an oversized
+// alphabet-valid segment is refused here rather than multiplied through.
+const maxCIDLength = 256
+
 func isCID(s string) bool {
-	if len(s) < 2 {
+	if len(s) < 2 || len(s) > maxCIDLength {
 		return false
 	}
 	var raw []byte
@@ -44,7 +51,9 @@ func isCID(s string) bool {
 	case s[0] == 'V':
 		raw, ok = decodeBase32HexLower(strings.ToLower(s[1:]))
 	case s[0] == 'k':
-		raw, ok = decodeBigBase(s[1:], "0123456789abcdefghijklmnopqrstuvwxyz")
+		raw, ok = decodeBigBase(s[1:], base36Alphabet)
+	case s[0] == 'K':
+		raw, ok = decodeBigBase(strings.ToLower(s[1:]), base36Alphabet)
 	case s[0] == 'f' || s[0] == 'F':
 		var err error
 		raw, err = hex.DecodeString(s[1:])
@@ -121,6 +130,8 @@ func decodeBase32HexLower(s string) ([]byte, bool) {
 	b, err := base32HexLower.DecodeString(s)
 	return b, err == nil
 }
+
+const base36Alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 const base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
