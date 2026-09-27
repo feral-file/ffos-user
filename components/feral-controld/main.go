@@ -1127,14 +1127,15 @@ func initializeApp(
 	var uaRewrite *uarewrite.Interceptor
 	if gatewayUserAgentConfig.IsEnabled() {
 		var uaHosts []string
-		var uaAgent string
+		var uaAgent, uaGateway string
 		if gatewayUserAgentConfig != nil {
 			uaHosts = gatewayUserAgentConfig.Hosts
 			uaAgent = gatewayUserAgentConfig.UserAgent
+			uaGateway = gatewayUserAgentConfig.ReplacementGateway
 		}
-		policy, rejected, err := uarewrite.NewFromOperatorHosts(uaHosts, uaAgent)
+		policy, rejected, err := uarewrite.NewFromOperatorHosts(uaHosts, uaAgent, uaGateway)
 		if len(rejected) > 0 {
-			logger.Error("Ignoring unusable gatewayUserAgent hosts; the rest of the list still applies",
+			logger.Error("Ignoring unusable gatewayUserAgent entries; the rest of the block still applies",
 				zap.Strings("rejected", rejected))
 		}
 		if err != nil {
