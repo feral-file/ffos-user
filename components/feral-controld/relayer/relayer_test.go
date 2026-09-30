@@ -2072,3 +2072,104 @@ func TestClient_BackgroundRetryLoop_PreservesRestoredConnection(t *testing.T) {
 	ts.client.Close()
 }
 
+// TestClient_BackgroundRetryLoop_AppliesExponentialBackoffToTransientAndBusyErrors verifies Finding [F1]:
+// When reconnect encounters TransientError or BusyError, it must not get stuck in a short random retry loop;
+// instead, it must schedule the outer exponential backoff retry loop (5s, 10s, 20s, ...) until connection succeeds.
+func TestClient_BackgroundRetryLoop_AppliesExponentialBackoffToTransientAndBusyErrors(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	setupMockTicker(ts)
+	ts.mockClock.EXPECT().Now().Return(time.Time{}).AnyTimes()
+
+	// Initial connection setup
+	ts.mockConn.EXPECT().SetPongHandler(gomock.Any()).Times(1)
+	ts.mockConn.EXPECT().WriteJSON(gomock.Any()).Return(nil).AnyTimes()
+	ts.mockConn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil).AnyTimes()
+	ts.mockConn.EXPECT().WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	ts.mockConn.EXPECT().Close().Return(nil).Times(1)
+
+	readErrHappened := make(chan struct{})
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		DoAndReturn(func() (int, []byte, error) {
+			close(readErrHappened)
+			return 0, nil, errors.New("socket read error")
+		}).
+		Times(1)
+
+	// Second mock connection that will succeed on the 3rd retry
+	succeededConn := mocks.NewMockWebSocketConn(ts.ctrl)
+	succeededConn.EXPECT().SetReadLimit(int64(relayer.MAX_MESSAGE_BYTES)).AnyTimes()
+	succeededConn.EXPECT().SetPongHandler(gomock.Any()).AnyTimes()
+	succeededConn.EXPECT().WriteJSON(gomock.Any()).Return(nil).AnyTimes()
+	succeededConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil).AnyTimes()
+	succeededConn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil).AnyTimes()
+	succeededConn.EXPECT().ReadMessage().Return(0, []byte{}, nil).AnyTimes()
+	succeededConn.EXPECT().WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	succeededConn.EXPECT().Close().Return(nil).Times(1)
+
+	// Dial sequence:
+	// 1. Initial connect succeeds
+	// 2. Initial reconnect fails with TransientError (e.g. ENETUNREACH)
+	// 3. 1st retry in backoff loop fails with BusyError (e.g. ECONNREFUSED)
+	// 4. 2nd retry in backoff loop succeeds
+	transientErr := relayer.TransientError{Err: syscall.ENETUNREACH}
+	busyErr := relayer.BusyError{Err: syscall.ECONNREFUSED}
+
+	gomock.InOrder(
+		ts.mockDialer.EXPECT().
+			DialContext(ts.ctx, gomock.Any(), nil).
+			Return(ts.mockConn, &http.Response{StatusCode: http.StatusOK}, nil),
+		ts.mockDialer.EXPECT().
+			DialContext(ts.ctx, gomock.Any(), nil).
+			Return(nil, nil, transientErr),
+		ts.mockDialer.EXPECT().
+			DialContext(ts.ctx, gomock.Any(), nil).
+			Return(nil, nil, busyErr),
+		ts.mockDialer.EXPECT().
+			DialContext(ts.ctx, gomock.Any(), nil).
+			Return(succeededConn, &http.Response{StatusCode: http.StatusOK}, nil),
+	)
+
+	// Track the backoff durations passed to Sleep
+	var recordedSleeps []time.Duration
+	var mu sync.Mutex
+	reconnected := make(chan struct{})
+
+	ts.mockClock.EXPECT().
+		Sleep(gomock.Any()).
+		DoAndReturn(func(d time.Duration) {
+			mu.Lock()
+			recordedSleeps = append(recordedSleeps, d)
+			count := len(recordedSleeps)
+			mu.Unlock()
+			if count == 2 {
+				// After second sleep, 3rd dial will succeed
+				time.AfterFunc(20*time.Millisecond, func() {
+					close(reconnected)
+				})
+			}
+		}).
+		AnyTimes()
+
+	require.NoError(t, ts.client.Connect(ts.ctx))
+
+	<-readErrHappened
+
+	select {
+	case <-reconnected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for background exponential backoff reconnection")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, recordedSleeps, 2, "expected exactly 2 backoff sleeps before success")
+	assert.Equal(t, 5*time.Second, recordedSleeps[0], "first backoff sleep should be 5s")
+	assert.Equal(t, 10*time.Second, recordedSleeps[1], "second backoff sleep should be 10s (exponential)")
+
+	assert.True(t, ts.client.IsConnected(), "client should be reconnected after successful dial")
+	ts.client.Close()
+}
+

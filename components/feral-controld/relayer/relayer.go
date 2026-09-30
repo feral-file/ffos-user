@@ -499,8 +499,10 @@ func (r *relayer) reconnect(ctx context.Context) error {
 	}
 	r.Unlock()
 
-	// Retry to connect
-	return r.RetryableConnect(ctx)
+	// Perform a single connect attempt so failures (transient, busy, permanent)
+	// return immediately to the caller to schedule backoff, rather than getting
+	// stuck in RetryableConnect's internal tight retry loop.
+	return r.Connect(ctx)
 }
 
 func (r *relayer) OnRelayerMessage(f Handler) {
@@ -588,9 +590,13 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 									return
 								}
 								r.logger.Info("Attempting background relayer reconnection", zap.Duration("backoff", backoff))
-								recErr := r.RetryableConnect(ctx)
-								if recErr == nil {
+								recErr := r.Connect(ctx)
+								if recErr == nil || errors.Is(recErr, ErrAlreadyConnected) {
 									r.logger.Info("Relayer reconnected successfully in background")
+									return
+								}
+								if errors.Is(recErr, context.Canceled) || errors.Is(recErr, context.DeadlineExceeded) || r.shouldStop(ctx, done) {
+									r.logger.Info("Relayer background reconnect aborted during shutdown", zap.Error(recErr))
 									return
 								}
 								r.logger.Warn("Background relayer reconnect attempt failed, retrying",
