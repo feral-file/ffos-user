@@ -378,6 +378,18 @@ type GatewayUserAgentConfig struct {
 	// back to the defaults — the same landing point an unreadable block
 	// gets. See uarewrite.NewFromOperatorHosts.
 	Hosts []string `json:"hosts,omitempty"`
+	// ReplacementGateway is where a `/ipfs/<cid>` request bound for one of
+	// Hosts is sent instead, now that ipfs.io and dweb.link serve content
+	// only through an in-browser service worker (see uarewrite.RewriteURL).
+	// Scheme and host, e.g. "https://ipfs.filebase.io"; a trailing path is
+	// tolerated and dropped. Empty uses uarewrite.DefaultReplacementGateway.
+	// An unusable value, including one that names one of Hosts (a listed
+	// host does not serve content, so it cannot be the fallback), is
+	// DROPPED and named in an Error log, and the default applies — same
+	// salvage rule as Hosts. If the default is itself listed, the CID
+	// redirect is turned off and the User-Agent rule alone remains, which
+	// is also logged. The interceptor is never disabled over this field.
+	ReplacementGateway string `json:"replacementGateway,omitempty"`
 }
 
 // IsEnabled reports whether the rewrite should run. It defaults ON: this is
