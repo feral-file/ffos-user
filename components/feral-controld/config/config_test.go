@@ -586,13 +586,14 @@ func TestGatewayUserAgentTuningDecodesHostsAndUserAgent(t *testing.T) {
 	t.Parallel()
 
 	var c config.Config
-	raw := `{"gatewayUserAgent":{"userAgent":"feral-player/9.9","hosts":["ipfs.io","https://dweb.link"]}}`
+	raw := `{"gatewayUserAgent":{"userAgent":"feral-player/9.9","hosts":["ipfs.io","https://dweb.link"],"replacementGateway":"https://gw.example/ipfs/"}}`
 	require.NoError(t, json.Unmarshal([]byte(raw), &c))
 
 	g := c.GatewayUserAgentTuning(zaptest.NewLogger(t))
 	require.NotNil(t, g)
 	assert.Equal(t, "feral-player/9.9", g.UserAgent)
 	assert.Equal(t, []string{"ipfs.io", "https://dweb.link"}, g.Hosts)
+	assert.Equal(t, "https://gw.example/ipfs/", g.ReplacementGateway)
 	assert.True(t, g.IsEnabled(), "a block without \"enabled\" stays ON")
 }
 
