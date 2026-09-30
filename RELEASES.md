@@ -19,6 +19,88 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
+## 2.0.9 — package-rail only (off-flow cut: v2.0.8 + #370, without #368)
+
+Hotfix for objkt works rendering black on FF1 after `ipfs.io` retired:
+#370 (controld `uarewrite` redirects retired-gateway CID requests to a
+working IPFS gateway; merged into `develop` 2026-09-27, verified on
+Birchview). `develop` at that point also carried #368 (mint-pairing join
+channel, merged 2026-09-26), which is not ready to ship, so this release was
+deliberately NOT promoted `develop -> staging`.
+
+Branch `hotfix/2.0.9-retired-gateway-fix` is cut from `develop` commit
+`4672094` (the tree the v2.0.8 staging merge #366 was taken from) plus a
+`-x` cherry-pick of the #370 merge (`e3990bf`). Its diff against `v2.0.8`
+is exactly the #370 diff plus this entry; it contains no line of #368.
+Cherry-pick applied without conflicts; `go build`, `go vet`, `gofmt`, and
+`go test ./...` pass on the branch (the one local failure,
+`hub.TestHandlePlayerLogsBrowserContract`, is a port-8080-in-use bench
+artefact that fails identically on `develop`).
+
+**Single-rail.** The diff touches only `components/feral-controld/**` (and
+this file). No `users/**` change, so no full-image declaration is required
+and a package-only rollout is permitted; the three-copy DRM predicate and
+the headless startup invariants are untouched.
+
+### Off-flow hazards
+
+- The promotion `hotfix/2.0.9-retired-gateway-fix -> staging -> release` is
+  a human step outside the `develop -> staging` rule (AGENTS.md "Branch flow
+  guardrail"). Agents prepared the branch and must not open or merge those
+  PRs.
+- The next ordinary `develop -> staging` promotion WILL carry #368. Do not
+  cut 2.1.0 (or whatever follows) until mint pairing is ready, or cut it the
+  same way this one was.
+- Tag `v2.0.9` on the `staging -> release` merge commit, as every prior tag.
+- After tagging, open `hotfix/2.0.9-retired-gateway-fix -> develop` (an
+  agent-permitted base) so this entry and the cherry-pick land on `develop`.
+  It merges clean today (`git merge-tree origin/develop HEAD`; the #370
+  hunks are identical on both sides, only `RELEASES.md` is one-sided).
+  Without it `develop` has no 2.0.9 record, and the next `develop ->
+  staging` promotion conflicts in `RELEASES.md` because the next entry
+  written on `develop` lands at the same newest-first position.
+
+### Release action (human)
+
+The ffos-user diff is single-rail, so either rail is permitted. Only the
+package rail ships exactly "v2.0.8 + #370": an image build also re-resolves
+the `ffos` branch it runs on and `ff_player_ref` at dispatch time, so the
+full-image option carries whatever those have gained since 2.0.8. Both use
+the same inputs as 2.0.8/2.0.7 except `version` and `ffos_user_ref`.
+
+1. Full image (matches the usual staging bench + release flow).
+   **Precondition:** the 2.0.8 runs (`ffos` 35980202732 Staging,
+   35986510652 Production) built from `ffos` `staging` `82fcbe0`, `ffos`
+   `release` `7ed99fb`, and `ff-player` `main` `24a0f95` (2026-09-23).
+   All three are still at those SHAs as of this entry (2026-09-30). Before
+   dispatching, confirm they have not moved; if any has, either review what
+   moved or take option 2. Pin `ff_player_ref=24a0f95` rather than `main`
+   so the player half cannot drift between the two runs.
+   `build-image-to-cf.yml` in `ffos`, Staging run on `ffos` `staging` with
+   `version=2.0.9`, `ffos_user_ref=staging` (after the hotfix branch is
+   merged into ffos-user `staging`), then the Production run on `ffos`
+   `release` with `ffos_user_ref=release`. All other inputs as in the 2.0.7
+   tables (`pacman_snapshot=2026/07/13`, `ff_player_ref=24a0f95`,
+   `dev_iso=false`, `update_min_version` true on Staging / false on
+   Production, `update_required_version=false`, `update_recovery_version=false`).
+
+2. Package only (no image rebuild; devices pick it up on the next
+   `feral-service-update.sh` run, which does `pacman -Sy` of the three
+   daemons and reboots): `manual-build-components.yaml` with
+   `component=feral-controld`, `version=2.0.9`,
+   `ffos_user_ref=hotfix/2.0.9-retired-gateway-fix` (or `v2.0.9`),
+   `pacman_snapshot=2026/07/13`, `maintainer=Feral File`,
+   `description=Feral File Controld Service` (what the image rail passes;
+   the workflow defaults differ only in package metadata), dispatched on `ffos` `staging` /
+   `environment=Staging` for the bench and on `ffos` `release` /
+   `environment=Production` for the fleet; then `manual-push-pacman-repo.yaml`
+   on the same branch/environment so the repo database lists the new
+   package. The upload prefix is the `ffos` branch the run is dispatched on.
+
+Agents never dispatch the `release`/Production runs and dispatch the
+Staging ones only after explicit in-session confirmation
+(`scripts/agent-iso-build-guard.sh`).
+
 ## 2.0.7 — full-image
 
 Everything on `develop` since the `v2.0.6` staging merge (staging PR #355):
