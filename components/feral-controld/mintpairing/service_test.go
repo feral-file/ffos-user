@@ -4341,6 +4341,30 @@ func TestHandleJoinPairingChannel_AsksFromTheAnnouncedRequest(t *testing.T) {
 	}
 }
 
+// TestHandleJoinPairingChannel_AnnouncedApprovalRunsToTheJoinExpiry: the
+// announced path asks before any message lands, so its approval deadline is
+// the expiry the join reported — which the broker renews at join (play#19),
+// giving a late join a full idle TTL rather than the create-time remainder.
+func TestHandleJoinPairingChannel_AnnouncedApprovalRunsToTheJoinExpiry(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	brokerExpiry := time.Now().Add(4 * time.Minute).Truncate(time.Second)
+	announced := minter.MintRequest{ChannelID: "ch_site", MessageID: "msg_site", Origin: testSiteOrigin}
+	joined := joinedFor(&fakeBrokerChannel{channelID: "ch_site"}, "ch_site")
+	joined.expiresAt = brokerExpiry
+	joined.announcedRequest = &announced
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newJoinTestService(t, &fakeBrokerJoiner{joined: joined}, nil, relayerClient, &fakeCDP{})
+	s.opts.ApprovalTimeout = 10 * time.Minute
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"channelId": "ch_site", "pairingToken": "pt_secret"})
+	require.NoError(t, err)
+	approval := <-relayerClient.sent
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
+	assert.Equal(t, brokerExpiry.UTC().Format(time.RFC3339), approval.Message.(map[string]any)["expiresAt"])
+}
+
 func TestHandleJoinPairingChannel_ByShortCode(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
