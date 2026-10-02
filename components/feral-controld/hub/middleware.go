@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	fflogger "github.com/feral-file/ffos-user/components/feral-controld/logger"
 )
 
 // MAX_INFLIGHT_REQUESTS bounds the number of hub requests in flight across ALL
@@ -91,6 +94,25 @@ func (h *hub) withMiddleware(route string, next http.HandlerFunc) http.HandlerFu
 
 		r.Body = http.MaxBytesReader(w, r.Body, MAX_REQUEST_BODY_BYTES)
 
+		// Web pages may not drive the hub. Until LAN authorization lands
+		// (below), the hub trusts every caller on the network, and a browser
+		// is the one caller that does not belong to the owner: an artwork
+		// playing on this device or any site open in a browser on the same
+		// Wi-Fi can send a no-cors POST to /api/cast that the JSON decoder
+		// accepts. Browsers always mark cross-site requests with Origin or
+		// Sec-Fetch-Site and pages cannot strip them; the app, ff-cli, and
+		// the relayer path send neither. The player's log route keeps its own
+		// stricter loopback-plus-exact-origin check, so it is exempt here.
+		if route != playerLogsRoute && isBrowserOriginated(r) {
+			h.logger.Warn("Hub request rejected: browser origin",
+				zap.String("route", route),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.ByteString("origin", helper.TruncateBytes([]byte(r.Header.Get("Origin")), fflogger.MAX_FIELD_LENGTH)),
+			)
+			http.Error(w, "Browser origins are not allowed", http.StatusForbidden)
+			return
+		}
+
 		// Control-plane contact signal (see hub.contactObserver for the route
 		// and loopback exclusions and why they are load-bearing).
 		if h.contactObserver != nil && countsAsContact(route) && !isLoopbackAddr(r.RemoteAddr) {
@@ -141,4 +163,14 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	// A hijacked connection reports 101 Switching Protocols by convention.
 	r.status = http.StatusSwitchingProtocols
 	return hj.Hijack()
+}
+
+// playerLogsRoute is the one route a browser legitimately calls: the
+// device's own player posting console logs (see handlePlayerLogs).
+const playerLogsRoute = "player_logs"
+
+// isBrowserOriginated reports whether a request carries the headers browsers
+// attach to cross-site and page-initiated requests.
+func isBrowserOriginated(r *http.Request) bool {
+	return r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != ""
 }
