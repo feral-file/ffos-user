@@ -197,6 +197,10 @@ All messages are JSON. The message envelope is:
   as a commandrouter pre-CDP special case that creates or reuses the Mint
   Pairing Broker session and drives the player overlay through
   `mintPairingDisplay`.
+- If `command == "joinMintPairingChannel"` → handle inside `feral-controld`
+  as a commandrouter pre-CDP special case that joins a site-created Mint
+  Pairing Broker channel on the device's configured broker; no overlay is
+  painted for it (see `docs/controld-inbound-controller-messages.md`).
 - If `command == "mintPairingApprovalDecision"` → handle inside
   `feral-controld` as a commandrouter pre-CDP special case that validates and
   completes a pending browser-session approval request.
