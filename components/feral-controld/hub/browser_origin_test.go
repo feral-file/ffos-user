@@ -37,7 +37,7 @@ func TestMiddlewareRejectsBrowserOrigins(t *testing.T) {
 				ran = true
 				w.WriteHeader(http.StatusOK)
 			})
-			req := httptest.NewRequest(http.MethodPost, "http://ff1.local:1111/api/cast", strings.NewReader(`{"command":"sshAccess","request":{}}`))
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/cast", strings.NewReader(`{"command":"sshAccess","request":{}}`))
 			req.RemoteAddr = "192.168.1.10:41000"
 			for k, v := range tt.headers {
 				req.Header.Set(k, v)
@@ -51,10 +51,14 @@ func TestMiddlewareRejectsBrowserOrigins(t *testing.T) {
 	}
 }
 
-// TestIsLocalHost pins the DNS-rebinding boundary: every way a native client
-// names the device passes; a public DNS name, which is all a rebinding page
-// can put in Host, does not.
+// TestIsLocalHost pins the DNS-rebinding boundary: IP literals, localhost,
+// and the device's own name pass; any other name, including a short one a
+// resolver could expand through a public search suffix, does not.
 func TestIsLocalHost(t *testing.T) {
+	prev := deviceHostname
+	deviceHostname = func() (string, error) { return "FF1-NFZMNQSP", nil }
+	t.Cleanup(func() { deviceHostname = prev })
+
 	for host, want := range map[string]bool{
 		"192.168.1.50:1111":                true,
 		"192.168.1.50":                     true,
@@ -65,13 +69,13 @@ func TestIsLocalHost(t *testing.T) {
 		"localhost:1111":                   true,
 		"ff1-nfzmnqsp.local:1111":          true,
 		"FF1-NFZMNQSP.LOCAL":               true,
-		"ff1.local.:1111":                  true,
+		"ff1-nfzmnqsp.local.:1111":         true,
 		"ff1-nfzmnqsp:1111":                true,
-		"ff1-nfzmnqsp.lan:1111":            true,
-		"ff1.home.arpa":                    true,
+		"evil:1111":                        false,
+		"ff1-other.local:1111":             false,
+		"ff1-nfzmnqsp.lan:1111":            false,
+		"ff1-nfzmnqsp.local.example.net":   false,
 		"attacker.example:1111":            false,
-		"attacker.example":                 false,
-		"local.attacker.example":           false,
 		"evil-local:1111.example":          false,
 		"":                                 false,
 	} {
@@ -91,7 +95,7 @@ func TestMiddlewareRejectsRebindingHost(t *testing.T) {
 		want    int
 	}{
 		{"http://attacker.example:1111/api/v2/status", false, http.StatusForbidden},
-		{"http://ff1-nfzmnqsp.local:1111/api/v2/status", true, http.StatusOK},
+		{"http://evil:1111/api/v2/status", false, http.StatusForbidden},
 		{"http://192.168.1.50:1111/api/v2/status", true, http.StatusOK},
 	} {
 		h := &hub{logger: zap.NewNop(), reqSlots: make(chan struct{}, 1)}

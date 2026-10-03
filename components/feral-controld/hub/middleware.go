@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -110,8 +111,8 @@ func (h *hub) withMiddleware(route string, next http.HandlerFunc) http.HandlerFu
 		// rebinding: its own domain is re-pointed at this device, so its
 		// requests are same-origin and a GET carries no Origin. Such a request
 		// names the attacker's domain in Host, and status hands out the
-		// topic ID, so only Host values a public DNS name cannot take are
-		// accepted (see isLocalHost).
+		// topic ID, so only an IP literal, localhost, or this device's own
+		// name is accepted (see isLocalHost).
 		if !isLocalHost(r.Host) {
 			h.logger.Warn("Hub request rejected: non-local Host",
 				zap.String("route", route),
@@ -193,15 +194,15 @@ func isBrowserOriginated(r *http.Request) bool {
 	return r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != ""
 }
 
-// localHostSuffixes are names only a local resolver answers: mDNS and the
-// suffixes home routers hand out. None is registrable in public DNS, so a
-// rebinding page cannot put one in Host.
-var localHostSuffixes = []string{".local", ".lan", ".home", ".home.arpa", ".internal"}
+// deviceHostname reports this device's hostname (its serial, from
+// /etc/hostname). A variable so tests can name a device.
+var deviceHostname = os.Hostname
 
 // isLocalHost reports whether a request's Host names this device the way a
-// native client on the LAN does: an IP literal, localhost, a single-label
-// name, or a name under a local-only suffix. Anything else is a public DNS
-// name, which is what a DNS-rebinding page carries.
+// native client on the LAN does: an IP literal, localhost, or the device's own
+// hostname, bare or under .local (how mDNS publishes it). Any other name could
+// come from public DNS, directly or by a resolver expanding a short name
+// through its search list, and that is what a DNS-rebinding page carries.
 func isLocalHost(hostport string) bool {
 	host := hostport
 	if h, port, err := net.SplitHostPort(hostport); err == nil {
@@ -216,18 +217,17 @@ func isLocalHost(hostport string) bool {
 	}
 	// A link-local IPv6 literal may carry a zone ("fe80::1%25wlan0").
 	if i := strings.IndexByte(host, '%'); i >= 0 {
-		host = host[:i]
-	}
-	if net.ParseIP(host) != nil {
-		return true
-	}
-	if host == "localhost" || !strings.Contains(host, ".") {
-		return true
-	}
-	for _, suffix := range localHostSuffixes {
-		if strings.HasSuffix(host, suffix) {
+		if ip := net.ParseIP(host[:i]); ip != nil {
 			return true
 		}
 	}
-	return false
+	if net.ParseIP(host) != nil || host == "localhost" {
+		return true
+	}
+	self, err := deviceHostname()
+	self = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(self)), ".")
+	if err != nil || self == "" {
+		return false
+	}
+	return host == self || host == self+".local"
 }
