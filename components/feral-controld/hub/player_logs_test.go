@@ -43,7 +43,7 @@ func TestHandlePlayerLogsEnrichesAndForwardsAllowlistedSource(t *testing.T) {
 	}
 	//nolint:gosec // Intentional fake credentials exercise the public boundary.
 	body := `[{"timestamp":"2026-09-15T01:02:03.000Z","level":"error","environment":"browser-secret","message":"[AppContext] failed https://user:pass@example.com/art?token=private","context":{"session_id":"Bearer browser-secret"}}]`
-	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
 	req.Header.Set("Content-Type", "application/json")
@@ -84,7 +84,7 @@ func TestHandlePlayerLogsDropsFreeFormDetailsFromAllowlistedSources(t *testing.T
 		{"timestamp":"2026-09-15T01:02:05Z","level":"error","environment":"production","message":"[AppContext] session_token=abc","context":{"session_id":"session-1"}},
 		{"timestamp":"2026-09-15T01:02:06Z","level":"error","environment":"production","message":"[AppContext] csrfToken=abc","context":{"session_id":"session-1"}}
 	]`
-	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
 	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
@@ -130,7 +130,7 @@ func TestHandlePlayerLogsSamplesWholeSessionsAcrossBatches(t *testing.T) {
 
 	send := func(sessionID, message string) int {
 		body := fmt.Sprintf(`[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":%q,"context":{"session_id":%q}}]`, message, sessionID)
-		req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/logs", strings.NewReader(body))
 		req.RemoteAddr = "127.0.0.1:12345"
 		req.Header.Set("Origin", playerOrigin)
 		w := httptest.NewRecorder()
@@ -168,7 +168,7 @@ func TestHandlePlayerLogsKeepsDebugAndTraceLocal(t *testing.T) {
 		{"timestamp":"2026-09-15T01:02:03Z","level":"trace","environment":"browser-secret","message":"[AppContext] trace diagnostic","context":{"session_id":"session-1"}},
 		{"timestamp":"2026-09-15T01:02:04Z","level":"debug","environment":"browser-secret","message":"[AppContext] debug diagnostic","context":{"session_id":"session-1"}}
 	]`
-	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
 	w := httptest.NewRecorder()
@@ -181,7 +181,7 @@ func TestHandlePlayerLogsKeepsDebugAndTraceLocal(t *testing.T) {
 
 func TestHandlePlayerLogsAllowsOnlyPlayerPreflightOnLoopback(t *testing.T) {
 	h := &hub{}
-	req := httptest.NewRequest(http.MethodOptions, "/api/logs", nil)
+	req := httptest.NewRequest(http.MethodOptions, "http://127.0.0.1:1111/api/logs", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
 	w := httptest.NewRecorder()
@@ -193,7 +193,7 @@ func TestHandlePlayerLogsAllowsOnlyPlayerPreflightOnLoopback(t *testing.T) {
 	assert.Equal(t, http.MethodPost, w.Header().Get("Access-Control-Allow-Methods"))
 	assert.Equal(t, "Content-Type", w.Header().Get("Access-Control-Allow-Headers"))
 
-	remote := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(`[]`))
+	remote := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/logs", strings.NewReader(`[]`))
 	remote.RemoteAddr = "192.0.2.1:12345"
 	remote.Header.Set("Origin", playerOrigin)
 	remoteResponse := httptest.NewRecorder()
@@ -217,7 +217,7 @@ func TestHandlePlayerLogsRejectsInvalidRecordWithoutCallingUpstream(t *testing.T
 		logHTTPClient:  upstream.Client(),
 	}
 	body := `[{"timestamp":"not-a-time","level":"info","environment":"production","message":"[AppContext] hello","context":{"session_id":"session-1"}}]`
-	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
 	w := httptest.NewRecorder()
@@ -244,7 +244,7 @@ func TestHandlePlayerLogsRejectsUnrecognizedMessageSource(t *testing.T) {
 		logHTTPClient:  upstream.Client(),
 	}
 	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"password hunter2","context":{"session_id":"session-1"}}]`
-	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
 	w := httptest.NewRecorder()
@@ -259,7 +259,7 @@ func TestHandlePlayerLogsRejectsOversizedBodyBeforeJSONAllocation(t *testing.T) 
 	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"` +
 		strings.Repeat("x", maxPlayerLogBodyBytes) +
 		`","context":{"session_id":"session-1"}}]`
-	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
 	w := httptest.NewRecorder()
@@ -283,7 +283,7 @@ func TestHandlePlayerLogsAcceptsWithoutForwardingWhenDisabled(t *testing.T) {
 		logDeliveryDisabled: true,
 	}
 	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"[AppContext] hello","context":{"session_id":"session-1"}}]`
-	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
 	w := httptest.NewRecorder()
@@ -308,7 +308,7 @@ func TestHandlePlayerLogsPropagatesUpstreamFailure(t *testing.T) {
 		logHTTPClient:  upstream.Client(),
 	}
 	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"[AppContext] hello","context":{"session_id":"session-1"}}]`
-	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
 	w := httptest.NewRecorder()
@@ -334,7 +334,7 @@ func TestHandlePlayerLogsRejectsStatusControllerIDFallback(t *testing.T) {
 		logHTTPClient:  upstream.Client(),
 	}
 	body := `[{"timestamp":"2026-09-15T01:02:03Z","level":"info","environment":"production","message":"[AppContext] hello","context":{"session_id":"session-1"}}]`
-	req := httptest.NewRequest(http.MethodPost, "/api/logs", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/logs", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Origin", playerOrigin)
 	w := httptest.NewRecorder()

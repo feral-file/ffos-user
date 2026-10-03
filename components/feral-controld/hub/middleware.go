@@ -5,9 +5,15 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	fflogger "github.com/feral-file/ffos-user/components/feral-controld/logger"
 )
 
 // MAX_INFLIGHT_REQUESTS bounds the number of hub requests in flight across ALL
@@ -63,8 +69,8 @@ func isLoopbackAddr(remoteAddr string) bool {
 // It is deliberately the one chokepoint for cross-cutting concerns on the LAN
 // control surface: today an in-flight concurrency limiter (command-storm
 // protection) and per-request logging. It is also, by design, the future
-// insertion point for LAN authorization (screen-anchored pairing, issue
-// #3471). Nothing else may register a hub route directly: any route bypassing
+// insertion point for LAN authorization (screen-anchored pairing, feral-file
+// #3551). Nothing else may register a hub route directly: any route bypassing
 // this wrapper would also bypass the storm cap and the coming authorization
 // check, so new cross-cutting behavior belongs here, not in individual
 // handlers, and every route MUST go through routes()'s withMiddleware calls.
@@ -91,13 +97,48 @@ func (h *hub) withMiddleware(route string, next http.HandlerFunc) http.HandlerFu
 
 		r.Body = http.MaxBytesReader(w, r.Body, MAX_REQUEST_BODY_BYTES)
 
+		// Web pages may not drive the hub. Until LAN authorization lands
+		// (below), the hub trusts every caller on the network, and a browser
+		// is the one caller that does not belong to the owner: an artwork
+		// playing on this device or any site open in a browser on the same
+		// Wi-Fi can send a no-cors POST to /api/cast that the JSON decoder
+		// accepts. Browsers always mark cross-site requests with Origin or
+		// Sec-Fetch-Site and pages cannot strip them; the app, ff-cli, and
+		// the relayer path send neither. The player's log route keeps its own
+		// stricter loopback-plus-exact-origin check, so it is exempt here.
+		//
+		// A page can also reach the hub without either header through DNS
+		// rebinding: its own domain is re-pointed at this device, so its
+		// requests are same-origin and a GET carries no Origin. Such a request
+		// names the attacker's domain in Host, and status hands out the
+		// topic ID, so only an IP literal, localhost, or this device's own
+		// name is accepted (see isLocalHost).
+		if !isLocalHost(r.Host) {
+			h.logger.Warn("Hub request rejected: non-local Host",
+				zap.String("route", route),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.ByteString("host", helper.TruncateBytes([]byte(r.Host), fflogger.MAX_FIELD_LENGTH)),
+			)
+			http.Error(w, "Host not allowed", http.StatusForbidden)
+			return
+		}
+		if route != playerLogsRoute && isBrowserOriginated(r) {
+			h.logger.Warn("Hub request rejected: browser origin",
+				zap.String("route", route),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.ByteString("origin", helper.TruncateBytes([]byte(r.Header.Get("Origin")), fflogger.MAX_FIELD_LENGTH)),
+			)
+			http.Error(w, "Browser origins are not allowed", http.StatusForbidden)
+			return
+		}
+
 		// Control-plane contact signal (see hub.contactObserver for the route
 		// and loopback exclusions and why they are load-bearing).
 		if h.contactObserver != nil && countsAsContact(route) && !isLoopbackAddr(r.RemoteAddr) {
 			h.contactObserver()
 		}
 
-		// LAN AUTHORIZATION SEAM (issue #3471): screen-anchored pairing checks
+		// LAN AUTHORIZATION SEAM (feral-file#3551): screen-anchored pairing checks
 		// go here, guarding every route uniformly, before next is invoked.
 
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
@@ -141,4 +182,52 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	// A hijacked connection reports 101 Switching Protocols by convention.
 	r.status = http.StatusSwitchingProtocols
 	return hj.Hijack()
+}
+
+// playerLogsRoute is the one route a browser legitimately calls: the
+// device's own player posting console logs (see handlePlayerLogs).
+const playerLogsRoute = "player_logs"
+
+// isBrowserOriginated reports whether a request carries the headers browsers
+// attach to cross-site and page-initiated requests.
+func isBrowserOriginated(r *http.Request) bool {
+	return r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != ""
+}
+
+// deviceHostname reports this device's hostname (its serial, from
+// /etc/hostname). A variable so tests can name a device.
+var deviceHostname = os.Hostname
+
+// isLocalHost reports whether a request's Host names this device the way a
+// native client on the LAN does: an IP literal, localhost, or the device's own
+// hostname, bare or under .local (how mDNS publishes it). Any other name could
+// come from public DNS, directly or by a resolver expanding a short name
+// through its search list, and that is what a DNS-rebinding page carries.
+func isLocalHost(hostport string) bool {
+	host := hostport
+	if h, port, err := net.SplitHostPort(hostport); err == nil {
+		if _, perr := strconv.ParseUint(port, 10, 16); perr != nil {
+			return false
+		}
+		host = h
+	}
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	if host == "" {
+		return false
+	}
+	// A link-local IPv6 literal may carry a zone ("fe80::1%25wlan0").
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		if ip := net.ParseIP(host[:i]); ip != nil {
+			return true
+		}
+	}
+	if net.ParseIP(host) != nil || host == "localhost" {
+		return true
+	}
+	self, err := deviceHostname()
+	self = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(self)), ".")
+	if err != nil || self == "" {
+		return false
+	}
+	return host == self || host == self+".local"
 }

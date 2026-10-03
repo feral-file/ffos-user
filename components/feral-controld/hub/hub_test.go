@@ -149,7 +149,7 @@ func TestMetricsRouteServesAllRegistries(t *testing.T) {
 	defer ts.teardown()
 
 	mux := ts.hub.(*hub).server.Handler()
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/metrics", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -290,7 +290,7 @@ func TestUnmatchedRouteGoesThroughMiddleware(t *testing.T) {
 
 	// Unsaturated: unmatched path 404s (served through the middleware).
 	rr := httptest.NewRecorder()
-	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/definitely-not-a-route", nil))
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/definitely-not-a-route", nil))
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 
 	// Saturated: every slot held -> the unmatched request must be shed by the
@@ -304,7 +304,7 @@ func TestUnmatchedRouteGoesThroughMiddleware(t *testing.T) {
 		}
 	}()
 	rr = httptest.NewRecorder()
-	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/definitely-not-a-route", nil))
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/definitely-not-a-route", nil))
 	assert.Equal(t, http.StatusTooManyRequests, rr.Code)
 }
 
@@ -815,7 +815,7 @@ func TestHandleScreenshot_SuccessWithCustomBounds(t *testing.T) {
 		SHA256:     "abc123",
 		CapturedAt: time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC),
 	}
-	req := httptest.NewRequest(http.MethodGet, "/api/screenshot?width=800&height=800", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot?width=800&height=800", nil)
 	w := httptest.NewRecorder()
 
 	ts.mux.ServeHTTP(w, req)
@@ -837,7 +837,7 @@ func TestHandleScreenshot_UsesNativeSizeWhenBoundsAreOmitted(t *testing.T) {
 	defer ts.teardown()
 
 	ts.capturer.image = &screenshot.Image{Data: []byte("png-data"), Width: 1920, Height: 1080}
-	req := httptest.NewRequest(http.MethodGet, "/api/screenshot", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil)
 	w := httptest.NewRecorder()
 
 	ts.hub.(*hub).handleScreenshot(w, req)
@@ -869,7 +869,7 @@ func TestHandleScreenshot_HoldsSlotUntilResponseWriteCompletes(t *testing.T) {
 	go func() {
 		ts.hub.(*hub).handleScreenshot(
 			firstWriter,
-			httptest.NewRequest(http.MethodGet, "/api/screenshot", nil),
+			httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil),
 		)
 		close(firstDone)
 	}()
@@ -883,7 +883,7 @@ func TestHandleScreenshot_HoldsSlotUntilResponseWriteCompletes(t *testing.T) {
 	secondWriter := httptest.NewRecorder()
 	ts.hub.(*hub).handleScreenshot(
 		secondWriter,
-		httptest.NewRequest(http.MethodGet, "/api/screenshot", nil),
+		httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil),
 	)
 
 	assert.Equal(t, http.StatusTooManyRequests, secondWriter.Code)
@@ -948,7 +948,7 @@ func TestHandleScreenshot_RejectsBrowserRequest(t *testing.T) {
 			ts := setup(t)
 			defer ts.teardown()
 
-			req := httptest.NewRequest(http.MethodGet, "/api/screenshot", nil)
+			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil)
 			req.Header.Set(tt.header, tt.value)
 			w := httptest.NewRecorder()
 
@@ -978,7 +978,7 @@ func TestHandleScreenshot_MapsCaptureErrors(t *testing.T) {
 			defer ts.teardown()
 
 			ts.capturer.err = tt.captureErr
-			req := httptest.NewRequest(http.MethodGet, "/api/screenshot", nil)
+			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil)
 			w := httptest.NewRecorder()
 
 			ts.hub.(*hub).handleScreenshot(w, req)
@@ -1165,7 +1165,7 @@ func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
 	}}
 	h := New(ctx, mockWS, mockCmd, provider, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
 
-	req := httptest.NewRequest("GET", "/api/status", nil)
+	req := httptest.NewRequest("GET", "http://127.0.0.1:1111/api/status", nil)
 	w := httptest.NewRecorder()
 	h.withMiddleware("status", h.handleStatus)(w, req)
 
@@ -1206,7 +1206,7 @@ func TestHandleCast_OversizedBodyRejected413(t *testing.T) {
 	New(context.Background(), mockWS, mockCmd, nil, nil, mockServer, wrapper.NewJSON(), logger)
 
 	body := strings.NewReader(`{"command":"` + strings.Repeat("a", MAX_REQUEST_BODY_BYTES+1024) + `"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/cast", body)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/cast", body)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -1255,7 +1255,7 @@ func TestHandleStatusV2_SamePayloadContract2(t *testing.T) {
 	// Through the real mux, so the route registration itself is covered.
 	get := func(path string) map[string]any {
 		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		mux.ServeHTTP(w, httptest.NewRequest("GET", "http://127.0.0.1:1111"+path, nil))
 		require.Equal(t, http.StatusOK, w.Code, path)
 		var got map[string]any
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got), path)
@@ -1300,7 +1300,7 @@ func TestHandleStatus_ClaimedDeviceStillServesTopicID(t *testing.T) {
 	}}
 	h := New(ctx, mockWS, mockCmd, provider, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
 
-	req := httptest.NewRequest("GET", "/api/status", nil)
+	req := httptest.NewRequest("GET", "http://127.0.0.1:1111/api/status", nil)
 	w := httptest.NewRecorder()
 	h.withMiddleware("status", h.handleStatus)(w, req)
 
@@ -1321,7 +1321,7 @@ func TestHandleStatus_NilProviderReturnsContract(t *testing.T) {
 	defer ts.teardown()
 
 	hubImpl := ts.hub.(*hub) // setup() wires a nil status provider
-	req := httptest.NewRequest("GET", "/api/status", nil)
+	req := httptest.NewRequest("GET", "http://127.0.0.1:1111/api/status", nil)
 	w := httptest.NewRecorder()
 
 	// setup()'s hub uses a mocked JSON encoder, so drive a real one here.
@@ -1340,7 +1340,7 @@ func TestHandleStatus_InvalidMethod(t *testing.T) {
 	defer ts.teardown()
 
 	hubImpl := ts.hub.(*hub)
-	req := httptest.NewRequest("POST", "/api/status", nil)
+	req := httptest.NewRequest("POST", "http://127.0.0.1:1111/api/status", nil)
 	w := httptest.NewRecorder()
 	hubImpl.handleStatus(w, req)
 
@@ -1369,7 +1369,7 @@ func TestMiddleware_EnvelopeRoundTrip(t *testing.T) {
 	h := New(ctx, mockWS, gated, nil, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
 
 	body := `{"command":"roundtrip","request":{"k":"v"}}`
-	req := httptest.NewRequest("POST", "/api/cast", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://127.0.0.1:1111/api/cast", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -1410,7 +1410,7 @@ func TestHandleCast_StormProtection(t *testing.T) {
 	var accepted, limited int
 	for i := 0; i < total; i++ {
 		body := fmt.Sprintf(`{"command":"stormtest","request":{"i":%d}}`, i)
-		req := httptest.NewRequest("POST", "/api/cast", strings.NewReader(body))
+		req := httptest.NewRequest("POST", "http://127.0.0.1:1111/api/cast", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 
