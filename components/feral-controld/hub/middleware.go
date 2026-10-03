@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -103,6 +105,22 @@ func (h *hub) withMiddleware(route string, next http.HandlerFunc) http.HandlerFu
 		// Sec-Fetch-Site and pages cannot strip them; the app, ff-cli, and
 		// the relayer path send neither. The player's log route keeps its own
 		// stricter loopback-plus-exact-origin check, so it is exempt here.
+		//
+		// A page can also reach the hub without either header through DNS
+		// rebinding: its own domain is re-pointed at this device, so its
+		// requests are same-origin and a GET carries no Origin. Such a request
+		// names the attacker's domain in Host, and status hands out the
+		// topic ID, so only Host values a public DNS name cannot take are
+		// accepted (see isLocalHost).
+		if !isLocalHost(r.Host) {
+			h.logger.Warn("Hub request rejected: non-local Host",
+				zap.String("route", route),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.ByteString("host", helper.TruncateBytes([]byte(r.Host), fflogger.MAX_FIELD_LENGTH)),
+			)
+			http.Error(w, "Host not allowed", http.StatusForbidden)
+			return
+		}
 		if route != playerLogsRoute && isBrowserOriginated(r) {
 			h.logger.Warn("Hub request rejected: browser origin",
 				zap.String("route", route),
@@ -173,4 +191,43 @@ const playerLogsRoute = "player_logs"
 // attach to cross-site and page-initiated requests.
 func isBrowserOriginated(r *http.Request) bool {
 	return r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != ""
+}
+
+// localHostSuffixes are names only a local resolver answers: mDNS and the
+// suffixes home routers hand out. None is registrable in public DNS, so a
+// rebinding page cannot put one in Host.
+var localHostSuffixes = []string{".local", ".lan", ".home", ".home.arpa", ".internal"}
+
+// isLocalHost reports whether a request's Host names this device the way a
+// native client on the LAN does: an IP literal, localhost, a single-label
+// name, or a name under a local-only suffix. Anything else is a public DNS
+// name, which is what a DNS-rebinding page carries.
+func isLocalHost(hostport string) bool {
+	host := hostport
+	if h, port, err := net.SplitHostPort(hostport); err == nil {
+		if _, perr := strconv.ParseUint(port, 10, 16); perr != nil {
+			return false
+		}
+		host = h
+	}
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	if host == "" {
+		return false
+	}
+	// A link-local IPv6 literal may carry a zone ("fe80::1%25wlan0").
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if host == "localhost" || !strings.Contains(host, ".") {
+		return true
+	}
+	for _, suffix := range localHostSuffixes {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
 }
