@@ -335,9 +335,8 @@ The portal binds `:80` (permitted by the system-wide `net.ipv4.ip_unprivileged_p
 | `/status` | GET | JSON `{ "state", "ssid?", "reason?", "message?" }` where `state` ∈ `idle` / `joining` / `succeeded` / `failed`. Sourced from the provisioning machine so it survives a portal restart across the AP bounce. `Cache-Control: no-store`. |
 | `/rescan` | GET | Plain-HTML confirmation page (`rescan_confirm.html`) warning that the setup Wi-Fi will restart and the QR must be re-scanned. A page rather than `window.confirm()` because captive-portal mini-browsers (iOS CNA, Android sign-in sheet) suppress JS dialogs. Viewing it does not bounce the AP. |
 | `/rescan` | POST | Performs the bounce: the machine tears the AP down, runs a fresh station-mode scan, and re-raises — disconnecting the phone; the response page (sent before the bounce lands) tells the user to re-scan the QR code to reconnect. Renders `rescan.html` on acceptance, re-renders the picker on rejection. Other methods → `303` to `/`. |
-| `/setup.css` | GET | The shared stylesheet every portal page links (one embedded copy of the setup design language instead of per-template `<style>` blocks). `Content-Type: text/css`; `Cache-Control: max-age=3600` — deliberately not immutable, since the sheet changes with daemon releases and a phone that cached it across an OTA would style new pages with old rules. |
-| `/fonts/<name>.woff2` | GET | Serves the embedded PP Mori faces (`PPMori-Regular.woff2`, `PPMori-Bold.woff2`) referenced by `/setup.css`. `Content-Type: font/woff2`; `Cache-Control: max-age=31536000, immutable`. Registered explicitly so the subtree escapes the unmatched-path probe redirect below; an unknown, non-`.woff2`, or slash-containing name under `/fonts/` returns `404` (never a redirect). |
-| OS probe paths | GET | `/generate_204`, `/gen_204`, `/hotspot-detect.html`, `/library/test/success.html`, `/connecttest.txt`, `/ncsi.txt` all `302` to `/`. Any other unmatched non-root path is also redirected, covering unenumerated probe variants (the explicitly registered `/setup.css` and `/fonts/` asset routes above are the exceptions). |
+| `/fonts/<name>.woff2` | GET | Serves the embedded PP Mori faces (`PPMori-Regular.woff2`, `PPMori-Bold.woff2`) referenced by the inline stylesheet. `Content-Type: font/woff2`; `Cache-Control: max-age=3600`. Registered explicitly so the subtree escapes the unmatched-path probe redirect below; an unknown, non-`.woff2`, or slash-containing name under `/fonts/` returns `404` (never a redirect). |
+| OS probe paths | GET | `/generate_204`, `/gen_204`, `/hotspot-detect.html`, `/library/test/success.html`, `/connecttest.txt`, `/ncsi.txt` all `302` to `/`. Any other unmatched non-root path is also redirected, covering unenumerated probe variants (the explicitly registered `/fonts/` asset routes above are the exception). |
 
 Captive detection is a three-layer design split across the `ffos` image and this portal:
 
@@ -346,6 +345,8 @@ Captive detection is a three-layer design split across the `ffos` image and this
 - **HTTP layer (this service):** once the redirected probe lands on the routes above, the `302`-on-probe (rather than returning the 204/success body each OS expects) is what makes the phone conclude it is behind a captive portal and auto-open the page.
 
 The DNS and NAT layers only make the probe request arrive; the HTTP layer is what makes it look like a captive portal.
+
+Every portal page includes the shared `portal/static/setup.css` template in its HTML response. Connecting or rescanning shuts the portal down, so styling must arrive with the page rather than depend on a later stylesheet request. Fonts remain separate requests; the CSS supplies system-font fallbacks when those cannot load.
 
 ### AP trigger state machine (`provisioning`)
 

@@ -4,8 +4,9 @@
    white type in PP Mori, letterspaced uppercase micro-labels, sharp
    corners, no color except muted semantic status tints. Committed
    dark-only (color-scheme: dark) — the device's own UI never changes with
-   the phone's theme, so neither does this. Served as /setup.css from the
-   embedded FS (see portal.go), so there is exactly one copy to keep true. */
+   the phone's theme, so neither does this. Included in each HTML response
+   from this shared template: styling survives the setup Wi-Fi disconnect
+   without a second request, and there is exactly one copy to keep true. */
 
 @font-face {
   font-family: 'PP Mori';
