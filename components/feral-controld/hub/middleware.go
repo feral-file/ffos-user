@@ -69,8 +69,8 @@ func isLoopbackAddr(remoteAddr string) bool {
 // It is deliberately the one chokepoint for cross-cutting concerns on the LAN
 // control surface: today an in-flight concurrency limiter (command-storm
 // protection) and per-request logging. It is also, by design, the future
-// insertion point for LAN authorization (screen-anchored pairing, issue
-// #3471). Nothing else may register a hub route directly: any route bypassing
+// insertion point for LAN authorization (screen-anchored pairing, feral-file
+// #3551). Nothing else may register a hub route directly: any route bypassing
 // this wrapper would also bypass the storm cap and the coming authorization
 // check, so new cross-cutting behavior belongs here, not in individual
 // handlers, and every route MUST go through routes()'s withMiddleware calls.
@@ -138,7 +138,7 @@ func (h *hub) withMiddleware(route string, next http.HandlerFunc) http.HandlerFu
 			h.contactObserver()
 		}
 
-		// LAN AUTHORIZATION SEAM (issue #3471): screen-anchored pairing checks
+		// LAN AUTHORIZATION SEAM (feral-file#3551): screen-anchored pairing checks
 		// go here, guarding every route uniformly, before next is invoked.
 
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
