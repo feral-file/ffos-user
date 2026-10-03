@@ -40,7 +40,11 @@ import (
 //go:embed templates/*.html fonts/*.woff2 static/setup.css
 var assets embed.FS
 
-var tmpl = template.Must(template.ParseFS(assets, "templates/*.html"))
+// Include the shared CSS in each HTML response: joining or rescanning stops
+// the portal, so a follow-up stylesheet request may never reach it. Parsing
+// the file as a template keeps one source without bypassing html/template's
+// contextual escaping for any user-supplied data.
+var tmpl = template.Must(template.ParseFS(assets, "templates/*.html", "static/setup.css"))
 
 // Abuse bounds for the portal listener. The portal is unauthenticated by
 // design (a captive portal must be) and anything on the setup AP's subnet can
@@ -424,10 +428,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/connect", s.handleConnect)
 	s.mux.HandleFunc("/status", s.handleStatus)
 	s.mux.HandleFunc("/rescan", s.handleRescan)
-	// Explicit registrations keep these asset paths out of handleRoot's
+	// Explicit registration keeps font paths out of handleRoot's
 	// treat-unknown-paths-as-captive-probes redirect.
 	s.mux.HandleFunc("/fonts/", s.handleFonts)
-	s.mux.HandleFunc("/setup.css", s.handleSetupCSS)
 
 	// OS captive-portal probes. Returning a redirect (rather than the 204 /
 	// success body each OS looks for) is what makes the phone decide it is
@@ -531,21 +534,6 @@ func (s *Server) handleFonts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "font/woff2")
-	w.Header().Set("Cache-Control", "max-age=3600")
-	_, _ = w.Write(data)
-}
-
-// handleSetupCSS serves the shared stylesheet. Unlike the fonts it is not
-// marked immutable: the sheet changes with daemon releases, and a phone that
-// cached it across an OTA would style the new pages with the old rules. An
-// hour comfortably covers a setup session.
-func (s *Server) handleSetupCSS(w http.ResponseWriter, r *http.Request) {
-	data, err := assets.ReadFile("static/setup.css")
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	w.Header().Set("Cache-Control", "max-age=3600")
 	_, _ = w.Write(data)
 }
