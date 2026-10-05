@@ -46,11 +46,22 @@ const (
 	// used to happen immediately. The reboot remains the self-heal rail (a
 	// fresh boot clears transient faults and the nightly updaters need boots),
 	// but a customer must see a stable error screen instead of a black screen
-	// every ~5 minutes. restartHistory is memory-only (ffos-user#254), so after
-	// the reboot the cycle repeats: ~5 min of restarts, then this hold. That is
-	// bounded and mostly visible-error; persisting the budget across reboots
-	// is #254/#255 scope, not this policy.
+	// every ~5 minutes. restartHistory itself stays memory-only; what survives
+	// the reboot is the fallback-reboot counter below.
 	CHROMIUM_FALLBACK_HOLD = 15 * time.Minute
+	// CHROMIUM_MAX_FALLBACK_REBOOTS caps how many consecutive boots may end in
+	// a fallback-hold reboot before the monitor stops rebooting and parks on
+	// the fallback screen indefinitely (ffos-user#254). Before this cap the
+	// cycle "~5 min of restarts, 15 min hold, reboot" repeated forever, and
+	// the device was never in one state long enough to diagnose. One reboot
+	// is the self-heal attempt: if the same failure survives a fresh boot,
+	// another reboot will not fix it. Parking keeps every other daemon up
+	// (controld's LAN hub/AP, the nightly updater timer — whose own OTA reboot
+	// is the way out), and the counter is cleared by the first healthy check,
+	// so a fixed device returns to the normal ladder. A power cycle still
+	// retries the full ladder, but ends parked rather than rebooting again.
+	// The counter is persisted in chromiumFallbackStateFile.
+	CHROMIUM_MAX_FALLBACK_REBOOTS = 1
 )
 
 // ChromiumMonitor monitors Chromium browser health via Chrome DevTools Protocol.
@@ -87,8 +98,11 @@ const (
 // Fallback hold: once the restart budget is exhausted the monitor no longer
 // reboots at once. It stops the kiosk, starts feral-kiosk-fallback.service
 // (a stable "Something went wrong..." screen) and holds for
-// CHROMIUM_FALLBACK_HOLD, then reboots. A successful check during the hold
-// (manual restart, OTA) clears the hold and the restart history.
+// CHROMIUM_FALLBACK_HOLD, then reboots — unless CHROMIUM_MAX_FALLBACK_REBOOTS
+// consecutive boots have already ended that way, in which case it parks on
+// the fallback screen with no further reboot. A successful check (manual
+// restart, OTA) clears the hold, the restart history and the persisted
+// fallback-reboot counter.
 type ChromiumMonitor struct {
 	mu                 sync.Mutex
 	cdpEndpoint        string
@@ -121,6 +135,14 @@ type ChromiumMonitor struct {
 	// the restart budget was exhausted; the hold ends in a reboot unless a
 	// check succeeds first.
 	fallbackSince time.Time
+
+	// fallbackReboots mirrors the persisted count of consecutive boots that
+	// ended in a fallback-hold reboot; it is loaded once at construction and
+	// written through to fallbackStatePath. fallbackParked latches "the hold
+	// elapsed with the reboot cap reached" so the parked state is logged once.
+	fallbackStatePath string
+	fallbackReboots   int
+	fallbackParked    bool
 }
 
 // NewChromiumMonitor creates a new Chromium monitor instance.
@@ -132,8 +154,19 @@ type ChromiumMonitor struct {
 // cold-boot devices and post-restart cycles from logging
 // "Chromium browser hang detected" while Chromium is legitimately starting up.
 func NewChromiumMonitor(cdpEndpoint string, logger *zap.Logger, commandHandler *CommandHandler) *ChromiumMonitor {
+	fallbackReboots, err := loadChromiumFallbackReboots(chromiumFallbackStateFile)
+	if err != nil {
+		logger.Error("Chromium: could not read persisted fallback-reboot count; assuming none",
+			zap.Error(err))
+	} else if fallbackReboots > 0 {
+		logger.Warn("Chromium: previous boot(s) ended in a fallback-hold reboot",
+			zap.Int("consecutive_fallback_reboots", fallbackReboots),
+			zap.Int("max_fallback_reboots", CHROMIUM_MAX_FALLBACK_REBOOTS))
+	}
 	return &ChromiumMonitor{
-		cdpEndpoint: cdpEndpoint,
+		fallbackStatePath: chromiumFallbackStateFile,
+		fallbackReboots:   fallbackReboots,
+		cdpEndpoint:       cdpEndpoint,
 		client: &http.Client{
 			Timeout: CHROMIUM_REQUEST_TIMEOUT,
 		},
@@ -242,13 +275,29 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 	recovered := !m.fallbackSince.IsZero()
 	if recovered {
 		m.fallbackSince = time.Time{}
+		m.fallbackParked = false
 		m.restartHistory = m.restartHistory[:0]
 	}
+	// A healthy Chromium ends the run of fallback reboots (#254). Checked on
+	// every success but only writes when there is something to clear, so the
+	// steady state touches no disk. In-memory is zeroed even if the removal
+	// fails: retrying would log every 5 s, and the cost of a stale file is one
+	// extra parked hold after a later failure, not a lost self-heal.
+	clearPersisted := m.fallbackReboots > 0
+	m.fallbackReboots = 0
+	statePath := m.fallbackStatePath
 	m.mu.Unlock()
 
 	if recovered {
 		m.commandHandler.clearKioskFallback()
 		m.logger.Info("Chromium: recovered while fallback screen was showing; resuming normal monitoring")
+	}
+	if clearPersisted {
+		if err := clearChromiumFallbackReboots(statePath); err != nil {
+			m.logger.Error("Chromium: failed to clear persisted fallback-reboot count", zap.Error(err))
+		} else {
+			m.logger.Info("Chromium: healthy; cleared persisted fallback-reboot count")
+		}
 	}
 
 	return nil
@@ -302,6 +351,7 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 	if !m.fallbackSince.IsZero() {
 		if !displayConnected {
 			m.fallbackSince = time.Time{}
+			m.fallbackParked = false
 			// Forget the exhausted budget too: the kiosk is stopped, so once a
 			// display returns the reconnect grace must end in a kiosk RESTART,
 			// not in an immediate second fallback because three stale stamps
@@ -317,10 +367,17 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 			enteredDevConsole := !m.devConsole
 			m.devConsole = true
 			m.fallbackSince = time.Now()
+			parked := m.fallbackParked
 			m.mu.Unlock()
 			if enteredDevConsole {
-				m.logger.Info("Chromium: developer console active during fallback hold; deferring the reboot until tty1 is active",
-					zap.String("active_vt", activeVT))
+				// Parked means no reboot is pending, so say so rather than
+				// claim one is being deferred; the hold is re-anchored either
+				// way and re-parks 15 min after tty1 returns.
+				msg := "Chromium: developer console active during fallback hold; deferring the reboot until tty1 is active"
+				if parked {
+					msg = "Chromium: developer console active while parked on the fallback screen; no reboot pending"
+				}
+				m.logger.Info(msg, zap.String("active_vt", activeVT))
 			}
 			return true
 		}
@@ -330,12 +387,42 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 			m.mu.Unlock()
 			return true
 		}
+		// Reboot cap reached (#254): a fresh boot already failed the same way,
+		// so park on the fallback screen instead of rebooting again. The hold
+		// stays armed (fallbackSince untouched, fallbackShown still set) so
+		// the display/dev-console gates above and the recovery path in check()
+		// keep working exactly as during an ordinary hold.
+		if m.fallbackReboots >= CHROMIUM_MAX_FALLBACK_REBOOTS {
+			enteredPark := !m.fallbackParked
+			m.fallbackParked = true
+			reboots := m.fallbackReboots
+			m.mu.Unlock()
+			if enteredPark {
+				m.logger.Error("Chromium: fallback hold elapsed but the reboot cap is reached; staying on the fallback screen without rebooting",
+					zap.Int("consecutive_fallback_reboots", reboots),
+					zap.Int("max_fallback_reboots", CHROMIUM_MAX_FALLBACK_REBOOTS))
+				m.commandHandler.reportFallbackParked(ctx, reboots)
+			}
+			return true
+		}
 		m.fallbackSince = time.Time{}
+		m.fallbackReboots++
+		reboots := m.fallbackReboots
+		statePath := m.fallbackStatePath
 		m.mu.Unlock()
+		// Persist before rebooting. If the write fails, reboot anyway: that is
+		// exactly the pre-#254 behavior, and a device that cannot write its
+		// home directory is better served by the self-heal than by parking.
+		if err := storeChromiumFallbackReboots(statePath, reboots); err != nil {
+			m.logger.Error("Chromium: failed to persist fallback-reboot count; rebooting anyway",
+				zap.Error(err))
+		}
 		m.commandHandler.clearKioskFallback()
 		m.logger.Error("Chromium: fallback hold elapsed, triggering system reboot",
 			zap.Duration("held", held),
-			zap.Duration("hold", CHROMIUM_FALLBACK_HOLD))
+			zap.Duration("hold", CHROMIUM_FALLBACK_HOLD),
+			zap.Int("consecutive_fallback_reboots", reboots),
+			zap.Int("max_fallback_reboots", CHROMIUM_MAX_FALLBACK_REBOOTS))
 		m.commandHandler.rebootSystem(ctx, CrashReasonChromiumCrash)
 		return true
 	}

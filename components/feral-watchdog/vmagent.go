@@ -123,6 +123,28 @@ func (v *VmagentClient) SendCrashRebootMetric(ctx context.Context, reason CrashR
 	}
 }
 
+// SendChromiumFallbackParkedMetric reports that the Chromium monitor has
+// parked on the fallback screen after the cross-boot reboot cap
+// (ffos-user#254). Parking replaces the reboot loop, so without this metric a
+// parked device's last fleet signal would be the previous boot's
+// crash_reboot and it would look healthier than a rebooting one.
+func (v *VmagentClient) SendChromiumFallbackParkedMetric(ctx context.Context, consecutiveReboots int) {
+	metric := fmt.Sprintf("ff_chromium_fallback_parked{consecutive_reboots=\"%d\"} 1", consecutiveReboots)
+
+	v.logger.Info("Sending chromium_fallback_parked metric to vmagent",
+		zap.String("metric", metric),
+		zap.String("url", v.url))
+
+	if err := v.SendMetric(ctx, metric); err != nil {
+		v.logger.Error("Failed to send chromium_fallback_parked metric to vmagent",
+			zap.Error(err),
+			zap.String("url", v.url))
+	} else {
+		v.logger.Info("Successfully sent chromium_fallback_parked metric to vmagent",
+			zap.String("url", v.url))
+	}
+}
+
 // SendServiceFailedMetric sends the service_failed metric to vmagent
 func (v *VmagentClient) SendServiceFailedMetric(ctx context.Context, service string) {
 	metric := fmt.Sprintf("ff_service_failed{service=\"%s\"} 1", service)

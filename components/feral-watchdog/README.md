@@ -41,11 +41,19 @@ The CDP Monitor is responsible for monitoring the health of the Chromium browser
   During the hold every failed check is expected and quiet. The reboot stays
   the self-heal rail (a fresh boot clears transient faults and the nightly
   updaters need boots), but the customer sees a stable error screen instead
-  of a black screen every ~5 minutes. The restart history is memory-only
-  (ffos-user#254), so after the reboot the cycle repeats: ~5 min of restarts,
-  then 15 min of fallback. If a check succeeds during the hold (an operator
-  restarted the kiosk, an OTA fixed the bundle), the hold is dropped and the
-  restart history reset; `chromium-kiosk.service` stops the fallback unit in
+  of a black screen every ~5 minutes. The reboot is capped across boots
+  (ffos-user#254): the hold's reboot is recorded in
+  `/home/feralfile/.state/watchdog-chromium-fallback.json` before it is
+  issued, and once `CHROMIUM_MAX_FALLBACK_REBOOTS` (1) consecutive boots have
+  ended that way, the next expired hold **parks** on the fallback screen
+  with no further reboot, so the device stops cycling and stays reachable
+  (LAN hub/AP, updater timer) for diagnosis or an OTA. An unreadable or
+  corrupt record reads as zero and a failed write still reboots: both fail
+  toward the old self-heal, never toward parking. A power cycle still retries
+  the restart ladder but ends parked. If a check succeeds during the hold (an
+  operator restarted the kiosk, an OTA fixed the bundle), the hold is dropped
+  and the restart history reset; any successful check also deletes the
+  persisted record; `chromium-kiosk.service` stops the fallback unit in
   its `ExecStartPre`, so any kiosk start clears the screen. If the fallback
   unit cannot be started (older image without it, sudo refused) or the
   kiosk stop itself fails, the monitor reboots immediately instead of
