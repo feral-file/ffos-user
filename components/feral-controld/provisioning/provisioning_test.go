@@ -1126,7 +1126,7 @@ func TestFreshAPRaiseResetsStaleJoinStatus(t *testing.T) {
 // TestRedundantOfflineKeepsJoinFailureStatus: the unprovisioned-offline branch
 // is level-triggered, so a redundant offline event while the AP is already up
 // (wlan churn during the post-failure re-raise) must not wipe the join-failure
-// outcome the re-associated phone polls /status for.
+// outcome shown by the re-raised portal.
 func TestRedundantOfflineKeepsJoinFailureStatus(t *testing.T) {
 	h := newHarness(t)
 	h.wifi.setProfile(false)

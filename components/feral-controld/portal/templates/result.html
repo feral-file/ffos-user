@@ -20,5 +20,43 @@
     retry.
   </p>
 </main>
+<script>
+  // The AP disappears during the join. Keep watching through network failures
+  // until it returns with an outcome; navigating to / avoids resubmitting POST.
+  (function () {
+    if (!window.fetch || !window.AbortController) return;
+    var inflight = false;
+    var finished = false;
+    var poll = function () {
+      if (inflight || finished) return;
+      inflight = true;
+      var ctl = new AbortController();
+      var timer = setTimeout(function () { ctl.abort(); }, 1500);
+      fetch('/status', {
+        cache: 'no-store',
+        headers: { 'X-Setup-Watcher': '1' },
+        signal: ctl.signal
+      }).then(function (r) {
+        if (!r.ok) return;
+        return r.json().then(function (st) {
+          if (st && st.state === 'failed') {
+            finished = true;
+            window.location.replace('/');
+          }
+        });
+      }).catch(function () {
+        // A dropped hotspot or incomplete response is not a join verdict.
+      }).then(function () {
+        clearTimeout(timer);
+        inflight = false;
+        if (!finished) setTimeout(poll, 3000);
+      });
+    };
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') poll();
+    });
+    poll();
+  })();
+</script>
 </body>
 </html>

@@ -1193,7 +1193,7 @@ func (m *Machine) loop(ctx context.Context) {
 // RequestJoin is the portal's JoinFunc: it validates the submission and hands it
 // to the loop, returning immediately. The AP-bounce + join run asynchronously on
 // the loop goroutine because taking the AP down drops the phone that submitted
-// the form; the phone re-associates and polls /status (Status) for the outcome.
+// the form.
 func (m *Machine) RequestJoin(req portal.JoinRequest) error {
 	ssid := req.SSID
 	if req.Manual {
@@ -2086,7 +2086,7 @@ func (m *Machine) applyJoin(ctx context.Context, ssid, psk string, hidden bool) 
 	// still holding the radio violates the single-radio sequencing, and a
 	// success would strand the leftover profile with nothing retrying its
 	// deletion. Re-raising via StateAPActive self-heals instead — softap.Up
-	// replaces the profile — and the phone polls /status for this outcome.
+	// replaces the profile.
 	if !m.ensureAPDown(ctx) {
 		outcome := portal.Status{
 			State:   portal.JoinFailed,
@@ -3165,11 +3165,10 @@ func (m *Machine) probeWired(ctx context.Context) (bool, error) {
 // (unprovisioned / sustained-offline). Without it the portal would greet a
 // user mid-setup with the success banner of a join that happened weeks ago.
 // The join-failure re-raise in applyJoin deliberately keeps its status: the
-// phone re-associates and polls /status for exactly that outcome. That is why
-// the reset is edge-gated on state: the unprovisioned-offline branch is
+// reset is edge-gated on state: the unprovisioned-offline branch is
 // level-triggered, and a redundant offline event while the AP is already up
 // (e.g. wlan churn during the post-failure re-raise) must not wipe the
-// outcome the phone is about to poll for.
+// retained outcome.
 func (m *Machine) resetJoinStatus() {
 	m.mu.Lock()
 	if m.state != StateAPActive {

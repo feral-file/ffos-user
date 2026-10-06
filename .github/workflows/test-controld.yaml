@@ -5,6 +5,8 @@ on:
     paths:
       - 'components/feral-controld/**/*.go'
       - 'components/feral-controld/**/*.html'
+      - 'components/feral-controld/**/*.mjs'
+      - '.github/workflows/test-controld.yaml'
       - 'components/feral-controld/**/*.woff2'
       - 'components/feral-controld/**/*.css'
       - '.golangci.yml'
@@ -29,6 +31,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  portal-result:
+    name: Test portal result polling
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Exercise result page script
+        run: node --test components/feral-controld/portal/result_poll_test.mjs
   test:
     name: Test feral-controld (Go)
     runs-on: ubuntu-latest
