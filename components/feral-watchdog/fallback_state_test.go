@@ -10,9 +10,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// TestMain points the persisted fallback-reboot counter at a path whose
-// directory does not exist, for every test that does not opt in with
-// useFallbackStateFile. Loads then read "no file" (zero) and stores fail, so
+// TestMain points the persisted fallback-reboot counter (and the updater
+// lock, see update_gate_test.go) at a path whose directory does not exist,
+// for every test that does not opt in with useFallbackStateFile. Loads then read "no file" (zero) and stores fail, so
 // tests that predate #254 see exactly the old reboot behavior and can never
 // leak a counter into one another (or into /home/feralfile on a dev box).
 func TestMain(m *testing.M) {
@@ -21,6 +21,10 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	chromiumFallbackStateFile = filepath.Join(dir, "absent", "watchdog-chromium-fallback.json")
+	// Same isolation for the update gate: no lock file means "no update", so
+	// every test that does not call simulateUpdate sees the ungated ladder
+	// regardless of what the CI host's /run and /proc/locks contain.
+	updaterLockFile = filepath.Join(dir, "absent", "feral-updater.lock")
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)

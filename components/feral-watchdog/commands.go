@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -61,13 +62,31 @@ type CommandHandler struct {
 	// would erase the customer's error screen — until the Chromium monitor
 	// clears it (recovery, or the hold abandoned for headless).
 	fallbackShown bool
+	// lastRebootDeferLog rate-limits logRebootDeferred.
+	lastRebootDeferLog time.Time
+	// updates tells every recovery path whether an update is running
+	// (update_gate.go, ffos#124). Shared by the Chromium monitor and the
+	// resource handlers through updateInProgress so they all agree on one
+	// hold and one ceiling.
+	updates *updateGate
 }
 
 func NewCommandHandler(logger *zap.Logger, vmagentClient *VmagentClient) *CommandHandler {
 	return &CommandHandler{
 		logger:        logger,
 		vmagentClient: vmagentClient,
+		updates:       newUpdateGate(logger),
 	}
+}
+
+// updateInProgress reports whether recovery should wait for an update (see
+// updateGate). Nil-safe so handlers built without a CommandHandler, and
+// handlers built as struct literals in tests, read "no update".
+func (c *CommandHandler) updateInProgress() bool {
+	if c == nil || c.updates == nil {
+		return false
+	}
+	return c.updates.active()
 }
 
 // restartKiosk attempts to restart the chromium-kiosk service. It is a no-op
@@ -206,8 +225,27 @@ func (c *CommandHandler) reportFallbackParked(ctx context.Context, consecutiveRe
 	c.vmagentClient.SendChromiumFallbackParkedMetric(ctx, consecutiveReboots)
 }
 
-// rebootSystem initiates a system reboot
+// rebootSystem initiates a system reboot, unless an update is in progress.
+//
+// The update gate (ffos#124) is the single choke point for every reboot
+// path — RAM, GPU, disk-full and the Chromium ladder — because each of them
+// can fire mid-update for reasons the update itself causes (IO starvation,
+// the ISO download filling the disk). Rebooting then throws the update away;
+// skipping is safe because every update ends in its own reboot, or, on
+// failure, removes its download and releases the lock. The disk and RAM
+// handlers re-request their reboot on later ticks, so a condition that
+// outlives a failed update still reboots once the lock is gone. The GPU
+// handler is one-shot (it reboots on the gpu_hanging event's timer), so a
+// GPU hang during an update that then fails is not rebooted until the next
+// hang event or the next update; accepted, because the common outcome of an
+// update is its own reboot. Callers keep their state as if the reboot had
+// been attempted, exactly as on a failed `systemctl reboot`.
 func (c *CommandHandler) rebootSystem(ctx context.Context, reason CrashReason) {
+	if c.updateInProgress() {
+		c.logRebootDeferred(reason)
+		return
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -224,6 +262,23 @@ func (c *CommandHandler) rebootSystem(ctx context.Context, reason CrashReason) {
 			zap.Error(err),
 			zap.ByteString("output", output))
 	}
+}
+
+// rebootDeferLogInterval rate-limits the "reboot deferred" line: the disk and
+// RAM handlers re-request their reboot on every metrics tick, and an update
+// can run for an hour on a slow link.
+const rebootDeferLogInterval = time.Minute
+
+func (c *CommandHandler) logRebootDeferred(reason CrashReason) {
+	c.mu.Lock()
+	if !c.lastRebootDeferLog.IsZero() && time.Since(c.lastRebootDeferLog) < rebootDeferLogInterval {
+		c.mu.Unlock()
+		return
+	}
+	c.lastRebootDeferLog = time.Now()
+	c.mu.Unlock()
+	c.logger.Warn("Reboot deferred: an update is in progress and ends in its own reboot",
+		zap.String("reason", string(reason)))
 }
 
 func (c *CommandHandler) cleanupPacmanCache(ctx context.Context) {

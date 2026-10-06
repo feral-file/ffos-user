@@ -63,7 +63,8 @@ The CDP Monitor is responsible for monitoring the health of the Chromium browser
   the two exemptions below still apply: a display unplugged during the hold
   abandons it and forgets the exhausted budget (no reboot; once a display
   returns the reconnect grace restarts the kiosk), and a developer on
-  another VT defers the reboot until tty1 is active again. RAM/GPU-triggered
+  another VT defers the reboot until tty1 is active again, and so does an
+  update in progress (see below). RAM/GPU-triggered
   kiosk restarts are refused while the error screen is deliberately up.
 - **Developer console is exempt.** cage runs with `-s`, so a developer with a
   keyboard can Ctrl+Alt+F2 to the password-protected `getty@tty2`.
@@ -75,6 +76,22 @@ The CDP Monitor is responsible for monitoring the health of the Chromium browser
   transition once; returning to `tty1` re-arms the startup grace. The gate
   fails open when the file is unreadable. The two predicates MUST stay
   identical.
+- **Updates are exempt (ffos#124).** While ffos's `feral-updater.sh` holds
+  `/run/feral-updater.lock` (nightly timer and boot OTA gate alike, for the
+  whole full-image or pacman update, until it has requested its reboot), the
+  monitor suppresses escalation like the developer console and re-arms the
+  startup grace when the update ends. The update's rsync/mkinitcpio IO storm
+  can starve `/json/version` long enough to walk the ladder, and a reboot
+  then throws the update away. The lock is detected by reading `/proc/locks`,
+  never by taking it: a probe that took the lock, even briefly, could make
+  the updater's `flock -n` fail, and the updater would then skip that
+  night's update. The kernel drops the entry when the updater dies, so a
+  crashed update cannot leave recovery suppressed. A live but wedged updater
+  is capped instead: one updater process (holder PID) may suppress recovery
+  for at most `UPDATE_GATE_MAX_HOLD` (8 h), after which the gate fails open
+  with one Error. Any read error counts as "no update" (fail open to the
+  normal ladder). This replaces controld's boot gate stopping and restarting
+  the watchdog around the update, which was removed.
 - **Headless devices are exempt.** On a device with no monitor, the kiosk
   intentionally waits for a display before launching Chromium, so a missing
   `/json/version` is expected, not a failure. Escalation is suppressed (no
@@ -92,6 +109,15 @@ The CDP Monitor is responsible for monitoring the health of the Chromium browser
 ## Resource Monitoring (RAM, GPU, DISK)
 
 The monitord will send a metric every 2s.
+
+During an update (see "Updates are exempt" above) the resource policies wait
+too. Every reboot goes through `rebootSystem`, which defers it with a
+rate-limited Warn. The disk policy sits the update out entirely: no reboot,
+and no `pacman -Scc` either, since that can delete packages a concurrent
+pacman update has downloaded but not yet installed; it resumes where it
+stood once the lock is released. The RAM policy still restarts the kiosk
+(that frees memory without touching the update) but its reboot step waits.
+The GPU reboot is one-shot and is dropped if it fires mid-update.
 
 ### GPU
 

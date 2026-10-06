@@ -32,6 +32,9 @@ func TestClassifyUpdaterMessage(t *testing.T) {
 		{"perm/snapshot (marks_signing_and_image_failures_permanent)", "Failed to create snapshot '/.snapshots/@ota_prev'. Aborting.", errPermanent},
 		{"perm/unknown-error (marks_signing_and_image_failures_permanent)", "Unknown error occurred", errPermanent},
 
+		// Go-only (ffos#124): the free-space precheck has no setupd counterpart.
+		{"perm/disk-space (ffos#124 free-space precheck)", "Not enough free disk space for the update: need 7168 MiB, have 2048 MiB.", errPermanent},
+
 		// classify_updater_message_marks_unrecognized_as_permanent
 		{"perm/unrecognized (marks_unrecognized_as_permanent)", "something unexpected", errPermanent},
 

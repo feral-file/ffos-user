@@ -46,6 +46,15 @@ func classifyUpdaterMessage(message string) updateErrorKind {
 		return errPermanent
 	}
 
+	// Free-space precheck (feral-system-update.sh, ffos#124): the device lacks
+	// room for the ISO plus the new snapshot. Prefix match because the script
+	// appends the needed/available sizes. Permanent: the gate's 2 s/4 s
+	// retries cannot free gigabytes, and attempting the update anyway is what
+	// the precheck exists to prevent (ENOSPC mid-rsync, disk-full reboots).
+	if strings.HasPrefix(msg, "Not enough free disk space for the update") {
+		return errPermanent
+	}
+
 	// Unknown/unclassified errors from the updater-spawn layer.
 	if msg == "Unknown error occurred" {
 		return errPermanent

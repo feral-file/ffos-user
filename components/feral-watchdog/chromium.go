@@ -14,8 +14,10 @@ import (
 
 // errChromiumHeadless tags a failed health check that happened while Chromium
 // is expected to be absent: no display connected (the kiosk waits for one), a
-// developer VT other than tty1 active (start-kiosk.sh holds cage back), or the
-// fallback hold in progress (the kiosk was stopped on purpose). The monitor
+// developer VT other than tty1 active (start-kiosk.sh holds cage back), an
+// update in progress (ffos#124: the update's IO storm may starve Chromium and
+// the update ends in its own reboot), or the fallback hold in progress (the
+// kiosk was stopped on purpose). The monitor
 // loop logs these at debug instead of warning every check interval.
 var errChromiumHeadless = errors.New("chromium down while headless (expected)")
 
@@ -95,6 +97,11 @@ const (
 // launch cage, so Chromium is legitimately absent and escalation is
 // suppressed; returning to tty1 re-anchors the grace window.
 //
+// Update gating (ffos#124) works the same way again: while ffos's updater
+// holds its lock (CommandHandler.updateInProgress), escalation is suppressed
+// and the end of the update re-anchors the grace window. Inside the fallback hold the hold
+// is re-anchored instead, so its reboot cannot land mid-update.
+//
 // Fallback hold: once the restart budget is exhausted the monitor no longer
 // reboots at once. It stops the kiosk, starts feral-kiosk-fallback.service
 // (a stable "Something went wrong..." screen) and holds for
@@ -130,6 +137,12 @@ type ChromiumMonitor struct {
 	// tty1 re-anchors the startup grace, exactly like the headless latch.
 	ttyActiveFile string
 	devConsole    bool
+
+	// updating latches "we last observed an update holding the updater
+	// lock" (updateInProgress, ffos#124), so the transition is logged once
+	// and the end of the update re-anchors the startup grace, exactly like
+	// the headless and developer-console latches.
+	updating bool
 
 	// fallbackSince is non-zero while the fallback screen is showing after
 	// the restart budget was exhausted; the hold ends in a reboot unless a
@@ -268,6 +281,7 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 	// grace window.
 	m.headless = false
 	m.devConsole = false
+	m.updating = false
 	// Chromium came back while the fallback screen was up (someone restarted
 	// the kiosk by hand, an OTA fixed the bundle): drop the hold and forget the
 	// exhausted budget so a later fault gets the full restart ladder again.
@@ -309,7 +323,8 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 // repeated on the next 5-second tick.
 //
 // It reports whether the failure happened while headless (no connected
-// display, a developer VT active, or the fallback hold in progress), so the
+// display, a developer VT active, an update in progress, or the fallback hold
+// in progress), so the
 // caller can tag it as expected rather than warn-worthy.
 //
 // The decision splits on hasEverConnected. Pre-connect, we wait through
@@ -330,6 +345,14 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 	// below name the same VT.
 	activeVT, vtReadable := readActiveVT(m.ttyActiveFile)
 	onKioskVT := kioskVTActive(activeVT, vtReadable)
+	// Update gate (ffos#124): while an OTA or package update holds the
+	// updater lock, its IO storm can starve /json/version long enough to walk
+	// the restart ladder, and the fallback hold would end in a reboot that
+	// kills the update. Escalation is suppressed like the developer console:
+	// no kiosk restart, no budget accumulation, and a fresh grace when the
+	// update ends (usually it ends in its own reboot instead). Read outside
+	// m.mu for the same reason as the two reads above.
+	updating := m.commandHandler.updateInProgress()
 
 	m.mu.Lock()
 	// Fallback hold: the kiosk was stopped on purpose and the error screen is
@@ -344,7 +367,9 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 	//   - developer console on another VT: the console is most needed exactly
 	//     when the kiosk has no picture, so the hold is re-anchored rather
 	//     than rebooting the developer out of their shell; a full hold
-	//     starts over once tty1 is active again.
+	//     starts over once tty1 is active again;
+	//   - an update in progress: re-anchored the same way, so the hold's
+	//     reboot cannot land mid-update; a full hold starts over afterwards.
 	// fallbackSince is reset before rebooting so a failed reboot command
 	// (sudo/systemctl outage) cannot re-fire every 5 s; it then drops into the
 	// normal restart ladder, which is acceptable.
@@ -382,6 +407,17 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 			return true
 		}
 		m.devConsole = false
+		if updating {
+			enteredUpdating := !m.updating
+			m.updating = true
+			m.fallbackSince = time.Now()
+			m.mu.Unlock()
+			if enteredUpdating {
+				m.logger.Info("Chromium: update in progress during fallback hold; deferring the hold until the update ends")
+			}
+			return true
+		}
+		m.updating = false
 		held := time.Since(m.fallbackSince)
 		if held < CHROMIUM_FALLBACK_HOLD {
 			m.mu.Unlock()
@@ -451,7 +487,16 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 		}
 		return true
 	}
-	reconnected := m.headless || m.devConsole
+	if updating {
+		enteredUpdating := !m.updating
+		m.updating = true
+		m.mu.Unlock()
+		if enteredUpdating {
+			m.logger.Info("Chromium: update in progress; suppressing health-check escalation until it ends")
+		}
+		return true
+	}
+	reconnected := m.headless || m.devConsole || m.updating
 	if reconnected {
 		// Display (re)appeared after a headless period, or the developer
 		// returned to tty1. Escalation resumes, but with a FRESH pre-connect
@@ -461,6 +506,7 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 		// monitorStart from before.
 		m.headless = false
 		m.devConsole = false
+		m.updating = false
 		m.hasEverConnected = false
 		m.monitorStart = time.Now()
 		m.lastSuccessfulResp = time.Time{}
@@ -471,7 +517,7 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 	m.mu.Unlock()
 
 	if reconnected {
-		m.logger.Info("Chromium: Display reconnected or developer console left; resuming health-check escalation with a fresh startup grace",
+		m.logger.Info("Chromium: Display reconnected, developer console left or update ended; resuming health-check escalation with a fresh startup grace",
 			zap.Duration("startup_grace", CHROMIUM_STARTUP_GRACE))
 	}
 
