@@ -46,6 +46,22 @@ function page({ fetchAvailable = true, abortAvailable = true } = {}) {
 
 const answer = (request, state) => request.resolve({ ok: true, json: async () => ({ state }) });
 
+test('queued credential retry stays on the result page until its new verdict', async () => {
+  const p = page();
+  // Status masks the retained auth-failure as joining while the accepted
+  // retry is queued or running, including retries of the very same SSID.
+  for (let i = 0; i < 3; i++) {
+    answer(p.requests.at(-1), 'joining');
+    await flush();
+    assert.deepEqual(p.navigations, []);
+    p.tick(3000);
+  }
+  answer(p.requests.at(-1), 'failed');
+  await flush();
+  assert.deepEqual(p.navigations, ['/']);
+  assert.equal(p.timers.size, 0);
+});
+
 test('polls immediately, survives AP outage, and GET-navigates to failure banner', async () => {
   const p = page();
   assert.equal(p.requests.length, 1);

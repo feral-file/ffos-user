@@ -687,8 +687,8 @@ func (m *Machine) sessionExpiryDue() bool {
 	// policies keep the probes-never-count rule because their phases were
 	// never shortened.
 	//
-	// Freshness comes from two sources. The index.html picker polls
-	// /status every two seconds (the #3515 watcher, before hand-off), and
+	// Freshness comes from two sources. An OPEN picker polls /status every
+	// two seconds (the #3515 hand-off watcher, before it hands off), and
 	// those polls count: a human on the form keeps the AP up, bounded by
 	// the deferral ceiling below. Once the page has handed off its polls
 	// carry X-Setup-Watcher and are excluded (portal.Config.TrafficObserved),
