@@ -196,6 +196,16 @@ func (c *CommandHandler) isKioskActivating(ctx context.Context) bool {
 	return strings.TrimSpace(string(output)) == "activating"
 }
 
+// reportFallbackParked emits the one-shot metric for a Chromium monitor that
+// has parked on the fallback screen instead of rebooting (ffos-user#254).
+func (c *CommandHandler) reportFallbackParked(ctx context.Context, consecutiveReboots int) {
+	if c.vmagentClient == nil {
+		c.logger.Warn("Vmagent client is nil, skipping chromium_fallback_parked metric")
+		return
+	}
+	c.vmagentClient.SendChromiumFallbackParkedMetric(ctx, consecutiveReboots)
+}
+
 // rebootSystem initiates a system reboot
 func (c *CommandHandler) rebootSystem(ctx context.Context, reason CrashReason) {
 	c.mu.Lock()
