@@ -22,6 +22,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
+	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -753,6 +754,77 @@ func TestHandleStartPairingSession_ReturnsCommandErrorForDisplayFailure(t *testi
 	require.NoError(t, err)
 	assertCommandError(t, result, "display_unavailable", true)
 	assert.Equal(t, 1, ch.closeCount)
+	// Round 4 review, F1: a failed display must not leave the controller
+	// pointing at this dead session — it would read as a live overlay to
+	// DisplayActive() and block a later Automatic show from another owner.
+	_, has := s.ctrl.Current()
+	assert.False(t, has, "a failed display must leave nothing current")
+	assert.False(t, s.DisplayActive())
+}
+
+// TestHandleStartPairingSession_NeverLeaksABenignRejectionError pins round 6
+// review's follow-up F1: startPairing's redisplay branches return a non-nil
+// errSessionEnded/errOverlayOccupied specifically so refreshExpiredPairingCode
+// (startPairing's other caller) can tell a benign rejection from a genuine
+// fault and skip its own Warn — but HandleStartPairingSession, the
+// command-transport entry point, used to forward that same error straight
+// through. mediator and hub both treat ANY non-nil error from a command
+// handler as "send nothing" (they only special-case four unrelated typed
+// errors), so the already-built commandError("display_unavailable", ...)
+// result was silently dropped instead of reaching the owner. Reachable
+// without any CDP timing: HandleClosePairingSession clears s.active via
+// cancelActivePairing, which takes no startMu, so an ordinary close can land
+// between the redisplay branch's own currentActive() read and its live()
+// check inside the controller's decision. This drives many rounds of a
+// start-pairing redisplay racing a close for the same active and asserts
+// HandleStartPairingSession's own Go error is always nil, exactly like every
+// other outcome of this call (see the sibling display-failure tests above).
+func TestHandleStartPairingSession_NeverLeaksABenignRejectionError(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	// A real broker starter is needed too: when the raced close wins before
+	// startPairing even reads s.active, the redisplay branch is never taken at
+	// all and startPairing falls through to its normal fresh-start path.
+	ch := &fakeBrokerChannel{pairingCode: "PAIR-FRESH"}
+	s := newService(
+		Options{Enabled: true, BrokerBaseURL: "https://broker.example", IdleTTL: time.Minute},
+		&fakeBrokerStarter{channel: ch},
+		nil,
+		nil,
+		&fakeCDP{},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	const rounds = 200
+	for round := 0; round < rounds; round++ {
+		active := &activePairing{
+			channelID:   fmt.Sprintf("ch_%d", round),
+			pairingCode: fmt.Sprintf("PAIR-%d", round),
+			phase:       activePairingPhasePairingCode,
+			cancel:      func() {},
+		}
+		active.listener = &sessionListener{s: s, active: active}
+		s.mu.Lock()
+		s.active = active
+		s.mu.Unlock()
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		var startErr error
+		go func() {
+			defer wg.Done()
+			_, startErr = s.HandleStartPairingSession(context.Background(), nil)
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = s.HandleClosePairingSession(context.Background(), nil)
+		}()
+		wg.Wait()
+
+		assert.NoError(t, startErr, "round %d: HandleStartPairingSession must never return a non-nil Go error, even when the redisplay it raced lost to a concurrent close", round)
+	}
 }
 
 func TestHandleStartPairingSession_ReturnsCommandErrorForApplicationDisplayFailure(t *testing.T) {
@@ -774,6 +846,8 @@ func TestHandleStartPairingSession_ReturnsCommandErrorForApplicationDisplayFailu
 	require.NoError(t, err)
 	assertCommandError(t, result, "display_unavailable", true)
 	assert.Equal(t, 1, ch.closeCount)
+	_, has := s.ctrl.Current()
+	assert.False(t, has, "a failed display must leave nothing current (round 4 review, F1)")
 }
 
 func TestHandleStartPairingSession_ReturnsCommandErrorForActiveRedisplayFailure(t *testing.T) {
@@ -1251,6 +1325,72 @@ func TestWaitForBrowserAndApproval_RefreshesCodeAfterPairingExpiryBeforeJoin(t *
 	assert.Equal(t, 0, newChannel.closeCount)
 }
 
+// TestWaitForBrowserAndApproval_RefreshSucceedsEvenWhenTheExpiredHideIsSlow
+// covers round 2's F-race from the delivery side: the expiry cleanup's hide of
+// the old overlay is now synchronous up to its DECISION (clearing the
+// controller's current overlay), so the refresh goroutine is spawned only
+// after that decision has already happened — a strict happens-before within
+// one goroutine, not a scheduling race, which is what actually closes F-race
+// (TestWaitForBrowserAndApproval_RefreshesCodeAfterPairingExpiryBeforeJoin
+// above is the same guarantee's end-to-end proof). What a slow CDP send could
+// still break is the refresh waiting on that unrelated DELIVERY; this test
+// holds the old session's hide delivery open well past the point the new code
+// must already be showing, so a future change that makes the refresh wait on
+// delivery (not just decision) would show up here as a timeout.
+func TestWaitForBrowserAndApproval_RefreshSucceedsEvenWhenTheExpiredHideIsSlow(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	oldChannel := &fakeBrokerChannel{
+		channelID:   "ch_old",
+		pairingCode: "PAIR-OLD",
+		expiresAt:   time.Now().Add(80 * time.Millisecond),
+	}
+	newChannel := &fakeBrokerChannel{
+		channelID:   "ch_new",
+		pairingCode: "PAIR-NEW",
+		expiresAt:   time.Now().Add(time.Minute),
+	}
+	starter := &fakeBrokerStarter{channels: []brokerChannel{oldChannel, newChannel}}
+	cdpClient := &fakeCDP{}
+	cdpClient.onDisplay = func(state string) {
+		if state == "hidden" {
+			// Simulate a slow CDP send for the expiring session's clear — long
+			// enough that, under the old async-hide design, the refresh's
+			// Automatic show would reach the controller's lock first and be
+			// rejected.
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	s := newService(
+		Options{
+			Enabled:       true,
+			BrokerBaseURL: "https://broker.example",
+			PollInterval:  time.Millisecond,
+		},
+		starter,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-OLD", "")
+
+	// The new code must show up well inside the slow hide's own 300ms send —
+	// its decision does not wait on that delivery.
+	assert.Eventually(t, func() bool {
+		return starter.StartCount() == 2
+	}, 250*time.Millisecond, 5*time.Millisecond, "the refresh must not wait on the slow hide delivery")
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-NEW", "")
+}
+
 func TestHandleStartPairingSession_StaleExpiredCleanupDoesNotOverwriteReplacementDisplay(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -1433,9 +1573,16 @@ func TestHandleStartPairingSession_RestartDuringDelayedTerminalHideLeavesNewDisp
 	assertLastDisplay(t, cdpClient, "pairing_code", "PAIR-NEW", "")
 }
 
-func TestShowPairingCode_FailedReplacementDoesNotSuppressReleasedCleanup(t *testing.T) {
-	oldActive := &activePairing{channelID: "ch_old", pairingCode: "PAIR-OLD", displayGen: 1}
-	newActive := &activePairing{channelID: "ch_new", pairingCode: "PAIR-NEW"}
+// A failed delivery no longer rolls back the decision it belongs to — the
+// decision and the delivery are two different things (see the overlay
+// package doc). newActive replaces oldActive on screen immediately; only its
+// delivery fails, which showPairingCode still reports through Result.Wait
+// (the same observable failure the display-failure tests below hold the
+// start command to), but the replacement itself stands. oldActive no longer
+// holds the screen, so its own clear is correctly a no-op.
+func TestShowPairingCode_ReplacementCommitsEvenWhenItsDeliveryFails(t *testing.T) {
+	oldActive := &activePairing{channelID: "ch_old", pairingCode: "PAIR-OLD", cancel: func() {}}
+	newActive := &activePairing{channelID: "ch_new", pairingCode: "PAIR-NEW", cancel: func() {}}
 	cdpClient := &fakeCDP{
 		appResponseForRequest: func(request map[string]any) any {
 			if request["state"] == "pairing_code" && request["pairingCode"] == "PAIR-NEW" {
@@ -1453,17 +1600,81 @@ func TestShowPairingCode_FailedReplacementDoesNotSuppressReleasedCleanup(t *test
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
+	oldActive.listener = &sessionListener{s: s, active: oldActive}
+	newActive.listener = &sessionListener{s: s, active: newActive}
 	s.active = oldActive
-	s.displayOwner = oldActive
-	s.displayGeneration = oldActive.displayGen
+	alwaysLive := func() bool { return true }
 
-	displayGeneration, restoreDisplay := s.releaseDisplayOwnership(oldActive)
-	require.True(t, restoreDisplay)
-	require.Error(t, s.showPairingCode(context.Background(), newActive))
+	require.NoError(t, s.showPairingCode(context.Background(), oldActive, overlay.Owner, alwaysLive))
+	require.Error(t, s.showPairingCode(context.Background(), newActive, overlay.Owner, alwaysLive),
+		"the delivery failure is still reported to this call's own caller")
+	cur, has := s.ctrl.Current()
+	require.True(t, has, "the decision committed regardless of the delivery outcome")
+	assert.Equal(t, "PAIR-NEW", cur.Payload, "newActive's show is what committed, not oldActive's")
 
-	s.restoreDefaultDisplay(oldActive.channelID, displayGeneration)
+	before := len(cdpClient.displayRequestsSnapshot())
+	s.hideSession(oldActive)
+	time.Sleep(20 * time.Millisecond)
+	assert.Len(t, cdpClient.displayRequestsSnapshot(), before, "oldActive no longer holds the screen, so its clear sends nothing")
+}
 
-	assertLastDisplay(t, cdpClient, "hidden", "", "")
+// TestHideSession_ConcurrentShowsNeverDesyncFromTheControllersCurrentOwner
+// pins round 6 review's follow-up F1: showMint used to cache its own
+// ShowIf's Handle into active.handle AFTER ShowIf returned, so two
+// concurrent shows for the same active — e.g. the start command's
+// redisplay branch (showPairingCode) racing the approval worker's own
+// showRequestReceived, both sharing one listener via listenerFor — could
+// commit in one order but write that external Handle in the other, leaving
+// hideSession holding a Handle for an overlay that was not this active's
+// true last commit. hideSession's Hide(staleHandle) would then wrongly
+// return ErrNotCurrent and silently no-op even while this active genuinely
+// still owned the screen. The fix (Controller.HideOwned) removed the
+// external Handle: ownership is re-read fresh, under the controller's own
+// decision lock, at hideSession time — there is nothing left to desync.
+// This drives many rounds of two concurrent Owner shows for the same
+// active (always leaving something current, since neither show is ever
+// rejected by its own listener's earlier overlay) and checks that
+// hideSession always actually clears it.
+func TestHideSession_ConcurrentShowsNeverDesyncFromTheControllersCurrentOwner(t *testing.T) {
+	active := &activePairing{channelID: "ch1", pairingCode: "PAIR-1", cancel: func() {}}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{},
+		nil,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	active.listener = &sessionListener{s: s, active: active}
+	s.active = active
+	alwaysLive := func() bool { return true }
+
+	const rounds = 50
+	for round := 0; round < rounds; round++ {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = s.showPairingCode(context.Background(), active, overlay.Owner, alwaysLive)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = s.showRequestReceived(context.Background(), active, "a browser")
+		}()
+		wg.Wait()
+
+		_, has := s.ctrl.Current()
+		require.True(t, has, "round %d: one of the two concurrent Owner shows must have committed", round)
+
+		before := len(cdpClient.displayRequestsSnapshot())
+		s.hideSession(active)
+		time.Sleep(10 * time.Millisecond)
+		_, stillHas := s.ctrl.Current()
+		assert.False(t, stillHas, "round %d: hideSession must clear the screen this active still genuinely owns", round)
+		assert.Greater(t, len(cdpClient.displayRequestsSnapshot()), before, "round %d: hideSession must not silently no-op on a stale handle", round)
+	}
 }
 
 // fakeMintNavigationSession is a minimal, directly-controllable
@@ -1535,7 +1746,9 @@ func TestShowPairingCode_ParksWhileNavigationPending(t *testing.T) {
 	s.navigationParkTimeout = 2 * time.Second
 
 	done := make(chan error, 1)
-	go func() { done <- s.showPairingCode(context.Background(), active) }()
+	go func() {
+		done <- s.showPairingCode(context.Background(), active, overlay.Owner, func() bool { return true })
+	}()
 
 	// Give the call a chance to observe the pending flag and start parking.
 	time.Sleep(30 * time.Millisecond)
@@ -1569,7 +1782,9 @@ func TestShowPairingCode_ExitsParkWhenTargetGenerationReady(t *testing.T) {
 	s.navigationParkTimeout = 2 * time.Second
 
 	done := make(chan error, 1)
-	go func() { done <- s.showPairingCode(context.Background(), active) }()
+	go func() {
+		done <- s.showPairingCode(context.Background(), active, overlay.Owner, func() bool { return true })
+	}()
 
 	time.Sleep(30 * time.Millisecond)
 	cdpClient.mu.Lock()
@@ -1605,7 +1820,7 @@ func TestShowPairingCode_ExitsParkPromptlyWhenEnteredPostBump(t *testing.T) {
 	s.navigationParkTimeout = 2 * time.Second
 
 	start := time.Now()
-	err := s.showPairingCode(context.Background(), active)
+	err := s.showPairingCode(context.Background(), active, overlay.Owner, func() bool { return true })
 	elapsed := time.Since(start)
 
 	require.NoError(t, err)
@@ -5192,4 +5407,29 @@ func TestHandleJoinPairingChannel_MismatchOutcomeSurvivesASlowRejection(t *testi
 	case <-time.After(time.Second):
 		t.Fatal("the channel must still be closed")
 	}
+}
+
+// Round 3 review, F2: a session that legitimately ended between a caller's
+// own liveness check and the controller's decision (an OnOverride landing in
+// that window) must classify as errSessionEnded, not a generic display
+// error, and isBenignRejection must recognize it alongside errOverlayOccupied
+// — both are benign, neither should log as a fault.
+func TestShowPairingCode_LiveFalseAtDecisionIsErrSessionEnded(t *testing.T) {
+	s := newService(
+		Options{},
+		nil,
+		nil,
+		nil,
+		&fakeCDP{},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	active := &activePairing{channelID: "ch_1", pairingCode: "PAIR-1", cancel: func() {}}
+
+	err := s.showPairingCode(context.Background(), active, overlay.Owner, func() bool { return false })
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errSessionEnded)
+	assert.True(t, isBenignRejection(err), "errSessionEnded is a benign rejection, not a fault")
+	assert.False(t, isBenignRejection(errors.New("cdp send failed")), "a genuine delivery error is not benign")
 }

@@ -39,6 +39,13 @@ type narratorSpy struct {
 }
 
 func (s *narratorSpy) ShowFinalizing() { s.calls = append(s.calls, "finalizing") }
+
+// ShowClaimQRAutomatic records the same call as ShowClaimQR: the existing claim
+// assertions read the narration, not the priority it was painted with.
+func (s *narratorSpy) ShowClaimQRAutomatic(url string, deviceName string) {
+	s.ShowClaimQR(url, deviceName)
+}
+
 func (s *narratorSpy) ShowClaimQR(url string, deviceName string) {
 	s.calls = append(s.calls, "claim")
 	s.lastURL = url

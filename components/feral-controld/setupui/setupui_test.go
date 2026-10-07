@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 )
 
@@ -359,11 +360,6 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 			name:      "ready",
 			call:      func(s *Service) { s.ShowReady() },
 			wantState: stateReady,
-		},
-		{
-			name:      "hidden",
-			call:      func(s *Service) { s.Hide() },
-			wantState: stateHidden,
 		},
 		{
 			name:      "factory reset",
@@ -776,37 +772,127 @@ func TestResyncBeforeAnyStateIsNoop(t *testing.T) {
 	assert.Equal(t, 0, sender.callCount())
 }
 
-// TestResync_NoOpWhenPendingNonEmpty pins minor #14: Resync now also runs as
-// a generation-ready reconciler (on every document replacement, not just the
-// original CDP on-connect wiring), so it can fire while a genuine
-// multi-state sequence (e.g. the claim flow's ShowReady()+Hide() — two
-// DISTINCT states that must both reach the player) is still queued. It must
-// leave a non-empty queue alone rather than collapsing it down to just the
-// last intent, which would silently drop the Ready.
-func TestResync_NoOpWhenPendingNonEmpty(t *testing.T) {
-	svc := newTestService(t, newFakeCDP(), validContract)
+// TestResync_DoesNotReclaimAfterConcurrentOwner pins round 5 review's F3
+// directly: a setup overlay this service shows (ShowFinalizing) can lose the
+// screen to a newer owner (a browser-pairing request) before the "CDP
+// reconnected" trigger calls Resync. The pre-fix Resync read Current() and
+// then unconditionally re-Showed that stale snapshot with Owner priority,
+// clobbering whoever had taken over since. Controller.Replay closes that gap
+// by re-checking ownership under its own single lock acquisition instead of a
+// separate snapshot step, so Resync must leave the newer owner's overlay
+// alone here.
+func TestResync_DoesNotReclaimAfterConcurrentOwner(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
 
-	svc.mu.Lock()
-	svc.last = map[string]any{"state": stateHidden}
-	svc.pending = []map[string]any{
-		{"state": stateReady},
-		{"state": stateHidden},
-	}
-	svc.running = true // pretend a worker is already draining this queue
-	svc.mu.Unlock()
+	svc.ShowFinalizing()
+	fake.waitForCalls(t, 1)
+
+	// A browser-pairing request takes the screen before the reconnect fires
+	// Resync.
+	other := overlay.Overlay{Kind: "mint:pairing_code"}
+	otherListener := &fakeListener{}
+	_, _, err := svc.ctrl.Show(context.Background(), otherListener, other, overlay.Owner)
+	require.NoError(t, err)
 
 	svc.Resync()
+	time.Sleep(20 * time.Millisecond)
 
-	svc.mu.Lock()
-	defer svc.mu.Unlock()
-	require.Len(t, svc.pending, 2, "a non-empty queue must be left alone")
-	assert.Equal(t, stateReady, svc.pending[0]["state"])
-	assert.Equal(t, stateHidden, svc.pending[1]["state"])
+	cur, has := svc.ctrl.Current()
+	assert.True(t, has)
+	assert.Equal(t, other.Kind, cur.Kind, "Resync must not reclaim the screen from a newer owner")
 }
 
-// TestResync_ReEnqueuesLastWhenPendingEmpty pins the other half: an EMPTY
-// queue means there is genuinely nothing in flight, so Resync's original job
-// (catch a reconnected/new document up to the current intent) still applies.
+// TestResync_ReplayedHiddenIntentRoutesThroughTheProductionRouter guards
+// against the gap review found in the first version of this fix: this
+// file's own test controller (newTestService's overlay.New(setupPainter{s:
+// s})) routes Hide by ignoring its Overlay argument entirely, so a Kind-less
+// delivery passes here regardless. main.go instead wires setupui and
+// mintpairing behind a shared overlay.Router, which routes STRICTLY by Kind
+// prefix — a delivery carrying the zero-value Overlay{} (Kind=="") matches no
+// prefix and is silently dropped. Resync's hidden-intent replay must still
+// reach the player when wired exactly as production does.
+func TestResync_ReplayedHiddenIntentRoutesThroughTheProductionRouter(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
+	svc.SetController(overlay.New(overlay.NewRouter(map[string]overlay.Painter{
+		"setup:": setupPainter{s: svc},
+	})))
+
+	svc.ShowReady()
+	svc.Hide()
+	fake.waitForCalls(t, 2)
+
+	before := fake.callCount()
+	svc.Resync()
+	fake.waitForCalls(t, before+1)
+	assert.Equal(t, stateHidden, fake.lastRequest()["state"])
+}
+
+// TestResync_ReplaysHiddenIntentAfterHide pins the fix for round 5 review's
+// F2: a plain Hide() clears the overlay controller's current overlay to
+// nothing, which setupui cannot tell apart from "the clear's own CDP send
+// failed" without blocking the caller to find out (its contract is never
+// block). So Resync must replay the hidden intent unconditionally on every
+// reconnect, exactly as it already does for a shown state (see
+// TestResyncRepushesLastStateWhenCDPReturns) — not silently assume the last
+// clear got through, which is what the pre-fix no-op here actually did.
+func TestResync_ReplaysHiddenIntentAfterHide(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
+
+	svc.ShowReady()
+	svc.Hide()
+	fake.waitForCalls(t, 2)
+
+	before := fake.callCount()
+	svc.Resync()
+	fake.waitForCalls(t, before+1)
+	assert.Equal(t, stateHidden, fake.lastRequest()["state"])
+}
+
+// fakeListener is a minimal overlay.Listener for tests that need some OTHER
+// owner to hold the screen, without caring what happens when it is replaced.
+type fakeListener struct{}
+
+func (fakeListener) OnOverride(overlay.Overlay) {}
+func (fakeListener) OnClose()                   {}
+
+// TestResync_HiddenIntentDoesNotClobberANewerOwner guards the other half: the
+// replay above must re-check ownership at commit time (round 5 review, F3's
+// same reasoning applied to the hidden-intent path), not blindly clear
+// whatever is current. If a different overlay owner has taken the screen
+// since this service's own last Hide(), Resync must leave it alone.
+func TestResync_HiddenIntentDoesNotClobberANewerOwner(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
+
+	svc.ShowReady()
+	svc.Hide()
+	fake.waitForCalls(t, 2)
+
+	// A different listener takes the screen after setupui hid itself. Asserted
+	// on the controller's own decision (Current), not a CDP call count: this
+	// test's svc.ctrl has no router splitting owners onto separate painters
+	// the way production wiring does, so any Show on it — including this
+	// other listener's — reaches the same fake sender setupui's own narration
+	// does, making a call-count assertion race against that unrelated send.
+	other := overlay.Overlay{Kind: "other:kind"}
+	otherListener := &fakeListener{}
+	_, _, err := svc.ctrl.Show(context.Background(), otherListener, other, overlay.Owner)
+	require.NoError(t, err)
+
+	svc.Resync()
+	time.Sleep(20 * time.Millisecond)
+
+	cur, has := svc.ctrl.Current()
+	assert.True(t, has)
+	assert.Equal(t, other.Kind, cur.Kind, "a newer owner's overlay must survive a stale hidden-intent replay")
+}
+
+// TestResync_ReEnqueuesLastWhenPendingEmpty pins the other half: Resync's
+// original job (catch a reconnected/new document up to the current intent)
+// still applies when something is current.
 func TestResync_ReEnqueuesLastWhenPendingEmpty(t *testing.T) {
 	fake := newFakeCDP()
 	svc := newTestService(t, fake, validContract)
@@ -993,56 +1079,55 @@ func TestReadyThenHideDeliversBoth(t *testing.T) {
 	assert.Equal(t, stateHidden, fake.requests[1]["state"])
 }
 
-// TestSameStateBurstCoalesces keeps the flip side of the queue contract honest:
-// a CONTIGUOUS burst of the same state (OTA progress) collapses to one trailing
-// entry with the newest payload, so a slow CDP link never builds a backlog of
-// stale percentages — while a repeat AFTER intervening states must append, so
-// the screen ends on the newest state instead of a buried replacement.
-func TestSameStateBurstCoalesces(t *testing.T) {
-	svc := newTestService(t, newFakeCDP(), validContract)
+// TestShowClaimQRAutomatic_NotStarvedByItsOwnEarlierFinalizing is round 3
+// review's F1 end to end, through the real production call path: the
+// auto-claim loop's ShowFinalizing() (Owner) followed by its own
+// ShowClaimQRAutomatic() must not find "something current" and reject,
+// because that something is this same Service's own earlier overlay. Before
+// the overlay package's fix, every one of this flow's claim-QR repaints after
+// the first would have silently failed, stranding an unclaimed device on
+// "Finalizing" until an unrelated narrator or an explicit cloud command
+// repainted the screen.
+func TestShowClaimQRAutomatic_NotStarvedByItsOwnEarlierFinalizing(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
 
-	// Enqueue directly (no worker running) to test the coalescing rule itself
-	// deterministically.
-	svc.mu.Lock()
-	svc.enqueueLocked(map[string]any{"state": stateUpdating, "progress": 10})
-	svc.enqueueLocked(map[string]any{"state": stateUpdating, "progress": 50})
-	svc.enqueueLocked(map[string]any{"state": stateHidden})
-	svc.enqueueLocked(map[string]any{"state": stateUpdating, "progress": 90})
-	queue := make([]map[string]any, len(svc.pending))
-	copy(queue, svc.pending)
-	svc.mu.Unlock()
+	svc.ShowFinalizing()
+	fake.waitForCalls(t, 1)
 
-	require.Len(t, queue, 3)
-	assert.Equal(t, stateUpdating, queue[0]["state"])
-	assert.Equal(t, 50, queue[0]["progress"], "contiguous burst must coalesce to the newest payload")
-	assert.Equal(t, stateHidden, queue[1]["state"])
-	assert.Equal(t, stateUpdating, queue[2]["state"])
-	assert.Equal(t, 90, queue[2]["progress"], "a repeat after intervening states must append, not replace the buried entry")
+	svc.ShowClaimQRAutomatic("https://claim.example/x", "FF1-8EVTK3RE")
+	fake.waitForCalls(t, 2)
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	require.Len(t, fake.requests, 2)
+	assert.Equal(t, stateFinalizing, fake.requests[0]["state"])
+	assert.Equal(t, stateClaimQR, fake.requests[1]["state"], "the claim QR must not be starved by this service's own earlier overlay")
 }
 
-// TestRepeatAfterInterveningStatesEndsOnNewest pins the delivery-order bug the
-// old replace-in-place rule caused: softap_qr→joining→join_failed queued, then
-// a fresh softap_qr (the re-raised AP). Replacing the buried first entry
-// delivered softap_qr(new)→joining→join_failed and left the player on an
-// obsolete failure screen while the AP was active. The queue must end on the
-// newest softap_qr.
-func TestRepeatAfterInterveningStatesEndsOnNewest(t *testing.T) {
-	svc := newTestService(t, newFakeCDP(), validContract)
+// Hide() with no setup narration current sends nothing — there is no "clear an
+// empty screen" bypass any more (see the overlay package doc and
+// SweepStaleOverlay, the one legitimate case of painting without the owner
+// having asked). Hiding something another owner painted, not setup, is the
+// same no-op for the same reason: a plain Hide clears only setup's own overlay.
+func TestHide_NothingCurrentSendsNothing(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
 
-	svc.mu.Lock()
-	svc.enqueueLocked(map[string]any{"state": stateSoftAPQR, "ssid": "FF1-abc", "psk": "old"})
-	svc.enqueueLocked(map[string]any{"state": stateJoining})
-	svc.enqueueLocked(map[string]any{"state": stateJoinFailed})
-	svc.enqueueLocked(map[string]any{"state": stateSoftAPQR, "ssid": "FF1-abc", "psk": "new"})
-	queue := make([]map[string]any, len(svc.pending))
-	copy(queue, svc.pending)
-	svc.mu.Unlock()
+	svc.Hide()
 
-	require.Len(t, queue, 4)
-	assert.Equal(t, stateSoftAPQR, queue[3]["state"], "delivery must END on the re-raised QR")
-	assert.Equal(t, "new", queue[3]["psk"])
-	assert.Equal(t, "old", queue[0]["psk"], "the earlier QR keeps its original position and payload")
+	time.Sleep(20 * time.Millisecond)
+	assert.Zero(t, fake.callCount(), "nothing was shown, so there is nothing to clear")
 }
+
+// The coalescing and ordering rules (a contiguous same-state burst collapses
+// to its newest payload; a repeat after intervening states appends instead of
+// replacing a buried entry) moved to the overlay package's own delivery queue
+// along with the queue itself — see
+// overlay.TestDelivery_CoalescesTrailingSameKindButKeepsDistinctStates. They
+// are no longer setupui-internal state to poke directly; TestReadyThenHideDeliversBoth
+// above is the black-box proof at this package's own level that distinct
+// states still both arrive, in order.
 
 // TestUnreadableContractDefersWithoutLatching: a read failure (boot ordering,
 // OTA mid-replace of the player bundle) must NOT latch narration off for the
@@ -1205,6 +1290,100 @@ func TestSweepStaleOverlay(t *testing.T) {
 		assert.Equal(t, stateUpdating, sender.lastRequest()["state"])
 		assert.True(t, svc.Narrating())
 	})
+}
+
+// TestSweepStaleOverlay_DoesNotExploitSameListenerExemptionDuringTheNarratedRace
+// pins round 4 review's F2. Every setupui push shares one controller listener
+// (s), so between an Owner show's commit and showOwned's own "s.narrated =
+// true" flip (two separate locks: the controller's and s.mu), the sweep can
+// read narrated == false while a live Owner overlay from this same Service
+// is already current. The controller's same-listener exemption — added so
+// ShowClaimQRAutomatic may replace its own earlier ShowFinalizing — would
+// read that live overlay as "this listener's own earlier show" and let the
+// sweep's Automatic hide through anyway, erasing a live narration (e.g.
+// ShowUpdating mid-OTA) the sweep was never meant to touch. This reproduces
+// the exact window deterministically: it commits the show through the
+// controller directly, the same call showOwned makes, without going through
+// showOwned itself — so narrated is left false exactly as it would be
+// mid-race — then invokes the production SweepStaleOverlay and asserts the
+// live overlay survives.
+func TestSweepStaleOverlay_DoesNotExploitSameListenerExemptionDuringTheNarratedRace(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, validContract)
+
+	live := overlay.Overlay{
+		Kind:    setupKind(stateUpdating),
+		Payload: map[string]any{"state": stateUpdating},
+	}
+	_, result, err := svc.ctrl.ShowIf(context.Background(), svc, live, overlay.Owner, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, result.Wait(context.Background()))
+	sender.waitForCalls(t, 1)
+	svc.mu.Lock()
+	narratedStillFalse := !svc.narrated
+	svc.mu.Unlock()
+	require.True(t, narratedStillFalse, "the race window requires narrated to still read false (committed outside showOwned, which alone flips it)")
+
+	svc.SweepStaleOverlay()
+	time.Sleep(20 * time.Millisecond) // give a (wrongly) accepted sweep time to deliver
+
+	cur, has := svc.ctrl.Current()
+	require.True(t, has, "the live overlay must still be current")
+	assert.Equal(t, live.Kind, cur.Kind, "the sweep must not replace a live overlay committed outside showOwned's narrated flip")
+	assert.Equal(t, 1, sender.callCount(), "no hide may be delivered while the live overlay stands")
+}
+
+// TestShowOwnedAndHideIf_ConcurrentDecisionsKeepHiddenIntentConsistent pins
+// round 6 review's F4: showOwned and hideIf used to write s.narrated /
+// s.hiddenIntent AFTER ShowIf/HideIf returned. Nothing in setupui's own
+// contract serializes two of ITS OWN decisions any more (the overlay
+// package doc explains why the old internal queue, which used to do that,
+// was removed), so a push racing a hide could commit in one order but
+// return — and so write these two fields — in the other, leaving
+// hiddenIntent describing whichever call returned last rather than
+// whichever decision actually committed last. The fix moved both writes
+// into the CommitHook, which runs under the controller's own decision lock
+// in true commit order (see overlay.CommitHook's doc), so this no longer
+// depends on which goroutine happens to resume first. This drives many
+// concurrent shows and hides on the same Service and checks, after every
+// batch, that hiddenIntent agrees with whether anything is actually
+// current — nothing current must mean hiddenIntent is true (the last
+// commit was a hide), something current must mean it is false (the last
+// commit was a show) — with the race detector run alongside to catch any
+// write this ordering guarantee fails to fence.
+func TestShowOwnedAndHideIf_ConcurrentDecisionsKeepHiddenIntentConsistent(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, validContract)
+
+	const workers = 8
+	const rounds = 50
+	for round := 0; round < rounds; round++ {
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				if i%2 == 0 {
+					svc.ShowUpdating(i)
+				} else {
+					svc.HideIfShowing(stateUpdating)
+				}
+			}(i)
+		}
+		wg.Wait()
+
+		cur, has := svc.ctrl.Current()
+		svc.mu.Lock()
+		hiddenIntent := svc.hiddenIntent
+		svc.mu.Unlock()
+		if has {
+			assert.False(t, hiddenIntent, "round %d: %v is current; hiddenIntent must reflect the later show, not a stale hide", round, cur.Kind)
+		} else {
+			assert.True(t, hiddenIntent, "round %d: nothing is current; hiddenIntent must reflect the later hide, not a stale show", round)
+		}
+		// Reset to a known state before the next round's race.
+		svc.HideIfShowing(stateUpdating)
+	}
 }
 
 // TestHideIfShowing pins the owned-narration clear: a flow may hide the
