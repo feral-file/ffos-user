@@ -572,6 +572,17 @@ func (s *Service) ShowFinalizing() {
 // "open the app on the same Wi-Fi and it finds this frame automatically"
 // guidance — the QR itself is the backup path.
 func (s *Service) ShowClaimQR(url string, deviceName string) {
+	s.showClaimQR(url, deviceName, overlay.Owner)
+}
+
+// ShowClaimQRAutomatic paints the claim QR on a timer's behalf (the auto-claim
+// loop). It is accepted only on an empty screen, so it never replaces an
+// overlay the owner asked for, such as a browser-pairing code.
+func (s *Service) ShowClaimQRAutomatic(url string, deviceName string) {
+	s.showClaimQR(url, deviceName, overlay.Automatic)
+}
+
+func (s *Service) showClaimQR(url string, deviceName string, pr overlay.Priority) {
 	req := map[string]any{
 		"state": stateClaimQR,
 		"url":   url,
@@ -579,7 +590,7 @@ func (s *Service) ShowClaimQR(url string, deviceName string) {
 	if strings.TrimSpace(deviceName) != "" {
 		req["device_name"] = deviceName
 	}
-	s.push(req)
+	s.showOwned(req, pr, nil)
 }
 
 // RefreshClaimQRName rewrites only the device_name of the claim-QR narration

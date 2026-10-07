@@ -24,6 +24,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
+	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/qrdisplay"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
@@ -101,6 +102,11 @@ type Service interface {
 	HandleJoinPairingChannel(ctx context.Context, args map[string]any) (any, error)
 	HandleClosePairingSession(ctx context.Context, args map[string]any) (any, error)
 	HandleApprovalDecision(ctx context.Context, args map[string]any) (any, error)
+	// SetController makes the service show and clear its overlays through a
+	// controller shared with the other owners. Call once before the first session.
+	SetController(c *overlay.Controller)
+	// Painter returns the transport the shared controller paints mint overlays with.
+	Painter() overlay.Painter
 	// DisplayActive reports whether THIS process currently owns the player
 	// overlay with a live mint-pairing display (pairing code or
 	// request-received, painted by showPairingCode/showRequestReceived and
@@ -172,15 +178,13 @@ type service struct {
 	cancel context.CancelFunc
 
 	startMu sync.Mutex
-	// displayMu serializes player overlay mutations so a delayed terminal hide
-	// cannot overtake a replacement pairing-code display.
-	displayMu         sync.Mutex
-	mu                sync.Mutex
-	active            *activePairing
-	displayOwner      *activePairing
-	displayGeneration uint64
-	pending           map[string]*pendingApproval
-	doneMap           map[string]completedApproval
+	mu      sync.Mutex
+	active  *activePairing
+	// ctrl owns the screen overlay. Pairing codes and request states are shown
+	// and cleared through it; see mintpairing's painter and sessionListener.
+	ctrl    *overlay.Controller
+	pending map[string]*pendingApproval
+	doneMap map[string]completedApproval
 
 	// starting is a pairing start whose broker call is in flight and whose
 	// session has not been published yet. Without it a reset landing in that
@@ -480,9 +484,14 @@ type activePairing struct {
 	expiresAt   time.Time
 	phase       activePairingPhase
 	browserName string
-	displayGen  uint64
-	cancel      context.CancelFunc
-	done        chan struct{}
+	// handle is this session's current overlay on screen, if it has one. A
+	// session whose overlay was replaced holds a stale handle and clears nothing.
+	handle overlay.Handle
+	// listener is this session's owner side of the overlay, created once per
+	// session so re-shows of the same code are not treated as overrides.
+	listener overlay.Listener
+	cancel   context.CancelFunc
+	done     chan struct{}
 
 	// joined marks a site-initiated pairing: the device joined a channel the
 	// site created, so there is no code to show and the panel is never
@@ -608,7 +617,7 @@ func newService(
 	if json == nil {
 		json = wrapper.NewJSON()
 	}
-	return &service{
+	s := &service{
 		opts:           opts,
 		broker:         broker,
 		sessionCreator: sessionCreator,
@@ -620,6 +629,9 @@ func newService(
 		doneMap:        make(map[string]completedApproval),
 		creates:        newCreateGate(),
 	}
+	// A private controller until SetController shares one with setupui.
+	s.ctrl = overlay.New(mintPainter{s: s})
+	return s
 }
 
 // defaultNavigationParkPollInterval / defaultNavigationParkTimeout bound the
@@ -731,6 +743,12 @@ func (s *service) Stop() {
 }
 
 func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]any) (any, error) {
+	return s.startPairing(ctx, overlay.Owner)
+}
+
+// startPairing starts or re-shows a pairing. pr is who asked: an owner's tap
+// may replace any overlay, an automatic refresh only an empty screen.
+func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, error) {
 	if s == nil || !s.opts.Enabled {
 		return commandError("disabled", "mint pairing is not enabled", false), nil
 	}
@@ -783,7 +801,7 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 				ExpiresAt: formatOptionalTime(active.expiresAt),
 			}, nil
 		}
-		if err := s.showPairingCode(ctx, active); err != nil {
+		if err := s.showPairingCode(ctx, active, pr, func() bool { return s.isActive(active) }); err != nil {
 			s.logger.Warn("Failed to redisplay active mint pairing code", append(pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt), zap.Error(err))...)
 			return commandError("display_unavailable", "failed to display mint pairing QR code", true), nil
 		}
@@ -865,7 +883,7 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	}
 	s.logger.Info("Mint pairing broker channel started", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
 
-	if err := s.showPairingCode(ctx, active); err != nil {
+	if err := s.showPairingCode(ctx, active, pr, func() bool { return !s.startCanceled(starting) }); err != nil {
 		sessionCancel()
 		s.closeChannel(channel)
 		s.logger.Warn("Failed to display mint pairing QR code; closed broker channel", append(pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt), zap.Error(err))...)
@@ -879,10 +897,8 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	// with the code already on screen, and take it back down if it moved.
 	if !startGuard.sameAs(currentTopicGuard()) {
 		sessionCancel()
-		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
-		if restoreDisplay {
-			s.restoreDefaultDisplay(active.channelID, displayGeneration)
-		}
+		s.clearActive(active)
+		s.hideSession(active)
 		s.closeChannel(channel)
 		s.logger.Warn("Dropping a mint pairing session whose claim went while its code was displayed",
 			pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
@@ -893,10 +909,8 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	// start; the channel it got back anyway is taken down, not published.
 	if !s.publishUnlessCanceled(starting, active) {
 		sessionCancel()
-		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
-		if restoreDisplay {
-			s.restoreDefaultDisplay(active.channelID, displayGeneration)
-		}
+		s.clearActive(active)
+		s.hideSession(active)
 		s.closeChannel(channel)
 		s.logger.Info("Dropping a mint pairing start that was closed while it started",
 			pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
@@ -1426,13 +1440,11 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	terminalSent := false
 	refreshAfterClose := false
 	defer func() {
-		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
+		s.clearActive(active)
 		if active.done != nil {
 			close(active.done)
 		}
-		if restoreDisplay {
-			go s.restoreDefaultDisplay(active.channelID, displayGeneration)
-		}
+		go s.hideSession(active)
 		if terminalSent {
 			// Terminal broker messages must remain pollable after controld sends
 			// them. The broker's TTL handles cleanup; explicit Close is only for
@@ -1741,7 +1753,7 @@ func (s *service) completeDecisionFor(ctx context.Context, active *activePairing
 	}
 
 	if paintsOverlay(channel) {
-		if err := qrdisplay.ShowCreatingToken(ctx, s.cdp, browserDisplayName(request.BrowserInfo)); err != nil {
+		if err := s.showMint(ctx, active, overlay.Overlay{Kind: KindCreatingToken, Payload: browserDisplayName(request.BrowserInfo)}, overlay.Owner, func() bool { return s.isActive(active) }); err != nil {
 			s.logger.Warn("Failed to display mint pairing token creation status", zap.Error(err), zap.String("channelID", request.ChannelID))
 		}
 	}
@@ -2197,9 +2209,8 @@ func (s *service) sendMintPairingNotification(ctx context.Context, notificationT
 // DisplayActive reports whether this process currently owns the player
 // overlay with a live mint-pairing display. See the Service interface doc.
 func (s *service) DisplayActive() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.displayOwner != nil
+	cur, ok := s.ctrl.Current()
+	return ok && strings.HasPrefix(string(cur.Kind), mintKindPrefix)
 }
 
 func (s *service) registerPending(p *pendingApproval) {
@@ -2316,7 +2327,7 @@ func (s *service) refreshExpiredPairingCode() {
 	if runCtx == nil || runCtx.Err() != nil {
 		return
 	}
-	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	result, err := s.startPairing(context.Background(), overlay.Automatic)
 	if err != nil {
 		s.logger.Warn("Failed to refresh expired mint pairing code", zap.Error(err))
 		return
@@ -2338,55 +2349,154 @@ func (s *service) setActivePendingApproval(active *activePairing, browserName st
 	active.browserName = browserName
 }
 
-func (s *service) showPairingCode(ctx context.Context, active *activePairing) error {
-	// Park BEFORE taking displayMu — parking can take up to the full
-	// timeout, and holding displayMu across it would serialize every OTHER
-	// display mutation behind an unrelated navigation.
-	s.parkForNavigation()
-	s.displayMu.Lock()
-	defer s.displayMu.Unlock()
+// Mint overlay kinds, namespaced for the shared controller's router.
+const mintKindPrefix = "mint:"
 
-	if err := qrdisplay.ShowPairingCode(ctx, s.cdp, active.pairingCode); err != nil {
+const (
+	// KindPairingCode is the browser-pairing code on screen.
+	KindPairingCode overlay.Kind = mintKindPrefix + "pairing_code"
+	// KindRequestReceived is a browser request awaiting the owner's decision.
+	KindRequestReceived overlay.Kind = mintKindPrefix + "request_received"
+	// KindCreatingToken is a session being connected after an approval.
+	KindCreatingToken overlay.Kind = mintKindPrefix + "creating_token"
+)
+
+// mintPainter sends mint overlays to the player. Its Show does no ownership
+// bookkeeping: the controller records what is on screen.
+type mintPainter struct {
+	s *service
+}
+
+func (p mintPainter) Show(ctx context.Context, o overlay.Overlay) error {
+	switch o.Kind {
+	case KindPairingCode:
+		code, _ := o.Payload.(string)
+		return qrdisplay.ShowPairingCode(ctx, p.s.cdp, code)
+	case KindRequestReceived:
+		name, _ := o.Payload.(string)
+		return qrdisplay.ShowRequestReceived(ctx, p.s.cdp, name)
+	case KindCreatingToken:
+		name, _ := o.Payload.(string)
+		return qrdisplay.ShowCreatingToken(ctx, p.s.cdp, name)
+	}
+	return overlay.ErrUnknownKind
+}
+
+func (p mintPainter) Hide(ctx context.Context, _ overlay.Overlay) error {
+	return qrdisplay.ShowDefaultDisplay(ctx, p.s.cdp)
+}
+
+// Painter returns the mint transport for a shared overlay controller.
+func (s *service) Painter() overlay.Painter {
+	return mintPainter{s: s}
+}
+
+// SetController makes the service paint through a controller shared with the
+// other overlay owners. Call once at wiring time, before the first session.
+func (s *service) SetController(c *overlay.Controller) {
+	s.ctrl = c
+}
+
+// sessionListener is the owner side of one session's overlay. Being overridden
+// by a newer overlay ends the session: its code is no longer on the screen.
+type sessionListener struct {
+	s      *service
+	active *activePairing
+}
+
+// OnOverride ends the session whose overlay was replaced. Only cancels: the
+// worker's exit closes the channel, and it clears nothing on screen, since the
+// replacing overlay now holds it.
+func (l *sessionListener) OnOverride(by overlay.Overlay) {
+	l.s.endOverridden(l.active, by)
+}
+
+// OnClose is unused: a session ends by its own worker or by replacement.
+func (l *sessionListener) OnClose() {}
+
+// endOverridden cancels active because another overlay replaced its code.
+func (s *service) endOverridden(active *activePairing, by overlay.Overlay) {
+	s.mu.Lock()
+	ended := s.active == active
+	if ended {
+		s.active = nil
+		active.cancel()
+	}
+	s.mu.Unlock()
+	if ended {
+		s.logger.Info("Mint pairing session ended: a newer overlay replaced its code",
+			zap.String("channelID", active.channelID), zap.String("by", string(by.Kind)))
+	}
+}
+
+// showMint paints one mint overlay for active through the controller. live
+// guards the paint: a session canceled while it was waiting must not paint.
+// errSessionEnded is returned when live fails, so callers can tell a closed
+// session from a display that could not be shown.
+func (s *service) showMint(ctx context.Context, active *activePairing, o overlay.Overlay, pr overlay.Priority, live func() bool) error {
+	// Park before the controller lock: a recovery navigation can take up to
+	// its timeout, and the controller serializes every other paint behind it.
+	s.parkForNavigation()
+	var listener overlay.Listener = unownedOverlay{}
+	if active != nil {
+		listener = s.listenerFor(active)
+	}
+	h, err := s.ctrl.ShowIf(ctx, listener, o, pr, func(overlay.Overlay, bool) bool {
+		return live()
+	})
+	if err != nil {
+		if errors.Is(err, overlay.ErrRejected) && !live() {
+			return errSessionEnded
+		}
 		return err
 	}
-
-	s.mu.Lock()
-	s.displayGeneration++
-	active.displayGen = s.displayGeneration
-	s.displayOwner = active
-	s.mu.Unlock()
+	if active != nil {
+		s.mu.Lock()
+		active.handle = h
+		s.mu.Unlock()
+	}
 	return nil
+}
+
+// unownedOverlay is the listener of a paint that belongs to no session, such as
+// a creating-token status outside a pairing. Being overridden needs no action.
+type unownedOverlay struct{}
+
+func (unownedOverlay) OnOverride(overlay.Overlay) {}
+func (unownedOverlay) OnClose()                   {}
+
+// listenerFor returns active's overlay listener, creating it on first use.
+func (s *service) listenerFor(active *activePairing) overlay.Listener {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if active.listener == nil {
+		active.listener = &sessionListener{s: s, active: active}
+	}
+	return active.listener
+}
+
+// errSessionEnded is returned when a session was canceled before its overlay
+// could be shown.
+var errSessionEnded = errors.New("mint pairing session ended before its overlay was shown")
+
+func (s *service) showPairingCode(ctx context.Context, active *activePairing, pr overlay.Priority, live func() bool) error {
+	return s.showMint(ctx, active, overlay.Overlay{Kind: KindPairingCode, Payload: active.pairingCode}, pr, live)
 }
 
 func (s *service) showRequestReceived(ctx context.Context, active *activePairing, browserName string) error {
-	// See showPairingCode's comment: park before taking displayMu.
-	s.parkForNavigation()
-	s.displayMu.Lock()
-	defer s.displayMu.Unlock()
-
-	if err := qrdisplay.ShowRequestReceived(ctx, s.cdp, browserName); err != nil {
-		return err
-	}
-
-	s.mu.Lock()
-	s.displayGeneration++
-	active.displayGen = s.displayGeneration
-	s.displayOwner = active
-	s.mu.Unlock()
-	return nil
+	return s.showMint(ctx, active, overlay.Overlay{Kind: KindRequestReceived, Payload: browserName}, overlay.Owner, func() bool {
+		return s.isActive(active)
+	})
 }
 
-func (s *service) releaseDisplayOwnership(active *activePairing) (uint64, bool) {
+// clearActive drops active as the service's session, so no new start or re-show
+// finds it. It does not touch the screen.
+func (s *service) clearActive(active *activePairing) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.active == active {
 		s.active = nil
 	}
-	if s.displayOwner != active {
-		return active.displayGen, false
-	}
-	s.displayOwner = nil
-	return active.displayGen, true
 }
 
 func (s *service) closeChannel(channel brokerChannel) {
@@ -2397,26 +2507,22 @@ func (s *service) closeChannel(channel brokerChannel) {
 	}
 }
 
-func (s *service) restoreDefaultDisplay(channelID string, displayGeneration uint64) {
-	// See showPairingCode's comment: park before taking displayMu.
-	s.parkForNavigation()
-	s.displayMu.Lock()
-	defer s.displayMu.Unlock()
-
-	// The ownership check must happen at send time. Cleanup runs in a detached
-	// goroutine, so a newer session can claim the overlay after the old session
-	// releases it but before the hidden command reaches Chromium.
+// hideSession clears the screen when active's overlay is still the current one.
+// A session whose overlay was replaced sends nothing: the replacing overlay now
+// holds the screen, and clearing it would erase the owner's newer request.
+func (s *service) hideSession(active *activePairing) {
 	s.mu.Lock()
-	stale := s.displayGeneration != displayGeneration || s.displayOwner != nil
+	h := active.handle
 	s.mu.Unlock()
-	if stale {
+	if h == (overlay.Handle{}) {
 		return
 	}
-
+	s.parkForNavigation()
 	ctx, cancel := context.WithTimeout(context.Background(), displayRecoveryTimeout)
 	defer cancel()
-	if err := qrdisplay.ShowDefaultDisplay(ctx, s.cdp); err != nil {
-		s.logger.Warn("Failed to restore default display after mint pairing", zap.Error(err), zap.String("channelID", channelID))
+	err := s.ctrl.Hide(ctx, h)
+	if err != nil && !errors.Is(err, overlay.ErrNotCurrent) {
+		s.logger.Warn("Failed to clear mint pairing display", zap.Error(err), zap.String("channelID", active.channelID))
 	}
 }
 

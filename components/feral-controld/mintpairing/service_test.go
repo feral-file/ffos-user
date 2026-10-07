@@ -22,6 +22,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
+	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -1433,8 +1434,8 @@ func TestHandleStartPairingSession_RestartDuringDelayedTerminalHideLeavesNewDisp
 	assertLastDisplay(t, cdpClient, "pairing_code", "PAIR-NEW", "")
 }
 
-func TestShowPairingCode_FailedReplacementDoesNotSuppressReleasedCleanup(t *testing.T) {
-	oldActive := &activePairing{channelID: "ch_old", pairingCode: "PAIR-OLD", displayGen: 1}
+func TestShowPairingCode_FailedReplacementKeepsCurrentOverlayClearable(t *testing.T) {
+	oldActive := &activePairing{channelID: "ch_old", pairingCode: "PAIR-OLD"}
 	newActive := &activePairing{channelID: "ch_new", pairingCode: "PAIR-NEW"}
 	cdpClient := &fakeCDP{
 		appResponseForRequest: func(request map[string]any) any {
@@ -1453,15 +1454,17 @@ func TestShowPairingCode_FailedReplacementDoesNotSuppressReleasedCleanup(t *test
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
+	oldActive.listener = &sessionListener{s: s, active: oldActive}
+	newActive.listener = &sessionListener{s: s, active: newActive}
 	s.active = oldActive
-	s.displayOwner = oldActive
-	s.displayGeneration = oldActive.displayGen
+	alwaysLive := func() bool { return true }
 
-	displayGeneration, restoreDisplay := s.releaseDisplayOwnership(oldActive)
-	require.True(t, restoreDisplay)
-	require.Error(t, s.showPairingCode(context.Background(), newActive))
+	require.NoError(t, s.showPairingCode(context.Background(), oldActive, overlay.Owner, alwaysLive))
+	require.Error(t, s.showPairingCode(context.Background(), newActive, overlay.Owner, alwaysLive))
 
-	s.restoreDefaultDisplay(oldActive.channelID, displayGeneration)
+	// The failed replacement changed nothing, so the old session still holds the
+	// screen and its clear must go out.
+	s.hideSession(oldActive)
 
 	assertLastDisplay(t, cdpClient, "hidden", "", "")
 }
@@ -1535,7 +1538,9 @@ func TestShowPairingCode_ParksWhileNavigationPending(t *testing.T) {
 	s.navigationParkTimeout = 2 * time.Second
 
 	done := make(chan error, 1)
-	go func() { done <- s.showPairingCode(context.Background(), active) }()
+	go func() {
+		done <- s.showPairingCode(context.Background(), active, overlay.Owner, func() bool { return true })
+	}()
 
 	// Give the call a chance to observe the pending flag and start parking.
 	time.Sleep(30 * time.Millisecond)
@@ -1569,7 +1574,9 @@ func TestShowPairingCode_ExitsParkWhenTargetGenerationReady(t *testing.T) {
 	s.navigationParkTimeout = 2 * time.Second
 
 	done := make(chan error, 1)
-	go func() { done <- s.showPairingCode(context.Background(), active) }()
+	go func() {
+		done <- s.showPairingCode(context.Background(), active, overlay.Owner, func() bool { return true })
+	}()
 
 	time.Sleep(30 * time.Millisecond)
 	cdpClient.mu.Lock()
@@ -1605,7 +1612,7 @@ func TestShowPairingCode_ExitsParkPromptlyWhenEnteredPostBump(t *testing.T) {
 	s.navigationParkTimeout = 2 * time.Second
 
 	start := time.Now()
-	err := s.showPairingCode(context.Background(), active)
+	err := s.showPairingCode(context.Background(), active, overlay.Owner, func() bool { return true })
 	elapsed := time.Since(start)
 
 	require.NoError(t, err)
