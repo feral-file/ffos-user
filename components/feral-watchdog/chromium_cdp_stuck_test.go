@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // TestChromiumMonitorCDPStuckRestartsEvenWhenHealthy pins the ffos-user#356
@@ -101,14 +103,26 @@ func TestChromiumMonitorCDPStuckClearedAfterRestart(t *testing.T) {
 	}
 }
 
-// TestChromiumMonitorCDPStuckClearedOnHeadlessReconnectViaSuccess pins
-// ffos-user#356 review F2 (the success-path half): cdphealth.Monitor has no
-// visibility into display/VT/update state, so it is guaranteed to latch
-// cdpStuck=true on a headless device once a period runs past
-// cdphealth.StuckThreshold — that latch must be treated as stale, not acted
-// on, the moment the display reconnects and check()'s own success path
-// grants a fresh startup grace.
-func TestChromiumMonitorCDPStuckClearedOnHeadlessReconnectViaSuccess(t *testing.T) {
+// TestChromiumMonitorCDPStuckActsOnFreshGateReadsNotStaleLatches pins
+// ffos-user#356 review round 3's F1 fix directly: escalateCDPStuck (called
+// from check()'s success path) must decide purely from a FRESH, local read
+// of the suppression gates on every call, never from
+// m.headless/m.devConsole/m.updating — those fields are checkHangState's
+// own latch state, mutated only by the FAILURE path since round 3 (calling
+// checkHangState from the success path, as this code used to, re-triggered
+// its "entered" logging every tick during a live dev-console/update
+// window; see check()'s own comment on escalateCDPStuck).
+//
+// Earlier (pre-round-3) this test asserted that reconnecting from headless
+// granted the same kind of "fresh startup grace" checkHangState's own
+// pre-connect branch grants. That was actually a symptom of the bug: it
+// depended on the success path having latched m.headless=true via
+// checkHangState in the first place. Once Chromium has ALREADY answered
+// /json/version successfully (which is the only way escalateCDPStuck ever
+// runs), there is nothing left to wait out — round 2's F2 already
+// established cdpStuck must never participate in pre-connect-grace timing;
+// escalateCDPStuck has no grace concept at all, by design.
+func TestChromiumMonitorCDPStuckActsOnFreshGateReadsNotStaleLatches(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
@@ -121,22 +135,20 @@ func TestChromiumMonitorCDPStuckClearedOnHeadlessReconnectViaSuccess(t *testing.
 		t.Fatalf("expected success against ok endpoint, got %v", err)
 	}
 	if got := readRestartCount(t, countFile); got != "0" {
-		t.Fatalf("cdpStuck must not restart a headless device, got %s", got)
+		t.Fatalf("cdpStuck must not restart while the fresh read says headless, got %s", got)
 	}
 
+	// Display reconnects. Chromium was already confirmed up on the call
+	// above (the endpoint always answers 200) — this is not a cold start,
+	// so there is no grace left to grant: the very next tick must act on
+	// the still-true cdpStuck exactly as it would with no headless history
+	// at all.
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 	if err := monitor.check(context.Background()); err != nil {
 		t.Fatalf("expected success against ok endpoint, got %v", err)
 	}
-
-	if got := readRestartCount(t, countFile); got != "0" {
-		t.Fatalf("expected the fresh startup grace to hold on the very first tick after reconnect, got restart count %s", got)
-	}
-	monitor.mu.Lock()
-	stillStuck := monitor.cdpStuck
-	monitor.mu.Unlock()
-	if stillStuck {
-		t.Fatal("expected cdpStuck cleared once the headless period ended")
+	if got := readRestartCount(t, countFile); got != "1" {
+		t.Fatalf("expected the fresh gate read to allow exactly one restart once no gate suppresses it, got %s", got)
 	}
 }
 
@@ -248,5 +260,41 @@ func TestChromiumMonitorCDPStuckDoesNotBypassPreConnectGrace(t *testing.T) {
 	}
 	if got := readRestartCount(t, countFile); got != "1" {
 		t.Fatalf("expected the ordinary startup-grace-exceeded path to restart once the grace genuinely elapsed, got %s", got)
+	}
+}
+
+// TestChromiumMonitorCDPStuckSuccessDuringUpdateDoesNotSpamOrRestart pins
+// ffos-user#356 review round 3's F1: a live OTA/package update can leave
+// /json/version answering 200 throughout (the update gate's own doc: its IO
+// storm only CAN starve it, not always does), so check()'s success path
+// runs repeatedly while commandHandler.updateInProgress() is independently
+// true. escalateCDPStuck must suppress every one of those ticks silently —
+// it must never call into checkHangState's own "entered update" Info log
+// (that belongs to the failure path's narrative, not this one), and a
+// cdpStuck report must not fire a restart while the update holds the lock.
+func TestChromiumMonitorCDPStuckSuccessDuringUpdateDoesNotSpamOrRestart(t *testing.T) {
+	countFile := installCountingSystemctl(t)
+	endpoint, closeServer := okLocalHTTPEndpoint(t)
+	defer closeServer()
+	core, logs := observer.New(zapcore.InfoLevel)
+	monitor := NewChromiumMonitor(endpoint, zap.New(core), NewCommandHandler(zap.New(core), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+
+	end := simulateUpdate(t)
+	defer end()
+	monitor.SetCDPStuck(true)
+
+	for i := 0; i < 5; i++ {
+		if err := monitor.check(context.Background()); err != nil {
+			t.Fatalf("tick %d: expected success against ok endpoint, got %v", i, err)
+		}
+	}
+
+	if got := readRestartCount(t, countFile); got != "0" {
+		t.Fatalf("cdpStuck must not restart while an update holds the lock, got %s", got)
+	}
+	if n := logs.FilterMessageSnippet("update in progress").Len(); n != 0 {
+		t.Fatalf("expected the success path to never log checkHangState's \"entered update\" transition (that belongs to the failure path only), got %d such log(s)", n)
 	}
 }

@@ -162,12 +162,25 @@ type ChromiumMonitor struct {
 	// (re)dial Chromium's page target for a sustained period, which
 	// /json/version polling below CANNOT see on its own — Chromium can keep
 	// answering /json/version while exposing zero or more than one devtools
-	// page target. checkHangState folds this into the exact same restart
-	// decision and suppression gates (headless/dev-console/update/fallback
-	// hold) as an ordinary hang; it never bypasses them. Cleared by
-	// restartChromium once acted on — see that function's doc for why a
-	// signal that never resends "true" must not be left to re-trigger a
-	// restart on every subsequent tick.
+	// page target. On the FAILURE path, checkHangState folds it into its own
+	// restart decision and suppression gates (headless/dev-console/update/
+	// fallback-hold), post-connect only — never bypassing them, never
+	// consulted pre-connect (cross-daemon clock skew against controld's own
+	// StuckThreshold timer would otherwise cut this device's still-unexpired
+	// cold-start grace short). On the SUCCESS path, escalateCDPStuck acts on
+	// it instead of checkHangState, with its own fresh, non-latching read of
+	// the same gates — calling checkHangState itself from a success tick
+	// re-triggered its "entered" latch/log every 5s throughout a live dev-
+	// console or update window, since that function's gate detection is a
+	// side-effecting mechanism built for the failure path only. Cleared by
+	// restartChromium once acted on. feral-controld's cdphealth.Monitor
+	// re-affirms "true" every StuckThreshold while an episode remains
+	// unresolved (not only once, and not only on a fresh disconnect — see
+	// cdphealth's own doc), so a kiosk restart that doesn't fix the
+	// underlying stall is re-reported, not silently dropped; the clear here
+	// exists so an ALREADY-acted-on report doesn't also re-trigger a second
+	// restart on literally the next tick before that fresh grace has had a
+	// chance to run its course.
 	cdpStuck bool
 }
 
@@ -361,14 +374,63 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 
 	// ffos-user#356: a healthy /json/version does not prove controld's own
 	// CDP page-target dial is healthy too (see cdpStuck's doc), so the
-	// escalation check runs here as well, not only on failure below. By
-	// this point hasEverConnected/lastSuccessfulResp were just set above, so
-	// checkHangState's ordinary hang/startup-grace cases read as healthy and
-	// only the cdpStuck case can fire — it never races or duplicates the
-	// failure-path's own call to checkHangState.
-	m.checkHangState(ctx)
+	// escalation check runs here as well, not only on failure below. This
+	// does NOT call checkHangState (review round 3, F1): that function's
+	// display/dev-console/update detection doubles as a side-effecting
+	// latch-and-log mechanism built for the FAILURE path, where
+	// headless/devConsole/updating have not just been reset to false a few
+	// lines above in this same call — calling it from here made every
+	// successful tick during a live dev-console session or OTA window (cage
+	// runs with -s specifically so Chromium survives a VT switch, so
+	// /json/version legitimately keeps answering 200 throughout one) look
+	// like a FRESH transition into that gate, firing its "entered" log
+	// every 5s instead of once and wiping cdpStuck before the switch's own
+	// cdpStuck case could ever be reached. escalateCDPStuck below reads the
+	// same gates fresh but purely as a local, non-latching check.
+	m.escalateCDPStuck(ctx)
 
 	return nil
+}
+
+// escalateCDPStuck acts on a true cdpStuck (ffos-user#356) once Chromium has
+// just answered /json/version successfully, without touching any of
+// checkHangState's headless/devConsole/updating/fallback-hold latches or
+// their "entered"/"logged once" semantics — see check()'s call site for why
+// calling checkHangState itself from here is exactly the bug review round 3
+// found. The gates are read fresh, locally, and have no side effect beyond
+// this one decision.
+func (m *ChromiumMonitor) escalateCDPStuck(ctx context.Context) {
+	m.mu.Lock()
+	cdpStuck := m.cdpStuck
+	m.mu.Unlock()
+	if !cdpStuck {
+		return
+	}
+
+	// Same three reads checkHangState makes, for the same reason (outside
+	// m.mu: they touch the filesystem/an external process). Purely local —
+	// nothing here is written back to m.headless/m.devConsole/m.updating.
+	if !isDisplayConnected(m.drmSysfsRoot) {
+		return
+	}
+	activeVT, vtReadable := readActiveVT(m.ttyActiveFile)
+	if !kioskVTActive(activeVT, vtReadable) {
+		return
+	}
+	if m.commandHandler.updateInProgress() {
+		return
+	}
+
+	// Same restart-deferral guard checkHangState's own escalation uses.
+	if m.commandHandler != nil && m.commandHandler.isKioskActivating(ctx) {
+		m.logger.Warn("Chromium: CDP-stuck restart trigger met but chromium-kiosk.service is activating; deferring")
+		return
+	}
+
+	m.logger.Error("Chromium: feral-controld reported its CDP page-target dial stuck; restarting kiosk (ffos-user#356)")
+	m.mu.Lock()
+	m.restartChromium(ctx)
+	m.mu.Unlock()
 }
 
 // checkHangState decides whether sustained failure to reach /json/version, OR
@@ -695,18 +757,19 @@ func (m *ChromiumMonitor) restartChromium(ctx context.Context) {
 	// ffos-user#356: clear the externally-reported latch as soon as this
 	// escalation is acted on — by EITHER branch below (an ordinary kiosk
 	// restart, or the restart-budget-exhausted fallback hold), not only the
-	// ordinary-restart branch's own state reset further down. cdphealth's
-	// Monitor only re-sends "true" on a FRESH disconnect episode (an actual
-	// reconnect in between); if this action does not fix the underlying
-	// stall, controld's view of "still stuck" never changes, so it never
-	// re-sends either. Leaving m.cdpStuck set would re-trigger
-	// checkHangState's cdpStuck case on literally the next 5s tick,
-	// bypassing whatever gate just engaged (the fresh pre-connect grace, or
-	// the fallback hold) and reproducing the exact restart-storm bug the
-	// ordinary-restart branch's own ESTABLISHED state reset exists to
-	// prevent. Any continued failure now escalates through the ordinary
-	// startup-grace/hang-threshold/fallback ladder instead, exactly like any
-	// other hang.
+	// ordinary-restart branch's own state reset further down. Leaving
+	// m.cdpStuck set would let checkHangState's cdpStuck case (failure path)
+	// or escalateCDPStuck (success path) re-trigger a restart on literally
+	// the next tick, bypassing whatever gate just engaged (the fresh
+	// pre-connect grace, or the fallback hold) and reproducing the exact
+	// restart-storm bug the ordinary-restart branch's own ESTABLISHED state
+	// reset exists to prevent. This is safe to clear unconditionally, not
+	// just a one-shot gamble: cdphealth.Monitor re-affirms "true" every
+	// StuckThreshold for as long as the episode remains unresolved (not
+	// only once, and not only after an intervening reconnect — see
+	// cdphealth.go's own doc), so if this restart does NOT fix the
+	// underlying stall, controld reports it again within one more
+	// threshold and escalation resumes; it is never permanently dropped.
 	m.cdpStuck = false
 
 	// Budget exhausted: show the stable error screen instead of rebooting
