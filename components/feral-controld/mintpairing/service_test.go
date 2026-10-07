@@ -1434,9 +1434,16 @@ func TestHandleStartPairingSession_RestartDuringDelayedTerminalHideLeavesNewDisp
 	assertLastDisplay(t, cdpClient, "pairing_code", "PAIR-NEW", "")
 }
 
-func TestShowPairingCode_FailedReplacementKeepsCurrentOverlayClearable(t *testing.T) {
-	oldActive := &activePairing{channelID: "ch_old", pairingCode: "PAIR-OLD"}
-	newActive := &activePairing{channelID: "ch_new", pairingCode: "PAIR-NEW"}
+// A failed delivery no longer rolls back the decision it belongs to — the
+// decision and the delivery are two different things (see the overlay
+// package doc). newActive replaces oldActive on screen immediately; only its
+// delivery fails, which showPairingCode still reports through Result.Wait
+// (the same observable failure the display-failure tests below hold the
+// start command to), but the replacement itself stands. oldActive no longer
+// holds the screen, so its own clear is correctly a no-op.
+func TestShowPairingCode_ReplacementCommitsEvenWhenItsDeliveryFails(t *testing.T) {
+	oldActive := &activePairing{channelID: "ch_old", pairingCode: "PAIR-OLD", cancel: func() {}}
+	newActive := &activePairing{channelID: "ch_new", pairingCode: "PAIR-NEW", cancel: func() {}}
 	cdpClient := &fakeCDP{
 		appResponseForRequest: func(request map[string]any) any {
 			if request["state"] == "pairing_code" && request["pairingCode"] == "PAIR-NEW" {
@@ -1460,13 +1467,14 @@ func TestShowPairingCode_FailedReplacementKeepsCurrentOverlayClearable(t *testin
 	alwaysLive := func() bool { return true }
 
 	require.NoError(t, s.showPairingCode(context.Background(), oldActive, overlay.Owner, alwaysLive))
-	require.Error(t, s.showPairingCode(context.Background(), newActive, overlay.Owner, alwaysLive))
+	require.Error(t, s.showPairingCode(context.Background(), newActive, overlay.Owner, alwaysLive),
+		"the delivery failure is still reported to this call's own caller")
+	assert.True(t, s.ctrl.IsCurrent(newActive.handle), "the decision committed regardless of the delivery outcome")
 
-	// The failed replacement changed nothing, so the old session still holds the
-	// screen and its clear must go out.
+	before := len(cdpClient.displayRequestsSnapshot())
 	s.hideSession(oldActive)
-
-	assertLastDisplay(t, cdpClient, "hidden", "", "")
+	time.Sleep(20 * time.Millisecond)
+	assert.Len(t, cdpClient.displayRequestsSnapshot(), before, "oldActive no longer holds the screen, so its clear sends nothing")
 }
 
 // fakeMintNavigationSession is a minimal, directly-controllable

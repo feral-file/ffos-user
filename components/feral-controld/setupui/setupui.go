@@ -11,6 +11,7 @@
 package setupui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -195,26 +196,7 @@ type Service struct {
 	// hides a stale overlay only while it is false, since an overlay this
 	// process painted is not stale.
 	narrated bool
-	// pending is the ordered queue of states the worker still needs to push.
-	// Coalescing rule: a new push REPLACES a queued entry with the same "state"
-	// value in place (so an OTA progress burst collapses to one trailing
-	// "updating" send), but DISTINCT states are all delivered in order. The
-	// distinction matters: the claim flow's ShowReady()+Hide() are two
-	// back-to-back different states and both must reach the player — a
-	// single-slot newest-intent-wins design silently dropped the Ready. Bounded
-	// by maxPendingStates (drop-oldest) purely as a leak guard; in practice the
-	// setup flow never queues more than a handful of distinct states.
-	pending []map[string]any
-	// running guards against spawning more than one worker goroutine at a time.
-	running bool
 }
-
-// maxPendingStates bounds the pending queue. Setup narration has 12 distinct
-// states total (including the scanning/finalizing/factory_reset/connecting/
-// setup_error extensions), so a deeper queue only ever means a stalled CDP
-// send; dropping the oldest intent is the correct staleness policy for a
-// courtesy overlay.
-const maxPendingStates = 13
 
 // New builds a narration Service. A blank contractPath falls back to
 // DefaultContractPath. logger may be nil (narration then stays silent about its
@@ -660,18 +642,21 @@ func (s *Service) Hide() {
 // is in-memory, so after a daemon restart the player may still render the
 // PREVIOUS life's overlay (e.g. a claim QR painted before a crash on a device
 // that has since been claimed) — but an overlay THIS process painted is, by
-// definition, not stale. last == nil is exactly the complement of what
-// Resync can repair: any non-nil intent gets re-pushed on the next CDP
+// definition, not stale. narrated==false is exactly the complement of what
+// Resync can repair: any current overlay gets re-shown on the next CDP
 // (re)connect — even one whose original send failed, since a send failure
 // triggers the reconnect that fires Resync — so the sweep covers precisely
-// the one state Resync cannot, no more. The no-intent check and the hide are
-// one critical section under the same mutex every push takes (pushIf), so a
-// concurrent narrator (the startup OTA gate's ShowUpdating, a factory reset)
-// can never have its live narration erased by the sweep: if its push wins
-// the lock, the sweep no-ops; if the sweep wins, the push is enqueued after
-// the hide and the screen still ends on the narration. A caller-side
-// Narrating() probe followed by Hide() would reintroduce exactly that
-// check-then-act race.
+// the one state Resync cannot, no more.
+//
+// The hide is an Automatic Show of the hidden state (not a bypass, unlike the
+// pre-controller version of this function): it goes through the controller's
+// own decision lock, so a concurrent narrator (the startup OTA gate's
+// ShowUpdating, a factory reset) can never have its live narration erased by
+// the sweep. If the narrator's Owner show wins the lock first, the sweep sees
+// it as current and the Automatic sweep is rejected; if the sweep wins first,
+// the narrator's later Owner show simply replaces it, same as any override. A
+// caller-side Narrating() probe followed by a direct Hide() would reintroduce
+// exactly the check-then-act race the controller's lock exists to remove.
 func (s *Service) SweepStaleOverlay() {
 	s.mu.Lock()
 	narrated := s.narrated
@@ -679,20 +664,17 @@ func (s *Service) SweepStaleOverlay() {
 	if narrated {
 		return
 	}
-	if _, has := s.ctrl.Current(); has {
-		return
-	}
-	// A clear, not a show: nothing is painted that the controller must record.
-	s.enqueue(map[string]any{"state": stateHidden})
+	s.showOwned(map[string]any{"state": stateHidden}, overlay.Automatic, nil)
 }
 
 // HideIfShowing hides only when the current narration intent is one of
 // states, so a flow can clear the narration IT painted without erasing a
-// concurrent narrator's. Same atomicity argument as SweepStaleOverlay: the
-// state comparison and the hide share every push's critical section, so a
-// racing ShowUpdating/ShowFactoryReset either lands first (the hide then
-// no-ops) or is queued behind the hide (and the screen still ends on it).
-// The canonical caller is the auto-claim flow clearing its own finalizing
+// concurrent narrator's. The state comparison and the hide run under the
+// overlay controller's own decision lock (see HideIf), so a racing
+// ShowUpdating/ShowFactoryReset either commits first (this hide then reads a
+// state not in states and no-ops) or commits after (simply replacing the
+// cleared screen, same as any other override). The canonical caller is the
+// auto-claim flow clearing its own finalizing
 // overlay after discovering mid-flow that the device settled — the exact
 // moment another narrator may have taken the screen.
 func (s *Service) HideIfShowing(states ...string) {
@@ -739,122 +721,55 @@ func (s *Service) Narrating() bool {
 	return has && isSetup(cur) && setupState(cur) != stateHidden
 }
 
-// Resync re-pushes the last intended narration state. It is the "CDP became
-// available" trigger: wire it to the CDP client's on-connect callback so a
-// reconnecting or freshly-loaded player catches up to the current setup state.
-// It is a no-op if nothing has been shown yet.
+// Resync re-shows the current overlay. It is the "CDP became available"
+// trigger: wire it to the CDP client's on-connect callback so a reconnecting
+// or freshly-loaded player catches up to the current setup state. It is a
+// no-op if nothing has been shown yet.
 func (s *Service) Resync() {
 	cur, has := s.ctrl.Current()
 	if !has || !isSetup(cur) {
 		return
 	}
-	s.mu.Lock()
-	// Resync now also runs as a generation-ready reconciler (on
-	// EVERY document replacement, not just the original CDP on-connect
-	// wiring), so it can fire while a genuine multi-state sequence is still
-	// queued (e.g. the claim flow's ShowReady()+Hide(), two DISTINCT states
-	// that must both reach the player — see the pending field's doc). The
-	// old unconditional overwrite collapsed that queue down to s.last,
-	// silently dropping the Ready. A non-empty queue is left alone here:
-	// those states will still deliver in order once the worker's park
-	// (parkForNavigation) releases post-generation-ready, so there is
-	// nothing for Resync to add. Only an EMPTY queue means there is
-	// genuinely nothing in flight for the new document to catch up on, and
-	// re-enqueuing the current intent is what a reconnect/new-generation
-	// resync is for.
-	if len(s.pending) > 0 {
-		s.mu.Unlock()
-		return
-	}
-	s.pending = []map[string]any{payloadOf(cur)}
-	starting := !s.running
-	s.running = true
-	s.mu.Unlock()
-	if starting {
-		go s.worker()
-	}
+	// Re-showing the same listener's own overlay is not an override (see the
+	// overlay package doc on decision versus delivery), so this just queues a
+	// fresh delivery of what is already current. No reconciliation with "what
+	// else might be queued" is needed: the controller's own delivery queue is
+	// the only queue now, and it is already in the right order relative to
+	// anything else in flight.
+	_, _, _ = s.ctrl.ShowIf(context.Background(), s, cur, overlay.Owner, nil)
 }
 
-// push enqueues req (see the pending field for the coalescing rule) and ensures
-// a worker is draining the queue. It returns immediately; the CDP send never
-// happens on the caller's goroutine. Retry policy is deliberately "retry on
-// next change", not a hot loop: a failed send is not re-attempted on its own.
-// The last state is retained for Resync so a later CDP reconnect can recover it.
+// push shows req. It returns immediately; the CDP send never happens on the
+// caller's goroutine (see the overlay package doc on decision versus
+// delivery). Retry policy is deliberately "retry on next change", not a hot
+// loop: a failed send is not re-attempted on its own.
 func (s *Service) push(req map[string]any) {
 	s.pushIf(req, nil)
 }
 
-// pushIf is the single enqueue-and-start path every narration intent takes:
-// when ok is non-nil it is evaluated UNDER the queue mutex and a false answer
-// drops the push entirely. Keeping the conditional ops (SweepStaleOverlay,
-// HideIfShowing) on this exact path — rather than duplicating the tail — is
-// what makes their "atomic with every push" claim structural: a future change
-// to queue policy or worker-spawn discipline cannot apply to plain pushes
-// alone and leave the conditional ops silently divergent.
-//
-// ok receives the current intent (s.last) as its argument BECAUSE it runs
-// while s.mu is held: handing the guarded state in leaves the predicate no
-// reason to reach back into the Service, whose exported methods take the same
-// non-reentrant mutex — a predicate calling one (e.g. Narrating) would
-// deadlock holding s.mu and wedge every push from every goroutine, breaking
-// the package's pushes-never-block contract.
+// pushIf shows req, or — when req is the hidden state, the one plain Hide()
+// path — clears the screen. Both run under the overlay controller's own
+// decision lock (see ShowIf/HideIf); a plain hide clears only setup narration
+// the controller shows, never a browser-pairing code or any other owner's
+// overlay. ok, when non-nil, is the condition a conditional caller
+// (ShowConnectingIfShowing, RefreshClaimQRName) checks against the current
+// narration before showing.
 func (s *Service) pushIf(req map[string]any, ok func(last map[string]any) bool) {
 	if stringField(req, "state") == stateHidden {
-		s.clearSetup()
+		s.hideIf(func(cur overlay.Overlay, has bool) bool {
+			return has && isSetup(cur)
+		})
 		return
 	}
 	s.showOwned(req, overlay.Owner, ok)
 }
 
-// enqueueLocked applies the coalescing rule: a push matching the TRAILING
-// queued state replaces it in place (newest payload); everything else appends
-// in arrival order. Trailing-only is load-bearing: replacing a same-state
-// entry buried under LATER states would reorder narration — queued
-// softap_qr→joining→join_failed plus a fresh softap_qr would deliver the new
-// QR FIRST and leave the screen on the obsolete failure. The screen must
-// always END on the newest state, so a repeat after intervening states
-// re-appends. Bursts that matter for coalescing (OTA progress) are contiguous,
-// so they still collapse to one trailing entry. Caller holds mu.
-//
-// Overflow (maxPendingStates) silently drops the oldest queued entry — the
-// correct staleness policy for a courtesy overlay.
-func (s *Service) enqueueLocked(req map[string]any) {
-	state := stringField(req, "state")
-	if n := len(s.pending); n > 0 && stringField(s.pending[n-1], "state") == state {
-		s.pending[n-1] = req
-		return
-	}
-	if len(s.pending) >= maxPendingStates {
-		s.pending = s.pending[1:]
-	}
-	s.pending = append(s.pending, req)
-}
-
-// worker drains pending narration states one at a time, in order, until the
-// queue is empty. Same-state bursts (OTA progress) collapse via enqueueLocked;
-// distinct states each get their own send so ordered sequences like
-// Ready→Hidden are delivered, not coalesced away.
-func (s *Service) worker() {
-	for {
-		s.mu.Lock()
-		if len(s.pending) == 0 {
-			s.running = false
-			s.mu.Unlock()
-			return
-		}
-		req := s.pending[0]
-		s.pending = s.pending[1:]
-		s.mu.Unlock()
-
-		s.parkForNavigation()
-		s.trySend(req)
-	}
-}
-
-// parkForNavigation blocks the worker while a playersession.Session recovery
-// navigation is pending, so a narration send cannot race the page
-// underneath it. It is a no-op when no session is wired (SetSession never
-// called), which is every existing test and any pre-session build. The park
+// parkForNavigation blocks the overlay controller's delivery worker — never a
+// caller of Show/Hide, which never block (see the overlay package doc) —
+// while a playersession.Session recovery navigation is pending, so a
+// narration send cannot race the page underneath it. It is a no-op when no
+// session is wired (SetSession never called), which is every existing test
+// and any pre-session build. The park
 // exits on whichever comes FIRST: the navigation's TARGET generation reaching
 // StageHandler; NavigationPending clearing; or the bounded park timeout —
 // on either of the latter two the item is still delivered best-effort right

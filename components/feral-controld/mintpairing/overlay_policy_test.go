@@ -85,7 +85,7 @@ func TestAutomaticRefresh_DoesNotReplaceClaimQR(t *testing.T) {
 	// The owner's pairing code is on screen, then the owner shows the claim QR.
 	_, err := s.HandleStartPairingSession(context.Background(), nil)
 	require.NoError(t, err)
-	_, err = ctrl.Show(context.Background(), &setupRecorderListener{}, overlay.Overlay{Kind: kindClaimQR}, overlay.Owner)
+	_, _, err = ctrl.Show(context.Background(), &setupRecorderListener{}, overlay.Overlay{Kind: kindClaimQR}, overlay.Owner)
 	require.NoError(t, err)
 
 	// The code expires on its own. The refresh must not put a code back over the QR.
@@ -95,6 +95,9 @@ func TestAutomaticRefresh_DoesNotReplaceClaimQR(t *testing.T) {
 	cur, ok := ctrl.Current()
 	require.True(t, ok)
 	assert.Equal(t, kindClaimQR, cur.Kind, "the claim QR must keep the screen")
+	// Delivery is asynchronous (see the overlay package doc), so wait for the
+	// claim QR to actually reach the recorder rather than asserting immediately.
+	assert.Eventually(t, func() bool { return len(setup.snapshot()) > 0 }, time.Second, time.Millisecond)
 	assert.Equal(t, []string{"show:" + string(kindClaimQR)}, setup.snapshot())
 }
 
@@ -110,7 +113,7 @@ func TestClaimQR_ReplacesPairingCodeAndEndsTheSession(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, s.DisplayActive(), "the pairing code is on screen")
 
-	_, err = ctrl.Show(context.Background(), &setupRecorderListener{}, overlay.Overlay{Kind: kindClaimQR}, overlay.Owner)
+	_, _, err = ctrl.Show(context.Background(), &setupRecorderListener{}, overlay.Overlay{Kind: kindClaimQR}, overlay.Owner)
 	require.NoError(t, err)
 
 	assert.Eventually(t, func() bool { return !s.DisplayActive() }, 2*time.Second, 10*time.Millisecond,
@@ -132,7 +135,7 @@ func TestBrowserPairingTap_ReplacesClaimQR(t *testing.T) {
 	starter := &fakeBrokerStarter{channel: &fakeBrokerChannel{pairingCode: "PAIR-C"}}
 	s, ctrl := newSharedOverlayService(t, starter, cdpClient, setup)
 
-	_, err := ctrl.Show(context.Background(), &setupRecorderListener{}, overlay.Overlay{Kind: kindClaimQR}, overlay.Owner)
+	_, _, err := ctrl.Show(context.Background(), &setupRecorderListener{}, overlay.Overlay{Kind: kindClaimQR}, overlay.Owner)
 	require.NoError(t, err)
 
 	result, err := s.HandleStartPairingSession(context.Background(), nil)

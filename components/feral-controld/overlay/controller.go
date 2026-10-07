@@ -15,6 +15,44 @@
 //     hide that could erase the overlay that replaced it.
 //
 // Callers hold a Handle, not a flag.
+//
+// # Decision and delivery are two different things
+//
+// Show/Hide decide who owns the screen under one lock, in memory, and return
+// immediately — no caller ever waits on a painter. A review of the first
+// version of this package (round 1, feral-file/ffos-user#385) found that
+// calling the painter synchronously while deciding reintroduced the exact
+// hazard this package exists to remove: a painter that blocks on I/O (a CDP
+// send that can take up to 15s, or longer behind a navigation park) stalled
+// every other caller sharing the decision lock — including setupui callers
+// whose own contract is "pushes never block the caller" (see
+// provisioning_wiring.go's inline, must-not-block event loop). The same
+// review found a second defect: a caller that sent a clear directly, bypassing
+// the controller "since it records nothing" (the old SweepStaleOverlay /
+// clearSetup special case), had a window in which a replacing paint could land
+// on the real screen before that bypassed clear did, erasing it.
+//
+// The fix is one delivery queue, owned by the controller, drained by one
+// background worker. Show/Hide enqueue a delivery job in the same critical
+// section that decides ownership, so delivery order always matches decision
+// order — across both owners, not just within one — and no bypass exists:
+// every clear, including the boot-time sweep, is an ordinary Show or Hide.
+// The worker is the only thing that calls the painter, so a painter is free to
+// block (park for navigation, wait on a CDP send) without blocking anyone.
+//
+// Show/Hide themselves can no longer report whether the painter's actual send
+// succeeded, because that happens after they return — a failed delivery is
+// never retried, and the controller's decision is not rolled back. This
+// matches how setupui's own narration already behaved before this package
+// existed: a push "succeeds" once it is queued, not once it is on screen.
+//
+// A caller that still needs the outcome of specifically its own delivery —
+// mintpairing's start command reported display failures to the owner before
+// this package existed, and three tests held it to that — gets a Result from
+// Show/ShowIf and calls Wait on it. That wait blocks only the calling
+// goroutine. It takes no lock and is not awaited by the controller itself, so
+// it cannot stall any other caller: the decision it is waiting on has already
+// been made and released by the time Wait runs.
 package overlay
 
 import (
@@ -44,25 +82,29 @@ const (
 	Automatic
 )
 
-// Painter sends overlays to the player. The controller calls it serially, one
-// call at a time, so an implementation need not be safe for concurrent use.
-// Hide receives the overlay it is clearing, so one painter can serve several
-// kinds and send the right clear for each.
+// Painter sends overlays to the player. The controller's own worker is the
+// only caller, one delivery at a time, so an implementation need not be safe
+// for concurrent use — and is free to block (park for a pending navigation,
+// wait on a slow or wedged CDP send): nothing else waits on it. Hide receives
+// the overlay it is clearing, so one painter can serve several kinds and send
+// the right clear for each. An error is for the painter's own logging; it
+// reaches no caller of Show or Hide, and the delivery is not retried.
 type Painter interface {
 	Show(ctx context.Context, o Overlay) error
 	Hide(ctx context.Context, o Overlay) error
 }
 
-// Condition is checked under the controller's lock, so the check and the paint
-// that follows it cannot be interleaved with another paint. cur is the overlay
-// on screen; ok is false when nothing is.
+// Condition is checked under the controller's lock, so the check and the
+// decision that follows it cannot be interleaved with another decision. cur is
+// the overlay on screen; ok is false when nothing is.
 type Condition func(cur Overlay, ok bool) bool
 
 // Listener is the owner side of a shown overlay.
 type Listener interface {
-	// OnOverride is called once, after the replacing overlay is on screen,
-	// with that replacing overlay. It is the only terminal event a listener
-	// gets for a replaced overlay.
+	// OnOverride is called once, after the replacing overlay has been decided
+	// (not necessarily delivered yet), with that replacing overlay. It is the
+	// only terminal event a listener gets for a replaced overlay. No lock is
+	// held, so a callback may call back into the controller.
 	OnOverride(by Overlay)
 	// OnClose is reserved for an overlay that ends by itself (timeout). Hide
 	// by the current owner is the owner's own action and fires nothing.
@@ -79,6 +121,10 @@ var (
 	ErrRejected = errors.New("overlay: automatic show rejected while another overlay is current")
 	// ErrNotCurrent is returned by Hide for a handle that is not the current overlay.
 	ErrNotCurrent = errors.New("overlay: handle is not the current overlay")
+	// ErrSuperseded is the Wait result for a delivery that coalescing replaced
+	// before the worker ever sent it — see enqueueLocked. It was never shown
+	// standalone, so there is nothing to report but that it was superseded.
+	ErrSuperseded = errors.New("overlay: delivery superseded by a newer show of the same kind before it was sent")
 )
 
 type entry struct {
@@ -87,17 +133,58 @@ type entry struct {
 	listener Listener
 }
 
+// Result lets a caller learn the outcome of specifically its own queued
+// delivery, without blocking anyone else — see the package doc on decision
+// versus delivery. Waiting is always optional; the zero Result (from an
+// ErrRejected Show) has nothing to wait for.
+type Result struct {
+	done <-chan error
+}
+
+// Wait blocks until the delivery this Result belongs to has been attempted —
+// delivered (the painter's own error, nil on success) or superseded
+// (ErrSuperseded) — or until ctx is done first, whichever comes first. It
+// takes no controller lock, so it never stalls any other caller.
+func (r Result) Wait(ctx context.Context) error {
+	if r.done == nil {
+		return nil
+	}
+	select {
+	case err := <-r.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// delivery is one queued call to the painter. hide marks a clear of overlay
+// (the overlay that was current when the clear was decided); otherwise it is
+// a show of overlay. done, when non-nil, receives exactly one value: the
+// painter's error on delivery, or ErrSuperseded if coalescing replaced this
+// entry first.
+type delivery struct {
+	overlay Overlay
+	hide    bool
+	done    chan error
+}
+
+// maxPendingDeliveries bounds the delivery queue. A deeper queue only ever
+// means the worker is stalled behind a slow or wedged send; dropping the
+// oldest entry is the correct staleness policy for a courtesy overlay, and
+// matches setupui's pre-controller queue bound.
+const maxPendingDeliveries = 32
+
 // Controller owns the screen overlay. The zero value is not usable; use New.
 type Controller struct {
-	// paint serializes every call to the painter and every change of cur,
-	// since a change of cur is always made together with a painter call.
-	paint sync.Mutex
-	// mu guards cur and nextID. It is never held while the painter runs or a
-	// listener is called, so a callback can call back into the controller.
+	// mu guards every field below. It is held only for in-memory bookkeeping
+	// — deciding ownership and queuing a delivery — never while the painter
+	// runs or a listener is called.
 	mu      sync.Mutex
 	painter Painter
 	cur     *entry
 	nextID  uint64
+	pending []delivery
+	running bool
 }
 
 // New returns a controller that paints through p.
@@ -105,84 +192,132 @@ func New(p Painter) *Controller {
 	return &Controller{painter: p}
 }
 
-// Show paints o and makes it the current overlay. The previous owner, if any,
-// is notified with OnOverride after the paint is done and no lock is held. A
-// listener replacing its own overlay is not an override: it is the same owner
-// moving its own display along, and it has nothing to be told.
+// Show decides o is the current overlay and queues it for delivery. The
+// previous owner, if any, is notified with OnOverride once the decision is
+// made, before Show returns. A listener replacing its own overlay is not an
+// override: it is the same owner moving its own display along, and it has
+// nothing to be told.
 //
-// A failed paint leaves the current overlay unchanged and returns the error.
-// An automatic Show over a current overlay returns ErrRejected without painting.
-func (c *Controller) Show(ctx context.Context, l Listener, o Overlay, pr Priority) (Handle, error) {
+// An automatic Show over a current overlay returns ErrRejected and queues
+// nothing — its zero Result has nothing to wait for. Show itself never fails
+// on the painter's account; call Wait on the returned Result for that — see
+// the package doc on decision versus delivery.
+func (c *Controller) Show(ctx context.Context, l Listener, o Overlay, pr Priority) (Handle, Result, error) {
 	return c.ShowIf(ctx, l, o, pr, nil)
 }
 
-// ShowIf is Show with a condition checked under the same lock as the paint. A
-// false condition returns ErrRejected and paints nothing. A nil condition
-// always passes.
-func (c *Controller) ShowIf(ctx context.Context, l Listener, o Overlay, pr Priority, cond Condition) (Handle, error) {
-	c.paint.Lock()
+// ShowIf is Show with a condition checked under the same lock as the decision.
+// A false condition returns ErrRejected, a zero Result, and queues nothing. A
+// nil condition always passes.
+func (c *Controller) ShowIf(_ context.Context, l Listener, o Overlay, pr Priority, cond Condition) (Handle, Result, error) {
 	c.mu.Lock()
-	// Safe to read here: cur changes only under paint, which we hold.
 	cur, has := c.currentLocked()
-	c.mu.Unlock()
 	if (pr == Automatic && has) || (cond != nil && !cond(cur, has)) {
-		c.paint.Unlock()
-		return Handle{}, ErrRejected
+		c.mu.Unlock()
+		return Handle{}, Result{}, ErrRejected
 	}
 
-	if err := c.painter.Show(ctx, o); err != nil {
-		c.paint.Unlock()
-		return Handle{}, err
-	}
-
-	c.mu.Lock()
 	c.nextID++
 	e := &entry{id: c.nextID, overlay: o, listener: l}
 	prev := c.cur
 	c.cur = e
+	done := make(chan error, 1)
+	c.enqueueLocked(delivery{overlay: o, done: done})
 	c.mu.Unlock()
-	c.paint.Unlock()
 
 	if prev != nil && prev.listener != l {
 		prev.listener.OnOverride(o)
 	}
-	return Handle{id: e.id}, nil
+	return Handle{id: e.id}, Result{done: done}, nil
 }
 
-// Hide clears the screen. Only the current overlay's handle may hide it; any
-// other handle gets ErrNotCurrent and sends nothing. A failed hide leaves the
-// current overlay in place.
+// Hide decides the screen is cleared and queues that clear for delivery. Only
+// the current overlay's handle may hide it; any other handle gets
+// ErrNotCurrent and queues nothing.
 func (c *Controller) Hide(ctx context.Context, h Handle) error {
 	return c.HideIf(ctx, func(cur Overlay, ok bool) bool {
-		return ok && c.IsCurrent(h)
+		// isCurrentLocked, not IsCurrent: this condition runs under mu (see
+		// HideIf), and IsCurrent would deadlock trying to take it again.
+		return ok && c.isCurrentLocked(h)
 	})
 }
 
-// HideIf clears the screen when cond holds, under the paint lock. A false
-// condition returns ErrNotCurrent and sends nothing.
-func (c *Controller) HideIf(ctx context.Context, cond Condition) error {
-	c.paint.Lock()
-	defer c.paint.Unlock()
-
+// HideIf clears the screen when cond holds, under the decision lock. A false
+// condition — including nothing being current, since cond always sees ok as
+// part of its own check — returns ErrNotCurrent and queues nothing.
+func (c *Controller) HideIf(_ context.Context, cond Condition) error {
 	c.mu.Lock()
 	cur, has := c.currentLocked()
-	c.mu.Unlock()
 	if !cond(cur, has) {
+		c.mu.Unlock()
 		return ErrNotCurrent
 	}
-	if !has {
-		// Nothing shown by this controller: there is nothing to clear, and a
-		// condition that passed on an empty screen wants a plain clear.
-		return nil
-	}
-
-	if err := c.painter.Hide(ctx, cur); err != nil {
-		return err
-	}
-	c.mu.Lock()
 	c.cur = nil
+	c.enqueueLocked(delivery{overlay: cur, hide: true})
 	c.mu.Unlock()
 	return nil
+}
+
+// enqueueLocked applies the same coalescing rule setupui's queue used before
+// this package existed: a delivery matching the TRAILING queued entry's kind
+// and direction (show or hide) replaces it in place, so a burst of the same
+// state (OTA progress) collapses to one trailing send; a distinct kind or
+// direction appends, so an ordered sequence (Ready then Hidden) still delivers
+// both. The replaced entry's done, if anyone is waiting on it, receives
+// ErrSuperseded — it was never sent standalone, and a waiter must not block
+// forever on a delivery that will never happen. Caller holds mu.
+func (c *Controller) enqueueLocked(d delivery) {
+	if n := len(c.pending); n > 0 {
+		last := c.pending[n-1]
+		if last.hide == d.hide && last.overlay.Kind == d.overlay.Kind {
+			if last.done != nil {
+				last.done <- ErrSuperseded
+			}
+			c.pending[n-1] = d
+			return
+		}
+	}
+	if len(c.pending) >= maxPendingDeliveries {
+		dropped := c.pending[0]
+		if dropped.done != nil {
+			dropped.done <- ErrSuperseded
+		}
+		c.pending = c.pending[1:]
+	}
+	c.pending = append(c.pending, d)
+	if !c.running {
+		c.running = true
+		go c.worker()
+	}
+}
+
+// worker drains pending deliveries one at a time, in order, until the queue is
+// empty. It is the only caller of the painter, so the painter may block
+// freely — nothing else is waiting on it. Each delivery's own done channel,
+// if any, gets exactly the painter's result; see Result.Wait.
+func (c *Controller) worker() {
+	for {
+		c.mu.Lock()
+		if len(c.pending) == 0 {
+			c.running = false
+			c.mu.Unlock()
+			return
+		}
+		d := c.pending[0]
+		c.pending = c.pending[1:]
+		c.mu.Unlock()
+
+		ctx := context.Background()
+		var err error
+		if d.hide {
+			err = c.painter.Hide(ctx, d.overlay)
+		} else {
+			err = c.painter.Show(ctx, d.overlay)
+		}
+		if d.done != nil {
+			d.done <- err
+		}
+	}
 }
 
 // currentLocked returns the current overlay. Caller holds mu.
@@ -193,19 +328,26 @@ func (c *Controller) currentLocked() (Overlay, bool) {
 	return c.cur.overlay, true
 }
 
-// Current reports the overlay on screen, if any.
+// Current reports the overlay decided as on screen, if any. It reflects the
+// latest decision, not necessarily what the player has rendered yet — the
+// same "intent, not delivery" reading setupui's own Narrating used before this
+// package existed.
 func (c *Controller) Current() (Overlay, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.cur == nil {
-		return Overlay{}, false
-	}
-	return c.cur.overlay, true
+	return c.currentLocked()
 }
 
-// IsCurrent reports whether h is the overlay on screen.
+// IsCurrent reports whether h is the overlay decided as on screen.
 func (c *Controller) IsCurrent(h Handle) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.isCurrentLocked(h)
+}
+
+// isCurrentLocked is IsCurrent for a caller that already holds mu — a
+// Condition, which ShowIf and HideIf invoke under it. Calling IsCurrent
+// instead from inside a Condition deadlocks on the same, non-reentrant lock.
+func (c *Controller) isCurrentLocked(h Handle) bool {
 	return c.cur != nil && c.cur.id == h.id
 }

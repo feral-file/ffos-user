@@ -361,11 +361,6 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 			wantState: stateReady,
 		},
 		{
-			name:      "hidden",
-			call:      func(s *Service) { s.Hide() },
-			wantState: stateHidden,
-		},
-		{
 			name:      "factory reset",
 			call:      func(s *Service) { s.ShowFactoryReset() },
 			wantState: stateFactoryReset,
@@ -776,42 +771,30 @@ func TestResyncBeforeAnyStateIsNoop(t *testing.T) {
 	assert.Equal(t, 0, sender.callCount())
 }
 
-// TestResync_NoOpWhenPendingNonEmpty pins minor #14: Resync now also runs as
-// a generation-ready reconciler (on every document replacement, not just the
-// original CDP on-connect wiring), so it can fire while a genuine
-// multi-state sequence (e.g. the claim flow's ShowReady()+Hide() — two
-// DISTINCT states that must both reach the player) is still queued. It must
-// leave a non-empty queue alone rather than collapsing it down to just the
-// last intent, which would silently drop the Ready.
-func TestResync_NoOpWhenPendingNonEmpty(t *testing.T) {
-	svc := newTestService(t, newFakeCDP(), validContract)
+// TestResync_ReshowsCurrentOverlayEvenAfterASecondState pins the behavior the
+// old queue-draining design needed a special case for: Resync always re-shows
+// whatever the overlay controller currently decides, never a stale snapshot.
+// A ShowReady() immediately followed by Hide() leaves nothing current (Hide
+// cleared it), so Resync after that sequence is correctly a no-op — ordering
+// and delivery of the Ready/Hidden pair themselves are the controller's own
+// queue's job now, not Resync's.
+func TestResync_ReshowsCurrentOverlayEvenAfterASecondState(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
 
-	// A worker is pretended to be draining, so the paint below only records the
-	// current overlay and queues nothing that a test could not see.
-	svc.mu.Lock()
-	svc.running = true
-	svc.mu.Unlock()
 	svc.ShowReady()
+	svc.Hide()
+	fake.waitForCalls(t, 2)
 
-	svc.mu.Lock()
-	svc.pending = []map[string]any{
-		{"state": stateReady},
-		{"state": stateHidden},
-	}
-	svc.mu.Unlock()
-
+	before := fake.callCount()
 	svc.Resync()
-
-	svc.mu.Lock()
-	defer svc.mu.Unlock()
-	require.Len(t, svc.pending, 2, "a non-empty queue must be left alone")
-	assert.Equal(t, stateReady, svc.pending[0]["state"])
-	assert.Equal(t, stateHidden, svc.pending[1]["state"])
+	time.Sleep(20 * time.Millisecond)
+	assert.Equal(t, before, fake.callCount(), "nothing is current after Hide, so Resync has nothing to re-show")
 }
 
-// TestResync_ReEnqueuesLastWhenPendingEmpty pins the other half: an EMPTY
-// queue means there is genuinely nothing in flight, so Resync's original job
-// (catch a reconnected/new document up to the current intent) still applies.
+// TestResync_ReEnqueuesLastWhenPendingEmpty pins the other half: Resync's
+// original job (catch a reconnected/new document up to the current intent)
+// still applies when something is current.
 func TestResync_ReEnqueuesLastWhenPendingEmpty(t *testing.T) {
 	fake := newFakeCDP()
 	svc := newTestService(t, fake, validContract)
@@ -998,56 +981,29 @@ func TestReadyThenHideDeliversBoth(t *testing.T) {
 	assert.Equal(t, stateHidden, fake.requests[1]["state"])
 }
 
-// TestSameStateBurstCoalesces keeps the flip side of the queue contract honest:
-// a CONTIGUOUS burst of the same state (OTA progress) collapses to one trailing
-// entry with the newest payload, so a slow CDP link never builds a backlog of
-// stale percentages — while a repeat AFTER intervening states must append, so
-// the screen ends on the newest state instead of a buried replacement.
-func TestSameStateBurstCoalesces(t *testing.T) {
-	svc := newTestService(t, newFakeCDP(), validContract)
+// Hide() with no setup narration current sends nothing — there is no "clear an
+// empty screen" bypass any more (see the overlay package doc and
+// SweepStaleOverlay, the one legitimate case of painting without the owner
+// having asked). Hiding something another owner painted, not setup, is the
+// same no-op for the same reason: a plain Hide clears only setup's own overlay.
+func TestHide_NothingCurrentSendsNothing(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
 
-	// Enqueue directly (no worker running) to test the coalescing rule itself
-	// deterministically.
-	svc.mu.Lock()
-	svc.enqueueLocked(map[string]any{"state": stateUpdating, "progress": 10})
-	svc.enqueueLocked(map[string]any{"state": stateUpdating, "progress": 50})
-	svc.enqueueLocked(map[string]any{"state": stateHidden})
-	svc.enqueueLocked(map[string]any{"state": stateUpdating, "progress": 90})
-	queue := make([]map[string]any, len(svc.pending))
-	copy(queue, svc.pending)
-	svc.mu.Unlock()
+	svc.Hide()
 
-	require.Len(t, queue, 3)
-	assert.Equal(t, stateUpdating, queue[0]["state"])
-	assert.Equal(t, 50, queue[0]["progress"], "contiguous burst must coalesce to the newest payload")
-	assert.Equal(t, stateHidden, queue[1]["state"])
-	assert.Equal(t, stateUpdating, queue[2]["state"])
-	assert.Equal(t, 90, queue[2]["progress"], "a repeat after intervening states must append, not replace the buried entry")
+	time.Sleep(20 * time.Millisecond)
+	assert.Zero(t, fake.callCount(), "nothing was shown, so there is nothing to clear")
 }
 
-// TestRepeatAfterInterveningStatesEndsOnNewest pins the delivery-order bug the
-// old replace-in-place rule caused: softap_qr→joining→join_failed queued, then
-// a fresh softap_qr (the re-raised AP). Replacing the buried first entry
-// delivered softap_qr(new)→joining→join_failed and left the player on an
-// obsolete failure screen while the AP was active. The queue must end on the
-// newest softap_qr.
-func TestRepeatAfterInterveningStatesEndsOnNewest(t *testing.T) {
-	svc := newTestService(t, newFakeCDP(), validContract)
-
-	svc.mu.Lock()
-	svc.enqueueLocked(map[string]any{"state": stateSoftAPQR, "ssid": "FF1-abc", "psk": "old"})
-	svc.enqueueLocked(map[string]any{"state": stateJoining})
-	svc.enqueueLocked(map[string]any{"state": stateJoinFailed})
-	svc.enqueueLocked(map[string]any{"state": stateSoftAPQR, "ssid": "FF1-abc", "psk": "new"})
-	queue := make([]map[string]any, len(svc.pending))
-	copy(queue, svc.pending)
-	svc.mu.Unlock()
-
-	require.Len(t, queue, 4)
-	assert.Equal(t, stateSoftAPQR, queue[3]["state"], "delivery must END on the re-raised QR")
-	assert.Equal(t, "new", queue[3]["psk"])
-	assert.Equal(t, "old", queue[0]["psk"], "the earlier QR keeps its original position and payload")
-}
+// The coalescing and ordering rules (a contiguous same-state burst collapses
+// to its newest payload; a repeat after intervening states appends instead of
+// replacing a buried entry) moved to the overlay package's own delivery queue
+// along with the queue itself — see
+// overlay.TestDelivery_CoalescesTrailingSameKindButKeepsDistinctStates. They
+// are no longer setupui-internal state to poke directly; TestReadyThenHideDeliversBoth
+// above is the black-box proof at this package's own level that distinct
+// states still both arrive, in order.
 
 // TestUnreadableContractDefersWithoutLatching: a read failure (boot ordering,
 // OTA mid-replace of the player bundle) must NOT latch narration off for the

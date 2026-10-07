@@ -45,20 +45,25 @@ func narrationOf(cur overlay.Overlay, has bool) map[string]any {
 	return payloadOf(cur)
 }
 
-// setupPainter is the transport the controller paints setup overlays through.
-// It queues the request for the worker, which keeps narration in order and
-// coalesces progress bursts, exactly as before the controller existed.
+// setupPainter is the transport the controller delivers setup overlays
+// through. It is called only from the controller's own worker goroutine (see
+// the overlay package doc), never from a caller of Show/Hide/ShowClaimQR/etc,
+// so parking for a pending navigation and the blocking CDP send below cannot
+// stall anything else — ordering and coalescing of the actual sends are the
+// controller's own queue's job now, not this type's.
 type setupPainter struct {
 	s *Service
 }
 
 func (p setupPainter) Show(_ context.Context, o overlay.Overlay) error {
-	p.s.enqueue(payloadOf(o))
+	p.s.parkForNavigation()
+	p.s.trySend(payloadOf(o))
 	return nil
 }
 
 func (p setupPainter) Hide(_ context.Context, _ overlay.Overlay) error {
-	p.s.enqueue(map[string]any{"state": stateHidden})
+	p.s.parkForNavigation()
+	p.s.trySend(map[string]any{"state": stateHidden})
 	return nil
 }
 
@@ -74,60 +79,27 @@ func (s *Service) SetController(c *overlay.Controller) {
 	s.ctrl = c
 }
 
-// OnOverride is called when another overlay replaces the setup overlay. Setup
-// states still queued have not reached the player yet; sending them now would
-// make the player yield the newer overlay. The queue is dropped. A state
-// already handed to the worker can still arrive late — the window is one send.
-func (s *Service) OnOverride(_ overlay.Overlay) {
-	s.mu.Lock()
-	s.pending = nil
-	s.mu.Unlock()
-}
+// OnOverride is called when another overlay replaces the setup overlay. There
+// is nothing queued locally to drop any more: the controller's own delivery
+// queue is the only queue, and it already orders this replacement correctly
+// (see the overlay package doc on decision versus delivery).
+func (s *Service) OnOverride(overlay.Overlay) {}
 
 // OnClose is unused: setup overlays end by replacement or by an explicit hide.
 func (s *Service) OnClose() {}
 
-// enqueue hands one request to the worker. The worker sends it in order.
-func (s *Service) enqueue(req map[string]any) {
-	s.mu.Lock()
-	s.narrated = true
-	s.enqueueLocked(req)
-	starting := !s.running
-	s.running = true
-	s.mu.Unlock()
-	if starting {
-		go s.worker()
-	}
-}
-
-// hideIf clears the screen when match holds, under the controller's lock.
+// hideIf clears the screen when match holds. Nothing current, or something
+// current that match rejects, sends nothing — there is no bypass for an empty
+// screen; see SweepStaleOverlay for the one legitimate case of painting
+// without the owner having asked (a stale overlay from an earlier process).
 func (s *Service) hideIf(match overlay.Condition) {
 	_ = s.ctrl.HideIf(context.Background(), match)
 }
 
-// clearSetup is a plain hide. It clears setup narration the controller shows,
-// and it clears an empty screen too: the player may still show an overlay from
-// an earlier process that this controller does not know about. A browser-pairing
-// code on screen belongs to another owner and is left alone.
-//
-// The empty-screen clear is a clear, not a show, so it goes straight to the
-// transport: there is no overlay for the controller to record.
-func (s *Service) clearSetup() {
-	emptyScreen := false
-	err := s.ctrl.HideIf(context.Background(), func(cur overlay.Overlay, has bool) bool {
-		if has && !isSetup(cur) {
-			return false
-		}
-		emptyScreen = !has
-		return true
-	})
-	if err == nil && emptyScreen {
-		s.enqueue(map[string]any{"state": stateHidden})
-	}
-}
-
 // showOwned is the one place setup narration is painted. A nil condition always
 // shows; a condition that fails drops the narration, as the old pushIf did.
+// A successful show marks this process as having narrated, which is what lets
+// SweepStaleOverlay tell a stale leftover overlay from its own live one.
 func (s *Service) showOwned(req map[string]any, pr overlay.Priority, ok func(last map[string]any) bool) {
 	var cond overlay.Condition
 	if ok != nil {
@@ -135,8 +107,13 @@ func (s *Service) showOwned(req map[string]any, pr overlay.Priority, ok func(las
 			return ok(narrationOf(cur, has))
 		}
 	}
-	_, _ = s.ctrl.ShowIf(context.Background(), s, overlay.Overlay{
+	_, _, err := s.ctrl.ShowIf(context.Background(), s, overlay.Overlay{
 		Kind:    setupKind(stringField(req, "state")),
 		Payload: req,
 	}, pr, cond)
+	if err == nil {
+		s.mu.Lock()
+		s.narrated = true
+		s.mu.Unlock()
+	}
 }

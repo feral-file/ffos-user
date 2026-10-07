@@ -45,7 +45,6 @@ const (
 	// above a topic's session cap and exists so a wrong or hostile response
 	// cannot be read into memory unbounded.
 	maxSessionListBytes       = 1 << 20
-	displayRecoveryTimeout    = 500 * time.Millisecond
 	stopCleanupTimeout        = 1500 * time.Millisecond
 	channelCloseTimeout       = 500 * time.Millisecond
 	maxApprovalRequestIDBytes = 16
@@ -2362,28 +2361,45 @@ const (
 )
 
 // mintPainter sends mint overlays to the player. Its Show does no ownership
-// bookkeeping: the controller records what is on screen.
+// bookkeeping: the controller records what is on screen. It is called only
+// from the controller's own delivery worker (see the overlay package doc),
+// never from a caller of showMint/hideSession, so parking for a pending
+// navigation and the blocking CDP send below cannot stall anything else. An
+// error is logged here, not returned to any caller: there is no caller left
+// to tell by the time delivery runs.
 type mintPainter struct {
 	s *service
 }
 
 func (p mintPainter) Show(ctx context.Context, o overlay.Overlay) error {
+	p.s.parkForNavigation()
+	var err error
 	switch o.Kind {
 	case KindPairingCode:
 		code, _ := o.Payload.(string)
-		return qrdisplay.ShowPairingCode(ctx, p.s.cdp, code)
+		err = qrdisplay.ShowPairingCode(ctx, p.s.cdp, code)
 	case KindRequestReceived:
 		name, _ := o.Payload.(string)
-		return qrdisplay.ShowRequestReceived(ctx, p.s.cdp, name)
+		err = qrdisplay.ShowRequestReceived(ctx, p.s.cdp, name)
 	case KindCreatingToken:
 		name, _ := o.Payload.(string)
-		return qrdisplay.ShowCreatingToken(ctx, p.s.cdp, name)
+		err = qrdisplay.ShowCreatingToken(ctx, p.s.cdp, name)
+	default:
+		err = overlay.ErrUnknownKind
 	}
-	return overlay.ErrUnknownKind
+	if err != nil {
+		p.s.logger.Warn("Failed to paint mint pairing overlay", zap.Error(err), zap.String("kind", string(o.Kind)))
+	}
+	return err
 }
 
 func (p mintPainter) Hide(ctx context.Context, _ overlay.Overlay) error {
-	return qrdisplay.ShowDefaultDisplay(ctx, p.s.cdp)
+	p.s.parkForNavigation()
+	if err := qrdisplay.ShowDefaultDisplay(ctx, p.s.cdp); err != nil {
+		p.s.logger.Warn("Failed to clear mint pairing overlay", zap.Error(err))
+		return err
+	}
+	return nil
 }
 
 // Painter returns the mint transport for a shared overlay controller.
@@ -2429,19 +2445,22 @@ func (s *service) endOverridden(active *activePairing, by overlay.Overlay) {
 	}
 }
 
-// showMint paints one mint overlay for active through the controller. live
-// guards the paint: a session canceled while it was waiting must not paint.
-// errSessionEnded is returned when live fails, so callers can tell a closed
-// session from a display that could not be shown.
+// showMint decides active owns o, queues it for delivery, then waits for that
+// specific delivery's own outcome — this call can still report a genuine CDP
+// failure to its caller, exactly as it did before the shared controller
+// existed (three tests hold the start command to that). The wait blocks only
+// this goroutine: the decision was already made and its lock released before
+// Show returned the Result, so nothing else is serialized behind it (see the
+// overlay package doc). live guards the decision itself: a session canceled
+// before it runs must not take the screen. errSessionEnded is returned when
+// live fails, so callers can tell a closed session from a decision an owner
+// rejected, or a delivery that genuinely failed.
 func (s *service) showMint(ctx context.Context, active *activePairing, o overlay.Overlay, pr overlay.Priority, live func() bool) error {
-	// Park before the controller lock: a recovery navigation can take up to
-	// its timeout, and the controller serializes every other paint behind it.
-	s.parkForNavigation()
 	var listener overlay.Listener = unownedOverlay{}
 	if active != nil {
 		listener = s.listenerFor(active)
 	}
-	h, err := s.ctrl.ShowIf(ctx, listener, o, pr, func(overlay.Overlay, bool) bool {
+	h, result, err := s.ctrl.ShowIf(ctx, listener, o, pr, func(overlay.Overlay, bool) bool {
 		return live()
 	})
 	if err != nil {
@@ -2455,7 +2474,7 @@ func (s *service) showMint(ctx context.Context, active *activePairing, o overlay
 		active.handle = h
 		s.mu.Unlock()
 	}
-	return nil
+	return result.Wait(ctx)
 }
 
 // unownedOverlay is the listener of a paint that belongs to no session, such as
@@ -2507,9 +2526,11 @@ func (s *service) closeChannel(channel brokerChannel) {
 	}
 }
 
-// hideSession clears the screen when active's overlay is still the current one.
-// A session whose overlay was replaced sends nothing: the replacing overlay now
-// holds the screen, and clearing it would erase the owner's newer request.
+// hideSession decides the screen is cleared when active's overlay is still the
+// current one. A session whose overlay was replaced decides nothing and sends
+// nothing: the replacing overlay now holds the screen, and clearing it would
+// erase the owner's newer request. The decision itself never blocks; the
+// actual clear, if any, is queued for the controller's delivery worker.
 func (s *service) hideSession(active *activePairing) {
 	s.mu.Lock()
 	h := active.handle
@@ -2517,10 +2538,7 @@ func (s *service) hideSession(active *activePairing) {
 	if h == (overlay.Handle{}) {
 		return
 	}
-	s.parkForNavigation()
-	ctx, cancel := context.WithTimeout(context.Background(), displayRecoveryTimeout)
-	defer cancel()
-	err := s.ctrl.Hide(ctx, h)
+	err := s.ctrl.Hide(context.Background(), h)
 	if err != nil && !errors.Is(err, overlay.ErrNotCurrent) {
 		s.logger.Warn("Failed to clear mint pairing display", zap.Error(err), zap.String("channelID", active.channelID))
 	}
