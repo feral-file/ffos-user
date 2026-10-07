@@ -5194,10 +5194,12 @@ func TestHandleJoinPairingChannel_MismatchOutcomeSurvivesASlowRejection(t *testi
 	}
 }
 
-// fakeClaimScreen is the claim-QR probe a test sets on the mint service.
+// fakeClaimScreen is the claim-QR probe a test sets on the mint service. A
+// mint paint clears it, as setupui does.
 type fakeClaimScreen struct{ showing bool }
 
-func (f fakeClaimScreen) ShowingClaimQR() bool { return f.showing }
+func (f *fakeClaimScreen) ShowingClaimQR() bool { return f.showing }
+func (f *fakeClaimScreen) ClaimQRReplaced()     { f.showing = false }
 
 // An expired pairing code is refreshed on its own. When the owner has since put
 // the claim QR on the screen, the refresh must leave it alone and mint nothing;
@@ -5232,7 +5234,7 @@ func TestRefreshExpiredPairingCode_RespectsClaimQR(t *testing.T) {
 	}
 
 	t.Run("claim QR on screen: no new code", func(t *testing.T) {
-		s, starter, cdpClient := newRefreshService(t, fakeClaimScreen{showing: true})
+		s, starter, cdpClient := newRefreshService(t, &fakeClaimScreen{showing: true})
 
 		s.refreshExpiredPairingCode()
 
@@ -5241,11 +5243,52 @@ func TestRefreshExpiredPairingCode_RespectsClaimQR(t *testing.T) {
 	})
 
 	t.Run("no claim QR on screen: refresh mints a code as before", func(t *testing.T) {
-		s, starter, cdpClient := newRefreshService(t, fakeClaimScreen{showing: false})
+		s, starter, cdpClient := newRefreshService(t, &fakeClaimScreen{showing: false})
 
 		s.refreshExpiredPairingCode()
 
 		assert.Equal(t, 1, starter.StartCount())
 		assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-456", "")
 	})
+}
+
+// A pairing code the owner brings up over the claim QR takes the screen, so
+// the claim QR no longer counts as on screen. When that code later expires on
+// its own the refresh must run, not stay blocked by the stale claim probe.
+func TestRefreshExpiredPairingCode_AfterCodeReplacedClaimQR(t *testing.T) {
+	state.GetState().Relayer.TopicID = "topic-1"
+	t.Cleanup(state.ResetForTesting)
+	starter := &fakeBrokerStarter{channel: &fakeBrokerChannel{pairingCode: "PAIR-789"}}
+	cdpClient := &fakeCDP{}
+	screen := &fakeClaimScreen{showing: true}
+	s := newService(
+		Options{
+			Enabled:            true,
+			BrokerBaseURL:      "https://broker.example",
+			IdleTTL:            time.Minute,
+			PlayerContractPath: writeValidPlayerContract(t),
+		},
+		starter,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.SetClaimScreen(screen)
+	s.Start(context.Background())
+	t.Cleanup(s.Stop)
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	require.True(t, result.(startPairingResponse).OK)
+	require.False(t, screen.ShowingClaimQR(), "the code paint must release the claim QR")
+
+	// Expiry closes the channel before the refresh runs; mirror that so the
+	// refresh starts a new session instead of reporting already_started.
+	_, err = s.CloseActivePairing(context.Background())
+	require.NoError(t, err)
+	s.refreshExpiredPairingCode()
+
+	assert.Equal(t, 2, starter.StartCount(), "expiry of a code that replaced the claim QR must refresh")
 }

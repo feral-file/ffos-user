@@ -719,6 +719,20 @@ func (s *Service) ShowingClaimQR() bool {
 	return s.last != nil && stringField(s.last, "state") == stateClaimQR
 }
 
+// ClaimQRReplaced records that another overlay painted over the claim QR. The
+// mint pairing display paints through qrdisplay, not through this service, so
+// without this the last intent would keep reporting a claim QR that is no
+// longer on screen. It clears only a claim-QR intent; any newer narration
+// already replaced it and is left alone. Resync is a no-op afterwards, so a
+// reconnect does not repaint the claim QR over the code.
+func (s *Service) ClaimQRReplaced() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.last != nil && stringField(s.last, "state") == stateClaimQR {
+		s.last = nil
+	}
+}
+
 // Resync re-pushes the last intended narration state. It is the "CDP became
 // available" trigger: wire it to the CDP client's on-connect callback so a
 // reconnecting or freshly-loaded player catches up to the current setup state.

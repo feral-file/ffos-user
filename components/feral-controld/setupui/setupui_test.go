@@ -1669,3 +1669,19 @@ func TestShowingClaimQR_FollowsLastIntent(t *testing.T) {
 	svc.Hide()
 	assert.False(t, svc.ShowingClaimQR(), "a hidden claim QR is no longer on screen")
 }
+
+// A mint pairing paint over the claim QR clears the claim intent. It must not
+// touch a newer narration that already replaced the claim QR.
+func TestClaimQRReplaced_ClearsOnlyClaimIntent(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, validContract)
+
+	svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
+	svc.ClaimQRReplaced()
+	assert.False(t, svc.ShowingClaimQR())
+	assert.False(t, svc.Narrating(), "a replaced claim QR leaves nothing to resync")
+
+	svc.ShowReady()
+	svc.ClaimQRReplaced()
+	assert.True(t, svc.Narrating(), "a newer ready narration is not the claim QR and stays")
+}

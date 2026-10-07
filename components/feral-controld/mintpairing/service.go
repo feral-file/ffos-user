@@ -650,11 +650,22 @@ func (s *service) SetSession(session NavigationSession) {
 // is on the screen. setupui.Service satisfies it.
 type ClaimScreen interface {
 	ShowingClaimQR() bool
+	// ClaimQRReplaced is called once a mint paint has taken the screen from
+	// the claim QR, so ShowingClaimQR stops reporting it.
+	ClaimQRReplaced()
 }
 
 // SetClaimScreen wires the claim-QR probe. See the Service interface doc.
 func (s *service) SetClaimScreen(screen ClaimScreen) {
 	s.claimScreen = screen
+}
+
+// releaseClaimScreen tells the claim-QR probe that a mint paint now holds the
+// screen. Called after each successful mint display paint.
+func (s *service) releaseClaimScreen() {
+	if s.claimScreen != nil {
+		s.claimScreen.ClaimQRReplaced()
+	}
 }
 
 // claimQRShowing reports whether the claim QR holds the screen. False when no
@@ -2389,6 +2400,7 @@ func (s *service) showPairingCode(ctx context.Context, active *activePairing) er
 	if err := qrdisplay.ShowPairingCode(ctx, s.cdp, active.pairingCode); err != nil {
 		return err
 	}
+	s.releaseClaimScreen()
 
 	s.mu.Lock()
 	s.displayGeneration++
@@ -2407,6 +2419,7 @@ func (s *service) showRequestReceived(ctx context.Context, active *activePairing
 	if err := qrdisplay.ShowRequestReceived(ctx, s.cdp, browserName); err != nil {
 		return err
 	}
+	s.releaseClaimScreen()
 
 	s.mu.Lock()
 	s.displayGeneration++
