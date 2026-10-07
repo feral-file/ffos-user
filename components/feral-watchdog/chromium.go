@@ -64,23 +64,6 @@ const (
 	// retries the full ladder, but ends parked rather than rebooting again.
 	// The counter is persisted in chromiumFallbackStateFile.
 	CHROMIUM_MAX_FALLBACK_REBOOTS = 1
-	// CHROMIUM_CDP_REPORT_FALLBACK_WINDOW (ffos-user#356) bounds how long
-	// canForgetRebootBudget may withhold forgiveness while waiting for
-	// feral-controld to ever send a single cdp_stuck signal (true, false,
-	// or cdphealth's own first-ever-healthy confirmation). A healthy device
-	// running a controld build that HAS cdphealth gets that first signal
-	// within seconds of boot (cdphealth's own pollInterval=5s), so this
-	// window is sized to be reached only when controld never will: an
-	// older package-rail build predating cdphealth (the two daemons are
-	// independently pacman-updatable — ffos-user#356's review found this
-	// is a real, not hypothetical, version-skew risk), cdphealth crashing
-	// or never starting, or the D-Bus match silently failing. Ten times
-	// StuckThreshold/CHROMIUM_STARTUP_GRACE (90s) is far outside any
-	// genuine single-episode window, so it cannot collide with the
-	// clock-skew race the bot already found and fixed twice in this same
-	// gate's history — this is a one-time "the feature isn't there at
-	// all" fallback, not a second clock-based health signal.
-	CHROMIUM_CDP_REPORT_FALLBACK_WINDOW = 10 * CHROMIUM_STARTUP_GRACE
 )
 
 // ChromiumMonitor monitors Chromium browser health via Chrome DevTools Protocol.
@@ -226,16 +209,6 @@ type ChromiumMonitor struct {
 	// no longer forgive the #254 reboot cap by itself — only an actual
 	// SetCDPStuck(false) from controld can.
 	cdpConfirmedHealthy bool
-	// watchdogStart (ffos-user#356) is set once at construction and NEVER
-	// reset — unlike monitorStart, which restartChromium and every
-	// suppressed-state exit re-anchor to "now" on purpose (a fresh
-	// cold-start grace after each one). canForgetRebootBudget's
-	// CHROMIUM_CDP_REPORT_FALLBACK_WINDOW fallback needs an anchor that
-	// reflects how long THIS PROCESS has gone with zero cdp_stuck signal
-	// ever received, not how long since the most recent restart — a
-	// device cycling restarts faster than the fallback window would
-	// otherwise never reach it against monitorStart.
-	watchdogStart time.Time
 }
 
 // SetCDPStuck records whether feral-controld has reported its CDP
@@ -278,7 +251,6 @@ func NewChromiumMonitor(cdpEndpoint string, logger *zap.Logger, commandHandler *
 		restartHistory:   make([]time.Time, 0, CHROMIUM_RESTART_HISTORY_SIZE),
 		hasEverConnected: false,
 		monitorStart:     time.Now(),
-		watchdogStart:    time.Now(),
 		commandHandler:   commandHandler,
 		drmSysfsRoot:     defaultDRMSysfsRoot,
 		ttyActiveFile:    defaultTTYActiveFile,
@@ -457,23 +429,25 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 	// point is that recovery-while-parked clears on the very next success.
 	//
 	// cdpReportReceived/cdpConfirmedHealthy together still have no escape
-	// if controld NEVER sends a single cdp_stuck signal — run-reviewer's
-	// review of this gate's own fix found this is not hypothetical: the
-	// two daemons are independently pacman-updatable, so an older
-	// feral-controld predating the cdphealth package (or one whose
-	// cdphealth goroutine never starts) pairs with a feral-watchdog that
-	// has this gate, and cdpReportReceived then stays false forever,
-	// permanently losing the pre-existing #254 self-heal budget on that
-	// device. CHROMIUM_CDP_REPORT_FALLBACK_WINDOW bounds that: once this
-	// process has gone that long since construction with zero signal
-	// EVER received, treat the whole feature as absent and fall back to
-	// the pre-existing unconditional-on-success behavior permanently —
-	// a healthy device with a working cdphealth receives its first
-	// signal within cdphealth's own 5s poll interval, far short of this
-	// window, so this never fires for one that actually has the feature.
-	canForgetRebootBudget := recovered ||
-		(m.cdpReportReceived && m.cdpConfirmedHealthy) ||
-		(!m.cdpReportReceived && time.Since(m.watchdogStart) > CHROMIUM_CDP_REPORT_FALLBACK_WINDOW)
+	// if controld NEVER sends a single cdp_stuck signal — e.g. an older
+	// feral-controld predating the cdphealth package, paired with a
+	// feral-watchdog that has this gate (the two daemons are
+	// independently pacman-updatable). A bounded time-based fallback was
+	// tried here (10x CHROMIUM_STARTUP_GRACE since construction) and
+	// REJECTED by feralfile-bot's review with a reproduction: cdphealth's
+	// own emit() retries a failed Send indefinitely (ffos-user#356 round
+	// 1's own fix), so a transient D-Bus outage can delay controld's
+	// FIRST successful report arbitrarily far past any fixed window —
+	// indistinguishable, from this process's side, from cdphealth never
+	// existing at all. Any timeout long enough to avoid false-positiving
+	// on that delay is also long enough to re-erase the cap during a
+	// genuinely sustained CDP failure that outlasts it, reproducing the
+	// exact bug this gate exists to prevent. There is no signal available
+	// to feral-watchdog that distinguishes "no report is coming" from
+	// "a report is coming, slowly" without a capability/version
+	// handshake this PR does not add (see Out of scope in the PR body):
+	// the version-skew risk is accepted rather than solved by a clock.
+	canForgetRebootBudget := recovered || (m.cdpReportReceived && m.cdpConfirmedHealthy)
 	var clearPersisted bool
 	if canForgetRebootBudget {
 		// Checked on every eligible success but only writes when there is

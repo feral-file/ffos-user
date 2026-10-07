@@ -252,48 +252,64 @@ func TestChromiumMonitorPlainRestartHoldsStaleCountUntilConfirmed(t *testing.T) 
 	}
 }
 
-// TestChromiumMonitorForgivesRebootCapAfterFallbackWindowWithNoReport pins
-// run-reviewer's finding on TestChromiumMonitorPlainRestartHoldsStaleCount-
-// UntilConfirmed's own premise: that test proves the cap survives as long as
-// no report has ever arrived, but never asks what happens if NO report EVER
-// arrives at all — a feral-controld predating the cdphealth package (the two
-// daemons are independently pacman-updatable), or one whose cdphealth
-// goroutine never starts. Without an escape hatch, cdpReportReceived would
-// stay false forever and the device would never regain the #254 self-heal
-// budget on an otherwise-healthy boot. CHROMIUM_CDP_REPORT_FALLBACK_WINDOW
-// bounds that: past the window, with zero signal ever received, the gate
-// falls back to the pre-existing unconditional-on-success behavior.
-func TestChromiumMonitorForgivesRebootCapAfterFallbackWindowWithNoReport(t *testing.T) {
+// TestChromiumMonitorNoTimeBasedEscapeForRebootCapEvenAfterLongDelay pins
+// feralfile-bot's finding against an earlier version of this gate that DID
+// have a time-based escape hatch (CHROMIUM_CDP_REPORT_FALLBACK_WINDOW,
+// 10xCHROMIUM_STARTUP_GRACE): the bot reproduced that cdphealth's own emit()
+// retries a failed Send indefinitely, so a transient D-Bus outage can delay
+// controld's FIRST successful report arbitrarily far past any fixed window —
+// indistinguishable, from this process's side, from cdphealth never
+// existing at all. Any timeout long enough to avoid that false positive is
+// also long enough to re-erase the cap during a genuinely sustained CDP
+// failure that outlasts it. The fallback window was removed rather than
+// re-tuned: there is no signal available to feral-watchdog that
+// distinguishes "no report is coming" from "a report is coming, slowly".
+// This test drives far more ticks than the old window would have tolerated
+// and asserts the cap still survives every one of them, with the only exit
+// an explicit SetCDPStuck call — no amount of elapsed silence forgives it.
+func TestChromiumMonitorNoTimeBasedEscapeForRebootCapEvenAfterLongDelay(t *testing.T) {
 	path := useFallbackStateFile(t, CHROMIUM_MAX_FALLBACK_REBOOTS)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
-	// No SetCDPStuck call at all, ever — simulating a feral-controld that
-	// never sends a single cdp_stuck signal.
+	// No SetCDPStuck call at all, ever — simulating a feral-controld whose
+	// cdphealth is either genuinely absent, or present but unable to get a
+	// single Send through yet (a sustained D-Bus outage), both of which
+	// look identical from here: pure silence.
 
-	// Still within the fallback window: the stale persisted count must
-	// survive, exactly like TestChromiumMonitorPlainRestartHoldsStaleCount-
-	// UntilConfirmed already pins for the ordinary case.
-	if err := monitor.check(context.Background()); err != nil {
-		t.Fatalf("expected success against ok endpoint, got %v", err)
+	for i := 0; i < 50; i++ {
+		if err := monitor.check(context.Background()); err != nil {
+			t.Fatalf("tick %d: expected success against ok endpoint, got %v", i, err)
+		}
 	}
 	if n, err := loadChromiumFallbackReboots(path); err != nil || n != CHROMIUM_MAX_FALLBACK_REBOOTS {
-		t.Fatalf("expected the stale persisted count to survive while still inside the fallback window, got %d, %v", n, err)
+		t.Fatalf("expected the stale persisted count to survive 50 ticks of silence with no report ever received, got %d, %v", n, err)
 	}
 
-	// Past the fallback window with zero report ever received: the gate
-	// must stop waiting and forgive the cap on the next success, the same
-	// way it always did before this PR.
+	// Simulate real elapsed wall-clock time far past what any plausible
+	// fixed window would have tolerated (the removed fallback window was
+	// 10xCHROMIUM_STARTUP_GRACE = 15 minutes; this is 10x that again) —
+	// without mutating the clock directly, 50 fast ticks alone would never
+	// exercise a time-based regression, since they execute in milliseconds.
 	monitor.mu.Lock()
-	monitor.watchdogStart = time.Now().Add(-CHROMIUM_CDP_REPORT_FALLBACK_WINDOW - time.Second)
+	monitor.monitorStart = time.Now().Add(-100 * CHROMIUM_STARTUP_GRACE)
 	monitor.mu.Unlock()
 	if err := monitor.check(context.Background()); err != nil {
 		t.Fatalf("expected success against ok endpoint, got %v", err)
 	}
+	if n, err := loadChromiumFallbackReboots(path); err != nil || n != CHROMIUM_MAX_FALLBACK_REBOOTS {
+		t.Fatalf("expected the stale persisted count to survive even after a huge simulated elapsed time with no report ever received, got %d, %v", n, err)
+	}
+
+	// The delayed report finally gets through: only now may the cap clear.
+	monitor.SetCDPStuck(false)
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("expected the persisted file to be removed once the fallback window elapsed with no report ever received, stat err=%v", err)
+		t.Fatalf("expected the persisted file to be removed once an actual report finally confirmed health, stat err=%v", err)
 	}
 }
 
