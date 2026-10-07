@@ -31,17 +31,22 @@ Two consequences the earlier draft got wrong:
   `setupDisplay` `hidden` never clears a mint panel. A session's restore cannot
   erase a claim QR on the player.
 - `ffos-player-contract.json` (`notes`) and `docs/DEVICE_LOCAL_PLAYER.md` still
-  say the player renders without arbitration. The code does arbitrate; those
-  notes are stale and should be fixed in the player repo.
+  say the player renders without arbitration. The code does arbitrate. These
+  notes are stale. Fixing them is a documentation task in the player repo and
+  does not block this design.
 
-The player does not stop the device from sending an automatic command over a
-newer one. Last-wins means that an expiry refresh of a pairing code replaces a
-claim QR the owner asked for, which is the behavior in #382. That decision
-belongs to the controller on the device side.
+The player is correct: it shows the last command it receives. The defect is on
+the device side. Two controld paths send a pairing code while the owner wants a
+claim QR:
 
-The device side still has no record of what is on screen. Result: automatic
-paints replace owner-requested ones, and the state each side keeps is stale
-after that. The app cannot read which overlay is on screen (#381).
+- Expiry refresh (`refreshExpiredPairingCode` → `showPairingCode`): nobody asked
+  for a new code, and it replaces the claim QR. This is #382.
+- Re-show on a repeated Browser Pairing tap (`already_started`): this one the
+  owner asked for, so it is kept.
+
+Controld has no record of what is on screen, so it cannot tell an automatic
+paint from an owner paint over an owner-requested overlay. The app cannot read
+which overlay is on screen either (#381).
 
 ## Required outcomes
 
@@ -103,11 +108,10 @@ current()             -> {kind, payload, handle} | none
 
 ## Open questions (to settle before implementation)
 
-1. **Player contract.** Answered from the code: the player arbitrates last-wins
-   and `hidden` clears only its own overlay (see *Current state*). Still to do:
-   the contract `notes` and `DEVICE_LOCAL_PLAYER.md` must be corrected in the
-   player repo, and the ff-player owners should confirm that this is the intended
-   contract, not an accident of two components.
+1. **Player contract.** Not a blocker. The player shows the last command it
+   receives, and the design keeps that behavior. The change is entirely in
+   controld. Correcting the stale notes in the player repo is a separate
+   documentation task.
 2. **Resync.** After a CDP reconnect, the controller re-sends `current()`, not the
    last intent of one painter. Confirm that a reconnect with no current overlay
    sends nothing.
