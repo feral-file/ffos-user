@@ -1082,6 +1082,10 @@ func initializeApp(
 	if strings.TrimSpace(mintPairingOpts.RelayerBaseURL) != "" {
 		devicectl.SetBrowserSessionCleanup(executor, mintPairing, logger)
 	}
+	// A browser-pairing code on screen must not outlive a claim QR that takes
+	// the screen after it. Not gated on the relayer URL: the code is painted
+	// locally whether or not a relayer is configured.
+	devicectl.SetMintPairingCloser(executor, mintPairing, logger)
 
 	// Offline cache. Disabled by default (see config.OfflineCacheConfig's
 	// doc on why it defaults off) — offlineCache/kioskReplay/staticServer
@@ -1393,6 +1397,9 @@ func initializeApp(
 	// mirroring setupui's park discipline above.
 	session.RegisterOverlayOwner("mintpairing", mintPairing.DisplayActive)
 	mintPairing.SetSession(session)
+	// The claim-QR probe lets an automatic refresh of an expired code leave a
+	// claim QR the owner asked for on the screen. See mintpairing.ClaimScreen.
+	mintPairing.SetClaimScreen(setupNarrator)
 	// mediator connectivity ownership (§4): SetSession registers the
 	// "connectivity" reconciler internally, so it runs last among the five
 	// above, and routes the edge-triggered pushes from connectivity_change

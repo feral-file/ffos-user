@@ -374,6 +374,11 @@ type executor struct {
 	// behaved before owner-kept sessions existed.
 	browserSessions BrowserSessionCleanup
 
+	// mintPairingCloser, when wired (SetMintPairingCloser), ends a browser-
+	// pairing code that is waiting on the screen whenever the claim QR is
+	// painted. Optional: nil leaves the claim QR alone.
+	mintPairingCloser MintPairingCloser
+
 	// otaGateEntryProbe is the startup OTA gate's OWN entry-window predicate
 	// (main wires it to re-read /proc/uptime against the wider
 	// startupOTAGateEntryWindow). Split from bootLifecycleProbe because the
@@ -942,6 +947,12 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 // and the (non-blocking) push only. Lock edge deviceNameMu → setupui.mu is
 // the one setDeviceName already establishes, one-way.
 func (e *executor) paintClaimQR(url string) {
+	// The claim QR is the owner's newer intent: it takes the screen, and a
+	// browser-pairing code still waiting on this device is closed rather than
+	// left to repaint over it later. Closed before deviceNameMu is taken —
+	// CloseActivePairing can wait out a worker, and a rename must not queue
+	// behind that wait.
+	e.closeMintPairingForClaimQR()
 	e.deviceNameMu.Lock()
 	defer e.deviceNameMu.Unlock()
 	e.setupUI().ShowClaimQR(url, e.deviceDisplayName())

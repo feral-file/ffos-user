@@ -1649,3 +1649,23 @@ func TestShowConnectingOrHideDowngradesToHide(t *testing.T) {
 		assert.False(t, leaked, "the queue marker must never reach the wire")
 	})
 }
+
+// ShowingClaimQR is the screen probe mintpairing's automatic refresh reads. It
+// must follow intent the same way Narrating does: true from ShowClaimQR until a
+// later push replaces or hides it, and never true for any other state.
+func TestShowingClaimQR_FollowsLastIntent(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, validContract)
+
+	assert.False(t, svc.ShowingClaimQR(), "nothing shown yet")
+
+	svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
+	assert.True(t, svc.ShowingClaimQR())
+
+	svc.ShowReady()
+	assert.False(t, svc.ShowingClaimQR(), "a different overlay replaces the claim QR")
+
+	svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
+	svc.Hide()
+	assert.False(t, svc.ShowingClaimQR(), "a hidden claim QR is no longer on screen")
+}

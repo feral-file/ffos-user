@@ -5193,3 +5193,59 @@ func TestHandleJoinPairingChannel_MismatchOutcomeSurvivesASlowRejection(t *testi
 		t.Fatal("the channel must still be closed")
 	}
 }
+
+// fakeClaimScreen is the claim-QR probe a test sets on the mint service.
+type fakeClaimScreen struct{ showing bool }
+
+func (f fakeClaimScreen) ShowingClaimQR() bool { return f.showing }
+
+// An expired pairing code is refreshed on its own. When the owner has since put
+// the claim QR on the screen, the refresh must leave it alone and mint nothing;
+// with no claim QR on screen the refresh still runs as before.
+func TestRefreshExpiredPairingCode_RespectsClaimQR(t *testing.T) {
+	newRefreshService := func(t *testing.T, screen ClaimScreen) (*service, *fakeBrokerStarter, *fakeCDP) {
+		t.Helper()
+		state.GetState().Relayer.TopicID = "topic-1"
+		t.Cleanup(state.ResetForTesting)
+		starter := &fakeBrokerStarter{channel: &fakeBrokerChannel{pairingCode: "PAIR-456"}}
+		cdpClient := &fakeCDP{}
+		s := newService(
+			Options{
+				Enabled:            true,
+				BrokerBaseURL:      "https://broker.example",
+				IdleTTL:            time.Minute,
+				PlayerContractPath: writeValidPlayerContract(t),
+			},
+			starter,
+			nil,
+			nil,
+			cdpClient,
+			wrapper.NewJSON(),
+			zap.NewNop(),
+		).(*service)
+		if screen != nil {
+			s.SetClaimScreen(screen)
+		}
+		s.Start(context.Background())
+		t.Cleanup(s.Stop)
+		return s, starter, cdpClient
+	}
+
+	t.Run("claim QR on screen: no new code", func(t *testing.T) {
+		s, starter, cdpClient := newRefreshService(t, fakeClaimScreen{showing: true})
+
+		s.refreshExpiredPairingCode()
+
+		assert.Equal(t, 0, starter.StartCount(), "a claim QR the owner asked for must not be displaced by an automatic refresh")
+		assert.Empty(t, cdpClient.displayRequestsSnapshot())
+	})
+
+	t.Run("no claim QR on screen: refresh mints a code as before", func(t *testing.T) {
+		s, starter, cdpClient := newRefreshService(t, fakeClaimScreen{showing: false})
+
+		s.refreshExpiredPairingCode()
+
+		assert.Equal(t, 1, starter.StartCount())
+		assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-456", "")
+	})
+}

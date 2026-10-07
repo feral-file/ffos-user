@@ -709,6 +709,16 @@ func (s *Service) Narrating() bool {
 	return s.last != nil && stringField(s.last, "state") != stateHidden
 }
 
+// ShowingClaimQR reports whether the last intended narration is the claim QR.
+// It reads intent like Narrating, so a claim QR whose paint has not reached the
+// player yet still counts. mintpairing's automatic refresh uses it to avoid
+// repainting a mint pairing code over a QR the owner asked for.
+func (s *Service) ShowingClaimQR() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.last != nil && stringField(s.last, "state") == stateClaimQR
+}
+
 // Resync re-pushes the last intended narration state. It is the "CDP became
 // available" trigger: wire it to the CDP client's on-connect callback so a
 // reconnecting or freshly-loaded player catches up to the current setup state.

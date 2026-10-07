@@ -108,6 +108,11 @@ type Service interface {
 	// playersession.Session.RegisterOverlayOwner, so a recovery navigation
 	// never erases a QR mid-pairing.
 	DisplayActive() bool
+	// SetClaimScreen wires the probe for the claim QR. An automatic refresh
+	// of an expired code reads it so it never repaints over a QR the owner
+	// asked for. Call once at wiring time; nil (never called) keeps the
+	// pre-existing refresh behavior.
+	SetClaimScreen(screen ClaimScreen)
 	// SetSession wires the playersession.Session the display sends park
 	// against while a recovery navigation is pending, mirroring
 	// setupui.Service.SetSession's discipline. Call once at wiring time,
@@ -204,6 +209,11 @@ type service struct {
 	// that predates the session — the sends then never park, preserving
 	// pre-session behavior exactly. Immutable after construction.
 	session NavigationSession
+
+	// claimScreen, when wired (SetClaimScreen), tells the automatic refresh
+	// whether the owner's claim QR is on screen. Written once at wiring time,
+	// read-only afterwards, so it needs no lock.
+	claimScreen ClaimScreen
 	// navigationParkPollInterval / navigationParkTimeout override the park
 	// bounds (zero means the defaults); test-only, same pre-first-use
 	// contract as session above.
@@ -634,6 +644,24 @@ const (
 // Service interface doc.
 func (s *service) SetSession(session NavigationSession) {
 	s.session = session
+}
+
+// ClaimScreen is the probe the mint service reads to know whether the claim QR
+// is on the screen. setupui.Service satisfies it.
+type ClaimScreen interface {
+	ShowingClaimQR() bool
+}
+
+// SetClaimScreen wires the claim-QR probe. See the Service interface doc.
+func (s *service) SetClaimScreen(screen ClaimScreen) {
+	s.claimScreen = screen
+}
+
+// claimQRShowing reports whether the claim QR holds the screen. False when no
+// probe is wired, which matches every test and any build without the claim
+// flow.
+func (s *service) claimQRShowing() bool {
+	return s.claimScreen != nil && s.claimScreen.ShowingClaimQR()
 }
 
 // parkForNavigation blocks the caller while a playersession.Session recovery
@@ -2314,6 +2342,18 @@ func (s *service) refreshExpiredPairingCode() {
 	runCtx := s.ctx
 	s.mu.Unlock()
 	if runCtx == nil || runCtx.Err() != nil {
+		return
+	}
+	// An expired code is refreshed on its own, not because the owner asked. A
+	// claim QR shown since the code was painted is the owner's newer intent and
+	// keeps the screen; the next Browser Pairing tap mints a fresh code.
+	// Accepted race: a claim QR painted after this check but before the
+	// refresh's own paint is overwritten by the refreshed code. The window is
+	// one goroutine hop wide, and the claim QR path cannot close a session that
+	// has already expired, so nothing narrower is available without a lock
+	// spanning the claim paint.
+	if s.claimQRShowing() {
+		s.logger.Info("Mint pairing code expired while the claim QR is on screen; not refreshing")
 		return
 	}
 	result, err := s.HandleStartPairingSession(context.Background(), nil)
