@@ -116,6 +116,14 @@ func (r *Restartable) Call(ctx context.Context, name string, path godbus.Path, i
 	return inner.Call(ctx, name, path, iface, method, args...)
 }
 
+func (r *Restartable) Send(payload godbus.DBusPayload) error {
+	inner := r.live()
+	if inner == nil {
+		return fmt.Errorf("dbus: client not started")
+	}
+	return inner.Send(payload)
+}
+
 func (r *Restartable) OnBusSignal(handler godbus.BusSignalHandler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

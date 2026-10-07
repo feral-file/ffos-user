@@ -132,12 +132,13 @@ There is currently no version suffix in any D-Bus name. Adding a version suffix 
 
 | Bus name | Object path | Interface | Type | Members |
 |---|---|---|---|---|
-| `com.feralfile.controld` | — | — | Bus name only (no exported RPCs currently) | — |
+| `com.feralfile.controld` | — | — | Bus name only (no exported RPCs) | — |
+| `com.feralfile.controld` | `/com/feralfile/controld` | `com.feralfile.controld` | Signal emitter | `cdp_stuck` (ffos-user#356) |
 | `com.feralfile.sysmonitord` | `/com/feralfile/sysmonitord` | `com.feralfile.sysmonitord` | RPC | `GetConnectivityStatus(refresh bool) → (bool, error)`, `GetSysMetrics() → (*SysDBusMetrics, error)` |
 | `com.feralfile.sysmonitord` | `/com/feralfile/sysmonitord` | `com.feralfile.sysmonitord` | Signal emitter | `sysmetrics`, `connectivity_change`, `sysevent` |
-| `com.feralfile.watchdog` | — | — | Bus name only (no exported RPCs currently) | — |
+| `com.feralfile.watchdog` | — | — | Bus name only (no exported RPCs or signals) | — |
 
-Before the setupd merge, `feral-controld` exported a `GetRelayerTopicID` RPC and emitted `show_pairing_qr_code` / `factory_reset` / `system_update` / `upload_logs` / `upload_logs_with_bundle` signals to `feral-setupd` on its own bus. Those handlers are now in-process inside `feral-controld`, so it exports no RPCs and emits none of those signals; its `dbus` package holds only the inbound `com.feralfile.sysmonitord` constants it consumes.
+Before the setupd merge, `feral-controld` exported a `GetRelayerTopicID` RPC and emitted `show_pairing_qr_code` / `factory_reset` / `system_update` / `upload_logs` / `upload_logs_with_bundle` signals to `feral-setupd` on its own bus. Those handlers are now in-process inside `feral-controld`, so it exports no RPCs and emits none of those legacy signals. Its `dbus` package holds the inbound `com.feralfile.sysmonitord` constants it consumes, plus (ffos-user#356) its own outbound `cdp_stuck` — the first signal `feral-controld` emits since the setupd merge. `feral-watchdog` consumes `cdp_stuck` the same way it consumes sysmonitord's signals: by duplicating the member-name string locally, since the two are separate Go modules and neither imports the other's `dbus`-equivalent package. `cdp_stuck` is report-only — see architecture.md invariant 12 — `feral-controld` must never itself restart `chromium-kiosk.service` or reboot.
 
 ---
 
@@ -153,7 +154,7 @@ Before the setupd merge, `feral-controld` exported a `GetRelayerTopicID` RPC and
 ### D-Bus Signals
 
 Signals carry either:
-- A single primitive value (e.g. `connectivity_change` carries a single `bool`)
+- A single primitive value (e.g. `connectivity_change` carries a single `bool`; so does `cdp_stuck` — `true` when feral-controld's CDP page-target dial has been stuck for `cdphealth.StuckThreshold`, `false` the moment it reconnects)
 - A JSON-serialized byte slice for structured data (e.g. `sysmetrics` carries `[]byte` which is a JSON-encoded metrics struct)
 
 Do not add ad-hoc fields to signal bodies without updating all consumers. Prefer the byte-slice JSON pattern for structured payloads so the schema can evolve with additive fields.

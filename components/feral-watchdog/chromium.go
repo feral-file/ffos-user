@@ -156,6 +156,28 @@ type ChromiumMonitor struct {
 	fallbackStatePath string
 	fallbackReboots   int
 	fallbackParked    bool
+
+	// cdpStuck (ffos-user#356) is set by SetCDPStuck from feral-controld's
+	// EVENT_CDP_STUCK DBus signal: controld's OWN CDP client has failed to
+	// (re)dial Chromium's page target for a sustained period, which
+	// /json/version polling below CANNOT see on its own — Chromium can keep
+	// answering /json/version while exposing zero or more than one devtools
+	// page target. checkHangState folds this into the exact same restart
+	// decision and suppression gates (headless/dev-console/update/fallback
+	// hold) as an ordinary hang; it never bypasses them. Cleared by
+	// restartChromium once acted on — see that function's doc for why a
+	// signal that never resends "true" must not be left to re-trigger a
+	// restart on every subsequent tick.
+	cdpStuck bool
+}
+
+// SetCDPStuck records whether feral-controld has reported its CDP
+// page-target dial as stuck (ffos-user#356). Safe to call from the mediator's
+// DBus-signal goroutine concurrently with check()'s own goroutine.
+func (m *ChromiumMonitor) SetCDPStuck(stuck bool) {
+	m.mu.Lock()
+	m.cdpStuck = stuck
+	m.mu.Unlock()
 }
 
 // NewChromiumMonitor creates a new Chromium monitor instance.
@@ -314,13 +336,25 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 		}
 	}
 
+	// ffos-user#356: a healthy /json/version does not prove controld's own
+	// CDP page-target dial is healthy too (see cdpStuck's doc), so the
+	// escalation check runs here as well, not only on failure below. By
+	// this point hasEverConnected/lastSuccessfulResp were just set above, so
+	// checkHangState's ordinary hang/startup-grace cases read as healthy and
+	// only the cdpStuck case can fire — it never races or duplicates the
+	// failure-path's own call to checkHangState.
+	m.checkHangState(ctx)
+
 	return nil
 }
 
-// checkHangState decides whether sustained failure to reach /json/version
-// warrants escalating to a kiosk restart. It is called on every failed check,
-// so the cost of false positives is high: any spurious restart will be
-// repeated on the next 5-second tick.
+// checkHangState decides whether sustained failure to reach /json/version, OR
+// feral-controld's own cdpStuck report (ffos-user#356), warrants escalating
+// to a kiosk restart. It is called on every failed check AND, since
+// ffos-user#356, at the end of every successful one too (from check()) so a
+// controld-reported stuck page-target dial can still escalate even while
+// /json/version itself answers fine. The cost of false positives is high:
+// any spurious restart will be repeated on the next 5-second tick.
 //
 // It reports whether the failure happened while headless (no connected
 // display, a developer VT active, an update in progress, or the fallback hold
@@ -331,7 +365,8 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 // CHROMIUM_STARTUP_GRACE; post-connect, the shorter CHROMIUM_HANG_THRESHOLD
 // applies. Both branches additionally consult the chromium-kiosk.service
 // activating state so we don't pile a fresh restart onto a restart that
-// systemd or someone else (OTA, user) is already running.
+// systemd or someone else (OTA, user) is already running. cdpStuck can
+// escalate in either branch, subject to the same gates.
 func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 	// Display gating comes first. On a headless device the kiosk deliberately
 	// waits for a display before launching Chromium, so /json/version is
@@ -514,6 +549,7 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 	hasEverConnected := m.hasEverConnected
 	timeSinceLast := time.Since(m.lastSuccessfulResp)
 	timeSinceStart := time.Since(m.monitorStart)
+	cdpStuck := m.cdpStuck
 	m.mu.Unlock()
 
 	if reconnected {
@@ -527,17 +563,29 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 	)
 	switch {
 	case !hasEverConnected:
-		if timeSinceStart <= CHROMIUM_STARTUP_GRACE {
-			// Cold boot or post-restart bring-up still in progress. Stay
-			// quiet — the noisy "Chromium browser hang detected" line is
-			// reserved for genuine post-connect renderer hangs.
+		if timeSinceStart <= CHROMIUM_STARTUP_GRACE && !cdpStuck {
+			// Cold boot or post-restart bring-up still in progress, and
+			// controld has not (yet) reported its own dial stuck either.
+			// Stay quiet — the noisy "Chromium browser hang detected" line
+			// is reserved for genuine post-connect renderer hangs.
 			return
 		}
 		shouldRestart = true
-		reason = "startup_grace_exceeded"
+		if timeSinceStart > CHROMIUM_STARTUP_GRACE {
+			reason = "startup_grace_exceeded"
+		} else {
+			reason = "controld_cdp_stuck"
+		}
 	case timeSinceLast > CHROMIUM_HANG_THRESHOLD:
 		shouldRestart = true
 		reason = "hang_threshold_exceeded"
+	case cdpStuck:
+		// ffos-user#356: /json/version is healthy (this check may be
+		// running from check()'s SUCCESS path), but feral-controld's own
+		// CDP page-target dial has been stuck for cdphealth.StuckThreshold
+		// — a failure mode /json/version alone can never see.
+		shouldRestart = true
+		reason = "controld_cdp_stuck"
 	}
 
 	if !shouldRestart {
@@ -556,11 +604,16 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 		return
 	}
 
-	if reason == "startup_grace_exceeded" {
+	switch reason {
+	case "startup_grace_exceeded":
 		m.logger.Error("Chromium: Chromium failed to come up within startup grace",
 			zap.Duration("budget", CHROMIUM_STARTUP_GRACE),
 			zap.Duration("elapsed", timeSinceStart))
-	} else {
+	case "controld_cdp_stuck":
+		m.logger.Error("Chromium: feral-controld reported its CDP page-target dial stuck; restarting kiosk (ffos-user#356)",
+			zap.Duration("time_since_last_response", timeSinceLast),
+			zap.Duration("time_since_monitor_start", timeSinceStart))
+	default:
 		m.logger.Error("Chromium: Chromium browser hang detected",
 			zap.Duration("time_since_last_response", timeSinceLast),
 			zap.Duration("threshold", CHROMIUM_HANG_THRESHOLD))
@@ -592,6 +645,23 @@ func (m *ChromiumMonitor) restartChromium(ctx context.Context) {
 	if len(m.restartHistory) > CHROMIUM_RESTART_HISTORY_SIZE {
 		m.restartHistory = m.restartHistory[1:]
 	}
+
+	// ffos-user#356: clear the externally-reported latch as soon as this
+	// escalation is acted on — by EITHER branch below (an ordinary kiosk
+	// restart, or the restart-budget-exhausted fallback hold), not only the
+	// ordinary-restart branch's own state reset further down. cdphealth's
+	// Monitor only re-sends "true" on a FRESH disconnect episode (an actual
+	// reconnect in between); if this action does not fix the underlying
+	// stall, controld's view of "still stuck" never changes, so it never
+	// re-sends either. Leaving m.cdpStuck set would re-trigger
+	// checkHangState's cdpStuck case on literally the next 5s tick,
+	// bypassing whatever gate just engaged (the fresh pre-connect grace, or
+	// the fallback hold) and reproducing the exact restart-storm bug the
+	// ordinary-restart branch's own ESTABLISHED state reset exists to
+	// prevent. Any continued failure now escalates through the ordinary
+	// startup-grace/hang-threshold/fallback ladder instead, exactly like any
+	// other hang.
+	m.cdpStuck = false
 
 	// Budget exhausted: show the stable error screen instead of rebooting
 	// right away. No kiosk restart is issued — the fallback owns the display

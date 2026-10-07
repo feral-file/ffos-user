@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/cdphealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
@@ -88,7 +89,11 @@ type app struct {
 	Math       wrapper.Math
 
 	// Components
-	CDP               cdp.CDP
+	CDP cdp.CDP
+	// CDPHealthMonitor reports a sustained CDP disconnect to feral-watchdog
+	// over DBus (ffos-user#356); see package cdphealth's doc for why this
+	// is report-only and must never itself restart chromium-kiosk.
+	CDPHealthMonitor  *cdphealth.Monitor
 	Relayer           relayer.Relayer
 	DBus              dbus.DBus
 	Mediator          mediator.Mediator
@@ -579,6 +584,13 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// re-seed) is registered as a reconciler on the session instead (see initializeApp),
 	// so it runs once the new document's command handler is actually installed rather than
 	// racing a page that has not hydrated yet.
+	// Report-only CDP health signal for feral-watchdog (ffos-user#356); see
+	// package cdphealth's doc. Started alongside CDP itself so it observes
+	// from the very first connect attempt, not just steady-state drops.
+	if app.CDPHealthMonitor != nil {
+		go app.CDPHealthMonitor.Start(ctx)
+	}
+
 	app.CDP.Start(ctx, func() {
 		if app.Session != nil {
 			app.Session.OnConnect()
@@ -1538,6 +1550,7 @@ func initializeApp(
 		Exec:                     exec,
 		Math:                     math,
 		CDP:                      cdp,
+		CDPHealthMonitor:         cdphealth.New(cdp, dbusClient, clock, logger),
 		Relayer:                  relayer,
 		DBus:                     dbusClient,
 		Mediator:                 mediator,

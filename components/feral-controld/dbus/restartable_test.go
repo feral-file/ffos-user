@@ -60,6 +60,15 @@ func (f *fakeRaw) Call(_ context.Context, _ string, _ godbus.Path, _ godbus.Inte
 	return []any{true}, nil
 }
 
+func (f *fakeRaw) Send(_ godbus.DBusPayload) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.started || f.stopped {
+		return errors.New("not started")
+	}
+	return nil
+}
+
 func (f *fakeRaw) OnBusSignal(h godbus.BusSignalHandler) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

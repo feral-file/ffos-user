@@ -92,9 +92,13 @@ func main() {
 		cancel()
 	}()
 
-	// Initialize DBus client
+	// Initialize DBus client. Two namespaces: sysmonitord's own signals, and
+	// (ffos-user#356) feral-controld's — currently only EVENT_CDP_STUCK,
+	// the one fact only controld can see (its own CDP page-target dial is
+	// stuck) that /json/version polling below cannot detect on its own.
 	mo := dbus.WithMatchPathNamespace(dbus.ObjectPath("/com/feralfile/sysmonitord"))
-	dbusClient := godbus.NewDBusClient(ctx, log, DBUS_NAME, mo)
+	moControld := dbus.WithMatchPathNamespace(dbus.ObjectPath("/com/feralfile/controld"))
+	dbusClient := godbus.NewDBusClient(ctx, log, DBUS_NAME, mo, moControld)
 	err = dbusClient.Start()
 	if err != nil {
 		log.Fatal("DBus init failed", zap.Error(err))
@@ -128,8 +132,15 @@ func main() {
 	cpuHandler := NewCPUHandler(log, cdpClient)
 	defer gpuHandler.GracefulShutdown(ctx)
 
+	// Chromium monitor is constructed before the mediator so the mediator
+	// can route feral-controld's EVENT_CDP_STUCK signal to it
+	// (ffos-user#356) — this daemon stays the sole place that decides to
+	// restart chromium-kiosk.service or reboot.
+	chromiumMonitor := NewChromiumMonitor(config.CDPConfig.Endpoint, log, commandHandler)
+	defer chromiumMonitor.Stop()
+
 	// Initialize mediator
-	mediator := NewMediator(dbusClient, diskHandler, ramHandler, gpuHandler, cpuHandler, log)
+	mediator := NewMediator(dbusClient, diskHandler, ramHandler, gpuHandler, cpuHandler, chromiumMonitor, log)
 	mediator.Start()
 	defer mediator.Stop()
 
@@ -145,8 +156,6 @@ func main() {
 	}()
 
 	// Start Chromium monitor
-	chromiumMonitor := NewChromiumMonitor(config.CDPConfig.Endpoint, log, commandHandler)
-	defer chromiumMonitor.Stop()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
