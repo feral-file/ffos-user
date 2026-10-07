@@ -92,13 +92,19 @@ func main() {
 		cancel()
 	}()
 
-	// Initialize DBus client. Two namespaces: sysmonitord's own signals, and
-	// (ffos-user#356) feral-controld's — currently only EVENT_CDP_STUCK,
-	// the one fact only controld can see (its own CDP page-target dial is
-	// stuck) that /json/version polling below cannot detect on its own.
-	mo := dbus.WithMatchPathNamespace(dbus.ObjectPath("/com/feralfile/sysmonitord"))
-	moControld := dbus.WithMatchPathNamespace(dbus.ObjectPath("/com/feralfile/controld"))
-	dbusClient := godbus.NewDBusClient(ctx, log, DBUS_NAME, mo, moControld)
+	// Initialize DBus client. Match the common /com/feralfile ancestor, not
+	// sysmonitord's and controld's object paths as two separate
+	// WithMatchPathNamespace options: AddMatchSignalContext joins every
+	// option into ONE bus match-rule string, so two different
+	// path_namespace keys in that one rule collapse to a single predicate
+	// rather than an OR — the first match attempt for (ffos-user#356)
+	// controld's EVENT_CDP_STUCK did exactly that and would have silently
+	// dropped one of the two namespaces (which one is bus-implementation
+	// dependent). components/feral-controld/main.go already solved this
+	// identical problem the same way for its own match rule — follow that
+	// precedent here instead of inventing a second one.
+	mo := dbus.WithMatchPathNamespace(dbus.ObjectPath("/com/feralfile"))
+	dbusClient := godbus.NewDBusClient(ctx, log, DBUS_NAME, mo)
 	err = dbusClient.Start()
 	if err != nil {
 		log.Fatal("DBus init failed", zap.Error(err))

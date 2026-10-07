@@ -101,8 +101,15 @@ func (m *Monitor) Start(ctx context.Context) {
 
 func (m *Monitor) tick() {
 	if m.cdp.Initialized() {
+		// Only retire the episode once the clear actually got out. A failed
+		// Send here (see emit's doc) must retry on the next tick rather than
+		// silently forgetting feral-watchdog still holds cdpStuck=true —
+		// leaving reported/unhealthySince untouched is exactly what makes
+		// that retry happen, since this whole branch runs again unchanged.
 		if m.reported {
-			m.emit(false)
+			if !m.emit(false) {
+				return
+			}
 		}
 		m.unhealthySince = time.Time{}
 		m.reported = false
@@ -114,12 +121,23 @@ func (m *Monitor) tick() {
 		m.unhealthySince = now
 	}
 	if !m.reported && now.Sub(m.unhealthySince) >= m.threshold {
-		m.emit(true)
-		m.reported = true
+		// Same reasoning as above: only latch reported once the send for
+		// THIS episode actually succeeded, so a transient failure at the
+		// threshold-crossing moment retries next tick instead of
+		// permanently dropping the one signal this package exists to
+		// deliver — a real risk given the real incident this targets ran
+		// for 7+ hours (ffos-user#356's own timeline).
+		if m.emit(true) {
+			m.reported = true
+		}
 	}
 }
 
-func (m *Monitor) emit(stuck bool) {
+// emit reports success so tick() can decide whether to retry. Logged
+// failures alone are not enough: tick()'s state machine must know whether
+// the send actually left the process, or it cannot tell "delivered" apart
+// from "dropped, retry next tick" — see both call sites' comments.
+func (m *Monitor) emit(stuck bool) bool {
 	err := m.bus.Send(godbus.DBusPayload{
 		Interface: dbus.INTERFACE,
 		Path:      dbus.PATH,
@@ -127,8 +145,8 @@ func (m *Monitor) emit(stuck bool) {
 		Body:      []interface{}{stuck},
 	})
 	if err != nil {
-		m.logger.Error("cdphealth: failed to send DBus signal", zap.Bool("stuck", stuck), zap.Error(err))
-		return
+		m.logger.Error("cdphealth: failed to send DBus signal; will retry next tick", zap.Bool("stuck", stuck), zap.Error(err))
+		return false
 	}
 	if stuck {
 		m.logger.Warn("cdphealth: CDP has not (re)connected for a sustained period; reporting stuck to feral-watchdog (ffos-user#356)",
@@ -136,4 +154,5 @@ func (m *Monitor) emit(stuck bool) {
 	} else {
 		m.logger.Info("cdphealth: CDP reconnected; clearing stuck signal")
 	}
+	return true
 }

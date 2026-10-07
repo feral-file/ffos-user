@@ -295,6 +295,19 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 	// this flips, sustained failures must use the larger startup-grace budget
 	// instead of the steady-state hang threshold.
 	m.mu.Lock()
+	// ffos-user#356: capture whether we were in ANY suppressed state —
+	// headless, dev console, update, or a fallback hold — before clearing
+	// the first three below. cdphealth.Monitor has no visibility into any
+	// of them: it would have latched cdpStuck=true throughout one that ran
+	// past StuckThreshold (a headless device never runs Chromium at all),
+	// so that latch is stale the moment we exit, exactly like headless/
+	// devConsole/updating themselves. check() — not checkHangState — owns
+	// this particular transition (checkHangState's own `reconnected` reset
+	// only fires when ITS failure-path call observes the stale fields
+	// still true; by the time this success path calls checkHangState below,
+	// headless/devConsole/updating are already cleared here, so that reset
+	// never sees them and never runs).
+	wasSuppressed := m.headless || m.devConsole || m.updating || !m.fallbackSince.IsZero()
 	m.lastSuccessfulResp = time.Now()
 	m.hasEverConnected = true
 	// A 200 proves a display is attached and Chromium is up. Clear the headless
@@ -304,6 +317,16 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 	m.headless = false
 	m.devConsole = false
 	m.updating = false
+	if wasSuppressed {
+		// Clearing here, not unconditionally on every success, matters:
+		// cdpStuck must still be able to trigger checkHangState's cdpStuck
+		// case below for the ordinary case this feature exists for — a
+		// healthy /json/version with controld independently reporting its
+		// CDP dial stuck — which clearing it on every success would defeat
+		// outright. It is only stale, and therefore safe (indeed necessary)
+		// to clear, right when exiting a state cdphealth could not see.
+		m.cdpStuck = false
+	}
 	// Chromium came back while the fallback screen was up (someone restarted
 	// the kiosk by hand, an OTA fixed the bundle): drop the hold and forget the
 	// exhausted budget so a later fault gets the full restart ladder again.
@@ -545,6 +568,18 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 		m.hasEverConnected = false
 		m.monitorStart = time.Now()
 		m.lastSuccessfulResp = time.Time{}
+		// ffos-user#356: cdpStuck must reset here too, alongside its three
+		// siblings above. cdphealth.Monitor has no idea a display/VT/update
+		// gate was ever closed — on a headless device it is GUARANTEED to
+		// latch cdpStuck=true after StuckThreshold, since Chromium never
+		// runs there at all. Without this reset, the fresh grace window just
+		// armed above is immediately defeated by the switch's own
+		// `!cdpStuck` check on the very next tick, firing a restart before
+		// Chromium has had any chance to cold-start — exactly the restart
+		// storm this reset block exists to prevent for the other three
+		// latches. If controld's dial is genuinely still stuck once the
+		// gate reopens, it reports again after another StuckThreshold.
+		m.cdpStuck = false
 	}
 	hasEverConnected := m.hasEverConnected
 	timeSinceLast := time.Since(m.lastSuccessfulResp)

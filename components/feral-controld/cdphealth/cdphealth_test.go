@@ -23,18 +23,30 @@ type fakeCDP struct {
 
 func (f *fakeCDP) Initialized() bool { return f.initialized }
 
-// fakeSender records every Send call.
+// fakeSender records every Send call. alwaysFail returns err on every call
+// (the existing "transport is down" shape). failNext, when >0, fails that
+// many calls (decrementing each time) before succeeding — for pinning the
+// retry-after-transient-failure behavior (ffos-user#356 review F3).
 type fakeSender struct {
-	mu    sync.Mutex
-	calls []godbus.DBusPayload
-	err   error
+	mu         sync.Mutex
+	calls      []godbus.DBusPayload
+	err        error
+	alwaysFail bool
+	failNext   int
 }
 
 func (f *fakeSender) Send(payload godbus.DBusPayload) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, payload)
-	return f.err
+	if f.alwaysFail {
+		return f.err
+	}
+	if f.failNext > 0 {
+		f.failNext--
+		return f.err
+	}
+	return nil
 }
 
 func (f *fakeSender) stuckValues() []bool {
@@ -159,10 +171,61 @@ func TestMonitor_RelapseAfterRecoveryReportsAgain(t *testing.T) {
 func TestMonitor_SendErrorIsLoggedNotFatal(t *testing.T) {
 	m, cdp, bus, clock := newTestMonitor(t)
 	bus.err = assertError{}
+	bus.alwaysFail = true
 	goUnhealthy(m, cdp)
 
 	clock.advance(StuckThreshold)
 	assert.NotPanics(t, m.tick, "a DBus send failure must not crash the health poller")
+}
+
+// TestMonitor_FailedSendRetriesNextTick pins ffos-user#356 review F3: a
+// transient Send failure right at the threshold-crossing tick must not
+// permanently drop the report for that episode — reported/unhealthySince
+// must stay as if nothing was sent, so the very next tick retries and
+// eventually gets the signal out.
+func TestMonitor_FailedSendRetriesNextTick(t *testing.T) {
+	m, cdp, bus, clock := newTestMonitor(t)
+	bus.err = assertError{}
+	bus.failNext = 1
+	goUnhealthy(m, cdp)
+
+	clock.advance(StuckThreshold)
+	m.tick()
+	require.Len(t, bus.calls, 1, "one send attempt, which failed")
+	assert.False(t, m.reported, "a failed send must not latch reported, or the episode's signal is dropped forever")
+
+	// A later tick, still past threshold, must retry and succeed this time.
+	clock.advance(pollInterval)
+	m.tick()
+	require.Equal(t, []bool{true, true}, bus.stuckValues(), "expected one failed attempt then one successful retry, both for stuck=true")
+	assert.True(t, m.reported)
+
+	// Must not keep re-sending once delivery succeeded.
+	clock.advance(pollInterval)
+	m.tick()
+	assert.Len(t, bus.calls, 2, "no further sends once delivery succeeded")
+}
+
+// TestMonitor_FailedClearRetriesNextTick is the symmetric case: a failed
+// clearing emit(false) on reconnect must not be silently treated as
+// delivered, or feral-watchdog's cdpStuck latch would stay true forever.
+func TestMonitor_FailedClearRetriesNextTick(t *testing.T) {
+	m, cdp, bus, clock := newTestMonitor(t)
+	goUnhealthy(m, cdp)
+	clock.advance(StuckThreshold)
+	m.tick()
+	require.Equal(t, []bool{true}, bus.stuckValues())
+
+	bus.err = assertError{}
+	bus.failNext = 1
+	cdp.initialized = true
+	m.tick()
+	require.Len(t, bus.calls, 2, "one failed clear attempt recorded")
+	assert.True(t, m.reported, "a failed clear must not drop the reported latch, or feral-watchdog's cdpStuck never clears")
+
+	m.tick()
+	assert.Equal(t, []bool{true, false, false}, bus.stuckValues(), "one failed clear attempt, then one successful retry")
+	assert.False(t, m.reported)
 }
 
 type assertError struct{}
@@ -170,10 +233,11 @@ type assertError struct{}
 func (assertError) Error() string { return "dbus: send failed" }
 
 // TestMonitor_UsesControldOwnIdentity guards the exact wire identity
-// feral-watchdog is wired to match in its own duplicated constants
-// (components/feral-watchdog/main.go's second WithMatchPathNamespace and
-// mediator.go's DBUS_CONTROLD_EVENT_CDP_STUCK) — a drift here silently
-// breaks the cross-module contract with no compiler to catch it.
+// feral-watchdog is wired to match in its own duplicated constant
+// (components/feral-watchdog/mediator.go's DBUS_CONTROLD_EVENT_CDP_STUCK,
+// received over the common /com/feralfile match namespace set up in
+// feral-watchdog/main.go) — a drift here silently breaks the cross-module
+// contract with no compiler to catch it.
 func TestMonitor_UsesControldOwnIdentity(t *testing.T) {
 	m, cdp, bus, clock := newTestMonitor(t)
 	goUnhealthy(m, cdp)
