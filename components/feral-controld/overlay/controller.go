@@ -202,13 +202,22 @@ func New(p Painter) *Controller {
 // nothing — its zero Result has nothing to wait for. Show itself never fails
 // on the painter's account; call Wait on the returned Result for that — see
 // the package doc on decision versus delivery.
+//
+// ctx is accepted for API symmetry with Result.Wait, which does use a ctx —
+// typically this same one, passed straight through by a caller. The decision
+// Show itself makes is in-memory and never blocks, so there is nothing for a
+// ctx to bound here (round 2 review, F-ctx); the delivery is queued and run on
+// the controller's own worker, detached from any single caller's ctx, since a
+// delivery can outlive the request that queued it (see Wait and the package
+// doc). The worker's own bound is the painter's — e.g. the CDP client's own
+// internal send timeout — not this ctx.
 func (c *Controller) Show(ctx context.Context, l Listener, o Overlay, pr Priority) (Handle, Result, error) {
 	return c.ShowIf(ctx, l, o, pr, nil)
 }
 
 // ShowIf is Show with a condition checked under the same lock as the decision.
 // A false condition returns ErrRejected, a zero Result, and queues nothing. A
-// nil condition always passes.
+// nil condition always passes. See Show's doc for why ctx bounds nothing here.
 func (c *Controller) ShowIf(_ context.Context, l Listener, o Overlay, pr Priority, cond Condition) (Handle, Result, error) {
 	c.mu.Lock()
 	cur, has := c.currentLocked()
@@ -233,7 +242,8 @@ func (c *Controller) ShowIf(_ context.Context, l Listener, o Overlay, pr Priorit
 
 // Hide decides the screen is cleared and queues that clear for delivery. Only
 // the current overlay's handle may hide it; any other handle gets
-// ErrNotCurrent and queues nothing.
+// ErrNotCurrent and queues nothing. See Show's doc for why ctx bounds nothing
+// here — the same holds for Hide.
 func (c *Controller) Hide(ctx context.Context, h Handle) error {
 	return c.HideIf(ctx, func(cur Overlay, ok bool) bool {
 		// isCurrentLocked, not IsCurrent: this condition runs under mu (see
@@ -307,6 +317,10 @@ func (c *Controller) worker() {
 		c.pending = c.pending[1:]
 		c.mu.Unlock()
 
+		// Background, not the original caller's ctx: this delivery can run
+		// long after that ctx's own caller returned (round 2 review, F-ctx;
+		// see Show's doc). The painter bounds itself — e.g. the CDP client's
+		// own internal send timeout.
 		ctx := context.Background()
 		var err error
 		if d.hide {

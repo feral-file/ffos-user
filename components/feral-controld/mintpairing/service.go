@@ -107,11 +107,16 @@ type Service interface {
 	// Painter returns the transport the shared controller paints mint overlays with.
 	Painter() overlay.Painter
 	// DisplayActive reports whether THIS process currently owns the player
-	// overlay with a live mint-pairing display (pairing code or
-	// request-received, painted by showPairingCode/showRequestReceived and
-	// cleared by releaseDisplayOwnership) — the overlay-owner probe for
+	// overlay with any live mint overlay — pairing code, request-received, or
+	// creating-token (all three share the "mint:" kind prefix; see
+	// mintKindPrefix) — the overlay-owner probe for
 	// playersession.Session.RegisterOverlayOwner, so a recovery navigation
-	// never erases a QR mid-pairing.
+	// never erases one mid-pairing. Ownership is the shared overlay
+	// controller's decision (Current), not any bookkeeping of this service's
+	// own. Covering creating-token too (round 2 review, F-doc) is intentional,
+	// not incidental: it is as much a live mint overlay as the other two, and
+	// a recovery navigation landing on it would be exactly the "erase a QR
+	// mid-pairing" case this probe exists to prevent.
 	DisplayActive() bool
 	// SetSession wires the playersession.Session the display sends park
 	// against while a recovery navigation is pending, mirroring
@@ -653,14 +658,14 @@ func (s *service) SetSession(session NavigationSession) {
 // applies to narration sends. No-op when no session is wired (SetSession
 // never called), which is every existing test and any pre-session build.
 //
-// Unlike setupui, this is NOT run on a dedicated queue-draining worker: the
-// three call sites (showPairingCode, showRequestReceived,
-// restoreDefaultDisplay) already run on their own goroutines (the broker
-// session goroutine, or restoreDefaultDisplay's own `go`), so parking here
-// blocks only that goroutine, not a shared queue. It is called BEFORE
-// displayMu is taken (never while holding it): parking can take up to the
-// full timeout, and holding displayMu across that would serialize every
-// OTHER display mutation behind an unrelated navigation.
+// Its one caller is mintPainter.Show/Hide, called only from the shared
+// overlay.Controller's own background delivery worker (round 2 review,
+// F-doc) — never from showMint/hideSession's goroutine, and never while any
+// lock is held (there is no displayMu any more; see the overlay package doc
+// on decision versus delivery). Parking there blocks only that one shared
+// worker goroutine, which is exactly where blocking is meant to be free: the
+// controller's decisions (Show/Hide) never wait on it, and no other caller is
+// serialized behind it either.
 //
 // The park exits on whichever comes FIRST: the navigation's TARGET
 // generation reaching StageHandler (see NavigationTargetGeneration and
@@ -801,6 +806,16 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 			}, nil
 		}
 		if err := s.showPairingCode(ctx, active, pr, func() bool { return s.isActive(active) }); err != nil {
+			if errors.Is(err, errOverlayOccupied) {
+				// errOverlayOccupied only propagates up as this function's own
+				// error: never through HandleStartPairingSession, which always
+				// calls with Owner (the only priority this sentinel can follow
+				// from) — see showMint. refreshExpiredPairingCode is the one
+				// caller that reads it, to pick its own log level.
+				s.logger.Info("Mint pairing redisplay skipped: another overlay owns the screen",
+					pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+				return commandError("display_unavailable", "failed to display mint pairing QR code", true), err
+			}
 			s.logger.Warn("Failed to redisplay active mint pairing code", append(pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt), zap.Error(err))...)
 			return commandError("display_unavailable", "failed to display mint pairing QR code", true), nil
 		}
@@ -885,6 +900,16 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 	if err := s.showPairingCode(ctx, active, pr, func() bool { return !s.startCanceled(starting) }); err != nil {
 		sessionCancel()
 		s.closeChannel(channel)
+		if errors.Is(err, errOverlayOccupied) {
+			// Automatic only: the controller correctly refused to replace an
+			// overlay the owner asked for. The designed outcome for an
+			// Automatic show, not a display fault — round 2 review, F-noise.
+			// Propagated as this function's own error so refreshExpiredPairingCode
+			// (the only Automatic caller) can pick its own log level too.
+			s.logger.Info("Mint pairing display skipped: another overlay owns the screen",
+				pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+			return commandError("display_unavailable", "failed to display mint pairing QR code", true), err
+		}
 		s.logger.Warn("Failed to display mint pairing QR code; closed broker channel", append(pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt), zap.Error(err))...)
 		return commandError("display_unavailable", "failed to display mint pairing QR code", true), nil
 	}
@@ -1443,7 +1468,17 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		if active.done != nil {
 			close(active.done)
 		}
-		go s.hideSession(active)
+		// Synchronous, not `go`: a refresh scheduled right after this defer
+		// (refreshAfterClose below) decides under the same controller lock this
+		// hide decides under. If the hide ran on its own goroutine, the refresh's
+		// Automatic show could race it and find this session's own, already-dead
+		// overlay still "current" — rejected as if something else legitimately
+		// owned the screen, with no retry (round 2 review, F-race). hideSession's
+		// own work is a fast, in-memory decision; only the resulting CDP clear is
+		// queued on the controller's worker, so this costs nothing to make
+		// synchronous — matching the other two call sites in this file that
+		// already pair clearActive with a synchronous hideSession.
+		s.hideSession(active)
 		if terminalSent {
 			// Terminal broker messages must remain pollable after controld sends
 			// them. The broker's TTL handles cleanup; explicit Close is only for
@@ -2328,6 +2363,12 @@ func (s *service) refreshExpiredPairingCode() {
 	}
 	result, err := s.startPairing(context.Background(), overlay.Automatic)
 	if err != nil {
+		if errors.Is(err, errOverlayOccupied) {
+			// Expected for Automatic: another overlay legitimately owns the
+			// screen. Already logged at Info where it was decided; nothing
+			// further to say here.
+			return
+		}
 		s.logger.Warn("Failed to refresh expired mint pairing code", zap.Error(err))
 		return
 	}
@@ -2452,9 +2493,17 @@ func (s *service) endOverridden(active *activePairing, by overlay.Overlay) {
 // this goroutine: the decision was already made and its lock released before
 // Show returned the Result, so nothing else is serialized behind it (see the
 // overlay package doc). live guards the decision itself: a session canceled
-// before it runs must not take the screen. errSessionEnded is returned when
-// live fails, so callers can tell a closed session from a decision an owner
-// rejected, or a delivery that genuinely failed.
+// before it runs must not take the screen. Three distinct outcomes share the
+// generic error return, and callers must tell them apart (round 2 review,
+// F-noise — treating the second case as a display fault logged an
+// indistinguishable Warn and burned a broker channel on every expected
+// Automatic rejection):
+//   - errSessionEnded: the session was canceled before its overlay could be
+//     shown. A real ending; log and clean up.
+//   - errOverlayOccupied: an Automatic show was rejected because another
+//     overlay legitimately owns the screen — the designed outcome for
+//     Automatic, not a fault. Callers should not warn or churn a channel over it.
+//   - any other error: the painter's own delivery genuinely failed. A real fault.
 func (s *service) showMint(ctx context.Context, active *activePairing, o overlay.Overlay, pr overlay.Priority, live func() bool) error {
 	var listener overlay.Listener = unownedOverlay{}
 	if active != nil {
@@ -2464,8 +2513,11 @@ func (s *service) showMint(ctx context.Context, active *activePairing, o overlay
 		return live()
 	})
 	if err != nil {
-		if errors.Is(err, overlay.ErrRejected) && !live() {
-			return errSessionEnded
+		if errors.Is(err, overlay.ErrRejected) {
+			if !live() {
+				return errSessionEnded
+			}
+			return errOverlayOccupied
 		}
 		return err
 	}
@@ -2497,6 +2549,10 @@ func (s *service) listenerFor(active *activePairing) overlay.Listener {
 // errSessionEnded is returned when a session was canceled before its overlay
 // could be shown.
 var errSessionEnded = errors.New("mint pairing session ended before its overlay was shown")
+
+// errOverlayOccupied is returned when an Automatic show was correctly
+// rejected because another overlay legitimately owns the screen. See showMint.
+var errOverlayOccupied = errors.New("mint pairing display skipped: another overlay owns the screen")
 
 func (s *service) showPairingCode(ctx context.Context, active *activePairing, pr overlay.Priority, live func() bool) error {
 	return s.showMint(ctx, active, overlay.Overlay{Kind: KindPairingCode, Payload: active.pairingCode}, pr, live)

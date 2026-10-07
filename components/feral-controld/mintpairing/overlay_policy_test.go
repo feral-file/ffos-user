@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -153,3 +154,48 @@ type setupRecorderListener struct{}
 
 func (setupRecorderListener) OnOverride(overlay.Overlay) {}
 func (setupRecorderListener) OnClose()                   {}
+
+// Round 2 review, F-noise: an Automatic refresh correctly rejected because the
+// claim QR legitimately owns the screen is the designed outcome, not a
+// display fault — it must not log at Warn, the level that means "something
+// is actually broken" to on-call triage.
+func TestAutomaticRefresh_RejectedByClaimQRLogsNoWarning(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	setup := &setupRecorder{}
+	cdpClient := &fakeCDP{}
+	starter := &fakeBrokerStarter{channel: &fakeBrokerChannel{pairingCode: "PAIR-D"}}
+
+	state.GetState().Relayer.TopicID = "topic-1"
+	t.Cleanup(state.ResetForTesting)
+	s := newService(
+		Options{
+			Enabled:            true,
+			BrokerBaseURL:      "https://broker.example",
+			IdleTTL:            time.Minute,
+			PlayerContractPath: writeValidPlayerContract(t),
+		},
+		starter,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.New(core),
+	).(*service)
+	ctrl := overlay.New(overlay.NewRouter(map[string]overlay.Painter{
+		"setup:": setup,
+		"mint:":  s.Painter(),
+	}))
+	s.SetController(ctrl)
+	s.Start(context.Background())
+	t.Cleanup(s.Stop)
+
+	_, _, err := ctrl.Show(context.Background(), &setupRecorderListener{}, overlay.Overlay{Kind: kindClaimQR}, overlay.Owner)
+	require.NoError(t, err)
+
+	s.refreshExpiredPairingCode()
+
+	cur, ok := ctrl.Current()
+	require.True(t, ok)
+	assert.Equal(t, kindClaimQR, cur.Kind, "the claim QR must keep the screen")
+	assert.Zero(t, logs.Len(), "a correctly-rejected Automatic refresh must not log at Warn")
+}

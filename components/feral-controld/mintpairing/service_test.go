@@ -1252,6 +1252,72 @@ func TestWaitForBrowserAndApproval_RefreshesCodeAfterPairingExpiryBeforeJoin(t *
 	assert.Equal(t, 0, newChannel.closeCount)
 }
 
+// TestWaitForBrowserAndApproval_RefreshSucceedsEvenWhenTheExpiredHideIsSlow
+// covers round 2's F-race from the delivery side: the expiry cleanup's hide of
+// the old overlay is now synchronous up to its DECISION (clearing the
+// controller's current overlay), so the refresh goroutine is spawned only
+// after that decision has already happened — a strict happens-before within
+// one goroutine, not a scheduling race, which is what actually closes F-race
+// (TestWaitForBrowserAndApproval_RefreshesCodeAfterPairingExpiryBeforeJoin
+// above is the same guarantee's end-to-end proof). What a slow CDP send could
+// still break is the refresh waiting on that unrelated DELIVERY; this test
+// holds the old session's hide delivery open well past the point the new code
+// must already be showing, so a future change that makes the refresh wait on
+// delivery (not just decision) would show up here as a timeout.
+func TestWaitForBrowserAndApproval_RefreshSucceedsEvenWhenTheExpiredHideIsSlow(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	oldChannel := &fakeBrokerChannel{
+		channelID:   "ch_old",
+		pairingCode: "PAIR-OLD",
+		expiresAt:   time.Now().Add(80 * time.Millisecond),
+	}
+	newChannel := &fakeBrokerChannel{
+		channelID:   "ch_new",
+		pairingCode: "PAIR-NEW",
+		expiresAt:   time.Now().Add(time.Minute),
+	}
+	starter := &fakeBrokerStarter{channels: []brokerChannel{oldChannel, newChannel}}
+	cdpClient := &fakeCDP{}
+	cdpClient.onDisplay = func(state string) {
+		if state == "hidden" {
+			// Simulate a slow CDP send for the expiring session's clear — long
+			// enough that, under the old async-hide design, the refresh's
+			// Automatic show would reach the controller's lock first and be
+			// rejected.
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	s := newService(
+		Options{
+			Enabled:       true,
+			BrokerBaseURL: "https://broker.example",
+			PollInterval:  time.Millisecond,
+		},
+		starter,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-OLD", "")
+
+	// The new code must show up well inside the slow hide's own 300ms send —
+	// its decision does not wait on that delivery.
+	assert.Eventually(t, func() bool {
+		return starter.StartCount() == 2
+	}, 250*time.Millisecond, 5*time.Millisecond, "the refresh must not wait on the slow hide delivery")
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-NEW", "")
+}
+
 func TestHandleStartPairingSession_StaleExpiredCleanupDoesNotOverwriteReplacementDisplay(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
