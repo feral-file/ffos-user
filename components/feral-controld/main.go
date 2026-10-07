@@ -38,6 +38,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
+	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
@@ -1322,6 +1323,15 @@ func initializeApp(
 	// half-torn-down) setup AP never counts as an uplink. Narration flows through
 	// a setupui.Service.
 	setupNarrator := setupui.New(cdp, setupui.DefaultContractPath, logger)
+	// One overlay controller for both owners of the screen. Each kind is routed
+	// to its owner's transport by prefix, and both owners share the record of
+	// what is showing. Wired before anything narrates.
+	overlayCtrl := overlay.New(overlay.NewRouter(map[string]overlay.Painter{
+		"setup:": setupNarrator.Painter(),
+		"mint:":  mintPairing.Painter(),
+	}))
+	setupNarrator.SetController(overlayCtrl)
+	mintPairing.SetController(overlayCtrl)
 	// One narration surface for the whole process: the executor's controld-owned
 	// claim / factory-reset / OTA-failure narration shares this exact instance with
 	// the provisioning domain below, so the single on-connect Resync() wired into

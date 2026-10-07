@@ -23,6 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -446,6 +447,10 @@ func (f *fakeMintPairingService) HandleApprovalDecision(_ context.Context, args 
 }
 
 func (f *fakeMintPairingService) DisplayActive() bool { return false }
+
+func (f *fakeMintPairingService) SetController(*overlay.Controller) {}
+
+func (f *fakeMintPairingService) Painter() overlay.Painter { return nil }
 
 func (f *fakeMintPairingService) SetSession(mintpairing.NavigationSession) {}
 
