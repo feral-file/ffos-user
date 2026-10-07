@@ -199,6 +199,49 @@ func TestChromiumMonitorHealthyCheckClearsPersistedCount(t *testing.T) {
 	}
 }
 
+// TestChromiumMonitorPlainRestartHoldsStaleCountUntilGraceElapses pins
+// ffos-user#356 review round (fix-review inner pass 1, F3): the
+// cdpStuck/recovered-aware forgiveness gate check() added also governs the
+// PLAIN case — a stale persisted count from a prior, unrelated boot, with
+// no fallback hold active and no cdpStuck report at all (hasEverConnected
+// is simply false right after this monitor's own construction, same as any
+// ordinary cold boot). It must behave identically to that case: hold the
+// stale count until cdphealth would have had a full CHROMIUM_STARTUP_GRACE
+// window to report a relapse, then clear it. This is the scenario reviewer
+// 2 found untested — TestChromiumMonitorHealthyCheckClearsPersistedCount
+// only exercises the `recovered` (parked) exemption, which bypasses this
+// gate entirely, not the general time-based path.
+func TestChromiumMonitorPlainRestartHoldsStaleCountUntilGraceElapses(t *testing.T) {
+	path := useFallbackStateFile(t, CHROMIUM_MAX_FALLBACK_REBOOTS)
+	endpoint, closeServer := okLocalHTTPEndpoint(t)
+	defer closeServer()
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+	// No fallbackSince, no cdpStuck — a plain cold boot/restart, not a
+	// recovery from the fallback screen and not a cdpStuck escalation.
+
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+	if n, err := loadChromiumFallbackReboots(path); err != nil || n != CHROMIUM_MAX_FALLBACK_REBOOTS {
+		t.Fatalf("expected the stale persisted count to survive the very first success this boot, got %d, %v", n, err)
+	}
+
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-CHROMIUM_STARTUP_GRACE - time.Second)
+	monitor.mu.Unlock()
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+	if _, err := loadChromiumFallbackReboots(path); err != nil {
+		t.Fatalf("expected the stale count to be cleared once the grace window elapsed with no cdpStuck report, got load error %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected the persisted file to be removed once forgiven, stat err=%v", err)
+	}
+}
+
 // TestChromiumMonitorPersistFailureStillReboots pins the fail direction of the
 // write: a device that cannot record the reboot keeps the old self-heal
 // rather than silently losing it.

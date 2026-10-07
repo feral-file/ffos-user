@@ -350,13 +350,41 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 		m.fallbackParked = false
 		m.restartHistory = m.restartHistory[:0]
 	}
-	// A healthy Chromium ends the run of fallback reboots (#254). Checked on
-	// every success but only writes when there is something to clear, so the
-	// steady state touches no disk. In-memory is zeroed even if the removal
-	// fails: retrying would log every 5 s, and the cost of a stale file is one
-	// extra parked hold after a later failure, not a lost self-heal.
-	clearPersisted := m.fallbackReboots > 0
-	m.fallbackReboots = 0
+	// A healthy Chromium ends the run of fallback reboots (#254) — but a
+	// /json/version success alone is no longer sufficient proof of that
+	// (ffos-user#356, feralfile-bot review F1): this PR adds the first
+	// failure mode (cdpStuck) that can drive its own restart/fallback-hold
+	// cycles while /json/version keeps answering 200 throughout, which the
+	// pre-existing "clear the budget on any success" logic below predates
+	// and never anticipated — it was written back when success WAS the
+	// health signal. Confirmed as a real regression: a CDP page-target
+	// failure that survives a reboot would otherwise clear fallbackReboots
+	// on the very next successful tick, erasing the #254 cap and rebooting
+	// forever instead of ever parking. Only clear once cdphealth has had a
+	// full CHROMIUM_STARTUP_GRACE window since this boot/restart to report
+	// a relapse (StuckThreshold == CHROMIUM_STARTUP_GRACE by design) and
+	// did not report one — cdpStuck being merely false right now is not
+	// enough on its own, since cdphealth can take up to that whole window
+	// to notice and report a relapse in the first place.
+	//
+	// `recovered` (above) is exempted from this gate, not folded into it:
+	// coming back healthy while the fallback screen was actively showing
+	// already means someone (an operator, an OTA) just intervened — a
+	// stronger, pre-existing signal this PR does not touch, and gating it
+	// on cdpStuck/elapsed-time too would regress
+	// TestChromiumMonitorHealthyCheckClearsPersistedCount, whose whole
+	// point is that recovery-while-parked clears on the very next success.
+	canForgetRebootBudget := recovered || (!m.cdpStuck && time.Since(m.monitorStart) > CHROMIUM_STARTUP_GRACE)
+	var clearPersisted bool
+	if canForgetRebootBudget {
+		// Checked on every eligible success but only writes when there is
+		// something to clear, so the steady state touches no disk.
+		// In-memory is zeroed even if the removal fails: retrying would log
+		// every 5 s, and the cost of a stale file is one extra parked hold
+		// after a later failure, not a lost self-heal.
+		clearPersisted = m.fallbackReboots > 0
+		m.fallbackReboots = 0
+	}
 	statePath := m.fallbackStatePath
 	m.mu.Unlock()
 
@@ -433,13 +461,18 @@ func (m *ChromiumMonitor) escalateCDPStuck(ctx context.Context) {
 	m.mu.Unlock()
 }
 
-// checkHangState decides whether sustained failure to reach /json/version, OR
-// feral-controld's own cdpStuck report (ffos-user#356), warrants escalating
-// to a kiosk restart. It is called on every failed check AND, since
-// ffos-user#356, at the end of every successful one too (from check()) so a
-// controld-reported stuck page-target dial can still escalate even while
-// /json/version itself answers fine. The cost of false positives is high:
-// any spurious restart will be repeated on the next 5-second tick.
+// checkHangState decides whether sustained failure to reach /json/version
+// warrants escalating to a kiosk restart; the cdpStuck case in its switch is
+// consulted here too, post-connect only (see that case's own comment for
+// why pre-connect is excluded). It is called ONLY on a failed check — never
+// on a successful one. check()'s success path has its own, separate
+// counterpart for a controld-reported stuck page-target dial while
+// /json/version itself answers fine: escalateCDPStuck, not this function
+// (see escalateCDPStuck's doc for why calling checkHangState from the
+// success path is exactly the bug review round 3 found — its
+// display/dev-console/update detection is a side-effecting latch-and-log
+// mechanism built for this failure path only). The cost of false positives
+// is high: any spurious restart will be repeated on the next 5-second tick.
 //
 // It reports whether the failure happened while headless (no connected
 // display, a developer VT active, an update in progress, or the fallback hold

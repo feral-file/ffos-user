@@ -298,3 +298,79 @@ func TestChromiumMonitorCDPStuckSuccessDuringUpdateDoesNotSpamOrRestart(t *testi
 		t.Fatalf("expected the success path to never log checkHangState's \"entered update\" transition (that belongs to the failure path only), got %d such log(s)", n)
 	}
 }
+
+// TestChromiumMonitorCDPStuckDoesNotEraseRebootCapOnSuccess pins
+// feralfile-bot's review F1 on PR #386 (ffos-user#356): the pre-existing
+// #254 "reboot cap across boots" counter was correct back when a
+// /json/version success WAS sufficient proof of recovery. This branch adds
+// the first failure mode (cdpStuck) that can drive its own restart/
+// fallback-hold cycles while /json/version keeps answering 200 throughout —
+// a CDP page-target failure surviving a reboot would otherwise erase the
+// cap on the very next successful tick and reboot forever instead of
+// parking. The persisted count must survive until cdphealth has had a full
+// CHROMIUM_STARTUP_GRACE window to report a relapse and did not.
+func TestChromiumMonitorCDPStuckDoesNotEraseRebootCapOnSuccess(t *testing.T) {
+	restartFile, _, fallbackFile, rebootFile := installFallbackStubs(t)
+	statePath := useFallbackStateFile(t, 1) // this boot already used its one fallback-hold reboot
+	endpoint, closeServer := okLocalHTTPEndpoint(t)
+	defer closeServer()
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+	monitor.SetCDPStuck(true)
+
+	// A success tick right after boot must NOT forget the persisted cap —
+	// the CDP failure that earned it hasn't had a chance to clear, and
+	// cdpStuck says it is still true. It must, however, still restart the
+	// kiosk via the ordinary cdpStuck escalation.
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+	if n, err := loadChromiumFallbackReboots(statePath); err != nil || n != 1 {
+		t.Fatalf("expected the persisted reboot cap to survive a success while cdpStuck is true, got %d, %v", n, err)
+	}
+	if got := readRestartCount(t, restartFile); got != "1" {
+		t.Fatalf("expected exactly one kiosk restart from the cdpStuck escalation, got %s", got)
+	}
+
+	// Two more cdpStuck reports in quick succession must accumulate toward
+	// the restart budget and re-enter the fallback hold rather than restart
+	// a third time — the budget was never erased, so it is already spent.
+	for i := 0; i < 2; i++ {
+		monitor.SetCDPStuck(true)
+		if err := monitor.check(context.Background()); err != nil {
+			t.Fatalf("tick %d: expected success against ok endpoint, got %v", i, err)
+		}
+	}
+	if got := readRestartCount(t, fallbackFile); got != "1" {
+		t.Fatalf("expected the exhausted restart budget to enter the fallback hold instead of a third kiosk restart, got %s", got)
+	}
+	if got := readRestartCount(t, restartFile); got != "2" {
+		t.Fatalf("expected exactly 2 ordinary kiosk restarts total (this loop's first iteration) before the 3rd hit the exhausted budget and fell into the fallback hold instead, got %s", got)
+	}
+
+	// Hold expiry with the persisted count already at the cap must PARK,
+	// never reboot a second time this boot — the regression the bot found
+	// would have erased the count back to 0 and rebooted here instead. The
+	// kiosk is genuinely stopped while the fallback screen is showing, so
+	// /json/version fails for real at this point (matching
+	// TestChromiumMonitorParksAfterRebootCap's own fixture) — checkHangState's
+	// failure-path hold logic, not escalateCDPStuck, is what decides
+	// park-vs-reboot here.
+	monitor.cdpEndpoint = closedLocalHTTPEndpoint(t)
+	monitor.mu.Lock()
+	monitor.fallbackSince = time.Now().Add(-(CHROMIUM_FALLBACK_HOLD + time.Second))
+	monitor.mu.Unlock()
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against a closed endpoint")
+	}
+	if got := readRestartCount(t, rebootFile); got != "0" {
+		t.Fatalf("expected the device to PARK on an exhausted reboot cap, not reboot again, got %s", got)
+	}
+	monitor.mu.Lock()
+	parked := monitor.fallbackParked
+	monitor.mu.Unlock()
+	if !parked {
+		t.Fatal("expected the monitor to latch parked once the exhausted hold expired")
+	}
+}
