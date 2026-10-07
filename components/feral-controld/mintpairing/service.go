@@ -179,10 +179,15 @@ type service struct {
 	startMu sync.Mutex
 	// displayMu serializes player overlay mutations so a delayed terminal hide
 	// cannot overtake a replacement pairing-code display.
-	displayMu         sync.Mutex
-	mu                sync.Mutex
-	active            *activePairing
-	displayOwner      *activePairing
+	displayMu    sync.Mutex
+	mu           sync.Mutex
+	active       *activePairing
+	displayOwner *activePairing
+	// restoring is closed once the latest mint-display restore has sent its
+	// hidden state. It is set in releaseDisplayOwnership, under the same lock
+	// that gives up displayOwner, so a close that sees no active session still
+	// finds it. Nil until a restore is due.
+	restoring         chan struct{}
 	displayGeneration uint64
 	pending           map[string]*pendingApproval
 	doneMap           map[string]completedApproval
@@ -493,10 +498,6 @@ type activePairing struct {
 	displayGen  uint64
 	cancel      context.CancelFunc
 	done        chan struct{}
-	// restored is closed once the mint display's hidden state is sent, when the
-	// worker's exit restored it (see waitForBrowserAndApproval). Nil when no
-	// restore was due. Written before done closes, so readers past done see it.
-	restored chan struct{}
 
 	// joined marks a site-initiated pairing: the device joined a channel the
 	// site created, so there is no code to show and the panel is never
@@ -922,9 +923,10 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	// with the code already on screen, and take it back down if it moved.
 	if !startGuard.sameAs(currentTopicGuard()) {
 		sessionCancel()
-		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
-		if restoreDisplay {
+		displayGeneration, restoring := s.releaseDisplayOwnership(active)
+		if restoring != nil {
 			s.restoreDefaultDisplay(active.channelID, displayGeneration)
+			close(restoring)
 		}
 		s.closeChannel(channel)
 		s.logger.Warn("Dropping a mint pairing session whose claim went while its code was displayed",
@@ -936,9 +938,10 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	// start; the channel it got back anyway is taken down, not published.
 	if !s.publishUnlessCanceled(starting, active) {
 		sessionCancel()
-		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
-		if restoreDisplay {
+		displayGeneration, restoring := s.releaseDisplayOwnership(active)
+		if restoring != nil {
 			s.restoreDefaultDisplay(active.channelID, displayGeneration)
+			close(restoring)
 		}
 		s.closeChannel(channel)
 		s.logger.Info("Dropping a mint pairing start that was closed while it started",
@@ -1469,17 +1472,14 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	terminalSent := false
 	refreshAfterClose := false
 	defer func() {
-		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
+		displayGeneration, restoring := s.releaseDisplayOwnership(active)
 		// The restore stays asynchronous: Stop must not wait on a best-effort
-		// display send (see TestStop_DoesNotWaitForDisplayRestore). Its
-		// completion is published on active.restored BEFORE done closes, so
-		// CloseActivePairing can wait for the hidden state specifically — a
-		// claim-QR paint issued right after a close must not be overtaken by it.
-		if restoreDisplay {
-			restored := make(chan struct{})
-			active.restored = restored
+		// display send (see TestStop_DoesNotWaitForDisplayRestore). Callers of
+		// CloseActivePairing wait on s.restoring instead, so a claim-QR paint
+		// after a close is never overtaken by the hidden state.
+		if restoring != nil {
 			go func() {
-				defer close(restored)
+				defer close(restoring)
 				s.restoreDefaultDisplay(active.channelID, displayGeneration)
 			}()
 		}
@@ -2009,6 +2009,19 @@ func (s *service) CloseActivePairing(ctx context.Context) (bool, error) {
 		starting := s.cancelStartingPairing()
 		active := s.cancelActivePairing()
 		if starting == nil && active == nil {
+			// Nothing left to close, but a worker that exited earlier may still
+			// be sending the hidden state of its display. A claim-QR paint after
+			// this close must not be overtaken by that send, so wait for it.
+			s.mu.Lock()
+			restoring := s.restoring
+			s.mu.Unlock()
+			if restoring != nil {
+				select {
+				case <-restoring:
+				case <-ctx.Done():
+					return closedAny, ctx.Err()
+				}
+			}
 			return closedAny, nil
 		}
 		closedAny = true
@@ -2031,16 +2044,6 @@ func (s *service) CloseActivePairing(ctx context.Context) (bool, error) {
 				// the claim being wiped.
 				select {
 				case <-active.done:
-				case <-ctx.Done():
-					return true, ctx.Err()
-				}
-			}
-			// The hidden state of the mint display goes out after the worker
-			// exits. Wait for it too: a claim-QR paint right after this close
-			// must not be overtaken by a hidden state that erases it.
-			if active.restored != nil {
-				select {
-				case <-active.restored:
 				case <-ctx.Done():
 					return true, ctx.Err()
 				}
@@ -2453,17 +2456,24 @@ func (s *service) showRequestReceived(ctx context.Context, active *activePairing
 	return nil
 }
 
-func (s *service) releaseDisplayOwnership(active *activePairing) (uint64, bool) {
+// releaseDisplayOwnership gives up the display for active. The returned channel
+// is non-nil exactly when the caller must restore the default display; the
+// caller closes it once that restore has been sent. Callers that restore
+// synchronously close it right after; the worker closes it from its restore
+// goroutine.
+func (s *service) releaseDisplayOwnership(active *activePairing) (uint64, chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.active == active {
 		s.active = nil
 	}
 	if s.displayOwner != active {
-		return active.displayGen, false
+		return active.displayGen, nil
 	}
 	s.displayOwner = nil
-	return active.displayGen, true
+	restoring := make(chan struct{})
+	s.restoring = restoring
+	return active.displayGen, restoring
 }
 
 func (s *service) closeChannel(channel brokerChannel) {

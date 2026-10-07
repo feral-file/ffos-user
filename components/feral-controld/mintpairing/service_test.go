@@ -1457,11 +1457,12 @@ func TestShowPairingCode_FailedReplacementDoesNotSuppressReleasedCleanup(t *test
 	s.displayOwner = oldActive
 	s.displayGeneration = oldActive.displayGen
 
-	displayGeneration, restoreDisplay := s.releaseDisplayOwnership(oldActive)
-	require.True(t, restoreDisplay)
+	displayGeneration, restoring := s.releaseDisplayOwnership(oldActive)
+	require.NotNil(t, restoring)
 	require.Error(t, s.showPairingCode(context.Background(), newActive))
 
 	s.restoreDefaultDisplay(oldActive.channelID, displayGeneration)
+	close(restoring)
 
 	assertLastDisplay(t, cdpClient, "hidden", "", "")
 }
@@ -5330,4 +5331,46 @@ func TestCloseActivePairing_SendsHiddenBeforeReturning(t *testing.T) {
 	require.NotEmpty(t, requests)
 	last := requests[len(requests)-1]
 	assert.Equal(t, "hidden", last["state"], "the hidden restore must be sent before CloseActivePairing returns")
+}
+
+// A worker that has already exited leaves no session for CloseActivePairing to
+// cancel, but its display restore can still be on the way. The close must wait
+// for that restore: a claim-QR paint issued after it must not be overtaken by
+// the hidden state.
+func TestCloseActivePairing_WaitsForRestoreAfterWorkerExit(t *testing.T) {
+	state.GetState().Relayer.TopicID = "topic-1"
+	t.Cleanup(state.ResetForTesting)
+	starter := &fakeBrokerStarter{channel: &fakeBrokerChannel{pairingCode: "PAIR-EXIT"}}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{
+			Enabled:            true,
+			BrokerBaseURL:      "https://broker.example",
+			IdleTTL:            time.Minute,
+			PlayerContractPath: writeValidPlayerContract(t),
+		},
+		starter,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+
+	_, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-EXIT", "")
+
+	// Stop cancels the worker and waits for it to exit, which leaves the restore
+	// to run after the session is already gone.
+	s.Stop()
+
+	_, err = s.CloseActivePairing(context.Background())
+	require.NoError(t, err)
+
+	requests := cdpClient.displayRequestsSnapshot()
+	require.NotEmpty(t, requests)
+	last := requests[len(requests)-1]
+	assert.Equal(t, "hidden", last["state"], "the close must wait for the restore of an exited worker")
 }
