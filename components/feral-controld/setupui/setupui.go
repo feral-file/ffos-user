@@ -922,14 +922,14 @@ func (s *Service) trySend(req map[string]any) {
 // yields a permanent no-narration fallback so narration-disabled is
 // indistinguishable from narration-working from the state machine's side.
 //
-// LOCKING: the manifest read runs OUTSIDE s.mu, mirroring
-// stateUnsupported — every Show*/Hide caller takes that mutex in
-// pushIf, and the UN-latched first read fires exactly on the boot narration
-// path (the process's first push), so a hung read on a degraded filesystem
-// under the mutex would stall the online Hide that ends the boot narration.
-// Safe without the lock because this only runs on the single narration
-// worker goroutine (the `running` guard); the latch and warnedUnreadable
-// stay mutex-guarded.
+// LOCKING: the manifest read runs OUTSIDE s.mu, mirroring stateUnsupported,
+// and the UN-latched first read fires exactly on the boot narration path (the
+// process's first push), so a hung read on a degraded filesystem under the
+// mutex would stall the online Hide that ends the boot narration. Safe
+// without the lock because trySend — this function's only caller — runs only
+// on the shared overlay.Controller's own single delivery worker goroutine
+// (see setupPainter's doc), not on whichever goroutine called Show/Hide/
+// pushIf; the latch and warnedUnreadable stay mutex-guarded.
 func (s *Service) narrationSupported() bool {
 	s.mu.Lock()
 	cached := s.support

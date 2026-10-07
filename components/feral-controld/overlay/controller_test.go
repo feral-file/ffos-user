@@ -326,7 +326,7 @@ func TestShowIf_ConditionFailureRejectsAndPaintsNothing(t *testing.T) {
 	p.waitForEvents(t, 1)
 
 	_, _, err = c.ShowIf(context.Background(), &recordingListener{}, Overlay{Kind: kindPairingCode}, Owner,
-		func(cur Overlay, ok bool) bool { return !ok })
+		func(cur Overlay, ok bool) bool { return !ok }, nil)
 
 	assert.ErrorIs(t, err, ErrRejected)
 	assert.Equal(t, []string{"show:claim_qr"}, p.snapshot())
@@ -344,7 +344,7 @@ func TestShowIf_ConditionSeesCurrentOverlay(t *testing.T) {
 		func(cur Overlay, ok bool) bool {
 			seen = cur.Kind
 			return ok
-		})
+		}, nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, kindClaimQR, seen)
@@ -358,10 +358,10 @@ func TestHideIf_ClearsOnlyWhenConditionHolds(t *testing.T) {
 	_, _, err := c.Show(context.Background(), &recordingListener{}, Overlay{Kind: kindClaimQR}, Owner)
 	require.NoError(t, err)
 
-	err = c.HideIf(context.Background(), func(cur Overlay, ok bool) bool { return ok && cur.Kind == kindPairingCode })
+	err = c.HideIf(context.Background(), func(cur Overlay, ok bool) bool { return ok && cur.Kind == kindPairingCode }, nil)
 	assert.ErrorIs(t, err, ErrNotCurrent)
 
-	err = c.HideIf(context.Background(), func(cur Overlay, ok bool) bool { return ok && cur.Kind == kindClaimQR })
+	err = c.HideIf(context.Background(), func(cur Overlay, ok bool) bool { return ok && cur.Kind == kindClaimQR }, nil)
 	require.NoError(t, err)
 	p.waitForEvents(t, 2)
 	assert.Equal(t, []string{"show:claim_qr", "hide:claim_qr"}, p.snapshot())
@@ -374,7 +374,7 @@ func TestHideIf_NothingCurrentIsErrNotCurrent(t *testing.T) {
 	p := &fakePainter{}
 	c := newController(t, p)
 
-	err := c.HideIf(context.Background(), func(_ Overlay, ok bool) bool { return ok })
+	err := c.HideIf(context.Background(), func(_ Overlay, ok bool) bool { return ok }, nil)
 	assert.ErrorIs(t, err, ErrNotCurrent)
 	assert.Empty(t, p.snapshot())
 }

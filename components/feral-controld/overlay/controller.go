@@ -57,6 +57,19 @@
 // goroutine. It takes no lock and is not awaited by the controller itself, so
 // it cannot stall any other caller: the decision it is waiting on has already
 // been made and released by the time Wait runs.
+//
+// # Bookkeeping that must agree with commit order, not return order
+//
+// ShowIf and HideIf return to the caller AFTER releasing the decision lock
+// (ShowIf additionally calls the replaced listener's OnOverride on the way
+// out). A caller that keeps its own derived state — setupui's narrated and
+// hiddenIntent latches — and updates it once the call returns can have two
+// concurrent decisions from itself (a Show racing a Hide, say) commit in one
+// order but return in the other, so the later-returning call's update
+// stomps the earlier-returning call's, even though its own decision was
+// actually the OLDER one (round 6 review, F4). CommitHook exists for this: it
+// runs inside the same lock acquisition that commits the decision, so hook
+// invocation order always matches commit order, with no such gap.
 package overlay
 
 import (
@@ -102,6 +115,21 @@ type Painter interface {
 // decision that follows it cannot be interleaved with another decision. cur is
 // the overlay on screen; ok is false when nothing is.
 type Condition func(cur Overlay, ok bool) bool
+
+// CommitHook runs synchronously, still holding the decision lock, the instant
+// a ShowIf or HideIf actually commits — never on a rejected call. It exists
+// for a caller whose own bookkeeping must agree with which decision happened
+// LAST, not with the order each call happens to return in (round 6 review,
+// F4): recording that bookkeeping after Show/HideIf returns raced a second
+// decision from another goroutine that committed later but returned first —
+// e.g. a Hide that commits and returns quickly, racing a Show whose own
+// return is delayed past that Hide's, which then overwrote the Hide's
+// "cleared" bookkeeping with its own stale "shown" bookkeeping. Running the
+// hook inside the same lock acquisition that commits the decision makes hook
+// invocation order match commit order exactly, with no gap for another
+// commit to land in between. Like Condition, it must never call back into the
+// controller (ShowIf, HideIf, Current, …): the lock is not reentrant.
+type CommitHook func()
 
 // Listener is the owner side of a shown overlay.
 type Listener interface {
@@ -222,13 +250,15 @@ func New(p Painter) *Controller {
 // doc). The worker's own bound is the painter's — e.g. the CDP client's own
 // internal send timeout — not this ctx.
 func (c *Controller) Show(ctx context.Context, l Listener, o Overlay, pr Priority) (Handle, Result, error) {
-	return c.ShowIf(ctx, l, o, pr, nil)
+	return c.ShowIf(ctx, l, o, pr, nil, nil)
 }
 
-// ShowIf is Show with a condition checked under the same lock as the decision.
-// A false condition returns ErrRejected, a zero Result, and queues nothing. A
-// nil condition always passes. See Show's doc for why ctx bounds nothing here.
-func (c *Controller) ShowIf(_ context.Context, l Listener, o Overlay, pr Priority, cond Condition) (Handle, Result, error) {
+// ShowIf is Show with a condition checked under the same lock as the decision,
+// and an optional CommitHook run under that same lock when the decision
+// commits. A false condition returns ErrRejected, a zero Result, and queues
+// nothing (onCommit is not called). A nil condition always passes. See Show's
+// doc for why ctx bounds nothing here.
+func (c *Controller) ShowIf(_ context.Context, l Listener, o Overlay, pr Priority, cond Condition, onCommit CommitHook) (Handle, Result, error) {
 	c.mu.Lock()
 	cur, has := c.currentLocked()
 	// has && c.cur.listener != l: an Automatic show may replace its own
@@ -248,6 +278,9 @@ func (c *Controller) ShowIf(_ context.Context, l Listener, o Overlay, pr Priorit
 	c.cur = e
 	done := make(chan error, 1)
 	c.enqueueLocked(delivery{overlay: o, done: done})
+	if onCommit != nil {
+		onCommit()
+	}
 	c.mu.Unlock()
 
 	if prev != nil && prev.listener != l {
@@ -315,19 +348,48 @@ func (c *Controller) Hide(ctx context.Context, h Handle) error {
 		// isCurrentLocked, not IsCurrent: this condition runs under mu (see
 		// HideIf), and IsCurrent would deadlock trying to take it again.
 		return ok && c.isCurrentLocked(h)
-	})
+	}, nil)
 }
 
-// HideIf clears the screen when cond holds, under the decision lock. A false
+// HideIf clears the screen when cond holds, under the decision lock, and runs
+// the optional CommitHook under that same lock when it does. A false
 // condition — including nothing being current, since cond always sees ok as
-// part of its own check — returns ErrNotCurrent and queues nothing.
-func (c *Controller) HideIf(_ context.Context, cond Condition) error {
+// part of its own check — returns ErrNotCurrent, queues nothing, and does not
+// call onCommit.
+func (c *Controller) HideIf(_ context.Context, cond Condition, onCommit CommitHook) error {
 	c.mu.Lock()
 	cur, has := c.currentLocked()
 	if !cond(cur, has) {
 		c.mu.Unlock()
 		return ErrNotCurrent
 	}
+	c.cur = nil
+	c.enqueueLocked(delivery{overlay: cur, hide: true})
+	if onCommit != nil {
+		onCommit()
+	}
+	c.mu.Unlock()
+	return nil
+}
+
+// HideOwned clears the screen if l owns the current overlay, and reports
+// ErrNotCurrent otherwise — including when nothing is current. It exists for
+// a caller that would otherwise have to keep an external Handle in sync with
+// which of its own shows actually committed last, the same snapshot-then-act
+// gap Replay closed for a resend: a Handle captured from one Show call and
+// written to the caller's own state AFTER that call returns can land out of
+// commit order against a second Show for the same l (round 6 review
+// follow-up, F1 — mintpairing's active.handle, exactly this pattern). Reading
+// l's ownership and clearing it happen under one lock acquisition, so there
+// is no such gap and no external Handle to keep correct: the caller names
+// itself, not a snapshot of what it last happened to own.
+func (c *Controller) HideOwned(l Listener) error {
+	c.mu.Lock()
+	if c.cur == nil || c.cur.listener != l {
+		c.mu.Unlock()
+		return ErrNotCurrent
+	}
+	cur := c.cur.overlay
 	c.cur = nil
 	c.enqueueLocked(delivery{overlay: cur, hide: true})
 	c.mu.Unlock()

@@ -488,11 +488,12 @@ type activePairing struct {
 	expiresAt   time.Time
 	phase       activePairingPhase
 	browserName string
-	// handle is this session's current overlay on screen, if it has one. A
-	// session whose overlay was replaced holds a stale handle and clears nothing.
-	handle overlay.Handle
 	// listener is this session's owner side of the overlay, created once per
-	// session so re-shows of the same code are not treated as overrides.
+	// session so re-shows of the same code are not treated as overrides. It
+	// also doubles as hideSession's ownership key via Controller.HideOwned,
+	// rather than an external Handle this struct would otherwise have to keep
+	// in sync with which show actually committed last (round 6 review
+	// follow-up, F1).
 	listener overlay.Listener
 	cancel   context.CancelFunc
 	done     chan struct{}
@@ -757,8 +758,20 @@ func (s *service) Stop() {
 	}
 }
 
+// HandleStartPairingSession is the command-transport entry point: its own Go
+// error reaches mediator/hub, where a non-nil error means the already-built
+// commandError result is never sent at all (round 6 review follow-up, F1) —
+// unlike refreshExpiredPairingCode, startPairing's other caller, which reads
+// that error itself to decide whether to log a Warn. isBenignRejection is
+// exactly the signal refreshExpiredPairingCode needs and this entry point
+// must swallow: errOverlayOccupied/errSessionEnded are startPairing's own
+// internal classification, never a transport-level fault.
 func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]any) (any, error) {
-	return s.startPairing(ctx, overlay.Owner)
+	result, err := s.startPairing(ctx, overlay.Owner)
+	if isBenignRejection(err) {
+		return result, nil
+	}
+	return result, err
 }
 
 // startPairing starts or re-shows a pairing. pr is who asked: an owner's tap
@@ -929,9 +942,11 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 		// Automatic show from a different listener (the auto-claim loop's
 		// claim QR) is rejected as if this phantom entry were still live
 		// (round 4 review, F1). clearActive/hideSession are no-ops when the
-		// decision never committed (a benign rejection, or active.handle is
-		// still zero), so calling them unconditionally here is safe —
-		// matching the two other error branches below in this same function.
+		// decision never committed (a benign rejection, or this listener
+		// never became the controller's current overlay — HideOwned reports
+		// ErrNotCurrent either way), so calling them unconditionally here is
+		// safe — matching the two other error branches below in this same
+		// function.
 		s.clearActive(active)
 		s.hideSession(active)
 		s.closeChannel(channel)
@@ -2572,9 +2587,9 @@ func (s *service) showMint(ctx context.Context, active *activePairing, o overlay
 	if active != nil {
 		listener = s.listenerFor(active)
 	}
-	h, result, err := s.ctrl.ShowIf(ctx, listener, o, pr, func(overlay.Overlay, bool) bool {
+	_, result, err := s.ctrl.ShowIf(ctx, listener, o, pr, func(overlay.Overlay, bool) bool {
 		return live()
-	})
+	}, nil)
 	if err != nil {
 		if errors.Is(err, overlay.ErrRejected) {
 			if !live() {
@@ -2583,11 +2598,6 @@ func (s *service) showMint(ctx context.Context, active *activePairing, o overlay
 			return errOverlayOccupied
 		}
 		return err
-	}
-	if active != nil {
-		s.mu.Lock()
-		active.handle = h
-		s.mu.Unlock()
 	}
 	return result.Wait(ctx)
 }
@@ -2654,19 +2664,24 @@ func (s *service) closeChannel(channel brokerChannel) {
 	}
 }
 
-// hideSession decides the screen is cleared when active's overlay is still the
-// current one. A session whose overlay was replaced decides nothing and sends
-// nothing: the replacing overlay now holds the screen, and clearing it would
-// erase the owner's newer request. The decision itself never blocks; the
-// actual clear, if any, is queued for the controller's delivery worker.
+// hideSession decides the screen is cleared when active's listener still owns
+// the current overlay (Controller.HideOwned re-checks that fresh, under the
+// controller's own decision lock — see its doc for why that replaces an
+// external Handle here). A session that never painted anything (joined, or
+// ended before its first show committed) has no listener yet and there is
+// nothing to clear; a session whose overlay was replaced no longer owns the
+// current one, so HideOwned reports ErrNotCurrent and sends nothing — the
+// replacing overlay now holds the screen, and clearing it would erase the
+// owner's newer request. The decision itself never blocks; the actual clear,
+// if any, is queued for the controller's delivery worker.
 func (s *service) hideSession(active *activePairing) {
 	s.mu.Lock()
-	h := active.handle
+	listener := active.listener
 	s.mu.Unlock()
-	if h == (overlay.Handle{}) {
+	if listener == nil {
 		return
 	}
-	err := s.ctrl.Hide(context.Background(), h)
+	err := s.ctrl.HideOwned(listener)
 	if err != nil && !errors.Is(err, overlay.ErrNotCurrent) {
 		s.logger.Warn("Failed to clear mint pairing display", zap.Error(err), zap.String("channelID", active.channelID))
 	}

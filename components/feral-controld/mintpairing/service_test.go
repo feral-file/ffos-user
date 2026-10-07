@@ -762,6 +762,71 @@ func TestHandleStartPairingSession_ReturnsCommandErrorForDisplayFailure(t *testi
 	assert.False(t, s.DisplayActive())
 }
 
+// TestHandleStartPairingSession_NeverLeaksABenignRejectionError pins round 6
+// review's follow-up F1: startPairing's redisplay branches return a non-nil
+// errSessionEnded/errOverlayOccupied specifically so refreshExpiredPairingCode
+// (startPairing's other caller) can tell a benign rejection from a genuine
+// fault and skip its own Warn — but HandleStartPairingSession, the
+// command-transport entry point, used to forward that same error straight
+// through. mediator and hub both treat ANY non-nil error from a command
+// handler as "send nothing" (they only special-case four unrelated typed
+// errors), so the already-built commandError("display_unavailable", ...)
+// result was silently dropped instead of reaching the owner. Reachable
+// without any CDP timing: HandleClosePairingSession clears s.active via
+// cancelActivePairing, which takes no startMu, so an ordinary close can land
+// between the redisplay branch's own currentActive() read and its live()
+// check inside the controller's decision. This drives many rounds of a
+// start-pairing redisplay racing a close for the same active and asserts
+// HandleStartPairingSession's own Go error is always nil, exactly like every
+// other outcome of this call (see the sibling display-failure tests above).
+func TestHandleStartPairingSession_NeverLeaksABenignRejectionError(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	// A real broker starter is needed too: when the raced close wins before
+	// startPairing even reads s.active, the redisplay branch is never taken at
+	// all and startPairing falls through to its normal fresh-start path.
+	ch := &fakeBrokerChannel{pairingCode: "PAIR-FRESH"}
+	s := newService(
+		Options{Enabled: true, BrokerBaseURL: "https://broker.example", IdleTTL: time.Minute},
+		&fakeBrokerStarter{channel: ch},
+		nil,
+		nil,
+		&fakeCDP{},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	const rounds = 200
+	for round := 0; round < rounds; round++ {
+		active := &activePairing{
+			channelID:   fmt.Sprintf("ch_%d", round),
+			pairingCode: fmt.Sprintf("PAIR-%d", round),
+			phase:       activePairingPhasePairingCode,
+			cancel:      func() {},
+		}
+		active.listener = &sessionListener{s: s, active: active}
+		s.mu.Lock()
+		s.active = active
+		s.mu.Unlock()
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		var startErr error
+		go func() {
+			defer wg.Done()
+			_, startErr = s.HandleStartPairingSession(context.Background(), nil)
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = s.HandleClosePairingSession(context.Background(), nil)
+		}()
+		wg.Wait()
+
+		assert.NoError(t, startErr, "round %d: HandleStartPairingSession must never return a non-nil Go error, even when the redisplay it raced lost to a concurrent close", round)
+	}
+}
+
 func TestHandleStartPairingSession_ReturnsCommandErrorForApplicationDisplayFailure(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -1543,12 +1608,73 @@ func TestShowPairingCode_ReplacementCommitsEvenWhenItsDeliveryFails(t *testing.T
 	require.NoError(t, s.showPairingCode(context.Background(), oldActive, overlay.Owner, alwaysLive))
 	require.Error(t, s.showPairingCode(context.Background(), newActive, overlay.Owner, alwaysLive),
 		"the delivery failure is still reported to this call's own caller")
-	assert.True(t, s.ctrl.IsCurrent(newActive.handle), "the decision committed regardless of the delivery outcome")
+	cur, has := s.ctrl.Current()
+	require.True(t, has, "the decision committed regardless of the delivery outcome")
+	assert.Equal(t, "PAIR-NEW", cur.Payload, "newActive's show is what committed, not oldActive's")
 
 	before := len(cdpClient.displayRequestsSnapshot())
 	s.hideSession(oldActive)
 	time.Sleep(20 * time.Millisecond)
 	assert.Len(t, cdpClient.displayRequestsSnapshot(), before, "oldActive no longer holds the screen, so its clear sends nothing")
+}
+
+// TestHideSession_ConcurrentShowsNeverDesyncFromTheControllersCurrentOwner
+// pins round 6 review's follow-up F1: showMint used to cache its own
+// ShowIf's Handle into active.handle AFTER ShowIf returned, so two
+// concurrent shows for the same active — e.g. the start command's
+// redisplay branch (showPairingCode) racing the approval worker's own
+// showRequestReceived, both sharing one listener via listenerFor — could
+// commit in one order but write that external Handle in the other, leaving
+// hideSession holding a Handle for an overlay that was not this active's
+// true last commit. hideSession's Hide(staleHandle) would then wrongly
+// return ErrNotCurrent and silently no-op even while this active genuinely
+// still owned the screen. The fix (Controller.HideOwned) removed the
+// external Handle: ownership is re-read fresh, under the controller's own
+// decision lock, at hideSession time — there is nothing left to desync.
+// This drives many rounds of two concurrent Owner shows for the same
+// active (always leaving something current, since neither show is ever
+// rejected by its own listener's earlier overlay) and checks that
+// hideSession always actually clears it.
+func TestHideSession_ConcurrentShowsNeverDesyncFromTheControllersCurrentOwner(t *testing.T) {
+	active := &activePairing{channelID: "ch1", pairingCode: "PAIR-1", cancel: func() {}}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{},
+		nil,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	active.listener = &sessionListener{s: s, active: active}
+	s.active = active
+	alwaysLive := func() bool { return true }
+
+	const rounds = 50
+	for round := 0; round < rounds; round++ {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = s.showPairingCode(context.Background(), active, overlay.Owner, alwaysLive)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = s.showRequestReceived(context.Background(), active, "a browser")
+		}()
+		wg.Wait()
+
+		_, has := s.ctrl.Current()
+		require.True(t, has, "round %d: one of the two concurrent Owner shows must have committed", round)
+
+		before := len(cdpClient.displayRequestsSnapshot())
+		s.hideSession(active)
+		time.Sleep(10 * time.Millisecond)
+		_, stillHas := s.ctrl.Current()
+		assert.False(t, stillHas, "round %d: hideSession must clear the screen this active still genuinely owns", round)
+		assert.Greater(t, len(cdpClient.displayRequestsSnapshot()), before, "round %d: hideSession must not silently no-op on a stale handle", round)
+	}
 }
 
 // fakeMintNavigationSession is a minimal, directly-controllable

@@ -95,13 +95,19 @@ func (s *Service) OnClose() {}
 // hide that actually commits marks this service's intent as hidden, so Resync
 // can replay it on reconnect even if its own CDP send failed — see
 // hiddenIntent's doc.
+//
+// The write runs inside the CommitHook, under the controller's own decision
+// lock, not after HideIf returns: a concurrent showOwned racing this hideIf
+// can commit either before or after it, and only the hook runs in true commit
+// order — after HideIf returns, a racing show's own return can be delayed
+// (round 6 review, F4) past this one, and then overwrite hiddenIntent with
+// its own, now-stale "shown" bookkeeping. See CommitHook's doc.
 func (s *Service) hideIf(match overlay.Condition) {
-	err := s.ctrl.HideIf(context.Background(), match)
-	if err == nil {
+	_ = s.ctrl.HideIf(context.Background(), match, func() {
 		s.mu.Lock()
 		s.hiddenIntent = true
 		s.mu.Unlock()
-	}
+	})
 }
 
 // showOwned is the one place setup narration is painted. A nil condition always
@@ -110,6 +116,12 @@ func (s *Service) hideIf(match overlay.Condition) {
 // SweepStaleOverlay tell a stale leftover overlay from its own live one, and
 // clears hiddenIntent: there is now a shown overlay again for Resync to
 // replay through the ordinary ctrl.Current() path.
+//
+// The write runs inside the CommitHook, under the controller's own decision
+// lock, not after ShowIf returns — same reasoning as hideIf's CommitHook use:
+// a concurrent hideIf racing this show can return before or after it
+// regardless of which one actually committed last, and only the hook's
+// in-lock invocation order matches true commit order (round 6 review, F4).
 func (s *Service) showOwned(req map[string]any, pr overlay.Priority, ok func(last map[string]any) bool) {
 	var cond overlay.Condition
 	if ok != nil {
@@ -117,14 +129,13 @@ func (s *Service) showOwned(req map[string]any, pr overlay.Priority, ok func(las
 			return ok(narrationOf(cur, has))
 		}
 	}
-	_, _, err := s.ctrl.ShowIf(context.Background(), s, overlay.Overlay{
+	_, _, _ = s.ctrl.ShowIf(context.Background(), s, overlay.Overlay{
 		Kind:    setupKind(stringField(req, "state")),
 		Payload: req,
-	}, pr, cond)
-	if err == nil {
+	}, pr, cond, func() {
 		s.mu.Lock()
 		s.narrated = true
 		s.hiddenIntent = false
 		s.mu.Unlock()
-	}
+	})
 }

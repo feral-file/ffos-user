@@ -1315,7 +1315,7 @@ func TestSweepStaleOverlay_DoesNotExploitSameListenerExemptionDuringTheNarratedR
 		Kind:    setupKind(stateUpdating),
 		Payload: map[string]any{"state": stateUpdating},
 	}
-	_, result, err := svc.ctrl.ShowIf(context.Background(), svc, live, overlay.Owner, nil)
+	_, result, err := svc.ctrl.ShowIf(context.Background(), svc, live, overlay.Owner, nil, nil)
 	require.NoError(t, err)
 	require.NoError(t, result.Wait(context.Background()))
 	sender.waitForCalls(t, 1)
@@ -1331,6 +1331,59 @@ func TestSweepStaleOverlay_DoesNotExploitSameListenerExemptionDuringTheNarratedR
 	require.True(t, has, "the live overlay must still be current")
 	assert.Equal(t, live.Kind, cur.Kind, "the sweep must not replace a live overlay committed outside showOwned's narrated flip")
 	assert.Equal(t, 1, sender.callCount(), "no hide may be delivered while the live overlay stands")
+}
+
+// TestShowOwnedAndHideIf_ConcurrentDecisionsKeepHiddenIntentConsistent pins
+// round 6 review's F4: showOwned and hideIf used to write s.narrated /
+// s.hiddenIntent AFTER ShowIf/HideIf returned. Nothing in setupui's own
+// contract serializes two of ITS OWN decisions any more (the overlay
+// package doc explains why the old internal queue, which used to do that,
+// was removed), so a push racing a hide could commit in one order but
+// return — and so write these two fields — in the other, leaving
+// hiddenIntent describing whichever call returned last rather than
+// whichever decision actually committed last. The fix moved both writes
+// into the CommitHook, which runs under the controller's own decision lock
+// in true commit order (see overlay.CommitHook's doc), so this no longer
+// depends on which goroutine happens to resume first. This drives many
+// concurrent shows and hides on the same Service and checks, after every
+// batch, that hiddenIntent agrees with whether anything is actually
+// current — nothing current must mean hiddenIntent is true (the last
+// commit was a hide), something current must mean it is false (the last
+// commit was a show) — with the race detector run alongside to catch any
+// write this ordering guarantee fails to fence.
+func TestShowOwnedAndHideIf_ConcurrentDecisionsKeepHiddenIntentConsistent(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, validContract)
+
+	const workers = 8
+	const rounds = 50
+	for round := 0; round < rounds; round++ {
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				if i%2 == 0 {
+					svc.ShowUpdating(i)
+				} else {
+					svc.HideIfShowing(stateUpdating)
+				}
+			}(i)
+		}
+		wg.Wait()
+
+		cur, has := svc.ctrl.Current()
+		svc.mu.Lock()
+		hiddenIntent := svc.hiddenIntent
+		svc.mu.Unlock()
+		if has {
+			assert.False(t, hiddenIntent, "round %d: %v is current; hiddenIntent must reflect the later show, not a stale hide", round, cur.Kind)
+		} else {
+			assert.True(t, hiddenIntent, "round %d: nothing is current; hiddenIntent must reflect the later hide, not a stale show", round)
+		}
+		// Reset to a known state before the next round's race.
+		svc.HideIfShowing(stateUpdating)
+	}
 }
 
 // TestHideIfShowing pins the owned-narration clear: a flow may hide the
