@@ -37,7 +37,7 @@ func (p *fakePainter) Show(_ context.Context, o Overlay) error {
 	return nil
 }
 
-func (p *fakePainter) Hide(context.Context) error {
+func (p *fakePainter) Hide(_ context.Context, _ Overlay) error {
 	if p.inFlight.Add(1) > 1 {
 		p.overlaps.Add(1)
 	}
@@ -246,17 +246,93 @@ func TestPaints_AreSerialized(t *testing.T) {
 	assert.Len(t, p.snapshot(), 50)
 }
 
-// The owner's own Show over itself is a replacement: the previous handle is
-// overridden exactly once, even when the same listener shows twice.
-func TestShow_SameListenerTwiceOverridesPreviousHandleOnce(t *testing.T) {
+// A listener replacing its own overlay is the same owner moving its display
+// along. It is not an override, so it is told nothing.
+func TestShow_SameOwnerReplacingItselfIsNotAnOverride(t *testing.T) {
 	p := &fakePainter{}
 	c := newController(t, p)
 	l := &recordingListener{}
 
 	_, err := c.Show(context.Background(), l, Overlay{Kind: kindPairingCode}, Owner)
 	require.NoError(t, err)
-	_, err = c.Show(context.Background(), l, Overlay{Kind: kindPairingCode}, Owner)
+	_, err = c.Show(context.Background(), l, Overlay{Kind: kindClaimQR}, Owner)
 	require.NoError(t, err)
 
-	assert.Equal(t, int32(1), l.overrides.Load())
+	assert.Zero(t, l.overrides.Load())
+	cur, _ := c.Current()
+	assert.Equal(t, kindClaimQR, cur.Kind)
+}
+
+// ShowIf checks its condition under the paint lock and paints nothing when the
+// condition fails.
+func TestShowIf_ConditionFailureRejectsAndPaintsNothing(t *testing.T) {
+	p := &fakePainter{}
+	c := newController(t, p)
+
+	_, err := c.Show(context.Background(), &recordingListener{}, Overlay{Kind: kindClaimQR}, Owner)
+	require.NoError(t, err)
+
+	_, err = c.ShowIf(context.Background(), &recordingListener{}, Overlay{Kind: kindPairingCode}, Owner,
+		func(cur Overlay, ok bool) bool { return !ok })
+
+	assert.ErrorIs(t, err, ErrRejected)
+	assert.Equal(t, []string{"show:claim_qr"}, p.snapshot())
+}
+
+func TestShowIf_ConditionSeesCurrentOverlay(t *testing.T) {
+	p := &fakePainter{}
+	c := newController(t, p)
+
+	_, err := c.Show(context.Background(), &recordingListener{}, Overlay{Kind: kindClaimQR}, Owner)
+	require.NoError(t, err)
+
+	var seen Kind
+	_, err = c.ShowIf(context.Background(), &recordingListener{}, Overlay{Kind: kindPairingCode}, Owner,
+		func(cur Overlay, ok bool) bool {
+			seen = cur.Kind
+			return ok
+		})
+
+	require.NoError(t, err)
+	assert.Equal(t, kindClaimQR, seen)
+}
+
+// HideIf clears only when its condition holds on the current overlay.
+func TestHideIf_ClearsOnlyWhenConditionHolds(t *testing.T) {
+	p := &fakePainter{}
+	c := newController(t, p)
+
+	_, err := c.Show(context.Background(), &recordingListener{}, Overlay{Kind: kindClaimQR}, Owner)
+	require.NoError(t, err)
+
+	err = c.HideIf(context.Background(), func(cur Overlay, ok bool) bool { return ok && cur.Kind == kindPairingCode })
+	assert.ErrorIs(t, err, ErrNotCurrent)
+
+	err = c.HideIf(context.Background(), func(cur Overlay, ok bool) bool { return ok && cur.Kind == kindClaimQR })
+	require.NoError(t, err)
+	assert.Equal(t, []string{"show:claim_qr", "hide"}, p.snapshot())
+}
+
+// Hide passes the overlay being cleared to the painter, so a painter that
+// serves several kinds sends the right clear.
+func TestHide_PainterReceivesTheOverlayBeingCleared(t *testing.T) {
+	p := &kindRecordingPainter{}
+	c := New(p)
+
+	h, err := c.Show(context.Background(), &recordingListener{}, Overlay{Kind: kindClaimQR}, Owner)
+	require.NoError(t, err)
+	require.NoError(t, c.Hide(context.Background(), h))
+
+	assert.Equal(t, []Kind{kindClaimQR}, p.hidden)
+}
+
+type kindRecordingPainter struct {
+	hidden []Kind
+}
+
+func (p *kindRecordingPainter) Show(context.Context, Overlay) error { return nil }
+
+func (p *kindRecordingPainter) Hide(_ context.Context, o Overlay) error {
+	p.hidden = append(p.hidden, o.Kind)
+	return nil
 }

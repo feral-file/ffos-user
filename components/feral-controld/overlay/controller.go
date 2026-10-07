@@ -46,10 +46,17 @@ const (
 
 // Painter sends overlays to the player. The controller calls it serially, one
 // call at a time, so an implementation need not be safe for concurrent use.
+// Hide receives the overlay it is clearing, so one painter can serve several
+// kinds and send the right clear for each.
 type Painter interface {
 	Show(ctx context.Context, o Overlay) error
-	Hide(ctx context.Context) error
+	Hide(ctx context.Context, o Overlay) error
 }
+
+// Condition is checked under the controller's lock, so the check and the paint
+// that follows it cannot be interleaved with another paint. cur is the overlay
+// on screen; ok is false when nothing is.
+type Condition func(cur Overlay, ok bool) bool
 
 // Listener is the owner side of a shown overlay.
 type Listener interface {
@@ -99,17 +106,26 @@ func New(p Painter) *Controller {
 }
 
 // Show paints o and makes it the current overlay. The previous owner, if any,
-// is notified with OnOverride after the paint is done and no lock is held.
+// is notified with OnOverride after the paint is done and no lock is held. A
+// listener replacing its own overlay is not an override: it is the same owner
+// moving its own display along, and it has nothing to be told.
 //
 // A failed paint leaves the current overlay unchanged and returns the error.
 // An automatic Show over a current overlay returns ErrRejected without painting.
 func (c *Controller) Show(ctx context.Context, l Listener, o Overlay, pr Priority) (Handle, error) {
+	return c.ShowIf(ctx, l, o, pr, nil)
+}
+
+// ShowIf is Show with a condition checked under the same lock as the paint. A
+// false condition returns ErrRejected and paints nothing. A nil condition
+// always passes.
+func (c *Controller) ShowIf(ctx context.Context, l Listener, o Overlay, pr Priority, cond Condition) (Handle, error) {
 	c.paint.Lock()
 	c.mu.Lock()
 	// Safe to read here: cur changes only under paint, which we hold.
-	blocked := pr == Automatic && c.cur != nil
+	cur, has := c.currentLocked()
 	c.mu.Unlock()
-	if blocked {
+	if (pr == Automatic && has) || (cond != nil && !cond(cur, has)) {
 		c.paint.Unlock()
 		return Handle{}, ErrRejected
 	}
@@ -127,7 +143,7 @@ func (c *Controller) Show(ctx context.Context, l Listener, o Overlay, pr Priorit
 	c.mu.Unlock()
 	c.paint.Unlock()
 
-	if prev != nil {
+	if prev != nil && prev.listener != l {
 		prev.listener.OnOverride(o)
 	}
 	return Handle{id: e.id}, nil
@@ -137,23 +153,44 @@ func (c *Controller) Show(ctx context.Context, l Listener, o Overlay, pr Priorit
 // other handle gets ErrNotCurrent and sends nothing. A failed hide leaves the
 // current overlay in place.
 func (c *Controller) Hide(ctx context.Context, h Handle) error {
+	return c.HideIf(ctx, func(cur Overlay, ok bool) bool {
+		return ok && c.IsCurrent(h)
+	})
+}
+
+// HideIf clears the screen when cond holds, under the paint lock. A false
+// condition returns ErrNotCurrent and sends nothing.
+func (c *Controller) HideIf(ctx context.Context, cond Condition) error {
 	c.paint.Lock()
 	defer c.paint.Unlock()
 
 	c.mu.Lock()
-	current := c.cur != nil && c.cur.id == h.id
+	cur, has := c.currentLocked()
 	c.mu.Unlock()
-	if !current {
+	if !cond(cur, has) {
 		return ErrNotCurrent
 	}
+	if !has {
+		// Nothing shown by this controller: there is nothing to clear, and a
+		// condition that passed on an empty screen wants a plain clear.
+		return nil
+	}
 
-	if err := c.painter.Hide(ctx); err != nil {
+	if err := c.painter.Hide(ctx, cur); err != nil {
 		return err
 	}
 	c.mu.Lock()
 	c.cur = nil
 	c.mu.Unlock()
 	return nil
+}
+
+// currentLocked returns the current overlay. Caller holds mu.
+func (c *Controller) currentLocked() (Overlay, bool) {
+	if c.cur == nil {
+		return Overlay{}, false
+	}
+	return c.cur.overlay, true
 }
 
 // Current reports the overlay on screen, if any.
