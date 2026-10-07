@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 )
 
@@ -1192,6 +1193,47 @@ func TestSweepStaleOverlay(t *testing.T) {
 		assert.Equal(t, stateUpdating, sender.lastRequest()["state"])
 		assert.True(t, svc.Narrating())
 	})
+}
+
+// TestSweepStaleOverlay_DoesNotExploitSameListenerExemptionDuringTheNarratedRace
+// pins round 4 review's F2. Every setupui push shares one controller listener
+// (s), so between an Owner show's commit and showOwned's own "s.narrated =
+// true" flip (two separate locks: the controller's and s.mu), the sweep can
+// read narrated == false while a live Owner overlay from this same Service
+// is already current. The controller's same-listener exemption — added so
+// ShowClaimQRAutomatic may replace its own earlier ShowFinalizing — would
+// read that live overlay as "this listener's own earlier show" and let the
+// sweep's Automatic hide through anyway, erasing a live narration (e.g.
+// ShowUpdating mid-OTA) the sweep was never meant to touch. This reproduces
+// the exact window deterministically: it commits the show through the
+// controller directly, the same call showOwned makes, without going through
+// showOwned itself — so narrated is left false exactly as it would be
+// mid-race — then invokes the production SweepStaleOverlay and asserts the
+// live overlay survives.
+func TestSweepStaleOverlay_DoesNotExploitSameListenerExemptionDuringTheNarratedRace(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, validContract)
+
+	live := overlay.Overlay{
+		Kind:    setupKind(stateUpdating),
+		Payload: map[string]any{"state": stateUpdating},
+	}
+	_, result, err := svc.ctrl.ShowIf(context.Background(), svc, live, overlay.Owner, nil)
+	require.NoError(t, err)
+	require.NoError(t, result.Wait(context.Background()))
+	sender.waitForCalls(t, 1)
+	svc.mu.Lock()
+	narratedStillFalse := !svc.narrated
+	svc.mu.Unlock()
+	require.True(t, narratedStillFalse, "the race window requires narrated to still read false (committed outside showOwned, which alone flips it)")
+
+	svc.SweepStaleOverlay()
+	time.Sleep(20 * time.Millisecond) // give a (wrongly) accepted sweep time to deliver
+
+	cur, has := svc.ctrl.Current()
+	require.True(t, has, "the live overlay must still be current")
+	assert.Equal(t, live.Kind, cur.Kind, "the sweep must not replace a live overlay committed outside showOwned's narrated flip")
+	assert.Equal(t, 1, sender.callCount(), "no hide may be delivered while the live overlay stands")
 }
 
 // TestHideIfShowing pins the owned-narration clear: a flow may hide the

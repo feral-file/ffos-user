@@ -657,6 +657,20 @@ func (s *Service) Hide() {
 // the narrator's later Owner show simply replaces it, same as any override. A
 // caller-side Narrating() probe followed by a direct Hide() would reintroduce
 // exactly the check-then-act race the controller's lock exists to remove.
+//
+// That rejection is NOT automatic from priority alone. Every setupui push —
+// whatever flow it belongs to — shares this one *Service as its controller
+// listener, and the controller's same-listener exemption (added so
+// ShowClaimQRAutomatic may replace its own earlier ShowFinalizing) would
+// otherwise read the narrator's Owner show as "this same listener's own
+// earlier overlay" and let the sweep's Automatic show through anyway. The
+// explicit condition below closes exactly that hole: it requires nothing be
+// current at all, not merely nothing from a different listener, so any live
+// setup narration — regardless of which flow committed it, and regardless of
+// whether s.narrated has been flipped yet — still blocks the sweep (round 4
+// review, F2). A current overlay that belongs to mintpairing is unaffected
+// either way: the controller's own listener check rejects that case on its
+// own, independent of this condition.
 func (s *Service) SweepStaleOverlay() {
 	s.mu.Lock()
 	narrated := s.narrated
@@ -664,7 +678,10 @@ func (s *Service) SweepStaleOverlay() {
 	if narrated {
 		return
 	}
-	s.showOwned(map[string]any{"state": stateHidden}, overlay.Automatic, nil)
+	// See the doc comment above for why this condition — not nil — is required.
+	s.showOwned(map[string]any{"state": stateHidden}, overlay.Automatic, func(last map[string]any) bool {
+		return len(last) == 0
+	})
 }
 
 // HideIfShowing hides only when the current narration intent is one of

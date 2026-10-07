@@ -754,6 +754,12 @@ func TestHandleStartPairingSession_ReturnsCommandErrorForDisplayFailure(t *testi
 	require.NoError(t, err)
 	assertCommandError(t, result, "display_unavailable", true)
 	assert.Equal(t, 1, ch.closeCount)
+	// Round 4 review, F1: a failed display must not leave the controller
+	// pointing at this dead session — it would read as a live overlay to
+	// DisplayActive() and block a later Automatic show from another owner.
+	_, has := s.ctrl.Current()
+	assert.False(t, has, "a failed display must leave nothing current")
+	assert.False(t, s.DisplayActive())
 }
 
 func TestHandleStartPairingSession_ReturnsCommandErrorForApplicationDisplayFailure(t *testing.T) {
@@ -775,6 +781,8 @@ func TestHandleStartPairingSession_ReturnsCommandErrorForApplicationDisplayFailu
 	require.NoError(t, err)
 	assertCommandError(t, result, "display_unavailable", true)
 	assert.Equal(t, 1, ch.closeCount)
+	_, has := s.ctrl.Current()
+	assert.False(t, has, "a failed display must leave nothing current (round 4 review, F1)")
 }
 
 func TestHandleStartPairingSession_ReturnsCommandErrorForActiveRedisplayFailure(t *testing.T) {

@@ -900,6 +900,19 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 
 	if err := s.showPairingCode(ctx, active, pr, func() bool { return !s.startCanceled(starting) }); err != nil {
 		sessionCancel()
+		// The decision commits before delivery is known (see the overlay
+		// package doc), so even a genuine delivery failure — not just a
+		// rejection — can leave this active as the controller's current
+		// overlay. Left uncleaned, a dead sessionListener stays "current"
+		// forever: DisplayActive() reports a false positive, and a later
+		// Automatic show from a different listener (the auto-claim loop's
+		// claim QR) is rejected as if this phantom entry were still live
+		// (round 4 review, F1). clearActive/hideSession are no-ops when the
+		// decision never committed (a benign rejection, or active.handle is
+		// still zero), so calling them unconditionally here is safe —
+		// matching the two other error branches below in this same function.
+		s.clearActive(active)
+		s.hideSession(active)
 		s.closeChannel(channel)
 		if isBenignRejection(err) {
 			// Neither outcome is a display fault (see isBenignRejection).
