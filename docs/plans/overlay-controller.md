@@ -19,10 +19,29 @@ knowledge of the other:
   a session exits.
 
 `executor.go` documents this as a known limitation: "no cross-surface
-arbitration". The player does not arbitrate either. Result: a paint from one
-side can silently replace the other's, and the state each side keeps is stale
-after that (#382: a claim QR is overwritten by a pairing code after expiry or a
-re-tap; the app cannot read which overlay is on screen, #381).
+arbitration". The player does arbitrate, last command wins, in both directions
+(`ff-player` at `dda7fec`, `MintPairingOverlay.tsx` and `SetupOverlay.tsx`):
+
+- a renderable `setupDisplay` state makes a showing mint panel yield (hidden);
+- any non-hidden `mintPairingDisplay` state makes a showing setup panel yield.
+
+Two consequences the earlier draft got wrong:
+
+- A `mintPairingDisplay` `hidden` never clears a setup panel, and a
+  `setupDisplay` `hidden` never clears a mint panel. A session's restore cannot
+  erase a claim QR on the player.
+- `ffos-player-contract.json` (`notes`) and `docs/DEVICE_LOCAL_PLAYER.md` still
+  say the player renders without arbitration. The code does arbitrate; those
+  notes are stale and should be fixed in the player repo.
+
+The player does not stop the device from sending an automatic command over a
+newer one. Last-wins means that an expiry refresh of a pairing code replaces a
+claim QR the owner asked for, which is the behavior in #382. That decision
+belongs to the controller on the device side.
+
+The device side still has no record of what is on screen. Result: automatic
+paints replace owner-requested ones, and the state each side keeps is stale
+after that. The app cannot read which overlay is on screen (#381).
 
 ## Required outcomes
 
@@ -84,10 +103,11 @@ current()             -> {kind, payload, handle} | none
 
 ## Open questions (to settle before implementation)
 
-1. **Player contract.** The player does not arbitrate two overlays. Confirm with
-   the ff-player owners that a single controller-driven `setupDisplay` or
-   `mintPairingDisplay` stream is the contract, and that `hidden` clears only the
-   overlay it was sent for.
+1. **Player contract.** Answered from the code: the player arbitrates last-wins
+   and `hidden` clears only its own overlay (see *Current state*). Still to do:
+   the contract `notes` and `DEVICE_LOCAL_PLAYER.md` must be corrected in the
+   player repo, and the ff-player owners should confirm that this is the intended
+   contract, not an accident of two components.
 2. **Resync.** After a CDP reconnect, the controller re-sends `current()`, not the
    last intent of one painter. Confirm that a reconnect with no current overlay
    sends nothing.
