@@ -65,9 +65,22 @@ type Monitor struct {
 	// is first observed false after being true (or after startup).
 	unhealthySince time.Time
 	// reported is true once EVENT_CDP_STUCK(true) has been sent for the
-	// current unhealthy episode, so a continued disconnect does not re-send
-	// it every tick. Cleared on reconnect.
+	// current unhealthy episode. Cleared on reconnect.
 	reported bool
+	// lastReportedAt is when "stuck" was last successfully sent. While the
+	// episode continues, tick() re-affirms "stuck" every threshold instead
+	// of sending it only once (ffos-user#356 review round 2, F1):
+	// feral-watchdog's cdpStuck is in-memory only, and ships Restart=always
+	// on a systemd unit that is routinely restarted independently of
+	// controld (package updates, crashes). A watchdog restart mid-episode
+	// zeroes its in-memory latch with no way to learn the episode is still
+	// live, since this signal is otherwise edge-triggered and controld has
+	// no other reason to resend "stuck" while Initialized() never changes.
+	// Periodic re-affirmation bounds how long that gap can last to one more
+	// threshold, without turning this into a resend-every-tick storm —
+	// chromium.go already treats a repeated "stuck=true" as a safe no-op
+	// whenever its own gates are already suppressing escalation.
+	lastReportedAt time.Time
 }
 
 // New creates a Monitor. clock is injected (rather than using time directly)
@@ -113,6 +126,7 @@ func (m *Monitor) tick() {
 		}
 		m.unhealthySince = time.Time{}
 		m.reported = false
+		m.lastReportedAt = time.Time{}
 		return
 	}
 
@@ -120,15 +134,19 @@ func (m *Monitor) tick() {
 	if m.unhealthySince.IsZero() {
 		m.unhealthySince = now
 	}
-	if !m.reported && now.Sub(m.unhealthySince) >= m.threshold {
-		// Same reasoning as above: only latch reported once the send for
-		// THIS episode actually succeeded, so a transient failure at the
-		// threshold-crossing moment retries next tick instead of
-		// permanently dropping the one signal this package exists to
-		// deliver — a real risk given the real incident this targets ran
-		// for 7+ hours (ffos-user#356's own timeline).
+	if now.Sub(m.unhealthySince) < m.threshold {
+		return
+	}
+	// Past threshold: send once, then keep re-affirming every threshold
+	// while the episode continues (lastReportedAt's doc explains why —
+	// ffos-user#356 review round 2, F1). Same success-gating as the clear
+	// above: only advance lastReportedAt once THIS send actually succeeded,
+	// so a transient failure at the re-affirm moment retries next tick
+	// instead of silently extending the gap it exists to bound.
+	if !m.reported || now.Sub(m.lastReportedAt) >= m.threshold {
 		if m.emit(true) {
 			m.reported = true
+			m.lastReportedAt = now
 		}
 	}
 }

@@ -212,3 +212,41 @@ func TestChromiumMonitorCDPStuckClearedOnFallbackRecovery(t *testing.T) {
 		t.Fatal("expected cdpStuck cleared on recovery from the fallback hold")
 	}
 }
+
+// TestChromiumMonitorCDPStuckDoesNotBypassPreConnectGrace pins ffos-user#356
+// review round 2, F2: cdphealth.StuckThreshold runs on controld's own clock
+// (anchored to when IT observed the dial go unhealthy), with no ordering
+// guarantee against this monitor's own monitorStart — a separate process.
+// cdpStuck=true must not cut this device's own, still-unexpired cold-start
+// grace short; it may only act once hasEverConnected flips true (the
+// cdpStuck case further down the switch) or the grace genuinely elapses.
+func TestChromiumMonitorCDPStuckDoesNotBypassPreConnectGrace(t *testing.T) {
+	countFile := installCountingSystemctl(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+
+	// Still well within this monitor's own fresh startup grace.
+	monitor.SetCDPStuck(true)
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against a closed endpoint")
+	}
+	if got := readRestartCount(t, countFile); got != "0" {
+		t.Fatalf("cdpStuck must not cut this device's own unexpired startup grace short, got restart count %s", got)
+	}
+
+	// Now genuinely past CHROMIUM_STARTUP_GRACE on this monitor's own clock
+	// (mutated directly rather than waiting out 90s real time) — this must
+	// still restart, via the ordinary startup_grace_exceeded path, exactly
+	// as it would with no cdpStuck signal involved at all.
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-CHROMIUM_STARTUP_GRACE - time.Second)
+	monitor.mu.Unlock()
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against a closed endpoint")
+	}
+	if got := readRestartCount(t, countFile); got != "1" {
+		t.Fatalf("expected the ordinary startup-grace-exceeded path to restart once the grace genuinely elapsed, got %s", got)
+	}
+}

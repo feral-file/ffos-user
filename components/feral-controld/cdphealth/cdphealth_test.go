@@ -119,16 +119,49 @@ func TestMonitor_ReportsStuckOnceAtThreshold(t *testing.T) {
 	m.tick()
 	require.Equal(t, []bool{true}, bus.stuckValues())
 
-	// Still disconnected on later ticks: must not resend "stuck" every
-	// interval (components/feral-watchdog/chromium.go's restartChromium
-	// doc explains exactly why a repeated signal would be dangerous — it
+	// Still disconnected on later ticks, but well under another full
+	// threshold: must not resend "stuck" every interval
+	// (components/feral-watchdog/chromium.go's restartChromium doc explains
+	// exactly why a repeated signal every tick would be dangerous — it
 	// would re-trigger a restart every tick instead of respecting the
-	// watchdog's own startup-grace/restart-budget ladder).
+	// watchdog's own startup-grace/restart-budget ladder). See
+	// TestMonitor_ReaffirmsStuckPeriodicallyWhileUnresolved for the
+	// once-per-threshold re-affirmation this does NOT suppress.
 	for i := 0; i < 5; i++ {
 		clock.advance(pollInterval)
 		m.tick()
 	}
 	assert.Equal(t, []bool{true}, bus.stuckValues(), "must not re-report while still stuck")
+}
+
+// TestMonitor_ReaffirmsStuckPeriodicallyWhileUnresolved pins ffos-user#356
+// review round 2, F1: feral-watchdog's cdpStuck is in-memory only and ships
+// on a Restart=always unit restarted independently of controld (package
+// updates, crashes) — if that restart lands mid-episode, the fresh
+// ChromiumMonitor has no way to learn the episode is still live unless
+// controld keeps re-affirming it, since Initialized() never toggles true in
+// between to naturally trigger a fresh report.
+func TestMonitor_ReaffirmsStuckPeriodicallyWhileUnresolved(t *testing.T) {
+	m, cdp, bus, clock := newTestMonitor(t)
+	goUnhealthy(m, cdp)
+
+	clock.advance(StuckThreshold)
+	m.tick()
+	require.Equal(t, []bool{true}, bus.stuckValues())
+
+	// One more full threshold with no reconnect: must re-affirm exactly once.
+	clock.advance(StuckThreshold)
+	m.tick()
+	assert.Equal(t, []bool{true, true}, bus.stuckValues(), "expected one re-affirmation after a full threshold still unresolved")
+
+	// A further short gap must not re-affirm again early.
+	clock.advance(pollInterval)
+	m.tick()
+	assert.Equal(t, []bool{true, true}, bus.stuckValues())
+
+	clock.advance(StuckThreshold)
+	m.tick()
+	assert.Equal(t, []bool{true, true, true}, bus.stuckValues(), "expected a second re-affirmation after another full threshold")
 }
 
 func TestMonitor_ClearsOnReconnect(t *testing.T) {

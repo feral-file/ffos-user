@@ -598,19 +598,28 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 	)
 	switch {
 	case !hasEverConnected:
-		if timeSinceStart <= CHROMIUM_STARTUP_GRACE && !cdpStuck {
-			// Cold boot or post-restart bring-up still in progress, and
-			// controld has not (yet) reported its own dial stuck either.
-			// Stay quiet — the noisy "Chromium browser hang detected" line
-			// is reserved for genuine post-connect renderer hangs.
+		if timeSinceStart <= CHROMIUM_STARTUP_GRACE {
+			// Cold boot or post-restart bring-up still in progress. Stay
+			// quiet — the noisy "Chromium browser hang detected" line is
+			// reserved for genuine post-connect renderer hangs.
+			//
+			// Deliberately NOT also gated on !cdpStuck (ffos-user#356
+			// review round 2, F2): cdphealth's StuckThreshold runs on
+			// controld's own clock, anchored to when IT observed the CDP
+			// dial go unhealthy, with no ordering guarantee against
+			// monitorStart here — a separate systemd unit, reset
+			// independently on every suppressed-state exit and every
+			// restartChromium call. Honoring cdpStuck here would let that
+			// cross-daemon skew cut this device's own, still-unexpired
+			// cold-start grace short. Nothing is lost by waiting it out:
+			// StuckThreshold == CHROMIUM_STARTUP_GRACE by design, so a
+			// stall that genuinely survives past this grace is caught by
+			// startup_grace_exceeded below at essentially the same
+			// wall-clock moment regardless of what controld reported.
 			return
 		}
 		shouldRestart = true
-		if timeSinceStart > CHROMIUM_STARTUP_GRACE {
-			reason = "startup_grace_exceeded"
-		} else {
-			reason = "controld_cdp_stuck"
-		}
+		reason = "startup_grace_exceeded"
 	case timeSinceLast > CHROMIUM_HANG_THRESHOLD:
 		shouldRestart = true
 		reason = "hang_threshold_exceeded"
@@ -618,7 +627,9 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 		// ffos-user#356: /json/version is healthy (this check may be
 		// running from check()'s SUCCESS path), but feral-controld's own
 		// CDP page-target dial has been stuck for cdphealth.StuckThreshold
-		// — a failure mode /json/version alone can never see.
+		// — a failure mode /json/version alone can never see. Only
+		// consulted here, post-connect: see the pre-connect case above for
+		// why it must not short-circuit that branch's own grace.
 		shouldRestart = true
 		reason = "controld_cdp_stuck"
 	}
