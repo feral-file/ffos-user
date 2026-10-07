@@ -148,6 +148,49 @@ func TestBrowserPairingTap_ReplacesClaimQR(t *testing.T) {
 	assert.Equal(t, KindPairingCode, cur.Kind)
 }
 
+// TestClaimQR_OverridesPairingCodeDuringItsInitialPaint_EndsTheSessionWithoutPublishing
+// pins round 5 review's F1: the claim QR can replace the pairing code's
+// overlay WHILE the code's own initial CDP send is still in flight —
+// showPairingCode's decision commits (and so can be overridden) well before
+// startPairing ever publishes s.active, which only happens after
+// showPairingCode's result.Wait returns. Before the fix, endOverridden
+// checked only s.active == active, which was still nil at that moment, so the
+// override was silently dropped: the start went on to publish anyway and
+// spawn a worker for a session that had already lost the screen. onDisplay
+// fires synchronously from inside the pairing code's own CDP send — before
+// result.Wait, and so before the publish — reproducing the race
+// deterministically rather than by timing.
+func TestClaimQR_OverridesPairingCodeDuringItsInitialPaint_EndsTheSessionWithoutPublishing(t *testing.T) {
+	setup := &setupRecorder{}
+	cdpClient := &fakeCDP{}
+	starter := &fakeBrokerStarter{channel: &fakeBrokerChannel{pairingCode: "PAIR-RACE"}}
+	s, ctrl := newSharedOverlayService(t, starter, cdpClient, setup)
+
+	cdpClient.onDisplay = func(state string) {
+		if state != "pairing_code" {
+			return
+		}
+		cdpClient.mu.Lock()
+		cdpClient.onDisplay = nil // once
+		cdpClient.mu.Unlock()
+		_, _, err := ctrl.Show(context.Background(), &setupRecorderListener{}, overlay.Overlay{Kind: kindClaimQR}, overlay.Owner)
+		assert.NoError(t, err)
+	}
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertCommandError(t, result, "pairing_closed", false)
+
+	s.mu.Lock()
+	active := s.active
+	s.mu.Unlock()
+	assert.Nil(t, active, "an overridden start must not publish")
+
+	cur, ok := ctrl.Current()
+	require.True(t, ok)
+	assert.Equal(t, kindClaimQR, cur.Kind, "the claim QR must keep the screen")
+}
+
 // setupRecorderListener is the setup side's listener: it is never overridden in
 // these tests, so it needs no behavior.
 type setupRecorderListener struct{}

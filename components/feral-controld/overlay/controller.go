@@ -256,6 +256,56 @@ func (c *Controller) ShowIf(_ context.Context, l Listener, o Overlay, pr Priorit
 	return Handle{id: e.id}, Result{done: done}, nil
 }
 
+// Replay re-queues a delivery of the current overlay if l is its owner, and
+// reports whether it did. Reading who owns the current overlay and deciding
+// to replay it happen under the same lock acquisition, so there is no gap for
+// a newer Owner show from elsewhere to land between a caller's own "is this
+// still mine" check and the replay — unlike a caller doing Current() then
+// Show/ShowIf itself, which has exactly that gap (round 5 review, F3: a
+// setup-narration reconnect replay built that way could clobber a
+// browser-pairing request that had taken the screen in the interval,
+// canceling its session). Replay changes no decision and notifies no one:
+// the overlay it resends is already l's own, so there is nothing to
+// override — it only asks the delivery worker to resend what is already
+// decided, exactly like Show's queued delivery but without re-deciding
+// ownership.
+func (c *Controller) Replay(l Listener) bool {
+	c.mu.Lock()
+	cur := c.cur
+	if cur == nil || cur.listener != l {
+		c.mu.Unlock()
+		return false
+	}
+	c.enqueueLocked(delivery{overlay: cur.overlay})
+	c.mu.Unlock()
+	return true
+}
+
+// ReplayHide re-queues a hide delivery of o, but only if nothing is current,
+// and reports whether it did. It exists for a caller whose own last decision
+// was to clear the screen (via HideIf, which commits cur to nil and so keeps
+// no record of what kind of hide it was): the controller's own bookkeeping
+// cannot tell such a caller apart from one that never showed anything, yet a
+// reconnect replay still needs a real Kind to route through — a caller
+// cannot get one out of HideIf's own delivery, since a HideIf that finds
+// nothing current has nothing to attach a Kind to (round 5 review follow-up:
+// a setup-narration Resync tried exactly that — HideIf with a condition
+// accepting "nothing current" — and the resulting delivery's Kind was the
+// zero value, which the shared Router cannot route to any painter, so the
+// replay was silently dropped in production). The check and the enqueue
+// happen under the same lock acquisition, so there is no gap for a show that
+// lands in between to be clobbered — same reasoning as Replay.
+func (c *Controller) ReplayHide(o Overlay) bool {
+	c.mu.Lock()
+	if c.cur != nil {
+		c.mu.Unlock()
+		return false
+	}
+	c.enqueueLocked(delivery{overlay: o, hide: true})
+	c.mu.Unlock()
+	return true
+}
+
 // Hide decides the screen is cleared and queues that clear for delivery. Only
 // the current overlay's handle may hide it; any other handle gets
 // ErrNotCurrent and queues nothing. See Show's doc for why ctx bounds nothing

@@ -509,6 +509,17 @@ type activePairing struct {
 	// the worker to finish: the send cannot be taken back, and the new pairing
 	// must not start while it is in flight.
 	delivering bool
+	// overridden is set (under s.mu) by endOverridden the moment a newer
+	// overlay replaces this pairing's code — even while its own start is
+	// still waiting on the painter (showPairingCode's result.Wait can block
+	// up to the CDP send timeout, and the decision that it lost the screen
+	// commits well before that returns). s.active == this pairing is not yet
+	// true at that point — publishUnlessCanceled only sets it after
+	// showPairingCode returns — so endOverridden has to record the override
+	// on the pairing itself, not just on s.active, or a start that already
+	// lost the screen would still publish and spawn its approval worker
+	// (round 5 review, F1).
+	overridden bool
 
 	// joinCredential is a digest of the credential that joined the channel,
 	// so a retried join (a lost LAN reply retried over the relay) is answered
@@ -795,6 +806,16 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 		}
 		if phase == activePairingPhasePendingApproval {
 			if err := s.showRequestReceived(ctx, active, browserName); err != nil {
+				if isBenignRejection(err) {
+					// Same two benign outcomes as the showPairingCode redisplay
+					// below: a correctly-rejected Automatic, or this session
+					// having legitimately ended between the check above and
+					// this decision (round 5 review follow-up — this call site
+					// shared showMint's old blanket-Warn bug but was missed
+					// when showPairingCode's sibling sites were fixed).
+					s.logger.Info("Mint pairing redisplay skipped", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+					return commandError("display_unavailable", "failed to display mint pairing request status", true), err
+				}
 				s.logger.Warn("Failed to redisplay active mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
 				return commandError("display_unavailable", "failed to display mint pairing request status", true), nil
 			}
@@ -1570,7 +1591,16 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 
 	if !active.joined {
 		if err := s.showRequestReceived(ctx, active, pending.browserName); err != nil {
-			s.logger.Warn("Failed to display mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
+			if isBenignRejection(err) {
+				// Same two benign outcomes as every other showMint call site
+				// (round 5 review follow-up — this one was missed when the
+				// others were fixed): a correctly-rejected Automatic, or this
+				// session having legitimately ended already. Neither is a
+				// display fault worth a Warn.
+				s.logger.Info("Mint pairing request-received display skipped", zap.String("channelID", active.channelID))
+			} else {
+				s.logger.Warn("Failed to display mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
+			}
 		}
 	}
 
@@ -2336,11 +2366,14 @@ func (s *service) cancelActivePairingForReplace() (*activePairing, bool) {
 }
 
 // publishUnlessCanceled makes active the active pairing unless its start was
-// canceled, in one critical section with the cancel flag.
+// canceled or its overlay was overridden before it could publish (round 5
+// review, F1 — active.overridden can be set by endOverridden while this
+// start was still waiting on its own delivery, long before this call), in one
+// critical section with both flags.
 func (s *service) publishUnlessCanceled(starting *startingPairing, active *activePairing) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if starting.canceled {
+	if starting.canceled || active.overridden {
 		return false
 	}
 	s.active = active
@@ -2487,18 +2520,28 @@ func (l *sessionListener) OnOverride(by overlay.Overlay) {
 func (l *sessionListener) OnClose() {}
 
 // endOverridden cancels active because another overlay replaced its code.
+// This can fire before active is ever published to s.active — the overlay
+// decision that it lost the screen commits while its own start is still
+// blocked in showPairingCode's result.Wait (see overridden's doc) — so
+// cancellation and the published slot are handled as two separate facts,
+// both recorded here under the same lock: active.overridden, checked by
+// publishUnlessCanceled to stop a since-overridden start from publishing at
+// all, and s.active itself, cleared when this was in fact the published one.
 func (s *service) endOverridden(active *activePairing, by overlay.Overlay) {
 	s.mu.Lock()
-	ended := s.active == active
-	if ended {
+	alreadyOverridden := active.overridden
+	active.overridden = true
+	wasPublished := s.active == active
+	if wasPublished {
 		s.active = nil
-		active.cancel()
 	}
 	s.mu.Unlock()
-	if ended {
-		s.logger.Info("Mint pairing session ended: a newer overlay replaced its code",
-			zap.String("channelID", active.channelID), zap.String("by", string(by.Kind)))
+	if alreadyOverridden {
+		return
 	}
+	active.cancel()
+	s.logger.Info("Mint pairing session ended: a newer overlay replaced its code",
+		zap.String("channelID", active.channelID), zap.String("by", string(by.Kind)))
 }
 
 // showMint decides active owns o, queues it for delivery, then waits for that

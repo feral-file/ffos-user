@@ -772,14 +772,72 @@ func TestResyncBeforeAnyStateIsNoop(t *testing.T) {
 	assert.Equal(t, 0, sender.callCount())
 }
 
-// TestResync_ReshowsCurrentOverlayEvenAfterASecondState pins the behavior the
-// old queue-draining design needed a special case for: Resync always re-shows
-// whatever the overlay controller currently decides, never a stale snapshot.
-// A ShowReady() immediately followed by Hide() leaves nothing current (Hide
-// cleared it), so Resync after that sequence is correctly a no-op — ordering
-// and delivery of the Ready/Hidden pair themselves are the controller's own
-// queue's job now, not Resync's.
-func TestResync_ReshowsCurrentOverlayEvenAfterASecondState(t *testing.T) {
+// TestResync_DoesNotReclaimAfterConcurrentOwner pins round 5 review's F3
+// directly: a setup overlay this service shows (ShowFinalizing) can lose the
+// screen to a newer owner (a browser-pairing request) before the "CDP
+// reconnected" trigger calls Resync. The pre-fix Resync read Current() and
+// then unconditionally re-Showed that stale snapshot with Owner priority,
+// clobbering whoever had taken over since. Controller.Replay closes that gap
+// by re-checking ownership under its own single lock acquisition instead of a
+// separate snapshot step, so Resync must leave the newer owner's overlay
+// alone here.
+func TestResync_DoesNotReclaimAfterConcurrentOwner(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
+
+	svc.ShowFinalizing()
+	fake.waitForCalls(t, 1)
+
+	// A browser-pairing request takes the screen before the reconnect fires
+	// Resync.
+	other := overlay.Overlay{Kind: "mint:pairing_code"}
+	otherListener := &fakeListener{}
+	_, _, err := svc.ctrl.Show(context.Background(), otherListener, other, overlay.Owner)
+	require.NoError(t, err)
+
+	svc.Resync()
+	time.Sleep(20 * time.Millisecond)
+
+	cur, has := svc.ctrl.Current()
+	assert.True(t, has)
+	assert.Equal(t, other.Kind, cur.Kind, "Resync must not reclaim the screen from a newer owner")
+}
+
+// TestResync_ReplayedHiddenIntentRoutesThroughTheProductionRouter guards
+// against the gap review found in the first version of this fix: this
+// file's own test controller (newTestService's overlay.New(setupPainter{s:
+// s})) routes Hide by ignoring its Overlay argument entirely, so a Kind-less
+// delivery passes here regardless. main.go instead wires setupui and
+// mintpairing behind a shared overlay.Router, which routes STRICTLY by Kind
+// prefix — a delivery carrying the zero-value Overlay{} (Kind=="") matches no
+// prefix and is silently dropped. Resync's hidden-intent replay must still
+// reach the player when wired exactly as production does.
+func TestResync_ReplayedHiddenIntentRoutesThroughTheProductionRouter(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
+	svc.SetController(overlay.New(overlay.NewRouter(map[string]overlay.Painter{
+		"setup:": setupPainter{s: svc},
+	})))
+
+	svc.ShowReady()
+	svc.Hide()
+	fake.waitForCalls(t, 2)
+
+	before := fake.callCount()
+	svc.Resync()
+	fake.waitForCalls(t, before+1)
+	assert.Equal(t, stateHidden, fake.lastRequest()["state"])
+}
+
+// TestResync_ReplaysHiddenIntentAfterHide pins the fix for round 5 review's
+// F2: a plain Hide() clears the overlay controller's current overlay to
+// nothing, which setupui cannot tell apart from "the clear's own CDP send
+// failed" without blocking the caller to find out (its contract is never
+// block). So Resync must replay the hidden intent unconditionally on every
+// reconnect, exactly as it already does for a shown state (see
+// TestResyncRepushesLastStateWhenCDPReturns) — not silently assume the last
+// clear got through, which is what the pre-fix no-op here actually did.
+func TestResync_ReplaysHiddenIntentAfterHide(t *testing.T) {
 	fake := newFakeCDP()
 	svc := newTestService(t, fake, validContract)
 
@@ -789,8 +847,47 @@ func TestResync_ReshowsCurrentOverlayEvenAfterASecondState(t *testing.T) {
 
 	before := fake.callCount()
 	svc.Resync()
+	fake.waitForCalls(t, before+1)
+	assert.Equal(t, stateHidden, fake.lastRequest()["state"])
+}
+
+// fakeListener is a minimal overlay.Listener for tests that need some OTHER
+// owner to hold the screen, without caring what happens when it is replaced.
+type fakeListener struct{}
+
+func (fakeListener) OnOverride(overlay.Overlay) {}
+func (fakeListener) OnClose()                   {}
+
+// TestResync_HiddenIntentDoesNotClobberANewerOwner guards the other half: the
+// replay above must re-check ownership at commit time (round 5 review, F3's
+// same reasoning applied to the hidden-intent path), not blindly clear
+// whatever is current. If a different overlay owner has taken the screen
+// since this service's own last Hide(), Resync must leave it alone.
+func TestResync_HiddenIntentDoesNotClobberANewerOwner(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
+
+	svc.ShowReady()
+	svc.Hide()
+	fake.waitForCalls(t, 2)
+
+	// A different listener takes the screen after setupui hid itself. Asserted
+	// on the controller's own decision (Current), not a CDP call count: this
+	// test's svc.ctrl has no router splitting owners onto separate painters
+	// the way production wiring does, so any Show on it — including this
+	// other listener's — reaches the same fake sender setupui's own narration
+	// does, making a call-count assertion race against that unrelated send.
+	other := overlay.Overlay{Kind: "other:kind"}
+	otherListener := &fakeListener{}
+	_, _, err := svc.ctrl.Show(context.Background(), otherListener, other, overlay.Owner)
+	require.NoError(t, err)
+
+	svc.Resync()
 	time.Sleep(20 * time.Millisecond)
-	assert.Equal(t, before, fake.callCount(), "nothing is current after Hide, so Resync has nothing to re-show")
+
+	cur, has := svc.ctrl.Current()
+	assert.True(t, has)
+	assert.Equal(t, other.Kind, cur.Kind, "a newer owner's overlay must survive a stale hidden-intent replay")
 }
 
 // TestResync_ReEnqueuesLastWhenPendingEmpty pins the other half: Resync's

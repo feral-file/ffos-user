@@ -559,3 +559,59 @@ func TestShow_AutomaticStillRejectedByADifferentListener(t *testing.T) {
 	cur, _ := c.Current()
 	assert.Equal(t, kindClaimQR, cur.Kind)
 }
+
+// TestReplay_ResendsOwnedOverlay pins Replay's success path: the owning
+// listener's current overlay is queued for delivery again, with no new
+// decision (no override notification, since nothing was overridden).
+func TestReplay_ResendsOwnedOverlay(t *testing.T) {
+	p := &fakePainter{}
+	c := newController(t, p)
+	owner := &recordingListener{}
+
+	_, _, err := c.Show(context.Background(), owner, Overlay{Kind: kindClaimQR}, Owner)
+	require.NoError(t, err)
+	p.waitForEvents(t, 1)
+
+	ok := c.Replay(owner)
+
+	assert.True(t, ok)
+	p.waitForEvents(t, 2)
+	assert.Equal(t, []string{"show:claim_qr", "show:claim_qr"}, p.snapshot())
+	assert.Zero(t, owner.overrides.Load(), "replaying one's own current overlay is not an override")
+}
+
+// TestReplay_NothingCurrentIsNoop guards the empty-screen case: nothing to
+// replay, nothing queued.
+func TestReplay_NothingCurrentIsNoop(t *testing.T) {
+	p := &fakePainter{}
+	c := newController(t, p)
+
+	ok := c.Replay(&recordingListener{})
+
+	assert.False(t, ok)
+	assert.Empty(t, p.snapshot())
+}
+
+// TestReplay_AnotherListenersOverlayIsNoop pins the fix this exists for
+// (round 5 review, F3): a listener asking to replay what it no longer owns
+// must not touch the screen, since the screen belongs to someone else now.
+func TestReplay_AnotherListenersOverlayIsNoop(t *testing.T) {
+	p := &fakePainter{}
+	c := newController(t, p)
+	stale := &recordingListener{}
+	current := &recordingListener{}
+
+	_, _, err := c.Show(context.Background(), stale, Overlay{Kind: kindClaimQR}, Owner)
+	require.NoError(t, err)
+	_, _, err = c.Show(context.Background(), current, Overlay{Kind: kindPairingCode}, Owner)
+	require.NoError(t, err)
+	p.waitForEvents(t, 2)
+
+	ok := c.Replay(stale)
+
+	assert.False(t, ok)
+	time.Sleep(20 * time.Millisecond)
+	assert.Equal(t, []string{"show:claim_qr", "show:pairing_code"}, p.snapshot(), "the current owner's overlay must not be re-sent on the replaced owner's behalf")
+	cur, _ := c.Current()
+	assert.Equal(t, kindPairingCode, cur.Kind, "the current owner's overlay must still be current")
+}

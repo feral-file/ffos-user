@@ -91,15 +91,25 @@ func (s *Service) OnClose() {}
 // hideIf clears the screen when match holds. Nothing current, or something
 // current that match rejects, sends nothing — there is no bypass for an empty
 // screen; see SweepStaleOverlay for the one legitimate case of painting
-// without the owner having asked (a stale overlay from an earlier process).
+// without the owner having asked (a stale overlay from an earlier process). A
+// hide that actually commits marks this service's intent as hidden, so Resync
+// can replay it on reconnect even if its own CDP send failed — see
+// hiddenIntent's doc.
 func (s *Service) hideIf(match overlay.Condition) {
-	_ = s.ctrl.HideIf(context.Background(), match)
+	err := s.ctrl.HideIf(context.Background(), match)
+	if err == nil {
+		s.mu.Lock()
+		s.hiddenIntent = true
+		s.mu.Unlock()
+	}
 }
 
 // showOwned is the one place setup narration is painted. A nil condition always
 // shows; a condition that fails drops the narration, as the old pushIf did.
 // A successful show marks this process as having narrated, which is what lets
-// SweepStaleOverlay tell a stale leftover overlay from its own live one.
+// SweepStaleOverlay tell a stale leftover overlay from its own live one, and
+// clears hiddenIntent: there is now a shown overlay again for Resync to
+// replay through the ordinary ctrl.Current() path.
 func (s *Service) showOwned(req map[string]any, pr overlay.Priority, ok func(last map[string]any) bool) {
 	var cond overlay.Condition
 	if ok != nil {
@@ -114,6 +124,7 @@ func (s *Service) showOwned(req map[string]any, pr overlay.Priority, ok func(las
 	if err == nil {
 		s.mu.Lock()
 		s.narrated = true
+		s.hiddenIntent = false
 		s.mu.Unlock()
 	}
 }

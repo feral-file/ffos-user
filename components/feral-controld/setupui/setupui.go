@@ -11,7 +11,6 @@
 package setupui
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -188,14 +187,28 @@ type Service struct {
 	// ordering, OTA mid-replace, a torn write) with the last real evidence.
 	// Absent key = supportUnknown = no successful read yet.
 	extSupport map[string]support
-	// ctrl owns the screen overlay. Every narration is shown and cleared through
-	// it, and it records the current overlay, so there is no separate
-	// last-intent here. See overlay_bridge.go.
+	// ctrl owns the screen overlay. Every SHOWN narration is recorded as its
+	// current overlay, so Resync can just replay it — but a plain Hide()
+	// clears ctrl's current overlay to nothing, which is indistinguishable
+	// from "nothing has been shown" or "a different owner has since taken the
+	// screen". hiddenIntent below is what Resync needs that ctrl alone
+	// cannot tell it (round 5 review, F2).
 	ctrl *overlay.Controller
 	// narrated is set once this process has sent any narration. The boot sweep
 	// hides a stale overlay only while it is false, since an overlay this
 	// process painted is not stale.
 	narrated bool
+	// hiddenIntent is set once a hide this service decided (hideIf, via
+	// pushIf's plain Hide() path or HideIfShowing) actually commits, and
+	// cleared the next time a show commits (see showOwned). A hide's CDP send
+	// can fail exactly like a show's, but unlike a show there is nothing left
+	// in ctrl.Current() for Resync to find and replay — ctrl's current
+	// overlay is simply nil either way, whether the clear never reached the
+	// player or reached it fine. hiddenIntent is what lets Resync replay a
+	// failed clear on reconnect anyway, the same way it already replays a
+	// failed show: unconditionally, since a hide's delivery outcome is never
+	// observed by setupui (it must never block the caller to find out).
+	hiddenIntent bool
 }
 
 // New builds a narration Service. A blank contractPath falls back to
@@ -742,18 +755,38 @@ func (s *Service) Narrating() bool {
 // trigger: wire it to the CDP client's on-connect callback so a reconnecting
 // or freshly-loaded player catches up to the current setup state. It is a
 // no-op if nothing has been shown yet.
+//
+// Replay (not a Current()-then-Show round trip, which this used before round
+// 5 review's F3) re-reads and re-checks ownership under the controller's own
+// single lock acquisition, so there is no gap in which a newer Owner show
+// from elsewhere — a browser-pairing request — can take the screen between
+// reading what is current and resending it. The old round trip had exactly
+// that gap: an unconditional Owner ShowIf of a stale snapshot would clobber
+// whatever had taken over in between, ending that session.
+//
+// When nothing is current, that is either because nothing has been shown yet
+// (hiddenIntent is false; no-op, same as before) or because this service's
+// own last hide committed (hiddenIntent is true) — see hiddenIntent's doc for
+// why that case still needs a replay here.
 func (s *Service) Resync() {
-	cur, has := s.ctrl.Current()
-	if !has || !isSetup(cur) {
+	if s.ctrl.Replay(s) {
 		return
 	}
-	// Re-showing the same listener's own overlay is not an override (see the
-	// overlay package doc on decision versus delivery), so this just queues a
-	// fresh delivery of what is already current. No reconciliation with "what
-	// else might be queued" is needed: the controller's own delivery queue is
-	// the only queue now, and it is already in the right order relative to
-	// anything else in flight.
-	_, _, _ = s.ctrl.ShowIf(context.Background(), s, cur, overlay.Owner, nil)
+	s.mu.Lock()
+	hidden := s.hiddenIntent
+	s.mu.Unlock()
+	if !hidden {
+		return
+	}
+	// ReplayHide, not HideIf: HideIf's own delivery is always the CURRENT
+	// overlay, which is nil here by definition (nothing is current) — a
+	// Kind-less delivery the shared Router cannot route to any painter, so it
+	// would be silently dropped in production (caught in review on this very
+	// fix). ReplayHide carries setupui's own Kind explicitly instead, and
+	// still only queues it if nothing has taken the screen in the meantime,
+	// re-checked under its own lock — same gap-closing reasoning as Replay
+	// above.
+	_ = s.ctrl.ReplayHide(overlay.Overlay{Kind: setupKind(stateHidden)})
 }
 
 // push shows req. It returns immediately; the CDP send never happens on the
