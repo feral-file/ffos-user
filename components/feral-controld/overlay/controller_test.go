@@ -519,3 +519,43 @@ func TestResultWait_ZeroResultReturnsImmediately(t *testing.T) {
 	cancel() // already done; a real wait would return ctx.Err() here instead of nil
 	assert.NoError(t, r.Wait(ctx))
 }
+
+// Round 3 review, F1: an Automatic show may replace its own listener's
+// earlier overlay — without this, setupui's ShowFinalizing (Owner) followed
+// by the auto-claim loop's ShowClaimQRAutomatic (Automatic) would starve the
+// claim QR forever, since both are the same listener and the second call
+// would otherwise find "something current" and be rejected.
+func TestShow_AutomaticMayReplaceItsOwnListenersEarlierOverlay(t *testing.T) {
+	p := &fakePainter{}
+	c := newController(t, p)
+	l := &recordingListener{}
+
+	_, _, err := c.Show(context.Background(), l, Overlay{Kind: "finalizing"}, Owner)
+	require.NoError(t, err)
+
+	h, _, err := c.Show(context.Background(), l, Overlay{Kind: kindClaimQR}, Automatic)
+
+	require.NoError(t, err, "the same listener's own Automatic show must not be rejected")
+	assert.True(t, c.IsCurrent(h))
+	assert.Zero(t, l.overrides.Load(), "replacing its own overlay is not an override")
+}
+
+// An Automatic show is still rejected when a DIFFERENT listener owns the
+// screen, same listener or not notwithstanding — this is the other half of
+// F1's fix, already covered by TestShow_AutomaticOverCurrentIsRejectedAndSilent
+// above with two distinct listeners; this test pins the boundary explicitly.
+func TestShow_AutomaticStillRejectedByADifferentListener(t *testing.T) {
+	p := &fakePainter{}
+	c := newController(t, p)
+	owner := &recordingListener{}
+	auto := &recordingListener{}
+
+	_, _, err := c.Show(context.Background(), owner, Overlay{Kind: kindClaimQR}, Owner)
+	require.NoError(t, err)
+
+	_, _, err = c.Show(context.Background(), auto, Overlay{Kind: kindPairingCode}, Automatic)
+
+	assert.ErrorIs(t, err, ErrRejected)
+	cur, _ := c.Current()
+	assert.Equal(t, kindClaimQR, cur.Kind)
+}

@@ -5274,3 +5274,28 @@ func TestHandleJoinPairingChannel_MismatchOutcomeSurvivesASlowRejection(t *testi
 		t.Fatal("the channel must still be closed")
 	}
 }
+
+// Round 3 review, F2: a session that legitimately ended between a caller's
+// own liveness check and the controller's decision (an OnOverride landing in
+// that window) must classify as errSessionEnded, not a generic display
+// error, and isBenignRejection must recognize it alongside errOverlayOccupied
+// — both are benign, neither should log as a fault.
+func TestShowPairingCode_LiveFalseAtDecisionIsErrSessionEnded(t *testing.T) {
+	s := newService(
+		Options{},
+		nil,
+		nil,
+		nil,
+		&fakeCDP{},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	active := &activePairing{channelID: "ch_1", pairingCode: "PAIR-1", cancel: func() {}}
+
+	err := s.showPairingCode(context.Background(), active, overlay.Owner, func() bool { return false })
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errSessionEnded)
+	assert.True(t, isBenignRejection(err), "errSessionEnded is a benign rejection, not a fault")
+	assert.False(t, isBenignRejection(errors.New("cdp send failed")), "a genuine delivery error is not benign")
+}

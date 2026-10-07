@@ -9,7 +9,11 @@
 //
 // Policy, from the owner's rules:
 //   - An owner action replaces whatever is current.
-//   - An automatic paint is accepted only when nothing is current.
+//   - An automatic paint is accepted when nothing is current, or when the
+//     current overlay is the same listener's own (round 3 review, F1: without
+//     this, a listener's own earlier owner-priority narration could
+//     permanently block that same listener's later automatic attempts — see
+//     Show's doc). It is rejected only by a DIFFERENT listener's overlay.
 //   - A replaced owner is told once through OnOverride. It holds no further
 //     right to the screen: its Hide returns ErrNotCurrent, so it never sends a
 //     hide that could erase the overlay that replaced it.
@@ -198,10 +202,16 @@ func New(p Painter) *Controller {
 // override: it is the same owner moving its own display along, and it has
 // nothing to be told.
 //
-// An automatic Show over a current overlay returns ErrRejected and queues
-// nothing — its zero Result has nothing to wait for. Show itself never fails
-// on the painter's account; call Wait on the returned Result for that — see
-// the package doc on decision versus delivery.
+// An automatic Show over a current overlay owned by a DIFFERENT listener
+// returns ErrRejected and queues nothing — its zero Result has nothing to
+// wait for. A listener's own Automatic show may still replace its own earlier
+// overlay (round 3 review, F1): without this exemption, an owner-priority
+// narration this same listener painted moments earlier (setupui's
+// ShowFinalizing, say) could permanently starve that listener's own later
+// Automatic attempts — e.g. the auto-claim loop's claim QR, repainted after
+// every reconnect — with no caller ever told why, since Show itself never
+// fails on the painter's account; call Wait on the returned Result for that —
+// see the package doc on decision versus delivery.
 //
 // ctx is accepted for API symmetry with Result.Wait, which does use a ctx —
 // typically this same one, passed straight through by a caller. The decision
@@ -221,7 +231,13 @@ func (c *Controller) Show(ctx context.Context, l Listener, o Overlay, pr Priorit
 func (c *Controller) ShowIf(_ context.Context, l Listener, o Overlay, pr Priority, cond Condition) (Handle, Result, error) {
 	c.mu.Lock()
 	cur, has := c.currentLocked()
-	if (pr == Automatic && has) || (cond != nil && !cond(cur, has)) {
+	// has && c.cur.listener != l: an Automatic show may replace its own
+	// listener's earlier overlay (see the doc above) but not another
+	// listener's. l != nil is not checked here — every real caller passes a
+	// non-nil Listener; a nil one would simply never match c.cur.listener and
+	// always be treated as "a different listener," the safe default.
+	blockedByOther := pr == Automatic && has && c.cur.listener != l
+	if blockedByOther || (cond != nil && !cond(cur, has)) {
 		c.mu.Unlock()
 		return Handle{}, Result{}, ErrRejected
 	}

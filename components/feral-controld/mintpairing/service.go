@@ -806,14 +806,15 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 			}, nil
 		}
 		if err := s.showPairingCode(ctx, active, pr, func() bool { return s.isActive(active) }); err != nil {
-			if errors.Is(err, errOverlayOccupied) {
-				// errOverlayOccupied only propagates up as this function's own
-				// error: never through HandleStartPairingSession, which always
-				// calls with Owner (the only priority this sentinel can follow
-				// from) — see showMint. refreshExpiredPairingCode is the one
-				// caller that reads it, to pick its own log level.
-				s.logger.Info("Mint pairing redisplay skipped: another overlay owns the screen",
-					pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+			if isBenignRejection(err) {
+				// Neither outcome is a display fault: errOverlayOccupied is the
+				// designed result of an Automatic show losing to another
+				// overlay, errSessionEnded means this very session legitimately
+				// ended (an OnOverride landed) between the check above and this
+				// decision — round 3 review, F2. refreshExpiredPairingCode is
+				// the one caller that reads this as its own error, to skip its
+				// own fallback Warn.
+				s.logger.Info("Mint pairing redisplay skipped", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
 				return commandError("display_unavailable", "failed to display mint pairing QR code", true), err
 			}
 			s.logger.Warn("Failed to redisplay active mint pairing code", append(pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt), zap.Error(err))...)
@@ -900,14 +901,11 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 	if err := s.showPairingCode(ctx, active, pr, func() bool { return !s.startCanceled(starting) }); err != nil {
 		sessionCancel()
 		s.closeChannel(channel)
-		if errors.Is(err, errOverlayOccupied) {
-			// Automatic only: the controller correctly refused to replace an
-			// overlay the owner asked for. The designed outcome for an
-			// Automatic show, not a display fault — round 2 review, F-noise.
+		if isBenignRejection(err) {
+			// Neither outcome is a display fault (see isBenignRejection).
 			// Propagated as this function's own error so refreshExpiredPairingCode
-			// (the only Automatic caller) can pick its own log level too.
-			s.logger.Info("Mint pairing display skipped: another overlay owns the screen",
-				pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+			// (the only Automatic caller) can skip its own fallback Warn too.
+			s.logger.Info("Mint pairing display skipped", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
 			return commandError("display_unavailable", "failed to display mint pairing QR code", true), err
 		}
 		s.logger.Warn("Failed to display mint pairing QR code; closed broker channel", append(pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt), zap.Error(err))...)
@@ -1788,7 +1786,12 @@ func (s *service) completeDecisionFor(ctx context.Context, active *activePairing
 
 	if paintsOverlay(channel) {
 		if err := s.showMint(ctx, active, overlay.Overlay{Kind: KindCreatingToken, Payload: browserDisplayName(request.BrowserInfo)}, overlay.Owner, func() bool { return s.isActive(active) }); err != nil {
-			s.logger.Warn("Failed to display mint pairing token creation status", zap.Error(err), zap.String("channelID", request.ChannelID))
+			// errSessionEnded is reachable here too (an OnOverride landing
+			// between the outer isActive check and this decision) — round 3
+			// review, F2. errOverlayOccupied is not: this call is always Owner.
+			if !isBenignRejection(err) {
+				s.logger.Warn("Failed to display mint pairing token creation status", zap.Error(err), zap.String("channelID", request.ChannelID))
+			}
 		}
 	}
 
@@ -2363,10 +2366,9 @@ func (s *service) refreshExpiredPairingCode() {
 	}
 	result, err := s.startPairing(context.Background(), overlay.Automatic)
 	if err != nil {
-		if errors.Is(err, errOverlayOccupied) {
-			// Expected for Automatic: another overlay legitimately owns the
-			// screen. Already logged at Info where it was decided; nothing
-			// further to say here.
+		if isBenignRejection(err) {
+			// Neither outcome needs a Warn here (round 3 review, F2): already
+			// logged at Info where it was decided.
 			return
 		}
 		s.logger.Warn("Failed to refresh expired mint pairing code", zap.Error(err))
@@ -2494,16 +2496,21 @@ func (s *service) endOverridden(active *activePairing, by overlay.Overlay) {
 // Show returned the Result, so nothing else is serialized behind it (see the
 // overlay package doc). live guards the decision itself: a session canceled
 // before it runs must not take the screen. Three distinct outcomes share the
-// generic error return, and callers must tell them apart (round 2 review,
-// F-noise — treating the second case as a display fault logged an
-// indistinguishable Warn and burned a broker channel on every expected
-// Automatic rejection):
+// generic error return (round 2 review, F-noise; round 3 review, F2 — the
+// first version treated every non-nil error alike, logging a Warn and
+// churning a broker channel on every expected rejection, benign or not):
 //   - errSessionEnded: the session was canceled before its overlay could be
-//     shown. A real ending; log and clean up.
-//   - errOverlayOccupied: an Automatic show was rejected because another
-//     overlay legitimately owns the screen — the designed outcome for
-//     Automatic, not a fault. Callers should not warn or churn a channel over it.
+//     shown — e.g. an OnOverride landed between a caller's own liveness check
+//     and this decision. A real ending, not a fault.
+//   - errOverlayOccupied: an Automatic show was rejected because a DIFFERENT
+//     listener's overlay legitimately owns the screen — the designed outcome
+//     for Automatic, not a fault (a listener's own earlier overlay is not
+//     occupying in this sense; see the overlay package's Show doc).
 //   - any other error: the painter's own delivery genuinely failed. A real fault.
+//
+// The first two are both benign rejections, not faults: callers check
+// isBenignRejection(err) rather than each sentinel individually, since no
+// caller currently needs to act differently on the two for logging purposes.
 func (s *service) showMint(ctx context.Context, active *activePairing, o overlay.Overlay, pr overlay.Priority, live func() bool) error {
 	var listener overlay.Listener = unownedOverlay{}
 	if active != nil {
@@ -2553,6 +2560,15 @@ var errSessionEnded = errors.New("mint pairing session ended before its overlay 
 // errOverlayOccupied is returned when an Automatic show was correctly
 // rejected because another overlay legitimately owns the screen. See showMint.
 var errOverlayOccupied = errors.New("mint pairing display skipped: another overlay owns the screen")
+
+// isBenignRejection reports whether err is one of showMint's two expected,
+// non-fault outcomes (errOverlayOccupied, errSessionEnded) rather than a
+// genuine delivery failure. Collapsed into one check (round 3 review, F2,
+// option b): no caller currently needs to act differently on the two, only to
+// avoid logging either as a Warn-level fault the way a real CDP failure would be.
+func isBenignRejection(err error) bool {
+	return errors.Is(err, errOverlayOccupied) || errors.Is(err, errSessionEnded)
+}
 
 func (s *service) showPairingCode(ctx context.Context, active *activePairing, pr overlay.Priority, live func() bool) error {
 	return s.showMint(ctx, active, overlay.Overlay{Kind: KindPairingCode, Payload: active.pairingCode}, pr, live)

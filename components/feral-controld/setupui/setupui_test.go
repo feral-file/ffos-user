@@ -981,6 +981,32 @@ func TestReadyThenHideDeliversBoth(t *testing.T) {
 	assert.Equal(t, stateHidden, fake.requests[1]["state"])
 }
 
+// TestShowClaimQRAutomatic_NotStarvedByItsOwnEarlierFinalizing is round 3
+// review's F1 end to end, through the real production call path: the
+// auto-claim loop's ShowFinalizing() (Owner) followed by its own
+// ShowClaimQRAutomatic() must not find "something current" and reject,
+// because that something is this same Service's own earlier overlay. Before
+// the overlay package's fix, every one of this flow's claim-QR repaints after
+// the first would have silently failed, stranding an unclaimed device on
+// "Finalizing" until an unrelated narrator or an explicit cloud command
+// repainted the screen.
+func TestShowClaimQRAutomatic_NotStarvedByItsOwnEarlierFinalizing(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
+
+	svc.ShowFinalizing()
+	fake.waitForCalls(t, 1)
+
+	svc.ShowClaimQRAutomatic("https://claim.example/x", "FF1-8EVTK3RE")
+	fake.waitForCalls(t, 2)
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	require.Len(t, fake.requests, 2)
+	assert.Equal(t, stateFinalizing, fake.requests[0]["state"])
+	assert.Equal(t, stateClaimQR, fake.requests[1]["state"], "the claim QR must not be starved by this service's own earlier overlay")
+}
+
 // Hide() with no setup narration current sends nothing — there is no "clear an
 // empty screen" bypass any more (see the overlay package doc and
 // SweepStaleOverlay, the one legitimate case of painting without the owner
