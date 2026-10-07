@@ -786,13 +786,18 @@ func TestResyncBeforeAnyStateIsNoop(t *testing.T) {
 func TestResync_NoOpWhenPendingNonEmpty(t *testing.T) {
 	svc := newTestService(t, newFakeCDP(), validContract)
 
+	// A worker is pretended to be draining, so the paint below only records the
+	// current overlay and queues nothing that a test could not see.
 	svc.mu.Lock()
-	svc.last = map[string]any{"state": stateHidden}
+	svc.running = true
+	svc.mu.Unlock()
+	svc.ShowReady()
+
+	svc.mu.Lock()
 	svc.pending = []map[string]any{
 		{"state": stateReady},
 		{"state": stateHidden},
 	}
-	svc.running = true // pretend a worker is already draining this queue
 	svc.mu.Unlock()
 
 	svc.Resync()

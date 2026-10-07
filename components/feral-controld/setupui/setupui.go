@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 )
 
@@ -186,9 +187,14 @@ type Service struct {
 	// ordering, OTA mid-replace, a torn write) with the last real evidence.
 	// Absent key = supportUnknown = no successful read yet.
 	extSupport map[string]support
-	// last is the most recently intended narration state. It is retained (not
-	// cleared after sending) so it can be re-pushed when CDP reconnects.
-	last map[string]any
+	// ctrl owns the screen overlay. Every narration is shown and cleared through
+	// it, and it records the current overlay, so there is no separate
+	// last-intent here. See overlay_bridge.go.
+	ctrl *overlay.Controller
+	// narrated is set once this process has sent any narration. The boot sweep
+	// hides a stale overlay only while it is false, since an overlay this
+	// process painted is not stale.
+	narrated bool
 	// pending is the ordered queue of states the worker still needs to push.
 	// Coalescing rule: a new push REPLACES a queued entry with the same "state"
 	// value in place (so an OTA progress burst collapses to one trailing
@@ -220,11 +226,14 @@ func New(sender CDPSender, contractPath string, logger *zap.Logger) *Service {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &Service{
+	s := &Service{
 		cdp:          sender,
 		contractPath: contractPath,
 		logger:       logger,
 	}
+	// A private controller until SetController shares one with mintpairing.
+	s.ctrl = overlay.New(setupPainter{s: s})
+	return s
 }
 
 // SetSession wires the playersession.Session the worker consults to avoid
@@ -598,10 +607,8 @@ func (s *Service) ShowClaimQR(url string, deviceName string) {
 // commit the old url back over it — a QR the app cannot claim with, and
 // nothing repaints until the next unrelated transition.
 func (s *Service) RefreshClaimQRName(resolve func() string) {
-	s.mu.Lock()
-	showing := stringField(s.last, "state") == stateClaimQR
-	s.mu.Unlock()
-	if !showing {
+	cur, has := s.ctrl.Current()
+	if !has || setupState(cur) != stateClaimQR {
 		return
 	}
 	req := map[string]any{"state": stateClaimQR}
@@ -655,7 +662,17 @@ func (s *Service) Hide() {
 // Narrating() probe followed by Hide() would reintroduce exactly that
 // check-then-act race.
 func (s *Service) SweepStaleOverlay() {
-	s.pushIf(map[string]any{"state": stateHidden}, func(last map[string]any) bool { return last == nil })
+	s.mu.Lock()
+	narrated := s.narrated
+	s.mu.Unlock()
+	if narrated {
+		return
+	}
+	if _, has := s.ctrl.Current(); has {
+		return
+	}
+	// A clear, not a show: nothing is painted that the controller must record.
+	s.enqueue(map[string]any{"state": stateHidden})
 }
 
 // HideIfShowing hides only when the current narration intent is one of
@@ -668,8 +685,11 @@ func (s *Service) SweepStaleOverlay() {
 // overlay after discovering mid-flow that the device settled — the exact
 // moment another narrator may have taken the screen.
 func (s *Service) HideIfShowing(states ...string) {
-	s.pushIf(map[string]any{"state": stateHidden}, func(last map[string]any) bool {
-		current := stringField(last, "state")
+	s.hideIf(func(cur overlay.Overlay, has bool) bool {
+		if !has || !isSetup(cur) {
+			return false
+		}
+		current := setupState(cur)
 		for _, st := range states {
 			if current == st {
 				return true
@@ -704,9 +724,8 @@ const StateFactoryReset = stateFactoryReset
 // still counts, which is the conservative reading for callers deciding whether
 // a destructive page operation would erase someone's narration.
 func (s *Service) Narrating() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.last != nil && stringField(s.last, "state") != stateHidden
+	cur, has := s.ctrl.Current()
+	return has && isSetup(cur) && setupState(cur) != stateHidden
 }
 
 // Resync re-pushes the last intended narration state. It is the "CDP became
@@ -714,11 +733,11 @@ func (s *Service) Narrating() bool {
 // reconnecting or freshly-loaded player catches up to the current setup state.
 // It is a no-op if nothing has been shown yet.
 func (s *Service) Resync() {
-	s.mu.Lock()
-	if s.last == nil {
-		s.mu.Unlock()
+	cur, has := s.ctrl.Current()
+	if !has || !isSetup(cur) {
 		return
 	}
+	s.mu.Lock()
 	// Resync now also runs as a generation-ready reconciler (on
 	// EVERY document replacement, not just the original CDP on-connect
 	// wiring), so it can fire while a genuine multi-state sequence is still
@@ -736,7 +755,7 @@ func (s *Service) Resync() {
 		s.mu.Unlock()
 		return
 	}
-	s.pending = []map[string]any{s.last}
+	s.pending = []map[string]any{payloadOf(cur)}
 	starting := !s.running
 	s.running = true
 	s.mu.Unlock()
@@ -769,19 +788,11 @@ func (s *Service) push(req map[string]any) {
 // deadlock holding s.mu and wedge every push from every goroutine, breaking
 // the package's pushes-never-block contract.
 func (s *Service) pushIf(req map[string]any, ok func(last map[string]any) bool) {
-	s.mu.Lock()
-	if ok != nil && !ok(s.last) {
-		s.mu.Unlock()
+	if stringField(req, "state") == stateHidden {
+		s.clearSetup()
 		return
 	}
-	s.last = req
-	s.enqueueLocked(req)
-	starting := !s.running
-	s.running = true
-	s.mu.Unlock()
-	if starting {
-		go s.worker()
-	}
+	s.showOwned(req, overlay.Owner, ok)
 }
 
 // enqueueLocked applies the coalescing rule: a push matching the TRAILING
