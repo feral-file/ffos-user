@@ -5292,3 +5292,42 @@ func TestRefreshExpiredPairingCode_AfterCodeReplacedClaimQR(t *testing.T) {
 
 	assert.Equal(t, 2, starter.StartCount(), "expiry of a code that replaced the claim QR must refresh")
 }
+
+// CloseActivePairing returns only after the mint display's hidden state has been
+// sent. A claim-QR paint issued right after the close must not be overtaken by
+// that hidden state, which would erase the claim QR.
+func TestCloseActivePairing_SendsHiddenBeforeReturning(t *testing.T) {
+	state.GetState().Relayer.TopicID = "topic-1"
+	t.Cleanup(state.ResetForTesting)
+	starter := &fakeBrokerStarter{channel: &fakeBrokerChannel{pairingCode: "PAIR-ORDER"}}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{
+			Enabled:            true,
+			BrokerBaseURL:      "https://broker.example",
+			IdleTTL:            time.Minute,
+			PlayerContractPath: writeValidPlayerContract(t),
+		},
+		starter,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	t.Cleanup(s.Stop)
+
+	_, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-ORDER", "")
+
+	closed, err := s.CloseActivePairing(context.Background())
+	require.NoError(t, err)
+	require.True(t, closed)
+
+	requests := cdpClient.displayRequestsSnapshot()
+	require.NotEmpty(t, requests)
+	last := requests[len(requests)-1]
+	assert.Equal(t, "hidden", last["state"], "the hidden restore must be sent before CloseActivePairing returns")
+}

@@ -493,6 +493,10 @@ type activePairing struct {
 	displayGen  uint64
 	cancel      context.CancelFunc
 	done        chan struct{}
+	// restored is closed once the mint display's hidden state is sent, when the
+	// worker's exit restored it (see waitForBrowserAndApproval). Nil when no
+	// restore was due. Written before done closes, so readers past done see it.
+	restored chan struct{}
 
 	// joined marks a site-initiated pairing: the device joined a channel the
 	// site created, so there is no code to show and the panel is never
@@ -1466,11 +1470,21 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	refreshAfterClose := false
 	defer func() {
 		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
+		// The restore stays asynchronous: Stop must not wait on a best-effort
+		// display send (see TestStop_DoesNotWaitForDisplayRestore). Its
+		// completion is published on active.restored BEFORE done closes, so
+		// CloseActivePairing can wait for the hidden state specifically — a
+		// claim-QR paint issued right after a close must not be overtaken by it.
+		if restoreDisplay {
+			restored := make(chan struct{})
+			active.restored = restored
+			go func() {
+				defer close(restored)
+				s.restoreDefaultDisplay(active.channelID, displayGeneration)
+			}()
+		}
 		if active.done != nil {
 			close(active.done)
-		}
-		if restoreDisplay {
-			go s.restoreDefaultDisplay(active.channelID, displayGeneration)
 		}
 		if terminalSent {
 			// Terminal broker messages must remain pollable after controld sends
@@ -2017,6 +2031,16 @@ func (s *service) CloseActivePairing(ctx context.Context) (bool, error) {
 				// the claim being wiped.
 				select {
 				case <-active.done:
+				case <-ctx.Done():
+					return true, ctx.Err()
+				}
+			}
+			// The hidden state of the mint display goes out after the worker
+			// exits. Wait for it too: a claim-QR paint right after this close
+			// must not be overtaken by a hidden state that erases it.
+			if active.restored != nil {
+				select {
+				case <-active.restored:
 				case <-ctx.Done():
 					return true, ctx.Err()
 				}
