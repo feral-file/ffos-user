@@ -81,6 +81,22 @@ type Monitor struct {
 	// chromium.go already treats a repeated "stuck=true" as a safe no-op
 	// whenever its own gates are already suppressing escalation.
 	lastReportedAt time.Time
+	// everConfirmed is set the first time Initialized() is observed true
+	// since this Monitor (i.e. this controld process) started, regardless
+	// of whether an episode was ever reported. Until then, tick() sends an
+	// explicit stuck=false EVEN WITH NOTHING to clear (ffos-user#356
+	// feralfile-bot review, second pass): feral-watchdog's own
+	// canForgetRebootBudget gate must never infer "CDP is healthy" from
+	// the mere ABSENCE of a stuck report plus elapsed local time —
+	// cdphealth's unhealthySince timer runs on controld's own clock,
+	// anchored to when IT first observes a disconnect, with no shared
+	// epoch or ordering guarantee against watchdog's own clock (two
+	// separate systemd processes); a watchdog-side timeout can expire
+	// before controld's own StuckThreshold has even elapsed, silently
+	// forgiving a reboot cap for a failure that simply hasn't been
+	// reported YET. This first-ever confirmation is the one positive
+	// signal watchdog can safely wait for instead.
+	everConfirmed bool
 }
 
 // New creates a Monitor. clock is injected (rather than using time directly)
@@ -114,12 +130,20 @@ func (m *Monitor) Start(ctx context.Context) {
 
 func (m *Monitor) tick() {
 	if m.cdp.Initialized() {
-		// Only retire the episode once the clear actually got out. A failed
-		// Send here (see emit's doc) must retry on the next tick rather than
-		// silently forgetting feral-watchdog still holds cdpStuck=true —
-		// leaving reported/unhealthySince untouched is exactly what makes
-		// that retry happen, since this whole branch runs again unchanged.
-		if m.reported {
+		// Send false when clearing a reported episode, OR (ffos-user#356,
+		// feralfile-bot's second pass) on the very first healthy
+		// observation this process has ever made, even if nothing was ever
+		// reported stuck — that first confirmation is the only positive
+		// signal feral-watchdog can safely treat as proof of health; see
+		// everConfirmed's doc for why silence-plus-timeout is not enough.
+		needsConfirm := m.reported || !m.everConfirmed
+		// Only retire the episode (and latch everConfirmed) once the send
+		// actually got out. A failed Send here (see emit's doc) must retry
+		// on the next tick rather than silently forgetting feral-watchdog
+		// still holds cdpStuck=true, or never establishing everConfirmed —
+		// leaving the fields below untouched is exactly what makes that
+		// retry happen, since this whole branch runs again unchanged.
+		if needsConfirm {
 			if !m.emit(false) {
 				return
 			}
@@ -127,6 +151,7 @@ func (m *Monitor) tick() {
 		m.unhealthySince = time.Time{}
 		m.reported = false
 		m.lastReportedAt = time.Time{}
+		m.everConfirmed = true
 		return
 	}
 

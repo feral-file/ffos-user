@@ -199,46 +199,198 @@ func TestChromiumMonitorHealthyCheckClearsPersistedCount(t *testing.T) {
 	}
 }
 
-// TestChromiumMonitorPlainRestartHoldsStaleCountUntilGraceElapses pins
-// ffos-user#356 review round (fix-review inner pass 1, F3): the
-// cdpStuck/recovered-aware forgiveness gate check() added also governs the
-// PLAIN case — a stale persisted count from a prior, unrelated boot, with
-// no fallback hold active and no cdpStuck report at all (hasEverConnected
-// is simply false right after this monitor's own construction, same as any
-// ordinary cold boot). It must behave identically to that case: hold the
-// stale count until cdphealth would have had a full CHROMIUM_STARTUP_GRACE
-// window to report a relapse, then clear it. This is the scenario reviewer
-// 2 found untested — TestChromiumMonitorHealthyCheckClearsPersistedCount
-// only exercises the `recovered` (parked) exemption, which bypasses this
-// gate entirely, not the general time-based path.
-func TestChromiumMonitorPlainRestartHoldsStaleCountUntilGraceElapses(t *testing.T) {
+// TestChromiumMonitorPlainRestartHoldsStaleCountUntilConfirmed pins
+// ffos-user#356's review history on this exact gate across two
+// feralfile-bot passes: a stale persisted count from a prior, unrelated
+// boot must survive a plain cold boot/restart (no fallback hold, no
+// cdpStuck report yet) until controld has ACTUALLY confirmed CDP health —
+// never merely because some local time elapsed with nothing reported.
+// Elapsed-time alone was the bot's second-pass finding: cdphealth's own
+// StuckThreshold timer is anchored to when CONTROLD first observes a
+// disconnect, a clock with no shared epoch against this process's own
+// monitorStart, so a local timeout can expire before controld's own report
+// would ever have arrived. The fix waits for an explicit received signal
+// (cdpReportReceived) instead — including cdphealth's own new
+// first-ever-healthy confirmation for a device that was never unhealthy at
+// all, which is exactly what this test simulates with SetCDPStuck(false).
+func TestChromiumMonitorPlainRestartHoldsStaleCountUntilConfirmed(t *testing.T) {
 	path := useFallbackStateFile(t, CHROMIUM_MAX_FALLBACK_REBOOTS)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
-	// No fallbackSince, no cdpStuck — a plain cold boot/restart, not a
-	// recovery from the fallback screen and not a cdpStuck escalation.
+	// No fallbackSince, no cdpStuck report yet — a plain cold boot/restart,
+	// not a recovery from the fallback screen and not a cdpStuck escalation.
 
 	if err := monitor.check(context.Background()); err != nil {
 		t.Fatalf("expected success against ok endpoint, got %v", err)
 	}
 	if n, err := loadChromiumFallbackReboots(path); err != nil || n != CHROMIUM_MAX_FALLBACK_REBOOTS {
-		t.Fatalf("expected the stale persisted count to survive the very first success this boot, got %d, %v", n, err)
+		t.Fatalf("expected the stale persisted count to survive a success with no report received yet, got %d, %v", n, err)
 	}
 
+	// Still no report: even many more successful ticks must not forgive
+	// the budget on elapsed time alone.
+	for i := 0; i < 20; i++ {
+		if err := monitor.check(context.Background()); err != nil {
+			t.Fatalf("tick %d: expected success against ok endpoint, got %v", i, err)
+		}
+	}
+	if n, err := loadChromiumFallbackReboots(path); err != nil || n != CHROMIUM_MAX_FALLBACK_REBOOTS {
+		t.Fatalf("expected the stale persisted count to still survive after many ticks with no report received, got %d, %v", n, err)
+	}
+
+	// controld's cdphealth now sends its first-ever confirmation (a device
+	// that was healthy the whole time, per cdphealth.go's everConfirmed).
+	monitor.SetCDPStuck(false)
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected the persisted file to be removed once an actual report confirmed health, stat err=%v", err)
+	}
+}
+
+// TestChromiumMonitorForgivesRebootCapAfterFallbackWindowWithNoReport pins
+// run-reviewer's finding on TestChromiumMonitorPlainRestartHoldsStaleCount-
+// UntilConfirmed's own premise: that test proves the cap survives as long as
+// no report has ever arrived, but never asks what happens if NO report EVER
+// arrives at all — a feral-controld predating the cdphealth package (the two
+// daemons are independently pacman-updatable), or one whose cdphealth
+// goroutine never starts. Without an escape hatch, cdpReportReceived would
+// stay false forever and the device would never regain the #254 self-heal
+// budget on an otherwise-healthy boot. CHROMIUM_CDP_REPORT_FALLBACK_WINDOW
+// bounds that: past the window, with zero signal ever received, the gate
+// falls back to the pre-existing unconditional-on-success behavior.
+func TestChromiumMonitorForgivesRebootCapAfterFallbackWindowWithNoReport(t *testing.T) {
+	path := useFallbackStateFile(t, CHROMIUM_MAX_FALLBACK_REBOOTS)
+	endpoint, closeServer := okLocalHTTPEndpoint(t)
+	defer closeServer()
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+	// No SetCDPStuck call at all, ever — simulating a feral-controld that
+	// never sends a single cdp_stuck signal.
+
+	// Still within the fallback window: the stale persisted count must
+	// survive, exactly like TestChromiumMonitorPlainRestartHoldsStaleCount-
+	// UntilConfirmed already pins for the ordinary case.
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+	if n, err := loadChromiumFallbackReboots(path); err != nil || n != CHROMIUM_MAX_FALLBACK_REBOOTS {
+		t.Fatalf("expected the stale persisted count to survive while still inside the fallback window, got %d, %v", n, err)
+	}
+
+	// Past the fallback window with zero report ever received: the gate
+	// must stop waiting and forgive the cap on the next success, the same
+	// way it always did before this PR.
 	monitor.mu.Lock()
-	monitor.monitorStart = time.Now().Add(-CHROMIUM_STARTUP_GRACE - time.Second)
+	monitor.watchdogStart = time.Now().Add(-CHROMIUM_CDP_REPORT_FALLBACK_WINDOW - time.Second)
 	monitor.mu.Unlock()
 	if err := monitor.check(context.Background()); err != nil {
 		t.Fatalf("expected success against ok endpoint, got %v", err)
 	}
-	if _, err := loadChromiumFallbackReboots(path); err != nil {
-		t.Fatalf("expected the stale count to be cleared once the grace window elapsed with no cdpStuck report, got load error %v", err)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected the persisted file to be removed once the fallback window elapsed with no report ever received, stat err=%v", err)
+	}
+}
+
+// TestChromiumMonitorHeadlessExitDoesNotForgiveRebootCapWithoutConfirmation
+// pins run-reviewer's own finding against the cdpReportReceived fix above
+// (ffos-user#356): cdpStuck is cleared from three purely local sites, not
+// only by an actual SetCDPStuck call — exiting a suppressed state in
+// check()'s success path (wasSuppressed) is one of them. A stale
+// cdpReportReceived=true plus that local clear used to satisfy
+// canForgetRebootBudget too, forgiving the persisted cap off a display blip
+// with no confirmation from controld at all. cdpConfirmedHealthy closes
+// that: it is written only inside SetCDPStuck, so a local clear alone must
+// not forgive the cap.
+func TestChromiumMonitorHeadlessExitDoesNotForgiveRebootCapWithoutConfirmation(t *testing.T) {
+	path := useFallbackStateFile(t, 1) // a prior boot already used its one fallback-hold reboot
+	monitor := NewChromiumMonitor(closedLocalHTTPEndpoint(t), zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
+
+	// controld reports a genuine, still-unresolved CDP-stuck episode.
+	monitor.SetCDPStuck(true)
+
+	// Headless and the endpoint is unreachable: checkHangState's FAILURE
+	// path latches m.headless, leaving cdpStuck untouched (still true,
+	// still unresolved).
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against a closed endpoint")
+	}
+
+	// Display reconnects and /json/version answers before controld has had
+	// any chance to re-affirm its report (cdphealth only re-affirms every
+	// StuckThreshold=90s). check()'s success path force-clears the stale
+	// cdpStuck latch via wasSuppressed — necessary for escalation, but not a
+	// confirmation from controld. The persisted reboot cap must survive.
+	endpoint, closeServer := okLocalHTTPEndpoint(t)
+	defer closeServer()
+	monitor.cdpEndpoint = endpoint
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+	if n, err := loadChromiumFallbackReboots(path); err != nil || n != 1 {
+		t.Fatalf("expected the persisted reboot cap to survive a headless-exit's local cdpStuck clear with no controld confirmation, got %d, %v", n, err)
+	}
+
+	// Only an actual SetCDPStuck(false) from controld may forgive it.
+	monitor.SetCDPStuck(false)
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("expected the persisted file to be removed once forgiven, stat err=%v", err)
+		t.Fatalf("expected the persisted file to be removed once an actual report confirmed health, stat err=%v", err)
+	}
+}
+
+// TestChromiumMonitorCDPStuckRestartDoesNotForgiveRebootCapWithoutConfirmation
+// pins run-reviewer's second reproduction against the same fix: the ordinary
+// cdpStuck-triggered kiosk restart itself (restartChromium) also clears
+// cdpStuck locally, not because controld confirmed anything. An immediate
+// /json/version recovery right after that restart must not forgive the
+// persisted cap either — the restart that just ran is exactly the kind of
+// restart the real ffos-user#356 incident survived.
+func TestChromiumMonitorCDPStuckRestartDoesNotForgiveRebootCapWithoutConfirmation(t *testing.T) {
+	path := useFallbackStateFile(t, 1) // a prior boot already used its one fallback-hold reboot
+	installCountingSystemctl(t)
+	endpoint, closeServer := okLocalHTTPEndpoint(t)
+	defer closeServer()
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+
+	// controld reports CDP stuck; /json/version keeps answering 200
+	// throughout (the real incident's exact blind spot), so escalateCDPStuck
+	// — not checkHangState — restarts the kiosk. restartChromium clears
+	// cdpStuck as part of acting on the escalation, not as a confirmation.
+	monitor.SetCDPStuck(true)
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+
+	// The very next tick, /json/version still answers fine (the kiosk
+	// restart "worked" at the process level) — but controld has not sent a
+	// fresh report. The persisted cap must survive this tick too.
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+	if n, err := loadChromiumFallbackReboots(path); err != nil || n != 1 {
+		t.Fatalf("expected the persisted reboot cap to survive the cdpStuck restart's own local cdpStuck clear with no controld confirmation, got %d, %v", n, err)
+	}
+
+	// Only an actual SetCDPStuck(false) from controld may forgive it.
+	monitor.SetCDPStuck(false)
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected the persisted file to be removed once an actual report confirmed health, stat err=%v", err)
 	}
 }
 

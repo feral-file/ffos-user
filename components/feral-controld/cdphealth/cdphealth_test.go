@@ -87,7 +87,12 @@ func TestMonitor_NoSignalWhileConnected(t *testing.T) {
 		m.tick()
 	}
 
-	assert.Empty(t, bus.stuckValues(), "a healthy CDP connection must never emit cdp_stuck")
+	// Exactly one confirmation on the very first tick (ffos-user#356,
+	// feralfile-bot's second-pass fix): a connection healthy from the
+	// start must still send one explicit "not stuck" so feral-watchdog has
+	// a positive signal to wait for rather than inferring health from
+	// silence plus a local timeout. No repeats after that.
+	assert.Equal(t, []bool{false}, bus.stuckValues(), "a healthy CDP connection must send exactly one first-ever confirmation, then stay silent")
 }
 
 // goUnhealthy flips cdp to disconnected and runs the tick that marks
@@ -281,4 +286,53 @@ func TestMonitor_UsesControldOwnIdentity(t *testing.T) {
 	assert.Equal(t, dbus.INTERFACE, bus.calls[0].Interface)
 	assert.Equal(t, dbus.PATH, bus.calls[0].Path)
 	assert.Equal(t, dbus.EVENT_CDP_STUCK, bus.calls[0].Member)
+}
+
+// TestMonitor_SendsFirstConfirmationExactlyOnce pins the exact mechanism
+// behind the feralfile-bot fix (ffos-user#356, second review pass):
+// feral-watchdog's canForgetRebootBudget gate must never infer health from
+// silence plus elapsed local time, because cdphealth's own StuckThreshold
+// timer is anchored to when THIS process first observes a disconnect — a
+// clock with no shared epoch or ordering guarantee against watchdog's own.
+// The fix is this one explicit, one-time confirmation on first-ever health:
+// watchdog waits for it instead of waiting out its own clock.
+func TestMonitor_SendsFirstConfirmationExactlyOnce(t *testing.T) {
+	m, cdp, bus, clock := newTestMonitor(t)
+
+	m.tick()
+	require.Equal(t, []bool{false}, bus.stuckValues(), "the first-ever healthy tick must send one explicit confirmation")
+
+	for i := 0; i < 5; i++ {
+		clock.advance(pollInterval)
+		m.tick()
+	}
+	assert.Equal(t, []bool{false}, bus.stuckValues(), "must not repeat the confirmation on later healthy ticks")
+
+	// A later disconnect-then-reconnect episode still gets its own
+	// true/false pair — everConfirmed only ever suppresses the FIRST
+	// confirmation's duplicate, not a genuine later transition.
+	goUnhealthy(m, cdp)
+	clock.advance(StuckThreshold)
+	m.tick()
+	cdp.initialized = true
+	m.tick()
+	assert.Equal(t, []bool{false, true, false}, bus.stuckValues())
+}
+
+// TestMonitor_FailedFirstConfirmationRetries pins the retry half: a failed
+// Send on the very first healthy tick (before everConfirmed is ever true)
+// must not be silently treated as delivered, or feral-watchdog never
+// receives the one positive signal it is now waiting for.
+func TestMonitor_FailedFirstConfirmationRetries(t *testing.T) {
+	m, _, bus, _ := newTestMonitor(t)
+	bus.err = assertError{}
+	bus.failNext = 1
+
+	m.tick()
+	require.Len(t, bus.calls, 1, "one failed attempt")
+	assert.False(t, m.everConfirmed, "a failed send must not latch everConfirmed, or the one positive signal watchdog needs is lost")
+
+	m.tick()
+	assert.Equal(t, []bool{false, false}, bus.stuckValues(), "expected one failed attempt then one successful retry")
+	assert.True(t, m.everConfirmed)
 }

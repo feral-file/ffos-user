@@ -35,7 +35,10 @@ import (
 // Call blocks until the attempt resolves. Attempts are rare (startup retries
 // only) and a session-bus dial fails fast when the socket is absent; the
 // underlying client already serializes whole Calls under its own mutex, so
-// this adds no new order of magnitude of contention.
+// this adds no new order of magnitude of contention. Send (below) holds the
+// mutex for its own full call too, for the same reason Stop does: see Send's
+// own doc for why, unlike Call, it cannot rely on the underlying client's
+// nil-connection guard to fail safely against a concurrent Stop.
 type Restartable struct {
 	mu      sync.Mutex
 	factory func() DBus
@@ -116,12 +119,24 @@ func (r *Restartable) Call(ctx context.Context, name string, path godbus.Path, i
 	return inner.Call(ctx, name, path, iface, method, args...)
 }
 
+// Send holds r.mu for the whole call, unlike Call/Export above: the
+// underlying godbus client's own Call has a nil-connection guard that lets
+// Restartable's live()-then-unlocked-call shape fail safely if Stop() races
+// it, but Send does not (ffos-user#356's review found this asymmetry) — an
+// unlocked Send racing a concurrent Stop can observe r.inner non-nil, then
+// have Stop() nil the underlying client's connection out from under it
+// before Send's own call reaches the bus, panicking on a nil conn instead of
+// returning the ordinary "not started" error every other path gets. Holding
+// the lock for the full call makes Send and Stop mutually exclusive, the
+// same way Start already is with every other method.
 func (r *Restartable) Send(payload godbus.DBusPayload) error {
-	inner := r.live()
-	if inner == nil {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.inner == nil {
 		return fmt.Errorf("dbus: client not started")
 	}
-	return inner.Send(payload)
+	return r.inner.Send(payload)
 }
 
 func (r *Restartable) OnBusSignal(handler godbus.BusSignalHandler) {
