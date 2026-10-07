@@ -948,12 +948,11 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 // the one setDeviceName already establishes, one-way.
 func (e *executor) paintClaimQR(url string) {
 	// The claim QR takes the screen, so a browser-pairing code still waiting on
-	// this device is closed rather than left to repaint over it later. This
-	// holds for the auto-claim paint too: a session can only exist on a claimed
-	// device, so a claim paint with one waiting means the claim was lost.
-	// Closed before deviceNameMu is taken —
-	// CloseActivePairing can wait out a worker, and a rename must not queue
-	// behind that wait.
+	// this device is closed rather than left to repaint over it later. A session
+	// needs only a ready relayer topic to start, not a claim, so this also closes
+	// a session waiting on a device the auto-claim loop is about to claim.
+	// Closed before deviceNameMu is taken — CloseActivePairing can wait out a
+	// worker, and a rename must not queue behind that wait.
 	e.closeMintPairingForClaimQR()
 	e.deviceNameMu.Lock()
 	defer e.deviceNameMu.Unlock()

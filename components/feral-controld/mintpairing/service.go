@@ -126,6 +126,11 @@ type Service interface {
 	// can reach it afterwards. Best effort by contract — the error says what
 	// could not be revoked, and the caller decides whether that stops it.
 	RevokeTopicSessions(ctx context.Context, topicID string) (int, error)
+	// SupersedeDisplayRestores makes every restore already scheduled stale, so
+	// it does not send its hidden state. Used when a claim QR has replaced the
+	// mint display: a restore left over from the replaced session would
+	// otherwise erase the claim QR.
+	SupersedeDisplayRestores()
 	// WaitForInFlightCreates blocks until every session creation already sent
 	// to the relayer has finished its post-create guard — including the revoke
 	// that guard performs when the claim moved under it — or until ctx
@@ -2050,6 +2055,16 @@ func (s *service) CloseActivePairing(ctx context.Context) (bool, error) {
 			}
 		}
 	}
+}
+
+// SupersedeDisplayRestores bumps the display generation, so restoreDefaultDisplay
+// calls scheduled for an earlier generation skip their hidden send. The check
+// in restoreDefaultDisplay compares generations, and any display paint also
+// moves the generation, so a superseded restore is one that is still pending.
+func (s *service) SupersedeDisplayRestores() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.displayGeneration++
 }
 
 // WaitForInFlightCreates blocks until nothing is mid-creation. See Service.

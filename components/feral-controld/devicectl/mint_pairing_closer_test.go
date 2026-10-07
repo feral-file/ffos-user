@@ -9,16 +9,20 @@ import (
 	"go.uber.org/zap"
 )
 
-// recordingMintCloser counts close requests and remembers the closer's error.
+// recordingMintCloser counts close and supersede requests and remembers the
+// closer's error.
 type recordingMintCloser struct {
-	calls int
-	err   error
+	calls      int
+	supersedes int
+	err        error
 }
 
 func (c *recordingMintCloser) CloseActivePairing(context.Context) (bool, error) {
 	c.calls++
 	return true, c.err
 }
+
+func (c *recordingMintCloser) SupersedeDisplayRestores() { c.supersedes++ }
 
 // A browser-pairing code on screen is closed when the claim QR is about to take
 // the screen. This is the only place the close happens for a claim paint, so
@@ -45,5 +49,14 @@ func TestCloseMintPairingForClaimQR(t *testing.T) {
 
 		assert.NotPanics(t, e.closeMintPairingForClaimQR)
 		assert.Equal(t, 1, closer.calls)
+	})
+
+	t.Run("every close supersedes pending restores, including a failed wait", func(t *testing.T) {
+		closer := &recordingMintCloser{err: context.DeadlineExceeded}
+		e := &executor{logger: zap.NewNop(), mintPairingCloser: closer}
+
+		e.closeMintPairingForClaimQR()
+
+		assert.Equal(t, 1, closer.supersedes, "a restore left pending by a timed-out close must not paint over the claim QR")
 	})
 }

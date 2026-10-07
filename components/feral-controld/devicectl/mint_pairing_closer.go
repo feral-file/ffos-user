@@ -10,15 +10,18 @@ import (
 // mintPairingCloseTimeout bounds how long painting the claim QR waits for an
 // in-flight browser-pairing worker to unwind. The paint still happens if the
 // wait runs out: the worker was already canceled, and the claim QR is the
-// owner's newer intent either way.
+// owner's newer intent either way. A hidden restore that is still pending when
+// the wait gives up is superseded, so it cannot erase the claim QR later.
 const mintPairingCloseTimeout = 10 * time.Second
 
 // MintPairingCloser is the mint-pairing surface the claim QR needs: end the
-// pairing session in progress so its code cannot repaint over the claim QR.
-// Owned here, by the consumer, so devicectl never imports mintpairing (the same
-// seam shape as BrowserSessionCleanup).
+// pairing session in progress so its code cannot repaint over the claim QR, and
+// supersede any restore still pending from it. Owned here, by the consumer, so
+// devicectl never imports mintpairing (the same seam shape as
+// BrowserSessionCleanup).
 type MintPairingCloser interface {
 	CloseActivePairing(ctx context.Context) (closed bool, err error)
+	SupersedeDisplayRestores()
 }
 
 // SetMintPairingCloser injects the closer. Wired once at composition time,
@@ -51,6 +54,9 @@ func (e *executor) closeMintPairingForClaimQR() {
 	ctx, cancel := context.WithTimeout(context.Background(), mintPairingCloseTimeout)
 	defer cancel()
 	closed, err := e.mintPairingCloser.CloseActivePairing(ctx)
+	// Superseded whether or not the wait finished: a restore still pending now
+	// belongs to a session the claim QR has already replaced.
+	e.mintPairingCloser.SupersedeDisplayRestores()
 	if err != nil {
 		e.logger.Warn("Could not close mint pairing before painting claim QR", zap.Error(err))
 		return

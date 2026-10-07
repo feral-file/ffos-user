@@ -5374,3 +5374,29 @@ func TestCloseActivePairing_WaitsForRestoreAfterWorkerExit(t *testing.T) {
 	last := requests[len(requests)-1]
 	assert.Equal(t, "hidden", last["state"], "the close must wait for the restore of an exited worker")
 }
+
+// A restore scheduled before SupersedeDisplayRestores must not send its hidden
+// state: the claim QR has replaced the session it belonged to.
+func TestRestoreDefaultDisplay_SkipsAfterSupersede(t *testing.T) {
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{Enabled: true, IdleTTL: time.Minute},
+		nil,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	s.mu.Lock()
+	scheduled := s.displayGeneration
+	s.mu.Unlock()
+
+	s.SupersedeDisplayRestores()
+	s.restoreDefaultDisplay("ch_superseded", scheduled)
+
+	for _, request := range cdpClient.displayRequestsSnapshot() {
+		assert.NotEqual(t, "hidden", request["state"], "a superseded restore must not hide the claim QR")
+	}
+}

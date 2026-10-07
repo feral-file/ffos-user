@@ -449,6 +449,8 @@ func (f *fakeMintPairingService) DisplayActive() bool { return false }
 
 func (f *fakeMintPairingService) SetClaimScreen(mintpairing.ClaimScreen) {}
 
+func (f *fakeMintPairingService) SupersedeDisplayRestores() {}
+
 func (f *fakeMintPairingService) SetSession(mintpairing.NavigationSession) {}
 
 func (f *fakeMintPairingService) RevokeTopicSessions(context.Context, string) (int, error) {
