@@ -1222,24 +1222,7 @@ func initializeApp(
 	// read DisplayActive() already uses.
 	poller.SetMintPairingOverlaySource(func() *status.MintPairingOverlay {
 		s := mintPairing.OverlayStatus()
-		if !s.Showing {
-			return nil
-		}
-		out := &status.MintPairingOverlay{
-			State:     s.State,
-			ChannelID: s.ChannelID,
-		}
-		// PairingCode/ExpiresAt are only ever set together by
-		// mintpairing.OverlayStatus (State == "pairing_code"); mirror that
-		// pairing here rather than re-deriving it from State.
-		if s.PairingCode != "" {
-			out.PairingCode = s.PairingCode
-			if !s.ExpiresAt.IsZero() {
-				expiresAt := s.ExpiresAt
-				out.ExpiresAt = &expiresAt
-			}
-		}
-		return out
+		return status.BuildMintPairingOverlay(s.Showing, s.State, s.ChannelID, s.PairingCode, s.ExpiresAt)
 	})
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {

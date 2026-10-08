@@ -1062,6 +1062,44 @@ func TestOverlayStatus_OmitsPairingCodeOutsidePairingCodeState(t *testing.T) {
 	assert.True(t, got.ExpiresAt.IsZero())
 }
 
+// TestOverlayStatus_OmitsPairingCodeInCreatingTokenState: creating_token is
+// the third named wire state (status.go's MintPairingOverlay.State doc), an
+// approval decision past request_received — same no-code-left-to-report rule
+// as request_received, and (round-4 pass-3 review) was the one of the three
+// states no test here exercised before this case.
+func TestOverlayStatus_OmitsPairingCodeInCreatingTokenState(t *testing.T) {
+	active := &activePairing{
+		channelID:   "ch_abc123",
+		pairingCode: "PAIR-123",
+		phase:       activePairingPhasePairingCode,
+		cancel:      func() {},
+	}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{},
+		nil,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	active.listener = &sessionListener{s: s, active: active}
+	s.active = active
+
+	require.NoError(t, s.showMint(context.Background(), active, overlay.Overlay{Kind: KindCreatingToken, Payload: "a browser"}, overlay.Owner, func() bool {
+		return s.isActive(active)
+	}))
+	active.phase = activePairingPhasePendingApproval
+
+	got := s.OverlayStatus()
+	assert.True(t, got.Showing)
+	assert.Equal(t, "creating_token", got.State)
+	assert.Equal(t, "ch_abc123", got.ChannelID, "the channel identity is still reported")
+	assert.Empty(t, got.PairingCode, "no code is on screen once minting has started")
+	assert.True(t, got.ExpiresAt.IsZero())
+}
+
 func TestHandleClosePairingSession_ReturnsNotStartedWithoutActivePairing(t *testing.T) {
 	s := newService(
 		Options{Enabled: true},

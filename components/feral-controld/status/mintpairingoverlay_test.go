@@ -45,6 +45,37 @@ func TestPollPlayerStatus_AttachesMintPairingOverlay(t *testing.T) {
 	}
 }
 
+// TestPollPlayerStatus_AttachesMintPairingOverlay_CreatingToken: the third
+// named wire state (status.go's MintPairingOverlay.State doc) carries only
+// State/ChannelID, same as request_received — no code is on screen once
+// minting has started. This layer is state-agnostic (it forwards whatever
+// the source returns), but round-4 pass-3 review found creating_token
+// untested on every surface; this pins it on this one too.
+func TestPollPlayerStatus_AttachesMintPairingOverlay_CreatingToken(t *testing.T) {
+	ws := &fakeWS{}
+	p := signatureTestPoller(map[string]any{
+		"ok":          true,
+		"castCommand": "displayPlaylist",
+		"index":       0,
+	}, ws)
+	p.SetMintPairingOverlaySource(func() *MintPairingOverlay {
+		return &MintPairingOverlay{State: "creating_token", ChannelID: "ch_abc123"}
+	})
+
+	p.pollPlayerStatus(context.Background())
+
+	got := sentPlayerStatus(t, ws)
+	if got.MintPairing == nil {
+		t.Fatal("expected mintPairing to be attached")
+	}
+	if got.MintPairing.State != "creating_token" || got.MintPairing.ChannelID != "ch_abc123" {
+		t.Fatalf("unexpected mintPairing: %+v", got.MintPairing)
+	}
+	if got.MintPairing.PairingCode != "" || got.MintPairing.ExpiresAt != nil {
+		t.Fatalf("expected no code left to report, got %+v", got.MintPairing)
+	}
+}
+
 // TestPollPlayerStatus_OmitsMintPairingWhenNothingShowing: a wired source
 // that reports nothing showing (nil) must omit the field, the same as an
 // unwired one — this is how the real seam in main.go reports "not showing".

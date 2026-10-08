@@ -119,6 +119,32 @@ type MintPairingOverlay struct {
 	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
 }
 
+// BuildMintPairingOverlay converts a mintpairing.Service.OverlayStatus()
+// snapshot into this field's wire shape, or nil when nothing is showing
+// (issue #381). Takes the snapshot's fields rather than the mintpairing type
+// itself so this package does not gain a dependency on mintpairing: shared by
+// the poller's pushed player_status (SetMintPairingOverlaySource's wiring)
+// and the commandrouter's direct checkStatus reply annotation, so both
+// surfaces derive the wire shape from one conversion and can never disagree
+// on what "showing" maps to.
+func BuildMintPairingOverlay(showing bool, state, channelID, pairingCode string, expiresAt time.Time) *MintPairingOverlay {
+	if !showing {
+		return nil
+	}
+	out := &MintPairingOverlay{State: state, ChannelID: channelID}
+	// PairingCode/ExpiresAt are only ever set together by
+	// mintpairing.OverlayStatus (State == "pairing_code"); mirror that
+	// pairing here rather than re-deriving it from State.
+	if pairingCode != "" {
+		out.PairingCode = pairingCode
+		if !expiresAt.IsZero() {
+			e := expiresAt
+			out.ExpiresAt = &e
+		}
+	}
+	return out
+}
+
 //go:generate mockgen -source=status.go -destination=../mocks/status.go -package=mocks -mock_names=Poller=MockStatusPoller
 
 type Poller interface {
