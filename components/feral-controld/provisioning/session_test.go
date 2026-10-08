@@ -341,7 +341,7 @@ func TestUserRequestedSessionBounds(t *testing.T) {
 // TestJoinFailureKeepsBoundedSession pins the one-typo rule: a join failure
 // inside a user-requested session re-raises under the SAME bounded policy —
 // never the unbounded/recheck cadence — and preserves the join status for the
-// phone's /status poll.
+// re-raised portal's failure banner.
 func TestJoinFailureKeepsBoundedSession(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
@@ -354,7 +354,7 @@ func TestJoinFailureKeepsBoundedSession(t *testing.T) {
 	h.m.applyJoin(ctx, "HomeNet", "typo", false)
 	require.Equal(t, StateAPActive, h.m.State(), "the failure re-raises")
 	assert.Equal(t, "auth-failure", h.m.Status().Reason,
-		"the re-raise must preserve the join outcome the phone polls for")
+		"the re-raise must preserve the join outcome shown by the portal")
 
 	// The retained policy's fresh clock: the session still expires on the
 	// user-requested bound (bounded, not unbounded).
@@ -664,7 +664,7 @@ func TestRecheckBlinkReRaisesWhenNetworkStillGone(t *testing.T) {
 	assert.Equal(t, scansBefore+1, h.rec.count("wifi.RefreshScanCache"),
 		"one radio pass, not two")
 	assert.Equal(t, portal.JoinIdle, h.m.Status().State,
-		"the re-raise must not wipe a join status a phone may poll (no resetJoinStatus)")
+		"the re-raise must not wipe the retained join status (no resetJoinStatus)")
 }
 
 // TestRecheckBlinkListingErrorAborts pins the fail-bias: a profile-listing

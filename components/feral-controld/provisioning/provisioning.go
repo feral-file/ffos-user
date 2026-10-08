@@ -546,6 +546,13 @@ type Machine struct {
 	apUp       bool
 	apInfo     softap.Info
 	portalSrv  PortalServer
+
+	// pendingJoins masks retained outcomes until all admitted joins finish.
+	pendingJoins int
+
+	// joinRunCtx is guarded by mu; canceled runs reject admissions until Start.
+	joinRunCtx context.Context
+
 	// apClientSeen latches the first portal request of the current raise (set
 	// by observePortalTraffic, cleared wherever apInfo is), so the
 	// ReasonAPClientAttached repaint fires once per raise: a phone that keeps
@@ -1017,12 +1024,36 @@ func (m *Machine) Start(ctx context.Context) {
 		}
 	}
 	runCtx, cancel := context.WithCancel(ctx)
+	m.mu.Lock()
+	m.joinRunCtx = runCtx
+	m.mu.Unlock()
 	m.cancel = cancel
 	m.done = make(chan struct{})
 	go func() {
 		defer close(m.done)
+		defer m.clearStoppedEvents()
+		defer cancel() // close admissions before draining the ended run
 		m.sup.run(runCtx, "provisioning-loop", m.loop)
 	}()
+}
+
+// clearStoppedEvents runs only after the supervisor has stopped, including a
+// cancellation during panic recovery. Queued events belong to the ended run;
+// discard them before a later Start rather than retaining a phantom join.
+// A recovered panic with a live context keeps its queue and admissions intact.
+func (m *Machine) clearStoppedEvents() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// RequestJoin checks this canceled context under the same lock. No new
+	// admission can be mistaken for an event belonging to the ended run.
+	for {
+		select {
+		case <-m.events:
+		default:
+			m.pendingJoins = 0
+			return
+		}
+	}
 }
 
 // Stop cancels the loop, waits for it to exit, and ensures the AP/portal are
@@ -1163,7 +1194,14 @@ func (m *Machine) loop(ctx context.Context) {
 			case evConnectivity:
 				m.onConnectivity(ctx, ev.online, false)
 			case evJoin:
-				m.applyJoin(ctx, ev.ssid, ev.psk, ev.hidden)
+				func() {
+					defer func() {
+						m.mu.Lock()
+						m.pendingJoins--
+						m.mu.Unlock()
+					}()
+					m.applyJoin(ctx, ev.ssid, ev.psk, ev.hidden)
+				}()
 			case evRescan:
 				m.applyRescan(ctx)
 			case evClaim:
@@ -1193,7 +1231,7 @@ func (m *Machine) loop(ctx context.Context) {
 // RequestJoin is the portal's JoinFunc: it validates the submission and hands it
 // to the loop, returning immediately. The AP-bounce + join run asynchronously on
 // the loop goroutine because taking the AP down drops the phone that submitted
-// the form; the phone re-associates and polls /status (Status) for the outcome.
+// the form.
 func (m *Machine) RequestJoin(req portal.JoinRequest) error {
 	ssid := req.SSID
 	if req.Manual {
@@ -1211,8 +1249,16 @@ func (m *Machine) RequestJoin(req portal.JoinRequest) error {
 	if strings.TrimSpace(ssid) == "" {
 		return errors.New("please choose a Wi-Fi network")
 	}
+	// Publish queue admission under the same lock as Status: a result-page
+	// poll must not mistake the previous failure for this credential retry.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.joinRunCtx != nil && m.joinRunCtx.Err() != nil {
+		return errors.New("Wi-Fi setup is stopped; please try again after restart")
+	}
 	select {
 	case m.events <- event{kind: evJoin, ssid: ssid, psk: req.Password, hidden: req.Hidden}:
+		m.pendingJoins++
 		return nil
 	default:
 		m.logger.Warn("provisioning: join queue full, dropping submission", zap.String("ssid", ssid))
@@ -1240,6 +1286,9 @@ func (m *Machine) RequestRescan() error {
 func (m *Machine) Status() portal.Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.pendingJoins > 0 {
+		return portal.Status{State: portal.JoinInProgress}
+	}
 	return m.status
 }
 
@@ -2086,7 +2135,7 @@ func (m *Machine) applyJoin(ctx context.Context, ssid, psk string, hidden bool) 
 	// still holding the radio violates the single-radio sequencing, and a
 	// success would strand the leftover profile with nothing retrying its
 	// deletion. Re-raising via StateAPActive self-heals instead — softap.Up
-	// replaces the profile — and the phone polls /status for this outcome.
+	// replaces the profile.
 	if !m.ensureAPDown(ctx) {
 		outcome := portal.Status{
 			State:   portal.JoinFailed,
@@ -3165,11 +3214,10 @@ func (m *Machine) probeWired(ctx context.Context) (bool, error) {
 // (unprovisioned / sustained-offline). Without it the portal would greet a
 // user mid-setup with the success banner of a join that happened weeks ago.
 // The join-failure re-raise in applyJoin deliberately keeps its status: the
-// phone re-associates and polls /status for exactly that outcome. That is why
-// the reset is edge-gated on state: the unprovisioned-offline branch is
+// reset is edge-gated on state: the unprovisioned-offline branch is
 // level-triggered, and a redundant offline event while the AP is already up
 // (e.g. wlan churn during the post-failure re-raise) must not wipe the
-// outcome the phone is about to poll for.
+// retained outcome.
 func (m *Machine) resetJoinStatus() {
 	m.mu.Lock()
 	if m.state != StateAPActive {
