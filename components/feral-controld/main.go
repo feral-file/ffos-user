@@ -1227,15 +1227,9 @@ func initializeApp(
 			return string(st), ok
 		})
 	}
-	// player_status carries the browser-pairing mint overlay state (issue
-	// #381), unconditionally — unlike SignatureStatus above, it is not gated
-	// behind the signature-verification feature. Sourced from the mint
-	// pairing service's own OverlayStatus(), the same overlay.Controller
-	// read DisplayActive() already uses.
-	poller.SetMintPairingOverlaySource(func() *status.MintPairingOverlay {
-		s := mintPairing.OverlayStatus()
-		return status.BuildMintPairingOverlay(s.Showing, s.State, s.ChannelID, s.PairingCode, s.ExpiresAt)
-	})
+	// player_status carries whatever overlay is currently on screen (issue
+	// #381) — wired further below, once setupNarrator exists too (see
+	// buildOverlaySource).
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -1353,6 +1347,28 @@ func initializeApp(
 	}))
 	setupNarrator.SetController(overlayCtrl)
 	mintPairing.SetController(overlayCtrl)
+	// player_status/checkStatus carry whatever overlay is currently on
+	// screen (issue #381), from either of its two owners. The precedence and
+	// nil-fallback live in status.CombineOverlaySources, not in a closure
+	// here, so they are unit-tested rather than reachable only through the
+	// whole of initializeApp (round 2 review, F2). This root supplies only
+	// the two probes. Wired here, not at either service's own construction
+	// point above, because it needs both mintPairing and setupNarrator, and
+	// setupNarrator does not exist until this point in main().
+	//
+	// One function, reused for both status surfaces
+	// (status.Poller.SetOverlaySource for the poller's push loop,
+	// commandrouter.SetOverlaySource for the direct checkStatus reply that
+	// bypasses the poller entirely), so the two can never disagree.
+	buildOverlaySource := status.CombineOverlaySources(
+		func() *status.Overlay {
+			s := mintPairing.OverlayStatus()
+			return status.BuildMintOverlay(s.Showing, s.State, s.ChannelID, s.PairingCode, s.ExpiresAt)
+		},
+		setupNarrator.CurrentNarrationState,
+	)
+	poller.SetOverlaySource(buildOverlaySource)
+	commandrouter.SetOverlaySource(rawCmdHandler, buildOverlaySource, logger)
 	// One narration surface for the whole process: the executor's controld-owned
 	// claim / factory-reset / OTA-failure narration shares this exact instance with
 	// the provisioning domain below, so the single on-connect Resync() wired into

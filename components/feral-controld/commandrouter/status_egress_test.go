@@ -20,6 +20,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -105,32 +106,34 @@ func TestCheckStatusShowingKeyEgress(t *testing.T) {
 	}
 }
 
-// TestCheckStatusMintPairingEgress is the regression coverage #388's round-3
-// review named: a direct checkStatus reply (LAN /api/cast or relayer) must
-// carry mintPairing from the wired mint pairing service, not only the
-// poller's pushed player_status notifications (pollPlayerStatus never runs
-// for this path — see sendCDPRequest). Also proves the controld-owned
-// drop-then-set contract on BOTH reply shapes a player can send (round-4
-// review: the bare and {messageID, message:{...}}-enveloped shapes each
-// strip any player-supplied mintPairing, including — the enveloped shape's
-// own failure mode — a spoofed key at the top level alongside a real
-// "message" sub-map, same as TestCheckStatusShowingKeyEgress covers for
-// showingKey).
-func TestCheckStatusMintPairingEgress(t *testing.T) {
+// TestCheckStatusOverlayEgress is the regression coverage #388's round-3
+// review originally named for mintPairing specifically, generalized when the
+// field itself was generalized to `overlay` (issue #381, owner direction):
+// a direct checkStatus reply (LAN /api/cast or relayer) must carry the
+// overlay from the wired source, not only the poller's pushed player_status
+// notifications (pollPlayerStatus never runs for this path — see
+// sendCDPRequest). Also proves the controld-owned drop-then-set contract on
+// BOTH reply shapes a player can send (round-4 review: the bare and
+// {messageID, message:{...}}-enveloped shapes each strip any
+// player-supplied overlay, including — the enveloped shape's own failure
+// mode — a spoofed key at the top level alongside a real "message" sub-map,
+// same as TestCheckStatusShowingKeyEgress covers for showingKey).
+func TestCheckStatusOverlayEgress(t *testing.T) {
 	expiresAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for _, transport := range []string{"hub", "relayer"} {
 		for _, wrapped := range []bool{false, true} {
 			for _, tc := range []struct {
 				name     string
-				overlay  mintpairing.OverlayStatus
+				overlay  mintpairing.OverlayStatus // consumed via status.BuildMintOverlay, same as main.go's wiring
 				wantKey  bool
 				wantJSON map[string]any
 			}{
 				{
-					name:    "pairing code showing",
+					name:    "mint pairing code showing",
 					overlay: mintpairing.OverlayStatus{Showing: true, State: "pairing_code", ChannelID: "chan-1", PairingCode: "123456", ExpiresAt: expiresAt},
 					wantKey: true,
 					wantJSON: map[string]any{
+						"owner":       "mint",
 						"state":       "pairing_code",
 						"channelId":   "chan-1",
 						"pairingCode": "123456",
@@ -138,25 +141,27 @@ func TestCheckStatusMintPairingEgress(t *testing.T) {
 					},
 				},
 				{
-					name:    "request received, no code left to report",
+					name:    "mint request received, no code left to report",
 					overlay: mintpairing.OverlayStatus{Showing: true, State: "request_received", ChannelID: "chan-1"},
 					wantKey: true,
 					wantJSON: map[string]any{
+						"owner":     "mint",
 						"state":     "request_received",
 						"channelId": "chan-1",
 					},
 				},
 				{
-					name:    "creating token, no code left to report",
+					name:    "mint creating token, no code left to report",
 					overlay: mintpairing.OverlayStatus{Showing: true, State: "creating_token", ChannelID: "chan-1"},
 					wantKey: true,
 					wantJSON: map[string]any{
+						"owner":     "mint",
 						"state":     "creating_token",
 						"channelId": "chan-1",
 					},
 				},
 				{
-					name:    "hidden",
+					name:    "nothing showing",
 					overlay: mintpairing.OverlayStatus{},
 					wantKey: false,
 				},
@@ -164,22 +169,25 @@ func TestCheckStatusMintPairingEgress(t *testing.T) {
 				t.Run(transport+"/"+tc.name+map[bool]string{true: "/wrapped", false: "/bare"}[wrapped], func(t *testing.T) {
 					ctrl := gomock.NewController(t)
 					ctx := context.Background()
-					// A player (or spoofed) reply claiming mintPairing must be
+					// A player (or spoofed) reply claiming overlay must be
 					// dropped, never trusted — this field is controld-owned —
 					// at BOTH locations an enveloped reply can carry it, which
 					// is what distinguishes this from a single-location strip.
-					spoofed := map[string]any{"state": "pairing_code"}
-					reply := map[string]any{"ok": true, "mintPairing": spoofed}
+					spoofed := map[string]any{"owner": "mint", "state": "pairing_code"}
+					reply := map[string]any{"ok": true, "overlay": spoofed}
 					if wrapped {
-						reply = map[string]any{"messageID": "player-request", "message": reply, "mintPairing": spoofed}
+						reply = map[string]any{"messageID": "player-request", "message": reply, "overlay": spoofed}
 					}
 					player := mocks.NewMockCDP(ctrl)
 					player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(reply, nil)
 					executor := newRoutableExecutor(ctrl)
-					mintSvc := &fakeMintPairingService{overlayStatus: tc.overlay}
 					codec := wrapper.NewJSON()
 					logger := zap.NewNop()
-					router := commandrouter.New(executor, player, nil, nil, mintSvc, nil, nil, nil, codec, logger)
+					router := commandrouter.New(executor, player, nil, nil, nil, nil, nil, nil, codec, logger)
+					overlay := tc.overlay
+					commandrouter.SetOverlaySource(router, func() *status.Overlay {
+						return status.BuildMintOverlay(overlay.Showing, overlay.State, overlay.ChannelID, overlay.PairingCode, overlay.ExpiresAt)
+					}, logger)
 					var encoded []byte
 					if transport == "hub" {
 						mux := http.NewServeMux()
@@ -210,14 +218,97 @@ func TestCheckStatusMintPairingEgress(t *testing.T) {
 					var decoded map[string]any
 					require.NoError(t, json.Unmarshal(encoded, &decoded))
 					if wrapped {
-						require.NotContains(t, decoded, "mintPairing", "spoofed top-level key must be dropped on an enveloped reply")
+						require.NotContains(t, decoded, "overlay", "spoofed top-level key must be dropped on an enveloped reply")
 						decoded = decoded["message"].(map[string]any)
 					}
 					if !tc.wantKey {
-						require.NotContains(t, decoded, "mintPairing")
+						require.NotContains(t, decoded, "overlay")
 						return
 					}
-					require.Equal(t, tc.wantJSON, decoded["mintPairing"])
+					require.Equal(t, tc.wantJSON, decoded["overlay"])
+				})
+			}
+		}
+	}
+}
+
+// TestCheckStatusOverlayEgress_SetupOwner: the setup/claim-QR sibling path —
+// a plain *status.Overlay{Owner: "setup", ...} source, no mint-pairing
+// conversion involved, proving the handler's annotation is agnostic to
+// which owner built the value.
+func TestCheckStatusOverlayEgress_SetupOwner(t *testing.T) {
+	for _, transport := range []string{"hub", "relayer"} {
+		for _, wrapped := range []bool{false, true} {
+			for _, tc := range []struct {
+				name    string
+				showing bool
+				wired   bool
+				wantKey bool
+			}{
+				{name: "claim QR showing", showing: true, wired: true, wantKey: true},
+				{name: "claim QR not showing", showing: false, wired: true, wantKey: false},
+				{name: "seam unwired", showing: true, wired: false, wantKey: false},
+			} {
+				t.Run(transport+"/"+tc.name+map[bool]string{true: "/wrapped", false: "/bare"}[wrapped], func(t *testing.T) {
+					ctrl := gomock.NewController(t)
+					ctx := context.Background()
+					reply := map[string]any{"ok": true, "overlay": map[string]any{"owner": "setup", "state": "claim_qr"}}
+					if wrapped {
+						reply = map[string]any{"messageID": "player-request", "message": reply, "overlay": map[string]any{"owner": "setup", "state": "claim_qr"}}
+					}
+					player := mocks.NewMockCDP(ctrl)
+					player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(reply, nil)
+					executor := newRoutableExecutor(ctrl)
+					codec := wrapper.NewJSON()
+					logger := zap.NewNop()
+					router := commandrouter.New(executor, player, nil, nil, nil, nil, nil, nil, codec, logger)
+					if tc.wired {
+						showing := tc.showing
+						commandrouter.SetOverlaySource(router, func() *status.Overlay {
+							if !showing {
+								return nil
+							}
+							return &status.Overlay{Owner: status.OverlayOwnerSetup, State: "claim_qr"}
+						}, logger)
+					}
+					var encoded []byte
+					if transport == "hub" {
+						mux := http.NewServeMux()
+						server := wrapper.NewHTTPServer(&http.Server{Handler: mux, ReadHeaderTimeout: time.Second})
+						hub.New(ctx, mocks.NewMockWS(ctrl), router, nil, nil, server, codec, logger)
+						response := httptest.NewRecorder()
+						mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/cast", strings.NewReader(`{"command":"checkStatus","request":{}}`)))
+						require.Equal(t, http.StatusOK, response.Code)
+						encoded = response.Body.Bytes()
+					} else {
+						remote := mocks.NewMockRelayer(ctrl)
+						bus := mocks.NewMockDBus(ctrl)
+						bus.EXPECT().OnBusSignal(gomock.Any())
+						var receive relayer.Handler
+						remote.EXPECT().OnRelayerMessage(gomock.Any()).Do(func(h relayer.Handler) { receive = h })
+						remote.EXPECT().Send(ctx, gomock.Any()).DoAndReturn(func(_ context.Context, response interface{}) error {
+							payload := response.(relayer.Response)
+							require.Equal(t, "controller-request", payload.MessageID)
+							var err error
+							encoded, err = json.Marshal(payload.Message)
+							return err
+						})
+						med := mediator.New(ctx, remote, bus, player, router, executor, nil, codec, logger)
+						med.Start()
+						command := "checkStatus"
+						require.NoError(t, receive(ctx, relayer.Payload{MessageID: "controller-request", Message: relayer.Message{Command: &command}}))
+					}
+					var decoded map[string]any
+					require.NoError(t, json.Unmarshal(encoded, &decoded))
+					if wrapped {
+						require.NotContains(t, decoded, "overlay", "spoofed top-level key must be dropped on an enveloped reply")
+						decoded = decoded["message"].(map[string]any)
+					}
+					if !tc.wantKey {
+						require.NotContains(t, decoded, "overlay")
+						return
+					}
+					require.Equal(t, map[string]any{"owner": "setup", "state": "claim_qr"}, decoded["overlay"])
 				})
 			}
 		}

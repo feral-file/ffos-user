@@ -119,12 +119,17 @@ type Service interface {
 	// mid-pairing" case this probe exists to prevent.
 	DisplayActive() bool
 	// OverlayStatus is DisplayActive's richer sibling (issue #381): the
-	// probe-free snapshot status.PlayerStatus's MintPairing field (the
+	// probe-free snapshot status.PlayerStatus's Overlay field (the
 	// checkStatus/player_status reply) is built from, via
-	// annotateMintPairingOverlay in the status package. Sourced the same way
-	// as DisplayActive — the shared overlay controller's Current(), not this
-	// service's own session bookkeeping — so it can never disagree with
-	// DisplayActive() or report an overlay that was already overridden.
+	// status.BuildMintOverlay and annotateOverlay in the status package.
+	// That field reports whichever overlay is on the screen, from whichever
+	// owner painted it, so this service is only ONE of its two sources: when
+	// mint pairing has nothing showing, the composition root falls back to
+	// setupui's own CurrentNarrationState() (see status.CombineOverlaySources).
+	// Sourced the same way as DisplayActive — the shared overlay controller's
+	// Current(), not this service's own session bookkeeping — so it can never
+	// disagree with DisplayActive() or report an overlay that was already
+	// overridden.
 	// Returns the zero value (Showing: false) when nothing from this
 	// listener is current.
 	OverlayStatus() OverlayStatus

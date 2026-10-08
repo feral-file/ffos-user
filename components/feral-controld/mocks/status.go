@@ -62,16 +62,16 @@ func (mr *MockStatusPollerMockRecorder) ForceRefresh() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ForceRefresh", reflect.TypeOf((*MockStatusPoller)(nil).ForceRefresh))
 }
 
-// SetMintPairingOverlaySource mocks base method.
-func (m *MockStatusPoller) SetMintPairingOverlaySource(fn func() *status.MintPairingOverlay) {
+// SetOverlaySource mocks base method.
+func (m *MockStatusPoller) SetOverlaySource(fn func() *status.Overlay) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "SetMintPairingOverlaySource", fn)
+	m.ctrl.Call(m, "SetOverlaySource", fn)
 }
 
-// SetMintPairingOverlaySource indicates an expected call of SetMintPairingOverlaySource.
-func (mr *MockStatusPollerMockRecorder) SetMintPairingOverlaySource(fn interface{}) *gomock.Call {
+// SetOverlaySource indicates an expected call of SetOverlaySource.
+func (mr *MockStatusPollerMockRecorder) SetOverlaySource(fn interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetMintPairingOverlaySource", reflect.TypeOf((*MockStatusPoller)(nil).SetMintPairingOverlaySource), fn)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetOverlaySource", reflect.TypeOf((*MockStatusPoller)(nil).SetOverlaySource), fn)
 }
 
 // SetStampObserver mocks base method.
