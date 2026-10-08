@@ -336,3 +336,78 @@ func TestMonitor_FailedFirstConfirmationRetries(t *testing.T) {
 	assert.Equal(t, []bool{false, false}, bus.stuckValues(), "expected one failed attempt then one successful retry")
 	assert.True(t, m.everConfirmed)
 }
+
+// TestMonitor_ReaffirmsHealthyConfirmationPeriodically pins ffos-user#356
+// feralfile-bot review F3: a watchdog that subscribes (or restarts) AFTER
+// controld's one-time first-ever confirmation already fired — the startup
+// script starts feral-watchdog last, so this is the ordinary boot case, not
+// an edge case — would otherwise wait forever for a signal controld will
+// never resend while CDP just stays healthy. Mirrors
+// TestMonitor_ReaffirmsStuckPeriodicallyWhileUnresolved's shape exactly, for
+// the opposite (healthy) state.
+func TestMonitor_ReaffirmsHealthyConfirmationPeriodically(t *testing.T) {
+	m, _, bus, clock := newTestMonitor(t)
+
+	m.tick()
+	require.Equal(t, []bool{false}, bus.stuckValues(), "first-ever healthy tick must confirm")
+
+	// Under a full threshold since the last confirmation: no resend yet.
+	for i := 0; i < 5; i++ {
+		clock.advance(pollInterval)
+		m.tick()
+	}
+	assert.Equal(t, []bool{false}, bus.stuckValues(), "must not resend before a full threshold has elapsed")
+
+	// A full threshold with no disconnect in between: must re-confirm, so a
+	// late-subscribing or freshly-restarted watchdog eventually sees it.
+	clock.advance(StuckThreshold)
+	m.tick()
+	assert.Equal(t, []bool{false, false}, bus.stuckValues(), "expected one re-confirmation after a full threshold of staying healthy")
+
+	// A further short gap must not re-confirm again early.
+	clock.advance(pollInterval)
+	m.tick()
+	assert.Equal(t, []bool{false, false}, bus.stuckValues())
+
+	clock.advance(StuckThreshold)
+	m.tick()
+	assert.Equal(t, []bool{false, false, false}, bus.stuckValues(), "expected a second re-confirmation after another full threshold")
+}
+
+// TestMonitor_HealthyObservationResetsDisconnectTimerEvenOnFailedSend pins
+// ffos-user#356 feralfile-bot review F4: the bot's own repro was a
+// disconnect that ran 85s (just under StuckThreshold), a healthy observation
+// whose confirmation Send failed, and a fresh disconnect only 5s later —
+// before the fix, unhealthySince was left over from the FIRST episode (only
+// reset inside the conditional, retryable emit path), so the brand-new
+// disconnect inherited 85s of stale elapsed time and crossed StuckThreshold
+// on this tick alone, reporting stuck on a connection that had only just
+// dropped.
+func TestMonitor_HealthyObservationResetsDisconnectTimerEvenOnFailedSend(t *testing.T) {
+	m, cdp, bus, clock := newTestMonitor(t)
+	goUnhealthy(m, cdp)
+
+	clock.advance(StuckThreshold - 5*time.Second)
+	m.tick()
+	require.Empty(t, bus.stuckValues(), "85s in: must not have reported yet")
+
+	bus.err = assertError{}
+	bus.failNext = 1
+	cdp.initialized = true
+	m.tick()
+	require.Equal(t, []bool{false}, bus.stuckValues(), "one failed confirmation attempt recorded")
+
+	// A fresh disconnect only 5s after the reconnect must NOT inherit the
+	// previous episode's elapsed time just because its confirmation failed
+	// to send: no new send is expected yet.
+	clock.advance(5 * time.Second)
+	cdp.initialized = false
+	m.tick()
+	assert.Equal(t, []bool{false}, bus.stuckValues(), "a disconnect only 5s old must not be reported as stuck, failed confirmation notwithstanding")
+
+	// The mechanism still works for a genuinely sustained NEW episode: a
+	// full fresh threshold from this second disconnect must still report.
+	clock.advance(StuckThreshold)
+	m.tick()
+	assert.Equal(t, []bool{false, true}, bus.stuckValues(), "a genuinely sustained fresh episode must still be reported")
+}

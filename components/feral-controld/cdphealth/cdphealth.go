@@ -97,6 +97,20 @@ type Monitor struct {
 	// reported YET. This first-ever confirmation is the one positive
 	// signal watchdog can safely wait for instead.
 	everConfirmed bool
+	// lastConfirmedAt is when "not stuck" was last successfully sent.
+	// tick() re-sends it every threshold while CDP stays healthy
+	// (ffos-user#356, feralfile-bot review F3), not only once: the
+	// feralfile-bot's own repro showed a watchdog that starts (or
+	// restarts) AFTER this process's one-time first-ever confirmation
+	// already fired — the startup script starts feral-watchdog last, and
+	// a watchdog unit restart (independent of controld, same reasoning as
+	// lastReportedAt's own doc below) loses cdpReportReceived/
+	// cdpConfirmedHealthy entirely — would then wait forever for a signal
+	// that will never come again, permanently losing the #254 reboot
+	// budget even on a device whose CDP has been healthy throughout.
+	// Mirrors lastReportedAt's cadence exactly, just for the opposite
+	// (healthy) state.
+	lastConfirmedAt time.Time
 }
 
 // New creates a Monitor. clock is injected (rather than using time directly)
@@ -129,33 +143,51 @@ func (m *Monitor) Start(ctx context.Context) {
 }
 
 func (m *Monitor) tick() {
+	now := m.clock.Now()
 	if m.cdp.Initialized() {
-		// Send false when clearing a reported episode, OR (ffos-user#356,
-		// feralfile-bot's second pass) on the very first healthy
-		// observation this process has ever made, even if nothing was ever
-		// reported stuck — that first confirmation is the only positive
-		// signal feral-watchdog can safely treat as proof of health; see
-		// everConfirmed's doc for why silence-plus-timeout is not enough.
-		needsConfirm := m.reported || !m.everConfirmed
-		// Only retire the episode (and latch everConfirmed) once the send
-		// actually got out. A failed Send here (see emit's doc) must retry
-		// on the next tick rather than silently forgetting feral-watchdog
-		// still holds cdpStuck=true, or never establishing everConfirmed —
-		// leaving the fields below untouched is exactly what makes that
-		// retry happen, since this whole branch runs again unchanged.
+		// ffos-user#356 review F4: reset the disconnect-continuity timer on
+		// EVERY healthy observation, unconditionally — before, and
+		// independent of, whatever happens to the confirmation send below.
+		// unhealthySince measures how long the CURRENT disconnect episode
+		// has run; the moment Initialized() is observed true again, that
+		// episode is over regardless of whether the D-Bus confirmation
+		// managed to go out. Resetting it only inside the (conditional,
+		// retryable) emit path left a stale unhealthySince behind whenever
+		// that send failed, so a brand-new, unrelated disconnect seconds
+		// later inherited the OLD episode's elapsed time and crossed
+		// StuckThreshold immediately — reporting stuck on a connection that
+		// had only just dropped. The confirmation's own delivery/retry
+		// state (reported, lastReportedAt, everConfirmed, lastConfirmedAt)
+		// is deliberately separate so a failed send still retries without
+		// re-corrupting this timer.
+		m.unhealthySince = time.Time{}
+
+		// Send false when clearing a reported episode, on the very first
+		// healthy observation this process has ever made (everConfirmed —
+		// ffos-user#356, feralfile-bot's second pass), OR periodically
+		// thereafter while CDP stays healthy (ffos-user#356, feralfile-bot
+		// review F3 — see lastConfirmedAt's own doc for why a one-time
+		// confirmation is not enough).
+		needsConfirm := m.reported || !m.everConfirmed || now.Sub(m.lastConfirmedAt) >= m.threshold
+		// Only retire the episode (and latch everConfirmed/lastConfirmedAt)
+		// once the send actually got out. A failed Send here (see emit's
+		// doc) must retry on the next tick rather than silently forgetting
+		// feral-watchdog still holds cdpStuck=true, or never establishing
+		// everConfirmed — leaving the fields below untouched is exactly
+		// what makes that retry happen, since this whole branch runs again
+		// unchanged except for the unconditional reset above.
 		if needsConfirm {
 			if !m.emit(false) {
 				return
 			}
+			m.lastConfirmedAt = now
 		}
-		m.unhealthySince = time.Time{}
 		m.reported = false
 		m.lastReportedAt = time.Time{}
 		m.everConfirmed = true
 		return
 	}
 
-	now := m.clock.Now()
 	if m.unhealthySince.IsZero() {
 		m.unhealthySince = now
 	}
