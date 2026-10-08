@@ -1215,15 +1215,9 @@ func initializeApp(
 			return string(st), ok
 		})
 	}
-	// player_status carries the browser-pairing mint overlay state (issue
-	// #381), unconditionally — unlike SignatureStatus above, it is not gated
-	// behind the signature-verification feature. Sourced from the mint
-	// pairing service's own OverlayStatus(), the same overlay.Controller
-	// read DisplayActive() already uses.
-	poller.SetMintPairingOverlaySource(func() *status.MintPairingOverlay {
-		s := mintPairing.OverlayStatus()
-		return status.BuildMintPairingOverlay(s.Showing, s.State, s.ChannelID, s.PairingCode, s.ExpiresAt)
-	})
+	// player_status carries whatever overlay is currently on screen (issue
+	// #381) — wired further below, once setupNarrator exists too (see
+	// buildOverlaySource).
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -1341,18 +1335,33 @@ func initializeApp(
 	}))
 	setupNarrator.SetController(overlayCtrl)
 	mintPairing.SetController(overlayCtrl)
-	// player_status also carries whether the claim QR is the overlay
-	// currently showing — a sibling of the mint-pairing signal above,
-	// wired here (not alongside it) because it needs setupNarrator, which
-	// does not exist yet at that earlier point in main().
-	poller.SetClaimQRShowingSource(setupNarrator.IsShowingClaimQR)
-	// Same signal, for the direct checkStatus reply path (LAN /api/cast,
-	// relayer RPC) that bypasses the poller entirely — see
-	// annotateClaimQRShowingReply's doc; mintPairing's own reply annotation
-	// needs no equivalent call because commandrouter.New already took
-	// mintPairing as a constructor argument above, unlike setupNarrator,
-	// which this handler never otherwise depends on.
-	commandrouter.SetClaimQRShowingSource(rawCmdHandler, setupNarrator.IsShowingClaimQR, logger)
+	// player_status/checkStatus carry whatever overlay is currently on
+	// screen (issue #381): mint pairing's own overlay takes precedence when
+	// it has one (overlay.Controller's own exclusivity guarantees the two
+	// can never both be true), else setupNarrator's current narration state
+	// — the claim QR among others — is reported; nil when neither has
+	// anything showing. One function, reused for both status surfaces
+	// (status.Poller.SetOverlaySource for the poller's push loop,
+	// commandrouter.SetOverlaySource for the direct checkStatus reply that
+	// bypasses the poller entirely), so the two can never disagree. Wired
+	// here, not at either service's own construction point above, because
+	// it needs both mintPairing and setupNarrator, and setupNarrator does
+	// not exist until this point in main().
+	buildOverlaySource := func() *status.Overlay {
+		s := mintPairing.OverlayStatus()
+		// Shadowing the `overlay` package import here would compile but
+		// confuse a reader at a glance, given its name — mintOverlay avoids
+		// that even though it has no other reason to exist.
+		if mintOverlay := status.BuildMintOverlay(s.Showing, s.State, s.ChannelID, s.PairingCode, s.ExpiresAt); mintOverlay != nil {
+			return mintOverlay
+		}
+		if state, ok := setupNarrator.CurrentNarrationState(); ok {
+			return &status.Overlay{Owner: status.OverlayOwnerSetup, State: state}
+		}
+		return nil
+	}
+	poller.SetOverlaySource(buildOverlaySource)
+	commandrouter.SetOverlaySource(rawCmdHandler, buildOverlaySource, logger)
 	// One narration surface for the whole process: the executor's controld-owned
 	// claim / factory-reset / OTA-failure narration shares this exact instance with
 	// the provisioning domain below, so the single on-connect Resync() wired into

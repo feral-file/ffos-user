@@ -751,17 +751,27 @@ func (s *Service) Narrating() bool {
 	return has && isSetup(cur) && setupState(cur) != stateHidden
 }
 
-// IsShowingClaimQR reports whether the claim QR is the overlay currently on
-// the player (sibling of mintpairing.Service.DisplayActive/OverlayStatus,
-// same overlay.Controller.Current() source): the claim QR is painted by a
-// CDP evaluation the same way the browser-pairing mint overlay is, never by
-// a page navigation, so the Chromium page URL never reflects it. The app's
-// prior signal for this (`displayURL`'s `step=qr` query parameter) assumed a
-// navigation and has not actually matched this overlay-based painting path;
-// this is the first authoritative signal for it.
-func (s *Service) IsShowingClaimQR() bool {
+// CurrentNarrationState reports the narration state currently on the player
+// (the general sibling of mintpairing.Service.DisplayActive/OverlayStatus,
+// same overlay.Controller.Current() source): "", false when nothing from
+// this listener is current, else the state string — "claim_qr" among
+// others (see the state constants above) — and true. Every setupui overlay,
+// the claim QR included, is painted by a CDP evaluation, never a page
+// navigation, so the Chromium page URL never reflects any of them; the
+// app's prior signal for the claim QR specifically (`displayURL`'s
+// `step=qr` query parameter) assumed a navigation and has not actually
+// matched this overlay-based painting path. This method is the first
+// authoritative signal for any setupui state, general on purpose (issue
+// #381's owner direction): a status surface reporting only "is it the claim
+// QR" would have to grow a new method for the next state a caller needs,
+// when the controller already has one answer for "what is current" that
+// serves them all.
+func (s *Service) CurrentNarrationState() (string, bool) {
 	cur, has := s.ctrl.Current()
-	return has && isSetup(cur) && setupState(cur) == stateClaimQR
+	if !has || !isSetup(cur) {
+		return "", false
+	}
+	return setupState(cur), true
 }
 
 // Resync re-shows the current overlay. It is the "CDP became available"

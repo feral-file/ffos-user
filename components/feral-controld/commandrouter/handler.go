@@ -65,16 +65,19 @@ type handler struct {
 	// appears to move.
 	sessionGeneration func() uint64
 
-	// claimQRShowing, when set (SetClaimQRShowingSource), reports whether
-	// the claim QR is the overlay currently on the player — the same
-	// setupui.Service.IsShowingClaimQR() read status.pollPlayerStatus uses
-	// for the poller's own push loop, narrowed to a func() bool seam so
-	// this package does not gain a dependency on setupui (mirroring how
-	// mintPairing above is the one typed dependency this handler already
-	// carries, for the sibling checkStatus-reply annotation). nil means the
-	// direct checkStatus reply this handler annotates never carries the
-	// `claimQrShowing` key, mirroring mintPairing's own nil-guard pattern.
-	claimQRShowing func() bool
+	// overlaySource, when set (SetOverlaySource), reports whatever overlay
+	// is currently on the player, from whichever owner — the same
+	// combined mint-pairing/setupui read status.pollPlayerStatus uses for
+	// the poller's own push loop, narrowed to a func() *status.Overlay seam
+	// so this package does not gain a dependency on setupui (mintPairing
+	// above is the one typed overlay-owning dependency this handler already
+	// carries, for other commands; this seam also now covers that owner's
+	// contribution to the direct checkStatus-reply annotation, in place of
+	// reading h.mintPairing.OverlayStatus() a second time here). nil means
+	// the direct checkStatus reply this handler annotates never carries the
+	// `overlay` key, mirroring every other controld-owned field's
+	// nil-guard pattern.
+	overlaySource func() *status.Overlay
 
 	// recoverySession, when set (SetRecoverySession), is the
 	// playersession.Session the refreshArtwork recovery escalation (§3)
@@ -295,20 +298,20 @@ func (h *handler) setSessionGeneration(fn func() uint64) {
 	h.sessionGeneration = fn
 }
 
-// SetClaimQRShowingSource injects the claim-QR overlay signal onto h, if h
-// supports it (same concrete-handler-only, pre-NewGate contract as
+// SetOverlaySource injects the overlay signal onto h, if h supports it
+// (same concrete-handler-only, pre-NewGate contract as
 // SetSessionGeneration).
-func SetClaimQRShowingSource(h Handler, fn func() bool, logger *zap.Logger) {
-	setter, ok := h.(interface{ setClaimQRShowingSource(func() bool) })
+func SetOverlaySource(h Handler, fn func() *status.Overlay, logger *zap.Logger) {
+	setter, ok := h.(interface{ setOverlaySource(func() *status.Overlay) })
 	if !ok {
-		logger.Warn("Command handler does not support claim-QR overlay wiring")
+		logger.Warn("Command handler does not support overlay wiring")
 		return
 	}
-	setter.setClaimQRShowingSource(fn)
+	setter.setOverlaySource(fn)
 }
 
-func (h *handler) setClaimQRShowingSource(fn func() bool) {
-	h.claimQRShowing = fn
+func (h *handler) setOverlaySource(fn func() *status.Overlay) {
+	h.overlaySource = fn
 }
 
 // SetSourceProber injects the cast-time source preflight onto h, if h
@@ -2017,14 +2020,13 @@ func (h *handler) sendCDPRequest(command commands.Command) (interface{}, error) 
 		return nil, fmt.Errorf("command reply raced a page navigation (generation changed from %d to %d); retry: %w", genBefore, genAfter, ErrGenerationRace)
 	}
 	// Direct status requests bypass the lightweight notification mapper. Apply
-	// the same showing-key privacy boundary, and the same controld-owned mint
+	// the same showing-key privacy boundary, and the same controld-owned
 	// overlay annotation (issue #381), before either hub or relayer egress —
-	// pollPlayerStatus's annotateMintPairingOverlay only runs for the
-	// poller's own push loop, never for a direct checkStatus reply.
+	// pollPlayerStatus's annotateOverlay only runs for the poller's own push
+	// loop, never for a direct checkStatus reply.
 	if command.Type == "checkStatus" {
 		playerresponse.SanitizeShowingKey(result)
-		annotateMintPairingOverlayReply(result, h.mintPairing)
-		annotateClaimQRShowingReply(result, h.claimQRShowing)
+		annotateOverlayReply(result, h.overlaySource)
 	}
 
 	return result, nil

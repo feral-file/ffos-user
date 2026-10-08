@@ -89,58 +89,81 @@ type PlayerStatus struct {
 	// players omit it entirely (nil): callers must treat an absent stamp as
 	// "source unavailable", never as a mismatch.
 	Stamp *string `json:"stamp,omitempty"`
-	// MintPairing is controld-owned, same contract as SignatureStatus: the
+	// Overlay is controld-owned, same contract as SignatureStatus: the
 	// player never sends it, so a reply that carries one is dropped and the
-	// field is set only from annotateMintPairingOverlay below (issue #381).
-	// The browser-pairing mint overlay — the pairing code, "request
-	// received", or "creating token" screen — is a CDP evaluation painted
-	// over this same player page, not a navigation, so nothing else on this
-	// reply (Command, Playlist, RenderStatus, ...) ever reflects it; this is
-	// the one field that does. Nil (omitted) when nothing is showing.
-	MintPairing *MintPairingOverlay `json:"mintPairing,omitempty"`
-	// ClaimQRShowing is controld-owned, same contract as MintPairing: the
-	// claim QR is a sibling overlay painted by setupui the same way the
-	// browser-pairing mint overlay is — a CDP evaluation, never a page
-	// navigation — so nothing else on this reply reflects it either. `bool`
-	// with omitempty (not a nullable object, unlike MintPairing): there is
-	// nothing else to report about this overlay today, so presence of
-	// `true` is the whole signal and `false`/absent both mean "not
-	// showing" — a caller must not depend on telling the two apart.
-	ClaimQRShowing bool `json:"claimQrShowing,omitempty"`
+	// field is set only from annotateOverlay below (issue #381). Whatever
+	// feral-controld's shared overlay.Controller currently has on the
+	// player screen — mint pairing's pairing code / "request received" /
+	// "creating token", or setupui's narration (the claim QR among other
+	// states) — is a CDP evaluation painted over this same player page, not
+	// a navigation, so nothing else on this reply (Command, Playlist,
+	// RenderStatus, displayURL on the sibling DeviceStatusResponse, ...)
+	// ever reflects it; this is the one field that does. One field, not one
+	// per owner: the controller's whole contract is that exactly one
+	// overlay owns the screen at a time, so one field reporting it is the
+	// honest shape — a caller that only cares about one Owner/State
+	// combination reads past the rest, the same way it already ignores any
+	// other field it does not need. Nil (omitted) when nothing is showing.
+	Overlay *Overlay `json:"overlay,omitempty"`
 }
 
-// MintPairingOverlay is PlayerStatus.MintPairing's shape (issue #381):
-// whether the browser-pairing mint overlay is currently on the player.
-type MintPairingOverlay struct {
-	// State is "pairing_code", "request_received", or "creating_token" — the
-	// mint overlay kind currently painted, trimmed of its controller-internal
-	// "mint:" prefix. Never "hidden": a hidden overlay is reported by the
-	// whole MintPairingOverlay object being absent, not by a State value.
+// OverlayOwner identifies which subsystem's overlay.Painter currently owns
+// the player screen — the controller-internal Kind prefix
+// ("mint:"/"setup:"), spelled out for the wire.
+type OverlayOwner string
+
+const (
+	// OverlayOwnerMint is mintpairing's browser-pairing overlay.
+	OverlayOwnerMint OverlayOwner = "mint"
+	// OverlayOwnerSetup is setupui's narration overlay (the claim QR among
+	// its other states).
+	OverlayOwnerSetup OverlayOwner = "setup"
+)
+
+// Overlay is PlayerStatus.Overlay's shape (issue #381): whatever overlay is
+// currently on the player, from whichever owner painted it.
+type Overlay struct {
+	// Owner is which Kind prefix (and therefore which Painter) currently
+	// owns the screen.
+	Owner OverlayOwner `json:"owner"`
+	// State is the overlay's Kind, trimmed of its owner prefix: for
+	// Owner == "mint", "pairing_code" | "request_received" |
+	// "creating_token"; for Owner == "setup", whichever setupui narration
+	// state is currently painted (for example "claim_qr", "scanning",
+	// "joining", "updating", "finalizing" — see setupui's own state
+	// constants; this field reports whatever setupui reports, not a
+	// curated subset). Never "hidden" for either owner: a hidden overlay
+	// is reported by the whole Overlay object being absent, not by a
+	// State value.
 	State string `json:"state"`
-	// ChannelID identifies the broker channel this overlay belongs to, the
-	// same value startMintPairingSession/closeMintPairingSession use.
-	ChannelID string `json:"channelId,omitempty"`
-	// PairingCode and ExpiresAt are set only while State is "pairing_code" —
-	// once a browser has joined (request_received/creating_token) there is no
-	// code left on screen to go stale. The app needs ExpiresAt to tell a
-	// still-valid displayed code from one that has silently expired.
+	// ChannelID, PairingCode, ExpiresAt are mint-pairing-specific and set
+	// only when Owner == "mint" — setupui's narration carries no
+	// equivalent identifiers. PairingCode/ExpiresAt are further gated to
+	// State == "pairing_code": once a browser has joined
+	// (request_received/creating_token) there is no code left on screen
+	// to go stale. The app needs ExpiresAt to tell a still-valid displayed
+	// code from one that has silently expired.
+	ChannelID   string     `json:"channelId,omitempty"`
 	PairingCode string     `json:"pairingCode,omitempty"`
 	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
 }
 
-// BuildMintPairingOverlay converts a mintpairing.Service.OverlayStatus()
-// snapshot into this field's wire shape, or nil when nothing is showing
-// (issue #381). Takes the snapshot's fields rather than the mintpairing type
-// itself so this package does not gain a dependency on mintpairing: shared by
-// the poller's pushed player_status (SetMintPairingOverlaySource's wiring)
-// and the commandrouter's direct checkStatus reply annotation, so both
-// surfaces derive the wire shape from one conversion and can never disagree
-// on what "showing" maps to.
-func BuildMintPairingOverlay(showing bool, state, channelID, pairingCode string, expiresAt time.Time) *MintPairingOverlay {
+// BuildMintOverlay converts a mintpairing.Service.OverlayStatus() snapshot
+// into this field's wire shape with Owner "mint", or nil when nothing is
+// showing (issue #381). Takes the snapshot's fields rather than the
+// mintpairing type itself so this package does not gain a dependency on
+// mintpairing: shared by the poller's pushed player_status
+// (SetOverlaySource's wiring) and the commandrouter's direct checkStatus
+// reply annotation, so both surfaces derive the wire shape from one
+// conversion and can never disagree on what "showing" maps to. The
+// Owner-"setup" case needs no equivalent builder — it has no conditional
+// sub-fields, so callers construct it directly (`&Overlay{Owner:
+// OverlayOwnerSetup, State: state}`).
+func BuildMintOverlay(showing bool, state, channelID, pairingCode string, expiresAt time.Time) *Overlay {
 	if !showing {
 		return nil
 	}
-	out := &MintPairingOverlay{State: state, ChannelID: channelID}
+	out := &Overlay{Owner: OverlayOwnerMint, State: state, ChannelID: channelID}
 	// PairingCode/ExpiresAt are only ever set together by
 	// mintpairing.OverlayStatus (State == "pairing_code"); mirror that
 	// pairing here rather than re-deriving it from State.
@@ -182,18 +205,13 @@ type Poller interface {
 	// nil is safe (no-op) and is what a build with verification disabled
 	// leaves it as.
 	SetVerificationLookup(fn func(id, url string) (string, bool))
-	// SetMintPairingOverlaySource registers the function pollPlayerStatus asks
-	// for the mint overlay currently on screen (see PlayerStatus.MintPairing,
-	// issue #381). Called on every successful checkStatus round-trip, mirroring
-	// SetVerificationLookup's contract exactly: set once at wiring time before
-	// Start, single writer, nil-safe (no-op, which is what an unwired build
-	// leaves it as).
-	SetMintPairingOverlaySource(fn func() *MintPairingOverlay)
-	// SetClaimQRShowingSource registers the function pollPlayerStatus asks
-	// whether the claim QR overlay is currently on screen (see
-	// PlayerStatus.ClaimQRShowing). Same contract as
-	// SetMintPairingOverlaySource.
-	SetClaimQRShowingSource(fn func() bool)
+	// SetOverlaySource registers the function pollPlayerStatus asks for
+	// whatever overlay is currently on screen, from whichever owner (see
+	// PlayerStatus.Overlay, issue #381). Called on every successful
+	// checkStatus round-trip, mirroring SetVerificationLookup's contract
+	// exactly: set once at wiring time before Start, single writer,
+	// nil-safe (no-op, which is what an unwired build leaves it as).
+	SetOverlaySource(fn func() *Overlay)
 }
 
 // poller handles periodic polling of both player status via CDP and device status
@@ -249,15 +267,10 @@ type poller struct {
 	// stampObserver.
 	verificationLookup func(id, url string) (string, bool)
 
-	// mintPairingOverlay, when set (SetMintPairingOverlaySource), resolves
-	// the mint overlay currently on screen (issue #381). Same single-writer
-	// contract as stampObserver/verificationLookup.
-	mintPairingOverlay func() *MintPairingOverlay
-
-	// claimQRShowing, when set (SetClaimQRShowingSource), resolves whether
-	// the claim QR overlay is currently on screen. Same single-writer
-	// contract as the fields above.
-	claimQRShowing func() bool
+	// overlaySource, when set (SetOverlaySource), resolves whatever overlay
+	// is currently on screen, from whichever owner (issue #381). Same
+	// single-writer contract as stampObserver/verificationLookup.
+	overlaySource func() *Overlay
 }
 
 func NewPoller(
@@ -377,12 +390,8 @@ func (s *poller) SetVerificationLookup(fn func(id, url string) (string, bool)) {
 	s.verificationLookup = fn
 }
 
-func (s *poller) SetMintPairingOverlaySource(fn func() *MintPairingOverlay) {
-	s.mintPairingOverlay = fn
-}
-
-func (s *poller) SetClaimQRShowingSource(fn func() bool) {
-	s.claimQRShowing = fn
+func (s *poller) SetOverlaySource(fn func() *Overlay) {
+	s.overlaySource = fn
 }
 
 func (s *poller) SuppressPlayerNotifications(suppress bool) {
@@ -476,8 +485,7 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	// Annotate BEFORE lightweightPlayerStatus blanks Playlist: the lookup
 	// keys are the reply's playlist id and URL, and id lives on that struct.
 	s.annotateSignatureStatus(playerStatus)
-	s.annotateMintPairingOverlay(playerStatus)
-	s.annotateClaimQRShowing(playerStatus)
+	s.annotateOverlay(playerStatus)
 
 	lightweightPlayerStatus := s.lightweightPlayerStatus(playerStatus)
 
@@ -509,33 +517,20 @@ func (s *poller) annotateSignatureStatus(playerStatus *PlayerStatus) {
 	}
 }
 
-// annotateMintPairingOverlay fills PlayerStatus.MintPairing from the mint
-// pairing source, or leaves it nil (omitted) when nothing is wired or
-// nothing is showing (issue #381). Same drop-then-set contract as
-// annotateSignatureStatus: the reply was decoded straight into PlayerStatus,
-// so a player (or a spoofed reply) could have supplied this field too — it
-// is controld-owned, and the mint overlay is the one thing on this page the
-// player's own checkStatus reply never describes (a CDP evaluation painted
-// over the page, not a navigation it would report).
-func (s *poller) annotateMintPairingOverlay(playerStatus *PlayerStatus) {
-	playerStatus.MintPairing = nil
-	if s.mintPairingOverlay == nil {
+// annotateOverlay fills PlayerStatus.Overlay from the overlay source, or
+// leaves it nil (omitted) when nothing is wired or nothing is showing
+// (issue #381). Same drop-then-set contract as annotateSignatureStatus: the
+// reply was decoded straight into PlayerStatus, so a player (or a spoofed
+// reply) could have supplied this field too — it is controld-owned, and
+// whatever overlay is current is the one thing on this page the player's
+// own checkStatus reply never describes (a CDP evaluation painted over the
+// page, not a navigation it would report).
+func (s *poller) annotateOverlay(playerStatus *PlayerStatus) {
+	playerStatus.Overlay = nil
+	if s.overlaySource == nil {
 		return
 	}
-	playerStatus.MintPairing = s.mintPairingOverlay()
-}
-
-// annotateClaimQRShowing fills PlayerStatus.ClaimQRShowing from the claim-QR
-// source, or leaves it false (omitted) when nothing is wired or the claim QR
-// is not the overlay currently showing. Same drop-then-set, controld-owned
-// contract as annotateMintPairingOverlay — the sibling overlay this reply
-// otherwise has no signal for at all.
-func (s *poller) annotateClaimQRShowing(playerStatus *PlayerStatus) {
-	playerStatus.ClaimQRShowing = false
-	if s.claimQRShowing == nil {
-		return
-	}
-	playerStatus.ClaimQRShowing = s.claimQRShowing()
+	playerStatus.Overlay = s.overlaySource()
 }
 
 func isPlayerPageURL(url string) bool {
