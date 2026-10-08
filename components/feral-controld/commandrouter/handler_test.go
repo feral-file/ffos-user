@@ -448,6 +448,10 @@ func (f *fakeMintPairingService) HandleApprovalDecision(_ context.Context, args 
 
 func (f *fakeMintPairingService) DisplayActive() bool { return false }
 
+func (f *fakeMintPairingService) OverlayStatus() mintpairing.OverlayStatus {
+	return mintpairing.OverlayStatus{}
+}
+
 func (f *fakeMintPairingService) SetController(*overlay.Controller) {}
 
 func (f *fakeMintPairingService) Painter() overlay.Painter { return nil }

@@ -118,6 +118,16 @@ type Service interface {
 	// a recovery navigation landing on it would be exactly the "erase a QR
 	// mid-pairing" case this probe exists to prevent.
 	DisplayActive() bool
+	// OverlayStatus is DisplayActive's richer sibling (issue #381): the
+	// probe-free snapshot status.PlayerStatus's MintPairing field (the
+	// checkStatus/player_status reply) is built from, via
+	// annotateMintPairingOverlay in the status package. Sourced the same way
+	// as DisplayActive — the shared overlay controller's Current(), not this
+	// service's own session bookkeeping — so it can never disagree with
+	// DisplayActive() or report an overlay that was already overridden.
+	// Returns the zero value (Showing: false) when nothing from this
+	// listener is current.
+	OverlayStatus() OverlayStatus
 	// SetSession wires the playersession.Session the display sends park
 	// against while a recovery navigation is pending, mirroring
 	// setupui.Service.SetSession's discipline. Call once at wiring time,
@@ -2306,6 +2316,49 @@ func (s *service) sendMintPairingNotification(ctx context.Context, notificationT
 func (s *service) DisplayActive() bool {
 	cur, ok := s.ctrl.Current()
 	return ok && strings.HasPrefix(string(cur.Kind), mintKindPrefix)
+}
+
+// OverlayStatus is the Service interface's read-only overlay snapshot (issue
+// #381). See the interface doc.
+type OverlayStatus struct {
+	Showing bool
+	// State is the mint kind currently painted, trimmed of mintKindPrefix:
+	// "pairing_code", "request_received", or "creating_token". Empty when
+	// Showing is false.
+	State string
+	// ChannelID, PairingCode and ExpiresAt describe the active pairing this
+	// overlay belongs to. PairingCode and ExpiresAt are set only while State
+	// is "pairing_code" — see activePairing's joined/phase doc for why a
+	// request-received or creating-token overlay has no code left to report.
+	ChannelID   string
+	PairingCode string
+	ExpiresAt   time.Time
+}
+
+// OverlayStatus reports the overlay this process currently has on the
+// player, if any. See the Service interface doc.
+func (s *service) OverlayStatus() OverlayStatus {
+	cur, ok := s.ctrl.Current()
+	if !ok || !strings.HasPrefix(string(cur.Kind), mintKindPrefix) {
+		return OverlayStatus{}
+	}
+	out := OverlayStatus{
+		Showing: true,
+		State:   strings.TrimPrefix(string(cur.Kind), mintKindPrefix),
+	}
+	// currentActive is the same accessor startPairing's redisplay path uses;
+	// a miss here (active already cleared by the time this read lands) just
+	// leaves the identifying fields empty rather than guessing — the caller
+	// already has Showing+State from the controller, which is the part that
+	// must never disagree with DisplayActive().
+	if active, phase, _ := s.currentActive(); active != nil {
+		out.ChannelID = active.channelID
+		if phase == activePairingPhasePairingCode {
+			out.PairingCode = active.pairingCode
+			out.ExpiresAt = active.expiresAt
+		}
+	}
+	return out
 }
 
 func (s *service) registerPending(p *pendingApproval) {

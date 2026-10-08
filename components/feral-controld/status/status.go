@@ -89,6 +89,34 @@ type PlayerStatus struct {
 	// players omit it entirely (nil): callers must treat an absent stamp as
 	// "source unavailable", never as a mismatch.
 	Stamp *string `json:"stamp,omitempty"`
+	// MintPairing is controld-owned, same contract as SignatureStatus: the
+	// player never sends it, so a reply that carries one is dropped and the
+	// field is set only from annotateMintPairingOverlay below (issue #381).
+	// The browser-pairing mint overlay — the pairing code, "request
+	// received", or "creating token" screen — is a CDP evaluation painted
+	// over this same player page, not a navigation, so nothing else on this
+	// reply (Command, Playlist, RenderStatus, ...) ever reflects it; this is
+	// the one field that does. Nil (omitted) when nothing is showing.
+	MintPairing *MintPairingOverlay `json:"mintPairing,omitempty"`
+}
+
+// MintPairingOverlay is PlayerStatus.MintPairing's shape (issue #381):
+// whether the browser-pairing mint overlay is currently on the player.
+type MintPairingOverlay struct {
+	// State is "pairing_code", "request_received", or "creating_token" — the
+	// mint overlay kind currently painted, trimmed of its controller-internal
+	// "mint:" prefix. Never "hidden": a hidden overlay is reported by the
+	// whole MintPairingOverlay object being absent, not by a State value.
+	State string `json:"state"`
+	// ChannelID identifies the broker channel this overlay belongs to, the
+	// same value startMintPairingSession/closeMintPairingSession use.
+	ChannelID string `json:"channelId,omitempty"`
+	// PairingCode and ExpiresAt are set only while State is "pairing_code" —
+	// once a browser has joined (request_received/creating_token) there is no
+	// code left on screen to go stale. The app needs ExpiresAt to tell a
+	// still-valid displayed code from one that has silently expired.
+	PairingCode string     `json:"pairingCode,omitempty"`
+	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
 }
 
 //go:generate mockgen -source=status.go -destination=../mocks/status.go -package=mocks -mock_names=Poller=MockStatusPoller
@@ -119,6 +147,13 @@ type Poller interface {
 	// nil is safe (no-op) and is what a build with verification disabled
 	// leaves it as.
 	SetVerificationLookup(fn func(id, url string) (string, bool))
+	// SetMintPairingOverlaySource registers the function pollPlayerStatus asks
+	// for the mint overlay currently on screen (see PlayerStatus.MintPairing,
+	// issue #381). Called on every successful checkStatus round-trip, mirroring
+	// SetVerificationLookup's contract exactly: set once at wiring time before
+	// Start, single writer, nil-safe (no-op, which is what an unwired build
+	// leaves it as).
+	SetMintPairingOverlaySource(fn func() *MintPairingOverlay)
 }
 
 // poller handles periodic polling of both player status via CDP and device status
@@ -173,6 +208,11 @@ type poller struct {
 	// on-screen playlist's signature verdict. Same single-writer contract as
 	// stampObserver.
 	verificationLookup func(id, url string) (string, bool)
+
+	// mintPairingOverlay, when set (SetMintPairingOverlaySource), resolves
+	// the mint overlay currently on screen (issue #381). Same single-writer
+	// contract as stampObserver/verificationLookup.
+	mintPairingOverlay func() *MintPairingOverlay
 }
 
 func NewPoller(
@@ -292,6 +332,10 @@ func (s *poller) SetVerificationLookup(fn func(id, url string) (string, bool)) {
 	s.verificationLookup = fn
 }
 
+func (s *poller) SetMintPairingOverlaySource(fn func() *MintPairingOverlay) {
+	s.mintPairingOverlay = fn
+}
+
 func (s *poller) SuppressPlayerNotifications(suppress bool) {
 	s.Lock()
 	s.suppressPlayerNotifications = suppress
@@ -383,6 +427,7 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	// Annotate BEFORE lightweightPlayerStatus blanks Playlist: the lookup
 	// keys are the reply's playlist id and URL, and id lives on that struct.
 	s.annotateSignatureStatus(playerStatus)
+	s.annotateMintPairingOverlay(playerStatus)
 
 	lightweightPlayerStatus := s.lightweightPlayerStatus(playerStatus)
 
@@ -412,6 +457,22 @@ func (s *poller) annotateSignatureStatus(playerStatus *PlayerStatus) {
 	if status, ok := s.verificationLookup(id, url); ok {
 		playerStatus.SignatureStatus = &status
 	}
+}
+
+// annotateMintPairingOverlay fills PlayerStatus.MintPairing from the mint
+// pairing source, or leaves it nil (omitted) when nothing is wired or
+// nothing is showing (issue #381). Same drop-then-set contract as
+// annotateSignatureStatus: the reply was decoded straight into PlayerStatus,
+// so a player (or a spoofed reply) could have supplied this field too — it
+// is controld-owned, and the mint overlay is the one thing on this page the
+// player's own checkStatus reply never describes (a CDP evaluation painted
+// over the page, not a navigation it would report).
+func (s *poller) annotateMintPairingOverlay(playerStatus *PlayerStatus) {
+	playerStatus.MintPairing = nil
+	if s.mintPairingOverlay == nil {
+		return
+	}
+	playerStatus.MintPairing = s.mintPairingOverlay()
 }
 
 func isPlayerPageURL(url string) bool {
