@@ -98,6 +98,15 @@ type PlayerStatus struct {
 	// reply (Command, Playlist, RenderStatus, ...) ever reflects it; this is
 	// the one field that does. Nil (omitted) when nothing is showing.
 	MintPairing *MintPairingOverlay `json:"mintPairing,omitempty"`
+	// ClaimQRShowing is controld-owned, same contract as MintPairing: the
+	// claim QR is a sibling overlay painted by setupui the same way the
+	// browser-pairing mint overlay is — a CDP evaluation, never a page
+	// navigation — so nothing else on this reply reflects it either. `bool`
+	// with omitempty (not a nullable object, unlike MintPairing): there is
+	// nothing else to report about this overlay today, so presence of
+	// `true` is the whole signal and `false`/absent both mean "not
+	// showing" — a caller must not depend on telling the two apart.
+	ClaimQRShowing bool `json:"claimQrShowing,omitempty"`
 }
 
 // MintPairingOverlay is PlayerStatus.MintPairing's shape (issue #381):
@@ -180,6 +189,11 @@ type Poller interface {
 	// Start, single writer, nil-safe (no-op, which is what an unwired build
 	// leaves it as).
 	SetMintPairingOverlaySource(fn func() *MintPairingOverlay)
+	// SetClaimQRShowingSource registers the function pollPlayerStatus asks
+	// whether the claim QR overlay is currently on screen (see
+	// PlayerStatus.ClaimQRShowing). Same contract as
+	// SetMintPairingOverlaySource.
+	SetClaimQRShowingSource(fn func() bool)
 }
 
 // poller handles periodic polling of both player status via CDP and device status
@@ -239,6 +253,11 @@ type poller struct {
 	// the mint overlay currently on screen (issue #381). Same single-writer
 	// contract as stampObserver/verificationLookup.
 	mintPairingOverlay func() *MintPairingOverlay
+
+	// claimQRShowing, when set (SetClaimQRShowingSource), resolves whether
+	// the claim QR overlay is currently on screen. Same single-writer
+	// contract as the fields above.
+	claimQRShowing func() bool
 }
 
 func NewPoller(
@@ -362,6 +381,10 @@ func (s *poller) SetMintPairingOverlaySource(fn func() *MintPairingOverlay) {
 	s.mintPairingOverlay = fn
 }
 
+func (s *poller) SetClaimQRShowingSource(fn func() bool) {
+	s.claimQRShowing = fn
+}
+
 func (s *poller) SuppressPlayerNotifications(suppress bool) {
 	s.Lock()
 	s.suppressPlayerNotifications = suppress
@@ -454,6 +477,7 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	// keys are the reply's playlist id and URL, and id lives on that struct.
 	s.annotateSignatureStatus(playerStatus)
 	s.annotateMintPairingOverlay(playerStatus)
+	s.annotateClaimQRShowing(playerStatus)
 
 	lightweightPlayerStatus := s.lightweightPlayerStatus(playerStatus)
 
@@ -499,6 +523,19 @@ func (s *poller) annotateMintPairingOverlay(playerStatus *PlayerStatus) {
 		return
 	}
 	playerStatus.MintPairing = s.mintPairingOverlay()
+}
+
+// annotateClaimQRShowing fills PlayerStatus.ClaimQRShowing from the claim-QR
+// source, or leaves it false (omitted) when nothing is wired or the claim QR
+// is not the overlay currently showing. Same drop-then-set, controld-owned
+// contract as annotateMintPairingOverlay — the sibling overlay this reply
+// otherwise has no signal for at all.
+func (s *poller) annotateClaimQRShowing(playerStatus *PlayerStatus) {
+	playerStatus.ClaimQRShowing = false
+	if s.claimQRShowing == nil {
+		return
+	}
+	playerStatus.ClaimQRShowing = s.claimQRShowing()
 }
 
 func isPlayerPageURL(url string) bool {

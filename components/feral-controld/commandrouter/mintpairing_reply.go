@@ -51,3 +51,34 @@ func annotateMintPairingOverlayReply(result interface{}, mintPairing mintpairing
 	}
 	target[replyKeyMintPairing] = overlay
 }
+
+// replyKeyClaimQRShowing mirrors status.PlayerStatus.ClaimQRShowing's wire
+// key on the raw checkStatus reply this package forwards untyped.
+const replyKeyClaimQRShowing = "claimQrShowing"
+
+// annotateClaimQRShowingReply fills a direct checkStatus reply's
+// claimQrShowing key the same way status.pollPlayerStatus's
+// annotateClaimQRShowing fills PlayerStatus.ClaimQRShowing for the poller's
+// pushed player_status notifications — sibling of
+// annotateMintPairingOverlayReply above, same controld-owned,
+// drop-then-set-from-the-seam contract, same two-location strip (bare and
+// enveloped) for the same spoofing reason. claimQRShowing may be nil
+// (feature not wired), in which case the key is only ever dropped.
+func annotateClaimQRShowingReply(result interface{}, claimQRShowing func() bool) {
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		return
+	}
+	delete(m, replyKeyClaimQRShowing)
+	target := m
+	if msg, ok := m["message"].(map[string]interface{}); ok {
+		delete(msg, replyKeyClaimQRShowing)
+		target = msg
+	}
+	if claimQRShowing == nil {
+		return
+	}
+	if claimQRShowing() {
+		target[replyKeyClaimQRShowing] = true
+	}
+}

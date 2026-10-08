@@ -751,6 +751,19 @@ func (s *Service) Narrating() bool {
 	return has && isSetup(cur) && setupState(cur) != stateHidden
 }
 
+// IsShowingClaimQR reports whether the claim QR is the overlay currently on
+// the player (sibling of mintpairing.Service.DisplayActive/OverlayStatus,
+// same overlay.Controller.Current() source): the claim QR is painted by a
+// CDP evaluation the same way the browser-pairing mint overlay is, never by
+// a page navigation, so the Chromium page URL never reflects it. The app's
+// prior signal for this (`displayURL`'s `step=qr` query parameter) assumed a
+// navigation and has not actually matched this overlay-based painting path;
+// this is the first authoritative signal for it.
+func (s *Service) IsShowingClaimQR() bool {
+	cur, has := s.ctrl.Current()
+	return has && isSetup(cur) && setupState(cur) == stateClaimQR
+}
+
 // Resync re-shows the current overlay. It is the "CDP became available"
 // trigger: wire it to the CDP client's on-connect callback so a reconnecting
 // or freshly-loaded player catches up to the current setup state. It is a

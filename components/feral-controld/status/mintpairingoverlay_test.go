@@ -153,3 +153,59 @@ func TestPollPlayerStatus_MintPairingDoesNotDefeatDedupe(t *testing.T) {
 		t.Fatalf("expected one websocket send across two identical polls, got %d", ws.sendAllCalls)
 	}
 }
+
+func TestPollPlayerStatus_AttachesClaimQRShowing(t *testing.T) {
+	ws := &fakeWS{}
+	p := signatureTestPoller(map[string]any{
+		"ok":          true,
+		"castCommand": "displayPlaylist",
+		"index":       0,
+	}, ws)
+	p.SetClaimQRShowingSource(func() bool { return true })
+
+	p.pollPlayerStatus(context.Background())
+
+	got := sentPlayerStatus(t, ws)
+	if !got.ClaimQRShowing {
+		t.Fatal("expected claimQrShowing to be true")
+	}
+}
+
+func TestPollPlayerStatus_OmitsClaimQRShowingWhenFalseOrUnwired(t *testing.T) {
+	for _, wired := range []bool{false, true} {
+		ws := &fakeWS{}
+		p := signatureTestPoller(map[string]any{
+			"ok":          true,
+			"castCommand": "displayPlaylist",
+			"index":       0,
+		}, ws)
+		if wired {
+			p.SetClaimQRShowingSource(func() bool { return false })
+		}
+
+		p.pollPlayerStatus(context.Background())
+
+		got := sentPlayerStatus(t, ws)
+		if got.ClaimQRShowing {
+			t.Fatalf("wired=%v: expected claimQrShowing false", wired)
+		}
+	}
+}
+
+// TestPollPlayerStatus_DropsPlayerSuppliedClaimQRShowing: the field is
+// controld-owned, same contract as mintPairing. A value the player put in
+// its reply must not survive.
+func TestPollPlayerStatus_DropsPlayerSuppliedClaimQRShowing(t *testing.T) {
+	ws := &fakeWS{}
+	p := signatureTestPoller(map[string]any{
+		"ok":             true,
+		"index":          0,
+		"claimQrShowing": true,
+	}, ws)
+
+	p.pollPlayerStatus(context.Background())
+
+	if got := sentPlayerStatus(t, ws); got.ClaimQRShowing {
+		t.Fatal("player-supplied claimQrShowing leaked")
+	}
+}

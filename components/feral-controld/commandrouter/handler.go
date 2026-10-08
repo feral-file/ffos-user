@@ -65,6 +65,17 @@ type handler struct {
 	// appears to move.
 	sessionGeneration func() uint64
 
+	// claimQRShowing, when set (SetClaimQRShowingSource), reports whether
+	// the claim QR is the overlay currently on the player — the same
+	// setupui.Service.IsShowingClaimQR() read status.pollPlayerStatus uses
+	// for the poller's own push loop, narrowed to a func() bool seam so
+	// this package does not gain a dependency on setupui (mirroring how
+	// mintPairing above is the one typed dependency this handler already
+	// carries, for the sibling checkStatus-reply annotation). nil means the
+	// direct checkStatus reply this handler annotates never carries the
+	// `claimQrShowing` key, mirroring mintPairing's own nil-guard pattern.
+	claimQRShowing func() bool
+
 	// recoverySession, when set (SetRecoverySession), is the
 	// playersession.Session the refreshArtwork recovery escalation (§3)
 	// drives via NavigateHomeInline — the caller here holds no external lock
@@ -282,6 +293,22 @@ func SetSessionGeneration(h Handler, fn func() uint64, logger *zap.Logger) {
 
 func (h *handler) setSessionGeneration(fn func() uint64) {
 	h.sessionGeneration = fn
+}
+
+// SetClaimQRShowingSource injects the claim-QR overlay signal onto h, if h
+// supports it (same concrete-handler-only, pre-NewGate contract as
+// SetSessionGeneration).
+func SetClaimQRShowingSource(h Handler, fn func() bool, logger *zap.Logger) {
+	setter, ok := h.(interface{ setClaimQRShowingSource(func() bool) })
+	if !ok {
+		logger.Warn("Command handler does not support claim-QR overlay wiring")
+		return
+	}
+	setter.setClaimQRShowingSource(fn)
+}
+
+func (h *handler) setClaimQRShowingSource(fn func() bool) {
+	h.claimQRShowing = fn
 }
 
 // SetSourceProber injects the cast-time source preflight onto h, if h
@@ -1997,6 +2024,7 @@ func (h *handler) sendCDPRequest(command commands.Command) (interface{}, error) 
 	if command.Type == "checkStatus" {
 		playerresponse.SanitizeShowingKey(result)
 		annotateMintPairingOverlayReply(result, h.mintPairing)
+		annotateClaimQRShowingReply(result, h.claimQRShowing)
 	}
 
 	return result, nil

@@ -1341,6 +1341,18 @@ func initializeApp(
 	}))
 	setupNarrator.SetController(overlayCtrl)
 	mintPairing.SetController(overlayCtrl)
+	// player_status also carries whether the claim QR is the overlay
+	// currently showing — a sibling of the mint-pairing signal above,
+	// wired here (not alongside it) because it needs setupNarrator, which
+	// does not exist yet at that earlier point in main().
+	poller.SetClaimQRShowingSource(setupNarrator.IsShowingClaimQR)
+	// Same signal, for the direct checkStatus reply path (LAN /api/cast,
+	// relayer RPC) that bypasses the poller entirely — see
+	// annotateClaimQRShowingReply's doc; mintPairing's own reply annotation
+	// needs no equivalent call because commandrouter.New already took
+	// mintPairing as a constructor argument above, unlike setupNarrator,
+	// which this handler never otherwise depends on.
+	commandrouter.SetClaimQRShowingSource(rawCmdHandler, setupNarrator.IsShowingClaimQR, logger)
 	// One narration surface for the whole process: the executor's controld-owned
 	// claim / factory-reset / OTA-failure narration shares this exact instance with
 	// the provisioning domain below, so the single on-connect Resync() wired into

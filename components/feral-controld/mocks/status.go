@@ -62,6 +62,18 @@ func (mr *MockStatusPollerMockRecorder) ForceRefresh() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ForceRefresh", reflect.TypeOf((*MockStatusPoller)(nil).ForceRefresh))
 }
 
+// SetClaimQRShowingSource mocks base method.
+func (m *MockStatusPoller) SetClaimQRShowingSource(fn func() bool) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetClaimQRShowingSource", fn)
+}
+
+// SetClaimQRShowingSource indicates an expected call of SetClaimQRShowingSource.
+func (mr *MockStatusPollerMockRecorder) SetClaimQRShowingSource(fn interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetClaimQRShowingSource", reflect.TypeOf((*MockStatusPoller)(nil).SetClaimQRShowingSource), fn)
+}
+
 // SetMintPairingOverlaySource mocks base method.
 func (m *MockStatusPoller) SetMintPairingOverlaySource(fn func() *status.MintPairingOverlay) {
 	m.ctrl.T.Helper()

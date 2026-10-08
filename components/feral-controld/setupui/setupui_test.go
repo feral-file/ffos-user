@@ -1430,6 +1430,56 @@ func TestHideIfShowing(t *testing.T) {
 // resolved name; any other intent (or none) is left alone and the resolver
 // never runs — the factory-reset clear reaches this path with the screen on
 // factory_reset and must not read the serial for nothing.
+// TestIsShowingClaimQR pins the claim-QR overlay signal the app now reads
+// from player_status (sibling of mintpairing's DisplayActive/OverlayStatus):
+// true only while claim_qr is the current overlay, false before it is
+// shown, after it is hidden, and while a different setup narration state
+// (or nothing) owns the screen.
+func TestIsShowingClaimQR(t *testing.T) {
+	t.Run("false before anything is shown", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		assert.False(t, svc.IsShowingClaimQR())
+	})
+
+	t.Run("true once the claim QR is painted", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
+		sender.waitForCalls(t, 1)
+
+		assert.True(t, svc.IsShowingClaimQR())
+	})
+
+	t.Run("false once a different narration state replaces it", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
+		sender.waitForCalls(t, 1)
+		require.True(t, svc.IsShowingClaimQR())
+
+		svc.ShowUpdating(40)
+		sender.waitForCalls(t, 2)
+
+		assert.False(t, svc.IsShowingClaimQR())
+	})
+
+	t.Run("false once hidden", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
+		sender.waitForCalls(t, 1)
+		svc.Hide()
+		sender.waitForCalls(t, 2)
+
+		assert.False(t, svc.IsShowingClaimQR())
+	})
+}
+
 func TestRefreshClaimQRName(t *testing.T) {
 	resolveTo := func(name string, ran *bool) func() string {
 		return func() string {

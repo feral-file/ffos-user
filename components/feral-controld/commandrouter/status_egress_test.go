@@ -223,3 +223,87 @@ func TestCheckStatusMintPairingEgress(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckStatusClaimQRShowingEgress is the claim-QR sibling of
+// TestCheckStatusMintPairingEgress: a direct checkStatus reply (LAN
+// /api/cast or relayer) must carry claimQrShowing from the wired
+// setupui.Service.IsShowingClaimQR seam, not only the poller's pushed
+// player_status notifications (pollPlayerStatus never runs for this path).
+// Also proves the same controld-owned drop-then-set contract on both reply
+// shapes a player can send.
+func TestCheckStatusClaimQRShowingEgress(t *testing.T) {
+	for _, transport := range []string{"hub", "relayer"} {
+		for _, wrapped := range []bool{false, true} {
+			for _, tc := range []struct {
+				name    string
+				showing bool
+				wired   bool
+				wantKey bool
+			}{
+				{name: "claim QR showing", showing: true, wired: true, wantKey: true},
+				{name: "claim QR not showing", showing: false, wired: true, wantKey: false},
+				{name: "seam unwired", showing: true, wired: false, wantKey: false},
+			} {
+				t.Run(transport+"/"+tc.name+map[bool]string{true: "/wrapped", false: "/bare"}[wrapped], func(t *testing.T) {
+					ctrl := gomock.NewController(t)
+					ctx := context.Background()
+					// A player (or spoofed) reply claiming claimQrShowing must be
+					// dropped, never trusted — this field is controld-owned — at
+					// BOTH locations an enveloped reply can carry it.
+					reply := map[string]any{"ok": true, "claimQrShowing": true}
+					if wrapped {
+						reply = map[string]any{"messageID": "player-request", "message": reply, "claimQrShowing": true}
+					}
+					player := mocks.NewMockCDP(ctrl)
+					player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(reply, nil)
+					executor := newRoutableExecutor(ctrl)
+					codec := wrapper.NewJSON()
+					logger := zap.NewNop()
+					router := commandrouter.New(executor, player, nil, nil, nil, nil, nil, nil, codec, logger)
+					if tc.wired {
+						showing := tc.showing
+						commandrouter.SetClaimQRShowingSource(router, func() bool { return showing }, logger)
+					}
+					var encoded []byte
+					if transport == "hub" {
+						mux := http.NewServeMux()
+						server := wrapper.NewHTTPServer(&http.Server{Handler: mux, ReadHeaderTimeout: time.Second})
+						hub.New(ctx, mocks.NewMockWS(ctrl), router, nil, nil, server, codec, logger)
+						response := httptest.NewRecorder()
+						mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/cast", strings.NewReader(`{"command":"checkStatus","request":{}}`)))
+						require.Equal(t, http.StatusOK, response.Code)
+						encoded = response.Body.Bytes()
+					} else {
+						remote := mocks.NewMockRelayer(ctrl)
+						bus := mocks.NewMockDBus(ctrl)
+						bus.EXPECT().OnBusSignal(gomock.Any())
+						var receive relayer.Handler
+						remote.EXPECT().OnRelayerMessage(gomock.Any()).Do(func(h relayer.Handler) { receive = h })
+						remote.EXPECT().Send(ctx, gomock.Any()).DoAndReturn(func(_ context.Context, response interface{}) error {
+							payload := response.(relayer.Response)
+							require.Equal(t, "controller-request", payload.MessageID)
+							var err error
+							encoded, err = json.Marshal(payload.Message)
+							return err
+						})
+						med := mediator.New(ctx, remote, bus, player, router, executor, nil, codec, logger)
+						med.Start()
+						command := "checkStatus"
+						require.NoError(t, receive(ctx, relayer.Payload{MessageID: "controller-request", Message: relayer.Message{Command: &command}}))
+					}
+					var decoded map[string]any
+					require.NoError(t, json.Unmarshal(encoded, &decoded))
+					if wrapped {
+						require.NotContains(t, decoded, "claimQrShowing", "spoofed top-level key must be dropped on an enveloped reply")
+						decoded = decoded["message"].(map[string]any)
+					}
+					if !tc.wantKey {
+						require.NotContains(t, decoded, "claimQrShowing")
+						return
+					}
+					require.Equal(t, true, decoded["claimQrShowing"])
+				})
+			}
+		}
+	}
+}
