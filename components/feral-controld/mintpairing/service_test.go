@@ -1063,7 +1063,7 @@ func TestOverlayStatus_OmitsPairingCodeOutsidePairingCodeState(t *testing.T) {
 }
 
 // TestOverlayStatus_OmitsPairingCodeInCreatingTokenState: creating_token is
-// the third named wire state (status.go's MintPairingOverlay.State doc), an
+// the third named wire state (status.go's Overlay.State doc), an
 // approval decision past request_received — same no-code-left-to-report rule
 // as request_received, and (round-4 pass-3 review) was the one of the three
 // states no test here exercised before this case.

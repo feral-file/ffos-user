@@ -184,3 +184,90 @@ func TestPollPlayerStatus_OverlayDoesNotDefeatDedupe(t *testing.T) {
 		t.Fatalf("expected one websocket send across two identical polls, got %d", ws.sendAllCalls)
 	}
 }
+
+// TestCombineOverlaySources pins the precedence, the setup wrapping, and the
+// nil fallback of the one closure BOTH status surfaces are wired with. Before
+// this existed the three-branch decision was a closure inside initializeApp,
+// reachable from no test at all: reversing the precedence, dropping a source,
+// or breaking the nil fallback shipped green (round 2 review, F2) — which is
+// exactly the class of bug issue #381 is about.
+func TestCombineOverlaySources(t *testing.T) {
+	mintShowing := &Overlay{Owner: OverlayOwnerMint, State: "pairing_code", ChannelID: "ch-1", PairingCode: "ABCD"}
+	mint := func(o *Overlay) func() *Overlay { return func() *Overlay { return o } }
+	setup := func(state string, ok bool) func() (string, bool) {
+		return func() (string, bool) { return state, ok }
+	}
+
+	tests := []struct {
+		name  string
+		mint  func() *Overlay
+		setup func() (string, bool)
+		want  *Overlay
+	}{{
+		name:  "nothing showing on either source is no overlay at all",
+		mint:  mint(nil),
+		setup: setup("", false),
+		want:  nil,
+	}, {
+		name:  "mint's own overlay is reported with its richer fields intact",
+		mint:  mint(mintShowing),
+		setup: setup("", false),
+		want:  mintShowing,
+	}, {
+		name:  "setupui's narration state is reported as owner setup",
+		mint:  mint(nil),
+		setup: setup("claim_qr", true),
+		want:  &Overlay{Owner: OverlayOwnerSetup, State: "claim_qr"},
+	}, {
+		name:  "any setupui state is reported, not a curated subset",
+		mint:  mint(nil),
+		setup: setup("finalizing", true),
+		want:  &Overlay{Owner: OverlayOwnerSetup, State: "finalizing"},
+	}, {
+		// The shared overlay.Controller makes this unreachable in production
+		// (one owner holds the screen); pinned so the ORDER cannot be
+		// reversed silently if that ever stops holding.
+		name:  "mint wins when both report, and carries no setup state",
+		mint:  mint(mintShowing),
+		setup: setup("claim_qr", true),
+		want:  mintShowing,
+	}, {
+		name:  "a true setupui answer with an empty state still reports owner setup",
+		mint:  mint(nil),
+		setup: setup("", true),
+		want:  &Overlay{Owner: OverlayOwnerSetup, State: ""},
+	}, {
+		name:  "an unwired mint probe falls through to setupui",
+		mint:  nil,
+		setup: setup("scanning", true),
+		want:  &Overlay{Owner: OverlayOwnerSetup, State: "scanning"},
+	}, {
+		name:  "an unwired setupui probe reports mint alone",
+		mint:  mint(mintShowing),
+		setup: nil,
+		want:  mintShowing,
+	}, {
+		name:  "two unwired probes are no overlay, never a panic",
+		mint:  nil,
+		setup: nil,
+		want:  nil,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CombineOverlaySources(tt.mint, tt.setup)()
+			if tt.want == nil {
+				if got != nil {
+					t.Fatalf("expected no overlay, got %+v", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("expected overlay %+v, got nil", tt.want)
+			}
+			if *got != *tt.want {
+				t.Fatalf("expected overlay %+v, got %+v", *tt.want, *got)
+			}
+		})
+	}
+}

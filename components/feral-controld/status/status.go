@@ -157,8 +157,7 @@ type Overlay struct {
 // reply annotation, so both surfaces derive the wire shape from one
 // conversion and can never disagree on what "showing" maps to. The
 // Owner-"setup" case needs no equivalent builder — it has no conditional
-// sub-fields, so callers construct it directly (`&Overlay{Owner:
-// OverlayOwnerSetup, State: state}`).
+// sub-fields, so CombineOverlaySources below constructs it inline.
 func BuildMintOverlay(showing bool, state, channelID, pairingCode string, expiresAt time.Time) *Overlay {
 	if !showing {
 		return nil
@@ -175,6 +174,45 @@ func BuildMintOverlay(showing bool, state, channelID, pairingCode string, expire
 		}
 	}
 	return out
+}
+
+// CombineOverlaySources builds the one function both status surfaces ask for
+// "whatever overlay is on the player" (issue #381): the poller's pushed
+// player_status (Poller.SetOverlaySource) and the commandrouter's direct
+// checkStatus reply, which bypasses the poller entirely. The composition root
+// wires the SAME returned closure into both, so the two can never disagree
+// about what is on screen.
+//
+// Precedence is mint-then-setup, and it is an ordering, not an arbitration:
+// the shared overlay.Controller already guarantees at most one owner holds
+// the screen, so at most one of these two sources can report something. The
+// order therefore only decides which is consulted first, and mint goes first
+// because its snapshot carries the richer fields (channelId/pairingCode/
+// expiresAt) — reversing it would not change any reachable answer, but it
+// would make the cheaper probe the one that runs on every poll.
+//
+// mint returns the already-converted mint overlay (BuildMintOverlay's result)
+// rather than the mintpairing snapshot, so this package keeps no dependency
+// on mintpairing; setup is setupui.Service.CurrentNarrationState's shape,
+// whose false means "nothing of setupui's is on the screen" — note that it is
+// a RESOLVED-display answer, not the pushed intent, which is what makes nil
+// here mean the viewer is looking at artwork. Either source may be nil (an
+// unwired build), read as "nothing showing", mirroring the nil-safe
+// single-writer contract of the poller's other sources.
+func CombineOverlaySources(mint func() *Overlay, setup func() (string, bool)) func() *Overlay {
+	return func() *Overlay {
+		if mint != nil {
+			if o := mint(); o != nil {
+				return o
+			}
+		}
+		if setup != nil {
+			if state, ok := setup(); ok {
+				return &Overlay{Owner: OverlayOwnerSetup, State: state}
+			}
+		}
+		return nil
+	}
 }
 
 //go:generate mockgen -source=status.go -destination=../mocks/status.go -package=mocks -mock_names=Poller=MockStatusPoller

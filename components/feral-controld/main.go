@@ -1348,30 +1348,25 @@ func initializeApp(
 	setupNarrator.SetController(overlayCtrl)
 	mintPairing.SetController(overlayCtrl)
 	// player_status/checkStatus carry whatever overlay is currently on
-	// screen (issue #381): mint pairing's own overlay takes precedence when
-	// it has one (overlay.Controller's own exclusivity guarantees the two
-	// can never both be true), else setupNarrator's current narration state
-	// — the claim QR among others — is reported; nil when neither has
-	// anything showing. One function, reused for both status surfaces
+	// screen (issue #381), from either of its two owners. The precedence and
+	// nil-fallback live in status.CombineOverlaySources, not in a closure
+	// here, so they are unit-tested rather than reachable only through the
+	// whole of initializeApp (round 2 review, F2). This root supplies only
+	// the two probes. Wired here, not at either service's own construction
+	// point above, because it needs both mintPairing and setupNarrator, and
+	// setupNarrator does not exist until this point in main().
+	//
+	// One function, reused for both status surfaces
 	// (status.Poller.SetOverlaySource for the poller's push loop,
 	// commandrouter.SetOverlaySource for the direct checkStatus reply that
-	// bypasses the poller entirely), so the two can never disagree. Wired
-	// here, not at either service's own construction point above, because
-	// it needs both mintPairing and setupNarrator, and setupNarrator does
-	// not exist until this point in main().
-	buildOverlaySource := func() *status.Overlay {
-		s := mintPairing.OverlayStatus()
-		// Shadowing the `overlay` package import here would compile but
-		// confuse a reader at a glance, given its name — mintOverlay avoids
-		// that even though it has no other reason to exist.
-		if mintOverlay := status.BuildMintOverlay(s.Showing, s.State, s.ChannelID, s.PairingCode, s.ExpiresAt); mintOverlay != nil {
-			return mintOverlay
-		}
-		if state, ok := setupNarrator.CurrentNarrationState(); ok {
-			return &status.Overlay{Owner: status.OverlayOwnerSetup, State: state}
-		}
-		return nil
-	}
+	// bypasses the poller entirely), so the two can never disagree.
+	buildOverlaySource := status.CombineOverlaySources(
+		func() *status.Overlay {
+			s := mintPairing.OverlayStatus()
+			return status.BuildMintOverlay(s.Showing, s.State, s.ChannelID, s.PairingCode, s.ExpiresAt)
+		},
+		setupNarrator.CurrentNarrationState,
+	)
 	poller.SetOverlaySource(buildOverlaySource)
 	commandrouter.SetOverlaySource(rawCmdHandler, buildOverlaySource, logger)
 	// One narration surface for the whole process: the executor's controld-owned

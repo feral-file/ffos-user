@@ -1491,6 +1491,141 @@ func TestCurrentNarrationState(t *testing.T) {
 	})
 }
 
+// TestCurrentNarrationStateReportsResolvedDisplay pins the one deliberate
+// difference between this signal and Narrating(): it reports what the player
+// actually renders, not the neutral intent the controller retains for Resync
+// replay (see resolveExtensionState). On a manifest that predates a state the
+// two genuinely differ, and reporting the intent advertised an `overlay` on
+// checkStatus/player_status after the screen had already returned to artwork
+// — persistently, not for a sampling window (feralfile-bot F1 on PR #389).
+//
+// Every outcome the send-time downgrade table can produce is covered here, so
+// a later state added to sendFallbacks cannot reintroduce the skew for one
+// shape only: the hide override, a different-state fallback, a supporting
+// manifest (no downgrade at all), a retained hidden intent, and narration
+// disabled outright.
+func TestCurrentNarrationStateReportsResolvedDisplay(t *testing.T) {
+	t.Run("hide downgrade omits the overlay", func(t *testing.T) {
+		sender := newFakeCDP()
+		// validContract predates `connecting`, so the ap-recheck push
+		// downgrades to a HIDE while the retained intent stays "connecting".
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowConnectingOrHide("Checking for your Wi-Fi network…")
+		sender.waitForCalls(t, 1)
+		require.Equal(t, stateHidden, sender.lastRequest()["state"])
+
+		state, ok := svc.CurrentNarrationState()
+		assert.False(t, ok, "the screen is back on artwork; no overlay may be advertised")
+		assert.Empty(t, state)
+	})
+
+	t.Run("reports the fallback state, not the intent", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		// No hide marker: the table's own fallback paints join_failed.
+		svc.ShowConnecting("Reconnecting…")
+		sender.waitForCalls(t, 1)
+		require.Equal(t, stateJoinFailed, sender.lastRequest()["state"])
+
+		state, ok := svc.CurrentNarrationState()
+		assert.True(t, ok)
+		assert.Equal(t, stateJoinFailed, state,
+			"the viewer is looking at join_failed, so that is what the status must say")
+	})
+
+	t.Run("supporting manifest reports the neutral state unchanged", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, contractWithConnecting)
+
+		svc.ShowConnectingOrHide("Checking for your Wi-Fi network…")
+		sender.waitForCalls(t, 1)
+		require.Equal(t, stateConnecting, sender.lastRequest()["state"])
+
+		state, ok := svc.CurrentNarrationState()
+		assert.True(t, ok)
+		assert.Equal(t, stateConnecting, state)
+	})
+
+	t.Run("a retained hidden intent is nothing showing", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
+		sender.waitForCalls(t, 1)
+		svc.Hide()
+		sender.waitForCalls(t, 2)
+		// Resync's ReplayHide path is what can leave a setup:hidden Kind
+		// current; it must never surface as an overlay whose state is the
+		// literal string "hidden".
+		svc.Resync()
+
+		state, ok := svc.CurrentNarrationState()
+		assert.False(t, ok)
+		assert.Empty(t, state)
+	})
+
+	// scanning/finalizing/factory_reset are extension states with NO entry in
+	// sendFallbacks: an older manifest accepts them with {ok:true} and
+	// renders nothing, so the send deliberately goes out unresolved (see
+	// resolvedState's last paragraph) and the screen does not change. Tracking
+	// manifest support for only the two downgradeable states left these three
+	// permanently supportUnknown, which read as "supported" — so the report
+	// claimed an overlay nobody could see, for the whole duration of the
+	// state (round 2 review, F1).
+	for _, tc := range []struct {
+		state string
+		show  func(*Service)
+	}{
+		{stateScanning, func(s *Service) { s.ShowScanning() }},
+		{stateFinalizing, func(s *Service) { s.ShowFinalizing() }},
+		{stateFactoryReset, func(s *Service) { s.ShowFactoryReset() }},
+	} {
+		t.Run("a no-fallback extension state the manifest lacks omits the overlay: "+tc.state, func(t *testing.T) {
+			sender := newFakeCDP()
+			// validContract predates all three.
+			svc := newTestService(t, sender, validContract)
+
+			tc.show(svc)
+			sender.waitForCalls(t, 1)
+			require.Equal(t, tc.state, sender.lastRequest()["state"],
+				"the send must still go out unresolved — the player no-ops it, and guessing a hide would clear a newer player's render")
+
+			state, ok := svc.CurrentNarrationState()
+			assert.False(t, ok, "this player renders nothing for %q, so no overlay may be advertised", tc.state)
+			assert.Empty(t, state)
+		})
+
+		t.Run("the same state is reported on a manifest that lists it: "+tc.state, func(t *testing.T) {
+			sender := newFakeCDP()
+			svc := newTestService(t, sender, contractWithConnecting)
+
+			tc.show(svc)
+			sender.waitForCalls(t, 1)
+
+			state, ok := svc.CurrentNarrationState()
+			assert.True(t, ok)
+			assert.Equal(t, tc.state, state)
+		})
+	}
+
+	t.Run("narration disabled outright omits the overlay", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, contractWithoutSetupDisplay)
+
+		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
+		// The worker resolves the manifest once and short-circuits; nothing
+		// reaches CDP, so there is no send to synchronize on.
+		time.Sleep(100 * time.Millisecond)
+		require.Equal(t, 0, sender.callCount())
+
+		state, ok := svc.CurrentNarrationState()
+		assert.False(t, ok, "no setup overlay ever reached the screen on this player")
+		assert.Empty(t, state)
+	})
+}
+
 func TestRefreshClaimQRName(t *testing.T) {
 	resolveTo := func(name string, ran *bool) func() string {
 		return func() string {

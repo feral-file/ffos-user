@@ -170,10 +170,13 @@ type Service struct {
 
 	mu      sync.Mutex
 	support support
-	// extSupport holds, per downgradeable extension state (the sendFallbacks
-	// keys), the LAST manifest verdict derived from a successfully read
-	// manifest (can the running player render it, or must the send apply the
-	// state's fallback?). Resolved on the WORKER at send time, never at
+	// extSupport holds, per EXTENSION state (every state outside
+	// requiredStates, not only the downgradeable sendFallbacks keys), the
+	// LAST manifest verdict derived from a successfully read manifest: can
+	// the running player render it, or must the send apply the state's
+	// fallback — and, for a state with no fallback, does anything reach the
+	// screen at all (what CurrentNarrationState reads it for)? Resolved on
+	// the WORKER at send time, never at
 	// Show-time — see resolveExtensionState for why the retained intent must
 	// stay neutral. Unlike support, these are deliberately NOT process-lifetime
 	// latches: the player bundle (and its manifest) is OTA-replaced without a
@@ -366,6 +369,79 @@ var sendFallbacks = map[string]sendFallback{
 	stateSetupError: {state: stateJoinFailed},
 }
 
+// requiredStates names the setupDisplay states EVERY manifest that passes the
+// gate is guaranteed to list (validateSetupDisplayManifest enforces exactly
+// this set). Every other state is an extension state: a manifest that
+// predates one accepts it with {ok:true} and renders NOTHING (see the state
+// constants' extensibility note), so for those — and only those — the running
+// player's actual support has to be resolved from the manifest before anything
+// may claim the state is on the screen. Shared by the validator and by
+// isExtensionState so the two readings of "required" cannot drift apart.
+var requiredStates = []string{
+	stateSoftAPQR, stateJoining, stateJoinFailed, stateUpdating,
+	stateClaimQR, stateReady, stateHidden,
+}
+
+// isExtensionState reports whether state is outside requiredStates, i.e.
+// whether a fielded manifest may legitimately not list it. The empty string
+// reads as an extension state, which is the conservative answer: no manifest
+// lists it, so nothing renders for it.
+func isExtensionState(state string) bool {
+	for _, required := range requiredStates {
+		if state == required {
+			return false
+		}
+	}
+	return true
+}
+
+// resolvedState applies the send-time downgrade table to one intent state,
+// given the manifest verdict for it. It is the ONE place the table's outcome
+// is decided, so once a delivery has resolved, the send path
+// (resolveExtensionState) and the status report (CurrentNarrationState) agree
+// on what the player has on screen — the skew they drifted into was a
+// persistent false `overlay` on checkStatus/player_status after an ap-recheck
+// hide, not a sampling race. Returns the state the player renders, or
+// stateHidden when the downgrade clears the screen instead.
+//
+// "Once resolved" is the real limit of that agreement, and is deliberate: a
+// Show* call commits its decision to the controller synchronously, while the
+// manifest verdict this function is given is written later, on the delivery
+// worker. Between the two, a report reads the previous verdict (or none) for a
+// state whose support has just changed — the same narrow, self-correcting,
+// no-I/O class as the four `ctrl.Current()` races the branch already accepts,
+// and self-correcting for the same reason: the next poll re-reads a verdict
+// the worker has by then written.
+//
+// marked/hideMarked are the fallbackHideKey annotation as read off the intent
+// (present-as-bool, and its value); unsupported is POSITIVE evidence that the
+// running player predates state — the send path derives it from a fresh
+// manifest read, the report path from the last cached verdict (see
+// cachedStateUnsupported for why those two sources are deliberately
+// different).
+//
+// A state with no fallback and no hide marker is returned UNCHANGED even when
+// unsupported: the send must still go out (the player no-ops it, and guessing
+// a hide would clear an overlay a newer player would have rendered). It is the
+// report path's job to omit it — see CurrentNarrationState.
+func resolvedState(state string, marked, hideMarked, unsupported bool) string {
+	if !unsupported {
+		return state
+	}
+	if marked && hideMarked {
+		// The per-push hide override (see fallbackHideKey) wins over the
+		// state table's fallback.
+		return stateHidden
+	}
+	if fb, inTable := sendFallbacks[state]; inTable {
+		if fb.hide {
+			return stateHidden
+		}
+		return fb.state
+	}
+	return state
+}
+
 // resolveExtensionState maps a queued extension-state intent to what the
 // RUNNING player can render, at send time rather than Show-time. The stored
 // intent (last / the pending queue) always keeps the neutral state: resolving
@@ -374,19 +450,28 @@ var sendFallbacks = map[string]sendFallback{
 // the exact flash stateConnecting exists to remove. Copy-on-write so the
 // retained maps are never mutated. Runs on the worker goroutine (trySend),
 // which also keeps the manifest read off the provisioning state machine's
-// goroutine. Returns req unchanged for every state outside the fallback
-// table.
+// goroutine. Returns req unchanged for every required state.
+//
+// It resolves EVERY extension state, not only the two in sendFallbacks. For
+// scanning/finalizing/factory_reset the resolution cannot change the wire
+// payload (they have no fallback, so resolvedState returns them unchanged),
+// but it is what records their manifest verdict in extSupport — the cache
+// CurrentNarrationState needs in order not to advertise an overlay for a
+// state the running player silently no-ops. Resolving only the downgradeable
+// pair left the other three permanently supportUnknown, which read as
+// "supported" everywhere (round 2 review, F1).
 func (s *Service) resolveExtensionState(req map[string]any) map[string]any {
 	state := stringField(req, "state")
 	hideMarked, marked := req[fallbackHideKey].(bool)
-	fb, inTable := sendFallbacks[state]
-	if !inTable && !marked {
+	if !isExtensionState(state) && !marked {
+		// A required state is listed by every manifest that passes the gate,
+		// so there is nothing to resolve and the common path — `updating`'s
+		// per-percent pushes across a whole OTA among it — never pays for the
+		// manifest read.
 		return req
 	}
-	unsupported := s.stateUnsupported(state)
-	if unsupported && marked && hideMarked {
-		// The per-push hide override (see fallbackHideKey) wins over the
-		// state table's fallback.
+	resolved := resolvedState(state, marked, hideMarked, s.stateUnsupported(state))
+	if resolved == stateHidden {
 		return map[string]any{"state": stateHidden}
 	}
 	// Copy-on-write: the retained intent keeps the neutral state AND the
@@ -399,12 +484,7 @@ func (s *Service) resolveExtensionState(req map[string]any) map[string]any {
 		}
 		out[k] = v
 	}
-	if unsupported && inTable {
-		if fb.hide {
-			return map[string]any{"state": stateHidden}
-		}
-		out["state"] = fb.state
-	}
+	out["state"] = resolved
 	return out
 }
 
@@ -461,7 +541,7 @@ func (s *Service) stateUnsupported(target string) bool {
 	}
 	s.mu.Lock()
 	if s.extSupport == nil {
-		s.extSupport = make(map[string]support, len(sendFallbacks))
+		s.extSupport = make(map[string]support)
 	}
 	changed := s.extSupport[target] != verdict
 	s.extSupport[target] = verdict
@@ -751,10 +831,41 @@ func (s *Service) Narrating() bool {
 	return has && isSetup(cur) && setupState(cur) != stateHidden
 }
 
+// cachedStateUnsupported reports the LAST manifest verdict for state WITHOUT
+// touching the disk: the read-only, non-blocking half of stateUnsupported, for
+// callers that are not the narration worker. Absent key (supportUnknown, no
+// successful manifest read yet) reports false, the same no-positive-evidence
+// default stateUnsupported uses — downgrading a report on anything short of
+// positive evidence would claim the screen is clear when it is not.
+//
+// It deliberately does NOT re-read the manifest the way stateUnsupported
+// does: that read is documented as safe only on the single narration worker
+// goroutine (the `running` guard), and a status probe must never block behind
+// disk I/O on a degraded filesystem nor race the worker's verdict write. The
+// cached verdict is the one the last delivery actually resolved against,
+// which is exactly what "what is on the screen now" means.
+func (s *Service) cachedStateUnsupported(state string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.extSupport[state] == supportNo
+}
+
+// narrationDisabled reports the process-lifetime "this player has no
+// setupDisplay contract at all" latch (see narrationSupported). While it
+// holds, every setup push is skipped before it reaches the player, so the
+// retained intent in the controller describes a screen nobody painted.
+// supportUnknown is NOT disabled: no positive evidence yet, same default as
+// everywhere else in this file.
+func (s *Service) narrationDisabled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.support == supportNo
+}
+
 // CurrentNarrationState reports the narration state currently on the player
 // (the general sibling of mintpairing.Service.DisplayActive/OverlayStatus,
 // same overlay.Controller.Current() source): "", false when nothing from
-// this listener is current, else the state string — "claim_qr" among
+// this listener is on screen, else the state string — "claim_qr" among
 // others (see the state constants above) — and true. Every setupui overlay,
 // the claim QR included, is painted by a CDP evaluation, never a page
 // navigation, so the Chromium page URL never reflects any of them; the
@@ -766,12 +877,52 @@ func (s *Service) Narrating() bool {
 // QR" would have to grow a new method for the next state a caller needs,
 // when the controller already has one answer for "what is current" that
 // serves them all.
+//
+// It reports the RESOLVED DISPLAY state, not the raw intent Narrating()
+// returns — the one deliberate difference between the two, and the reason
+// this is not simply Narrating() plus a string. The retained intent must stay
+// neutral for Resync replay (see resolveExtensionState), so on a player whose
+// manifest predates a state the intent and the screen genuinely differ:
+//
+//   - the ap-recheck push (ShowConnectingOrHide, fallbackHideKey) delivers a
+//     HIDE, leaving artwork on screen while the intent still reads
+//     "connecting" — reported as nothing showing, not as an overlay;
+//   - a table fallback (connecting/setup_error -> join_failed) paints the
+//     FALLBACK state, so that is what is reported, not the intent;
+//   - an extension state with no fallback (scanning/finalizing/factory_reset)
+//     on a manifest that predates it is accepted with {ok:true} and renders
+//     NOTHING, so the screen is unchanged and there is no overlay to report;
+//   - a retained setup:hidden intent (ReplayHide's Kind, which Narrating()
+//     screens out by the same reasoning) is nothing showing, never an
+//     overlay whose state is literally "hidden";
+//   - narration disabled outright for the process means no setup overlay
+//     ever reached the screen at all.
+//
+// Narrating() keeps the intent reading on purpose: its callers decide whether
+// a destructive page operation would erase someone's narration, where the
+// conservative answer is the pushed intent. A status surface answering "what
+// is the viewer looking at" needs the opposite, so the resolution lives here.
+// See resolvedState for the one window in which the two can still disagree.
 func (s *Service) CurrentNarrationState() (string, bool) {
 	cur, has := s.ctrl.Current()
-	if !has || !isSetup(cur) {
+	if !has || !isSetup(cur) || s.narrationDisabled() {
 		return "", false
 	}
-	return setupState(cur), true
+	intent := setupState(cur)
+	hideMarked, marked := payloadOf(cur)[fallbackHideKey].(bool)
+	unsupported := s.cachedStateUnsupported(intent)
+	state := resolvedState(intent, marked, hideMarked, unsupported)
+	if state == stateHidden || state == "" {
+		return "", false
+	}
+	if state == intent && unsupported {
+		// No fallback existed for an unsupported state, so the send went out
+		// as-is and the player no-opped it. state != intent is always a
+		// REQUIRED fallback state (join_failed), which every gated manifest
+		// lists — so it never needs a second verdict read.
+		return "", false
+	}
+	return state, true
 }
 
 // Resync re-shows the current overlay. It is the "CDP became available"
@@ -1188,7 +1339,7 @@ func validateSetupDisplayManifest(manifest playerContractManifest) error {
 	for _, state := range contract.States {
 		states[state] = true
 	}
-	for _, required := range []string{stateSoftAPQR, stateJoining, stateJoinFailed, stateUpdating, stateClaimQR, stateReady, stateHidden} {
+	for _, required := range requiredStates {
 		if !states[required] {
 			return fmt.Errorf("contracts.setupDisplay.states missing %q", required)
 		}
