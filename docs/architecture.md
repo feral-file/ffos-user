@@ -144,7 +144,19 @@ feral-sys-monitord  --[sysmetrics]-----------> feral-controld
                     --[connectivity_change]--> feral-controld
                     --[connectivity_change]--> feral-watchdog
                     --[sysevent]-------------> feral-watchdog
+
+feral-controld      --[cdp_stuck]------------> feral-watchdog
 ```
+
+`cdp_stuck` (ffos-user#356) is report-only: `feral-controld`'s `cdp_stuck`
+fires when its own CDP client has failed to (re)dial Chromium's page target
+for a sustained period — a failure mode `feral-watchdog`'s `/json/version`
+polling cannot see on its own, since Chromium can keep answering
+`/json/version` while exposing zero or more than one devtools page target.
+`feral-controld` never acts on this itself; `feral-watchdog`'s
+`ChromiumMonitor` is still the only place that decides to restart
+`chromium-kiosk.service` or reboot — see invariant 12 below, added for this
+signal the same way invariant 1 already binds `feral-sys-monitord`.
 
 **RPC direction** (request/response):
 
@@ -152,7 +164,7 @@ feral-sys-monitord  --[sysmetrics]-----------> feral-controld
 feral-controld  --[GetConnectivityStatus]--> feral-sys-monitord
 ```
 
-The former controld→setupd signals (`show_pairing_qr_code`, `factory_reset`, `system_update`, `upload_logs`, `upload_logs_with_bundle`) and the `GetRelayerTopicID` RPC no longer cross a process boundary: those handlers now live inside `feral-controld` and are invoked directly. `com.feralfile.controld`'s `dbus` package now exports only the inbound `feral-sys-monitord` constants it consumes.
+The former controld→setupd signals (`show_pairing_qr_code`, `factory_reset`, `system_update`, `upload_logs`, `upload_logs_with_bundle`) and the `GetRelayerTopicID` RPC no longer cross a process boundary: those handlers now live inside `feral-controld` and are invoked directly. `com.feralfile.controld`'s `dbus` package exports the inbound `feral-sys-monitord` constants it consumes, plus (ffos-user#356) its own outbound `cdp_stuck` signal — the first thing it emits since the setupd merge.
 
 ### External transport: WebSocket relayer
 
@@ -297,3 +309,4 @@ individual v1 transport may be removed or repurposed in isolation.
 9. `feral-controld`'s startup brings the hub, mDNS, and provisioning up before the relayer/CDP init, and the relayer connect is never fatal. Do not reorder so that a relayer or CDP failure can abort setup.
 10. `feral-sys-monitord` exposes D-Bus RPC (`GetConnectivityStatus`, `GetSysMetrics`), relied on by `feral-controld`. Do not remove without a coordinated update to all callers.
 11. The unauthenticated `:1111` command API, `:1111/metrics`, and the system-wide `ip_unprivileged_port_start=80` sysctl are accepted, release-scoped surfaces whose end state is v2 screen-anchored pairing (#3471). Add LAN authorization at the hub's shared middleware chokepoint, not by diverging individual routes.
+12. `feral-controld` may REPORT a health condition to `feral-watchdog` over D-Bus (today: `cdp_stuck`, ffos-user#356), but must never itself call `systemctl restart`/`reboot` on Chromium's behalf or decide to. `feral-watchdog`'s `ChromiumMonitor` remains the sole owner of that decision, folding any such report into its existing restart/fallback-hold/reboot-cap ladder and suppression gates rather than acting on it directly.

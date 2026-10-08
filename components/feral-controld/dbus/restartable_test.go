@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/feral-file/godbus"
 	"github.com/stretchr/testify/assert"
@@ -23,6 +24,13 @@ type fakeRaw struct {
 	started  bool
 	stopped  bool
 	handlers []godbus.BusSignalHandler
+
+	// sendEntered/sendGate (ffos-user#356) let a test observe that Send has
+	// begun running and then hold it there under test control, to probe
+	// whether Restartable.Send excludes a concurrent Stop for its own full
+	// duration. Both nil in every test that does not need this.
+	sendEntered chan struct{}
+	sendGate    chan struct{}
 }
 
 func (f *fakeRaw) Start() error {
@@ -58,6 +66,21 @@ func (f *fakeRaw) Call(_ context.Context, _ string, _ godbus.Path, _ godbus.Inte
 		return nil, errors.New("not started")
 	}
 	return []any{true}, nil
+}
+
+func (f *fakeRaw) Send(_ godbus.DBusPayload) error {
+	if f.sendEntered != nil {
+		f.sendEntered <- struct{}{}
+	}
+	if f.sendGate != nil {
+		<-f.sendGate
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.started || f.stopped {
+		return errors.New("not started")
+	}
+	return nil
 }
 
 func (f *fakeRaw) OnBusSignal(h godbus.BusSignalHandler) {
@@ -227,4 +250,52 @@ func TestRestartableHandlerDelegation(t *testing.T) {
 	r.mu.Lock()
 	require.Empty(t, r.handlers, "removal must also drop the recorded copy")
 	r.mu.Unlock()
+}
+
+// TestRestartableSendExcludesConcurrentStop pins ffos-user#356's review
+// finding: Restartable.Send used to read the live client under the lock,
+// then release it before actually calling inner.Send — the same shape Call
+// still uses today, safe for Call only because the underlying godbus
+// client's Call has its own nil-connection guard, which its Send does not.
+// A Stop racing an in-flight Send could nil the underlying connection out
+// from under it, panicking on the real client instead of returning the
+// ordinary "not started" error. Send must now hold the Restartable lock for
+// its whole call, the same way Start/Stop already do, so the two can never
+// interleave at this layer regardless of what the underlying client does.
+func TestRestartableSendExcludesConcurrentStop(t *testing.T) {
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	f := &fakeRaw{sendEntered: entered, sendGate: gate}
+	r := NewRestartable(zap.NewNop(), func() DBus { return f })
+	require.NoError(t, r.Start())
+
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- r.Send(godbus.DBusPayload{})
+	}()
+	<-entered // Send is now blocked inside inner.Send, holding r.mu if the fix is in place.
+
+	stopDone := make(chan struct{})
+	go func() {
+		_ = r.Stop()
+		close(stopDone)
+	}()
+
+	select {
+	case <-stopDone:
+		t.Fatal("Stop completed while Send was still in flight — Send no longer excludes a concurrent Stop")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: Stop is blocked waiting for r.mu, which Send still holds.
+	}
+
+	close(gate) // let Send's inner call finish and release r.mu
+	require.NoError(t, <-sendDone, "expected Send to complete successfully before Stop ran")
+
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		t.Fatal("expected Stop to complete once Send released the lock")
+	}
+	_, stopped, _ := f.snapshot()
+	require.True(t, stopped, "expected Stop to have actually run")
 }

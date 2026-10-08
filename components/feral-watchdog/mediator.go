@@ -16,6 +16,14 @@ const (
 	DBUS_SYS_MONITORD_EVENT_SYSMETRICS godbus.Member = "sysmetrics"
 	DBUS_SYSTEM_EVENT                  godbus.Member = "sysevent"
 
+	// DBUS_CONTROLD_EVENT_CDP_STUCK (ffos-user#356) must stay byte-for-byte
+	// equal to dbus.EVENT_CDP_STUCK in components/feral-controld/dbus/dbus.go
+	// — feral-watchdog is a separate Go module and cannot import that
+	// package, so the two sides match purely on this string value (the
+	// same cross-module convention the sysmetrics/sysevent names above
+	// already follow).
+	DBUS_CONTROLD_EVENT_CDP_STUCK godbus.Member = "cdp_stuck"
+
 	GPU_HANGING_SIGNAL = "gpu_hanging"
 	GPU_RECOVER_SIGNAL = "gpu_recover"
 )
@@ -85,6 +93,7 @@ type Mediator struct {
 	memoryHandler       *MemoryHandler
 	gpuHandler          *GPUHandler
 	cpuHandler          *CPUHandler
+	chromiumMonitor     *ChromiumMonitor
 }
 
 func NewMediator(
@@ -93,14 +102,16 @@ func NewMediator(
 	ram *MemoryHandler,
 	gpu *GPUHandler,
 	cpu *CPUHandler,
+	chromium *ChromiumMonitor,
 	logger *zap.Logger) *Mediator {
 	return &Mediator{
-		dbus:          dbus,
-		logger:        logger,
-		diskHandler:   disk,
-		memoryHandler: ram,
-		gpuHandler:    gpu,
-		cpuHandler:    cpu,
+		dbus:            dbus,
+		logger:          logger,
+		diskHandler:     disk,
+		memoryHandler:   ram,
+		gpuHandler:      gpu,
+		cpuHandler:      cpu,
+		chromiumMonitor: chromium,
 	}
 }
 
@@ -166,6 +177,21 @@ func (m *Mediator) handleDBusSignal(
 
 		// Process metrics for system health monitoring
 		m.ProcessMetrics(ctx, &metrics)
+	case DBUS_CONTROLD_EVENT_CDP_STUCK:
+		if len(payload.Body) != 1 {
+			m.logger.Error("Invalid number of arguments", zap.Int("expected", 1), zap.Int("actual", len(payload.Body)))
+			return nil, nil
+		}
+
+		stuck, ok := payload.Body[0].(bool)
+		if !ok {
+			m.logger.Error("Invalid body type", zap.String("expected", "bool"), zap.String("actual", reflect.TypeOf(payload.Body[0]).String()))
+			return nil, nil
+		}
+
+		if m.chromiumMonitor != nil {
+			m.chromiumMonitor.SetCDPStuck(stuck)
+		}
 	}
 
 	return nil, nil
