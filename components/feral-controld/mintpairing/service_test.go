@@ -974,6 +974,132 @@ func TestDisplayActive_TracksLiveOverlayOwnership(t *testing.T) {
 	assert.False(t, s.DisplayActive(), "the overlay was released on close")
 }
 
+// TestOverlayStatus_ReportsPairingCodeChannelAndExpiry pins issue #381's
+// getDeviceStatus field: OverlayStatus is empty before any pairing starts,
+// reports the live pairing code with its channel ID and expiry once shown,
+// and goes back to empty once the session closes — the same ownership
+// transitions TestDisplayActive_TracksLiveOverlayOwnership pins for the bool
+// probe, now for the richer snapshot.
+func TestOverlayStatus_ReportsPairingCodeChannelAndExpiry(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	expiresAt := time.Now().Add(time.Minute).Truncate(time.Second)
+	ch := &fakeBrokerChannel{
+		channelID:   "ch_abc123",
+		pairingCode: "PAIR-123",
+		expiresAt:   expiresAt,
+		closed:      make(chan struct{}, 1),
+	}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{
+			Enabled:       true,
+			BrokerBaseURL: "https://broker.example",
+			PollInterval:  time.Millisecond,
+		},
+		&fakeBrokerStarter{channel: ch},
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	assert.Equal(t, OverlayStatus{}, s.OverlayStatus(), "nothing has started yet")
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-123", "")
+
+	got := s.OverlayStatus()
+	assert.True(t, got.Showing)
+	assert.Equal(t, "pairing_code", got.State)
+	assert.Equal(t, "ch_abc123", got.ChannelID)
+	assert.Equal(t, "PAIR-123", got.PairingCode)
+	assert.True(t, got.ExpiresAt.Equal(expiresAt), "expiresAt %v must equal the channel's %v", got.ExpiresAt, expiresAt)
+
+	_, err = s.HandleClosePairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertEventuallyDisplayObserved(t, cdpClient, "hidden", "", "")
+	assert.Equal(t, OverlayStatus{}, s.OverlayStatus(), "the overlay was released on close")
+}
+
+// TestOverlayStatus_OmitsPairingCodeOutsidePairingCodeState: once a browser
+// has joined and the overlay has moved to request_received, there is no code
+// left on screen to go stale — OverlayStatus must not keep reporting one.
+func TestOverlayStatus_OmitsPairingCodeOutsidePairingCodeState(t *testing.T) {
+	active := &activePairing{
+		channelID:   "ch_abc123",
+		pairingCode: "PAIR-123",
+		phase:       activePairingPhasePairingCode,
+		cancel:      func() {},
+	}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{},
+		nil,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	active.listener = &sessionListener{s: s, active: active}
+	s.active = active
+
+	require.NoError(t, s.showRequestReceived(context.Background(), active, "a browser"))
+	active.phase = activePairingPhasePendingApproval
+
+	got := s.OverlayStatus()
+	assert.True(t, got.Showing)
+	assert.Equal(t, "request_received", got.State)
+	assert.Equal(t, "ch_abc123", got.ChannelID, "the channel identity is still reported")
+	assert.Empty(t, got.PairingCode, "no code is on screen once a browser has joined")
+	assert.True(t, got.ExpiresAt.IsZero())
+}
+
+// TestOverlayStatus_OmitsPairingCodeInCreatingTokenState: creating_token is
+// the third named wire state (status.go's MintPairingOverlay.State doc), an
+// approval decision past request_received — same no-code-left-to-report rule
+// as request_received, and (round-4 pass-3 review) was the one of the three
+// states no test here exercised before this case.
+func TestOverlayStatus_OmitsPairingCodeInCreatingTokenState(t *testing.T) {
+	active := &activePairing{
+		channelID:   "ch_abc123",
+		pairingCode: "PAIR-123",
+		phase:       activePairingPhasePairingCode,
+		cancel:      func() {},
+	}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{},
+		nil,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	active.listener = &sessionListener{s: s, active: active}
+	s.active = active
+
+	require.NoError(t, s.showMint(context.Background(), active, overlay.Overlay{Kind: KindCreatingToken, Payload: "a browser"}, overlay.Owner, func() bool {
+		return s.isActive(active)
+	}))
+	active.phase = activePairingPhasePendingApproval
+
+	got := s.OverlayStatus()
+	assert.True(t, got.Showing)
+	assert.Equal(t, "creating_token", got.State)
+	assert.Equal(t, "ch_abc123", got.ChannelID, "the channel identity is still reported")
+	assert.Empty(t, got.PairingCode, "no code is on screen once minting has started")
+	assert.True(t, got.ExpiresAt.IsZero())
+}
+
 func TestHandleClosePairingSession_ReturnsNotStartedWithoutActivePairing(t *testing.T) {
 	s := newService(
 		Options{Enabled: true},

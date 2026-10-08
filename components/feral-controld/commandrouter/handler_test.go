@@ -416,6 +416,11 @@ type fakeMintPairingService struct {
 	joinResult     any
 	closeResult    any
 	approvalResult any
+
+	// overlayStatus is what OverlayStatus() returns; the zero value (Showing
+	// false) matches this fake's behavior before issue #381's direct-reply
+	// annotation needed it to be settable.
+	overlayStatus mintpairing.OverlayStatus
 }
 
 func (f *fakeMintPairingService) Start(context.Context) {}
@@ -447,6 +452,10 @@ func (f *fakeMintPairingService) HandleApprovalDecision(_ context.Context, args 
 }
 
 func (f *fakeMintPairingService) DisplayActive() bool { return false }
+
+func (f *fakeMintPairingService) OverlayStatus() mintpairing.OverlayStatus {
+	return f.overlayStatus
+}
 
 func (f *fakeMintPairingService) SetController(*overlay.Controller) {}
 

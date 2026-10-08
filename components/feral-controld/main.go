@@ -1227,6 +1227,15 @@ func initializeApp(
 			return string(st), ok
 		})
 	}
+	// player_status carries the browser-pairing mint overlay state (issue
+	// #381), unconditionally — unlike SignatureStatus above, it is not gated
+	// behind the signature-verification feature. Sourced from the mint
+	// pairing service's own OverlayStatus(), the same overlay.Controller
+	// read DisplayActive() already uses.
+	poller.SetMintPairingOverlaySource(func() *status.MintPairingOverlay {
+		s := mintPairing.OverlayStatus()
+		return status.BuildMintPairingOverlay(s.Showing, s.State, s.ChannelID, s.PairingCode, s.ExpiresAt)
+	})
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
