@@ -4611,6 +4611,101 @@ func TestHandleJoinPairingChannel_ByTokenRunsTheApprovalFlowWithoutPainting(t *t
 	assert.False(t, s.DisplayActive())
 }
 
+// TestHandleJoinPairingChannel_AsksFromTheAnnouncedRequest: a site that
+// announced its mint request at create gets the owner asked at join, without
+// the device polling for the encrypted copy — which the site still sends (same
+// message id) and which must not raise a second approval (play#17).
+func TestHandleJoinPairingChannel_AsksFromTheAnnouncedRequest(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	announced := minter.MintRequest{
+		ChannelID:                  "ch_site",
+		MessageID:                  "msg_site",
+		Origin:                     testSiteOrigin,
+		BrowserInfo:                minter.BrowserInfo{Name: "Art Blocks"},
+		SupportsPersistentSessions: true,
+	}
+	encryptedCopy := announced
+	encryptedCopy.Seq = 2
+	ch := &fakeBrokerChannel{
+		channelID:   "ch_site",
+		request:     &encryptedCopy,
+		successSent: make(chan struct{}, 1),
+	}
+	joined := joinedFor(ch, "ch_site")
+	joined.announcedRequest = &announced
+	joiner := &fakeBrokerJoiner{joined: joined}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newJoinTestService(t, joiner, nil, relayerClient, &fakeCDP{})
+
+	result, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{
+		"channelId":    "ch_site",
+		"pairingToken": "pt_secret",
+	})
+	require.NoError(t, err)
+	require.True(t, result.(joinPairingResponse).OK)
+
+	approval := <-relayerClient.sent
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
+	approvalMessage := approval.Message.(map[string]any)
+	assert.Equal(t, "msg_site", approvalMessage["requestMessageID"])
+	assert.Equal(t, true, approvalMessage["supportsPersistentSessions"])
+	approvalID := approvalMessage["approvalRequestID"].(string)
+
+	result, err = s.HandleApprovalDecision(context.Background(), validDecisionArgs(approvalID, "topic-1", "ch_site", "msg_site"))
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", result.(approvalResponse).Status)
+
+	outcome := <-relayerClient.sent
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+	select {
+	case <-ch.successSent:
+	case <-time.After(time.Second):
+		t.Fatal("expected the session to be delivered to the site")
+	}
+	assert.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.active == nil
+	}, time.Second, time.Millisecond)
+
+	ch.mu.Lock()
+	polls, successes := len(ch.pollAfterSeqs), ch.successCount
+	ch.mu.Unlock()
+	assert.Zero(t, polls, "the encrypted copy of an announced request must not be polled")
+	assert.Equal(t, 1, successes)
+	select {
+	case extra := <-relayerClient.sent:
+		t.Fatalf("unexpected relayer message after the outcome: %#v", extra)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// TestHandleJoinPairingChannel_AnnouncedApprovalRunsToTheJoinExpiry: the
+// announced path asks before any message lands, so its approval deadline is
+// the expiry the join reported — which the broker renews at join (play#19),
+// giving a late join a full idle TTL rather than the create-time remainder.
+func TestHandleJoinPairingChannel_AnnouncedApprovalRunsToTheJoinExpiry(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	brokerExpiry := time.Now().Add(4 * time.Minute).Truncate(time.Second)
+	announced := minter.MintRequest{ChannelID: "ch_site", MessageID: "msg_site", Origin: testSiteOrigin}
+	joined := joinedFor(&fakeBrokerChannel{channelID: "ch_site"}, "ch_site")
+	joined.expiresAt = brokerExpiry
+	joined.announcedRequest = &announced
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newJoinTestService(t, &fakeBrokerJoiner{joined: joined}, nil, relayerClient, &fakeCDP{})
+	s.opts.ApprovalTimeout = 10 * time.Minute
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"channelId": "ch_site", "pairingToken": "pt_secret"})
+	require.NoError(t, err)
+	approval := <-relayerClient.sent
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
+	assert.Equal(t, brokerExpiry.UTC().Format(time.RFC3339), approval.Message.(map[string]any)["expiresAt"])
+}
+
 func TestHandleJoinPairingChannel_ByShortCode(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
