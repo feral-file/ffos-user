@@ -2876,6 +2876,7 @@ func TestRefresher_PrepareSendFailure_RestoresSchedulerCache(t *testing.T) {
 }
 
 func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
+	retryStarted := make(chan struct{})
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -2893,6 +2894,11 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 	// the 5m ticker as if the pass succeeded.
 	mockClock.EXPECT().
 		SleepContext(gomock.Any(), refresher.PLAYER_STATUS_POLLING_INTERVAL).
+		DoAndReturn(func(ctx context.Context, _ time.Duration) error {
+			close(retryStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		}).
 		MinTimes(1)
 	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
 
@@ -2918,6 +2924,13 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 	case <-fakeSched.restored:
 	case <-time.After(2 * time.Second):
 		t.Fatal("player rejection did not restore the scheduler cache")
+	}
+	// Restore fires inside the refresh pass, before the retry sleep. Wait for
+	// both observations so teardown cannot verify the mock before its call.
+	select {
+	case <-retryStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("player rejection did not enter the startup retry wait")
 	}
 	r.Stop()
 
