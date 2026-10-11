@@ -327,34 +327,13 @@ type StatusSnapshot struct {
 	// dirSize skips .tmp files, so a capture in flight and any orphaned
 	// temporary (reclaimed only by Start's sweep) are absent from it.
 	DiskUsedBytes *int64 `json:"diskUsed,omitempty"`
-	// DiskLimitBytes is the cache's byte budget (Service.maxDiskBytes,
-	// i.e. offlineCache.maxDiskBytes or DefaultMaxDiskBytes) that
-	// DiskUsedBytes is measured against — the denominator a controller
-	// needs to render cache usage, and the reason items are evicted.
-	//
-	// It is the budget, NOT the threshold eviction fires at, and
-	// DiskUsedBytes is NOT bounded by it in either direction:
-	// reclaimDiskForCapture evicts down to maxDiskBytes minus a headroom
-	// margin before every capture, so a busy store swings between that
-	// reclaim target (currently seven eighths of the budget) and the
-	// ceiling itself, and controllers see evictions while usage still
-	// shows room; and a lowered maxDiskBytes on a populated
-	// device stays unreconciled until the next capture, since eviction runs
-	// only on that path. See
-	// docs/controld-inbound-controller-messages.md's "Cache size and
-	// eviction", which tells client authors to clamp the ratio and quotes
-	// the current margin as illustrative rather than contractual.
-	//
-	// Nil means NO ceiling, not a zero-sized one: maxDiskBytes <=0 is
-	// Service's "unlimited" (see the field), under which enforceDiskLimit
-	// and reclaimDiskForCapture return early and no ITEM is ever evicted
-	// (playlist bodies are still pruned by count — see
-	// PrunePlaylistRecords — which is why this says item).
-	// Serializing that as 0 would tell a controller the precise opposite —
-	// a cache permanently at 100% of its budget, with eviction imminent —
-	// so it is omitted and clients must render the absence as "no limit"
-	// rather than defaulting to DefaultMaxDiskBytes, which an operator's
-	// offlineCache.maxDiskBytes may have overridden.
+	// DiskLimitBytes is the effective cache budget in bytes: percentage of
+	// the cache filesystem, a positive configured absolute cap, and space
+	// available above the free-space reserve. It changes as other disk users
+	// grow. Eviction runs before/after captures and at least once per minute
+	// while idle. Clamp usage ratios: metadata and asynchronous eviction can
+	// temporarily leave usage above the budget. Nil retains the lower-level
+	// constructor's unlimited meaning; zero means no storage headroom.
 	DiskLimitBytes *int64 `json:"diskLimit,omitempty"`
 	// NextCursor is the source KEY (an opaque token on the wire) to pass
 	// back as StatusRequest.Cursor to fetch the next page. Empty means
@@ -624,6 +603,7 @@ type Service interface {
 }
 
 type captureJob struct {
+	automatic *atomic.Bool
 	// sourceKey is SourceKey(item.Source) — the queue/state identity,
 	// computed once at enqueue. item carries the raw source alongside for
 	// notifications and logs.
@@ -772,12 +752,19 @@ func (q *jobQueue) removeItems(keys map[string]bool) []captureJob {
 }
 
 type service struct {
-	store         Store
-	classifier    Classifier
-	capturer      Capturer
-	mediaCapturer MediaCapturer
-	json          wrapper.JSON
-	logger        *zap.Logger
+	storage        *storagePolicy
+	automatic      *playbackCache
+	onCacheChanged func()
+	// There is at most one automatically queued/in-flight capture. An explicit
+	// Download racing it upgrades that job to an offline snapshot.
+	automaticKey    string
+	automaticIntent *atomic.Bool
+	store           Store
+	classifier      Classifier
+	capturer        Capturer
+	mediaCapturer   MediaCapturer
+	json            wrapper.JSON
+	logger          *zap.Logger
 
 	captureWindowMs int
 	maxDiskBytes    int64 // <=0 means unlimited
@@ -1112,12 +1099,20 @@ func (s *service) run(ctx context.Context) {
 	// With no gate at all there is nothing to re-evaluate, so no ticker is
 	// created (a nil channel in the select below simply never fires).
 	var retryTick <-chan time.Time
-	if s.admission != nil {
+	if s.admission != nil || s.automatic != nil || s.storage != nil {
 		ticker := s.clock.NewTicker(s.retryInterval)
 		defer ticker.Stop()
 		retryTick = ticker.C()
 	}
+	nextStorageCheck := time.Time{}
 	for {
+		if s.storage != nil && !s.clock.Now().Before(nextStorageCheck) {
+			s.enforceDiskLimit("", "")
+			nextStorageCheck = s.clock.Now().Add(time.Minute)
+		}
+		if s.automatic != nil && ctx.Err() == nil && s.queue.len() == 0 {
+			s.automatic.prepare(ctx)
+		}
 		j, ok := s.dequeueAdmitted()
 		if !ok {
 			select {
@@ -2118,12 +2113,19 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 // not to be the authoritative guard. Phase 2's check, taken under the
 // same lock as the actual push, is what actually enforces the bound.
 func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class MediaClass) (enqueueOutcome, error) {
+	return s.enqueueCapture(item, epoch, class, false)
+}
+
+func (s *service) enqueueCapture(item dp1playlist.PlaylistItem, epoch uint64, class MediaClass, automatic bool) (enqueueOutcome, error) {
 	if !s.started.Load() {
 		return enqueueClearWon, ErrServiceNotStarted
 	}
 	key := SourceKey(item.Source)
 	s.mu.RLock()
 	st, tracked := s.state[key]
+	if !automatic && s.automaticKey == key && s.automaticIntent != nil && (st == StateQueued || st == StateDownloading) {
+		s.automaticIntent.Store(false)
+	}
 	queueFull := s.queue.len() >= s.maxQueueLen
 	cleared := s.downloadEpoch[key] != epoch
 	s.mu.RUnlock()
@@ -2160,6 +2162,9 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 		return enqueueClearWon, ErrServiceNotStarted
 	}
 	if st, ok := s.state[key]; ok && (st == StateQueued || st == StateDownloading) {
+		if !automatic && s.automaticKey == key && s.automaticIntent != nil {
+			s.automaticIntent.Store(false)
+		}
 		s.mu.Unlock()
 		return enqueueAlreadyQueued, nil
 	}
@@ -2181,7 +2186,13 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 	s.state[key] = StateQueued
 	s.sourceByKey[key] = item.Source
 	queuedNotified := make(chan struct{})
-	s.queue.push(captureJob{sourceKey: key, item: item, class: class, queuedNotified: queuedNotified})
+	var intent *atomic.Bool
+	if automatic {
+		intent = &atomic.Bool{}
+		intent.Store(true)
+		s.automaticKey, s.automaticIntent = key, intent
+	}
+	s.queue.push(captureJob{sourceKey: key, item: item, class: class, automatic: intent, queuedNotified: queuedNotified})
 	s.mu.Unlock()
 
 	// Notified only AFTER the commit above, never before it. An earlier
@@ -2276,17 +2287,66 @@ func (s *service) process(ctx context.Context, j captureJob) {
 	// captureMu's doc on why the whole blob-writing window must be
 	// fenced, not only the save.
 	s.captureMu.Lock()
+	if j.automatic != nil {
+		ctx = context.WithValue(ctx, automaticCaptureKey{}, j.automatic)
+	}
+	startedAutomatic := isAutomaticCapture(ctx)
 	rec, err := s.captureForClass(ctx, j)
+	if err != nil && startedAutomatic && !isAutomaticCapture(ctx) {
+		// A Download that joined a freshness-rejected automatic attempt still
+		// gets the explicit snapshot it requested.
+		rec, err = s.captureForClass(ctx, j)
+	}
+	// Close the explicit-download upgrade window atomically with publishing
+	// the terminal state. A later Download must enqueue a new snapshot instead
+	// of joining an automatic capture that has already persisted its TTL.
+	if j.automatic != nil {
+		s.mu.Lock()
+	}
+	if err == nil && j.automatic != nil && !j.automatic.Load() && rec.Automatic {
+		rec.Automatic = false
+		for i := range rec.Resources {
+			rec.Resources[i].FreshUntil = time.Time{}
+		}
+		err = s.store.SaveItem(rec)
+	}
+	terminal := StateFailed
+	if err == nil {
+		terminal = stateFromCoverage(rec.Coverage)
+	}
+	if errors.Is(err, errAutomaticUncacheable) {
+		terminal = StateNotCached
+	}
+	if j.automatic != nil {
+		s.state[j.sourceKey] = terminal
+		s.automaticIntent = nil
+		s.mu.Unlock()
+	}
 	s.captureMu.Unlock()
 	if err != nil {
+		if errors.Is(err, errAutomaticUncacheable) {
+			s.notifyObserver(j.item.Source, StateNotCached, Coverage{})
+			return
+		}
 		s.logger.Warn("offline cache: capture failed",
 			zap.String("source", truncateSourceForLog(j.item.Source)), zap.Error(err))
-		s.notify(j.item.Source, StateFailed, Coverage{Reason: err.Error()})
+		if j.automatic != nil {
+			s.notifyObserver(j.item.Source, terminal, Coverage{Reason: err.Error()})
+		} else {
+			s.notify(j.item.Source, terminal, Coverage{Reason: err.Error()})
+		}
 		return
 	}
 
-	s.notify(j.item.Source, stateFromCoverage(rec.Coverage), rec.Coverage)
+	if j.automatic != nil {
+		s.notifyObserver(j.item.Source, terminal, rec.Coverage)
+	} else {
+		s.notify(j.item.Source, terminal, rec.Coverage)
+	}
 	s.enforceDiskLimit(j.sourceKey, j.item.Source)
+	if s.onCacheChanged != nil {
+		s.onCacheChanged()
+	}
 }
 
 // captureForClass routes a queued job to the capture pipeline matching
@@ -2330,19 +2390,20 @@ func (s *service) captureForClass(ctx context.Context, j captureJob) (*ItemRecor
 // alone in that case would mean maxDiskBytes is not actually a hard
 // ceiling — exactly the "flip offlineCache.enabled on and it can still
 // fill the disk" failure mode this budget exists to prevent (see
-// OptionsFromConfig's DefaultMaxDiskBytes doc). So once
+// storagePolicy). So once
 // oldestEvictableItem has nothing else left to offer, evictDownTo's
 // last-resort mode deliberately evicts the just-captured item too.
 func (s *service) enforceDiskLimit(justCapturedKey, justCapturedSource string) {
-	if s.maxDiskBytes <= 0 {
+	limit, err := s.diskBudget()
+	if err != nil || (s.storage == nil && limit <= 0) {
 		return
 	}
-	s.evictDownTo(s.maxDiskBytes, justCapturedKey, justCapturedSource, true)
+	s.evictDownTo(limit, justCapturedKey, justCapturedSource, true)
 }
 
 // captureReclaimHeadroomDivisor sizes the free-space floor
 // reclaimDiskForCapture guarantees before each capture:
-// maxDiskBytes/8, i.e. 1.25 GiB at the DefaultMaxDiskBytes of 10 GiB.
+// one eighth of the effective cache budget.
 // The value is a trade-off between two failure directions: a floor too
 // small starves large multi-resource artworks of budget on a full
 // store (they capture partial and need further rollover passes to
@@ -2377,19 +2438,20 @@ const captureReclaimHeadroomDivisor = 8
 // room is actually left, exactly as it would have before this reclaim
 // existed.
 func (s *service) reclaimDiskForCapture(sourceKey string) {
-	if s.maxDiskBytes <= 0 {
+	limit, err := s.diskBudget()
+	if err != nil || (s.storage == nil && limit <= 0) {
 		return
 	}
 	// The protected item's source is irrelevant here: with the
 	// last-resort mode off, evictDownTo can never evict (and so never
 	// needs to announce) the protected item itself.
-	s.evictDownTo(s.maxDiskBytes-s.maxDiskBytes/captureReclaimHeadroomDivisor, sourceKey, "", false)
+	s.evictDownTo(limit-limit/captureReclaimHeadroomDivisor, sourceKey, "", false)
 }
 
 // evictDownTo is the shared eviction loop behind enforceDiskLimit
 // (post-capture, target = the hard ceiling itself) and
 // reclaimDiskForCapture (pre-capture, target = ceiling minus a
-// headroom floor). It evicts the oldest-captured item (by CapturedAt,
+// headroom floor). It evicts the least recently played item (falling back to CapturedAt,
 // via oldestEvictableItem), preferring anything OTHER than
 // protectedKey, and re-runs GC until usage is back under targetBytes or
 // nothing more can be evicted. Blobs are deduped, so an item's disk
@@ -2467,8 +2529,9 @@ func (s *service) gc() (int, int64, error) {
 	return s.store.GC()
 }
 
-// oldestEvictableItem picks the eviction victim: the oldest-captured
-// record other than excludeKey. It returns both the victim's key (for
+// oldestEvictableItem picks the eviction victim: the least recently played
+// record (capture time until played), other than excludeKey.
+// It returns both the victim's key (for
 // the store delete) and its source (for the eviction notification —
 // already in hand here from the record read, where the caller could not
 // recover it after the delete).
@@ -2479,6 +2542,10 @@ func (s *service) oldestEvictableItem(excludeKey string) (key, source string, ok
 	}
 
 	var oldestAt time.Time
+	currentKey := ""
+	if s.automatic != nil {
+		currentKey = s.automatic.currentKey()
+	}
 	for _, candidate := range keys {
 		if candidate == excludeKey {
 			continue
@@ -2487,8 +2554,12 @@ func (s *service) oldestEvictableItem(excludeKey string) (key, source string, ok
 		if err != nil {
 			continue
 		}
-		if !ok || rec.CapturedAt.Before(oldestAt) {
-			key, source, oldestAt, ok = candidate, rec.Item.Source, rec.CapturedAt, true
+		usedAt := rec.LastPlayedAt
+		if usedAt.IsZero() {
+			usedAt = rec.CapturedAt
+		}
+		if !ok || (key == currentKey && candidate != currentKey) || ((key == currentKey) == (candidate == currentKey) && usedAt.Before(oldestAt)) {
+			key, source, oldestAt, ok = candidate, rec.Item.Source, usedAt, true
 		}
 	}
 	return key, source, ok
@@ -3023,10 +3094,9 @@ func (s *service) Status(req StatusRequest) (StatusSnapshot, error) {
 		// Omitted rather than reported as 0 when unlimited — the two
 		// cases are opposites to a client, not degrees of the same
 		// thing. See DiskLimitBytes' doc.
-		if s.maxDiskBytes > 0 {
+		if diskLimit, limitErr := s.diskBudget(); limitErr == nil && (s.storage != nil || diskLimit > 0) {
 			// Named diskLimit rather than limit: the enclosing scope's
 			// limit is the page size, an unrelated quantity.
-			diskLimit := s.maxDiskBytes
 			snapshot.DiskLimitBytes = &diskLimit
 		}
 	}
@@ -3149,6 +3219,12 @@ func (s *service) itemStatus(key, sourceHint string, withBytes bool) (ItemStatus
 	// re-download attempt over an existing ready/partial capture should
 	// still report that earlier successful capture, not "failed".
 	state := stateFromCoverage(rec.Coverage)
+	if rec.Automatic && !rec.freshForPlayback(s.clock.Now()) {
+		state = StateNotCached
+		if trackedState == StateQueued || trackedState == StateDownloading {
+			state = trackedState
+		}
+	}
 	status := ItemStatus{
 		Source:           rec.Item.Source,
 		State:            state,
@@ -3241,6 +3317,9 @@ func (s *service) notifyEvicted(source string, coverage Coverage) {
 	s.sourceByKey[key] = source
 	s.mu.Unlock()
 	s.notifyObserver(source, StateNotCached, coverage)
+	if s.onCacheChanged != nil {
+		s.onCacheChanged()
+	}
 }
 
 func (s *service) notify(source string, state ItemState, coverage Coverage) {

@@ -21,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/cdphealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
@@ -1107,6 +1108,7 @@ func initializeApp(
 	var offlineCacheStaticServer offlinecache.StaticServer
 	var offlineCacheNotifier *offlinecache.Notifier
 	var offlineCacheSysMetricsSink func(raw []byte)
+	var offlineCacheChanged func(func())
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
 		ocRuntime := offlinecache.Bootstrap(
@@ -1119,6 +1121,16 @@ func initializeApp(
 		offlineCacheStaticServer = ocRuntime.StaticServer
 		offlineCacheNotifier = ocRuntime.Notifier
 		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
+		offlineCacheChanged = ocRuntime.SetCacheChanged
+		if ocRuntime.ObservePlayback != nil {
+			status.SetPlaybackObserver(poller, func(st *status.PlayerStatus) {
+				if st == nil || (st.Command != string(commands.CMD_DISPLAY_PLAYLIST) && st.Command != string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST)) || st.Items == nil || st.Index == nil {
+					ocRuntime.ObservePlayback(nil, 0, false)
+					return
+				}
+				ocRuntime.ObservePlayback(*st.Items, *st.Index, st.RenderStatus != nil && *st.RenderStatus == 2)
+			})
+		}
 	}
 
 	// Kiosk User-Agent rewrite (#296). Built independently of the offline
@@ -1243,6 +1255,9 @@ func initializeApp(
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
+	if offlineCacheChanged != nil {
+		offlineCacheChanged(playlistRefresher.ForceRefresh)
+	}
 	playlist_refresher.SetContentPolicy(playlistRefresher, policyStore)
 	commandrouter.SetPolicyRefresher(rawCmdHandler, playlistRefresher, logger)
 	// The owner's content policy falls with the claim on a factory reset, for

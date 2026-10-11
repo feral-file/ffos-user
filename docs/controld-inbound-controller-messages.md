@@ -2615,54 +2615,33 @@ still present, so a `0` is not distinguishable on the wire from a genuinely
 empty cache. Do not present a lone `0` as authoritative "cache is empty"
 if other fields — a nonzero `totals.ready`, say — contradict it.
 
-**Cache size and eviction.** `diskLimit` is the cache's byte budget: the device's
-`offlineCache.maxDiskBytes`, or 10 GiB when the operator left it unset.
-It is why cached items are evicted at all. Both it and `diskUsed` are in
-**bytes** — note the `deviceMetrics` command reports device filesystem
-figures in KiB, so the two cannot be mixed without conversion.
+**Cache size and eviction.** `diskLimit` is the effective artwork-cache byte
+budget: 50% of its filesystem by default (`offlineCache.maxDiskPercent`), capped
+by a positive `offlineCache.maxDiskBytes`, and reduced when needed to preserve
+the larger of 5 GiB (`minFreeDiskBytes`) or 10% of the filesystem as free space.
+These are ceilings, not reserved/preallocated files. `diskUsed` and `diskLimit`
+are bytes; `deviceMetrics` filesystem figures use KiB.
 
-**The ratio is not bounded to 0..100%, in either direction.** Render
-`diskUsed / diskLimit` as a proportion by all means, but clamp it, and do
-not label any fixed percentage "full":
+Eviction prefers least recently played artwork, using capture time until an item
+has played. The current artwork is preferred to survive, but no item is exempt
+from the ceiling. Reclaim runs before/after captures, on startup and at least
+once per minute while idle. Downloads also check available space while streaming.
+The pre-capture margin is currently one eighth of the effective budget; this is
+an implementation detail that clients must not hardcode.
 
-- *It usually rests below the budget.* The device reclaims room **ahead of**
-  each download, evicting oldest-captured items until a headroom margin is
-  free, so a busy cache typically settles below `diskLimit` and climbs back
-  toward it as each download lands. A gauge that only reads "full at
-  `diskLimit`" will rarely look full. Items are therefore evicted — and
-  eviction notifications sent — while `diskUsed` still shows room left.
-- *It can also exceed the budget.* Eviction runs only on the download path,
-  so lowering `offlineCache.maxDiskBytes` on a device that already holds a
-  larger cache leaves `diskUsed` above `diskLimit` until the next download
-  runs. Playlist metadata is also counted in `diskUsed` but bounded by
-  count rather than bytes, and no eviction can reclaim it.
+Clamp `diskUsed / diskLimit`: metadata and asynchronous enforcement can leave
+usage temporarily above the limit. A zero limit means no storage headroom.
+An absent first-page `diskLimit` means unlimited (only lower-level constructors
+support this); absence on later pages means carry forward the first page's value.
+Do not substitute a default budget. Use "removed to make room" for eviction copy.
 
-For user-facing copy: "removed to make room for newer downloads" is honest
-at any fill level; "evicted because the cache is full" is not.
-
-The current headroom margin is one eighth of the budget (a 10 GiB budget
-starts reclaiming past ~8.75 GiB). That figure is **illustrative, not
-contractual** — it is a device-side tuning constant that may change
-without a contract revision, so do not hardcode it or derive a threshold
-from it.
-
-`diskLimit` is **not** bounded by the device's actual free disk space, and
-is a different quantity from the device filesystem usage `deviceMetrics`
-reports. It is a policy budget, not reserved space: on a device with less
-free space than the budget, downloads can start failing while `diskUsed`
-is still well under `diskLimit`. A client showing both device storage and
-cache usage must present them as two separate quantities, never as parts
-of one total.
-
-**On a first-page response, an absent `diskLimit` means there is no
-ceiling** — the cache is unlimited and no *item* is ever evicted (playlist
-metadata is still pruned by count). Do not confuse this with its absence
-on a continuation page, which means only "carry forward what the first
-page reported". No supported configuration produces the unlimited case
-today (`offlineCache.maxDiskBytes <= 0` means "use the 10 GiB default"),
-but handle it anyway: render it as "no limit", never as `0`, and never by
-substituting the 10 GiB default, which an operator may have overridden.
-`diskUsed` is still reported.
+Automatic caching is enabled with the offline-cache feature unless
+`automaticPlaybackDisabled` is true. It warms the actual playing item list,
+requires explicit HTTP freshness, and serves expired/missing resources from the
+network. Software, streams, ambiguous types and redirect-followed responses stay
+on their normal live path. Explicit downloads retain snapshot semantics and
+playlist-URL offline recovery. Automatic warming alone does not persist a full
+playlist for offline recovery. See [automatic playback cache](automatic-playback-cache.md).
 
 To keep a live gauge current, re-poll with `totalsOnly: true` — the
 `offline_cache_status` notifications below carry per-item state only, never

@@ -8,6 +8,7 @@ import (
 	go_url "net/url"
 	"slices"
 	"strings"
+	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
@@ -119,11 +120,15 @@ func (c *mediaCapturer) Capture(ctx context.Context, item dp1playlist.PlaylistIt
 	}
 
 	rec := &ItemRecord{
+		Automatic:  isAutomaticCapture(ctx),
 		Item:       item,
 		Entry:      item.Source,
 		Resources:  []Resource{resource},
 		Coverage:   coverage,
 		CapturedAt: c.clock.Now().UTC(),
+	}
+	if !rec.Automatic {
+		rec.Resources[0].FreshUntil = time.Time{}
 	}
 	if err := c.store.SaveItem(rec); err != nil {
 		return nil, fmt.Errorf("offline cache: save item %s: %w", item.Source, err)
@@ -271,6 +276,21 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 	if resp.StatusCode < go_http.StatusOK || resp.StatusCode >= go_http.StatusMultipleChoices {
 		return Resource{}, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
+	var freshUntil time.Time
+	if isAutomaticCapture(ctx) {
+		freshUntil = automaticFreshUntil(resp.Header, c.clock.Now())
+		// Only the final response's headers survive the HTTP client's redirect
+		// chain. A mutable redirect can point to an immutable file; caching it
+		// under the original URL would freeze that redirect's future changes.
+		if resp.Request != nil && resp.Request.URL.String() != req.URL.String() {
+			return Resource{}, errAutomaticUncacheable
+		}
+		// HEAD classification is only a hint. A redirect or changing origin
+		// can return software/error content to the GET instead.
+		if resp.StatusCode != go_http.StatusOK || freshUntil.IsZero() || classifyContentType(strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))) != ClassMedia {
+			return Resource{}, errAutomaticUncacheable
+		}
+	}
 
 	// This path has no browser to sniff for it, so where the origin
 	// declared no Content-Type it must produce its own fallback or
@@ -300,9 +320,10 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 	}
 
 	return Resource{
-		URL:    sourceURL,
-		Status: go_http.StatusOK,
-		SHA256: hash,
+		FreshUntil: freshUntil,
+		URL:        sourceURL,
+		Status:     go_http.StatusOK,
+		SHA256:     hash,
 		// resp.Header.Get, not the raw resolved Content-Type of some
 		// intermediate hop: Go's http.Client already reports the FINAL
 		// response's headers here regardless of how many redirects were
