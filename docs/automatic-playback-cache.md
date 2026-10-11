@@ -39,8 +39,11 @@ filesystem free. Recheck space while streaming; a cache failure must leave live
 playback available. These are ceilings, not preallocated files.
 
 Cache current and upcoming items from the player's actual active item list,
-with bounded work and backoff. Warming may reclaim least recently played items
-outside the active playlist, but never its upcoming cached works. Entries
+with bounded work and backoff. Discard expired automatic records first. Warming
+may reclaim least recently played automatic items outside the active playlist,
+but preserves explicit offline snapshots and fresh upcoming works. Hard storage
+ceilings may reclaim either kind when necessary to keep the filesystem reserve.
+Expired records do not receive playback-recency updates. Usable entries
 evicted under disk pressure are not downloaded again in that same observed
 playlist. Refused and oversized sources stay suppressed until a different
 playlist is observed; transient failures keep bounded retries. Persist playback
@@ -50,7 +53,9 @@ failures or reconnects. Existing explicit downloads retain their offline
 snapshot semantics. Deferred software downloads do not block admissible media.
 
 Speculative attempts do not emit queued/downloading/failure notifications or
-leave failed entries in whole-store status. Successful captures publish ready;
+leave failed entries in whole-store status. Eviction removes records from that
+listing; explicit source queries and eviction notifications still say not_cached.
+Successful captures publish their cached state;
 an explicit Download joining an automatic attempt retains manual semantics.
 
 Automatic entries require an explicit HTTP freshness lifetime. Honor no-store,

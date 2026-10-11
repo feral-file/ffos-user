@@ -47,6 +47,18 @@ func (p *playbackCache) protectedKeys() map[string]bool {
 	return keys
 }
 
+// Expiry discards unusable bytes, not a working-set eviction. Keep the
+// source eligible for a fresh capture after backoff, unless policy refused it.
+func (p *playbackCache) expiredEvicted(source string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := SourceKey(source)
+	if attempt, ok := p.attempts[key]; ok {
+		attempt.cached = false
+		p.attempts[key] = attempt
+	}
+}
+
 func (p *playbackCache) completed(source string, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -132,7 +144,12 @@ func (p *playbackCache) prepare(ctx context.Context) {
 	p.mu.Unlock()
 	now := p.s.clock.Now()
 	if touch {
-		if err := p.s.store.TouchItem(SourceKey(current), now); err != nil && !errors.Is(err, ErrItemNotFound) {
+		// An expired automatic entry is not what rendered; the network was.
+		rec, err := p.s.store.LoadItem(SourceKey(current))
+		if err == nil && rec.freshForPlayback(now) {
+			err = p.s.store.TouchItem(SourceKey(current), now)
+		}
+		if err != nil && !errors.Is(err, ErrItemNotFound) {
 			p.s.logger.Warn("automatic cache: recording playback failed", zap.Error(err))
 		}
 	}

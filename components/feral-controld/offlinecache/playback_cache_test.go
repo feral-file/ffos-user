@@ -239,6 +239,67 @@ func TestPlaybackCache_ExpiredResidentEntryCanRefresh(t *testing.T) {
 	rec, err = s.store.LoadItem(SourceKey(origin.URL))
 	require.NoError(t, err)
 	require.True(t, rec.freshForPlayback(time.Now()))
+	rec.Resources[0].FreshUntil = time.Now().Add(-time.Minute)
+	require.NoError(t, s.store.SaveItem(rec))
+	s.evictDownTo(0, "", "", false, nil)
+	expirePlaybackAttempts(s)
+	playbackPass(s)
+	require.Equal(t, int32(3), requests.Load(), "expiry reclamation must permit a later fresh capture")
+}
+
+func TestEviction_ExpiredAutomaticFirstAndNoGhostStatus(t *testing.T) {
+	store := playbackStore(t)
+	manual := "https://example.com/offline.png"
+	stale := "https://example.com/expired.png"
+	old := time.Now().Add(-time.Hour)
+	for i, source := range []string{manual, stale} {
+		hash, err := store.WriteBlob(strings.NewReader(source), 0)
+		require.NoError(t, err)
+		rec := &ItemRecord{Item: dp1playlist.PlaylistItem{Source: source}, CapturedAt: old.Add(time.Duration(i) * time.Minute), LastPlayedAt: old, Coverage: Coverage{Complete: true}, Resources: []Resource{{URL: source, SHA256: hash}}}
+		if source == stale {
+			rec.Automatic = true
+			rec.Resources[0].FreshUntil = old
+		}
+		require.NoError(t, store.SaveItem(rec))
+	}
+	s := playbackService(t, store, playbackClassifier(func(context.Context, string) (MediaClass, error) {
+		t.Fatal("refused expired item must remain live")
+		return ClassMedia, nil
+	}))
+	s.started.Store(true)
+	key := SourceKey(stale)
+	s.state[key], s.sourceByKey[key] = StateReady, stale
+	s.automatic.observe([]dp1playlist.PlaylistItem{{Source: stale}}, 0, true)
+	s.automatic.attempts[key] = automaticAttempt{cached: true, blocked: true}
+	s.automatic.prepare(context.Background())
+	rec, err := store.LoadItem(key)
+	require.NoError(t, err)
+	require.True(t, rec.LastPlayedAt.Equal(old), "network playback must not freshen an unusable cache record's recency")
+	_, source, expired, ok := s.oldestEvictableItem("", nil)
+	require.True(t, ok)
+	require.True(t, expired)
+	require.Equal(t, stale, source)
+	used, err := store.DiskUsage()
+	require.NoError(t, err)
+	// Even an active expired source is reclaimable; the explicit snapshot is
+	// protected from speculative reclaim regardless of its older capture date.
+	s.evictDownTo(used-1, key, stale, false, s.automatic.protectedKeys())
+	require.NotContains(t, s.state, key)
+	require.NotContains(t, s.sourceByKey, key)
+	st, err := s.Status(StatusRequest{})
+	require.NoError(t, err)
+	require.Len(t, st.Items, 1)
+	require.Equal(t, manual, st.Items[0].Source)
+	st, err = s.Status(StatusRequest{Sources: []string{stale}})
+	require.NoError(t, err)
+	require.Equal(t, StateNotCached, st.Items[0].State)
+	_, _, _, ok = s.oldestEvictableItem("", map[string]bool{})
+	require.False(t, ok, "speculative warming cannot reclaim an explicit offline snapshot")
+	_, _, _, ok = s.oldestEvictableItem("", nil)
+	require.True(t, ok, "hard-ceiling enforcement can still reclaim space")
+	// An automatic failure after reclaim cannot resurrect a prior ready state.
+	s.restoreAutomaticTracking(captureJob{sourceKey: key, previouslyTracked: true, previousState: StateReady, previousSource: stale})
+	require.NotContains(t, s.state, key)
 }
 
 func (deferSoftwareAdmission) Admit(class MediaClass) AdmissionDecision {
@@ -321,7 +382,7 @@ func TestEviction_UsesPersistedLastPlayed(t *testing.T) {
 	}
 	require.NoError(t, store.TouchItem(SourceKey("https://example.com/a"), time.Now()))
 	s := playbackService(t, store, nil)
-	_, victim, ok := s.oldestEvictableItem("", nil)
+	_, victim, _, ok := s.oldestEvictableItem("", nil)
 	require.True(t, ok)
 	require.Equal(t, "https://example.com/b", victim)
 }

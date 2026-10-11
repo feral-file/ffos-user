@@ -2230,10 +2230,11 @@ func (s *service) automaticPending() bool {
 	return s.automaticIntent != nil && (st == StateQueued || st == StateDownloading)
 }
 
-// Caller holds s.mu. A failed optimization must not create durable-looking
-// download state, or erase a preceding explicit download's failure.
+// Caller holds s.mu. Failed optimizations preserve a preceding explicit
+// failure. Successful snapshots are reported from disk, which may have been
+// reclaimed during this attempt; restoring their old ready state would lie.
 func (s *service) restoreAutomaticTracking(j captureJob) {
-	if j.previouslyTracked {
+	if j.previouslyTracked && j.previousState == StateFailed {
 		s.state[j.sourceKey], s.sourceByKey[j.sourceKey] = j.previousState, j.previousSource
 	} else {
 		delete(s.state, j.sourceKey)
@@ -2544,7 +2545,7 @@ func (s *service) evictDownTo(targetBytes int64, protectedKey, protectedSource s
 			return
 		}
 
-		victimKey, victimSource, ok := s.oldestEvictableItem(protectedKey, excluded)
+		victimKey, victimSource, expired, ok := s.oldestEvictableItem(protectedKey, excluded)
 		reason := ""
 		if !ok {
 			if !evictProtectedAsLastResort {
@@ -2566,6 +2567,12 @@ func (s *service) evictDownTo(targetBytes int64, protectedKey, protectedSource s
 			s.logger.Warn("offline cache: evict item failed", zap.String("source", truncateSourceForLog(victimSource)), zap.Error(err))
 			return
 		}
+		if victimKey == protectedKey {
+			protectedKey = ""
+		}
+		if expired && s.automatic != nil {
+			s.automatic.expiredEvicted(victimSource)
+		}
 		s.notifyEvicted(victimSource, Coverage{Reason: reason})
 
 		if _, _, err := s.gc(); err != nil {
@@ -2585,16 +2592,19 @@ func (s *service) gc() (int, int64, error) {
 	return s.store.GC()
 }
 
-// oldestEvictableItem picks the eviction victim: the least recently played
-// record (capture time until played), other than excludeKey.
+// oldestEvictableItem ranks unusable automatic records first, then playback
+// recency (capture time until played). A non-nil warmingSet denotes speculative
+// reclaim: retain explicit snapshots and fresh members of the active playlist.
+// Manual reclaim and hard-ceiling enforcement pass nil and may evict either
+// kind. Expired automatic bytes have no protection, even for the current item.
 // It returns both the victim's key (for
 // the store delete) and its source (for the eviction notification —
 // already in hand here from the record read, where the caller could not
 // recover it after the delete).
-func (s *service) oldestEvictableItem(excludeKey string, excluded map[string]bool) (key, source string, ok bool) {
+func (s *service) oldestEvictableItem(excludeKey string, warmingSet map[string]bool) (key, source string, expired, ok bool) {
 	keys, err := s.store.ListItemKeys()
 	if err != nil {
-		return "", "", false
+		return "", "", false, false
 	}
 
 	var oldestAt time.Time
@@ -2603,22 +2613,27 @@ func (s *service) oldestEvictableItem(excludeKey string, excluded map[string]boo
 		currentKey = s.automatic.currentKey()
 	}
 	for _, candidate := range keys {
-		if candidate == excludeKey || excluded[candidate] {
-			continue
-		}
 		rec, err := s.store.LoadItem(candidate)
 		if err != nil {
+			continue
+		}
+		candidateExpired := rec.Automatic && !rec.freshForPlayback(s.clock.Now())
+		if warmingSet != nil && !rec.Automatic {
+			continue
+		}
+		if !candidateExpired && (candidate == excludeKey || warmingSet[candidate]) {
 			continue
 		}
 		usedAt := rec.LastPlayedAt
 		if usedAt.IsZero() {
 			usedAt = rec.CapturedAt
 		}
-		if !ok || (key == currentKey && candidate != currentKey) || ((key == currentKey) == (candidate == currentKey) && usedAt.Before(oldestAt)) {
-			key, source, oldestAt, ok = candidate, rec.Item.Source, usedAt, true
+		preferByRecency := (key == currentKey && candidate != currentKey) || ((key == currentKey) == (candidate == currentKey) && usedAt.Before(oldestAt))
+		if !ok || (candidateExpired && !expired) || (candidateExpired == expired && preferByRecency) {
+			key, source, oldestAt, expired, ok = candidate, rec.Item.Source, usedAt, candidateExpired, true
 		}
 	}
-	return key, source, ok
+	return key, source, expired, ok
 }
 
 // ClearItem deletes the record for source (the raw source URL, hashed to
@@ -3369,8 +3384,10 @@ func (s *service) notifyEvicted(source string, coverage Coverage) {
 		s.mu.Unlock()
 		return
 	}
-	s.state[key] = StateNotCached
-	s.sourceByKey[key] = source
+	// The push reports eviction; whole-store status describes what remains.
+	// Explicit source queries still return not_cached from their source hint.
+	delete(s.state, key)
+	delete(s.sourceByKey, key)
 	s.mu.Unlock()
 	s.notifyObserver(source, StateNotCached, coverage)
 	if s.onCacheChanged != nil {

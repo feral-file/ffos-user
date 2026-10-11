@@ -604,11 +604,13 @@ limits. The effective limit is recomputed before/after capture and at startup,
 then at least once per minute while idle. Streaming writes check available
 space too, so unrelated disk growth can abort an in-flight download safely.
 
-Eviction prefers least recently played artwork, falling back to capture time
-until an item has played. The current artwork is preferred to survive; no
-item is exempt from the hard ceiling. Pre-capture reclaim targets seven eighths
-of the effective budget, with the capture's own source protected during that
-reclaim. An oversized capture can fail without consuming the free-space reserve.
+Eviction removes expired automatic records first, then prefers least recently
+played artwork, falling back to capture time until an item has played. Warming
+preserves explicit snapshots and fresh active-playlist members; hard-ceiling
+enforcement may evict either kind. Pre-capture reclaim targets seven eighths of
+the effective budget, with the capture's own source protected unless its
+automatic record has expired. An oversized capture can fail without consuming
+the free-space reserve.
 
 With offline caching enabled, [automatic playback caching](automatic-playback-cache.md)
 warms current/upcoming fresh media without a Download command. Its versioned

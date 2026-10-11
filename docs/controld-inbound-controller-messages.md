@@ -2622,9 +2622,12 @@ the larger of 5 GiB (`minFreeDiskBytes`) or 10% of the filesystem as free space.
 These are ceilings, not reserved/preallocated files. `diskUsed` and `diskLimit`
 are bytes; `deviceMetrics` filesystem figures use KiB.
 
-Eviction prefers least recently played artwork, using capture time until an item
-has played. The current artwork is preferred to survive, but no item is exempt
-from the ceiling. Reclaim runs before/after captures, on startup and at least
+Eviction removes expired automatic records first, then prefers least recently
+played artwork, using capture time until an item has played. Speculative warming
+preserves explicit offline snapshots and fresh members of the active playlist.
+No item is exempt from the hard ceiling. Evicted records leave the whole-store
+listing; explicit source queries and eviction notifications still report
+`not_cached`. Reclaim runs before/after captures, on startup and at least
 once per minute while idle. Downloads also check available space while streaming.
 The pre-capture margin is currently one eighth of the effective budget; this is
 an implementation detail that clients must not hardcode.
