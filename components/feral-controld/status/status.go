@@ -298,7 +298,8 @@ type poller struct {
 	// present at all. Written once at wiring time before Start; read without
 	// a lock on the polling goroutine, same single-writer contract as
 	// displayConnected.
-	stampObserver func(stamp string, present bool)
+	stampObserver    func(stamp string, present bool)
+	playbackObserver func(*PlayerStatus)
 
 	// verificationLookup, when set (SetVerificationLookup), resolves the
 	// on-screen playlist's signature verdict. Same single-writer contract as
@@ -424,6 +425,14 @@ func (s *poller) SetStampObserver(fn func(stamp string, present bool)) {
 	s.stampObserver = fn
 }
 
+// SetPlaybackObserver installs an observe-only hook before Start. The callback
+// runs on the poller and must copy any retained data without doing I/O.
+func SetPlaybackObserver(p Poller, fn func(*PlayerStatus)) {
+	if concrete, ok := p.(*poller); ok {
+		concrete.playbackObserver = fn
+	}
+}
+
 func (s *poller) SetVerificationLookup(fn func(id, url string) (string, bool)) {
 	s.verificationLookup = fn
 }
@@ -451,6 +460,13 @@ func (s *poller) ForceRefresh() {
 }
 
 func (s *poller) pollPlayerStatus(ctx context.Context) {
+	// Invalidate a prior snapshot on every unavailable/error path as well.
+	observed := false
+	defer func() {
+		if !observed && s.playbackObserver != nil {
+			s.playbackObserver(nil)
+		}
+	}()
 	// While CDP is intentionally absent (headless boot with no monitor, or mid-reconnect
 	// after a kiosk/Chromium restart) every checkStatus send would fail at Error level and
 	// emit a player-status error notification each interval, flooding logs. Skip
@@ -490,6 +506,10 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	}
 
 	// Handle nil playerStatus (CDP returned nil result when player is not playing in case showing QR code)
+	if s.playbackObserver != nil {
+		s.playbackObserver(playerStatus)
+		observed = true
+	}
 	if playerStatus == nil {
 		s.updateArtPlaybackMetrics(false, now)
 		return

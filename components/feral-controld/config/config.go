@@ -97,16 +97,15 @@ type SignatureVerificationConfig struct {
 // the kiosk (see offlinecache.KioskReplay's doc on that risk), so it must
 // be explicitly opted into per the plan's "Open risks".
 type OfflineCacheConfig struct {
-	Enabled bool `json:"enabled"`
+	// Automatic playback warms fresh media without an explicit download.
+	AutomaticPlaybackDisabled bool  `json:"automaticPlaybackDisabled,omitempty"`
+	MaxDiskPercent            int   `json:"maxDiskPercent,omitempty"`
+	MinFreeDiskBytes          int64 `json:"minFreeDiskBytes,omitempty"`
+	Enabled                   bool  `json:"enabled"`
 	// RootDir is the on-disk store root (blobs/items/playlists).
 	RootDir string `json:"rootDir,omitempty"`
-	// MaxDiskBytes bounds total store size. Unlike most fields here,
-	// <=0 does NOT mean "unlimited" — offlinecache.OptionsFromConfig
-	// deliberately treats an unset/non-positive value as "use
-	// offlinecache.DefaultMaxDiskBytes" instead, since this feature
-	// caches potentially gigabyte-scale software-artwork assets and a
-	// config that merely omits this field must not silently let the
-	// cache grow unbounded on a disk-constrained device.
+	// MaxDiskBytes, when positive, additionally caps the percentage budget.
+	// An absent/non-positive value keeps the percentage and free-space limits.
 	MaxDiskBytes int64 `json:"maxDiskBytes,omitempty"`
 	// CaptureWindowMs bounds how long one capture observes network
 	// activity before finalizing; <=0 uses the capturer's own default.
