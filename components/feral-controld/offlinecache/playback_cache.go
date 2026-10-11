@@ -25,14 +25,49 @@ type playbackCache struct {
 	ready        bool
 	generation   uint64
 	clearBarrier uint64
-	attempts     map[string]time.Time
+	attempts     map[string]automaticAttempt
 	touched      string
+}
+
+type automaticAttempt struct {
+	at      time.Time
+	cached  bool
+	blocked bool
+}
+
+// Keep the active playlist resident during speculative warming. The hard
+// storage ceiling can still evict it when unrelated writers consume space.
+func (p *playbackCache) protectedKeys() map[string]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	keys := make(map[string]bool, len(p.sources))
+	for _, source := range p.sources {
+		keys[SourceKey(source)] = true
+	}
+	return keys
+}
+
+func (p *playbackCache) completed(source string, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := SourceKey(source)
+	attempt, exists := p.attempts[key]
+	if !exists {
+		return
+	}
+	if err == nil {
+		attempt.cached = true
+	}
+	if errors.Is(err, errAutomaticUncacheable) || errors.Is(err, errCacheDiskPressure) || errors.Is(err, ErrBlobTooLarge) {
+		attempt.blocked = true
+	}
+	p.attempts[key] = attempt
 }
 
 func (p *playbackCache) currentKey() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.sources) == 0 {
+	if !p.ready || len(p.sources) == 0 {
 		return ""
 	}
 	return SourceKey(p.sources[p.index])
@@ -53,12 +88,20 @@ func (p *playbackCache) observe(items []dp1playlist.PlaylistItem, index int, rea
 		sources[i] = item.Source
 	}
 	p.mu.Lock()
+	// Missing status suspends work and invalidates an in-flight probe, but
+	// does not start a new session or forget a clear/refusal/eviction.
+	if len(sources) == 0 {
+		p.ready = false
+		p.generation++
+		p.mu.Unlock()
+		return
+	}
 	changed := !slices.Equal(p.sources, sources)
 	wake := changed || p.index != index || p.ready != ready
 	if changed {
 		p.sources = sources
 		p.generation++
-		p.attempts = make(map[string]time.Time)
+		p.attempts = make(map[string]automaticAttempt)
 		p.clearBarrier = p.s.ClearBarrier()
 		p.touched = ""
 	}
@@ -101,7 +144,15 @@ func (p *playbackCache) prepare(ctx context.Context) {
 			continue
 		}
 		key := SourceKey(source)
-		if rec, err := p.s.store.LoadItem(key); err == nil && rec.freshForPlayback(now) {
+		rec, loadErr := p.s.store.LoadItem(key)
+		if loadErr == nil && rec.freshForPlayback(now) {
+			p.mu.Lock()
+			if p.generation == generation {
+				attempt := p.attempts[key]
+				attempt.cached = true
+				p.attempts[key] = attempt
+			}
+			p.mu.Unlock()
 			continue
 		}
 		p.mu.Lock()
@@ -110,11 +161,12 @@ func (p *playbackCache) prepare(ctx context.Context) {
 			return
 		}
 		attempted, seen := p.attempts[key]
-		if seen && now.Sub(attempted) < automaticRetryInterval {
+		if attempted.blocked || (attempted.cached && loadErr != nil) || (seen && now.Sub(attempted.at) < automaticRetryInterval) {
 			p.mu.Unlock()
 			continue
 		}
-		p.attempts[key] = now
+		attempted.at = now
+		p.attempts[key] = attempted
 		p.mu.Unlock()
 		// One probe per pass; never a goroutine per artwork or an unbounded
 		// playlist download. Live playback remains in the kiosk process.
@@ -123,6 +175,9 @@ func (p *playbackCache) prepare(ctx context.Context) {
 		class, err := p.s.classifier.Classify(probeCtx, source)
 		cancel()
 		if err != nil || class != ClassMedia {
+			if err == nil {
+				p.completed(source, errAutomaticUncacheable)
+			}
 			return
 		}
 		p.mu.Lock()

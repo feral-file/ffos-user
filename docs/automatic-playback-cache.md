@@ -39,10 +39,19 @@ filesystem free. Recheck space while streaming; a cache failure must leave live
 playback available. These are ceilings, not preallocated files.
 
 Cache current and upcoming items from the player's actual active item list,
-with bounded work and backoff. Prefer eviction of least recently played items;
-access survives daemon restarts. An explicit clear suppresses automatic
-repopulation for the current playback session. Existing explicit downloads
-retain their offline snapshot semantics.
+with bounded work and backoff. Warming may reclaim least recently played items
+outside the active playlist, but never its upcoming cached works. Entries
+evicted under disk pressure are not downloaded again in that same observed
+playlist. Refused and oversized sources stay suppressed until a different
+playlist is observed; transient failures keep bounded retries. Persist playback
+recency across daemon restarts. An explicit clear suppresses automatic
+repopulation for the current playback session, including temporary status
+failures or reconnects. Existing explicit downloads retain their offline
+snapshot semantics. Deferred software downloads do not block admissible media.
+
+Speculative attempts do not emit queued/downloading/failure notifications or
+leave failed entries in whole-store status. Successful captures publish ready;
+an explicit Download joining an automatic attempt retains manual semantics.
 
 Automatic entries require an explicit HTTP freshness lifetime. Honor no-store,
 no-cache, private, Age and expiry, and decline request-dependent responses that

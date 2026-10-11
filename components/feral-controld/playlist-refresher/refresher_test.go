@@ -2937,6 +2937,39 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 	assert.GreaterOrEqual(t, fakeSched.restoresCount(), 1, "player rejection must restore scheduler snapshot")
 }
 
+func TestRefresher_DefaultPlaylistReconcilesCacheWithoutRecasting(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cdpClient := mocks.NewMockCDP(ctrl)
+	poller := mocks.NewMockStatusPoller(ctrl)
+	dp := mocks.NewMockDP1(ctrl)
+	clock := mocks.NewMockClock(ctrl)
+	replay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: clock})
+	cdpClient.EXPECT().Initialized().Return(true).AnyTimes()
+	cdpClient.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
+	pl := createMockPlaylist()
+	pl.DynamicQueries = nil
+	poller.EXPECT().FetchPlayerStatus(ctx).Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST), nil, pl), nil).AnyTimes()
+	replay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	replay.EXPECT().LockPlayback().AnyTimes()
+	replay.EXPECT().UnlockPlayback().AnyTimes()
+	synced := make(chan struct{})
+	replay.EXPECT().SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).DoAndReturn(func(context.Context, []string) (int, error) {
+		close(synced)
+		return 1, nil
+	})
+	r := refresher.New(ctx, dp, poller, cdpClient, replay, nil, wrapper.NewJSON(), nil, clock, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r.Start()
+	defer r.Stop()
+	select {
+	case <-synced:
+	case <-time.After(time.Second):
+		t.Fatal("default playback did not reconcile replay scope")
+	}
+}
+
 func TestRefresher_MalformedPlayerResponse_RestoresSchedulerCache(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

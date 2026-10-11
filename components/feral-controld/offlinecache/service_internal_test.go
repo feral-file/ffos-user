@@ -133,7 +133,7 @@ func TestService_EvictDownTo_StopsAfterOneVictimWhenGCFails(t *testing.T) {
 
 	// Target 0 with three items on disk: without the gc-failure stop this
 	// loop would evict every readable record trying to get under target.
-	svc.evictDownTo(0, "", "", false)
+	svc.evictDownTo(0, "", "", false, nil)
 
 	_, err := store.LoadItem(SourceKey("https://example.com/item-victim"))
 	assert.ErrorIs(t, err, ErrItemNotFound, "the oldest readable record is deleted before the GC failure is discovered")

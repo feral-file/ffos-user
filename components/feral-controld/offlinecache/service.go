@@ -603,7 +603,10 @@ type Service interface {
 }
 
 type captureJob struct {
-	automatic *atomic.Bool
+	automatic         *atomic.Bool
+	previousState     ItemState
+	previousSource    string
+	previouslyTracked bool
 	// sourceKey is SourceKey(item.Source) — the queue/state identity,
 	// computed once at enqueue. item carries the raw source alongside for
 	// notifications and logs.
@@ -1110,10 +1113,12 @@ func (s *service) run(ctx context.Context) {
 			s.enforceDiskLimit("", "")
 			nextStorageCheck = s.clock.Now().Add(time.Minute)
 		}
-		if s.automatic != nil && ctx.Err() == nil && s.queue.len() == 0 {
-			s.automatic.prepare(ctx)
-		}
 		j, ok := s.dequeueAdmitted()
+		// A thermally deferred software job must not starve admissible media.
+		if !ok && s.automatic != nil && ctx.Err() == nil && !s.automaticPending() {
+			s.automatic.prepare(ctx)
+			j, ok = s.dequeueAdmitted()
+		}
 		if !ok {
 			select {
 			case <-s.queue.wake:
@@ -2183,6 +2188,8 @@ func (s *service) enqueueCapture(item dp1playlist.PlaylistItem, epoch uint64, cl
 		s.mu.Unlock()
 		return enqueueClearWon, ErrQueueFull
 	}
+	previousState, previouslyTracked := s.state[key]
+	previousSource := s.sourceByKey[key]
 	s.state[key] = StateQueued
 	s.sourceByKey[key] = item.Source
 	queuedNotified := make(chan struct{})
@@ -2192,7 +2199,7 @@ func (s *service) enqueueCapture(item dp1playlist.PlaylistItem, epoch uint64, cl
 		intent.Store(true)
 		s.automaticKey, s.automaticIntent = key, intent
 	}
-	s.queue.push(captureJob{sourceKey: key, item: item, class: class, automatic: intent, queuedNotified: queuedNotified})
+	s.queue.push(captureJob{sourceKey: key, item: item, class: class, automatic: intent, previousState: previousState, previousSource: previousSource, previouslyTracked: previouslyTracked, queuedNotified: queuedNotified})
 	s.mu.Unlock()
 
 	// Notified only AFTER the commit above, never before it. An earlier
@@ -2205,13 +2212,33 @@ func (s *service) enqueueCapture(item dp1playlist.PlaylistItem, epoch uint64, cl
 	// ever describe work that really is scheduled. Deliberately outside
 	// s.mu: the observer sends over the relayer/hub WS, and notify's doc
 	// explains why that must never run under this lock.
-	s.notifyObserver(item.Source, StateQueued, Coverage{})
+	if intent == nil || !intent.Load() {
+		s.notifyObserver(item.Source, StateQueued, Coverage{})
+	}
 	// Releases process()'s barrier — see captureJob.queuedNotified.
 	// Deliberately after the notify above, and unconditional, so the
 	// worker is never left waiting on a job whose enqueuer has already
 	// moved on.
 	close(queuedNotified)
 	return enqueueQueued, nil
+}
+
+func (s *service) automaticPending() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	st := s.state[s.automaticKey]
+	return s.automaticIntent != nil && (st == StateQueued || st == StateDownloading)
+}
+
+// Caller holds s.mu. A failed optimization must not create durable-looking
+// download state, or erase a preceding explicit download's failure.
+func (s *service) restoreAutomaticTracking(j captureJob) {
+	if j.previouslyTracked {
+		s.state[j.sourceKey], s.sourceByKey[j.sourceKey] = j.previousState, j.previousSource
+	} else {
+		delete(s.state, j.sourceKey)
+		delete(s.sourceByKey, j.sourceKey)
+	}
 }
 
 func (s *service) process(ctx context.Context, j captureJob) {
@@ -2245,7 +2272,12 @@ func (s *service) process(ctx context.Context, j captureJob) {
 		// behind, so Status keeps answering identically for a Stop()ed
 		// service that outlives the process (tests, chiefly).
 		s.mu.Lock()
-		s.state[j.sourceKey] = StateFailed
+		if j.automatic != nil && j.automatic.Load() {
+			s.restoreAutomaticTracking(j)
+			s.automaticIntent = nil
+		} else {
+			s.state[j.sourceKey] = StateFailed
+		}
 		s.mu.Unlock()
 		return
 	}
@@ -2268,7 +2300,9 @@ func (s *service) process(ctx context.Context, j captureJob) {
 	// to do here, and it deliberately runs without s.mu held (see
 	// notify's doc on why the observer call is never made under that
 	// lock).
-	s.notifyObserver(j.item.Source, StateDownloading, Coverage{})
+	if j.automatic == nil || !j.automatic.Load() {
+		s.notifyObserver(j.item.Source, StateDownloading, Coverage{})
+	}
 
 	// Make room BEFORE the capture starts, not only after it succeeds:
 	// both capture pipelines seed their disk budget with the store's
@@ -2281,7 +2315,8 @@ func (s *service) process(ctx context.Context, j captureJob) {
 	// the eviction loop's GC goes through s.gc(), which locks captureMu
 	// itself. That ordering is safe against a concurrent capture because
 	// this single worker goroutine is the only place captures run.
-	s.reclaimDiskForCapture(j.sourceKey)
+	startedAutomatic := j.automatic != nil && j.automatic.Load()
+	s.reclaimDiskForCapture(j.sourceKey, startedAutomatic)
 
 	// Held for the full Capture call, not just its final SaveItem — see
 	// captureMu's doc on why the whole blob-writing window must be
@@ -2290,17 +2325,22 @@ func (s *service) process(ctx context.Context, j captureJob) {
 	if j.automatic != nil {
 		ctx = context.WithValue(ctx, automaticCaptureKey{}, j.automatic)
 	}
-	startedAutomatic := isAutomaticCapture(ctx)
 	rec, err := s.captureForClass(ctx, j)
-	if err != nil && startedAutomatic && !isAutomaticCapture(ctx) {
-		// A Download that joined a freshness-rejected automatic attempt still
-		// gets the explicit snapshot it requested.
-		rec, err = s.captureForClass(ctx, j)
-	}
 	// Close the explicit-download upgrade window atomically with publishing
 	// the terminal state. A later Download must enqueue a new snapshot instead
 	// of joining an automatic capture that has already persisted its TTL.
 	if j.automatic != nil {
+		s.mu.Lock()
+	}
+	if err != nil && startedAutomatic && !j.automatic.Load() {
+		// Check the upgrade under the same lock as terminal publication, so
+		// even a Download arriving after Capture returned receives its snapshot.
+		// Explicit downloads can reclaim space occupied by the active playlist.
+		s.mu.Unlock()
+		s.captureMu.Unlock()
+		s.reclaimDiskForCapture(j.sourceKey, false)
+		s.captureMu.Lock()
+		rec, err = s.captureForClass(ctx, j)
 		s.mu.Lock()
 	}
 	if err == nil && j.automatic != nil && !j.automatic.Load() && rec.Automatic {
@@ -2317,12 +2357,24 @@ func (s *service) process(ctx context.Context, j captureJob) {
 	if errors.Is(err, errAutomaticUncacheable) {
 		terminal = StateNotCached
 	}
+	automatic := j.automatic != nil && j.automatic.Load()
 	if j.automatic != nil {
-		s.state[j.sourceKey] = terminal
+		if automatic && err != nil {
+			s.restoreAutomaticTracking(j)
+		} else {
+			s.state[j.sourceKey] = terminal
+		}
 		s.automaticIntent = nil
 		s.mu.Unlock()
 	}
 	s.captureMu.Unlock()
+	if automatic {
+		s.automatic.completed(j.item.Source, err)
+		if err != nil {
+			// Speculative failures never become controller download failures.
+			return
+		}
+	}
 	if err != nil {
 		if errors.Is(err, errAutomaticUncacheable) {
 			s.notifyObserver(j.item.Source, StateNotCached, Coverage{})
@@ -2398,7 +2450,7 @@ func (s *service) enforceDiskLimit(justCapturedKey, justCapturedSource string) {
 	if err != nil || (s.storage == nil && limit <= 0) {
 		return
 	}
-	s.evictDownTo(limit, justCapturedKey, justCapturedSource, true)
+	s.evictDownTo(limit, justCapturedKey, justCapturedSource, true, nil)
 }
 
 // captureReclaimHeadroomDivisor sizes the free-space floor
@@ -2437,7 +2489,7 @@ const captureReclaimHeadroomDivisor = 8
 // not an over-budget alarm: the capture then simply runs with whatever
 // room is actually left, exactly as it would have before this reclaim
 // existed.
-func (s *service) reclaimDiskForCapture(sourceKey string) {
+func (s *service) reclaimDiskForCapture(sourceKey string, automatic bool) {
 	limit, err := s.diskBudget()
 	if err != nil || (s.storage == nil && limit <= 0) {
 		return
@@ -2445,7 +2497,11 @@ func (s *service) reclaimDiskForCapture(sourceKey string) {
 	// The protected item's source is irrelevant here: with the
 	// last-resort mode off, evictDownTo can never evict (and so never
 	// needs to announce) the protected item itself.
-	s.evictDownTo(limit-limit/captureReclaimHeadroomDivisor, sourceKey, "", false)
+	var protected map[string]bool
+	if automatic && s.automatic != nil {
+		protected = s.automatic.protectedKeys()
+	}
+	s.evictDownTo(limit-limit/captureReclaimHeadroomDivisor, sourceKey, "", false, protected)
 }
 
 // evictDownTo is the shared eviction loop behind enforceDiskLimit
@@ -2477,7 +2533,7 @@ func (s *service) reclaimDiskForCapture(sourceKey string) {
 //     outcome, so the loop returns quietly without touching
 //     protectedKey and without the over-budget warning — the hard
 //     ceiling is enforceDiskLimit's job, not this reclaim's.
-func (s *service) evictDownTo(targetBytes int64, protectedKey, protectedSource string, evictProtectedAsLastResort bool) {
+func (s *service) evictDownTo(targetBytes int64, protectedKey, protectedSource string, evictProtectedAsLastResort bool, excluded map[string]bool) {
 	for {
 		usage, err := s.store.DiskUsage()
 		if err != nil {
@@ -2488,7 +2544,7 @@ func (s *service) evictDownTo(targetBytes int64, protectedKey, protectedSource s
 			return
 		}
 
-		victimKey, victimSource, ok := s.oldestEvictableItem(protectedKey)
+		victimKey, victimSource, ok := s.oldestEvictableItem(protectedKey, excluded)
 		reason := ""
 		if !ok {
 			if !evictProtectedAsLastResort {
@@ -2535,7 +2591,7 @@ func (s *service) gc() (int, int64, error) {
 // the store delete) and its source (for the eviction notification —
 // already in hand here from the record read, where the caller could not
 // recover it after the delete).
-func (s *service) oldestEvictableItem(excludeKey string) (key, source string, ok bool) {
+func (s *service) oldestEvictableItem(excludeKey string, excluded map[string]bool) (key, source string, ok bool) {
 	keys, err := s.store.ListItemKeys()
 	if err != nil {
 		return "", "", false
@@ -2547,7 +2603,7 @@ func (s *service) oldestEvictableItem(excludeKey string) (key, source string, ok
 		currentKey = s.automatic.currentKey()
 	}
 	for _, candidate := range keys {
-		if candidate == excludeKey {
+		if candidate == excludeKey || excluded[candidate] {
 			continue
 		}
 		rec, err := s.store.LoadItem(candidate)

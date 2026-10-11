@@ -79,7 +79,7 @@ func (c *mediaCapturer) Capture(ctx context.Context, item dp1playlist.PlaylistIt
 	budget := newDiskBudgetFromStore(c.store, c.maxDiskBytes, c.logger)
 	capBytes, ok := budget.reserve()
 	if !ok {
-		return nil, fmt.Errorf("offline cache: disk budget exhausted, cannot download %s", item.Source)
+		return nil, fmt.Errorf("%w: cannot download %s", errCacheDiskPressure, item.Source)
 	}
 
 	// Unlike capture.go's software path — where a resource fetch failure
@@ -278,6 +278,9 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 	}
 	var freshUntil time.Time
 	if isAutomaticCapture(ctx) {
+		if capBytes > 0 && resp.ContentLength > capBytes {
+			return Resource{}, ErrBlobTooLarge
+		}
 		freshUntil = automaticFreshUntil(resp.Header, c.clock.Now())
 		// Only the final response's headers survive the HTTP client's redirect
 		// chain. A mutable redirect can point to an immutable file; caching it
