@@ -42,7 +42,9 @@ func (p *playbackCache) protectedKeys() map[string]bool {
 	defer p.mu.Unlock()
 	keys := make(map[string]bool, len(p.sources))
 	for _, source := range p.sources {
-		keys[SourceKey(source)] = true
+		if source != "" {
+			keys[SourceKey(source)] = true
+		}
 	}
 	return keys
 }
@@ -79,7 +81,7 @@ func (p *playbackCache) completed(source string, err error) {
 func (p *playbackCache) currentKey() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.ready || len(p.sources) == 0 {
+	if !p.ready || len(p.sources) == 0 || p.sources[p.index] == "" {
 		return ""
 	}
 	return SourceKey(p.sources[p.index])
@@ -92,10 +94,10 @@ func (p *playbackCache) observe(items []dp1playlist.PlaylistItem, index int, rea
 	}
 	sources := make([]string, len(items))
 	for i, item := range items {
-		if len(item.Source) > MaxSourceURLBytes {
-			sources = nil
-			index = 0
-			break
+		if len(item.Source) > MaxSourceURLBytes || isDataURI(item.Source) {
+			// Inline artwork already carries its bytes. An ineligible item
+			// must not disable warming of its eligible playlist neighbors.
+			continue
 		}
 		sources[i] = item.Source
 	}
@@ -116,6 +118,13 @@ func (p *playbackCache) observe(items []dp1playlist.PlaylistItem, index int, rea
 		p.attempts = make(map[string]automaticAttempt)
 		p.clearBarrier = p.s.ClearBarrier()
 		p.touched = ""
+		// Lock order is playback then service, shared with automaticCaptureContext.
+		// A manual Download that joined the job owns its completion instead.
+		p.s.mu.Lock()
+		if p.s.automaticIntent != nil && p.s.automaticIntent.Load() && p.s.automaticCancel != nil && !slices.Contains(sources, p.s.sourceByKey[p.s.automaticKey]) {
+			p.s.automaticCancel()
+		}
+		p.s.mu.Unlock()
 	}
 	p.index, p.ready = index, ready
 	p.mu.Unlock()
@@ -137,7 +146,7 @@ func (p *playbackCache) prepare(ctx context.Context) {
 		return
 	}
 	current := p.sources[p.index]
-	touch := current != p.touched
+	touch := current != "" && current != p.touched
 	p.touched = current
 	generation, barrier := p.generation, p.clearBarrier
 	sources := append(slices.Clone(p.sources[p.index:]), p.sources[:p.index]...)
@@ -209,4 +218,21 @@ func (p *playbackCache) prepare(ctx context.Context) {
 		}
 		return
 	}
+}
+
+// Register cancellation atomically with observing the active list. This also
+// catches a switch after enqueue but before the worker starts the transfer.
+func (s *service) automaticCaptureContext(ctx context.Context, j captureJob) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	if s.automatic != nil {
+		s.automatic.mu.Lock()
+		defer s.automatic.mu.Unlock()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.automaticCancel = cancel
+	if j.automatic.Load() && s.automatic != nil && !slices.Contains(s.automatic.sources, j.item.Source) {
+		cancel()
+	}
+	return context.WithValue(ctx, automaticCaptureKey{}, j.automatic), cancel
 }

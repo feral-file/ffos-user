@@ -109,6 +109,170 @@ func TestPlaybackCache_ClearSuppressesRepopulation(t *testing.T) {
 	require.ErrorIs(t, store.TouchItem(SourceKey(item.Source), time.Now()), ErrItemNotFound)
 }
 
+func TestPlaybackCache_IneligibleNeighborDoesNotDisableWarming(t *testing.T) {
+	for _, source := range []string{"data:image/png;base64," + strings.Repeat("A", 3000), "https://example.com/" + strings.Repeat("a", 3000)} {
+		s := playbackService(t, playbackStore(t), playbackClassifier(func(_ context.Context, source string) (MediaClass, error) {
+			require.Equal(t, "https://example.com/art.png", source)
+			return ClassMedia, nil
+		}))
+		s.started.Store(true)
+		items := []dp1playlist.PlaylistItem{{Source: source}, {Source: "https://example.com/art.png"}}
+		s.automatic.observe(items, 0, true)
+		s.automatic.prepare(context.Background())
+		job, ok := s.dequeueAdmitted()
+		require.True(t, ok)
+		require.Equal(t, items[1].Source, job.item.Source)
+		require.Empty(t, s.automatic.currentKey())
+	}
+}
+
+func TestPlaybackCache_SwitchCancelsTransferAndReleasesManualQueue(t *testing.T) {
+	entered, canceled := make(chan struct{}), make(chan struct{})
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "max-age=7200")
+		if r.URL.Path == "/old" {
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			close(entered)
+			<-r.Context().Done()
+			close(canceled)
+			return
+		}
+		_, _ = io.WriteString(w, "requested image")
+	}))
+	defer origin.Close()
+	s := playbackService(t, playbackStore(t), playbackClassifier(func(context.Context, string) (MediaClass, error) { return ClassMedia, nil }))
+	obs := &recordingProgressObserver{}
+	s.observer = obs
+	require.NoError(t, s.Start(context.Background()))
+	defer s.Stop()
+	old := dp1playlist.PlaylistItem{Source: origin.URL + "/old"}
+	s.automatic.observe([]dp1playlist.PlaylistItem{old}, 0, true)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("automatic transfer did not start")
+	}
+	manual := dp1playlist.PlaylistItem{Source: origin.URL + "/manual"}
+	require.NoError(t, s.DownloadItem(context.Background(), manual))
+	s.automatic.observe([]dp1playlist.PlaylistItem{{Source: origin.URL + "/new"}}, 0, false)
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("playlist switch did not abort the old transfer")
+	}
+	require.Eventually(t, func() bool { _, err := s.store.LoadItem(SourceKey(manual.Source)); return err == nil }, time.Second, time.Millisecond)
+	st, err := s.Status(StatusRequest{Sources: []string{old.Source}})
+	require.NoError(t, err)
+	require.Equal(t, StateNotCached, st.Items[0].State)
+	require.Eventually(t, func() bool { return len(obs.states()) == 3 }, time.Second, time.Millisecond)
+	require.Equal(t, []ItemState{StateQueued, StateDownloading, StateReady}, obs.states(), "only the manual job emits progress")
+}
+
+func TestPlaybackCache_SwitchBeforeCaptureDropsQueuedSpeculation(t *testing.T) {
+	s := playbackService(t, playbackStore(t), playbackClassifier(func(context.Context, string) (MediaClass, error) { return ClassMedia, nil }))
+	s.started.Store(true)
+	s.mediaCapturer = playbackMediaCapturer(func(context.Context, dp1playlist.PlaylistItem) (*ItemRecord, error) {
+		t.Fatal("obsolete queued artwork must not be fetched")
+		return nil, nil
+	})
+	s.automatic.observe([]dp1playlist.PlaylistItem{{Source: "https://example.com/old.png"}}, 0, true)
+	s.automatic.prepare(context.Background())
+	s.automatic.observe([]dp1playlist.PlaylistItem{{Source: "https://example.com/new.png"}}, 0, false)
+	j, ok := s.dequeueAdmitted()
+	require.True(t, ok)
+	s.process(context.Background(), j)
+	require.Empty(t, s.state)
+}
+
+func TestPlaybackCache_ManualJoinAfterSwitchUsesLiveWorkerContext(t *testing.T) {
+	entered, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	releaseCapture := sync.OnceFunc(func() { close(release) })
+	s := playbackService(t, playbackStore(t), playbackClassifier(func(context.Context, string) (MediaClass, error) { return ClassMedia, nil }))
+	var calls atomic.Int32
+	s.mediaCapturer = playbackMediaCapturer(func(ctx context.Context, item dp1playlist.PlaylistItem) (*ItemRecord, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-ctx.Done()
+			close(canceled)
+			<-release
+			return nil, ctx.Err()
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		rec := &ItemRecord{Item: item, Coverage: Coverage{Complete: true}}
+		return rec, s.store.SaveItem(rec)
+	})
+	require.NoError(t, s.Start(context.Background()))
+	defer s.Stop()
+	defer releaseCapture()
+	item := dp1playlist.PlaylistItem{Source: "https://example.com/old.png"}
+	s.automatic.observe([]dp1playlist.PlaylistItem{item}, 0, true)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("automatic capture did not start")
+	}
+	s.automatic.observe([]dp1playlist.PlaylistItem{{Source: "https://example.com/new.png"}}, 0, false)
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("old capture was not canceled")
+	}
+	require.NoError(t, s.DownloadItem(context.Background(), item))
+	releaseCapture()
+	require.Eventually(t, func() bool { rec, err := s.store.LoadItem(SourceKey(item.Source)); return err == nil && !rec.Automatic }, time.Second, time.Millisecond)
+	require.Equal(t, int32(2), calls.Load())
+}
+
+func TestPlaybackCache_StatusHidesSpeculationUntilManualJoin(t *testing.T) {
+	for _, prior := range []string{"missing", "expired", "ready"} {
+		t.Run(prior, func(t *testing.T) {
+			s := playbackService(t, playbackStore(t), nil)
+			s.started.Store(true)
+			item := dp1playlist.PlaylistItem{Source: "https://example.com/art.png"}
+			if prior != "missing" {
+				freshUntil := time.Now().Add(time.Hour)
+				if prior == "expired" {
+					freshUntil = time.Now().Add(-time.Hour)
+				}
+				require.NoError(t, s.store.SaveItem(&ItemRecord{Item: item, Automatic: true, Coverage: Coverage{Complete: true}, Resources: []Resource{{URL: item.Source, FreshUntil: freshUntil}}}))
+			}
+			_, err := s.enqueueCapture(item, 0, ClassMedia, true)
+			require.NoError(t, err)
+			for _, downloading := range []bool{false, true} {
+				if downloading {
+					_, ok := s.dequeueAdmitted()
+					require.True(t, ok)
+				}
+				st, err := s.Status(StatusRequest{Sources: []string{item.Source}})
+				require.NoError(t, err)
+				want := StateNotCached
+				if prior == "ready" {
+					want = StateReady
+				}
+				require.Equal(t, want, st.Items[0].State)
+				if prior == "missing" {
+					st, err = s.Status(StatusRequest{})
+					require.NoError(t, err)
+					require.Empty(t, st.Items)
+				}
+			}
+			_, err = s.enqueue(item, 0, ClassMedia)
+			require.NoError(t, err)
+			st, err := s.Status(StatusRequest{Sources: []string{item.Source}})
+			require.NoError(t, err)
+			if prior == "ready" {
+				require.Equal(t, StateReady, st.Items[0].State)
+			} else {
+				require.Equal(t, StateDownloading, st.Items[0].State)
+			}
+		})
+	}
+}
+
 // Expire retry backoff without sleeping five minutes. These tests drive the
 // worker synchronously, so no background goroutine owns the attempt map.
 func expirePlaybackAttempts(s *service) {
@@ -529,6 +693,7 @@ func TestPlaybackCache_ExplicitDownloadUpgradesInflightCapture(t *testing.T) {
 		t.Fatal("automatic capture did not start")
 	}
 	require.NoError(t, s.DownloadItem(context.Background(), item))
+	s.automatic.observe([]dp1playlist.PlaylistItem{{Source: "https://example.com/new.png"}}, 0, false)
 	close(release)
 	require.Eventually(t, func() bool {
 		rec, err := store.LoadItem(SourceKey(item.Source))

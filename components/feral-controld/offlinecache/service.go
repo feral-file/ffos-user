@@ -763,6 +763,7 @@ type service struct {
 	// Download racing it upgrades that job to an offline snapshot.
 	automaticKey    string
 	automaticIntent *atomic.Bool
+	automaticCancel context.CancelFunc // guarded by mu; only cancels speculative work
 	store           Store
 	classifier      Classifier
 	capturer        Capturer
@@ -2319,16 +2320,25 @@ func (s *service) process(ctx context.Context, j captureJob) {
 	// itself. That ordering is safe against a concurrent capture because
 	// this single worker goroutine is the only place captures run.
 	startedAutomatic := j.automatic != nil && j.automatic.Load()
-	s.reclaimDiskForCapture(j.sourceKey, startedAutomatic)
+	captureCtx := ctx
+	if j.automatic != nil {
+		var cancel context.CancelFunc
+		captureCtx, cancel = s.automaticCaptureContext(ctx, j)
+		defer cancel()
+	}
+	if captureCtx.Err() == nil {
+		s.reclaimDiskForCapture(j.sourceKey, startedAutomatic)
+	}
 
 	// Held for the full Capture call, not just its final SaveItem — see
 	// captureMu's doc on why the whole blob-writing window must be
 	// fenced, not only the save.
 	s.captureMu.Lock()
-	if j.automatic != nil {
-		ctx = context.WithValue(ctx, automaticCaptureKey{}, j.automatic)
+	var rec *ItemRecord
+	err := captureCtx.Err()
+	if err == nil {
+		rec, err = s.captureForClass(captureCtx, j)
 	}
-	rec, err := s.captureForClass(ctx, j)
 	// Close the explicit-download upgrade window atomically with publishing
 	// the terminal state. A later Download must enqueue a new snapshot instead
 	// of joining an automatic capture that has already persisted its TTL.
@@ -2343,6 +2353,8 @@ func (s *service) process(ctx context.Context, j captureJob) {
 		s.captureMu.Unlock()
 		s.reclaimDiskForCapture(j.sourceKey, false)
 		s.captureMu.Lock()
+		// A playlist switch may have canceled captureCtx just before the
+		// manual join. The worker context still owns that explicit download.
 		rec, err = s.captureForClass(ctx, j)
 		s.mu.Lock()
 	}
@@ -2373,6 +2385,7 @@ func (s *service) process(ctx context.Context, j captureJob) {
 			s.state[j.sourceKey] = terminal
 		}
 		s.automaticIntent = nil
+		s.automaticCancel = nil
 		s.mu.Unlock()
 	}
 	s.captureMu.Unlock()
@@ -3294,7 +3307,13 @@ func (s *service) allKnownItemKeys() ([]string, error) {
 func (s *service) itemStatus(key, sourceHint string, withBytes bool) (ItemStatus, bool) {
 	s.mu.RLock()
 	trackedState, tracked := s.state[key]
-	if src, ok := s.sourceByKey[key]; ok {
+	speculative := s.automaticKey == key && s.automaticIntent != nil && s.automaticIntent.Load()
+	if speculative {
+		// Polling must obey the same quiet-until-success contract as pushes.
+		// Otherwise a later silent refusal strands a client's progress state.
+		trackedState, tracked = "", false
+	}
+	if src, ok := s.sourceByKey[key]; ok && !speculative {
 		// Tracked entries always know their source — sourceByKey is kept
 		// in lockstep with state (see its doc) — and it wins over the
 		// hint: both are the same string whenever both exist. The ok

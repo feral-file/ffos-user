@@ -51,9 +51,12 @@ recency across daemon restarts. An explicit clear suppresses automatic
 repopulation for the current playback session, including temporary status
 failures or reconnects. Existing explicit downloads retain their offline
 snapshot semantics. Deferred software downloads do not block admissible media.
+Inline or oversized sources are skipped individually. Switching playlists
+cancels speculative transfers for works absent from the new list; an explicit
+Download that joined the transfer retains its requested snapshot.
 
 Speculative attempts do not emit queued/downloading/failure notifications or
-leave failed entries in whole-store status. Eviction removes records from that
+expose progress in status queries or leave failed entries in whole-store status. Eviction removes records from that
 listing; explicit source queries and eviction notifications still say not_cached.
 Successful captures publish their cached state;
 an explicit Download joining an automatic attempt retains manual semantics.
