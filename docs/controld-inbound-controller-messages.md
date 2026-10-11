@@ -2640,7 +2640,7 @@ Do not substitute a default budget. Use "removed to make room" for eviction copy
 
 Automatic caching is enabled with the offline-cache feature unless
 `automaticPlaybackDisabled` is true. It warms the actual playing item list,
-requires explicit HTTP freshness, and serves expired/missing resources from the
+requires at least an hour of explicit remaining HTTP freshness, and serves expired/missing resources from the
 network. Software, streams, ambiguous types and redirect-followed responses stay
 on their normal live path. Explicit downloads retain snapshot semantics and
 playlist-URL offline recovery. Automatic warming alone does not persist a full

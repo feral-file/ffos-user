@@ -613,7 +613,8 @@ automatic record has expired. An oversized capture can fail without consuming
 the free-space reserve.
 
 With offline caching enabled, [automatic playback caching](automatic-playback-cache.md)
-warms current/upcoming fresh media without a Download command. Its versioned
+warms current/upcoming media with at least an hour of explicit remaining HTTP
+freshness without a Download command. Its versioned
 record envelope makes old binaries reject and quarantine automatic records
 instead of silently serving them forever. Manual snapshot records retain their
 existing format and offline behavior.

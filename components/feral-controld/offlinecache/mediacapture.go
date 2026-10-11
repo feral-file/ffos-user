@@ -282,6 +282,9 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 			return Resource{}, ErrBlobTooLarge
 		}
 		freshUntil = automaticFreshUntil(resp.Header, c.clock.Now())
+		if freshUntil.Sub(c.clock.Now()) < automaticMinFreshLifetime {
+			return Resource{}, errAutomaticUncacheable
+		}
 		// Only the final response's headers survive the HTTP client's redirect
 		// chain. A mutable redirect can point to an immutable file; caching it
 		// under the original URL would freeze that redirect's future changes.

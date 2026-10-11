@@ -755,9 +755,10 @@ func (q *jobQueue) removeItems(keys map[string]bool) []captureJob {
 }
 
 type service struct {
-	storage        *storagePolicy
-	automatic      *playbackCache
-	onCacheChanged func()
+	storage          *storagePolicy
+	automatic        *playbackCache
+	onCacheChanged   func()
+	overBudgetLogged bool // worker-owned; reset when the store returns under budget
 	// There is at most one automatically queued/in-flight capture. An explicit
 	// Download racing it upgrades that job to an offline snapshot.
 	automaticKey    string
@@ -1110,6 +1111,7 @@ func (s *service) run(ctx context.Context) {
 	nextStorageCheck := time.Time{}
 	for {
 		if s.storage != nil && !s.clock.Now().Before(nextStorageCheck) {
+			s.pruneExpiredAutomatic()
 			s.enforceDiskLimit("", "")
 			nextStorageCheck = s.clock.Now().Add(time.Minute)
 		}
@@ -2351,6 +2353,11 @@ func (s *service) process(ctx context.Context, j captureJob) {
 		}
 		err = s.store.SaveItem(rec)
 	}
+	if err == nil && rec.Automatic && !rec.freshForPlayback(s.clock.Now()) {
+		// A very slow transfer can outlive even a long TTL. Suppress further
+		// automatic attempts; the storage sweep reclaims the expired record.
+		err = errAutomaticUncacheable
+	}
 	terminal := StateFailed
 	if err == nil {
 		terminal = stateFromCoverage(rec.Coverage)
@@ -2542,6 +2549,7 @@ func (s *service) evictDownTo(targetBytes int64, protectedKey, protectedSource s
 			return
 		}
 		if usage <= targetBytes {
+			s.overBudgetLogged = false
 			return
 		}
 
@@ -2555,8 +2563,11 @@ func (s *service) evictDownTo(targetBytes int64, protectedKey, protectedSource s
 				// Already gave up the just-captured item's protection
 				// above and there is STILL nothing left to evict:
 				// nothing more this function can do.
-				s.logger.Warn("offline cache: over disk budget with nothing left to evict",
-					zap.Int64("usage_bytes", usage), zap.Int64("max_bytes", s.maxDiskBytes))
+				if !s.overBudgetLogged {
+					s.overBudgetLogged = true
+					s.logger.Warn("offline cache: over disk budget with nothing left to evict",
+						zap.Int64("usage_bytes", usage), zap.Int64("max_bytes", targetBytes))
+				}
 				return
 			}
 			victimKey, victimSource = protectedKey, protectedSource
@@ -2578,6 +2589,38 @@ func (s *service) evictDownTo(targetBytes int64, protectedKey, protectedSource s
 		if _, _, err := s.gc(); err != nil {
 			s.logger.Warn("offline cache: GC during eviction failed", zap.Error(err))
 			return
+		}
+	}
+}
+
+// Expired automatic bytes cannot be served or conditionally revalidated by
+// this store. Reclaim them even with ample space, once per storage sweep.
+// The single worker owns capture and cleanup; GC uses the normal capture fence.
+func (s *service) pruneExpiredAutomatic() {
+	keys, err := s.store.ListItemKeys()
+	if err != nil {
+		return
+	}
+	now := s.clock.Now()
+	removed := false
+	for _, key := range keys {
+		rec, loadErr := s.store.LoadItem(key)
+		if loadErr != nil || !rec.Automatic || rec.freshForPlayback(now) {
+			continue
+		}
+		deleted, deleteErr := s.store.DeleteItem(key)
+		if deleteErr != nil || !deleted {
+			continue
+		}
+		removed = true
+		if s.automatic != nil {
+			s.automatic.expiredEvicted(rec.Item.Source)
+		}
+		s.notifyEvicted(rec.Item.Source, Coverage{})
+	}
+	if removed {
+		if _, _, gcErr := s.gc(); gcErr != nil {
+			s.logger.Warn("automatic cache: expired blob cleanup failed", zap.Error(gcErr))
 		}
 	}
 }

@@ -60,7 +60,10 @@ an explicit Download joining an automatic attempt retains manual semantics.
 
 Automatic entries require an explicit HTTP freshness lifetime. Honor no-store,
 no-cache, private, Age and expiry, and decline request-dependent responses that
-the shared source-keyed store cannot represent. Expired entries pass through to
+the shared source-keyed store cannot represent. Require at least one hour of
+remaining freshness at response headers; shorter-lived media stays on normal
+playback to avoid recurring full-file background downloads. A transfer that
+outlives its TTL is suppressed for that observed session. Expired entries pass through to
 the origin, even before scope refresh. HTML/JS software, streams, responses reached
 through redirects and ambiguous types are not automatically snapshotted. Native browser caching still applies
 to their network requests. Missing/expired automatic files never block a live
@@ -71,3 +74,8 @@ Pre-feature binaries fail their existing source-identity check and quarantine
 these records, making downgrade a cold automatic cache. Explicit downloads and
 clears still use that same path, so no hidden record can resurrect a cleared
 item. Manual records remain in the existing bare format.
+
+The startup/idle storage sweep removes expired automatic records even below the
+budget, then garbage-collects their unreferenced blobs. A budget that remains
+exceeded with no reclaimable items emits one warning per pressure episode,
+including the effective limit; recovery re-arms the warning.

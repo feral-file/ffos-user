@@ -17,7 +17,9 @@ import (
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -56,7 +58,7 @@ func TestPlaybackCache_WarmsCurrentThenUpcomingAndReusesAfterRestart(t *testing.
 		paths = append(paths, r.URL.Path)
 		mu.Unlock()
 		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.Header().Set("Cache-Control", "public, max-age=7200")
 		_, _ = io.WriteString(w, "image")
 	}))
 	defer origin.Close()
@@ -128,7 +130,7 @@ func TestPlaybackCache_OversizedPlaylistPreservesUpcomingAndBoundsDownloads(t *t
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Header().Set("Cache-Control", "max-age=7200")
 		w.Header().Set("Content-Length", "100000")
 		// Distinct blobs exercise actual storage pressure rather than dedup.
 		_, _ = io.WriteString(w, strings.Repeat(string(r.URL.Path[len(r.URL.Path)-1]), 100000))
@@ -221,7 +223,7 @@ func TestPlaybackCache_ExpiredResidentEntryCanRefresh(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
 		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Header().Set("Cache-Control", "max-age=7200")
 		_, _ = io.WriteString(w, "image")
 	}))
 	defer origin.Close()
@@ -302,6 +304,104 @@ func TestEviction_ExpiredAutomaticFirstAndNoGhostStatus(t *testing.T) {
 	require.NotContains(t, s.state, key)
 }
 
+func TestPlaybackCache_ExpiredRecordsPrunedWithoutDiskPressure(t *testing.T) {
+	store := playbackStore(t)
+	source := "https://example.com/expired.png"
+	hash, err := store.WriteBlob(strings.NewReader("expired image"), 0)
+	require.NoError(t, err)
+	require.NoError(t, store.SaveItem(&ItemRecord{Item: dp1playlist.PlaylistItem{Source: source}, Automatic: true, Coverage: Coverage{Complete: true}, Resources: []Resource{{URL: source, SHA256: hash, FreshUntil: time.Now().Add(-time.Hour)}}}))
+	s := playbackService(t, store, nil)
+	s.storage = &storagePolicy{percent: 50, minFree: 5 << 30, space: func(string) (int64, int64, error) { return 128 << 30, 100 << 30, nil }}
+	require.NoError(t, s.Start(context.Background()))
+	defer s.Stop()
+	require.Eventually(t, func() bool { st, err := s.Status(StatusRequest{}); return err == nil && len(st.Items) == 0 }, time.Second, time.Millisecond)
+	st, err := s.Status(StatusRequest{Sources: []string{source}})
+	require.NoError(t, err)
+	require.Equal(t, StateNotCached, st.Items[0].State)
+	require.Eventually(t, func() bool { used, _ := store.DiskUsage(); return used == 0 }, time.Second, time.Millisecond)
+}
+
+func TestStorageBudget_WarnsOncePerPressureEpisodeWithEffectiveLimit(t *testing.T) {
+	store := playbackStore(t)
+	// Unreferenced bytes stand in for metadata that item eviction cannot remove.
+	_, err := store.WriteBlob(strings.NewReader("unreclaimable by item eviction"), 0)
+	require.NoError(t, err)
+	s := playbackService(t, store, nil)
+	s.maxDiskBytes = 80 << 30
+	available := int64(1 << 30)
+	s.storage = &storagePolicy{percent: 50, minFree: 5 << 30, space: func(string) (int64, int64, error) { return 128 << 30, available, nil }}
+	core, logs := observer.New(zap.WarnLevel)
+	s.logger = zap.New(core)
+	for range 5 {
+		s.enforceDiskLimit("", "")
+	}
+	require.Equal(t, 1, logs.Len())
+	require.Equal(t, int64(0), logs.All()[0].ContextMap()["max_bytes"])
+	available = 100 << 30
+	s.enforceDiskLimit("", "")
+	available = 1 << 30
+	s.enforceDiskLimit("", "")
+	require.Equal(t, 2, logs.Len(), "a new pressure episode must be observable")
+}
+
+func TestAutomaticCapture_DeclinesShortFreshness(t *testing.T) {
+	for _, policy := range []string{"max-age=60", "max-age=1800"} {
+		t.Run(policy, func(t *testing.T) {
+			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "video/mp4")
+				w.Header().Set("Cache-Control", policy)
+				_, _ = io.WriteString(w, "video")
+			}))
+			defer origin.Close()
+			store := playbackStore(t)
+			media := NewMediaCapturer(wrapper.NewHTTPClient(), store, wrapper.NewJSON(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
+			intent := &atomic.Bool{}
+			intent.Store(true)
+			_, err := media.Capture(context.WithValue(context.Background(), automaticCaptureKey{}, intent), dp1playlist.PlaylistItem{Source: origin.URL})
+			require.ErrorIs(t, err, errAutomaticUncacheable)
+			used, err := store.DiskUsage()
+			require.NoError(t, err)
+			require.Zero(t, used)
+		})
+	}
+}
+
+type playbackMediaCapturer func(context.Context, dp1playlist.PlaylistItem) (*ItemRecord, error)
+
+func (f playbackMediaCapturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem) (*ItemRecord, error) {
+	return f(ctx, item)
+}
+
+func TestPlaybackCache_TransferOutlivingTTLDoesNotRepeat(t *testing.T) {
+	store := playbackStore(t)
+	s := playbackService(t, store, playbackClassifier(func(context.Context, string) (MediaClass, error) { return ClassMedia, nil }))
+	s.started.Store(true)
+	captures := 0
+	s.mediaCapturer = playbackMediaCapturer(func(_ context.Context, item dp1playlist.PlaylistItem) (*ItemRecord, error) {
+		captures++
+		hash, err := store.WriteBlob(strings.NewReader("slowly transferred image"), 0)
+		if err != nil {
+			return nil, err
+		}
+		rec := &ItemRecord{Item: item, Automatic: true, Coverage: Coverage{Complete: true}, Resources: []Resource{{URL: item.Source, SHA256: hash, FreshUntil: time.Now().Add(-time.Second)}}}
+		return rec, store.SaveItem(rec)
+	})
+	obs := &recordingProgressObserver{}
+	s.observer = obs
+	s.automatic.observe([]dp1playlist.PlaylistItem{{Source: "https://example.com/slow.png"}}, 0, true)
+	playbackPass(s)
+	s.pruneExpiredAutomatic()
+	for range 5 {
+		expirePlaybackAttempts(s)
+		playbackPass(s)
+	}
+	require.Equal(t, 1, captures)
+	require.NotContains(t, obs.states(), StateReady)
+	used, err := store.DiskUsage()
+	require.NoError(t, err)
+	require.Zero(t, used)
+}
+
 func (deferSoftwareAdmission) Admit(class MediaClass) AdmissionDecision {
 	return AdmissionDecision{Allowed: class == ClassMedia}
 }
@@ -309,7 +409,7 @@ func (deferSoftwareAdmission) Admit(class MediaClass) AdmissionDecision {
 func TestPlaybackCache_DeferredSoftwareDoesNotStarveMedia(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Header().Set("Cache-Control", "max-age=7200")
 		_, _ = io.WriteString(w, "image")
 	}))
 	defer origin.Close()
@@ -409,7 +509,7 @@ func TestPlaybackCache_ExplicitDownloadUpgradesInflightCapture(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Header().Set("Cache-Control", "max-age=7200")
 		w.WriteHeader(200)
 		w.(http.Flusher).Flush()
 		close(entered)
@@ -493,7 +593,7 @@ func TestAutomaticCapture_DoesNotSnapshotMutableRedirect(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "public,max-age=3600")
+		w.Header().Set("Cache-Control", "public,max-age=7200")
 		_, _ = io.WriteString(w, "image")
 	}))
 	defer origin.Close()

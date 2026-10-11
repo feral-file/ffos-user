@@ -12,6 +12,10 @@ import (
 
 var errAutomaticUncacheable = errors.New("automatic cache: response requires live playback")
 
+// Short-lived media stays on the browser's normal path. Repeated full-file
+// refreshes of large assets would otherwise consume bandwidth throughout play.
+const automaticMinFreshLifetime = time.Hour
+
 type automaticCaptureKey struct{}
 
 // Automatic capture is a performance optimization, not an offline snapshot.
