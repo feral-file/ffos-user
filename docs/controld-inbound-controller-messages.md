@@ -2026,6 +2026,7 @@ Error cases:
 | Topic mismatch | Decision `topicID` differs from the current device topic, or the claim the pairing began under was cleared and re-taken (a factory reset and re-claim, even onto the same topic id) | `ok: false`, `topic_mismatch`, `retryable: false` | Keep waiting until timeout |
 | Channel/request mismatch | `channelID` or `requestMessageID` differs from pending request | `ok: false`, `request_mismatch`, `retryable: false` | Keep waiting until timeout |
 | Expired decision | Request deadline passed before valid decision | `ok: false`, `expired`, `retryable: false` | Encrypted `mint_rejected` with `approval_expired` |
+| Channel gone before the decision | While the approval is pending, controld polls the channel every few seconds. The broker answered 404 or 409 `closed` (the page canceled, timed out, or retried onto a new channel), or 410 `expired` | `ok: false`, `browser_gone` (404/409) or `expired` (410), `retryable: false` (`not_found` once controld has finished ending it). A 404 counts only when the broker names it `not_found`, so a bare 404 from a proxy cannot end a live approval. The outcome already sent is `cancelled` with `reason: "browser_gone"` for 404/409, and `expired` for 410: on a joined pairing the approval deadline is the broker's, so a 410 is the owner not answering in time, not the site leaving. The split is best-effort: the broker sweeps expired channels to 404, and a page whose own wait ran out closes its channel (409) just before controld's timer fires, so an unanswered prompt can end either way; both dismiss it. A reload or closed tab is not detected, because the page leaves its channel open | None: a gone channel carries nothing, and no session is minted. A decision accepted before controld saw the channel go is answered without minting: an approve reports outcome `failed`, a reject reports `rejected` |
 | Duplicate same decision | Same accepted decision delivered again | `ok: true`, `status: "already_accepted"` | No duplicate minting |
 | Conflicting duplicate decision | Different terminal decision, or the same decision with a different `keepPaired`, after one was accepted | `ok: false`, `already_decided`, `retryable: false` | No change |
 | Controller rejects | Valid `decision: "reject"` | `ok: true`, `status: "accepted"` | Encrypted `mint_rejected` with controller reason or `rejected_by_user` |
@@ -2041,6 +2042,7 @@ Recommended mint-pairing error codes:
 - `request_mismatch`
 - `expired`
 - `already_decided`
+- `browser_gone`
 - `session_create_failed`
 - `browser_delivery_failed`
 
@@ -2090,6 +2092,15 @@ Allowed `status` values:
 - `failed`
 - `expired`
 - `cancelled`
+
+`reason` is optional and present only on `cancelled`. `origin_mismatch` and
+`browser_key_mismatch` mark a joined channel whose request contradicted the
+broker's attestation. `browser_gone` marks an approval ended because the
+browser closed or abandoned its channel (broker 404/409) while the owner had
+not yet decided; a broker expiry (410) is reported as `expired` instead. A
+controller should dismiss the prompt and may tell the owner the website
+stopped waiting. Absent means a replace, close, or shutdown. Controllers must
+ignore reasons they do not know.
 
 The outcome must not include the browser session token.
 

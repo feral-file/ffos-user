@@ -51,6 +51,16 @@ const (
 	defaultPlayerContractPath = "/opt/feral/feral-player/ffos-player-contract.json"
 
 	approvalCancellationStatus = "cancelled" //nolint:misspell // Wire protocol status is documented with this spelling.
+
+	// defaultChannelWatchInterval paces the liveness poll that runs while an
+	// approval is pending (watchChannelWhileApproving). Slower than the request
+	// poll on purpose: it runs for up to the whole approval window, and the
+	// only cost of a slower beat is a few more seconds in which an owner can
+	// still tap approve on a page that has already left (issue #332).
+	defaultChannelWatchInterval = 3 * time.Second
+	// browserGoneReason names, on the controller outcome and the refused
+	// decision, an approval ended because the browser abandoned its channel.
+	browserGoneReason = "browser_gone"
 )
 
 type Options struct {
@@ -61,6 +71,9 @@ type Options struct {
 	ApprovalTimeout    time.Duration
 	RelayerBaseURL     string
 	PlayerContractPath string
+	// ChannelWatchInterval overrides defaultChannelWatchInterval; zero keeps
+	// the default. Not in the config file: it exists for tests.
+	ChannelWatchInterval time.Duration
 }
 
 func OptionsFromConfig(cfg *config.MintPairingConfig, relayerEndpoint string) Options {
@@ -494,6 +507,13 @@ type pendingApproval struct {
 	expiresAt        time.Time
 	decisionCh       chan approvalDecisionRequest
 	accepted         *approvalDecisionRequest
+	// endedCode is set (under s.mu) once the worker has seen the channel gone
+	// at the broker, and is the code a later decision is refused with:
+	// browser_gone when the page closed or abandoned it, expired when the
+	// broker expired it. Approving after that would mint a session nobody can
+	// receive while telling the owner it worked. A decision that landed first
+	// is still answered (see endApprovalOnGoneChannel).
+	endedCode string
 }
 
 type activePairing struct {
@@ -1438,6 +1458,15 @@ func (s *service) HandleApprovalDecision(ctx context.Context, args map[string]an
 		s.mu.Unlock()
 		return approvalResponse{OK: true, Status: status, ApprovalRequestID: decision.ApprovalRequestID}, nil
 	}
+	switch pending.endedCode {
+	case "":
+	case browserGoneReason:
+		s.mu.Unlock()
+		return approvalError(decision.ApprovalRequestID, browserGoneReason, "the website closed this request; ask it to try again", false), nil
+	default:
+		s.mu.Unlock()
+		return approvalError(decision.ApprovalRequestID, pending.endedCode, "approval request expired", false), nil
+	}
 	if !pending.expiresAt.IsZero() && time.Now().After(pending.expiresAt) {
 		s.mu.Unlock()
 		return approvalError(decision.ApprovalRequestID, "expired", "approval request expired", false), nil
@@ -1648,8 +1677,35 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	expireTimer := time.NewTimer(time.Until(expiresAt))
 	defer expireTimer.Stop()
 
+	// Watch the channel for the whole wait: a page that gave up and closed
+	// its channel (cancel, timeout, an integrator's retry, regeneration) leaves
+	// this approval answerable otherwise, and the owner's approve is
+	// acknowledged while the session goes nowhere (issue #332). NOT covered:
+	// a reload or closed tab, because the play client does not close its
+	// channel then; that channel stays open until the broker expires it.
+	// Every case below stops the watcher first, so the terminal work never
+	// shares the channel with a poll still in flight.
+	watch := s.watchChannelWhileApproving(ctx, active.channel, request.Seq)
+	defer watch.stop()
+	// goneBeforeStop reports a gone answer the watcher buffered while select
+	// was choosing another ready case. Called after stop, when the watcher has
+	// exited, so nothing can arrive later. Checked before minting: a channel
+	// already known to be gone must never be minted for.
+	goneBeforeStop := func() (error, bool) {
+		select {
+		case goneErr := <-watch.gone:
+			return goneErr, true
+		default:
+			return nil, false
+		}
+	}
+
 	select {
+	case goneErr := <-watch.gone:
+		watch.stop()
+		terminalSent = s.endApprovalOnGoneChannel(active, *request, guard, pending, goneErr)
 	case <-ctx.Done():
+		watch.stop()
 		if !time.Now().Before(expiresAt) {
 			if decision, ok := s.acceptedDecision(pending); ok {
 				terminalSent, err = s.completeDecisionFor(context.Background(), active, active.channel, *request, guard, approvalRequestID, decision)
@@ -1664,6 +1720,11 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		terminalSent = s.sendApprovalCancelled(active, *request, approvalRequestID)
 		return
 	case <-expireTimer.C:
+		watch.stop()
+		if goneErr, gone := goneBeforeStop(); gone {
+			terminalSent = s.endApprovalOnGoneChannel(active, *request, guard, pending, goneErr)
+			return
+		}
 		if decision, ok := s.acceptedDecision(pending); ok {
 			terminalSent, err = s.completeDecisionFor(context.Background(), active, active.channel, *request, guard, approvalRequestID, decision)
 			if err != nil {
@@ -1673,6 +1734,13 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		}
 		terminalSent = s.sendApprovalExpired(active, *request, approvalRequestID)
 	case decision := <-pending.decisionCh:
+		watch.stop()
+		if goneErr, gone := goneBeforeStop(); gone {
+			// The decision is already recorded on pending; the gone path
+			// answers it without minting.
+			terminalSent = s.endApprovalOnGoneChannel(active, *request, guard, pending, goneErr)
+			return
+		}
 		terminalSent, err = s.completeDecisionFor(context.Background(), active, active.channel, *request, guard, approvalRequestID, decision)
 		if err != nil {
 			s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
@@ -1777,6 +1845,154 @@ func (s *service) sendApprovalExpired(active *activePairing, request minter.Mint
 		return false
 	}
 	return true
+}
+
+// endApprovalOnGoneChannel ends a pending approval whose channel the broker
+// says is gone, and reports whether the worker should skip closing it (always:
+// a gone channel carries nothing more).
+//
+// The fence goes up first, under s.mu — the lock HandleApprovalDecision
+// accepts under — so a decision racing the watcher is either accepted before
+// it (and answered here) or refused after it with the fence's code. It is
+// never acknowledged and then dropped.
+//
+// What ended the channel decides what the owner is told. 410 is the broker's
+// own expiry: for a joined pairing the approval deadline IS the broker
+// deadline, so a beat that lands on the boundary (or a broker clock running
+// ahead) must still read as the owner not answering in time — `expired` —
+// not as a site that walked away. 404 and 409 read as the page closing or
+// abandoning the channel: a cancellation outcome with reason browser_gone
+// (#332). The split is best-effort, not a guarantee: the broker sweeps
+// expired channels to 404 on any create, and a page whose own wait ran out
+// closes its channel (409) moments before controld's timer would fire. Both
+// outcomes dismiss the prompt; only the wording differs.
+//
+// A decision that landed before the fence is answered without touching the
+// channel. An approve is reported `failed` and nothing is minted: delivery
+// would be refused, and minting first would leave a session whose cleanup
+// depends on a revoke succeeding. A reject is reported `rejected`, which is
+// what the owner chose; the browser hears nothing because it cannot.
+func (s *service) endApprovalOnGoneChannel(active *activePairing, request minter.MintRequest, guard topicGuard, pending *pendingApproval, goneErr error) bool {
+	endedCode := browserGoneReason
+	if status, ok := brokerStatusCode(goneErr); ok && status == http.StatusGone {
+		endedCode = "expired"
+	}
+	s.mu.Lock()
+	pending.endedCode = endedCode
+	accepted := pending.accepted
+	s.mu.Unlock()
+
+	s.logger.Info("Mint pairing channel gone while approval was pending",
+		zap.Error(goneErr),
+		zap.String("endedCode", endedCode),
+		zap.Bool("decisionLanded", accepted != nil),
+		zap.String("channelID", active.channelID),
+		zap.String("approvalRequestID", pending.approvalRequestID))
+
+	// A claim that is gone hears nothing, as in rejectAttestationMismatch: a
+	// factory reset mid-approval must not surface the previous owner's
+	// pairing on the new claim's controllers.
+	if !guard.sameAs(currentTopicGuard()) {
+		return true
+	}
+	outcomeCtx, cancel := context.WithTimeout(context.Background(), terminalOperationTimeout)
+	defer cancel()
+	switch {
+	case accepted != nil && accepted.Decision == "approve":
+		s.sendApprovalOutcome(outcomeCtx, pending.approvalRequestID, request.ChannelID, request.MessageID, "failed", "")
+	case accepted != nil:
+		s.sendApprovalOutcome(outcomeCtx, pending.approvalRequestID, request.ChannelID, request.MessageID, "rejected", "")
+	case endedCode == browserGoneReason:
+		s.sendApprovalOutcomeWithReason(outcomeCtx, pending.approvalRequestID, request.ChannelID, request.MessageID, approvalCancellationStatus, "", browserGoneReason)
+	default:
+		s.sendApprovalOutcome(outcomeCtx, pending.approvalRequestID, request.ChannelID, request.MessageID, "expired", "")
+	}
+	return true
+}
+
+// channelWatch is one liveness watcher over a pending approval's channel.
+// gone receives at most one error, the broker's answer that the channel is
+// closed or expired. stop cancels the watcher and waits for it to exit; it is
+// idempotent.
+type channelWatch struct {
+	gone <-chan error
+	stop func()
+}
+
+// watchChannelWhileApproving polls the channel until ctx ends or the broker
+// says the channel is gone. It reads after afterSeq, so the request already
+// handled is not decrypted again; a copy the browser re-sends is skipped by
+// advancing the cursor. Any other failure (network, 5xx, a message that does
+// not decode) is not proof the browser left and only waits for the next
+// beat. The goroutine is owned by the returned stop, which the worker calls
+// before it touches the channel again.
+func (s *service) watchChannelWhileApproving(ctx context.Context, channel brokerChannel, afterSeq int64) channelWatch {
+	interval := s.opts.ChannelWatchInterval
+	if interval <= 0 {
+		interval = defaultChannelWatchInterval
+	}
+	watchCtx, cancel := context.WithCancel(ctx)
+	gone := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for sleepContext(watchCtx, interval) {
+			_, nextAfterSeq, err := channel.PollMintRequest(watchCtx, afterSeq)
+			if err == nil {
+				afterSeq = maxInt64(afterSeq, nextAfterSeq)
+				continue
+			}
+			// Classify before checking for stop: a 409/410 whose status line
+			// arrived as stop canceled the poll is still the broker's word
+			// that the channel is gone (the minter returns the status even
+			// when the body read is cut off), and the worker reads gone after
+			// stop so it never mints for that channel.
+			if isChannelGone(err) {
+				gone <- err
+				return
+			}
+			if watchCtx.Err() != nil {
+				return
+			}
+			s.logger.Debug("Mint pairing channel liveness poll failed; still watching", zap.Error(err))
+		}
+	}()
+	var once sync.Once
+	return channelWatch{
+		gone: gone,
+		stop: func() {
+			once.Do(func() {
+				cancel()
+				<-done
+			})
+		},
+	}
+}
+
+// isChannelGone reports whether a broker error says the channel can no longer
+// carry anything to the browser: 404 (unknown, or already swept), 409 (closed
+// by a participant — the play client closes its channel when it gives up) or
+// 410 (expired; endApprovalOnGoneChannel reports that one as an expiry, not
+// as the browser leaving). Other 4xx are not read as gone: a 401 would mean this
+// device's own credential is wrong, which says nothing about the browser.
+func isChannelGone(err error) bool {
+	status, ok := brokerStatusCode(err)
+	if !ok {
+		return false
+	}
+	switch status {
+	case http.StatusConflict, http.StatusGone:
+		return true
+	case http.StatusNotFound:
+		// A 404 ends the approval for good, so it counts only when the broker
+		// itself said it: a bare 404 from a proxy or a misrouted request mid
+		// deploy would otherwise end a live approval (and turn an approve that
+		// already landed into failed). The broker always names it not_found.
+		var brokerErr *minter.BrokerError
+		return errors.As(err, &brokerErr) && brokerErr.Code == "not_found"
+	default:
+		return false
+	}
 }
 
 // completeDecision completes a decision for a pairing that is not registered
@@ -2286,6 +2502,13 @@ func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID str
 // the shape of the session the browser received and is empty for every outcome
 // that delivered none.
 func (s *service) sendApprovalOutcome(ctx context.Context, approvalRequestID string, channelID string, requestMessageID string, status string, lifetime string) {
+	s.sendApprovalOutcomeWithReason(ctx, approvalRequestID, channelID, requestMessageID, status, lifetime, "")
+}
+
+// sendApprovalOutcomeWithReason is sendApprovalOutcome with an optional
+// machine-readable reason (e.g. browser_gone on a cancellation outcome); empty
+// omits the field, keeping every existing outcome byte-identical.
+func (s *service) sendApprovalOutcomeWithReason(ctx context.Context, approvalRequestID string, channelID string, requestMessageID string, status string, lifetime string, reason string) {
 	message := map[string]any{
 		"v":                 1,
 		"approvalRequestID": approvalRequestID,
@@ -2296,6 +2519,9 @@ func (s *service) sendApprovalOutcome(ctx context.Context, approvalRequestID str
 	}
 	if lifetime != "" {
 		message["lifetime"] = lifetime
+	}
+	if reason != "" {
+		message["reason"] = reason
 	}
 	err := s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME, approvalRequestID, message, 10)
 	if err != nil {
