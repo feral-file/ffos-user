@@ -499,36 +499,37 @@ func TestJoinScanRetriesToleratesErrors(t *testing.T) {
 	require.NoError(t, c.Join(context.Background(), "Home", "secret12", false))
 }
 
-// --- Scan cache TTL ----------------------------------------------------------
+// --- Scan cache --------------------------------------------------------------
 
-func TestCachedScanServesWithinTTLThenRefreshes(t *testing.T) {
-	var scans int
+// TestCachedScanNeverScans pins #261: the portal reads CachedScan only while
+// the setup AP holds the radio, where every scan fails. However old the cache
+// is — and even when it was never filled — a read must serve what is stored
+// without running nmcli. The old read-side TTL fell through to a live scan
+// here, which hung the picker ~15s and then rendered it blank.
+func TestCachedScanNeverScans(t *testing.T) {
+	var calls int
 	c, _, clock := newController(func(argv []string) ([]byte, error) {
-		joined := strings.Join(argv, " ")
-		if strings.Contains(joined, "device wifi list") {
-			scans++
+		calls++
+		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
 			return []byte("Alpha\nBravo\n"), nil
 		}
 		return nil, nil
 	})
 
-	// First call populates the cache with one live scan.
-	got, err := c.CachedScan(context.Background())
+	cached, err := c.CachedScan(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, []string{"Alpha", "Bravo"}, got)
-	assert.Equal(t, 1, scans)
+	assert.Empty(t, cached, "an unfilled cache reads empty")
+	assert.Zero(t, calls, "an unfilled cache must not trigger a scan")
 
-	// Within TTL: served from cache, no new scan.
-	clock.advance(scanCacheTTL - time.Minute)
-	_, err = c.CachedScan(context.Background())
+	_, err = c.RefreshScanCache(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 1, scans)
+	calls = 0
 
-	// Past TTL: a fresh scan runs.
-	clock.advance(2 * time.Minute)
-	_, err = c.CachedScan(context.Background())
+	clock.advance(scanRetainWindow + time.Hour)
+	cached, err = c.CachedScan(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 2, scans)
+	assert.Equal(t, []string{"Alpha", "Bravo"}, cached)
+	assert.Zero(t, calls, "an aged cache must not trigger a scan")
 }
 
 func TestRefreshScanCachePreservesCandidatesBeyondDisplayCap(t *testing.T) {
@@ -711,10 +712,10 @@ func TestScanReadyPinsIface(t *testing.T) {
 }
 
 // TestRefreshScanCacheKeepsCacheOnEmptyScan is the regression for the portal's
-// "search for networks again" button blanking its own picker: the button
+// "Network not listed?" refresh blanking its own picker: the button
 // bounces the AP, and the refresh that follows catches NM's BSS list still
 // empty from the AP-mode flip. That empty result must not evict the entries the
-// picker is showing, and must not extend their expiry either.
+// picker is showing, and must not extend their retain window either.
 func TestRefreshScanCacheKeepsCacheOnEmptyScan(t *testing.T) {
 	var out []byte
 	c, _, clock := newController(func(argv []string) ([]byte, error) {
@@ -741,52 +742,18 @@ func TestRefreshScanCacheKeepsCacheOnEmptyScan(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"Alpha", "Bravo"}, cached)
 
-	// The retained entries keep their ORIGINAL expiry: the empty scan bought no
-	// extra life, so a stale list still ages out on schedule.
-	clock.advance(scanCacheTTL - time.Minute)
-	out = []byte("Charlie\n")
+	// The retained entries keep their ORIGINAL retain window: the empty scan
+	// bought no extra life, so the next empty scan past it clears them.
+	clock.advance(scanRetainWindow)
+	_, err = c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
 	cached, err = c.CachedScan(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, []string{"Charlie"}, cached)
-}
-
-// TestRefreshScanCacheEmptyWithNoCacheExpiresFast: with nothing worth keeping,
-// the empty result is cached only briefly — long enough that portal page loads
-// do not each fire a live scan under the AP, short enough to retry soon.
-func TestRefreshScanCacheEmptyWithNoCacheExpiresFast(t *testing.T) {
-	var scans int
-	var out []byte
-	c, _, clock := newController(func(argv []string) ([]byte, error) {
-		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
-			scans++
-			return out, nil
-		}
-		return nil, nil
-	})
-
-	got, err := c.RefreshScanCache(context.Background())
-	require.NoError(t, err)
-	require.Empty(t, got)
-	require.Equal(t, 1, scans)
-
-	// Within the short TTL the empty answer is served from cache.
-	clock.advance(emptyScanCacheTTL / 2)
-	cached, err := c.CachedScan(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, cached)
-	assert.Equal(t, 1, scans, "no live scan while the AP holds the radio")
-
-	// Past it, the next read scans again — and picks up the recovered networks.
-	clock.advance(emptyScanCacheTTL)
-	out = []byte("Alpha\n")
-	cached, err = c.CachedScan(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, []string{"Alpha"}, cached)
-	assert.Equal(t, 2, scans)
 }
 
-// TestRefreshScanCacheEmptyDoesNotReviveExpiredCache: an expired list is not
-// "usable" — an empty scan past its TTL must not resurrect it.
+// TestRefreshScanCacheEmptyDoesNotReviveExpiredCache: a list older than
+// scanRetainWindow is not kept — an empty scan past the window clears it.
 func TestRefreshScanCacheEmptyDoesNotReviveExpiredCache(t *testing.T) {
 	var out []byte
 	c, _, clock := newController(func(argv []string) ([]byte, error) {
@@ -800,7 +767,7 @@ func TestRefreshScanCacheEmptyDoesNotReviveExpiredCache(t *testing.T) {
 	_, err := c.RefreshScanCache(context.Background())
 	require.NoError(t, err)
 
-	clock.advance(scanCacheTTL + time.Minute)
+	clock.advance(scanRetainWindow + time.Minute)
 	out = nil
 	_, err = c.RefreshScanCache(context.Background())
 	require.NoError(t, err)
