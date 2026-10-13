@@ -300,7 +300,7 @@ func TestEndApprovalOnGoneChannel(t *testing.T) {
 				require.True(t, result.(approvalResponse).OK)
 			}
 
-			skipClose := s.endApprovalOnGoneChannel(&activePairing{channelID: "ch_1"}, goneRequest, pending, brokerStatus(tc.goneStatus))
+			skipClose := s.endApprovalOnGoneChannel(&activePairing{channelID: "ch_1"}, goneRequest, pending.guard, pending, brokerStatus(tc.goneStatus))
 			assert.True(t, skipClose, "a gone channel is never closed again")
 
 			outcome := receiveNotification(t, relayerClient)
@@ -333,6 +333,27 @@ func TestEndApprovalOnGoneChannel(t *testing.T) {
 			default:
 			}
 		})
+	}
+}
+
+func TestEndApprovalOnGoneChannel_AClaimThatIsGoneHearsNothing(t *testing.T) {
+	defer state.ResetForTesting()
+	s, pending, relayerClient, _ := goneApprovalFixture(t)
+	// A factory reset and re-claim between the request and the gone answer:
+	// same topic id, new generation.
+	if _, err := state.ClearClaim(); err != nil {
+		t.Logf("ClearClaim save failed as expected in tests: %v", err)
+	}
+	if _, err := state.SetRelayerTopicID("topic-1"); err != nil {
+		t.Logf("SetRelayerTopicID save failed as expected in tests: %v", err)
+	}
+
+	skipClose := s.endApprovalOnGoneChannel(&activePairing{channelID: "ch_1"}, goneRequest, pending.guard, pending, brokerStatus(http.StatusConflict))
+	assert.True(t, skipClose)
+	select {
+	case response := <-relayerClient.sent:
+		t.Fatalf("a superseded claim must hear nothing, got %v", response.NotificationType)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
