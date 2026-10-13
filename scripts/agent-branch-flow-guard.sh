@@ -29,9 +29,9 @@
 # Agents work in other repos from the same session — ff-app and play have
 # only `main` — and this file's rules would wrongly refuse their normal PRs.
 # A segment is skipped only when its target is positively another repository,
-# named outside quotes by gh's -R/--repo, git's -C, or a single
-# `repos/OWNER/NAME` API path, or else the shell's own working directory when
-# the command has no cd/pushd/popd at all. A `cd` is never followed. Anything
+# named outside quotes by gh's -R/--repo or git's -C, or else the shell's own
+# working directory when the command has no cd/pushd/popd at all. A REST call
+# (gh api, api.github.com) is never skipped. A `cd` is never followed. Anything
 # unresolvable or unreadable keeps the full rules: the guard fails closed.
 # Details at "can this command be scoped at all?" below.
 #
@@ -181,8 +181,8 @@ effective_branch="$(branch_of "$cwd")"
 # from one inside a commit message. Two consequences, both fail closed:
 #
 # 1. A target is only ever taken from something that names it explicitly and
-#    sits OUTSIDE quotes in the original command: gh's -R/--repo, a git -C,
-#    or a single repos/OWNER/NAME API path. The shell's own working directory
+#    sits OUTSIDE quotes in the original command: gh's -R/--repo or a git
+#    -C. REST calls are never descoped. The shell's own working directory
 #    (the hook payload's cwd) is the only implicit target, and it is used
 #    only when the command contains no cd/pushd/popd at all — quoted or not
 #    — because a cd anywhere makes "which directory is this segment in"
@@ -237,9 +237,6 @@ while IFS= read -r oseg; do
   #   - gh's -R/--repo, read only when the segment's command IS gh (`git
   #     diff -R`, `grep -R` mean something else) and it appears exactly once,
   #     detached;
-  #   - exactly one repos/OWNER/NAME path in a gh api / api.github.com call
-  #     (a placeholder like repos/:owner/:repo counts as a second, unreadable
-  #     one);
   #   - exactly one git -C <dir>, or (see cwd_usable) the shell's cwd: out
   #     only if the directory has remotes and none names a flow repository.
   # Whatever the source, a segment that names a flow repository in URL form
@@ -247,12 +244,12 @@ while IFS= read -r oseg; do
   seg_repo_spec=""
   out_of_scope=0
   is_gh=0; [[ "$seg" =~ ^[[:space:]]*gh[[:space:]] ]] && is_gh=1
-  # Any gh ... api call counts as an API segment, prefixed (`command gh api`)
-  # or not: those are never descoped by the cwd, only by an explicit path.
+  # A REST call (gh ... api, prefixed or not, or api.github.com) is never
+  # descoped: its destination is the endpoint, and request data, quoting,
+  # numeric repositories/ID paths, and dot segments make that hard to read
+  # reliably from this text. Agents rarely need REST writes in other repos.
   is_api=0; [[ "$seg" =~ (^|[[:space:]])gh[[:space:]](.*[[:space:]])?api[[:space:]] || "$seg" == *api.github.com* ]] && is_api=1
   repo_flags="$(printf '%s\n' "$oseg" | grep -Eo '(^|[[:space:]])(-R|--repo)([=[:space:]]+[^[:space:]]+|[^[:space:]=]+)' || true)"
-  repos_mentions="$(printf '%s\n' "$oseg" | { grep -o 'repos/' || true; } | wc -l | tr -d ' ')"
-  repo_paths="$(printf '%s\n' "$oseg" | grep -Eo '(^|[[:space:]/])repos/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+' || true)"
   dash_c="$(printf '%s\n' "$oseg" | grep -Eo '(^|[[:space:]])git[[:space:]]+-C[[:space:]]+[^[:space:]]+' || true)"
   seg_dir=""
   [[ $cwd_usable -eq 1 ]] && seg_dir="$cwd"
@@ -273,7 +270,9 @@ while IFS= read -r oseg; do
     # with a separate value). Case-sensitive: `-c key=val` stays.
     seg="$(printf '%s' "$oseg" | sed -E 's/(^|[[:space:]])git[[:space:]]+-C[[:space:]]+[^[:space:]]+/\1git/' | tr '[:upper:]' '[:lower:]')"
   fi
-  if [[ $is_gh -eq 1 && -n "$repo_flags" ]]; then
+  if [[ $is_api -eq 1 ]]; then
+    :
+  elif [[ $is_gh -eq 1 && -n "$repo_flags" ]]; then
     # The value must look like OWNER/NAME: `--title -R --body x` makes gh
     # read `-R` as the title, and `--body` is not a repository.
     if [[ "$(printf '%s\n' "$repo_flags" | wc -l)" -eq 1 && "$repo_flags" =~ (-R|--repo)[=[:space:]]+([A-Za-z0-9._][A-Za-z0-9._-]*/[A-Za-z0-9._/-]+)$ ]]; then
@@ -283,15 +282,7 @@ while IFS= read -r oseg; do
         out_of_scope=1
       fi
     fi
-  elif [[ $is_api -eq 1 && "$repos_mentions" -gt 0 ]]; then
-    if [[ "$repos_mentions" -eq 1 && "$(printf '%s\n' "$repo_paths" | grep -c .)" -eq 1 ]]; then
-      api_path="$(printf '%s' "$repo_paths" | sed -E 's#^[[:space:]/]*##')"
-      if in_unquoted "$(ere_escape "$api_path")" &&
-         ! [[ "$(repo_name_of "${api_path##*/}")" =~ ^($flow_repo_names)$ ]]; then
-        out_of_scope=1
-      fi
-    fi
-  elif [[ $is_api -eq 0 ]] && dir_out_of_flow "$seg_dir"; then
+  elif dir_out_of_flow "$seg_dir"; then
     out_of_scope=1
   fi
   # A flow repository named as a path component anywhere — a remote URL, a

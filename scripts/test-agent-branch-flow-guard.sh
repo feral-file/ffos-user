@@ -186,7 +186,6 @@ expect allow 'gh pr create --base main --fill' "$app_feature_dir"
 expect allow 'git push origin main' "$app_dir"
 expect allow 'git commit -m x' "$app_dir"
 expect allow 'git -C '"$app_dir"' push origin main' "$user_dir"
-expect allow 'gh api -X PUT repos/feral-file/ff-app/pulls/12/merge' "$user_dir"
 expect allow 'git push' "$upstream_only_dir"                   # single remote resolves
 expect allow 'git -C '"$app_dir"' checkout main && git -C '"$app_dir"' merge feat-x' "$user_dir"
 # A cd is never followed: which directory a later segment runs in cannot be
@@ -303,6 +302,13 @@ expect deny  'gh pr view 1 -R feral-file/ff-app $(gh pr merge 200 --squash)' "$u
 # Still fine: a plain merge by number in a non-flow repo, and an ff-app API path.
 expect allow 'gh pr merge 12 --squash' "$app_dir"
 expect allow 'gh api repos/feral-file/ff-app/pulls/12' "$user_dir"
+# REST writes are never descoped: request data can name any repository
+# (repository 1026026999 is ffos-user), so even another repo's write keeps
+# the full rules. Reads still pass.
+expect deny  'gh api -X POST repositories/1026026999/merges -f commit_message=/repos/feral-file/ff-app -f base=main -f head=develop' "$app_dir"
+expect deny  'gh -R feral-file/ff-app api -X POST repositories/1026026999/merges -f base=main' "$app_dir"
+expect deny  'curl -X POST https://api.github.com/repos/o/ff-app/../../../repositories/1026026999/merges -d base=main' "$app_dir"
+expect deny  'gh api -X PUT repos/feral-file/ff-app/pulls/12/merge' "$user_dir"
 
 # A checkout through git -C moves that repository, not the current one.
 expect allow 'git -C '"$staging_dir"' checkout staging && git commit -m x' "$feature_dir"

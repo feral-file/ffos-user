@@ -51,12 +51,12 @@ This file defines the repository-wide principles for coding agents. The detailed
   session that also works in another repository, such as `ff-app` or `play`,
   whose only branch is `main`, follows that repository's own flow there. The
   guard lets those commands through only when it can positively tell they
-  target another repository: an unquoted `gh -R/--repo`, `git -C <dir>`, or
-  single `repos/OWNER/NAME` API path, or the shell's own working directory
-  when the command contains no `cd`/`chdir`/`pushd`/`popd` (never for a `gh
-  api` call). It never follows a `cd`, so do cross-repo work with `git -C`
-  and `gh -R`. Anything it can't read keeps the full rules: an unresolvable
-  target, escapes or multi-line quoted strings, a background `&`, a heredoc,
+  target another repository: an unquoted `gh -R/--repo` or `git -C <dir>`,
+  or the shell's own working directory when the command contains no
+  `cd`/`chdir`/`pushd`/`popd`. REST calls (`gh api`, `api.github.com`) are
+  never let through this way. It never follows a `cd`, so do cross-repo work
+  with `git -C` and `gh -R`. Anything it can't read keeps the full rules:
+  an unresolvable target, escapes or multi-line quoted strings, a background `&`, a heredoc,
   `sh -c`/`eval`/`env`, any `GIT_*`/`GH_*` assignment, a `$(...)`/backtick
   running git or gh, `--git-dir`, or a `#` comment. So does a command that
   names a flow repository in a URL or GitHub path, PR URLs included. For
