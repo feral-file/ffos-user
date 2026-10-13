@@ -239,6 +239,36 @@ func TestApprovalWait_WatcherReadsPastTheHandledRequest(t *testing.T) {
 	}
 }
 
+// cancelledGonePollChannel is a channel whose poll is in flight when the
+// watcher is stopped and still comes back with the broker's 409: the minter
+// returns the status even when cancellation cuts off reading the body.
+type cancelledGonePollChannel struct {
+	*fakeBrokerChannel
+	polling chan struct{}
+}
+
+func (c *cancelledGonePollChannel) PollMintRequest(ctx context.Context, _ int64) (*minter.MintRequest, int64, error) {
+	closeOnce(c.polling)
+	<-ctx.Done()
+	return nil, 0, brokerStatus(http.StatusConflict)
+}
+
+func TestApprovalWait_GoneAnswerRacingStopIsKept(t *testing.T) {
+	s := newService(Options{Enabled: true, ChannelWatchInterval: time.Millisecond}, nil, nil, nil, nil, wrapper.NewJSON(), zap.NewNop()).(*service)
+	ch := &cancelledGonePollChannel{fakeBrokerChannel: &fakeBrokerChannel{}, polling: make(chan struct{})}
+
+	watch := s.watchChannelWhileApproving(context.Background(), ch, 0)
+	<-ch.polling
+	watch.stop()
+
+	select {
+	case err := <-watch.gone:
+		assert.True(t, isChannelGone(err))
+	default:
+		t.Fatal("a gone answer that arrived as the watcher stopped must reach the worker, or it mints for a closed channel")
+	}
+}
+
 // goneApprovalFixture registers a pending approval on a service whose
 // relayer records outcomes, for exercising endApprovalOnGoneChannel directly:
 // the worker's select cannot be steered into the gone case while a decision is

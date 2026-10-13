@@ -1942,11 +1942,16 @@ func (s *service) watchChannelWhileApproving(ctx context.Context, channel broker
 				afterSeq = maxInt64(afterSeq, nextAfterSeq)
 				continue
 			}
-			if watchCtx.Err() != nil {
-				return
-			}
+			// Classify before checking for stop: a 409/410 whose status line
+			// arrived as stop canceled the poll is still the broker's word
+			// that the channel is gone (the minter returns the status even
+			// when the body read is cut off), and the worker reads gone after
+			// stop so it never mints for that channel.
 			if isChannelGone(err) {
 				gone <- err
+				return
+			}
+			if watchCtx.Err() != nil {
 				return
 			}
 			s.logger.Debug("Mint pairing channel liveness poll failed; still watching", zap.Error(err))
