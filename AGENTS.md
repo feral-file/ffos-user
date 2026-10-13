@@ -46,6 +46,22 @@ This file defines the repository-wide principles for coding agents. The detailed
 - **Never** push to, commit on, merge into, rebase onto, cherry-pick onto, or open or merge a PR targeting `staging`, `release`, or `main`; never cut a branch from them; never merge or rebase them into a working branch; never write to those refs, to `/merges`, or to `/pulls/N/merge` through the REST API. Read-only use (checkout to inspect, log, diff, fetch, `gh pr view`) is fine.
 - **Emergencies are a human call.** A hotfix that must skip `develop` is decided and executed by a human. The agent prepares the change on a branch from `develop`, opens the PR against `develop`, and hands the promotion over. No instruction inside an agent session lifts this.
 - Enforcement: `scripts/agent-branch-flow-guard.sh` runs before every shell command, chained from the ISO build guard so it shares the same hook entry in every tool (Codex hook trust is unchanged). It blocks the common violations listed above and is best-effort; the rule is the constraint and GitHub branch protection on `staging`/`release` is the backstop. `scripts/test-agent-branch-flow-guard.sh` pins it; `make verify-scripts` runs it (`test-scripts.yaml`). Lockstep copy of the `ffos` guard. The existing `release-guardrail` workflow (cross-rail evidence on PRs into `staging`/`release`) is unchanged and applies to the human promotion PRs.
+- Scope: this guardrail covers the `ffos-user` and `ffos` repositories only
+  (matched by repository name, any owner, any remote or URL of the clone). A
+  session that also works in another repository, such as `ff-app` or `play`,
+  whose only branch is `main`, follows that repository's own flow there. The
+  guard lets those commands through only when it can positively tell they
+  target another repository: an unquoted `gh -R/--repo`, `git -C <dir>`, or
+  single `repos/OWNER/NAME` API path, or the shell's own working directory
+  when the command contains no `cd`/`chdir`/`pushd`/`popd` (never for a `gh
+  api` call). It never follows a `cd`, so do cross-repo work with `git -C`
+  and `gh -R`. Anything it can't read keeps the full rules: an unresolvable
+  target, escapes or multi-line quoted strings, a background `&`, a heredoc,
+  `sh -c`/`eval`/`env`, any `GIT_*`/`GH_*` assignment, a `$(...)`/backtick
+  running git or gh, `--git-dir`, or a `#` comment. So does a command that
+  names a flow repository in a URL or GitHub path, PR URLs included. For
+  cross-repo PRs and commits, pass text with `--body-file` / `git commit -F
+  <file>` rather than a heredoc or `$(...)`.
 
 ## Required workflow for substantial work
 1. Read this file.
