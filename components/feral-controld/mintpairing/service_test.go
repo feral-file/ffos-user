@@ -4013,6 +4013,27 @@ type fakeBrokerChannel struct {
 	pollErr    error
 	onSend     func()
 	beforePoll func()
+	// pollAfterRequestErr, once set, is what every poll returns after the
+	// request has been handed out: the broker's answer for a channel the
+	// browser closed or let expire while the approval was pending.
+	pollAfterRequestErr error
+	// requestHandedOut records that the request was returned by a poll.
+	requestHandedOut bool
+}
+
+// SetPollAfterRequestErr makes later polls fail with err, as the broker does
+// once the browser has abandoned the channel.
+func (f *fakeBrokerChannel) SetPollAfterRequestErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pollAfterRequestErr = err
+}
+
+// PollCount reports how many polls the channel has served.
+func (f *fakeBrokerChannel) PollCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.pollAfterSeqs)
 }
 
 func closeOnce(ch chan struct{}) {
@@ -4054,10 +4075,14 @@ func (f *fakeBrokerChannel) PollMintRequest(_ context.Context, afterSeq int64) (
 		return nil, nextSeq, nil
 	}
 	if f.request == nil {
+		if f.requestHandedOut && f.pollAfterRequestErr != nil {
+			return nil, afterSeq, f.pollAfterRequestErr
+		}
 		return nil, afterSeq, nil
 	}
 	request := f.request
 	f.request = nil
+	f.requestHandedOut = true
 	if f.pollErr != nil {
 		return request, afterSeq, f.pollErr
 	}
