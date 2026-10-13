@@ -117,8 +117,8 @@ type Status struct {
 }
 
 // ScanFunc returns the SSIDs to offer in the picker. In production this is
-// wifictl.CachedScan: while the setup AP holds the radio a live scan is
-// unreliable, so the portal reads the pre-AP cache.
+// wifictl.CachedScan: while the setup AP holds the radio no live scan can
+// succeed, so the portal reads the pre-AP cache, at any age.
 type ScanFunc func(ctx context.Context) ([]string, error)
 
 // JoinRequest is one credential submission from the portal form.
