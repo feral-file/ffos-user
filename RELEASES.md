@@ -33,6 +33,9 @@ ffos-user, package rail (`components/**`):
   - Recovery is deferred while `feral-updater.sh` holds
     `/run/feral-updater.lock` (#380, ffos#124). The watchdog reads
     `/proc/locks`.
+  - A `cdp_stuck` report latched before Chromium first answers no longer
+    restarts the kiosk on that first answer (#401, from the
+    #396 review).
 - **controld.**
   - Sustained CDP-stuck is reported to the watchdog over D-Bus (`cdp_stuck`,
     #386, #356), and the watchdog restarts the kiosk on it.
@@ -43,10 +46,14 @@ ffos-user, package rail (`components/**`):
     `offlineCache.enabled` is, which the image config sets.
   - Portal scan reads never go live (#393, #261).
   - Mint-pairing approval channel liveness (#394, #332).
+  - cdphealth re-confirmations at Debug, the mediator drops controld's own
+    signals, and `offlinecache` builds on darwin again (#398).
 - Agent guard scoping (#395). No device impact.
 
 #396's head is `develop`, so anything merged into `develop` before #396 merges
-also ships in 2.0.11. If #398 lands first, add it to the controld list above.
+also ships in 2.0.11. #398 and #399 (this entry) did. #401 is open against
+`develop` and must merge before #396 to ship; if it does not, drop its three
+mentions in this entry.
 
 `ffos` #166, image rail only:
 
@@ -83,15 +90,34 @@ alone with `manual-build-components.yaml` (as 2.0.9 option 2 allowed).
 
 ### Before dispatch
 
-- **Fix PRs.** Merge them into `develop` and promote, or record that they
-  were deliberately left out:
-  - ffos#167: a pending Tailscale login or a failed revoke stalls or aborts a
-    factory reset.
-  - ffos-user#398: cdphealth logs Info about every 90 s on every healthy
-    device; controld logs an "Unknown signal" Warn for its own signals.
-  - Bench evidence for both is in the PRs. The FF1 reproduced the ffos#167
-    bug on 2026-10-14: a reset was blocked 2m45s and rebooted the device
-    after controld's 2 min latch had already released.
+- **Fix PRs.** ffos#167 and #398 merged into their `develop` branches on
+  2026-10-14 and ride with ffos#166 / #396; #401 is open:
+  - ffos#167: a pending Tailscale login or a failed revoke stalled or aborted
+    a factory reset. The FF1 reproduced the bug on 2026-10-14 (a reset was
+    blocked 2m45s and rebooted the device after controld's 2 min latch had
+    already released); the fix passed the bench the same day.
+  - ffos-user#398: cdphealth logged Info about every 90 s on every healthy
+    device; controld logged an "Unknown signal" Warn for its own signals.
+  - ffos-user#401: a `cdp_stuck` latched during a slow Chromium
+    cold start (or a headless re-affirmation landing in the display
+    hot-plug grace) restarted the kiosk on its first healthy check.
+- **Known risks, decide before the Production run** (from the #396 review).
+  The first two are new-feature follow-ups; the third lowers a budget 2.0.10
+  shipped:
+  - The automatic playback cache (#391) re-downloads every expired playlist
+    item, not only what is about to play. Items are cached only when fresh
+    for at least 1 h, so the worst case is one full re-download of the
+    playlist per hour on media served with `max-age` near that floor.
+    `offlineCache.automaticPlaybackDisabled` is the kill switch.
+  - The #254 reboot cap is forgiven by the first healthy `cdp_stuck=false`
+    confirmation, so a Chromium that comes up and then hangs within the
+    minute every boot still reboots forever (as before #378).
+  - On upgrade the cache budget becomes `maxDiskPercent` (default 50 %,
+    about 63.75 GB on an FF1) capped by the image's 80 GB `maxDiskBytes`,
+    not the flat 80 GB 2.0.10 shipped. A device holding more than that in
+    explicit downloads loses the oldest on its first boot after the upgrade
+    (`enforceDiskLimit` runs at start), and the app's `getOfflineCacheStatus`
+    shows the new limit.
 - **Bench a Staging image on an FF1 before the Production run:**
   - **Old recovery → 2.0.11.** Factory-reset onto the recovery root, then let
     the boot gate update it:
@@ -112,8 +138,8 @@ alone with `manual-build-components.yaml` (as 2.0.9 option 2 allowed).
   - Development bench devices on those builds poll `feat/owner-tailscale`,
     the branch baked into `ff1-config.json`, not `develop`. Reflash them, or
     dispatch a Development build on that branch, to move them.
-- **Merge order.** Merge this `RELEASES.md` entry into `develop` before #396
-  merges, so the entry reaches `staging` with the release.
+- **Merge order.** Done: this entry merged into `develop` via #399 before
+  #396, so it reaches `staging` with the release.
 
 ### Release action (human)
 
