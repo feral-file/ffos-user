@@ -597,46 +597,27 @@ malformed `item.Source` (which is about to fail `Page.navigate` moments
 later anyway with a clearer error), only the origin-scoped clear is
 skipped; the unconditional cache flush still runs.
 
-`offlineCache.maxDiskBytes` deliberately does NOT default to "unlimited"
-the way most `OfflineCacheConfig` fields default to "off"/"unset" —
-`OptionsFromConfig` falls back to `DefaultMaxDiskBytes` (10 GiB) whenever
-config omits or zeroes it. This feature exists specifically to cache
-potentially gigabyte-scale software-artwork assets (§4.3's 1.1 GB video)
-on disk-constrained embedded devices; a config that merely flips
-`offlineCache.enabled` to `true` without also setting `maxDiskBytes`
-must not silently mean "fill the disk" — `Service.enforceDiskLimit` is a
-complete no-op when `maxDiskBytes <= 0` (see its doc), so an unset budget
-combined with `downloadPlaylist` against large assets could exhaust the
-filesystem.
+The shared store uses 50% of its filesystem by default, additionally capped
+by a positive `offlineCache.maxDiskBytes`. Keep the larger of 5 GiB or 10%
+of the filesystem free. `maxDiskPercent` and `minFreeDiskBytes` tune those
+limits. The effective limit is recomputed before/after capture and at startup,
+then at least once per minute while idle. Streaming writes check available
+space too, so unrelated disk growth can abort an in-flight download safely.
 
-`maxDiskBytes` is enforced as a genuine hard bound, not just a
-"try to make room" heuristic: `enforceDiskLimit`'s eviction loop normally
-protects the just-captured item (`justCapturedID`) while evicting older
-items oldest-first, but if the cache is *still* over budget once every
-older item has been evicted — i.e. the just-captured item's own size
-alone exceeds `maxDiskBytes` — it evicts the just-captured item too
-rather than leaving the cache permanently over budget. The caller sees
-this as the item transitioning to `not_cached` immediately after
-appearing to complete, with `Coverage.Reason` explaining that it alone
-exceeded the disk budget.
+Eviction removes expired automatic records first, then prefers least recently
+played artwork, falling back to capture time until an item has played. Warming
+preserves explicit snapshots and fresh active-playlist members; hard-ceiling
+enforcement may evict either kind. Pre-capture reclaim targets seven eighths of
+the effective budget, with the capture's own source protected unless its
+automatic record has expired. An oversized capture can fail without consuming
+the free-space reserve.
 
-The bound is enforced on BOTH sides of a capture, because eviction only
-on the way out is not enough for a cache that must roll over.
-Post-capture, `enforceDiskLimit` trims back under `maxDiskBytes` as
-above. Pre-capture, `service.process` first runs
-`Service.reclaimDiskForCapture`, which evicts oldest-first (never the
-item about to be captured, and returning quietly rather than warning
-when the target is unreachable — see its doc) until at least
-`maxDiskBytes/8` of the budget is free. Without that step, a store
-sitting at its ceiling starved every new capture up front: both
-capture pipelines seed their disk
-budget with the store's *remaining* room, and the post-capture eviction
-only runs after a *successful* capture, so once full the cache froze on
-its oldest contents forever (feral-file/ffos-user#229 review finding).
-An item larger than the 1/8th headroom floor still captures with
-whatever room eviction actually freed — degrading only itself (partial
-coverage) rather than wiping the rest of the cache for one oversized
-item.
+With offline caching enabled, [automatic playback caching](automatic-playback-cache.md)
+warms current/upcoming media with at least an hour of explicit remaining HTTP
+freshness without a Download command. Its versioned
+record envelope makes old binaries reject and quarantine automatic records
+instead of silently serving them forever. Manual snapshot records retain their
+existing format and offline behavior.
 
 ### 3.3 Direct-download path for media and other single-file items
 
@@ -1885,39 +1866,16 @@ Item records are counted but not separately bounded: unlike playlist
 bodies they are deleted with their item, so they scale with a population
 eviction already controls.
 
-The ceiling is also **reported**, as `getOfflineCacheStatus`' `diskLimit`
-alongside the `diskUsed` it bounds, so a controller can show cache usage
-as a proportion rather than a bare byte count and explain why items
-disappear. It is omitted rather than sent as `0` when `maxDiskBytes <= 0`,
-because that case means no ceiling *and no item eviction* — the opposite
-of what a `0` would convey. (Playlist-body pruning above is by count and
-runs regardless, which is why that phrasing says *item*.)
+The effective ceiling is reported as `getOfflineCacheStatus.diskLimit` alongside
+`diskUsed`. It reflects percentage, absolute-cap and free-space constraints.
+Zero means no storage headroom; absence retains the low-level unlimited case.
+Clients clamp the ratio and re-poll rather than infer eviction thresholds.
 
-What `diskLimit` reports is the **budget, not the threshold eviction
-actually fires at** — the two are different numbers, and a controller that
-conflates them draws a gauge that misreads in both directions.
-`reclaimDiskForCapture` above runs before every capture and evicts down to
-`maxDiskBytes - maxDiskBytes/captureReclaimHeadroomDivisor`, so a busy
-store oscillates between roughly seven eighths of the budget and the
-budget itself (a capture is handed the whole freed headroom as its own
-ceiling — see `newDiskBudgetFromStore`); `enforceDiskLimit` only binds
-when one capture writes past the ceiling in a single pass. Usage can also
-sit *above* the budget indefinitely, because eviction runs only on the
-capture path: lowering `maxDiskBytes` on a populated device is not
-reconciled until the next download, and `Start` deliberately does not
-enforce the ceiling (it sweeps and GCs only). Playlist bodies are counted
-but bounded by count, so no eviction reclaims them either.
-
-`docs/controld-inbound-controller-messages.md` states all of this for
-client authors, and quotes the current one-eighth margin as an explicitly
-**illustrative, non-contractual** figure so a client can picture the
-behavior without hardcoding it. Retuning `captureReclaimHeadroomDivisor`
-therefore means updating every figure derived from it: "one eighth" and the
-"~8.75 GiB" example in that doc's "Cache size and eviction" paragraph, and
-"roughly seven eighths" above in this one — not merely rechecking the
-surrounding prose, which stays true at any margin. If a controller ever
-genuinely needs the threshold rather than the budget, add a field for it
-rather than letting clients derive one from the divisor.
+Eviction runs at startup and periodically while idle as well as around captures.
+The pre-capture headroom margin is one eighth of the effective budget. Playlist
+metadata remains bounded by record count; it is counted in disk usage but item
+eviction does not reclaim it. The controller-facing contract is documented in
+`docs/controld-inbound-controller-messages.md`, "Cache size and eviction".
 
 ### A child target is only resumed once interception is armed
 
