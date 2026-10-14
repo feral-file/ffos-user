@@ -186,6 +186,8 @@ All messages are JSON. The message envelope is:
 }
 ```
 
+**Relayer reconnect diagnosis:** transient network errors use a randomized 1–5 second retry delay. Server-busy errors (HTTP 429/5xx or connection refused) use 10–60 seconds to reduce pressure on an unavailable endpoint. Unclassified errors also use 10–60 seconds, returning after the eleventh failed attempt; permanent errors stop immediately. The LAN relayer fields report socket state, not a changed recovery policy. A faster first retry for unclassified errors remains unvalidated: capture the actual dial/read error during a failed installation and test recovery against both a brief link interruption and a busy endpoint before reducing this delay.
+
 **Relayer keepalive control messages:**
 - `controld` sends both a transport-level WebSocket `Ping` frame and an application-level `{"type":"ping"}` message on the relayer WebSocket.
 - The relayer should reply to the transport ping with a WebSocket `Pong` frame and to the application ping with `{"type":"pong"}` once the new keepalive path is deployed.
@@ -285,6 +287,8 @@ The `mintPairingApprovalDecision` command is a controller-to-controld approval r
 
 The hub does not carry `messageID == "system"` messages; topic assignment is relayer-only.
 
+For installation diagnosis, `curl --fail http://<device-ip>:1111/api/screenshot -o screenshot.png` saves the current renderer output. Read `/api/v2/status` alongside it to distinguish LAN connectivity from the relay socket state.
+
 `GET /api/screenshot` uses an isolated, short-lived CDP connection so PNG encoding cannot block the persistent command/status connection. `width` and `height` are optional positive integers up to 4096; either may be supplied alone. Two-axis boxes must not exceed 8,294,400 pixels (3840×2160, the 4K-UHD pixel budget); a one-axis request is proportionally scaled down when its derived surface would exceed that budget. This preserves aspect ratio without cropping or stretching while keeping every accepted capture deliverable within the 40 MiB PNG and 64 MiB CDP-frame limits. With neither parameter, the route reads viewport metrics first: it preserves native output when the viewport fits both budgets and sends a full-viewport scaled clip before encoding when it does not. Capture plus response delivery is single-flight and has a 10-second capture deadline; the Hub's 30-second write deadline bounds a backpressured client. The PNG is evidence of Chromium renderer output, not proof of compositor, HDMI, or physical-panel output. The route remains inside the Hub's unauthenticated trusted-LAN boundary; rejecting `Origin` and `Sec-Fetch-Site` requests reduces browser/DNS-rebinding exposure but is not a substitute for the planned shared Hub authorization layer.
 
 **`GET /api/status` / `GET /api/v2/status` body** (`hub/status.go`; identical shape, only `contract` differs):
@@ -297,6 +301,8 @@ The hub does not carry `messageID == "system"` messages; topic assignment is rel
   "contract": "1",
   "claimed": true,
   "internet": true,
+  "relayer_connected": true,
+  "relayer_last_connected_at": "2026-10-14T02:00:00Z",
   "setup_state": "online",
   "connectivity": "...",
   "topic_id": "..."
@@ -305,6 +311,7 @@ The hub does not carry `messageID == "system"` messages; topic assignment is rel
 
 - `contract` is owned by the hub (not the status provider): `"1"` on the legacy route, `"2"` on `/api/v2/status`. The versioned route — not the field — is the firmware gate the pairing app uses: a device that 404s on `/api/v2/status` (or lacks the `api` mDNS TXT key) is old firmware and must be treated as **not LAN-pairable** (no discovery notification, no pairing offer). The field remains the dual-running-window signal for retiring the open `:1111` surface.
 - `setup_state` is a coarse provisioning-state string. When the provisioning machine is wired in (production), it is the live machine state: `starting`, `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joining`. The bare status provider falls back to `claimed` / `unclaimed`.
+- `relayer_connected` reports the cached relayer WebSocket lifecycle state, independently of LAN link and internet reachability. It is not proof that a cloud command will complete. `relayer_last_connected_at` is the UTC RFC3339 timestamp of the most recent successful socket dial in this daemon process; it remains after disconnect and is `null` until the first successful dial (including after restart). Status reads trigger no relayer probe.
 - `claimed` mirrors the mDNS TXT `claimed` value.
 - `branch` and `version` are read from the same `ff1-config.json` the OTA gate uses, so the LAN payload can never disagree with the claim QR.
 - `internet` is live internet reachability (sys-monitord's cached signal, one local D-Bus round-trip per poll). It is distinct from `connectivity`, which is LAN-link state: a device on a healthy LAN with a dead WAN is `connectivity: "connected"`, `internet: false`.
