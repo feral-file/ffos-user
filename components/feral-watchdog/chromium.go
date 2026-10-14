@@ -172,8 +172,10 @@ type ChromiumMonitor struct {
 	// the same gates — calling checkHangState itself from a success tick
 	// re-triggered its "entered" latch/log every 5s throughout a live dev-
 	// console or update window, since that function's gate detection is a
-	// side-effecting mechanism built for the failure path only. Cleared by
-	// restartChromium once acted on. feral-controld's cdphealth.Monitor
+	// side-effecting mechanism built for the failure path only. A report
+	// latched while still pre-connect is stale by the first 200 and is
+	// cleared there, before escalateCDPStuck runs (see check()'s
+	// firstConnect). Cleared by restartChromium once acted on. feral-controld's cdphealth.Monitor
 	// re-affirms "true" every StuckThreshold while an episode remains
 	// unresolved (not only once, and not only on a fresh disconnect — see
 	// cdphealth's own doc), so a kiosk restart that doesn't fix the
@@ -350,6 +352,9 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 	// headless/devConsole/updating are already cleared here, so that reset
 	// never sees them and never runs).
 	wasSuppressed := m.headless || m.devConsole || m.updating || !m.fallbackSince.IsZero()
+	// Pre-connect is one more state cdphealth cannot see; the first 200
+	// since (re)start exits it exactly like the four above.
+	firstConnect := !m.hasEverConnected
 	m.lastSuccessfulResp = time.Now()
 	m.hasEverConnected = true
 	// A 200 proves a display is attached and Chromium is up. Clear the headless
@@ -359,7 +364,7 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 	m.headless = false
 	m.devConsole = false
 	m.updating = false
-	if wasSuppressed {
+	if wasSuppressed || firstConnect {
 		// Clearing here, not unconditionally on every success, matters:
 		// cdpStuck must still be able to trigger checkHangState's cdpStuck
 		// case below for the ordinary case this feature exists for — a
@@ -367,6 +372,23 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 		// CDP dial stuck — which clearing it on every success would defeat
 		// outright. It is only stale, and therefore safe (indeed necessary)
 		// to clear, right when exiting a state cdphealth could not see.
+		//
+		// firstConnect (2.0.11 staging review): checkHangState's pre-connect
+		// branch already refuses to ACT on cdpStuck (cross-daemon clock
+		// skew, see there), but the latch itself used to survive into this
+		// first success, where escalateCDPStuck below acted on it. A report
+		// that landed while Chromium was still starting — a cold start
+		// slower than controld's StuckThreshold, or a re-affirmation
+		// (cdphealth re-affirms every threshold on a headless device)
+		// arriving inside the fresh grace the `reconnected` reset arms
+		// after a display hot-plug — restarted the kiosk the moment it
+		// first answered, and a slow enough cold start repeated that into
+		// the restart ladder. That report described a Chromium that had
+		// not answered yet, not this one: if controld's dial is genuinely
+		// stuck against this one too, it re-reports within one more
+		// StuckThreshold and the post-connect paths act on it then. Still
+		// a local clear, not a confirmation: cdpConfirmedHealthy is
+		// untouched.
 		m.cdpStuck = false
 	}
 	// Chromium came back while the fallback screen was up (someone restarted
