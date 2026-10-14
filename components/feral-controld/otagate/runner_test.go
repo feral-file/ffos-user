@@ -176,70 +176,54 @@ func TestTailKeepsPollingWhileUnitAlive(t *testing.T) {
 	}
 }
 
-// TestRunRestartsWatchdogOnFailure is the G3 regression: Run stops
-// feral-watchdog up front, and Restart=always does NOT resurrect an explicitly
-// stopped unit — so every failure path must start it again or the kiosk
-// watchdog stays dead until a manual reboot.
-func TestRunRestartsWatchdogOnFailure(t *testing.T) {
-	exec := &fakeExec{fail: map[string]error{
-		"systemctl start feral-updater-run@": fmt.Errorf("boom"),
-	}}
-	r := &systemdRunner{exec: exec, clock: newFakeClock()}
-	r.unitActive = func(context.Context, string) bool { return true }
-
-	err := r.Run(context.Background(), nil)
-	if err == nil || !strings.Contains(err.Error(), "Failed to start updater service") {
-		t.Fatalf("Run error = %v, want updater start failure", err)
-	}
-
-	var stopped, restarted bool
-	for _, cmd := range exec.recorded() {
-		switch cmd {
-		case "systemctl --user stop feral-watchdog.service":
-			stopped = true
-		case "systemctl --user start feral-watchdog.service":
-			restarted = true
-		}
-	}
-	if !stopped {
-		t.Error("watchdog was never stopped")
-	}
-	if !restarted {
-		t.Error("watchdog was not restarted on the failure path")
-	}
-}
-
-// TestRunRestartsWatchdogOnSuccess is the F5 regression: even on a successful
-// update the watchdog must be restarted, so a deferred/staged/failed reboot does
-// not leave a dead watchdog on the still-running old build. (In production the
-// imminent reboot usually kills it again, harmlessly.)
-func TestRunRestartsWatchdogOnSuccess(t *testing.T) {
-	exec := &fakeExec{}
-	r := &systemdRunner{exec: exec, clock: newFakeClock()}
-	r.unitActive = func(context.Context, string) bool { return true }
-	r.openLog = func(string) (io.ReadCloser, error) {
-		// The run id is random; recover it from the recorded systemctl start so the
-		// canned log lines carry a matching id= tag.
-		id := ""
+// TestRunLeavesWatchdogAlone pins ffos#124: the runner no longer stops and
+// restarts feral-watchdog around an update, on success or failure. The
+// watchdog defers its own recovery while the updater lock is held, and the
+// old stop left it dead whenever the restart path was not reached.
+func TestRunLeavesWatchdogAlone(t *testing.T) {
+	assertNoWatchdog := func(t *testing.T, exec *fakeExec) {
+		t.Helper()
 		for _, cmd := range exec.recorded() {
-			if strings.Contains(cmd, "feral-updater-run@") {
-				id = strings.TrimSuffix(strings.SplitAfter(cmd, "feral-updater-run@")[1], ".service")
+			if strings.Contains(cmd, "feral-watchdog") {
+				t.Errorf("runner touched the watchdog: %q", cmd)
 			}
 		}
-		return io.NopCloser(strings.NewReader(
-			`[PROGRESS] id=` + id + ` progress=100 message="Done"` + "\n")), nil
 	}
 
-	if err := r.Run(context.Background(), nil); err != nil {
-		t.Fatalf("Run error = %v, want nil", err)
-	}
-	var restarted bool
-	for _, cmd := range exec.recorded() {
-		if cmd == "systemctl --user start feral-watchdog.service" {
-			restarted = true
+	t.Run("failure", func(t *testing.T) {
+		exec := &fakeExec{fail: map[string]error{
+			"systemctl start feral-updater-run@": fmt.Errorf("boom"),
+		}}
+		r := &systemdRunner{exec: exec, clock: newFakeClock()}
+		r.unitActive = func(context.Context, string) bool { return true }
+
+		err := r.Run(context.Background(), nil)
+		if err == nil || !strings.Contains(err.Error(), "Failed to start updater service") {
+			t.Fatalf("Run error = %v, want updater start failure", err)
 		}
-	}
-	if !restarted {
-		t.Error("watchdog was not restarted on the success path (F5): a deferred reboot would strand a dead watchdog")
-	}
+		assertNoWatchdog(t, exec)
+	})
+
+	t.Run("success", func(t *testing.T) {
+		exec := &fakeExec{}
+		r := &systemdRunner{exec: exec, clock: newFakeClock()}
+		r.unitActive = func(context.Context, string) bool { return true }
+		r.openLog = func(string) (io.ReadCloser, error) {
+			// The run id is random; recover it from the recorded systemctl start
+			// so the canned log lines carry a matching id= tag.
+			id := ""
+			for _, cmd := range exec.recorded() {
+				if strings.Contains(cmd, "feral-updater-run@") {
+					id = strings.TrimSuffix(strings.SplitAfter(cmd, "feral-updater-run@")[1], ".service")
+				}
+			}
+			return io.NopCloser(strings.NewReader(
+				`[PROGRESS] id=` + id + ` progress=100 message="Done"` + "\n")), nil
+		}
+
+		if err := r.Run(context.Background(), nil); err != nil {
+			t.Fatalf("Run error = %v, want nil", err)
+		}
+		assertNoWatchdog(t, exec)
+	})
 }

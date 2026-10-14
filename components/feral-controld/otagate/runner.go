@@ -60,8 +60,9 @@ type UpdateRunner interface {
 }
 
 // systemdRunner replicates feral-setupd's updater.rs spawn/monitor mechanism:
-// stop the watchdog, start the transient feral-updater-run@{id}.service unit,
-// then tail /var/log/updaterd.log for lines tagged with this run's id.
+// start the transient feral-updater-run@{id}.service unit, then tail
+// /var/log/updaterd.log for lines tagged with this run's id. (setupd also
+// stopped the watchdog first; that was dropped for ffos#124, see Run.)
 type systemdRunner struct {
 	exec   wrapper.Exec
 	clock  wrapper.Clock
@@ -115,31 +116,15 @@ func (r *systemdRunner) Run(ctx context.Context, onProgress func(int, string)) (
 	id := fmt.Sprintf("controld-%d", rand.Int63n(int64(^uint64(0)>>1))+1) //nolint:gosec
 	unit := fmt.Sprintf("feral-updater-run@%s.service", id)
 
-	// 1. Stop feral-watchdog to avoid it fighting the update. Best-effort.
-	_ = r.exec.CommandContext(ctx, "systemctl", "--user", "stop", "feral-watchdog.service").Run()
+	// feral-watchdog is deliberately left running. It defers its reboots and
+	// Chromium escalation on its own while the updater holds
+	// /run/feral-updater.lock (feral-watchdog/update_gate.go, ffos#124), which
+	// covers this boot-gate run and the nightly timer alike. This runner used
+	// to stop the watchdog and restart it on every exit path; that left the
+	// watchdog dead if controld itself died mid-run, and raced with
+	// .start-services.sh starting it at boot. Do not reintroduce it.
 
-	// Restart the watchdog on EVERY exit path out of this run, success included.
-	// Restart=always does not resurrect an explicitly-stopped unit and the only
-	// other start is .start-services.sh at boot, so a run that returns without
-	// this would leave the kiosk watchdog dead on a device that runs unattended
-	// for months. Success is NOT exempted: on success the updater unit reboots
-	// into the new build and that reboot restarts the watchdog anyway, so this
-	// restart is a harmless no-op in the common case — but if the reboot is
-	// deferred, staged, or fails, this is the only thing that keeps the watchdog
-	// alive on the still-running old build (the F5 gap). The brief window where
-	// the watchdog runs before an imminent reboot cannot harm anything the reboot
-	// doesn't already tear down. context.Background(): the failure may BE ctx's
-	// cancellation, which must not also skip the restart.
-	defer func() {
-		restartCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := r.exec.CommandContext(restartCtx,
-			"systemctl", "--user", "start", "feral-watchdog.service").Run(); err != nil && r.logger != nil {
-			r.logger.Warn("OTA runner: failed to restart feral-watchdog after update run", zap.Error(err))
-		}
-	}()
-
-	// 2. Start the transient updater unit and wait for the start command itself.
+	// 1. Start the transient updater unit and wait for the start command itself.
 	startErr := r.exec.CommandContext(ctx, "systemctl", "start", unit).Run()
 	if startErr != nil {
 		// Capitalization is load-bearing: classifyUpdaterMessage matches the exact
@@ -148,14 +133,14 @@ func (r *systemdRunner) Run(ctx context.Context, onProgress func(int, string)) (
 		return fmt.Errorf("Failed to start updater service: %w", startErr)
 	}
 
-	// 3. Open the log file with the bounded retry the unit needs to create it.
+	// 2. Open the log file with the bounded retry the unit needs to create it.
 	rc, err := r.openLogWithRetry(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rc.Close() }()
 
-	// 4. Tail and interpret each line until completion, error, unit death, or
+	// 3. Tail and interpret each line until completion, error, unit death, or
 	// ctx cancel.
 	return r.tail(ctx, rc, id, unit, onProgress)
 }

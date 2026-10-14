@@ -49,6 +49,9 @@
   },
   "offlineCache": {
     "enabled": false,
+    "automaticPlaybackDisabled": false,
+    "maxDiskPercent": 50,
+    "minFreeDiskBytes": 5368709120,
     "resourceGate": {
       "disabled": false,
       "softwareMaxMemoryPercent": 80,

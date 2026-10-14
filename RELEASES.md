@@ -19,7 +19,204 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
-## 2.0.9 — package-rail only (off-flow cut: v2.0.8 + #370, without #368)
+## 2.0.11 — full-image (ffos-user single-rail, paired with ffos#166)
+
+Everything on `develop` since `v2.0.10` (2.0.10 staging PR #373), promoted
+in staging PR #396, shipped together with `ffos` staging PR #166.
+
+ffos-user, package rail (`components/**`):
+
+- **Watchdog.**
+  - Chromium fallback reboots are capped across boots, then the watchdog
+    parks on the fallback screen (#378, #254). The count persists in
+    `/home/feralfile/.state/watchdog-chromium-fallback.json`.
+  - Recovery is deferred while `feral-updater.sh` holds
+    `/run/feral-updater.lock` (#380, ffos#124). The watchdog reads
+    `/proc/locks`.
+  - A `cdp_stuck` report latched before Chromium first answers no longer
+    restarts the kiosk on that first answer (#401, from the
+    #396 review).
+- **controld.**
+  - Sustained CDP-stuck is reported to the watchdog over D-Bus (`cdp_stuck`,
+    #386, #356), and the watchdog restarts the kiosk on it.
+  - The boot OTA gate no longer stops and starts the watchdog (#380).
+  - Shared overlay controller for setupui and mint pairing (#385).
+  - `overlay` field on `player_status` / `checkStatus` (#388, #389).
+  - Automatic playback artwork cache (#391). It is on wherever
+    `offlineCache.enabled` is, which the image config sets.
+  - Portal scan reads never go live (#393, #261).
+  - Mint-pairing approval channel liveness (#394, #332).
+  - cdphealth re-confirmations at Debug, the mediator drops controld's own
+    signals, and `offlinecache` builds on darwin again (#398).
+- Agent guard scoping (#395). No device impact.
+
+#396's head is `develop`, so anything merged into `develop` before #396 merges
+also ships in 2.0.11. #398 and #399 (this entry) did. #401 is open against
+`develop` and must merge before #396 to ship; if it does not, drop its three
+mentions in this entry.
+
+`ffos` #166, image rail only:
+
+- OTA free-space precheck (ffos#161, issue ffos#124).
+- Opt-in owner access over Tailscale (ffos#162). Adds the `tailscale` package
+  and owner units, and changes `factory_reset.sh`, `nftables.conf` and the
+  `btrfs-rollback` initramfs hook.
+- `ota-download.sh` restarts from zero when the server refuses a resume
+  (ffos#164, issue ffos#141).
+- CI package prefetch retry (ffos#164, issue ffos#163).
+- Agent guard scoping (ffos#165).
+
+### Why full-image, although this diff is single-rail
+
+The ffos-user diff touches no `users/**` file, so `check-release-rail.sh`
+does not require this entry. It is declared anyway, for two reasons.
+
+**1. The ffos half only ships in an image.** The precheck, owner access and
+the factory-reset/initramfs changes have no package path. If only the
+packages moved, ffos#166 would not ship at all.
+
+**2. controld and watchdog must never ship apart.** Never build either one
+alone with `manual-build-components.yaml` (as 2.0.9 option 2 allowed).
+
+- New controld + old watchdog:
+  - The boot OTA gate no longer stops the watchdog (#380).
+  - The old watchdog has no update gate.
+  - Result: a disk or Chromium-ladder reboot can kill a boot OTA.
+- Old controld + new watchdog:
+  - No `cdp_stuck=false` ever arrives.
+  - The #378 reboot counter is never cleared by healthy operation.
+  - Result: the next unrelated Chromium incident parks the device with no
+    self-heal reboot.
+
+### Before dispatch
+
+- **Fix PRs.** ffos#167 and #398 merged into their `develop` branches on
+  2026-10-14 and ride with ffos#166 / #396; #401 is open:
+  - ffos#167: a pending Tailscale login or a failed revoke stalled or aborted
+    a factory reset. The FF1 reproduced the bug on 2026-10-14 (a reset was
+    blocked 2m45s and rebooted the device after controld's 2 min latch had
+    already released); the fix passed the bench the same day.
+  - ffos-user#398: cdphealth logged Info about every 90 s on every healthy
+    device; controld logged an "Unknown signal" Warn for its own signals.
+  - ffos-user#401: a `cdp_stuck` latched during a slow Chromium
+    cold start (or a headless re-affirmation landing in the display
+    hot-plug grace) restarted the kiosk on its first healthy check.
+- **Known risks, decide before the Production run** (from the #396 review).
+  The first two are new-feature follow-ups; the third lowers a budget 2.0.10
+  shipped:
+  - The automatic playback cache (#391) re-downloads every expired playlist
+    item, not only what is about to play. Items are cached only when fresh
+    for at least 1 h, so the worst case is one full re-download of the
+    playlist per hour on media served with `max-age` near that floor.
+    `offlineCache.automaticPlaybackDisabled` is the kill switch.
+  - The #254 reboot cap is forgiven by the first healthy `cdp_stuck=false`
+    confirmation, so a Chromium that comes up and then hangs within the
+    minute every boot still reboots forever (as before #378).
+  - On upgrade the cache budget becomes `maxDiskPercent` (default 50 %,
+    about 63.75 GB on an FF1) capped by the image's 80 GB `maxDiskBytes`,
+    not the flat 80 GB 2.0.10 shipped. A device holding more than that in
+    explicit downloads loses the oldest on its first boot after the upgrade
+    (`enforceDiskLimit` runs at start), and the app's `getOfflineCacheStatus`
+    shows the new limit.
+- **Bench a Staging image on an FF1 before the Production run:**
+  - **Old recovery → 2.0.11.** Factory-reset onto the recovery root, then let
+    the boot gate update it:
+    - The staging recovery is 2.0.0, so a reset FF1 comes back on 2.0.0 in
+      SoftAP setup. On 2026-10-14 a phone could not join that portal; the
+      bench recovered over ethernet.
+    - Production's recovery is 2.0.1.
+    - 2.0.0 → 2.0.10 over this path passed on 2026-10-14. 2.0.x → 2.0.11 has
+      not been run.
+  - Retest B1 on hardware with ffos#167.
+  - Free-space precheck refusal.
+  - Slow-link resume.
+  - Five quick `systemctl reboot`s must not arm the factory-reset gesture.
+- **Version numbers.** 2.0.12 and 2.0.13 were already used by Development
+  builds of `feat/owner-tailscale` (`ffos` runs 37578400509, 38064438854).
+  - The updater compares its branch's `latest` by inequality, not ordering,
+    so Staging and Production devices are unaffected.
+  - Development bench devices on those builds poll `feat/owner-tailscale`,
+    the branch baked into `ff1-config.json`, not `develop`. Reflash them, or
+    dispatch a Development build on that branch, to move them.
+- **Merge order.** Done: this entry merged into `develop` via #399 before
+  #396, so it reaches `staging` with the release.
+
+### Release action (human)
+
+Two dispatches of `build-image-to-cf.yml` in `ffos`. Inputs are the ones
+2.0.10 used, except `version`.
+
+1. **Staging run**, on `ffos` `staging`, after ffos#166 and ffos-user#396
+   have merged:
+   - `version=2.0.11`, `soak-test=false`, `environment=Staging`
+   - `pacman_snapshot=2026/07/13`, `ffos_user_ref=staging`,
+     `ff_player_ref=main`, `dev_iso=false`
+   - `update_min_version=true`, `update_required_version=false`,
+     `update_recovery_version=false`
+2. **Production run**, on `ffos` `release`, after the bench round passes and
+   both repos have promoted `staging -> release`. Same inputs, except:
+   - `environment=Production`, `ffos_user_ref=release`
+   - `update_min_version=false`
+
+`ff_player_ref=main` is resolved at dispatch time, as in 2.0.9 and 2.0.10.
+Since 2.0.10's `52c9995` (2026-10-02), `ff-player` `main` has gained only
+docs: `aa17e5d` (#292) and `ff3320f` (#279). Re-check before dispatching, or
+pin `ff_player_ref` to one SHA in both runs, so the two runs build the same
+player.
+
+After the Production run, tag `v2.0.11` on the ffos-user `staging -> release`
+merge commit, as every prior tag. Agents never dispatch the
+Production run. They dispatch the Staging one only after explicit in-session
+confirmation (`scripts/agent-iso-build-guard.sh`).
+
+## 2.0.10 — full-image (recorded after the fact)
+
+**Contents.** 2.0.9 plus #368: mint-pairing join channel, controld only (plus
+docs). Staging PR #373, release PR #374, tag `v2.0.10` (`7345a2b`). `v2.0.9`
+is an ancestor.
+
+**Rails.** The `v2.0.9..v2.0.10` diff touches only
+`components/feral-controld/**` and `docs/**`. It is single-rail, so no
+declaration was required, and this entry was not written at the time.
+
+**This resolves the 2.0.9 off-flow hazard.** #368, held back from 2.0.9,
+shipped here through the ordinary `develop -> staging` promotion.
+
+**Shipped** as a full image on 2026-10-02. Both runs used the same `ffos`
+SHAs as 2.0.8 and 2.0.9, so the `ffos` half is unchanged since 2.0.8. The
+player is whatever `ff-player` `main` was at each dispatch: `52c9995` for
+2.0.10 (inferred from dispatch time; the run logs do not print it).
+
+- `ffos` run 36982696059: Staging, on `staging` `82fcbe0`.
+- `ffos` run 36991328458: Production, on `release` `7ed99fb`.
+
+Inputs:
+
+| input | Staging | Production |
+|---|---|---|
+| `version` | `2.0.10` | `2.0.10` |
+| `soak-test` | `false` | `false` |
+| `environment` | `Staging` | `Production` |
+| `pacman_snapshot` | `2026/07/13` | `2026/07/13` |
+| `ffos_user_ref` | `staging` | `release` |
+| `ff_player_ref` | `main` | `main` |
+| `dev_iso` | `false` | `false` |
+| `update_min_version` | `true` | `false` |
+| `update_required_version` | `false` | `false` |
+| `update_recovery_version` | `false` | `false` |
+
+The runs log the recovery version each channel serves: `2.0.0` on Staging,
+`2.0.1` on Production.
+
+## 2.0.9 — package-rail only (off-flow cut: v2.0.8 + #370, without #368; shipped full-image)
+
+**Shipped (recorded 2026-10-14):** option 1, full image, on 2026-09-30.
+`ffos` runs 36695675292 (Staging, `staging` `82fcbe0`) and 36698827508
+(Production, `release` `7ed99fb`). `ff_player_ref=main` was used, not the
+pinned `24a0f95` recommended below, so the player drifted as the pin was
+meant to prevent: `main` had gained `0780590` (2026-09-28) by then. The run
+logs do not print the player SHA, so this is inferred from timing. The
+"next promotion WILL carry #368" hazard was resolved by 2.0.10.
 
 Hotfix for objkt works rendering black on FF1 after `ipfs.io` retired:
 #370 (controld `uarewrite` redirects retired-gateway CID requests to a

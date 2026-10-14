@@ -19,7 +19,9 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/cdphealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
@@ -38,6 +40,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
+	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
@@ -88,7 +91,11 @@ type app struct {
 	Math       wrapper.Math
 
 	// Components
-	CDP               cdp.CDP
+	CDP cdp.CDP
+	// CDPHealthMonitor reports a sustained CDP disconnect to feral-watchdog
+	// over DBus (ffos-user#356); see package cdphealth's doc for why this
+	// is report-only and must never itself restart chromium-kiosk.
+	CDPHealthMonitor  *cdphealth.Monitor
 	Relayer           relayer.Relayer
 	DBus              dbus.DBus
 	Mediator          mediator.Mediator
@@ -579,6 +586,13 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// re-seed) is registered as a reconciler on the session instead (see initializeApp),
 	// so it runs once the new document's command handler is actually installed rather than
 	// racing a page that has not hydrated yet.
+	// Report-only CDP health signal for feral-watchdog (ffos-user#356); see
+	// package cdphealth's doc. Started alongside CDP itself so it observes
+	// from the very first connect attempt, not just steady-state drops.
+	if app.CDPHealthMonitor != nil {
+		go app.CDPHealthMonitor.Start(ctx)
+	}
+
 	app.CDP.Start(ctx, func() {
 		if app.Session != nil {
 			app.Session.OnConnect()
@@ -1094,6 +1108,7 @@ func initializeApp(
 	var offlineCacheStaticServer offlinecache.StaticServer
 	var offlineCacheNotifier *offlinecache.Notifier
 	var offlineCacheSysMetricsSink func(raw []byte)
+	var offlineCacheChanged func(func())
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
 		ocRuntime := offlinecache.Bootstrap(
@@ -1106,6 +1121,16 @@ func initializeApp(
 		offlineCacheStaticServer = ocRuntime.StaticServer
 		offlineCacheNotifier = ocRuntime.Notifier
 		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
+		offlineCacheChanged = ocRuntime.SetCacheChanged
+		if ocRuntime.ObservePlayback != nil {
+			status.SetPlaybackObserver(poller, func(st *status.PlayerStatus) {
+				if st == nil || (st.Command != string(commands.CMD_DISPLAY_PLAYLIST) && st.Command != string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST)) || st.Items == nil || st.Index == nil {
+					ocRuntime.ObservePlayback(nil, 0, false)
+					return
+				}
+				ocRuntime.ObservePlayback(*st.Items, *st.Index, st.RenderStatus != nil && *st.RenderStatus == 2)
+			})
+		}
 	}
 
 	// Kiosk User-Agent rewrite (#296). Built independently of the offline
@@ -1214,6 +1239,9 @@ func initializeApp(
 			return string(st), ok
 		})
 	}
+	// player_status carries whatever overlay is currently on screen (issue
+	// #381) — wired further below, once setupNarrator exists too (see
+	// buildOverlaySource).
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -1227,6 +1255,9 @@ func initializeApp(
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
+	if offlineCacheChanged != nil {
+		offlineCacheChanged(playlistRefresher.ForceRefresh)
+	}
 	playlist_refresher.SetContentPolicy(playlistRefresher, policyStore)
 	commandrouter.SetPolicyRefresher(rawCmdHandler, playlistRefresher, logger)
 	// The owner's content policy falls with the claim on a factory reset, for
@@ -1322,6 +1353,37 @@ func initializeApp(
 	// half-torn-down) setup AP never counts as an uplink. Narration flows through
 	// a setupui.Service.
 	setupNarrator := setupui.New(cdp, setupui.DefaultContractPath, logger)
+	// One overlay controller for both owners of the screen. Each kind is routed
+	// to its owner's transport by prefix, and both owners share the record of
+	// what is showing. Wired before anything narrates.
+	overlayCtrl := overlay.New(overlay.NewRouter(map[string]overlay.Painter{
+		"setup:": setupNarrator.Painter(),
+		"mint:":  mintPairing.Painter(),
+	}))
+	setupNarrator.SetController(overlayCtrl)
+	mintPairing.SetController(overlayCtrl)
+	// player_status/checkStatus carry whatever overlay is currently on
+	// screen (issue #381), from either of its two owners. The precedence and
+	// nil-fallback live in status.CombineOverlaySources, not in a closure
+	// here, so they are unit-tested rather than reachable only through the
+	// whole of initializeApp (round 2 review, F2). This root supplies only
+	// the two probes. Wired here, not at either service's own construction
+	// point above, because it needs both mintPairing and setupNarrator, and
+	// setupNarrator does not exist until this point in main().
+	//
+	// One function, reused for both status surfaces
+	// (status.Poller.SetOverlaySource for the poller's push loop,
+	// commandrouter.SetOverlaySource for the direct checkStatus reply that
+	// bypasses the poller entirely), so the two can never disagree.
+	buildOverlaySource := status.CombineOverlaySources(
+		func() *status.Overlay {
+			s := mintPairing.OverlayStatus()
+			return status.BuildMintOverlay(s.Showing, s.State, s.ChannelID, s.PairingCode, s.ExpiresAt)
+		},
+		setupNarrator.CurrentNarrationState,
+	)
+	poller.SetOverlaySource(buildOverlaySource)
+	commandrouter.SetOverlaySource(rawCmdHandler, buildOverlaySource, logger)
 	// One narration surface for the whole process: the executor's controld-owned
 	// claim / factory-reset / OTA-failure narration shares this exact instance with
 	// the provisioning domain below, so the single on-connect Resync() wired into
@@ -1538,6 +1600,7 @@ func initializeApp(
 		Exec:                     exec,
 		Math:                     math,
 		CDP:                      cdp,
+		CDPHealthMonitor:         cdphealth.New(cdp, dbusClient, clock, logger),
 		Relayer:                  relayer,
 		DBus:                     dbusClient,
 		Mediator:                 mediator,

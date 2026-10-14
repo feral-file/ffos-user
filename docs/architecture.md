@@ -144,7 +144,19 @@ feral-sys-monitord  --[sysmetrics]-----------> feral-controld
                     --[connectivity_change]--> feral-controld
                     --[connectivity_change]--> feral-watchdog
                     --[sysevent]-------------> feral-watchdog
+
+feral-controld      --[cdp_stuck]------------> feral-watchdog
 ```
+
+`cdp_stuck` (ffos-user#356) is report-only: `feral-controld`'s `cdp_stuck`
+fires when its own CDP client has failed to (re)dial Chromium's page target
+for a sustained period — a failure mode `feral-watchdog`'s `/json/version`
+polling cannot see on its own, since Chromium can keep answering
+`/json/version` while exposing zero or more than one devtools page target.
+`feral-controld` never acts on this itself; `feral-watchdog`'s
+`ChromiumMonitor` is still the only place that decides to restart
+`chromium-kiosk.service` or reboot — see invariant 12 below, added for this
+signal the same way invariant 1 already binds `feral-sys-monitord`.
 
 **RPC direction** (request/response):
 
@@ -152,7 +164,7 @@ feral-sys-monitord  --[sysmetrics]-----------> feral-controld
 feral-controld  --[GetConnectivityStatus]--> feral-sys-monitord
 ```
 
-The former controld→setupd signals (`show_pairing_qr_code`, `factory_reset`, `system_update`, `upload_logs`, `upload_logs_with_bundle`) and the `GetRelayerTopicID` RPC no longer cross a process boundary: those handlers now live inside `feral-controld` and are invoked directly. `com.feralfile.controld`'s `dbus` package now exports only the inbound `feral-sys-monitord` constants it consumes.
+The former controld→setupd signals (`show_pairing_qr_code`, `factory_reset`, `system_update`, `upload_logs`, `upload_logs_with_bundle`) and the `GetRelayerTopicID` RPC no longer cross a process boundary: those handlers now live inside `feral-controld` and are invoked directly. `com.feralfile.controld`'s `dbus` package exports the inbound `feral-sys-monitord` constants it consumes, plus (ffos-user#356) its own outbound `cdp_stuck` signal — the first thing it emits since the setupd merge.
 
 ### External transport: WebSocket relayer
 
@@ -235,6 +247,7 @@ Each service owns its own state files exclusively. No service should read or wri
 | earlyoom/oom-state | `/var/lib/oom_state/chromium-oom-kill-count` | Chromium OOM kill count (read by `controld` OOM recoverer) |
 | earlyoom/oom-state | `/var/lib/oom_state/chromium-oom-kill-handled-count` | Handled OOM kill count (written by `controld` OOM recoverer) |
 | `feral-watchdog` | `/home/feralfile/.state/failed_recovery_version` | Version of a recovery candidate that failed to boot |
+| `feral-watchdog` | `/home/feralfile/.state/watchdog-chromium-fallback.json` | Consecutive boots that ended in a Chromium fallback-hold reboot (ffos-user#254); at the cap the watchdog parks on the fallback screen instead of rebooting. Deleted on the first healthy CDP check; an unreadable record reads as zero (reboot, never park) |
 | `chromium-kiosk` (`start-kiosk.sh`) | `/home/feralfile/.state/player-bundle-fingerprint` | Content fingerprint of the player bundle at the last purge that resolved a complete fingerprint (guard for issue #234); a defensive purge on an unreadable bundle deliberately leaves it unchanged so the next start retries |
 
 The former `feral-setupd` state file (`/home/feralfile/.state/setupd`, with `setup_phase` / `pre_failure_phase` / `topic_id` / `connected`) is gone. The merged OTA gate (`otagate`) tracks update state in memory (`Mode`/`Result` enums and an in-memory permanent-failure latch) rather than persisting a durable setup-phase machine; the relayer topic lives in `controld.state`; the live setup/provisioning state is derived from the `provisioning` machine, not a file.
@@ -296,3 +309,4 @@ individual v1 transport may be removed or repurposed in isolation.
 9. `feral-controld`'s startup brings the hub, mDNS, and provisioning up before the relayer/CDP init, and the relayer connect is never fatal. Do not reorder so that a relayer or CDP failure can abort setup.
 10. `feral-sys-monitord` exposes D-Bus RPC (`GetConnectivityStatus`, `GetSysMetrics`), relied on by `feral-controld`. Do not remove without a coordinated update to all callers.
 11. The unauthenticated `:1111` command API, `:1111/metrics`, and the system-wide `ip_unprivileged_port_start=80` sysctl are accepted, release-scoped surfaces whose end state is v2 screen-anchored pairing (#3471). Add LAN authorization at the hub's shared middleware chokepoint, not by diverging individual routes.
+12. `feral-controld` may REPORT a health condition to `feral-watchdog` over D-Bus (today: `cdp_stuck`, ffos-user#356), but must never itself call `systemctl restart`/`reboot` on Chromium's behalf or decide to. `feral-watchdog`'s `ChromiumMonitor` remains the sole owner of that decision, folding any such report into its existing restart/fallback-hold/reboot-cap ladder and suppression gates rather than acting on it directly.

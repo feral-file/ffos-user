@@ -2876,6 +2876,7 @@ func TestRefresher_PrepareSendFailure_RestoresSchedulerCache(t *testing.T) {
 }
 
 func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
+	retryStarted := make(chan struct{})
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -2893,6 +2894,11 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 	// the 5m ticker as if the pass succeeded.
 	mockClock.EXPECT().
 		SleepContext(gomock.Any(), refresher.PLAYER_STATUS_POLLING_INTERVAL).
+		DoAndReturn(func(ctx context.Context, _ time.Duration) error {
+			close(retryStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		}).
 		MinTimes(1)
 	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
 
@@ -2919,9 +2925,49 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("player rejection did not restore the scheduler cache")
 	}
+	// Restore fires inside the refresh pass, before the retry sleep. Wait for
+	// both observations so teardown cannot verify the mock before its call.
+	select {
+	case <-retryStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("player rejection did not enter the startup retry wait")
+	}
 	r.Stop()
 
 	assert.GreaterOrEqual(t, fakeSched.restoresCount(), 1, "player rejection must restore scheduler snapshot")
+}
+
+func TestRefresher_DefaultPlaylistReconcilesCacheWithoutRecasting(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cdpClient := mocks.NewMockCDP(ctrl)
+	poller := mocks.NewMockStatusPoller(ctrl)
+	dp := mocks.NewMockDP1(ctrl)
+	clock := mocks.NewMockClock(ctrl)
+	replay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: clock})
+	cdpClient.EXPECT().Initialized().Return(true).AnyTimes()
+	cdpClient.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
+	pl := createMockPlaylist()
+	pl.DynamicQueries = nil
+	poller.EXPECT().FetchPlayerStatus(ctx).Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST), nil, pl), nil).AnyTimes()
+	replay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	replay.EXPECT().LockPlayback().AnyTimes()
+	replay.EXPECT().UnlockPlayback().AnyTimes()
+	synced := make(chan struct{})
+	replay.EXPECT().SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).DoAndReturn(func(context.Context, []string) (int, error) {
+		close(synced)
+		return 1, nil
+	})
+	r := refresher.New(ctx, dp, poller, cdpClient, replay, nil, wrapper.NewJSON(), nil, clock, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r.Start()
+	defer r.Stop()
+	select {
+	case <-synced:
+	case <-time.After(time.Second):
+		t.Fatal("default playback did not reconcile replay scope")
+	}
 }
 
 func TestRefresher_MalformedPlayerResponse_RestoresSchedulerCache(t *testing.T) {

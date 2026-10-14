@@ -644,6 +644,15 @@ func (m *mediator) handleDBusSignal(
 		return nil, nil
 	}
 
+	// The match rule covers the whole /com/feralfile namespace (main.go),
+	// which includes controld's own object path, so every signal controld
+	// emits (cdp_stuck, ffos-user#356) is delivered back here. Those are
+	// reports for other daemons, not input: drop them before logging, or
+	// each periodic cdp_stuck send adds an Info + "Unknown signal" Warn pair.
+	if payload.Path == dbus.PATH {
+		return nil, nil
+	}
+
 	if payload.Member != dbus.MONITORD_EVENT_SYSMETRICS {
 		m.logger.Info("handle received DBus signal", zap.String("name", payload.Name()), zap.String("path", payload.Path.String()))
 	}

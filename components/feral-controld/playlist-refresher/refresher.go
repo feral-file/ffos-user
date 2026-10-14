@@ -481,6 +481,12 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			return nil
 		}
 
+		if playerStatus.Command == string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST) {
+			// Default playback can also warm the automatic artwork cache. Only
+			// reconcile replay scope; its playlist lifecycle stays player-owned.
+			r.resyncKioskReplayScopeToCurrentDisplay()
+			return nil
+		}
 		if playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
 			return nil
 		}
@@ -1276,7 +1282,7 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 		r.logger.Warn("offline cache: failed to fetch player status to resync replay scope after refresh failure", zap.Error(err))
 		return
 	}
-	if playerStatus == nil || playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
+	if playerStatus == nil || (playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) && playerStatus.Command != string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST)) {
 		return
 	}
 
