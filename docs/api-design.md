@@ -154,8 +154,10 @@ Before the setupd merge, `feral-controld` exported a `GetRelayerTopicID` RPC and
 ### D-Bus Signals
 
 Signals carry either:
-- A single primitive value (e.g. `connectivity_change` carries a single `bool`; so does `cdp_stuck` — `true` when feral-controld's CDP page-target dial has been stuck for `cdphealth.StuckThreshold`, `false` the moment it reconnects)
+- A single primitive value (e.g. `connectivity_change` carries a single `bool`; so does `cdp_stuck` — `true` when feral-controld's CDP page-target dial has been stuck for `cdphealth.StuckThreshold` and re-affirmed every threshold while it stays stuck, `false` the moment it reconnects and re-confirmed every threshold while it stays healthy)
 - A JSON-serialized byte slice for structured data (e.g. `sysmetrics` carries `[]byte` which is a JSON-encoded metrics struct)
+
+A daemon whose match rule covers the `/com/feralfile` path namespace also receives the signals it emits itself: godbus skips a client's own signals by comparing the sender's unique name with the name from `NameAcquired`, which is the well-known name once `RequestName` succeeds, so the skip never matches. Signal handlers must drop payloads on their own object path before logging or dispatching them (feral-controld's mediator does this for `/com/feralfile/controld`).
 
 Do not add ad-hoc fields to signal bodies without updating all consumers. Prefer the byte-slice JSON pattern for structured payloads so the schema can evolve with additive fields.
 

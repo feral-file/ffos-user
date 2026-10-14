@@ -180,6 +180,18 @@ func (m *Monitor) tick() {
 			if !m.emit(false) {
 				return
 			}
+			// Only a real transition is worth an Info line. The periodic
+			// re-confirmation above fires every threshold on every healthy
+			// device for the daemon's whole life (~960 lines/day), and the
+			// log is shipped off-device, so it stays at Debug.
+			switch {
+			case m.reported:
+				m.logger.Info("cdphealth: CDP reconnected; clearing stuck signal")
+			case !m.everConfirmed:
+				m.logger.Info("cdphealth: CDP healthy; confirmed to feral-watchdog")
+			default:
+				m.logger.Debug("cdphealth: re-confirmed healthy CDP to feral-watchdog")
+			}
 			m.lastConfirmedAt = now
 		}
 		m.reported = false
@@ -202,6 +214,14 @@ func (m *Monitor) tick() {
 	// instead of silently extending the gap it exists to bound.
 	if !m.reported || now.Sub(m.lastReportedAt) >= m.threshold {
 		if m.emit(true) {
+			// Warn once per episode; a headless device never connects, so
+			// its re-affirmations would otherwise Warn every threshold forever.
+			if m.reported {
+				m.logger.Debug("cdphealth: re-affirmed stuck CDP to feral-watchdog")
+			} else {
+				m.logger.Warn("cdphealth: CDP has not (re)connected for a sustained period; reporting stuck to feral-watchdog (ffos-user#356)",
+					zap.Duration("threshold", m.threshold))
+			}
 			m.reported = true
 			m.lastReportedAt = now
 		}
@@ -211,7 +231,9 @@ func (m *Monitor) tick() {
 // emit reports success so tick() can decide whether to retry. Logged
 // failures alone are not enough: tick()'s state machine must know whether
 // the send actually left the process, or it cannot tell "delivered" apart
-// from "dropped, retry next tick" — see both call sites' comments.
+// from "dropped, retry next tick" — see both call sites' comments. Success
+// is logged by the callers, which know whether this send is a transition
+// or a routine re-send.
 func (m *Monitor) emit(stuck bool) bool {
 	err := m.bus.Send(godbus.DBusPayload{
 		Interface: dbus.INTERFACE,
@@ -222,12 +244,6 @@ func (m *Monitor) emit(stuck bool) bool {
 	if err != nil {
 		m.logger.Error("cdphealth: failed to send DBus signal; will retry next tick", zap.Bool("stuck", stuck), zap.Error(err))
 		return false
-	}
-	if stuck {
-		m.logger.Warn("cdphealth: CDP has not (re)connected for a sustained period; reporting stuck to feral-watchdog (ffos-user#356)",
-			zap.Duration("threshold", m.threshold))
-	} else {
-		m.logger.Info("cdphealth: CDP reconnected; clearing stuck signal")
 	}
 	return true
 }
