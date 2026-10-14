@@ -53,6 +53,11 @@ func TestChromiumMonitorCDPStuckSuppressedWhileHeadless(t *testing.T) {
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
 
+	// Connect first: a report latched before the first 200 is cleared as
+	// stale (check()'s firstConnect); this test pins the headless gate.
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("a headless check reports success (no attempt to reach a kiosk that is not running): %v", err)
+	}
 	monitor.SetCDPStuck(true)
 	if err := monitor.check(context.Background()); err != nil {
 		t.Fatalf("a headless check reports success (no attempt to reach a kiosk that is not running): %v", err)
@@ -65,8 +70,9 @@ func TestChromiumMonitorCDPStuckSuppressedWhileHeadless(t *testing.T) {
 
 // TestChromiumMonitorCDPStuckClearedAfterRestart pins the restart-storm
 // guard: once cdpStuck has triggered one restart, it must not re-trigger a
-// second one on the very next tick just because controld's episode (which
-// only reports a FRESH disconnect, not a continuing one) never resent it.
+// second one on the very next tick: controld re-affirms a continuing
+// episode only every StuckThreshold, so the restart's own clear must hold
+// until then.
 func TestChromiumMonitorCDPStuckClearedAfterRestart(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
@@ -130,6 +136,13 @@ func TestChromiumMonitorCDPStuckActsOnFreshGateReadsNotStaleLatches(t *testing.T
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
 
+	// Connect first: a report latched before the first 200 is stale and is
+	// cleared by that first success (see check()'s firstConnect and
+	// TestChromiumMonitorCDPStuckLatchedPreConnectDoesNotRestartOnFirstSuccess);
+	// this test is about the post-connect gate reads.
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
 	monitor.SetCDPStuck(true)
 	if err := monitor.check(context.Background()); err != nil {
 		t.Fatalf("expected success against ok endpoint, got %v", err)
@@ -283,6 +296,11 @@ func TestChromiumMonitorCDPStuckSuccessDuringUpdateDoesNotSpamOrRestart(t *testi
 
 	end := simulateUpdate(t)
 	defer end()
+	// Connect first: a report latched before the first 200 is cleared as
+	// stale (check()'s firstConnect); this test pins the update gate.
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
 	monitor.SetCDPStuck(true)
 
 	for i := 0; i < 5; i++ {
@@ -307,8 +325,9 @@ func TestChromiumMonitorCDPStuckSuccessDuringUpdateDoesNotSpamOrRestart(t *testi
 // fallback-hold cycles while /json/version keeps answering 200 throughout —
 // a CDP page-target failure surviving a reboot would otherwise erase the
 // cap on the very next successful tick and reboot forever instead of
-// parking. The persisted count must survive until cdphealth has had a full
-// CHROMIUM_STARTUP_GRACE window to report a relapse and did not.
+// parking. The persisted count must survive every success until an actual
+// SetCDPStuck(false) from controld confirms health (cdpReportReceived &&
+// cdpConfirmedHealthy); no elapsed time forgives it.
 func TestChromiumMonitorCDPStuckDoesNotEraseRebootCapOnSuccess(t *testing.T) {
 	restartFile, _, fallbackFile, rebootFile := installFallbackStubs(t)
 	statePath := useFallbackStateFile(t, 1) // this boot already used its one fallback-hold reboot
@@ -317,12 +336,22 @@ func TestChromiumMonitorCDPStuckDoesNotEraseRebootCapOnSuccess(t *testing.T) {
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
-	monitor.SetCDPStuck(true)
 
-	// A success tick right after boot must NOT forget the persisted cap —
-	// the CDP failure that earned it hasn't had a chance to clear, and
-	// cdpStuck says it is still true. It must, however, still restart the
-	// kiosk via the ordinary cdpStuck escalation.
+	// The first success tick right after boot must NOT forget the persisted
+	// cap: no report has arrived yet, so nothing has confirmed the CDP
+	// failure that earned it is gone. (A stuck report cannot usefully
+	// precede this first 200 — one latched pre-connect is stale and cleared
+	// by it, see check()'s firstConnect — so controld's report lands after.)
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+	if n, err := loadChromiumFallbackReboots(statePath); err != nil || n != 1 {
+		t.Fatalf("expected the persisted reboot cap to survive a success with no controld report, got %d, %v", n, err)
+	}
+
+	// controld then reports stuck. The cap still survives, and the kiosk is
+	// restarted via the ordinary cdpStuck escalation.
+	monitor.SetCDPStuck(true)
 	if err := monitor.check(context.Background()); err != nil {
 		t.Fatalf("expected success against ok endpoint, got %v", err)
 	}
@@ -333,10 +362,17 @@ func TestChromiumMonitorCDPStuckDoesNotEraseRebootCapOnSuccess(t *testing.T) {
 		t.Fatalf("expected exactly one kiosk restart from the cdpStuck escalation, got %s", got)
 	}
 
-	// Two more cdpStuck reports in quick succession must accumulate toward
-	// the restart budget and re-enter the fallback hold rather than restart
-	// a third time — the budget was never erased, so it is already spent.
+	// Two more cdpStuck reports must accumulate toward the restart budget
+	// and re-enter the fallback hold rather than restart a third time — the
+	// budget was never erased, so it is already spent. Each restart drops
+	// the monitor back to pre-connect, so Chromium answers once (the
+	// restarted kiosk coming up) before controld's next re-affirmation
+	// lands; a report latched before that first answer would be cleared as
+	// stale (check()'s firstConnect), exactly as on a device.
 	for i := 0; i < 2; i++ {
+		if err := monitor.check(context.Background()); err != nil {
+			t.Fatalf("tick %d: expected success against ok endpoint, got %v", i, err)
+		}
 		monitor.SetCDPStuck(true)
 		if err := monitor.check(context.Background()); err != nil {
 			t.Fatalf("tick %d: expected success against ok endpoint, got %v", i, err)
@@ -372,5 +408,84 @@ func TestChromiumMonitorCDPStuckDoesNotEraseRebootCapOnSuccess(t *testing.T) {
 	monitor.mu.Unlock()
 	if !parked {
 		t.Fatal("expected the monitor to latch parked once the exhausted hold expired")
+	}
+}
+
+// TestChromiumMonitorCDPStuckLatchedPreConnectDoesNotRestartOnFirstSuccess
+// pins the pre-connect side of the latch (2.0.11 staging review): controld
+// reports stuck while this monitor has never yet reached Chromium — a cold
+// start slower than cdphealth.StuckThreshold — and Chromium then answers for
+// the first time. That report described a Chromium that had not started;
+// acting on it restarted the kiosk the moment it came up and, on a slow
+// enough cold start, again after every restart. The first success must clear
+// the stale latch instead. A report that arrives post-connect still escalates.
+func TestChromiumMonitorCDPStuckLatchedPreConnectDoesNotRestartOnFirstSuccess(t *testing.T) {
+	countFile := installCountingSystemctl(t)
+	endpoint, closeServer := okLocalHTTPEndpoint(t)
+	defer closeServer()
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+
+	monitor.SetCDPStuck(true)
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+	if got := readRestartCount(t, countFile); got != "0" {
+		t.Fatalf("a cdp_stuck latched before Chromium ever answered must not restart it on its first answer, got %s", got)
+	}
+	monitor.mu.Lock()
+	stillStuck := monitor.cdpStuck
+	monitor.mu.Unlock()
+	if stillStuck {
+		t.Fatal("expected the pre-connect cdpStuck latch cleared by the first successful check")
+	}
+
+	// Post-connect, the same report is acted on.
+	monitor.SetCDPStuck(true)
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+	if got := readRestartCount(t, countFile); got != "1" {
+		t.Fatalf("expected one kiosk restart once controld re-reports after connect, got %s", got)
+	}
+}
+
+// TestChromiumMonitorCDPStuckReaffirmedDuringHotplugGraceDoesNotRestart pins
+// the realistic route into the same bug: a headless device, where cdphealth
+// re-affirms stuck every StuckThreshold because Chromium never runs. A
+// display is plugged in; checkHangState's `reconnected` reset arms a fresh
+// grace and clears the latch, then a re-affirmation lands before Chromium's
+// first answer. That first answer must not be met with a kiosk restart.
+func TestChromiumMonitorCDPStuckReaffirmedDuringHotplugGraceDoesNotRestart(t *testing.T) {
+	countFile := installCountingSystemctl(t)
+	monitor := NewChromiumMonitor(closedLocalHTTPEndpoint(t), zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
+	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
+
+	// Headless: the failure path latches m.headless; cdpStuck is irrelevant.
+	monitor.SetCDPStuck(true)
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against a closed endpoint")
+	}
+
+	// Display plugged in, Chromium still cold-starting: the `reconnected`
+	// reset runs on this failed check and arms a fresh pre-connect grace.
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against a closed endpoint")
+	}
+
+	// controld's periodic re-affirmation lands inside that grace.
+	monitor.SetCDPStuck(true)
+
+	endpoint, closeServer := okLocalHTTPEndpoint(t)
+	defer closeServer()
+	monitor.cdpEndpoint = endpoint
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected success against ok endpoint, got %v", err)
+	}
+	if got := readRestartCount(t, countFile); got != "0" {
+		t.Fatalf("a re-affirmation received during the hot-plug grace must not restart Chromium on its first answer, got %s", got)
 	}
 }
