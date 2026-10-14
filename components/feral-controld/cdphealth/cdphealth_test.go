@@ -8,7 +8,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/feral-file/godbus"
 
@@ -410,4 +412,96 @@ func TestMonitor_HealthyObservationResetsDisconnectTimerEvenOnFailedSend(t *test
 	clock.advance(StuckThreshold)
 	m.tick()
 	assert.Equal(t, []bool{false, true}, bus.stuckValues(), "a genuinely sustained fresh episode must still be reported")
+}
+
+// TestMonitor_LogsTransitionsNotRoutineResends pins the log levels: only a
+// transition (first stuck report, clearing a reported episode, first-ever
+// healthy confirmation) is logged above Debug. The periodic re-sends run every
+// threshold on every device, and at Info/Warn they flooded the shipped log.
+func TestMonitor_LogsTransitionsNotRoutineResends(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	cdp := &fakeCDP{initialized: true}
+	bus := &fakeSender{}
+	clock := &fakeClock{now: time.Date(2026, 10, 14, 16, 0, 0, 0, time.UTC)}
+	m := New(cdp, bus, clock, zap.New(core))
+
+	m.tick()
+	require.Equal(t, 1, logs.FilterMessage("cdphealth: CDP healthy; confirmed to feral-watchdog").Len())
+
+	clock.advance(StuckThreshold)
+	m.tick()
+	clock.advance(StuckThreshold)
+	m.tick()
+	require.Equal(t, []bool{false, false, false}, bus.stuckValues())
+	assert.Equal(t, 1, logs.Len(), "periodic healthy re-confirmations must stay below Info")
+
+	cdp.initialized = false
+	m.tick()
+	clock.advance(StuckThreshold)
+	m.tick()
+	clock.advance(StuckThreshold)
+	m.tick()
+	require.Equal(t, []bool{false, false, false, true, true}, bus.stuckValues())
+	stuckLogs := logs.FilterLevelExact(zap.WarnLevel)
+	assert.Equal(t, 1, stuckLogs.Len(), "stuck must Warn once per episode, not on every re-affirmation")
+
+	cdp.initialized = true
+	m.tick()
+	assert.Equal(t, 1, logs.FilterMessage("cdphealth: CDP reconnected; clearing stuck signal").Len())
+	assert.Equal(t, 3, logs.Len())
+}
+
+// TestMonitor_RetriedTransitionKeepsItsLevel pins that a transition whose
+// first send failed is still logged at its transition level when the retry
+// succeeds: the state it is classified by only advances on a successful send.
+func TestMonitor_RetriedTransitionKeepsItsLevel(t *testing.T) {
+	cases := []struct {
+		name    string
+		prepare func(m *Monitor, cdp *fakeCDP, clock *fakeClock)
+		wantMsg string
+	}{
+		{
+			name:    "first confirmation",
+			prepare: func(*Monitor, *fakeCDP, *fakeClock) {},
+			wantMsg: "cdphealth: CDP healthy; confirmed to feral-watchdog",
+		},
+		{
+			name: "first stuck report",
+			prepare: func(m *Monitor, cdp *fakeCDP, clock *fakeClock) {
+				cdp.initialized = false
+				m.tick()
+				clock.advance(StuckThreshold)
+			},
+			wantMsg: "cdphealth: CDP has not (re)connected for a sustained period; reporting stuck to feral-watchdog (ffos-user#356)",
+		},
+		{
+			name: "clearing a reported episode",
+			prepare: func(m *Monitor, cdp *fakeCDP, clock *fakeClock) {
+				cdp.initialized = false
+				m.tick()
+				clock.advance(StuckThreshold)
+				m.tick()
+				cdp.initialized = true
+			},
+			wantMsg: "cdphealth: CDP reconnected; clearing stuck signal",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.InfoLevel)
+			cdp := &fakeCDP{initialized: true}
+			bus := &fakeSender{err: assert.AnError}
+			clock := &fakeClock{now: time.Date(2026, 10, 14, 16, 0, 0, 0, time.UTC)}
+			m := New(cdp, bus, clock, zap.New(core))
+			tc.prepare(m, cdp, clock)
+
+			bus.failNext = 1
+			m.tick()
+			require.Zero(t, logs.FilterMessage(tc.wantMsg).Len(), "a failed send must not log the transition")
+
+			clock.advance(pollInterval)
+			m.tick()
+			assert.Equal(t, 1, logs.FilterMessage(tc.wantMsg).Len(), "the successful retry must log the transition once")
+		})
+	}
 }

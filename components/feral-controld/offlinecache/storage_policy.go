@@ -43,11 +43,14 @@ func filesystemSpace(path string) (int64, int64, error) {
 		var stat syscall.Statfs_t
 		err := syscall.Statfs(path, &stat)
 		if err == nil {
-			if stat.Bsize <= 0 || stat.Blocks > uint64(math.MaxInt64)/uint64(stat.Bsize) || stat.Bavail > stat.Blocks {
+			// Statfs_t.Bsize is int64 on linux but uint32 on darwin; widen it
+			// once so the arithmetic below compiles on both.
+			bsize := int64(stat.Bsize)
+			if bsize <= 0 || stat.Blocks > uint64(math.MaxInt64)/uint64(bsize) || stat.Bavail > stat.Blocks {
 				return 0, 0, errors.New("artwork cache: invalid filesystem capacity")
 			}
 			// The positive block size and division bound above make both products fit int64.
-			return int64(stat.Blocks) * stat.Bsize, int64(stat.Bavail) * stat.Bsize, nil //nolint:gosec // G115: capacity is bounded before conversion.
+			return int64(stat.Blocks) * bsize, int64(stat.Bavail) * bsize, nil //nolint:gosec // G115: capacity is bounded before conversion.
 		}
 		if !errors.Is(err, os.ErrNotExist) || filepath.Dir(path) == path {
 			return 0, 0, err
