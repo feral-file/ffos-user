@@ -1656,6 +1656,8 @@ func TestRefresher_Background_DoneChannel(t *testing.T) {
 	// Create a mock ticker with a controllable channel
 	mockTicker := mocks.NewMockTicker(ts.ctrl)
 	tickerChan := make(chan time.Time, 1)
+	started := make(chan struct{})
+	stopped := make(chan struct{}, 2)
 
 	// Mock the ticker's C() method to return our controllable channel
 	mockTicker.EXPECT().
@@ -1668,12 +1670,16 @@ func TestRefresher_Background_DoneChannel(t *testing.T) {
 	// 2. Once explicitly when done channel is triggered
 	mockTicker.EXPECT().
 		Stop().
+		Do(func() { stopped <- struct{}{} }).
 		Times(2)
 
 	// Expect clock to create ticker
 	ts.mockClock.EXPECT().
 		NewTicker(gomock.Any()).
-		Return(mockTicker).
+		DoAndReturn(func(time.Duration) wrapper.Ticker {
+			close(started)
+			return mockTicker
+		}).
 		Times(1)
 
 	// Create a playlist URL for the test
@@ -1700,14 +1706,24 @@ func TestRefresher_Background_DoneChannel(t *testing.T) {
 	// Start the refresher
 	ts.refresher.Start()
 
-	// Give it a moment to process the initial playlist and create the ticker
-	time.Sleep(100 * time.Millisecond)
+	// Wait for startup before stopping; CI scheduling cannot guarantee a sleep is long enough.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresher did not create its ticker")
+	}
 
 	// Stop the refresher (this sends the done signal)
 	ts.refresher.Stop()
 
-	// Give it a moment to process the done signal
-	time.Sleep(50 * time.Millisecond)
+	// Join both Stop calls before gomock teardown checks its expectations.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("ticker.Stop() called %d times, want 2", i)
+		}
+	}
 }
 
 // TestRefresher_HeadlessBoot_CDPNotInitialized pins the headless expected-state
