@@ -80,6 +80,12 @@ expect deny  'gh pr merge 300' "$feature_dir"
 expect deny  'gh pr merge 999' "$feature_dir"            # base unresolvable
 expect deny  'gh -R feral-file/ffos pr merge 200' "$feature_dir"
 expect deny  'gh pr merge $PR' "$feature_dir"
+# A -R the guard could not read as one OWNER/NAME would make the base lookup
+# ask the wrong repository about this PR number: fail closed.
+expect allow 'gh pr merge 100 -R feral-file/ffos' "$feature_dir"
+expect deny  'gh pr merge 100 -R https://github.com/feral-file/ffos' "$feature_dir"
+expect deny  'gh pr merge 100 -R o/ff-app -R feral-file/ffos' "$feature_dir"
+expect deny  'gh pr merge 100 --repo=https://github.com/feral-file/ffos.git' "$feature_dir"
 
 # --- git push to protected branches ------------------------------------------
 expect deny  'git push origin staging' "$feature_dir"

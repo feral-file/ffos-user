@@ -313,6 +313,12 @@ while IFS= read -r oseg; do
     if printf '%s' "$seg" | grep -Eq '[$`]'; then
       deny "BLOCKED: gh pr merge with a shell expansion cannot be checked against the branch flow."
     fi
+    # A -R that was written but not read into seg_repo_spec (a URL, a value
+    # that is not OWNER/NAME, or the flag given twice) would make the lookup
+    # below ask the wrong repository about this PR number.
+    if [[ -n "$repo_flags" && -z "$seg_repo_spec" ]]; then
+      deny "BLOCKED: gh pr merge with a -R/--repo that is not a single OWNER/NAME cannot be checked against the branch flow."
+    fi
     base=""
     base="$(pr_base "$target" "$seg_dir" "$seg_repo_spec")"
     [[ "$base" == "develop" ]] || deny "BLOCKED: gh pr merge ${target:-(current branch PR)} targets ${base:-a base that could not be resolved}; only PRs into develop may be merged by an agent."
