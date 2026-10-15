@@ -24,6 +24,7 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -173,6 +174,11 @@ type Config struct {
 	Join   JoinFunc
 	Status StatusFunc
 	Rescan RescanFunc
+	// ScanAge, when set, reports how old the list Scan serves is (ok=false:
+	// unknown, no line). The picker shows it because the list is served at
+	// any age while the AP holds the radio and an empty refresh never
+	// replaces it, so an aged list must look aged (#267, #404).
+	ScanAge func() (age time.Duration, ok bool)
 	// ActivityObserved, when set, is invoked once per HUMAN-CAUSED portal
 	// request — the /connect and /rescan action handlers only, classified by
 	// handler, not method (the rescan form submits as GET). It feeds the
@@ -593,7 +599,13 @@ func (s *Server) renderIndexRejection(w http.ResponseWriter, r *http.Request, re
 		SSIDs            []string
 		ManualSSIDOption string
 		LastStatus       *Status
+		ScanAge          string
 	}{SSIDs: ssids, ManualSSIDOption: manualSSIDOption}
+	if s.cfg.ScanAge != nil && len(ssids) > 0 {
+		if age, ok := s.cfg.ScanAge(); ok {
+			data.ScanAge = scanAgeText(age)
+		}
+	}
 
 	if rejection != "" {
 		// A fresh rejection outranks the machine's last join outcome: the
@@ -607,6 +619,24 @@ func (s *Server) renderIndexRejection(w http.ResponseWriter, r *http.Request, re
 	}
 
 	s.render(w, "index.html", data)
+}
+
+// scanAgeText renders the picker's list age as a phrase that completes
+// "Networks found …". Coarse on purpose: the point is "fresh" versus "old
+// enough to search again", and the page is not live.
+func scanAgeText(age time.Duration) string {
+	switch {
+	case age < time.Minute:
+		return "just now"
+	case age < 2*time.Minute:
+		return "1 minute ago"
+	case age < time.Hour:
+		return strconv.Itoa(int(age/time.Minute)) + " minutes ago"
+	case age < 2*time.Hour:
+		return "over an hour ago"
+	default:
+		return strconv.Itoa(int(age/time.Hour)) + " hours ago"
+	}
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {

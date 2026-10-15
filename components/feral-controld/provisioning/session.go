@@ -588,7 +588,7 @@ func (m *Machine) latchSessionPolicy(reason string) {
 	switch reason {
 	case "unprovisioned":
 		policy = sessionUnbounded
-	case "sustained-offline", ReasonRelocated:
+	case "sustained-offline", ReasonSustainedNoLease, ReasonRelocated:
 		policy = sessionRecheck
 	case ReasonSetupIncomplete:
 		policy = sessionEpisode
@@ -949,7 +949,15 @@ func (m *Machine) runRecheckBlink(ctx context.Context) {
 // activateInRangeProfiles force-activates saved profiles whose SSID the scan
 // shows in range, most-recently-used first, with hidden-SSID profiles
 // (invisible to scans by definition) getting one attempt last if budget
-// remains. Returns (associated, measured): `associated` is whether any
+// remains. An EMPTY error-free scan is not evidence that nothing is in
+// range: the first post-teardown scan comes back empty routinely (bench,
+// FF1-8EVTK3RE, 2 of 2 blinks, ffos-user#404), and filtering on it attempted
+// no association at all, so a radio state that keeps post-bounce scans empty
+// never got one. On an empty scan the most-recently-used visible profile
+// therefore gets ONE blind attempt ahead of the hidden ones — the same bounded
+// activation the hidden path already makes, and its failure reason lands in
+// the log. One, not all: a blind activation of an out-of-range profile burns
+// a full ActivationTimeout. Returns (associated, measured): `associated` is whether any
 // activation succeeded; `measured` is whether the pass COMPLETED — the
 // profile list was readable and every candidate got its attempt (or there
 // legitimately were none in range). The backoff ladder escalates only on a
@@ -971,18 +979,28 @@ func (m *Machine) activateInRangeProfiles(blinkCtx context.Context, ssids []stri
 	for _, s := range ssids {
 		inRange[s] = true
 	}
-	var candidates, hidden []wifictl.ActivationProfile
+	var candidates, hidden, visible []wifictl.ActivationProfile
 	for _, p := range profiles {
 		switch {
 		case p.Hidden:
 			hidden = append(hidden, p)
 		case inRange[p.SSID]:
 			candidates = append(candidates, p)
+		default:
+			visible = append(visible, p)
 		}
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		return candidates[i].LastUsed > candidates[j].LastUsed
 	})
+	if len(ssids) == 0 && len(visible) > 0 {
+		sort.SliceStable(visible, func(i, j int) bool {
+			return visible[i].LastUsed > visible[j].LastUsed
+		})
+		m.logger.Info("provisioning: recheck scan was empty; trying the most recent saved profile blind",
+			zap.String("ssid", visible[0].SSID))
+		candidates = append(candidates, visible[0])
+	}
 	candidates = append(candidates, hidden...)
 
 	for _, p := range candidates {

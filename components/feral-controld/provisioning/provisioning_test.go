@@ -252,6 +252,7 @@ func (w *fakeWifi) RefreshScanCache(context.Context) ([]string, error) {
 	}
 	return []string{"Net"}, nil
 }
+func (w *fakeWifi) CachedScanTime() (time.Time, bool) { return time.Time{}, false }
 func (w *fakeWifi) CachedScan(context.Context) ([]string, error) {
 	return []string{"Net"}, nil
 }

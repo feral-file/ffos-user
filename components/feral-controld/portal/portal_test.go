@@ -1058,3 +1058,34 @@ func TestTrafficObservedCarriesTheClientIP(t *testing.T) {
 	defer mu.Unlock()
 	assert.Equal(t, []string{"10.42.0.22", "not-an-address"}, ips)
 }
+
+// TestIndexShowsScanAge (#404/#267): the picker labels its list with the
+// list's age, since the list is served at any age and an empty refresh never
+// replaces it. No ScanAge seam, an unknown age, or an empty picker: no line.
+func TestIndexShowsScanAge(t *testing.T) {
+	scan := func(context.Context) ([]string, error) { return []string{"HomeNet"}, nil }
+	for _, tc := range []struct {
+		name string
+		age  func() (time.Duration, bool)
+		want string
+	}{
+		{"fresh", func() (time.Duration, bool) { return 10 * time.Second, true }, "Networks found just now."},
+		{"aged", func() (time.Duration, bool) { return 47 * time.Minute, true }, "Networks found 47 minutes ago."},
+		{"hours", func() (time.Duration, bool) { return 3 * time.Hour, true }, "Networks found 3 hours ago."},
+		{"unknown", func() (time.Duration, bool) { return 0, false }, ""},
+		{"no seam", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ts, client := newTestServer(t, Config{Scan: scan, ScanAge: tc.age})
+			resp, err := client.Get(ts.URL + "/")
+			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
+			body := readAll(t, resp)
+			if tc.want == "" {
+				assert.NotContains(t, body, "Networks found")
+				return
+			}
+			assert.Contains(t, body, tc.want)
+		})
+	}
+}

@@ -667,6 +667,59 @@ func TestRecheckBlinkReRaisesWhenNetworkStillGone(t *testing.T) {
 		"the re-raise must not wipe a join status a phone may poll (no resetJoinStatus)")
 }
 
+// TestRecheckBlinkEmptyScanTriesMRUBlind pins #404 item 2: an EMPTY,
+// error-free blink scan (the routine post-teardown race) still makes one
+// bounded activation of the most-recently-used visible profile, ahead of the
+// hidden ones, instead of attempting nothing. Only ONE blind visible attempt:
+// each burns a full activation deadline when the network is out of range. An
+// empty scan still never escalates the ladder.
+func TestRecheckBlinkEmptyScanTriesMRUBlind(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	h.wifi.activationProfiles = []wifictl.ActivationProfile{
+		{UUID: "a", SSID: "OldNet", LastUsed: 50},
+		{UUID: "c", SSID: "Net", LastUsed: 99},
+		{UUID: "h", SSID: "Ghost", Hidden: true, LastUsed: 5},
+	}
+	h.wifi.activateErrs = map[string]error{
+		"a": errors.New("no"), "c": errors.New("no"), "h": errors.New("no"),
+	}
+	driveSustainedRaise(t, h, ctx)
+
+	h.wifi.mu.Lock()
+	h.wifi.emptyScans = 1 // the blink's scan only
+	h.wifi.mu.Unlock()
+	h.tickN(ctx, 8) // ladder rung 0
+	assert.Equal(t, 1, countReason(h, StateOfflineRetrying, ReasonAPRecheck))
+	assert.Equal(t, []string{"c", "h"}, h.wifi.activations,
+		"MRU visible profile blind, then hidden; never every visible profile")
+	assert.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, 0, h.m.recheckCycle, "an empty scan never escalates the ladder")
+}
+
+// TestRecheckBlinkEmptyScanBlindActivationRecovers: the blind attempt is a
+// real recovery path — when it associates, the session ends like any other
+// successful blink.
+func TestRecheckBlinkEmptyScanBlindActivationRecovers(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	h.wifi.activationProfiles = []wifictl.ActivationProfile{{UUID: "b", SSID: "Net", LastUsed: 1}}
+	driveSustainedRaise(t, h, ctx)
+
+	h.wifi.mu.Lock()
+	h.wifi.emptyScans = 1
+	h.wifi.mu.Unlock()
+	fl.up = true
+	h.tickN(ctx, 8)
+	assert.Equal(t, []string{"b"}, h.wifi.activations)
+	assert.Equal(t, StateOfflineRetrying, h.m.State())
+	assert.Equal(t, 1, h.rec.count("ap.Up"), "no re-raise after the blind activation associated")
+}
+
 // TestRecheckBlinkListingErrorAborts pins the fail-bias: a profile-listing
 // error aborts the blink — never a blind activation — and the re-raise
 // proceeds.
@@ -1061,9 +1114,9 @@ func TestSnapshotServesCachedEvidence(t *testing.T) {
 
 	// Wire the detail probe so the type is learned from the same read.
 	var probeCalls int
-	h.m.activeLinkDetail = func(context.Context) (bool, bool, error) {
+	h.m.activeLinkDetail = func(context.Context) (LinkDetail, error) {
 		probeCalls++
-		return fl.up, false, fl.err // a Wi-Fi station: link yes, wire no
+		return LinkDetail{Link: fl.up}, fl.err // a Wi-Fi station: link yes, wire no
 	}
 
 	h.m.onConnectivity(ctx, false, false)
