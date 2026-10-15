@@ -257,6 +257,9 @@ type WifiController interface {
 	// CachedScanTime is when CachedScan's list was scanned (ok=false: none).
 	// Only the portal's list-age line reads it.
 	CachedScanTime() (time.Time, bool)
+	// SetOwnAPSSID tells the scan cache which SSID is this device's own
+	// setup AP, so RefreshScanCache drops it before judging a scan empty.
+	SetOwnAPSSID(ssid string)
 	// Join must honor ctx cancellation: applyJoin bounds it with a deadline
 	// (Config.JoinTimeout) because it is the one long blocking call on the
 	// loop goroutine — an implementation that ignores ctx wedges the machine
@@ -366,7 +369,6 @@ const (
 	preAPScanRetryDelay = 2 * time.Second
 )
 
-// Config wires the machine's dependencies and tunables.
 // LinkDetail is one Config.ActiveLinkDetail reading (production:
 // status.LinkChecker.ExternalLinkReading). Link and Wired carry the ACTIVATED
 // verdicts every guard keys on; AddrPending reports a device past L2 that is
@@ -378,6 +380,7 @@ type LinkDetail struct {
 	AddrPendingConn string
 }
 
+// Config wires the machine's dependencies and tunables.
 type Config struct {
 	AP           softap.Backend
 	Wifi         WifiController
@@ -460,7 +463,7 @@ type Config struct {
 
 	// ActiveLinkDetail, when non-nil, is preferred over ActiveLink: the same
 	// probe with the ethernet-only verdict from the same nmcli read
-	// (status.LinkChecker.ExternalLinkDetail). It exists for the §4.7 health
+	// (status.LinkChecker.ExternalLinkReading). It exists for the §4.7 health
 	// snapshot — the machine caches the link TYPE its tick probes saw, so
 	// status polls never spend a probe of their own. Identical failure bias
 	// to ActiveLink (an error is unknown and defers the AP). The reading's
@@ -753,8 +756,8 @@ type Machine struct {
 	// station through IP_CONFIG (~45s), FAILED, and a fresh activation, and
 	// after its autoconnect retries run out it can sit DISCONNECTED for
 	// minutes, so the reading at expiry is often not the stuck one. Reset with
-	// the window. It changes only the raise's reason and copy, never whether
-	// or when it fires (ffos-user#404).
+	// the window. It changes only the raise's reason, never whether or when
+	// it fires (ffos-user#404).
 	offlineNoLease     bool
 	offlineNoLeaseConn string
 	// lastAddrPending/lastAddrPendingConn are the most recent real probe's
@@ -1973,7 +1976,7 @@ func (m *Machine) onTick(ctx context.Context) {
 						zap.String("connection", noLeaseConn))
 					m.transition(ctx, StateAPActive, Detail{
 						Reason:  ReasonSustainedNoLease,
-						Message: "Connected to Wi-Fi but no address was assigned; starting setup",
+						Message: "Network connected but no address was assigned; starting setup",
 					})
 					return
 				}
@@ -2557,6 +2560,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		m.noteAPRaiseFailure()
 		return err
 	}
+	m.wifi.SetOwnAPSSID(info.SSID)
 
 	// Re-arm the attached-client latch BEFORE the portal can accept a request:
 	// on the rescan/re-raise paths the phone's captive probe races srv.Start

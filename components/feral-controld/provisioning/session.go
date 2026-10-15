@@ -954,9 +954,11 @@ func (m *Machine) runRecheckBlink(ctx context.Context) {
 // FF1-8EVTK3RE, 2 of 2 blinks, ffos-user#404), and filtering on it attempted
 // no association at all, so a radio state that keeps post-bounce scans empty
 // never got one. On an empty scan the most-recently-used visible profile
-// therefore gets ONE blind attempt ahead of the hidden ones — the same bounded
-// activation the hidden path already makes, and its failure reason lands in
-// the log. One, not all: a blind activation of an out-of-range profile burns
+// therefore gets ONE blind attempt, ranked with the hidden ones by LastUsed —
+// the same bounded activation the hidden path already makes, and its failure
+// reason lands in the log. The scan arrives with the device's own setup SSID
+// already removed (wifictl.SetOwnAPSSID), so a scan that saw only that counts
+// as empty here. One, not all: a blind activation of an out-of-range profile burns
 // a full ActivationTimeout. Returns (associated, measured): `associated` is whether any
 // activation succeeded; `measured` is whether the pass COMPLETED — the
 // profile list was readable and every candidate got its attempt (or there
@@ -999,7 +1001,13 @@ func (m *Machine) activateInRangeProfiles(blinkCtx context.Context, ssids []stri
 		})
 		m.logger.Info("provisioning: recheck scan was empty; trying the most recent saved profile blind",
 			zap.String("ssid", visible[0].SSID))
-		candidates = append(candidates, visible[0])
+		// Ranked WITH the hidden profiles by LastUsed, not ahead of them:
+		// both are blind guesses, so the newer one goes first, and an old
+		// visible profile never takes a newer hidden one's slot.
+		hidden = append(hidden, visible[0])
+		sort.SliceStable(hidden, func(i, j int) bool {
+			return hidden[i].LastUsed > hidden[j].LastUsed
+		})
 	}
 	candidates = append(candidates, hidden...)
 

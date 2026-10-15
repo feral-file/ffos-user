@@ -1250,3 +1250,31 @@ func TestSetDeviceAutoconnectHonorsCtx(t *testing.T) {
 		assert.Error(t, err, "call %d must carry the caller's canceled ctx", i)
 	}
 }
+
+// TestRefreshScanCacheOwnAPSSIDOnlyIsEmpty (#404): NM can leave the device's
+// own setup SSID in a post-bounce scan. A scan that saw only it is an empty
+// scan: the live result is empty (callers retry, the blink tries blind) and
+// the previous list stays; otherwise the own SSID is dropped from the cache.
+func TestRefreshScanCacheOwnAPSSIDOnlyIsEmpty(t *testing.T) {
+	var out []byte
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
+			return out, nil
+		}
+		return nil, nil
+	})
+	c.SetOwnAPSSID("FF1-abc")
+
+	out = []byte("Alpha\nFF1-abc\n")
+	got, err := c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Alpha"}, got, "the own SSID is never a candidate")
+
+	out = []byte("FF1-abc\n")
+	got, err = c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, got, "a scan of only the own SSID reads as empty")
+	cached, err := c.CachedScan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Alpha"}, cached, "and keeps the previous list")
+}

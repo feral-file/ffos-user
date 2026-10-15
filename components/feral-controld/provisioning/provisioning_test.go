@@ -164,8 +164,10 @@ func (f *fakeNeighbors) lookup(ip string) (string, bool) {
 }
 
 type fakeWifi struct {
-	rec        *recorder
-	mu         sync.Mutex
+	rec *recorder
+	mu  sync.Mutex
+	// ownAPSSID records the last SetOwnAPSSID (ensureAPUp's own-SSID hand-off).
+	ownAPSSID  string
 	hasProfile bool
 	profileErr error
 	joinErr    error // returned by Join
@@ -253,6 +255,11 @@ func (w *fakeWifi) RefreshScanCache(context.Context) ([]string, error) {
 	return []string{"Net"}, nil
 }
 func (w *fakeWifi) CachedScanTime() (time.Time, bool) { return time.Time{}, false }
+func (w *fakeWifi) SetOwnAPSSID(ssid string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.ownAPSSID = ssid
+}
 func (w *fakeWifi) CachedScan(context.Context) ([]string, error) {
 	return []string{"Net"}, nil
 }

@@ -669,10 +669,11 @@ func TestRecheckBlinkReRaisesWhenNetworkStillGone(t *testing.T) {
 
 // TestRecheckBlinkEmptyScanTriesMRUBlind pins #404 item 2: an EMPTY,
 // error-free blink scan (the routine post-teardown race) still makes one
-// bounded activation of the most-recently-used visible profile, ahead of the
-// hidden ones, instead of attempting nothing. Only ONE blind visible attempt:
-// each burns a full activation deadline when the network is out of range. An
-// empty scan still never escalates the ladder.
+// bounded activation of the most-recently-used visible profile instead of
+// attempting nothing, ranked with the hidden ones by LastUsed (a newer hidden
+// network keeps its place ahead of it). Only ONE blind visible attempt: each
+// burns a full activation deadline when the network is out of range. An empty
+// scan still never escalates the ladder.
 func TestRecheckBlinkEmptyScanTriesMRUBlind(t *testing.T) {
 	ctx := context.Background()
 	fl := &fakeLink{up: false}
@@ -682,9 +683,10 @@ func TestRecheckBlinkEmptyScanTriesMRUBlind(t *testing.T) {
 		{UUID: "a", SSID: "OldNet", LastUsed: 50},
 		{UUID: "c", SSID: "Net", LastUsed: 99},
 		{UUID: "h", SSID: "Ghost", Hidden: true, LastUsed: 5},
+		{UUID: "g", SSID: "HomeHidden", Hidden: true, LastUsed: 120},
 	}
 	h.wifi.activateErrs = map[string]error{
-		"a": errors.New("no"), "c": errors.New("no"), "h": errors.New("no"),
+		"a": errors.New("no"), "c": errors.New("no"), "h": errors.New("no"), "g": errors.New("no"),
 	}
 	driveSustainedRaise(t, h, ctx)
 
@@ -693,8 +695,8 @@ func TestRecheckBlinkEmptyScanTriesMRUBlind(t *testing.T) {
 	h.wifi.mu.Unlock()
 	h.tickN(ctx, 8) // ladder rung 0
 	assert.Equal(t, 1, countReason(h, StateOfflineRetrying, ReasonAPRecheck))
-	assert.Equal(t, []string{"c", "h"}, h.wifi.activations,
-		"MRU visible profile blind, then hidden; never every visible profile")
+	assert.Equal(t, []string{"g", "c", "h"}, h.wifi.activations,
+		"blind attempts in LastUsed order, one visible profile only")
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 0, h.m.recheckCycle, "an empty scan never escalates the ladder")
 }
@@ -1268,4 +1270,17 @@ func TestClearOfflineDropsPendingScanSkip(t *testing.T) {
 	h.m.clearOffline()
 	assert.False(t, h.m.skipNextPreAPScan,
 		"the scan-skip must not outlive the AP episode that set it")
+}
+
+// TestAPRaiseHandsOwnSSIDToTheScanCache (#404): every raise tells wifictl its
+// own setup SSID, so a post-bounce scan that saw only that SSID reads as
+// empty there (the blind blink attempt fires, the picker keeps its list).
+func TestAPRaiseHandsOwnSSIDToTheScanCache(t *testing.T) {
+	ctx := context.Background()
+	h := newLinkHarness(t, &fakeLink{up: false})
+	h.wifi.setProfile(true)
+	driveSustainedRaise(t, h, ctx)
+	h.wifi.mu.Lock()
+	defer h.wifi.mu.Unlock()
+	assert.Equal(t, "FF1-abc", h.wifi.ownAPSSID)
 }

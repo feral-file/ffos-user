@@ -96,26 +96,14 @@ func (c *LinkChecker) ExternalLink(ctx context.Context, excludeProfile string) (
 	return res.link, err
 }
 
-// ExternalLinkDetail is ExternalLink plus the ethernet-only verdict from the
-// SAME nmcli read: linkProbe already computes both in one pass, and the
-// provisioning machine's health snapshot (network-recovery-ux §4.7) needs the
-// link TYPE without spending a second probe — the polling path must never run
-// nmcli, so the machine caches what its own tick probes saw, and this is how
-// a tick probe learns the type for free. Same surface-errors bias as
-// ExternalLink.
-func (c *LinkChecker) ExternalLinkDetail(ctx context.Context, excludeProfile string) (link, wired bool, err error) {
-	if c == nil || c.exec == nil {
-		return false, false, errors.New("link checker not initialized")
-	}
-	res, err := c.linkProbe(ctx, excludeProfile)
-	return res.link, res.wired, err
-}
-
-// ExternalLinkReading is one hotspot-excluding probe in full: the combined
-// ACTIVATED verdict, the ethernet-only verdict, and whether a device is
-// associated but stuck waiting for an address (see LinkReading.AddrPending).
-// One nmcli read, the same survey-validity rule, and the same surface-errors
-// bias as ExternalLinkDetail.
+// ExternalLinkReading is ExternalLink in full, from the SAME nmcli read: the
+// combined ACTIVATED verdict, the ethernet-only verdict, and whether a device
+// is associated but stuck waiting for an address (see LinkReading.AddrPending).
+// linkProbe computes all of them in one pass, and the provisioning machine's
+// health snapshot (network-recovery-ux §4.7) needs the link TYPE without a
+// second probe: the polling path must never run nmcli, so the machine caches
+// what its own tick probes saw. Same survey-validity rule and surface-errors
+// bias as ExternalLink.
 func (c *LinkChecker) ExternalLinkReading(ctx context.Context, excludeProfile string) (LinkReading, error) {
 	if c == nil || c.exec == nil {
 		return LinkReading{}, errors.New("link checker not initialized")
@@ -131,7 +119,7 @@ func (c *LinkChecker) ExternalLinkReading(ctx context.Context, excludeProfile st
 
 // LinkReading is ExternalLinkReading's result.
 type LinkReading struct {
-	// Link and Wired are ExternalLinkDetail's two verdicts.
+	// Link is ExternalLink's verdict; Wired is the ethernet-only one.
 	Link, Wired bool
 	// AddrPending reports a non-excluded ethernet or Wi-Fi device past L2
 	// (associated and authenticated, or cable negotiated) that is still
@@ -140,8 +128,8 @@ type LinkReading struct {
 	// ip-config-unavailable, and retries, so during an outage this is seen on
 	// some ticks and not others. It does NOT count as Link: every guard that
 	// reads Link keys on ACTIVATED deliberately. It exists so the provisioning
-	// machine can say "connected, but no address" instead of "Wi-Fi
-	// unavailable" when it raises the setup AP (ffos-user#404).
+	// machine's sustained raise can record a DHCP failure (reason
+	// sustained-no-lease) apart from a lost link (ffos-user#404).
 	AddrPending bool
 	// AddrPendingConn is the active connection name of the first such device
 	// (for Wi-Fi profiles this codebase creates, the SSID). May be empty.
@@ -198,7 +186,7 @@ func (c *LinkChecker) LinkTelemetry(ctx context.Context) (wired, wifi bool, err 
 // Gating the ladder on ACTIVATED-only misread venue DHCP failures as
 // link-down (cable/radio out) and made the no-lease class unreachable —
 // exactly the failure the taxonomy exists to name. Exclusion and
-// survey-validity/error semantics match ExternalLinkDetail.
+// survey-validity/error semantics match ExternalLinkReading.
 //
 // It must NOT be wired into the AP-raise guard, hub/mDNS lifecycle, or
 // admission gates: those key on ACTIVATED deliberately, and counting a

@@ -82,6 +82,10 @@ type Controller struct {
 	// no cache). An empty refresh never advances it: it buys the old list
 	// no freshness.
 	cacheScannedAt time.Time
+	// ownAPSSID is this device's own setup-AP SSID (SetOwnAPSSID), removed
+	// from every RefreshScanCache result: it is never a destination, and a
+	// post-bounce scan that saw only it is an empty scan.
+	ownAPSSID string
 }
 
 // New builds a Controller. iface may be empty to let nmcli pick the Wi-Fi
@@ -277,6 +281,15 @@ func (c *Controller) CachedScan(context.Context) ([]string, error) {
 	return append([]string(nil), c.cacheSSIDs...), nil
 }
 
+// SetOwnAPSSID records this device's own setup-AP SSID so RefreshScanCache
+// drops it from every result (see there). The provisioning machine sets it on
+// each AP raise; the SSID is derived from the device ID, so it is stable.
+func (c *Controller) SetOwnAPSSID(ssid string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ownAPSSID = ssid
+}
+
 // CachedScanTime reports when the cached list was scanned (ok=false: no
 // cache). The portal shows it so an aged list is visibly aged (#267): since
 // CachedScan serves any age and an empty refresh never replaces the list,
@@ -319,9 +332,6 @@ func (c *Controller) RefreshScanCache(ctx context.Context) ([]string, error) {
 	// asking early does not fail loudly, it returns an empty list.
 	c.waitForScanReady(ctx)
 
-	// Preserve every candidate in the cache. NetworkManager can retain the
-	// active setup SSID in these results; the portal must remove that exact
-	// non-destination before applying its nine-network display cap.
 	ssids, err := c.scan(ctx, true)
 	if err != nil {
 		return nil, err
@@ -330,6 +340,20 @@ func (c *Controller) RefreshScanCache(ctx context.Context) ([]string, error) {
 	now := c.clock.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// NetworkManager can retain the device's own setup SSID in these results
+	// right after the AP comes down. Drop it BEFORE the emptiness test: a scan
+	// that saw only it saw nothing, and caching it would blank the picker
+	// (the portal filters it out) exactly like an empty scan would.
+	if c.ownAPSSID != "" {
+		kept := ssids[:0]
+		for _, s := range ssids {
+			if s != c.ownAPSSID {
+				kept = append(kept, s)
+			}
+		}
+		ssids = kept
+	}
 
 	if len(ssids) == 0 {
 		fields := []zap.Field{zap.Int("cached_ssids", len(c.cacheSSIDs))}
