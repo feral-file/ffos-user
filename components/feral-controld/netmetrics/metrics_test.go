@@ -2,6 +2,7 @@ package netmetrics
 
 import (
 	"testing"
+	"time"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
@@ -101,4 +102,27 @@ func labelValue(t *testing.T, m *dto.Metric, name string) string {
 	}
 	t.Fatalf("label %s not found", name)
 	return ""
+}
+
+func TestRelayerSnapshotLifecycle(t *testing.T) {
+	relayerSnapshot.Lock()
+	relayerSnapshot.connected = false
+	relayerSnapshot.lastConnected = time.Time{}
+	relayerSnapshot.Unlock()
+	defer SetRelayerConnected(false)
+	connected, last := RelayerSnapshot()
+	require.False(t, connected)
+	require.True(t, last.IsZero())
+	SetRelayerConnected(true)
+	connected, last = RelayerSnapshot()
+	require.True(t, connected)
+	require.False(t, last.IsZero())
+	SetRelayerConnected(false)
+	connected, disconnectedLast := RelayerSnapshot()
+	require.False(t, connected)
+	require.Equal(t, last, disconnectedLast)
+	SetRelayerConnected(true)
+	connected, reconnectedLast := RelayerSnapshot()
+	require.True(t, connected)
+	require.False(t, reconnectedLast.Before(last))
 }

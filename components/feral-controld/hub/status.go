@@ -4,10 +4,12 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -85,15 +87,17 @@ type StatusInfo struct {
 // the QR's constant "pairing" phase is derivable as claimed==false with a
 // served topic_id).
 type statusResponse struct {
-	DeviceID     string `json:"device_id"`
-	Version      string `json:"version"`
-	Branch       string `json:"branch"`
-	Contract     string `json:"contract"`
-	Claimed      bool   `json:"claimed"`
-	Internet     bool   `json:"internet"`
-	SetupState   string `json:"setup_state"`
-	Connectivity string `json:"connectivity"`
-	TopicID      string `json:"topic_id"`
+	RelayerConnected       bool       `json:"relayer_connected"`
+	RelayerLastConnectedAt *time.Time `json:"relayer_last_connected_at"`
+	DeviceID               string     `json:"device_id"`
+	Version                string     `json:"version"`
+	Branch                 string     `json:"branch"`
+	Contract               string     `json:"contract"`
+	Claimed                bool       `json:"claimed"`
+	Internet               bool       `json:"internet"`
+	SetupState             string     `json:"setup_state"`
+	Connectivity           string     `json:"connectivity"`
+	TopicID                string     `json:"topic_id"`
 	// network is the additive §4.7 health object (docs/network-recovery-ux.md);
 	// omitted when no provisioning machine is wired.
 	Network *status.NetworkHealth `json:"network,omitempty"`
@@ -133,17 +137,24 @@ func (h *hub) serveStatus(w http.ResponseWriter, r *http.Request, contract strin
 	// authorization boundary, matching the BLE-era posture (any nearby phone
 	// could pair without authentication); an on-device confirmation before
 	// topic handover is the LAN contract v2 path if this needs tightening.
+	connected, lastConnected := netmetrics.RelayerSnapshot()
+	var lastConnectedAt *time.Time
+	if !lastConnected.IsZero() {
+		lastConnectedAt = &lastConnected
+	}
 	resp := statusResponse{
-		DeviceID:     info.DeviceID,
-		Version:      info.Version,
-		Branch:       info.Branch,
-		Contract:     contract,
-		Claimed:      info.Claimed,
-		Internet:     info.Internet,
-		SetupState:   info.SetupState,
-		Connectivity: info.Connectivity,
-		TopicID:      info.TopicID,
-		Network:      info.Network,
+		RelayerConnected:       connected,
+		RelayerLastConnectedAt: lastConnectedAt,
+		DeviceID:               info.DeviceID,
+		Version:                info.Version,
+		Branch:                 info.Branch,
+		Contract:               contract,
+		Claimed:                info.Claimed,
+		Internet:               info.Internet,
+		SetupState:             info.SetupState,
+		Connectivity:           info.Connectivity,
+		TopicID:                info.TopicID,
+		Network:                info.Network,
 	}
 
 	if err := h.respondJSON(w, http.StatusOK, resp); err != nil {
