@@ -1058,3 +1058,40 @@ func TestTrafficObservedCarriesTheClientIP(t *testing.T) {
 	defer mu.Unlock()
 	assert.Equal(t, []string{"10.42.0.22", "not-an-address"}, ips)
 }
+
+// TestIndexShowsScanAge (#404/#267): the picker labels its list with the
+// list's age, since the list is served at any age and an empty refresh never
+// replaces it. No ScanAge seam, an unknown age, or an empty picker: no line.
+func TestIndexShowsScanAge(t *testing.T) {
+	listed := []string{"HomeNet"}
+	fresh := func() (time.Duration, bool) { return 10 * time.Second, true }
+	for _, tc := range []struct {
+		name  string
+		ssids []string
+		age   func() (time.Duration, bool)
+		want  string
+	}{
+		{"fresh", listed, fresh, "Networks found just now."},
+		{"aged", listed, func() (time.Duration, bool) { return 47 * time.Minute, true }, "Networks found 47 minutes ago."},
+		{"hours", listed, func() (time.Duration, bool) { return 3 * time.Hour, true }, "Networks found 3 hours ago."},
+		{"unknown", listed, func() (time.Duration, bool) { return 0, false }, ""},
+		{"no seam", listed, nil, ""},
+		{"empty picker", nil, fresh, ""},
+		{"only the setup SSID", []string{"FF1-abc"}, fresh, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ssids := tc.ssids
+			scan := func(context.Context) ([]string, error) { return ssids, nil }
+			_, ts, client := newTestServer(t, Config{Scan: scan, ScanAge: tc.age, APSSID: "FF1-abc"})
+			resp, err := client.Get(ts.URL + "/")
+			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
+			body := readAll(t, resp)
+			if tc.want == "" {
+				assert.NotContains(t, body, "Networks found")
+				return
+			}
+			assert.Contains(t, body, tc.want)
+		})
+	}
+}

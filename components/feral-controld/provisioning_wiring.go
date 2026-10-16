@@ -499,15 +499,22 @@ func wireInternetProbe(ex any, dc dbus.DBus, logger *zap.Logger) {
 }
 
 // externalLinkDetailProbe is externalLinkProbe's detail flavor: the same
-// hotspot-excluding probe, plus the ethernet-only verdict from the same nmcli
-// read, so the machine's §4.7 health snapshot learns the link TYPE at zero
-// extra probe cost. Same nil and failure semantics.
-func externalLinkDetailProbe(lc *status.LinkChecker) func(context.Context) (bool, bool, error) {
+// hotspot-excluding probe, plus the ethernet-only and address-pending verdicts
+// from the same nmcli read, so the machine's §4.7 health snapshot learns the
+// link TYPE, and its sustained raise learns the no-lease shape (#404), at
+// zero extra probe cost. Same nil and failure semantics.
+func externalLinkDetailProbe(lc *status.LinkChecker) func(context.Context) (provisioning.LinkDetail, error) {
 	if lc == nil {
 		return nil
 	}
-	return func(ctx context.Context) (bool, bool, error) {
-		return lc.ExternalLinkDetail(ctx, softap.ProfileName)
+	return func(ctx context.Context) (provisioning.LinkDetail, error) {
+		r, err := lc.ExternalLinkReading(ctx, softap.ProfileName)
+		return provisioning.LinkDetail{
+			Link:            r.Link,
+			Wired:           r.Wired,
+			AddrPending:     r.AddrPending,
+			AddrPendingConn: r.AddrPendingConn,
+		}, err
 	}
 }
 

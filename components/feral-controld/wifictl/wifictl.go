@@ -26,14 +26,6 @@ import (
 const (
 	nmcliBin = "nmcli"
 
-	// scanRetainWindow bounds how long a cached scan may survive a later
-	// EMPTY refresh (see RefreshScanCache). It is NOT a read-side TTL:
-	// CachedScan serves the cache at any age, because its only caller is the
-	// portal, which runs only while the AP holds the radio and no live scan
-	// can succeed (#261). The 10 minutes are inherited from feral-setupd's
-	// former read TTL (constant::SSID_CACHE_TTL).
-	scanRetainWindow = 10 * time.Minute
-
 	// ssidWaitTimeout / ssidWaitInterval bound the post-AP-bounce wait for the
 	// join target to reappear in NM's scan results (see Join / waitForSSID).
 	ssidWaitTimeout  = 20 * time.Second
@@ -84,9 +76,16 @@ type Controller struct {
 	// nmcli choose, which is correct on single-radio FF1 hardware.
 	iface string
 
-	mu               sync.Mutex
-	cacheSSIDs       []string
-	cacheRetainUntil time.Time
+	mu         sync.Mutex
+	cacheSSIDs []string
+	// cacheScannedAt is when the scan that produced cacheSSIDs ran (zero =
+	// no cache). An empty refresh never advances it: it buys the old list
+	// no freshness.
+	cacheScannedAt time.Time
+	// ownAPSSID is this device's own setup-AP SSID (SetOwnAPSSID), removed
+	// from every RefreshScanCache result: it is never a destination, and a
+	// post-bounce scan that saw only it is an empty scan.
+	ownAPSSID string
 }
 
 // New builds a Controller. iface may be empty to let nmcli pick the Wi-Fi
@@ -260,8 +259,8 @@ func (c *Controller) ScanAllSSIDs(ctx context.Context) ([]string, error) {
 	return parseSSIDs(string(out)), nil
 }
 
-// CachedScan returns the most recent RefreshScanCache result, at any age. It
-// never touches the radio.
+// CachedScan returns the most recent non-empty RefreshScanCache result, at any
+// age. It never touches the radio.
 //
 // The cache exists because NetworkManager serializes Wi-Fi operations on a
 // single radio, and this driver rejects every scan while the SoftAP hotspot
@@ -282,24 +281,48 @@ func (c *Controller) CachedScan(context.Context) ([]string, error) {
 	return append([]string(nil), c.cacheSSIDs...), nil
 }
 
+// SetOwnAPSSID records this device's own setup-AP SSID so RefreshScanCache
+// drops it from every result (see there). The provisioning machine sets it on
+// each AP raise; the SSID is derived from the device ID, so it is stable.
+func (c *Controller) SetOwnAPSSID(ssid string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ownAPSSID = ssid
+}
+
+// CachedScanTime reports when the cached list was scanned (ok=false: no
+// cache). The portal shows it so an aged list is visibly aged (#267): since
+// CachedScan serves any age and an empty refresh never replaces the list,
+// a stale picker must say so rather than pass as fresh.
+func (c *Controller) CachedScanTime() (time.Time, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cacheScannedAt, len(c.cacheSSIDs) > 0
+}
+
 // RefreshScanCache performs a forced live scan and stores it for CachedScan.
 // Call this while station mode still owns the radio (before the AP goes up).
 //
-// A successful-but-EMPTY scan never replaces a recent cache. The portal's
-// "Network not listed?" refresh bounces the setup AP, so the refresh that
-// follows always lands moments after the radio flipped from AP back to station
-// mode — with NM's BSS list empty and its rescan request not yet honored,
-// `nmcli device wifi list --rescan yes` exits 0 with no rows. That is
-// indistinguishable at this layer from "no networks exist", and caching it
-// blanked the picker (dropping the portal to its manual SSID field) — the
-// button reliably destroyed the very list it was pressed to refresh. So the
-// previous entries are kept when they are younger than scanRetainWindow,
-// measured from the scan that produced them (an empty scan buys no extra
-// life). Older entries are dropped and the empty result is stored. A scan
-// ERROR, by contrast, changes nothing at any age: it carries no evidence about
-// the airwaves, while an empty scan past the window is the only signal this
-// layer has that the old list no longer holds. The asymmetry is deliberate —
-// do not "align" one path to the other.
+// A successful-but-EMPTY scan never replaces the cache, at any age — it is
+// treated exactly like a scan ERROR: no evidence about the airwaves. The
+// portal's "Network not listed?" refresh and the recheck blink both bounce the
+// setup AP, so their scans land moments after the radio flipped from AP back
+// to station mode — with NM's BSS list empty and its rescan request not yet
+// honored, `nmcli device wifi list --rescan yes` exits 0 with no rows. That is
+// indistinguishable at this layer from "no networks exist", and the bench
+// shows it is the common case (FF1-8EVTK3RE: the first post-teardown scan was
+// empty 2 of 2 times; ffos-user#404). Caching it blanked the picker (dropping
+// the portal to its manual SSID field), so the button destroyed the very list
+// it was pressed to refresh.
+//
+// This used to keep the old list only for 10 minutes and then let an empty
+// scan clear it, on the theory that a late empty scan meant the old list no
+// longer held. In practice the empty scan is the bounce race, not the air, and
+// an AP session routinely outlives 10 minutes, so the clear reproduced the
+// field report's blank picker (#404 item 3). An aged list costs at worst a
+// listed network that has gone (its join fails with a clear message) and is
+// labeled with its age (CachedScanTime); an empty one costs the picker.
+// Do not reintroduce an age-based clear.
 //
 // The returned slice is always the LIVE scan result, empty included, never the
 // retained cache: callers retry on empty (see provisioning.ensureAPUp), and
@@ -309,9 +332,6 @@ func (c *Controller) RefreshScanCache(ctx context.Context) ([]string, error) {
 	// asking early does not fail loudly, it returns an empty list.
 	c.waitForScanReady(ctx)
 
-	// Preserve every candidate in the cache. NetworkManager can retain the
-	// active setup SSID in these results; the portal must remove that exact
-	// non-destination before applying its nine-network display cap.
 	ssids, err := c.scan(ctx, true)
 	if err != nil {
 		return nil, err
@@ -321,21 +341,31 @@ func (c *Controller) RefreshScanCache(ctx context.Context) ([]string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(ssids) == 0 {
-		if len(c.cacheSSIDs) > 0 && now.Before(c.cacheRetainUntil) {
-			c.logger.Warn("wifictl: forced scan saw no networks; keeping the previous scan cache",
-				zap.Int("cached_ssids", len(c.cacheSSIDs)))
-			return nil, nil
+	// NetworkManager can retain the device's own setup SSID in these results
+	// right after the AP comes down. Drop it BEFORE the emptiness test: a scan
+	// that saw only it saw nothing, and caching it would blank the picker
+	// (the portal filters it out) exactly like an empty scan would.
+	if c.ownAPSSID != "" {
+		kept := ssids[:0]
+		for _, s := range ssids {
+			if s != c.ownAPSSID {
+				kept = append(kept, s)
+			}
 		}
-		c.logger.Warn("wifictl: forced scan saw no networks and no recent cache; clearing it",
-			zap.Int("dropped_ssids", len(c.cacheSSIDs)))
-		c.cacheSSIDs = nil
-		c.cacheRetainUntil = time.Time{}
+		ssids = kept
+	}
+
+	if len(ssids) == 0 {
+		fields := []zap.Field{zap.Int("cached_ssids", len(c.cacheSSIDs))}
+		if !c.cacheScannedAt.IsZero() {
+			fields = append(fields, zap.Duration("cache_age", now.Sub(c.cacheScannedAt)))
+		}
+		c.logger.Warn("wifictl: forced scan saw no networks; keeping the previous scan cache", fields...)
 		return nil, nil
 	}
 
 	c.cacheSSIDs = ssids
-	c.cacheRetainUntil = now.Add(scanRetainWindow)
+	c.cacheScannedAt = now
 	return ssids, nil
 }
 
