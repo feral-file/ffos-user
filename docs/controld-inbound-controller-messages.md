@@ -1726,6 +1726,16 @@ becomes the channel's minter, and from there runs the same flow as
 is shown on the panel for a joined channel: no `mintPairingDisplay` call is
 made at any stage, including the terminal `hidden`.
 
+A site on a library that announces its mint request at create (play#17) hands
+the request to the device in the broker's join response. The device then sends
+the `mint_pairing_approval_request` as soon as it joins, while the visitor is
+still in the app, instead of waiting for the site's page to poll again (a phone
+browser stops polling in the background). The site still sends the encrypted
+`mint_request` under the same message id for older devices; a device that
+answered the announcement never reads it, because a joined pairing answers one
+request. Sites that announce nothing are answered from the encrypted request as
+before.
+
 Arguments, exactly one of:
 
 ```json
