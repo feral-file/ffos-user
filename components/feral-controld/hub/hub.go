@@ -175,7 +175,7 @@ func NewWithLogDelivery(
 // routes registers every hub endpoint through the shared middleware. Each route
 // MUST be wrapped by withMiddleware — it is the single chokepoint for the
 // in-flight storm cap, request logging, and the future LAN authorization check
-// (issue #3471). Do not register a bare handler here.
+// (feral-file#3551). Do not register a bare handler here.
 func (h *hub) routes() {
 	handler := h.server.Handler()
 	mux, ok := handler.(*http.ServeMux)
