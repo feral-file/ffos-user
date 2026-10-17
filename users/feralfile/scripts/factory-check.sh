@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 # factory-check.sh: the live-ISO "Factory check" boot entry (ffos
 # archiso-x86_64-linux-factory-check.conf). Boots a bare FF1 board from the
-# installer USB stick into a text screen and takes Wi-Fi readings on request,
-# nothing installed, nothing on the NVMe touched. Each reading is a labeled run
-# of wifi-reading.sh; the table shows on the HDMI screen and the JSON lands on a
-# second USB stick when one is plugged in (any FAT/exFAT stick), otherwise in
-# RAM only and the screen is the record. Runs as root on tty1 via
-# /root/.automated_script.sh.
+# installer USB stick into a text screen and takes a Wi-Fi reading every minute
+# on its own, nothing installed, nothing on the NVMe touched. Hands-off by
+# design: inside the art panel only the USB-C port is reachable once the pocket
+# cover is on, so the keyboard is needed for the boot menu only. Boot with the
+# cover off, pick the entry, unplug the keyboard, close the box, and read the
+# panel. Each reading is a numbered run of wifi-reading.sh, shown against
+# reading 1, so moving the antennas between readings shows as a delta on the
+# screen. The screen is the record (photograph it); the JSON also lands on a
+# second FAT/exFAT USB stick when one is plugged in. Runs as root on tty1 via
+# /root/.automated_script.sh. Ends when the power is pulled.
 set -uo pipefail
 
 SCRIPTS=/home/feralfile/scripts
 RESULTS=/root/factory-check
 MOUNT=/mnt/factory-check
+SCANS=10          # about a minute per reading
+PAUSE_SECONDS=10  # between readings
 
 say() { printf '\n%s\n' "$*"; }
 
@@ -42,59 +48,51 @@ results_stick() {
   return 1
 }
 
-clear
-echo "Feral File factory check: Wi-Fi reading"
-echo "---------------------------------------"
-echo "Board: $(cat /etc/hostname 2>/dev/null)"
+header() {
+  clear
+  echo "Feral File factory check: Wi-Fi reading        board $(cat /etc/hostname 2>/dev/null)"
+  echo "$results_line"
+  echo "A reading runs every minute on its own; the keyboard can be unplugged and the box closed."
+  echo "Photograph the screen for each antenna placement. Pull the power to finish."
+  echo "-------------------------------------------------------------------------------------"
+}
 
 if iface=$(wait_for_wifi); then
-  echo "Wi-Fi: $iface $(cat "/sys/class/net/$iface/address")"
+  :
 else
-  say "No Wi-Fi interface came up in 60 s. Check the M.2 card and both antenna leads, then reboot."
-  read -r -p "Press Enter to shut down..." _
-  poweroff
+  clear
+  say "No Wi-Fi interface came up in 60 s. Check the M.2 card and both antenna leads, then power-cycle."
+  sleep infinity
 fi
 
 mkdir -p "$RESULTS"
+results_line="Results: RAM only, the screen is the record"
 if stick=$(results_stick); then
   mkdir -p "$MOUNT"
   if mount "$stick" "$MOUNT" 2>/dev/null; then
     RESULTS="$MOUNT/factory-check"; mkdir -p "$RESULTS"
-    echo "Results: $stick (USB stick), folder factory-check"
-  else
-    echo "Results: could not mount $stick; results stay in RAM, photograph the screen"
+    results_line="Results: JSON on USB stick $stick, folder factory-check (also shown here)"
   fi
-else
-  echo "Results: no second USB stick found; results stay in RAM, photograph the screen"
 fi
 
-say "Take one reading per placement at the same spot: e.g. 'in-box' with the board in the"
-echo "enclosure and everything closed, then 'open' with the antennas on plastic in the open."
-echo "Each reading scans 10 times (about a minute)."
-
-previous=""
+first=""
+n=0
 while true; do
+  n=$((n + 1))
+  header
+  echo "Reading $n  $(date '+%H:%M:%S')  Wi-Fi $iface $(cat "/sys/class/net/$iface/address")"
   echo
-  read -r -p "Label for this reading (letters, digits, dashes), or q to finish: " label
-  case "$label" in
-    q|Q) break ;;
-    "") continue ;;
-  esac
-  label=${label//[^A-Za-z0-9_-]/-}
-  echo
-  if ! out=$(bash "$SCRIPTS/wifi-reading.sh" record "$label" -n 10 -o "$RESULTS" | tee /dev/tty); then
-    say "Reading failed."
-    continue
+  if out=$(bash "$SCRIPTS/wifi-reading.sh" record "r$n" -n "$SCANS" -o "$RESULTS" 2>&1 | tee /dev/tty); then
+    current=$(sed -n 's/^saved //p' <<<"$out")
+    if [ -z "$first" ]; then
+      first=$current
+    elif [ -n "$current" ]; then
+      say "Reading $n against reading 1:"
+      bash "$SCRIPTS/wifi-reading.sh" compare "$first" "$current" | grep -E 'GHz: median|seen only in'
+    fi
+    sync
+  else
+    say "Reading failed; trying again."
   fi
-  current=$(sed -n 's/^saved //p' <<<"$out")
-  if [ -n "$previous" ] && [ -n "$current" ]; then
-    say "Compared with the previous reading:"
-    bash "$SCRIPTS/wifi-reading.sh" compare "$previous" "$current"
-  fi
-  previous=$current
+  sleep "$PAUSE_SECONDS"
 done
-
-sync
-if mountpoint -q "$MOUNT"; then umount "$MOUNT" && say "USB stick unmounted, safe to remove."; fi
-read -r -p "Press Enter to shut down..." _
-poweroff
