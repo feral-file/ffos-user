@@ -23,6 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -415,6 +416,11 @@ type fakeMintPairingService struct {
 	joinResult     any
 	closeResult    any
 	approvalResult any
+
+	// overlayStatus is what OverlayStatus() returns; the zero value (Showing
+	// false) matches this fake's behavior before issue #381's direct-reply
+	// annotation needed it to be settable.
+	overlayStatus mintpairing.OverlayStatus
 }
 
 func (f *fakeMintPairingService) Start(context.Context) {}
@@ -446,6 +452,14 @@ func (f *fakeMintPairingService) HandleApprovalDecision(_ context.Context, args 
 }
 
 func (f *fakeMintPairingService) DisplayActive() bool { return false }
+
+func (f *fakeMintPairingService) OverlayStatus() mintpairing.OverlayStatus {
+	return f.overlayStatus
+}
+
+func (f *fakeMintPairingService) SetController(*overlay.Controller) {}
+
+func (f *fakeMintPairingService) Painter() overlay.Painter { return nil }
 
 func (f *fakeMintPairingService) SetSession(mintpairing.NavigationSession) {}
 

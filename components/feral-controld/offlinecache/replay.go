@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -634,6 +635,12 @@ func (r *replayer) EnableForPlaylist(ctx context.Context, sources []string, mixe
 			return fmt.Errorf("offline cache replay: load item %s: %w", source, err)
 		}
 		for _, res := range rec.Resources {
+			if rec.Automatic {
+				mixed = true // automatic cache misses must always reach the origin
+				if res.FreshUntil.IsZero() {
+					res.FreshUntil = time.Unix(1, 0)
+				}
+			}
 			resources[resourceKey(res.Method, res.URL)] = res
 		}
 	}
@@ -1100,12 +1107,20 @@ func (r *replayer) processRequestPaused(sessionID string, session CDPSession, pa
 	// to the iframe fallback — see docs/offline-artwork-capture.md §6.
 	if !found && evt.Request.Method == go_http.MethodHead {
 		if getResource, ok := resources[resourceKey(go_http.MethodGet, headLookupURL(evt.Request.URL))]; ok {
+			if !getResource.freshAt(time.Now()) {
+				r.continueRequest(ctx, session, evt.RequestID)
+				return
+			}
 			r.fulfillHeadFromGet(ctx, session, evt.RequestID, getResource, mixed)
 			return
 		}
 	}
 	if !found {
 		r.handleMiss(ctx, session, evt.RequestID, mixed)
+		return
+	}
+	if !resource.freshAt(time.Now()) {
+		r.continueRequest(ctx, session, evt.RequestID)
 		return
 	}
 

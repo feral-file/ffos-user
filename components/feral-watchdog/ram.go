@@ -84,11 +84,21 @@ func (c *MemoryHandler) checkMemoryUsage(ctx context.Context, metrics *SysMetric
 		return
 	}
 
+	wouldReboot := !c.lastKioskRestart.IsZero() && time.Since(c.lastKioskRestart) < RAM_REBOOT_DURATION_THRESHOLD
+	// Update gate (ffos#124): the reboot step waits for a running update
+	// (rebootSystem would refuse it anyway). Checked before the Error lines
+	// so they do not repeat every metrics tick while it waits. The kiosk
+	// restart step stays live: it frees memory without touching the update.
+	if wouldReboot && c.commandHandler.updateInProgress() {
+		c.commandHandler.logRebootDeferred(CrashReasonRamCritical)
+		return
+	}
+
 	c.logger.Error("RAM: usage exceeded critical threshold for too long",
 		zap.Float64("usage_percent", memUsage),
 		zap.Duration("duration", durHigh))
 
-	if !c.lastKioskRestart.IsZero() && time.Since(c.lastKioskRestart) < RAM_REBOOT_DURATION_THRESHOLD {
+	if wouldReboot {
 		c.logger.Error("RAM: Rebooting. Usage remains critical after kiosk restart.")
 		c.commandHandler.rebootSystem(ctx, CrashReasonRamCritical)
 	} else {

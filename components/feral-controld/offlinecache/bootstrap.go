@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
@@ -31,21 +32,8 @@ const (
 	DefaultHeadlessDebugPort    = 9223
 	DefaultHeadlessIdleTeardown = 30 * time.Second
 	DefaultStaticServerAddr     = "127.0.0.1:8082"
-	// DefaultMaxDiskBytes bounds the store's total size when
-	// offlineCache.maxDiskBytes is left unset (0) in config. Store and
-	// Service's own maxDiskBytes/maxBytes parameters treat <=0 as
-	// "unlimited" — a reasonable seam-level contract for direct
-	// construction (tests, other future callers) — but OptionsFromConfig
-	// deliberately does not let that meaning reach an operator's config
-	// file: this feature exists to cache potentially gigabyte-scale
-	// software-artwork assets (see docs/offline-artwork-capture.md's
-	// 1.1GB video case) on disk-constrained embedded devices, so a
-	// config that merely omits maxDiskBytes must not silently mean
-	// "fill the disk." 10 GiB comfortably holds a full DP-1 playlist's
-	// worth (up to 1024 items per the DP-1 spec) of video-heavy
-	// artworks while still bounding runaway growth — operators on
-	// smaller devices can still tighten this via offlineCache.maxDiskBytes.
-	DefaultMaxDiskBytes = 10 << 30 // 10 GiB
+	DefaultMaxDiskPercent       = 50
+	DefaultMinFreeDiskBytes     = 5 << 30
 )
 
 // Options bundles every offlinecache tunable, mirroring
@@ -53,6 +41,9 @@ const (
 // defaulted struct rather than passing a raw *config.OfflineCacheConfig
 // around, so Bootstrap and its tests see one canonical set of values.
 type Options struct {
+	AutomaticPlayback    bool
+	MaxDiskPercent       int
+	MinFreeDiskBytes     int64
 	Enabled              bool
 	RootDir              string
 	MaxDiskBytes         int64
@@ -105,8 +96,10 @@ type ResourceGateOptions struct {
 // config.Get().OfflineCache directly without a nil check).
 func OptionsFromConfig(cfg *config.OfflineCacheConfig, kioskCDPEndpoint string) Options {
 	opts := Options{
+		AutomaticPlayback:    true,
+		MaxDiskPercent:       DefaultMaxDiskPercent,
+		MinFreeDiskBytes:     DefaultMinFreeDiskBytes,
 		RootDir:              DefaultRootDir,
-		MaxDiskBytes:         DefaultMaxDiskBytes,
 		HeadlessBinaryPath:   DefaultHeadlessBinaryPath,
 		HeadlessUserDataDir:  DefaultHeadlessUserDataDir,
 		HeadlessDebugPort:    DefaultHeadlessDebugPort,
@@ -134,6 +127,13 @@ func OptionsFromConfig(cfg *config.OfflineCacheConfig, kioskCDPEndpoint string) 
 	}
 
 	opts.Enabled = cfg.Enabled
+	opts.AutomaticPlayback = !cfg.AutomaticPlaybackDisabled
+	if cfg.MaxDiskPercent > 0 && cfg.MaxDiskPercent <= 90 {
+		opts.MaxDiskPercent = cfg.MaxDiskPercent
+	}
+	if cfg.MinFreeDiskBytes > 0 {
+		opts.MinFreeDiskBytes = cfg.MinFreeDiskBytes
+	}
 	if cfg.RootDir != "" {
 		opts.RootDir = cfg.RootDir
 	}
@@ -358,8 +358,12 @@ func defaultHeadlessLimits() HeadlessLimits {
 // component constructor in this codebase (systemd-services.mdc: startup
 // must be explicit and observable, not hidden inside a constructor).
 type Runtime struct {
-	Service     Service
-	KioskReplay KioskReplay
+	// ObservePlayback must be wired before Start. It only retains a bounded
+	// snapshot; the service worker performs all background work.
+	ObservePlayback func([]dp1playlist.PlaylistItem, int, bool)
+	SetCacheChanged func(func())
+	Service         Service
+	KioskReplay     KioskReplay
 	// ScopeLost is exposed for the same reason Notifier below is: main.go
 	// needs a method the narrower dependency it otherwise holds does not
 	// carry. It is deliberately the one-method ScopeLostRegistrar rather
@@ -412,6 +416,12 @@ func Bootstrap(
 		logger.Warn("offline cache: " + opts.ResourceGateWarning)
 	}
 	store := NewStore(opts.RootDir, osWrapper, jsonWrapper, logger)
+	var storage *storagePolicy
+	if opts.MaxDiskPercent > 0 {
+		storage = &storagePolicy{root: opts.RootDir, percent: opts.MaxDiskPercent, minFree: opts.MinFreeDiskBytes,
+			maxBytes: opts.MaxDiskBytes, space: filesystemSpace}
+		store = &budgetStore{Store: store, policy: storage}
+	}
 	// net.DefaultResolver honors the system resolver configuration
 	// (systemd-resolved on this device), so the guard's view of a name
 	// matches what the capture paths will actually dial moments later —
@@ -436,7 +446,7 @@ func Bootstrap(
 	// so every artwork asset that takes more than 30 seconds to
 	// transfer failed, unconditionally, on both download paths. That is
 	// flatly incompatible with what this subsystem exists to do: the
-	// store's budget is measured in GiB (DefaultMaxDiskBytes), and
+	// store's budget is measured in GiB, and
 	// staticserver.go only earns its keep on blobs over 200 MB — a size
 	// no device uplink moves in 30 seconds, which made that entire
 	// replay path unreachable in practice rather than merely slow.
@@ -483,11 +493,19 @@ func Bootstrap(
 		admissionOpts.Controller = gate
 		sysMetricsSink = gate.Observe
 	}
-	service := NewService(store, classifier, capturer, mediaCapturer, jsonWrapper, opts.CaptureWindowMs, opts.MaxDiskBytes, notifier, admissionOpts, logger)
+	svc := NewService(store, classifier, capturer, mediaCapturer, jsonWrapper, opts.CaptureWindowMs, opts.MaxDiskBytes, notifier, admissionOpts, logger)
+	worker := svc.(*service)
+	worker.storage = storage
+	var observePlayback func([]dp1playlist.PlaylistItem, int, bool)
+	if opts.AutomaticPlayback {
+		worker.automatic = &playbackCache{s: worker}
+		observePlayback = worker.automatic.observe
+	}
 	kioskReplay := NewKioskReplay(replayer, store, opts.KioskCDPEndpoint, httpClient, dialer, jsonWrapper, ioWrapper, clockWrapper, logger)
 
 	return Runtime{
-		Service: service, KioskReplay: kioskReplay, ScopeLost: scopeLost,
+		ObservePlayback: observePlayback, SetCacheChanged: func(fn func()) { worker.onCacheChanged = fn },
+		Service: svc, KioskReplay: kioskReplay, ScopeLost: scopeLost,
 		StaticServer: staticServer, Notifier: notifier, SysMetricsSink: sysMetricsSink,
 	}
 }

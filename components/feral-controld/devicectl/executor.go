@@ -927,7 +927,7 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return false, true, false
 	}
-	e.paintClaimQR(e.buildDeviceConnectURL(ctx))
+	e.paintClaimQR(e.buildDeviceConnectURL(ctx), skipIfSettled)
 	return true, false, false
 }
 
@@ -941,9 +941,13 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 // behind the connect-URL's own reads; the critical section is the name read
 // and the (non-blocking) push only. Lock edge deviceNameMu → setupui.mu is
 // the one setDeviceName already establishes, one-way.
-func (e *executor) paintClaimQR(url string) {
+func (e *executor) paintClaimQR(url string, automatic bool) {
 	e.deviceNameMu.Lock()
 	defer e.deviceNameMu.Unlock()
+	if automatic {
+		e.setupUI().ShowClaimQRAutomatic(url, e.deviceDisplayName())
+		return
+	}
 	e.setupUI().ShowClaimQR(url, e.deviceDisplayName())
 }
 
@@ -985,6 +989,8 @@ const (
 type setupNarrator interface {
 	ShowFinalizing()
 	ShowClaimQR(url string, deviceName string)
+	// ShowClaimQRAutomatic is ShowClaimQR for a claim paint no owner asked for.
+	ShowClaimQRAutomatic(url string, deviceName string)
 	RefreshClaimQRName(resolve func() string)
 	ShowReady()
 	ShowFactoryReset()
