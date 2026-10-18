@@ -200,9 +200,10 @@ var deviceHostname = os.Hostname
 
 // isLocalHost reports whether a request's Host names this device the way a
 // native client on the LAN does: an IP literal, localhost, or the device's own
-// hostname, bare or under .local (how mDNS publishes it). Any other name could
-// come from public DNS, directly or by a resolver expanding a short name
-// through its search list, and that is what a DNS-rebinding page carries.
+// hostname under .local (how mDNS publishes it). Any other name, the bare
+// hostname included, could come from public DNS, directly or by a resolver
+// expanding a short name through its search list, and that is what a
+// DNS-rebinding page carries.
 func isLocalHost(hostport string) bool {
 	host := hostport
 	if h, port, err := net.SplitHostPort(hostport); err == nil {
@@ -229,5 +230,5 @@ func isLocalHost(hostport string) bool {
 	if err != nil || self == "" {
 		return false
 	}
-	return host == self || host == self+".local"
+	return host == self+".local"
 }

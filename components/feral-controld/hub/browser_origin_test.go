@@ -52,8 +52,9 @@ func TestMiddlewareRejectsBrowserOrigins(t *testing.T) {
 }
 
 // TestIsLocalHost pins the DNS-rebinding boundary: IP literals, localhost,
-// and the device's own name pass; any other name, including a short one a
-// resolver could expand through a public search suffix, does not.
+// and the device's own .local name pass; any other name, including the bare
+// device name or another short one a resolver could expand through a public
+// search suffix, does not.
 func TestIsLocalHost(t *testing.T) {
 	prev := deviceHostname
 	deviceHostname = func() (string, error) { return "FF1-NFZMNQSP", nil }
@@ -70,7 +71,8 @@ func TestIsLocalHost(t *testing.T) {
 		"ff1-nfzmnqsp.local:1111":          true,
 		"FF1-NFZMNQSP.LOCAL":               true,
 		"ff1-nfzmnqsp.local.:1111":         true,
-		"ff1-nfzmnqsp:1111":                true,
+		"ff1-nfzmnqsp:1111":                false,
+		"FF1-NFZMNQSP":                     false,
 		"evil:1111":                        false,
 		"ff1-other.local:1111":             false,
 		"ff1-nfzmnqsp.lan:1111":            false,
@@ -89,6 +91,10 @@ func TestIsLocalHost(t *testing.T) {
 // from a rebinding page carries neither browser header, only the attacker's
 // Host, and must not reach status (which serves the topic ID).
 func TestMiddlewareRejectsRebindingHost(t *testing.T) {
+	prev := deviceHostname
+	deviceHostname = func() (string, error) { return "FF1-NFZMNQSP", nil }
+	t.Cleanup(func() { deviceHostname = prev })
+
 	for _, tt := range []struct {
 		target  string
 		wantRun bool
@@ -96,6 +102,8 @@ func TestMiddlewareRejectsRebindingHost(t *testing.T) {
 	}{
 		{"http://attacker.example:1111/api/v2/status", false, http.StatusForbidden},
 		{"http://evil:1111/api/v2/status", false, http.StatusForbidden},
+		{"http://ff1-nfzmnqsp:1111/api/v2/status", false, http.StatusForbidden},
+		{"http://ff1-nfzmnqsp.local:1111/api/v2/status", true, http.StatusOK},
 		{"http://192.168.1.50:1111/api/v2/status", true, http.StatusOK},
 	} {
 		h := &hub{logger: zap.NewNop(), reqSlots: make(chan struct{}, 1)}
