@@ -62,7 +62,7 @@ func TestCheckStatusShowingKeyEgress(t *testing.T) {
 						server := wrapper.NewHTTPServer(&http.Server{Handler: mux, ReadHeaderTimeout: time.Second})
 						hub.New(ctx, mocks.NewMockWS(ctrl), router, nil, nil, server, codec, logger)
 						response := httptest.NewRecorder()
-						mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/cast", strings.NewReader(`{"command":"checkStatus","request":{}}`)))
+						mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/cast", strings.NewReader(`{"command":"checkStatus","request":{}}`)))
 						require.Equal(t, http.StatusOK, response.Code)
 						encoded = response.Body.Bytes()
 					} else {
@@ -194,7 +194,7 @@ func TestCheckStatusOverlayEgress(t *testing.T) {
 						server := wrapper.NewHTTPServer(&http.Server{Handler: mux, ReadHeaderTimeout: time.Second})
 						hub.New(ctx, mocks.NewMockWS(ctrl), router, nil, nil, server, codec, logger)
 						response := httptest.NewRecorder()
-						mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/cast", strings.NewReader(`{"command":"checkStatus","request":{}}`)))
+						mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/cast", strings.NewReader(`{"command":"checkStatus","request":{}}`)))
 						require.Equal(t, http.StatusOK, response.Code)
 						encoded = response.Body.Bytes()
 					} else {
@@ -277,7 +277,7 @@ func TestCheckStatusOverlayEgress_SetupOwner(t *testing.T) {
 						server := wrapper.NewHTTPServer(&http.Server{Handler: mux, ReadHeaderTimeout: time.Second})
 						hub.New(ctx, mocks.NewMockWS(ctrl), router, nil, nil, server, codec, logger)
 						response := httptest.NewRecorder()
-						mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/cast", strings.NewReader(`{"command":"checkStatus","request":{}}`)))
+						mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/cast", strings.NewReader(`{"command":"checkStatus","request":{}}`)))
 						require.Equal(t, http.StatusOK, response.Code)
 						encoded = response.Body.Bytes()
 					} else {
