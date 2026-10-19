@@ -5,4 +5,6 @@ chmod +x /home/feralfile/scripts/display-restore.sh
 chmod +x /home/feralfile/scripts/run-vmagent.sh
 chmod +x /home/feralfile/scripts/ota-update-success-check.sh
 chmod +x /home/feralfile/scripts/enable-wake-on-lan.sh
+chmod +x /home/feralfile/scripts/wifi-reading.sh
+chmod +x /home/feralfile/scripts/factory-check.sh
 sudo chmod +x /usr/local/bin/vmagent-prod
