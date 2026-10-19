@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # factory-check.sh: the live-ISO "Factory check" boot entry (ffos
 # archiso-x86_64-linux-factory-check.conf). Boots a bare FF1 board from the
-# installer USB stick into a text screen and takes a Wi-Fi reading every minute
+# installer USB stick into a text screen and takes Wi-Fi readings back to back
 # on its own, nothing installed, nothing on the NVMe touched. Hands-off by
 # design: inside the art panel only the USB-C port is reachable once the pocket
 # cover is on, so the keyboard is needed for the boot menu only. Boot with the
@@ -16,7 +16,9 @@ set -uo pipefail
 SCRIPTS=/home/feralfile/scripts
 RESULTS=/root/factory-check
 MOUNT=/mnt/factory-check
-SCANS=10          # about a minute per reading
+CMDLINE="${FF_CMDLINE:-/proc/cmdline}"
+BY_UUID="${FF_DEV_BY_UUID:-/dev/disk/by-uuid}"
+SCANS=10          # each waits for a finished scan: 4-16 s on an RTL8821CE
 PAUSE_SECONDS=10  # between readings
 
 say() { printf '\n%s\n' "$*"; }
@@ -34,17 +36,30 @@ wait_for_wifi() {
   return 1
 }
 
-# A removable FAT/exFAT partition that is not the live ISO's own device.
+# The disk the live ISO booted from (sda, not sda1). archisodevice names its
+# ISO 9660 partition, but the same stick also carries the ISO's FAT EFI
+# partition (ARCHISO_EFI), which looks exactly like a results stick.
+boot_disk() {
+  local uuid dev parent
+  uuid=$(sed -n 's/.*archisodevice=UUID=\([^ ]*\).*/\1/p' "$CMDLINE")
+  [ -n "$uuid" ] || return 1
+  dev=$(readlink -e "$BY_UUID/$uuid") || return 1
+  parent=$(lsblk -ndo PKNAME "$dev" 2>/dev/null)
+  basename "${parent:-$dev}"
+}
+
+# A removable FAT/exFAT partition on any disk but the one the ISO booted from.
+# When that disk cannot be told, no stick is used: the screen is the record,
+# and the installer stick is never written.
 results_stick() {
-  local iso_dev name type rm fstype mnt
-  iso_dev=$(sed -n 's/.*archisodevice=UUID=\([^ ]*\).*/\1/p' /proc/cmdline)
-  while read -r name type rm fstype mnt; do
-    if [ "$type" != part ] || [ "$rm" != 1 ]; then continue; fi
+  local boot name type rm parent fstype mnt
+  boot=$(boot_disk) || return 1
+  while read -r name type rm parent fstype mnt; do
+    if [ "$type" != part ] || [ "$rm" != 1 ] || [ "$parent" = "$boot" ]; then continue; fi
     case "$fstype" in vfat|exfat) ;; *) continue ;; esac
     [ -n "$mnt" ] && continue
-    [ -n "$iso_dev" ] && [ "$(lsblk -rno UUID "/dev/$name" 2>/dev/null)" = "$iso_dev" ] && continue
     echo "/dev/$name"; return 0
-  done < <(lsblk -rno NAME,TYPE,RM,FSTYPE,MOUNTPOINT)
+  done < <(lsblk -rno NAME,TYPE,RM,PKNAME,FSTYPE,MOUNTPOINT)
   return 1
 }
 
@@ -52,10 +67,13 @@ header() {
   clear
   echo "Feral File factory check: Wi-Fi reading        board $(cat /etc/hostname 2>/dev/null)"
   echo "$results_line"
-  echo "A reading runs every minute on its own; the keyboard can be unplugged and the box closed."
+  echo "Readings repeat on their own; the keyboard can be unplugged and the box closed."
   echo "Photograph the screen for each antenna placement. Pull the power to finish."
   echo "-------------------------------------------------------------------------------------"
 }
+
+# Sourced (scripts/test-wifi-reading.sh), only the functions load.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 if iface=$(wait_for_wifi); then
   :

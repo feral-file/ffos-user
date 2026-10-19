@@ -15,7 +15,7 @@
 # this exists; the factory-check live-ISO entry is the usual way it runs.
 set -euo pipefail
 
-SETTLE_SECONDS=5 # a scan on the RTL8821CE finishes well inside this
+SCAN_TIMEOUT=20 # an RTL8821CE scan takes several seconds, and longer while busy
 
 SUDO=""
 [ "$(id -u)" -ne 0 ] && SUDO="sudo"
@@ -37,15 +37,48 @@ band() {
   if [ "$1" -lt 3000 ]; then echo 2.4GHz; elif [ "$1" -lt 5950 ]; then echo 5GHz; else echo 6GHz; fi
 }
 
+# bss_table -> TSV lines: id bssid freq level age ssid, one per access point
+# wpa_supplicant holds. Read in pages: wpa_cli cuts a reply at 4 KiB, which
+# scan_results reaches at about 40 access points, so each page asks only for
+# these fields and resumes after the last id the previous page returned.
+bss_table() {
+  local start=0 page last
+  while :; do
+    # MASK: id, bssid, freq, level, age, ssid, and the ==== record delimiter.
+    page=$({ wpa bss "RANGE=$start-" MASK=0x21287 || true; } | gawk -F= '
+      $1 == "id" { id = $2 } $1 == "bssid" { b = $2 } $1 == "freq" { f = $2 }
+      $1 == "level" { l = $2 } $1 == "age" { a = $2 } $1 == "ssid" { s = substr($0, 6) }
+      $0 == "====" { printf "%s\t%s\t%s\t%s\t%s\t%s\n", id, b, f, l, a, s; s = "" }')
+    [ -n "$page" ] || return 0
+    printf '%s\n' "$page"
+    last=$(tail -n 1 <<<"$page" | cut -f 1)
+    [[ "$last" =~ ^[0-9]+$ ]] && [ "$last" -ge "$start" ] || return 0
+    start=$((last + 1))
+  done
+}
+
 # scan_once <sample_index> -> TSV lines: sample bssid freq band dbm ssid
+#
+# Only access points this scan saw. wpa_supplicant keeps entries from earlier
+# scans for minutes, with their old level, so an entry counts only when its age
+# shows it arrived after the scan was requested. FAIL-BUSY means a scan is
+# already running; its results land after that point too.
 scan_once() {
-  local i=$1 bssid freq level ssid
-  wpa scan >/dev/null
-  sleep "$SETTLE_SECONDS"
-  while IFS=$'\t' read -r bssid freq level _ ssid; do
+  local i=$1 t0 elapsed fresh bssid freq level ssid
+  t0=$(date +%s)
+  wpa scan >/dev/null || true
+  while :; do
+    sleep 1
+    elapsed=$(($(date +%s) - t0))
+    fresh=$(bss_table | gawk -F'\t' -v e="$elapsed" '$5 != "" && $5 < e')
+    [ -n "$fresh" ] && break
+    [ "$elapsed" -lt "$SCAN_TIMEOUT" ] || return 0
+  done
+  while IFS=$'\t' read -r _ bssid freq level _ ssid; do
     [[ "$bssid" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || continue
+    [[ "$ssid" =~ ^(\\x00)+$ ]] && ssid="" # hidden network
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$bssid" "$freq" "$(band "$freq")" "$level" "${ssid:-}"
-  done < <(wpa scan_results)
+  done <<<"$fresh"
 }
 
 # summarize < samples.tsv -> TSV: band freq ssid bssid n median min max (sorted)
@@ -158,6 +191,9 @@ compare() {
       if ($lost | length) > 0 then "\nseen only in baseline (lost in test): \($lost | length) access points" else empty end)
   '
 }
+
+# Sourced (scripts/test-wifi-reading.sh), only the functions load.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 case "${1:-}" in
   record) [ $# -ge 2 ] || die "record needs a label"; shift; record "$@" ;;
