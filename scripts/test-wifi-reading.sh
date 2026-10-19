@@ -92,7 +92,8 @@ cat > "$tmp_dir/bss" <<'EOF'
 20	e4:fa:c4:76:a5:63	5955	-70	0	six
 EOF
 
-# Serves two records per reply, the way a full reply stops at the cap.
+# Serves two records per reply, the way a full reply stops at the cap, and
+# ends the table's last record with #### as wpa_supplicant does.
 cat > "$fake_bin/wpa_cli" <<'EOF'
 #!/usr/bin/env bash
 shift 2 # -i IFACE
@@ -100,8 +101,8 @@ case "$1" in
   scan) echo FAIL-BUSY ;;
   bss)
     start=${2#RANGE=}; start=${start%-}
-    gawk -F'\t' -v s="$start" '$1 >= s && n < 2 {
-      n++; printf "id=%s\nbssid=%s\nfreq=%s\nlevel=%s\nage=%s\nssid=%s\n====\n", $1, $2, $3, $4, $5, $6
+    gawk -F'\t' -v s="$start" -v last="$(tail -n 1 "$FF_TEST_BSS" | cut -f 1)" '$1 >= s && n < 2 {
+      n++; printf "id=%s\nbssid=%s\nfreq=%s\nlevel=%s\nage=%s\nssid=%s\n%s\n", $1, $2, $3, $4, $5, $6, ($1 == last ? "####" : "====")
     }' "$FF_TEST_BSS" ;;
   *) echo "unexpected wpa_cli $*" >&2; exit 1 ;;
 esac

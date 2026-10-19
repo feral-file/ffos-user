@@ -44,11 +44,12 @@ band() {
 bss_table() {
   local start=0 page last
   while :; do
-    # MASK: id, bssid, freq, level, age, ssid, and the ==== record delimiter.
+    # MASK: id, bssid, freq, level, age, ssid, and the record delimiter:
+    # ==== after each record, #### after the last one in the table.
     page=$({ wpa bss "RANGE=$start-" MASK=0x21287 || true; } | gawk -F= '
       $1 == "id" { id = $2 } $1 == "bssid" { b = $2 } $1 == "freq" { f = $2 }
       $1 == "level" { l = $2 } $1 == "age" { a = $2 } $1 == "ssid" { s = substr($0, 6) }
-      $0 == "====" { printf "%s\t%s\t%s\t%s\t%s\t%s\n", id, b, f, l, a, s; s = "" }')
+      $0 == "====" || $0 == "####" { printf "%s\t%s\t%s\t%s\t%s\t%s\n", id, b, f, l, a, s; s = "" }')
     [ -n "$page" ] || return 0
     printf '%s\n' "$page"
     last=$(tail -n 1 <<<"$page" | cut -f 1)
