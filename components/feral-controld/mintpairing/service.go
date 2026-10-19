@@ -24,6 +24,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
+	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/qrdisplay"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
@@ -44,13 +45,22 @@ const (
 	// above a topic's session cap and exists so a wrong or hostile response
 	// cannot be read into memory unbounded.
 	maxSessionListBytes       = 1 << 20
-	displayRecoveryTimeout    = 500 * time.Millisecond
 	stopCleanupTimeout        = 1500 * time.Millisecond
 	channelCloseTimeout       = 500 * time.Millisecond
 	maxApprovalRequestIDBytes = 16
 	defaultPlayerContractPath = "/opt/feral/feral-player/ffos-player-contract.json"
 
 	approvalCancellationStatus = "cancelled" //nolint:misspell // Wire protocol status is documented with this spelling.
+
+	// defaultChannelWatchInterval paces the liveness poll that runs while an
+	// approval is pending (watchChannelWhileApproving). Slower than the request
+	// poll on purpose: it runs for up to the whole approval window, and the
+	// only cost of a slower beat is a few more seconds in which an owner can
+	// still tap approve on a page that has already left (issue #332).
+	defaultChannelWatchInterval = 3 * time.Second
+	// browserGoneReason names, on the controller outcome and the refused
+	// decision, an approval ended because the browser abandoned its channel.
+	browserGoneReason = "browser_gone"
 )
 
 type Options struct {
@@ -61,6 +71,9 @@ type Options struct {
 	ApprovalTimeout    time.Duration
 	RelayerBaseURL     string
 	PlayerContractPath string
+	// ChannelWatchInterval overrides defaultChannelWatchInterval; zero keeps
+	// the default. Not in the config file: it exists for tests.
+	ChannelWatchInterval time.Duration
 }
 
 func OptionsFromConfig(cfg *config.MintPairingConfig, relayerEndpoint string) Options {
@@ -101,13 +114,38 @@ type Service interface {
 	HandleJoinPairingChannel(ctx context.Context, args map[string]any) (any, error)
 	HandleClosePairingSession(ctx context.Context, args map[string]any) (any, error)
 	HandleApprovalDecision(ctx context.Context, args map[string]any) (any, error)
+	// SetController makes the service show and clear its overlays through a
+	// controller shared with the other owners. Call once before the first session.
+	SetController(c *overlay.Controller)
+	// Painter returns the transport the shared controller paints mint overlays with.
+	Painter() overlay.Painter
 	// DisplayActive reports whether THIS process currently owns the player
-	// overlay with a live mint-pairing display (pairing code or
-	// request-received, painted by showPairingCode/showRequestReceived and
-	// cleared by releaseDisplayOwnership) — the overlay-owner probe for
+	// overlay with any live mint overlay — pairing code, request-received, or
+	// creating-token (all three share the "mint:" kind prefix; see
+	// mintKindPrefix) — the overlay-owner probe for
 	// playersession.Session.RegisterOverlayOwner, so a recovery navigation
-	// never erases a QR mid-pairing.
+	// never erases one mid-pairing. Ownership is the shared overlay
+	// controller's decision (Current), not any bookkeeping of this service's
+	// own. Covering creating-token too (round 2 review, F-doc) is intentional,
+	// not incidental: it is as much a live mint overlay as the other two, and
+	// a recovery navigation landing on it would be exactly the "erase a QR
+	// mid-pairing" case this probe exists to prevent.
 	DisplayActive() bool
+	// OverlayStatus is DisplayActive's richer sibling (issue #381): the
+	// probe-free snapshot status.PlayerStatus's Overlay field (the
+	// checkStatus/player_status reply) is built from, via
+	// status.BuildMintOverlay and annotateOverlay in the status package.
+	// That field reports whichever overlay is on the screen, from whichever
+	// owner painted it, so this service is only ONE of its two sources: when
+	// mint pairing has nothing showing, the composition root falls back to
+	// setupui's own CurrentNarrationState() (see status.CombineOverlaySources).
+	// Sourced the same way as DisplayActive — the shared overlay controller's
+	// Current(), not this service's own session bookkeeping — so it can never
+	// disagree with DisplayActive() or report an overlay that was already
+	// overridden.
+	// Returns the zero value (Showing: false) when nothing from this
+	// listener is current.
+	OverlayStatus() OverlayStatus
 	// SetSession wires the playersession.Session the display sends park
 	// against while a recovery navigation is pending, mirroring
 	// setupui.Service.SetSession's discipline. Call once at wiring time,
@@ -172,15 +210,13 @@ type service struct {
 	cancel context.CancelFunc
 
 	startMu sync.Mutex
-	// displayMu serializes player overlay mutations so a delayed terminal hide
-	// cannot overtake a replacement pairing-code display.
-	displayMu         sync.Mutex
-	mu                sync.Mutex
-	active            *activePairing
-	displayOwner      *activePairing
-	displayGeneration uint64
-	pending           map[string]*pendingApproval
-	doneMap           map[string]completedApproval
+	mu      sync.Mutex
+	active  *activePairing
+	// ctrl owns the screen overlay. Pairing codes and request states are shown
+	// and cleared through it; see mintpairing's painter and sessionListener.
+	ctrl    *overlay.Controller
+	pending map[string]*pendingApproval
+	doneMap map[string]completedApproval
 
 	// starting is a pairing start whose broker call is in flight and whose
 	// session has not been published yet. Without it a reset landing in that
@@ -481,6 +517,13 @@ type pendingApproval struct {
 	expiresAt        time.Time
 	decisionCh       chan approvalDecisionRequest
 	accepted         *approvalDecisionRequest
+	// endedCode is set (under s.mu) once the worker has seen the channel gone
+	// at the broker, and is the code a later decision is refused with:
+	// browser_gone when the page closed or abandoned it, expired when the
+	// broker expired it. Approving after that would mint a session nobody can
+	// receive while telling the owner it worked. A decision that landed first
+	// is still answered (see endApprovalOnGoneChannel).
+	endedCode string
 }
 
 type activePairing struct {
@@ -490,9 +533,15 @@ type activePairing struct {
 	expiresAt   time.Time
 	phase       activePairingPhase
 	browserName string
-	displayGen  uint64
-	cancel      context.CancelFunc
-	done        chan struct{}
+	// listener is this session's owner side of the overlay, created once per
+	// session so re-shows of the same code are not treated as overrides. It
+	// also doubles as hideSession's ownership key via Controller.HideOwned,
+	// rather than an external Handle this struct would otherwise have to keep
+	// in sync with which show actually committed last (round 6 review
+	// follow-up, F1).
+	listener overlay.Listener
+	cancel   context.CancelFunc
+	done     chan struct{}
 
 	// joined marks a site-initiated pairing: the device joined a channel the
 	// site created, so there is no code to show and the panel is never
@@ -511,6 +560,17 @@ type activePairing struct {
 	// the worker to finish: the send cannot be taken back, and the new pairing
 	// must not start while it is in flight.
 	delivering bool
+	// overridden is set (under s.mu) by endOverridden the moment a newer
+	// overlay replaces this pairing's code — even while its own start is
+	// still waiting on the painter (showPairingCode's result.Wait can block
+	// up to the CDP send timeout, and the decision that it lost the screen
+	// commits well before that returns). s.active == this pairing is not yet
+	// true at that point — publishUnlessCanceled only sets it after
+	// showPairingCode returns — so endOverridden has to record the override
+	// on the pairing itself, not just on s.active, or a start that already
+	// lost the screen would still publish and spawn its approval worker
+	// (round 5 review, F1).
+	overridden bool
 
 	// joinCredential is a digest of the credential that joined the channel,
 	// so a retried join (a lost LAN reply retried over the relay) is answered
@@ -623,7 +683,7 @@ func newService(
 	if json == nil {
 		json = wrapper.NewJSON()
 	}
-	return &service{
+	s := &service{
 		opts:           opts,
 		broker:         broker,
 		sessionCreator: sessionCreator,
@@ -635,6 +695,9 @@ func newService(
 		doneMap:        make(map[string]completedApproval),
 		creates:        newCreateGate(),
 	}
+	// A private controller until SetController shares one with setupui.
+	s.ctrl = overlay.New(mintPainter{s: s})
+	return s
 }
 
 // defaultNavigationParkPollInterval / defaultNavigationParkTimeout bound the
@@ -657,14 +720,14 @@ func (s *service) SetSession(session NavigationSession) {
 // applies to narration sends. No-op when no session is wired (SetSession
 // never called), which is every existing test and any pre-session build.
 //
-// Unlike setupui, this is NOT run on a dedicated queue-draining worker: the
-// three call sites (showPairingCode, showRequestReceived,
-// restoreDefaultDisplay) already run on their own goroutines (the broker
-// session goroutine, or restoreDefaultDisplay's own `go`), so parking here
-// blocks only that goroutine, not a shared queue. It is called BEFORE
-// displayMu is taken (never while holding it): parking can take up to the
-// full timeout, and holding displayMu across that would serialize every
-// OTHER display mutation behind an unrelated navigation.
+// Its one caller is mintPainter.Show/Hide, called only from the shared
+// overlay.Controller's own background delivery worker (round 2 review,
+// F-doc) — never from showMint/hideSession's goroutine, and never while any
+// lock is held (there is no displayMu any more; see the overlay package doc
+// on decision versus delivery). Parking there blocks only that one shared
+// worker goroutine, which is exactly where blocking is meant to be free: the
+// controller's decisions (Show/Hide) never wait on it, and no other caller is
+// serialized behind it either.
 //
 // The park exits on whichever comes FIRST: the navigation's TARGET
 // generation reaching StageHandler (see NavigationTargetGeneration and
@@ -745,7 +808,25 @@ func (s *service) Stop() {
 	}
 }
 
+// HandleStartPairingSession is the command-transport entry point: its own Go
+// error reaches mediator/hub, where a non-nil error means the already-built
+// commandError result is never sent at all (round 6 review follow-up, F1) —
+// unlike refreshExpiredPairingCode, startPairing's other caller, which reads
+// that error itself to decide whether to log a Warn. isBenignRejection is
+// exactly the signal refreshExpiredPairingCode needs and this entry point
+// must swallow: errOverlayOccupied/errSessionEnded are startPairing's own
+// internal classification, never a transport-level fault.
 func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]any) (any, error) {
+	result, err := s.startPairing(ctx, overlay.Owner)
+	if isBenignRejection(err) {
+		return result, nil
+	}
+	return result, err
+}
+
+// startPairing starts or re-shows a pairing. pr is who asked: an owner's tap
+// may replace any overlay, an automatic refresh only an empty screen.
+func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, error) {
 	if s == nil || !s.opts.Enabled {
 		return commandError("disabled", "mint pairing is not enabled", false), nil
 	}
@@ -788,6 +869,16 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 		}
 		if phase == activePairingPhasePendingApproval {
 			if err := s.showRequestReceived(ctx, active, browserName); err != nil {
+				if isBenignRejection(err) {
+					// Same two benign outcomes as the showPairingCode redisplay
+					// below: a correctly-rejected Automatic, or this session
+					// having legitimately ended between the check above and
+					// this decision (round 5 review follow-up — this call site
+					// shared showMint's old blanket-Warn bug but was missed
+					// when showPairingCode's sibling sites were fixed).
+					s.logger.Info("Mint pairing redisplay skipped", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+					return commandError("display_unavailable", "failed to display mint pairing request status", true), err
+				}
 				s.logger.Warn("Failed to redisplay active mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
 				return commandError("display_unavailable", "failed to display mint pairing request status", true), nil
 			}
@@ -798,7 +889,18 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 				ExpiresAt: formatOptionalTime(active.expiresAt),
 			}, nil
 		}
-		if err := s.showPairingCode(ctx, active); err != nil {
+		if err := s.showPairingCode(ctx, active, pr, func() bool { return s.isActive(active) }); err != nil {
+			if isBenignRejection(err) {
+				// Neither outcome is a display fault: errOverlayOccupied is the
+				// designed result of an Automatic show losing to another
+				// overlay, errSessionEnded means this very session legitimately
+				// ended (an OnOverride landed) between the check above and this
+				// decision — round 3 review, F2. refreshExpiredPairingCode is
+				// the one caller that reads this as its own error, to skip its
+				// own fallback Warn.
+				s.logger.Info("Mint pairing redisplay skipped", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+				return commandError("display_unavailable", "failed to display mint pairing QR code", true), err
+			}
 			s.logger.Warn("Failed to redisplay active mint pairing code", append(pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt), zap.Error(err))...)
 			return commandError("display_unavailable", "failed to display mint pairing QR code", true), nil
 		}
@@ -880,9 +982,31 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	}
 	s.logger.Info("Mint pairing broker channel started", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
 
-	if err := s.showPairingCode(ctx, active); err != nil {
+	if err := s.showPairingCode(ctx, active, pr, func() bool { return !s.startCanceled(starting) }); err != nil {
 		sessionCancel()
+		// The decision commits before delivery is known (see the overlay
+		// package doc), so even a genuine delivery failure — not just a
+		// rejection — can leave this active as the controller's current
+		// overlay. Left uncleaned, a dead sessionListener stays "current"
+		// forever: DisplayActive() reports a false positive, and a later
+		// Automatic show from a different listener (the auto-claim loop's
+		// claim QR) is rejected as if this phantom entry were still live
+		// (round 4 review, F1). clearActive/hideSession are no-ops when the
+		// decision never committed (a benign rejection, or this listener
+		// never became the controller's current overlay — HideOwned reports
+		// ErrNotCurrent either way), so calling them unconditionally here is
+		// safe — matching the two other error branches below in this same
+		// function.
+		s.clearActive(active)
+		s.hideSession(active)
 		s.closeChannel(channel)
+		if isBenignRejection(err) {
+			// Neither outcome is a display fault (see isBenignRejection).
+			// Propagated as this function's own error so refreshExpiredPairingCode
+			// (the only Automatic caller) can skip its own fallback Warn too.
+			s.logger.Info("Mint pairing display skipped", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+			return commandError("display_unavailable", "failed to display mint pairing QR code", true), err
+		}
 		s.logger.Warn("Failed to display mint pairing QR code; closed broker channel", append(pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt), zap.Error(err))...)
 		return commandError("display_unavailable", "failed to display mint pairing QR code", true), nil
 	}
@@ -894,10 +1018,8 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	// with the code already on screen, and take it back down if it moved.
 	if !startGuard.sameAs(currentTopicGuard()) {
 		sessionCancel()
-		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
-		if restoreDisplay {
-			s.restoreDefaultDisplay(active.channelID, displayGeneration)
-		}
+		s.clearActive(active)
+		s.hideSession(active)
 		s.closeChannel(channel)
 		s.logger.Warn("Dropping a mint pairing session whose claim went while its code was displayed",
 			pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
@@ -908,10 +1030,8 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	// start; the channel it got back anyway is taken down, not published.
 	if !s.publishUnlessCanceled(starting, active) {
 		sessionCancel()
-		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
-		if restoreDisplay {
-			s.restoreDefaultDisplay(active.channelID, displayGeneration)
-		}
+		s.clearActive(active)
+		s.hideSession(active)
 		s.closeChannel(channel)
 		s.logger.Info("Dropping a mint pairing start that was closed while it started",
 			pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
@@ -1354,6 +1474,15 @@ func (s *service) HandleApprovalDecision(ctx context.Context, args map[string]an
 		s.mu.Unlock()
 		return approvalResponse{OK: true, Status: status, ApprovalRequestID: decision.ApprovalRequestID}, nil
 	}
+	switch pending.endedCode {
+	case "":
+	case browserGoneReason:
+		s.mu.Unlock()
+		return approvalError(decision.ApprovalRequestID, browserGoneReason, "the website closed this request; ask it to try again", false), nil
+	default:
+		s.mu.Unlock()
+		return approvalError(decision.ApprovalRequestID, pending.endedCode, "approval request expired", false), nil
+	}
 	if !pending.expiresAt.IsZero() && time.Now().After(pending.expiresAt) {
 		s.mu.Unlock()
 		return approvalError(decision.ApprovalRequestID, "expired", "approval request expired", false), nil
@@ -1442,13 +1571,21 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	terminalSent := false
 	refreshAfterClose := false
 	defer func() {
-		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
+		s.clearActive(active)
 		if active.done != nil {
 			close(active.done)
 		}
-		if restoreDisplay {
-			go s.restoreDefaultDisplay(active.channelID, displayGeneration)
-		}
+		// Synchronous, not `go`: a refresh scheduled right after this defer
+		// (refreshAfterClose below) decides under the same controller lock this
+		// hide decides under. If the hide ran on its own goroutine, the refresh's
+		// Automatic show could race it and find this session's own, already-dead
+		// overlay still "current" — rejected as if something else legitimately
+		// owned the screen, with no retry (round 2 review, F-race). hideSession's
+		// own work is a fast, in-memory decision; only the resulting CDP clear is
+		// queued on the controller's worker, so this costs nothing to make
+		// synchronous — matching the other two call sites in this file that
+		// already pair clearActive with a synchronous hideSession.
+		s.hideSession(active)
 		if terminalSent {
 			// Terminal broker messages must remain pollable after controld sends
 			// them. The broker's TTL handles cleanup; explicit Close is only for
@@ -1539,7 +1676,16 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 
 	if !active.joined {
 		if err := s.showRequestReceived(ctx, active, pending.browserName); err != nil {
-			s.logger.Warn("Failed to display mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
+			if isBenignRejection(err) {
+				// Same two benign outcomes as every other showMint call site
+				// (round 5 review follow-up — this one was missed when the
+				// others were fixed): a correctly-rejected Automatic, or this
+				// session having legitimately ended already. Neither is a
+				// display fault worth a Warn.
+				s.logger.Info("Mint pairing request-received display skipped", zap.String("channelID", active.channelID))
+			} else {
+				s.logger.Warn("Failed to display mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
+			}
 		}
 	}
 
@@ -1557,8 +1703,35 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	expireTimer := time.NewTimer(time.Until(expiresAt))
 	defer expireTimer.Stop()
 
+	// Watch the channel for the whole wait: a page that gave up and closed
+	// its channel (cancel, timeout, an integrator's retry, regeneration) leaves
+	// this approval answerable otherwise, and the owner's approve is
+	// acknowledged while the session goes nowhere (issue #332). NOT covered:
+	// a reload or closed tab, because the play client does not close its
+	// channel then; that channel stays open until the broker expires it.
+	// Every case below stops the watcher first, so the terminal work never
+	// shares the channel with a poll still in flight.
+	watch := s.watchChannelWhileApproving(ctx, active.channel, request.Seq)
+	defer watch.stop()
+	// goneBeforeStop reports a gone answer the watcher buffered while select
+	// was choosing another ready case. Called after stop, when the watcher has
+	// exited, so nothing can arrive later. Checked before minting: a channel
+	// already known to be gone must never be minted for.
+	goneBeforeStop := func() (error, bool) {
+		select {
+		case goneErr := <-watch.gone:
+			return goneErr, true
+		default:
+			return nil, false
+		}
+	}
+
 	select {
+	case goneErr := <-watch.gone:
+		watch.stop()
+		terminalSent = s.endApprovalOnGoneChannel(active, *request, guard, pending, goneErr)
 	case <-ctx.Done():
+		watch.stop()
 		if !time.Now().Before(expiresAt) {
 			if decision, ok := s.acceptedDecision(pending); ok {
 				terminalSent, err = s.completeDecisionFor(context.Background(), active, active.channel, *request, guard, approvalRequestID, decision)
@@ -1573,6 +1746,11 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		terminalSent = s.sendApprovalCancelled(active, *request, approvalRequestID)
 		return
 	case <-expireTimer.C:
+		watch.stop()
+		if goneErr, gone := goneBeforeStop(); gone {
+			terminalSent = s.endApprovalOnGoneChannel(active, *request, guard, pending, goneErr)
+			return
+		}
 		if decision, ok := s.acceptedDecision(pending); ok {
 			terminalSent, err = s.completeDecisionFor(context.Background(), active, active.channel, *request, guard, approvalRequestID, decision)
 			if err != nil {
@@ -1582,6 +1760,13 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		}
 		terminalSent = s.sendApprovalExpired(active, *request, approvalRequestID)
 	case decision := <-pending.decisionCh:
+		watch.stop()
+		if goneErr, gone := goneBeforeStop(); gone {
+			// The decision is already recorded on pending; the gone path
+			// answers it without minting.
+			terminalSent = s.endApprovalOnGoneChannel(active, *request, guard, pending, goneErr)
+			return
+		}
 		terminalSent, err = s.completeDecisionFor(context.Background(), active, active.channel, *request, guard, approvalRequestID, decision)
 		if err != nil {
 			s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
@@ -1688,6 +1873,154 @@ func (s *service) sendApprovalExpired(active *activePairing, request minter.Mint
 	return true
 }
 
+// endApprovalOnGoneChannel ends a pending approval whose channel the broker
+// says is gone, and reports whether the worker should skip closing it (always:
+// a gone channel carries nothing more).
+//
+// The fence goes up first, under s.mu — the lock HandleApprovalDecision
+// accepts under — so a decision racing the watcher is either accepted before
+// it (and answered here) or refused after it with the fence's code. It is
+// never acknowledged and then dropped.
+//
+// What ended the channel decides what the owner is told. 410 is the broker's
+// own expiry: for a joined pairing the approval deadline IS the broker
+// deadline, so a beat that lands on the boundary (or a broker clock running
+// ahead) must still read as the owner not answering in time — `expired` —
+// not as a site that walked away. 404 and 409 read as the page closing or
+// abandoning the channel: a cancellation outcome with reason browser_gone
+// (#332). The split is best-effort, not a guarantee: the broker sweeps
+// expired channels to 404 on any create, and a page whose own wait ran out
+// closes its channel (409) moments before controld's timer would fire. Both
+// outcomes dismiss the prompt; only the wording differs.
+//
+// A decision that landed before the fence is answered without touching the
+// channel. An approve is reported `failed` and nothing is minted: delivery
+// would be refused, and minting first would leave a session whose cleanup
+// depends on a revoke succeeding. A reject is reported `rejected`, which is
+// what the owner chose; the browser hears nothing because it cannot.
+func (s *service) endApprovalOnGoneChannel(active *activePairing, request minter.MintRequest, guard topicGuard, pending *pendingApproval, goneErr error) bool {
+	endedCode := browserGoneReason
+	if status, ok := brokerStatusCode(goneErr); ok && status == http.StatusGone {
+		endedCode = "expired"
+	}
+	s.mu.Lock()
+	pending.endedCode = endedCode
+	accepted := pending.accepted
+	s.mu.Unlock()
+
+	s.logger.Info("Mint pairing channel gone while approval was pending",
+		zap.Error(goneErr),
+		zap.String("endedCode", endedCode),
+		zap.Bool("decisionLanded", accepted != nil),
+		zap.String("channelID", active.channelID),
+		zap.String("approvalRequestID", pending.approvalRequestID))
+
+	// A claim that is gone hears nothing, as in rejectAttestationMismatch: a
+	// factory reset mid-approval must not surface the previous owner's
+	// pairing on the new claim's controllers.
+	if !guard.sameAs(currentTopicGuard()) {
+		return true
+	}
+	outcomeCtx, cancel := context.WithTimeout(context.Background(), terminalOperationTimeout)
+	defer cancel()
+	switch {
+	case accepted != nil && accepted.Decision == "approve":
+		s.sendApprovalOutcome(outcomeCtx, pending.approvalRequestID, request.ChannelID, request.MessageID, "failed", "")
+	case accepted != nil:
+		s.sendApprovalOutcome(outcomeCtx, pending.approvalRequestID, request.ChannelID, request.MessageID, "rejected", "")
+	case endedCode == browserGoneReason:
+		s.sendApprovalOutcomeWithReason(outcomeCtx, pending.approvalRequestID, request.ChannelID, request.MessageID, approvalCancellationStatus, "", browserGoneReason)
+	default:
+		s.sendApprovalOutcome(outcomeCtx, pending.approvalRequestID, request.ChannelID, request.MessageID, "expired", "")
+	}
+	return true
+}
+
+// channelWatch is one liveness watcher over a pending approval's channel.
+// gone receives at most one error, the broker's answer that the channel is
+// closed or expired. stop cancels the watcher and waits for it to exit; it is
+// idempotent.
+type channelWatch struct {
+	gone <-chan error
+	stop func()
+}
+
+// watchChannelWhileApproving polls the channel until ctx ends or the broker
+// says the channel is gone. It reads after afterSeq, so the request already
+// handled is not decrypted again; a copy the browser re-sends is skipped by
+// advancing the cursor. Any other failure (network, 5xx, a message that does
+// not decode) is not proof the browser left and only waits for the next
+// beat. The goroutine is owned by the returned stop, which the worker calls
+// before it touches the channel again.
+func (s *service) watchChannelWhileApproving(ctx context.Context, channel brokerChannel, afterSeq int64) channelWatch {
+	interval := s.opts.ChannelWatchInterval
+	if interval <= 0 {
+		interval = defaultChannelWatchInterval
+	}
+	watchCtx, cancel := context.WithCancel(ctx)
+	gone := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for sleepContext(watchCtx, interval) {
+			_, nextAfterSeq, err := channel.PollMintRequest(watchCtx, afterSeq)
+			if err == nil {
+				afterSeq = maxInt64(afterSeq, nextAfterSeq)
+				continue
+			}
+			// Classify before checking for stop: a 409/410 whose status line
+			// arrived as stop canceled the poll is still the broker's word
+			// that the channel is gone (the minter returns the status even
+			// when the body read is cut off), and the worker reads gone after
+			// stop so it never mints for that channel.
+			if isChannelGone(err) {
+				gone <- err
+				return
+			}
+			if watchCtx.Err() != nil {
+				return
+			}
+			s.logger.Debug("Mint pairing channel liveness poll failed; still watching", zap.Error(err))
+		}
+	}()
+	var once sync.Once
+	return channelWatch{
+		gone: gone,
+		stop: func() {
+			once.Do(func() {
+				cancel()
+				<-done
+			})
+		},
+	}
+}
+
+// isChannelGone reports whether a broker error says the channel can no longer
+// carry anything to the browser: 404 (unknown, or already swept), 409 (closed
+// by a participant — the play client closes its channel when it gives up) or
+// 410 (expired; endApprovalOnGoneChannel reports that one as an expiry, not
+// as the browser leaving). Other 4xx are not read as gone: a 401 would mean this
+// device's own credential is wrong, which says nothing about the browser.
+func isChannelGone(err error) bool {
+	status, ok := brokerStatusCode(err)
+	if !ok {
+		return false
+	}
+	switch status {
+	case http.StatusConflict, http.StatusGone:
+		return true
+	case http.StatusNotFound:
+		// A 404 ends the approval for good, so it counts only when the broker
+		// itself said it: a bare 404 from a proxy or a misrouted request mid
+		// deploy would otherwise end a live approval (and turn an approve that
+		// already landed into failed). The broker always names it not_found.
+		var brokerErr *minter.BrokerError
+		return errors.As(err, &brokerErr) && brokerErr.Code == "not_found"
+	default:
+		return false
+	}
+}
+
 // completeDecision completes a decision for a pairing that is not registered
 // as the active one (no identity fence). The worker uses completeDecisionFor.
 func (s *service) completeDecision(ctx context.Context, channel brokerChannel, request minter.MintRequest, guard topicGuard, approvalRequestID string, decision approvalDecisionRequest) (bool, error) {
@@ -1767,8 +2100,13 @@ func (s *service) completeDecisionFor(ctx context.Context, active *activePairing
 	}
 
 	if paintsOverlay(channel) {
-		if err := qrdisplay.ShowCreatingToken(ctx, s.cdp, browserDisplayName(request.BrowserInfo)); err != nil {
-			s.logger.Warn("Failed to display mint pairing token creation status", zap.Error(err), zap.String("channelID", request.ChannelID))
+		if err := s.showMint(ctx, active, overlay.Overlay{Kind: KindCreatingToken, Payload: browserDisplayName(request.BrowserInfo)}, overlay.Owner, func() bool { return s.isActive(active) }); err != nil {
+			// errSessionEnded is reachable here too (an OnOverride landing
+			// between the outer isActive check and this decision) — round 3
+			// review, F2. errOverlayOccupied is not: this call is always Owner.
+			if !isBenignRejection(err) {
+				s.logger.Warn("Failed to display mint pairing token creation status", zap.Error(err), zap.String("channelID", request.ChannelID))
+			}
 		}
 	}
 
@@ -2190,6 +2528,13 @@ func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID str
 // the shape of the session the browser received and is empty for every outcome
 // that delivered none.
 func (s *service) sendApprovalOutcome(ctx context.Context, approvalRequestID string, channelID string, requestMessageID string, status string, lifetime string) {
+	s.sendApprovalOutcomeWithReason(ctx, approvalRequestID, channelID, requestMessageID, status, lifetime, "")
+}
+
+// sendApprovalOutcomeWithReason is sendApprovalOutcome with an optional
+// machine-readable reason (e.g. browser_gone on a cancellation outcome); empty
+// omits the field, keeping every existing outcome byte-identical.
+func (s *service) sendApprovalOutcomeWithReason(ctx context.Context, approvalRequestID string, channelID string, requestMessageID string, status string, lifetime string, reason string) {
 	message := map[string]any{
 		"v":                 1,
 		"approvalRequestID": approvalRequestID,
@@ -2200,6 +2545,9 @@ func (s *service) sendApprovalOutcome(ctx context.Context, approvalRequestID str
 	}
 	if lifetime != "" {
 		message["lifetime"] = lifetime
+	}
+	if reason != "" {
+		message["reason"] = reason
 	}
 	err := s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME, approvalRequestID, message, 10)
 	if err != nil {
@@ -2223,9 +2571,51 @@ func (s *service) sendMintPairingNotification(ctx context.Context, notificationT
 // DisplayActive reports whether this process currently owns the player
 // overlay with a live mint-pairing display. See the Service interface doc.
 func (s *service) DisplayActive() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.displayOwner != nil
+	cur, ok := s.ctrl.Current()
+	return ok && strings.HasPrefix(string(cur.Kind), mintKindPrefix)
+}
+
+// OverlayStatus is the Service interface's read-only overlay snapshot (issue
+// #381). See the interface doc.
+type OverlayStatus struct {
+	Showing bool
+	// State is the mint kind currently painted, trimmed of mintKindPrefix:
+	// "pairing_code", "request_received", or "creating_token". Empty when
+	// Showing is false.
+	State string
+	// ChannelID, PairingCode and ExpiresAt describe the active pairing this
+	// overlay belongs to. PairingCode and ExpiresAt are set only while State
+	// is "pairing_code" — see activePairing's joined/phase doc for why a
+	// request-received or creating-token overlay has no code left to report.
+	ChannelID   string
+	PairingCode string
+	ExpiresAt   time.Time
+}
+
+// OverlayStatus reports the overlay this process currently has on the
+// player, if any. See the Service interface doc.
+func (s *service) OverlayStatus() OverlayStatus {
+	cur, ok := s.ctrl.Current()
+	if !ok || !strings.HasPrefix(string(cur.Kind), mintKindPrefix) {
+		return OverlayStatus{}
+	}
+	out := OverlayStatus{
+		Showing: true,
+		State:   strings.TrimPrefix(string(cur.Kind), mintKindPrefix),
+	}
+	// currentActive is the same accessor startPairing's redisplay path uses;
+	// a miss here (active already cleared by the time this read lands) just
+	// leaves the identifying fields empty rather than guessing — the caller
+	// already has Showing+State from the controller, which is the part that
+	// must never disagree with DisplayActive().
+	if active, phase, _ := s.currentActive(); active != nil {
+		out.ChannelID = active.channelID
+		if phase == activePairingPhasePairingCode {
+			out.PairingCode = active.pairingCode
+			out.ExpiresAt = active.expiresAt
+		}
+	}
+	return out
 }
 
 func (s *service) registerPending(p *pendingApproval) {
@@ -2301,11 +2691,14 @@ func (s *service) cancelActivePairingForReplace() (*activePairing, bool) {
 }
 
 // publishUnlessCanceled makes active the active pairing unless its start was
-// canceled, in one critical section with the cancel flag.
+// canceled or its overlay was overridden before it could publish (round 5
+// review, F1 — active.overridden can be set by endOverridden while this
+// start was still waiting on its own delivery, long before this call), in one
+// critical section with both flags.
 func (s *service) publishUnlessCanceled(starting *startingPairing, active *activePairing) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if starting.canceled {
+	if starting.canceled || active.overridden {
 		return false
 	}
 	s.active = active
@@ -2342,8 +2735,13 @@ func (s *service) refreshExpiredPairingCode() {
 	if runCtx == nil || runCtx.Err() != nil {
 		return
 	}
-	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	result, err := s.startPairing(context.Background(), overlay.Automatic)
 	if err != nil {
+		if isBenignRejection(err) {
+			// Neither outcome needs a Warn here (round 3 review, F2): already
+			// logged at Info where it was decided.
+			return
+		}
 		s.logger.Warn("Failed to refresh expired mint pairing code", zap.Error(err))
 		return
 	}
@@ -2364,55 +2762,208 @@ func (s *service) setActivePendingApproval(active *activePairing, browserName st
 	active.browserName = browserName
 }
 
-func (s *service) showPairingCode(ctx context.Context, active *activePairing) error {
-	// Park BEFORE taking displayMu — parking can take up to the full
-	// timeout, and holding displayMu across it would serialize every OTHER
-	// display mutation behind an unrelated navigation.
-	s.parkForNavigation()
-	s.displayMu.Lock()
-	defer s.displayMu.Unlock()
+// Mint overlay kinds, namespaced for the shared controller's router.
+const mintKindPrefix = "mint:"
 
-	if err := qrdisplay.ShowPairingCode(ctx, s.cdp, active.pairingCode); err != nil {
+const (
+	// KindPairingCode is the browser-pairing code on screen.
+	KindPairingCode overlay.Kind = mintKindPrefix + "pairing_code"
+	// KindRequestReceived is a browser request awaiting the owner's decision.
+	KindRequestReceived overlay.Kind = mintKindPrefix + "request_received"
+	// KindCreatingToken is a session being connected after an approval.
+	KindCreatingToken overlay.Kind = mintKindPrefix + "creating_token"
+)
+
+// mintPainter sends mint overlays to the player. Its Show does no ownership
+// bookkeeping: the controller records what is on screen. It is called only
+// from the controller's own delivery worker (see the overlay package doc),
+// never from a caller of showMint/hideSession, so parking for a pending
+// navigation and the blocking CDP send below cannot stall anything else. An
+// error is logged here, not returned to any caller: there is no caller left
+// to tell by the time delivery runs.
+type mintPainter struct {
+	s *service
+}
+
+func (p mintPainter) Show(ctx context.Context, o overlay.Overlay) error {
+	p.s.parkForNavigation()
+	var err error
+	switch o.Kind {
+	case KindPairingCode:
+		code, _ := o.Payload.(string)
+		err = qrdisplay.ShowPairingCode(ctx, p.s.cdp, code)
+	case KindRequestReceived:
+		name, _ := o.Payload.(string)
+		err = qrdisplay.ShowRequestReceived(ctx, p.s.cdp, name)
+	case KindCreatingToken:
+		name, _ := o.Payload.(string)
+		err = qrdisplay.ShowCreatingToken(ctx, p.s.cdp, name)
+	default:
+		err = overlay.ErrUnknownKind
+	}
+	if err != nil {
+		p.s.logger.Warn("Failed to paint mint pairing overlay", zap.Error(err), zap.String("kind", string(o.Kind)))
+	}
+	return err
+}
+
+func (p mintPainter) Hide(ctx context.Context, _ overlay.Overlay) error {
+	p.s.parkForNavigation()
+	if err := qrdisplay.ShowDefaultDisplay(ctx, p.s.cdp); err != nil {
+		p.s.logger.Warn("Failed to clear mint pairing overlay", zap.Error(err))
 		return err
 	}
-
-	s.mu.Lock()
-	s.displayGeneration++
-	active.displayGen = s.displayGeneration
-	s.displayOwner = active
-	s.mu.Unlock()
 	return nil
+}
+
+// Painter returns the mint transport for a shared overlay controller.
+func (s *service) Painter() overlay.Painter {
+	return mintPainter{s: s}
+}
+
+// SetController makes the service paint through a controller shared with the
+// other overlay owners. Call once at wiring time, before the first session.
+func (s *service) SetController(c *overlay.Controller) {
+	s.ctrl = c
+}
+
+// sessionListener is the owner side of one session's overlay. Being overridden
+// by a newer overlay ends the session: its code is no longer on the screen.
+type sessionListener struct {
+	s      *service
+	active *activePairing
+}
+
+// OnOverride ends the session whose overlay was replaced. Only cancels: the
+// worker's exit closes the channel, and it clears nothing on screen, since the
+// replacing overlay now holds it.
+func (l *sessionListener) OnOverride(by overlay.Overlay) {
+	l.s.endOverridden(l.active, by)
+}
+
+// OnClose is unused: a session ends by its own worker or by replacement.
+func (l *sessionListener) OnClose() {}
+
+// endOverridden cancels active because another overlay replaced its code.
+// This can fire before active is ever published to s.active — the overlay
+// decision that it lost the screen commits while its own start is still
+// blocked in showPairingCode's result.Wait (see overridden's doc) — so
+// cancellation and the published slot are handled as two separate facts,
+// both recorded here under the same lock: active.overridden, checked by
+// publishUnlessCanceled to stop a since-overridden start from publishing at
+// all, and s.active itself, cleared when this was in fact the published one.
+func (s *service) endOverridden(active *activePairing, by overlay.Overlay) {
+	s.mu.Lock()
+	alreadyOverridden := active.overridden
+	active.overridden = true
+	wasPublished := s.active == active
+	if wasPublished {
+		s.active = nil
+	}
+	s.mu.Unlock()
+	if alreadyOverridden {
+		return
+	}
+	active.cancel()
+	s.logger.Info("Mint pairing session ended: a newer overlay replaced its code",
+		zap.String("channelID", active.channelID), zap.String("by", string(by.Kind)))
+}
+
+// showMint decides active owns o, queues it for delivery, then waits for that
+// specific delivery's own outcome — this call can still report a genuine CDP
+// failure to its caller, exactly as it did before the shared controller
+// existed (three tests hold the start command to that). The wait blocks only
+// this goroutine: the decision was already made and its lock released before
+// Show returned the Result, so nothing else is serialized behind it (see the
+// overlay package doc). live guards the decision itself: a session canceled
+// before it runs must not take the screen. Three distinct outcomes share the
+// generic error return (round 2 review, F-noise; round 3 review, F2 — the
+// first version treated every non-nil error alike, logging a Warn and
+// churning a broker channel on every expected rejection, benign or not):
+//   - errSessionEnded: the session was canceled before its overlay could be
+//     shown — e.g. an OnOverride landed between a caller's own liveness check
+//     and this decision. A real ending, not a fault.
+//   - errOverlayOccupied: an Automatic show was rejected because a DIFFERENT
+//     listener's overlay legitimately owns the screen — the designed outcome
+//     for Automatic, not a fault (a listener's own earlier overlay is not
+//     occupying in this sense; see the overlay package's Show doc).
+//   - any other error: the painter's own delivery genuinely failed. A real fault.
+//
+// The first two are both benign rejections, not faults: callers check
+// isBenignRejection(err) rather than each sentinel individually, since no
+// caller currently needs to act differently on the two for logging purposes.
+func (s *service) showMint(ctx context.Context, active *activePairing, o overlay.Overlay, pr overlay.Priority, live func() bool) error {
+	var listener overlay.Listener = unownedOverlay{}
+	if active != nil {
+		listener = s.listenerFor(active)
+	}
+	_, result, err := s.ctrl.ShowIf(ctx, listener, o, pr, func(overlay.Overlay, bool) bool {
+		return live()
+	}, nil)
+	if err != nil {
+		if errors.Is(err, overlay.ErrRejected) {
+			if !live() {
+				return errSessionEnded
+			}
+			return errOverlayOccupied
+		}
+		return err
+	}
+	return result.Wait(ctx)
+}
+
+// unownedOverlay is the listener of a paint that belongs to no session, such as
+// a creating-token status outside a pairing. Being overridden needs no action.
+type unownedOverlay struct{}
+
+func (unownedOverlay) OnOverride(overlay.Overlay) {}
+func (unownedOverlay) OnClose()                   {}
+
+// listenerFor returns active's overlay listener, creating it on first use.
+func (s *service) listenerFor(active *activePairing) overlay.Listener {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if active.listener == nil {
+		active.listener = &sessionListener{s: s, active: active}
+	}
+	return active.listener
+}
+
+// errSessionEnded is returned when a session was canceled before its overlay
+// could be shown.
+var errSessionEnded = errors.New("mint pairing session ended before its overlay was shown")
+
+// errOverlayOccupied is returned when an Automatic show was correctly
+// rejected because another overlay legitimately owns the screen. See showMint.
+var errOverlayOccupied = errors.New("mint pairing display skipped: another overlay owns the screen")
+
+// isBenignRejection reports whether err is one of showMint's two expected,
+// non-fault outcomes (errOverlayOccupied, errSessionEnded) rather than a
+// genuine delivery failure. Collapsed into one check (round 3 review, F2,
+// option b): no caller currently needs to act differently on the two, only to
+// avoid logging either as a Warn-level fault the way a real CDP failure would be.
+func isBenignRejection(err error) bool {
+	return errors.Is(err, errOverlayOccupied) || errors.Is(err, errSessionEnded)
+}
+
+func (s *service) showPairingCode(ctx context.Context, active *activePairing, pr overlay.Priority, live func() bool) error {
+	return s.showMint(ctx, active, overlay.Overlay{Kind: KindPairingCode, Payload: active.pairingCode}, pr, live)
 }
 
 func (s *service) showRequestReceived(ctx context.Context, active *activePairing, browserName string) error {
-	// See showPairingCode's comment: park before taking displayMu.
-	s.parkForNavigation()
-	s.displayMu.Lock()
-	defer s.displayMu.Unlock()
-
-	if err := qrdisplay.ShowRequestReceived(ctx, s.cdp, browserName); err != nil {
-		return err
-	}
-
-	s.mu.Lock()
-	s.displayGeneration++
-	active.displayGen = s.displayGeneration
-	s.displayOwner = active
-	s.mu.Unlock()
-	return nil
+	return s.showMint(ctx, active, overlay.Overlay{Kind: KindRequestReceived, Payload: browserName}, overlay.Owner, func() bool {
+		return s.isActive(active)
+	})
 }
 
-func (s *service) releaseDisplayOwnership(active *activePairing) (uint64, bool) {
+// clearActive drops active as the service's session, so no new start or re-show
+// finds it. It does not touch the screen.
+func (s *service) clearActive(active *activePairing) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.active == active {
 		s.active = nil
 	}
-	if s.displayOwner != active {
-		return active.displayGen, false
-	}
-	s.displayOwner = nil
-	return active.displayGen, true
 }
 
 func (s *service) closeChannel(channel brokerChannel) {
@@ -2423,26 +2974,26 @@ func (s *service) closeChannel(channel brokerChannel) {
 	}
 }
 
-func (s *service) restoreDefaultDisplay(channelID string, displayGeneration uint64) {
-	// See showPairingCode's comment: park before taking displayMu.
-	s.parkForNavigation()
-	s.displayMu.Lock()
-	defer s.displayMu.Unlock()
-
-	// The ownership check must happen at send time. Cleanup runs in a detached
-	// goroutine, so a newer session can claim the overlay after the old session
-	// releases it but before the hidden command reaches Chromium.
+// hideSession decides the screen is cleared when active's listener still owns
+// the current overlay (Controller.HideOwned re-checks that fresh, under the
+// controller's own decision lock — see its doc for why that replaces an
+// external Handle here). A session that never painted anything (joined, or
+// ended before its first show committed) has no listener yet and there is
+// nothing to clear; a session whose overlay was replaced no longer owns the
+// current one, so HideOwned reports ErrNotCurrent and sends nothing — the
+// replacing overlay now holds the screen, and clearing it would erase the
+// owner's newer request. The decision itself never blocks; the actual clear,
+// if any, is queued for the controller's delivery worker.
+func (s *service) hideSession(active *activePairing) {
 	s.mu.Lock()
-	stale := s.displayGeneration != displayGeneration || s.displayOwner != nil
+	listener := active.listener
 	s.mu.Unlock()
-	if stale {
+	if listener == nil {
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), displayRecoveryTimeout)
-	defer cancel()
-	if err := qrdisplay.ShowDefaultDisplay(ctx, s.cdp); err != nil {
-		s.logger.Warn("Failed to restore default display after mint pairing", zap.Error(err), zap.String("channelID", channelID))
+	err := s.ctrl.HideOwned(listener)
+	if err != nil && !errors.Is(err, overlay.ErrNotCurrent) {
+		s.logger.Warn("Failed to clear mint pairing display", zap.Error(err), zap.String("channelID", active.channelID))
 	}
 }
 

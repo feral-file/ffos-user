@@ -320,8 +320,10 @@ func (k *kioskReplay) scopeFor(sources []string) (cachedSources []string, mixed 
 		}
 		seen[key] = true
 		total++
-		if _, err := k.store.LoadItem(key); err == nil {
-			cachedSources = append(cachedSources, source)
+		if rec, err := k.store.LoadItem(key); err == nil {
+			if !rec.Automatic || rec.freshForPlayback(k.clock.Now()) {
+				cachedSources = append(cachedSources, source)
+			}
 			continue
 		} else if !errors.Is(err, ErrItemNotFound) {
 			k.logger.Warn("offline cache: failed to check cache state for playlist item, treating as uncached",

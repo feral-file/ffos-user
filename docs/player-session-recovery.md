@@ -176,12 +176,13 @@ this order, before ever sending `Page.navigate`:
 
 `NavigationPending() bool` reports an armed-or-executing navigation.
 Off-lane producers that own their own send path consult it immediately
-before each send and park while it's true — setupui narration parks inside
-its own queue-worker loop, right before each `trySend`; mintpairing/qrdisplay
-display sends park *before* taking their own display lock (never while
-holding it), since a park can run for the full timeout and holding that lock
-across it would serialize every other display mutation behind an unrelated
-navigation (see §4).
+before each send and park while it's true. Since #385 both overlay painters
+park the shared overlay controller's single delivery worker: setupui's
+`parkForNavigation` right before each `trySend`, mintpairing's own
+`parkForNavigation` from `mintPainter.Show`/`Hide`. Neither holds a lock
+across the park (mintpairing's display lock is gone), since a park can run
+for the full timeout and holding a lock across it would serialize every other
+display mutation behind an unrelated navigation (see §4).
 
 The flag is a **refcount**, not a bool: `NavigateHomeInline` claims the same
 single-flight slot the async `NavigateHome` worker uses
@@ -257,9 +258,9 @@ HTTP timeout) cannot afford to wait out someone else's navigation.
 
 | Producer | Disposition |
 |---|---|
-| setupui narration | Own worker + queue. Parks sends on `NavigationPending` (§3.2); registers `Narrating()` as an overlay owner. |
+| setupui narration | Painter on the shared `overlay.Controller` (#385); its sends run on the controller's single delivery worker, which setupui's `parkForNavigation` parks on `NavigationPending` (§3.2). Registers `Narrating()` as an overlay owner. |
 | mediator connectivity | Registers a reconciler that enqueues through the SAME single push worker the edge-triggered `connectivity_change` handler uses (never calls the push body directly) — cache-read-then-send only ever happens in one place at a time. |
-| mintpairing / qrdisplay | Overlay owner registration (`DisplayActive`); same `NavigationPending` park at each of its three send sites, entered *before* taking its own display lock. |
+| mintpairing / qrdisplay | Painter on the shared `overlay.Controller` (#385); its own `parkForNavigation` runs on the controller's delivery worker from `mintPainter.Show`/`Hide`, with no display lock. qrdisplay is the CDP helper the painter calls and has no park of its own. Overlay owner registration (`DisplayActive`). |
 | sleep_schedule `applySleepTransition*` | Generation re-check around the CDP send; a moved generation is recorded as `playerUnknownFailed` (§7), never surfaced as an error to a manual-override caller. |
 | commandrouter `sendCDPRequest` | Generation re-check; a moved generation returns `ErrGenerationRace` (`errors.Is`-able) — excluded from the refreshArtwork recovery escalation below, since a generation race is not itself evidence the page is broken. |
 | commandrouter refreshArtwork recovery | `NavigateHomeInline({PurgeCache:true})` on a refused/failed refresh — the caller holds no external lock. |

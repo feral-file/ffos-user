@@ -298,7 +298,7 @@ func TestPaintClaimQR_WaitsForAnInFlightRename(t *testing.T) {
 	e.deviceNameMu.Lock()
 	painted := make(chan struct{})
 	go func() {
-		e.paintClaimQR("https://claim.example/x")
+		e.paintClaimQR("https://claim.example/x", false)
 		close(painted)
 	}()
 

@@ -24,6 +24,31 @@ import (
 
 const testStaticBaseURL = "http://127.0.0.1:8082"
 
+func TestReplayer_AutomaticExpiryAndUnknownRequestsPassThrough(t *testing.T) {
+	for _, method := range []string{"GET", "HEAD"} {
+		t.Run(method, func(t *testing.T) {
+			ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+			source := "https://example.com/art.png"
+			res := seedMediaItem(t, ts.store, "automatic", source, "image/png", "image", nil)
+			_, err := ts.store.DeleteItem(offlinecache.SourceKey(source))
+			require.NoError(t, err)
+			res.FreshUntil = time.Now().Add(-time.Second)
+			require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
+				Item: dp1playlist.PlaylistItem{Source: source}, Automatic: true,
+				Resources: []offlinecache.Resource{res}, Coverage: offlinecache.Coverage{Complete: true},
+			}))
+			ts.stubFetchEnable()
+			require.NoError(t, ts.replayer.EnableForItem(context.Background(), source))
+			done := ts.expectSend("Fetch.continueRequest")
+			ts.handler(requestPausedEventWithMethod(t, "expired", source, method))
+			require.Equal(t, "expired", awaitSend(t, done)["requestId"])
+			done = ts.expectSend("Fetch.continueRequest")
+			ts.handler(requestPausedEventWithMethod(t, "live-dependency", "https://example.com/live", method))
+			require.Equal(t, "live-dependency", awaitSend(t, done)["requestId"])
+		})
+	}
+}
+
 type replayTestSetup struct {
 	ctrl        *gomock.Controller
 	store       offlinecache.Store

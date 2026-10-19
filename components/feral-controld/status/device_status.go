@@ -135,9 +135,10 @@ type DeviceStatusResponse struct {
 	// machine's snapshot (see NetworkHealth); nil (omitted) only when that
 	// seam is unwired.
 	Network *NetworkHealth `json:"network,omitempty"`
-	// LastOutage is attached by the devicectl executor from the netlog
-	// recorder (see LastOutage); nil (omitted) when the recorder is disabled
-	// or no outage has closed since process start.
+	// LastOutage is attached inside GetStatus from the netlog recorder (see
+	// LastOutage and the lastOutage field's doc comment for why it lives
+	// here rather than on the executor); nil (omitted) when the recorder is
+	// disabled or no outage has closed since process start.
 	LastOutage          *LastOutage       `json:"lastOutage,omitempty"`
 	ScreenRotation      string            `json:"screenRotation,omitempty"`
 	ConnectedWifi       string            `json:"connectedWifi,omitempty"`

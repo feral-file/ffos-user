@@ -47,6 +47,19 @@ func (c *DiskHandler) checkDiskUsage(ctx context.Context, metrics *SysMetrics) {
 
 	c.diskCleanupCooldown = time.Time{}
 
+	// Update gate (ffos#124): the disk policy sits out a running update
+	// entirely. Its reboot would kill the update (the ISO download is often
+	// what pushed usage up, and the update frees it again or reboots), and
+	// its `pacman -Scc` cleanup can delete packages a concurrent pacman
+	// update has just downloaded but not yet installed. Returning before any
+	// logging keeps the >95% Error line from repeating every metrics tick
+	// for the length of the update. isCleaned is left as it was, so the
+	// ladder resumes where it stood once the lock is released (or the gate's
+	// ceiling expires).
+	if c.commandHandler.updateInProgress() {
+		return
+	}
+
 	diskUsage, err := metrics.Disk.UsagePercent()
 	if err != nil {
 		c.logger.Error("DISK: Failed to get disk usage", zap.Error(err))
