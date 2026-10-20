@@ -172,9 +172,16 @@ Any failure means "no valid reply". The reply is never trusted partially.
 `invitation_invalid`, `pending`, `not_approved`, `rate_limited`, `locked`,
 `command_failed`, `internal_error`.
 
-For `command_failed`, `res` carries the existing handler error body, for example
-`{"error":"sourceUnreachable",…}`, with the same shape the relayer path returns
-today. The owner commands of §5.5 use `res` = `{"error":"<reason>"}` with
+A command the device executed answers `ok:true` with the handler's reply as
+`res`, even when that reply itself says `"ok":false` (a player refusal is a
+result, not a protocol failure); the controller reads `res` exactly as it
+reads a legacy relayer reply.
+
+For `command_failed` (the handler raised an error instead of replying),
+`res` carries the error body the relayer path returns for it today:
+`{"ok":false,"error":"<id>","command":"<name>","message":"<text>"}` with
+`<id>` one of `rate_limited`, `sourceUnreachable`, `contentBlocked`,
+`playlistInvalid`, or `failed` for anything else. The owner commands of §5.5 use `res` = `{"error":"<reason>"}` with
 `<reason>` one of `invalid_request`, `not_pending`, `not_found`,
 `last_owner`, `too_many_controllers`.
 
@@ -200,8 +207,16 @@ detail (a cause string would make the device an oracle):
 | `locked` | §8; checked before step 1 |
 
 On the LAN these come back as HTTP 401, except `envelope_required` and
-`enrollment_required`, which come back as 403. On the relayer they are the RPC
-`message`.
+`enrollment_required`, which come back as 403. On the relayer an envelope's
+public error is the RPC `message`, `{"error":{"code":"<code>"}}`.
+
+A **plaintext** command refused on the relayer (§7.2) is answered with a
+different shape, because the clients that send plaintext are the released
+ones: `{"ok":false,"error":"<code>","command":"<name>","message":"<text>"}`.
+`ok:false` and a flat string `error` are load-bearing: released ff-app reads
+`error` as a string (an object crashes its reply parsing into a silent
+failure), and released ff1-cli and Play treat any reply without `ok:false`
+as success.
 
 ## 5. Enrollment
 
@@ -353,6 +368,14 @@ phantom entry, so a new command cannot ship without a tier.
 | `enforced` | ≥1 active owner grant, `control.enforced=true` | refused: `enrollment_required` | only the exact Play shape `{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{…}}}`: `request` has exactly the members `intent` and `dp1_call`, `intent` is exactly `{"action":"now_display"}`, `dp1_call` is an object; anything else → `envelope_required` | full |
 | `locked` | identity or grant store unreadable/corrupt | refused: `locked` | controller tier only, else `locked` | refused: public `locked` |
 
+Outside `legacy`, two more LAN surfaces close:
+- `GET /api/screenshot` answers `403 enrollment_required`. It has no envelope
+  form (it is a raw PNG GET), and the screen can carry pairing material.
+- `/api/status` and `/api/v2/status` serve `topic_id:""` even before the
+  relayer claim lands: an owner enrolls first and claims second, and in
+  between the topic would still be a relayer bearer credential for any LAN
+  peer.
+
 "LAN" means any caller of the hub (`/api/cast`), whatever network it came
 from: Wi-Fi, Ethernet, an owner VPN or a Tailscale address all get the LAN
 column. Only the relayer path gets the relayer column.
@@ -386,7 +409,12 @@ Rules:
   becomes `legacy` automatically, and the files are left untouched.
 - Every write goes through the same checks first, so the device cannot persist
   a file it would lock on.
-- Factory reset deletes the directory before it starts the reset unit.
+- Factory reset deletes the directory before anything else in its sequence
+  (before the claim is cleared and before the reset unit starts). If the
+  delete fails the reset is refused: a reset that rolls back onto the running
+  subvolume must not keep the previous owner's grants. Until the process
+  restarts the retired authority is `locked`; after it, the missing directory
+  means a new identity in `legacy`.
 - OTA carries the directory live: see ffos `feral-system-update.sh`.
 
 ## 9. Sealed notifications (FF1 → one controller)
@@ -427,6 +455,10 @@ What is sent in each state:
 |---|---|---|---|
 | `enrolled` / `enforced` | one per active grant, for every notification type including `controller_approval_request` | none | `enrolled`: unchanged, for old apps; `enforced`: stopped |
 | `legacy` | — | unchanged | unchanged |
+| `locked` | — (no readable grants) | unchanged | unchanged |
+
+Every notification is sealed separately for each channel it goes out on, so
+the LAN and relayer copies of one event carry different `seq` values.
 
 ## 10. Wire carriage of requests
 
@@ -436,21 +468,34 @@ What is sent in each state:
 | legacy relayer | the same JSON as a topic cast | RPC `message` = `{"v":1,"jwe":"<compact>"}` |
 | v2 relay | frame payload = UTF-8 bytes of the compact JWE; chunking is TBD with #25 | same |
 
+The LAN hub caps the whole request body at 4 MiB, so on the LAN the compact
+must leave room for the ~50-byte cast wrapper.
+
 ## 11. Public discovery
 
 - `/api/v2/status` and `getDeviceStatus` gain
   `"control":{"v":1,"state":"legacy|enrolled|enforced|locked","profile":profile}`.
   The presence of `control` is the capability signal. A `locked` device omits
   `profile`: it cannot vouch for an identity it could not read.
-- The claim QR, while unowned, appends four pipe fields to the existing six:
+- The claim QR appends four pipe fields to the existing six when the device
+  is `legacy` and either unclaimed or asked with `purpose:"enroll"` (below):
   `…|<setup_phase>|<inv>|<thumb(sig)>|<thumb(enc)>|<gen>`.
   - Old app parsers read only indices 0, 1 and 3.
   - The topic stays at index 1 while the device is unowned.
-  - The QR built in `components/launcher-ui/index.html` and the one built by
-    `formatDeviceConnectURL` MUST stay byte-identical.
+  - The only builder is `formatDeviceConnectURL` in devicectl
+    (`components/launcher-ui`, the other builder this once had to match, was
+    deleted with feral-setupd).
+  - The invitation is issued when the QR is painted, replaced when it has
+    less than 2 minutes left, and refreshed in place one minute before it
+    expires while the claim QR is still on screen. A QR that is no longer on
+    screen mints nothing.
+  - When the first owner enrolls, the invitation is consumed and the claim
+    QR is taken down; from then on the auto-claim flow treats the device as
+    settled and does not repaint the topic-carrying QR.
 - `showPairingQRCode` with `{"show":true,"purpose":"enroll"}` on a `legacy`,
   claimed device displays the invitation QR. This is the migration path for
-  2.0.x owners.
+  2.0.x owners. On a device that is not `legacy` the same request paints the
+  ordinary claim QR without invitation fields.
 
 ## 12. Fixtures
 
