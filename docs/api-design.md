@@ -283,7 +283,7 @@ The `mintPairingApprovalDecision` command is a controller-to-controld approval r
 | `/api/cast` | POST | Same JSON command envelope as the relayer (`command` + `request`); routed through the same `commandrouter`, including the pre-CDP mint-pairing commands. Non-POST → `405`. A per-command token-bucket gate inside `commandrouter` can additionally return `429`. |
 | `/api/status` | GET | LEGACY device/setup status JSON (below), `contract: "1"`. Kept for transitional tooling; not the pairing surface. Non-GET → `405`. |
 | `/api/v2/status` | GET | The LAN **pairing** surface: identical payload, `contract: "2"`. The versioned route is the firmware gate — old firmware 404s here (and advertises no `api` mDNS TXT key), which is how the app tells LAN-pairable devices from old ones. Non-GET → `405`. |
-| `/api/screenshot` | GET | PNG observation of the sole Chromium page target. Optional `width` and `height` query parameters define an aspect-ratio-preserving bounding box. Browser-originated requests are rejected. On a claimed device, requires `X-FF1-Topic` (else `401 topic_required`): the screen can show the claim QR, which carries the topic. Non-GET → `405`. |
+| `/api/screenshot` | GET | PNG observation of the sole Chromium page target. Optional `width` and `height` query parameters define an aspect-ratio-preserving bounding box. Browser-originated requests are rejected. On a claimed device, requires `X-FF1-Topic` (else `401 topic_required`): the screen can show the claim QR, which carries the topic. With the control protocol on (feral-file#3551, `docs/ff1-control-v1.md` §7.2): `403 {"error":{"code":"enrollment_required"}}` in every state but `legacy`; in `legacy`, `403 {"error":{"code":"screen_protected"}}` while a first-owner invitation is live, re-checked after the capture (an invitation minted during it discards the image). Non-GET → `405`. |
 | `/api/notification` | GET → WS | Upgrades to a WebSocket that streams the same outbound notifications the relayer receives. Non-GET → `405`. |
 | `/metrics` | GET | Prometheus text exposition: playback metrics plus the stage-0 network-observability gauges (`net_link_state`, `net_wifi_signal_percent`, `net_wifi_link_info`, `relayer_connected`, `relayer_last_close_code`, `relayer_disconnects_total`; see [`wan-outage-observability.md`](wan-outage-observability.md)). Cache-only — a scrape never triggers probe work. |
 
@@ -307,9 +307,12 @@ For installation diagnosis, `curl --fail http://<device-ip>:1111/api/screenshot 
   "relayer_last_connected_at": "2026-10-14T02:00:00Z",
   "setup_state": "online",
   "connectivity": "...",
-  "topic_id": "..."
+  "topic_id": "...",
+  "control": {"v": 1, "state": "legacy|enrolled|enforced|locked", "profile": {"v": 1, "dev": "...", "gen": "...", "sig": {}, "enc": {}}}
 }
 ```
+
+- `control` (feral-file#3551, `docs/ff1-control-v1.md` §11) is present only when the control protocol runs on this device; its presence is the capability signal. A `locked` device omits `profile`. Outside `legacy`, `topic_id` is `""` even before the relayer claim. `getDeviceStatus` and the `device_status` notification carry the same block.
 
 - `contract` is owned by the hub (not the status provider): `"1"` on the legacy route, `"2"` on `/api/v2/status`. The versioned route — not the field — is the firmware gate the pairing app uses: a device that 404s on `/api/v2/status` (or lacks the `api` mDNS TXT key) is old firmware and must be treated as **not LAN-pairable** (no discovery notification, no pairing offer). The field remains the dual-running-window signal for retiring the open `:1111` surface.
 - `setup_state` is a coarse provisioning-state string. When the provisioning machine is wired in (production), it is the live machine state: `starting`, `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joining`. The bare status provider falls back to `claimed` / `unclaimed`.

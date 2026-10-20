@@ -119,7 +119,9 @@ The device runs these steps in order and stops at the first failure:
    - first in the grant store (active or revoked records), for any `op`;
    - otherwise, only when the (not yet trusted) claims say
      `op=enroll`/`requestAccess`, the key carried in `enroll.sig`, with
-     `thumb(enroll.sig) == kid`.
+     `thumb(enroll.sig) == kid`. A payload from an unknown `kid` larger than
+     16 KiB is `unknown_controller` before its JSON is read (enrollment
+     claims are a few hundred bytes).
    Verify ES256. A signature that is not exactly 64 bytes (DER, truncated)
    fails verification here.
 3. Read `rk` and `rid`. Without a usable reply key and request id no
@@ -169,8 +171,9 @@ Any failure means "no valid reply". The reply is never trusted partially.
 ### 4.3 Encrypted error codes
 
 `invalid_request`, `expired`, `replay`, `permission_denied`, `access_revoked`,
-`invitation_invalid`, `pending`, `not_approved`, `rate_limited`, `locked`,
-`command_failed`, `internal_error`.
+`invitation_invalid`, `pending`, `not_approved`, `rate_limited`,
+`command_failed`, `internal_error`. (`locked` is only ever a public error,
+§4.4: a locked device has no trusted identity to sign a reply with.)
 
 A command the device executed answers `ok:true` with the handler's reply as
 `res`, even when that reply itself says `"ok":false` (a player refusal is a
@@ -185,9 +188,16 @@ For `command_failed` (the handler raised an error instead of replying),
 `<reason>` one of `invalid_request`, `not_pending`, `not_found`,
 `last_owner`, `too_many_controllers`.
 
-`internal_error` means the device could not durably record the request's
-replay window (§6). The request was **not** executed. Its `ctr` may or may
-not be consumed, so the controller retries with a new `ctr`.
+`internal_error` means the device could not confirm a durable write.
+- For a command, the replay window (§6) was not confirmed and the command
+  was **not** executed. Its `ctr` may or may not be consumed, so the
+  controller retries with a new `ctr`.
+- For a control-plane operation (enroll, requestAccess, approve, revoke),
+  the write may have been **applied** (renamed into place but its directory
+  fsync failed); the device's memory follows it. The client MUST re-list
+  (`listControllers`) or re-enroll, which is idempotent, before retrying,
+  and must not assume the operation failed. Retrying an applied approval
+  does not rotate `nk`.
 
 `access_revoked` covers both a revoked and an expired grant.
 
@@ -207,10 +217,12 @@ detail (a cause string would make the device an oracle):
 | `locked` | §8; checked before step 1 |
 | `invalid_message` | plaintext whose top level repeats a member name, exactly or in another letter case (§7.2) |
 | `screen_protected` | `GET /api/screenshot` while an invitation is live (§7.2) |
+| `busy` | too many envelopes being authenticated at once (§10); retry |
 
 On the LAN these come back as HTTP 401, except `envelope_required`,
-`enrollment_required` and `screen_protected`, which come back as 403, and
-`invalid_message`, which comes back as 400. On the relayer an envelope's
+`enrollment_required` and `screen_protected`, which come back as 403,
+`invalid_message`, which comes back as 400, and `busy`, which comes back as
+503. On the relayer an envelope's
 public error is the RPC `message`, `{"error":{"code":"<code>"}}`.
 
 A **plaintext** command refused on the relayer (§7.2) is answered with a
@@ -224,6 +236,11 @@ as success.
 ## 5. Enrollment
 
 `enroll` object, exactly: `{"sig":JWK,"enc":JWK,"label":string(1..64 characters),"platform":"ios"|"android"|"cli"|"other","inv"?:string}`.
+A `label` containing a C0/C1 control character or an invisible formatting
+or bidi character (the set the device strips from device names:
+U+061C, U+200B-U+200F, U+202A-U+202E, U+2060, U+2066-U+2069, U+2028, U+2029,
+U+FEFF) is `invalid_request`: an owner must not be shown one controller's
+label rendered as another's.
 `inv` is allowed only with `op=enroll`. `thumb(enroll.sig)` MUST equal `ctl`
 (else `invalid_request`).
 
@@ -274,9 +291,10 @@ A later controller asks for access.
   - At most 1 **new** request per 10 s from any source (a refresh is not new).
   - Per route, counted over the other pending requests: at most 1 pending
     request per LAN source, and at most 2 from the relayer. A LAN source is
-    the peer's IPv4 address or the /64 of its IPv6 address (one host can hold
-    a whole /64). The source is used only for this count; it is never
-    authority.
+    the peer's IPv4 address (IPv4-mapped included), the /64 of a global or
+    ULA IPv6 address (one host can hold a whole /64), or, for every
+    link-local IPv6 address (`fe80::/10`, any zone), one single source. The
+    source is used only for this count; it is never authority.
   - A refresh of an existing pending `ctl` at most once per 10 s.
   - A pending request lives for 5 minutes from its last refresh, and never
     more than 10 minutes from its creation, however often it refreshes.
@@ -334,13 +352,14 @@ never reach the command router):
   is a role (and expiry) change of an **active** grant in place: keys, `nk`,
   window and `createdAt` are kept and `approvedBy` becomes the approver. With
   neither (unknown or revoked `ctl`, nothing pending) it fails `not_pending`.
-  Demoting an owner fails `last_owner` when no other active owner remains. `expiresAt` must be in the future and is allowed only for
+  Demoting an owner fails `last_owner` when no other active owner remains.
+  `expiresAt` must be in the future and is allowed only for
   `role:"controller"`: an owner grant never expires, so the last owner cannot
-  silently lapse. Approving a `ctl` that already has a record (revoked, or
-  active for a role change) updates that record in place: it keeps its
-  `createdAt` and its replay window, and gets a fresh `nk`. At most 32 active
-  grants and 128 records (revoked ones included) exist
-  (`too_many_controllers`).
+  silently lapse. A pending-request approval of a `ctl` that already has a
+  record (a revoked one) updates that record in place: it keeps its
+  `createdAt` and its replay window and gets a fresh `nk`. A role change
+  without a pending request keeps `nk` too. At most 32 active grants and 128
+  records (revoked ones included) exist (`too_many_controllers`).
 - `revokeController` on a `ctl` that has only a pending request denies (drops)
   that request; further `requestAccess` from that `ctl` answers
   `not_approved` until the denied request would have expired (§5.2).
@@ -481,9 +500,10 @@ Rules:
   was deleted can never come back as "no control state", which with the
   protocol disabled in config would mean open. A tombstone that cannot be
   `stat`ed for a reason other than "does not exist" means plain `locked`, not
-  retired. A retired device (a real tombstone) accepts one
-  plaintext command on either route, `factoryReset`, so the owner can retry
-  the reset; everything else is refused as `locked`. A completed reset boots
+  retired. A retired device (a real tombstone) accepts exactly one plaintext
+  command on every route, `factoryReset`, so the owner can retry the reset;
+  everything else, relayer controller-tier plaintext included, is refused as
+  `locked`. A completed reset boots
   a subvolume without the tombstone, and the missing directory then means a
   new identity in `legacy`.
 
@@ -541,14 +561,22 @@ Wire carriage, the same object on the LAN notification WebSocket and on the
 relayer notification channel:
 
 ```json
-{"type":"notification","notification_type":"sealed","persist_record_count":0,"message":{"v":1,"ctl":"<ctl>","jwe":"…"}}
+{"type":"notification","messageID"?:"<id>","notification_type":"sealed","persist_record_count":<n>,"message":{"v":1,"ctl":"<ctl>","jwe":"…"}}
 ```
+
+`persist_record_count` and `messageID` are copied from the plaintext
+notification the sealed copy stands for (`0` and absent for the device's own
+`controller_approval_request`). They are routing metadata the relayer needs
+to store and replace persisted records: a count, and an opaque random id the
+device minted (mint pairing uses its approval request id). Nothing of the
+notification's content leaves the ciphertext. The relayer persists all
+sealed copies under the one `notification_type` `"sealed"`.
 
 What is sent in each state:
 
 | State | Sealed copies | LAN WebSocket plaintext | Relayer plaintext |
 |---|---|---|---|
-| `enrolled` / `enforced` | one per active grant, for every notification type including `controller_approval_request` | none | `enrolled`: unchanged, for old apps; `enforced`: stopped |
+| `enrolled` / `enforced` | one per active grant for every notification type, except `controller_approval_request`, which goes to active owners only | none | `enrolled`: unchanged, for old apps; `enforced`: stopped |
 | `legacy` | — | unchanged | unchanged |
 | `locked` | — (no readable grants) | unchanged | unchanged |
 
@@ -563,8 +591,17 @@ the LAN and relayer copies of one event carry different `seq` values.
 | legacy relayer | the same JSON as a topic cast | RPC `message` = `{"v":1,"jwe":"<compact>"}` |
 | v2 relay | frame payload = UTF-8 bytes of the compact JWE; chunking is TBD with #25 | same |
 
+The `request` carrier is parsed strictly (§1): exactly the members `v` (the
+integer 1) and `jwe` (a non-empty string), no duplicate, case-variant or
+extra member; anything else is `bad_envelope`.
+
 The LAN hub caps the whole request body at 4 MiB, so on the LAN the compact
 must leave room for the ~50-byte cast wrapper.
+
+At most 4 envelopes are authenticated at a time (decrypt, verify, parse);
+an envelope that cannot get a slot within 1 s is answered with the public
+error `busy` (LAN 503) and should be retried. No lock other than that bound
+is held while an envelope is unauthenticated.
 
 ## 11. Public discovery
 
@@ -653,3 +690,9 @@ and the ff1-cli test suite does the same with `jose`.
   relayer-originated on connect, so a controller cannot forge one.
 - Play browser sessions never subscribe to the notification channel, so
   sealing notifications (§9) cannot strand a Play session.
+- Residual, accepted: on a claimed device still in `legacy`, any LAN peer
+  can send `showPairingQRCode{show:true,purpose:"enroll"}` and a person at
+  the screen can then take ownership with the invitation it shows. This is
+  the same class as the open legacy `factoryReset` and `connect`: in
+  `legacy` the LAN is open by design (§7.2), and the invitation itself only
+  ever appears on the physical screen.

@@ -97,25 +97,8 @@ func (g *Gate) ScreenProtected() bool {
 	return live
 }
 
-// envelopeRequest is the ff1Envelope `request` object (§10), exactly.
-type envelopeRequest struct {
-	V   int    `json:"v"`
-	JWE string `json:"jwe"`
-}
-
 func parseEnvelopeRequest(raw json.RawMessage) (string, error) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil || len(m) != 2 {
-		return "", errors.New("ff1Envelope request must be exactly {v, jwe}")
-	}
-	var req envelopeRequest
-	if err := json.Unmarshal(raw, &req); err != nil || req.V != 1 || req.JWE == "" {
-		return "", errors.New("ff1Envelope request must be {\"v\":1,\"jwe\":string}")
-	}
-	if _, ok := m["v"]; !ok {
-		return "", errors.New("ff1Envelope request missing v")
-	}
-	return req.JWE, nil
+	return control.ParseCarrier(raw)
 }
 
 // HandleEnvelope opens one ff1Envelope request (the `request` object of the
@@ -136,7 +119,7 @@ func (g *Gate) HandleEnvelope(ctx context.Context, raw json.RawMessage, origin c
 		return nil, &control.PublicError{Code: control.CodeBadEnvelope, Err: err}
 	}
 	if len(adm.Notifications) > 0 && g.publisher != nil {
-		g.publisher.PublishSealed(ctx, adm.Notifications)
+		g.publisher.PublishAdmission(ctx, g.auth, adm)
 	}
 	if adm.OwnerEnrolled && g.onOwnerEnrolled != nil {
 		g.onOwnerEnrolled()

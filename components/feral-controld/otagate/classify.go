@@ -55,6 +55,16 @@ func classifyUpdaterMessage(message string) updateErrorKind {
 		return errPermanent
 	}
 
+	// Downgrade refusal (ffos 5b80c5c, feral-file#3551 M4): the target image
+	// predates the control-state carry, so installing it would lose (or, on
+	// a later upgrade, resurrect) controller grants. Permanent: the device
+	// stays on its current image until a carry-capable image is published;
+	// retrying the same target cannot succeed. Prefix match: the script
+	// appends the reason.
+	if strings.HasPrefix(msg, "Refusing update: target image cannot carry controller state") {
+		return errPermanent
+	}
+
 	// Unknown/unclassified errors from the updater-spawn layer.
 	if msg == "Unknown error occurred" {
 		return errPermanent

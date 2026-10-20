@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func ownerDevice(t *testing.T) (*testDevice, *testCtl, *testCtl) {
@@ -782,7 +785,10 @@ func TestLANSourceKey(t *testing.T) {
 		"::ffff:192.168.1.9":         "192.168.1.9",
 		"2001:db8:1:2:aaaa::1":       "2001:db8:1:2::/64",
 		"2001:db8:1:2:ffff:ffff::99": "2001:db8:1:2::/64",
-		"fe80::1":                    "fe80::/64",
+		"fe80::1":                    "fe80::/10",
+		"fe80::1%eth0":               "fe80::/10", // zone stripped
+		"fe80:0:0:5::99%wlan0":       "fe80::/10", // all link-local is one source
+		"2001:db8:1:2::1%eth0":       "2001:db8:1:2::/64",
 		"not-an-ip":                  "not-an-ip",
 	} {
 		if got := LANSourceKey(in); got != want {
@@ -809,5 +815,162 @@ func TestPendingCapAggregatesIPv6Prefix(t *testing.T) {
 	d.advance(pendingNewInterval)
 	if r := open(newTestCtl(t, "b"), "2001:db8:1:2::11"); r.Code != CodeRateLimited {
 		t.Fatalf("same /64 got a second slot: %+v", r)
+	}
+}
+
+// Review M1: a hostile envelope stuck in the unauthenticated phase holds no
+// lock: State() and a valid owner request complete meanwhile.
+func TestUnauthenticatedOpenDoesNotBlock(t *testing.T) {
+	d, owner, _ := ownerDevice(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var first atomic.Bool
+	d.a.openHook = func() {
+		if first.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
+	}
+	go func() { _, _ = d.a.Open(strings.Repeat("A", 1<<20)) }()
+	<-entered
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = d.a.State()
+		rc := d.cmdClaims(owner, "rotate", `{}`)
+		adm, err := d.a.Open(d.seal(owner, rc))
+		if err != nil || !adm.Execute() {
+			t.Errorf("owner request failed while a hostile open was in flight: %v", err)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stuck unauthenticated open blocked State() / a valid request")
+	}
+	close(release)
+}
+
+// Review M1: concurrent unauthenticated opens are bounded; beyond the bound
+// a request waits briefly and then gets the public busy error.
+func TestOpenConcurrencyBound(t *testing.T) {
+	d, owner, _ := ownerDevice(t)
+	prev := openWait
+	openWait = 50 * time.Millisecond
+	t.Cleanup(func() { openWait = prev })
+	release := make(chan struct{})
+	var held sync.WaitGroup
+	held.Add(maxConcurrentOpens)
+	d.a.openHook = func() { held.Done(); <-release }
+	for range maxConcurrentOpens {
+		go func() { _, _ = d.a.Open("x") }()
+	}
+	held.Wait()
+	d.a.openHook = nil
+	_, err := d.a.Open(d.seal(owner, d.cmdClaims(owner, "rotate", `{}`)))
+	if publicCode(err) != CodeBusy {
+		t.Fatalf("err = %v, want busy", err)
+	}
+	if (&PublicError{Code: CodeBusy}).HTTPStatus() != 503 {
+		t.Fatal("busy is not 503")
+	}
+	close(release)
+}
+
+// Review M1: an unknown kid with a large payload is refused before any
+// JSON walk of it.
+func TestUnknownKidLargePayloadRefused(t *testing.T) {
+	d, _, _ := ownerDevice(t)
+	stranger := newTestCtl(t, "stranger")
+	rc := d.claims(stranger, OpRequestAccess)
+	rc.Enroll = stranger.enroll("")
+	payload, _ := rc.Marshal()
+	big := strings.Replace(string(payload), `"label":"stranger"`, `"label":"`+strings.Repeat("x", maxEnrollPayload)+`"`, 1)
+	d.expectPublic(sealPayload(t, d.id, stranger.sig, []byte(big)), CodeUnknownController)
+}
+
+// Review L3: a control op whose write committed but was not confirmed
+// durable keeps its memory effects; a retry does not rotate nk.
+func TestApproveDurabilityUncertainIsApplied(t *testing.T) {
+	d, owner, _ := ownerDevice(t)
+	tab := newTestCtl(t, "tab")
+	rc := d.claims(tab, OpRequestAccess)
+	rc.Enroll = tab.enroll("")
+	d.expectOK(tab, rc)
+	d.fs.FailSync = func(string) error { return errors.New("eio") }
+	d.expectCode(owner, d.cmdClaims(owner, CmdApproveController, `{"ctl":"`+tab.ctl+`","role":"controller"}`), CodeInternalError)
+	d.fs.FailSync = nil
+	g1, ok := d.a.Store().Grant(tab.ctl)
+	if !ok || !g1.Active(d.now.Load()) {
+		t.Fatal("committed approval not in memory")
+	}
+	if _, pending := d.a.pending[tab.ctl]; pending {
+		t.Fatal("pending entry survived a committed approval")
+	}
+	d.expectOK(owner, d.cmdClaims(owner, CmdApproveController, `{"ctl":"`+tab.ctl+`","role":"controller"}`))
+	if g2, _ := d.a.Store().Grant(tab.ctl); g2.NK != g1.NK {
+		t.Fatal("retry of an applied approval rotated nk")
+	}
+}
+
+// Review L4: a requestAccess whose window write did not commit leaves no
+// pending entry and spends no new-request slot.
+func TestRequestAccessPersistFailureLeavesNoPending(t *testing.T) {
+	d, owner, ctl := ownerDevice(t)
+	d.expectOK(owner, d.cmdClaims(owner, CmdRevokeController, `{"ctl":"`+ctl.ctl+`"}`))
+	d.fs.FailWrite = func(string) error { return errors.New("enospc") }
+	rc := d.claims(ctl, OpRequestAccess)
+	rc.Enroll = ctl.enroll("")
+	d.expectCode(ctl, rc, CodeInternalError)
+	d.fs.FailWrite = nil
+	if len(d.a.pending) != 0 || d.a.lastNewPending != 0 {
+		t.Fatal("uncommitted requestAccess left state behind")
+	}
+	other := newTestCtl(t, "other")
+	rc = d.claims(other, OpRequestAccess)
+	rc.Enroll = other.enroll("")
+	d.expectOK(other, rc) // not rate-limited by a request that never landed
+}
+
+// Review L5: a pre-approval enroll from a ctl with a record persists its
+// window, so the same envelope cannot be replayed later.
+func TestPreApprovalEnrollPersistsWindow(t *testing.T) {
+	d, owner, ctl := ownerDevice(t)
+	d.expectOK(owner, d.cmdClaims(owner, CmdRevokeController, `{"ctl":"`+ctl.ctl+`"}`))
+	rc := d.claims(ctl, OpEnroll)
+	rc.Enroll = ctl.enroll("")
+	compact := d.seal(ctl, rc)
+	adm, err := d.a.Open(compact)
+	if err != nil || d.final(adm, rc).Code != CodeNotApproved {
+		t.Fatal("pre-approval enroll")
+	}
+	d.reopen(false)
+	adm, _ = d.a.Open(compact)
+	if d.final(adm, rc).Code != CodeReplay {
+		t.Fatal("pre-approval enroll window not persisted")
+	}
+}
+
+// Review L7: labels carrying control or bidi/format characters are refused.
+func TestLabelUnsafeCharactersRefused(t *testing.T) {
+	d, _, _ := ownerDevice(t)
+	for i, label := range []string{"evil\u202eenohp", "tab\x07", "a\u2060b", "x\u0085"} {
+		tab := newTestCtl(t, "tab"+itoa(int64(i)))
+		rc := d.claims(tab, OpRequestAccess)
+		rc.Enroll = tab.enroll("")
+		rc.Enroll.Label = label
+		d.expectCode(tab, rc, CodeInvalidRequest)
+	}
+}
+
+// Review I2: the carrier is exactly {"v":1,"jwe"}.
+func TestParseCarrierStrict(t *testing.T) {
+	if j, err := ParseCarrier([]byte(`{"v":1,"jwe":"a.b"}`)); err != nil || j != "a.b" {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{`{"V":1,"jwe":"a"}`, `{"v":1,"JWE":"a"}`, `{"v":1,"jwe":"a","jwe":"b"}`,
+		`{"v":1,"jwe":"a","x":1}`, `{"v":1.0,"jwe":"a"}`, `{"v":2,"jwe":"a"}`, `{"v":1,"jwe":""}`, `[]`} {
+		if _, err := ParseCarrier([]byte(bad)); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
 	}
 }

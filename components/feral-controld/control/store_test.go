@@ -285,6 +285,10 @@ func TestRetire(t *testing.T) {
 	if a.Policy(RouteLAN, "displayPlaylist", nil).Allow || a.Policy(RouteRelayer, "sshAccess", nil).Allow {
 		t.Fatal("retired device opened other plaintext")
 	}
+	// Review L2: not even relayer controller-tier plaintext.
+	if a.Policy(RouteRelayer, "rotate", nil).Allow || a.Policy(RouteRelayer, "displayPlaylist", nil).Allow {
+		t.Fatal("retired device allowed relayer controller-tier plaintext")
+	}
 	// A completed reset boots a subvolume without the tombstone: legacy, new gen.
 	_ = d.fs.RemoveAll(RetiredMarker(d.dir))
 	a, _ = New(Config{Dir: d.dir, DeviceID: testDeviceID, FS: d.fs})

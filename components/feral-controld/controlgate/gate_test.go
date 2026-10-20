@@ -291,3 +291,26 @@ func TestScreenProtectedWhileInvitationLive(t *testing.T) {
 		t.Fatal("cleared invitation still protected")
 	}
 }
+
+// Review L8: a sealed copy carries the original notification's
+// persist_record_count and messageID (routing metadata, not content).
+func TestSealedCopyCarriesPersistAndMessageID(t *testing.T) {
+	a, _ := newAuthority(t, false)
+	g := controlgate.New(a, &recorder{}, zap.NewNop())
+	enrollOwner(t, g, a)
+	fr := &fakeRelayer{}
+	wr := controlgate.WrapRelayer(fr, a, zap.NewNop())
+	_ = wr.Send(context.Background(), relayer.Response{Type: "notification", MessageID: "appr-1",
+		NotificationType: "mint_pairing_approval_request", PersistRecordCount: 10, Message: map[string]any{"x": 1}})
+	var sealed []map[string]any
+	for _, m := range fr.sent {
+		var v map[string]any
+		_ = json.Unmarshal(m, &v)
+		if v["notification_type"] == "sealed" {
+			sealed = append(sealed, v)
+		}
+	}
+	if len(sealed) != 1 || sealed[0]["messageID"] != "appr-1" || sealed[0]["persist_record_count"] != float64(10) {
+		t.Fatalf("sealed copy = %+v", sealed)
+	}
+}

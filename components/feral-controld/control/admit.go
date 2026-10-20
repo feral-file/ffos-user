@@ -10,8 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -32,6 +32,8 @@ const (
 	// CodeScreenProtected refuses /api/screenshot while the screen may show
 	// a live invitation (§7.2).
 	CodeScreenProtected = "screen_protected"
+	// CodeBusy: too many envelopes are being opened at once; retry.
+	CodeBusy = "busy"
 )
 
 // Encrypted reply codes (§4.3).
@@ -110,6 +112,8 @@ func PublicErrorStatus(code string) int {
 		return http.StatusForbidden
 	case CodeInvalidMessage:
 		return http.StatusBadRequest
+	case CodeBusy:
+		return http.StatusServiceUnavailable
 	}
 	return http.StatusUnauthorized
 }
@@ -145,13 +149,29 @@ type Sealed struct {
 
 // Wire renders the §9 carriage object for the LAN WebSocket and the relayer
 // notification channel.
-func (s Sealed) Wire() ([]byte, error) {
+func (s Sealed) Wire() ([]byte, error) { return s.WireWith(0, "") }
+
+// WireWith renders the §9 carriage object carrying the ORIGINAL
+// notification's persist_record_count and messageID (review L8): the relayer
+// needs them to store and replace persisted records, and both are routing
+// metadata (a count, and an opaque random id the device minted), never
+// content. messageID is omitted when empty.
+func (s Sealed) WireWith(persistRecordCount int, messageID string) ([]byte, error) {
 	return marshalJSON(struct {
 		Type               string `json:"type"`
+		MessageID          string `json:"messageID,omitempty"`
 		NotificationType   string `json:"notification_type"`
 		PersistRecordCount int    `json:"persist_record_count"`
 		Message            Sealed `json:"message"`
-	}{"notification", "sealed", 0, s})
+	}{"notification", messageID, "sealed", persistRecordCount, s})
+}
+
+// Notice is a notification the authority produced, before sealing: the
+// caller seals one copy per channel (§9) with Authority.Seal.
+type Notice struct {
+	Ctl  string
+	Type string
+	Body any
 }
 
 // Admission is the outcome of opening an authentic request.
@@ -173,8 +193,11 @@ type Admission struct {
 	// Code is the ok:false code carried by Final, for logs and metrics.
 	Code string
 	// Notifications are sealed messages the caller must emit (approval
-	// requests to owners after a requestAccess).
+	// requests to owners after a requestAccess): ONE channel's copies.
 	Notifications []Sealed
+	// Notices are the same notifications unsealed, so a caller emitting on
+	// more than one channel seals a separate copy for each (§9, review L1).
+	Notices []Notice
 	// OwnerEnrolled is set when the first-owner invitation was consumed:
 	// the caller takes the claim/invitation QR off the screen (§5.1).
 	OwnerEnrolled bool
@@ -225,8 +248,13 @@ type Authority struct {
 	randMu sync.Mutex
 	rand   io.Reader
 
-	inv            *invitation
-	invGen         uint64
+	inv    *invitation
+	invGen uint64
+
+	// openSem bounds unauthenticated opens (review M1); openHook is a test
+	// seam run while a slot is held.
+	openSem        chan struct{}
+	openHook       func()
 	pending        map[string]*pendingRequest
 	denied         map[string]int64 // ctl -> until, owner-denied requests
 	lastNewPending int64
@@ -295,6 +323,7 @@ func New(cfg Config) (*Authority, error) {
 		rand:     cfg.Rand,
 		pending:  map[string]*pendingRequest{},
 		denied:   map[string]int64{},
+		openSem:  make(chan struct{}, maxConcurrentOpens),
 		seq:      map[string]uint64{},
 	}
 	a.store = OpenStore(cfg.FS, cfg.Dir, cfg.DeviceID, a.randReader(), cfg.Now())
@@ -495,87 +524,163 @@ func (a *Authority) Open(compact string) (*Admission, error) {
 // OpenFrom is Open with the request's origin, used only for the per-route
 // pending caps of requestAccess (§5.2).
 func (a *Authority) OpenFrom(compact string, origin Origin) (*Admission, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	if err := a.store.LockErr(); err != nil {
 		return nil, publicErr(CodeLocked, err)
 	}
-	id := a.store.Identity()
-	now := a.now().Unix()
+	// Steps 1-3 and the claims parse run OUTSIDE a.mu, bounded by openSem:
+	// they are unauthenticated work (ECDH, up to 4 MiB of AES-GCM, ES256,
+	// a full JSON walk) and must not stall every other admission and State()
+	// behind one hostile envelope (review M1). a.mu covers only the window,
+	// pending and store mutation below.
+	if !a.acquireOpen() {
+		return nil, publicErr(CodeBusy, errors.New("too many envelopes being opened"))
+	}
+	pre, adm, perr := a.authenticate(compact)
+	a.releaseOpen()
+	if perr != nil {
+		return nil, perr
+	}
+	if adm != nil {
+		return adm, nil // an encrypted claim failure; nothing to mutate
+	}
 
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.store.LockErr(); err != nil {
+		return nil, publicErr(CodeLocked, err) // retired while we verified
+	}
+	now := a.now().Unix()
+	// Re-read the record under the lock: the verified key cannot change
+	// (ctl = thumb(sig)), but the window, role and revocation can have.
+	grant, known := a.store.Grant(pre.adm.ctl)
+	c := pre.claims
+	a.prunePending(now)
+	switch c.Op {
+	case OpCmd:
+		if !known {
+			return nil, publicErr(CodeUnknownController, errors.New("kid not in grant store"))
+		}
+		return a.admitCmd(pre.adm, c, grant, now)
+	case OpEnroll:
+		if c.Enroll.Inv != "" {
+			return a.enrollWithInvitation(pre.adm, c, grant, known, now)
+		}
+		return a.enrollApproved(pre.adm, c, grant, known, now)
+	default:
+		return a.requestAccess(pre.adm, c, grant, known, now, origin)
+	}
+}
+
+// maxEnrollPayload bounds the claims of a request whose kid is not in the
+// grant store. Only enroll/requestAccess may come from an unknown kid, and
+// their claims are a few hundred bytes; anything larger is refused before
+// any JSON walk (review M1).
+const maxEnrollPayload = 16 << 10
+
+// maxConcurrentOpens bounds unauthenticated opens in flight, so the hub's
+// 64 request slots cannot all be spent on envelope crypto; openWait is how
+// long an open waits for a slot before answering busy.
+const maxConcurrentOpens = 4
+
+var openWait = time.Second
+
+func (a *Authority) acquireOpen() bool {
+	select {
+	case a.openSem <- struct{}{}:
+	default:
+		t := time.NewTimer(openWait)
+		defer t.Stop()
+		select {
+		case a.openSem <- struct{}{}:
+		case <-t.C:
+			return false
+		}
+	}
+	if a.openHook != nil {
+		a.openHook()
+	}
+	return true
+}
+
+func (a *Authority) releaseOpen() { <-a.openSem }
+
+type authenticated struct {
+	adm    *Admission
+	claims RequestClaims
+}
+
+// authenticate is §3.4 steps 1-4 (everything that needs no mutable state):
+// it returns the authenticated request, or an Admission already finalized
+// with an encrypted claim error, or a public error.
+func (a *Authority) authenticate(compact string) (authenticated, *Admission, *PublicError) {
+	id := a.store.Identity()
 	// Step 1: outer JWE.
 	jwsBytes, err := openRequest(compact, id.enc, id.encPub.Thumbprint())
 	if err != nil {
-		return nil, publicErr(CodeBadEnvelope, err)
+		return authenticated{}, nil, publicErr(CodeBadEnvelope, err)
 	}
 	// Step 2: inner JWS, key lookup, signature.
 	p, err := parseJWS(string(jwsBytes), typReqJWS)
 	if err != nil {
-		return nil, publicErr(CodeBadEnvelope, err)
+		return authenticated{}, nil, publicErr(CodeBadEnvelope, err)
 	}
 	grant, known := a.store.Grant(p.kid)
 	key := grant.Sig
 	if !known {
+		if len(p.payload) > maxEnrollPayload {
+			return authenticated{}, nil, publicErr(CodeUnknownController, errors.New("kid not in grant store"))
+		}
 		op, sig := peekClaims(p.payload)
 		if (op != OpEnroll && op != OpRequestAccess) || sig == nil || sig.Thumbprint() != p.kid {
-			return nil, publicErr(CodeUnknownController, errors.New("kid not in grant store"))
+			return authenticated{}, nil, publicErr(CodeUnknownController, errors.New("kid not in grant store"))
 		}
 		key = *sig
 	}
 	pub, err := key.ECDSA()
 	if err != nil || !p.verify(pub) {
-		return nil, publicErr(CodeBadSignature, errors.New("ES256 verification failed"))
+		return authenticated{}, nil, publicErr(CodeBadSignature, errors.New("ES256 verification failed"))
 	}
 	// Step 3: the reply handle.
 	h, m, err := parseReplyHandle(p.payload)
 	if err != nil {
-		return nil, publicErr(CodeBadEnvelope, err)
+		return authenticated{}, nil, publicErr(CodeBadEnvelope, err)
 	}
 
 	// From here on the request is authentic and every failure is an
 	// encrypted reply to the signer (ctl = the verified kid).
 	adm := &Admission{auth: a, rk: h.rk, ctl: p.kid, RequestID: h.rid}
+	finish := func(code string) (authenticated, *Admission, *PublicError) {
+		out, err := a.fail(adm, code, nil)
+		if err != nil {
+			var pe *PublicError
+			errors.As(err, &pe)
+			return authenticated{}, nil, pe
+		}
+		return authenticated{}, out, nil
+	}
 	c, err := parseRequestClaims(m)
 	if err != nil {
-		return a.failClaim(adm, err)
+		var ce *claimError
+		if errors.As(err, &ce) {
+			return finish(ce.code)
+		}
+		return finish(CodeInvalidRequest)
 	}
 	adm.Op = c.Op
+	now := a.now().Unix()
 	// Step 4.
 	switch {
-	case c.Dev != id.deviceID:
-		return a.fail(adm, CodeInvalidRequest, nil)
-	case c.Gen != id.gen:
-		return a.fail(adm, CodeInvalidRequest, nil)
-	case c.Ctl != p.kid:
-		return a.fail(adm, CodeInvalidRequest, nil)
+	case c.Dev != id.deviceID, c.Gen != id.gen, c.Ctl != p.kid:
+		return finish(CodeInvalidRequest)
 	case now > c.Exp+expiryGrace:
-		return a.fail(adm, CodeExpired, nil)
+		return finish(CodeExpired)
 	case c.Iat > now+futureSkew:
-		return a.fail(adm, CodeInvalidRequest, nil)
+		return finish(CodeInvalidRequest)
 	}
 	if c.Enroll != nil && c.Enroll.Sig.Thumbprint() != c.Ctl {
-		return a.fail(adm, CodeInvalidRequest, nil)
+		return finish(CodeInvalidRequest)
 	}
-	a.prunePending(now)
-	switch c.Op {
-	case OpCmd:
-		return a.admitCmd(adm, c, grant, now)
-	case OpEnroll:
-		if c.Enroll.Inv != "" {
-			return a.enrollWithInvitation(adm, c, grant, known, now)
-		}
-		return a.enrollApproved(adm, c, grant, known, now)
-	default:
-		return a.requestAccess(adm, c, grant, known, now, origin)
-	}
-}
-
-func (a *Authority) failClaim(adm *Admission, err error) (*Admission, error) {
-	var ce *claimError
-	if errors.As(err, &ce) {
-		return a.fail(adm, ce.code, nil)
-	}
-	return a.fail(adm, CodeInvalidRequest, nil)
+	return authenticated{adm: adm, claims: c}, nil, nil
 }
 
 // fail finalizes adm with an ok:false reply. If even the reply cannot be
@@ -673,7 +778,13 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 		}
 		return gs, nil
 	})
-	if err != nil {
+	// A committed write is what a restart reads, even when its directory
+	// fsync was not confirmed (ErrDurability): the memory-only side effects
+	// must follow it, or a retry would act on a state the store already left
+	// behind (e.g. re-approve from a pending entry and rotate nk again).
+	// The reply is still internal_error; the client re-lists (§4.3).
+	committed := err == nil || errors.Is(err, ErrDurability)
+	if !committed {
 		return a.persistFailure(adm)
 	}
 	delete(a.pending, approvedPending)
@@ -686,6 +797,9 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 	// The revoked controller's seq is kept: a re-approval continues the
 	// sequence instead of restarting below what it already saw (§9).
 	_ = revoked
+	if err != nil {
+		return a.persistFailure(adm)
+	}
 	if out.failure != "" {
 		return a.fail(adm, CodeCommandFailed, map[string]string{"error": out.failure})
 	}
@@ -864,17 +978,45 @@ func (a *Authority) prunePending(now int64) {
 }
 
 // LANSourceKey is the per-LAN-source key for the pending cap (§5.2): the
-// IPv4 address, or the /64 of an IPv6 address, since one LAN host can hold a
-// whole /64 of addresses (review N3). An unparsable value is used as is.
+// IPv4 address (IPv4-mapped IPv6 included), the /64 of a global or ULA IPv6
+// address (one host can hold a whole /64), and ONE key for every link-local
+// IPv6 address (fe80::/10), whose interface identifiers a host mints at will
+// (review L6). Zones ("%eth0") are stripped. An unparsable value is used as is.
 func LANSourceKey(ip string) string {
-	addr := net.ParseIP(ip)
-	if addr == nil {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
 		return ip
 	}
-	if v4 := addr.To4(); v4 != nil {
-		return v4.String()
+	addr = addr.WithZone("").Unmap()
+	switch {
+	case addr.Is4():
+		return addr.String()
+	case addr.IsLinkLocalUnicast():
+		return "fe80::/10"
 	}
-	return addr.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	pfx, err := addr.Prefix(64)
+	if err != nil {
+		return addr.String()
+	}
+	return pfx.String()
+}
+
+// ParseCarrier parses the ff1Envelope `request` object (§10) strictly:
+// exactly {"v":1,"jwe":"<compact>"}, no duplicate, case-variant or extra
+// member (review I2), and returns the compact.
+func ParseCarrier(raw []byte) (string, error) {
+	m, err := strictObject(raw, []string{"v", "jwe"}, nil)
+	if err != nil {
+		return "", err
+	}
+	if v, err := uintMember(m, "v"); err != nil || v != 1 {
+		return "", errors.New("carrier v must be 1")
+	}
+	jwe, err := stringMember(m, "jwe")
+	if err != nil || jwe == "" {
+		return "", errors.New("carrier jwe must be a non-empty string")
+	}
+	return jwe, nil
 }
 
 // pendingCapped reports whether a NEW pending request from o would exceed a
@@ -973,6 +1115,15 @@ func (a *Authority) enrollApproved(adm *Admission, c RequestClaims, g Grant, kno
 			return a.succeed(adm, enrollResult{Role: g.Role, NK: b64u(g.NK[:]), Profile: a.store.Identity().Profile(), ExpiresAt: g.ExpiresAt})
 		}
 	}
+	if known {
+		// A record (revoked or expired) keeps its window in the store: the
+		// accepted ctr is persisted like requestAccess does (review L5), so
+		// a captured pre-approval enroll cannot be replayed later.
+		err := a.store.Update(setWindow(g.Ctl, g.Window.Accept(c.Ctr)))
+		if err != nil && !errors.Is(err, ErrDurability) {
+			return a.persistFailure(adm)
+		}
+	}
 	p, ok := a.pending[c.Ctl]
 	if !ok {
 		return a.fail(adm, CodeNotApproved, nil)
@@ -984,6 +1135,18 @@ func (a *Authority) enrollApproved(adm *Admission, c RequestClaims, g Grant, kno
 		p.window = p.window.Accept(c.Ctr)
 	}
 	return a.fail(adm, CodePending, a.pendingRes(p))
+}
+
+// insertPending records a new or refreshed request (only after any store
+// write it depends on committed).
+func (a *Authority) insertPending(p *pendingRequest, isNew bool, now int64, c RequestClaims) {
+	p.refreshedAt = now
+	p.enroll = *c.Enroll
+	p.expiresAt = min(now+pendingTTL, p.createdAt+pendingMaxLife)
+	if isNew {
+		a.pending[c.Ctl] = p
+		a.lastNewPending = now
+	}
 }
 
 func (a *Authority) pendingRes(p *pendingRequest) any {
@@ -1017,14 +1180,13 @@ func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, know
 		return a.succeed(adm, map[string]any{"status": "approved", "role": g.Role})
 	}
 	notify := true
-	if p == nil {
+	isNew := p == nil
+	if isNew {
 		if len(a.pending) >= maxPending || (a.lastNewPending != 0 && now-a.lastNewPending < pendingNewInterval) ||
 			a.pendingCapped(origin, c.Ctl) {
 			return a.fail(adm, CodeRateLimited, nil)
 		}
 		p = &pendingRequest{ctl: c.Ctl, createdAt: now, origin: origin}
-		a.pending[c.Ctl] = p
-		a.lastNewPending = now
 	} else {
 		// A refresh extends the request; it is rate-limited per ctl and
 		// re-notifies owners only when what they are shown changed.
@@ -1033,17 +1195,24 @@ func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, know
 		}
 		notify = p.enroll.Label != c.Enroll.Label || p.enroll.Platform != c.Enroll.Platform
 	}
-	p.refreshedAt = now
 	if known {
 		// A known (revoked/expired) record keeps its window in the store.
-		if err := a.store.Update(setWindow(g.Ctl, g.Window.Accept(c.Ctr))); err != nil {
+		// Persist BEFORE the request enters the table (review L4): an
+		// uncommitted write must leave no pending entry and spend no slot.
+		err := a.store.Update(setWindow(g.Ctl, g.Window.Accept(c.Ctr)))
+		if err != nil && !errors.Is(err, ErrDurability) {
+			return a.persistFailure(adm)
+		}
+		if err != nil {
+			// Committed but unconfirmed: the window moved; record the
+			// request so a retry with a new ctr is a refresh.
+			a.insertPending(p, isNew, now, c)
 			return a.persistFailure(adm)
 		}
 	} else {
 		p.window = p.window.Accept(c.Ctr)
 	}
-	p.enroll = *c.Enroll
-	p.expiresAt = min(now+pendingTTL, p.createdAt+pendingMaxLife)
+	a.insertPending(p, isNew, now, c)
 	body := map[string]any{"ctl": p.ctl, "label": p.enroll.Label, "platform": p.enroll.Platform,
 		"code": a.approvalCode(p.ctl), "expiresAt": p.expiresAt}
 	for _, owner := range a.store.Grants() {
@@ -1051,6 +1220,7 @@ func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, know
 			s, err := a.sealLocked(owner, NotificationApprovalRequest, body, now)
 			if err == nil {
 				adm.Notifications = append(adm.Notifications, s)
+				adm.Notices = append(adm.Notices, Notice{Ctl: owner.Ctl, Type: NotificationApprovalRequest, Body: body})
 			}
 		}
 	}

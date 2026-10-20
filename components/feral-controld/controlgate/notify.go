@@ -24,21 +24,29 @@ func NewPublisher(r relayer.Relayer, w ws.WS, logger *zap.Logger) *Publisher {
 	return &Publisher{relayer: r, ws: w, logger: logger}
 }
 
-// PublishSealed sends each sealed message as its §9 wire object.
-func (p *Publisher) PublishSealed(ctx context.Context, sealed []control.Sealed) {
-	for _, s := range sealed {
-		wire, err := s.Wire()
+// PublishAdmission sends the notifications an admission produced: the
+// relayer gets the authority's sealed copies, the LAN WebSocket a separately
+// sealed copy of each (§9: one seal, and one seq, per channel; review L1).
+func (p *Publisher) PublishAdmission(ctx context.Context, auth *control.Authority, adm *control.Admission) {
+	if p.relayer != nil && p.relayer.IsConnected() {
+		for _, s := range adm.Notifications {
+			if wire, err := s.Wire(); err == nil {
+				if err := p.relayer.Send(ctx, json.RawMessage(wire)); err != nil {
+					p.logger.Warn("Failed to send sealed notification via relayer", zap.Error(err))
+				}
+			}
+		}
+	}
+	if p.ws == nil {
+		return
+	}
+	for _, n := range adm.Notices {
+		s, err := auth.Seal(n.Ctl, n.Type, n.Body)
 		if err != nil {
 			continue
 		}
-		raw := json.RawMessage(wire)
-		if p.relayer != nil && p.relayer.IsConnected() {
-			if err := p.relayer.Send(ctx, raw); err != nil {
-				p.logger.Warn("Failed to send sealed notification via relayer", zap.Error(err))
-			}
-		}
-		if p.ws != nil {
-			if err := p.ws.SendAll(raw); err != nil {
+		if wire, err := s.Wire(); err == nil {
+			if err := p.ws.SendAll(json.RawMessage(wire)); err != nil {
 				p.logger.Warn("Failed to send sealed notification via websocket", zap.Error(err))
 			}
 		}
@@ -48,20 +56,24 @@ func (p *Publisher) PublishSealed(ctx context.Context, sealed []control.Sealed) 
 // notification extracts the type and message of a notification envelope as
 // the producers build it (status poller and offline cache: a map; mint
 // pairing: relayer.Response). ok is false for anything else (RPC replies).
-func notification(data any) (typ string, message json.RawMessage, ok bool) {
+type notificationMeta struct {
+	Type               string          `json:"type"`
+	NotificationType   string          `json:"notification_type"`
+	Message            json.RawMessage `json:"message"`
+	MessageID          string          `json:"messageID"`
+	PersistRecordCount int             `json:"persist_record_count"`
+}
+
+func notification(data any) (notificationMeta, bool) {
 	b, err := json.Marshal(data)
 	if err != nil {
-		return "", nil, false
+		return notificationMeta{}, false
 	}
-	var n struct {
-		Type             string          `json:"type"`
-		NotificationType string          `json:"notification_type"`
-		Message          json.RawMessage `json:"message"`
-	}
+	var n notificationMeta
 	if json.Unmarshal(b, &n) != nil || n.Type != "notification" || n.NotificationType == "" {
-		return "", nil, false
+		return notificationMeta{}, false
 	}
-	return n.NotificationType, n.Message, true
+	return n, true
 }
 
 // channelPlan says, for the current state, whether plaintext still goes out
@@ -93,7 +105,7 @@ func WrapRelayer(r relayer.Relayer, auth *control.Authority, logger *zap.Logger)
 
 // Send applies the §9 plan to notifications.
 func (s *SealingRelayer) Send(ctx context.Context, data any) error {
-	typ, msg, ok := notification(data)
+	n, ok := notification(data)
 	if !ok {
 		return s.Relayer.Send(ctx, data)
 	}
@@ -103,7 +115,7 @@ func (s *SealingRelayer) Send(ctx context.Context, data any) error {
 		firstErr = s.Relayer.Send(ctx, data)
 	}
 	if sealed {
-		for _, w := range sealAll(s.auth, typ, msg, s.logger) {
+		for _, w := range sealAll(s.auth, n, s.logger) {
 			if err := s.Relayer.Send(ctx, w); err != nil && firstErr == nil {
 				firstErr = err
 			}
@@ -126,7 +138,7 @@ func WrapWS(w ws.WS, auth *control.Authority, logger *zap.Logger) *SealingWS {
 
 // SendAll applies the §9 plan to notifications broadcast on the LAN WS.
 func (s *SealingWS) SendAll(message any) error {
-	typ, msg, ok := notification(message)
+	n, ok := notification(message)
 	if !ok {
 		return s.WS.SendAll(message)
 	}
@@ -136,7 +148,7 @@ func (s *SealingWS) SendAll(message any) error {
 		firstErr = s.WS.SendAll(message)
 	}
 	if sealed {
-		for _, w := range sealAll(s.auth, typ, msg, s.logger) {
+		for _, w := range sealAll(s.auth, n, s.logger) {
 			if err := s.WS.SendAll(w); err != nil && firstErr == nil {
 				firstErr = err
 			}
@@ -145,18 +157,19 @@ func (s *SealingWS) SendAll(message any) error {
 	return firstErr
 }
 
-func sealAll(auth *control.Authority, typ string, msg json.RawMessage, logger *zap.Logger) []json.RawMessage {
+func sealAll(auth *control.Authority, n notificationMeta, logger *zap.Logger) []json.RawMessage {
+	msg := n.Message
 	if len(msg) == 0 {
 		msg = json.RawMessage("null")
 	}
-	sealed, err := auth.SealAll(typ, msg)
+	sealed, err := auth.SealAll(n.NotificationType, msg)
 	if err != nil {
-		logger.Warn("Failed to seal notification", zap.String("notification_type", typ), zap.Error(err))
+		logger.Warn("Failed to seal notification", zap.String("notification_type", n.NotificationType), zap.Error(err))
 		return nil
 	}
 	out := make([]json.RawMessage, 0, len(sealed))
 	for _, s := range sealed {
-		if w, err := s.Wire(); err == nil {
+		if w, err := s.WireWith(n.PersistRecordCount, n.MessageID); err == nil {
 			out = append(out, w)
 		}
 	}

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 )
 
 // Op is the request operation (§3.3).
@@ -225,8 +227,8 @@ func parseEnroll(raw json.RawMessage, op Op) (Enroll, error) {
 	if e.Enc, err = ParsePublicJWK(m["enc"]); err != nil {
 		return e, invalidRequest("enroll.enc: %v", err)
 	}
-	if e.Label, err = stringMember(m, "label"); err != nil || !validLabel(e.Label) {
-		return e, invalidRequest("enroll.label must be 1-64 characters")
+	if e.Label, err = stringMember(m, "label"); err != nil || !validLabel(e.Label) || devicename.HasUnsafeCharacters(e.Label) {
+		return e, invalidRequest("enroll.label must be 1-64 characters with no control or formatting characters")
 	}
 	if e.Platform, err = stringMember(m, "platform"); err != nil || !slices.Contains(validPlatforms, e.Platform) {
 		return e, invalidRequest("enroll.platform must be one of %v", validPlatforms)

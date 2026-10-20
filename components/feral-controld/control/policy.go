@@ -68,8 +68,14 @@ func Policy(state State, route Route, cmd string, req json.RawMessage) Decision 
 // device with no remote way to finish the reset its owner asked for; the
 // reset only wipes a device that was already being wiped.
 func (a *Authority) Policy(route Route, cmd string, req json.RawMessage) Decision {
-	if cmd == cmdFactoryReset && errors.Is(a.LockErr(), ErrRetired) {
-		return allow
+	if errors.Is(a.LockErr(), ErrRetired) {
+		// Retired: factoryReset on any route, and nothing else on any route
+		// (review L2: locked alone still let relayer controller-tier
+		// plaintext through).
+		if cmd == cmdFactoryReset {
+			return allow
+		}
+		return deny(CodeLocked)
 	}
 	return Policy(a.State(), route, cmd, req)
 }

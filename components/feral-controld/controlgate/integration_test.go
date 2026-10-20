@@ -253,6 +253,17 @@ func TestControlProtocolEndToEnd(t *testing.T) {
 	if err != nil || n.Type != control.NotificationApprovalRequest || !strings.Contains(string(n.Body), wantCode) {
 		t.Fatalf("approval notification: %v %+v", err, n)
 	}
+	// Review L1: each channel got its own seal, with its own seq.
+	var rntf struct {
+		Message control.Sealed `json:"message"`
+	}
+	for _, m := range r.pubRelay.sent {
+		_ = json.Unmarshal(m, &rntf)
+	}
+	rn, err := control.OpenNotification(rntf.Message.JWE, owner.ctl, owner.nkFrom(t, nil))
+	if err != nil || rn.Seq == n.Seq || rntf.Message.JWE == ntf.Message.JWE {
+		t.Fatalf("relayer and WS copies share a seal: %v relayer seq %d ws seq %d", err, rn.Seq, n.Seq)
+	}
 	expectCode(t, r.lanEnvelope(cli, cli.build(control.OpEnroll, "", "", "")), control.CodePending)
 
 	approve := owner.build(control.OpCmd, control.CmdApproveController, `{"ctl":"`+cli.ctl+`","role":"controller"}`, "")

@@ -202,7 +202,9 @@ func TestRefusedPaintVoidsInvitation(t *testing.T) {
 	e.SetControl(fc)
 	e.paintClaimQRWithInvitation(context.Background(), true)
 	assert.Equal(t, int32(1), fc.issued.Load())
-	assert.Equal(t, int32(1), fc.cleared.Load(), "a refused paint must void the invitation it minted")
+	// One clear before the paint (nothing on screen: any old invitation goes,
+	// review I3) and one after it (the refused paint voids what it minted).
+	assert.Equal(t, int32(2), fc.cleared.Load(), "a refused paint must void the invitation it minted")
 	assert.Nil(t, e.invTimer)
 
 	// A paint that takes keeps it.
@@ -210,6 +212,26 @@ func TestRefusedPaintVoidsInvitation(t *testing.T) {
 	e = &executor{logger: zap.NewNop(), setupNarrator: &narratorSpy{}, os: mockOS, json: wrapper.NewJSON()}
 	e.SetControl(fc)
 	e.paintClaimQRWithInvitation(context.Background(), true)
-	assert.Equal(t, int32(0), fc.cleared.Load())
+	assert.Equal(t, int32(1), fc.cleared.Load(), "only the pre-paint clear; the painted invitation stays")
+	e.stopInvitationRefresh()
+}
+
+// Review I3: repainting the claim QR after another narration replaced it
+// voids the old invitation first, so the repaint mints a new one even
+// inside the 15 s watch window.
+func TestRepaintAfterReplacementMintsNewInvitation(t *testing.T) {
+	stateUnclaimed(t)
+	ctrl := gomock.NewController(t)
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(gomock.Any()).Return(nil, errors.New("absent")).AnyTimes()
+	mockOS.EXPECT().IsNotExist(gomock.Any()).Return(true).AnyTimes()
+	mockOS.EXPECT().Stat(gomock.Any()).Return(nil, errors.New("absent")).AnyTimes()
+	fc := &fakeControl{fields: []string{"i", "s", "e", "g"}, ok: true}
+	spy := &narratorSpy{calls: []string{"claim", "ready"}} // replaced by another narration
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, os: mockOS, json: wrapper.NewJSON()}
+	e.SetControl(fc)
+	e.paintClaimQRWithInvitation(context.Background(), false)
+	assert.Equal(t, int32(1), fc.cleared.Load(), "the replaced QR's invitation must be voided before the repaint")
+	assert.Equal(t, int32(1), fc.issued.Load())
 	e.stopInvitationRefresh()
 }

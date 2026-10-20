@@ -66,7 +66,7 @@ The client verifies against its pinned `devSig`. This also neutralizes F7's fake
 
 ### 2.4 Private notifications (device → controller)
 - Enrollment hands each controller a random 32-byte `nk`.
-- A notification is a JWE `dir/A256GCM` under `nk`, with protected header `{typ:ff1-ntf+jwe, ctl, seq}`, over `{v, dev, gen, ctl, seq, type, body}`.
+- A notification is a JWE `dir/A256GCM` under `nk`, with protected header exactly `{"alg":"dir","enc":"A256GCM","typ":"ff1-ntf+jwe","kid":"<ctl>"}`, over `{v, dev, gen, ctl, ep, seq, iat, type, body}` (as built: spec §9).
 - The device emits one per live grant (≤32) on both the LAN WS and the relayer notification channel, as `notification_type:"sealed"` with `persist_record_count` low.
 - Revocation simply stops emission for that controller. No WS authentication is needed, because the socket carries ciphertext only.
 - Cost is one AES-GCM per controller, not ECDH.
@@ -95,11 +95,11 @@ Envelopes over ~60 KiB need endpoint chunking on v2. To agree with Anh: either c
 ## 3. Device states and command tiers
 
 ### 3.1 States
-Reported in `/api/v2/status` (`control:{v:1, state, gen, pins}`), in `device_status`, and in a boot log line (fleet count via log streaming).
+Reported in `/api/v2/status` (as built: `control:{v:1, state, profile}`, profile = `{v, dev, gen, sig, enc}`; pins are derived from it), in `device_status`, and in a boot log line (fleet count via log streaming).
 
 - **legacy:** new firmware, no grants. Plaintext accepted as today, except for the phase-0 containment rules. The invitation QR is offered.
 - **enrolled:** at least one owner grant.
-  - LAN accepts envelopes only (plaintext → 401 `enrollment_required`).
+  - LAN accepts envelopes only (as built: plaintext → **403** `enrollment_required`).
   - Relayer plaintext is limited to the **controller tier**, so off-LAN old apps keep playback.
   - Owner-tier commands require an envelope on every route.
 - **enforced:** switched on by a `controld.json` flag in the floor release (F11).
@@ -127,7 +127,7 @@ Proposed; Sean confirms. Unknown names fail closed for non-owners, and the check
    - It sends `showPairingQRCode{show:true, purpose:"enroll"}`; the device displays the invitation. Scan, then enroll as in step 1.
    - **Possession of the topic never mints a grant.**
 3. **Later phone.**
-   - It sends `op:requestAccess` (LAN only in phase 1) with its keys and label. The device holds it as pending: ≤4 pending, 5-minute TTL, rate-limited.
+   - It sends `op:requestAccess` with its keys and label, on the LAN or via the relayer (as built: both routes, with per-route caps of 1 pending per LAN source and 2 via the relayer, under ≤4 total; spec §5.2). The device holds it as pending: 5-minute TTL, 10-minute absolute life, rate-limited.
    - The device pushes a sealed `controller_approval_request` to every owner.
    - The owner sees a sheet copied from the mint-pairing prompt layer, showing a 6-digit code derived from `controllerId`. The requester shows the same code.
    - The owner approves with an `approveController{ctl, role, expiresAt?}` envelope. The requester re-sends `enroll` and receives `{role, nk}`.
@@ -277,6 +277,8 @@ Changes against the plan, decided during implementation:
 - **Plaintext with ambiguous or duplicate top-level keys** is refused. Arguments are normalized from the judged bytes.
 - **Relayer plaintext denials** use the `{"ok":false,"error":...}` shape that released clients surface.
 - **ff-cli** never pins from LAN status; its pins come only from the owner's handoff.
+
+**Release constraint (downgrade safety): `control.enabled` MUST NOT be set in `controld.json` for any channel before the ffos M4 image (`feat/3551-ota-control-state`) is on that channel's OTA path.** An image without the carry step would drop `.state/control` on update (owners lose their grants) or, on a later downgrade/upgrade, resurrect stale grants. The M4 image also refuses to install a pre-carry target ("Refusing update: target image cannot carry controller state", classified permanent by otagate).
 
 Still open before a release train:
 1. Hardware: FF1-8EVTK3RE was unreachable during implementation. Still to run:
