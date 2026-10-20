@@ -61,9 +61,10 @@ func castRequest(command string, topicHeader *string) *http.Request {
 func strPtr(s string) *string { return &s }
 
 // TestCastTopicGate pins the feral-file#3551 phase-0 policy on /api/cast:
-// on a claimed device sshAccess and connect need X-FF1-Topic equal to the
-// current topic (no topic yet = refuse); unclaimed devices and every other
-// command are untouched. A refusal never reaches the command router — the
+// on a claimed device sshAccess needs X-FF1-Topic equal to the current topic
+// (no topic yet = refuse); unclaimed devices and every other command —
+// connect included, which the released app sends before every LAN cast
+// without the header — are untouched. A refusal never reaches the command router — the
 // mock carries no expectation, so any call through fails the test.
 func TestCastTopicGate(t *testing.T) {
 	for _, tt := range []struct {
@@ -78,11 +79,10 @@ func TestCastTopicGate(t *testing.T) {
 		{"claimed sshAccess with wrong header", claimedWithTopic, commands.CMD_SSH_ACCESS, strPtr("topic-wrong"), false},
 		{"claimed sshAccess with topic prefix", claimedWithTopic, commands.CMD_SSH_ACCESS, strPtr(testTopic[:len(testTopic)-1]), false},
 		{"claimed sshAccess with right header", claimedWithTopic, commands.CMD_SSH_ACCESS, strPtr(testTopic), true},
-		{"claimed connect without header", claimedWithTopic, commands.CMD_CONNECT, nil, false},
-		{"claimed connect with wrong header", claimedWithTopic, commands.CMD_CONNECT, strPtr("topic-wrong"), false},
-		{"claimed connect with right header", claimedWithTopic, commands.CMD_CONNECT, strPtr(testTopic), true},
+		{"claimed connect without header stays open (released app casts)", claimedWithTopic, commands.CMD_CONNECT, nil, true},
+		{"claimed connect with wrong header stays open", claimedWithTopic, commands.CMD_CONNECT, strPtr("topic-wrong"), true},
 		{"claimed but no topic yet refuses sshAccess even with a header", claimedNoTopic, commands.CMD_SSH_ACCESS, strPtr(testTopic), false},
-		{"claimed but no topic yet refuses connect", claimedNoTopic, commands.CMD_CONNECT, nil, false},
+		{"claimed with no topic yet leaves connect open", claimedNoTopic, commands.CMD_CONNECT, nil, true},
 		{"claimed but no topic yet refuses an empty header", claimedNoTopic, commands.CMD_SSH_ACCESS, strPtr(""), false},
 		{"unclaimed sshAccess stays open", unclaimed, commands.CMD_SSH_ACCESS, nil, true},
 		{"unclaimed connect stays open (first claim)", unclaimed, commands.CMD_CONNECT, nil, true},

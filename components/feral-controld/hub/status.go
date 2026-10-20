@@ -133,7 +133,7 @@ func (h *hub) serveStatus(w http.ResponseWriter, r *http.Request, contract strin
 	// phase 0, LAN containment). The topic is a bearer credential on
 	// ff-relayer: serving it to any LAN peer of a claimed device handed that
 	// peer remote control of an owned frame, and with it the topic-gated LAN
-	// commands (sshAccess, connect — see lanauth.go). Unclaimed devices keep
+	// surfaces (sshAccess, screenshot — see lanauth.go). Unclaimed devices keep
 	// serving it because the first claim reads it here.
 	//
 	// Multi-phone still works without it: a second phone joins through an

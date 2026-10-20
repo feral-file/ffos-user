@@ -26,29 +26,27 @@ const TopicHeader = "X-FF1-Topic"
 const topicRequiredBody = `{"error":{"code":"topic_required"}}` + "\n"
 
 // topicGatedCommands are the /api/cast commands a LAN caller may run on a
-// CLAIMED device only by presenting the current topic in TopicHeader:
+// CLAIMED device only by presenting the current topic in TopicHeader. Today
+// that is sshAccess alone: it opens a shell as feralfile, who has passwordless
+// sudo — strictly more than the topic grants, so it must never be cheaper than
+// the topic.
 //
-//   - sshAccess opens a shell as feralfile, who has passwordless sudo — strictly
-//     more than the topic grants, so it must never be cheaper than the topic.
-//   - connect overwrites the persisted claim record with no proof (#3551 F5).
-//     HAZARD: ff-app sends connect LAN-first before every playlist cast
-//     (canvas_client_service_v2 connectToDevice), does not send TopicHeader,
-//     and does not fall back to the relayer on a LAN HTTP error. Gating
-//     connect therefore fails LAN casts from an app without the header on a
-//     claimed device; ship it only together with an app that sends the
-//     header, or drop connect from this set.
+// connect deliberately stays open in phase 0: the released ff-app sends it
+// LAN-first before every cast, without the header and with no relayer fallback
+// on a LAN HTTP error, so gating it would break casting. An open connect only
+// rewrites the claim record and confers no authority; the phase-1 control
+// protocol makes it owner-tier.
 //
-// Unclaimed devices leave both open: the first claim must keep working, and an
+// Unclaimed devices leave sshAccess open: the first claim must keep working, and an
 // unclaimed device serves its topic on /api/v2/status anyway. Relayer-originated
 // commands never pass through the hub (the mediator calls the command router
 // directly), and the relayer already proved the topic, so they are unaffected.
 //
 // Deliberately NOT gated here, documented residuals until #3551 phase 1:
-// factoryReset, startWifiSetup, and the keyboard/mouse/gesture input commands
-// stay open to any LAN caller.
+// connect, factoryReset, startWifiSetup, showPairingQRCode, and the
+// keyboard/mouse/gesture input commands stay open to any LAN caller.
 var topicGatedCommands = map[commands.Type]bool{
 	commands.CMD_SSH_ACCESS: true,
-	commands.CMD_CONNECT:    true,
 }
 
 // topicGatedRoutes are whole hub routes (keyed on the middleware route label)

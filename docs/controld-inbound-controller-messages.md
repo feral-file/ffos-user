@@ -203,13 +203,11 @@ Current error cases:
 
 Current relayer error response: none standardized; command failure is logged.
 
-LAN hub (`POST :1111/api/cast`) requirement (feral-file#3551 phase 0): on a
-**claimed** device, `connect` must carry the header `X-FF1-Topic` equal to the
-device's current relayer topic. A missing or wrong header, or a claimed device
-that holds no topic yet, is refused with HTTP `401` and the body
-`{"error":{"code":"topic_required"}}` before the executor runs. An unclaimed
-device accepts `connect` without the header (the first claim). Relayer-delivered
-`connect` is unaffected — the relayer already proved the topic.
+LAN hub (`POST :1111/api/cast`): `connect` needs no `X-FF1-Topic` header,
+claimed or not. It is a feral-file#3551 phase-0 residual: the released ff-app
+sends it LAN-first before every cast without the header, so it stays open until
+the phase-1 control protocol makes it owner-tier. An open `connect` only
+rewrites the claim record and confers no authority.
 
 ### showPairingQRCode
 
@@ -3162,8 +3160,8 @@ Rules:
   `factoryReset`, `updateToLatestVersion`, `sshAccess`) should remain explicit
   command names with narrow request bodies.
 - LAN hub authorization is phase 0 of feral-file#3551 (containment): on a
-  claimed device, only `sshAccess` and `connect` (plus `GET /api/screenshot`)
-  require the `X-FF1-Topic` header; see those sections. Every other command,
-  including `factoryReset`, `startWifiSetup`, `showPairingQRCode`, and the
+  claimed device, only `sshAccess` (plus `GET /api/screenshot`) requires the
+  `X-FF1-Topic` header; see that section. Every other command, including
+  `connect`, `factoryReset`, `startWifiSetup`, `showPairingQRCode`, and the
   keyboard/mouse/gesture input commands, stays open to any LAN caller until
   phase 1.
