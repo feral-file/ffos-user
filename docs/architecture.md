@@ -310,3 +310,45 @@ individual v1 transport may be removed or repurposed in isolation.
 10. `feral-sys-monitord` exposes D-Bus RPC (`GetConnectivityStatus`, `GetSysMetrics`), relied on by `feral-controld`. Do not remove without a coordinated update to all callers.
 11. The unauthenticated `:1111` command API, `:1111/metrics`, and the system-wide `ip_unprivileged_port_start=80` sysctl are accepted, release-scoped surfaces whose end state is v2 screen-anchored pairing (#3471). Add LAN authorization at the hub's shared middleware chokepoint, not by diverging individual routes.
 12. `feral-controld` may REPORT a health condition to `feral-watchdog` over D-Bus (today: `cdp_stuck`, ffos-user#356), but must never itself call `systemctl restart`/`reboot` on Chromium's behalf or decide to. `feral-watchdog`'s `ChromiumMonitor` remains the sole owner of that decision, folding any such report into its existing restart/fallback-hold/reboot-cap ladder and suppression gates rather than acting on it directly.
+
+### Merged pairing broker rollout
+
+The Worker in `feral-file/ff-relayer#25` hosts the existing `/v1/*` encrypted
+pairing exchange alongside the legacy `/api/*` control adapter. A staged FF1
+can use one host for both without changing the Go pairing client's wire format:
+
+```json
+{
+  "relayer": { "endpoint": "wss://relay.example", "apiKey": "" },
+  "mintPairing": { "enabled": true, "brokerBaseURL": "https://relay.example" }
+}
+```
+
+The daemon adds `/api/connection` even when the optional compatibility key is
+empty. Query parameters are encoded individually. The Worker must explicitly
+enable `LEGACY_API_ENABLED=true` for this client. For isolated LAN development,
+use `ws://<machine-ip>:8787` and `http://<machine-ip>:8787`, with the Worker's
+local-only `DEV_INSECURE_LAN=true` setting. Never use this HTTP setting for the
+production deployment.
+
+Back up `~/.config/controld.json` and `~/.state/controld.state` before switching
+relayers. A topic signed by another relayer's HMAC key cannot be reused. Stop the
+service before changing its persisted topic, preserve the rest of the state,
+and retain the originals for rollback. Changing a topic is not ownership
+migration. Existing channels on the standalone broker are not imported into
+SQLite; drain them or restart pairing at a declared cutoff.
+
+The current Go minter and daemon remain compatibility clients. The Worker's
+`/v2/players/{playerId}/connections` route is an opaque bridge, not authorization.
+Do not connect the current plaintext command router to it. The shared
+feral-file/feral-file#3551 endpoint protocol must first define and test independent
+controller keys, identity binding, replay rejection, permissions, expiry and
+revocation on already-open LAN/relay connections. Old topics and browser tokens
+must never become owner grants. The earlier MQTT authentication document is a
+design draft, not an implemented substitute for that protocol.
+
+A 2026-10-20 local test on FF1-SKYZ2E3A verified command replies, notifications,
+app approval, Play browser casting, and Chromium screenshot output through the
+merged broker and compatibility adapter. It did not verify v2/E2EE control or
+physical HDMI output. Keep the standalone broker and legacy endpoints until the
+new endpoint flow passes staging, including LAN operation with relay disabled.

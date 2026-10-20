@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
@@ -352,31 +351,17 @@ func (r *relayer) Connect(ctx context.Context) error {
 		return ErrAlreadyConnected
 	}
 
-	// Create URL with topicID if available
-	connectURL := r.endpoint
-
-	if r.apiKey != "" {
-		connectURL += fmt.Sprintf("/api/connection?apiKey=%s", r.apiKey)
-	}
-
-	// Single snapshot: topicID and isReady must come from the SAME write, not
-	// two separate GetState() reads that could straddle a concurrent
-	// clearPersistedClaim()/topic assignment.
+	// Snapshot the claim once so topic and readiness cannot straddle a reset.
 	claim := state.ClaimSnapshot()
 	topicID := claim.TopicID
-	r.logger.Info("Retrieved topic ID from state",
-		zap.String("topicID", topicID),
-		zap.Bool("isEmpty", topicID == ""),
-		zap.Bool("isReady", claim.TopicReady))
-
-	if topicID != "" {
-		connectURL += fmt.Sprintf("&topicID=%s", topicID)
-		r.logger.Debug("Added topic ID to connection URL", zap.String("connectURL", connectURL))
-	} else {
-		r.logger.Warn("Topic ID is empty, connecting without topic ID",
-			zap.String("connectURL", connectURL),
-			zap.String("stateFile", constants.STATE_FILE))
+	connectURL, err := legacyConnectionURL(r.endpoint, r.apiKey, topicID)
+	if err != nil {
+		r.Unlock()
+		return err
 	}
+	r.logger.Info("Connecting to legacy relayer",
+		zap.Bool("hasTopic", topicID != ""),
+		zap.Bool("topicReady", claim.TopicReady))
 
 	conn, resp, err := r.dialer.DialContext(ctx, connectURL, nil)
 	if err != nil {
