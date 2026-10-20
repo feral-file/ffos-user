@@ -145,9 +145,12 @@ probe outcome).
 
 ## Control Protocol Envelope (`ff1Envelope`, feral-file#3551)
 
-Active only when `controld.json` sets `"control":{"enabled":true}`. With the
-flag off, `ff1Envelope` is an unknown command like any other (forwarded to
-the player, which rejects it) and nothing below applies. The normative
+Active when `controld.json` sets `"control":{"enabled":true}`, and always on
+a device that already has control state (`.state/control/` or the
+factory-reset tombstone), whatever the config says: the config is replaced by
+every full-image OTA and must never reopen an owned device. With the
+protocol off, `ff1Envelope` is an unknown command like any other (forwarded
+to the player, which rejects it) and nothing below applies. The normative
 contract is `docs/ff1-control-v1.md`; this section is the message-level
 summary.
 

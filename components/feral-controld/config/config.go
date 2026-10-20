@@ -320,33 +320,51 @@ func (c *Config) ContentPolicyTuning(logger *zap.Logger) ContentPolicyConfig {
 }
 
 // ControlConfig is the decoded "control" block.
+//
+// controld.json is replaced on every full-image OTA from a release-level
+// secret (plan fact F11), so this block is a RELEASE setting, not a device
+// one, and it must never be able to reopen a device that already has control
+// state: main forces the protocol on whenever .state/control (or its
+// retirement tombstone) exists, whatever Enabled says. See control_wiring.go.
 type ControlConfig struct {
-	// Enabled turns the control protocol on: identity, envelopes, plaintext
-	// policy, sealed notifications. Off (the default) leaves every transport
-	// exactly as it was before the protocol existed.
+	// Enabled decides only whether a device WITHOUT control state starts the
+	// protocol (creates its identity and offers invitations).
 	Enabled bool `json:"enabled"`
-	// Enforced is the §7.2 "enforced" switch (phase 2): relayer plaintext is
-	// cut to the exact Play cast shape and relayer plaintext notifications
-	// stop. Meaningful only with Enabled.
+	// Enforced is the §7.2 "enforced" switch (phase 2). It can only make a
+	// device stricter than enrolled, never less strict.
 	Enforced bool `json:"enforced"`
+	// Malformed records that the block (or one of its fields) did not
+	// decode; the affected fields read false.
+	Malformed bool `json:"-"`
 }
 
-// ControlTuning decodes the control block. Absent or malformed means
-// disabled: a malformed block must not crash-loop the daemon, and "disabled"
-// is the pre-protocol behavior every device ran until this release. (Once a
-// fleet depends on enforcement, revisit: a typo then silently reopens the
-// plaintext surfaces, which the Warn below is the only trace of.)
+// ControlTuning decodes the control block field by field, so one bad value
+// does not take the other with it. Absent means disabled and not enforced.
+// A malformed field reads false and sets Malformed: for Enabled that only
+// affects devices without control state, and for Enforced false is still
+// the enrolled policy, so both degrade safely.
 func (c *Config) ControlTuning(logger *zap.Logger) ControlConfig {
 	var t ControlConfig
-	if len(c.Control) == 0 {
+	if len(c.Control) == 0 || string(c.Control) == "null" {
 		return t
 	}
-	if err := json.Unmarshal(c.Control, &t); err != nil {
-		if logger != nil {
-			logger.Warn("control config block malformed; control protocol disabled",
-				zap.Error(err), zap.String("raw", string(c.Control)))
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(c.Control, &fields); err != nil {
+		t.Malformed = true
+	}
+	for name, dst := range map[string]*bool{"enabled": &t.Enabled, "enforced": &t.Enforced} {
+		raw, ok := fields[name]
+		if !ok {
+			continue
 		}
-		return ControlConfig{}
+		if err := json.Unmarshal(raw, dst); err != nil {
+			*dst = false
+			t.Malformed = true
+		}
+	}
+	if t.Malformed && logger != nil {
+		logger.Error("control config block malformed; bad fields read as false (devices with control state keep enforcing it)",
+			zap.String("raw", string(c.Control)))
 	}
 	return t
 }

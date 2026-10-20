@@ -25,6 +25,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
@@ -1012,7 +1013,7 @@ func initializeApp(
 
 	// Control protocol (feral-file#3551): nil unless control.enabled. The
 	// notification producers get sealing handles when it is on (§9).
-	controlWire := newControlWiring(controlConfig, deviceIDFromHostname(), logger)
+	controlWire := newControlWiring(controlConfig, deviceIDFromHostname(), control.DefaultDir, &control.OSFS{}, logger)
 	notifyRelayer, notifyWS := controlWire.notificationHandles(relayer, wsHandler, logger)
 
 	// StatusPoller

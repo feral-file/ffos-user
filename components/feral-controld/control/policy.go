@@ -1,6 +1,9 @@
 package control
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+)
 
 // Route is the transport a PLAINTEXT command arrived on. It matters only for
 // plaintext (§7.2); an envelope's authority never depends on its route.
@@ -57,9 +60,21 @@ func Policy(state State, route Route, cmd string, req json.RawMessage) Decision 
 }
 
 // Policy applies the package Policy in the authority's current state.
+//
+// One exception: a RETIRED authority (factory reset in progress, or a reset
+// that rolled back after the control directory was deleted) accepts a
+// plaintext factoryReset on either route. Locked otherwise refuses every
+// owner-tier plaintext and every envelope, which would leave a rolled-back
+// device with no remote way to finish the reset its owner asked for; the
+// reset only wipes a device that was already being wiped.
 func (a *Authority) Policy(route Route, cmd string, req json.RawMessage) Decision {
+	if cmd == cmdFactoryReset && errors.Is(a.LockErr(), ErrRetired) {
+		return allow
+	}
 	return Policy(a.State(), route, cmd, req)
 }
+
+const cmdFactoryReset = "factoryReset"
 
 // isPlayCastShape is the exact enforced-state relayer allowance (§7.2): a
 // request with exactly the members intent and dp1_call, intent exactly

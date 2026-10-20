@@ -2,6 +2,7 @@ package control
 
 import (
 	"errors"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -261,16 +262,34 @@ func TestRetire(t *testing.T) {
 	if _, err := d.fs.Stat(d.dir); err == nil {
 		t.Fatal("control dir survived Retire")
 	}
+	if _, err := d.fs.Stat(RetiredMarker(d.dir)); err != nil {
+		t.Fatal("no retirement tombstone")
+	}
 	if d.a.State() != StateLocked || !errors.Is(d.a.LockErr(), ErrRetired) {
 		t.Fatalf("state after retire = %s", d.a.State())
 	}
 	if publicCode(func() error { _, err := d.a.Open(d.seal(owner, d.cmdClaims(owner, "rotate", `{}`))); return err }()) != CodeLocked {
 		t.Fatal("retired authority admitted a request")
 	}
-	// The next start finds no directory and comes up legacy with a new gen.
+	// A restart on the same subvolume (the reset rolled back) stays retired:
+	// the tombstone forces locked rather than "no state".
 	a, _ := New(Config{Dir: d.dir, DeviceID: testDeviceID, FS: d.fs})
+	if a.State() != StateLocked || !errors.Is(a.LockErr(), ErrRetired) || !StateExists(d.fs, d.dir) {
+		t.Fatalf("restart after retire: %s %v", a.State(), a.LockErr())
+	}
+	// Retired accepts plaintext factoryReset (so the reset can be retried)
+	// and nothing else owner-tier.
+	if !a.Policy(RouteLAN, "factoryReset", nil).Allow || !a.Policy(RouteRelayer, "factoryReset", nil).Allow {
+		t.Fatal("retired device refuses the reset retry")
+	}
+	if a.Policy(RouteLAN, "displayPlaylist", nil).Allow || a.Policy(RouteRelayer, "sshAccess", nil).Allow {
+		t.Fatal("retired device opened other plaintext")
+	}
+	// A completed reset boots a subvolume without the tombstone: legacy, new gen.
+	_ = d.fs.RemoveAll(RetiredMarker(d.dir))
+	a, _ = New(Config{Dir: d.dir, DeviceID: testDeviceID, FS: d.fs})
 	if a.State() != StateLegacy || a.Store().Identity().Gen() == d.id.gen {
-		t.Fatal("restart after retire did not start over")
+		t.Fatal("fresh subvolume did not start over")
 	}
 	// A failing delete is reported and still locks.
 	d2, _, _ := ownerDevice(t)
@@ -279,7 +298,44 @@ func TestRetire(t *testing.T) {
 	if err := s.Retire(); err == nil || !errors.Is(s.LockErr(), ErrLocked) {
 		t.Fatal("failed retire not reported or not locked")
 	}
+	// If the tombstone cannot be written nothing is deleted.
+	d3, _, _ := ownerDevice(t)
+	d3.fs.FailWrite = func(name string) error {
+		if strings.HasSuffix(name, ".retired") {
+			return errors.New("enospc")
+		}
+		return nil
+	}
+	if err := d3.a.Retire(); err == nil {
+		t.Fatal("retire without a tombstone reported success")
+	}
+	if _, err := d3.fs.Stat(d3.dir); err != nil {
+		t.Fatal("control dir deleted although the tombstone was not written")
+	}
 }
+
+func TestStateExists(t *testing.T) {
+	fsys := NewMemFS()
+	if StateExists(fsys, "/s/control") {
+		t.Fatal("empty fs has state")
+	}
+	fsys.SetFile("/s/control.retired", []byte("{}"))
+	if !StateExists(fsys, "/s/control") {
+		t.Fatal("tombstone not counted")
+	}
+	fsys2 := NewMemFS()
+	_ = InitDir(fsys2, "/s/control", testIdentity(t), nil)
+	if !StateExists(fsys2, "/s/control") {
+		t.Fatal("dir not counted")
+	}
+	if !StateExists(statErrFS{fsys}, "/s/x") {
+		t.Fatal("an unreadable answer must count as present")
+	}
+}
+
+type statErrFS struct{ *MemFS }
+
+func (statErrFS) Stat(string) (fs.FileInfo, error) { return nil, errors.New("eio") }
 
 type failRemoveFS struct{ *MemFS }
 

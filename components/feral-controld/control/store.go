@@ -133,6 +133,9 @@ func InitDir(fsys FS, dir string, id *Identity, grants []Grant) error {
 // LoadStore loads an existing directory. A missing directory returns an
 // error wrapping errNoDir; anything else wrong returns ErrLocked.
 func LoadStore(fsys FS, dir, deviceID string) (*Store, error) {
+	if _, err := fsys.Stat(RetiredMarker(dir)); err == nil || !isNotExist(err) {
+		return nil, ErrRetired
+	}
 	fi, err := fsys.Stat(dir)
 	if isNotExist(err) {
 		return nil, errNoDir
@@ -193,17 +196,45 @@ func (s *Store) LockErr() error {
 	return s.lockErr
 }
 
+// RetiredMarker is the tombstone Retire writes next to the control directory
+// (dir + ".retired") before deleting it. While it exists the device is
+// locked-retired whatever controld.json says: a reset that rolls back onto
+// this subvolume after the directory was deleted must not come back as "no
+// control state", which with control.enabled=false would mean open. A reset
+// that completes boots a subvolume without it.
+func RetiredMarker(dir string) string { return dir + ".retired" }
+
+// StateExists reports whether dir holds control state: the directory, its
+// staging dir, or the retirement tombstone. Anything Stat cannot rule out
+// (an error other than not-exist) counts as present: the answer decides
+// whether the protocol is forced on, and "unsure" must fail closed.
+func StateExists(fsys FS, dir string) bool {
+	for _, p := range []string{dir, RetiredMarker(dir)} {
+		if _, err := fsys.Stat(p); err == nil || !isNotExist(err) {
+			return true
+		}
+	}
+	return false
+}
+
 // Retire deletes the control directory (factory reset, §8) and locks the
-// store so nothing is admitted or persisted afterwards. The lock is taken
-// first, so even a partly failed delete leaves the store refusing; the error
-// is still returned, and the caller must not proceed with the reset, because
-// a reset that rolls back onto this subvolume would otherwise keep the
-// previous owner's grants.
+// store so nothing is admitted or persisted afterwards. Order: lock in
+// memory, write the durable tombstone, then delete. If the tombstone cannot
+// be written nothing is deleted and the error is returned; the caller must
+// not proceed with the reset. A partly failed delete also returns the error
+// with the store already locked.
 func (s *Store) Retire() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lockErr = ErrRetired
 	s.grants = nil
+	parent := filepath.Dir(s.dir)
+	if err := s.fs.MkdirAll(parent, 0o750); err != nil {
+		return err
+	}
+	if _, err := s.fs.WriteFileAtomic(RetiredMarker(s.dir), []byte(`{"v":1}`), 0o600); err != nil {
+		return err
+	}
 	if err := s.fs.RemoveAll(s.dir); err != nil {
 		return err
 	}

@@ -409,12 +409,41 @@ Rules:
   becomes `legacy` automatically, and the files are left untouched.
 - Every write goes through the same checks first, so the device cannot persist
   a file it would lock on.
-- Factory reset deletes the directory before anything else in its sequence
-  (before the claim is cleared and before the reset unit starts). If the
-  delete fails the reset is refused: a reset that rolls back onto the running
-  subvolume must not keep the previous owner's grants. Until the process
-  restarts the retired authority is `locked`; after it, the missing directory
-  means a new identity in `legacy`.
+- Factory reset retires the directory before anything else in its sequence
+  (before the claim is cleared and before the reset unit starts):
+  1. it durably writes the tombstone `/home/feralfile/.state/control.retired`;
+  2. it deletes the directory.
+  If the tombstone cannot be written nothing is deleted and the reset is
+  refused; if the delete fails the reset is refused too. While the tombstone
+  exists the device is `locked` (retired) whatever the configuration says,
+  so a reset that rolls back onto the running subvolume after the directory
+  was deleted can never come back as "no control state", which with the
+  protocol disabled in config would mean open. A retired device accepts one
+  plaintext command on either route, `factoryReset`, so the owner can retry
+  the reset; everything else is refused as `locked`. A completed reset boots
+  a subvolume without the tombstone, and the missing directory then means a
+  new identity in `legacy`.
+
+### 8.1 Configuration never reopens a device
+
+`controld.json` is replaced on every full-image OTA from a release-level
+secret, so its `control` block is a release setting, not a device one. The
+device decides whether the protocol runs from its own state first:
+
+| Control state on disk (`control/`, `control.new/`, or `control.retired`; anything `stat` cannot rule out counts as present) | `control.enabled` | Result |
+|---|---|---|
+| present | any value, absent, or malformed | protocol on, policy from the persisted state |
+| absent | `true` | protocol on: new identity in `legacy`, invitations offered |
+| absent | `false`, absent, or malformed | protocol off: transports exactly as before the protocol |
+
+`control.enforced` only ever tightens `enrolled` to `enforced`. A malformed
+value reads as `false`, which is still the `enrolled` policy. A malformed
+block is logged as an error and never relaxes a device that has state. If
+the hostname cannot be read while state exists, the protocol still runs
+(envelopes then fail their `dev` check and the plaintext policy applies).
+
+The OTA carry-forward (ffos `feral-system-update.sh`) MUST carry
+`control.retired` along with `control/`.
 - OTA carries the directory live: see ffos `feral-system-update.sh`.
 
 ## 9. Sealed notifications (FF1 → one controller)

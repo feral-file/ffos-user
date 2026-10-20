@@ -16,28 +16,56 @@ import (
 )
 
 // controlWiring is the feral-file#3551 control protocol as built for one
-// daemon run (docs/ff1-control-v1.md). With control.enabled=false (the
-// default) newControlWiring returns nil and every transport is wired exactly
-// as before: no authority, no wrappers, no policy.
+// daemon run (docs/ff1-control-v1.md). nil means the protocol is off and
+// every transport is wired exactly as before: no authority, no wrappers, no
+// policy.
 type controlWiring struct {
 	auth *control.Authority
 }
 
-// newControlWiring builds the authority when enabled. A failure to build it
-// (no hostname) disables the protocol for this run rather than the daemon:
-// controld is the recovery channel and must start.
-func newControlWiring(cfg config.ControlConfig, deviceID string, logger *zap.Logger) *controlWiring {
-	if !cfg.Enabled {
+// unknownDeviceID stands in when the hostname cannot be read but control
+// state forces the protocol on: every envelope then fails its dev check, and
+// the plaintext policy still applies. Failing closed beats starting open.
+const unknownDeviceID = "FF1-UNKNOWN"
+
+// newControlWiring decides whether the protocol runs and builds it.
+//
+// The decision FAILS CLOSED (spec §8). controld.json is replaced on every
+// full-image OTA from a release-level secret, so config alone must never be
+// able to switch a device back to open:
+//   - control state on disk (the directory, its staging dir, or the
+//     retirement tombstone; anything Stat cannot rule out counts) forces the
+//     protocol on, whatever control.enabled says or whether it parsed;
+//   - control.enabled only decides whether a device WITHOUT control state
+//     starts the protocol (creates its identity, offers invitations);
+//   - control.enforced only ever tightens enrolled to enforced.
+func newControlWiring(cfg config.ControlConfig, deviceID, dir string, fsys control.FS, logger *zap.Logger) *controlWiring {
+	hasState := control.StateExists(fsys, dir)
+	if !hasState && !cfg.Enabled {
 		return nil
 	}
-	auth, err := control.New(control.Config{DeviceID: deviceID, Enforced: cfg.Enforced})
+	if hasState && !cfg.Enabled {
+		logger.Warn("Control state exists on disk; running the control protocol although control.enabled is off",
+			zap.Bool("config_malformed", cfg.Malformed))
+	}
+	if deviceID == "" {
+		if !hasState {
+			logger.Error("Control protocol enabled but the hostname is unreadable; not starting it")
+			return nil
+		}
+		logger.Error("Hostname unreadable; control state forces the protocol on with an unknown device id (envelopes will fail)")
+		deviceID = unknownDeviceID
+	}
+	auth, err := control.New(control.Config{Dir: dir, DeviceID: deviceID, Enforced: cfg.Enforced, FS: fsys})
 	if err != nil {
-		logger.Error("Control protocol enabled but could not start; running without it", zap.Error(err))
+		// Only a programming error (empty DeviceID) gets here.
+		logger.Error("Control protocol could not start", zap.Error(err))
 		return nil
 	}
 	// The boot line the fleet count reads (plan §3.1): one per start.
 	st := auth.Status()
-	fields := []zap.Field{zap.String("control_state", string(st.State)), zap.Bool("control_enforced", cfg.Enforced)}
+	fields := []zap.Field{zap.String("control_state", string(st.State)), zap.Bool("control_enforced", cfg.Enforced),
+		zap.Bool("control_enabled_config", cfg.Enabled), zap.Bool("control_state_on_disk", hasState)}
 	if st.Profile != nil {
 		fields = append(fields, zap.String("control_gen", st.Profile.Gen))
 	}
