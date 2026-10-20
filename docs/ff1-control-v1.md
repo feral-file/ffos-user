@@ -733,15 +733,20 @@ showed what goes wrong without them.
    - A `gen` reported by status or a notification never selects a grant.
    - Once a new grant is confirmed, the controller deletes its other grants for
      that device.
-3. **Reset evidence.** Public errors (`bad_envelope`, `unknown_controller`,
-   `bad_signature`) are unauthenticated and are never evidence that a device was
-   reset. Only these count:
-   - the controller's own successful `factoryReset`;
-   - the relayer itself (over TLS) reporting that the stored topic has no device,
-     together with a live LAN status showing a different `gen`.
+3. **Reset evidence and recovery.** Public errors (`bad_envelope`,
+   `unknown_controller`, `bad_signature`) are unauthenticated and are never
+   evidence of a reset. The relayer reporting "no device on this topic" (1003)
+   is also weak: it is what an offline device looks like.
 
-   Until such evidence exists, the controller keeps sealing to the confirmed
-   grant and offers no status-pinned enrollment.
+   So a controller that holds a grant for a device MUST NOT re-enroll with that
+   device using a network-pinned profile. Its only recovery actions are:
+   - scanning the physical claim QR (§5.1, pins from the screen);
+   - a user-confirmed Remove of its local grant, after which it is a new
+     controller.
+
+   Until the user does one of these, it keeps sealing to the confirmed grant.
+   A `requestAccess` reply of `approved` for a key that has never held a grant is
+   treated as pending: the approval code is always shown and compared.
 4. **Retries.** Every resend is a new envelope with a new `ctr`, `rid` and `rk`.
    A request whose outcome is unknown is resent only where the command is safe to
    repeat.
