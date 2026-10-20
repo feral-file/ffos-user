@@ -1,6 +1,6 @@
 # feral-file#3551 — Brandon's execution plan: endpoint authorization and E2EE
 
-Status: draft, 2026-10-20. Built from the issue thread through Anh's 2026-10-19 09:45 comment, ff-relayer#25, Anh's open relay PRs (ff-relayer#26, ffos-user#407, ff-app#1138, ff1-cli#133, play#23), and a read of ffos-user develop @48ab2ad, ffos develop @c9ca7fa, ff-app main, ff1-cli main @71f6495, ff-relayer main @49251b4 and the play repo.
+Status: in implementation, 2026-10-20. Phase 0 (ffos-user `feat/3551-phase0-lan-containment`, ff1-cli `feat/3551-phase0-topic-header`), M1 (`control/` package + fixtures) and M4 (ffos `feat/3551-ota-control-state`) are committed locally. Built from the issue thread through Anh's 2026-10-19 09:45 comment, ff-relayer#25, Anh's open relay PRs (ff-relayer#26, ffos-user#407, ff-app#1138, ff1-cli#133, play#23), and a read of ffos-user develop @48ab2ad, ffos develop @c9ca7fa, ff-app main, ff1-cli main @71f6495, ff-relayer main @49251b4 and the play repo.
 
 ## 0. The split
 
@@ -147,13 +147,13 @@ One FF OS release (controld package rail) plus an ff-cli patch; no app change.
 
 - **P0-1 ffos-user, hub middleware at the seam (F2):**
   - On a claimed device, LAN `sshAccess` requires the header `X-FF1-Topic` equal to the current topic (constant-time compare).
-  - On a claimed device, LAN `connect` requires the same header.
-  - First claim of an unclaimed device stays open.
+  - `/api/screenshot` requires the same header on a claimed device (otherwise any LAN client can show the claim QR and screenshot the topic).
+  - `connect` stays open: the released app sends it LAN-first before every cast without the header and with no relayer fallback. It only rewrites the claim record; phase 1 makes it owner-tier.
   - `/api/status` and `/api/v2/status` omit `topic_id` once claimed. The second phone uses "Show Pairing QR Code" (F14).
   - Audit every LAN-served payload for the topic: status, `getDeviceStatus` reply, notifications, `/metrics`, logs, mDNS.
   - Update the `hub/status.go:132` rationale comment.
 - **P0-2 ff1-cli:** `ssh enable|disable` sends `X-FF1-Topic` from the keyring. A clear error on 401 tells the user to re-pair.
-- **Residual, documented:** reset, Wi-Fi setup and input stay open on LAN until phase 1. A sole-phone owner who loses that phone re-pairs only via reset.
+- **Residual, documented:** `connect`, reset, Wi-Fi setup, `showPairingQRCode` and input stay open on LAN until phase 1. A sole-phone owner who loses that phone re-pairs only via reset.
 - **Check:** from a laptop on the Wi-Fi, `curl …/api/v2/status` has no `topic_id`, and `sshAccess` without the header gets 401. App pairing a second phone via the QR still works.
 
 ### Phase 1 — protocol
