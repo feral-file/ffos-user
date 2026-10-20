@@ -133,7 +133,11 @@ The device runs these steps in order and stops at the first failure:
    allowances).
 5. Replay window (§6).
 6. Authorization (§7) and the operation's own preconditions (§5). Then
-   persist the replay window **before** executing.
+   persist the replay window **before** executing. A request refused here
+   (`permission_denied`, `access_revoked`, `not_approved`, `rate_limited`,
+   `invitation_invalid`) spends its `ctr` too, wherever a window exists
+   (§6), so a captured refused envelope never becomes live after a later
+   promotion or re-approval.
 
 Failures in steps 1–3 produce a public error (§4.4). Failures from step 4 on
 produce an encrypted reply whose `ctl` is the verified JWS `kid` (even when
@@ -286,7 +290,8 @@ A later controller asks for access.
   the reply is `not_approved` until the moment the denied request would have
   expired.
 - Otherwise it creates or refreshes a pending request for `ctl`. Every limit
-  below answers `rate_limited` and changes nothing:
+  below answers `rate_limited` and changes nothing but the spent `ctr`
+  (§3.4 step 6):
   - At most 4 pending requests in total.
   - At most 1 **new** request per 10 s from any source (a refresh is not new).
   - Per route, counted over the other pending requests: at most 1 pending
@@ -358,7 +363,9 @@ never reach the command router):
   silently lapse. A pending-request approval of a `ctl` that already has a
   record (a revoked one) updates that record in place: it keeps its
   `createdAt` and its replay window and gets a fresh `nk`. A role change
-  without a pending request keeps `nk` too. At most 32 active grants and 128
+  without a pending request keeps `nk` too. A role change that omits
+  `expiresAt` clears any expiry the grant had: the request states the whole
+  grant, so a client that wants to keep an expiry sends it again. At most 32 active grants and 128
   records (revoked ones included) exist (`too_many_controllers`).
 - `revokeController` on a `ctl` that has only a pending request denies (drops)
   that request; further `requestAccess` from that `ctl` answers
@@ -382,6 +389,10 @@ accepted only if all hold:
 On acceptance the window is updated and **persisted durably before the command
 executes**: write a temp file, fsync it, rename, then fsync the directory.
 If that write fails the request is not executed (`internal_error`, §4.3).
+An authenticated refusal after the window check (§3.4 step 6) is persisted
+the same way before its reply; a `ctl` with neither a record nor a pending
+request has no window to spend, and a replay of its refused request is no
+more than any peer can send with a fresh key.
 
 A revoked record keeps its window. Re-approval keeps it too.
 
@@ -484,7 +495,9 @@ Rules:
   Inconsistent includes: a `gen` mismatch, a duplicate or unknown member, a
   record whose `ctl` is not `thumb(sig)`, a duplicate `ctl`, an invalid role,
   platform, label or `approvedBy`, a replay window that violates §6 (`hi = 0`
-  with bits set, `hi > 0` without bit 0, bits for counters below 1). It never
+  with bits set, `hi > 0` without bit 0, bits for counters below 1), an
+  owner record with `expiresAt` (§5.5: an owner never expires, and one that
+  lapsed would reopen the device as `legacy`). It never
   becomes `legacy` automatically, and the files are left untouched.
 - Every write goes through the same checks first, so the device cannot persist
   a file it would lock on.
@@ -524,6 +537,9 @@ value reads as `false`, which is still the `enrolled` policy. A malformed
 block is logged as an error and never relaxes a device that has state. If
 the hostname cannot be read while state exists, the protocol still runs
 (envelopes then fail their `dev` check and the plaintext policy applies).
+If it cannot be read and no state exists, the protocol does not start (the
+device stays as before the protocol, `legacy`-equivalent) and an error is
+logged; the next start with a readable hostname creates the identity.
 
 The OTA carry-forward (ffos `feral-system-update.sh`) MUST carry
 `control.retired` along with `control/`.
@@ -569,8 +585,14 @@ notification the sealed copy stands for (`0` and absent for the device's own
 `controller_approval_request`). They are routing metadata the relayer needs
 to store and replace persisted records: a count, and an opaque random id the
 device minted (mint pairing uses its approval request id). Nothing of the
-notification's content leaves the ciphertext. The relayer persists all
-sealed copies under the one `notification_type` `"sealed"`.
+notification's content leaves the ciphertext. A relayer that knows the
+`"sealed"` type (ff-relayer#25/#26) persists all sealed copies under it.
+**Residual on the deployed relayer** (ff-relayer `main`): it has no `sealed`
+type, so it stores sealed copies under its default id 0 (sharing that bucket,
+and its pruning, with `offline_cache_status`) and replays them as
+`notification_type:"default"`, which both app versions drop. Live delivery
+is unaffected (the type string is forwarded as is); a reconnecting
+controller just gets no persisted sealed row until #26 ships.
 
 What is sent in each state:
 
@@ -583,13 +605,16 @@ What is sent in each state:
 Every notification is sealed separately for each channel it goes out on, so
 the LAN and relayer copies of one event carry different `seq` values.
 
-ff-relayer persists the last plaintext `device_status`, `player_status` and
-`ddc_status` per topic (`persist_record_count:1`) and replays them to every
-new subscriber. Once relayer plaintext stops (`enforced`), that history would
-be replayed indefinitely. So on **every boot in the `enforced` state**, once
-the relayer connects, the device sends each of those three types once in
-plaintext with body `{}` and `persist_record_count:1`, overwriting the stored
-row. It is best-effort (a failed send is logged, not retried) and idempotent,
+ff-relayer persists plaintext notifications per topic and replays them to
+every new subscriber: `device_status`, `player_status`, `ddc_status` and
+`offline_cache_status` (`persist_record_count:1`) and both mint pairing types
+(`mint_pairing_approval_request`/`_outcome`, 10). Once relayer plaintext
+stops (`enforced`), that history would be replayed indefinitely. So on
+**every boot in the `enforced` state**, once the relayer connects, the device
+sends each of those six types once in plaintext with body `{}` and
+`persist_record_count:1`; the relayer prunes a type to the newest message's
+count, so this evicts every stored row of it. The purge runs at boot only:
+a device that becomes `enforced` mid-run purges on its next boot. It is best-effort (a failed send is logged, not retried) and idempotent,
 so it runs on every enforced boot rather than once per transition and keeps
 no marker.
 
@@ -706,10 +731,10 @@ and the ff1-cli test suite does the same with `jose`.
   the same class as the open legacy `factoryReset` and `connect`: in
   `legacy` the LAN is open by design (§7.2), and the invitation itself only
   ever appears on the physical screen.
-- Residual, accepted: the enforced-boot purge (§9) overwrites only the
-  relayer's latest stored row of each plaintext status type. Older rows the
-  relayer may still hold, any copy a subscriber already received, and a
-  purge that failed to send are outside the device's reach.
+- Residual, accepted: the enforced-boot purge (§9) evicts the relayer's
+  stored rows of each persisted plaintext type. Any copy a subscriber
+  already received, and a purge that failed to send, are outside the
+  device's reach.
 
 ## 14. Controller requirements
 
@@ -721,6 +746,12 @@ showed what goes wrong without them.
    - the physical claim QR (first owner, migration);
    - an owner's end-to-end encrypted handoff (ff1-cli pairing);
    - for `requestAccess` only, the unauthenticated LAN status.
+
+   The handoff authenticates the receiving client to the sending phone, not
+   the sender to the receiver: whoever joins the handoff channel first with
+   its short code can supply the profile. A wrong profile only makes the
+   pairing fail (the device's replies do not verify), so the receiver MUST
+   NOT replace a grant it already holds until the new pairing is enrolled.
 
    In the third case the requester's approval code (§5.4) binds the pin, and an
    owner comparing codes is the only protection. An impostor can still answer
@@ -755,3 +786,8 @@ showed what goes wrong without them.
    clock.
 6. **Notifications are advisory.** A controller never acts automatically on a
    notification (§9). An owner approves only after comparing codes.
+7. **Retired device.** A device whose status reports `control.state:"locked"`
+   after a factory reset the controller asked for may be retired (§8): it
+   refuses every envelope and accepts only a plaintext `factoryReset`, which
+   is the controller's one way to retry that reset. Plain `locked` (corrupt
+   state) refuses even that; recovery is the factory reset on the device.

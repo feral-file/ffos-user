@@ -435,6 +435,11 @@ func validateGrants(gs []Grant) error {
 		if g.CreatedAt < 0 || g.ExpiresAt < 0 || g.RevokedAt < 0 {
 			return fmt.Errorf("record %s: negative time", g.Ctl)
 		}
+		// An owner never expires (§5.5): one that could would lapse an owned
+		// device back to legacy, so it is corruption and locks (review L2).
+		if g.Role == RoleOwner && g.ExpiresAt != 0 {
+			return fmt.Errorf("record %s: owner with expiresAt", g.Ctl)
+		}
 	}
 	return nil
 }

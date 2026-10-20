@@ -723,6 +723,18 @@ func (a *Authority) persistFailure(adm *Admission) (*Admission, error) {
 	return a.fail(adm, CodeInternalError, nil)
 }
 
+// refuse answers an authenticated denial from a ctl with a grant record and
+// spends its ctr like an accepted request (§6), so a captured refused
+// envelope cannot become live after a later promotion or re-approval
+// (review D1). A committed but unconfirmed write (ErrDurability) still moved
+// the window, so the denial stands.
+func (a *Authority) refuse(adm *Admission, ctl string, window Window, code string) (*Admission, error) {
+	if err := a.store.Update(setWindow(ctl, window)); err != nil && !errors.Is(err, ErrDurability) {
+		return a.persistFailure(adm)
+	}
+	return a.fail(adm, code, nil)
+}
+
 // setWindow is an Update step recording w for ctl.
 func setWindow(ctl string, w Window) func([]Grant) ([]Grant, error) {
 	return func(gs []Grant) ([]Grant, error) {
@@ -740,18 +752,18 @@ func (a *Authority) admitCmd(adm *Admission, c RequestClaims, g Grant, now int64
 	if err := g.Window.Check(c.Ctr); err != nil {
 		return a.fail(adm, CodeReplay, nil)
 	}
+	window := g.Window.Accept(c.Ctr)
 	if !g.Active(now) {
-		return a.fail(adm, CodeAccessRevoked, nil)
+		return a.refuse(adm, g.Ctl, window, CodeAccessRevoked)
 	}
 	if a.stateLocked(now) == StateLegacy {
-		return a.fail(adm, CodeNotApproved, nil)
+		return a.refuse(adm, g.Ctl, window, CodeNotApproved)
 	}
 	if !TierOf(c.Cmd).Allows(g.Role) {
-		return a.fail(adm, CodePermissionDenied, nil)
+		return a.refuse(adm, g.Ctl, window, CodePermissionDenied)
 	}
 	adm.Command, adm.Request = c.Cmd, c.Req
 	adm.Principal = Principal{ControllerID: g.Ctl, Role: g.Role}
-	window := g.Window.Accept(c.Ctr)
 
 	switch c.Cmd {
 	case CmdApproveController, CmdRevokeController, CmdListControllers:
@@ -1072,15 +1084,21 @@ func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Gran
 	if err := window.Check(c.Ctr); err != nil {
 		return a.fail(adm, CodeReplay, nil)
 	}
-	if a.stateLocked(now) != StateLegacy {
+	invalid := func() (*Admission, error) {
+		if known {
+			return a.refuse(adm, g.Ctl, window.Accept(c.Ctr), CodeInvitationInvalid)
+		}
 		return a.fail(adm, CodeInvitationInvalid, nil)
+	}
+	if a.stateLocked(now) != StateLegacy {
+		return invalid()
 	}
 	if a.inv == nil || now >= a.inv.expiresAt {
 		a.setInvLocked(nil)
-		return a.fail(adm, CodeInvitationInvalid, nil)
+		return invalid()
 	}
 	if subtle.ConstantTimeCompare([]byte(c.Enroll.Inv), []byte(a.inv.value)) != 1 {
-		return a.fail(adm, CodeInvitationInvalid, nil)
+		return invalid()
 	}
 	nk, err := a.randBytes(32)
 	if err != nil {
@@ -1168,14 +1186,6 @@ func (a *Authority) pendingRes(p *pendingRequest) any {
 
 // requestAccess is §5.2.
 func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, known bool, now int64, origin Origin) (*Admission, error) {
-	if a.stateLocked(now) == StateLegacy {
-		// No owner exists to approve; the first controller uses the
-		// invitation instead.
-		return a.fail(adm, CodeNotApproved, nil)
-	}
-	if until, ok := a.denied[c.Ctl]; ok && now < until {
-		return a.fail(adm, CodeNotApproved, nil)
-	}
 	p := a.pending[c.Ctl]
 	if known {
 		if err := g.Window.Check(c.Ctr); err != nil {
@@ -1185,6 +1195,27 @@ func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, know
 		if err := p.window.Check(c.Ctr); err != nil {
 			return a.fail(adm, CodeReplay, nil)
 		}
+	}
+	// Every refusal spends ctr where a window exists (review D1). A key
+	// with neither a record nor a pending entry has nothing to spend: a
+	// replay of its refused request is no more than any LAN or relayer peer
+	// can send with a fresh key.
+	refuse := func(code string) (*Admission, error) {
+		if known {
+			return a.refuse(adm, g.Ctl, g.Window.Accept(c.Ctr), code)
+		}
+		if p != nil {
+			p.window = p.window.Accept(c.Ctr)
+		}
+		return a.fail(adm, code, nil)
+	}
+	if a.stateLocked(now) == StateLegacy {
+		// No owner exists to approve; the first controller uses the
+		// invitation instead.
+		return refuse(CodeNotApproved)
+	}
+	if until, ok := a.denied[c.Ctl]; ok && now < until {
+		return refuse(CodeNotApproved)
 	}
 	if known && g.Active(now) {
 		if err := a.store.Update(setWindow(g.Ctl, g.Window.Accept(c.Ctr))); err != nil {
@@ -1197,14 +1228,14 @@ func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, know
 	if isNew {
 		if len(a.pending) >= maxPending || (a.lastNewPending != 0 && now-a.lastNewPending < pendingNewInterval) ||
 			a.pendingCapped(origin, c.Ctl) {
-			return a.fail(adm, CodeRateLimited, nil)
+			return refuse(CodeRateLimited)
 		}
 		p = &pendingRequest{ctl: c.Ctl, createdAt: now, origin: origin}
 	} else {
 		// A refresh extends the request; it is rate-limited per ctl and
 		// re-notifies owners only when what they are shown changed.
 		if now-p.refreshedAt < pendingRefreshInterval {
-			return a.fail(adm, CodeRateLimited, nil)
+			return refuse(CodeRateLimited)
 		}
 		notify = p.enroll.Label != c.Enroll.Label || p.enroll.Platform != c.Enroll.Platform
 	}

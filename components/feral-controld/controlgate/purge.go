@@ -10,24 +10,30 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 )
 
-// plaintextPersistedTypes are the notification types the status poller has
-// always sent in plaintext with persist_record_count 1, which ff-relayer
-// stores per topic and replays to every new subscriber (§9).
+// plaintextPersistedTypes are every notification type a producer sends in
+// plaintext with a persist_record_count, which ff-relayer stores per topic
+// and replays to every new subscriber (§9): the status poller's three (1),
+// offline cache (1) and mint pairing (10). ff-relayer prunes a type to the
+// newest message's count, so one count-1 row evicts the producer's whole
+// history whatever its count was (review W1).
 var plaintextPersistedTypes = []relayer.NotificationType{
 	relayer.NOTIFICATION_TYPE_DEVICE_STATUS,
 	relayer.NOTIFICATION_TYPE_PLAYER_STATUS,
 	relayer.NOTIFICATION_TYPE_DDC_STATUS,
+	relayer.NOTIFICATION_TYPE_OFFLINE_CACHE_STATUS,
+	relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST,
+	relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME,
 }
 
 // PurgeStalePlaintext overwrites the relayer's stored plaintext history on
 // an ENFORCED device: once enforced, plaintext notifications stop, but the
-// relayer would keep replaying the last plaintext device/player/ddc status
-// to anyone subscribing to the topic, indefinitely. It sends each persisted
+// relayer would keep replaying the last plaintext rows of every persisted
+// type to anyone subscribing to the topic, indefinitely. It sends each persisted
 // type once, in plaintext, with body {} and persist_record_count 1, which
 // replaces the stored row.
 //
 // Run on EVERY boot in the enforced state, not once per transition: it is
-// three tiny idempotent messages, and a marker file would be one more piece
+// six tiny idempotent messages, and a marker file would be one more piece
 // of state to carry and get wrong. It waits for the relayer connection (up to
 // maxWait, polling every poll) and is best-effort: a send failure is logged,
 // and the relayer may still hold older rows (a residual, §13). r must be the

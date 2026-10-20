@@ -193,7 +193,7 @@ func plaintextDenial(cmd commands.Type, code string) map[string]any {
 	msg := "this FF1 requires a signed control envelope for " + string(cmd) + "; update the app"
 	switch code {
 	case control.CodeLocked:
-		msg = "this FF1's control state is locked; factory reset is required to recover"
+		msg = "this FF1's control state is locked; factory reset it on the device itself to recover"
 	case control.CodeInvalidMessage:
 		msg = "message has duplicate or case-variant member names"
 	}

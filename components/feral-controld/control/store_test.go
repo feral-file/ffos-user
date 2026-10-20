@@ -84,6 +84,7 @@ func TestCorruptStoreLocks(t *testing.T) {
 		"bad approvedBy":     edit(grantsFile, `"approvedBy":"invitation"`, `"approvedBy":"someone"`),
 		"label too long":     edit(grantsFile, `"label":"owner"`, `"label":"`+strings.Repeat("x", 65)+`"`),
 		"identity point off": edit(identityFile, `"x":"`, `"x":"A`),
+		"owner expiresAt":    edit(grantsFile, `"role":"owner"`, `"role":"owner","expiresAt":4102444800`),
 	}
 	for name, corrupt := range cases {
 		fsys := good()

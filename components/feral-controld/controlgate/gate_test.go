@@ -398,7 +398,7 @@ func TestPurgeStalePlaintextOnEnforcedBoot(t *testing.T) {
 			}
 			continue
 		}
-		if n != 3 || len(r.sent) != 3 {
+		if n != 6 || len(r.sent) != 6 {
 			t.Fatalf("purge sent %d", n)
 		}
 		types := map[string]bool{}
@@ -410,8 +410,11 @@ func TestPurgeStalePlaintextOnEnforcedBoot(t *testing.T) {
 			}
 			types[v["notification_type"].(string)] = true
 		}
-		if !types["device_status"] || !types["player_status"] || !types["ddc_status"] {
-			t.Fatalf("purged types %v", types)
+		for _, want := range []string{"device_status", "player_status", "ddc_status", "offline_cache_status",
+			"mint_pairing_approval_request", "mint_pairing_approval_outcome"} {
+			if !types[want] {
+				t.Fatalf("purged types %v, missing %s", types, want)
+			}
 		}
 	}
 }

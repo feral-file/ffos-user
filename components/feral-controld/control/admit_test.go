@@ -974,3 +974,68 @@ func TestParseCarrierStrict(t *testing.T) {
 		}
 	}
 }
+
+// Review D1: an authenticated denial spends ctr, so a captured refused
+// envelope never becomes live after a later authorization change.
+func TestRefusedRequestSpendsCtr(t *testing.T) {
+	replayed := func(t *testing.T, d *testDevice, compact string, rc RequestClaims) {
+		t.Helper()
+		adm, err := d.a.Open(compact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if adm.Execute() {
+			t.Fatalf("refused envelope executed on replay")
+		}
+		if r := d.final(adm, rc); r.Code != CodeReplay {
+			t.Fatalf("replay = %+v, want %q", r, CodeReplay)
+		}
+	}
+
+	t.Run("permission_denied then promotion", func(t *testing.T) {
+		d, owner, ctl := ownerDevice(t)
+		rc := d.cmdClaims(ctl, "pause", `{}`) // unknown name: owner tier
+		compact := d.seal(ctl, rc)
+		adm, err := d.a.Open(compact)
+		if err != nil || d.final(adm, rc).Code != CodePermissionDenied {
+			t.Fatalf("not denied: %v", err)
+		}
+		d.expectOK(owner, d.cmdClaims(owner, CmdApproveController, `{"ctl":"`+ctl.ctl+`","role":"owner"}`))
+		replayed(t, d, compact, rc)
+	})
+
+	t.Run("access_revoked then re-approval", func(t *testing.T) {
+		d, owner, ctl := ownerDevice(t)
+		d.expectOK(owner, d.cmdClaims(owner, CmdRevokeController, `{"ctl":"`+ctl.ctl+`"}`))
+		rc := d.cmdClaims(ctl, "rotate", `{}`)
+		compact := d.seal(ctl, rc)
+		adm, err := d.a.Open(compact)
+		if err != nil || d.final(adm, rc).Code != CodeAccessRevoked {
+			t.Fatalf("not revoked: %v", err)
+		}
+		ask := d.claims(ctl, OpRequestAccess)
+		ask.Enroll = ctl.enroll("")
+		d.expectOK(ctl, ask)
+		d.expectOK(owner, d.cmdClaims(owner, CmdApproveController, `{"ctl":"`+ctl.ctl+`","role":"controller"}`))
+		replayed(t, d, compact, rc)
+	})
+
+	t.Run("rate_limited requestAccess", func(t *testing.T) {
+		d, _, _ := ownerDevice(t)
+		tab := newTestCtl(t, "tab")
+		ask := func() RequestClaims {
+			rc := d.claims(tab, OpRequestAccess)
+			rc.Enroll = tab.enroll("")
+			return rc
+		}
+		d.expectOK(tab, ask())
+		rc := ask()
+		compact := d.seal(tab, rc)
+		adm, err := d.a.Open(compact)
+		if err != nil || d.final(adm, rc).Code != CodeRateLimited {
+			t.Fatalf("not rate limited: %v", err)
+		}
+		d.advance(pendingRefreshInterval)
+		replayed(t, d, compact, rc)
+	})
+}

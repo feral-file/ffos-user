@@ -100,7 +100,7 @@ Reported in `/api/v2/status` (as built: `control:{v:1, state, profile}`, profile
 - **legacy:** new firmware, no grants. Plaintext accepted as today, except for the phase-0 containment rules. The invitation QR is offered.
 - **enrolled:** at least one owner grant.
   - LAN accepts envelopes only (as built: plaintext → **403** `enrollment_required`).
-  - Relayer plaintext is limited to the **controller tier**, so off-LAN old apps keep playback.
+  - Relayer plaintext is limited to the **controller tier**, so off-LAN old apps keep playback. On the same Wi-Fi the released app cannot cast at all: its router relays after an HTTP error only for the status probe, so every `displayPlaylist` gets LAN 403 and a cast error (no hang, no crash). Open decision for the change owner: accept and record this, or answer LAN plaintext controller-tier commands in `enrolled` as the relayer does.
   - Owner-tier commands require an envelope on every route.
 - **enforced:** switched on by a `controld.json` flag in the floor release (F11).
   - Relayer plaintext is limited to the exact `displayPlaylist` shape (Play sessions).
@@ -226,7 +226,7 @@ After the fleet counts in §3.1 show enrolled devices.
    - Tampered, wrong-`gen` and wrong-`dev` requests are rejected.
    - A fake portal on the topic cannot produce an accepted reply.
 4. **Mixed versions.**
-   - Old app on an enrolled device: relayer playback works; LAN gives a clear failure.
+   - Old app on an enrolled device: off-LAN relayer playback works; on the same LAN casting fails with a clear error (no relay fallback, see §3.1).
    - New app and CLI on old firmware: the legacy path works.
    - Play sessions cast through every state.
 5. **Transport parity.** One enrolled controller works over LAN, legacy relayer, Tailscale IP, and Anh's v2 relay (with the relay disabled → LAN only), with no grant change.
@@ -249,7 +249,7 @@ Bench: FF1-8EVTK3RE (disruptive tests allowed). Release builds and dispatch by a
 
 ## 8. Risks
 
-- **The old app strands on LAN after enrollment** (F13). Mitigation: the new app is required to enroll, so only other household phones are affected; the floor follows soon after.
+- **The old app strands on LAN after enrollment** (F13): it cannot cast at all on the same Wi-Fi, not only lose LAN control. Mitigation: the new app is required to enroll, so only other household phones are affected; the floor follows soon after.
 - **Hand-rolled Dart JOSE.** Mitigation: a narrow profile, fixtures, and negative vectors.
 - **fsync per request.** Inputs run at up to 50/s through the gate. Benchmark on the device in M1; if it is too slow, batch the window persist with a short `exp`.
 - **A factory reset onto an old snapshot reopens the hub until the next OTA.** This is a documented residual. Before phase 2, make sure the recovery candidate is new firmware fleet-wide.
@@ -279,6 +279,8 @@ Changes against the plan, decided during implementation:
 - **ff-cli** never pins from LAN status; its pins come only from the owner's handoff.
 
 **Release constraint (downgrade safety): `control.enabled` MUST NOT be set in `controld.json` for any channel before the ffos M4 image (`feat/3551-ota-control-state`) is on that channel's OTA path.** An image without the carry step would drop `.state/control` on update (owners lose their grants) or, on a later downgrade/upgrade, resurrect stale grants. The M4 image also refuses to install a pre-carry target ("Refusing update: target image cannot carry controller state", classified permanent by otagate).
+
+Release-notes line for the first control-enabled release: **once a control-enabled release runs on a device, that device can never OTA to an older image; the only way back is a factory reset.** Operational hole the code cannot close: dispatching an image workflow file that predates the strip gate, with `.control.enabled=true` already in that environment's secret, ships an image that creates state and loses it on its next OTA.
 
 Still open before a release train:
 1. Hardware: FF1-8EVTK3RE was unreachable during implementation. Still to run:
