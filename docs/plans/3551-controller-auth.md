@@ -1,6 +1,6 @@
 # feral-file#3551 — Brandon's execution plan: endpoint authorization and E2EE
 
-Status: in implementation, 2026-10-20. Phase 0 (ffos-user `feat/3551-phase0-lan-containment`, ff1-cli `feat/3551-phase0-topic-header`), M1 (`control/` package + fixtures) and M4 (ffos `feat/3551-ota-control-state`) are committed locally. Built from the issue thread through Anh's 2026-10-19 09:45 comment, ff-relayer#25, Anh's open relay PRs (ff-relayer#26, ffos-user#407, ff-app#1138, ff1-cli#133, play#23), and a read of ffos-user develop @48ab2ad, ffos develop @c9ca7fa, ff-app main, ff1-cli main @71f6495, ff-relayer main @49251b4 and the play repo.
+Status: phase 0 and phase 1 implemented on local branches, 2026-10-20; not pushed, not hardware-tested. See §9.
 
 ## 0. The split
 
@@ -253,3 +253,39 @@ Bench: FF1-8EVTK3RE (disruptive tests allowed). Release builds and dispatch by a
 - **Hand-rolled Dart JOSE.** Mitigation: a narrow profile, fixtures, and negative vectors.
 - **fsync per request.** Inputs run at up to 50/s through the gate. Benchmark on the device in M1; if it is too slow, batch the window persist with a short `exp`.
 - **A factory reset onto an old snapshot reopens the hub until the next OTA.** This is a documented residual. Before phase 2, make sure the recovery candidate is new firmware fleet-wide.
+
+## 9. Implementation status (2026-10-20)
+
+| Repo | Branch | Scope | State |
+|---|---|---|---|
+| ffos-user | `feat/3551-phase0-lan-containment` | P0-1 | done; `connect` left open (released app sends it before every LAN cast); `/api/screenshot` also topic-gated |
+| ff1-cli | `feat/3551-phase0-topic-header` | P0-2 | done |
+| ffos-user | `feat/3551-control-protocol` (includes phase 0) | M0 spec + fixtures, M1–M3, watchdog/otagate follow-ups | done; two review rounds |
+| ffos | `feat/3551-ota-control-state` | M4 (carry `control/`, `control.new/`, `control.retired` with `--checksum`; watchdog marker `/run/feral-controld-ota-stop`) | done; reviewed |
+| ff1-cli | `feat/3551-controller-auth` (on phase 0) | M6 | done; repo-required review |
+| ff-app | `feat/3551-controller-auth` | M5 core + UI | done; repo-required review; second-pass review pending |
+
+Changes against the plan, decided during implementation:
+- **Phase 0:** `connect` is not gated.
+- **Approval code:** binds the requester's pinned `devSig` (spec §5.4), which defeats a LAN MITM serving a fake profile.
+- **Fail-closed configuration (§8.1):** control state on disk keeps the protocol on regardless of `controld.json`. Factory reset writes the `control.retired` tombstone before erasing.
+- **Invitations:**
+  - no attempt cap;
+  - the invitation lives only while its QR is on screen;
+  - `/api/screenshot` is refused while an invitation is live, and is re-checked after capture;
+  - a client must enroll before it sends `connect`.
+- **Plaintext with ambiguous or duplicate top-level keys** is refused. Arguments are normalized from the judged bytes.
+- **Relayer plaintext denials** use the `{"ok":false,"error":...}` shape that released clients surface.
+- **ff-cli** never pins from LAN status; its pins come only from the owner's handoff.
+
+Still open before a release train:
+1. Hardware: FF1-8EVTK3RE was unreachable during implementation. Still to run:
+   - dev controld with `control.enabled`;
+   - the fsync benchmark (`control.test -test.bench OpenPersist`);
+   - a bench OTA carrying control state;
+   - factory reset, both paths;
+   - captures;
+   - a physical-phone app pass, including the on-device Flutter MCP pass ff-app AGENTS.md requires.
+2. Anh: agree §2 with #25 (v2 chunking, browser grant boundary). Run the thin E2E over the v2 relay.
+3. Sean: owner-approves-owner, lost phone = reset, and the tier table (§7).
+4. Push branches and open PRs: ffos/ffos-user against `develop`, ff-app/ff1-cli against `main`. No workflow dispatch by agents.
