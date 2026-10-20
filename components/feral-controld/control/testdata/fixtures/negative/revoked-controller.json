@@ -1,0 +1,66 @@
+{
+  "name": "revoked-controller",
+  "kind": "request",
+  "description": "Authentic request from a revoked grant.",
+  "setup": {
+    "now": 1767225600,
+    "grants": [
+      "owner",
+      "controller",
+      "revoked"
+    ],
+    "randSeed": "AnczY7V0_K8hXxVmw_svhHR35ZnBre3gua0tNZYZR98"
+  },
+  "from": "revoked",
+  "payload": "{\"v\":1,\"dev\":\"FF1-FIXTURE1\",\"gen\":\"772x9uI4OcVjB0inn2MHLA\",\"ctl\":\"Ym85kZeVg6Js-1lNmtDsLzhA8GdEZ2Nt5lEXOBGNCg0\",\"rid\":\"rid-revoked-controller\",\"ctr\":1,\"iat\":1767225600,\"exp\":1767225660,\"op\":\"cmd\",\"rk\":\"QvZoXxAMx-1JFhoWxAYm1RVl-OVDak6OGd5RuH2IEUw\",\"cmd\":\"displayPlaylist\",\"req\":{\"intent\":{\"action\":\"now_display\"},\"dp1_call\":{\"dpVersion\":\"1.0.0\",\"title\":\"fixture\",\"items\":[]}}}",
+  "claims": {
+    "v": 1,
+    "dev": "FF1-FIXTURE1",
+    "gen": "772x9uI4OcVjB0inn2MHLA",
+    "ctl": "Ym85kZeVg6Js-1lNmtDsLzhA8GdEZ2Nt5lEXOBGNCg0",
+    "rid": "rid-revoked-controller",
+    "ctr": 1,
+    "iat": 1767225600,
+    "exp": 1767225660,
+    "op": "cmd",
+    "rk": "QvZoXxAMx-1JFhoWxAYm1RVl-OVDak6OGd5RuH2IEUw",
+    "cmd": "displayPlaylist",
+    "req": {
+      "intent": {
+        "action": "now_display"
+      },
+      "dp1_call": {
+        "dpVersion": "1.0.0",
+        "title": "fixture",
+        "items": []
+      }
+    }
+  },
+  "ephemeralKey": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "GCws1dtb1P6cuoSZBg2C206ga5saqHiz9txEw5zAnFE",
+    "y": "7nABSnfc34CsEEeqZNIs606RaYAC5KMeezHLrUVsL7o",
+    "d": "_XhVIqCLMQzAWUA6MhGmdOUVnnHxkqFZmz180sfyxBg"
+  },
+  "iv": "GO0hc6gHydo7Yxw9",
+  "jws": "eyJhbGciOiJFUzI1NiIsImtpZCI6IlltODVrWmVWZzZKcy0xbE5tdERzTHpoQThHZEVaMk50NWxFWE9CR05DZzAiLCJ0eXAiOiJmZjEtcmVxK2p3cyJ9.eyJ2IjoxLCJkZXYiOiJGRjEtRklYVFVSRTEiLCJnZW4iOiI3NzJ4OXVJNE9jVmpCMGlubjJNSExBIiwiY3RsIjoiWW04NWtaZVZnNkpzLTFsTm10RHNMemhBOEdkRVoyTnQ1bEVYT0JHTkNnMCIsInJpZCI6InJpZC1yZXZva2VkLWNvbnRyb2xsZXIiLCJjdHIiOjEsImlhdCI6MTc2NzIyNTYwMCwiZXhwIjoxNzY3MjI1NjYwLCJvcCI6ImNtZCIsInJrIjoiUXZab1h4QU14LTFKRmhvV3hBWW0xUlZsLU9WRGFrNk9HZDVSdUgySUVVdyIsImNtZCI6ImRpc3BsYXlQbGF5bGlzdCIsInJlcSI6eyJpbnRlbnQiOnsiYWN0aW9uIjoibm93X2Rpc3BsYXkifSwiZHAxX2NhbGwiOnsiZHBWZXJzaW9uIjoiMS4wLjAiLCJ0aXRsZSI6ImZpeHR1cmUiLCJpdGVtcyI6W119fX0.xbHxoyJ59QsffF2wD8irmkMF5kmTok2ARjgIzqdszKXDLgCnR5KYEvEllyRVIRLlhTW9F9pDgqoBw82nw6PkKA",
+  "compact": "eyJhbGciOiJFQ0RILUVTIiwiZW5jIjoiQTI1NkdDTSIsImtpZCI6InpjdnU5Z1MtWkNsNWJWOWlLZFBhTGZSQW9YVzZ4d1Z0Mjd5MU5ucG1jbXciLCJ0eXAiOiJmZjEtcmVxK2p3ZSIsImN0eSI6ImZmMS1yZXErandzIiwiZXBrIjp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiR0N3czFkdGIxUDZjdW9TWkJnMkMyMDZnYTVzYXFIaXo5dHhFdzV6QW5GRSIsInkiOiI3bkFCU25mYzM0Q3NFRWVxWk5JczYwNlJhWUFDNUtNZWV6SExyVVZzTDdvIn19..GO0hc6gHydo7Yxw9.qxWG3ZVaggK9X8tUcb5wcLHVa_O6wfqPU8psfMj6wQY3w-L_5shvuOEGF0ZzX79bh2c_tXoYLvRCLteK7wPadOhsn9szn-jFMVPUBLHW_lG5vaRLlqyIbO4H4f0zp39eocF1oI84j0XNyjuYLGynuWH7DjSJd7Mk2jAZ9PVv4CCLaaiNs0ompEUIGm4A0_qSnSpNgMWYfQMUfMmQtGNh3KcL2E8oRINbFl0XrkIBdCX_W34JX5nW4MWNA0Y8S7PKMTQ_nzY3ItN5BjLG0X3xD7tGocTCDzZzdppCx50zMN_omjSxyvwQ2zYZExxu_snhN9EVWEWkDFXn5x5ZqSoqMygHJ1I7OldeMPUI73Q6sG28D7VRgLxA2KfoIzc6GUQuxE6mL_qVb7_b0cIrvD0G-JZAVop0w73WnDfHJq2Sn4EcZfSz1E1haTVk3i7DMYIUC4NuggeOZJ05489HEI69SeiTGikZIFtc_pzZ04RWXSOTtO4bqpftiooIzKKFKctWCOZuh5Dd7jpjdsmeoePFRxymnMNDQwyiKEmzDn9CSRWcafifesHETlN4xTPCy1ruD3tvT0BPcakGOGOsnBy0yoV-0O25XlvYD86R2xfwv6fwqg771FZDIW-cWhMMghvQ-mH2XV2fVsU4zSkJX3vTzI1SoT1kt7mvBGswVufROgoEpdXHJx3CJI6mhXO_Cd-zxmwp1VQK8-prxLESW5-mLNGyqKAOhh1SLML668EvcOwc6gjiIDvPvedVvc6tBICQ-cnyQDJqtlfD-TeOE-qVesOmhhjsUwMcUqPugt15FNbJDM40S8L2X3RHjvdge6Fo-rjg8NZIRFLiaaQiECu9CsYrN_CLmONy9S2oEgfXVhKFyqBn2-6rjjIsVPn1yhvXqRlai-wGi0dsRfH4eqvzNhRKzf_TbEQtRdUH_s4jbA.hVnSHXyYdO43KGHWiaFpDw",
+  "rk": "QvZoXxAMx-1JFhoWxAYm1RVl-OVDak6OGd5RuH2IEUw",
+  "expect": {
+    "replyCode": "access_revoked"
+  },
+  "reply": {
+    "compact": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIiwidHlwIjoiZmYxLXJlcytqd2UiLCJjdHkiOiJmZjEtcmVzK2p3cyJ9..pQTC7zy0u1CmO6nO.F3TNXZ_O39qY2wBx-Vb8lERFkx8Z32C1ktmCZ4tlTZVFjxgGq4C3hn39ffzZmWF5w4W9Os8WgdDKb_8TZ4LtbJTWsc6MA03Tt0FzZm7mmVGpxM0rIkDoJYYeu1ikdjmmpbj3SgU3_2--liPdRzDaQm2PiLAKcHtzYqPgOkq88r1fTMkt71sfVxIgVuXmiPuo1IGwLbferpAL7UDD-AqMtGFqtqV1GdvcpbbilUuET5Nn-C6I1x5sslnthtj34CaII3kKzLC4BNySwa5OTCkMp7Np8xIhlpv5VHcnPvHkjhaig0oUs3zs5ZL8EdaoGUbBWbrkSLhsJ04Hz0TXJrIr7ArfrSJXHKIgIzstqPIx8L0Ack1u1-xRKd0RpuRV4KVk7Lz6f7hD5pWFT4EO58EQXhCyCMPtE8_D-_L7WzUXRV-KyM_I_qvsJtX4CREAA9CgtnUQNjj_WYAp4go0O-V3jkpprdH6N6b3ihONnLNg-w0IUsaDILiTGy6yGg9kjXn_im8M-CxPOhNoHeqY6iN9rgPkUUJn8QJ7yNiDkc8TbbotQzxm1dVPtjz49k3Aju5Z5wnmioNibR_HfnMxIKzQuu7CIbFsts78M4GFjgnhHw.P4CRzGJhjaS5tSQNVQAVXA",
+    "claims": {
+      "v": 1,
+      "dev": "FF1-FIXTURE1",
+      "gen": "772x9uI4OcVjB0inn2MHLA",
+      "ctl": "Ym85kZeVg6Js-1lNmtDsLzhA8GdEZ2Nt5lEXOBGNCg0",
+      "rid": "rid-revoked-controller",
+      "iat": 1767225600,
+      "ok": false,
+      "code": "access_revoked"
+    }
+  }
+}
