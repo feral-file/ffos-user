@@ -49,6 +49,10 @@ var (
 	// might still lose it. Callers must not report success on top of it.
 	ErrDurability = errors.New("control: write not confirmed durable")
 	errNoDir      = errors.New("control: state directory missing")
+	// ErrRetired means Retire deleted the control directory (factory reset).
+	// It wraps ErrLocked: a retired authority refuses everything until the
+	// process restarts and, finding no directory, starts over as legacy.
+	ErrRetired = fmt.Errorf("%w: control identity retired", ErrLocked)
 )
 
 // Grant is one controller record (§8). Revoked records are kept: their
@@ -183,7 +187,31 @@ func OpenStore(fsys FS, dir, deviceID string, r io.Reader, now time.Time) *Store
 }
 
 // LockErr is non-nil when the store is locked.
-func (s *Store) LockErr() error { return s.lockErr }
+func (s *Store) LockErr() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lockErr
+}
+
+// Retire deletes the control directory (factory reset, §8) and locks the
+// store so nothing is admitted or persisted afterwards. The lock is taken
+// first, so even a partly failed delete leaves the store refusing; the error
+// is still returned, and the caller must not proceed with the reset, because
+// a reset that rolls back onto this subvolume would otherwise keep the
+// previous owner's grants.
+func (s *Store) Retire() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lockErr = ErrRetired
+	s.grants = nil
+	if err := s.fs.RemoveAll(s.dir); err != nil {
+		return err
+	}
+	if err := s.fs.RemoveAll(s.dir + ".new"); err != nil {
+		return err
+	}
+	return s.fs.SyncDir(filepath.Dir(s.dir))
+}
 
 // Identity returns the device identity (nil when locked).
 func (s *Store) Identity() *Identity { return s.id }

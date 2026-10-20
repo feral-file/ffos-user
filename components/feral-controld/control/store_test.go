@@ -252,3 +252,56 @@ func TestIdentityRoundTrip(t *testing.T) {
 		t.Fatal("bad gen accepted")
 	}
 }
+
+func TestRetire(t *testing.T) {
+	d, owner, _ := ownerDevice(t)
+	if err := d.a.Retire(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.fs.Stat(d.dir); err == nil {
+		t.Fatal("control dir survived Retire")
+	}
+	if d.a.State() != StateLocked || !errors.Is(d.a.LockErr(), ErrRetired) {
+		t.Fatalf("state after retire = %s", d.a.State())
+	}
+	if publicCode(func() error { _, err := d.a.Open(d.seal(owner, d.cmdClaims(owner, "rotate", `{}`))); return err }()) != CodeLocked {
+		t.Fatal("retired authority admitted a request")
+	}
+	// The next start finds no directory and comes up legacy with a new gen.
+	a, _ := New(Config{Dir: d.dir, DeviceID: testDeviceID, FS: d.fs})
+	if a.State() != StateLegacy || a.Store().Identity().Gen() == d.id.gen {
+		t.Fatal("restart after retire did not start over")
+	}
+	// A failing delete is reported and still locks.
+	d2, _, _ := ownerDevice(t)
+	failing := &failRemoveFS{MemFS: d2.fs}
+	s := OpenStore(failing, d2.dir, testDeviceID, nil, time.Now())
+	if err := s.Retire(); err == nil || !errors.Is(s.LockErr(), ErrLocked) {
+		t.Fatal("failed retire not reported or not locked")
+	}
+}
+
+type failRemoveFS struct{ *MemFS }
+
+func (failRemoveFS) RemoveAll(string) error { return errors.New("ebusy") }
+
+func TestEnsureInvitation(t *testing.T) {
+	d := newTestDevice(t)
+	a, err := d.a.EnsureInvitation(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := d.a.EnsureInvitation(time.Minute)
+	if a.Value != b.Value {
+		t.Fatal("live invitation reissued")
+	}
+	d.advance(invitationTTL - 30)
+	c, _ := d.a.EnsureInvitation(time.Minute)
+	if c.Value == a.Value || c.ExpiresAt <= a.ExpiresAt {
+		t.Fatal("nearly spent invitation not refreshed")
+	}
+	d2, _, _ := ownerDevice(t)
+	if _, err := d2.a.EnsureInvitation(time.Minute); err == nil {
+		t.Fatal("invitation issued on an enrolled device")
+	}
+}

@@ -375,6 +375,34 @@ func (a *Authority) invitationLocked() Invitation {
 	return Invitation{Value: a.inv.value, ExpiresAt: a.inv.expiresAt, Pins: id.Pins(), Gen: id.gen}
 }
 
+// EnsureInvitation returns the live invitation, issuing a fresh one when there
+// is none or the current one has less than minRemaining left. The claim-QR
+// painter calls it on every paint so the QR never carries a nearly spent
+// invitation. Refused unless StateLegacy, like IssueInvitation.
+func (a *Authority) EnsureInvitation(minRemaining time.Duration) (Invitation, error) {
+	a.mu.Lock()
+	live := a.inv != nil && a.now().Add(minRemaining).Unix() < a.inv.expiresAt
+	var cur Invitation
+	if live {
+		cur = a.invitationLocked()
+	}
+	a.mu.Unlock()
+	if live && a.State() == StateLegacy {
+		return cur, nil
+	}
+	return a.IssueInvitation()
+}
+
+// Retire deletes the control directory and voids every grant, invitation and
+// pending request (factory reset). See Store.Retire.
+func (a *Authority) Retire() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.inv = nil
+	a.pending = map[string]*pendingRequest{}
+	return a.store.Retire()
+}
+
 // ClearInvitation voids the current invitation (QR dismissed, claim taken).
 func (a *Authority) ClearInvitation() {
 	a.mu.Lock()
