@@ -261,7 +261,7 @@ func New(cfg Config) (*Authority, error) {
 		seq:      map[string]uint64{},
 	}
 	a.store = OpenStore(cfg.FS, cfg.Dir, cfg.DeviceID, a.randReader(), cfg.Now())
-	ep, err := a.randBytes(8)
+	ep, err := a.randBytes(epLen)
 	if err != nil {
 		return nil, err
 	}

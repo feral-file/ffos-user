@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -315,6 +316,18 @@ func TestOpenReplyRejectsUnboundClaims(t *testing.T) {
 	} {
 		if _, err := parseReplyClaims([]byte(bad)); err == nil {
 			t.Errorf("accepted %s", bad)
+		}
+	}
+}
+
+func TestNotificationEpStrict(t *testing.T) {
+	base := `{"v":1,"dev":"d","gen":"g","ctl":"c","ep":"%s","seq":1,"iat":1,"type":"t","body":{}}`
+	for ep, ok := range map[string]bool{
+		"AAAAAAAAAAA": true, "AAAA": false, "AAAAAAAAAAA=": false, "": false, "AAAAAAAAAAAAAAA": false, "AAAAAAAAAA*": false,
+	} {
+		_, err := parseNotificationClaims([]byte(fmt.Sprintf(base, ep)))
+		if (err == nil) != ok {
+			t.Errorf("ep %q: err=%v want ok=%v", ep, err, ok)
 		}
 	}
 }

@@ -142,33 +142,37 @@ func (g *gen) positives() error {
 		setup            *Setup
 		mutate           func(*control.RequestClaims)
 		res              any
+		// The outcome the vector is FOR. The generator checks the device
+		// really produces it, so a label can never drift from its outcome.
+		execute  bool
+		wantCode string // "" = ok:true
 	}
 	list := []pos{
 		{"cmd-owner-displayPlaylist", "Owner casts a playlist; the caller executes it and replies ok.", "owner", nil,
-			nil, map[string]any{"ok": true}},
+			nil, map[string]any{"ok": true}, true, ""},
 		{"cmd-controller-rotate", "Controller-tier command from a controller grant.", "controller", nil,
-			func(c *control.RequestClaims) { c.Cmd, c.Req = "rotate", json.RawMessage(`{"clockwise":true}`) }, map[string]any{"ok": true}},
+			func(c *control.RequestClaims) { c.Cmd, c.Req = "rotate", json.RawMessage(`{"clockwise":true}`) }, map[string]any{"ok": true}, true, ""},
 		{"cmd-controller-command-failed", "Executed command that failed: ok:false, code command_failed, res = the handler's error body.", "controller", nil,
-			nil, map[string]any{"ok": false, "error": "sourceUnreachable", "command": "displayPlaylist", "message": "sourceUnreachable: no playlist item source is loadable (item 0: HTTP 400)"}},
+			nil, map[string]any{"ok": false, "error": "sourceUnreachable", "command": "displayPlaylist", "message": "sourceUnreachable: no playlist item source is loadable (item 0: HTTP 400)"}, true, control.CodeCommandFailed},
 		{"cmd-owner-listControllers", "Owner control command answered by the authority itself.", "owner", nil,
-			func(c *control.RequestClaims) { c.Cmd, c.Req = control.CmdListControllers, json.RawMessage(`{}`) }, nil},
+			func(c *control.RequestClaims) { c.Cmd, c.Req = control.CmdListControllers, json.RawMessage(`{}`) }, nil, false, ""},
 		{"enroll-invitation", "First owner enrolls with the invitation on a legacy device (§5.1).", "stranger",
 			nil, func(c *control.RequestClaims) {
 				c.Op, c.Cmd, c.Req = control.OpEnroll, "", nil
 				c.Enroll = g.enroll("stranger", "")
-			}, nil},
+			}, nil, false, ""},
 		{"requestAccess-pending", "A later controller asks for access; the owner gets a sealed controller_approval_request (§5.2).", "stranger", nil,
 			func(c *control.RequestClaims) {
 				c.Op, c.Cmd, c.Req = control.OpRequestAccess, "", nil
 				c.Enroll = g.enroll("stranger", "")
-			}, nil},
+			}, nil, false, ""},
 		{"enroll-approved", "An approved controller enrolls without inv and receives its nk (§5.3).", "controller", nil,
 			func(c *control.RequestClaims) {
 				c.Op, c.Cmd, c.Req = control.OpEnroll, "", nil
 				c.Enroll = g.enroll("controller", "")
-			}, nil},
+			}, nil, false, ""},
 		{"cmd-owner-reordered-ctr", "ctr below hi but inside the window and unseen is accepted (§6).", "owner", nil,
-			func(c *control.RequestClaims) { c.Ctr = 40 }, map[string]any{"ok": true}},
+			func(c *control.RequestClaims) { c.Ctr = 40 }, map[string]any{"ok": true}, true, ""},
 	}
 	for _, p := range list {
 		f := &Fixture{Name: p.name, Kind: "request", Description: p.desc, From: p.from, Setup: g.setup(p.name)}
@@ -177,7 +181,8 @@ func (g *gen) positives() error {
 			f.Setup.Grants = []string{}
 			f.Setup.Invitation = true
 		case "cmd-owner-reordered-ctr":
-			f.Setup.Windows = map[string]WindowSpec{"owner": {Hi: 50, Bitmap: "0000000000000401"}}
+			// hi=50; 50 and 49 seen (bits 0, 1); ctr 40 (bit 10) unseen.
+			f.Setup.Windows = map[string]WindowSpec{"owner": {Hi: 50, Bitmap: "0000000000000003"}}
 		}
 		rc := g.claims(p.name, p.from)
 		if p.mutate != nil {
@@ -185,6 +190,11 @@ func (g *gen) positives() error {
 		}
 		if err := g.positive(f, rc, p.res); err != nil {
 			return fmt.Errorf("%s: %w", p.name, err)
+		}
+		wantOK := p.wantCode == ""
+		if f.Expect.Execute != p.execute || f.Expect.ReplyOK != wantOK || f.Expect.ReplyCode != p.wantCode {
+			return fmt.Errorf("%s: device outcome execute=%v ok=%v code=%q, vector is for execute=%v code=%q",
+				p.name, f.Expect.Execute, f.Expect.ReplyOK, f.Expect.ReplyCode, p.execute, p.wantCode)
 		}
 	}
 	// A standalone sealed notification (§9).
@@ -415,6 +425,13 @@ func (g *gen) negativeClient() error {
 	ntfs := []rv{
 		{"notification-wrong-nk", "Sealed under another controller's nk.", gcmSeal(ntfHdr, mustB64(g.k.Controllers["controller"].NK), iv, []byte(body)), owner.NK, nil},
 		{"notification-ctl-mismatch", "Header kid is the owner but the claims name another ctl.", gcmSeal(ntfHdr, nk, iv, []byte(strings.Replace(body, owner.Ctl, g.k.Controllers["controller"].Ctl, 1))), owner.NK, nil},
+		{"notification-bad-ep", "ep is not b64u of exactly 8 bytes (here 3 bytes).", gcmSeal(ntfHdr, nk, iv, []byte(strings.Replace(body, `"ep":"AAAAAAAAAAA"`, `"ep":"AAAA"`, 1))), owner.NK, nil},
+		{"notification-padded-ep", "ep carries base64 padding.", gcmSeal(ntfHdr, nk, iv, []byte(strings.Replace(body, `"ep":"AAAAAAAAAAA"`, `"ep":"AAAAAAAAAAA="`, 1))), owner.NK, nil},
+	}
+	// Baseline: the unmodified body opens, so each negative fails for its
+	// own reason.
+	if _, err := control.OpenNotification(gcmSeal(ntfHdr, nk, iv, []byte(body)), owner.Ctl, nk); err != nil {
+		return fmt.Errorf("client baseline notification does not open: %w", err)
 	}
 	for _, n := range ntfs {
 		if _, err := control.OpenNotification(n.compact, owner.Ctl, mustB64(n.rk)); err == nil {

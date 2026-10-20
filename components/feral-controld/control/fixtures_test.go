@@ -180,6 +180,14 @@ func TestPositiveFixtures(t *testing.T) {
 			if f.Expect.Principal != nil && adm.Principal != *f.Expect.Principal {
 				t.Fatalf("principal %+v", adm.Principal)
 			}
+			// A positive vector is an ACCEPTED request: its reply is ok:true,
+			// or command_failed for a command that executed and failed.
+			if !f.Expect.ReplyOK && f.Expect.ReplyCode != control.CodeCommandFailed {
+				t.Fatalf("positive vector records a rejection (%q)", f.Expect.ReplyCode)
+			}
+			if f.Name == "cmd-owner-reordered-ctr" && (!adm.Execute() || !f.Expect.ReplyOK) {
+				t.Fatal("the reordered-ctr vector must be admitted and answered ok")
+			}
 			if !adm.Execute() {
 				r, err := control.OpenReply(adm.Final, b64(t, f.RK), devSig)
 				if err != nil || r.OK != f.Expect.ReplyOK || r.Code != f.Expect.ReplyCode {

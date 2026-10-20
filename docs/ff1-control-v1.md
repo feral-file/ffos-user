@@ -455,7 +455,9 @@ A sealed notification is a compact JWE:
 - protected header exactly
   `{"alg":"dir","enc":"A256GCM","typ":"ff1-ntf+jwe","kid":"<ctl>"}`;
 - key `nk`;
-- plaintext claims, exactly `{"v":1,"dev","gen","ctl","ep","seq","iat","type","body"}`.
+- plaintext claims, exactly `{"v":1,"dev","gen","ctl","ep","seq","iat","type","body"}`;
+  a controller MUST reject an `ep` that is not exactly `b64u(8 bytes)` (no
+  padding).
   The controller MUST check that `ctl` equals the header `kid` and its own
   `controllerId`, and that `dev`/`gen` match its pins.
 
@@ -556,7 +558,8 @@ must leave room for the ~50-byte cast wrapper.
   - `kind:"reply"` / `kind:"notification"`: vectors a controller MUST reject:
     wrong `rk`, tampered, signed by a key other than the pinned `devSig`,
     unbound `rid` (`bind` gives the dev/gen/ctl/rid the controller sent), extra
-    header member, DER signature, wrong `nk`, header `kid` ≠ claims `ctl`.
+    header member, DER signature, wrong `nk`, header `kid` ≠ claims `ctl`,
+    `ep` that is not `b64u(8 bytes)` (short, or padded).
 
 `setup` describes the device a request vector is opened against: `now`,
 `grants` (which `keys.json` controllers are in `grants.json`), optional

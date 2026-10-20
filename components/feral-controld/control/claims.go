@@ -23,6 +23,7 @@ const (
 	futureSkew    = 300 // iat <= now + 300
 	invLen        = 16
 	rkLen         = 32
+	epLen         = 8 // notification epoch, §9
 	maxCmdNameLen = 64
 )
 
@@ -307,6 +308,10 @@ func parseNotificationClaims(raw []byte) (NotificationClaims, error) {
 		if _, err := uintMember(m, k); err != nil {
 			return n, malformed("notification %s", k)
 		}
+	}
+	var ep [epLen]byte
+	if err := fixedB64Member(m, "ep", ep[:]); err != nil {
+		return n, malformed("notification ep must be b64u(8 bytes): %v", err)
 	}
 	if err := json.Unmarshal(raw, &n); err != nil {
 		return n, malformed("notification claims: %v", err)
