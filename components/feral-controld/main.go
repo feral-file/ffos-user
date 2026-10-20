@@ -1582,7 +1582,7 @@ func initializeApp(
 	if sink, ok := hub.(interface{ SetContactObserver(func()) }); ok {
 		sink.SetContactObserver(provMachine.ObserveHubContact)
 	}
-	controlWire.wire(cmdHandler, relayer, wsHandler, hub, mediator, executor, logger)
+	controlWire.wire(context, cmdHandler, relayer, wsHandler, hub, mediator, executor, logger)
 	// The claim observer registered above fans out here (declared before the
 	// machine existed).
 	provMachineForClaim = provMachine

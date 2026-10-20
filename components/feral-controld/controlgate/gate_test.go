@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
@@ -312,5 +316,102 @@ func TestSealedCopyCarriesPersistAndMessageID(t *testing.T) {
 	}
 	if len(sealed) != 1 || sealed[0]["messageID"] != "appr-1" || sealed[0]["persist_record_count"] != float64(10) {
 		t.Fatalf("sealed copy = %+v", sealed)
+	}
+}
+
+// Hardware follow-up: a request refused after its signature verified is
+// logged with the verified controller, its role, the op, the command name
+// and the code, and nothing of the request body, rk, nk or JWE.
+func TestRefusedRequestAuditLog(t *testing.T) {
+	a, _ := newAuthority(t, false)
+	core, logs := observer.New(zapcore.InfoLevel)
+	g := controlgate.New(a, &recorder{}, zap.New(core))
+	owner := enrollOwner(t, g, a)
+	cli := newClient(t, "cli", owner.profile)
+	send := func(c *client, s sent) control.ReplyClaims {
+		t.Helper()
+		wire, perr := g.HandleEnvelope(context.Background(), s.body, control.Origin{})
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		b, _ := json.Marshal(wire)
+		return c.open(s, b)
+	}
+	send(cli, cli.build(control.OpRequestAccess, "", "", ""))
+	send(owner, owner.build(control.OpCmd, control.CmdApproveController, `{"ctl":"`+cli.ctl+`","role":"controller"}`, ""))
+	secret := `{"enabled":true,"publicKey":"ssh-ed25519 SECRET"}` //nolint:gosec // G101: a marker string the test checks never reaches a log.
+	if r := send(cli, cli.build(control.OpCmd, "sshAccess", secret, "")); r.Code != control.CodePermissionDenied {
+		t.Fatalf("code %q", r.Code)
+	}
+	entries := logs.FilterMessage("Control request answered by the authority").All()
+	last := entries[len(entries)-1].ContextMap()
+	want := map[string]any{"op": "cmd", "command": "sshAccess", "controller": cli.ctl, "role": "controller", "code": "permission_denied"}
+	for k, v := range want {
+		if last[k] != v {
+			t.Errorf("audit field %s = %v, want %v", k, last[k], v)
+		}
+	}
+	for _, e := range logs.All() {
+		for k, v := range e.ContextMap() {
+			s, _ := v.(string)
+			if k == "jwe" || k == "rk" || k == "nk" || k == "req" || strings.Contains(s, "SECRET") {
+				t.Fatalf("log %q leaks %s=%v", e.Message, k, v)
+			}
+		}
+	}
+}
+
+// toggleRelayer reports disconnected until connect is closed.
+type toggleRelayer struct {
+	fakeRelayer
+	connected chan struct{}
+}
+
+func (r *toggleRelayer) IsConnected() bool {
+	select {
+	case <-r.connected:
+		return true
+	default:
+		return false
+	}
+}
+
+// Hardware follow-up: on an enforced boot the stored plaintext history on
+// the relayer is overwritten once the relayer connects; nothing is sent in
+// any other state.
+func TestPurgeStalePlaintextOnEnforcedBoot(t *testing.T) {
+	for _, enforced := range []bool{false, true} {
+		a, _ := newAuthority(t, enforced)
+		g := controlgate.New(a, &recorder{}, zap.NewNop())
+		enrollOwner(t, g, a)
+		r := &toggleRelayer{connected: make(chan struct{})}
+		done := make(chan int)
+		go func() {
+			done <- controlgate.PurgeStalePlaintext(context.Background(), a, r, zap.NewNop(), time.Millisecond, 5*time.Second)
+		}()
+		time.Sleep(20 * time.Millisecond)
+		close(r.connected)
+		n := <-done
+		if !enforced {
+			if n != 0 || len(r.sent) != 0 {
+				t.Fatalf("purged in enrolled state: %d", n)
+			}
+			continue
+		}
+		if n != 3 || len(r.sent) != 3 {
+			t.Fatalf("purge sent %d", n)
+		}
+		types := map[string]bool{}
+		for _, m := range r.sent {
+			var v map[string]any
+			_ = json.Unmarshal(m, &v)
+			if v["type"] != "notification" || v["persist_record_count"] != float64(1) || fmt.Sprint(v["message"]) != "map[]" {
+				t.Fatalf("purge message shape: %s", m)
+			}
+			types[v["notification_type"].(string)] = true
+		}
+		if !types["device_status"] || !types["player_status"] || !types["ddc_status"] {
+			t.Fatalf("purged types %v", types)
+		}
 	}
 }

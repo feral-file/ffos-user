@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"time"
+
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
@@ -90,11 +93,14 @@ func (c *controlWiring) notificationHandles(r relayer.Relayer, w ws.WS, logger *
 }
 
 // wire plugs the gate into the hub, the mediator and the executor.
-func (c *controlWiring) wire(handler commandrouter.Handler, r relayer.Relayer, w ws.WS,
+func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler, r relayer.Relayer, w ws.WS,
 	h hub.Hub, m mediator.Mediator, executor devicectl.Executor, logger *zap.Logger) {
 	if c == nil {
 		return
 	}
+	// Enforced boot: overwrite the plaintext status history the relayer
+	// keeps per topic (§9, §13). Background, best-effort, raw relayer.
+	go controlgate.PurgeStalePlaintext(ctx, c.auth, r, logger, 2*time.Second, 10*time.Minute)
 	gate := controlgate.New(c.auth, handler, logger)
 	gate.SetPublisher(controlgate.NewPublisher(r, w, logger))
 	if sink, ok := h.(interface{ SetControl(hub.ControlGate) }); ok {

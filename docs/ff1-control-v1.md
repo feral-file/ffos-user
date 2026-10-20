@@ -583,6 +583,16 @@ What is sent in each state:
 Every notification is sealed separately for each channel it goes out on, so
 the LAN and relayer copies of one event carry different `seq` values.
 
+ff-relayer persists the last plaintext `device_status`, `player_status` and
+`ddc_status` per topic (`persist_record_count:1`) and replays them to every
+new subscriber. Once relayer plaintext stops (`enforced`), that history would
+be replayed indefinitely. So on **every boot in the `enforced` state**, once
+the relayer connects, the device sends each of those three types once in
+plaintext with body `{}` and `persist_record_count:1`, overwriting the stored
+row. It is best-effort (a failed send is logged, not retried) and idempotent,
+so it runs on every enforced boot rather than once per transition and keeps
+no marker.
+
 ## 10. Wire carriage of requests
 
 | Route | Request | Reply |
@@ -696,3 +706,7 @@ and the ff1-cli test suite does the same with `jose`.
   the same class as the open legacy `factoryReset` and `connect`: in
   `legacy` the LAN is open by design (§7.2), and the invitation itself only
   ever appears on the physical screen.
+- Residual, accepted: the enforced-boot purge (§9) overwrites only the
+  relayer's latest stored row of each plaintext status type. Older rows the
+  relayer may still hold, any copy a subscriber already received, and a
+  purge that failed to send are outside the device's reach.

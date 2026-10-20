@@ -188,6 +188,13 @@ type Admission struct {
 	Request   json.RawMessage
 	Principal Principal
 	RequestID string
+	// Signer and SignerRole identify who signed the request, for audit
+	// logs, whatever the outcome: Signer is the verified kid (a public
+	// thumbprint) and SignerRole the role of its grant record, if any
+	// (revoked or expired records included). Principal is set only when
+	// authority was actually conferred; never use Signer* for decisions.
+	Signer     string
+	SignerRole Role
 
 	Final string
 	// Code is the ok:false code carried by Final, for logs and metrics.
@@ -553,6 +560,9 @@ func (a *Authority) OpenFrom(compact string, origin Origin) (*Admission, error) 
 	// Re-read the record under the lock: the verified key cannot change
 	// (ctl = thumb(sig)), but the window, role and revocation can have.
 	grant, known := a.store.Grant(pre.adm.ctl)
+	if known {
+		pre.adm.SignerRole = grant.Role
+	}
 	c := pre.claims
 	a.prunePending(now)
 	switch c.Op {
@@ -648,7 +658,10 @@ func (a *Authority) authenticate(compact string) (authenticated, *Admission, *Pu
 
 	// From here on the request is authentic and every failure is an
 	// encrypted reply to the signer (ctl = the verified kid).
-	adm := &Admission{auth: a, rk: h.rk, ctl: p.kid, RequestID: h.rid}
+	adm := &Admission{auth: a, rk: h.rk, ctl: p.kid, RequestID: h.rid, Signer: p.kid}
+	if known {
+		adm.SignerRole = grant.Role
+	}
 	finish := func(code string) (authenticated, *Admission, *PublicError) {
 		out, err := a.fail(adm, code, nil)
 		if err != nil {
@@ -666,7 +679,7 @@ func (a *Authority) authenticate(compact string) (authenticated, *Admission, *Pu
 		}
 		return finish(CodeInvalidRequest)
 	}
-	adm.Op = c.Op
+	adm.Op, adm.Command = c.Op, c.Cmd
 	now := a.now().Unix()
 	// Step 4.
 	switch {

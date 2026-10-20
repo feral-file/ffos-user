@@ -125,9 +125,13 @@ func (g *Gate) HandleEnvelope(ctx context.Context, raw json.RawMessage, origin c
 		g.onOwnerEnrolled()
 	}
 	if !adm.Execute() {
+		// Audit fields only: the verified signer (a public thumbprint), its
+		// grant's role, the op, the command NAME and the outcome code. Never
+		// the request body, rk, nk or the JWE.
 		g.logger.Info("Control request answered by the authority",
 			zap.String("op", string(adm.Op)), zap.String("command", adm.Command),
-			zap.String("controller", adm.Principal.ControllerID), zap.String("code", adm.Code))
+			zap.String("controller", adm.Signer), zap.String("role", string(adm.SignerRole)),
+			zap.String("code", adm.Code))
 		return &Wire{V: 1, JWE: adm.Final}, nil
 	}
 	g.logger.Info("Control request admitted",
