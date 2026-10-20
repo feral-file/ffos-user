@@ -710,3 +710,43 @@ and the ff1-cli test suite does the same with `jose`.
   relayer's latest stored row of each plaintext status type. Older rows the
   relayer may still hold, any copy a subscriber already received, and a
   purge that failed to send are outside the device's reach.
+
+## 14. Controller requirements
+
+Every controller (ff-app, ff1-cli, a browser or any later client) MUST follow
+these rules. The device cannot enforce them; review findings on both clients
+showed what goes wrong without them.
+
+1. **Pin sources.** A device profile is pinned only from:
+   - the physical claim QR (first owner, migration);
+   - an owner's end-to-end encrypted handoff (ff1-cli pairing);
+   - for `requestAccess` only, the unauthenticated LAN status.
+
+   In the third case the requester's approval code (§5.4) binds the pin, and an
+   owner comparing codes is the only protection. An impostor can still answer
+   "approved" to that requester and read its commands until the requester gets a
+   reply that verifies under the real device's key. It gains no authority over
+   the real FF1.
+2. **Confirmed generation.**
+   - A controller seals only to the grant whose `gen` was most recently confirmed
+     by a reply that verified under the pinned `devSig`.
+   - A `gen` reported by status or a notification never selects a grant.
+   - Once a new grant is confirmed, the controller deletes its other grants for
+     that device.
+3. **Reset evidence.** Public errors (`bad_envelope`, `unknown_controller`,
+   `bad_signature`) are unauthenticated and are never evidence that a device was
+   reset. Only these count:
+   - the controller's own successful `factoryReset`;
+   - the relayer itself (over TLS) reporting that the stored topic has no device,
+     together with a live LAN status showing a different `gen`.
+
+   Until such evidence exists, the controller keeps sealing to the confirmed
+   grant and offers no status-pinned enrollment.
+4. **Retries.** Every resend is a new envelope with a new `ctr`, `rid` and `rk`.
+   A request whose outcome is unknown is resent only where the command is safe to
+   repeat.
+5. **Time.** A controller learns the device's clock only from verified replies.
+   Notifications may be replayed by the relayer (§9), so they never move the
+   clock.
+6. **Notifications are advisory.** A controller never acts automatically on a
+   notification (§9). An owner approves only after comparing codes.
