@@ -114,7 +114,7 @@ func TestRequestAccessApproveEnroll(t *testing.T) {
 	rc.Enroll = tablet.enroll("")
 	adm := d.send(tablet, rc)
 	r := d.final(adm, rc)
-	if !r.OK || !strings.Contains(string(r.Res), `"status":"pending"`) || !strings.Contains(string(r.Res), ApprovalCode(tablet.ctl)) {
+	if !r.OK || !strings.Contains(string(r.Res), `"status":"pending"`) || !strings.Contains(string(r.Res), ApprovalCode(tablet.ctl, d.id.Pins().Sig)) {
 		t.Fatalf("requestAccess reply = %+v %s", r, r.Res)
 	}
 	if len(adm.Notifications) != 1 || adm.Notifications[0].Ctl != owner.ctl {
@@ -262,7 +262,7 @@ func TestListControllers(t *testing.T) {
 	if len(res.Controllers) != 2 || !res.Controllers[0].Self || res.Controllers[1].Ctl != ctl.ctl || res.Controllers[1].Self {
 		t.Fatalf("controllers = %+v", res.Controllers)
 	}
-	if len(res.Pending) != 1 || res.Pending[0].Code != ApprovalCode(tablet.ctl) {
+	if len(res.Pending) != 1 || res.Pending[0].Code != ApprovalCode(tablet.ctl, d.id.Pins().Sig) {
 		t.Fatalf("pending = %+v", res.Pending)
 	}
 }
@@ -562,7 +562,7 @@ func TestSealSequence(t *testing.T) {
 	}
 	g, _ := d.a.Store().Grant(owner.ctl)
 	n, err := OpenNotification(s.JWE, owner.ctl, g.NK[:])
-	if err != nil || n.Seq != 2 || string(n.Body) != `{"b":2}` || n.Dev != testDeviceID {
+	if err != nil || n.Seq != 2 || string(n.Body) != `{"b":2}` || n.Dev != testDeviceID || len(n.Ep) != 11 || n.Ep != d.a.ep {
 		t.Fatalf("%v %+v", err, n)
 	}
 	if _, err := OpenNotification(s.JWE, ctl.ctl, g.NK[:]); err == nil {
@@ -578,13 +578,14 @@ func TestSealSequence(t *testing.T) {
 }
 
 func TestApprovalCode(t *testing.T) {
-	// Pinned value: other implementations reproduce it (fixtures carry it too).
-	got := ApprovalCode("NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs")
-	if len(got) != 6 || got != ApprovalCode("NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs") {
+	// Pinned against an independent computation (Python hashlib).
+	const ctl, pin = "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs", "zcvu9gS-ZCl5bV9iKdPaLfRAoXW6xwVt27y1Nnpmcmw"
+	if got := ApprovalCode(ctl, pin); got != "610259" {
 		t.Fatal(got)
 	}
-	if ApprovalCode("a") == ApprovalCode("b") {
-		t.Fatal("collision on trivial inputs")
+	// The device pin is bound: a different pin gives a different code.
+	if ApprovalCode(ctl, pin) == ApprovalCode(ctl, "other") {
+		t.Fatal("approval code ignores the device pin")
 	}
 }
 

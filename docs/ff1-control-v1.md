@@ -237,7 +237,7 @@ A later controller asks for access.
   - A pending request lives for 5 minutes from its last refresh.
   - Pending requests are held in memory only. A restart drops them and the
     requester asks again.
-- `res` = `{"status":"pending","code":approvalCode(ctl),"expiresAt":t}`.
+- `res` = `{"status":"pending","code":approvalCode(ctl, thumb(devSig)),"expiresAt":t}`.
 - On every create and refresh, every active owner gets a sealed
   `controller_approval_request` notification (§9), with body
   `{"ctl","label","platform","code","expiresAt"}`.
@@ -255,9 +255,18 @@ Succeeds only after an owner has approved exactly `ctl`.
 
 ### 5.4 Approval code
 
-`approvalCode(ctl)` = the first 4 bytes of `SHA-256("ff1-approval-code/v1|" + ctl)`
-read as uint32 big-endian, mod 1000000, zero-padded to 6 digits. The owner UI
-and the requester both display it.
+`approvalCode(ctl, sigPin)` = the first 4 bytes of
+`SHA-256("ff1-approval-code/v1|" + ctl + "|" + sigPin)` read as uint32
+big-endian, mod 1000000, zero-padded to 6 digits, where `sigPin` is
+`thumb(devSig)`. The device computes it with its own pin; the requester
+computes it with the pin it holds (from the claim QR or the profile it
+pinned). The owner UI shows the device's code and the requester shows its
+own; the owner approves only when they match.
+
+Binding the pin defeats a LAN man-in-the-middle that serves a new phone a
+fake profile and relays the phone's still-valid `requestAccess` JWS to the
+real device: the phone's code is then computed over the attacker's pin and
+differs from the code the real device sends the owner.
 
 ### 5.5 Owner commands
 
@@ -344,6 +353,10 @@ phantom entry, so a new command cannot ship without a tier.
 | `enforced` | ≥1 active owner grant, `control.enforced=true` | refused: `enrollment_required` | only the exact Play shape `{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{…}}}`: `request` has exactly the members `intent` and `dp1_call`, `intent` is exactly `{"action":"now_display"}`, `dp1_call` is an object; anything else → `envelope_required` | full |
 | `locked` | identity or grant store unreadable/corrupt | refused: `locked` | controller tier only, else `locked` | refused: public `locked` |
 
+"LAN" means any caller of the hub (`/api/cast`), whatever network it came
+from: Wi-Fi, Ethernet, an owner VPN or a Tailscale address all get the LAN
+column. Only the relayer path gets the relayer column.
+
 Internal callers (OOM recovery, `playRecentlyPlayed` re-entry) are not subject
 to this policy. An unrecognized state is treated as `locked`.
 
@@ -385,13 +398,21 @@ A sealed notification is a compact JWE:
 - protected header exactly
   `{"alg":"dir","enc":"A256GCM","typ":"ff1-ntf+jwe","kid":"<ctl>"}`;
 - key `nk`;
-- plaintext claims, exactly `{"v":1,"dev","gen","ctl","seq","iat","type","body"}`,
-  not signed (only the device and the controller know `nk`). The controller
-  MUST check that `ctl` equals the header `kid` and its own `controllerId`,
-  and that `dev`/`gen` match its pins.
+- plaintext claims, exactly `{"v":1,"dev","gen","ctl","ep","seq","iat","type","body"}`.
+  The controller MUST check that `ctl` equals the header `kid` and its own
+  `controllerId`, and that `dev`/`gen` match its pins.
 
-`seq` starts at 1 per controller per daemon run and increases per
-notification. Controllers accept the newest `iat`/`seq` and ignore older ones.
+`ep` is `b64u(8 random bytes)`, drawn once per daemon run (not persisted).
+`seq` starts at 1 per controller per run and increases per notification.
+Controllers order notifications by (`ep`, `seq`): within one `ep` they keep
+the highest `seq` and ignore older ones; a notification with an `ep` they
+have not seen starts a new run and is accepted.
+
+Notifications are **not signed**: they are authenticated only by `nk`, which
+the controller itself holds. A controller MUST NOT take any action
+automatically because of a notification (approve a request, change a
+setting, send a command). Notifications only inform UI; every action is a
+user-initiated, signed request.
 
 Wire carriage, the same object on the LAN notification WebSocket and on the
 relayer notification channel:
@@ -446,6 +467,8 @@ What is sent in each state:
   verdict in `expect` (`execute`, `command`, `principal`, `replyOk`,
   `replyCode`), the device's `reply` (`compact` and decoded `claims`) and any
   `notifications` it emitted (`to`, `compact`, `claims`, `wire`).
+- `positive/approval-code.json` (`kind:"approvalCode"`): `cases` of
+  `{ctl, sigPin, code}` for §5.4, the last one with a non-device pin.
 - `negative/*.json`:
   - `kind:"request"`: a `compact` (or `compactRepeat` `{char,count}` for the
     oversize vector, built by repeating `char`) plus `setup`, and either

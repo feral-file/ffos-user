@@ -211,6 +211,9 @@ type Authority struct {
 	pending        map[string]*pendingRequest
 	lastNewPending int64
 	seq            map[string]uint64
+	// ep is this daemon run's notification epoch (§9): seq restarts at 1
+	// each run, so controllers order by (ep, seq) and accept any new ep.
+	ep string
 }
 
 type invitation struct {
@@ -258,6 +261,11 @@ func New(cfg Config) (*Authority, error) {
 		seq:      map[string]uint64{},
 	}
 	a.store = OpenStore(cfg.FS, cfg.Dir, cfg.DeviceID, a.randReader(), cfg.Now())
+	ep, err := a.randBytes(8)
+	if err != nil {
+		return nil, err
+	}
+	a.ep = b64u(ep)
 	return a, nil
 }
 
@@ -374,9 +382,17 @@ func (a *Authority) ClearInvitation() {
 	a.inv = nil
 }
 
+func (a *Authority) approvalCode(ctl string) string {
+	return ApprovalCode(ctl, a.store.Identity().Pins().Sig)
+}
+
 // ApprovalCode is §5.4: the 6-digit code the owner and requester compare.
-func ApprovalCode(ctl string) string {
-	sum := sha256.Sum256([]byte(approvalCodePrefix + ctl))
+// devSigPin is thumb(devSig): the device passes its own, the requester the
+// pin it holds. Binding the pin means a LAN man-in-the-middle that served
+// the new phone a fake profile (and relays its still-valid JWS to the real
+// device) shows a different code on the owner's screen than on the phone.
+func ApprovalCode(ctl, devSigPin string) string {
+	sum := sha256.Sum256([]byte(approvalCodePrefix + ctl + "|" + devSigPin))
 	return fmt.Sprintf("%06d", binary.BigEndian.Uint32(sum[:4])%1000000)
 }
 
@@ -690,7 +706,7 @@ func (a *Authority) list(gs []Grant, self string, _ int64) controlResult {
 		res.Controllers = append(res.Controllers, controllerView{g.Ctl, g.Role, g.Label, g.Platform, g.CreatedAt, g.ExpiresAt, g.RevokedAt, g.Ctl == self})
 	}
 	for _, p := range a.sortedPending() {
-		res.Pending = append(res.Pending, pendingView{p.ctl, p.enroll.Label, p.enroll.Platform, ApprovalCode(p.ctl), p.expiresAt})
+		res.Pending = append(res.Pending, pendingView{p.ctl, p.enroll.Label, p.enroll.Platform, a.approvalCode(p.ctl), p.expiresAt})
 	}
 	return controlResult{res: res}
 }
@@ -806,11 +822,11 @@ func (a *Authority) enrollApproved(adm *Admission, c RequestClaims, g Grant, kno
 		}
 		p.window = p.window.Accept(c.Ctr)
 	}
-	return a.fail(adm, CodePending, pendingRes(p))
+	return a.fail(adm, CodePending, a.pendingRes(p))
 }
 
-func pendingRes(p *pendingRequest) any {
-	return map[string]any{"status": "pending", "code": ApprovalCode(p.ctl), "expiresAt": p.expiresAt}
+func (a *Authority) pendingRes(p *pendingRequest) any {
+	return map[string]any{"status": "pending", "code": a.approvalCode(p.ctl), "expiresAt": p.expiresAt}
 }
 
 // requestAccess is §5.2.
@@ -855,7 +871,7 @@ func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, know
 	p.enroll = *c.Enroll
 	p.expiresAt = now + pendingTTL
 	body := map[string]any{"ctl": p.ctl, "label": p.enroll.Label, "platform": p.enroll.Platform,
-		"code": ApprovalCode(p.ctl), "expiresAt": p.expiresAt}
+		"code": a.approvalCode(p.ctl), "expiresAt": p.expiresAt}
 	for _, owner := range a.store.Grants() {
 		if owner.Role == RoleOwner && owner.Active(now) {
 			s, err := a.sealLocked(owner, NotificationApprovalRequest, body, now)
@@ -864,7 +880,7 @@ func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, know
 			}
 		}
 	}
-	return a.succeed(adm, pendingRes(p))
+	return a.succeed(adm, a.pendingRes(p))
 }
 
 func (a *Authority) sealReply(adm *Admission, ok bool, code string, res any) (string, error) {
@@ -947,7 +963,7 @@ func (a *Authority) sealLocked(g Grant, typ string, body any, now int64) (Sealed
 	}
 	id := a.store.Identity()
 	a.seq[g.Ctl]++
-	pt, err := marshalJSON(NotificationClaims{V: 1, Dev: id.deviceID, Gen: id.gen, Ctl: g.Ctl, Seq: a.seq[g.Ctl],
+	pt, err := marshalJSON(NotificationClaims{V: 1, Dev: id.deviceID, Gen: id.gen, Ctl: g.Ctl, Ep: a.ep, Seq: a.seq[g.Ctl],
 		Iat: now, Type: typ, Body: b})
 	if err != nil {
 		return Sealed{}, err

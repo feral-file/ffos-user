@@ -18,7 +18,7 @@ type gen struct {
 func Generate() (map[string][]byte, error) {
 	g := &gen{k: NewKeys(), files: map[string][]byte{}}
 	g.files["keys.json"] = Encode(g.k)
-	steps := []func() error{g.positives, g.negativeRequests, g.negativeClient}
+	steps := []func() error{g.positives, g.approvalCodes, g.negativeRequests, g.negativeClient}
 	for _, step := range steps {
 		if err := step(); err != nil {
 			return nil, err
@@ -82,8 +82,9 @@ func (g *gen) positive(f *Fixture, rc control.RequestClaims, executeRes any) err
 		return err
 	}
 	if f.Setup.Invitation {
-		// The invitation is the device's first rand draw, so a consumer
-		// that rebuilds the device from Setup gets the same value.
+		// The invitation comes from the device's seeded stream (after the
+		// 8-byte ep draw), so a consumer that rebuilds the device from
+		// Setup gets the same value.
 		rc.Enroll.Inv = inv
 	}
 	if err := g.request(f, rc); err != nil {
@@ -409,7 +410,7 @@ func (g *gen) negativeClient() error {
 		g.emit("negative", &Fixture{Name: r.name, Kind: "reply", Description: r.desc, Compact: r.compact, RK: r.rk, Bind: r.bind, Expect: Expect{Reject: true}})
 	}
 	ntfHdr := `{"alg":"dir","enc":"A256GCM","typ":"ff1-ntf+jwe","kid":"` + owner.Ctl + `"}`
-	body := `{"v":1,"dev":"` + bind.Dev + `","gen":"` + bind.Gen + `","ctl":"` + owner.Ctl + `","seq":1,"iat":` + fmt.Sprint(Now) + `,"type":"device_status","body":{}}`
+	body := `{"v":1,"dev":"` + bind.Dev + `","gen":"` + bind.Gen + `","ctl":"` + owner.Ctl + `","ep":"AAAAAAAAAAA","seq":1,"iat":` + fmt.Sprint(Now) + `,"type":"device_status","body":{}}`
 	nk := mustB64(owner.NK)
 	ntfs := []rv{
 		{"notification-wrong-nk", "Sealed under another controller's nk.", gcmSeal(ntfHdr, mustB64(g.k.Controllers["controller"].NK), iv, []byte(body)), owner.NK, nil},
@@ -421,5 +422,37 @@ func (g *gen) negativeClient() error {
 		}
 		g.emit("negative", &Fixture{Name: n.name, Kind: "notification", Description: n.desc, Compact: n.compact, To: "owner", NK: n.rk, Expect: Expect{Reject: true}})
 	}
+	return nil
+}
+
+// ApprovalCodeCase is one §5.4 input/output pair.
+type ApprovalCodeCase struct {
+	Ctl    string `json:"ctl"`
+	SigPin string `json:"sigPin"`
+	Code   string `json:"code"`
+}
+
+// ApprovalCodes is positive/approval-code.json.
+type ApprovalCodes struct {
+	Name        string             `json:"name"`
+	Kind        string             `json:"kind"`
+	Description string             `json:"description"`
+	Cases       []ApprovalCodeCase `json:"cases"`
+}
+
+func (g *gen) approvalCodes() error {
+	devPin := g.k.Device.Pins.Sig
+	var cases []ApprovalCodeCase
+	for _, name := range []string{"owner", "controller", "revoked", "stranger"} {
+		ctl := g.k.Controllers[name].Ctl
+		cases = append(cases, ApprovalCodeCase{ctl, devPin, control.ApprovalCode(ctl, devPin)})
+	}
+	// The same requester against a different (e.g. MITM) device pin.
+	stranger := g.k.Controllers["stranger"].Ctl
+	other := g.k.Controllers["owner"].Sig.Thumb()
+	cases = append(cases, ApprovalCodeCase{stranger, other, control.ApprovalCode(stranger, other)})
+	g.files["positive/approval-code.json"] = Encode(ApprovalCodes{Name: "approval-code", Kind: "approvalCode",
+		Description: "approvalCode(ctl, sigPin) = first 4 bytes of SHA-256(\"ff1-approval-code/v1|\" + ctl + \"|\" + sigPin) as uint32 BE, mod 1e6, 6 digits (§5.4). The last case uses a non-device pin and must differ.",
+		Cases:       cases})
 	return nil
 }

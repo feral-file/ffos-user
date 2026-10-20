@@ -287,6 +287,7 @@ type NotificationClaims struct {
 	Dev  string          `json:"dev"`
 	Gen  string          `json:"gen"`
 	Ctl  string          `json:"ctl"`
+	Ep   string          `json:"ep"`
 	Seq  uint64          `json:"seq"`
 	Iat  int64           `json:"iat"`
 	Type string          `json:"type"`
@@ -294,7 +295,7 @@ type NotificationClaims struct {
 }
 
 func parseNotificationClaims(raw []byte) (NotificationClaims, error) {
-	m, err := strictObject(raw, []string{"v", "dev", "gen", "ctl", "seq", "iat", "type", "body"}, nil)
+	m, err := strictObject(raw, []string{"v", "dev", "gen", "ctl", "ep", "seq", "iat", "type", "body"}, nil)
 	if err != nil {
 		return NotificationClaims{}, malformed("notification claims: %v", err)
 	}

@@ -116,6 +116,22 @@ func TestPositiveFixtures(t *testing.T) {
 	devSig := pubJWK(t, k.Device.Sig)
 	for _, f := range loadFixtures(t, "positive") {
 		t.Run(f.Name, func(t *testing.T) {
+			if f.Kind == "approvalCode" {
+				b, _ := os.ReadFile(filepath.Join(fixtureDir, "positive", f.Name+".json")) //nolint:gosec // G304: fixture dir.
+				var v fixturegen.ApprovalCodes
+				if err := json.Unmarshal(b, &v); err != nil || len(v.Cases) < 2 {
+					t.Fatal(err)
+				}
+				for _, c := range v.Cases {
+					if got := control.ApprovalCode(c.Ctl, c.SigPin); got != c.Code || len(got) != 6 {
+						t.Fatalf("ApprovalCode(%s, %s) = %s, want %s", c.Ctl, c.SigPin, got, c.Code)
+					}
+				}
+				if v.Cases[len(v.Cases)-1].Code == v.Cases[len(v.Cases)-2].Code {
+					t.Fatal("the device pin does not change the code")
+				}
+				return
+			}
 			if f.Kind == "notification" {
 				for _, n := range f.Notifications {
 					got, err := control.OpenNotification(n.Compact, k.Controllers[n.To].Ctl, b64(t, k.Controllers[n.To].NK))
