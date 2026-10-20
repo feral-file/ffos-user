@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -101,6 +102,10 @@ type statusResponse struct {
 	// network is the additive §4.7 health object (docs/network-recovery-ux.md);
 	// omitted when no provisioning machine is wired.
 	Network *status.NetworkHealth `json:"network,omitempty"`
+	// Control is the feral-file#3551 capability block (§11); omitted when
+	// control.enabled is false, which is how a client tells the protocol is
+	// off.
+	Control *control.Status `json:"control,omitempty"`
 }
 
 // handleStatus serves GET /api/status — the legacy (contract "1") route, kept
@@ -151,6 +156,18 @@ func (h *hub) serveStatus(w http.ResponseWriter, r *http.Request, contract strin
 	if info.Claimed {
 		topicID = ""
 	}
+	// Once the control protocol has an owner (or is locked), the topic is
+	// withheld even before the relayer claim lands: the owner enrolls first
+	// and claims second, and in between the topic would still be a relayer
+	// bearer credential for any LAN peer.
+	var controlStatus *control.Status
+	if h.control != nil {
+		st := h.control.Status()
+		controlStatus = &st
+		if st.State != control.StateLegacy {
+			topicID = ""
+		}
+	}
 
 	connected, lastConnected := netmetrics.RelayerSnapshot()
 	var lastConnectedAt *time.Time
@@ -170,6 +187,7 @@ func (h *hub) serveStatus(w http.ResponseWriter, r *http.Request, contract strin
 		Connectivity:           info.Connectivity,
 		TopicID:                topicID,
 		Network:                info.Network,
+		Control:                controlStatus,
 	}
 
 	if err := h.respondJSON(w, http.StatusOK, resp); err != nil {

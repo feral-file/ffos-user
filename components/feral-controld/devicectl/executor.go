@@ -113,6 +113,19 @@ type executor struct {
 	// factory reset. See SetContentPolicyResetter.
 	contentPolicyResetter func() error
 
+	// control is the feral-file#3551 claim-QR/reset seam (SetControl); nil
+	// when control.enabled is false, which leaves the claim QR and the
+	// factory reset exactly as before.
+	control ControlClaim
+	// enrollQR is set while the QR on screen was requested with
+	// purpose:"enroll" (the 2.0.x owner migration): it carries the control
+	// invitation even though the device is claimed.
+	enrollQR atomic.Bool
+	// invMu guards invTimer, the pending refresh of an invitation-carrying
+	// claim QR shortly before its invitation expires.
+	invMu    sync.Mutex
+	invTimer *time.Timer
+
 	// nameObserver, when set, is notified after the device name is stored so
 	// the mDNS record can be re-registered with it. Same wiring discipline as
 	// claimObserver: set once before commands are served, so no lock.
@@ -544,6 +557,70 @@ func (e *executor) SetClaimObserver(observer func(claimed bool)) {
 	e.claimObserver = observer
 }
 
+// ControlClaim is the executor's view of the feral-file#3551 control
+// authority (controlgate.ClaimQR implements it).
+type ControlClaim interface {
+	// ClaimQRFields returns the invitation fields to append to the claim URL
+	// (inv, thumb(devSig), thumb(devEnc), gen) and when the invitation
+	// expires; ok is false unless the device is in the legacy state.
+	ClaimQRFields() (fields []string, expiresAt time.Time, ok bool)
+	// Enrolled reports whether an active owner grant exists.
+	Enrolled() bool
+	// Retire deletes the control identity (factory reset).
+	Retire() error
+}
+
+// SetControl wires the control seam. Call before the claim flow starts.
+func (e *executor) SetControl(c ControlClaim) { e.control = c }
+
+// invitationRefreshLead is how long before its invitation expires an
+// on-screen claim QR is repainted with a fresh one.
+const invitationRefreshLead = time.Minute
+
+// scheduleInvitationRefresh arms the repaint of an invitation-carrying claim
+// QR invitationRefreshLead before expiresAt, replacing any armed one.
+func (e *executor) scheduleInvitationRefresh(expiresAt time.Time) {
+	d := time.Until(expiresAt) - invitationRefreshLead
+	if d < time.Second {
+		d = time.Second
+	}
+	e.invMu.Lock()
+	defer e.invMu.Unlock()
+	if e.invTimer != nil {
+		e.invTimer.Stop()
+	}
+	e.invTimer = time.AfterFunc(d, e.refreshInvitationQR)
+}
+
+func (e *executor) stopInvitationRefresh() {
+	e.invMu.Lock()
+	defer e.invMu.Unlock()
+	if e.invTimer != nil {
+		e.invTimer.Stop()
+		e.invTimer = nil
+	}
+}
+
+// refreshInvitationQR repaints the claim QR with a fresh invitation, but only
+// while the claim QR is what is on screen (RefreshClaimQRURL builds — and so
+// mints an invitation and re-arms this timer — only then). A QR that came
+// down lets the chain end.
+func (e *executor) refreshInvitationQR() {
+	if e.control == nil || e.control.Enrolled() {
+		return
+	}
+	e.setupUI().RefreshClaimQRURL(func() string { return e.buildDeviceConnectURL(context.Background()) })
+}
+
+// ControlOwnerEnrolled takes the claim QR down after the first owner enrolled
+// with the invitation it carried (§5.1): that invitation is spent and the
+// device is no longer claimable from the screen.
+func (e *executor) ControlOwnerEnrolled() {
+	e.stopInvitationRefresh()
+	e.enrollQR.Store(false)
+	e.setupUI().HideIfShowing(setupui.StateClaimQR)
+}
+
 func (e *executor) SetContentPolicyResetter(reset func() error) {
 	e.contentPolicyResetter = reset
 }
@@ -798,10 +875,14 @@ func (e *executor) sendDisplayDefaultPlaylist() error {
 func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interface{}, error) {
 	var cmdArgs struct {
 		Show bool `json:"show"`
+		// Purpose "enroll" asks for the control invitation on a claimed
+		// legacy device (feral-file#3551 §11, the 2.0.x owner migration).
+		Purpose string `json:"purpose"`
 	}
 	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
+	e.enrollQR.Store(cmdArgs.Show && cmdArgs.Purpose == "enroll")
 
 	// controld drives the claim/pairing QR in-process: on show=true it runs the
 	// mandatory pre-claim OTA gate and, only on a supported build, paints the
@@ -992,6 +1073,7 @@ type setupNarrator interface {
 	// ShowClaimQRAutomatic is ShowClaimQR for a claim paint no owner asked for.
 	ShowClaimQRAutomatic(url string, deviceName string)
 	RefreshClaimQRName(resolve func() string)
+	RefreshClaimQRURL(build func() string)
 	ShowReady()
 	ShowFactoryReset()
 	ShowJoinFailed(reason string)
@@ -1515,7 +1597,10 @@ func (e *executor) awaitPlayerCommandHandlerReady(ctx context.Context) bool {
 // by the cloud this process lifetime. The auto-claim loop must treat both as
 // terminal; painting the claim QR over a settled device is always wrong.
 func (e *executor) claimSettled() bool {
-	return e.deviceClaimed() || e.pairingConfirmed.Load()
+	// An enrolled control owner settles the device too: the owner enrolled
+	// from the invitation QR and claims next, over an envelope; repainting
+	// the topic-carrying QR in between would hand the topic to the room.
+	return e.deviceClaimed() || e.pairingConfirmed.Load() || (e.control != nil && e.control.Enrolled())
 }
 
 // deviceClaimed mirrors the claim derivation every other surface uses (mDNS
@@ -1553,7 +1638,14 @@ func (e *executor) buildDeviceConnectURL(ctx context.Context) string {
 	} else {
 		e.logger.Warn("Claim QR: could not read local build; branch/version omitted", zap.Error(err))
 	}
-	return formatDeviceConnectURL(e.deviceID(), topicID, true, branch, version, claimSetupPhase)
+	var invitation []string
+	if e.control != nil && (!state.ClaimSnapshot().Claimed || e.enrollQR.Load()) {
+		if fields, expiresAt, ok := e.control.ClaimQRFields(); ok {
+			invitation = fields
+			e.scheduleInvitationRefresh(expiresAt)
+		}
+	}
+	return formatDeviceConnectURL(e.deviceID(), topicID, true, branch, version, claimSetupPhase, invitation...)
 }
 
 // formatDeviceConnectURL replicates the claim URL built by
@@ -1567,14 +1659,23 @@ func (e *executor) buildDeviceConnectURL(ctx context.Context) string {
 //
 // with the branch's '/' percent-encoded to %2F and nothing else encoded. Ported
 // from feral-setupd startup.rs::build_device_info; the app's parser must not be
-// able to tell this apart from the setupd-built payload.
-func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, version, setupPhase string) string {
+// able to tell this apart from the setupd-built payload. (launcher-ui, the
+// other builder this once had to match, was deleted with feral-setupd.)
+//
+// invitation, when present, is the feral-file#3551 control invitation
+// appended as four more fields (docs/ff1-control-v1.md §11):
+// |<inv>|<thumb(devSig)>|<thumb(devEnc)>|<gen>. Old app parsers read only
+// indices 0, 1 and 3, so the topic stays at index 1.
+func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, version, setupPhase string, invitation ...string) string {
 	internet := "false"
 	if online {
 		internet = "true"
 	}
 	branch = strings.ReplaceAll(branch, "/", "%2F")
 	deviceInfo := fmt.Sprintf("%s|%s|%s|%s|%s|%s", deviceID, topicID, internet, branch, version, setupPhase)
+	for _, f := range invitation {
+		deviceInfo += "|" + f
+	}
 	return deviceConnectURLPrefix + deviceInfo
 }
 
@@ -2979,6 +3080,21 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	// (see resetStaged): the arming and the guard must not be separable by a
 	// concurrent relayer message.
 	e.resetStaged.Store(true)
+
+	// Retire the control identity (feral-file#3551 §8) before anything else
+	// changes: delete .state/control and refuse every envelope from now on.
+	// A failure FAILS the reset, latch released, nothing else touched: the
+	// candidate boot can roll back onto this subvolume, and a "reset" device
+	// that kept the previous owner's grants would hand the next owner a frame
+	// someone else still controls.
+	if e.control != nil {
+		e.stopInvitationRefresh()
+		if err := e.control.Retire(); err != nil {
+			e.resetStaged.Store(false)
+			e.logger.Error("Factory reset refused: retiring the control identity failed", zap.Error(err))
+			return nil, fmt.Errorf("factory reset refused: retiring control identity: %w", err)
+		}
+	}
 
 	// Topic rotation (security invariant): set-factory-boot.service does NOT
 	// swap the running root. It snapshots the factory image to

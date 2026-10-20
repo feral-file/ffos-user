@@ -1255,6 +1255,7 @@ func TestInitializeApp(t *testing.T) {
 		// /home/feralfile and merely degrade to nil with a warn).
 		&config.NetlogConfig{Disabled: true},
 		provisioning.Tuning{},
+		config.ControlConfig{},
 		"com.feralfile.test",
 		nil,
 	)
@@ -1334,6 +1335,7 @@ func TestInitializeApp_OfflineCacheEnabled(t *testing.T) {
 		nil,
 		&config.NetlogConfig{Disabled: true},
 		provisioning.Tuning{},
+		config.ControlConfig{},
 		"com.feralfile.test",
 		nil,
 	)
@@ -1531,6 +1533,7 @@ func TestInitializeAppGatewayUserAgentDisabled(t *testing.T) {
 		&config.GatewayUserAgentConfig{Enabled: &disabled},
 		&config.NetlogConfig{Disabled: true},
 		provisioning.Tuning{},
+		config.ControlConfig{},
 		"com.feralfile.test",
 		nil,
 	)
@@ -1563,6 +1566,7 @@ func TestInitializeAppGatewayUserAgentInvalidHostsDegrades(t *testing.T) {
 		&config.GatewayUserAgentConfig{Hosts: []string{"https://"}},
 		&config.NetlogConfig{Disabled: true},
 		provisioning.Tuning{},
+		config.ControlConfig{},
 		"com.feralfile.test",
 		nil,
 	)
@@ -1600,6 +1604,7 @@ func TestInitializeAppGatewayUserAgentKeepsUsableHosts(t *testing.T) {
 		},
 		&config.NetlogConfig{Disabled: true},
 		provisioning.Tuning{},
+		config.ControlConfig{},
 		"com.feralfile.test",
 		nil,
 	)

@@ -15,6 +15,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
@@ -447,6 +448,16 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		h.logger.Warn("Rejecting command while a factory reset is staged",
 			zap.String("command", commandType.String()))
 		return nil, fmt.Errorf("factory reset in progress: %s is not accepted", commandType)
+	}
+
+	// Envelope-admitted commands carry their Principal on ctx; plaintext and
+	// internal callers (OOM recovery, the playRecentlyPlayed re-entry, which
+	// keeps the caller's ctx and is controller tier anyway) carry none and are
+	// governed by the transport policy instead.
+	if p, ok := control.PrincipalFrom(ctx); ok && !control.TierOf(string(commandType)).Allows(p.Role) {
+		h.logger.Warn("Rejecting command outside the controller's tier",
+			zap.String("command", commandType.String()), zap.String("role", string(p.Role)))
+		return nil, ErrPermissionDenied
 	}
 
 	var result interface{}

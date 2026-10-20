@@ -2,6 +2,7 @@ package mediator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
+	"github.com/feral-file/ffos-user/components/feral-controld/controlgate"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
@@ -163,6 +166,35 @@ type mediator struct {
 
 	// connPushHook is the test-only completion seam (SetConnectivityPushHook).
 	connPushHook atomic.Pointer[func()]
+
+	// control is the feral-file#3551 control gate; nil when control.enabled
+	// is false, which keeps the relayer path exactly as before. Set once
+	// before Start (SetControl).
+	control ControlGate
+}
+
+// ControlGate is the mediator's view of controlgate.Gate.
+type ControlGate interface {
+	HandleEnvelope(ctx context.Context, raw json.RawMessage) (*controlgate.Wire, *control.PublicError)
+	Plaintext(route control.Route, cmd commands.Command) control.Decision
+}
+
+// SetControl wires the control gate (type-asserted seam, like
+// SetInternetObserver, so the Mediator interface and its mocks stay as
+// they are). Call before Start.
+func (m *mediator) SetControl(g ControlGate) { m.control = g }
+
+// plaintextDenial is the relayer RPC message for a plaintext command the
+// §7.2 policy refuses. ok:false is load-bearing and error is a flat string:
+// it is the only shape every released client reports as a failure without
+// crashing (ff-app casts error to String; ff1-cli and Play treat a body
+// without ok:false as success).
+func plaintextDenial(cmd commands.Type, code string) map[string]any {
+	msg := "this FF1 requires a signed control envelope for " + string(cmd) + "; update the app"
+	if code == control.CodeLocked {
+		msg = "this FF1's control state is locked; factory reset is required to recover"
+	}
+	return map[string]any{"ok": false, "error": code, "command": string(cmd), "message": msg}
 }
 
 // startMDNSLocked registers the advertiser with the current device info and
@@ -841,6 +873,28 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 			Type:         commandType,
 			Arguments:    payload.Message.Request,
 			RawArguments: payload.Message.RawRequest,
+		}
+		// Control protocol (feral-file#3551, docs/ff1-control-v1.md §7.2,
+		// §10): an envelope is answered by the authority, the RPC message is
+		// {"v":1,"jwe"} or the public error; plaintext is policy-checked
+		// on RouteRelayer before it can reach the router.
+		if m.control != nil {
+			if commandType == control.CmdEnvelope {
+				var message any
+				wire, perr := m.control.HandleEnvelope(ctx, payload.Message.RawRequest)
+				if perr != nil {
+					message = json.RawMessage(perr.Body())
+				} else {
+					message = wire
+				}
+				return m.relayer.Send(ctx, relayer.Response{Type: "RPC", MessageID: payload.MessageID, Message: message})
+			}
+			if d := m.control.Plaintext(control.RouteRelayer, command); !d.Allow {
+				m.logger.Warn("Relayer plaintext command refused by control policy",
+					zap.String("command", commandType.String()), zap.String("code", d.Code))
+				return m.relayer.Send(ctx, relayer.Response{Type: "RPC", MessageID: payload.MessageID,
+					Message: plaintextDenial(commandType, d.Code)})
+			}
 		}
 		result, err := m.cmdHandler.Process(ctx, command)
 		if err != nil {

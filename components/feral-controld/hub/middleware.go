@@ -143,6 +143,9 @@ func (h *hub) withMiddleware(route string, next http.HandlerFunc) http.HandlerFu
 		// Phase 0 (containment) puts only route-level topic gates here (see
 		// topicGatedRoutes); its per-command gate on /api/cast needs the
 		// decoded command and lives in handleCast (see topicGatedCommands).
+		if route == "screenshot" && h.refuseScreenshotUnlessLegacy(w) {
+			return
+		}
 		if topicGatedRoutes[route] && h.refuseWithoutTopic(w, r, route) {
 			return
 		}

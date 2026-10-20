@@ -16,6 +16,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	fflogger "github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
@@ -77,6 +78,10 @@ type hub struct {
 	// lanauth.go). Nil in production — the gate then reads the global
 	// state.ClaimSnapshot — and set by tests to pin a claim state.
 	claimSnapshot func() state.ClaimInfo
+
+	// control is the feral-file#3551 control gate (see control.go); nil when
+	// control.enabled is false.
+	control ControlGate
 }
 
 // SetContactObserver wires the control-plane contact signal (see
@@ -297,6 +302,23 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 	if payload.Type == "" {
 		http.Error(w, "Command type is required", http.StatusBadRequest)
 		return
+	}
+
+	// Control protocol (feral-file#3551 phase 1, docs/ff1-control-v1.md):
+	// envelopes go to the authority; plaintext goes through the §7.2 policy
+	// (RouteLAN — every hub caller, VPN and Tailscale included). Both run
+	// before the phase-0 topic gate, which still guards the legacy state.
+	if h.control != nil {
+		if payload.Type == control.CmdEnvelope {
+			h.serveEnvelope(w, r, payload)
+			return
+		}
+		if d := h.control.Plaintext(control.RouteLAN, payload); !d.Allow {
+			h.logger.Warn("Hub plaintext cast refused by control policy",
+				zap.String("command", string(payload.Type)), zap.String("code", d.Code))
+			writeControlError(w, d.Code)
+			return
+		}
 	}
 
 	// LAN containment (feral-file#3551 phase 0): on a claimed device the

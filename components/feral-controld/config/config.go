@@ -283,6 +283,11 @@ type Config struct {
 	// before restarting). Existing keys keep their existing strict behavior.
 	Provisioning json.RawMessage `json:"provisioning,omitempty"`
 
+	// Control is the feral-file#3551 controller-authorization block
+	// (docs/ff1-control-v1.md), raw and decoded permissively by
+	// ControlTuning() for the same crash-loop reason as Provisioning.
+	Control json.RawMessage `json:"control,omitempty"`
+
 	// MACInfo contains MAC addresses for all network interfaces
 	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
 	MACInfo map[string]string `json:"-"`
@@ -310,6 +315,38 @@ func (c *Config) ContentPolicyTuning(logger *zap.Logger) ContentPolicyConfig {
 				zap.Error(err), zap.String("raw", string(c.ContentPolicy)))
 		}
 		return ContentPolicyConfig{}
+	}
+	return t
+}
+
+// ControlConfig is the decoded "control" block.
+type ControlConfig struct {
+	// Enabled turns the control protocol on: identity, envelopes, plaintext
+	// policy, sealed notifications. Off (the default) leaves every transport
+	// exactly as it was before the protocol existed.
+	Enabled bool `json:"enabled"`
+	// Enforced is the §7.2 "enforced" switch (phase 2): relayer plaintext is
+	// cut to the exact Play cast shape and relayer plaintext notifications
+	// stop. Meaningful only with Enabled.
+	Enforced bool `json:"enforced"`
+}
+
+// ControlTuning decodes the control block. Absent or malformed means
+// disabled: a malformed block must not crash-loop the daemon, and "disabled"
+// is the pre-protocol behavior every device ran until this release. (Once a
+// fleet depends on enforcement, revisit: a typo then silently reopens the
+// plaintext surfaces, which the Warn below is the only trace of.)
+func (c *Config) ControlTuning(logger *zap.Logger) ControlConfig {
+	var t ControlConfig
+	if len(c.Control) == 0 {
+		return t
+	}
+	if err := json.Unmarshal(c.Control, &t); err != nil {
+		if logger != nil {
+			logger.Warn("control config block malformed; control protocol disabled",
+				zap.Error(err), zap.String("raw", string(c.Control)))
+		}
+		return ControlConfig{}
 	}
 	return t
 }

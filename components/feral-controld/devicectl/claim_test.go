@@ -61,6 +61,16 @@ func (s *narratorSpy) RefreshClaimQRName(resolve func() string) {
 	s.calls = append(s.calls, "refresh_claim_name")
 	s.lastName = resolve()
 }
+
+// RefreshClaimQRURL mirrors setupui.Service: build runs only while the
+// spy's current intent is the claim QR.
+func (s *narratorSpy) RefreshClaimQRURL(build func() string) {
+	if len(s.calls) == 0 || s.calls[len(s.calls)-1] != "claim" {
+		return
+	}
+	s.calls = append(s.calls, "refresh_claim_url")
+	s.lastURL = build()
+}
 func (s *narratorSpy) ShowReady()        { s.calls = append(s.calls, "ready") }
 func (s *narratorSpy) ShowFactoryReset() { s.calls = append(s.calls, "factory_reset") }
 func (s *narratorSpy) ShowJoinFailed(reason string) {

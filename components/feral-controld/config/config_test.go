@@ -765,3 +765,13 @@ func TestContentPolicyTuningPermissiveDecode(t *testing.T) {
 		assert.Equal(t, config.ContentPolicyConfig{}, c.ContentPolicyTuning(zap.NewNop()))
 	})
 }
+
+func TestControlTuning(t *testing.T) {
+	assert.Equal(t, config.ControlConfig{}, (&config.Config{}).ControlTuning(zap.NewNop()))
+	c := &config.Config{Control: []byte(`{"enabled":true}`)}
+	assert.Equal(t, config.ControlConfig{Enabled: true}, c.ControlTuning(zap.NewNop()))
+	c = &config.Config{Control: []byte(`{"enabled":true,"enforced":true}`)}
+	assert.Equal(t, config.ControlConfig{Enabled: true, Enforced: true}, c.ControlTuning(zap.NewNop()))
+	c = &config.Config{Control: []byte(`{"enabled":"yes"}`)}
+	assert.Equal(t, config.ControlConfig{}, c.ControlTuning(zap.NewNop()))
+}
