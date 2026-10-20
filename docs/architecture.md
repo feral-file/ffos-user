@@ -350,5 +350,8 @@ design draft, not an implemented substitute for that protocol.
 A 2026-10-20 local test on FF1-SKYZ2E3A verified command replies, notifications,
 app approval, Play browser casting, and Chromium screenshot output through the
 merged broker and compatibility adapter. It did not verify v2/E2EE control or
-physical HDMI output. Keep the standalone broker and legacy endpoints until the
+physical HDMI output. The revised daemon was also run on that device with an
+empty compatibility API key: it reconnected and returned HTTP 200 for a real
+`getDeviceStatus` command through the local relayer. Keep the standalone broker
+and legacy endpoints until the
 new endpoint flow passes staging, including LAN operation with relay disabled.
