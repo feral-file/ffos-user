@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"unicode"
 )
 
 type Type string
@@ -76,8 +77,29 @@ type Command struct {
 	Ambiguous bool `json:"-"`
 }
 
+// foldKey maps s to a canonical representative of its simple case-folding
+// class, rune by rune: two keys get the same foldKey exactly when
+// bytes.EqualFold (the folding encoding/json uses to match object keys to
+// struct fields) says they are equal. strings.ToLower is not enough:
+// encoding/json matches "ſ" (U+017F) to "s" and "K" (U+212A) to "k"
+// (review N2).
+func foldKey(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		lowest := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < lowest {
+				lowest = f
+			}
+		}
+		b.WriteRune(lowest)
+	}
+	return b.String()
+}
+
 // AmbiguousTopLevel reports whether data is a JSON object whose top-level
-// member names collide when compared case-insensitively (which includes
+// member names collide under encoding/json's case folding (which includes
 // exact duplicates). Anything that is not a well-formed object reports false;
 // the regular decode rejects it.
 func AmbiguousTopLevel(data []byte) bool {
@@ -95,7 +117,7 @@ func AmbiguousTopLevel(data []byte) bool {
 		if !ok {
 			return false
 		}
-		k := strings.ToLower(key)
+		k := foldKey(key)
 		if seen[k] {
 			return true
 		}

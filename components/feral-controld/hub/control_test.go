@@ -25,6 +25,7 @@ import (
 
 // stubGate is a ControlGate with a fixed state and a recorded envelope.
 type stubGate struct {
+	gen       uint64
 	state     control.State
 	envelope  json.RawMessage
 	origin    control.Origin
@@ -41,9 +42,10 @@ func (s *stubGate) HandleEnvelope(_ context.Context, raw json.RawMessage, origin
 func (s *stubGate) Plaintext(route control.Route, cmd commands.Command) (control.Decision, commands.Command) {
 	return control.Policy(s.state, route, string(cmd.Type), cmd.RawArguments), cmd
 }
-func (s *stubGate) ScreenProtected() bool  { return s.protected }
-func (s *stubGate) State() control.State   { return s.state }
-func (s *stubGate) Status() control.Status { return control.Status{V: 1, State: s.state} }
+func (s *stubGate) ScreenProtected() bool        { return s.protected }
+func (s *stubGate) InvitationGeneration() uint64 { return s.gen }
+func (s *stubGate) State() control.State         { return s.state }
+func (s *stubGate) Status() control.Status       { return control.Status{V: 1, State: s.state} }
 
 func serve(mux *http.ServeMux, req *http.Request) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
@@ -180,4 +182,37 @@ func TestEnvelopeOriginIsTheLANPeer(t *testing.T) {
 	req.RemoteAddr = "192.168.1.77:51000"
 	serve(mux, req)
 	assert.Equal(t, control.Origin{Route: control.RouteLAN, Remote: "192.168.1.77", Known: true}, g.origin)
+}
+
+// raceCapturer mints an invitation (moves the stub's generation) while the
+// capture is in flight.
+type raceCapturer struct {
+	g    *stubGate
+	live bool
+}
+
+func (c *raceCapturer) Capture(context.Context, screenshot.Bounds) (*screenshot.Image, error) {
+	c.g.gen++
+	c.g.protected = c.live
+	return &screenshot.Image{Data: []byte("png"), Width: 1, Height: 1}, nil
+}
+
+// Review N1: an invitation minted (or still live) during the capture
+// discards the image.
+func TestScreenshotDiscardedWhenInvitationRacesCapture(t *testing.T) {
+	for _, live := range []bool{true, false} {
+		ctrl := gomock.NewController(t)
+		mockServer := mocks.NewMockHTTPServer(ctrl)
+		mux := http.NewServeMux()
+		mockServer.EXPECT().Handler().Return(mux).AnyTimes()
+		g := &stubGate{state: control.StateLegacy}
+		h := New(context.Background(), mocks.NewMockWS(ctrl), mocks.NewMockCommandHandler(ctrl), fixedStatus{},
+			&raceCapturer{g: g, live: live}, mockServer, wrapper.NewJSON(), zap.NewNop()).(*hub)
+		h.claimSnapshot = func() state.ClaimInfo { return unclaimed }
+		h.SetControl(g)
+		rec := serve(mux, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil))
+		assert.Equal(t, http.StatusForbidden, rec.Code, "live=%v", live)
+		assert.JSONEq(t, `{"error":{"code":"screen_protected"}}`, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "png")
+	}
 }

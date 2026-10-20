@@ -727,3 +727,87 @@ func TestSeqSurvivesRevoke(t *testing.T) {
 		t.Fatalf("seq after re-approval = %d (%v), want 4", n.Seq, err)
 	}
 }
+
+// Review N1 support: the generation moves on issue, clear and consumption,
+// and not on a no-op clear.
+func TestInvitationGeneration(t *testing.T) {
+	d := newTestDevice(t)
+	g0 := d.a.InvitationGeneration()
+	d.a.ClearInvitation()
+	if d.a.InvitationGeneration() != g0 {
+		t.Fatal("clearing nothing moved the generation")
+	}
+	inv, _ := d.a.IssueInvitation()
+	g1 := d.a.InvitationGeneration()
+	if g1 == g0 {
+		t.Fatal("issue did not move the generation")
+	}
+	phone := newTestCtl(t, "phone")
+	rc := d.claims(phone, OpEnroll)
+	rc.Enroll = phone.enroll(inv.Value)
+	d.expectOK(phone, rc)
+	if d.a.InvitationGeneration() == g1 {
+		t.Fatal("consumption did not move the generation")
+	}
+}
+
+// Review N3: a pending request's whole life is capped at 10 minutes,
+// however often it refreshes.
+func TestPendingAbsoluteLife(t *testing.T) {
+	d, _, _ := ownerDevice(t)
+	tab := newTestCtl(t, "tab")
+	var last ReplyClaims
+	for i := 0; i < 8; i++ {
+		rc := d.claims(tab, OpRequestAccess)
+		rc.Enroll = tab.enroll("")
+		last = d.expectOK(tab, rc)
+		d.advance(pendingRefreshInterval * 6) // 60 s
+	}
+	if !strings.Contains(string(last.Res), `"expiresAt":`+itoa(testNow+pendingMaxLife)) {
+		t.Fatalf("refreshes extended past the absolute life: %s", last.Res)
+	}
+	d.advance(pendingMaxLife) // well past
+	d.a.mu.Lock()
+	d.a.prunePending(d.now.Load())
+	_, alive := d.a.pending[tab.ctl]
+	d.a.mu.Unlock()
+	if alive {
+		t.Fatal("pending entry outlived its absolute life")
+	}
+}
+
+func TestLANSourceKey(t *testing.T) {
+	for in, want := range map[string]string{
+		"192.168.1.9":                "192.168.1.9",
+		"::ffff:192.168.1.9":         "192.168.1.9",
+		"2001:db8:1:2:aaaa::1":       "2001:db8:1:2::/64",
+		"2001:db8:1:2:ffff:ffff::99": "2001:db8:1:2::/64",
+		"fe80::1":                    "fe80::/64",
+		"not-an-ip":                  "not-an-ip",
+	} {
+		if got := LANSourceKey(in); got != want {
+			t.Errorf("%s -> %s, want %s", in, got, want)
+		}
+	}
+}
+
+// Review N3: one host rotating IPv6 addresses inside its /64 is one source.
+func TestPendingCapAggregatesIPv6Prefix(t *testing.T) {
+	d, _, _ := ownerDevice(t)
+	open := func(c *testCtl, ip string) ReplyClaims {
+		rc := d.claims(c, OpRequestAccess)
+		rc.Enroll = c.enroll("")
+		adm, err := d.a.OpenFrom(d.seal(c, rc), Origin{Route: RouteLAN, Remote: LANSourceKey(ip), Known: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d.final(adm, rc)
+	}
+	if r := open(newTestCtl(t, "a"), "2001:db8:1:2::10"); !r.OK {
+		t.Fatal(r.Code)
+	}
+	d.advance(pendingNewInterval)
+	if r := open(newTestCtl(t, "b"), "2001:db8:1:2::11"); r.Code != CodeRateLimited {
+		t.Fatalf("same /64 got a second slot: %+v", r)
+	}
+}

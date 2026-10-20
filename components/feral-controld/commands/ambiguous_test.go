@@ -26,3 +26,25 @@ func TestAmbiguousTopLevel(t *testing.T) {
 		t.Fatalf("ambiguous message not flagged: %v %+v", err, c)
 	}
 }
+
+// Review N2: the folding must match encoding/json's, which this test pins by
+// asking encoding/json itself which key it binds.
+func TestAmbiguousFoldingMatchesEncodingJSON(t *testing.T) {
+	for _, msg := range []string{
+		"{\"command\":\"x\",\"request\":{\"a\":1},\"reque\u017ft\":{\"b\":2}}",
+		"{\"command\":\"x\",\"request\":{\"a\":1},\"REQUE\u017fT\":{\"b\":2}}",
+	} {
+		var w struct {
+			Request map[string]any `json:"request"`
+		}
+		if err := json.Unmarshal([]byte(msg), &w); err != nil {
+			t.Fatal(err)
+		}
+		if w.Request["b"] == nil {
+			t.Fatalf("premise: encoding/json did not fold %s", msg)
+		}
+		if !AmbiguousTopLevel([]byte(msg)) {
+			t.Fatalf("%s not flagged although encoding/json folds it", msg)
+		}
+	}
+}

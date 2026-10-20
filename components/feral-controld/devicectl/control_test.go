@@ -180,3 +180,36 @@ func TestConnectClaimClearsInvitation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), fc.cleared.Load())
 }
+
+// refusingSpy refuses automatic claim paints, like setupui does while
+// another overlay owns the screen.
+type refusingSpy struct{ *narratorSpy }
+
+func (r *refusingSpy) ShowClaimQRAutomatic(string, string) {}
+
+// Review N4d: an invitation is minted for a paint, and voided at once when
+// the paint did not take.
+func TestRefusedPaintVoidsInvitation(t *testing.T) {
+	stateUnclaimed(t)
+	ctrl := gomock.NewController(t)
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(gomock.Any()).Return(nil, errors.New("absent")).AnyTimes()
+	mockOS.EXPECT().IsNotExist(gomock.Any()).Return(true).AnyTimes()
+	mockOS.EXPECT().Stat(gomock.Any()).Return(nil, errors.New("absent")).AnyTimes()
+
+	fc := &fakeControl{fields: []string{"i", "s", "e", "g"}, ok: true}
+	e := &executor{logger: zap.NewNop(), setupNarrator: &refusingSpy{&narratorSpy{}}, os: mockOS, json: wrapper.NewJSON()}
+	e.SetControl(fc)
+	e.paintClaimQRWithInvitation(context.Background(), true)
+	assert.Equal(t, int32(1), fc.issued.Load())
+	assert.Equal(t, int32(1), fc.cleared.Load(), "a refused paint must void the invitation it minted")
+	assert.Nil(t, e.invTimer)
+
+	// A paint that takes keeps it.
+	fc = &fakeControl{fields: []string{"i", "s", "e", "g"}, ok: true}
+	e = &executor{logger: zap.NewNop(), setupNarrator: &narratorSpy{}, os: mockOS, json: wrapper.NewJSON()}
+	e.SetControl(fc)
+	e.paintClaimQRWithInvitation(context.Background(), true)
+	assert.Equal(t, int32(0), fc.cleared.Load())
+	e.stopInvitationRefresh()
+}

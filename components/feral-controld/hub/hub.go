@@ -417,7 +417,13 @@ func (h *hub) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), screenshot.CaptureTimeout)
 	defer cancel()
 
+	invGen := h.screenshotGeneration()
 	image, err := h.capturer.Capture(ctx, bounds)
+	if err == nil && h.screenshotRaced(invGen) {
+		h.logger.Warn("Screenshot discarded: an invitation appeared during the capture")
+		writeControlError(w, control.CodeScreenProtected)
+		return
+	}
 	if err != nil {
 		statusCode := screenshotErrorStatus(err)
 		h.logger.Warn("Failed to capture screenshot", zap.Int("status", statusCode), zap.Error(err))

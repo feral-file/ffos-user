@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"slices"
 	"sync"
@@ -50,8 +51,11 @@ const (
 
 // Ceremony limits (§5).
 const (
-	invitationTTL      = 10 * 60
-	pendingTTL         = 5 * 60
+	invitationTTL = 10 * 60
+	pendingTTL    = 5 * 60
+	// pendingMaxLife caps a pending request's whole life, refreshes
+	// included, so one entry cannot hold a slot forever (review N3).
+	pendingMaxLife     = 10 * 60
 	maxPending         = 4
 	pendingNewInterval = 10
 	// pendingRefreshInterval: a pending ctl may refresh at most this often.
@@ -222,6 +226,7 @@ type Authority struct {
 	rand   io.Reader
 
 	inv            *invitation
+	invGen         uint64
 	pending        map[string]*pendingRequest
 	denied         map[string]int64 // ctl -> until, owner-denied requests
 	lastNewPending int64
@@ -388,7 +393,7 @@ func (a *Authority) IssueInvitation() (Invitation, error) {
 	if err != nil {
 		return Invitation{}, err
 	}
-	a.inv = &invitation{value: b64u(b), expiresAt: now + invitationTTL}
+	a.setInvLocked(&invitation{value: b64u(b), expiresAt: now + invitationTTL})
 	return a.invitationLocked(), nil
 }
 
@@ -430,16 +435,41 @@ func (a *Authority) EnsureInvitation(minRemaining time.Duration) (Invitation, er
 func (a *Authority) Retire() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.inv = nil
-	a.pending = map[string]*pendingRequest{}
-	return a.store.Retire()
+	err := a.store.Retire()
+	// Memory follows the tombstone: if it never committed, nothing changes
+	// (§8); once it did, invitation and pending requests are void.
+	if errors.Is(a.store.LockErr(), ErrRetired) {
+		a.setInvLocked(nil)
+		a.pending = map[string]*pendingRequest{}
+	}
+	return err
 }
 
 // ClearInvitation voids the current invitation (QR dismissed, claim taken).
 func (a *Authority) ClearInvitation() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.inv = nil
+	a.setInvLocked(nil)
+}
+
+// setInvLocked replaces the invitation and bumps invGen when the value on
+// offer actually changes (issued, cleared, consumed).
+func (a *Authority) setInvLocked(inv *invitation) {
+	if a.inv == nil && inv == nil {
+		return
+	}
+	a.inv = inv
+	a.invGen++
+}
+
+// InvitationGeneration changes every time an invitation is issued, cleared
+// or consumed. A caller that must not race a newly painted invitation (the
+// screenshot route, whose capture takes seconds) reads it before and after
+// and refuses when it moved (review N1).
+func (a *Authority) InvitationGeneration() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.invGen
 }
 
 func (a *Authority) approvalCode(ctl string) string {
@@ -833,6 +863,20 @@ func (a *Authority) prunePending(now int64) {
 	}
 }
 
+// LANSourceKey is the per-LAN-source key for the pending cap (§5.2): the
+// IPv4 address, or the /64 of an IPv6 address, since one LAN host can hold a
+// whole /64 of addresses (review N3). An unparsable value is used as is.
+func LANSourceKey(ip string) string {
+	addr := net.ParseIP(ip)
+	if addr == nil {
+		return ip
+	}
+	if v4 := addr.To4(); v4 != nil {
+		return v4.String()
+	}
+	return addr.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
 // pendingCapped reports whether a NEW pending request from o would exceed a
 // per-route cap (§5.2). The global cap and interval are checked separately.
 func (a *Authority) pendingCapped(o Origin, ctl string) bool {
@@ -877,7 +921,7 @@ func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Gran
 		return a.fail(adm, CodeInvitationInvalid, nil)
 	}
 	if a.inv == nil || now >= a.inv.expiresAt {
-		a.inv = nil
+		a.setInvLocked(nil)
 		return a.fail(adm, CodeInvitationInvalid, nil)
 	}
 	if subtle.ConstantTimeCompare([]byte(c.Enroll.Inv), []byte(a.inv.value)) != 1 {
@@ -902,7 +946,7 @@ func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Gran
 		// The grant is what a restart reads: the invitation is spent either
 		// way. On ErrDurability the controller retries enroll without inv
 		// and gets the same grant back.
-		a.inv = nil
+		a.setInvLocked(nil)
 		adm.OwnerEnrolled = true
 	}
 	if err != nil {
@@ -999,7 +1043,7 @@ func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, know
 		p.window = p.window.Accept(c.Ctr)
 	}
 	p.enroll = *c.Enroll
-	p.expiresAt = now + pendingTTL
+	p.expiresAt = min(now+pendingTTL, p.createdAt+pendingMaxLife)
 	body := map[string]any{"ctl": p.ctl, "label": p.enroll.Label, "platform": p.enroll.Platform,
 		"code": a.approvalCode(p.ctl), "expiresAt": p.expiresAt}
 	for _, owner := range a.store.Grants() {

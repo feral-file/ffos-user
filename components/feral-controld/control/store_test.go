@@ -309,7 +309,7 @@ func TestRetire(t *testing.T) {
 	if err := d3.a.Retire(); err == nil {
 		t.Fatal("retire without a tombstone reported success")
 	}
-	// Review F5: nothing changed in memory either.
+	// Review F5: nothing changed in memory either (nor the pending table).
 	if d3.a.LockErr() != nil || d3.a.State() != StateEnrolled {
 		t.Fatalf("failed retire changed memory: %v %s", d3.a.LockErr(), d3.a.State())
 	}
@@ -392,4 +392,23 @@ func (m markerErrFS) Stat(name string) (fs.FileInfo, error) {
 		return nil, errors.New("eio")
 	}
 	return m.MemFS.Stat(name)
+}
+
+// Review nit: a failed Retire (no tombstone) leaves the invitation and the
+// pending table as they were.
+func TestFailedRetireKeepsInvitation(t *testing.T) {
+	d := newTestDevice(t)
+	inv, _ := d.a.IssueInvitation()
+	d.fs.FailWrite = func(name string) error {
+		if strings.HasSuffix(name, ".retired") {
+			return errors.New("enospc")
+		}
+		return nil
+	}
+	if err := d.a.Retire(); err == nil {
+		t.Fatal("retire without tombstone succeeded")
+	}
+	if cur, ok := d.a.CurrentInvitation(); !ok || cur.Value != inv.Value {
+		t.Fatal("failed retire voided the invitation")
+	}
 }

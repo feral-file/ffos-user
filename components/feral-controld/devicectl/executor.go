@@ -1053,8 +1053,20 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return false, true, false
 	}
-	e.paintClaimQR(e.buildDeviceConnectURL(ctx), skipIfSettled)
+	e.paintClaimQRWithInvitation(ctx, skipIfSettled)
 	return true, false, false
+}
+
+// paintClaimQRWithInvitation builds the claim URL (which mints or reuses the
+// control invitation when one belongs on it) and paints it. If the paint did
+// not take — an automatic paint is refused while another overlay owns the
+// screen — the invitation just minted is voided at once: an invitation must
+// exist only while a QR carrying it is on screen (review N4d).
+func (e *executor) paintClaimQRWithInvitation(ctx context.Context, automatic bool) {
+	e.paintClaimQR(e.buildDeviceConnectURL(ctx), automatic)
+	if e.control != nil && !e.setupUI().ClaimQRShowing() {
+		e.clearControlInvitation()
+	}
 }
 
 // paintClaimQR reads the display name and pushes the claim QR under

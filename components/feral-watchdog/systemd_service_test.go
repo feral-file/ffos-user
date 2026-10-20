@@ -340,25 +340,39 @@ func (m *metricCollectorRoundTripper) Metrics() []string {
 	return out
 }
 
-// feral-file#3551 M4: the OTA carry step stops controld on purpose under the
-// updater lock; that inactive reading is not a failure. Outside an update it
-// still is.
+// feral-file#3551 M4 / review N5: the OTA carry step stops controld on
+// purpose. The report is suppressed only while BOTH the ffos marker exists
+// and the updater lock is held; the lock alone (a long download) or the
+// marker alone (stale) keeps the normal report.
 func TestSystemdMonitor_InactiveControldDuringUpdate_NotReported(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "feral-controld-ota-stop")
+	prev := controldOTAStopMarker
+	controldOTAStopMarker = marker
+	t.Cleanup(func() { controldOTAStopMarker = prev })
+
 	monitor, collector := newTestSystemdMonitor(t)
 	ctx := context.Background()
 	setServiceStates(t, "active", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
+	// Lock held, no marker: reported.
 	end := simulateUpdate(t)
 	setServiceStates(t, "active", "inactive", "active")
 	requireNoError(t, monitor.check(ctx))
-	metrics := collector.Metrics()
-	assertMetricCount(t, metrics, `ff_service_failed{service="feral-controld.service"} 1`, 0)
-	assertMetricCount(t, metrics, "service_failed_incident 1", 0)
+	assertMetricCount(t, collector.Metrics(), `ff_service_failed{service="feral-controld.service"} 1`, 1)
 
-	// The update ended and controld is still down: now it is a failure.
+	// Back up, then the carry step: marker + lock -> not reported.
+	setServiceStates(t, "active", "active", "active")
+	requireNoError(t, monitor.check(ctx))
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setServiceStates(t, "active", "inactive", "active")
+	requireNoError(t, monitor.check(ctx))
+	assertMetricCount(t, collector.Metrics(), `ff_service_failed{service="feral-controld.service"} 1`, 1)
+
+	// Update over (lock released) with a stale marker: reported again.
 	end()
 	requireNoError(t, monitor.check(ctx))
-	metrics = collector.Metrics()
-	assertMetricCount(t, metrics, `ff_service_failed{service="feral-controld.service"} 1`, 1)
+	assertMetricCount(t, collector.Metrics(), `ff_service_failed{service="feral-controld.service"} 1`, 2)
 }

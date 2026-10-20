@@ -216,7 +216,11 @@ Two more refusals apply whenever the protocol is on:
   another case (`"request"` and `"Request"`), is refused in every state:
   LAN `400 {"error":{"code":"invalid_message"}}`, relayer
   `{"ok":false,"error":"invalid_message",…}`. Accepted plaintext runs with
-  its `request` decoded from the exact bytes the policy judged.
+  its `request` decoded from the exact bytes the policy judged. Behaviour change
+  when the protocol is wired: a message whose ONLY request member is a
+  case variant (`"Request"`, no `"request"`) used to reach the handler
+  through encoding/json's case-insensitive decode; it now runs with no
+  arguments, because only the exact `request` token is judged and used.
 - In `legacy`, `GET /api/screenshot` answers
   `403 {"error":{"code":"screen_protected"}}` while the first-owner
   invitation is live (the claim QR carries it).

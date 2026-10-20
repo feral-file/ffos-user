@@ -87,6 +87,9 @@ func (g *Gate) Plaintext(route control.Route, cmd commands.Command) (control.Dec
 	return d, cmd
 }
 
+// InvitationGeneration exposes Authority.InvitationGeneration (review N1).
+func (g *Gate) InvitationGeneration() uint64 { return g.auth.InvitationGeneration() }
+
 // ScreenProtected reports whether the panel may be showing a live
 // invitation, which a screenshot would hand to any LAN peer (review F1).
 func (g *Gate) ScreenProtected() bool {

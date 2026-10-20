@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-watchdog/packages/cdp"
@@ -34,6 +35,17 @@ var (
 		"feral-controld.service": true,
 	}
 )
+
+// controldOTAStopMarker is created by ffos ota-control-state.sh just before
+// it stops feral-controld to carry .state/control, and removed when it
+// restarts controld; after arming it is never removed (the reboot clears
+// /run). LOCKSTEP CONTRACT with ffos: this exact path. A variable for tests.
+var controldOTAStopMarker = "/run/feral-controld-ota-stop"
+
+func controldStopExpected() bool {
+	_, err := os.Stat(controldOTAStopMarker)
+	return err == nil
+}
 
 // SystemdMonitor monitors systemd services
 type SystemdMonitor struct {
@@ -82,9 +94,12 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 	hasFailedService := false
 	// An OTA stops feral-controld on purpose while it carries the live
 	// control state into the new image (ffos ota-control-state.sh,
-	// feral-file#3551 M4), under the updater lock. An inactive reading then
-	// is the update working, not a failure to report.
-	updating := m.commandHandler.updateInProgress()
+	// feral-file#3551 M4). An inactive reading then is the update working,
+	// not a failure to report — but only for that step: the script creates
+	// controldOTAStopMarker just before the stop, and the updater lock must
+	// also be held. Either alone (a stale marker, a long download under the
+	// lock) keeps the normal report (review N5).
+	updating := controldStopExpected() && m.commandHandler.updateInProgress()
 
 	for service := range systemdServices {
 		state, err := m.commandHandler.checkSystemdUserServiceStatus(ctx, service)

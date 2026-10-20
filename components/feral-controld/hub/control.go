@@ -23,6 +23,7 @@ type ControlGate interface {
 	State() control.State
 	Status() control.Status
 	ScreenProtected() bool
+	InvitationGeneration() uint64
 }
 
 // SetControl wires the control gate. Call before Start.
@@ -52,7 +53,7 @@ func (h *hub) serveEnvelope(w http.ResponseWriter, r *http.Request, payload comm
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	wire, perr := h.control.HandleEnvelope(h.ctx, raw, control.Origin{Route: control.RouteLAN, Remote: host, Known: true})
+	wire, perr := h.control.HandleEnvelope(h.ctx, raw, control.Origin{Route: control.RouteLAN, Remote: control.LANSourceKey(host), Known: true})
 	if perr != nil {
 		h.logger.Warn("Hub envelope refused", zap.String("code", perr.Code), zap.String("remote_addr", r.RemoteAddr))
 		writeControlError(w, perr.Code)
@@ -72,6 +73,26 @@ func (h *hub) serveEnvelope(w http.ResponseWriter, r *http.Request, payload comm
 // gate, so any LAN host could read the invitation off a screenshot and
 // become the sole owner (review F1). Otherwise the phase-0 topic gate still
 // guards the route.
+// screenshotGeneration returns the invitation generation to compare after a
+// capture (review N1); 0 when control is off.
+func (h *hub) screenshotGeneration() uint64 {
+	if h.control == nil {
+		return 0
+	}
+	return h.control.InvitationGeneration()
+}
+
+// screenshotRaced reports whether an invitation was minted, cleared or is
+// live after a capture that started at generation before. The middleware
+// check runs before Capture, which can take seconds; a QR painted in that
+// window would otherwise leave in the image (review N1).
+func (h *hub) screenshotRaced(before uint64) bool {
+	if h.control == nil {
+		return false
+	}
+	return h.control.InvitationGeneration() != before || h.control.ScreenProtected()
+}
+
 func (h *hub) refuseScreenshotUnlessLegacy(w http.ResponseWriter) bool {
 	if h.control == nil {
 		return false

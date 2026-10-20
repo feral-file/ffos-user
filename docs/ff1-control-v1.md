@@ -239,6 +239,15 @@ The first owner.
   would let any LAN peer block first-owner and migration enrollment forever.
   A wrong value is `invitation_invalid` and changes nothing. Issuing a new
   invitation replaces the old one.
+- A client MUST enroll with the invitation **before** it sends `connect` on
+  an unclaimed device. `connect` claims the device on the relayer, which takes
+  the claim QR down and with it voids the invitation (below); a client that
+  connects first has to have the QR shown again to enroll.
+- A new invitation is minted only when a claim QR carrying it is actually
+  painted, and voided at once if the paint does not take. A repaint after the
+  QR was hidden or replaced therefore carries a new invitation; a repaint of
+  a QR that is still on screen reuses its invitation unless less than
+  2 minutes of it remain.
 - The invitation lives only as long as the QR that carries it: it is voided
   whenever that QR is hidden or replaced (pairing ended with
   `showPairingQRCode{show:false}`, a legacy relayer claim, another narration
@@ -264,12 +273,20 @@ A later controller asks for access.
   - At most 4 pending requests in total.
   - At most 1 **new** request per 10 s from any source (a refresh is not new).
   - Per route, counted over the other pending requests: at most 1 pending
-    request per LAN peer IP, and at most 2 from the relayer. The peer IP is
-    used only for this count; it is never authority.
+    request per LAN source, and at most 2 from the relayer. A LAN source is
+    the peer's IPv4 address or the /64 of its IPv6 address (one host can hold
+    a whole /64). The source is used only for this count; it is never
+    authority.
   - A refresh of an existing pending `ctl` at most once per 10 s.
-  - A pending request lives for 5 minutes from its last refresh.
+  - A pending request lives for 5 minutes from its last refresh, and never
+    more than 10 minutes from its creation, however often it refreshes.
   - Pending requests and denials are held in memory only. A restart drops
     them and the requester asks again.
+  - Residual: an attacker who controls many LAN source prefixes can still
+    fill the 4 global slots for up to 10 minutes at a time. Every such
+    request is owner-visible (a sealed `controller_approval_request` with
+    its label, platform and code), the owner can deny each one, and a full
+    table only delays a legitimate requester, never grants anything.
 - `res` = `{"status":"pending","code":approvalCode(ctl, thumb(devSig)),"expiresAt":t}`.
 - On create, every active owner gets a sealed `controller_approval_request`
   notification (§9), with body `{"ctl","label","platform","code","expiresAt"}`.
@@ -399,9 +416,17 @@ decoders disagree about which copy counts, so the policy could judge one
 arguments decoded from exactly the `request` bytes the policy judged.
 
 In `legacy`, `GET /api/screenshot` answers `403 screen_protected` while an
-invitation is live: the claim QR then carries it, an unclaimed device has no
+invitation is live, and also when an invitation was issued, consumed or
+cleared, or is live, at the end of the capture (a capture takes seconds; a
+QR painted meanwhile must not leave in the image): the claim QR then carries it, an unclaimed device has no
 topic gate, and a screenshot would hand any LAN host the first-owner
 invitation. Otherwise the phase-0 rules apply.
+
+The `legacy` state is open on the LAN by design (§11 migration and first
+claim depend on it): plaintext casts, input and `showPairingQRCode` remain
+available to any LAN caller until an owner enrolls, exactly as in phase 0.
+What protects the first enrollment is that the invitation is shown only on
+the physical screen and never served over the network.
 
 Outside `legacy`, two more LAN surfaces close:
 - `GET /api/screenshot` answers `403 enrollment_required`. It has no envelope
