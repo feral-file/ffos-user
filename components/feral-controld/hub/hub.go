@@ -20,6 +20,7 @@ import (
 	fflogger "github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
+	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
@@ -71,6 +72,11 @@ type hub struct {
 	// executor's probes); invoked on request goroutines, so the observer must
 	// be internally synchronized and non-blocking.
 	contactObserver func()
+
+	// claimSnapshot is the claim-state source for the LAN topic gate (see
+	// lanauth.go). Nil in production — the gate then reads the global
+	// state.ClaimSnapshot — and set by tests to pin a claim state.
+	claimSnapshot func() state.ClaimInfo
 }
 
 // SetContactObserver wires the control-plane contact signal (see
@@ -290,6 +296,16 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 
 	if payload.Type == "" {
 		http.Error(w, "Command type is required", http.StatusBadRequest)
+		return
+	}
+
+	// LAN containment (feral-file#3551 phase 0): on a claimed device the
+	// commands that grant more than the relayer topic itself (shell access)
+	// require that topic as proof. This is the one
+	// policy that needs the command name, so it runs here, after the single
+	// body decode, rather than in the middleware seam (which would have to
+	// read the body twice). See topicGatedCommands.
+	if topicGatedCommands[payload.Type] && h.refuseWithoutTopic(w, r, string(payload.Type)) {
 		return
 	}
 
