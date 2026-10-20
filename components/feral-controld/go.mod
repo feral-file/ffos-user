@@ -9,6 +9,7 @@ require (
 	github.com/display-protocol/dp1-go v0.6.2
 	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260925215950-2dcfaa962a19
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
+	github.com/go-jose/go-jose/v4 v4.1.3
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.6.0
