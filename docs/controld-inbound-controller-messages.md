@@ -211,6 +211,16 @@ A refused relayer plaintext command gets the RPC `message`
 `legacy`, `GET /api/screenshot` answers `403 enrollment_required` and status
 serves `topic_id:""`.
 
+Two more refusals apply whenever the protocol is on:
+- A plaintext message whose top level repeats a member name, exactly or in
+  another case (`"request"` and `"Request"`), is refused in every state:
+  LAN `400 {"error":{"code":"invalid_message"}}`, relayer
+  `{"ok":false,"error":"invalid_message",…}`. Accepted plaintext runs with
+  its `request` decoded from the exact bytes the policy judged.
+- In `legacy`, `GET /api/screenshot` answers
+  `403 {"error":{"code":"screen_protected"}}` while the first-owner
+  invitation is live (the claim QR carries it).
+
 ## Shared Success Responses
 
 Most side-effect commands return:

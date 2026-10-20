@@ -309,6 +309,10 @@ func TestRetire(t *testing.T) {
 	if err := d3.a.Retire(); err == nil {
 		t.Fatal("retire without a tombstone reported success")
 	}
+	// Review F5: nothing changed in memory either.
+	if d3.a.LockErr() != nil || d3.a.State() != StateEnrolled {
+		t.Fatalf("failed retire changed memory: %v %s", d3.a.LockErr(), d3.a.State())
+	}
 	if _, err := d3.fs.Stat(d3.dir); err != nil {
 		t.Fatal("control dir deleted although the tombstone was not written")
 	}
@@ -327,6 +331,11 @@ func TestStateExists(t *testing.T) {
 	_ = InitDir(fsys2, "/s/control", testIdentity(t), nil)
 	if !StateExists(fsys2, "/s/control") {
 		t.Fatal("dir not counted")
+	}
+	fsys3 := NewMemFS()
+	fsys3.SetFile("/s/control.new/identity.json", []byte("partial"))
+	if !StateExists(fsys3, "/s/control") {
+		t.Fatal("staging dir not counted (review F9)")
 	}
 	if !StateExists(statErrFS{fsys}, "/s/x") {
 		t.Fatal("an unreadable answer must count as present")
@@ -360,4 +369,27 @@ func TestEnsureInvitation(t *testing.T) {
 	if _, err := d2.a.EnsureInvitation(time.Minute); err == nil {
 		t.Fatal("invitation issued on an enrolled device")
 	}
+}
+
+// Review F5: an unreadable tombstone is locked, but not "retired": the
+// plaintext factoryReset allowance is only for a real tombstone.
+func TestUnreadableTombstoneIsPlainLocked(t *testing.T) {
+	d, _, _ := ownerDevice(t)
+	fsys := markerErrFS{d.fs}
+	a, _ := New(Config{Dir: d.dir, DeviceID: testDeviceID, FS: fsys})
+	if a.State() != StateLocked || errors.Is(a.LockErr(), ErrRetired) || !errors.Is(a.LockErr(), ErrLocked) {
+		t.Fatalf("state %s err %v", a.State(), a.LockErr())
+	}
+	if a.Policy(RouteLAN, "factoryReset", nil).Allow {
+		t.Fatal("unreadable tombstone allowed the plaintext reset")
+	}
+}
+
+type markerErrFS struct{ *MemFS }
+
+func (m markerErrFS) Stat(name string) (fs.FileInfo, error) {
+	if strings.HasSuffix(name, ".retired") {
+		return nil, errors.New("eio")
+	}
+	return m.MemFS.Stat(name)
 }

@@ -737,6 +737,13 @@ func (s *Service) RefreshClaimQRURL(build func() string) {
 	})
 }
 
+// ClaimQRShowing reports whether the claim QR is the current narration
+// intent.
+func (s *Service) ClaimQRShowing() bool {
+	cur, has := s.ctrl.Current()
+	return has && setupState(cur) == stateClaimQR
+}
+
 // ShowReady narrates that setup completed successfully.
 func (s *Service) ShowReady() {
 	s.push(map[string]any{"state": stateReady})

@@ -28,5 +28,8 @@ func (c ClaimQR) Enrolled() bool {
 	return st == control.StateEnrolled || st == control.StateEnforced
 }
 
+// ClearInvitation voids the live invitation.
+func (c ClaimQR) ClearInvitation() { c.Auth.ClearInvitation() }
+
 // Retire deletes the control identity.
 func (c ClaimQR) Retire() error { return c.Auth.Retire() }

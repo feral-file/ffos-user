@@ -1,6 +1,10 @@
 package commands
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+)
 
 type Type string
 
@@ -62,6 +66,46 @@ type Command struct {
 	// Populated only by UnmarshalJSON (both ingress paths decode through it);
 	// nil for commands built in-process, which have no wire form.
 	RawArguments json.RawMessage `json:"-"`
+	// Ambiguous is set by UnmarshalJSON when the message's top level repeats
+	// a member name, exactly or in another letter case ("request" twice, or
+	// "request" and "Request"). encoding/json resolves such a document
+	// differently for the typed fields (case-insensitive, merging) and for
+	// RawArguments (exact key), so a policy that inspects one could be
+	// bypassed through the other (feral-file#3551 review F3). The control
+	// policy refuses ambiguous messages; legacy routing ignores the flag.
+	Ambiguous bool `json:"-"`
+}
+
+// AmbiguousTopLevel reports whether data is a JSON object whose top-level
+// member names collide when compared case-insensitively (which includes
+// exact duplicates). Anything that is not a well-formed object reports false;
+// the regular decode rejects it.
+func AmbiguousTopLevel(data []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return false
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return false
+		}
+		k := strings.ToLower(key)
+		if seen[k] {
+			return true
+		}
+		seen[k] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return false
+		}
+	}
+	return false
 }
 
 // commandWire is Command minus the custom decoder, so UnmarshalJSON can
@@ -86,6 +130,7 @@ func (c *Command) UnmarshalJSON(data []byte) error {
 	}
 	c.Type = w.Type
 	c.Arguments = w.Arguments
+	c.Ambiguous = AmbiguousTopLevel(data)
 	c.RawArguments = nil
 	if raw, ok := tokens["request"]; ok && len(raw) > 0 && string(raw) != "null" {
 		c.RawArguments = raw

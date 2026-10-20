@@ -175,8 +175,8 @@ type mediator struct {
 
 // ControlGate is the mediator's view of controlgate.Gate.
 type ControlGate interface {
-	HandleEnvelope(ctx context.Context, raw json.RawMessage) (*controlgate.Wire, *control.PublicError)
-	Plaintext(route control.Route, cmd commands.Command) control.Decision
+	HandleEnvelope(ctx context.Context, raw json.RawMessage, origin control.Origin) (*controlgate.Wire, *control.PublicError)
+	Plaintext(route control.Route, cmd commands.Command) (control.Decision, commands.Command)
 }
 
 // SetControl wires the control gate (type-asserted seam, like
@@ -191,8 +191,11 @@ func (m *mediator) SetControl(g ControlGate) { m.control = g }
 // without ok:false as success).
 func plaintextDenial(cmd commands.Type, code string) map[string]any {
 	msg := "this FF1 requires a signed control envelope for " + string(cmd) + "; update the app"
-	if code == control.CodeLocked {
+	switch code {
+	case control.CodeLocked:
 		msg = "this FF1's control state is locked; factory reset is required to recover"
+	case control.CodeInvalidMessage:
+		msg = "message has duplicate or case-variant member names"
 	}
 	return map[string]any{"ok": false, "error": code, "command": string(cmd), "message": msg}
 }
@@ -873,6 +876,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 			Type:         commandType,
 			Arguments:    payload.Message.Request,
 			RawArguments: payload.Message.RawRequest,
+			Ambiguous:    payload.Message.Ambiguous,
 		}
 		// Control protocol (feral-file#3551, docs/ff1-control-v1.md §7.2,
 		// §10): an envelope is answered by the authority, the RPC message is
@@ -881,7 +885,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 		if m.control != nil {
 			if commandType == control.CmdEnvelope {
 				var message any
-				wire, perr := m.control.HandleEnvelope(ctx, payload.Message.RawRequest)
+				wire, perr := m.control.HandleEnvelope(ctx, payload.Message.RawRequest, control.Origin{Route: control.RouteRelayer, Known: true})
 				if perr != nil {
 					message = json.RawMessage(perr.Body())
 				} else {
@@ -889,12 +893,14 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 				}
 				return m.relayer.Send(ctx, relayer.Response{Type: "RPC", MessageID: payload.MessageID, Message: message})
 			}
-			if d := m.control.Plaintext(control.RouteRelayer, command); !d.Allow {
+			d, normalized := m.control.Plaintext(control.RouteRelayer, command)
+			if !d.Allow {
 				m.logger.Warn("Relayer plaintext command refused by control policy",
 					zap.String("command", commandType.String()), zap.String("code", d.Code))
 				return m.relayer.Send(ctx, relayer.Response{Type: "RPC", MessageID: payload.MessageID,
 					Message: plaintextDenial(commandType, d.Code)})
 			}
+			command = normalized
 		}
 		result, err := m.cmdHandler.Process(ctx, command)
 		if err != nil {

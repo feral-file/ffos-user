@@ -27,7 +27,7 @@ func enrollOwner(t *testing.T, g *controlgate.Gate, a *control.Authority) *clien
 	}
 	owner := newClient(t, "owner", *a.Status().Profile)
 	s := owner.build(control.OpEnroll, "", "", inv.Value)
-	wire, perr := g.HandleEnvelope(context.Background(), s.body)
+	wire, perr := g.HandleEnvelope(context.Background(), s.body, control.Origin{})
 	if perr != nil {
 		t.Fatal(perr)
 	}
@@ -53,7 +53,7 @@ func TestHandleEnvelopeRunsAsPrincipal(t *testing.T) {
 	}
 
 	s := owner.build(control.OpCmd, "displayPlaylist", `{"dp1_call":{"items":[]}}`, "")
-	wire, perr := g.HandleEnvelope(context.Background(), s.body)
+	wire, perr := g.HandleEnvelope(context.Background(), s.body, control.Origin{})
 	if perr != nil {
 		t.Fatal(perr)
 	}
@@ -73,7 +73,7 @@ func TestHandleEnvelopeRunsAsPrincipal(t *testing.T) {
 	// Handler errors become command_failed with the relayer-path body.
 	rec.err = &commandrouter.RateLimitedError{Command: "displayPlaylist", Reason: "rate"}
 	s = owner.build(control.OpCmd, "displayPlaylist", `{}`, "")
-	wire, _ = g.HandleEnvelope(context.Background(), s.body)
+	wire, _ = g.HandleEnvelope(context.Background(), s.body, control.Origin{})
 	b, _ = json.Marshal(wire)
 	r = owner.open(s, b)
 	if r.OK || r.Code != control.CodeCommandFailed || !strings.Contains(string(r.Res), `"error":"rate_limited"`) {
@@ -81,7 +81,7 @@ func TestHandleEnvelopeRunsAsPrincipal(t *testing.T) {
 	}
 	rec.err = errors.New("boom")
 	s = owner.build(control.OpCmd, "rotate", `{}`, "")
-	wire, _ = g.HandleEnvelope(context.Background(), s.body)
+	wire, _ = g.HandleEnvelope(context.Background(), s.body, control.Origin{})
 	b, _ = json.Marshal(wire)
 	if r = owner.open(s, b); r.Code != control.CodeCommandFailed || !strings.Contains(string(r.Res), `"error":"failed"`) {
 		t.Fatalf("reply = %+v %s", r, r.Res)
@@ -92,12 +92,12 @@ func TestHandleEnvelopeRequestShape(t *testing.T) {
 	a, _ := newAuthority(t, false)
 	g := controlgate.New(a, &recorder{}, zap.NewNop())
 	for _, body := range []string{``, `null`, `{}`, `{"v":2,"jwe":"x"}`, `{"v":1}`, `{"v":1,"jwe":""}`, `{"v":1,"jwe":"a","x":1}`, `{"jwe":"a","x":1}`} {
-		_, perr := g.HandleEnvelope(context.Background(), json.RawMessage(body))
+		_, perr := g.HandleEnvelope(context.Background(), json.RawMessage(body), control.Origin{})
 		if perr == nil || perr.Code != control.CodeBadEnvelope {
 			t.Errorf("%q: %v", body, perr)
 		}
 	}
-	_, perr := g.HandleEnvelope(context.Background(), json.RawMessage(`{"v":1,"jwe":"not.a.jwe.at.all"}`))
+	_, perr := g.HandleEnvelope(context.Background(), json.RawMessage(`{"v":1,"jwe":"not.a.jwe.at.all"}`), control.Origin{})
 	if perr == nil || perr.Code != control.CodeBadEnvelope || perr.HTTPStatus() != 401 {
 		t.Fatalf("%+v", perr)
 	}
@@ -107,17 +107,17 @@ func TestPlaintextPolicyFollowsState(t *testing.T) {
 	a, _ := newAuthority(t, false)
 	g := controlgate.New(a, &recorder{}, zap.NewNop())
 	cmd := commands.Command{Type: "factoryReset"}
-	if !g.Plaintext(control.RouteLAN, cmd).Allow {
+	if d, _ := g.Plaintext(control.RouteLAN, cmd); !d.Allow {
 		t.Fatal("legacy refused plaintext")
 	}
 	enrollOwner(t, g, a)
-	if d := g.Plaintext(control.RouteLAN, commands.Command{Type: "displayPlaylist"}); d.Code != control.CodeEnrollmentRequired {
+	if d, _ := g.Plaintext(control.RouteLAN, commands.Command{Type: "displayPlaylist"}); d.Code != control.CodeEnrollmentRequired {
 		t.Fatalf("%+v", d)
 	}
-	if d := g.Plaintext(control.RouteRelayer, cmd); d.Code != control.CodeEnvelopeRequired {
+	if d, _ := g.Plaintext(control.RouteRelayer, cmd); d.Code != control.CodeEnvelopeRequired {
 		t.Fatalf("%+v", d)
 	}
-	if !g.Plaintext(control.RouteRelayer, commands.Command{Type: "rotate"}).Allow {
+	if d, _ := g.Plaintext(control.RouteRelayer, commands.Command{Type: "rotate"}); !d.Allow {
 		t.Fatal("controller-tier relayer plaintext refused while enrolled")
 	}
 }
@@ -228,7 +228,7 @@ func (c *client) nkFrom(t *testing.T, g *controlgate.Gate) []byte {
 		return c.nk
 	}
 	s := c.build(control.OpEnroll, "", "", "")
-	wire, perr := g.HandleEnvelope(context.Background(), s.body)
+	wire, perr := g.HandleEnvelope(context.Background(), s.body, control.Origin{})
 	if perr != nil {
 		t.Fatal(perr)
 	}
@@ -240,4 +240,54 @@ func (c *client) nkFrom(t *testing.T, g *controlgate.Gate) []byte {
 	_ = json.Unmarshal(r.Res, &res)
 	c.nk, _ = b64.DecodeString(res.NK)
 	return c.nk
+}
+
+// Review F3: the Play-shape bypass. The typed decode merged the case-variant
+// (or duplicate) "Request" into Arguments while the policy judged the exact
+// "request" token; such messages are refused, and an allowed command runs
+// with Arguments decoded from the very bytes the policy judged.
+func TestPlaintextAmbiguityAndNormalization(t *testing.T) {
+	a, _ := newAuthority(t, true)
+	g := controlgate.New(a, &recorder{}, zap.NewNop())
+	enrollOwner(t, g, a) // enforced: relayer plaintext is the exact Play shape only
+	for _, msg := range []string{
+		`{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{}},"Request":{"evil":1}}`,
+		`{"command":"displayPlaylist","Request":{"evil":1},"request":{"intent":{"action":"now_display"},"dp1_call":{}}}`,
+		`{"command":"displayPlaylist","request":{"evil":1},"request":{"intent":{"action":"now_display"},"dp1_call":{}}}`,
+	} {
+		var cmd commands.Command
+		if err := json.Unmarshal([]byte(msg), &cmd); err != nil {
+			t.Fatal(err)
+		}
+		if d, _ := g.Plaintext(control.RouteRelayer, cmd); d.Allow || d.Code != control.CodeInvalidMessage {
+			t.Errorf("%s: %+v", msg, d)
+		}
+	}
+	// A clean Play cast is allowed and its Arguments are exactly the raw bytes.
+	var cmd commands.Command
+	_ = json.Unmarshal([]byte(`{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{"items":[]}}}`), &cmd)
+	cmd.Arguments = map[string]any{"evil": 1} // whatever the typed decode said
+	d, out := g.Plaintext(control.RouteRelayer, cmd)
+	if !d.Allow || out.Arguments["evil"] != nil || out.Arguments["dp1_call"] == nil {
+		t.Fatalf("normalized command: %+v %+v", d, out.Arguments)
+	}
+}
+
+// Review F1: a live invitation protects the screen.
+func TestScreenProtectedWhileInvitationLive(t *testing.T) {
+	a, _ := newAuthority(t, false)
+	g := controlgate.New(a, &recorder{}, zap.NewNop())
+	if g.ScreenProtected() {
+		t.Fatal("protected with no invitation")
+	}
+	if _, err := a.IssueInvitation(); err != nil {
+		t.Fatal(err)
+	}
+	if !g.ScreenProtected() {
+		t.Fatal("live invitation not protected")
+	}
+	a.ClearInvitation()
+	if g.ScreenProtected() {
+		t.Fatal("cleared invitation still protected")
+	}
 }

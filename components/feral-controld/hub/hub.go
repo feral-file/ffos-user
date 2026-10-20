@@ -313,12 +313,14 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 			h.serveEnvelope(w, r, payload)
 			return
 		}
-		if d := h.control.Plaintext(control.RouteLAN, payload); !d.Allow {
+		d, normalized := h.control.Plaintext(control.RouteLAN, payload)
+		if !d.Allow {
 			h.logger.Warn("Hub plaintext cast refused by control policy",
 				zap.String("command", string(payload.Type)), zap.String("code", d.Code))
 			writeControlError(w, d.Code)
 			return
 		}
+		payload = normalized
 	}
 
 	// LAN containment (feral-file#3551 phase 0): on a claimed device the

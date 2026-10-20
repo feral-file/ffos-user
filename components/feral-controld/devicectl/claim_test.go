@@ -71,6 +71,9 @@ func (s *narratorSpy) RefreshClaimQRURL(build func() string) {
 	s.calls = append(s.calls, "refresh_claim_url")
 	s.lastURL = build()
 }
+func (s *narratorSpy) ClaimQRShowing() bool {
+	return len(s.calls) > 0 && (s.calls[len(s.calls)-1] == "claim" || s.calls[len(s.calls)-1] == "refresh_claim_url")
+}
 func (s *narratorSpy) ShowReady()        { s.calls = append(s.calls, "ready") }
 func (s *narratorSpy) ShowFactoryReset() { s.calls = append(s.calls, "factory_reset") }
 func (s *narratorSpy) ShowJoinFailed(reason string) {

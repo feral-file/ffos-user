@@ -25,6 +25,12 @@ const (
 	CodeEnrollmentRequired = "enrollment_required"
 	CodeEnvelopeRequired   = "envelope_required"
 	CodeLocked             = "locked"
+	// CodeInvalidMessage refuses a plaintext message whose top level is
+	// ambiguous (duplicate or case-variant member names, §7.2).
+	CodeInvalidMessage = "invalid_message"
+	// CodeScreenProtected refuses /api/screenshot while the screen may show
+	// a live invitation (§7.2).
+	CodeScreenProtected = "screen_protected"
 )
 
 // Encrypted reply codes (§4.3).
@@ -44,12 +50,17 @@ const (
 
 // Ceremony limits (§5).
 const (
-	invitationTTL         = 10 * 60
-	invitationMaxAttempts = 5
-	pendingTTL            = 5 * 60
-	maxPending            = 4
-	pendingNewInterval    = 10
-	approvalCodePrefix    = "ff1-approval-code/v1|"
+	invitationTTL      = 10 * 60
+	pendingTTL         = 5 * 60
+	maxPending         = 4
+	pendingNewInterval = 10
+	// pendingRefreshInterval: a pending ctl may refresh at most this often.
+	pendingRefreshInterval = 10
+	// maxPendingPerLANRemote / maxPendingRelayer are the per-route caps
+	// (§5.2) under the global maxPending.
+	maxPendingPerLANRemote = 1
+	maxPendingRelayer      = 2
+	approvalCodePrefix     = "ff1-approval-code/v1|"
 	// NotificationApprovalRequest is the §5.2 sealed notification type.
 	NotificationApprovalRequest = "controller_approval_request"
 )
@@ -90,8 +101,11 @@ func PublicErrorBody(code string) []byte {
 
 // PublicErrorStatus maps a public code to its LAN HTTP status.
 func PublicErrorStatus(code string) int {
-	if code == CodeEnvelopeRequired || code == CodeEnrollmentRequired {
+	switch code {
+	case CodeEnvelopeRequired, CodeEnrollmentRequired, CodeScreenProtected:
 		return http.StatusForbidden
+	case CodeInvalidMessage:
+		return http.StatusBadRequest
 	}
 	return http.StatusUnauthorized
 }
@@ -209,6 +223,7 @@ type Authority struct {
 
 	inv            *invitation
 	pending        map[string]*pendingRequest
+	denied         map[string]int64 // ctl -> until, owner-denied requests
 	lastNewPending int64
 	seq            map[string]uint64
 	// ep is this daemon run's notification epoch (§9): seq restarts at 1
@@ -216,21 +231,37 @@ type Authority struct {
 	ep string
 }
 
+// invitation has no attempt counter on purpose: 128 random bits need no
+// guess limit, and voiding it after N misses let any LAN peer block
+// first-owner and migration enrollment indefinitely (review F2).
 type invitation struct {
 	value     string
 	expiresAt int64
-	attempts  int
 }
 
 // pendingRequest is in memory only: a restart drops pending requests and the
 // requester asks again. Its window covers requestAccess/enroll from a ctl
 // that has no grant record yet (§6).
 type pendingRequest struct {
-	ctl       string
-	enroll    Enroll
-	createdAt int64
-	expiresAt int64
-	window    Window
+	ctl         string
+	enroll      Enroll
+	createdAt   int64
+	refreshedAt int64
+	expiresAt   int64
+	window      Window
+	origin      Origin
+}
+
+// Origin is where a request came from. It is NOT authority: it only feeds
+// the per-route pending caps (§5.2), so one LAN host or the relayer cannot
+// hold the whole pending table.
+type Origin struct {
+	Route Route
+	// Remote is the LAN peer's IP (no port); empty when unknown.
+	Remote string
+	// Known is false for callers that did not say (Open), which count only
+	// against the global cap.
+	Known bool
 }
 
 // New loads (or on first start creates) the control directory. A locked
@@ -258,6 +289,7 @@ func New(cfg Config) (*Authority, error) {
 		now:      cfg.Now,
 		rand:     cfg.Rand,
 		pending:  map[string]*pendingRequest{},
+		denied:   map[string]int64{},
 		seq:      map[string]uint64{},
 	}
 	a.store = OpenStore(cfg.FS, cfg.Dir, cfg.DeviceID, a.randReader(), cfg.Now())
@@ -425,8 +457,14 @@ func ApprovalCode(ctl, devSigPin string) string {
 }
 
 // Open runs §3.4 on a compact request. A non-nil error is always a
-// *PublicError. Otherwise see Admission.
+// *PublicError. Otherwise see Admission. Transports use OpenFrom.
 func (a *Authority) Open(compact string) (*Admission, error) {
+	return a.OpenFrom(compact, Origin{})
+}
+
+// OpenFrom is Open with the request's origin, used only for the per-route
+// pending caps of requestAccess (§5.2).
+func (a *Authority) OpenFrom(compact string, origin Origin) (*Admission, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.store.LockErr(); err != nil {
@@ -498,7 +536,7 @@ func (a *Authority) Open(compact string) (*Admission, error) {
 		}
 		return a.enrollApproved(adm, c, grant, known, now)
 	default:
-		return a.requestAccess(adm, c, grant, known, now)
+		return a.requestAccess(adm, c, grant, known, now, origin)
 	}
 }
 
@@ -609,8 +647,15 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 		return a.persistFailure(adm)
 	}
 	delete(a.pending, approvedPending)
-	delete(a.pending, deniedPending)
-	delete(a.seq, revoked)
+	if p, ok := a.pending[deniedPending]; ok {
+		// An owner's deny holds until the request would have expired, so
+		// the requester cannot immediately re-ask and re-notify (§5.2).
+		a.denied[deniedPending] = p.expiresAt
+		delete(a.pending, deniedPending)
+	}
+	// The revoked controller's seq is kept: a re-approval continues the
+	// sequence instead of restarting below what it already saw (§9).
+	_ = revoked
 	if out.failure != "" {
 		return a.fail(adm, CodeCommandFailed, map[string]string{"error": out.failure})
 	}
@@ -637,9 +682,28 @@ func (a *Authority) approve(gs []Grant, approver string, req json.RawMessage, no
 		}
 		expiresAt = int64(v) //nolint:gosec // G115: v <= 2^53-1.
 	}
+	existing := indexOf(gs, ctl)
+	// Demoting an owner must leave another active owner (§5.5).
+	if existing >= 0 && gs[existing].Active(now) && gs[existing].Role == RoleOwner && Role(role) != RoleOwner {
+		owners := 0
+		for _, g := range gs {
+			if g.Role == RoleOwner && g.Active(now) && g.Ctl != ctl {
+				owners++
+			}
+		}
+		if owners == 0 {
+			return gs, controlResult{failure: "last_owner"}, ""
+		}
+	}
 	p, ok := a.pending[ctl]
 	if !ok {
-		return gs, controlResult{failure: "not_pending"}, ""
+		// No pending request: a role/expiry change of an ACTIVE grant in
+		// place. Keys, nk, window and createdAt are kept.
+		if existing < 0 || !gs[existing].Active(now) {
+			return gs, controlResult{failure: "not_pending"}, ""
+		}
+		gs[existing].Role, gs[existing].ExpiresAt, gs[existing].ApprovedBy = Role(role), expiresAt, approver
+		return gs, controlResult{res: struct{}{}}, ""
 	}
 	nk, err := a.randBytes(32)
 	if err != nil {
@@ -762,6 +826,35 @@ func (a *Authority) prunePending(now int64) {
 			delete(a.pending, k)
 		}
 	}
+	for k, until := range a.denied {
+		if now >= until {
+			delete(a.denied, k)
+		}
+	}
+}
+
+// pendingCapped reports whether a NEW pending request from o would exceed a
+// per-route cap (§5.2). The global cap and interval are checked separately.
+func (a *Authority) pendingCapped(o Origin, ctl string) bool {
+	if !o.Known {
+		return false
+	}
+	lan, relayer := 0, 0
+	for _, p := range a.pending {
+		if p.ctl == ctl || !p.origin.Known {
+			continue
+		}
+		switch {
+		case p.origin.Route == RouteLAN && o.Route == RouteLAN && p.origin.Remote == o.Remote && o.Remote != "":
+			lan++
+		case p.origin.Route == RouteRelayer:
+			relayer++
+		}
+	}
+	if o.Route == RouteLAN {
+		return lan >= maxPendingPerLANRemote
+	}
+	return relayer >= maxPendingRelayer
 }
 
 type enrollResult struct {
@@ -788,10 +881,6 @@ func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Gran
 		return a.fail(adm, CodeInvitationInvalid, nil)
 	}
 	if subtle.ConstantTimeCompare([]byte(c.Enroll.Inv), []byte(a.inv.value)) != 1 {
-		a.inv.attempts++
-		if a.inv.attempts >= invitationMaxAttempts {
-			a.inv = nil
-		}
 		return a.fail(adm, CodeInvitationInvalid, nil)
 	}
 	nk, err := a.randBytes(32)
@@ -858,10 +947,13 @@ func (a *Authority) pendingRes(p *pendingRequest) any {
 }
 
 // requestAccess is §5.2.
-func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, known bool, now int64) (*Admission, error) {
+func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, known bool, now int64, origin Origin) (*Admission, error) {
 	if a.stateLocked(now) == StateLegacy {
 		// No owner exists to approve; the first controller uses the
 		// invitation instead.
+		return a.fail(adm, CodeNotApproved, nil)
+	}
+	if until, ok := a.denied[c.Ctl]; ok && now < until {
 		return a.fail(adm, CodeNotApproved, nil)
 	}
 	p := a.pending[c.Ctl]
@@ -880,14 +972,24 @@ func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, know
 		}
 		return a.succeed(adm, map[string]any{"status": "approved", "role": g.Role})
 	}
+	notify := true
 	if p == nil {
-		if len(a.pending) >= maxPending || (a.lastNewPending != 0 && now-a.lastNewPending < pendingNewInterval) {
+		if len(a.pending) >= maxPending || (a.lastNewPending != 0 && now-a.lastNewPending < pendingNewInterval) ||
+			a.pendingCapped(origin, c.Ctl) {
 			return a.fail(adm, CodeRateLimited, nil)
 		}
-		p = &pendingRequest{ctl: c.Ctl, createdAt: now}
+		p = &pendingRequest{ctl: c.Ctl, createdAt: now, origin: origin}
 		a.pending[c.Ctl] = p
 		a.lastNewPending = now
+	} else {
+		// A refresh extends the request; it is rate-limited per ctl and
+		// re-notifies owners only when what they are shown changed.
+		if now-p.refreshedAt < pendingRefreshInterval {
+			return a.fail(adm, CodeRateLimited, nil)
+		}
+		notify = p.enroll.Label != c.Enroll.Label || p.enroll.Platform != c.Enroll.Platform
 	}
+	p.refreshedAt = now
 	if known {
 		// A known (revoked/expired) record keeps its window in the store.
 		if err := a.store.Update(setWindow(g.Ctl, g.Window.Accept(c.Ctr))); err != nil {
@@ -901,7 +1003,7 @@ func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, know
 	body := map[string]any{"ctl": p.ctl, "label": p.enroll.Label, "platform": p.enroll.Platform,
 		"code": a.approvalCode(p.ctl), "expiresAt": p.expiresAt}
 	for _, owner := range a.store.Grants() {
-		if owner.Role == RoleOwner && owner.Active(now) {
+		if notify && owner.Role == RoleOwner && owner.Active(now) {
 			s, err := a.sealLocked(owner, NotificationApprovalRequest, body, now)
 			if err == nil {
 				adm.Notifications = append(adm.Notifications, s)

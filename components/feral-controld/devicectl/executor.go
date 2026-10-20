@@ -123,8 +123,9 @@ type executor struct {
 	enrollQR atomic.Bool
 	// invMu guards invTimer, the pending refresh of an invitation-carrying
 	// claim QR shortly before its invitation expires.
-	invMu    sync.Mutex
-	invTimer *time.Timer
+	invMu     sync.Mutex
+	invTimer  *time.Timer
+	invExpiry time.Time
 
 	// nameObserver, when set, is notified after the device name is stored so
 	// the mDNS record can be re-registered with it. Same wiring discipline as
@@ -568,6 +569,8 @@ type ControlClaim interface {
 	Enrolled() bool
 	// Retire deletes the control identity (factory reset).
 	Retire() error
+	// ClearInvitation voids the live invitation (its QR is gone).
+	ClearInvitation()
 }
 
 // SetControl wires the control seam. Call before the claim flow starts.
@@ -577,19 +580,42 @@ func (e *executor) SetControl(c ControlClaim) { e.control = c }
 // on-screen claim QR is repainted with a fresh one.
 const invitationRefreshLead = time.Minute
 
-// scheduleInvitationRefresh arms the repaint of an invitation-carrying claim
-// QR invitationRefreshLead before expiresAt, replacing any armed one.
+// invitationWatchInterval is how often a live invitation checks that its QR
+// is still the narration on screen; another narration taking the panel ends
+// the invitation (review F6).
+var invitationWatchInterval = 15 * time.Second
+
+// scheduleInvitationRefresh arms the watch of an invitation-carrying claim
+// QR: every invitationWatchInterval, and invitationRefreshLead before
+// expiresAt at the latest. Replaces any armed one.
 func (e *executor) scheduleInvitationRefresh(expiresAt time.Time) {
-	d := time.Until(expiresAt) - invitationRefreshLead
+	e.invMu.Lock()
+	defer e.invMu.Unlock()
+	e.invExpiry = expiresAt
+	e.armInvitationTimerLocked()
+}
+
+func (e *executor) armInvitationTimerLocked() {
+	d := time.Until(e.invExpiry) - invitationRefreshLead
+	if d > invitationWatchInterval {
+		d = invitationWatchInterval
+	}
 	if d < time.Second {
 		d = time.Second
 	}
-	e.invMu.Lock()
-	defer e.invMu.Unlock()
 	if e.invTimer != nil {
 		e.invTimer.Stop()
 	}
 	e.invTimer = time.AfterFunc(d, e.refreshInvitationQR)
+}
+
+// clearControlInvitation voids the invitation and stops its watch.
+func (e *executor) clearControlInvitation() {
+	if e.control == nil {
+		return
+	}
+	e.stopInvitationRefresh()
+	e.control.ClearInvitation()
 }
 
 func (e *executor) stopInvitationRefresh() {
@@ -609,7 +635,21 @@ func (e *executor) refreshInvitationQR() {
 	if e.control == nil || e.control.Enrolled() {
 		return
 	}
-	e.setupUI().RefreshClaimQRURL(func() string { return e.buildDeviceConnectURL(context.Background()) })
+	if !e.setupUI().ClaimQRShowing() {
+		// Another narration took the panel: the invitation it carried is
+		// not on screen any more and must not stay redeemable.
+		e.clearControlInvitation()
+		return
+	}
+	e.invMu.Lock()
+	due := time.Until(e.invExpiry) <= invitationRefreshLead
+	if !due {
+		e.armInvitationTimerLocked()
+	}
+	e.invMu.Unlock()
+	if due {
+		e.setupUI().RefreshClaimQRURL(func() string { return e.buildDeviceConnectURL(context.Background()) })
+	}
 }
 
 // ControlOwnerEnrolled takes the claim QR down after the first owner enrolled
@@ -618,6 +658,7 @@ func (e *executor) refreshInvitationQR() {
 func (e *executor) ControlOwnerEnrolled() {
 	e.stopInvitationRefresh()
 	e.enrollQR.Store(false)
+	// The authority consumed the invitation already; nothing to clear.
 	e.setupUI().HideIfShowing(setupui.StateClaimQR)
 }
 
@@ -745,7 +786,7 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 	case commands.CMD_WAKE_NOW:
 		result, err = e.wakeNow(ctx)
 	default:
-		return nil, fmt.Errorf("invalid command: %s", cmd)
+		return nil, fmt.Errorf("invalid command: %s", cmd.Type)
 	}
 
 	return result, err
@@ -795,6 +836,9 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 	// unrelated overlay.
 	if !wasClaimed {
 		e.setupUI().Hide()
+		// The claim QR (and any invitation it carried) is gone: the
+		// invitation must not outlive it (review F6).
+		e.clearControlInvitation()
 		// First pair: put artwork on screen immediately instead of leaving the
 		// player idle until the cloud gets around to sending content. The claim
 		// QR only paints after the relayer topic-wait, so the device is online
@@ -916,6 +960,7 @@ func (e *executor) showPairingQRCodeInProcess(ctx context.Context, show bool) (i
 		// succeeded.
 		ui.ShowReady()
 		ui.Hide()
+		e.clearControlInvitation()
 		return CmdOK, nil
 	}
 
@@ -1074,6 +1119,8 @@ type setupNarrator interface {
 	ShowClaimQRAutomatic(url string, deviceName string)
 	RefreshClaimQRName(resolve func() string)
 	RefreshClaimQRURL(build func() string)
+	// ClaimQRShowing reports whether the claim QR is the current narration.
+	ClaimQRShowing() bool
 	ShowReady()
 	ShowFactoryReset()
 	ShowJoinFailed(reason string)
@@ -1644,6 +1691,10 @@ func (e *executor) buildDeviceConnectURL(ctx context.Context) string {
 			invitation = fields
 			e.scheduleInvitationRefresh(expiresAt)
 		}
+	}
+	if e.control != nil && invitation == nil {
+		// This QR replaces any invitation-bearing one (review F6).
+		e.clearControlInvitation()
 	}
 	return formatDeviceConnectURL(e.deviceID(), topicID, true, branch, version, claimSetupPhase, invitation...)
 }

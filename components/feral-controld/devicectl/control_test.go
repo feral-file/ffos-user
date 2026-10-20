@@ -15,6 +15,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 func stateUnclaimed(t *testing.T) {
@@ -32,7 +33,10 @@ type fakeControl struct {
 	retireErr error
 	retired   atomic.Int32
 	issued    atomic.Int32
+	cleared   atomic.Int32
 }
+
+func (f *fakeControl) ClearInvitation() { f.cleared.Add(1) }
 
 func (f *fakeControl) ClaimQRFields() ([]string, time.Time, bool) {
 	f.issued.Add(1)
@@ -110,4 +114,69 @@ func TestFactoryReset_FailsWhenControlRetirementFails(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, int32(1), fc.retired.Load())
 	assert.False(t, e.ResetStaged(), "a refused reset must release the latch")
+}
+
+// Review F6: the invitation never outlives the QR that carried it.
+func TestInvitationClearedWhenItsQRGoes(t *testing.T) {
+	stateUnclaimed(t)
+	// show:false (cloud ended pairing).
+	fc := &fakeControl{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: &narratorSpy{}}
+	e.SetControl(fc)
+	_, err := e.showPairingQRCodeInProcess(context.Background(), false)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), fc.cleared.Load(), "show:false must clear the invitation")
+
+	// Another narration took the panel: the watch clears it.
+	fc = &fakeControl{fields: []string{"i", "s", "e", "g"}, ok: true}
+	spy := &narratorSpy{calls: []string{"claim", "ready"}}
+	e = &executor{logger: zap.NewNop(), setupNarrator: spy}
+	e.SetControl(fc)
+	e.scheduleInvitationRefresh(time.Now().Add(10 * time.Minute))
+	e.refreshInvitationQR()
+	assert.Equal(t, int32(1), fc.cleared.Load(), "a replaced QR must clear the invitation")
+	assert.Nil(t, e.invTimer, "the watch stops once the invitation is cleared")
+
+	// Still showing and not yet due: re-armed, nothing minted or cleared.
+	fc = &fakeControl{fields: []string{"i", "s", "e", "g"}, ok: true}
+	spy = &narratorSpy{calls: []string{"claim"}}
+	e = &executor{logger: zap.NewNop(), setupNarrator: spy}
+	e.SetControl(fc)
+	e.scheduleInvitationRefresh(time.Now().Add(10 * time.Minute))
+	e.refreshInvitationQR()
+	assert.Equal(t, int32(0), fc.cleared.Load())
+	assert.Equal(t, int32(0), fc.issued.Load())
+	assert.NotNil(t, e.invTimer)
+	e.stopInvitationRefresh()
+}
+
+func TestInvitationWatchIsBounded(t *testing.T) {
+	e := &executor{logger: zap.NewNop()}
+	e.scheduleInvitationRefresh(time.Now().Add(10 * time.Minute))
+	defer e.stopInvitationRefresh()
+	require.NotNil(t, e.invTimer)
+	// The watch fires no later than invitationWatchInterval, so a QR taken
+	// down by another narration voids its invitation within that bound.
+	assert.LessOrEqual(t, invitationWatchInterval, 15*time.Second)
+}
+
+// Review F6: a legacy claim (connect) takes the claim QR down, and with it
+// the invitation.
+func TestConnectClaimClearsInvitation(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().GetState().Return(&state.State{}).AnyTimes()
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
+	sm.EXPECT().SetConnectedDevice(gomock.Any()).Return(nil)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Return(nil, errors.New("player not connected")).AnyTimes()
+
+	fc := &fakeControl{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: &narratorSpy{}, json: wrapper.NewJSON(), cdp: mockCDP}
+	e.SetControl(fc)
+	_, err := e.connect([]byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), fc.cleared.Load())
 }

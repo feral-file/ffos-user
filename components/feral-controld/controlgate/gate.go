@@ -62,9 +62,36 @@ func (g *Gate) State() control.State { return g.auth.State() }
 // Status is the §11 status block.
 func (g *Gate) Status() control.Status { return g.auth.Status() }
 
-// Plaintext applies the §7.2 plaintext policy to a non-envelope command.
-func (g *Gate) Plaintext(route control.Route, cmd commands.Command) control.Decision {
-	return g.auth.Policy(route, string(cmd.Type), cmd.RawArguments)
+// Plaintext applies the §7.2 plaintext policy to a non-envelope command and
+// returns the command the caller must run in its place.
+//
+// The policy judges RawArguments, the exact `request` bytes, so the command
+// handed back carries Arguments decoded from those same bytes: never the
+// typed decode, which merges case-variant and duplicate keys the raw token
+// does not see (review F3). A message whose top level is ambiguous is
+// refused outright, in every state.
+func (g *Gate) Plaintext(route control.Route, cmd commands.Command) (control.Decision, commands.Command) {
+	if cmd.Ambiguous {
+		return control.Decision{Code: control.CodeInvalidMessage}, cmd
+	}
+	d := g.auth.Policy(route, string(cmd.Type), cmd.RawArguments)
+	if !d.Allow {
+		return d, cmd
+	}
+	cmd.Arguments = nil
+	if len(cmd.RawArguments) > 0 {
+		if err := json.Unmarshal(cmd.RawArguments, &cmd.Arguments); err != nil {
+			return control.Decision{Code: control.CodeInvalidMessage}, cmd
+		}
+	}
+	return d, cmd
+}
+
+// ScreenProtected reports whether the panel may be showing a live
+// invitation, which a screenshot would hand to any LAN peer (review F1).
+func (g *Gate) ScreenProtected() bool {
+	_, live := g.auth.CurrentInvitation()
+	return live
 }
 
 // envelopeRequest is the ff1Envelope `request` object (§10), exactly.
@@ -91,12 +118,12 @@ func parseEnvelopeRequest(raw json.RawMessage) (string, error) {
 // HandleEnvelope opens one ff1Envelope request (the `request` object of the
 // cast, raw) and, when admitted, executes it. It returns the wire reply, or a
 // public error to send in clear (HTTP status / RPC message per §4.4).
-func (g *Gate) HandleEnvelope(ctx context.Context, raw json.RawMessage) (*Wire, *control.PublicError) {
+func (g *Gate) HandleEnvelope(ctx context.Context, raw json.RawMessage, origin control.Origin) (*Wire, *control.PublicError) {
 	compact, err := parseEnvelopeRequest(raw)
 	if err != nil {
 		return nil, &control.PublicError{Code: control.CodeBadEnvelope, Err: err}
 	}
-	adm, err := g.auth.Open(compact)
+	adm, err := g.auth.OpenFrom(compact, origin)
 	if err != nil {
 		var pe *control.PublicError
 		if errors.As(err, &pe) {

@@ -205,9 +205,12 @@ detail (a cause string would make the device an oracle):
 | `enrollment_required` | plaintext refused, §7.2 |
 | `envelope_required` | owner-tier plaintext on the relayer |
 | `locked` | §8; checked before step 1 |
+| `invalid_message` | plaintext whose top level repeats a member name, exactly or in another letter case (§7.2) |
+| `screen_protected` | `GET /api/screenshot` while an invitation is live (§7.2) |
 
-On the LAN these come back as HTTP 401, except `envelope_required` and
-`enrollment_required`, which come back as 403. On the relayer an envelope's
+On the LAN these come back as HTTP 401, except `envelope_required`,
+`enrollment_required` and `screen_protected`, which come back as 403, and
+`invalid_message`, which comes back as 400. On the relayer an envelope's
 public error is the RPC `message`, `{"error":{"code":"<code>"}}`.
 
 A **plaintext** command refused on the relayer (§7.2) is answered with a
@@ -231,9 +234,16 @@ The first owner.
 - Valid only in state `legacy` (no active owner grant); otherwise the reply is
   `invitation_invalid`.
 - `inv` is the current invitation: `b64u(16 random bytes)`, single use, 10-minute
-  life, compared in constant time. A wrong value counts against a
-  5-per-invitation attempt limit, then the invitation is voided. Issuing a new
-  invitation replaces the old one and resets the count.
+  life, compared in constant time. There is **no attempt limit**: 128 random
+  bits need none, and voiding the invitation after some number of misses
+  would let any LAN peer block first-owner and migration enrollment forever.
+  A wrong value is `invitation_invalid` and changes nothing. Issuing a new
+  invitation replaces the old one.
+- The invitation lives only as long as the QR that carries it: it is voided
+  whenever that QR is hidden or replaced (pairing ended with
+  `showPairingQRCode{show:false}`, a legacy relayer claim, another narration
+  taking the panel, or a repaint without the invitation fields). The device
+  checks at least every 15 s that the QR is still on screen.
 - On success: create an owner grant (`approvedBy` = `"invitation"`), consume
   the invitation, and remove the claim QR.
 - `res` = `{"role":"owner","nk":b64u(32),"profile":profile}`.
@@ -246,16 +256,24 @@ A later controller asks for access.
   and the first controller uses the invitation instead.
 - If `ctl` already holds an active grant: `ok:true`,
   `res` = `{"status":"approved","role":role}`, no notification.
-- Otherwise it creates or refreshes a pending request for `ctl`.
-  - At most 4 pending requests; at most 1 **new** request per 10 s from any
-    source (a refresh is not new). Either limit gives `rate_limited`.
+- If an owner denied `ctl` (§5.5 `revokeController` on its pending request),
+  the reply is `not_approved` until the moment the denied request would have
+  expired.
+- Otherwise it creates or refreshes a pending request for `ctl`. Every limit
+  below answers `rate_limited` and changes nothing:
+  - At most 4 pending requests in total.
+  - At most 1 **new** request per 10 s from any source (a refresh is not new).
+  - Per route, counted over the other pending requests: at most 1 pending
+    request per LAN peer IP, and at most 2 from the relayer. The peer IP is
+    used only for this count; it is never authority.
+  - A refresh of an existing pending `ctl` at most once per 10 s.
   - A pending request lives for 5 minutes from its last refresh.
-  - Pending requests are held in memory only. A restart drops them and the
-    requester asks again.
+  - Pending requests and denials are held in memory only. A restart drops
+    them and the requester asks again.
 - `res` = `{"status":"pending","code":approvalCode(ctl, thumb(devSig)),"expiresAt":t}`.
-- On every create and refresh, every active owner gets a sealed
-  `controller_approval_request` notification (§9), with body
-  `{"ctl","label","platform","code","expiresAt"}`.
+- On create, every active owner gets a sealed `controller_approval_request`
+  notification (§9), with body `{"ctl","label","platform","code","expiresAt"}`.
+  A refresh re-notifies only when the label or platform changed.
 
 ### 5.3 `op=enroll` without `inv`
 
@@ -294,9 +312,12 @@ never reach the command router):
 | `revokeController` | `{"ctl"}` | `{}` |
 | `listControllers` | `{}` | `{"controllers":[{"ctl","role","label","platform","createdAt","expiresAt"?,"revokedAt"?,"self":bool}],"pending":[{"ctl","label","platform","code","expiresAt"}]}` |
 
-- `approveController` requires a live pending request for `ctl` (else
-  `not_pending`); the grant takes its keys, label and platform from that
-  request. `expiresAt` must be in the future and is allowed only for
+- `approveController` with a live pending request for `ctl` grants it: the
+  grant takes its keys, label and platform from that request. Without one it
+  is a role (and expiry) change of an **active** grant in place: keys, `nk`,
+  window and `createdAt` are kept and `approvedBy` becomes the approver. With
+  neither (unknown or revoked `ctl`, nothing pending) it fails `not_pending`.
+  Demoting an owner fails `last_owner` when no other active owner remains. `expiresAt` must be in the future and is allowed only for
   `role:"controller"`: an owner grant never expires, so the last owner cannot
   silently lapse. Approving a `ctl` that already has a record (revoked, or
   active for a role change) updates that record in place: it keeps its
@@ -304,7 +325,9 @@ never reach the command router):
   grants and 128 records (revoked ones included) exist
   (`too_many_controllers`).
 - `revokeController` on a `ctl` that has only a pending request denies (drops)
-  that request. Otherwise the grant must be active (`not_found`).
+  that request; further `requestAccess` from that `ctl` answers
+  `not_approved` until the denied request would have expired (§5.2).
+  Otherwise the grant must be active (`not_found`).
 - `listControllers` lists every record, revoked ones included.
 
 An owner cannot revoke the last active owner (`last_owner`). That would make
@@ -368,6 +391,18 @@ phantom entry, so a new command cannot ship without a tier.
 | `enforced` | ≥1 active owner grant, `control.enforced=true` | refused: `enrollment_required` | only the exact Play shape `{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{…}}}`: `request` has exactly the members `intent` and `dp1_call`, `intent` is exactly `{"action":"now_display"}`, `dp1_call` is an object; anything else → `envelope_required` | full |
 | `locked` | identity or grant store unreadable/corrupt | refused: `locked` | controller tier only, else `locked` | refused: public `locked` |
 
+Every plaintext message, on either route and in every state, is refused with
+`invalid_message` when its top level repeats a member name, exactly or in
+another letter case (`"request"` twice, or `"request"` and `"Request"`):
+decoders disagree about which copy counts, so the policy could judge one
+`request` while the handler ran another. An allowed command runs with its
+arguments decoded from exactly the `request` bytes the policy judged.
+
+In `legacy`, `GET /api/screenshot` answers `403 screen_protected` while an
+invitation is live: the claim QR then carries it, an unclaimed device has no
+topic gate, and a screenshot would hand any LAN host the first-owner
+invitation. Otherwise the phase-0 rules apply.
+
 Outside `legacy`, two more LAN surfaces close:
 - `GET /api/screenshot` answers `403 enrollment_required`. It has no envelope
   form (it is a raw PNG GET), and the screen can carry pairing material.
@@ -413,12 +448,15 @@ Rules:
   (before the claim is cleared and before the reset unit starts):
   1. it durably writes the tombstone `/home/feralfile/.state/control.retired`;
   2. it deletes the directory.
-  If the tombstone cannot be written nothing is deleted and the reset is
-  refused; if the delete fails the reset is refused too. While the tombstone
+  If the tombstone cannot be written, nothing changes, on disk or in memory,
+  and the reset is refused; if the delete fails the reset is refused too
+  (with the device already retired). While the tombstone
   exists the device is `locked` (retired) whatever the configuration says,
   so a reset that rolls back onto the running subvolume after the directory
   was deleted can never come back as "no control state", which with the
-  protocol disabled in config would mean open. A retired device accepts one
+  protocol disabled in config would mean open. A tombstone that cannot be
+  `stat`ed for a reason other than "does not exist" means plain `locked`, not
+  retired. A retired device (a real tombstone) accepts one
   plaintext command on either route, `factoryReset`, so the owner can retry
   the reset; everything else is refused as `locked`. A completed reset boots
   a subvolume without the tombstone, and the missing directory then means a
@@ -463,6 +501,7 @@ A sealed notification is a compact JWE:
 
 `ep` is `b64u(8 random bytes)`, drawn once per daemon run (not persisted).
 `seq` starts at 1 per controller per run and increases per notification.
+Revoking and re-approving a controller within a run continues its `seq`.
 Controllers order notifications by (`ep`, `seq`): within one `ep` they keep
 the highest `seq` and ignore older ones; a notification with an `ep` they
 have not seen starts a new run and is accepted.
@@ -580,3 +619,12 @@ request JWS and required for nothing else on the client side.
 Fixtures MUST also round-trip through a second, independent implementation:
 the Go tests cross-check every profile against go-jose v4 in both directions,
 and the ff1-cli test suite does the same with `jose`.
+
+## 13. Security notes
+
+- The relayer's `messageID:"system"` topic message is not a controller path:
+  ff-relayer generates every cast's `messageID` server side
+  (`crypto.randomUUID()` in `handleCast`), and the system message is
+  relayer-originated on connect, so a controller cannot forge one.
+- Play browser sessions never subscribe to the notification channel, so
+  sealing notifications (§9) cannot strand a Play session.

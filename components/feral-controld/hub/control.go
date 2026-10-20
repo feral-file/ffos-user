@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 
 	"go.uber.org/zap"
@@ -17,10 +18,11 @@ import (
 // route exactly as it was before the protocol: an ff1Envelope cast then falls
 // through to the router like any unknown command.
 type ControlGate interface {
-	HandleEnvelope(ctx context.Context, raw json.RawMessage) (*controlgate.Wire, *control.PublicError)
-	Plaintext(route control.Route, cmd commands.Command) control.Decision
+	HandleEnvelope(ctx context.Context, raw json.RawMessage, origin control.Origin) (*controlgate.Wire, *control.PublicError)
+	Plaintext(route control.Route, cmd commands.Command) (control.Decision, commands.Command)
 	State() control.State
 	Status() control.Status
+	ScreenProtected() bool
 }
 
 // SetControl wires the control gate. Call before Start.
@@ -44,7 +46,13 @@ func (h *hub) serveEnvelope(w http.ResponseWriter, r *http.Request, payload comm
 		writeControlError(w, control.CodeBadEnvelope)
 		return
 	}
-	wire, perr := h.control.HandleEnvelope(h.ctx, raw)
+	// The peer address is not authority; it only feeds the per-host
+	// pending-request cap (§5.2).
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	wire, perr := h.control.HandleEnvelope(h.ctx, raw, control.Origin{Route: control.RouteLAN, Remote: host, Known: true})
 	if perr != nil {
 		h.logger.Warn("Hub envelope refused", zap.String("code", perr.Code), zap.String("remote_addr", r.RemoteAddr))
 		writeControlError(w, perr.Code)
@@ -57,14 +65,24 @@ func (h *hub) serveEnvelope(w http.ResponseWriter, r *http.Request, payload comm
 }
 
 // refuseScreenshotUnlessLegacy closes /api/screenshot once the device has an
-// owner (or is locked). A screenshot has no envelope form — it is a raw PNG
-// GET — and the screen can carry pairing material, so the route answers 403
-// enrollment_required in every state but legacy. In legacy the phase-0 topic
-// gate still guards it.
+// owner (or is locked): a screenshot has no envelope form — it is a raw PNG
+// GET — so the route answers 403 enrollment_required in every state but
+// legacy. In legacy it answers 403 screen_protected while an invitation is
+// live: the claim QR then carries it, and an unclaimed device has no topic
+// gate, so any LAN host could read the invitation off a screenshot and
+// become the sole owner (review F1). Otherwise the phase-0 topic gate still
+// guards the route.
 func (h *hub) refuseScreenshotUnlessLegacy(w http.ResponseWriter) bool {
-	if h.control == nil || h.control.State() == control.StateLegacy {
+	if h.control == nil {
 		return false
 	}
-	writeControlError(w, control.CodeEnrollmentRequired)
-	return true
+	if h.control.State() != control.StateLegacy {
+		writeControlError(w, control.CodeEnrollmentRequired)
+		return true
+	}
+	if h.control.ScreenProtected() {
+		writeControlError(w, control.CodeScreenProtected)
+		return true
+	}
+	return false
 }

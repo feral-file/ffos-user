@@ -80,24 +80,30 @@ func (d *testDevice) expectPublicOrCode(c *testCtl, rc RequestClaims, code strin
 	d.expectCode(c, rc, code)
 }
 
-func TestInvitationAttemptLimitAndExpiry(t *testing.T) {
+// Review F2: wrong guesses never void the invitation (128 random bits need no
+// attempt cap; voiding let any LAN peer block enrollment forever).
+func TestInvitationSurvivesWrongGuessesAndExpires(t *testing.T) {
 	d := newTestDevice(t)
 	inv, _ := d.a.IssueInvitation()
-	phone := newTestCtl(t, "phone")
-	for i := 0; i < invitationMaxAttempts; i++ {
-		rc := d.claims(phone, OpEnroll)
-		rc.Enroll = phone.enroll("AAAAAAAAAAAAAAAAAAAAAA")
-		d.expectCode(phone, rc, CodeInvitationInvalid)
+	phone, attacker := newTestCtl(t, "phone"), newTestCtl(t, "attacker")
+	for i := 0; i < 50; i++ {
+		rc := d.claims(attacker, OpEnroll)
+		rc.Enroll = attacker.enroll("AAAAAAAAAAAAAAAAAAAAAA")
+		d.expectCode(attacker, rc, CodeInvitationInvalid)
+	}
+	if cur, ok := d.a.CurrentInvitation(); !ok || cur.Value != inv.Value {
+		t.Fatal("wrong guesses changed or voided the invitation")
 	}
 	rc := d.claims(phone, OpEnroll)
 	rc.Enroll = phone.enroll(inv.Value)
-	d.expectCode(phone, rc, CodeInvitationInvalid) // voided after 5 misses
+	d.expectOK(phone, rc)
 
-	inv, _ = d.a.IssueInvitation()
-	d.advance(invitationTTL)
-	rc = d.claims(phone, OpEnroll)
+	d2 := newTestDevice(t)
+	inv, _ = d2.a.IssueInvitation()
+	d2.advance(invitationTTL)
+	rc = d2.claims(phone, OpEnroll)
 	rc.Enroll = phone.enroll(inv.Value)
-	d.expectCode(phone, rc, CodeInvitationInvalid) // expired
+	d2.expectCode(phone, rc, CodeInvitationInvalid) // expired
 }
 
 func TestRequestAccessApproveEnroll(t *testing.T) {
@@ -186,7 +192,8 @@ func TestPendingLimits(t *testing.T) {
 	}
 	d.expectOK(reqs[0], ask(reqs[0]))
 	d.expectCode(reqs[1], ask(reqs[1]), CodeRateLimited) // < 10 s since the last new one
-	d.expectOK(reqs[0], ask(reqs[0]))                    // a refresh is not new
+	d.advance(pendingRefreshInterval)
+	d.expectOK(reqs[0], ask(reqs[0])) // a refresh is not new
 	for i := 1; i < maxPending; i++ {
 		d.advance(pendingNewInterval)
 		d.expectOK(reqs[i], ask(reqs[i]))
@@ -597,5 +604,126 @@ func TestPrincipalContext(t *testing.T) {
 	}
 	if _, ok := PrincipalFrom(context.Background()); ok {
 		t.Fatal("principal on empty ctx")
+	}
+}
+
+// Review F4 (a): a refresh is rate-limited per ctl and re-notifies owners
+// only when the label or platform changed.
+func TestPendingRefreshLimitsAndQuietRefresh(t *testing.T) {
+	d, _, _ := ownerDevice(t)
+	tab := newTestCtl(t, "tab")
+	ask := func(label string) *Admission {
+		rc := d.claims(tab, OpRequestAccess)
+		rc.Enroll = tab.enroll("")
+		rc.Enroll.Label = label
+		return d.send(tab, rc)
+	}
+	if adm := ask("tab"); len(adm.Notifications) != 1 {
+		t.Fatal("new request did not notify")
+	}
+	rc := d.claims(tab, OpRequestAccess)
+	rc.Enroll = tab.enroll("")
+	d.expectCode(tab, rc, CodeRateLimited) // refresh within 10 s
+	d.advance(pendingRefreshInterval)
+	if adm := ask("tab"); len(adm.Notifications) != 0 || adm.Final == "" {
+		t.Fatal("unchanged refresh re-notified owners")
+	}
+	d.advance(pendingRefreshInterval)
+	if adm := ask("renamed"); len(adm.Notifications) != 1 {
+		t.Fatal("changed refresh did not re-notify")
+	}
+}
+
+// Review F4 (b): an owner's deny holds until the request would have expired.
+func TestDeniedRequestStaysDenied(t *testing.T) {
+	d, owner, _ := ownerDevice(t)
+	tab := newTestCtl(t, "tab")
+	ask := func() RequestClaims {
+		rc := d.claims(tab, OpRequestAccess)
+		rc.Enroll = tab.enroll("")
+		return rc
+	}
+	d.expectOK(tab, ask())
+	d.expectOK(owner, d.cmdClaims(owner, CmdRevokeController, `{"ctl":"`+tab.ctl+`"}`))
+	d.advance(pendingRefreshInterval + pendingNewInterval)
+	d.expectCode(tab, ask(), CodeNotApproved)
+	d.advance(pendingTTL)
+	d.expectOK(tab, ask()) // the deny lapsed with the request it denied
+}
+
+// Review F4 (c): per-route caps under the global cap.
+func TestPendingPerRouteCaps(t *testing.T) {
+	d, _, _ := ownerDevice(t)
+	open := func(c *testCtl, o Origin) ReplyClaims {
+		rc := d.claims(c, OpRequestAccess)
+		rc.Enroll = c.enroll("")
+		adm, err := d.a.OpenFrom(d.seal(c, rc), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d.final(adm, rc)
+	}
+	lan := Origin{Route: RouteLAN, Remote: "192.168.1.9", Known: true}
+	if r := open(newTestCtl(t, "a"), lan); !r.OK {
+		t.Fatal(r.Code)
+	}
+	d.advance(pendingNewInterval)
+	if r := open(newTestCtl(t, "b"), lan); r.Code != CodeRateLimited {
+		t.Fatalf("second pending from one LAN host: %+v", r)
+	}
+	if r := open(newTestCtl(t, "c"), Origin{Route: RouteLAN, Remote: "192.168.1.10", Known: true}); !r.OK {
+		t.Fatalf("another LAN host: %+v", r)
+	}
+	rel := Origin{Route: RouteRelayer, Known: true}
+	for i, want := range []bool{true, true, false} {
+		d.advance(pendingNewInterval)
+		if r := open(newTestCtl(t, "r"+itoa(int64(i))), rel); r.OK != want {
+			t.Fatalf("relayer request %d: %+v", i, r)
+		}
+	}
+}
+
+// Review F7: an owner changes an active grant's role in place; demoting the
+// last owner is refused.
+func TestApproveChangesRoleInPlace(t *testing.T) {
+	d, owner, ctl := ownerDevice(t)
+	before, _ := d.a.Store().Grant(ctl.ctl)
+	d.expectOK(owner, d.cmdClaims(owner, CmdApproveController, `{"ctl":"`+ctl.ctl+`","role":"owner"}`))
+	after, _ := d.a.Store().Grant(ctl.ctl)
+	if after.Role != RoleOwner || after.NK != before.NK || after.CreatedAt != before.CreatedAt || after.ApprovedBy != owner.ctl {
+		t.Fatalf("role change: %+v", after)
+	}
+	// Two owners: one may demote the other, but not the last one.
+	d.expectOK(ctl, d.cmdClaims(ctl, CmdApproveController, `{"ctl":"`+owner.ctl+`","role":"controller"}`))
+	r := d.expectCode(ctl, d.cmdClaims(ctl, CmdApproveController, `{"ctl":"`+ctl.ctl+`","role":"controller"}`), CodeCommandFailed)
+	if string(r.Res) != `{"error":"last_owner"}` {
+		t.Fatalf("res = %s", r.Res)
+	}
+	// A revoked record still needs a fresh request.
+	d.expectOK(ctl, d.cmdClaims(ctl, CmdRevokeController, `{"ctl":"`+owner.ctl+`"}`))
+	r = d.expectCode(ctl, d.cmdClaims(ctl, CmdApproveController, `{"ctl":"`+owner.ctl+`","role":"owner"}`), CodeCommandFailed)
+	if string(r.Res) != `{"error":"not_pending"}` {
+		t.Fatalf("res = %s", r.Res)
+	}
+}
+
+// Review F8: seq continues across revoke and re-approval.
+func TestSeqSurvivesRevoke(t *testing.T) {
+	d, owner, ctl := ownerDevice(t)
+	for range 3 {
+		if _, err := d.a.Seal(ctl.ctl, "x", map[string]int{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.expectOK(owner, d.cmdClaims(owner, CmdRevokeController, `{"ctl":"`+ctl.ctl+`"}`))
+	rc := d.claims(ctl, OpRequestAccess)
+	rc.Enroll = ctl.enroll("")
+	d.expectOK(ctl, rc)
+	d.expectOK(owner, d.cmdClaims(owner, CmdApproveController, `{"ctl":"`+ctl.ctl+`","role":"controller"}`))
+	s, _ := d.a.Seal(ctl.ctl, "x", map[string]int{})
+	g, _ := d.a.Store().Grant(ctl.ctl)
+	n, err := OpenNotification(s.JWE, ctl.ctl, g.NK[:])
+	if err != nil || n.Seq != 4 {
+		t.Fatalf("seq after re-approval = %d (%v), want 4", n.Seq, err)
 	}
 }

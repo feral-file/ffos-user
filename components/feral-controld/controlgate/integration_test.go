@@ -326,6 +326,19 @@ func TestControlProtocolEndToEnd(t *testing.T) {
 		t.Fatalf("enforced relayer rotate: %s", msg)
 	}
 	play := `{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{"dpVersion":"1.0.0","items":[]}}}`
+	// Review F3: the case-variant / duplicate request bypass is refused on
+	// both routes, and the router never sees it.
+	before = r2.rec.count()
+	bypass := `{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{}},"Request":{"intent":{"action":"queue"},"dp1_call":{"evil":1}}}` //nolint:gosec // G101: a test message, not a credential.
+	if msg := r2.relayerCast([]byte(bypass)); !strings.Contains(string(msg), `"error":"invalid_message"`) {
+		t.Fatalf("enforced relayer bypass: %s", msg)
+	}
+	if code, body := r2.post([]byte(bypass)); code != 400 || !strings.Contains(string(body), "invalid_message") {
+		t.Fatalf("LAN bypass: %d %s", code, body)
+	}
+	if r2.rec.count() != before {
+		t.Fatal("an ambiguous message reached the router")
+	}
 	if msg := r2.relayerCast([]byte(play)); !strings.Contains(string(msg), `"ran":"displayPlaylist"`) {
 		t.Fatalf("enforced relayer Play cast: %s", msg)
 	}

@@ -18,26 +18,30 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/controlgate"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // stubGate is a ControlGate with a fixed state and a recorded envelope.
 type stubGate struct {
-	state    control.State
-	envelope json.RawMessage
+	state     control.State
+	envelope  json.RawMessage
+	origin    control.Origin
+	protected bool
 }
 
-func (s *stubGate) HandleEnvelope(_ context.Context, raw json.RawMessage) (*controlgate.Wire, *control.PublicError) {
-	s.envelope = raw
+func (s *stubGate) HandleEnvelope(_ context.Context, raw json.RawMessage, origin control.Origin) (*controlgate.Wire, *control.PublicError) {
+	s.envelope, s.origin = raw, origin
 	if string(raw) == `{"v":1,"jwe":"bad"}` {
 		return nil, &control.PublicError{Code: control.CodeUnknownController}
 	}
 	return &controlgate.Wire{V: 1, JWE: "reply"}, nil
 }
-func (s *stubGate) Plaintext(route control.Route, cmd commands.Command) control.Decision {
-	return control.Policy(s.state, route, string(cmd.Type), cmd.RawArguments)
+func (s *stubGate) Plaintext(route control.Route, cmd commands.Command) (control.Decision, commands.Command) {
+	return control.Policy(s.state, route, string(cmd.Type), cmd.RawArguments), cmd
 }
+func (s *stubGate) ScreenProtected() bool  { return s.protected }
 func (s *stubGate) State() control.State   { return s.state }
 func (s *stubGate) Status() control.Status { return control.Status{V: 1, State: s.state} }
 
@@ -75,7 +79,7 @@ func newControlHub(t *testing.T, claim state.ClaimInfo, st control.State) (*http
 	mux := http.NewServeMux()
 	mockServer.EXPECT().Handler().Return(mux).AnyTimes()
 	provider := fixedStatus{TopicID: claim.TopicID, Claimed: claim.Claimed}
-	h := New(context.Background(), mocks.NewMockWS(ctrl), mockCmd, provider, &fakeScreenshotCapturer{}, mockServer,
+	h := New(context.Background(), mocks.NewMockWS(ctrl), mockCmd, provider, &fakeScreenshotCapturer{image: &screenshot.Image{Data: []byte("png"), Width: 1, Height: 1}}, mockServer,
 		wrapper.NewJSON(), zap.NewNop()).(*hub)
 	h.claimSnapshot = func() state.ClaimInfo { return claim }
 	if st == "" {
@@ -151,4 +155,29 @@ func TestControlStatusAndScreenshot(t *testing.T) {
 	rec := serve(mux, req)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.JSONEq(t, `{"error":{"code":"enrollment_required"}}`, rec.Body.String())
+}
+
+// Review F1: in legacy, a live invitation closes /api/screenshot (an
+// unclaimed device has no topic gate, and the claim QR carries the
+// invitation).
+func TestScreenshotRefusedWhileInvitationLive(t *testing.T) {
+	mux, _, g := newControlHub(t, unclaimed, control.StateLegacy)
+	g.protected = true
+	rec := serve(mux, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.JSONEq(t, `{"error":{"code":"screen_protected"}}`, rec.Body.String())
+	g.protected = false
+	rec = serve(mux, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil))
+	assert.Equal(t, http.StatusOK, rec.Code, "no invitation: phase-0 rules (unclaimed = open)")
+}
+
+// Review F4: the hub passes the LAN peer's IP (not authority) for the
+// per-host pending cap.
+func TestEnvelopeOriginIsTheLANPeer(t *testing.T) {
+	mux, _, g := newControlHub(t, claimedWithTopic, control.StateEnrolled)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/cast",
+		strings.NewReader(`{"command":"ff1Envelope","request":{"v":1,"jwe":"ok"}}`))
+	req.RemoteAddr = "192.168.1.77:51000"
+	serve(mux, req)
+	assert.Equal(t, control.Origin{Route: control.RouteLAN, Remote: "192.168.1.77", Known: true}, g.origin)
 }

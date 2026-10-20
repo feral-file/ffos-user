@@ -133,8 +133,12 @@ func InitDir(fsys FS, dir string, id *Identity, grants []Grant) error {
 // LoadStore loads an existing directory. A missing directory returns an
 // error wrapping errNoDir; anything else wrong returns ErrLocked.
 func LoadStore(fsys FS, dir, deviceID string) (*Store, error) {
-	if _, err := fsys.Stat(RetiredMarker(dir)); err == nil || !isNotExist(err) {
+	if _, err := fsys.Stat(RetiredMarker(dir)); err == nil {
 		return nil, ErrRetired
+	} else if !isNotExist(err) {
+		// Unsure is locked, but not retired: the plaintext factoryReset
+		// allowance is only for a real tombstone (review F5).
+		return nil, fmt.Errorf("%w: reading the retirement tombstone: %w", ErrLocked, err)
 	}
 	fi, err := fsys.Stat(dir)
 	if isNotExist(err) {
@@ -209,7 +213,7 @@ func RetiredMarker(dir string) string { return dir + ".retired" }
 // (an error other than not-exist) counts as present: the answer decides
 // whether the protocol is forced on, and "unsure" must fail closed.
 func StateExists(fsys FS, dir string) bool {
-	for _, p := range []string{dir, RetiredMarker(dir)} {
+	for _, p := range []string{dir, dir + ".new", RetiredMarker(dir)} {
 		if _, err := fsys.Stat(p); err == nil || !isNotExist(err) {
 			return true
 		}
@@ -226,13 +230,21 @@ func StateExists(fsys FS, dir string) bool {
 func (s *Store) Retire() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lockErr = ErrRetired
-	s.grants = nil
 	parent := filepath.Dir(s.dir)
 	if err := s.fs.MkdirAll(parent, 0o750); err != nil {
 		return err
 	}
-	if _, err := s.fs.WriteFileAtomic(RetiredMarker(s.dir), []byte(`{"v":1}`), 0o600); err != nil {
+	committed, err := s.fs.WriteFileAtomic(RetiredMarker(s.dir), []byte(`{"v":1}`), 0o600)
+	if !committed {
+		// No tombstone: nothing changes, in memory or on disk, and the
+		// caller refuses the reset (review F5).
+		return err
+	}
+	// The tombstone is what a restart reads from here on, so memory follows
+	// it even if its directory fsync failed (reported below).
+	s.lockErr = ErrRetired
+	s.grants = nil
+	if err != nil {
 		return err
 	}
 	if err := s.fs.RemoveAll(s.dir); err != nil {
