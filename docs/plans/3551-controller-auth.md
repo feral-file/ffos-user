@@ -1,6 +1,6 @@
 # feral-file#3551 — Brandon's execution plan: endpoint authorization and E2EE
 
-Status: phase 0 and phase 1 implemented on local branches, 2026-10-20; not pushed, not hardware-tested. See §9.
+Status: phase 0 and phase 1 implemented, independently reviewed and hardware-tested (A–K) on local branches, 2026-10-20; not pushed. See §9.
 
 ## 0. The split
 
@@ -291,3 +291,41 @@ Still open before a release train:
 2. Anh: agree §2 with #25 (v2 chunking, browser grant boundary). Run the thin E2E over the v2 relay.
 3. Sean: owner-approves-owner, lost phone = reset, and the tier table (§7).
 4. Push branches and open PRs: ffos/ffos-user against `develop`, ff-app/ff1-cli against `main`. No workflow dispatch by agents.
+
+### Hardware test, FF1-8EVTK3RE (2026-10-20)
+
+The build under test was the device branch before `5f363a3`, running FF OS 2.0.12 with `control.enabled`.
+
+Passed:
+- **A. Phase 0.**
+- **B. Benchmark:** fsync costs 3.4–5.1 ms per admitted request, about 200–290 req/s fully serialized.
+- **C. Owner enrollment by migration QR:** the screenshot was refused while the invitation was live.
+- **D. Enrolled policy.**
+- **E. Real ff-cli as second controller:** approval code matched; controller denied ssh; promote then ssh; revoke; re-approve.
+- **F. Replay and forgery,** also after a restart.
+- **G. Persistence.**
+- **H. Enforced mode:** the relayer dedupes duplicate keys before the device sees them.
+- **I. Fail-closed config.**
+- **J. LAN capture:** no command or field names in clear.
+- **K. OTA carry step and watchdog marker on real systemd.**
+
+Partial:
+- **L. Factory reset:** the tombstone is written before the delete, as designed. The device then came back in the factory image with no Wi-Fi credentials, so the post-reset checks were not run.
+
+Still to retest on hardware once the device is reprovisioned:
+- the device fixes after `5f363a3`: the M1 lock split, `busy`, per-channel seals, the audit log and the enforced purge;
+- the post-reset state;
+- a real full-image OTA.
+
+The ff-app UI has not been exercised on a physical phone.
+
+### Review rounds
+
+| Repo | Reviews | Last state |
+|---|---|---|
+| ffos-user | review, verification, independent | fixed through `ac7d892` |
+| ffos | review, independent | fixed through `5b80c5c` |
+| ff1-cli | repo-required, independent | fixed through `0c75adc` |
+| ff-app | repo-required, second pass, third pass, confirmed-gen review | fixed through `d33224e7` |
+
+The client rules that came out of the reviews are normative in spec §14.
