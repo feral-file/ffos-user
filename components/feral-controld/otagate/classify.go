@@ -81,6 +81,15 @@ func classifyUpdaterMessage(message string) updateErrorKind {
 		return errTransient
 	}
 
+	// Control-state carry (ffos ota-control-state.sh, feral-file#3551 M4): the
+	// updater stops feral-controld to copy .state/control into the new image
+	// and refuses to arm the update when the stop does not take. A stuck stop
+	// is a momentary condition, not a broken image, so retry. Prefix match:
+	// the script appends why it refuses.
+	if strings.HasPrefix(msg, "Could not stop feral-controld") {
+		return errTransient
+	}
+
 	// Lock failures (another update process running or a stale lock). Transient
 	// because the lock may be released by the time we retry.
 	if strings.Contains(msg, "Lock already held by another instance") ||

@@ -339,3 +339,26 @@ func (m *metricCollectorRoundTripper) Metrics() []string {
 	copy(out, m.metrics)
 	return out
 }
+
+// feral-file#3551 M4: the OTA carry step stops controld on purpose under the
+// updater lock; that inactive reading is not a failure. Outside an update it
+// still is.
+func TestSystemdMonitor_InactiveControldDuringUpdate_NotReported(t *testing.T) {
+	monitor, collector := newTestSystemdMonitor(t)
+	ctx := context.Background()
+	setServiceStates(t, "active", "active", "active")
+	requireNoError(t, monitor.check(ctx))
+
+	end := simulateUpdate(t)
+	setServiceStates(t, "active", "inactive", "active")
+	requireNoError(t, monitor.check(ctx))
+	metrics := collector.Metrics()
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-controld.service"} 1`, 0)
+	assertMetricCount(t, metrics, "service_failed_incident 1", 0)
+
+	// The update ended and controld is still down: now it is a failure.
+	end()
+	requireNoError(t, monitor.check(ctx))
+	metrics = collector.Metrics()
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-controld.service"} 1`, 1)
+}

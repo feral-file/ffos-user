@@ -23,6 +23,9 @@ func TestClassifyUpdaterMessage(t *testing.T) {
 		{"infra/open-log (marks_setupd_infrastructure_failures_transient)", "Failed to open /var/log/updaterd.log after retries", errTransient},
 		{"infra/closed-channel (marks_setupd_infrastructure_failures_transient)", "updater closed channel without sending progress", errTransient},
 
+		// feral-file#3551 M4: ota-control-state.sh could not stop controld.
+		{"control-carry/stop-controld", "Could not stop feral-controld; refusing to arm the update with control state that may still change.", errTransient},
+
 		// classify_updater_message_marks_lock_failures_transient
 		{"lock/either-held (marks_lock_failures_transient)", "Exception: either Lock already held by another instance or some error happened.", errTransient},
 
