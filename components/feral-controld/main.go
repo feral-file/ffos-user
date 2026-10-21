@@ -25,7 +25,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
-	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
@@ -213,7 +212,6 @@ func main() {
 		config.GatewayUserAgentTuning(finalLogger),
 		config.Netlog,
 		provisioningTuningFromConfig(config.ProvisioningTuning(finalLogger), finalLogger),
-		config.ControlTuning(finalLogger),
 		dbus.NAME,
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
@@ -949,7 +947,6 @@ func initializeApp(
 	gatewayUserAgentConfig *config.GatewayUserAgentConfig,
 	netlogConfig *config.NetlogConfig,
 	provTuning provisioning.Tuning,
-	controlConfig config.ControlConfig,
 	dbusName string,
 	dbusOpts []dbus_v5.MatchOption,
 ) *app {
@@ -1011,13 +1008,8 @@ func initializeApp(
 	})
 	wsHandler := ws.NewWSHandler(context, wsUpgrader, clock, logger)
 
-	// Control protocol (feral-file#3551): nil unless control.enabled. The
-	// notification producers get sealing handles when it is on (§9).
-	controlWire := newControlWiring(controlConfig, deviceIDFromHostname(), control.DefaultDir, &control.OSFS{}, logger)
-	notifyRelayer, notifyWS := controlWire.notificationHandles(relayer, wsHandler, logger)
-
 	// StatusPoller
-	poller := status.NewPoller(cdp, notifyRelayer, notifyWS, deviceStatus, ddcPanel, json, logger)
+	poller := status.NewPoller(cdp, relayer, wsHandler, deviceStatus, ddcPanel, json, logger)
 
 	// Watchdog
 	watchdog := watchdog.New(logger)
@@ -1089,7 +1081,7 @@ func initializeApp(
 
 	// Mint Pairing
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
-	mintPairing := mintpairing.New(mintPairingOpts, notifyRelayer, cdp, httpClient, relayerAPIKey, json, logger)
+	mintPairing := mintpairing.New(mintPairingOpts, relayer, cdp, httpClient, relayerAPIKey, json, logger)
 	// Factory reset ends the outgoing topic's browser sessions before it clears
 	// the claim: they live on the relayer, and an owner-kept one has no expiry
 	// to reclaim it.
@@ -1120,7 +1112,7 @@ func initializeApp(
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
 		ocRuntime := offlinecache.Bootstrap(
-			ocOpts, notifyRelayer, notifyWS, httpClient, webSocketDialer,
+			ocOpts, relayer, wsHandler, httpClient, webSocketDialer,
 			os, io, json, exec, clock, logger,
 		)
 		offlineCache = ocRuntime.Service
@@ -1582,7 +1574,6 @@ func initializeApp(
 	if sink, ok := hub.(interface{ SetContactObserver(func()) }); ok {
 		sink.SetContactObserver(provMachine.ObserveHubContact)
 	}
-	controlWire.wire(context, cmdHandler, relayer, wsHandler, hub, mediator, executor, logger)
 	// The claim observer registered above fans out here (declared before the
 	// machine existed).
 	provMachineForClaim = provMachine

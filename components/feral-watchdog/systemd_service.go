@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"os"
 	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-watchdog/packages/cdp"
@@ -35,17 +34,6 @@ var (
 		"feral-controld.service": true,
 	}
 )
-
-// controldOTAStopMarker is created by ffos ota-control-state.sh just before
-// it stops feral-controld to carry .state/control, and removed when it
-// restarts controld; after arming it is never removed (the reboot clears
-// /run). LOCKSTEP CONTRACT with ffos: this exact path. A variable for tests.
-var controldOTAStopMarker = "/run/feral-controld-ota-stop"
-
-func controldStopExpected() bool {
-	_, err := os.Stat(controldOTAStopMarker)
-	return err == nil
-}
 
 // SystemdMonitor monitors systemd services
 type SystemdMonitor struct {
@@ -92,14 +80,6 @@ func (m *SystemdMonitor) Start(ctx context.Context) {
 
 func (m *SystemdMonitor) check(ctx context.Context) error {
 	hasFailedService := false
-	// An OTA stops feral-controld on purpose while it carries the live
-	// control state into the new image (ffos ota-control-state.sh,
-	// feral-file#3551 M4). An inactive reading then is the update working,
-	// not a failure to report — but only for that step: the script creates
-	// controldOTAStopMarker just before the stop, and the updater lock must
-	// also be held. Either alone (a stale marker, a long download under the
-	// lock) keeps the normal report (review N5).
-	updating := controldStopExpected() && m.commandHandler.updateInProgress()
 
 	for service := range systemdServices {
 		state, err := m.commandHandler.checkSystemdUserServiceStatus(ctx, service)
@@ -126,10 +106,6 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 		lastState := m.lastServiceStates[service]
 		wasDown := m.isServiceDown(service, lastState)
 		nowDown := m.isServiceDown(service, state)
-		expectedStop := updating && *state == SYSTEMD_SERVICE_STATUS_INACTIVE && servicesReportInactiveAsFailure[service]
-		if expectedStop {
-			nowDown = false
-		}
 		hasRecovered := wasDown && *state == SYSTEMD_SERVICE_STATUS_ACTIVE
 		hasJustFailed := !wasDown && nowDown
 
@@ -160,13 +136,7 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 			// With controld no longer PartOf=chromium-ready.target there is no
 			// "expected teardown" window: every monitored service is meant to be
 			// up, so any inactive reading is an Error. controld additionally
-			// escalates to a failure metric via the nowDown block — except
-			// while an update holds the updater lock (see updating above).
-			if expectedStop {
-				m.logger.Info("Systemd: Service is inactive during an update; not reported",
-					zap.String("service", service))
-				break
-			}
+			// escalates to a failure metric via the nowDown block.
 			m.logger.Error("Systemd: Service is inactive",
 				zap.String("service", service))
 		default:
@@ -189,14 +159,8 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 			}
 		}
 
-		// Update last state. An expected stop is recorded as "not observed",
-		// so controld still being down once the update ends is reported as a
-		// fresh failure rather than absorbed as already-known.
-		if expectedStop {
-			delete(m.lastServiceStates, service)
-		} else {
-			m.lastServiceStates[service] = state
-		}
+		// Update last state
+		m.lastServiceStates[service] = state
 	}
 
 	if hasFailedService && !m.failureIncidentReported {

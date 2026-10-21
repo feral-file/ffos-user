@@ -61,19 +61,6 @@ func (s *narratorSpy) RefreshClaimQRName(resolve func() string) {
 	s.calls = append(s.calls, "refresh_claim_name")
 	s.lastName = resolve()
 }
-
-// RefreshClaimQRURL mirrors setupui.Service: build runs only while the
-// spy's current intent is the claim QR.
-func (s *narratorSpy) RefreshClaimQRURL(build func() string) {
-	if len(s.calls) == 0 || s.calls[len(s.calls)-1] != "claim" {
-		return
-	}
-	s.calls = append(s.calls, "refresh_claim_url")
-	s.lastURL = build()
-}
-func (s *narratorSpy) ClaimQRShowing() bool {
-	return len(s.calls) > 0 && (s.calls[len(s.calls)-1] == "claim" || s.calls[len(s.calls)-1] == "refresh_claim_url")
-}
 func (s *narratorSpy) ShowReady()        { s.calls = append(s.calls, "ready") }
 func (s *narratorSpy) ShowFactoryReset() { s.calls = append(s.calls, "factory_reset") }
 func (s *narratorSpy) ShowJoinFailed(reason string) {
@@ -1135,13 +1122,13 @@ func TestConnectClaimTransitionHidesOverlay(t *testing.T) {
 
 	args := []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`)
 
-	res, err := e.connect(context.Background(), args)
+	res, err := e.connect(args)
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 	assert.Equal(t, []string{"hide"}, spy.calls, "the claim transition must clear the claim QR")
 
 	// Re-connect on the now-claimed device (connect mutated st in place).
-	res, err = e.connect(context.Background(), args)
+	res, err = e.connect(args)
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 	assert.Equal(t, []string{"hide"}, spy.calls, "a re-connect must not hide again")
@@ -1167,7 +1154,7 @@ func TestConnectClaimTransitionPlayerDownDoesNotFailClaim(t *testing.T) {
 	spy := &narratorSpy{}
 	e := &executor{logger: zap.NewNop(), setupNarrator: spy, json: wrapper.NewJSON(), cdp: mockCDP}
 
-	res, err := e.connect(context.Background(), []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
+	res, err := e.connect([]byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 	assert.Equal(t, []string{"hide"}, spy.calls)
@@ -1257,7 +1244,7 @@ func TestConnectClaimTransitionDefaultPlaybackDoesNotClearDisplayAtCache(t *test
 
 	doneConnect := make(chan struct{})
 	go func() {
-		res, err := e.connect(context.Background(), []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
+		res, err := e.connect([]byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
 		require.NoError(t, err)
 		assert.Equal(t, CmdOK, res)
 		close(doneConnect)

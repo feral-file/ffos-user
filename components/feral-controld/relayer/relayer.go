@@ -14,8 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/commands"
-
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
@@ -93,8 +91,6 @@ type Message struct {
 	// re-marshal whose HTML escaping can inflate it past the verifier's size
 	// bound (feral-file/ffos-user#307). Set by UnmarshalJSON only.
 	RawRequest json.RawMessage `json:"-"`
-	// Ambiguous: see commands.Command.Ambiguous.
-	Ambiguous bool `json:"-"`
 }
 
 type messageWire struct {
@@ -114,7 +110,6 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	m.Command, m.Request, m.TopicID = w.Command, w.Request, w.TopicID
-	m.Ambiguous = commands.AmbiguousTopLevel(data)
 	m.RawRequest = nil
 	if raw, ok := tokens["request"]; ok && len(raw) > 0 && string(raw) != "null" {
 		m.RawRequest = raw

@@ -12,7 +12,6 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
-	"github.com/feral-file/ffos-user/components/feral-controld/control"
 )
 
 // Policy describes how the storm gate protects a single command type.
@@ -284,13 +283,6 @@ func (g *gate) Process(ctx context.Context, command commands.Command) (interface
 	// failure is legible to every caller, and any caller may simply retry.
 	if p.Dedupe {
 		flightKey := key + "\x00" + argsHash(command.Arguments)
-		// An envelope-admitted command dedupes only with the SAME controller's
-		// identical in-flight command (feral-file#3551 F4): sharing one
-		// execution across principals would hand one controller a result
-		// produced on another's authority. Plaintext keeps today's key.
-		if p, ok := control.PrincipalFrom(ctx); ok {
-			flightKey = "ctl\x00" + p.ControllerID + "\x00" + flightKey
-		}
 		res, err, _ := g.flight.Do(flightKey, func() (interface{}, error) {
 			return g.admit(ctx, command, p, key)
 		})

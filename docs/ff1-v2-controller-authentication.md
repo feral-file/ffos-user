@@ -1,10 +1,5 @@
 # FF1 v2 controller authentication and access sessions
 
-> **Superseded.** Controller authentication is specified by
-> [`ff1-control-v1.md`](ff1-control-v1.md) (feral-file#3551), which is the
-> normative contract and is implemented in `components/feral-controld/control`.
-> This MQTT/mTLS draft is kept for its history only; do not implement it.
-
 - Status: design draft; not conformance-ready
 - Target contract version: `2.0.0`
 - Parent contract: [FF1 communication API v2](ff1-v2-api-contract.md)

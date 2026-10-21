@@ -28,10 +28,6 @@ var importDenylist = map[string][]string{
 	// packages (setupui already imports it) and so must not itself depend on
 	// the relayer transport.
 	"playersession": {"/relayer"},
-	// control is the transport-independent authority (docs/ff1-control-v1.md,
-	// feral-file#3551): the hub and the relayer path call INTO it, so it must
-	// never import a transport or the router it gates.
-	"control": {"/relayer", "/hub", "/mediator", "/commandrouter", "/devicectl", "/cdp"},
 }
 
 func TestProvisioningDomainImportIsolation(t *testing.T) {

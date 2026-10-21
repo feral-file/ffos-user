@@ -55,16 +55,6 @@ func classifyUpdaterMessage(message string) updateErrorKind {
 		return errPermanent
 	}
 
-	// Downgrade refusal (ffos 5b80c5c, feral-file#3551 M4): the target image
-	// predates the control-state carry, so installing it would lose (or, on
-	// a later upgrade, resurrect) controller grants. Permanent: the device
-	// stays on its current image until a carry-capable image is published;
-	// retrying the same target cannot succeed. Prefix match: the script
-	// appends the reason.
-	if strings.HasPrefix(msg, "Refusing update: target image cannot carry controller state") {
-		return errPermanent
-	}
-
 	// Unknown/unclassified errors from the updater-spawn layer.
 	if msg == "Unknown error occurred" {
 		return errPermanent
@@ -88,15 +78,6 @@ func classifyUpdaterMessage(message string) updateErrorKind {
 		strings.Contains(msg, "Failed to open /var/log/updaterd.log") ||
 		msg == "updater closed channel without sending progress" ||
 		strings.Contains(msg, "updater service exited without reporting completion") {
-		return errTransient
-	}
-
-	// Control-state carry (ffos ota-control-state.sh, feral-file#3551 M4): the
-	// updater stops feral-controld to copy .state/control into the new image
-	// and refuses to arm the update when the stop does not take. A stuck stop
-	// is a momentary condition, not a broken image, so retry. Prefix match:
-	// the script appends why it refuses.
-	if strings.HasPrefix(msg, "Could not stop feral-controld") {
 		return errTransient
 	}
 

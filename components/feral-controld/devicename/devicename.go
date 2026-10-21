@@ -75,15 +75,6 @@ var formattingCharacters = regexp.MustCompile(
 
 var repeatedWhitespace = regexp.MustCompile(`\s+`)
 
-// HasUnsafeCharacters reports whether s contains any character Sanitize
-// strips: C0/C1 controls or the invisible formatting/bidi characters. The
-// control protocol rejects controller labels carrying them (feral-file#3551
-// review L7) with exactly this set, so a label cannot impersonate another
-// controller in the owner's approval list any more than a name can.
-func HasUnsafeCharacters(s string) bool {
-	return controlCharacters.MatchString(s) || formattingCharacters.MatchString(s)
-}
-
 // Sanitize normalizes a caller-supplied name for storage.
 //
 // Truncation is hard rather than elliptical: this string is read back into the

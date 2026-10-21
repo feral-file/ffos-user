@@ -110,9 +110,9 @@ func (h *hub) withMiddleware(route string, next http.HandlerFunc) http.HandlerFu
 		// A page can also reach the hub without either header through DNS
 		// rebinding: its own domain is re-pointed at this device, so its
 		// requests are same-origin and a GET carries no Origin. Such a request
-		// names the attacker's domain in Host, and status hands out an
-		// unclaimed device's topic ID, so only an IP literal, localhost, or
-		// this device's own name is accepted (see isLocalHost).
+		// names the attacker's domain in Host, and status hands out the
+		// topic ID, so only an IP literal, localhost, or this device's own
+		// name is accepted (see isLocalHost).
 		if !isLocalHost(r.Host) {
 			h.logger.Warn("Hub request rejected: non-local Host",
 				zap.String("route", route),
@@ -140,15 +140,6 @@ func (h *hub) withMiddleware(route string, next http.HandlerFunc) http.HandlerFu
 
 		// LAN AUTHORIZATION SEAM (feral-file#3551): screen-anchored pairing checks
 		// go here, guarding every route uniformly, before next is invoked.
-		// Phase 0 (containment) puts only route-level topic gates here (see
-		// topicGatedRoutes); its per-command gate on /api/cast needs the
-		// decoded command and lives in handleCast (see topicGatedCommands).
-		if route == "screenshot" && h.refuseScreenshotUnlessLegacy(w) {
-			return
-		}
-		if topicGatedRoutes[route] && h.refuseWithoutTopic(w, r, route) {
-			return
-		}
 
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next(rec, r)

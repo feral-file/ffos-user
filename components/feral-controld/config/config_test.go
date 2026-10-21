@@ -765,18 +765,3 @@ func TestContentPolicyTuningPermissiveDecode(t *testing.T) {
 		assert.Equal(t, config.ContentPolicyConfig{}, c.ContentPolicyTuning(zap.NewNop()))
 	})
 }
-
-func TestControlTuning(t *testing.T) {
-	assert.Equal(t, config.ControlConfig{}, (&config.Config{}).ControlTuning(zap.NewNop()))
-	c := &config.Config{Control: []byte(`{"enabled":true}`)}
-	assert.Equal(t, config.ControlConfig{Enabled: true}, c.ControlTuning(zap.NewNop()))
-	c = &config.Config{Control: []byte(`{"enabled":true,"enforced":true}`)}
-	assert.Equal(t, config.ControlConfig{Enabled: true, Enforced: true}, c.ControlTuning(zap.NewNop()))
-	// One bad field does not take the other with it.
-	c = &config.Config{Control: []byte(`{"enabled":true,"enforced":"yes"}`)}
-	assert.Equal(t, config.ControlConfig{Enabled: true, Malformed: true}, c.ControlTuning(zap.NewNop()))
-	c = &config.Config{Control: []byte(`{"enabled":"yes"}`)}
-	assert.Equal(t, config.ControlConfig{Malformed: true}, c.ControlTuning(zap.NewNop()))
-	c = &config.Config{Control: []byte(`[true]`)}
-	assert.Equal(t, config.ControlConfig{Malformed: true}, c.ControlTuning(zap.NewNop()))
-}
