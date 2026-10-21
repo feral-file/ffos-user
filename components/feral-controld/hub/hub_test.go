@@ -562,7 +562,7 @@ func TestHandleCast_Success(t *testing.T) {
 
 	// Mock command handler to return success (use gomock.Any() for payload)
 	ts.mockCmd.EXPECT().
-		Process(ts.ctx, gomock.Any()).
+		Process(fromControllerCtx{}, gomock.Any()).
 		Return(expectedResult, nil).
 		Times(1)
 
@@ -674,7 +674,7 @@ func TestHandleCast_ProcessError(t *testing.T) {
 	// Mock command handler to return error
 	processErr := errors.New("process error")
 	ts.mockCmd.EXPECT().
-		Process(ts.ctx, gomock.Any()).
+		Process(fromControllerCtx{}, gomock.Any()).
 		Return(nil, processErr).
 		Times(1)
 
@@ -724,7 +724,7 @@ func TestHandleCast_SourceUnreachableRejected422(t *testing.T) {
 		Times(1)
 
 	ts.mockCmd.EXPECT().
-		Process(ts.ctx, gomock.Any()).
+		Process(fromControllerCtx{}, gomock.Any()).
 		Return(nil, &commandrouter.SourceUnreachableError{
 			Results: []offlinecache.SourceProbeResult{
 				{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
@@ -777,7 +777,7 @@ func TestHandleCast_ProcessNilResult(t *testing.T) {
 
 	// Mock command handler to return nil result (no error, but no content)
 	ts.mockCmd.EXPECT().
-		Process(ts.ctx, gomock.Any()).
+		Process(fromControllerCtx{}, gomock.Any()).
 		Return(nil, nil).
 		Times(1)
 
@@ -1092,6 +1092,19 @@ func TestRespondJSON_Success(t *testing.T) {
 
 // countingHandler is a real inner Handler that counts how many commands reach
 // it, used to prove the storm gate sheds excess before they hit the device.
+
+// fromControllerCtx matches a context the hub marked with
+// commands.FromController: every cast that enters through the LAN API is a
+// controller's, and the router wakes a sleeping player only for those.
+type fromControllerCtx struct{}
+
+func (fromControllerCtx) Matches(x interface{}) bool {
+	ctx, ok := x.(context.Context)
+	return ok && commands.IsFromController(ctx)
+}
+
+func (fromControllerCtx) String() string { return "a context marked commands.FromController" }
+
 type countingHandler struct {
 	calls atomic.Int64
 }
