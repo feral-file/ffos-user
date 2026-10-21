@@ -50,9 +50,10 @@ type handler struct {
 	scheduler   playlistschedule.Scheduler
 	logger      *zap.Logger
 
-	// asleep reports whether the player is (or is meant to be) sleeping; see
-	// devicectl.PlayerSleepGate. Read by wakeForControllerCast. nil never
-	// wakes (a build wired without the sleep tracker).
+	// asleep reports whether a cast must wake the player first; see
+	// devicectl.PlayerCastWakeGate (wider than the navigation gate: a failed
+	// wake stays eligible). Read by wakeForControllerCast. nil never wakes
+	// (a build wired without the sleep tracker).
 	asleep func() bool
 
 	// sourceProber, when set (SetSourceProber), is the cast-time source
@@ -401,7 +402,7 @@ func New(
 		scheduler:    scheduler,
 		json:         json,
 		logger:       logger,
-		asleep:       devicectl.PlayerSleepGate(executor),
+		asleep:       devicectl.PlayerCastWakeGate(executor),
 	}
 }
 
