@@ -524,7 +524,23 @@ Outside `legacy`, two more LAN surfaces close:
 
 "LAN" means any caller of the hub (`/api/cast`), whatever network it came
 from: Wi-Fi, Ethernet, an owner VPN or a Tailscale address all get the LAN
-column. Only the relayer path gets the relayer column.
+column. Only the legacy (topic) relayer path gets the relayer column.
+
+**Device-ID relay (v2, ff-relayer#26).** Its address is the public device ID
+and it authenticates nobody, so the relayer column above never applies to
+it. On v2 (`RouteRelayV2`) every plaintext command is refused in every state:
+`enrollment_required` in `legacy`, `envelope_required` in `enrolled` and
+`enforced`, `locked` in `locked`. The check runs before the state switch and
+before the retired `factoryReset` exception, which stays for the LAN and the
+legacy relayer only. Envelopes are admitted exactly as on any other route.
+`requestAccess` from v2 counts in the same relay bucket as the legacy relayer
+(§5.2). *Proposed, not implemented:* one plaintext exception,
+`getControlProfile`, answering only `{"contract","control":{"v","state","profile"}}`
+so an off-LAN controller can seal its first request. A client MUST verify that
+profile against pins from the QR or the ff-cli handoff (§14.1) and never pin
+from it. The route constant and policy exist; the v2 transport wiring lands
+with the v2 integration, which MUST dial v2 only when the control wiring is
+on (a device with the protocol off has no policy to apply).
 
 Internal callers (OOM recovery, `playRecentlyPlayed` re-entry) are not subject
 to this policy. An unrecognized state is treated as `locked`.
@@ -676,6 +692,22 @@ What is sent in each state:
 Every notification is sealed separately for each channel it goes out on, so
 the LAN and relayer copies of one event carry different `seq` values.
 
+**v2 relay.** The relayer columns above apply to the legacy (topic) relayer
+only. On the device-ID relay nothing is ever sent in plaintext, in any state
+(a `legacy` or `locked` device sends nothing there), and
+`persist_record_count` is ignored: v2 stores nothing. Sealed copies are
+addressed per controller, not fanned out to every peer: the device learns a
+peer→`ctl` binding only from a request whose replay window just accepted a
+fresh `ctr` (never from signature verification alone, so a replayed envelope
+cannot move a controller's notifications), keeps at most 2 peers per `ctl`,
+and drops the binding on peer disconnect, revocation or expiry. A controller
+that wants notifications therefore sends one envelope (any command) after
+connecting, on the same connection it reads notifications from. Admission
+notifications (`controller_approval_request`) are published on a context
+detached from the request, so a relay that routes by the requester's source
+cannot hand the owners' copies to the requester. *Integration item:* the
+binding lands with the v2 transport wiring.
+
 ff-relayer persists plaintext notifications per topic and replays them to
 every new subscriber: `device_status`, `player_status`, `ddc_status` and
 `offline_cache_status` (`persist_record_count:1`) and both mint pairing types
@@ -701,14 +733,23 @@ no marker.
 |---|---|---|
 | LAN | `POST /api/cast`, body `{"command":"ff1Envelope","request":{"v":1,"jwe":"<compact>"}}` | 200 `{"v":1,"jwe":"<compact>"}` |
 | legacy relayer | the same JSON as a topic cast | RPC `message` = `{"v":1,"jwe":"<compact>"}` |
-| v2 relay | frame payload = UTF-8 bytes of the compact JWE; chunking is TBD with #25 | same |
+| v2 relay | frame payload = `{"messageID":<client id>,"message":{"command":"ff1Envelope","request":{"v":1,"jwe":"<compact>"}}}`, split into `{"relayChunk":{…}}` frames above 32 KiB (whole message ≤ 4 MiB, reassembled within 180 s) | `{"type":"RPC","messageID":<same>,"message":{"v":1,"jwe":"<compact>"}}`, or `message` = the public `{"error":{"code"}}` |
 
 The `request` carrier is parsed strictly (§1): exactly the members `v` (the
 integer 1) and `jwe` (a non-empty string), no duplicate, case-variant or
 extra member; anything else is `bad_envelope`.
 
 The LAN hub caps the whole request body at 4 MiB, so on the LAN the compact
-must leave room for the ~50-byte cast wrapper.
+must leave room for the ~50-byte cast wrapper. The v2 relay caps the whole
+JSON message at 4 MiB the same way. Because the request is base64url-encoded
+twice (JWS, then JWE), the compact is about 16/9 of the plaintext `req`: the
+effective plaintext limit on any sealed route is about 2.25 MiB. Clients
+should check the sealed size before sending and say so, rather than fail
+generically.
+
+On v2 the `messageID` is chosen by the client and only routes the reply; the
+authenticated correlation is `rid` (§3.3). Relay acknowledgements are
+transport receipts, never success.
 
 At most 4 envelopes are authenticated at a time (decrypt, verify, parse);
 an envelope that cannot get a slot within 1 s is answered with the public
@@ -742,6 +783,13 @@ reply rather than `bad_envelope`.
   - The topic stays at index 1 whenever the device has one, claimed or
     not: once status withholds `topic_id` (§11 status, phase 0), the screen
     QR is how a second phone learns the topic.
+  - The layout is fixed for every transport:
+    `id|topic-or-empty|internet|branch|version|phase|inv|thumb(sig)|thumb(enc)|gen`.
+    A device without a topic (v2-only) leaves index 1 empty rather than
+    dropping the field, so every index keeps its meaning. Parsers MUST accept
+    an empty index 1 when the pins are present and MUST read the branch at
+    index 3. Released app parsers reject an empty index 1 with their own
+    "missing topic" error, which fails visibly instead of binding wrongly.
   - The only builder is `formatDeviceConnectURL` in devicectl
     (`components/launcher-ui`, the other builder this once had to match, was
     deleted with feral-setupd).
@@ -820,10 +868,16 @@ and the ff1-cli test suite does the same with `jose`.
 
 ## 13. Security notes
 
-- The relayer's `messageID:"system"` topic message is not a controller path:
-  ff-relayer generates every cast's `messageID` server side
-  (`crypto.randomUUID()` in `handleCast`), and the system message is
-  relayer-originated on connect, so a controller cannot forge one.
+- The relayer's `messageID:"system"` topic message is not a controller path
+  on the legacy relayer: ff-relayer generates every cast's `messageID` server
+  side (`crypto.randomUUID()` in `handleCast`), and the system message is
+  relayer-originated on connect, so a controller cannot forge one. On the v2
+  relay the `messageID` is chosen by the client, so a v2 frame with
+  `messageID:"system"` MUST be a no-op: the topic is honored only from the
+  legacy relayer route, and a reply is sent back on the route its request
+  came from. The topic is a bearer credential on the legacy relayer, so the
+  device never logs it raw (logs carry an 8-hex SHA-256 fingerprint, and
+  system frames are logged redacted).
 - Play browser sessions never subscribe to the notification channel, so
   sealing notifications (§9) cannot strand a Play session.
 - Residual, accepted: on a claimed device still in `legacy`, any LAN peer

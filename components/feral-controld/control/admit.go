@@ -1118,6 +1118,9 @@ func (a *Authority) pendingCapped(o Origin, ctl string) bool {
 	if !o.Known {
 		return false
 	}
+	// Every non-LAN route (the legacy relayer and the v2 relay) shares one
+	// relay bucket: neither identifies a source, so a second relay route
+	// must not double the remote share of the global cap.
 	lan, relayer := 0, 0
 	for _, p := range a.pending {
 		if p.ctl == ctl || !p.origin.Known {
@@ -1126,7 +1129,7 @@ func (a *Authority) pendingCapped(o Origin, ctl string) bool {
 		switch {
 		case p.origin.Route == RouteLAN && o.Route == RouteLAN && p.origin.Remote == o.Remote && o.Remote != "":
 			lan++
-		case p.origin.Route == RouteRelayer:
+		case p.origin.Route != RouteLAN:
 			relayer++
 		}
 	}

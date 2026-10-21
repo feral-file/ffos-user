@@ -283,6 +283,10 @@ func TestRetire(t *testing.T) {
 	if !a.Policy(RouteLAN, "factoryReset", nil).Allow || !a.Policy(RouteRelayer, "factoryReset", nil).Allow {
 		t.Fatal("retired device refuses the reset retry")
 	}
+	// ...but never on the public device-ID relay, where anyone could send it.
+	if d := a.Policy(RouteRelayV2, "factoryReset", nil); d.Allow || d.Code != CodeLocked {
+		t.Fatalf("retired device accepted factoryReset on RouteRelayV2: %+v", d)
+	}
 	if a.Policy(RouteLAN, "displayPlaylist", nil).Allow || a.Policy(RouteRelayer, "sshAccess", nil).Allow {
 		t.Fatal("retired device opened other plaintext")
 	}

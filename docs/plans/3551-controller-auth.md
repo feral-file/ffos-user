@@ -215,7 +215,11 @@ After the fleet counts in §3.1 show enrolled devices.
 - Topic rotation with session carry-over stays on #25.
 
 ### Phase 3 — tail
-`min_upgradeable_version` decision, legacy relayer retirement, account move, and v2 cutover. All on #25; my envelope is unchanged.
+Legacy relayer retirement, account move, and v2 cutover. All on #25; my envelope is unchanged.
+
+- **Rollout lever.** Use `min_runtime_version` (device must update; otagate `isUpdateRequired`), raised once and deliberately. Not `min_upgradeable_version`: below that floor a device is "too old to upgrade" and needs a USB reflash (otagate `isTooOldToUpgrade`).
+- **`LEGACY_API_ENABLED=false`** is gated on fleet telemetry of `control.state` (the controld boot line), not on firmware version. A `legacy`-state device has no grants, and v2 admits no plaintext, so turning legacy off strands every unmigrated device off-LAN. It also waits for Play to move to display grants.
+- **v2 integration-PR invariant** (device): v2 is dialed only when the control wiring is non-nil, and the dial lands in the same change as the `RouteRelayV2` wiring, the route-aware `system` handling and reply target, the per-controller notification binding, and the topic-independent claim QR. Any intermediate build that dials v2 without them is open to anyone who knows the device ID. `control.RouteRelayV2` and its policy (plaintext refused in every state, before the retired exception; shared relay pending bucket) are already on this branch.
 
 ## 6. Acceptance (what I demonstrate before the train)
 

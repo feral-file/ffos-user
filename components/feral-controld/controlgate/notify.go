@@ -3,6 +3,7 @@ package controlgate
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -24,11 +25,21 @@ func NewPublisher(r relayer.Relayer, w ws.WS, logger *zap.Logger) *Publisher {
 	return &Publisher{relayer: r, ws: w, logger: logger}
 }
 
+// publishTimeout bounds the relayer sends of one admission's notifications.
+const publishTimeout = 10 * time.Second
+
 // PublishAdmission sends the notifications an admission produced: the
 // relayer gets the authority's sealed copies, the LAN WebSocket a separately
 // sealed copy of each (§9: one seal, and one seq, per channel; review L1).
-func (p *Publisher) PublishAdmission(ctx context.Context, auth *control.Authority, adm *control.Admission) {
+//
+// The sends deliberately do not use the requester's context. A relay that
+// routes by a source carried in the context (the v2 device session replies
+// to the peer a request came from) would otherwise deliver the owners'
+// approval requests to the requester instead of the owners.
+func (p *Publisher) PublishAdmission(_ context.Context, auth *control.Authority, adm *control.Admission) {
 	if p.relayer != nil && p.relayer.IsConnected() {
+		ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
+		defer cancel()
 		for _, s := range adm.Notifications {
 			if wire, err := s.Wire(); err == nil {
 				if err := p.relayer.Send(ctx, json.RawMessage(wire)); err != nil {

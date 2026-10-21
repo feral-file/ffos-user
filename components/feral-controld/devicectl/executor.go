@@ -3448,13 +3448,13 @@ func (e *executor) revokeTopicBrowserSessions(topicID string, deadline time.Time
 	if err != nil {
 		e.logger.Error("Factory reset: failed to revoke browser sessions for the outgoing topic; sessions may survive the reset",
 			zap.Error(err),
-			zap.String("topicID", topicID),
+			zap.String("topic_fp", helper.TopicFingerprint(topicID)),
 			zap.Int("revoked", revoked))
 		return
 	}
 	if revoked > 0 {
 		e.logger.Info("Factory reset: revoked browser sessions for the outgoing topic",
-			zap.String("topicID", topicID),
+			zap.String("topic_fp", helper.TopicFingerprint(topicID)),
 			zap.Int("revoked", revoked))
 	}
 }

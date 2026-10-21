@@ -12,6 +12,11 @@ type Route int
 const (
 	RouteLAN Route = iota
 	RouteRelayer
+	// RouteRelayV2 is the device-ID relay (ff-relayer#26). Its address is
+	// the public device ID and it authenticates nobody, so no plaintext
+	// command is ever admitted on it, in any state (§7.2 v2 column). Not
+	// wired to a transport yet: the v2 integration lands that.
+	RouteRelayV2
 )
 
 // Decision is a plaintext-policy verdict. Code is the public error code to
@@ -30,6 +35,9 @@ func deny(code string) Decision { return Decision{Code: code} }
 // callers (OOM recovery, playRecentlyPlayed re-entry) never reach it, and
 // the ff1Envelope carrier is routed to Authority.Open before it.
 func Policy(state State, route Route, cmd string, req json.RawMessage) Decision {
+	if route == RouteRelayV2 {
+		return relayV2Refusal(state)
+	}
 	tier := TierOf(cmd)
 	switch state {
 	case StateLegacy:
@@ -68,6 +76,12 @@ func Policy(state State, route Route, cmd string, req json.RawMessage) Decision 
 // device with no remote way to finish the reset its owner asked for; the
 // reset only wipes a device that was already being wiped.
 func (a *Authority) Policy(route Route, cmd string, req json.RawMessage) Decision {
+	// The v2 refusal runs before the retired exception: on the public
+	// device-ID relay anyone could otherwise wipe a device whose reset rolled
+	// back. The exception stays for the LAN and the legacy relayer.
+	if route == RouteRelayV2 {
+		return relayV2Refusal(a.State())
+	}
 	if errors.Is(a.LockErr(), ErrRetired) {
 		// Retired: factoryReset on any route, and nothing else on any route
 		// (review L2: locked alone still let relayer controller-tier
@@ -81,6 +95,20 @@ func (a *Authority) Policy(route Route, cmd string, req json.RawMessage) Decisio
 }
 
 const cmdFactoryReset = "factoryReset"
+
+// relayV2Refusal is the public code for any plaintext on RouteRelayV2:
+// legacy has no owner yet (enroll first), locked refuses everything, and an
+// owned device wants an envelope.
+func relayV2Refusal(state State) Decision {
+	switch state {
+	case StateLegacy:
+		return deny(CodeEnrollmentRequired)
+	case StateEnrolled, StateEnforced:
+		return deny(CodeEnvelopeRequired)
+	default:
+		return deny(CodeLocked)
+	}
+}
 
 // isPlayCastShape is the exact enforced-state relayer allowance (§7.2): a
 // request with exactly the members intent and dp1_call, intent exactly

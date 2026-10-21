@@ -134,15 +134,48 @@ type fakeRelayer struct {
 	relayer.Relayer
 	mu   sync.Mutex
 	sent []json.RawMessage
+	ctxs []context.Context
 }
 
 func (f *fakeRelayer) IsConnected() bool { return true }
-func (f *fakeRelayer) Send(_ context.Context, data any) error {
+func (f *fakeRelayer) Send(ctx context.Context, data any) error {
 	b, _ := json.Marshal(data)
 	f.mu.Lock()
 	f.sent = append(f.sent, b)
+	f.ctxs = append(f.ctxs, ctx)
 	f.mu.Unlock()
 	return nil
+}
+
+type requestSourceKey struct{}
+
+// An admission's notifications must not travel on the requester's context:
+// a relay that routes replies by a source carried in the context would hand
+// the owners' approval requests to the requester.
+func TestPublishAdmissionDetachesRequestContext(t *testing.T) {
+	a, _ := newAuthority(t, false)
+	g := controlgate.New(a, &recorder{}, zap.NewNop())
+	owner := enrollOwner(t, g, a)
+	rel := &fakeRelayer{}
+	g.SetPublisher(controlgate.NewPublisher(rel, nil, zap.NewNop()))
+
+	cli := newClient(t, "cli", *a.Status().Profile)
+	reqCtx, cancel := context.WithCancel(context.WithValue(context.Background(), requestSourceKey{}, "requester-peer"))
+	s := cli.build(control.OpRequestAccess, "", "", "")
+	if _, perr := g.HandleEnvelope(reqCtx, s.body, control.Origin{Route: control.RouteRelayer, Known: true}); perr != nil {
+		t.Fatal(perr)
+	}
+	cancel()
+	rel.mu.Lock()
+	defer rel.mu.Unlock()
+	if len(rel.ctxs) == 0 {
+		t.Fatalf("owner %s got no approval request", owner.ctl)
+	}
+	for _, ctx := range rel.ctxs {
+		if ctx.Value(requestSourceKey{}) != nil {
+			t.Fatal("approval request sent on the requester's context")
+		}
+	}
 }
 
 type fakeWS struct {

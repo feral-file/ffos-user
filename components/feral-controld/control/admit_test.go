@@ -693,6 +693,34 @@ func TestPendingPerRouteCaps(t *testing.T) {
 	}
 }
 
+// The legacy relayer and the v2 relay share one relay bucket, so adding a
+// relay route never doubles the remote share of the global cap.
+func TestPendingRelayBucketSharedByV2(t *testing.T) {
+	d, _, _ := ownerDevice(t)
+	open := func(c *testCtl, o Origin) ReplyClaims {
+		rc := d.claims(c, OpRequestAccess)
+		rc.Enroll = c.enroll("")
+		adm, err := d.a.OpenFrom(d.seal(c, rc), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d.final(adm, rc)
+	}
+	rel := Origin{Route: RouteRelayer, Known: true}
+	v2 := Origin{Route: RouteRelayV2, Known: true}
+	// Two pending, under the global cap of 4: the third relay request is
+	// refused by the shared bucket, whichever relay route it uses.
+	for i, tc := range []struct {
+		o    Origin
+		want bool
+	}{{rel, true}, {v2, true}, {v2, false}, {rel, false}} {
+		d.advance(pendingNewInterval)
+		if r := open(newTestCtl(t, "s"+itoa(int64(i))), tc.o); r.OK != tc.want {
+			t.Fatalf("relay request %d (route %d): %+v", i, tc.o.Route, r)
+		}
+	}
+}
+
 // Review F7: an owner changes an active grant's role in place; demoting the
 // last owner is refused.
 func TestApproveChangesRoleInPlace(t *testing.T) {

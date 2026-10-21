@@ -38,6 +38,15 @@ func TestPolicy(t *testing.T) {
 		{StateLocked, RouteRelayer, "displayPlaylist", play, ""},
 		{StateLocked, RouteRelayer, "factoryReset", nil, CodeLocked},
 		{"bogus", RouteRelayer, "factoryReset", nil, CodeLocked},
+		// RouteRelayV2: the public device-ID relay admits no plaintext in
+		// any state, not even what legacy or the Play shape allow elsewhere.
+		{StateLegacy, RouteRelayV2, "sshAccess", nil, CodeEnrollmentRequired},
+		{StateLegacy, RouteRelayV2, "displayPlaylist", play, CodeEnrollmentRequired},
+		{StateEnrolled, RouteRelayV2, "displayPlaylist", play, CodeEnvelopeRequired},
+		{StateEnrolled, RouteRelayV2, "connect", nil, CodeEnvelopeRequired},
+		{StateEnforced, RouteRelayV2, "displayPlaylist", play, CodeEnvelopeRequired},
+		{StateLocked, RouteRelayV2, "displayPlaylist", play, CodeLocked},
+		{StateLocked, RouteRelayV2, "factoryReset", nil, CodeLocked},
 	}
 	for i, tc := range cases {
 		d := Policy(tc.state, tc.route, tc.cmd, tc.req)

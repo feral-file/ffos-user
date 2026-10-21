@@ -32,6 +32,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
@@ -433,7 +434,7 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	app.Logger.Info("Initial relayer connection gate evaluated",
 		zap.Bool("internet_connected", connected),
 		zap.Bool("relayer_ready", startupClaim.TopicReady),
-		zap.String("topic_id", startupClaim.TopicID),
+		zap.String("topic_fp", helper.TopicFingerprint(startupClaim.TopicID)),
 	)
 	// Gate on reachability ONLY, never on IsReady(): connecting with an empty
 	// topic is the designed topic-ASSIGNMENT path (relayer.Connect omits the

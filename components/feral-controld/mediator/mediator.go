@@ -828,6 +828,10 @@ func (m *mediator) handleDBusSignal(
 func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Payload) error {
 	payloadJSON, _ := m.json.Marshal(payload)
 	logPayload := helper.TruncateBytes(payloadJSON, logger.MAX_FIELD_LENGTH)
+	if payload.MessageID == relayer.MESSAGE_ID_SYSTEM {
+		// The system frame carries the topic, a bearer credential: never log it.
+		logPayload = []byte("[system frame redacted]")
+	}
 	m.logger.Info("handle received relayer message",
 		zap.ByteString("payload", logPayload),
 		zap.String("messageID", payload.MessageID),
