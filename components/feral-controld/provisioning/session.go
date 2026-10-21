@@ -911,7 +911,7 @@ func (m *Machine) runRecheckBlink(ctx context.Context) {
 
 	// Still gone: re-raise with the original reason. Deliberately a BARE
 	// transition — no clearOffline (the raise decision was already made) and
-	// no resetJoinStatus (a phone may be polling /status for a join outcome).
+	// no resetJoinStatus (the re-raised portal must retain the join outcome).
 	// The blink's own successful scan stands in for ensureAPUp's pre-raise
 	// pass; an errored or EMPTY scan does not (the empty post-bounce scan is
 	// the documented common failure the retry loop exists for), so the
