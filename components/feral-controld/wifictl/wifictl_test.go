@@ -525,7 +525,7 @@ func TestCachedScanNeverScans(t *testing.T) {
 	require.NoError(t, err)
 	calls = 0
 
-	clock.advance(scanRetainWindow + time.Hour)
+	clock.advance(3 * time.Hour)
 	cached, err = c.CachedScan(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, []string{"Alpha", "Bravo"}, cached)
@@ -715,7 +715,7 @@ func TestScanReadyPinsIface(t *testing.T) {
 // "Network not listed?" refresh blanking its own picker: the button
 // bounces the AP, and the refresh that follows catches NM's BSS list still
 // empty from the AP-mode flip. That empty result must not evict the entries the
-// picker is showing, and must not extend their retain window either.
+// picker is showing, and must not refresh their scan time either.
 func TestRefreshScanCacheKeepsCacheOnEmptyScan(t *testing.T) {
 	var out []byte
 	c, _, clock := newController(func(argv []string) ([]byte, error) {
@@ -742,19 +742,18 @@ func TestRefreshScanCacheKeepsCacheOnEmptyScan(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"Alpha", "Bravo"}, cached)
 
-	// The retained entries keep their ORIGINAL retain window: the empty scan
-	// bought no extra life, so the next empty scan past it clears them.
-	clock.advance(scanRetainWindow)
-	_, err = c.RefreshScanCache(context.Background())
-	require.NoError(t, err)
-	cached, err = c.CachedScan(context.Background())
-	require.NoError(t, err)
-	assert.Empty(t, cached)
+	// The empty scan bought no freshness: the cache still dates from the
+	// scan that produced it.
+	at, ok := c.CachedScanTime()
+	require.True(t, ok)
+	assert.Equal(t, clock.Now().Add(-time.Minute), at)
 }
 
-// TestRefreshScanCacheEmptyDoesNotReviveExpiredCache: a list older than
-// scanRetainWindow is not kept — an empty scan past the window clears it.
-func TestRefreshScanCacheEmptyDoesNotReviveExpiredCache(t *testing.T) {
+// TestRefreshScanCacheEmptyNeverClearsAgedCache pins #404 item 3: an empty
+// scan is no evidence at ANY age (the bounce race, not the air), so even a
+// list far older than the old 10-minute retain window survives it, and keeps
+// its original scan time so the portal can label it.
+func TestRefreshScanCacheEmptyNeverClearsAgedCache(t *testing.T) {
 	var out []byte
 	c, _, clock := newController(func(argv []string) ([]byte, error) {
 		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
@@ -767,14 +766,19 @@ func TestRefreshScanCacheEmptyDoesNotReviveExpiredCache(t *testing.T) {
 	_, err := c.RefreshScanCache(context.Background())
 	require.NoError(t, err)
 
-	clock.advance(scanRetainWindow + time.Minute)
+	scannedAt := clock.Now()
+
+	clock.advance(time.Hour)
 	out = nil
 	_, err = c.RefreshScanCache(context.Background())
 	require.NoError(t, err)
 
 	cached, err := c.CachedScan(context.Background())
 	require.NoError(t, err)
-	assert.Empty(t, cached, "stale entries stay retired")
+	assert.Equal(t, []string{"Alpha"}, cached, "an empty scan must never blank the picker")
+	at, ok := c.CachedScanTime()
+	require.True(t, ok)
+	assert.Equal(t, scannedAt, at)
 }
 
 // TestRefreshScanCacheErrorLeavesCacheIntact: an nmcli failure is not evidence
@@ -1245,4 +1249,32 @@ func TestSetDeviceAutoconnectHonorsCtx(t *testing.T) {
 	for i, err := range ctxErrs {
 		assert.Error(t, err, "call %d must carry the caller's canceled ctx", i)
 	}
+}
+
+// TestRefreshScanCacheOwnAPSSIDOnlyIsEmpty (#404): NM can leave the device's
+// own setup SSID in a post-bounce scan. A scan that saw only it is an empty
+// scan: the live result is empty (callers retry, the blink tries blind) and
+// the previous list stays; otherwise the own SSID is dropped from the cache.
+func TestRefreshScanCacheOwnAPSSIDOnlyIsEmpty(t *testing.T) {
+	var out []byte
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
+			return out, nil
+		}
+		return nil, nil
+	})
+	c.SetOwnAPSSID("FF1-abc")
+
+	out = []byte("Alpha\nFF1-abc\n")
+	got, err := c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Alpha"}, got, "the own SSID is never a candidate")
+
+	out = []byte("FF1-abc\n")
+	got, err = c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, got, "a scan of only the own SSID reads as empty")
+	cached, err := c.CachedScan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Alpha"}, cached, "and keeps the previous list")
 }
