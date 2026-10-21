@@ -18,7 +18,7 @@ func TestConnectAuthority(t *testing.T) {
 		t.Fatalf("legacy plaintext: protected=%v owner=%v", p, o)
 	}
 	if _, o := c.ConnectAuthority(owner); !o {
-		t.Fatal("owner principal not recognised")
+		t.Fatal("owner principal not recognized")
 	}
 	if _, o := c.ConnectAuthority(ctl); o {
 		t.Fatal("controller principal treated as owner")

@@ -7,7 +7,7 @@ import (
 
 // The v1 label set is frozen (§8): the store re-checks labels on load, so a
 // change here would boot-lock devices holding labels that were valid when
-// enrolled. This pins every member and a few neighbours that must stay
+// enrolled. This pins every member and a few neighbors that must stay
 // allowed. Change it only with a new protocol version.
 func TestLabelCharacterSetFrozen(t *testing.T) {
 	var rejected []rune
