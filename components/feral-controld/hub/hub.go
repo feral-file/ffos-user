@@ -333,7 +333,7 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.cmdHandler.Process(h.ctx, payload)
+	result, err := h.cmdHandler.Process(commands.FromController(h.ctx), payload)
 	if err != nil {
 		if commandrouter.IsRateLimited(err) {
 			h.logger.Warn("Cast request rejected by storm protection", zap.Error(err))

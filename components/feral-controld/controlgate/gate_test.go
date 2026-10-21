@@ -70,6 +70,9 @@ func TestHandleEnvelopeRunsAsPrincipal(t *testing.T) {
 	if !c.hasP || c.principal.ControllerID != owner.ctl || c.principal.Role != control.RoleOwner {
 		t.Fatalf("principal = %+v", c)
 	}
+	if !c.fromController {
+		t.Fatal("an admitted envelope must carry commands.FromController (#409 wake-on-cast)")
+	}
 	if string(c.cmd.RawArguments) != `{"dp1_call":{"items":[]}}` || c.cmd.Arguments["dp1_call"] == nil {
 		t.Fatalf("command = %+v", c.cmd)
 	}

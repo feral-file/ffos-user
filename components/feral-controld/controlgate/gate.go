@@ -153,7 +153,10 @@ func (g *Gate) execute(ctx context.Context, adm *control.Admission) (string, err
 	if err := json.Unmarshal(adm.Request, &cmd.Arguments); err != nil {
 		return adm.Reply(false, control.CodeInvalidRequest, nil)
 	}
-	result, err := g.handler.Process(control.WithPrincipal(ctx, adm.Principal), cmd)
+	// An admitted envelope is always a controller's command, so it carries the
+	// same FromController mark as the plaintext hub and relayer paths (#409:
+	// a controller's cast wakes a sleeping player).
+	result, err := g.handler.Process(commands.FromController(control.WithPrincipal(ctx, adm.Principal)), cmd)
 	if err != nil {
 		return adm.Reply(false, control.CodeCommandFailed, failureBody(cmd.Type, err))
 	}

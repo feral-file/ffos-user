@@ -123,15 +123,16 @@ type recorder struct {
 }
 
 type call struct {
-	cmd       commands.Command
-	principal control.Principal
-	hasP      bool
+	cmd            commands.Command
+	principal      control.Principal
+	hasP           bool
+	fromController bool
 }
 
 func (r *recorder) Process(ctx context.Context, cmd commands.Command) (interface{}, error) {
 	p, ok := control.PrincipalFrom(ctx)
 	r.mu.Lock()
-	r.calls = append(r.calls, call{cmd, p, ok})
+	r.calls = append(r.calls, call{cmd, p, ok, commands.IsFromController(ctx)})
 	r.mu.Unlock()
 	if r.err != nil {
 		return nil, r.err
