@@ -1078,8 +1078,12 @@ type enrollResult struct {
 // enrollWithInvitation is §5.1: the first owner.
 func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Grant, known bool, now int64) (*Admission, error) {
 	window := Window{}
-	if known {
+	p, pending := a.pending[c.Ctl]
+	switch {
+	case known:
 		window = g.Window
+	case pending:
+		window = p.window
 	}
 	if err := window.Check(c.Ctr); err != nil {
 		return a.fail(adm, CodeReplay, nil)
@@ -1087,6 +1091,9 @@ func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Gran
 	invalid := func() (*Admission, error) {
 		if known {
 			return a.refuse(adm, g.Ctl, window.Accept(c.Ctr), CodeInvitationInvalid)
+		}
+		if pending {
+			p.window = window.Accept(c.Ctr)
 		}
 		return a.fail(adm, CodeInvitationInvalid, nil)
 	}
@@ -1137,7 +1144,7 @@ func (a *Authority) enrollApproved(adm *Admission, c RequestClaims, g Grant, kno
 		}
 		if g.Active(now) {
 			if !g.Enc.Equal(c.Enroll.Enc) {
-				return a.fail(adm, CodeInvalidRequest, nil)
+				return a.refuse(adm, g.Ctl, g.Window.Accept(c.Ctr), CodeInvalidRequest)
 			}
 			if err := a.store.Update(setWindow(g.Ctl, g.Window.Accept(c.Ctr))); err != nil {
 				return a.persistFailure(adm)

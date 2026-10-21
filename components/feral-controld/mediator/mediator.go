@@ -883,6 +883,16 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 		// {"v":1,"jwe"} or the public error; plaintext is policy-checked
 		// on RouteRelayer before it can reach the router.
 		if m.control != nil {
+			// A frame with no command (the relayer's own error frames, e.g.
+			// {"error":{"code":2000,"message":"Invalid messageID"}}) is
+			// never answered: TierOf("") is owner, and a denial without a
+			// messageID draws the same relayer error back, looping forever.
+			// A reply without a messageID has no caller either (the rule
+			// sendShedResponse applies).
+			if payload.Message.Command == nil {
+				m.logger.Debug("Relayer frame without a command ignored under control")
+				return nil
+			}
 			if commandType == control.CmdEnvelope {
 				var message any
 				wire, perr := m.control.HandleEnvelope(ctx, payload.Message.RawRequest, control.Origin{Route: control.RouteRelayer, Known: true})
@@ -891,12 +901,18 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 				} else {
 					message = wire
 				}
+				if payload.MessageID == "" {
+					return nil
+				}
 				return m.relayer.Send(ctx, relayer.Response{Type: "RPC", MessageID: payload.MessageID, Message: message})
 			}
 			d, normalized := m.control.Plaintext(control.RouteRelayer, command)
 			if !d.Allow {
 				m.logger.Warn("Relayer plaintext command refused by control policy",
 					zap.String("command", commandType.String()), zap.String("code", d.Code))
+				if payload.MessageID == "" {
+					return nil
+				}
 				return m.relayer.Send(ctx, relayer.Response{Type: "RPC", MessageID: payload.MessageID,
 					Message: plaintextDenial(commandType, d.Code)})
 			}

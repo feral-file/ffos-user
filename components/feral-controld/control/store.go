@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 )
 
 // Role is a grant's authority (§5.5, §7.1).
@@ -444,7 +446,8 @@ func validateGrants(gs []Grant) error {
 	return nil
 }
 
+// validLabel is the one label rule, applied at enroll and on load (§8).
 func validLabel(s string) bool {
 	n := utf8.RuneCountInString(s)
-	return utf8.ValidString(s) && n >= 1 && n <= maxLabelRunes
+	return utf8.ValidString(s) && n >= 1 && n <= maxLabelRunes && !devicename.HasUnsafeCharacters(s)
 }

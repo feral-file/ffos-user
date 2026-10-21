@@ -1038,4 +1038,17 @@ func TestRefusedRequestSpendsCtr(t *testing.T) {
 		d.advance(pendingRefreshInterval)
 		replayed(t, d, compact, rc)
 	})
+
+	t.Run("enroll with a different enc", func(t *testing.T) {
+		d, _, ctl := ownerDevice(t)
+		rc := d.claims(ctl, OpEnroll)
+		rc.Enroll = ctl.enroll("")
+		rc.Enroll.Enc = newTestCtl(t, "other").enroll("").Enc
+		compact := d.seal(ctl, rc)
+		adm, err := d.a.Open(compact)
+		if err != nil || d.final(adm, rc).Code != CodeInvalidRequest {
+			t.Fatalf("not refused: %v", err)
+		}
+		replayed(t, d, compact, rc)
+	})
 }

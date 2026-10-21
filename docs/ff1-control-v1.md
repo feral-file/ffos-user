@@ -190,12 +190,15 @@ For `command_failed` (the handler raised an error instead of replying),
 `<id>` one of `rate_limited`, `sourceUnreachable`, `contentBlocked`,
 `playlistInvalid`, or `failed` for anything else. The owner commands of §5.5 use `res` = `{"error":"<reason>"}` with
 `<reason>` one of `invalid_request`, `not_pending`, `not_found`,
-`last_owner`, `too_many_controllers`.
+`last_owner`, `too_many_controllers`, or `internal_error` (no entropy for
+a new `nk`; nothing was written).
 
 `internal_error` means the device could not confirm a durable write.
 - For a command, the replay window (§6) was not confirmed and the command
   was **not** executed. Its `ctr` may or may not be consumed, so the
-  controller retries with a new `ctr`.
+  controller retries with a new `ctr`. (Both released-branch clients
+  currently surface it to the user instead of retrying, except ff1-cli on
+  the Play path.)
 - For a control-plane operation (enroll, requestAccess, approve, revoke),
   the write may have been **applied** (renamed into place but its directory
   fsync failed); the device's memory follows it. The client MUST re-list
@@ -258,7 +261,9 @@ The first owner.
   life, compared in constant time. There is **no attempt limit**: 128 random
   bits need none, and voiding the invitation after some number of misses
   would let any LAN peer block first-owner and migration enrollment forever.
-  A wrong value is `invitation_invalid` and changes nothing. Issuing a new
+  A wrong value is `invitation_invalid` and changes nothing but the spent
+  `ctr` of a `ctl` that has a record or a pending request (§3.4 step 6).
+  Issuing a new
   invitation replaces the old one.
 - A client MUST enroll with the invitation **before** it sends `connect` on
   an unclaimed device. `connect` claims the device on the relayer, which takes
@@ -303,6 +308,9 @@ A later controller asks for access.
   - A refresh of an existing pending `ctl` at most once per 10 s.
   - A pending request lives for 5 minutes from its last refresh, and never
     more than 10 minutes from its creation, however often it refreshes.
+    A pre-approval `enroll` does not refresh it: a client that waits longer
+    than 5 minutes for approval MUST re-send `requestAccess` before
+    `expiresAt`.
   - Pending requests and denials are held in memory only. A restart drops
     them and the requester asks again.
   - Residual: an attacker who controls many LAN source prefixes can still
@@ -494,7 +502,7 @@ Rules:
 - A present but unreadable or inconsistent directory means state `locked`.
   Inconsistent includes: a `gen` mismatch, a duplicate or unknown member, a
   record whose `ctl` is not `thumb(sig)`, a duplicate `ctl`, an invalid role,
-  platform, label or `approvedBy`, a replay window that violates §6 (`hi = 0`
+  platform, label (the same rule as enroll, §5.1) or `approvedBy`, a replay window that violates §6 (`hi = 0`
   with bits set, `hi > 0` without bit 0, bits for counters below 1), an
   owner record with `expiresAt` (§5.5: an owner never expires, and one that
   lapsed would reopen the device as `legacy`). It never
@@ -613,7 +621,12 @@ stops (`enforced`), that history would be replayed indefinitely. So on
 **every boot in the `enforced` state**, once the relayer connects, the device
 sends each of those six types once in plaintext with body `{}` and
 `persist_record_count:1`; the relayer prunes a type to the newest message's
-count, so this evicts every stored row of it. The purge runs at boot only:
+count, so this evicts every stored row of it. The deployed relayer has no
+`offline_cache_status` type either and stores it under id 0, so that purge
+row prunes the shared id-0 bucket. A purge row is itself stored, replayed to
+later subscribers and broadcast live like any notification: a controller
+MUST treat an empty-body `device_status`/`player_status` as "no data", not
+as a blank state. The purge runs at boot only:
 a device that becomes `enforced` mid-run purges on its next boot. It is best-effort (a failed send is logged, not retried) and idempotent,
 so it runs on every enforced boot rather than once per transition and keeps
 no marker.
@@ -638,6 +651,11 @@ an envelope that cannot get a slot within 1 s is answered with the public
 error `busy` (LAN 503) and should be retried. No lock other than that bound
 is held while an envelope is unauthenticated.
 
+A relayer frame with no `command` (the relayer's own error frames such as
+`{"error":{"code":2000,…}}`) is never answered, and nothing is sent back for
+a frame without a `messageID`: an answer would draw the same relayer error
+again and loop.
+
 ## 11. Public discovery
 
 - `/api/v2/status` and `getDeviceStatus` gain
@@ -648,7 +666,9 @@ is held while an envelope is unauthenticated.
   is `legacy` and either unclaimed or asked with `purpose:"enroll"` (below):
   `…|<setup_phase>|<inv>|<thumb(sig)>|<thumb(enc)>|<gen>`.
   - Old app parsers read only indices 0, 1 and 3.
-  - The topic stays at index 1 while the device is unowned.
+  - The topic stays at index 1 whenever the device has one, claimed or
+    not: once status withholds `topic_id` (§11 status, phase 0), the screen
+    QR is how a second phone learns the topic.
   - The only builder is `formatDeviceConnectURL` in devicectl
     (`components/launcher-ui`, the other builder this once had to match, was
     deleted with feral-setupd).
@@ -735,6 +755,21 @@ and the ff1-cli test suite does the same with `jose`.
   stored rows of each persisted plaintext type. Any copy a subscriber
   already received, and a purge that failed to send, are outside the
   device's reach.
+- Residual, accepted: every authenticated denial is a synchronous durable
+  write (§3.4 step 6). A holder of a revoked key can drive a few hundred
+  small writes a second and serialize admissions behind them; it gains
+  nothing and needs a key that once held a grant.
+- Residual, accepted: a sealed `controller_approval_request` published while
+  the relayer is disconnected is dropped and re-sent only on a refresh that
+  changes label or platform; the owner sees the request on its next
+  `listControllers`.
+- Residual, accepted: replies are unpadded, so their length tells a passive
+  observer the outcome class (ok, replay, a denial code, pending). It reveals
+  nothing a controller's own next action would not.
+- `/api/status` (v1) also carries the `control` block. The enforced purge
+  gives up after 10 minutes without a relayer connection. The invitation
+  watch can miss one re-arm when another narration takes the panel between
+  its check and the repaint; the invitation still expires on time.
 
 ## 14. Controller requirements
 
@@ -752,6 +787,10 @@ showed what goes wrong without them.
    its short code can supply the profile. A wrong profile only makes the
    pairing fail (the device's replies do not verify), so the receiver MUST
    NOT replace a grant it already holds until the new pairing is enrolled.
+   Residual, accepted: a channel joiner who is also a LAN man-in-the-middle
+   can answer as the device and complete a fake enrollment; the receiver
+   then replaces its real grant. The owner's approval code comparison is
+   the check against it.
 
    In the third case the requester's approval code (§5.4) binds the pin, and an
    owner comparing codes is the only protection. An impostor can still answer
@@ -773,7 +812,16 @@ showed what goes wrong without them.
    device using a network-pinned profile. Its only recovery actions are:
    - scanning the physical claim QR (§5.1, pins from the screen);
    - a user-confirmed Remove of its local grant, after which it is a new
-     controller.
+     controller. Remove always asks, whatever the grant's role.
+
+   A request refused with `access_revoked` in a reply that verified under the
+   pinned `devSig` is not a reset: the controller MAY send `requestAccess`
+   with its existing keys under that same pin (§5.2 re-approval keeps its
+   record).
+
+   The device does not tell a controller its role changed (§5.5 is in
+   place, with no notification). A controller learns its new role from the
+   next idempotent `enroll` reply or a verified `permission_denied`.
 
    Until the user does one of these, it keeps sealing to the confirmed grant.
    A `requestAccess` reply of `approved` for a key that has never held a grant is
@@ -788,6 +836,7 @@ showed what goes wrong without them.
    notification (§9). An owner approves only after comparing codes.
 7. **Retired device.** A device whose status reports `control.state:"locked"`
    after a factory reset the controller asked for may be retired (§8): it
-   refuses every envelope and accepts only a plaintext `factoryReset`, which
-   is the controller's one way to retry that reset. Plain `locked` (corrupt
-   state) refuses even that; recovery is the factory reset on the device.
+   refuses every envelope and accepts only a plaintext `factoryReset`. No
+   current client sends one (both seal whenever they hold a grant), so in
+   practice the retry is the factory reset on the device itself. Plain
+   `locked` (corrupt state) refuses even the plaintext one.

@@ -100,7 +100,7 @@ Reported in `/api/v2/status` (as built: `control:{v:1, state, profile}`, profile
 - **legacy:** new firmware, no grants. Plaintext accepted as today, except for the phase-0 containment rules. The invitation QR is offered.
 - **enrolled:** at least one owner grant.
   - LAN accepts envelopes only (as built: plaintext → **403** `enrollment_required`).
-  - Relayer plaintext is limited to the **controller tier**, so off-LAN old apps keep playback. On the same Wi-Fi the released app cannot cast at all: its router relays after an HTTP error only for the status probe, so every `displayPlaylist` gets LAN 403 and a cast error (no hang, no crash). Open decision for the change owner: accept and record this, or answer LAN plaintext controller-tier commands in `enrolled` as the relayer does.
+  - Relayer plaintext is limited to the **controller tier**, so off-LAN old apps keep playback. On the same Wi-Fi the released app cannot cast at all: its router relays after an HTTP error only for the status probe, so every `displayPlaylist` gets LAN 403 and a cast error (no hang, no crash). Open decision for the change owner: accept and record this, or answer LAN plaintext controller-tier commands in `enrolled` as the relayer does. The same released app on the same LAN also loses all live status: the device stops LAN WebSocket plaintext in `enrolled`, the released LAN transport logs and drops each sealed frame, and its LAN-first transport ignores relayer `device_status`/`player_status` while LAN is up (review round 2, B-12; needs a hardware check).
   - Owner-tier commands require an envelope on every route.
 - **enforced:** switched on by a `controld.json` flag in the floor release (F11).
   - Relayer plaintext is limited to the exact `displayPlaylist` shape (Play sessions).
@@ -154,7 +154,7 @@ One FF OS release (controld package rail) plus an ff-cli patch; no app change.
   - Update the `hub/status.go:132` rationale comment.
 - **P0-2 ff1-cli:** `ssh enable|disable` sends `X-FF1-Topic` from the keyring. A clear error on 401 tells the user to re-pair.
 - **Residual, documented:** `connect`, reset, Wi-Fi setup, `showPairingQRCode` and input stay open on LAN until phase 1. A sole-phone owner who loses that phone re-pairs only via reset.
-- **Check:** from a laptop on the Wi-Fi, `curl …/api/v2/status` has no `topic_id`, and `sshAccess` without the header gets 401. App pairing a second phone via the QR still works.
+- **Check:** from a laptop on the Wi-Fi, `curl …/api/v2/status` has no `topic_id`, and `sshAccess` without the header gets 401. ~~App pairing a second phone via the QR still works.~~ **False on the same LAN** (review round 2, B-2): the app's LAN bind sees `claimed:true` with no `topic_id`, reports "already claimed, cannot pair another phone, reset it" and never tries the QR topic. The released app hits this under phase 0 alone; off-LAN it binds only through an ambiguous-delivery fallback. The branch app is being changed to take the QR-topic path for an owned device. Release consequence and decision for the change owner: ship phase 0 only together with that app fix, or accept that a second phone on the same Wi-Fi needs the new app.
 
 ### Phase 1 — protocol
 One release train: FF OS, ff-app, ff-cli. PRs merge independently behind `control.enabled` (controld.json, default off on develop until the train).
