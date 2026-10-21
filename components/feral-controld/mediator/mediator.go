@@ -842,7 +842,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 			Arguments:    payload.Message.Request,
 			RawArguments: payload.Message.RawRequest,
 		}
-		result, err := m.cmdHandler.Process(ctx, command)
+		result, err := m.cmdHandler.Process(commands.FromController(ctx), command)
 		if err != nil {
 			if commandrouter.IsRateLimited(err) {
 				// Report a legible rejection back to the caller rather than

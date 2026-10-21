@@ -50,6 +50,12 @@ type handler struct {
 	scheduler   playlistschedule.Scheduler
 	logger      *zap.Logger
 
+	// asleep reports whether a cast must wake the player first; see
+	// devicectl.PlayerCastWakeGate (wider than the navigation gate: a failed
+	// wake stays eligible). Read by wakeForControllerCast. nil never wakes
+	// (a build wired without the sleep tracker).
+	asleep func() bool
+
 	// sourceProber, when set (SetSourceProber), is the cast-time source
 	// preflight (#304). Independent of offlineCache above on purpose: the
 	// probe must run whether or not offline caching is enabled — it only
@@ -396,6 +402,7 @@ func New(
 		scheduler:    scheduler,
 		json:         json,
 		logger:       logger,
+		asleep:       devicectl.PlayerCastWakeGate(executor),
 	}
 }
 
@@ -658,6 +665,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 		return result, nil
 	} else {
+		if err := h.wakeForControllerCast(ctx, commandType); err != nil {
+			return nil, err
+		}
 		var playlist *dp1.Playlist
 		var schedulerSnapshot playlistschedule.Snapshot
 		var schedulerSource playlistschedule.Source
@@ -1989,6 +1999,31 @@ func ensureDisplayPlaylistIntent(args map[string]interface{}) {
 	args["intent"] = map[string]interface{}{
 		"action": "now_display",
 	}
+}
+
+// wakeForControllerCast wakes a sleeping player before a controller's cast
+// (commands.FromController: the app over the hub or the relayer, a CLI, an
+// agent). A person pressing Play in front of a dark or paused wall means
+// "show it now"; forwarding the cast to a page parked on /sleep answered ok
+// while the screen did nothing. The wake is the same manual override wakeNow
+// applies, so it expires at the next schedule boundary and the schedule then
+// resumes. The device's own casts (playlistschedule cutovers, OOM recovery)
+// are built in-process, carry no controller mark, and leave the wall asleep.
+// A failed wake fails the cast: the reply must not claim a display that
+// cannot happen. Only commands that put artwork on screen wake.
+func (h *handler) wakeForControllerCast(ctx context.Context, commandType commands.Type) error {
+	if commandType != commands.CMD_DISPLAY_PLAYLIST && commandType != commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+		return nil
+	}
+	if !commands.IsFromController(ctx) || h.asleep == nil || !h.asleep() {
+		return nil
+	}
+	h.logger.Info("Controller cast while the player is asleep; waking it first",
+		zap.String("command", commandType.String()))
+	if _, err := h.executor.Execute(ctx, commands.Command{Type: commands.CMD_WAKE_NOW}); err != nil {
+		return fmt.Errorf("wake the player for %s: %w", commandType, err)
+	}
+	return nil
 }
 
 // sendCDPRequest marshals payload and sends to CDP

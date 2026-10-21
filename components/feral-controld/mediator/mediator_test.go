@@ -1277,7 +1277,7 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 
 				// Expect the command handler to process
 				ts.mockCommandHandler.EXPECT().
-					Process(gomock.Any(), commands.Command{
+					Process(fromControllerCtx{}, commands.Command{
 						Type:      commands.Type(cmd),
 						Arguments: args,
 					}).
@@ -1320,7 +1320,7 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 
 				// Expect the command handler to process and return error
 				ts.mockCommandHandler.EXPECT().
-					Process(gomock.Any(), commands.Command{
+					Process(fromControllerCtx{}, commands.Command{
 						Type:      commands.Type(cmd),
 						Arguments: args,
 					}).
@@ -1351,7 +1351,7 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 
 				// Expect the command handler to process and return nil result
 				ts.mockCommandHandler.EXPECT().
-					Process(gomock.Any(), commands.Command{
+					Process(fromControllerCtx{}, commands.Command{
 						Type:      commands.Type(cmd),
 						Arguments: args,
 					}).
@@ -1421,7 +1421,7 @@ func TestMediator_HandleRelayerMessage_RateLimited(t *testing.T) {
 	ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte("{}"), nil).AnyTimes()
 
 	ts.mockCommandHandler.EXPECT().
-		Process(gomock.Any(), commands.Command{Type: commands.Type(cmd), Arguments: args}).
+		Process(fromControllerCtx{}, commands.Command{Type: commands.Type(cmd), Arguments: args}).
 		Return(nil, &commandrouter.RateLimitedError{Command: commands.Type(cmd), Reason: "rate limit exceeded"}).
 		Times(1)
 
@@ -1478,7 +1478,7 @@ func TestMediator_HandleRelayerMessage_SourceUnreachable(t *testing.T) {
 	ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte("{}"), nil).AnyTimes()
 
 	ts.mockCommandHandler.EXPECT().
-		Process(gomock.Any(), commands.Command{Type: commands.Type(cmd), Arguments: args}).
+		Process(fromControllerCtx{}, commands.Command{Type: commands.Type(cmd), Arguments: args}).
 		Return(nil, &commandrouter.SourceUnreachableError{
 			Results: []offlinecache.SourceProbeResult{
 				{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
@@ -1525,3 +1525,15 @@ func TestMediator_HandleRelayerMessage_SourceUnreachable(t *testing.T) {
 		assert.NotContains(t, message, "origin.example")
 	}
 }
+
+// fromControllerCtx matches a context the mediator marked with
+// commands.FromController: every command that arrives over the relayer is a
+// controller's, and the router wakes a sleeping player only for those.
+type fromControllerCtx struct{}
+
+func (fromControllerCtx) Matches(x interface{}) bool {
+	ctx, ok := x.(context.Context)
+	return ok && commands.IsFromController(ctx)
+}
+
+func (fromControllerCtx) String() string { return "a context marked commands.FromController" }
