@@ -6,12 +6,11 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 )
 
 // Role is a grant's authority (§5.5, §7.1).
@@ -446,8 +445,17 @@ func validateGrants(gs []Grant) error {
 	return nil
 }
 
+// unsafeLabelCharacters is the v1 label character set (§8): C0/C1 controls
+// and the invisible formatting/bidi characters. It is a frozen copy of the
+// devicename set as of feral-file#3551, NOT shared with it: the store
+// re-applies this rule on load, so tightening it would boot-lock devices
+// holding a label that was valid when enrolled. label_test.go pins it.
+var unsafeLabelCharacters = regexp.MustCompile(
+	`[\x00-\x1f\x7f-\x9f\x{061c}\x{200b}-\x{200f}\x{202a}-\x{202e}\x{2060}\x{2066}-\x{2069}\x{2028}\x{2029}\x{feff}]`,
+)
+
 // validLabel is the one label rule, applied at enroll and on load (§8).
 func validLabel(s string) bool {
 	n := utf8.RuneCountInString(s)
-	return utf8.ValidString(s) && n >= 1 && n <= maxLabelRunes && !devicename.HasUnsafeCharacters(s)
+	return utf8.ValidString(s) && n >= 1 && n <= maxLabelRunes && !unsafeLabelCharacters.MatchString(s)
 }

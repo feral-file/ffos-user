@@ -565,12 +565,21 @@ type ControlClaim interface {
 	// (inv, thumb(devSig), thumb(devEnc), gen) and when the invitation
 	// expires; ok is false unless the device is in the legacy state.
 	ClaimQRFields() (fields []string, expiresAt time.Time, ok bool)
+	// ClaimQRPins returns the same four fields with an empty invitation
+	// ("", thumb(devSig), thumb(devEnc), gen) whenever the device can vouch
+	// for its profile, so a QR with no invitation still carries the pins a
+	// new controller must check (§11, §14.1).
+	ClaimQRPins() (fields []string, ok bool)
 	// Enrolled reports whether an active owner grant exists.
 	Enrolled() bool
 	// Retire deletes the control identity (factory reset).
 	Retire() error
 	// ClearInvitation voids the live invitation (its QR is gone).
 	ClearInvitation()
+	// ConnectAuthority reports whether the control protocol guards the
+	// claim (any state but legacy) and whether ctx carries an owner
+	// principal (§7.1 connect).
+	ConnectAuthority(ctx context.Context) (protected, owner bool)
 }
 
 // SetControl wires the control seam. Call before the claim flow starts.
@@ -660,6 +669,19 @@ func (e *executor) ControlOwnerEnrolled() {
 	e.enrollQR.Store(false)
 	// The authority consumed the invitation already; nothing to clear.
 	e.setupUI().HideIfShowing(setupui.StateClaimQR)
+	// Remote shell granted while the device had no owner (sshAccess is open
+	// to the LAN on an unclaimed device and to any topic holder in legacy)
+	// must not outlive the owner's arrival (review round 4 L6). Same steps
+	// as sshAccess{enabled:false}; off the request goroutine.
+	if e.exec != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, err := e.setSshAccess(ctx, []byte(`{"enabled":false}`)); err != nil {
+				e.logger.Warn("Could not revoke legacy-era SSH access after owner enrollment", zap.Error(err))
+			}
+		}()
+	}
 }
 
 func (e *executor) SetContentPolicyResetter(reset func() error) {
@@ -726,7 +748,7 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 	var result interface{}
 	switch cmd.Type {
 	case commands.CMD_CONNECT:
-		result, err = e.connect(bytes)
+		result, err = e.connect(ctx, bytes)
 	case commands.CMD_SHOW_PAIRING_QR_CODE:
 		result, err = e.showPairingQRCode(ctx, bytes)
 	case commands.CMD_KEYBOARD_EVENT:
@@ -792,7 +814,7 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 	return result, err
 }
 
-func (e *executor) connect(args []byte) (interface{}, error) {
+func (e *executor) connect(ctx context.Context, args []byte) (interface{}, error) {
 	var cmdArgs struct {
 		Device         Device `json:"clientDevice"`
 		PrimaryAddress string `json:"primaryAddress"`
@@ -811,6 +833,19 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 	}
 
 	wasClaimed := e.deviceClaimed()
+
+	// §7.1: connect is controller tier so every controller's cast (which
+	// starts with connect) works, but only an owner claims or rebinds. Under
+	// the protocol, a non-owner connect to a claimed device is answered ok
+	// and changes nothing; one to an unclaimed device is refused.
+	if e.control != nil {
+		if protected, owner := e.control.ConnectAuthority(ctx); protected && !owner {
+			if wasClaimed {
+				return CmdOK, nil
+			}
+			return nil, fmt.Errorf("connect: claiming this device needs owner access")
+		}
+	}
 
 	err = state.SetConnectedDevice(state.Device{
 		ID:       cmdArgs.Device.ID,
@@ -966,8 +1001,11 @@ func (e *executor) showPairingQRCodeInProcess(ctx context.Context, show bool) (i
 
 	// The relayer command obeys the cloud unconditionally (skipIfSettled
 	// false): an explicit show=true on a claimed device is a deliberate
-	// re-pair request.
-	e.runPreClaimGateAndPaint(ctx, false)
+	// re-pair request. One admitted while the device had no owner is the
+	// exception: if an owner enrolls while the gate runs, the topic QR must
+	// not be painted over the now-owned device (review round 4 L5).
+	ownerlessAtStart := e.control != nil && !e.control.Enrolled()
+	e.runPreClaimGateAndPaint(ctx, false, ownerlessAtStart)
 	return CmdOK, nil
 }
 
@@ -981,7 +1019,7 @@ func (e *executor) showPairingQRCodeInProcess(ctx context.Context, show bool) (i
 // failure so the loop stretches its retry cadence (see
 // autoClaimLadderFailureBackoffMin/Max for why that is neither terminal nor
 // the normal backoff).
-func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bool) (painted, terminal, ladderFailed bool) {
+func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled, ownerlessAtStart bool) (painted, terminal, ladderFailed bool) {
 	// t0 anchors the latch-freshness check in the error branch below. It MUST
 	// be read from the same clock the gate stamps FailureState.At with (both
 	// are e.clock — see otaGateInstance) and MUST stay raw: no .UTC()/.Round()
@@ -1049,7 +1087,7 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 	// clear only the finalizing overlay this flow painted — an unconditional
 	// Hide would erase live narration and blind the reload safeguard keyed on
 	// the same intent.
-	if skipIfSettled && e.claimSettled() {
+	if (skipIfSettled && e.claimSettled()) || (ownerlessAtStart && e.control.Enrolled()) {
 		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return false, true, false
 	}
@@ -1306,7 +1344,7 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 	backoff := autoClaimRetryMin
 	ladderBackoff := autoClaimLadderFailureBackoffMin
 	for {
-		painted, terminal, ladderFailed := e.runPreClaimGateAndPaint(ctx, true)
+		painted, terminal, ladderFailed := e.runPreClaimGateAndPaint(ctx, true, false)
 		if painted || terminal {
 			return
 		}
@@ -1714,6 +1752,9 @@ func (e *executor) buildDeviceConnectURL(ctx context.Context) string {
 	if e.control != nil && invitation == nil {
 		// This QR replaces any invitation-bearing one (review F6).
 		e.clearControlInvitation()
+		if pins, ok := e.control.ClaimQRPins(); ok {
+			invitation = pins
+		}
 	}
 	return formatDeviceConnectURL(e.deviceID(), topicID, true, branch, version, claimSetupPhase, invitation...)
 }
@@ -1734,8 +1775,9 @@ func (e *executor) buildDeviceConnectURL(ctx context.Context) string {
 //
 // invitation, when present, is the feral-file#3551 control invitation
 // appended as four more fields (docs/ff1-control-v1.md §11):
-// |<inv>|<thumb(devSig)>|<thumb(devEnc)>|<gen>. Old app parsers read only
-// indices 0, 1 and 3, so the topic stays at index 1.
+// |<inv>|<thumb(devSig)>|<thumb(devEnc)>|<gen>, with <inv> empty when there is
+// no invitation. Old app parsers read only indices 0, 1 and 3, so the topic
+// stays at index 1.
 func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, version, setupPhase string, invitation ...string) string {
 	internet := "false"
 	if online {

@@ -44,7 +44,6 @@ var commandTiers = map[string]Tier{
 	string(commands.CMD_FACTORY_RESET):              TierOwner,
 	string(commands.CMD_START_WIFI_SETUP):           TierOwner,
 	string(commands.CMD_UPDATE_TO_LATEST):           TierOwner,
-	string(commands.CMD_CONNECT):                    TierOwner,
 	string(commands.CMD_SET_DEVICE_NAME):            TierOwner,
 	string(commands.CMD_SHOW_PAIRING_QR_CODE):       TierOwner,
 	string(commands.CMD_START_MINT_PAIRING_SESSION): TierOwner,
@@ -72,6 +71,10 @@ var commandTiers = map[string]Tier{
 	"disconnect":   TierOwner,
 
 	// --- controller: playback, display, power, read-only status ---
+	// connect starts every ff-app cast. Only an owner claims or rebinds: the
+	// executor answers a non-owner connect to a claimed device ok without
+	// changing anything, and refuses one to an unclaimed device (§7.1).
+	string(commands.CMD_CONNECT):                   TierController,
 	string(commands.CMD_DISPLAY_PLAYLIST):          TierController,
 	string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST):  TierController,
 	string(commands.CMD_REFRESH_ARTWORK):           TierController,

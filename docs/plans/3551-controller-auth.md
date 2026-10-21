@@ -100,7 +100,7 @@ Reported in `/api/v2/status` (as built: `control:{v:1, state, profile}`, profile
 - **legacy:** new firmware, no grants. Plaintext accepted as today, except for the phase-0 containment rules. The invitation QR is offered.
 - **enrolled:** at least one owner grant.
   - LAN accepts envelopes only (as built: plaintext → **403** `enrollment_required`).
-  - Relayer plaintext is limited to the **controller tier**, so off-LAN old apps keep playback. On the same Wi-Fi the released app cannot cast at all: its router relays after an HTTP error only for the status probe, so every `displayPlaylist` gets LAN 403 and a cast error (no hang, no crash). Open decision for the change owner: accept and record this, or answer LAN plaintext controller-tier commands in `enrolled` as the relayer does. The same released app on the same LAN also loses all live status: the device stops LAN WebSocket plaintext in `enrolled`, the released LAN transport logs and drops each sealed frame, and its LAN-first transport ignores relayer `device_status`/`player_status` while LAN is up (review round 2, B-12; needs a hardware check).
+  - Relayer plaintext is limited to the **controller tier**, so off-LAN old apps keep playback. That holds only because `connect`, which every app cast sends first, is controller tier and a no-op on a claimed device under the protocol (review round 4 H1: with `connect` owner tier, no released app and no controller-role phone could cast at all). In `enforced` the released app's relayer `connect` is refused, so it cannot cast there (accepted: `enforced` cuts off old apps except Play). On the same Wi-Fi the released app cannot cast at all: its router relays after an HTTP error only for the status probe, so every `displayPlaylist` gets LAN 403 and a cast error (no hang, no crash). Open decision for the change owner: accept and record this, or answer LAN plaintext controller-tier commands in `enrolled` as the relayer does. The same released app on the same LAN also loses all live status: the device stops LAN WebSocket plaintext in `enrolled`, the released LAN transport logs and drops each sealed frame, and its LAN-first transport ignores relayer `device_status`/`player_status` while LAN is up (review round 2, B-12; needs a hardware check).
   - Owner-tier commands require an envelope on every route.
 - **enforced:** switched on by a `controld.json` flag in the floor release (F11).
   - Relayer plaintext is limited to the exact `displayPlaylist` shape (Play sessions).
@@ -108,7 +108,7 @@ Reported in `/api/v2/status` (as built: `control:{v:1, state, profile}`, profile
 ### 3.2 Command tiers
 Proposed; Sean confirms. Unknown names fail closed for non-owners, and the check sits **before** the CDP fallthrough (F3).
 
-- **Owner:** `sshAccess`, `factoryReset`, `startWifiSetup`, `updateToLatestVersion`, `connect`, `setDeviceName`, `showPairingQRCode`, `start/join/closeMintPairingSession`, `mintPairingApprovalDecision`, `setContentPolicy`, `analyticsToggle`, `betaFeaturesToggle`, `uploadLogs`, keyboard and gesture input, plus the new `approveController`, `revokeController` and `listControllers`.
+- **Owner:** `sshAccess`, `factoryReset`, `startWifiSetup`, `updateToLatestVersion`, `setDeviceName`, `showPairingQRCode`, `start/join/closeMintPairingSession`, `mintPairingApprovalDecision`, `setContentPolicy`, `analyticsToggle`, `betaFeaturesToggle`, `uploadLogs`, keyboard and gesture input, plus the new `approveController`, `revokeController` and `listControllers`.
 - **Controller:**
   - playback, offline cache, recently played;
   - `getDeviceStatus`, `deviceMetrics`, `checkStatus`;
@@ -154,7 +154,7 @@ One FF OS release (controld package rail) plus an ff-cli patch; no app change.
   - Update the `hub/status.go:132` rationale comment.
 - **P0-2 ff1-cli:** `ssh enable|disable` sends `X-FF1-Topic` from the keyring. A clear error on 401 tells the user to re-pair.
 - **Residual, documented:** `connect`, reset, Wi-Fi setup, `showPairingQRCode` and input stay open on LAN until phase 1. A sole-phone owner who loses that phone re-pairs only via reset.
-- **Check:** from a laptop on the Wi-Fi, `curl …/api/v2/status` has no `topic_id`, and `sshAccess` without the header gets 401. ~~App pairing a second phone via the QR still works.~~ **False on the same LAN** (review round 2, B-2): the app's LAN bind sees `claimed:true` with no `topic_id`, reports "already claimed, cannot pair another phone, reset it" and never tries the QR topic. The released app hits this under phase 0 alone; off-LAN it binds only through an ambiguous-delivery fallback. The branch app is being changed to take the QR-topic path for an owned device. Release consequence and decision for the change owner: ship phase 0 only together with that app fix, or accept that a second phone on the same Wi-Fi needs the new app.
+- **Check:** from a laptop on the Wi-Fi, `curl …/api/v2/status` has no `topic_id`, and `sshAccess` without the header gets 401. ~~App pairing a second phone via the QR still works.~~ **False on the same LAN** (review round 2, B-2): the app's LAN bind sees `claimed:true` with no `topic_id`, reports "already claimed, cannot pair another phone, reset it" and never tries the QR topic. The released app hits this under phase 0 alone; off-LAN it binds only through an ambiguous-delivery fallback. The branch app is being changed to take the QR-topic path for an owned device. Release consequence and decision for the change owner: ship phase 0 only together with that app fix, or accept that a second phone on the same Wi-Fi needs the new app. Round 4 (H3): the same dead end hits a claimed device in `legacy` or with the protocol off, the normal fleet state after the OTA; the app must take the QR-topic path whenever the QR carries a topic, not only for an owned device.
 
 ### Phase 1 — protocol
 One release train: FF OS, ff-app, ff-cli. PRs merge independently behind `control.enabled` (controld.json, default off on develop until the train).
@@ -175,7 +175,7 @@ One release train: FF OS, ff-app, ff-cli. PRs merge independently behind `contro
   - tier check before CDP fallthrough;
   - dedupe key includes `controllerId` (F4);
   - state-based plaintext policy per route (§3.1);
-  - `connect`, `mintPairingApprovalDecision` and the mint session commands become owner-tier (F5);
+  - `mintPairingApprovalDecision` and the mint session commands become owner-tier (F5); `connect` becomes controller tier, but only an owner claims or rebinds (a non-owner `connect` to a claimed device is a no-op `ok`), which closes F5 without breaking casts (review round 4 H1);
   - OOM recovery keeps bypassing as internal.
 - **M3 ffos-user, ceremonies:**
   - invitation QR (executor `formatDeviceConnectURL`, overlay);

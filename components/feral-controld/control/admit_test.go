@@ -1098,3 +1098,64 @@ func TestFirstOwnerEnrollRetryAfterUnconfirmedWrite(t *testing.T) {
 		t.Fatalf("retry res = %s, want the committed nk", r.Res)
 	}
 }
+
+// §7.1: every ff-app cast starts with connect, so a controller's sealed
+// connect is admitted (the executor keeps the claim itself owner-only).
+func TestControllerConnectAdmitted(t *testing.T) {
+	d, _, ctl := ownerDevice(t)
+	adm := d.expectExecute(ctl, d.cmdClaims(ctl, "connect", `{"clientDevice":{"device_id":"p"}}`))
+	if adm.Principal.Role != RoleController {
+		t.Fatalf("principal role %q", adm.Principal.Role)
+	}
+}
+
+// Review round 4 M1: revoked and expired records no longer hold the record
+// cap forever. At the cap, the record inactive longest is evicted once its
+// replay window can no longer matter; recent ones and active ones never are.
+func TestRecordCapEvictsLongInactive(t *testing.T) {
+	owner := newTestCtl(t, "owner")
+	gs := []Grant{owner.grant(RoleOwner)}
+	for i := 1; i < maxGrantRecords; i++ {
+		g := newTestCtl(t, "old-"+utoa(uint64(i))).grant(RoleController)
+		g.RevokedAt = testNow - 10 // recently revoked: not yet evictable
+		gs = append(gs, g)
+	}
+	d := newTestDevice(t, gs...)
+	newcomer := newTestCtl(t, "newcomer")
+	request := func() {
+		rc := d.claims(newcomer, OpRequestAccess)
+		rc.Enroll = newcomer.enroll("")
+		d.expectOK(newcomer, rc)
+	}
+	approve := `{"ctl":"` + newcomer.ctl + `","role":"controller"}`
+
+	request()
+	r := d.expectCode(owner, d.cmdClaims(owner, CmdApproveController, approve), CodeCommandFailed)
+	if string(r.Res) != `{"error":"too_many_controllers"}` {
+		t.Fatalf("res = %s", r.Res)
+	}
+
+	d.advance(recordRetention + 1)
+	request()
+	d.expectOK(owner, d.cmdClaims(owner, CmdApproveController, approve))
+	got := d.a.Store().Grants()
+	if len(got) != maxGrantRecords {
+		t.Fatalf("records = %d, want %d", len(got), maxGrantRecords)
+	}
+	if indexOf(got, owner.ctl) < 0 || indexOf(got, newcomer.ctl) < 0 {
+		t.Fatal("owner or newcomer missing after eviction")
+	}
+}
+
+// Review round 4 L1: an expired grant can be revoked, and stays revoked
+// when the wall clock steps back.
+func TestRevokeExpiredGrantSticks(t *testing.T) {
+	owner, guest := newTestCtl(t, "owner"), newTestCtl(t, "guest")
+	g := guest.grant(RoleController)
+	g.ExpiresAt = testNow + 60
+	d := newTestDevice(t, owner.grant(RoleOwner), g)
+	d.advance(120)
+	d.expectOK(owner, d.cmdClaims(owner, CmdRevokeController, `{"ctl":"`+guest.ctl+`"}`))
+	d.advance(-120)
+	d.expectCode(guest, d.cmdClaims(guest, "rotate", `{}`), CodeAccessRevoked)
+}

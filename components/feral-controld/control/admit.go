@@ -151,11 +151,11 @@ type Sealed struct {
 // notification channel.
 func (s Sealed) Wire() ([]byte, error) { return s.WireWith(0, "") }
 
-// WireWith renders the §9 carriage object carrying the ORIGINAL
-// notification's persist_record_count and messageID (review L8): the relayer
-// needs them to store and replace persisted records, and both are routing
-// metadata (a count, and an opaque random id the device minted), never
-// content. messageID is omitted when empty.
+// WireWith renders the §9 carriage object with the given
+// persist_record_count and the ORIGINAL notification's messageID (review
+// L8): both are routing metadata (a count, and an opaque random id the
+// device minted), never content. controlgate passes 0: sealed copies are
+// not persisted (§9). messageID is omitted when empty.
 func (s Sealed) WireWith(persistRecordCount int, messageID string) ([]byte, error) {
 	return marshalJSON(struct {
 		Type               string `json:"type"`
@@ -921,11 +921,45 @@ func (a *Authority) approve(gs []Grant, approver string, req json.RawMessage, no
 		gs[i] = g
 	} else {
 		if len(gs) >= maxGrantRecords {
-			return gs, controlResult{failure: "too_many_controllers"}, ""
+			j := evictable(gs, now)
+			if j < 0 {
+				return gs, controlResult{failure: "too_many_controllers"}, ""
+			}
+			gs = append(gs[:j], gs[j+1:]...)
 		}
 		gs = append(gs, g)
 	}
 	return gs, controlResult{res: struct{}{}}, ctl
+}
+
+// recordRetention is how long an inactive record must keep its replay
+// window: the latest any envelope signed while it was active can still pass
+// §3.4 step 4 (iat up to futureSkew ahead, exp-iat up to maxLifetime, plus
+// expiryGrace).
+const recordRetention = futureSkew + maxLifetime + expiryGrace
+
+// evictable returns the index of the record that has been inactive longest,
+// once past recordRetention, or -1. Active records are never evicted. It
+// frees a slot at the record cap, which revoked and expired records would
+// otherwise hold forever.
+func evictable(gs []Grant, now int64) int {
+	best, bestSince := -1, int64(0)
+	for i, g := range gs {
+		if g.Active(now) {
+			continue
+		}
+		since := g.RevokedAt
+		if since == 0 || (g.ExpiresAt != 0 && g.ExpiresAt < since) {
+			since = g.ExpiresAt
+		}
+		if now-since <= recordRetention {
+			continue
+		}
+		if best < 0 || since < bestSince {
+			best, bestSince = i, since
+		}
+	}
+	return best
 }
 
 // revoke returns the next records, the result, a pending request it denied
@@ -941,6 +975,16 @@ func (a *Authority) revoke(gs []Grant, req json.RawMessage, now int64) ([]Grant,
 		return gs, bad, "", ""
 	}
 	i := indexOf(gs, ctl)
+	if i >= 0 && gs[i].RevokedAt == 0 && !gs[i].Active(now) {
+		// An expired grant is revoked durably, so a wall-clock step back
+		// cannot revive it.
+		gs[i].RevokedAt = now
+		denied := ""
+		if _, ok := a.pending[ctl]; ok {
+			denied = ctl
+		}
+		return gs, controlResult{res: struct{}{}}, denied, ctl
+	}
 	if i < 0 || !gs[i].Active(now) {
 		// Revoking a pending request denies it.
 		if _, ok := a.pending[ctl]; ok {

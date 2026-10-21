@@ -19,6 +19,9 @@ func TestPolicy(t *testing.T) {
 		{StateEnrolled, RouteLAN, "displayPlaylist", play, CodeEnrollmentRequired},
 		{StateEnrolled, RouteRelayer, "displayPlaylist", play, ""},
 		{StateEnrolled, RouteRelayer, "rotate", nil, ""},
+		// connect starts every app cast; the executor keeps the claim owner-only.
+		{StateEnrolled, RouteRelayer, "connect", nil, ""},
+		{StateEnforced, RouteRelayer, "connect", nil, CodeEnvelopeRequired},
 		{StateEnrolled, RouteRelayer, "sshAccess", nil, CodeEnvelopeRequired},
 		{StateEnrolled, RouteRelayer, "unknownThing", nil, CodeEnvelopeRequired},
 		{StateEnrolled, RouteRelayer, "ping", nil, CodeEnvelopeRequired},

@@ -336,7 +336,13 @@ A later controller asks for access.
 - `res` = `{"status":"pending","code":approvalCode(ctl, thumb(devSig)),"expiresAt":t}`.
 - On create, every active owner gets a sealed `controller_approval_request`
   notification (§9), with body `{"ctl","label","platform","code","expiresAt"}`.
-  A refresh re-notifies only when the label or platform changed.
+  A refresh re-notifies only when the label or platform changed, so an owner
+  UI that closes its prompt at the first notification's `expiresAt` must
+  still list the request (`listControllers`) for its whole life, up to 10
+  minutes.
+- `not_approved` means either "no owner yet" (`legacy`) or "an owner denied
+  this `ctl` recently"; a client tells them apart by the status
+  `control.state`, not by the code.
 
 ### 5.3 `op=enroll` without `inv`
 
@@ -364,6 +370,16 @@ fake profile and relays the phone's still-valid `requestAccess` JWS to the
 real device: the phone's code is then computed over the attacker's pin and
 differs from the code the real device sends the owner.
 
+It does **not** defeat one that sends its own request instead. The code is
+about 20 bits; after reading the phone's `ctl` and label from the request
+sealed to its fake key, the attacker generates keys until
+`approvalCode(ctl_attacker, realPin)` equals the code the phone shows (about
+a million tries, seconds on one core), then asks with the phone's label. The
+owner sees one matching request. A longer code does not help against this
+offline search. So the code protects only a requester whose pin came from
+the screen: the claim QR carries the pins in every state (§11) and a second
+phone MUST pin from it (§14.1).
+
 ### 5.5 Owner commands
 
 These are `op=cmd`, owner tier, executed by the control authority itself (they
@@ -389,11 +405,17 @@ never reach the command router):
   without a pending request keeps `nk` too. A role change that omits
   `expiresAt` clears any expiry the grant had: the request states the whole
   grant, so a client that wants to keep an expiry sends it again. At most 32 active grants and 128
-  records (revoked ones included) exist (`too_many_controllers`).
+  records (revoked ones included) exist (`too_many_controllers`). At the
+  record cap, a new grant evicts the record that has been inactive (revoked
+  or expired) longest, once it has been inactive for more than 450 s
+  (`iat` up to 300 s ahead + `exp - iat` up to 120 + 30 grace: no envelope
+  it signed can still be accepted); active records are never evicted.
 - `revokeController` on a `ctl` that has only a pending request denies (drops)
   that request; further `requestAccess` from that `ctl` answers
   `not_approved` until the denied request would have expired (§5.2).
-  Otherwise the grant must be active (`not_found`).
+  An expired grant is revoked durably (it gets `revokedAt`, so a wall-clock
+  step back cannot revive it). Otherwise the grant must be active
+  (`not_found`).
 - `listControllers` lists every record, revoked ones included.
 
 An owner cannot revoke the last active owner (`last_owner`). That would make
@@ -419,6 +441,11 @@ more than any peer can send with a fresh key.
 
 A revoked record keeps its window. Re-approval keeps it too.
 
+A controller whose counter is behind the device's window (a restored backup
+or a synced config directory) gets a verified `replay`. The window has no
+upper bound, so it MAY recover by jumping its `ctr` forward; it MUST NOT
+delete a working grant over it (ff1-cli advises re-pairing, never unpair).
+
 `requestAccess` and pre-approval `enroll` requests from a `ctl` with no record
 are windowed per `ctl` in the (in-memory) pending record; the window becomes
 the grant's on approval. A `ctl` with a record (for example a revoked one) is
@@ -435,9 +462,15 @@ Unknown commands fail closed: they are owner-only.
 
 | Tier | Commands |
 |---|---|
-| owner | everything not listed below; specifically `sshAccess`, `factoryReset`, `startWifiSetup`, `updateToLatestVersion`, `connect`, `setDeviceName`, `showPairingQRCode`, `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, `mintPairingApprovalDecision`, `setContentPolicy`, `analyticsToggle`, `betaFeaturesToggle`, `uploadLogs`, `sendKeyboardEvent`, `tapGesture`, `doubleTapGesture`, `longPressGesture`, `dragGesture`, `clickAndDragGesture`, `zoomGesture`, `cursorUpdate`, `disconnect`, `approveController`, `revokeController`, `listControllers` |
-| controller | playback: `displayPlaylist`, `displayDefaultPlaylist`, `refreshArtwork`, `refreshPlaylist`, `checkStatus`, `moveToArtwork`, `updateIndex`, `setShuffle`, `setLoop`, `updateArtFraming`, `updateDisplaySettings`, `updateDefaultDuration`, `getRecentlyPlayed`, `playRecentlyPlayed`; offline cache: `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`, `clearPlaylistCache`, `getOfflineCacheStatus`; device: `getDeviceStatus`, `deviceMetrics`, `rotate`, `setVolume`, `toggleMute`, `ddcPanelControl`, `ddcPanelStatus`, `setSleepSchedule`, `setSleepMode`, `sleepNow`, `wakeNow`, `reboot`, `shutdown`, `runNetworkDiagnostics`, `getContentPolicy` |
+| owner | everything not listed below; specifically `sshAccess`, `factoryReset`, `startWifiSetup`, `updateToLatestVersion`, `setDeviceName`, `showPairingQRCode`, `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, `mintPairingApprovalDecision`, `setContentPolicy`, `analyticsToggle`, `betaFeaturesToggle`, `uploadLogs`, `sendKeyboardEvent`, `tapGesture`, `doubleTapGesture`, `longPressGesture`, `dragGesture`, `clickAndDragGesture`, `zoomGesture`, `cursorUpdate`, `disconnect`, `approveController`, `revokeController`, `listControllers` |
+| controller | playback: `displayPlaylist`, `displayDefaultPlaylist`, `refreshArtwork`, `refreshPlaylist`, `checkStatus`, `moveToArtwork`, `updateIndex`, `setShuffle`, `setLoop`, `updateArtFraming`, `updateDisplaySettings`, `updateDefaultDuration`, `getRecentlyPlayed`, `playRecentlyPlayed`; offline cache: `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`, `clearPlaylistCache`, `getOfflineCacheStatus`; claim: `connect` (see below); device: `getDeviceStatus`, `deviceMetrics`, `rotate`, `setVolume`, `toggleMute`, `ddcPanelControl`, `ddcPanelStatus`, `setSleepSchedule`, `setSleepMode`, `sleepNow`, `wakeNow`, `reboot`, `shutdown`, `runNetworkDiagnostics`, `getContentPolicy` |
 | internal | never accepted from any external principal, owner included (`permission_denied`): `resolveRecentlyPlayed` (router-internal), `ping`, `mintPairingDisplay`, `setupDisplay` (controld → player paint/probe commands that would otherwise fall through to the player over CDP), and `ff1Envelope` (an envelope inside an envelope) |
+
+`connect` is controller tier because every ff-app cast, released and new,
+starts with it. Only an owner claims or rebinds: under the protocol (any
+state but `legacy`) a non-owner `connect` to a claimed device is answered
+`ok` and changes nothing, and one to an unclaimed device is refused. In
+`legacy` it behaves as before the protocol.
 
 The names are the real catalog: `commands/types.go`, the literal names
 `commandrouter` special-cases, and ff-player's `CastCommand` plus
@@ -524,10 +557,10 @@ Rules:
   becomes `legacy` automatically, and the files are left untouched.
 - Every write goes through the same checks first, so the device cannot persist
   a file it would lock on. That holds across builds only while the label
-  rule is stable: the invisible set in §5 is frozen for v1, and a future
-  change to the device-name strip set MUST NOT change it (copy the set
-  rather than share it), or stored grants would lock on the next boot over
-  a display-only value.
+  rule is stable: the invisible set in §5 is frozen for v1. The control
+  package holds its own copy (`control/store.go`, pinned by
+  `label_test.go`), not the device-name strip set, so a change to device
+  names cannot lock stored grants on the next boot.
 - Factory reset retires the directory before anything else in its sequence
   (before the claim is cleared and before the reset unit starts):
   1. it durably writes the tombstone `/home/feralfile/.state/control.retired`;
@@ -559,9 +592,13 @@ device decides whether the protocol runs from its own state first:
 | absent | `true` | protocol on: new identity in `legacy`, invitations offered |
 | absent | `false`, absent, or malformed | protocol off: transports exactly as before the protocol |
 
-`control.enforced` only ever tightens `enrolled` to `enforced`. A malformed
-value reads as `false`, which is still the `enrolled` policy. A malformed
-block is logged as an error and never relaxes a device that has state. If
+`control.enforced` only ever tightens `enrolled` to `enforced`, and it is a
+per-release setting read on every boot, not a device latch: a release built
+without it (or with a malformed value, which reads as `false`) runs an
+enforced device as `enrolled` again. That relaxes the plaintext policy to
+§7.2 `enrolled`, never further. What configuration can never do is reopen a
+device that has state: a malformed `control` block is logged as an error and
+the protocol stays on. If
 the hostname cannot be read while state exists, the protocol still runs
 (envelopes then fail their `dev` check and the plaintext policy applies).
 If it cannot be read and no state exists, the protocol does not start (the
@@ -613,22 +650,20 @@ Wire carriage, the same object on the LAN notification WebSocket and on the
 relayer notification channel:
 
 ```json
-{"type":"notification","messageID"?:"<id>","notification_type":"sealed","persist_record_count":<n>,"message":{"v":1,"ctl":"<ctl>","jwe":"…"}}
+{"type":"notification","messageID"?:"<id>","notification_type":"sealed","persist_record_count":0,"message":{"v":1,"ctl":"<ctl>","jwe":"…"}}
 ```
 
-`persist_record_count` and `messageID` are copied from the plaintext
-notification the sealed copy stands for (`0` and absent for the device's own
-`controller_approval_request`). They are routing metadata the relayer needs
-to store and replace persisted records: a count, and an opaque random id the
-device minted (mint pairing uses its approval request id). Nothing of the
-notification's content leaves the ciphertext. A relayer that knows the
-`"sealed"` type (ff-relayer#25/#26) persists all sealed copies under it.
-**Residual on the deployed relayer** (ff-relayer `main`): it has no `sealed`
-type, so it stores sealed copies under its default id 0 (sharing that bucket,
-and its pruning, with `offline_cache_status`) and replays them as
-`notification_type:"default"`, which both app versions drop. Live delivery
-is unaffected (the type string is forwarded as is); a reconnecting
-controller just gets no persisted sealed row until #26 ships.
+Sealed copies are never persisted: `persist_record_count` is always `0`.
+Every copy, of every inner type and for every controller, shares the one
+relayer type `sealed`, and the relayer keeps the newest N rows per type, so
+stored rows would be whichever controller's copy came last. A reconnecting
+controller refetches state by envelope (`getDeviceStatus` and the other
+status queries) instead. `messageID` is copied from the plaintext
+notification the copy stands for (absent for the device's own
+`controller_approval_request`): an opaque random id the device minted (mint
+pairing uses its approval request id). Nothing of the notification's content
+leaves the ciphertext. Live delivery works on the deployed relayer too (the
+type string is forwarded as is).
 
 What is sent in each state:
 
@@ -697,9 +732,12 @@ reply rather than `bad_envelope`.
   `"control":{"v":1,"state":"legacy|enrolled|enforced|locked","profile":profile}`.
   The presence of `control` is the capability signal. A `locked` device omits
   `profile`: it cannot vouch for an identity it could not read.
-- The claim QR appends four pipe fields to the existing six when the device
-  is `legacy` and either unclaimed or asked with `purpose:"enroll"` (below):
-  `…|<setup_phase>|<inv>|<thumb(sig)>|<thumb(enc)>|<gen>`.
+- With the protocol on, the claim QR appends four pipe fields to the
+  existing six in every state but `locked`:
+  `…|<setup_phase>|<inv>|<thumb(sig)>|<thumb(enc)>|<gen>`. `<inv>` is the
+  invitation when the device is `legacy` and either unclaimed or asked with
+  `purpose:"enroll"` (below), and empty otherwise; the pins are always there
+  so a second phone pins from the screen (§5.4, §14.1).
   - Old app parsers read only indices 0, 1 and 3.
   - The topic stays at index 1 whenever the device has one, claimed or
     not: once status withholds `topic_id` (§11 status, phase 0), the screen
@@ -715,8 +753,8 @@ reply rather than `bad_envelope`.
     QR is taken down; from then on the auto-claim flow treats the device as
     settled and does not repaint the topic-carrying QR.
 - A second phone adds an owned device (`enrolled`/`enforced`) by scanning
-  the screen QR for the topic and then sending `requestAccess`, pinned from
-  the LAN status. Off the LAN, an `enrolled` device's relayer
+  the screen QR for the topic and the pins and then sending `requestAccess`,
+  checking the LAN status profile against those pins. Off the LAN, an `enrolled` device's relayer
   `getDeviceStatus` supplies the profile; an `enforced` device refuses that
   plaintext, so it admits a new controller only from the LAN, and the app
   says to join the same Wi-Fi instead of adding the device. This is a
@@ -809,6 +847,22 @@ and the ff1-cli test suite does the same with `jose`.
 - Residual, accepted: replies are unpadded, so their length tells a passive
   observer the outcome class (ok, replay, a denial code, pending). It reveals
   nothing a controller's own next action would not.
+- Residual, accepted: pending-request lifetimes, the 10 s new-request
+  limit and denials use the wall clock. A request that arrived while the
+  clock was far ahead, followed by an NTP correction, can rate-limit new
+  requests until the clock catches up; a restart clears it (memory only).
+- Residual, accepted: the setup access point's captive portal (`/connect`,
+  `/rescan`, `/status`) is outside this policy. Its WPA2 passphrase derives
+  from the device id, so anyone in radio range while the access point is up
+  can set Wi-Fi credentials: network position only, and on an enrolled
+  device the hub still applies the LAN policy.
+- Residual, accepted: a `locked` or retired device sends status
+  notifications in plaintext again on every channel (§9 table), including
+  persisted relayer rows an earlier enforced boot purged. A device in that
+  state has no grants to seal to.
+- Remote shell granted while the device had no owner (open `sshAccess` on
+  an unclaimed device, or by a topic holder in `legacy`) is revoked when the
+  first owner enrolls: the device runs the `sshAccess{enabled:false}` steps.
 - `/api/status` (v1) also carries the `control` block. The enforced purge
   gives up after 10 minutes without a relayer connection. The invitation
   watch can miss one re-arm when another narration takes the panel between
@@ -823,9 +877,12 @@ showed what goes wrong without them.
 1. **Pin sources.** A device profile is pinned only from:
    - the physical claim QR (first owner, migration);
    - an owner's end-to-end encrypted handoff (ff1-cli pairing);
-   - for `requestAccess` only, the unauthenticated LAN status, or off the
-     LAN an `enrolled` device's relayer `getDeviceStatus` reply (an
-     attacker there must hold the topic; the approval code binds either).
+   - for `requestAccess`, the pins on the screen QR (every state, §11); a
+     second phone MUST pin from them when the QR carries them, because the
+     approval code alone can be ground by a network attacker (§5.4);
+   - only when the QR carries no pins (firmware before them), the
+     unauthenticated LAN status, or off the LAN an `enrolled` device's
+     relayer `getDeviceStatus` reply.
 
    Whenever the scanned QR carries pins, a client MUST compare them with
    any profile it reads from the network and MUST NOT proceed on a
@@ -841,8 +898,8 @@ showed what goes wrong without them.
    then replaces its real grant. The owner's approval code comparison is
    the check against it.
 
-   In the third case the requester's approval code (§5.4) binds the pin, and an
-   owner comparing codes is the only protection. An impostor can still answer
+   In the network-pinned case the requester's approval code (§5.4) is the only
+   protection, and it does not stop an attacker who can grind a key. An impostor can still answer
    "approved" to that requester and read its commands until the requester gets a
    reply that verifies under the real device's key. It gains no authority over
    the real FF1.
@@ -862,7 +919,10 @@ showed what goes wrong without them.
    - scanning the physical claim QR (§5.1, pins from the screen);
    - a user-confirmed Remove of its local grant, after which it is a new
      controller. Remove always asks, whatever the grant's role (ff-app
-     Remove and ff1-cli `unpair` alike).
+     Remove and ff1-cli `unpair` alike);
+   - for ff1-cli, a new `device pair` from an owner's handoff (a profile
+     pinned by the handoff, not the network): the new keys are staged and
+     replace the old grant only once enrolled.
 
    A request refused with `access_revoked` in a reply that verified under the
    pinned `devSig` is not a reset: the controller MAY send `requestAccess`

@@ -296,9 +296,10 @@ func TestScreenProtectedWhileInvitationLive(t *testing.T) {
 	}
 }
 
-// Review L8: a sealed copy carries the original notification's
-// persist_record_count and messageID (routing metadata, not content).
-func TestSealedCopyCarriesPersistAndMessageID(t *testing.T) {
+// Review L8: a sealed copy carries the original notification's messageID
+// (routing metadata, not content). Review round 4 M2: it is never persisted
+// (persist_record_count 0), whatever the original's count.
+func TestSealedCopyCarriesMessageIDNotPersisted(t *testing.T) {
 	a, _ := newAuthority(t, false)
 	g := controlgate.New(a, &recorder{}, zap.NewNop())
 	enrollOwner(t, g, a)
@@ -314,7 +315,7 @@ func TestSealedCopyCarriesPersistAndMessageID(t *testing.T) {
 			sealed = append(sealed, v)
 		}
 	}
-	if len(sealed) != 1 || sealed[0]["messageID"] != "appr-1" || sealed[0]["persist_record_count"] != float64(10) {
+	if len(sealed) != 1 || sealed[0]["messageID"] != "appr-1" || sealed[0]["persist_record_count"] != float64(0) {
 		t.Fatalf("sealed copy = %+v", sealed)
 	}
 }

@@ -169,7 +169,11 @@ func sealAll(auth *control.Authority, n notificationMeta, logger *zap.Logger) []
 	}
 	out := make([]json.RawMessage, 0, len(sealed))
 	for _, s := range sealed {
-		if w, err := s.WireWith(n.PersistRecordCount, n.MessageID); err == nil {
+		// Sealed copies are never persisted (§9): every copy shares the one
+		// relayer type "sealed", and the relayer keeps the newest N rows per
+		// type, so stored rows would be whichever controller's copy came
+		// last. A reconnecting controller refetches state by envelope.
+		if w, err := s.WireWith(0, n.MessageID); err == nil {
 			out = append(out, w)
 		}
 	}

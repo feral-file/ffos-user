@@ -1135,13 +1135,13 @@ func TestConnectClaimTransitionHidesOverlay(t *testing.T) {
 
 	args := []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`)
 
-	res, err := e.connect(args)
+	res, err := e.connect(context.Background(), args)
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 	assert.Equal(t, []string{"hide"}, spy.calls, "the claim transition must clear the claim QR")
 
 	// Re-connect on the now-claimed device (connect mutated st in place).
-	res, err = e.connect(args)
+	res, err = e.connect(context.Background(), args)
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 	assert.Equal(t, []string{"hide"}, spy.calls, "a re-connect must not hide again")
@@ -1167,7 +1167,7 @@ func TestConnectClaimTransitionPlayerDownDoesNotFailClaim(t *testing.T) {
 	spy := &narratorSpy{}
 	e := &executor{logger: zap.NewNop(), setupNarrator: spy, json: wrapper.NewJSON(), cdp: mockCDP}
 
-	res, err := e.connect([]byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
+	res, err := e.connect(context.Background(), []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 	assert.Equal(t, []string{"hide"}, spy.calls)
@@ -1257,7 +1257,7 @@ func TestConnectClaimTransitionDefaultPlaybackDoesNotClearDisplayAtCache(t *test
 
 	doneConnect := make(chan struct{})
 	go func() {
-		res, err := e.connect([]byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
+		res, err := e.connect(context.Background(), []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
 		require.NoError(t, err)
 		assert.Equal(t, CmdOK, res)
 		close(doneConnect)
