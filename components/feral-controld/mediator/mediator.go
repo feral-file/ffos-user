@@ -894,15 +894,18 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 				return nil
 			}
 			if commandType == control.CmdEnvelope {
+				// No messageID, no caller: do not spend a window or run the
+				// command for a reply that would be discarded.
+				if payload.MessageID == "" {
+					m.logger.Debug("Relayer envelope without a messageID ignored")
+					return nil
+				}
 				var message any
 				wire, perr := m.control.HandleEnvelope(ctx, payload.Message.RawRequest, control.Origin{Route: control.RouteRelayer, Known: true})
 				if perr != nil {
 					message = json.RawMessage(perr.Body())
 				} else {
 					message = wire
-				}
-				if payload.MessageID == "" {
-					return nil
 				}
 				return m.relayer.Send(ctx, relayer.Response{Type: "RPC", MessageID: payload.MessageID, Message: message})
 			}

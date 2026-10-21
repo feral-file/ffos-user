@@ -119,5 +119,7 @@ func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler,
 	}); ok {
 		ex.SetControl(controlgate.ClaimQR{Auth: c.auth})
 		gate.SetOwnerEnrolledHook(ex.ControlOwnerEnrolled)
+	} else {
+		logger.Error("Executor does not accept the control claim; invitation QR and retire disabled")
 	}
 }

@@ -1553,9 +1553,13 @@ func (g *denyingGate) Plaintext(control.Route, commands.Command) (control.Decisi
 // has no caller to reply to either.
 func TestMediator_ControlNeverAnswersFramesWithoutCommandOrMessageID(t *testing.T) {
 	display := string(commands.CMD_DISPLAY_PLAYLIST)
+	envelope := string(control.CmdEnvelope)
 	frames := map[string]relayer.Payload{
 		"invalid messageID error frame": {},
 		"command without messageID":     {Message: relayer.Message{Command: &display}},
+		"command-less with messageID":   {MessageID: "m1"},
+		// Round 3 L-3: not opened, so no window is spent and nothing runs.
+		"envelope without messageID": {Message: relayer.Message{Command: &envelope}},
 	}
 	for _, code := range []string{control.CodeEnvelopeRequired, control.CodeLocked} {
 		for name, payload := range frames {
@@ -1579,6 +1583,9 @@ func TestMediator_ControlNeverAnswersFramesWithoutCommandOrMessageID(t *testing.
 
 				ts.mediator.Start()
 				assert.NoError(t, capturedHandler(ts.ctx, payload))
+				if name != "command without messageID" {
+					assert.Zero(t, gate.calls, "frame reached the control gate")
+				}
 			})
 		}
 	}

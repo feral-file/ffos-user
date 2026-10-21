@@ -565,6 +565,9 @@ func (a *Authority) OpenFrom(compact string, origin Origin) (*Admission, error) 
 	}
 	c := pre.claims
 	a.prunePending(now)
+	if pre.futureIat {
+		return a.refuseFutureIat(pre.adm, c, grant, known)
+	}
 	switch c.Op {
 	case OpCmd:
 		if !known {
@@ -617,6 +620,10 @@ func (a *Authority) releaseOpen() { <-a.openSem }
 type authenticated struct {
 	adm    *Admission
 	claims RequestClaims
+	// futureIat marks a step-4 iat too far ahead. It is the only claim
+	// refusal that a later clock can turn valid, so it is answered under
+	// a.mu where the window can be spent (review round 3 L-1).
+	futureIat bool
 }
 
 // authenticate is §3.4 steps 1-4 (everything that needs no mutable state):
@@ -687,13 +694,11 @@ func (a *Authority) authenticate(compact string) (authenticated, *Admission, *Pu
 		return finish(CodeInvalidRequest)
 	case now > c.Exp+expiryGrace:
 		return finish(CodeExpired)
-	case c.Iat > now+futureSkew:
-		return finish(CodeInvalidRequest)
 	}
 	if c.Enroll != nil && c.Enroll.Sig.Thumbprint() != c.Ctl {
 		return finish(CodeInvalidRequest)
 	}
-	return authenticated{adm: adm, claims: c}, nil, nil
+	return authenticated{adm: adm, claims: c, futureIat: c.Iat > now+futureSkew}, nil, nil
 }
 
 // fail finalizes adm with an ok:false reply. If even the reply cannot be
@@ -733,6 +738,25 @@ func (a *Authority) refuse(adm *Admission, ctl string, window Window, code strin
 		return a.persistFailure(adm)
 	}
 	return a.fail(adm, code, nil)
+}
+
+// refuseFutureIat answers a step-4 future iat with invalid_request and
+// spends ctr where a window exists, so the envelope cannot be accepted
+// verbatim once the device clock catches up.
+func (a *Authority) refuseFutureIat(adm *Admission, c RequestClaims, g Grant, known bool) (*Admission, error) {
+	if known {
+		if err := g.Window.Check(c.Ctr); err != nil {
+			return a.fail(adm, CodeReplay, nil)
+		}
+		return a.refuse(adm, g.Ctl, g.Window.Accept(c.Ctr), CodeInvalidRequest)
+	}
+	if p, ok := a.pending[c.Ctl]; ok {
+		if err := p.window.Check(c.Ctr); err != nil {
+			return a.fail(adm, CodeReplay, nil)
+		}
+		p.window = p.window.Accept(c.Ctr)
+	}
+	return a.fail(adm, CodeInvalidRequest, nil)
 }
 
 // setWindow is an Update step recording w for ctl.
@@ -1088,6 +1112,12 @@ func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Gran
 	if err := window.Check(c.Ctr); err != nil {
 		return a.fail(adm, CodeReplay, nil)
 	}
+	if known && g.Active(now) && g.ApprovedBy == approvedByInvitation && g.Enc.Equal(c.Enroll.Enc) {
+		// A retry after a committed but unconfirmed first-owner write: the
+		// invitation is spent, so answer it as the idempotent §5.3 enroll
+		// (review round 3 L-2).
+		return a.enrollApproved(adm, c, g, known, now)
+	}
 	invalid := func() (*Admission, error) {
 		if known {
 			return a.refuse(adm, g.Ctl, window.Accept(c.Ctr), CodeInvitationInvalid)
@@ -1124,8 +1154,8 @@ func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Gran
 	})
 	if errors.Is(err, ErrDurability) || err == nil {
 		// The grant is what a restart reads: the invitation is spent either
-		// way. On ErrDurability the controller retries enroll without inv
-		// and gets the same grant back.
+		// way. On ErrDurability the controller retries enroll, with or
+		// without inv, and gets the same grant back.
 		a.setInvLocked(nil)
 		adm.OwnerEnrolled = true
 	}

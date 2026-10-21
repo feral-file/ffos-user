@@ -59,12 +59,19 @@ func TestFirstOwnerInvitationFlow(t *testing.T) {
 		t.Fatalf("grant = %+v", g)
 	}
 
-	// The same envelope again is a replay; a second invitation enroll is
-	// refused because the device is no longer legacy.
+	// The same envelope again is a replay. A retry by the owner with a new
+	// ctr gets its grant back (round 3 L-2); another key is refused because
+	// the device is no longer legacy.
 	d.expectPublicOrCode(phone, rc, CodeReplay)
 	rc2 := d.claims(phone, OpEnroll)
 	rc2.Enroll = phone.enroll(inv.Value)
-	d.expectCode(phone, rc2, CodeInvitationInvalid)
+	if r := d.expectOK(phone, rc2); !strings.Contains(string(r.Res), res.NK) {
+		t.Fatalf("retry res = %s, want the same nk", r.Res)
+	}
+	other := newTestCtl(t, "other")
+	rc3 := d.claims(other, OpEnroll)
+	rc3.Enroll = other.enroll(inv.Value)
+	d.expectCode(other, rc3, CodeInvitationInvalid)
 	if _, err := d.a.IssueInvitation(); err == nil {
 		t.Fatal("invitation issued while enrolled")
 	}
@@ -1039,6 +1046,20 @@ func TestRefusedRequestSpendsCtr(t *testing.T) {
 		replayed(t, d, compact, rc)
 	})
 
+	t.Run("future iat", func(t *testing.T) {
+		d, _, ctl := ownerDevice(t)
+		rc := d.cmdClaims(ctl, "sshAccess", `{}`)
+		rc.Iat += futureSkew + 60
+		rc.Exp = rc.Iat + 60
+		compact := d.seal(ctl, rc)
+		adm, err := d.a.Open(compact)
+		if err != nil || d.final(adm, rc).Code != CodeInvalidRequest {
+			t.Fatalf("future iat not refused: %v", err)
+		}
+		d.advance(90) // iat is now within futureSkew
+		replayed(t, d, compact, rc)
+	})
+
 	t.Run("enroll with a different enc", func(t *testing.T) {
 		d, _, ctl := ownerDevice(t)
 		rc := d.claims(ctl, OpEnroll)
@@ -1051,4 +1072,29 @@ func TestRefusedRequestSpendsCtr(t *testing.T) {
 		}
 		replayed(t, d, compact, rc)
 	})
+}
+
+// Round 3 L-2: a first-owner enroll whose write committed but was not
+// confirmed spends the invitation; a retry with inv gets the grant back.
+func TestFirstOwnerEnrollRetryAfterUnconfirmedWrite(t *testing.T) {
+	d := newTestDevice(t)
+	inv, err := d.a.IssueInvitation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	phone := newTestCtl(t, "phone")
+	rc := d.claims(phone, OpEnroll)
+	rc.Enroll = phone.enroll(inv.Value)
+	d.fs.FailSync = func(string) error { return errors.New("eio") }
+	d.expectCode(phone, rc, CodeInternalError)
+	d.fs.FailSync = nil
+	g, ok := d.a.Store().Grant(phone.ctl)
+	if !ok {
+		t.Fatal("committed grant not in memory")
+	}
+	rc = d.claims(phone, OpEnroll)
+	rc.Enroll = phone.enroll(inv.Value)
+	if r := d.expectOK(phone, rc); !strings.Contains(string(r.Res), b64u(g.NK[:])) {
+		t.Fatalf("retry res = %s, want the committed nk", r.Res)
+	}
 }

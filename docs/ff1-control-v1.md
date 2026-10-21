@@ -135,9 +135,10 @@ The device runs these steps in order and stops at the first failure:
 6. Authorization (§7) and the operation's own preconditions (§5). Then
    persist the replay window **before** executing. A request refused here
    (`permission_denied`, `access_revoked`, `not_approved`, `rate_limited`,
-   `invitation_invalid`) spends its `ctr` too, wherever a window exists
-   (§6), so a captured refused envelope never becomes live after a later
-   promotion or re-approval.
+   `invitation_invalid`, and the `enc`-mismatch `invalid_request` of §5.3)
+   spends its `ctr` too, wherever a window exists (§6), so a captured
+   refused envelope never becomes live after a later promotion or
+   re-approval.
 
 Failures in steps 1–3 produce a public error (§4.4). Failures from step 4 on
 produce an encrypted reply whose `ctl` is the verified JWS `kid` (even when
@@ -145,7 +146,10 @@ the request's `ctl` claim differs).
 
 Code mapping for step 4: any member, shape, `v`, `dev`, `gen`, `ctl`,
 lifetime or future-`iat` failure is `invalid_request`; `now > exp + 30` is
-`expired`. Step 5 failures are `replay`.
+`expired`. Step 5 failures are `replay`. A future `iat` is the only step-4
+failure a later clock could turn valid, so it is checked against the window
+after step 5 and spends `ctr` like a step-6 refusal; the other step-4
+failures can never become valid and spend nothing.
 
 ## 4. Reply (FF1 → controller)
 
@@ -191,7 +195,8 @@ For `command_failed` (the handler raised an error instead of replying),
 `playlistInvalid`, or `failed` for anything else. The owner commands of §5.5 use `res` = `{"error":"<reason>"}` with
 `<reason>` one of `invalid_request`, `not_pending`, `not_found`,
 `last_owner`, `too_many_controllers`, or `internal_error` (no entropy for
-a new `nk`; nothing was written).
+a new `nk`; the grant store is unchanged, but the replay window was
+written).
 
 `internal_error` means the device could not confirm a durable write.
 - For a command, the replay window (§6) was not confirmed and the command
@@ -216,7 +221,7 @@ detail (a cause string would make the device an oracle):
 
 | Code | When |
 |---|---|
-| `bad_envelope` | §3.4 step 1 or 3 failed, or the JWS is structurally malformed |
+| `bad_envelope` | §3.4 step 1 or 3 failed, the JWS is structurally malformed, or the device could not seal any reply (no entropy) |
 | `unknown_controller` | step 2: `kid` not found |
 | `bad_signature` | step 2: signature did not verify |
 | `enrollment_required` | plaintext refused, §7.2 |
@@ -282,6 +287,12 @@ The first owner.
 - On success: create an owner grant (`approvedBy` = `"invitation"`), consume
   the invitation, and remove the claim QR.
 - `res` = `{"role":"owner","nk":b64u(32),"profile":profile}`.
+- After `internal_error` the grant may have been written and the invitation
+  spent anyway (§4.3). The first owner retries `enroll` with a new `ctr`,
+  with or without the same `inv`: from the `ctl` that holds the
+  invitation-approved grant with the same `enc` either form returns that
+  grant (§5.3); anyone else gets `invitation_invalid`. Neither client
+  retries automatically yet; ff-app recovers through Request access.
 
 ### 5.2 `op=requestAccess`
 
@@ -304,13 +315,17 @@ A later controller asks for access.
     the peer's IPv4 address (IPv4-mapped included), the /64 of a global or
     ULA IPv6 address (one host can hold a whole /64), or, for every
     link-local IPv6 address (`fe80::/10`, any zone), one single source. The
-    source is used only for this count; it is never authority.
+    source is used only for this count; it is never authority. The hub
+    listens on IPv4 only today, so the IPv6 rules are dormant; on a
+    dual-stack hub, SLAAC would make a whole LAN one /64 source with a cap
+    of one pending request.
   - A refresh of an existing pending `ctl` at most once per 10 s.
   - A pending request lives for 5 minutes from its last refresh, and never
     more than 10 minutes from its creation, however often it refreshes.
     A pre-approval `enroll` does not refresh it: a client that waits longer
     than 5 minutes for approval MUST re-send `requestAccess` before
-    `expiresAt`.
+    `expiresAt` (ff1-cli and ff-app re-send about every 4 minutes and ignore
+    a `rate_limited` refresh).
   - Pending requests and denials are held in memory only. A restart drops
     them and the requester asks again.
   - Residual: an attacker who controls many LAN source prefixes can still
@@ -508,7 +523,11 @@ Rules:
   lapsed would reopen the device as `legacy`). It never
   becomes `legacy` automatically, and the files are left untouched.
 - Every write goes through the same checks first, so the device cannot persist
-  a file it would lock on.
+  a file it would lock on. That holds across builds only while the label
+  rule is stable: the invisible set in §5 is frozen for v1, and a future
+  change to the device-name strip set MUST NOT change it (copy the set
+  rather than share it), or stored grants would lock on the next boot over
+  a display-only value.
 - Factory reset retires the directory before anything else in its sequence
   (before the claim is cleared and before the reset unit starts):
   1. it durably writes the tombstone `/home/feralfile/.state/control.retired`;
@@ -552,6 +571,15 @@ logged; the next start with a readable hostname creates the identity.
 The OTA carry-forward (ffos `feral-system-update.sh`) MUST carry
 `control.retired` along with `control/`.
 - OTA carries the directory live: see ffos `feral-system-update.sh`.
+- Capability floor: a device with control state MUST NOT run a controld
+  that predates this protocol, which would ignore the state and reopen the
+  device. A `feral-controld` package built from a ref that contains
+  `components/feral-controld/control/` provides `feral-controld-control-v1`.
+  With control state present, the OTA refuses an image whose controld lacks
+  that marker (permanent refusal), and the package rail holds back a repo
+  controld that lacks it. The marker, not the version number, is the
+  check: `pkgver` is an operator input and orders dev builds unreliably, so
+  any rollback to another marker-carrying build stays possible.
 
 ## 9. Sealed notifications (FF1 → one controller)
 
@@ -625,8 +653,9 @@ count, so this evicts every stored row of it. The deployed relayer has no
 `offline_cache_status` type either and stores it under id 0, so that purge
 row prunes the shared id-0 bucket. A purge row is itself stored, replayed to
 later subscribers and broadcast live like any notification: a controller
-MUST treat an empty-body `device_status`/`player_status` as "no data", not
-as a blank state. The purge runs at boot only:
+MUST treat an empty-body row of any purged type as "no data", not as a
+blank state (ff-app drops all four status types; `ddc_status` can be `{}`
+legitimately, which also means no data). The purge runs at boot only:
 a device that becomes `enforced` mid-run purges on its next boot. It is best-effort (a failed send is logged, not retried) and idempotent,
 so it runs on every enforced boot rather than once per transition and keeps
 no marker.
@@ -651,10 +680,16 @@ an envelope that cannot get a slot within 1 s is answered with the public
 error `busy` (LAN 503) and should be retried. No lock other than that bound
 is held while an envelope is unauthenticated.
 
-A relayer frame with no `command` (the relayer's own error frames such as
-`{"error":{"code":2000,…}}`) is never answered, and nothing is sent back for
-a frame without a `messageID`: an answer would draw the same relayer error
-again and loop.
+Under the protocol, a relayer frame with no `command` (the relayer's own
+error frames such as `{"error":{"code":2000,…}}`) is never answered, an
+envelope without a `messageID` is not opened, and a refused plaintext frame
+without one gets no reply: an answer would draw the same relayer error again
+and loop. An allowed plaintext command without a `messageID` (and any
+command with the protocol off) still runs and replies as before the
+protocol; the relayer answers that once with an error frame, which is then
+dropped. On the relayer, an envelope whose `request` is not a JSON object
+never reaches the authority (the relayer decoder drops it), so it gets no
+reply rather than `bad_envelope`.
 
 ## 11. Public discovery
 
@@ -679,6 +714,14 @@ again and loop.
   - When the first owner enrolls, the invitation is consumed and the claim
     QR is taken down; from then on the auto-claim flow treats the device as
     settled and does not repaint the topic-carrying QR.
+- A second phone adds an owned device (`enrolled`/`enforced`) by scanning
+  the screen QR for the topic and then sending `requestAccess`, pinned from
+  the LAN status. Off the LAN, an `enrolled` device's relayer
+  `getDeviceStatus` supplies the profile; an `enforced` device refuses that
+  plaintext, so it admits a new controller only from the LAN, and the app
+  says to join the same Wi-Fi instead of adding the device. This is a
+  reversible decision: a later version can answer `getDeviceStatus` on the
+  relayer in `enforced` with the public `control` block only.
 - `showPairingQRCode` with `{"show":true,"purpose":"enroll"}` on a `legacy`,
   claimed device displays the invitation QR. This is the migration path for
   2.0.x owners. On a device that is not `legacy` the same request paints the
@@ -780,7 +823,13 @@ showed what goes wrong without them.
 1. **Pin sources.** A device profile is pinned only from:
    - the physical claim QR (first owner, migration);
    - an owner's end-to-end encrypted handoff (ff1-cli pairing);
-   - for `requestAccess` only, the unauthenticated LAN status.
+   - for `requestAccess` only, the unauthenticated LAN status, or off the
+     LAN an `enrolled` device's relayer `getDeviceStatus` reply (an
+     attacker there must hold the topic; the approval code binds either).
+
+   Whenever the scanned QR carries pins, a client MUST compare them with
+   any profile it reads from the network and MUST NOT proceed on a
+   mismatch, whichever path it is on.
 
    The handoff authenticates the receiving client to the sending phone, not
    the sender to the receiver: whoever joins the handoff channel first with
@@ -812,12 +861,14 @@ showed what goes wrong without them.
    device using a network-pinned profile. Its only recovery actions are:
    - scanning the physical claim QR (§5.1, pins from the screen);
    - a user-confirmed Remove of its local grant, after which it is a new
-     controller. Remove always asks, whatever the grant's role.
+     controller. Remove always asks, whatever the grant's role (ff-app
+     Remove and ff1-cli `unpair` alike).
 
    A request refused with `access_revoked` in a reply that verified under the
    pinned `devSig` is not a reset: the controller MAY send `requestAccess`
    with its existing keys under that same pin (§5.2 re-approval keeps its
-   record).
+   record). Its UI MUST then show that it has no access (not "can play"),
+   with Request access and Remove reachable outside any one-time prompt.
 
    The device does not tell a controller its role changed (§5.5 is in
    place, with no notification). A controller learns its new role from the
