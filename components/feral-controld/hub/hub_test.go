@@ -1289,41 +1289,55 @@ func TestHandleStatusV2_SamePayloadContract2(t *testing.T) {
 	assert.Equal(t, v1, v2, "v1 and v2 must serve the identical provider payload")
 }
 
-// TestHandleStatus_ClaimedDeviceStillServesTopicID pins the multi-controller
-// contract: FF1 is controlled by several phones, and a frame whose original
-// phone is lost/wiped must stay pairable from any LAN peer, so a CLAIMED
-// device keeps serving its topic_id (LAN-presence = authorization, matching
-// the BLE-era posture). The claimed flag stays visible so the app can
-// suppress the unprompted app-open claim offer — manual pairing only.
-func TestHandleStatus_ClaimedDeviceStillServesTopicID(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
-	ctx := context.Background()
+// TestHandleStatus_ClaimedDeviceWithholdsTopicID pins feral-file#3551 phase
+// 0: the topic is a bearer credential on ff-relayer, so once the device is
+// claimed neither status route hands it to LAN peers. The key stays present
+// as "" (the pre-multi-phone shape) because the released app maps claimed +
+// empty topic_id to its known alreadyClaimed result; dropping the key or
+// inventing a marker would break that mapping.
+func TestHandleStatus_ClaimedDeviceWithholdsTopicID(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		claimed   bool
+		wantTopic string
+	}{
+		{"claimed withholds the topic", true, ""},
+		{"unclaimed serves the topic for the first claim", false, "topic-xyz"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 
-	mockWS := mocks.NewMockWS(ctrl)
-	mockCmd := mocks.NewMockCommandHandler(ctrl)
-	mockServer := mocks.NewMockHTTPServer(ctrl)
-	mockServer.EXPECT().Handler().Return(http.NewServeMux()).AnyTimes()
+			mockServer := mocks.NewMockHTTPServer(ctrl)
+			mux := http.NewServeMux()
+			mockServer.EXPECT().Handler().Return(mux).AnyTimes()
 
-	provider := stubStatusProvider{info: StatusInfo{
-		DeviceID: "ff1-abc",
-		Claimed:  true,
-		TopicID:  "topic-xyz",
-	}}
-	h := New(ctx, mockWS, mockCmd, provider, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
+			provider := stubStatusProvider{info: StatusInfo{
+				DeviceID: "ff1-abc",
+				Claimed:  tt.claimed,
+				TopicID:  "topic-xyz",
+			}}
+			New(context.Background(), mocks.NewMockWS(ctrl), mocks.NewMockCommandHandler(ctrl),
+				provider, nil, mockServer, wrapper.NewJSON(), logger)
 
-	req := httptest.NewRequest("GET", "http://127.0.0.1:1111/api/status", nil)
-	w := httptest.NewRecorder()
-	h.withMiddleware("status", h.handleStatus)(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	var got map[string]any
-	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
-	assert.Equal(t, true, got["claimed"])
-	assert.Equal(t, "topic-xyz", got["topic_id"],
-		"a claimed device keeps serving its topic — multi-phone pairing "+
-			"and lost-phone recovery depend on it")
+			for _, path := range []string{"/api/status", "/api/v2/status"} {
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111"+path, nil))
+				require.Equal(t, http.StatusOK, w.Code, path)
+				var got map[string]any
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got), path)
+				assert.Equal(t, tt.claimed, got["claimed"], path)
+				topic, present := got["topic_id"]
+				assert.True(t, present, "%s: topic_id key must stay present", path)
+				assert.Equal(t, tt.wantTopic, topic, path)
+				if tt.claimed {
+					assert.NotContains(t, w.Body.String(), "topic-xyz",
+						"%s: a claimed device's topic must appear nowhere in the payload", path)
+				}
+			}
+		})
+	}
 }
 
 // TestHandleStatus_NilProviderReturnsContract verifies a nil provider still

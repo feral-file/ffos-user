@@ -5450,3 +5450,34 @@ func TestExecutor_ScreenRotation_ConcurrentTapsAdvanceTwoSteps(t *testing.T) {
 	assert.Equal(t, "180", stored)
 	assert.Equal(t, []string{"270", "180"}, transforms)
 }
+
+// Review round 4 L6: SSH granted while the device had no owner is revoked
+// when the first owner enrolls (same steps as sshAccess{enabled:false}).
+func TestExecutor_OwnerEnrolledRevokesLegacySsh(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	stopped, done := make(chan struct{}), make(chan struct{})
+	ts.mockJSON.EXPECT().Unmarshal([]byte(`{"enabled":false}`), gomock.Any()).Return(nil)
+	// The authorized_keys removal is the last step.
+	ts.mockOS.EXPECT().IsNotExist(gomock.Any()).DoAndReturn(func(error) bool {
+		close(done)
+		return true
+	})
+	ts.mockExecCmd.EXPECT().CombinedOutput().Return([]byte(""), nil).AnyTimes()
+	ts.mockExec.EXPECT().CommandContext(gomock.Any(), "sudo", "systemctl", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, args ...string) wrapper.ExecCmd {
+			if args[1] == "stop" && args[2] == "sshd.service" {
+				close(stopped)
+			}
+			return ts.mockExecCmd
+		}).AnyTimes()
+
+	ts.executor.(interface{ ControlOwnerEnrolled() }).ControlOwnerEnrolled()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sshd was not stopped after owner enrollment")
+	}
+	<-done
+}
