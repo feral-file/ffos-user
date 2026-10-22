@@ -190,7 +190,7 @@ func (m *mediator) SetControl(g ControlGate) { m.control = g }
 // crashing (ff-app casts error to String; ff1-cli and Play treat a body
 // without ok:false as success).
 func plaintextDenial(cmd commands.Type, code string) map[string]any {
-	msg := "this FF1 requires a signed control envelope for " + string(cmd) + "; update the app"
+	msg := "this FF1 requires a signed control envelope for " + string(cmd) + "; update the Feral File app or ff-cli"
 	switch code {
 	case control.CodeLocked:
 		msg = "this FF1's control state is locked; factory reset it on the device itself to recover"

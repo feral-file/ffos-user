@@ -62,10 +62,9 @@ const (
 	pendingNewInterval = 10
 	// pendingRefreshInterval: a pending ctl may refresh at most this often.
 	pendingRefreshInterval = 10
-	// maxPendingPerLANRemote / maxPendingRelayer are the per-route caps
-	// (§5.2) under the global maxPending.
+	// maxPendingPerLANRemote is the per-LAN-host cap (§5.2) under the
+	// global maxPending.
 	maxPendingPerLANRemote = 1
-	maxPendingRelayer      = 2
 	approvalCodePrefix     = "ff1-approval-code/v1|"
 	// NotificationApprovalRequest is the §5.2 sealed notification type.
 	NotificationApprovalRequest = "controller_approval_request"
@@ -100,8 +99,18 @@ func (e *PublicError) Body() []byte { return PublicErrorBody(e.Code) }
 // HTTPStatus is the LAN status for the code (§4.4).
 func (e *PublicError) HTTPStatus() int { return PublicErrorStatus(e.Code) }
 
+// publicErrorMessages are the hints an out-of-date app or ff-cli prints for
+// a plaintext refusal it has no code for (§4.4). Clients branch on code only.
+var publicErrorMessages = map[string]string{
+	CodeEnrollmentRequired: "this FF1 is secured: update the Feral File app or ff-cli, then ask an owner to add you",
+	CodeEnvelopeRequired:   "this FF1 is secured: update the Feral File app or ff-cli to send signed commands",
+}
+
 // PublicErrorBody renders a public error body; also used by Policy denials.
 func PublicErrorBody(code string) []byte {
+	if msg, ok := publicErrorMessages[code]; ok {
+		return []byte(`{"error":{"code":` + jsonString(code) + `,"message":` + jsonString(msg) + `}}`)
+	}
 	return []byte(`{"error":{"code":` + jsonString(code) + `}}`)
 }
 
@@ -178,7 +187,7 @@ type Notice struct {
 //
 // If Final is non-empty the authority has already produced the complete
 // reply — an encrypted error, or the result of a control-plane operation it
-// executes itself (enroll, requestAccess, approve/revoke/listControllers) —
+// executes itself (enroll, requestAccess, approve/revoke/list/registerController) —
 // and the caller sends Final and executes nothing. Otherwise the request is
 // an admitted op=cmd: its replay window is already durable, the caller runs
 // Command/Request as Principal and answers with Reply.
@@ -292,9 +301,9 @@ type pendingRequest struct {
 	origin      Origin
 }
 
-// Origin is where a request came from. It is NOT authority: it only feeds
-// the per-route pending caps (§5.2), so one LAN host or the relayer cannot
-// hold the whole pending table.
+// Origin is where a request came from. It is NOT authority for commands: it
+// feeds the per-route pending caps (§5.2), keeps requestAccess LAN-only
+// (§5.2) and keeps first-owner enrollment off the device-ID relay (§5.1).
 type Origin struct {
 	Route Route
 	// Remote is the LAN peer's IP (no port); empty when unknown.
@@ -524,12 +533,16 @@ func ApprovalCode(ctl, devSigPin string) string {
 
 // Open runs §3.4 on a compact request. A non-nil error is always a
 // *PublicError. Otherwise see Admission. Transports use OpenFrom.
+//
+// Open is a LAN open from an unknown remote (tests and conformance vectors).
+// Every production caller goes through OpenFrom with its real route.
 func (a *Authority) Open(compact string) (*Admission, error) {
-	return a.OpenFrom(compact, Origin{})
+	return a.OpenFrom(compact, Origin{Route: RouteLAN})
 }
 
-// OpenFrom is Open with the request's origin, used only for the per-route
-// pending caps of requestAccess (§5.2).
+// OpenFrom is Open with the request's origin: requestAccess is LAN-only and
+// capped per route (§5.2), and enroll with inv is refused on RouteRelayV2
+// (§5.1).
 func (a *Authority) OpenFrom(compact string, origin Origin) (*Admission, error) {
 	if err := a.store.LockErr(); err != nil {
 		return nil, publicErr(CodeLocked, err)
@@ -576,7 +589,7 @@ func (a *Authority) OpenFrom(compact string, origin Origin) (*Admission, error) 
 		return a.admitCmd(pre.adm, c, grant, now)
 	case OpEnroll:
 		if c.Enroll.Inv != "" {
-			return a.enrollWithInvitation(pre.adm, c, grant, known, now)
+			return a.enrollWithInvitation(pre.adm, c, grant, known, now, origin)
 		}
 		return a.enrollApproved(pre.adm, c, grant, known, now)
 	default:
@@ -783,14 +796,14 @@ func (a *Authority) admitCmd(adm *Admission, c RequestClaims, g Grant, now int64
 	if a.stateLocked(now) == StateLegacy {
 		return a.refuse(adm, g.Ctl, window, CodeNotApproved)
 	}
-	if !TierOf(c.Cmd).Allows(g.Role) {
+	if !TierOf(c.Cmd).Allows(g.Role) && !isSelfRevoke(c, g) {
 		return a.refuse(adm, g.Ctl, window, CodePermissionDenied)
 	}
 	adm.Command, adm.Request = c.Cmd, c.Req
 	adm.Principal = Principal{ControllerID: g.Ctl, Role: g.Role}
 
 	switch c.Cmd {
-	case CmdApproveController, CmdRevokeController, CmdListControllers:
+	case CmdApproveController, CmdRevokeController, CmdListControllers, CmdRegisterController:
 		return a.controlCommand(adm, c, window, now)
 	}
 	// Step 6: durable before the caller executes anything.
@@ -798,6 +811,21 @@ func (a *Authority) admitCmd(adm *Admission, c RequestClaims, g Grant, now int64
 		return a.persistFailure(adm)
 	}
 	return adm, nil
+}
+
+// isSelfRevoke reports whether c is revokeController naming the signer's own
+// ctl: the one owner-tier form a controller grant may send (§5.5), so a
+// controller that removes an FF1 does not leave an orphan grant behind. The
+// last_owner guard in revoke still applies to an owner revoking itself.
+func isSelfRevoke(c RequestClaims, g Grant) bool {
+	if c.Cmd != CmdRevokeController {
+		return false
+	}
+	m, err := strictObject(c.Req, []string{"ctl"}, nil)
+	if err != nil {
+		return false
+	}
+	return expectString(m, "ctl", g.Ctl) == nil
 }
 
 // controlResult is the outcome of an owner control command executed inside
@@ -811,7 +839,7 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 	var out controlResult
 	// Memory-only side effects (pending table, seq) are applied after the
 	// store commit, so a failed write leaves them untouched too.
-	var approvedPending, deniedPending, revoked string
+	var approvedPending, deniedPending, revoked, registered string
 	err := a.store.Update(func(gs []Grant) ([]Grant, error) {
 		gs, err := setWindow(adm.ctl, window)(gs)
 		if err != nil {
@@ -822,6 +850,8 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 			gs, out, approvedPending = a.approve(gs, adm.ctl, c.Req, now)
 		case CmdRevokeController:
 			gs, out, deniedPending, revoked = a.revoke(gs, c.Req, now)
+		case CmdRegisterController:
+			gs, out, registered = a.register(gs, adm.ctl, c.Req, now)
 		default:
 			out = a.list(gs, adm.ctl, now)
 		}
@@ -837,6 +867,12 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 		return a.persistFailure(adm)
 	}
 	delete(a.pending, approvedPending)
+	if registered != "" {
+		// The owner added these keys directly: a pending request or a
+		// standing deny for the same ctl is moot (§5.6).
+		delete(a.pending, registered)
+		delete(a.denied, registered)
+	}
 	if p, ok := a.pending[deniedPending]; ok {
 		// An owner's deny holds until the request would have expired, so
 		// the requester cannot immediately re-ask and re-notify (§5.2).
@@ -865,28 +901,13 @@ func (a *Authority) approve(gs []Grant, approver string, req json.RawMessage, no
 	if err1 != nil || err2 != nil || !Role(role).valid() {
 		return gs, controlResult{failure: "invalid_request"}, ""
 	}
-	var expiresAt int64
-	if _, ok := m["expiresAt"]; ok {
-		v, err := uintMember(m, "expiresAt")
-		// An owner grant cannot expire: the last owner silently lapsing
-		// would turn an owned device back into a legacy one.
-		if err != nil || int64(v) <= now || Role(role) == RoleOwner { //nolint:gosec // G115: v <= 2^53-1.
-			return gs, controlResult{failure: "invalid_request"}, ""
-		}
-		expiresAt = int64(v) //nolint:gosec // G115: v <= 2^53-1.
+	expiresAt, ok := grantExpiry(m, Role(role), now)
+	if !ok {
+		return gs, controlResult{failure: "invalid_request"}, ""
 	}
 	existing := indexOf(gs, ctl)
-	// Demoting an owner must leave another active owner (§5.5).
-	if existing >= 0 && gs[existing].Active(now) && gs[existing].Role == RoleOwner && Role(role) != RoleOwner {
-		owners := 0
-		for _, g := range gs {
-			if g.Role == RoleOwner && g.Active(now) && g.Ctl != ctl {
-				owners++
-			}
-		}
-		if owners == 0 {
-			return gs, controlResult{failure: "last_owner"}, ""
-		}
+	if demotesLastOwner(gs, ctl, Role(role), now) {
+		return gs, controlResult{failure: "last_owner"}, ""
 	}
 	p, ok := a.pending[ctl]
 	if !ok {
@@ -902,34 +923,156 @@ func (a *Authority) approve(gs []Grant, approver string, req json.RawMessage, no
 	if err != nil {
 		return gs, controlResult{failure: "internal_error"}, ""
 	}
-	active := 0
-	for _, g := range gs {
-		if g.Active(now) && g.Ctl != ctl {
-			active++
-		}
-	}
-	if active >= maxActiveGrants {
+	if activeOthers(gs, ctl, now) >= maxActiveGrants {
 		return gs, controlResult{failure: "too_many_controllers"}, ""
 	}
 	g := Grant{Ctl: ctl, Sig: p.enroll.Sig, Enc: p.enroll.Enc, Role: Role(role), Label: p.enroll.Label,
 		Platform: p.enroll.Platform, CreatedAt: now, ApprovedBy: approver, ExpiresAt: expiresAt, NK: [32]byte(nk),
 		Window: p.window}
-	if i := indexOf(gs, ctl); i >= 0 {
-		// Re-approval of a revoked (or re-approval of an active) record:
-		// the window is the record's, never reset (§6).
-		g.CreatedAt, g.Window = gs[i].CreatedAt, gs[i].Window
-		gs[i] = g
-	} else {
-		if len(gs) >= maxGrantRecords {
-			j := evictable(gs, now)
-			if j < 0 {
-				return gs, controlResult{failure: "too_many_controllers"}, ""
-			}
-			gs = append(gs[:j], gs[j+1:]...)
-		}
-		gs = append(gs, g)
+	gs, ok = putGrant(gs, g, now)
+	if !ok {
+		return gs, controlResult{failure: "too_many_controllers"}, ""
 	}
 	return gs, controlResult{res: struct{}{}}, ctl
+}
+
+// grantExpiry reads the optional expiresAt of approveController and
+// registerController. An owner grant cannot expire: the last owner silently
+// lapsing would turn an owned device back into a legacy one.
+func grantExpiry(m map[string]json.RawMessage, role Role, now int64) (int64, bool) {
+	if _, ok := m["expiresAt"]; !ok {
+		return 0, true
+	}
+	v, err := uintMember(m, "expiresAt")
+	if err != nil || int64(v) <= now || role == RoleOwner { //nolint:gosec // G115: v <= 2^53-1.
+		return 0, false
+	}
+	return int64(v), true //nolint:gosec // G115: v <= 2^53-1.
+}
+
+// demotesLastOwner reports whether giving ctl role would leave no other
+// active owner (§5.5).
+func demotesLastOwner(gs []Grant, ctl string, role Role, now int64) bool {
+	i := indexOf(gs, ctl)
+	if i < 0 || !gs[i].Active(now) || gs[i].Role != RoleOwner || role == RoleOwner {
+		return false
+	}
+	for _, g := range gs {
+		if g.Role == RoleOwner && g.Active(now) && g.Ctl != ctl {
+			return false
+		}
+	}
+	return true
+}
+
+// activeOthers counts the active grants other than ctl's.
+func activeOthers(gs []Grant, ctl string, now int64) int {
+	n := 0
+	for _, g := range gs {
+		if g.Active(now) && g.Ctl != ctl {
+			n++
+		}
+	}
+	return n
+}
+
+// putGrant stores g, which gains authority now. An existing record (revoked
+// or expired, or re-approved while active) keeps its createdAt and replay
+// window, never reset (§6). A new record may evict the longest-inactive one
+// at the record cap; false means there is no room.
+func putGrant(gs []Grant, g Grant, now int64) ([]Grant, bool) {
+	if i := indexOf(gs, g.Ctl); i >= 0 {
+		g.CreatedAt, g.Window = gs[i].CreatedAt, gs[i].Window
+		gs[i] = g
+		return gs, true
+	}
+	if len(gs) >= maxGrantRecords {
+		j := evictable(gs, now)
+		if j < 0 {
+			return gs, false
+		}
+		gs = append(gs[:j], gs[j+1:]...)
+	}
+	return append(gs, g), true
+}
+
+// registerResult is registerController's res: the ctl the device derived
+// from the scanned sig key, so the owner app can check it registered the
+// keys it scanned.
+type registerResult struct {
+	Ctl       string `json:"ctl"`
+	Role      Role   `json:"role"`
+	ExpiresAt int64  `json:"expiresAt,omitempty"`
+}
+
+// register is registerController (§5.6): an owner adds a controller from the
+// keys it scanned off the controller's own screen. It is idempotent per ctl:
+//   - an active grant keeps its keys, nk, window and createdAt and takes the
+//     new role, expiry and label;
+//   - a revoked or expired record is reactivated with a fresh nk, keeping
+//     its window and createdAt;
+//   - a record whose enc differs is refused: ctl = thumb(sig) pins sig, and
+//     a second enc for the same sig is never silently swapped in.
+//
+// It returns the registered ctl for the caller's post-commit cleanup.
+func (a *Authority) register(gs []Grant, approver string, req json.RawMessage, now int64) ([]Grant, controlResult, string) {
+	bad := controlResult{failure: "invalid_request"}
+	m, err := strictObject(req, []string{"sig", "enc", "label", "platform", "role"}, []string{"expiresAt"})
+	if err != nil {
+		return gs, bad, ""
+	}
+	sig, err := ParsePublicJWK(m["sig"])
+	if err != nil {
+		return gs, bad, ""
+	}
+	enc, err := ParsePublicJWK(m["enc"])
+	if err != nil {
+		return gs, bad, ""
+	}
+	label, err1 := stringMember(m, "label")
+	platform, err2 := stringMember(m, "platform")
+	role, err3 := stringMember(m, "role")
+	if err1 != nil || err2 != nil || err3 != nil || !validLabel(label) || !slices.Contains(validPlatforms, platform) ||
+		!Role(role).valid() {
+		return gs, bad, ""
+	}
+	expiresAt, ok := grantExpiry(m, Role(role), now)
+	if !ok {
+		return gs, bad, ""
+	}
+	ctl := sig.Thumbprint()
+	res := controlResult{res: registerResult{Ctl: ctl, Role: Role(role), ExpiresAt: expiresAt}}
+	i := indexOf(gs, ctl)
+	if i >= 0 && !gs[i].Enc.Equal(enc) {
+		return gs, bad, ""
+	}
+	if demotesLastOwner(gs, ctl, Role(role), now) {
+		return gs, controlResult{failure: "last_owner"}, ""
+	}
+	if i >= 0 && gs[i].Active(now) {
+		gs[i].Role, gs[i].ExpiresAt, gs[i].ApprovedBy = Role(role), expiresAt, approver
+		gs[i].Label, gs[i].Platform = label, platform
+		return gs, res, ctl
+	}
+	if activeOthers(gs, ctl, now) >= maxActiveGrants {
+		return gs, controlResult{failure: "too_many_controllers"}, ""
+	}
+	nk, err := a.randBytes(32)
+	if err != nil {
+		return gs, controlResult{failure: "internal_error"}, ""
+	}
+	g := Grant{Ctl: ctl, Sig: sig, Enc: enc, Role: Role(role), Label: label, Platform: platform, CreatedAt: now,
+		ApprovedBy: approver, ExpiresAt: expiresAt, NK: [32]byte(nk)}
+	if p, ok := a.pending[ctl]; ok && i < 0 {
+		// The same keys asked over the LAN first: the ctrs that request
+		// spent stay spent (§6).
+		g.Window = p.window
+	}
+	gs, ok = putGrant(gs, g, now)
+	if !ok {
+		return gs, controlResult{failure: "too_many_controllers"}, ""
+	}
+	return gs, res, ctl
 }
 
 // recordRetention is how long an inactive record must keep its replay
@@ -1115,28 +1258,18 @@ func ParseCarrier(raw []byte) (string, error) {
 // pendingCapped reports whether a NEW pending request from o would exceed a
 // per-route cap (§5.2). The global cap and interval are checked separately.
 func (a *Authority) pendingCapped(o Origin, ctl string) bool {
-	if !o.Known {
+	// Only LAN requests reach the table (requestAccess is LAN-only, §5.2):
+	// one LAN host holds at most maxPendingPerLANRemote of it.
+	if !o.Known || o.Remote == "" {
 		return false
 	}
-	// Every non-LAN route (the legacy relayer and the v2 relay) shares one
-	// relay bucket: neither identifies a source, so a second relay route
-	// must not double the remote share of the global cap.
-	lan, relayer := 0, 0
+	n := 0
 	for _, p := range a.pending {
-		if p.ctl == ctl || !p.origin.Known {
-			continue
-		}
-		switch {
-		case p.origin.Route == RouteLAN && o.Route == RouteLAN && p.origin.Remote == o.Remote && o.Remote != "":
-			lan++
-		case p.origin.Route != RouteLAN:
-			relayer++
+		if p.ctl != ctl && p.origin.Known && p.origin.Remote == o.Remote {
+			n++
 		}
 	}
-	if o.Route == RouteLAN {
-		return lan >= maxPendingPerLANRemote
-	}
-	return relayer >= maxPendingRelayer
+	return n >= maxPendingPerLANRemote
 }
 
 type enrollResult struct {
@@ -1147,7 +1280,7 @@ type enrollResult struct {
 }
 
 // enrollWithInvitation is §5.1: the first owner.
-func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Grant, known bool, now int64) (*Admission, error) {
+func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Grant, known bool, now int64, origin Origin) (*Admission, error) {
 	window := Window{}
 	p, pending := a.pending[c.Ctl]
 	switch {
@@ -1174,7 +1307,12 @@ func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Gran
 		}
 		return a.fail(adm, CodeInvitationInvalid, nil)
 	}
-	if a.stateLocked(now) != StateLegacy {
+	if a.stateLocked(now) != StateLegacy || origin.Route == RouteRelayV2 {
+		// The device-ID relay is open to anyone who knows the public ID
+		// and has no plaintext profile read, so a first owner never
+		// enrolls over it; the LAN and the legacy relayer keep the
+		// screen-QR migration path (§5.1). Refused before the invitation
+		// is compared, so v2 is no oracle for it.
 		return invalid()
 	}
 	if a.inv == nil || now >= a.inv.expiresAt {
@@ -1292,6 +1430,13 @@ func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, know
 			p.window = p.window.Accept(c.Ctr)
 		}
 		return a.fail(adm, code, nil)
+	}
+	if origin.Route != RouteLAN {
+		// requestAccess is a LAN-only fallback (§5.2): off the LAN a
+		// controller is added by an owner (registerController, §5.6), and
+		// a relay requester's only pins would be the ones it asks to be
+		// approved under.
+		return refuse(CodeNotApproved)
 	}
 	if a.stateLocked(now) == StateLegacy {
 		// No owner exists to approve; the first controller uses the
