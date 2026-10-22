@@ -24,6 +24,11 @@ type CDPConfig struct {
 	Endpoint string `json:"endpoint"`
 }
 
+// RelayV2Config is optional and never replaces legacy relayer configuration.
+type RelayV2Config struct {
+	Endpoint string `json:"endpoint"`
+}
+
 type RelayerConfig struct {
 	Endpoint string `json:"endpoint"`
 	APIKey   string `json:"apiKey"`
@@ -225,6 +230,7 @@ type NetlogConfig struct {
 // Configuration for all components
 type Config struct {
 	CDPConfig         *CDPConfig         `json:"cdp"`
+	RelayV2           *RelayV2Config     `json:"relayV2,omitempty"`
 	RelayerConfig     *RelayerConfig     `json:"relayer"`
 	MintPairingConfig *MintPairingConfig `json:"mintPairing"`
 	// LogStreaming is decoded permissively because telemetry is optional and

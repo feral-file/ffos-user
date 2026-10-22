@@ -455,3 +455,25 @@ func TestPurgeStalePlaintextOnEnforcedBoot(t *testing.T) {
 		}
 	}
 }
+
+// Producer readiness must not suppress private v2 updates during legacy outage.
+func TestSealingRelayerV2OnlyReadiness(t *testing.T) {
+	a, _ := newAuthority(t, false)
+	legacy := &toggleRelayer{connected: make(chan struct{})}
+	wrapped := controlgate.WrapRelayer(legacy, a, zap.NewNop())
+	live := true
+	wrapped.V2Connected = func() bool { return live }
+	called := false
+	wrapped.NotifyV2 = func(_ context.Context, typ string, _ any) { called = typ == "device_status" }
+	if !wrapped.IsConnected() {
+		t.Fatal("v2 readiness suppressed by legacy outage")
+	}
+	_ = wrapped.Send(context.Background(), map[string]any{"type": "notification", "notification_type": "device_status", "message": map[string]any{"ok": true}})
+	if !called {
+		t.Fatal("producer notification did not reach v2 adapter")
+	}
+	live = false
+	if wrapped.IsConnected() {
+		t.Fatal("disconnected carriers reported ready")
+	}
+}

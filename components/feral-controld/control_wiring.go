@@ -23,7 +23,9 @@ import (
 // every transport is wired exactly as before: no authority, no wrappers, no
 // policy.
 type controlWiring struct {
-	auth *control.Authority
+	auth   *control.Authority
+	v2     relayer.Relayer
+	v2Gate *controlgate.RelayV2
 }
 
 // unknownDeviceID stands in when the hostname cannot be read but control
@@ -89,7 +91,14 @@ func (c *controlWiring) notificationHandles(r relayer.Relayer, w ws.WS, logger *
 	if c == nil {
 		return r, w
 	}
-	return controlgate.WrapRelayer(r, c.auth, logger), controlgate.WrapWS(w, c.auth, logger)
+	wrapped := controlgate.WrapRelayer(r, c.auth, logger)
+	wrapped.V2Connected = func() bool { return c.v2 != nil && c.v2.IsConnected() }
+	wrapped.NotifyV2 = func(ctx context.Context, typ string, body any) {
+		if c.v2Gate != nil {
+			c.v2Gate.Notify(ctx, typ, body, "")
+		}
+	}
+	return wrapped, controlgate.WrapWS(w, c.auth, logger)
 }
 
 // wire plugs the gate into the hub, the mediator and the executor.
@@ -102,7 +111,24 @@ func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler,
 	// keeps per topic (§9, §13). Background, best-effort, raw relayer.
 	go controlgate.PurgeStalePlaintext(ctx, c.auth, r, logger, 2*time.Second, 10*time.Minute)
 	gate := controlgate.New(c.auth, handler, logger)
-	gate.SetPublisher(controlgate.NewPublisher(r, w, logger))
+	publisher := controlgate.NewPublisher(r, w, logger)
+	gate.SetPublisher(publisher)
+	if c.v2 != nil {
+		v2Gate := controlgate.New(c.auth, handler, logger)
+		c.v2Gate = controlgate.NewRelayV2(v2Gate)
+		v2Gate.SetPublisher(publisher)
+		publisher.SetRelayV2(c.v2Gate)
+		c.v2.OnRelayerMessage(c.v2Gate.Handle)
+		if lifecycle, ok := c.v2.(interface{ SetPeerDisconnectHandler(func(relayer.Peer)) }); ok {
+			lifecycle.SetPeerDisconnectHandler(c.v2Gate.Disconnected)
+		}
+		go func() {
+			if err := c.v2.RetryableConnect(ctx); err != nil && ctx.Err() == nil {
+				logger.Warn("V2 carrier connection failed", zap.Error(err))
+			}
+		}()
+		go func() { <-ctx.Done(); c.v2.Close() }()
+	}
 	if sink, ok := h.(interface{ SetControl(hub.ControlGate) }); ok {
 		sink.SetControl(gate)
 	} else {

@@ -119,3 +119,26 @@ func TestControlWiring_UnreadableHostnameWithStateFailsClosed(t *testing.T) {
 		t.Fatal("state on disk but no protocol because the hostname is unreadable")
 	}
 }
+
+func TestV2EligibilityUsesActualAuthorityAndExplicitConfig(t *testing.T) {
+	w := wiringFor(t, config.ControlConfig{}, ownedState(t))
+	cfg := &config.RelayV2Config{Endpoint: "wss://relay.test"}
+	if !relayV2Eligible(cfg, w, "FF1-SKYZ2E3A") {
+		t.Fatal("persisted authority with config off must dial v2")
+	}
+	for _, tc := range []struct {
+		cfg       *config.RelayV2Config
+		authority *controlWiring
+		id        string
+	}{
+		{nil, w, "FF1-SKYZ2E3A"},
+		{&config.RelayV2Config{}, w, "FF1-SKYZ2E3A"},
+		{cfg, nil, "FF1-SKYZ2E3A"},
+		{cfg, w, "FF1"},
+		{cfg, w, unknownDeviceID},
+	} {
+		if relayV2Eligible(tc.cfg, tc.authority, tc.id) {
+			t.Fatalf("ineligible v2 dial: %+v", tc)
+		}
+	}
+}

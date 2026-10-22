@@ -37,6 +37,7 @@ type Gate struct {
 
 	publisher       *Publisher
 	onOwnerEnrolled func()
+	onAdmitted      func(context.Context, string)
 }
 
 // New builds a gate over auth that executes admitted commands on handler
@@ -133,6 +134,11 @@ func (g *Gate) HandleEnvelope(ctx context.Context, raw json.RawMessage, origin c
 			zap.String("controller", adm.Signer), zap.String("role", string(adm.SignerRole)),
 			zap.String("code", adm.Code))
 		return &Wire{V: 1, JWE: adm.Final}, nil
+	}
+	// Execute is true only after the authority durably accepts the window.
+	// Signer is audit-only and must never establish a notification binding.
+	if g.onAdmitted != nil {
+		g.onAdmitted(ctx, adm.Principal.ControllerID)
 	}
 	g.logger.Info("Control request admitted",
 		zap.String("command", adm.Command), zap.String("controller", adm.Principal.ControllerID),

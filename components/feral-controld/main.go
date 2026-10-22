@@ -218,7 +218,7 @@ func main() {
 		dbus.NAME,
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
-		})
+		}, config.RelayV2)
 	if streamErr == nil {
 		if sink, ok := app.Relayer.(interface{ SetBeforeExit(func()) }); ok {
 			sink.SetBeforeExit(func() {
@@ -953,6 +953,7 @@ func initializeApp(
 	controlConfig config.ControlConfig,
 	dbusName string,
 	dbusOpts []dbus_v5.MatchOption,
+	v2Config ...*config.RelayV2Config,
 ) *app {
 	// Basic components. This is the daemon-lifetime context: it flows into every
 	// long-lived component built below, and main cancels it (app.Cancel) on
@@ -1012,9 +1013,12 @@ func initializeApp(
 	})
 	wsHandler := ws.NewWSHandler(context, wsUpgrader, clock, logger)
 
-	// Control protocol (feral-file#3551): nil unless control.enabled. The
+	// Control protocol: enabled by config OR forced on by persisted state. The
 	// notification producers get sealing handles when it is on (§9).
 	controlWire := newControlWiring(controlConfig, deviceIDFromHostname(), control.DefaultDir, &control.OSFS{}, logger)
+	if len(v2Config) > 0 && relayV2Eligible(v2Config[0], controlWire, deviceIDFromHostname()) {
+		controlWire.v2 = newRelayV2(v2Config[0].Endpoint, deviceIDFromHostname(), webSocketDialer, randomizer, clock, os, json, logger)
+	}
 	notifyRelayer, notifyWS := controlWire.notificationHandles(relayer, wsHandler, logger)
 
 	// StatusPoller
