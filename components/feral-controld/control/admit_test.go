@@ -433,7 +433,7 @@ func TestPublicErrors(t *testing.T) {
 	d.expectPublic(sealPayload(t, other, owner.sig, payload), CodeBadEnvelope)
 
 	pe := &PublicError{Code: CodeEnvelopeRequired}
-	if pe.HTTPStatus() != 403 || string(pe.Body()) != `{"error":{"code":"envelope_required"}}` {
+	if pe.HTTPStatus() != 403 || string(pe.Body()) != `{"error":{"code":"envelope_required","message":"this FF1 needs signed requests: update the Feral File app or ff-cli"}}` {
 		t.Fatalf("%d %s", pe.HTTPStatus(), pe.Body())
 	}
 	if PublicErrorStatus(CodeBadSignature) != 401 {
@@ -684,19 +684,12 @@ func TestPendingPerRouteCaps(t *testing.T) {
 	if r := open(newTestCtl(t, "c"), Origin{Route: RouteLAN, Remote: "192.168.1.10", Known: true}); !r.OK {
 		t.Fatalf("another LAN host: %+v", r)
 	}
-	rel := Origin{Route: RouteRelayer, Known: true}
-	for i, want := range []bool{true, true, false} {
-		d.advance(pendingNewInterval)
-		if r := open(newTestCtl(t, "r"+itoa(int64(i))), rel); r.OK != want {
-			t.Fatalf("relayer request %d: %+v", i, r)
-		}
-	}
 }
 
-// The legacy relayer and the v2 relay share one relay bucket, so adding a
-// relay route never doubles the remote share of the global cap.
-func TestPendingRelayBucketSharedByV2(t *testing.T) {
-	d, _, _ := ownerDevice(t)
+// requestAccess is a LAN-only fallback (§5.2): the legacy relayer and the v2
+// relay refuse it with not_approved and spend the ctr of a known record.
+func TestRequestAccessIsLANOnly(t *testing.T) {
+	d, owner, ctl := ownerDevice(t)
 	open := func(c *testCtl, o Origin) ReplyClaims {
 		rc := d.claims(c, OpRequestAccess)
 		rc.Enroll = c.enroll("")
@@ -706,18 +699,29 @@ func TestPendingRelayBucketSharedByV2(t *testing.T) {
 		}
 		return d.final(adm, rc)
 	}
-	rel := Origin{Route: RouteRelayer, Known: true}
-	v2 := Origin{Route: RouteRelayV2, Known: true}
-	// Two pending, under the global cap of 4: the third relay request is
-	// refused by the shared bucket, whichever relay route it uses.
-	for i, tc := range []struct {
-		o    Origin
-		want bool
-	}{{rel, true}, {v2, true}, {v2, false}, {rel, false}} {
+	for _, route := range []Route{RouteRelayer, RouteRelayV2} {
 		d.advance(pendingNewInterval)
-		if r := open(newTestCtl(t, "s"+itoa(int64(i))), tc.o); r.OK != tc.want {
-			t.Fatalf("relay request %d (route %d): %+v", i, tc.o.Route, r)
+		if r := open(newTestCtl(t, "relay"+itoa(int64(route))), Origin{Route: route, Known: true}); r.Code != CodeNotApproved {
+			t.Fatalf("route %d: %+v", route, r)
 		}
+	}
+	if n := len(d.a.pending); n != 0 {
+		t.Fatalf("a relay request entered the pending table (%d)", n)
+	}
+	// An active grant still learns it is approved on a relay (the
+	// first-owner recovery path after internal_error).
+	if r := open(ctl, Origin{Route: RouteRelayer, Known: true}); !r.OK || !strings.Contains(string(r.Res), `"approved"`) {
+		t.Fatalf("active grant on the relayer: %+v", r)
+	}
+	// A revoked record asking over a relay is refused, and its ctr is
+	// spent.
+	d.expectOK(owner, d.cmdClaims(owner, CmdRevokeController, `{"ctl":"`+ctl.ctl+`"}`))
+	if r := open(ctl, Origin{Route: RouteRelayer, Known: true}); r.Code != CodeNotApproved {
+		t.Fatalf("known record on the relayer: %+v", r)
+	}
+	g, _ := d.a.Store().Grant(ctl.ctl)
+	if g.Window.Hi != ctl.ctr {
+		t.Fatalf("refused relay requestAccess did not spend ctr: hi=%d ctr=%d", g.Window.Hi, ctl.ctr)
 	}
 }
 

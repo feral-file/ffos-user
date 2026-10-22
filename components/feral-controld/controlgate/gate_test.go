@@ -162,7 +162,7 @@ func TestPublishAdmissionDetachesRequestContext(t *testing.T) {
 	cli := newClient(t, "cli", *a.Status().Profile)
 	reqCtx, cancel := context.WithCancel(context.WithValue(context.Background(), requestSourceKey{}, "requester-peer"))
 	s := cli.build(control.OpRequestAccess, "", "", "")
-	if _, perr := g.HandleEnvelope(reqCtx, s.body, control.Origin{Route: control.RouteRelayer, Known: true}); perr != nil {
+	if _, perr := g.HandleEnvelope(reqCtx, s.body, control.Origin{Route: control.RouteLAN, Remote: "192.168.1.20", Known: true}); perr != nil {
 		t.Fatal(perr)
 	}
 	cancel()

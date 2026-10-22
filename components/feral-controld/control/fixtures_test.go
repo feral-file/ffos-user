@@ -116,6 +116,14 @@ func TestPositiveFixtures(t *testing.T) {
 	devSig := pubJWK(t, k.Device.Sig)
 	for _, f := range loadFixtures(t, "positive") {
 		t.Run(f.Name, func(t *testing.T) {
+			switch f.Kind {
+			case "controllerQR":
+				checkControllerQR(t, "positive", f.Name)
+				return
+			case "registration":
+				checkRegistration(t, "positive", f.Name)
+				return
+			}
 			if f.Kind == "approvalCode" {
 				b, _ := os.ReadFile(filepath.Join(fixtureDir, "positive", f.Name+".json")) //nolint:gosec // G304: fixture dir.
 				var v fixturegen.ApprovalCodes
@@ -236,6 +244,12 @@ func TestNegativeFixtures(t *testing.T) {
 					t.Fatal("client accepted a notification it must reject")
 				}
 				return
+			case "controllerQR":
+				checkControllerQR(t, "negative", f.Name)
+				return
+			case "registration":
+				checkRegistration(t, "negative", f.Name)
+				return
 			}
 			a, _, err := fixturegen.BuildDevice(k, *f.Setup)
 			if err != nil {
@@ -266,7 +280,8 @@ func TestNegativeFixtures(t *testing.T) {
 	for _, name := range []string{"tampered-tag", "wrong-jwe-kid", "wrong-dev", "wrong-gen", "expired", "replayed-ctr",
 		"out-of-window-ctr", "der-signature", "jwe-extra-header-member", "jws-extra-header-member", "jws-alg-none",
 		"jwe-alg-rsa", "jws-alg-rs256", "oversize", "reply-wrong-rk", "revoked-controller", "unknown-kid",
-		"lifetime-over-120", "ctl-not-kid"} {
+		"lifetime-over-120", "ctl-not-kid", "controller-qr", "registration-wrong-ps", "registration-wrong-channel",
+		"registration-wrong-ctl", "registerController-from-controller", "revoke-other-from-controller"} {
 		if !seen[name] {
 			t.Errorf("negative fixture %s missing", name)
 		}

@@ -204,7 +204,8 @@ written).
   controller retries with a new `ctr`. (Both released-branch clients
   currently surface it to the user instead of retrying, except ff1-cli on
   the Play path.)
-- For a control-plane operation (enroll, requestAccess, approve, revoke),
+- For a control-plane operation (enroll, requestAccess, approve, register,
+  revoke),
   the write may have been **applied** (renamed into place but its directory
   fsync failed); the device's memory follows it. The client MUST re-list
   (`listControllers`) or re-enroll, which is idempotent, before retrying,
@@ -217,7 +218,12 @@ written).
 
 These are sent when no reply key can be trusted. The body is
 `{"error":{"code":"<code>"}}` with one of these codes, and never any other
-detail (a cause string would make the device an oracle):
+detail (a cause string would make the device an oracle). The one exception
+is a fixed, code-determined `message` on the two plaintext refusals,
+`enrollment_required` and `envelope_required`, telling an out-of-date app or
+ff-cli to update: `{"error":{"code":"…","message":"this FF1 needs signed
+requests: update the Feral File app or ff-cli"}}`. Clients branch on `code`
+only and MUST accept the extra member.
 
 | Code | When |
 |---|---|
@@ -262,6 +268,13 @@ The first owner.
 
 - Valid only in state `legacy` (no active owner grant); otherwise the reply is
   `invitation_invalid`.
+- Refused with `invitation_invalid` on the device-ID relay (`RouteRelayV2`),
+  before the invitation is compared, so v2 is no oracle for it. The LAN and
+  the legacy relayer keep it: the on-screen invitation is the security, and
+  the legacy relayer is how a claimed 2.0.x device off the owner's LAN (or
+  on client-isolated Wi-Fi) is migrated ("Secure this FF1", then scan the
+  screen). On v2 a first owner has no way to seal anyway: there is no
+  plaintext profile read (§7.2).
 - `inv` is the current invitation: `b64u(16 random bytes)`, single use, 10-minute
   life, compared in constant time. There is **no attempt limit**: 128 random
   bits need none, and voiding the invitation after some number of misses
@@ -291,17 +304,24 @@ The first owner.
   spent anyway (§4.3). The first owner retries `enroll` with a new `ctr`,
   with or without the same `inv`: from the `ctl` that holds the
   invitation-approved grant with the same `enc` either form returns that
-  grant (§5.3); anyone else gets `invitation_invalid`. Neither client
-  retries automatically yet; ff-app recovers through Request access.
+  grant (§5.3); anyone else gets `invitation_invalid`. A client recovers
+  with that idempotent `enroll`.
 
 ### 5.2 `op=requestAccess`
 
-A later controller asks for access.
+A later controller asks for access. **This is a LAN-only fallback**: the
+default way to add a controller is owner-initiated registration (§5.6), and
+clients no longer offer `requestAccess`.
 
 - In state `legacy` the reply is `not_approved`: there is no owner to approve,
   and the first controller uses the invitation instead.
 - If `ctl` already holds an active grant: `ok:true`,
   `res` = `{"status":"approved","role":role}`, no notification.
+- Off the LAN (the legacy relayer, the v2 relay) a `ctl` without an active
+  grant gets `not_approved` and creates or refreshes nothing; the `ctr` of a
+  known record is spent. Off the LAN a requester's only pins would come from
+  the reply path it is asking to be approved over, so the approval code
+  (§5.4) would bind nothing.
 - If an owner denied `ctl` (§5.5 `revokeController` on its pending request),
   the reply is `not_approved` until the moment the denied request would have
   expired.
@@ -310,8 +330,8 @@ A later controller asks for access.
   (§3.4 step 6):
   - At most 4 pending requests in total.
   - At most 1 **new** request per 10 s from any source (a refresh is not new).
-  - Per route, counted over the other pending requests: at most 1 pending
-    request per LAN source, and at most 2 from the relayer. A LAN source is
+  - Counted over the other pending requests: at most 1 pending request per
+    LAN source. A LAN source is
     the peer's IPv4 address (IPv4-mapped included), the /64 of a global or
     ULA IPv6 address (one host can hold a whole /64), or, for every
     link-local IPv6 address (`fe80::/10`, any zone), one single source. The
@@ -324,8 +344,7 @@ A later controller asks for access.
     more than 10 minutes from its creation, however often it refreshes.
     A pre-approval `enroll` does not refresh it: a client that waits longer
     than 5 minutes for approval MUST re-send `requestAccess` before
-    `expiresAt` (ff1-cli and ff-app re-send about every 4 minutes and ignore
-    a `rate_limited` refresh).
+    `expiresAt`, ignoring a `rate_limited` refresh.
   - Pending requests and denials are held in memory only. A restart drops
     them and the requester asks again.
   - Residual: an attacker who controls many LAN source prefixes can still
@@ -389,6 +408,7 @@ never reach the command router):
 |---|---|---|
 | `approveController` | `{"ctl","role":"owner"|"controller","expiresAt"?}` | `{}` |
 | `revokeController` | `{"ctl"}` | `{}` |
+| `registerController` | `{"sig":JWK,"enc":JWK,"label","platform","role":"owner"\|"controller","expiresAt"?}` | `{"ctl","role","expiresAt"?}` |
 | `listControllers` | `{}` | `{"controllers":[{"ctl","role","label","platform","createdAt","expiresAt"?,"revokedAt"?,"self":bool}],"pending":[{"ctl","label","platform","code","expiresAt"}]}` |
 
 - `approveController` with a live pending request for `ctl` grants it: the
@@ -416,11 +436,140 @@ never reach the command router):
   An expired grant is revoked durably (it gets `revokedAt`, so a wall-clock
   step back cannot revive it). Otherwise the grant must be active
   (`not_found`).
+- `registerController` is owner-initiated registration (§5.6.4).
 - `listControllers` lists every record, revoked ones included.
 
 An owner cannot revoke the last active owner (`last_owner`). That would make
 the device unowned without a reset. An owner may revoke itself while another
 active owner exists.
+
+**Self-revoke.** `revokeController` whose `ctl` is the signer's own is the
+one owner-tier form a **controller** grant may send: a controller that
+removes an FF1 (app Remove, `ff-cli device unpair`) revokes itself first,
+best effort, so no orphan grant is left behind. Any other `ctl` from a
+controller is `permission_denied`. A sole owner revoking itself still fails
+`last_owner`.
+
+### 5.6 Owner-initiated registration
+
+The default way to add a controller (a second phone, ff-cli, a browser): the
+controller shows its keys, and an owner who scans them registers them on the
+FF1. Like adding an SSH key, nothing is requested from the device by the
+newcomer and no approval code is compared.
+
+1. The controller generates its `sig`/`enc` keys, an ephemeral P-256
+   **minter key**, a 16-byte pairing secret `ps`, and a pairing
+   `channelId` (`crypto.randomUUID()`). It joins that channel on the relay
+   carrier (`/v2/channels/{channelId}/connections`) and shows the
+   controller QR (§5.6.1) on its screen or terminal, plus the same string
+   for pasting.
+2. The owner's app scans it, picks the FF1, the role and an optional expiry,
+   and sends `registerController` (§5.6.4) under its owner grant.
+3. Only after a **verified** `ok:true` reply whose `res.ctl` is
+   `thumb(QR sig)` does the owner's app join the channel and send the sealed
+   result (§5.6.2) to the controller's connection. If the owner declines, it
+   sends `outcome:"rejected"`.
+4. The controller opens and checks the result (§5.6.3), pins `profile`, and
+   sends a protected `op=enroll` without `inv` (§5.3), which returns its
+   role, `nk` and expiry. It shows the FF1 as ready only after its own
+   verified enroll.
+5. The controller enforces its own timeout: the relay keeps nothing. A
+   timeout means "not completed", never "rejected"; the grant, if the owner
+   registered one, stays and a later retry with the same keys completes it.
+
+A leaked QR lets others join the channel, see ciphertext or disrupt the
+exchange, but not forge a result: forging needs `ps`, which is only in the
+QR and inside the ciphertext. A QR image forwarded to a remote owner through
+a chat app carries `ps` through that app; that is the accepted residual
+(§13).
+
+#### 5.6.1 Controller QR
+
+`ff1-ctl:1|<channelId>|<minterKey>|<sig.x>|<sig.y>|<enc.x>|<enc.y>|<ps>|<platform>|<label>`
+
+- `channelId`: 16–64 characters of `[A-Za-z0-9_-]` (a UUID fits). The
+  relay accepts 1–128, so the controller generating it and the owner
+  parsing it both check this range.
+- `minterKey`: `b64u` of the 65-byte uncompressed SEC 1 point
+  (`0x04‖X‖Y`) of the minter public key. Compressed or off-curve points are
+  invalid.
+- `sig.x` … `enc.y`: the JWK `x`/`y` coordinates (`b64u` of 32 bytes); each
+  pair MUST be a point on P-256.
+- `ps`: `b64u` of exactly 16 bytes, unpadded.
+- `platform`: as in §5.
+- `label`: the rest of the string, as in §5 (1–64 characters, no control or
+  formatting characters). It is last so it may contain `|`: a parser splits
+  the part after the prefix **at most 9 times**.
+- A parser MUST reject anything else. The QR is about 350 bytes; at error
+  correction level H it is QR version 20 or below.
+
+#### 5.6.2 Sealed registration result
+
+Plaintext (the canonical member order shown; extra members are invalid):
+
+`{"v":1,"type":"ff1_controller_registration","channelId","ps","ctl","outcome":"approved"|"rejected","profile"?,"deviceName"?,"role"?,"expiresAt"?,"topicId"?}`
+
+- `channelId`, `ps`, `ctl` echo the QR (`ctl` = `thumb(QR sig)`).
+- `outcome:"approved"` requires `profile` (§2, exactly
+  `{"v","dev","gen","sig","enc"}`), `deviceName` (1–64 characters, label
+  rules) and `role`; `expiresAt` only for `role:"controller"`. `topicId`
+  is the FF1's legacy relayer topic when the owner's record has one, so the
+  new controller can use the protected legacy route until the FF1 is on
+  v2; it is dropped once firmware is v2-only.
+- `outcome:"rejected"` carries none of the optional members.
+
+Wire message, sent as the relay frame's payload:
+`{"v":1,"type":"ff1_controller_registration_sealed","epk":b64u(SEC1 65),"iv":b64u(12),"ct":b64u(ciphertext‖tag)}`
+
+- The owner generates a fresh P-256 key `epk` per message.
+- `Z` = ECDH(epk, minterKey), the 32-byte x coordinate.
+- `salt` = SHA-256(UTF-8 `"ff1-ctl:1|" + channelId`).
+- `K` = HKDF-SHA256(IKM `Z`, `salt`, info UTF-8
+  `"ff1-controller-registration/v1"`, 32 bytes).
+- `AAD` = UTF-8 `"ff1-controller-registration/v1|" + channelId + "|" +
+  minterKey + "|" + epk` (the `b64u` strings as they appear in the QR and the
+  message).
+- `ct` = AES-256-GCM(`K`, `iv`, plaintext, `AAD`), 128-bit tag appended.
+
+#### 5.6.3 What the controller checks
+
+In order, rejecting the message on any failure (and keeping the channel
+open for a genuine one until its timeout):
+
+1. The wire message is exactly the five members, `v` 1, the sealed type,
+   a valid `epk`, a 12-byte `iv`; it decrypts under the derived key and AAD.
+2. The plaintext is exactly the members above, `v` 1, the result type.
+3. `channelId` is its own; `ps` equals its own (constant time); `ctl` is
+   `thumb` of its own `sig`.
+4. For `approved`: `profile` parses; when the user named a device (ff-cli
+   `--device`), `profile.dev` matches it; `deviceName` and `role` are valid;
+   `expiresAt`, if present, is in the future and the role is `controller`.
+5. Only then: pin `profile`, store `topicId` if present, and enroll (§5.3).
+   An unsolicited result never replaces a controller's existing grant
+   record for another device or generation.
+
+#### 5.6.4 `registerController`
+
+Owner tier. `req` = `{"sig":JWK,"enc":JWK,"label","platform","role","expiresAt"?}`
+with the §5 key, label and platform rules; `ctl` = `thumb(sig)`. It is
+idempotent per `ctl`:
+
+- No record: a new grant (`approvedBy` = the owner, a fresh `nk`). If the
+  same `ctl` has a live LAN `requestAccess`, the grant takes that request's
+  replay window, so its spent `ctr`s stay spent.
+- An **active** grant: role, expiry, label and platform are replaced; keys,
+  `nk`, window and `createdAt` are kept.
+- A **revoked or expired** record: reactivated with a fresh `nk`, keeping its
+  window and `createdAt` (§6), so its old envelopes stay replays.
+- A record whose `enc` differs from `req.enc`: `invalid_request`. `sig` is
+  pinned by `ctl`, and a second `enc` for it is never swapped in silently.
+- Caps, eviction, the owner-expiry rule and `last_owner` (demoting the last
+  owner, including the caller registering itself as a controller) are as for
+  `approveController`.
+- It clears a pending `requestAccess` and a standing deny for the same `ctl`.
+- `approveController` keeps its two uses: granting a pending LAN request and
+  changing an active grant's role in place (§5.5). Adding new keys is
+  `registerController`.
 
 ## 6. Replay window
 
@@ -462,7 +611,7 @@ Unknown commands fail closed: they are owner-only.
 
 | Tier | Commands |
 |---|---|
-| owner | everything not listed below; specifically `sshAccess`, `factoryReset`, `startWifiSetup`, `updateToLatestVersion`, `setDeviceName`, `showPairingQRCode`, `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, `mintPairingApprovalDecision`, `setContentPolicy`, `analyticsToggle`, `betaFeaturesToggle`, `uploadLogs`, `sendKeyboardEvent`, `tapGesture`, `doubleTapGesture`, `longPressGesture`, `dragGesture`, `clickAndDragGesture`, `zoomGesture`, `cursorUpdate`, `disconnect`, `approveController`, `revokeController`, `listControllers` |
+| owner | everything not listed below; specifically `sshAccess`, `factoryReset`, `startWifiSetup`, `updateToLatestVersion`, `setDeviceName`, `showPairingQRCode`, `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, `mintPairingApprovalDecision`, `setContentPolicy`, `analyticsToggle`, `betaFeaturesToggle`, `uploadLogs`, `sendKeyboardEvent`, `tapGesture`, `doubleTapGesture`, `longPressGesture`, `dragGesture`, `clickAndDragGesture`, `zoomGesture`, `cursorUpdate`, `disconnect`, `approveController`, `revokeController` (a controller may name only its own `ctl`, §5.5), `listControllers`, `registerController` |
 | controller | playback: `displayPlaylist`, `displayDefaultPlaylist`, `refreshArtwork`, `refreshPlaylist`, `checkStatus`, `moveToArtwork`, `updateIndex`, `setShuffle`, `setLoop`, `updateArtFraming`, `updateDisplaySettings`, `updateDefaultDuration`, `getRecentlyPlayed`, `playRecentlyPlayed`; offline cache: `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`, `clearPlaylistCache`, `getOfflineCacheStatus`; claim: `connect` (see below); device: `getDeviceStatus`, `deviceMetrics`, `rotate`, `setVolume`, `toggleMute`, `ddcPanelControl`, `ddcPanelStatus`, `setSleepSchedule`, `setSleepMode`, `sleepNow`, `wakeNow`, `reboot`, `shutdown`, `runNetworkDiagnostics`, `getContentPolicy` |
 | internal | never accepted from any external principal, owner included (`permission_denied`): `resolveRecentlyPlayed` (router-internal), `ping`, `mintPairingDisplay`, `setupDisplay` (controld → player paint/probe commands that would otherwise fall through to the player over CDP), and `ff1Envelope` (an envelope inside an envelope) |
 
@@ -533,14 +682,22 @@ it. On v2 (`RouteRelayV2`) every plaintext command is refused in every state:
 `enforced`, `locked` in `locked`. The check runs before the state switch and
 before the retired `factoryReset` exception, which stays for the LAN and the
 legacy relayer only. Envelopes are admitted exactly as on any other route.
-`requestAccess` from v2 counts in the same relay bucket as the legacy relayer
-(§5.2). *Proposed, not implemented:* one plaintext exception,
-`getControlProfile`, answering only `{"contract","control":{"v","state","profile"}}`
-so an off-LAN controller can seal its first request. A client MUST verify that
-profile against pins from the QR or the ff-cli handoff (§14.1) and never pin
-from it. The route constant and policy exist; the v2 transport wiring lands
-with the v2 integration, which MUST dial v2 only when the control wiring is
-on (a device with the protocol off has no policy to apply).
+`requestAccess` is refused on v2 (§5.2) and so is first-owner `enroll` with
+`inv` (§5.1). There is no plaintext exception on v2, not even a profile read:
+a controller learns the profile from the screen QR pins (first owner, on the
+LAN or the legacy relayer) or from its registration result (§5.6), so v2
+carries envelopes only. The route constant and policy exist; the v2 transport
+wiring lands with the v2 integration.
+
+**Dual-stack transport config.** The v2 endpoint is its own `controld.json`
+key, `relayV2.endpoint`; `relayer.endpoint` and `relayer.apiKey` keep their
+legacy meaning. `controld.json` changes only with a full image (the package
+rail never rewrites it), so a controld updated on an old image keeps a
+working legacy relayer. The device dials v2 only when **all** hold:
+`relayV2.endpoint` is configured, a control authority exists (judged from
+the device's state, not from `control.enabled`), and the device ID is the
+stable MAC-derived one (a hostname that fell back to `FF1` never dials v2).
+Otherwise it stays legacy-only.
 
 Internal callers (OOM recovery, `playRecentlyPlayed` re-entry) are not subject
 to this policy. An unrecognized state is treated as `locked`.
@@ -700,13 +857,21 @@ addressed per controller, not fanned out to every peer: the device learns a
 peer→`ctl` binding only from a request whose replay window just accepted a
 fresh `ctr` (never from signature verification alone, so a replayed envelope
 cannot move a controller's notifications), keeps at most 2 peers per `ctl`,
-and drops the binding on peer disconnect, revocation or expiry. A controller
-that wants notifications therefore sends one envelope (any command) after
-connecting, on the same connection it reads notifications from. Admission
+and drops the binding on peer disconnect, revocation or expiry. "Fresh
+`ctr`" covers every admitted envelope with a principal, including those the
+authority answers itself (`listControllers`, `registerController`, an
+approved `enroll`), not only commands the caller executes. Revocations
+reach the binding layer as `Admission.RevokedCtls`; a binding whose `Seal`
+fails (an inactive grant) is dropped too, so a later reactivation by
+`registerController` needs a fresh request before notifications resume.
+`mint_pairing_*` notifications are legacy-only and never sent on v2. A
+controller that wants notifications therefore sends one envelope (any
+command) after connecting, on the same connection it reads notifications
+from. Admission
 notifications (`controller_approval_request`) are published on a context
 detached from the request, so a relay that routes by the requester's source
 cannot hand the owners' copies to the requester. *Integration item:* the
-binding lands with the v2 transport wiring.
+binding lands with the v2 transport wiring (ffos-user#408).
 
 ff-relayer persists plaintext notifications per topic and replays them to
 every new subscriber: `device_status`, `player_status`, `ddc_status` and
@@ -751,6 +916,27 @@ On v2 the `messageID` is chosen by the client and only routes the reply; the
 authenticated correlation is `rid` (§3.3). Relay acknowledgements are
 transport receipts, never success.
 
+v2 errors are typed by what they prove. A request is **proven undelivered**
+only when the relay refused it for every target and no chunk of it was
+acknowledged; only then may a client resend it or fall back to another
+route. Anything else (a timeout after an acknowledgement, a socket drop
+after sending) is **ambiguous** and is never resent (§14.4). A client's
+first envelope on a device channel goes to `to:"peers"` and it then pins
+the peer whose reply verifies under the pinned `devSig`.
+
+A v2 refusal at connect or admission time (HTTP 429, close code 1008, the
+relay's `backpressure`) is **transient**: the device and every client retry
+with backoff and never treat it as permanent. The device-ID channel is
+public, so strangers can contend for it. (The legacy relayer's handshake
+semantics are unchanged: released firmware treats a 4xx there as permanent,
+which is why device-facing topic issuance is retired last.)
+
+`enroll` is never carried on v2. The device channel is addressed by the
+public device ID and anyone can join it, so a v2 reply that verifies under a
+profile the controller has not yet confirmed proves nothing: whoever forged
+that profile can answer. Enrollment goes over the LAN or the legacy relayer
+with a topic the controller held before the pairing (§5.6, §14.1).
+
 At most 4 envelopes are authenticated at a time (decrypt, verify, parse);
 an envelope that cannot get a slot within 1 s is answered with the public
 error `busy` (LAN 503) and should be retried. No lock other than that bound
@@ -788,8 +974,10 @@ reply rather than `bad_envelope`.
     A device without a topic (v2-only) leaves index 1 empty rather than
     dropping the field, so every index keeps its meaning. Parsers MUST accept
     an empty index 1 when the pins are present and MUST read the branch at
-    index 3. Released app parsers reject an empty index 1 with their own
-    "missing topic" error, which fails visibly instead of binding wrongly.
+    index 3. Released app parsers drop a QR with an empty index 1 **silently**
+    (the scan does nothing). During dual-stack the slot is always filled, so
+    this matters only for v2-only firmware, which ships after the released
+    app floor has moved past those parsers.
   - The only builder is `formatDeviceConnectURL` in devicectl
     (`components/launcher-ui`, the other builder this once had to match, was
     deleted with feral-setupd).
@@ -800,14 +988,12 @@ reply rather than `bad_envelope`.
   - When the first owner enrolls, the invitation is consumed and the claim
     QR is taken down; from then on the auto-claim flow treats the device as
     settled and does not repaint the topic-carrying QR.
-- A second phone adds an owned device (`enrolled`/`enforced`) by scanning
-  the screen QR for the topic and the pins and then sending `requestAccess`,
-  checking the LAN status profile against those pins. Off the LAN, an `enrolled` device's relayer
-  `getDeviceStatus` supplies the profile; an `enforced` device refuses that
-  plaintext, so it admits a new controller only from the LAN, and the app
-  says to join the same Wi-Fi instead of adding the device. This is a
-  reversible decision: a later version can answer `getDeviceStatus` on the
-  relayer in `enforced` with the public `control` block only.
+- A second phone, ff-cli or a browser joins an owned device
+  (`enrolled`/`enforced`) through owner-initiated registration (§5.6): it
+  shows its controller QR and an owner registers it, from anywhere. Clients
+  no longer offer `requestAccess`; the device keeps it as a LAN-only
+  fallback (§5.2) for a phone standing next to the FF1 with no owner at
+  hand, pinned from the screen QR.
 - `showPairingQRCode` with `{"show":true,"purpose":"enroll"}` on a `legacy`,
   claimed device displays the invitation QR. This is the migration path for
   2.0.x owners. On a device that is not `legacy` the same request paints the
@@ -830,6 +1016,20 @@ reply rather than `bad_envelope`.
   `notifications` it emitted (`to`, `compact`, `claims`, `wire`).
 - `positive/approval-code.json` (`kind:"approvalCode"`): `cases` of
   `{ctl, sigPin, code}` for §5.4, the last one with a non-device pin.
+- Registration (§5.6). Request vectors `cmd-owner-registerController`
+  (new grant; `res.ctl`), `cmd-owner-registerController-reactivate` and
+  `cmd-controller-self-revoke`. `positive/controller-qr.json` and
+  `negative/controller-qr.json` (`kind:"controllerQR"`): `cases` of a `qr`
+  string and, for valid ones, its parsed `channelId`, `minterKey`, `ctl`,
+  `sig`, `enc` (canonical JWK JSON), `ps`, `platform`, `label`.
+  `positive/controller-registration*.json` and `negative/registration-*.json`
+  (`kind:"registration"`): the controller's `qr` and private `minterKey`,
+  `controller` (the `keys.json` controller whose keys the QR carries),
+  `channelId`, `ps`, `now`, optional `wantDev`, the owner's
+  `ownerEphemeralKey` and `iv`, the exact `plaintext`, and the `wire`
+  message. A client MUST reproduce `wire` byte for byte from the owner
+  inputs, open every positive vector to `plaintext`, and reject every
+  negative one.
 - `negative/*.json`:
   - `kind:"request"`: a `compact` (or `compactRepeat` `{char,count}` for the
     oversize vector, built by repeating `char`) plus `setup`, and either
@@ -839,7 +1039,8 @@ reply rather than `bad_envelope`.
     DER signature, extra and duplicate header members, `alg` `none`/`RS256`
     (JWS) and `RSA-OAEP-256` (JWE), off-curve `epk`, oversize body, forged
     signature, unknown `kid`, revoked controller, `exp - iat > 120`,
-    `ctl ≠ kid`, owner-tier command from a controller.
+    `ctl ≠ kid`, owner-tier command from a controller, `registerController`
+    from a controller, `revokeController` of another `ctl` from a controller.
   - `kind:"reply"` / `kind:"notification"`: vectors a controller MUST reject:
     wrong `rk`, tampered, signed by a key other than the pinned `devSig`,
     unbound `rid` (`bind` gives the dev/gen/ctl/rid the controller sent), extra
@@ -917,6 +1118,24 @@ and the ff1-cli test suite does the same with `jose`.
 - Remote shell granted while the device had no owner (open `sshAccess` on
   an unclaimed device, or by a topic holder in `legacy`) is revoked when the
   first owner enrolls: the device runs the `sshAccess{enabled:false}` steps.
+- Residual, accepted: the LAN-only `requestAccess` fallback (§5.2) keeps the
+  approval-code grinding residual of §5.4 when a requester pins from LAN
+  status instead of the screen QR. Clients no longer offer it; owner-initiated
+  registration (§5.6) compares no code and binds the profile inside the
+  owner's sealed result.
+- Residual, accepted: a controller QR (§5.6.1) forwarded to a remote owner
+  through a chat app carries `ps` and the minter key through that app, which
+  could then forge a registration result for those keys during the
+  exchange. The relay alone cannot. The controller still enrolls only under
+  a profile whose device then answers its sealed `enroll` with a grant.
+- Residual, accepted: a request a controller signs **before** its keys are
+  registered is answered `unknown_controller` and never enters a window, so a
+  copy captured on the relay can be replayed if the owner registers those
+  keys within its `exp` + 30 s. The §5.6 flow sends nothing before the
+  protected `enroll`, and ff-cli sends no command while a pairing is open.
+- Residual, accepted: in a 2.0.x migration whoever scans the enroll QR
+  first becomes the first owner; a lost sole owner still means a factory
+  reset.
 - `/api/status` (v1) also carries the `control` block. The enforced purge
   gives up after 10 minutes without a relayer connection. The invitation
   watch can miss one re-arm when another narration takes the panel between
@@ -930,7 +1149,16 @@ showed what goes wrong without them.
 
 1. **Pin sources.** A device profile is pinned only from:
    - the physical claim QR (first owner, migration);
-   - an owner's end-to-end encrypted handoff (ff1-cli pairing);
+   - an owner's sealed registration result (§5.6), checked per §5.6.3;
+   - an owner's end-to-end encrypted handoff (the earlier short-code ff1-cli
+     pairing that carried a profile; superseded by §5.6). The short-code
+     handoff stays only as a topic handoff for devices without the protocol
+     (no `control` block in status) or with no owner yet (`legacy`), where it
+     carries no profile. That choice is made from unauthenticated status, so a
+     client that already holds or held a grant for the device never takes
+     it unless the user forces it, and a topic that arrives inside a
+     registration result is never used before the controller's verified
+     enroll;
    - for `requestAccess`, the pins on the screen QR (every state, §11); a
      second phone MUST pin from them when the QR carries them, because the
      approval code alone can be ground by a network attacker (§5.4);
@@ -974,32 +1202,48 @@ showed what goes wrong without them.
    - a user-confirmed Remove of its local grant, after which it is a new
      controller. Remove always asks, whatever the grant's role (ff-app
      Remove and ff1-cli `unpair` alike);
-   - for ff1-cli, a new `device pair` from an owner's handoff (a profile
-     pinned by the handoff, not the network): the new keys are staged and
-     replace the old grant only once enrolled.
+   - a new owner-initiated registration (§5.6; for ff1-cli `device pair`):
+     the profile comes from the owner's sealed result, not the network, and
+     new keys are staged and replace the old grant only once enrolled.
 
    A request refused with `access_revoked` in a reply that verified under the
-   pinned `devSig` is not a reset: the controller MAY send `requestAccess`
-   with its existing keys under that same pin (§5.2 re-approval keeps its
-   record). Its UI MUST then show that it has no access (not "can play"),
-   with Request access and Remove reachable outside any one-time prompt.
+   pinned `devSig` is not a reset: an owner can re-register the same keys
+   (§5.6.4 reactivates the record), so the controller MAY show its
+   controller QR with its existing keys. Its UI MUST then show that it has
+   no access (not "can play"), with "Show this code to an owner" and Remove
+   reachable outside any one-time prompt. A device reset shows up as a new
+   `gen` in the screen QR pins; the controller says "if it was reset, ask an
+   owner to add you again".
 
    The device does not tell a controller its role changed (§5.5 is in
    place, with no notification). A controller learns its new role from the
    next idempotent `enroll` reply or a verified `permission_denied`.
 
    Until the user does one of these, it keeps sealing to the confirmed grant.
-   A `requestAccess` reply of `approved` for a key that has never held a grant is
-   treated as pending: the approval code is always shown and compared.
 4. **Retries.** Every resend is a new envelope with a new `ctr`, `rid` and `rk`.
    A request whose outcome is unknown is resent only where the command is safe to
-   repeat.
+   repeat. A `replay` in a reply that verified under the pinned `devSig`
+   means the controller's counter fell behind the device's window (a
+   restored backup, a second copy of the keys): the controller moves its
+   counter past the window (at least 64 ahead) under its counter lock and
+   retries once, keeping its keys. A public error is never evidence of this.
 5. **Time.** A controller learns the device's clock only from verified replies.
    Notifications may be replayed by the relayer (§9), so they never move the
    clock.
 6. **Notifications are advisory.** A controller never acts automatically on a
    notification (§9). An owner approves only after comparing codes.
-7. **Retired device.** A device whose status reports `control.state:"locked"`
+7. **Removal.** A controller that removes an FF1 sends a best-effort sealed
+   self-revoke (`revokeController` with its own `ctl`, §5.5) before deleting
+   its keys, and deletes them whatever the outcome. An owner's Remove is
+   blocked when it is the last active owner ("add another owner first");
+   the device refuses that self-revoke with `last_owner` anyway.
+8. **Registration.** A controller adds itself only through §5.6: it shows
+   its QR, waits for a sealed result that passes §5.6.3, and treats a
+   timeout as "not completed". An owner app sends `approved` only after a
+   verified `registerController` reply whose `res.ctl` is `thumb` of the
+   scanned `sig`. A `topicId` in the result is stored for the legacy relayer
+   route only.
+9. **Retired device.** A device whose status reports `control.state:"locked"`
    after a factory reset the controller asked for may be retired (§8): it
    refuses every envelope and accepts only a plaintext `factoryReset`. No
    current client sends one (both seal whenever they hold a grant), so in

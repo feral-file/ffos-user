@@ -135,7 +135,7 @@ func TestControlPlaintextPolicyOnLAN(t *testing.T) {
 			want, status = control.CodeLocked, http.StatusUnauthorized
 		}
 		assert.Equal(t, status, rec.Code, st)
-		assert.JSONEq(t, `{"error":{"code":"`+want+`"}}`, rec.Body.String(), st)
+		assert.JSONEq(t, string(control.PublicErrorBody(want)), rec.Body.String(), st)
 	}
 }
 
@@ -156,7 +156,7 @@ func TestControlStatusAndScreenshot(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil)
 	rec := serve(mux, req)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
-	assert.JSONEq(t, `{"error":{"code":"enrollment_required"}}`, rec.Body.String())
+	assert.JSONEq(t, string(control.PublicErrorBody(control.CodeEnrollmentRequired)), rec.Body.String())
 }
 
 // Review F1: in legacy, a live invitation closes /api/screenshot (an

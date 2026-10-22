@@ -214,7 +214,7 @@ func TestControlProtocolEndToEnd(t *testing.T) {
 
 	// --- plaintext LAN refused; relayer plaintext is tiered ---
 	code, body := r.post([]byte(`{"command":"displayPlaylist","request":{"dp1_call":{}}}`))
-	if code != 403 || strings.TrimSpace(string(body)) != `{"error":{"code":"enrollment_required"}}` {
+	if code != 403 || strings.TrimSpace(string(body)) != `{"error":{"code":"enrollment_required","message":"this FF1 needs signed requests: update the Feral File app or ff-cli"}}` {
 		t.Fatalf("enrolled LAN plaintext: %d %s", code, body)
 	}
 	if code, body := r.get("/api/screenshot"); code != 403 || !strings.Contains(string(body), "enrollment_required") {
@@ -225,7 +225,7 @@ func TestControlProtocolEndToEnd(t *testing.T) {
 	}
 	before := r.rec.count()
 	msg := r.relayerCast([]byte(`{"command":"factoryReset","request":{}}`))
-	if string(msg) != `{"command":"factoryReset","error":"envelope_required","message":"this FF1 requires a signed control envelope for factoryReset; update the app","ok":false}` || r.rec.count() != before {
+	if string(msg) != `{"command":"factoryReset","error":"envelope_required","message":"this FF1 requires a signed control envelope for factoryReset; update the Feral File app or ff-cli","ok":false}` || r.rec.count() != before {
 		t.Fatalf("enrolled relayer owner-tier plaintext: %s", msg)
 	}
 

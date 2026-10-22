@@ -18,7 +18,7 @@ type gen struct {
 func Generate() (map[string][]byte, error) {
 	g := &gen{k: NewKeys(), files: map[string][]byte{}}
 	g.files["keys.json"] = Encode(g.k)
-	steps := []func() error{g.positives, g.approvalCodes, g.negativeRequests, g.negativeClient}
+	steps := []func() error{g.positives, g.approvalCodes, g.negativeRequests, g.negativeClient, g.registrationVectors}
 	for _, step := range steps {
 		if err := step(); err != nil {
 			return nil, err
@@ -173,6 +173,18 @@ func (g *gen) positives() error {
 			}, nil, false, ""},
 		{"cmd-owner-reordered-ctr", "ctr below hi but inside the window and unseen is accepted (§6).", "owner", nil,
 			func(c *control.RequestClaims) { c.Ctr = 40 }, map[string]any{"ok": true}, true, ""},
+		{"cmd-owner-registerController", "Owner registers the keys it scanned from a controller QR (§5.6); res carries the derived ctl. The controller then enrolls without inv as in enroll-approved.", "owner", nil,
+			func(c *control.RequestClaims) {
+				c.Cmd, c.Req = control.CmdRegisterController, g.registerReq("stranger", "controller", `,"expiresAt":`+fmt.Sprint(Now+86400))
+			}, nil, false, ""},
+		{"cmd-owner-registerController-reactivate", "Registering a revoked record's keys reactivates it with a fresh nk, keeping its window (§5.6).", "owner", nil,
+			func(c *control.RequestClaims) {
+				c.Cmd, c.Req = control.CmdRegisterController, g.registerReq("revoked", "controller", "")
+			}, nil, false, ""},
+		{"cmd-controller-self-revoke", "A controller revokes its own grant: the one revokeController form a controller may send (§5.5).", "controller", nil,
+			func(c *control.RequestClaims) {
+				c.Cmd, c.Req = control.CmdRevokeController, json.RawMessage(`{"ctl":"`+g.k.Controllers["controller"].Ctl+`"}`)
+			}, nil, false, ""},
 	}
 	for _, p := range list {
 		f := &Fixture{Name: p.name, Kind: "request", Description: p.desc, From: p.from, Setup: g.setup(p.name)}
@@ -322,6 +334,14 @@ func (g *gen) negativeRequests() error {
 		{name: "revoked-controller", desc: "Authentic request from a revoked grant.", from: "revoked", reply: control.CodeAccessRevoked},
 		{name: "permission-denied", desc: "Controller grant sends an owner-tier command.", from: "controller", reply: control.CodePermissionDenied,
 			mutate: func(c *control.RequestClaims) { c.Cmd, c.Req = "sshAccess", json.RawMessage(`{"enabled":true}`) }},
+		{name: "registerController-from-controller", desc: "A controller grant cannot register another controller (§5.6, owner tier).", from: "controller", reply: control.CodePermissionDenied,
+			mutate: func(c *control.RequestClaims) {
+				c.Cmd, c.Req = control.CmdRegisterController, g.registerReq("stranger", "controller", "")
+			}},
+		{name: "revoke-other-from-controller", desc: "A controller may revoke only itself; naming another ctl is owner tier (§5.5).", from: "controller", reply: control.CodePermissionDenied,
+			mutate: func(c *control.RequestClaims) {
+				c.Cmd, c.Req = control.CmdRevokeController, json.RawMessage(`{"ctl":"`+g.k.Controllers["owner"].Ctl+`"}`)
+			}},
 	}
 	for _, v := range list {
 		from := v.from

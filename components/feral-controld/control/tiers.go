@@ -27,6 +27,8 @@ const (
 	CmdApproveController = "approveController"
 	CmdRevokeController  = "revokeController"
 	CmdListControllers   = "listControllers"
+	// CmdRegisterController is owner-initiated registration (§5.6).
+	CmdRegisterController = "registerController"
 	// CmdEnvelope is the carrier command name on LAN and the legacy relayer
 	// (§10). An envelope whose inner cmd is itself ff1Envelope is refused.
 	CmdEnvelope = "ff1Envelope"
@@ -62,8 +64,11 @@ var commandTiers = map[string]Tier{
 	string(commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT): TierOwner,
 	string(commands.CMD_ZOOM_GESTURE):               TierOwner,
 	CmdApproveController:                            TierOwner,
-	CmdRevokeController:                             TierOwner,
-	CmdListControllers:                              TierOwner,
+	// revokeController naming the signer's own ctl is the one form a
+	// controller may send (self-revoke, §5.5); admitCmd checks it.
+	CmdRevokeController:   TierOwner,
+	CmdListControllers:    TierOwner,
+	CmdRegisterController: TierOwner,
 	// Player CastCommand names that reach the player over the CDP
 	// fallthrough. cursorUpdate is pointer injection like the gestures;
 	// disconnect tears down the player's cast session.
