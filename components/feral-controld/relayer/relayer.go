@@ -499,8 +499,10 @@ func (r *relayer) reconnect(ctx context.Context) error {
 	}
 	r.Unlock()
 
-	// Retry to connect
-	return r.RetryableConnect(ctx)
+	// Perform a single connect attempt so failures (transient, busy, permanent)
+	// return immediately to the caller to schedule backoff, rather than getting
+	// stuck in RetryableConnect's internal tight retry loop.
+	return r.Connect(ctx)
 }
 
 func (r *relayer) OnRelayerMessage(f Handler) {
@@ -573,12 +575,41 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 							r.logger.Info("Skipping relayer reconnect failure during shutdown", zap.Error(err))
 							return
 						}
-						// Stop the program and let the systemd restart it
-						r.logger.Error("Failed to reconnect to Relayer, the controld will be restarted by systemd shortly", zap.Error(err))
-						if r.beforeExit != nil {
-							r.beforeExit()
-						}
-						r.os.Exit(1)
+						r.logger.Warn("Initial relayer reconnect failed; launching background exponential backoff retry loop",
+							zap.Error(err),
+						)
+						go func() {
+							backoff := 5 * time.Second
+							maxBackoff := 60 * time.Second
+							for {
+								if r.shouldStop(ctx, done) {
+									return
+								}
+								r.clock.Sleep(backoff)
+								if r.shouldStop(ctx, done) {
+									return
+								}
+								r.logger.Info("Attempting background relayer reconnection", zap.Duration("backoff", backoff))
+								recErr := r.Connect(ctx)
+								if recErr == nil || errors.Is(recErr, ErrAlreadyConnected) {
+									r.logger.Info("Relayer reconnected successfully in background")
+									return
+								}
+								if errors.Is(recErr, context.Canceled) || errors.Is(recErr, context.DeadlineExceeded) || r.shouldStop(ctx, done) {
+									r.logger.Info("Relayer background reconnect aborted during shutdown", zap.Error(recErr))
+									return
+								}
+								r.logger.Warn("Background relayer reconnect attempt failed, retrying",
+									zap.Error(recErr),
+									zap.Duration("next_backoff", backoff*2),
+								)
+								backoff *= 2
+								if backoff > maxBackoff {
+									backoff = maxBackoff
+								}
+							}
+						}()
+						return
 					}
 					return
 				}
