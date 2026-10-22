@@ -223,6 +223,12 @@ type Admission struct {
 	// committed. A transport that binds connections to controllers (the v2
 	// relay, §9) unbinds them.
 	RevokedCtls []string
+	// ReactivatedCtls lists the controllers this admission gave authority
+	// (a new grant, or a revoked/expired record reactivated by
+	// approveController or registerController), once committed. A
+	// transport that binds connections drops any binding it still holds
+	// for them, so notifications resume only after a fresh request (§9).
+	ReactivatedCtls []string
 
 	auth *Authority
 	rk   []byte
@@ -860,6 +866,9 @@ func isSelfRevoke(c RequestClaims, g Grant) bool {
 type controlResult struct {
 	res     any
 	failure string // non-empty: ok:false command_failed with {"error":failure}
+	// activated is a ctl whose grant gained authority here (a new grant, or
+	// a revoked/expired record reactivated), for Admission.ReactivatedCtls.
+	activated string
 }
 
 func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Window, now int64) (*Admission, error) {
@@ -910,6 +919,9 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 	// sequence instead of restarting below what it already saw (§9).
 	if revoked != "" {
 		adm.RevokedCtls = append(adm.RevokedCtls, revoked)
+	}
+	if out.activated != "" {
+		adm.ReactivatedCtls = append(adm.ReactivatedCtls, out.activated)
 	}
 	if err != nil {
 		return a.persistFailure(adm)
@@ -962,7 +974,7 @@ func (a *Authority) approve(gs []Grant, approver string, req json.RawMessage, no
 	if !ok {
 		return gs, controlResult{failure: "too_many_controllers"}, ""
 	}
-	return gs, controlResult{res: struct{}{}}, ctl
+	return gs, controlResult{res: struct{}{}, activated: ctl}, ctl
 }
 
 // grantExpiry reads the optional expiresAt of approveController and
@@ -1101,6 +1113,7 @@ func (a *Authority) register(gs []Grant, approver string, req json.RawMessage, n
 	if !ok {
 		return gs, controlResult{failure: "too_many_controllers"}, ""
 	}
+	res.activated = ctl
 	return gs, res, ctl
 }
 
