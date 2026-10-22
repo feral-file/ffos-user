@@ -335,3 +335,55 @@ The ff-app UI has not been exercised on a physical phone.
 | ff-app | repo-required, second pass, third pass, confirmed-gen review | fixed through `d33224e7` |
 
 The client rules that came out of the reviews are normative in spec §14.
+
+## 10. Owner-initiated registration and dual-stack (2026-10-22)
+
+Agreed with Anh on feral-file#3551 (comments 6331809819, 6332549323,
+6332730806, 6332777506, 6333172332). Spec: §5.6 (registration), §5.1/§5.2
+(route rules), §5.5 (self-revoke), §7.2 (dual-stack config), §14.
+
+### Ownership
+
+- **Ours** (ffos-user #412, ff-app #1141, ff-cli #135, ffos #174):
+  `registerController` and its grant/key/replay rules, self-revoke and
+  last-owner protection, enrollment/reset policy, the app's Add controller /
+  Show this code / locked screens, CLI QR pairing with staging and
+  `--resume`, the shared QR/result/crypto fixtures.
+- **Anh's** (ff-relayer#26, ffos-user#408, ff-app#1139, ff-cli#134,
+  play#24, rebased onto ours): the generic-channel adapters
+  (`/v2/channels/{channelId}/connections`) for device traffic and the
+  pairing exchange, `relayV2.endpoint`, peer context/targeted send/disconnect
+  hooks for the gate, split legacy retirement in the relay.
+- The QR pairing flow is a joint release dependency: it ships only with a
+  working adapter. Our endpoint and OTA protections ship on the LAN and the
+  legacy relayer without waiting for v2.
+
+### A. Migration and rollout
+
+| # | Item | Status |
+|---|---|---|
+| A1 | `relayV2.endpoint` separate from `relayer.endpoint`/`apiKey`; dial v2 only with the key, an authority and a stable device ID | spec §7.2; config key lands in #408 (Anh) |
+| A2 | Registration works on every control-enabled firmware: the result carries optional `topicId` | spec §5.6.2; clients store it |
+| A3 | First-owner `enroll`+`inv` refused only on `RouteRelayV2` | done (#412) |
+| A4 | `requestAccess` LAN-only on the device; clients stop offering it | device done (#412); clients in #1141/#135 |
+| A5 | Reset images and shelf stock are pre-protocol: raise `update_recovery_version` to a dual-stack image before legacy retirement | release step (human) |
+| A6 | Split retirement: controller endpoints first, device-facing topic issuance last | relay (Anh) |
+| A7 | Migration telemetry: `state`/`claimed`/`transports` in fleet telemetry | open |
+| A8 | No channel rollback below dual-stack | release rule |
+| A9 | Raise the app force-update floor before prod `control.enabled=true`; ff-cli relies on the refusal `message` | device message done (#412); floor is a release step |
+| A10 | Released app drops an empty-topic QR silently | spec §11 corrected |
+
+### B. Flow details
+
+| # | Item | Status |
+|---|---|---|
+| B11 | Pairing channel on the generic carrier; controller enforces its own timeout | adapter (Anh); timeout in clients |
+| B12 | CLI `--resume` persists the verified result in staging | #135 |
+| B13 | `registerController`: clears pending, keeps nk on active, fresh nk on reactivation, `approveController` for pending only | done (#412) |
+| B14 | Reset on v2: new `gen` in screen pins is the evidence; locked/retired screen in the app | spec §14.3; app #1141 |
+| B15 | Controller self-revoke; CLI jumps ctr forward on a verified `replay` | device done (#412); clients #1141/#135 |
+| B16 | Last owner's Remove blocked; first scanner wins in migration; lost sole owner = reset | spec §13/§14.7; app #1141 |
+| B17 | One sealed request on every socket open; one device socket per FF1 for owners | clients (Anh's adapter) |
+| B18 | Browser uses the same QR flow; `role:"display"` later | play#24 (Anh) |
+| B19 | CLI cannot be first owner; pairing needs internet; terminal QR + pasteable string; `expiresAt` stored | #135 |
+| B20 | "Secure this FF1" may trigger the pre-claim OTA gate; hostname fallback `FF1` never dials v2 | app copy #1141; spec §7.2 |
