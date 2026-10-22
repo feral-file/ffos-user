@@ -487,7 +487,9 @@ a chat app carries `ps` through that app; that is the accepted residual
 
 `ff1-ctl:1|<channelId>|<minterKey>|<sig.x>|<sig.y>|<enc.x>|<enc.y>|<ps>|<platform>|<label>`
 
-- `channelId`: 16–64 characters of `[A-Za-z0-9_-]` (a UUID fits).
+- `channelId`: 16–64 characters of `[A-Za-z0-9_-]` (a UUID fits). The
+  relay accepts 1–128, so the controller generating it and the owner
+  parsing it both check this range.
 - `minterKey`: `b64u` of the 65-byte uncompressed SEC 1 point
   (`0x04‖X‖Y`) of the minter public key. Compressed or off-curve points are
   invalid.
@@ -855,13 +857,21 @@ addressed per controller, not fanned out to every peer: the device learns a
 peer→`ctl` binding only from a request whose replay window just accepted a
 fresh `ctr` (never from signature verification alone, so a replayed envelope
 cannot move a controller's notifications), keeps at most 2 peers per `ctl`,
-and drops the binding on peer disconnect, revocation or expiry. A controller
-that wants notifications therefore sends one envelope (any command) after
-connecting, on the same connection it reads notifications from. Admission
+and drops the binding on peer disconnect, revocation or expiry. "Fresh
+`ctr`" covers every admitted envelope with a principal, including those the
+authority answers itself (`listControllers`, `registerController`, an
+approved `enroll`), not only commands the caller executes. Revocations
+reach the binding layer as `Admission.RevokedCtls`; a binding whose `Seal`
+fails (an inactive grant) is dropped too, so a later reactivation by
+`registerController` needs a fresh request before notifications resume.
+`mint_pairing_*` notifications are legacy-only and never sent on v2. A
+controller that wants notifications therefore sends one envelope (any
+command) after connecting, on the same connection it reads notifications
+from. Admission
 notifications (`controller_approval_request`) are published on a context
 detached from the request, so a relay that routes by the requester's source
 cannot hand the owners' copies to the requester. *Integration item:* the
-binding lands with the v2 transport wiring.
+binding lands with the v2 transport wiring (ffos-user#408).
 
 ff-relayer persists plaintext notifications per topic and replays them to
 every new subscriber: `device_status`, `player_status`, `ddc_status` and
@@ -905,6 +915,27 @@ generically.
 On v2 the `messageID` is chosen by the client and only routes the reply; the
 authenticated correlation is `rid` (§3.3). Relay acknowledgements are
 transport receipts, never success.
+
+v2 errors are typed by what they prove. A request is **proven undelivered**
+only when the relay refused it for every target and no chunk of it was
+acknowledged; only then may a client resend it or fall back to another
+route. Anything else (a timeout after an acknowledgement, a socket drop
+after sending) is **ambiguous** and is never resent (§14.4). A client's
+first envelope on a device channel goes to `to:"peers"` and it then pins
+the peer whose reply verifies under the pinned `devSig`.
+
+A v2 refusal at connect or admission time (HTTP 429, close code 1008, the
+relay's `backpressure`) is **transient**: the device and every client retry
+with backoff and never treat it as permanent. The device-ID channel is
+public, so strangers can contend for it. (The legacy relayer's handshake
+semantics are unchanged: released firmware treats a 4xx there as permanent,
+which is why device-facing topic issuance is retired last.)
+
+`enroll` is never carried on v2. The device channel is addressed by the
+public device ID and anyone can join it, so a v2 reply that verifies under a
+profile the controller has not yet confirmed proves nothing: whoever forged
+that profile can answer. Enrollment goes over the LAN or the legacy relayer
+with a topic the controller held before the pairing (§5.6, §14.1).
 
 At most 4 envelopes are authenticated at a time (decrypt, verify, parse);
 an envelope that cannot get a slot within 1 s is answered with the public

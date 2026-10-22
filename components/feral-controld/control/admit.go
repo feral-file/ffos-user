@@ -217,6 +217,11 @@ type Admission struct {
 	// OwnerEnrolled is set when the first-owner invitation was consumed:
 	// the caller takes the claim/invitation QR off the screen (§5.1).
 	OwnerEnrolled bool
+	// RevokedCtls lists the controllers this admission made inactive
+	// (revokeController, including a self-revoke), once the store write
+	// committed. A transport that binds connections to controllers (the v2
+	// relay, §9) unbinds them.
+	RevokedCtls []string
 
 	auth *Authority
 	rk   []byte
@@ -881,7 +886,9 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 	}
 	// The revoked controller's seq is kept: a re-approval continues the
 	// sequence instead of restarting below what it already saw (§9).
-	_ = revoked
+	if revoked != "" {
+		adm.RevokedCtls = append(adm.RevokedCtls, revoked)
+	}
 	if err != nil {
 		return a.persistFailure(adm)
 	}

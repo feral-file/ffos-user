@@ -201,7 +201,11 @@ func TestSelfRevoke(t *testing.T) {
 	d.register(owner, other, RoleController, "")
 	d.expectCode(ctl, d.cmdClaims(ctl, CmdRevokeController, `{"ctl":"`+other.ctl+`"}`), CodePermissionDenied)
 	d.expectCode(ctl, d.cmdClaims(ctl, CmdRevokeController, `{"ctl":"`+ctl.ctl+`","x":1}`), CodePermissionDenied)
-	d.expectOK(ctl, d.cmdClaims(ctl, CmdRevokeController, `{"ctl":"`+ctl.ctl+`"}`))
+	self := d.cmdClaims(ctl, CmdRevokeController, `{"ctl":"`+ctl.ctl+`"}`)
+	adm := d.send(ctl, self)
+	if r := d.final(adm, self); !r.OK || len(adm.RevokedCtls) != 1 || adm.RevokedCtls[0] != ctl.ctl {
+		t.Fatalf("self-revoke: %+v revoked=%v", r, adm.RevokedCtls)
+	}
 	if g, _ := d.a.Store().Grant(ctl.ctl); g.Active(d.now.Load()) {
 		t.Fatal("self-revoke left the grant active")
 	}
@@ -213,9 +217,31 @@ func TestSelfRevoke(t *testing.T) {
 
 func TestSoleOwnerCannotSelfRevoke(t *testing.T) {
 	d, owner, _ := ownerDevice(t)
-	r := d.expectCode(owner, d.cmdClaims(owner, CmdRevokeController, `{"ctl":"`+owner.ctl+`"}`), CodeCommandFailed)
-	if string(r.Res) != `{"error":"last_owner"}` {
-		t.Fatalf("res = %s", r.Res)
+	rc := d.cmdClaims(owner, CmdRevokeController, `{"ctl":"`+owner.ctl+`"}`)
+	adm := d.send(owner, rc)
+	r := d.final(adm, rc)
+	if r.Code != CodeCommandFailed || string(r.Res) != `{"error":"last_owner"}` || len(adm.RevokedCtls) != 0 {
+		t.Fatalf("res = %s revoked=%v", r.Res, adm.RevokedCtls)
+	}
+}
+
+// An owner revoking another controller reports it for unbinding; denying a
+// pending request revokes no grant.
+func TestRevokeReportsRevokedCtl(t *testing.T) {
+	d, owner, ctl := ownerDevice(t)
+	rc := d.cmdClaims(owner, CmdRevokeController, `{"ctl":"`+ctl.ctl+`"}`)
+	adm := d.send(owner, rc)
+	if r := d.final(adm, rc); !r.OK || len(adm.RevokedCtls) != 1 || adm.RevokedCtls[0] != ctl.ctl {
+		t.Fatalf("revoke: %+v revoked=%v", r, adm.RevokedCtls)
+	}
+	phone := newTestCtl(t, "phone")
+	ask := d.claims(phone, OpRequestAccess)
+	ask.Enroll = phone.enroll("")
+	d.final(d.send(phone, ask), ask)
+	deny := d.cmdClaims(owner, CmdRevokeController, `{"ctl":"`+phone.ctl+`"}`)
+	adm = d.send(owner, deny)
+	if r := d.final(adm, deny); !r.OK || len(adm.RevokedCtls) != 0 {
+		t.Fatalf("deny: %+v revoked=%v", r, adm.RevokedCtls)
 	}
 }
 
