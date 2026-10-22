@@ -215,6 +215,11 @@ type relayer struct {
 	controlSem       chan struct{}
 	shedSem          chan struct{}
 
+	// v2Attempts counts v2 dials since the last stable session and
+	// v2ConnectedAt is when the current one started (see retryV2).
+	v2Attempts    int
+	v2ConnectedAt time.Time
+
 	// connObserver, when set, is told about connection lifecycle transitions:
 	// (true, 0) after a successful dial, (false, 0) on teardown, and
 	// (false, code) when the read loop saw a close frame with a code. It feeds
@@ -364,32 +369,9 @@ func (r *relayer) Connect(ctx context.Context) error {
 		return ErrAlreadyConnected
 	}
 
-	// Create URL with topicID if available
-	connectURL := r.endpoint
-
-	if r.apiKey != "" {
-		connectURL += fmt.Sprintf("/api/connection?apiKey=%s", r.apiKey)
-	}
-
-	// Single snapshot: topicID and isReady must come from the SAME write, not
-	// two separate GetState() reads that could straddle a concurrent
-	// clearPersistedClaim()/topic assignment.
-	claim := state.ClaimSnapshot()
-	topicID := claim.TopicID
-	r.logger.Info("Retrieved topic ID from state",
-		zap.String("topic_fp", helper.TopicFingerprint(topicID)),
-		zap.Bool("isEmpty", topicID == ""),
-		zap.Bool("isReady", claim.TopicReady))
-
-	if topicID != "" {
-		connectURL += fmt.Sprintf("&topicID=%s", topicID)
-		r.logger.Debug("Added topic ID to connection URL", zap.String("connectURL", connectURL))
-	} else {
-		r.logger.Warn("Topic ID is empty, connecting without topic ID",
-			zap.String("connectURL", connectURL),
-			zap.String("stateFile", constants.STATE_FILE))
-	}
-
+	// The v2 carrier is addressed by the device ID and never reads the claim:
+	// no topic goes into its URL or its logs.
+	var connectURL, topicID string
 	var headers http.Header
 	if r.deviceID != "" {
 		var err error
@@ -399,6 +381,32 @@ func (r *relayer) Connect(ctx context.Context) error {
 			return PermanentError{Err: err}
 		}
 		headers = http.Header{"Sec-WebSocket-Protocol": []string{relaywire.Subprotocol}}
+	} else {
+		// Create URL with topicID if available
+		connectURL = r.endpoint
+
+		if r.apiKey != "" {
+			connectURL += fmt.Sprintf("/api/connection?apiKey=%s", r.apiKey)
+		}
+
+		// Single snapshot: topicID and isReady must come from the SAME write, not
+		// two separate GetState() reads that could straddle a concurrent
+		// clearPersistedClaim()/topic assignment.
+		claim := state.ClaimSnapshot()
+		topicID = claim.TopicID
+		r.logger.Info("Retrieved topic ID from state",
+			zap.String("topic_fp", helper.TopicFingerprint(topicID)),
+			zap.Bool("isEmpty", topicID == ""),
+			zap.Bool("isReady", claim.TopicReady))
+
+		if topicID != "" {
+			connectURL += fmt.Sprintf("&topicID=%s", topicID)
+			r.logger.Debug("Added topic ID to connection URL", zap.String("connectURL", connectURL))
+		} else {
+			r.logger.Warn("Topic ID is empty, connecting without topic ID",
+				zap.String("connectURL", connectURL),
+				zap.String("stateFile", constants.STATE_FILE))
+		}
 	}
 	conn, resp, err := r.dialer.DialContext(ctx, connectURL, headers)
 	if err != nil {
@@ -407,12 +415,11 @@ func (r *relayer) Connect(ctx context.Context) error {
 		if resp != nil {
 			statusCode = resp.StatusCode
 		}
-		r.logger.Warn("Relayer dial failed",
-			zap.Error(err),
-			zap.String("endpoint", r.endpoint),
-			zap.String("topic_fp", helper.TopicFingerprint(topicID)),
-			zap.Int("status_code", statusCode),
-		)
+		fields := []zap.Field{zap.Error(err), zap.String("endpoint", r.endpoint), zap.Int("status_code", statusCode)}
+		if r.deviceID == "" {
+			fields = append(fields, zap.String("topic_fp", helper.TopicFingerprint(topicID)))
+		}
+		r.logger.Warn("Relayer dial failed", fields...)
 		return r.categorizeWebsocketError(err, resp)
 	}
 
@@ -432,6 +439,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 		conn.SetReadLimit(relaywire.MaxFrameBytes)
 		r.session = newDeviceSession(conn)
 		r.session.onDisconnect = r.peerDisconnected
+		r.v2ConnectedAt = time.Now()
 	}
 	// Stage-0/1 observability (docs/wan-outage-observability.md): connection
 	// state is exported event-driven from the three lifecycle sites (here,
@@ -449,11 +457,11 @@ func (r *relayer) Connect(ctx context.Context) error {
 	if resp != nil {
 		cfRay = resp.Header.Get("cf-ray")
 	}
-	r.logger.Info("Relayer websocket dial succeeded",
-		zap.String("endpoint", r.endpoint),
-		zap.String("topic_fp", helper.TopicFingerprint(topicID)),
-		zap.String("cf_ray", cfRay),
-	)
+	dialFields := []zap.Field{zap.String("endpoint", r.endpoint), zap.String("cf_ray", cfRay)}
+	if r.deviceID == "" {
+		dialFields = append(dialFields, zap.String("topic_fp", helper.TopicFingerprint(topicID)))
+	}
+	r.logger.Info("Relayer websocket dial succeeded", dialFields...)
 
 	// Set pong handler
 	conn.SetPongHandler(func(_ string) error {
@@ -630,9 +638,19 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 				}
 
 				logMsg := helper.TruncateBytes(msg, logger.MAX_FIELD_LENGTH)
+				if session != nil {
+					// v2 bodies are a peer's opaque payloads (sealed
+					// envelopes, or whatever a stranger on the public
+					// channel sent): never log them.
+					logMsg = []byte("[v2 payload redacted]")
+				}
 				var payload Payload
 				if err := json.Unmarshal(msg, &payload); err != nil {
-					r.logger.Error("Invalid JSON received",
+					logInvalid := r.logger.Error
+					if session != nil {
+						logInvalid = r.logger.Debug // any stranger on the channel can send this
+					}
+					logInvalid("Invalid JSON received",
 						zap.ByteString("message", logMsg),
 						zap.Int("message_length", len(msg)),
 					)
@@ -654,14 +672,22 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 				if payload.MessageID == MESSAGE_ID_SYSTEM {
 					logMsg = []byte("[system frame redacted]")
 				}
-				r.logger.Info("Received message",
-					zap.ByteString("message", logMsg),
-					zap.String("type", payload.Type),
-					zap.String("messageID", payload.MessageID),
-					zap.String("command", derefString(payload.Message.Command)),
-					zap.String("topic_fp", helper.TopicFingerprint(derefString(payload.Message.TopicID))),
-					zap.Int("message_length", len(msg)),
-				)
+				if session != nil {
+					r.logger.Debug("Received v2 message",
+						zap.String("messageID", payload.MessageID),
+						zap.String("command", derefString(payload.Message.Command)),
+						zap.Int("message_length", len(msg)),
+					)
+				} else {
+					r.logger.Info("Received message",
+						zap.ByteString("message", logMsg),
+						zap.String("type", payload.Type),
+						zap.String("messageID", payload.MessageID),
+						zap.String("command", derefString(payload.Message.Command)),
+						zap.String("topic_fp", helper.TopicFingerprint(derefString(payload.Message.TopicID))),
+						zap.Int("message_length", len(msg)),
+					)
+				}
 
 				r.dispatchMessage(messageCtx, payload, done)
 			}

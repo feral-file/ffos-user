@@ -1,6 +1,9 @@
 package relayer
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestV2Eligibility(t *testing.T) {
 	for _, tc := range []struct {
@@ -39,5 +42,20 @@ func TestPeerDisconnectHookRetiresGeneration(t *testing.T) {
 	s.close()
 	if two.Live() || !gone[two] {
 		t.Fatal("generation did not clear all peers")
+	}
+}
+
+// §10: v2 refusals are transient; redials back off, capped, instead of a
+// fixed tight loop.
+func TestV2RetryDelayBacksOffCapped(t *testing.T) {
+	want := []time.Duration{0, 5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second,
+		80 * time.Second, 160 * time.Second, 5 * time.Minute, 5 * time.Minute}
+	for n, w := range want {
+		if got := v2RetryDelay(n); got != w {
+			t.Errorf("attempt %d: %v, want %v", n, got, w)
+		}
+	}
+	if got := v2RetryDelay(1000); got != v2RetryCeiling {
+		t.Errorf("attempt 1000: %v", got)
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // timeoutError implements net.Error interface for testing
@@ -2062,6 +2063,8 @@ func TestV2ReadFailureNeverExitsDaemon(t *testing.T) {
 		close(rejected)
 		return nil, &http.Response{StatusCode: http.StatusNotFound}, websocket.ErrBadHandshake
 	}).Times(1)
+	// The rejected redial backs off (§10) instead of dialing again at once.
+	ts.mockRandomizer.EXPECT().Duration(gomock.Any(), gomock.Any()).Return(time.Hour).AnyTimes()
 	// No os.Exit expectation: any call is a regression.
 	// Test - Connect (this automatically starts background message reading)
 	err := ts.client.Connect(ts.ctx)
@@ -2082,4 +2085,26 @@ func TestV2ReadFailureNeverExitsDaemon(t *testing.T) {
 	}
 	cancel()
 	ts.client.Close()
+}
+
+// The v2 dial never reads the claim: no topic in its URL or its logs, at any
+// level (review low: the raw topic was built into connectURL and debug-logged).
+func TestV2DialCarriesNoTopic(t *testing.T) {
+	ts := setup(t)
+	defer ts.ctrl.Finish()
+	core, logs := observer.New(zap.DebugLevel)
+	client := relayer.NewV2("wss://relay.test", "FF1-SKYZ2E3A", ts.mockDialer, ts.mockRandomizer, ts.mockClock, ts.mockOS, ts.mockJSON, zap.New(core))
+	ts.mockDialer.EXPECT().DialContext(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, u string, _ http.Header) (wrapper.WebSocketConn, *http.Response, error) {
+			assert.NotContains(t, u, "topicID")
+			return nil, &http.Response{StatusCode: http.StatusTooManyRequests}, websocket.ErrBadHandshake
+		})
+	require.Error(t, client.Connect(context.Background()))
+	for _, e := range logs.All() {
+		for _, f := range e.Context {
+			if f.Key == "topic_fp" || f.Key == "connectURL" {
+				t.Fatalf("v2 log %q carries %s", e.Message, f.Key)
+			}
+		}
+	}
 }

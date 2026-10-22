@@ -63,6 +63,31 @@ func (p Peer) Send(ctx context.Context, payload []byte) error {
 // leaves. Install before connecting; the handler must not call the relayer.
 func (r *relayer) SetPeerDisconnectHandler(fn func(Peer)) { r.peerDisconnected = fn }
 
+// v2 redial backoff. §10: a refusal at connect or admission (HTTP 429, close
+// code 1008) is transient, and so, for an optional carrier, is everything
+// else, a malformed endpoint included; none of them may become a tight loop.
+const (
+	v2RetryFloor   = 5 * time.Second
+	v2RetryCeiling = 5 * time.Minute
+	// v2StableAfter is how long a session must have lasted for the next
+	// redial to start the backoff over. A relay that accepts and then closes
+	// at once (1008) keeps backing off.
+	v2StableAfter = time.Minute
+)
+
+// v2RetryDelay is the base wait before dial attempt n since the last stable
+// session: none for the first, then doubling from v2RetryFloor up to v2RetryCeiling.
+func v2RetryDelay(attempt int) time.Duration {
+	if attempt <= 0 {
+		return 0
+	}
+	d := v2RetryFloor
+	for i := 1; i < attempt && d < v2RetryCeiling; i++ {
+		d *= 2
+	}
+	return min(d, v2RetryCeiling)
+}
+
 // retryV2 keeps an optional endpoint outage local, including configuration/404
 // failures. It never exits controld or disables a healthy legacy/LAN carrier.
 func (r *relayer) retryV2(ctx context.Context) error {
@@ -70,23 +95,36 @@ func (r *relayer) retryV2(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		r.Lock()
+		if !r.v2ConnectedAt.IsZero() {
+			if time.Since(r.v2ConnectedAt) >= v2StableAfter {
+				r.v2Attempts = 0
+			}
+			r.v2ConnectedAt = time.Time{}
+		}
+		delay := v2RetryDelay(r.v2Attempts)
+		r.v2Attempts++
+		done := r.done
+		r.Unlock()
+		if delay > 0 {
+			// Jitter so devices refused together do not redial together.
+			delay = r.randomizer.Duration(delay/2, delay)
+			r.logger.Info("Waiting before v2 redial", zap.Duration("delay", delay))
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-done:
+				timer.Stop()
+				return ErrNotConnected
+			case <-timer.C:
+			}
+		}
 		err := r.Connect(ctx)
 		if err == nil || errors.Is(err, ErrAlreadyConnected) {
 			return nil
 		}
 		r.logger.Warn("Optional v2 connection unavailable; retrying", zap.Error(err))
-		r.Lock()
-		done := r.done
-		r.Unlock()
-		timer := time.NewTimer(5 * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-done:
-			timer.Stop()
-			return ErrNotConnected
-		case <-timer.C:
-		}
 	}
 }
