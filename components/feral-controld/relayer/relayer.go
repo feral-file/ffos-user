@@ -493,7 +493,11 @@ func (r *relayer) Connect(ctx context.Context) error {
 		r.pingDoneChan = make(chan struct{})
 	}
 	pingDone := r.pingDoneChan
+	session := r.session
 	r.Unlock()
+	if session != nil {
+		go r.v2Keepalive(ctx, done, pingDone, session)
+	}
 
 	// Start pinging
 	ticker := r.clock.NewTicker(PING_INTERVAL)
@@ -628,6 +632,13 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 				}
 
 				messageCtx := ctx
+				if session != nil && kind == websocket.TextMessage && string(msg) == "pong" {
+					// The relay's auto-response to the §10 text ping: liveness only.
+					if err := conn.SetReadDeadline(time.Time{}); err != nil {
+						r.logger.Debug("Failed to clear read deadline after v2 pong", zap.Error(err))
+					}
+					continue
+				}
 				if session != nil {
 					var source string
 					msg, source, err = session.receive(kind, msg)

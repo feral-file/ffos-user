@@ -8,6 +8,8 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -126,5 +128,34 @@ func (r *relayer) retryV2(ctx context.Context) error {
 			return nil
 		}
 		r.logger.Warn("Optional v2 connection unavailable; retrying", zap.Error(err))
+	}
+}
+
+// §10 liveness: the relay closes a connection that shows no frame and no
+// ping for 90 s, so the device sends the text frame "ping" well inside 30 s,
+// jittered so a fleet reconnected together does not ping together. The relay
+// auto-responds "pong", which the read loop drops.
+const (
+	v2PingFloor   = 20 * time.Second
+	v2PingCeiling = 28 * time.Second
+)
+
+// v2Keepalive pings one socket generation until it, or the relayer, stops.
+func (r *relayer) v2Keepalive(ctx context.Context, done, pingDone <-chan struct{}, s *deviceSession) {
+	for {
+		timer := time.NewTimer(r.randomizer.Duration(v2PingFloor, v2PingCeiling))
+		select {
+		case <-ctx.Done():
+		case <-done:
+		case <-pingDone:
+		case <-s.done:
+		case <-timer.C:
+			if err := s.write(websocket.TextMessage, []byte("ping")); err != nil {
+				r.logger.Debug("V2 keepalive ping failed", zap.Error(err))
+			}
+			continue
+		}
+		timer.Stop()
+		return
 	}
 }

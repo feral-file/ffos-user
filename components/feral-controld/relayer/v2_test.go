@@ -1,8 +1,18 @@
 package relayer
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/relaywire"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 func TestV2Eligibility(t *testing.T) {
@@ -57,5 +67,51 @@ func TestV2RetryDelayBacksOffCapped(t *testing.T) {
 	}
 	if got := v2RetryDelay(1000); got != v2RetryCeiling {
 		t.Errorf("attempt 1000: %v", got)
+	}
+}
+
+type fastRandomizer struct{}
+
+func (fastRandomizer) Intn(int) int { return 0 }
+func (fastRandomizer) Duration(time.Duration, time.Duration) time.Duration {
+	return 10 * time.Millisecond
+}
+
+// §10 liveness: the device sends the text frame "ping" on its own schedule
+// and ignores the relay's text "pong".
+func TestV2SendsTextPing(t *testing.T) {
+	accepted := make(chan *websocket.Conn, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		up := websocket.Upgrader{Subprotocols: []string{relaywire.Subprotocol}}
+		if conn, err := up.Upgrade(w, req, nil); err == nil {
+			accepted <- conn
+		}
+	}))
+	defer server.Close()
+	r := NewV2("ws"+strings.TrimPrefix(server.URL, "http"), "FF1-SKYZ2E3A", wrapper.NewWebSocketDialer(websocket.DefaultDialer),
+		fastRandomizer{}, wrapper.NewClock(), wrapper.NewOS(), wrapper.NewJSON(), zap.NewNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	remote := <-accepted
+	defer func() { _ = remote.Close() }()
+	for i := 0; i < 2; i++ {
+		_ = remote.SetReadDeadline(time.Now().Add(2 * time.Second))
+		kind, data, err := remote.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kind != websocket.TextMessage || string(data) != "ping" {
+			t.Fatalf("frame %d: %d %q", i, kind, data)
+		}
+		if err := remote.WriteMessage(websocket.TextMessage, []byte("pong")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !r.IsConnected() {
+		t.Fatal("a text pong broke the session")
 	}
 }
