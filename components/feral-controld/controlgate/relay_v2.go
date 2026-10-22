@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -43,9 +44,12 @@ type v2Binding struct {
 	tick   uint64 // last bind, for eviction
 	queue  chan []byte
 	cancel context.CancelFunc
-	// snapshot is set on a new binding: the controller is owed the current
-	// status snapshots once its reply has gone out.
-	snapshot bool
+	// pending is set on a new binding until the reply to the request that
+	// made it has gone out: its queue is held (a client pins the peer from
+	// that reply and would drop anything earlier) and it is then sent the
+	// current status snapshots first.
+	pending bool
+	release chan struct{}
 }
 
 // RelayV2 connects an opaque carrier to the existing authority. Bindings are
@@ -55,6 +59,8 @@ type RelayV2 struct {
 	logger *zap.Logger
 	source func(context.Context) (v2Peer, bool)
 
+	// mu also orders every seal and enqueue, so the seq of the copies one
+	// binding receives follows the order the notifications were produced.
 	mu       sync.Mutex
 	bindings map[v2Peer]*v2Binding
 	tick     uint64
@@ -80,29 +86,49 @@ func NewRelayV2(gate *Gate) *RelayV2 {
 	return r
 }
 
+// Watch makes another gate's admissions (the LAN and legacy relayer routes)
+// retire v2 bindings: a revocation or reactivation counts from every route
+// (§9). Call before serving.
+func (r *RelayV2) Watch(g *Gate) { g.onAdmitted = r.grantsChanged }
+
+func (r *RelayV2) grantsChanged(_ context.Context, adm *control.Admission) {
+	for _, ctl := range adm.RevokedCtls {
+		r.unbindCtl(ctl)
+	}
+	for _, ctl := range adm.ReactivatedCtls {
+		r.unbindCtl(ctl)
+	}
+}
+
 // admitted binds the requesting peer to the principal of every envelope whose
 // replay window accepted a fresh ctr: commands the caller executes and those
 // the authority answers itself (list, approve, revoke, registerController, an
 // approved enroll). The authority sets Principal only when it conferred
 // authority, so an authenticated refusal (permission_denied, access_revoked)
 // binds nothing even though it spent its ctr, and neither does a replay. An
-// internal_error reply means the window write did not commit.
+// internal_error reply means the window write did not commit. A self-revoke
+// binds nothing, so the peer keeps any binding it had.
 func (r *RelayV2) admitted(ctx context.Context, adm *control.Admission) {
-	if adm.Principal.ControllerID != "" && adm.Code != control.CodeInternalError {
-		r.bind(ctx, adm.Principal.ControllerID)
+	ctl := adm.Principal.ControllerID
+	if ctl != "" && adm.Code != control.CodeInternalError && !slices.Contains(adm.RevokedCtls, ctl) {
+		r.bind(ctx, ctl)
 	}
-	for _, ctl := range adm.RevokedCtls {
-		r.unbindCtl(ctl, nil)
-	}
+	r.grantsChanged(ctx, adm)
 }
 
 func (r *RelayV2) bind(ctx context.Context, ctl string) {
 	peer, ok := r.source(ctx)
-	if !ok || !peer.Live() {
+	if !ok {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Both rechecked under mu: a revocation committed on another route
+	// after this request was admitted unbinds under mu too, so either it
+	// sees this binding or this sees the inactive grant.
+	if !peer.Live() || !r.gate.auth.GrantActive(ctl) {
+		return
+	}
 	r.pruneLocked()
 	r.tick++
 	if b := r.bindings[peer]; b != nil {
@@ -134,13 +160,18 @@ func (r *RelayV2) bind(ctx context.Context, ctl string) {
 	// the binding is dropped, never when the request ends.
 	bctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	b := &v2Binding{peer: peer, ctl: ctl, tick: r.tick, queue: make(chan []byte, v2QueueDepth),
-		cancel: cancel, snapshot: true}
+		cancel: cancel, pending: true, release: make(chan struct{})}
 	r.bindings[peer] = b
 	go r.drain(bctx, b)
 }
 
-// drain sends one binding's queue until the binding is dropped.
+// drain sends one binding's queue, once released, until the binding is dropped.
 func (r *RelayV2) drain(bctx context.Context, b *v2Binding) {
+	select {
+	case <-bctx.Done():
+		return
+	case <-b.release:
+	}
 	for {
 		select {
 		case <-bctx.Done():
@@ -180,17 +211,10 @@ func (r *RelayV2) pruneLocked() {
 	}
 }
 
-// unbindCtl drops ctl's bindings: all of them, or only those in only (the
-// bindings a failed seal was for, so a fresh binding made meanwhile stays).
-func (r *RelayV2) unbindCtl(ctl string, only []*v2Binding) {
+// unbindCtl drops every binding of ctl.
+func (r *RelayV2) unbindCtl(ctl string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if only != nil {
-		for _, b := range only {
-			r.dropLocked(b)
-		}
-		return
-	}
 	for _, b := range r.bindings {
 		if b.ctl == ctl {
 			r.dropLocked(b)
@@ -207,6 +231,9 @@ func (r *RelayV2) Handle(ctx context.Context, payload relayer.Payload) error {
 	if !ok || payload.MessageID == "" || payload.Message.Command == nil {
 		return nil
 	}
+	// After the reply (deferred calls run after the Send below), so a client
+	// that pins the peer from its first verified reply drops nothing.
+	defer r.releaseAfterReply(peer)
 	var result any
 	switch {
 	case *payload.Message.Command != control.CmdEnvelope:
@@ -236,41 +263,44 @@ func (r *RelayV2) Handle(ctx context.Context, payload relayer.Payload) error {
 	if err != nil {
 		return err
 	}
-	err = peer.Send(ctx, body)
-	// After the reply, so a client that pins the peer from its first verified
-	// reply does not drop the snapshot as coming from an unpinned peer.
-	r.sendSnapshot(peer)
-	return err
+	return peer.Send(ctx, body)
 }
 
-// sendSnapshot queues the current status snapshots for a new binding (§9).
-func (r *RelayV2) sendSnapshot(peer v2Peer) {
+// releaseAfterReply releases a new binding's queue after its reply, first
+// queueing the current status snapshots for it (§9).
+func (r *RelayV2) releaseAfterReply(peer v2Peer) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	b := r.bindings[peer]
-	if b == nil || !b.snapshot {
-		r.mu.Unlock()
+	if b == nil || !b.pending {
 		return
 	}
-	b.snapshot = false
+	b.pending = false
 	types := make([]string, 0, len(r.latest))
 	for typ := range r.latest {
 		types = append(types, typ)
 	}
 	sort.Strings(types)
-	bodies := make([]json.RawMessage, len(types))
-	for i, typ := range types {
-		bodies[i] = r.latest[typ]
+	// Front of the queue: anything queued meanwhile is newer.
+	held := make([][]byte, 0, len(b.queue))
+	for len(b.queue) > 0 {
+		held = append(held, <-b.queue)
 	}
-	r.mu.Unlock()
-	for i, typ := range types {
-		r.deliver(b.ctl, typ, bodies[i], []*v2Binding{b})
+	for _, typ := range types {
+		if !r.deliverLocked(b.ctl, typ, r.latest[typ], []*v2Binding{b}) {
+			break
+		}
 	}
+	for _, wire := range held {
+		r.enqueue(b, wire)
+	}
+	close(b.release)
 }
 
 // Publish is the notification producers' path (SealingRelayer). Mint pairing
 // stays legacy-only (§9). A snapshot type (one the legacy relayer persists:
 // the status types) is deduplicated against what v2 last sent and kept for
-// bindings made later.
+// bindings made later; a pending binding gets it with its snapshot instead.
 func (r *RelayV2) Publish(typ string, body json.RawMessage, snapshot bool) {
 	if strings.HasPrefix(typ, "mint_pairing_") {
 		return
@@ -278,16 +308,15 @@ func (r *RelayV2) Publish(typ string, body json.RawMessage, snapshot bool) {
 	if len(body) == 0 {
 		body = json.RawMessage("null")
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if snapshot {
-		r.mu.Lock()
 		if prev, ok := r.latest[typ]; ok && bytes.Equal(prev, body) {
-			r.mu.Unlock()
 			return
 		}
 		r.latest[typ] = append(json.RawMessage(nil), body...)
-		r.mu.Unlock()
 	}
-	r.Notify(typ, body, "")
+	r.notifyLocked(typ, body, "", snapshot)
 }
 
 // Notify seals once per bound controller and queues the copy for each of its
@@ -295,35 +324,46 @@ func (r *RelayV2) Publish(typ string, body json.RawMessage, snapshot bool) {
 // activity, including expiry and revocation on open sockets.
 func (r *RelayV2) Notify(typ string, body any, onlyController string) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notifyLocked(typ, body, onlyController, false)
+}
+
+func (r *RelayV2) notifyLocked(typ string, body any, onlyController string, skipPending bool) {
 	r.pruneLocked()
 	byCtl := make(map[string][]*v2Binding)
 	for _, b := range r.bindings {
-		if onlyController == "" || b.ctl == onlyController {
+		if (onlyController == "" || b.ctl == onlyController) && (!skipPending || !b.pending) {
 			byCtl[b.ctl] = append(byCtl[b.ctl], b)
 		}
 	}
-	r.mu.Unlock()
 	for ctl, bs := range byCtl {
-		r.deliver(ctl, typ, body, bs)
+		r.deliverLocked(ctl, typ, body, bs)
 	}
 }
 
-func (r *RelayV2) deliver(ctl, typ string, body any, bs []*v2Binding) {
+// deliverLocked seals one copy for ctl and queues it for bs. It reports false
+// when ctl's bindings were dropped because its grant is no longer active
+// (§9: a later reactivation needs a fresh request); a transient seal failure
+// keeps them.
+func (r *RelayV2) deliverLocked(ctl, typ string, body any, bs []*v2Binding) bool {
 	sealed, err := r.gate.auth.Seal(ctl, typ, body)
-	if err != nil {
-		// An inactive grant: a later reactivation must not resume
-		// notifications on these sockets without a fresh request (§9).
-		r.unbindCtl(ctl, bs)
-		return
+	if err == nil {
+		var wire []byte
+		if wire, err = sealed.Wire(); err == nil {
+			for _, b := range bs {
+				r.enqueue(b, wire)
+			}
+			return true
+		}
 	}
-	wire, err := sealed.Wire()
-	if err != nil {
-		r.logger.Warn("Failed to encode v2 notification", zap.String("notification_type", typ), zap.Error(err))
-		return
+	if !r.gate.auth.GrantActive(ctl) {
+		for _, b := range bs {
+			r.dropLocked(b)
+		}
+		return false
 	}
-	for _, b := range bs {
-		r.enqueue(b, wire)
-	}
+	r.logger.Warn("Failed to seal v2 notification", zap.String("notification_type", typ), zap.Error(err))
+	return true
 }
 
 // Disconnected retires routing state immediately; grants remain authority-owned.

@@ -468,9 +468,14 @@ func TestSealingRelayerV2OnlyReadiness(t *testing.T) {
 	if !wrapped.IsConnected() {
 		t.Fatal("v2 readiness suppressed by legacy outage")
 	}
-	_ = wrapped.Send(context.Background(), map[string]any{"type": "notification", "notification_type": "device_status", "message": map[string]any{"ok": true}, "persist_record_count": 1})
+	err := wrapped.Send(context.Background(), map[string]any{"type": "notification", "notification_type": "device_status", "message": map[string]any{"ok": true}, "persist_record_count": 1})
 	if !called {
 		t.Fatal("producer notification did not reach v2 adapter")
+	}
+	// The legacy half reports not-connected without trying the socket, so
+	// the producer keeps its legacy dedupe state and logs no error.
+	if !errors.Is(err, relayer.ErrNotConnected) || len(legacy.sent) != 0 {
+		t.Fatalf("legacy send while disconnected: %v %d", err, len(legacy.sent))
 	}
 	live = false
 	if wrapped.IsConnected() {

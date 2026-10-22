@@ -138,6 +138,9 @@ func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler,
 		c.v2Gate = controlgate.NewRelayV2(v2Gate)
 		v2Gate.SetPublisher(publisher)
 		publisher.SetRelayV2(c.v2Gate)
+		// Revocations and reactivations on the LAN or legacy relayer retire
+		// v2 bindings too (§9).
+		c.v2Gate.Watch(gate)
 		c.v2.OnRelayerMessage(c.v2Gate.Handle)
 		if lifecycle, ok := c.v2.(interface{ SetPeerDisconnectHandler(func(relayer.Peer)) }); ok {
 			lifecycle.SetPeerDisconnectHandler(c.v2Gate.Disconnected)

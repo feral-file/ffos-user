@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,10 +75,18 @@ type v2Rig struct {
 	g       *controlgate.Gate
 	rec     *recorder
 	adapter *controlgate.RelayV2
+	// skew moves the device clock ahead, past requestAccess's global
+	// interval between new pending requests.
+	skew *atomic.Int64
 }
 
 func newV2Rig(t *testing.T) *v2Rig {
-	a, _ := newAuthority(t, false)
+	skew := &atomic.Int64{}
+	a, err := control.New(control.Config{Dir: "/s/control", DeviceID: testDevice, FS: control.NewMemFS(),
+		Now: func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }})
+	if err != nil || a.LockErr() != nil {
+		t.Fatal(err, a.LockErr())
+	}
 	rec := &recorder{}
 	g := controlgate.New(a, rec, zap.NewNop())
 	adapter := controlgate.NewRelayV2(g)
@@ -85,7 +94,7 @@ func newV2Rig(t *testing.T) *v2Rig {
 		p, ok := ctx.Value(peerKey{}).(*fakePeer)
 		return p, ok
 	})
-	return &v2Rig{a: a, g: g, rec: rec, adapter: adapter}
+	return &v2Rig{a: a, g: g, rec: rec, adapter: adapter, skew: skew}
 }
 
 func (r *v2Rig) from(p *fakePeer) context.Context {
@@ -241,27 +250,130 @@ func TestV2BindingCapEvictsOldest(t *testing.T) {
 	}
 }
 
-// §9: RevokedCtls unbinds, and a binding whose Seal fails is dropped.
-func TestV2UnbindsOnRevokeAndSealFailure(t *testing.T) {
+// lan runs one envelope on g as the LAN route (no relay peer in ctx).
+func lan(t *testing.T, g *controlgate.Gate, c *client, s sent) control.ReplyClaims {
+	t.Helper()
+	wire, perr := g.HandleEnvelope(context.Background(), s.body, control.Origin{Route: control.RouteLAN, Known: true})
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	b, _ := json.Marshal(wire)
+	return c.open(s, b)
+}
+
+// addController gives a second controller an active controller grant
+// (requestAccess, owner approval, enroll) over g's LAN route.
+func addController(t *testing.T, r *v2Rig, g *controlgate.Gate, owner *client) *client {
+	t.Helper()
+	a := r.a
+	r.skew.Add(int64(11 * time.Second))
+	cli := newClient(t, "cli", *a.Status().Profile)
+	if r := lan(t, g, cli, cli.build(control.OpRequestAccess, "", "", "")); !r.OK {
+		t.Fatalf("requestAccess: %+v", r)
+	}
+	approve := owner.build(control.OpCmd, control.CmdApproveController, `{"ctl":"`+cli.ctl+`","role":"controller"}`, "")
+	if r := lan(t, g, owner, approve); !r.OK {
+		t.Fatalf("approve: %+v %s", r, r.Res)
+	}
+	if r := lan(t, g, cli, cli.build(control.OpEnroll, "", "", "")); !r.OK {
+		t.Fatalf("enroll: %+v", r)
+	}
+	return cli
+}
+
+// §9: a revocation on another route (the watched LAN gate) unbinds, and so
+// does a reactivation; a grant revoked where nothing reports it is dropped
+// when its next copy cannot be sealed.
+func TestV2UnbindsOnRevocationFromEveryRoute(t *testing.T) {
 	r := newV2Rig(t)
 	owner := enrollOwner(t, r.g, r.a)
+	watched := controlgate.New(r.a, r.rec, zap.NewNop())
+	r.adapter.Watch(watched)
+	unwatched := controlgate.New(r.a, r.rec, zap.NewNop())
+	bindAs := func(c *client, p *fakePeer) {
+		t.Helper()
+		s := c.build(control.OpCmd, "getDeviceStatus", `{}`, "")
+		if reply := c.open(s, r.cast(t, p, s.cast)); !reply.OK {
+			t.Fatalf("v2 request: %+v", reply)
+		}
+	}
+	revoke := func(g *controlgate.Gate, c *client) {
+		t.Helper()
+		s := owner.build(control.OpCmd, control.CmdRevokeController, `{"ctl":"`+c.ctl+`"}`, "")
+		if reply := lan(t, g, owner, s); !reply.OK {
+			t.Fatalf("revoke: %+v %s", reply, reply.Res)
+		}
+	}
+
+	cli := addController(t, r, unwatched, owner)
+	p := newFakePeer()
+	bindAs(cli, p)
+	revoke(watched, cli)
+	if len(r.adapter.Bound(cli.ctl)) != 0 {
+		t.Fatal("LAN revocation left the v2 binding")
+	}
+
+	cli2 := addController(t, r, unwatched, owner)
+	p2 := newFakePeer()
+	bindAs(cli2, p2)
+	revoke(unwatched, cli2)
+	if len(r.adapter.Bound(cli2.ctl)) != 1 {
+		t.Fatal("unwatched revocation reached the binding layer")
+	}
+	r.adapter.Notify("device_status", map[string]any{}, "")
+	if len(r.adapter.Bound(cli2.ctl)) != 0 {
+		t.Fatal("binding with an inactive grant kept")
+	}
+	p2.quiet(t)
+	// The request of a revoked grant binds nothing (the race guard).
+	r.adapter.Admitted(r.from(p2), &control.Admission{Principal: control.Principal{ControllerID: cli2.ctl}})
+	if len(r.adapter.Bound(cli2.ctl)) != 0 {
+		t.Fatal("inactive grant bound")
+	}
+
+	po := newFakePeer()
+	bindAs(owner, po)
+	r.adapter.GrantsChanged(context.Background(), &control.Admission{ReactivatedCtls: []string{owner.ctl}})
+	if len(r.adapter.Bound(owner.ctl)) != 0 {
+		t.Fatal("reactivated ctl kept its old binding")
+	}
+}
+
+// A self-revoke sent from a peer bound to another controller leaves that
+// binding alone.
+func TestV2SelfRevokeKeepsPeersOtherBinding(t *testing.T) {
+	r := newV2Rig(t)
+	owner := enrollOwner(t, r.g, r.a)
+	cli := addController(t, r, r.g, owner)
 	p := newFakePeer()
 	s := owner.build(control.OpCmd, "getDeviceStatus", `{}`, "")
 	owner.open(s, r.cast(t, p, s.cast))
-	if len(r.adapter.Bound(owner.ctl)) != 1 {
-		t.Fatal("not bound")
+	s = cli.build(control.OpCmd, control.CmdRevokeController, `{"ctl":"`+cli.ctl+`"}`, "")
+	if reply := cli.open(s, r.cast(t, p, s.cast)); !reply.OK {
+		t.Fatalf("self-revoke: %+v %s", reply, reply.Res)
 	}
-	r.adapter.Admitted(context.Background(), &control.Admission{RevokedCtls: []string{owner.ctl}})
-	if len(r.adapter.Bound(owner.ctl)) != 0 {
-		t.Fatal("revoked ctl still bound")
+	if b := r.adapter.Bound(owner.ctl); len(b) != 1 || b[0] != controlgate.V2Peer(p) {
+		t.Fatal("self-revoke dropped the peer's owner binding")
 	}
-	r.adapter.Admitted(r.from(p), &control.Admission{Principal: control.Principal{ControllerID: "ghost"}})
-	if len(r.adapter.Bound("ghost")) != 1 {
-		t.Fatal("admitted principal not bound")
+}
+
+// A new binding receives nothing before the reply to the request that made
+// it; once released it gets the snapshot first, then what was held.
+func TestV2NewBindingHeldUntilReply(t *testing.T) {
+	r := newV2Rig(t)
+	owner := enrollOwner(t, r.g, r.a)
+	nk := owner.nkFrom(t, r.g)
+	p := newFakePeer()
+	r.adapter.Admitted(r.from(p), &control.Admission{Principal: control.Principal{ControllerID: owner.ctl}})
+	r.adapter.Notify("controller_approval_request", map[string]any{"n": 1}, "")
+	r.adapter.Publish("device_status", json.RawMessage(`{"v":1}`), true)
+	p.quiet(t)
+	r.adapter.ReleaseAfterReply(p)
+	if n := openNotification(t, p.next(t), owner, nk); n.Type != "device_status" {
+		t.Fatalf("first after release: %+v", n)
 	}
-	r.adapter.Notify("device_status", map[string]any{}, "")
-	if len(r.adapter.Bound("ghost")) != 0 {
-		t.Fatal("binding with an inactive grant kept")
+	if n := openNotification(t, p.next(t), owner, nk); n.Type != "controller_approval_request" {
+		t.Fatalf("held notification: %+v", n)
 	}
 	p.quiet(t)
 }

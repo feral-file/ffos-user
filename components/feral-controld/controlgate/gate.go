@@ -126,7 +126,8 @@ func (g *Gate) HandleEnvelope(ctx context.Context, raw json.RawMessage, origin c
 		g.onOwnerEnrolled()
 	}
 	// Every authentic admission, executed or answered by the authority: the
-	// v2 relay binds on a conferred Principal and unbinds RevokedCtls (§9).
+	// v2 gate binds on a conferred Principal, and every gate the v2 relay
+	// watches retires bindings on RevokedCtls/ReactivatedCtls (§9).
 	// Signer is audit-only and must never establish a notification binding.
 	if g.onAdmitted != nil {
 		g.onAdmitted(ctx, adm)

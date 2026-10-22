@@ -1582,6 +1582,14 @@ func marshalRes(res any) (json.RawMessage, error) {
 	return marshalJSON(res)
 }
 
+// GrantActive reports whether ctl holds an active grant right now.
+func (a *Authority) GrantActive(ctl string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	g, ok := a.store.Grant(ctl)
+	return ok && g.Active(a.now().Unix())
+}
+
 // Seal builds a §9 sealed notification for one active grant.
 func (a *Authority) Seal(ctl, typ string, body any) (Sealed, error) {
 	a.mu.Lock()

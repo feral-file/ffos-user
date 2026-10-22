@@ -143,6 +143,12 @@ func (s *SealingRelayer) Send(ctx context.Context, data any) error {
 	if s.NotifyV2 != nil {
 		s.NotifyV2(n.NotificationType, n.Message, n.PersistRecordCount > 0)
 	}
+	if !s.Relayer.IsConnected() {
+		// Only v2 is up: skip the legacy sends (and the relayer's warning
+		// for each); the producer keeps its legacy dedupe state and resends
+		// once the relayer reconnects.
+		return relayer.ErrNotConnected
+	}
 	plain, sealed := channelPlan(s.auth.State(), true)
 	var firstErr error
 	if plain {
