@@ -686,8 +686,7 @@ legacy relayer only. Envelopes are admitted exactly as on any other route.
 `inv` (§5.1). There is no plaintext exception on v2, not even a profile read:
 a controller learns the profile from the screen QR pins (first owner, on the
 LAN or the legacy relayer) or from its registration result (§5.6), so v2
-carries envelopes only. The route constant and policy exist; the v2 transport
-wiring lands with the v2 integration.
+carries envelopes only.
 
 **Dual-stack transport config.** The v2 endpoint is its own `controld.json`
 key, `relayV2.endpoint`; `relayer.endpoint` and `relayer.apiKey` keep their
@@ -870,8 +869,12 @@ command) after connecting, on the same connection it reads notifications
 from. Admission
 notifications (`controller_approval_request`) are published on a context
 detached from the request, so a relay that routes by the requester's source
-cannot hand the owners' copies to the requester. *Integration item:* the
-binding lands with the v2 transport wiring (ffos-user#408).
+cannot hand the owners' copies to the requester. A new binding is sent the
+newest copy of each status type (`device_status`, `player_status`,
+`ddc_status`, `offline_cache_status`) after the reply to the request that
+created it, and v2 deduplicates those types against what it last sent, apart
+from the legacy channels. Sends never wait on a peer: each binding has a
+small queue that drops when full, and each send is bounded.
 
 ff-relayer persists plaintext notifications per topic and replays them to
 every new subscriber: `device_status`, `player_status`, `ddc_status` and
@@ -959,6 +962,11 @@ reply rather than `bad_envelope`.
   `"control":{"v":1,"state":"legacy|enrolled|enforced|locked","profile":profile}`.
   The presence of `control` is the capability signal. A `locked` device omits
   `profile`: it cannot vouch for an identity it could not read.
+  `control.transports` lists the routes this device is configured to carry
+  envelopes on, in this order: `"lan"` (always), `"relayer"` (a legacy
+  relayer endpoint is configured), `"relayV2"` (the device dials the v2 relay,
+  §7.2 dual-stack rules). It reports configuration, not whether a socket is
+  up right now. Clients treat an absent `transports` as `["lan","relayer"]`.
 - With the protocol on, the claim QR appends four pipe fields to the
   existing six in every state but `locked`:
   `…|<setup_phase>|<inv>|<thumb(sig)>|<thumb(enc)>|<gen>`. `<inv>` is the

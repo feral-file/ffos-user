@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"go.uber.org/zap"
@@ -84,6 +85,23 @@ func newControlWiring(cfg config.ControlConfig, deviceID, dir string, fsys contr
 	return &controlWiring{auth: auth}
 }
 
+// setTransports reports the configured transports in the §11 status block:
+// the LAN hub always, the legacy relayer when it has an endpoint, and the v2
+// relay when this device dials it.
+func (c *controlWiring) setTransports(legacyRelayer bool) {
+	if c == nil {
+		return
+	}
+	ts := []string{control.TransportLAN}
+	if legacyRelayer {
+		ts = append(ts, control.TransportRelayer)
+	}
+	if c.v2 != nil {
+		ts = append(ts, control.TransportRelayV2)
+	}
+	c.auth.SetTransports(ts)
+}
+
 // notificationHandles returns the relayer and WebSocket handles notification
 // producers should use: sealing wrappers when the protocol is on, the raw
 // handles otherwise.
@@ -93,9 +111,9 @@ func (c *controlWiring) notificationHandles(r relayer.Relayer, w ws.WS, logger *
 	}
 	wrapped := controlgate.WrapRelayer(r, c.auth, logger)
 	wrapped.V2Connected = func() bool { return c.v2 != nil && c.v2.IsConnected() }
-	wrapped.NotifyV2 = func(ctx context.Context, typ string, body any) {
+	wrapped.NotifyV2 = func(typ string, body json.RawMessage, snapshot bool) {
 		if c.v2Gate != nil {
-			c.v2Gate.Notify(ctx, typ, body, "")
+			c.v2Gate.Publish(typ, body, snapshot)
 		}
 	}
 	return wrapped, controlgate.WrapWS(w, c.auth, logger)
@@ -113,8 +131,10 @@ func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler,
 	gate := controlgate.New(c.auth, handler, logger)
 	publisher := controlgate.NewPublisher(r, w, logger)
 	gate.SetPublisher(publisher)
+	gates := []*controlgate.Gate{gate}
 	if c.v2 != nil {
 		v2Gate := controlgate.New(c.auth, handler, logger)
+		gates = append(gates, v2Gate)
 		c.v2Gate = controlgate.NewRelayV2(v2Gate)
 		v2Gate.SetPublisher(publisher)
 		publisher.SetRelayV2(c.v2Gate)
@@ -144,7 +164,12 @@ func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler,
 		ControlOwnerEnrolled()
 	}); ok {
 		ex.SetControl(controlgate.ClaimQR{Auth: c.auth})
-		gate.SetOwnerEnrolledHook(ex.ControlOwnerEnrolled)
+		// The authority refuses first-owner enroll on v2 (§5.1); the v2 gate
+		// gets the hook anyway so the claim QR cannot outlive its invitation
+		// if that ever changes.
+		for _, g := range gates {
+			g.SetOwnerEnrolledHook(ex.ControlOwnerEnrolled)
+		}
 	} else {
 		logger.Error("Executor does not accept the control claim; invitation QR and retire disabled")
 	}

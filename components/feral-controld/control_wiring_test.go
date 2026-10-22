@@ -5,12 +5,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"slices"
 	"testing"
 
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	"github.com/feral-file/ffos-user/components/feral-controld/control"
+	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 )
 
@@ -140,5 +142,21 @@ func TestV2EligibilityUsesActualAuthorityAndExplicitConfig(t *testing.T) {
 		if relayV2Eligible(tc.cfg, tc.authority, tc.id) {
 			t.Fatalf("ineligible v2 dial: %+v", tc)
 		}
+	}
+}
+
+// §11: control.transports lists the configured transports.
+func TestControlWiring_Transports(t *testing.T) {
+	var off *controlWiring
+	off.setTransports(true) // protocol off: nothing to report, no panic
+	w := wiringFor(t, config.ControlConfig{}, ownedState(t))
+	w.setTransports(true)
+	if got := w.auth.Status().Transports; !slices.Equal(got, []string{"lan", "relayer"}) {
+		t.Fatalf("legacy-only transports: %v", got)
+	}
+	w.v2 = &mocks.MockRelayer{}
+	w.setTransports(true)
+	if got := w.auth.Status().Transports; !slices.Equal(got, []string{"lan", "relayer", "relayV2"}) {
+		t.Fatalf("dual-stack transports: %v", got)
 	}
 }

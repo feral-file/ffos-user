@@ -92,7 +92,7 @@ func TestV2BindsOnlyAfterVerifiedReplayAdmission(t *testing.T) {
 	// No plaintext profile escape hatch and no command execution.
 	send("unverified-peer", "plain", json.RawMessage(`{"command":"getControlProfile","request":{}}`))
 	h, response := read()
-	if h.To != "unverified-peer" || !strings.Contains(string(response["message"]), "bad_envelope") || recorder.count() != 0 {
+	if h.To != "unverified-peer" || !strings.Contains(string(response["message"]), `"code":"envelope_required"`) || recorder.count() != 0 {
 		t.Fatal("plaintext escaped v2 ingress", response)
 	}
 	cmd := owner.build(control.OpCmd, "getDeviceStatus", `{}`, "")
@@ -108,7 +108,7 @@ func TestV2BindsOnlyAfterVerifiedReplayAdmission(t *testing.T) {
 		t.Fatal("replay executed")
 	}
 	done := make(chan struct{})
-	go func() { adapter.Notify(ctx, "device_status", map[string]any{"test": true}, ""); close(done) }()
+	go func() { adapter.Notify("device_status", map[string]any{"test": true}, ""); close(done) }()
 	h, response = read()
 	if h.To != "owner-peer" || string(response["notification_type"]) != `"sealed"` {
 		t.Fatal("private notification misrouted", h, response)

@@ -464,11 +464,11 @@ func TestSealingRelayerV2OnlyReadiness(t *testing.T) {
 	live := true
 	wrapped.V2Connected = func() bool { return live }
 	called := false
-	wrapped.NotifyV2 = func(_ context.Context, typ string, _ any) { called = typ == "device_status" }
+	wrapped.NotifyV2 = func(typ string, _ json.RawMessage, snapshot bool) { called = typ == "device_status" && snapshot }
 	if !wrapped.IsConnected() {
 		t.Fatal("v2 readiness suppressed by legacy outage")
 	}
-	_ = wrapped.Send(context.Background(), map[string]any{"type": "notification", "notification_type": "device_status", "message": map[string]any{"ok": true}})
+	_ = wrapped.Send(context.Background(), map[string]any{"type": "notification", "notification_type": "device_status", "message": map[string]any{"ok": true}, "persist_record_count": 1})
 	if !called {
 		t.Fatal("producer notification did not reach v2 adapter")
 	}

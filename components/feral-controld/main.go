@@ -1019,6 +1019,7 @@ func initializeApp(
 	if len(v2Config) > 0 && relayV2Eligible(v2Config[0], controlWire, deviceIDFromHostname()) {
 		controlWire.v2 = newRelayV2(v2Config[0].Endpoint, deviceIDFromHostname(), webSocketDialer, randomizer, clock, os, json, logger)
 	}
+	controlWire.setTransports(relayerEndpoint != "")
 	notifyRelayer, notifyWS := controlWire.notificationHandles(relayer, wsHandler, logger)
 
 	// StatusPoller
