@@ -104,7 +104,7 @@ func (g *gen) registrationVectors() error {
 		wire, err := sealRaw(q, pt, epk, iv)
 		return &epk, b64u(iv), string(pt), string(wire), err
 	}
-	emit := func(dir, name, desc, wantDev string, res any, post func(string) string) error {
+	emit := func(dir, name, desc, wantDev string, res any, post func(string) string, minterOverride *PrivateJWK) error {
 		epk, iv, pt, wire, err := seal(name, res)
 		if err != nil {
 			return err
@@ -112,10 +112,14 @@ func (g *gen) registrationVectors() error {
 		if post != nil {
 			wire = post(wire)
 		}
+		mk := minter
+		if minterOverride != nil {
+			mk = *minterOverride
+		}
 		v := RegistrationVector{Name: name, Kind: "registration", Description: desc, Now: Now, Controller: "stranger",
-			QR: q.String(), MinterKey: minter, ChannelID: q.ChannelID, PS: b64u(q.PS), WantDev: wantDev,
+			QR: q.String(), MinterKey: mk, ChannelID: q.ChannelID, PS: b64u(q.PS), WantDev: wantDev,
 			OwnerEphemeralKey: epk, IV: iv, Plaintext: pt, Wire: wire}
-		_, openErr := control.OpenRegistration(q, minter.ECDH(), []byte(wire), wantDev, Now)
+		_, openErr := control.OpenRegistration(q, mk.ECDH(), []byte(wire), wantDev, Now)
 		if dir == "positive" {
 			if openErr != nil {
 				return fmt.Errorf("%s: %w", name, openErr)
@@ -131,12 +135,12 @@ func (g *gen) registrationVectors() error {
 		g.files[dir+"/"+name+".json"] = Encode(v)
 		return nil
 	}
-	if err := emit("positive", "controller-registration", "Owner app seals an approved result to the controller QR's minter key (§5.6.2); the controller opens and checks it (§5.6.3), with profile.dev matched against wantDev.", DeviceID, approved, nil); err != nil {
+	if err := emit("positive", "controller-registration", "Owner app seals an approved result to the controller QR's minter key (§5.6.2); the controller opens and checks it (§5.6.3), with profile.dev matched against wantDev.", DeviceID, approved, nil, nil); err != nil {
 		return err
 	}
 	rejected := control.RegistrationResult{V: 1, Type: control.RegistrationType, ChannelID: q.ChannelID, PS: b64u(q.PS),
 		Ctl: q.Ctl(), Outcome: "rejected"}
-	if err := emit("positive", "controller-registration-rejected", "The owner declined: a rejected result carries no grant members.", "", rejected, nil); err != nil {
+	if err := emit("positive", "controller-registration-rejected", "The owner declined: a rejected result carries no grant members.", "", rejected, nil, nil); err != nil {
 		return err
 	}
 	ownerExp := approved
@@ -150,32 +154,67 @@ func (g *gen) registrationVectors() error {
 	wrongPS := approved
 	wrongPS.PS = b64u(derive("registration/ps/other")[:16])
 	pt, _ := json.Marshal(approved)
+	rpt, _ := json.Marshal(rejected)
+	repl := func(old, new string) string {
+		if !strings.Contains(string(pt), old) {
+			panic("fixture plaintext lacks " + old)
+		}
+		return strings.Replace(string(pt), old, new, 1)
+	}
+	wireRepl := func(old, new string) func(string) string {
+		return func(w string) string {
+			if !strings.Contains(w, old) {
+				panic("fixture wire lacks " + old)
+			}
+			return strings.Replace(w, old, new, 1)
+		}
+	}
+	otherMinter := jwkFromScalar(scalar("registration/minter/other"))
 	negatives := []struct {
 		name, desc, wantDev string
 		res                 any
 		post                func(string) string
+		minter              *PrivateJWK
 	}{
-		{"registration-wrong-ps", "ps is not the one in the QR.", "", wrongPS, nil},
-		{"registration-wrong-channel", "channelId member names another channel (sealed with the right keys).", "", otherChan, nil},
-		{"registration-wrong-ctl", "ctl is not thumb(QR sig).", "", other, nil},
-		{"registration-wrong-device", "profile.dev is not the configured device.", "FF1-OTHER0001", approved, nil},
-		{"registration-owner-expiry", "An owner role with expiresAt.", "", ownerExp, nil},
-		{"registration-expired", "expiresAt is not after now.", "", expired, nil},
-		{"registration-extra-member", "Plaintext carries an unknown member.", "", strings.Replace(string(pt), `{"v":1`, `{"x":1,"v":1`, 1), nil},
-		{"registration-approved-no-profile", "An approved result without profile.", "", strings.Replace(string(pt), `"profile":`+string(profile)+`,`, "", 1), nil},
-		{"registration-rejected-with-role", "A rejected result carrying a role.", "", strings.Replace(string(pt), `"outcome":"approved"`, `"outcome":"rejected"`, 1), nil},
+		{"registration-wrong-ps", "ps is not the one in the QR.", "", wrongPS, nil, nil},
+		{"registration-wrong-channel", "channelId member names another channel (sealed with the right keys).", "", otherChan, nil, nil},
+		{"registration-wrong-ctl", "ctl is not thumb(QR sig).", "", other, nil, nil},
+		{"registration-wrong-device", "profile.dev is not the configured device.", "FF1-OTHER0001", approved, nil, nil},
+		{"registration-owner-expiry", "An owner role with expiresAt.", "", ownerExp, nil, nil},
+		{"registration-expired", "expiresAt is not after now.", "", expired, nil, nil},
+		{"registration-extra-member", "Plaintext carries an unknown member.", "", repl(`{"v":1`, `{"x":1,"v":1`), nil, nil},
+		{"registration-duplicate-member", "Plaintext repeats v.", "", repl(`{"v":1`, `{"v":1,"v":1`), nil, nil},
+		{"registration-plaintext-v2", "Plaintext v is 2.", "", repl(`{"v":1`, `{"v":2`), nil, nil},
+		{"registration-plaintext-type", "Plaintext type is not ff1_controller_registration.", "", repl(`"type":"ff1_controller_registration"`, `"type":"ff1_controller_handoff"`), nil, nil},
+		{"registration-approved-no-profile", "An approved result without profile.", "", repl(`"profile":`+string(profile)+`,`, ""), nil, nil},
+		{"registration-approved-no-role", "An approved result without role.", "", repl(`"role":"controller",`, ""), nil, nil},
+		{"registration-bad-role", "role is not owner or controller.", "", repl(`"role":"controller"`, `"role":"display"`), nil, nil},
+		{"registration-bad-device-name", "deviceName carries a control character.", "", repl(`"deviceName":"Living Room FF1"`, `"deviceName":"Living\u0007Room"`), nil, nil},
+		{"registration-rejected-with-role", "A rejected result carrying only an extra role.", "", strings.Replace(string(rpt), `"outcome":"rejected"`, `"outcome":"rejected","role":"controller"`, 1), nil, nil},
+		{"registration-wrong-minter", "Opened with a minter key other than the QR's.", "", approved, nil, &otherMinter},
+		{"registration-wire-v2", "Wire message v is 2.", "", approved, wireRepl(`{"v":1`, `{"v":2`), nil},
+		{"registration-wire-type", "Wire message type is the plaintext type.", "", approved, wireRepl(`"type":"ff1_controller_registration_sealed"`, `"type":"ff1_controller_registration"`), nil},
+		{"registration-short-iv", "iv is 11 bytes.", "", approved, func(w string) string {
+			var m map[string]string
+			_ = json.Unmarshal([]byte(strings.Replace(w, `"v":1,`, "", 1)), &m)
+			return strings.Replace(w, `"iv":"`+m["iv"]+`"`, `"iv":"`+b64u(mustB64(m["iv"])[:11])+`"`, 1)
+		}, nil},
+		{"registration-compressed-epk", "epk in compressed SEC1 form.", "", approved, func(w string) string {
+			var m map[string]string
+			_ = json.Unmarshal([]byte(strings.Replace(w, `"v":1,`, "", 1)), &m)
+			e := mustB64(m["epk"])
+			return strings.Replace(w, m["epk"], b64u(append([]byte{2 + e[64]&1}, e[1:33]...)), 1)
+		}, nil},
 		{"registration-tampered", "One ciphertext character changed.", "", approved, func(w string) string {
 			i := strings.Index(w, `"ct":"`) + 6
 			b := []byte(w)
 			b[i] = map[bool]byte{true: 'B', false: 'A'}[b[i] == 'A']
 			return string(b)
-		}},
-		{"registration-wire-extra-member", "Wire message with an extra member.", "", approved, func(w string) string {
-			return strings.Replace(w, `{"v":1`, `{"x":1,"v":1`, 1)
-		}},
+		}, nil},
+		{"registration-wire-extra-member", "Wire message with an extra member.", "", approved, wireRepl(`{"v":1`, `{"x":1,"v":1`), nil},
 	}
 	for _, n := range negatives {
-		if err := emit("negative", n.name, n.desc, n.wantDev, n.res, n.post); err != nil {
+		if err := emit("negative", n.name, n.desc, n.wantDev, n.res, n.post, n.minter); err != nil {
 			return err
 		}
 	}
@@ -225,6 +264,8 @@ func (g *gen) controllerQRVectors(q control.ControllerQR) error {
 		{Description: "Wrong prefix (version 2).", QR: strings.Replace(s, "ff1-ctl:1|", "ff1-ctl:2|", 1)},
 		{Description: "Too few fields (label missing).", QR: s[:strings.LastIndex(s, "|")]},
 		{Description: "channelId shorter than 16 characters.", QR: with(0, "short")},
+		{Description: "channelId longer than 64 characters.", QR: with(0, strings.Repeat("a", 65))},
+		{Description: "channelId with a character outside [A-Za-z0-9_-].", QR: with(0, "7b0d6e4a.2f51.4c8e.9a43.a48fcc56c5d9")},
 		{Description: "minterKey in compressed form.", QR: with(1, b64u(compressed))},
 		{Description: "minterKey not on P-256.", QR: with(1, b64u(offCurve))},
 		{Description: "sig.y not on the curve with sig.x.", QR: with(3, f[5])},

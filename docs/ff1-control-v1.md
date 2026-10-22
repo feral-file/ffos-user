@@ -221,8 +221,9 @@ These are sent when no reply key can be trusted. The body is
 detail (a cause string would make the device an oracle). The one exception
 is a fixed, code-determined `message` on the two plaintext refusals,
 `enrollment_required` and `envelope_required`, telling an out-of-date app or
-ff-cli to update: `{"error":{"code":"…","message":"this FF1 is secured: update
-the Feral File app or ff-cli…"}}`. Clients branch on `code` only.
+ff-cli to update: `{"error":{"code":"…","message":"this FF1 needs signed
+requests: update the Feral File app or ff-cli"}}`. Clients branch on `code`
+only and MUST accept the extra member.
 
 | Code | When |
 |---|---|
@@ -303,8 +304,8 @@ The first owner.
   spent anyway (§4.3). The first owner retries `enroll` with a new `ctr`,
   with or without the same `inv`: from the `ctl` that holds the
   invitation-approved grant with the same `enc` either form returns that
-  grant (§5.3); anyone else gets `invitation_invalid`. Neither client
-  retries automatically yet; ff-app recovers through Request access.
+  grant (§5.3); anyone else gets `invitation_invalid`. A client recovers
+  with that idempotent `enroll`.
 
 ### 5.2 `op=requestAccess`
 
@@ -312,14 +313,15 @@ A later controller asks for access. **This is a LAN-only fallback**: the
 default way to add a controller is owner-initiated registration (§5.6), and
 clients no longer offer `requestAccess`.
 
-- On any route but the LAN (the legacy relayer, the v2 relay) the reply is
-  `not_approved`, and the `ctr` of a known record is spent. Off the LAN a
-  requester's only pins would come from the reply path it is asking to be
-  approved over, so the approval code (§5.4) would bind nothing.
 - In state `legacy` the reply is `not_approved`: there is no owner to approve,
   and the first controller uses the invitation instead.
 - If `ctl` already holds an active grant: `ok:true`,
   `res` = `{"status":"approved","role":role}`, no notification.
+- Off the LAN (the legacy relayer, the v2 relay) a `ctl` without an active
+  grant gets `not_approved` and creates or refreshes nothing; the `ctr` of a
+  known record is spent. Off the LAN a requester's only pins would come from
+  the reply path it is asking to be approved over, so the approval code
+  (§5.4) would bind nothing.
 - If an owner denied `ctl` (§5.5 `revokeController` on its pending request),
   the reply is `not_approved` until the moment the denied request would have
   expired.
@@ -551,7 +553,7 @@ with the §5 key, label and platform rules; `ctl` = `thumb(sig)`. It is
 idempotent per `ctl`:
 
 - No record: a new grant (`approvedBy` = the owner, a fresh `nk`). If the
-  same keys have a live LAN `requestAccess`, the grant takes that request's
+  same `ctl` has a live LAN `requestAccess`, the grant takes that request's
   replay window, so its spent `ctr`s stay spent.
 - An **active** grant: role, expiry, label and platform are replaced; keys,
   `nk`, window and `createdAt` are kept.
@@ -563,7 +565,9 @@ idempotent per `ctl`:
   owner, including the caller registering itself as a controller) are as for
   `approveController`.
 - It clears a pending `requestAccess` and a standing deny for the same `ctl`.
-- `approveController` stays for pending LAN requests only.
+- `approveController` keeps its two uses: granting a pending LAN request and
+  changing an active grant's role in place (§5.5). Adding new keys is
+  `registerController`.
 
 ## 6. Replay window
 
@@ -1093,6 +1097,11 @@ and the ff1-cli test suite does the same with `jose`.
   could then forge a registration result for those keys during the
   exchange. The relay alone cannot. The controller still enrolls only under
   a profile whose device then answers its sealed `enroll` with a grant.
+- Residual, accepted: a request a controller signs **before** its keys are
+  registered is answered `unknown_controller` and never enters a window, so a
+  copy captured on the relay can be replayed if the owner registers those
+  keys within its `exp` + 30 s. The §5.6 flow sends nothing before the
+  protected `enroll`, and ff-cli sends no command while a pairing is open.
 - Residual, accepted: in a 2.0.x migration whoever scans the enroll QR
   first becomes the first owner; a lost sole owner still means a factory
   reset.

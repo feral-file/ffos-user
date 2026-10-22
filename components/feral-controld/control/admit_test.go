@@ -433,7 +433,7 @@ func TestPublicErrors(t *testing.T) {
 	d.expectPublic(sealPayload(t, other, owner.sig, payload), CodeBadEnvelope)
 
 	pe := &PublicError{Code: CodeEnvelopeRequired}
-	if pe.HTTPStatus() != 403 || string(pe.Body()) != `{"error":{"code":"envelope_required","message":"this FF1 is secured: update the Feral File app or ff-cli to send signed commands"}}` {
+	if pe.HTTPStatus() != 403 || string(pe.Body()) != `{"error":{"code":"envelope_required","message":"this FF1 needs signed requests: update the Feral File app or ff-cli"}}` {
 		t.Fatalf("%d %s", pe.HTTPStatus(), pe.Body())
 	}
 	if PublicErrorStatus(CodeBadSignature) != 401 {
@@ -708,7 +708,12 @@ func TestRequestAccessIsLANOnly(t *testing.T) {
 	if n := len(d.a.pending); n != 0 {
 		t.Fatalf("a relay request entered the pending table (%d)", n)
 	}
-	// A revoked record asking over a relay is refused too, and its ctr is
+	// An active grant still learns it is approved on a relay (the
+	// first-owner recovery path after internal_error).
+	if r := open(ctl, Origin{Route: RouteRelayer, Known: true}); !r.OK || !strings.Contains(string(r.Res), `"approved"`) {
+		t.Fatalf("active grant on the relayer: %+v", r)
+	}
+	// A revoked record asking over a relay is refused, and its ctr is
 	// spent.
 	d.expectOK(owner, d.cmdClaims(owner, CmdRevokeController, `{"ctl":"`+ctl.ctl+`"}`))
 	if r := open(ctl, Origin{Route: RouteRelayer, Known: true}); r.Code != CodeNotApproved {

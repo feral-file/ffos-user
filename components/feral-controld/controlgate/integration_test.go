@@ -214,7 +214,7 @@ func TestControlProtocolEndToEnd(t *testing.T) {
 
 	// --- plaintext LAN refused; relayer plaintext is tiered ---
 	code, body := r.post([]byte(`{"command":"displayPlaylist","request":{"dp1_call":{}}}`))
-	if code != 403 || strings.TrimSpace(string(body)) != `{"error":{"code":"enrollment_required","message":"this FF1 is secured: update the Feral File app or ff-cli, then ask an owner to add you"}}` {
+	if code != 403 || strings.TrimSpace(string(body)) != `{"error":{"code":"enrollment_required","message":"this FF1 needs signed requests: update the Feral File app or ff-cli"}}` {
 		t.Fatalf("enrolled LAN plaintext: %d %s", code, body)
 	}
 	if code, body := r.get("/api/screenshot"); code != 403 || !strings.Contains(string(body), "enrollment_required") {

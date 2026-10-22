@@ -156,7 +156,7 @@ func TestControlStatusAndScreenshot(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil)
 	rec := serve(mux, req)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
-	assert.JSONEq(t, `{"error":{"code":"enrollment_required","message":"this FF1 is secured: update the Feral File app or ff-cli, then ask an owner to add you"}}`, rec.Body.String())
+	assert.JSONEq(t, string(control.PublicErrorBody(control.CodeEnrollmentRequired)), rec.Body.String())
 }
 
 // Review F1: in legacy, a live invitation closes /api/screenshot (an

@@ -75,8 +75,10 @@ func checkRegistration(t *testing.T, sub, name string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Ctl != q.Ctl() || res.ChannelID != v.ChannelID {
-		t.Fatalf("result %+v", res)
+	// Every member the controller acts on, not just the bindings.
+	got, _ := json.Marshal(res)
+	if !jsonEqual(t, got, v.Result) || res.Ctl != q.Ctl() || res.ChannelID != v.ChannelID {
+		t.Fatalf("result %s, want %s", got, v.Result)
 	}
 	wire, err := control.SealRegistrationBytes(q, []byte(v.Plaintext), v.OwnerEphemeralKey.ECDH(), b64(t, v.IV))
 	if err != nil || string(wire) != v.Wire {

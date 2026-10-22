@@ -102,8 +102,8 @@ func (e *PublicError) HTTPStatus() int { return PublicErrorStatus(e.Code) }
 // publicErrorMessages are the hints an out-of-date app or ff-cli prints for
 // a plaintext refusal it has no code for (§4.4). Clients branch on code only.
 var publicErrorMessages = map[string]string{
-	CodeEnrollmentRequired: "this FF1 is secured: update the Feral File app or ff-cli, then ask an owner to add you",
-	CodeEnvelopeRequired:   "this FF1 is secured: update the Feral File app or ff-cli to send signed commands",
+	CodeEnrollmentRequired: "this FF1 needs signed requests: update the Feral File app or ff-cli",
+	CodeEnvelopeRequired:   "this FF1 needs signed requests: update the Feral File app or ff-cli",
 }
 
 // PublicErrorBody renders a public error body; also used by Policy denials.
@@ -1431,13 +1431,6 @@ func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, know
 		}
 		return a.fail(adm, code, nil)
 	}
-	if origin.Route != RouteLAN {
-		// requestAccess is a LAN-only fallback (§5.2): off the LAN a
-		// controller is added by an owner (registerController, §5.6), and
-		// a relay requester's only pins would be the ones it asks to be
-		// approved under.
-		return refuse(CodeNotApproved)
-	}
 	if a.stateLocked(now) == StateLegacy {
 		// No owner exists to approve; the first controller uses the
 		// invitation instead.
@@ -1451,6 +1444,14 @@ func (a *Authority) requestAccess(adm *Admission, c RequestClaims, g Grant, know
 			return a.persistFailure(adm)
 		}
 		return a.succeed(adm, map[string]any{"status": "approved", "role": g.Role})
+	}
+	if origin.Route != RouteLAN {
+		// Creating or refreshing a pending request is a LAN-only fallback
+		// (§5.2): off the LAN a controller is added by an owner
+		// (registerController, §5.6), and a relay requester's only pins
+		// would be the ones it asks to be approved under. An active grant
+		// still learns it is approved above, on any route.
+		return refuse(CodeNotApproved)
 	}
 	notify := true
 	isNew := p == nil
