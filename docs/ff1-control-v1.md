@@ -861,9 +861,13 @@ and drops the binding on peer disconnect, revocation or expiry. "Fresh
 `ctr`" covers every admitted envelope with a principal, including those the
 authority answers itself (`listControllers`, `registerController`, an
 approved `enroll`), not only commands the caller executes. Revocations
-reach the binding layer as `Admission.RevokedCtls`; a binding whose `Seal`
-fails (an inactive grant) is dropped too, so a later reactivation by
-`registerController` needs a fresh request before notifications resume.
+reach the binding layer as `Admission.RevokedCtls` from **every** route
+(LAN, legacy relayer, v2), and grants that gain authority as
+`Admission.ReactivatedCtls`: the binding layer drops any binding it holds
+for either, so a reactivated controller gets notifications again only
+after a fresh request. A binding whose grant is inactive when a copy is
+sealed is dropped too; a transient seal failure (no entropy) is not a
+reason to drop it.
 `mint_pairing_*` notifications are legacy-only and never sent on v2. A
 controller that wants notifications therefore sends one envelope (any
 command) after connecting, on the same connection it reads notifications
@@ -923,6 +927,20 @@ route. Anything else (a timeout after an acknowledgement, a socket drop
 after sending) is **ambiguous** and is never resent (§14.4). A client's
 first envelope on a device channel goes to `to:"peers"` and it then pins
 the peer whose reply verifies under the pinned `devSig`.
+
+**Liveness.** Every v2 endpoint (the device and each client, on device and
+pairing channels) sends the text frame `ping` at least every 30 s; the
+relay answers `pong` without waking its state (an auto-response) and closes
+a connection that has shown no frame and no `ping` for 90 s. A full channel
+refuses newcomers (429) rather than evicting a live connection, so a device
+that keeps pinging is never pushed out. Endpoints ignore a text `pong`.
+
+**Ambiguity is the default.** Once any frame of a request has been written
+to the socket, only an explicit relay refusal for every destination known
+at send time, with no chunk acknowledged, proves it undelivered. A peer
+leaving, a socket closing, a deadline firing while a receipt is pending,
+or any other silence is ambiguous: the device acknowledges before it
+executes, so a departed device may already have run the command.
 
 A v2 refusal at connect or admission time (HTTP 429, close code 1008, the
 relay's `backpressure`) is **transient**: the device and every client retry
@@ -1227,6 +1245,10 @@ showed what goes wrong without them.
    restored backup, a second copy of the keys): the controller moves its
    counter past the window (at least 64 ahead) under its counter lock and
    retries once, keeping its keys. A public error is never evidence of this.
+   On v2 a `replay` is not evidence of it either, because the same sealed
+   bytes may have reached the device twice (a fan-out plus a copy to a
+   connection that joined late): there it is reported as an unknown outcome
+   and never triggers the counter jump or a resend.
 5. **Time.** A controller learns the device's clock only from verified replies.
    Notifications may be replayed by the relayer (§9), so they never move the
    clock.

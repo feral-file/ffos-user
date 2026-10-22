@@ -274,3 +274,24 @@ func TestFirstOwnerEnrollRefusedOnRelayV2(t *testing.T) {
 		t.Fatalf("legacy relayer enroll: %+v", r)
 	}
 }
+
+// §9: a reactivated or new grant is reported so a v2 binding left over from
+// before the revocation is dropped; an in-place role change is not.
+func TestRegisterReportsReactivatedCtl(t *testing.T) {
+	d, owner, ctl := ownerDevice(t)
+	upd := d.cmdClaims(owner, CmdRegisterController, registerReq(t, ctl, RoleController, ""))
+	if adm := d.send(owner, upd); len(adm.ReactivatedCtls) != 0 {
+		t.Fatalf("active update reported %v", adm.ReactivatedCtls)
+	}
+	d.expectOK(owner, d.cmdClaims(owner, CmdRevokeController, `{"ctl":"`+ctl.ctl+`"}`))
+	re := d.cmdClaims(owner, CmdRegisterController, registerReq(t, ctl, RoleController, ""))
+	adm := d.send(owner, re)
+	if r := d.final(adm, re); !r.OK || len(adm.ReactivatedCtls) != 1 || adm.ReactivatedCtls[0] != ctl.ctl {
+		t.Fatalf("reactivation: %+v %v", r, adm.ReactivatedCtls)
+	}
+	cli := newTestCtl(t, "laptop")
+	nw := d.cmdClaims(owner, CmdRegisterController, registerReq(t, cli, RoleController, ""))
+	if adm := d.send(owner, nw); len(adm.ReactivatedCtls) != 1 || adm.ReactivatedCtls[0] != cli.ctl {
+		t.Fatalf("new grant: %v", adm.ReactivatedCtls)
+	}
+}
