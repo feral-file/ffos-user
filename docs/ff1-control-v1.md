@@ -1119,8 +1119,10 @@ showed what goes wrong without them.
 1. **Pin sources.** A device profile is pinned only from:
    - the physical claim QR (first owner, migration);
    - an owner's sealed registration result (§5.6), checked per §5.6.3;
-   - an owner's end-to-end encrypted handoff (the retired short-code ff1-cli
-     pairing; superseded by §5.6);
+   - an owner's end-to-end encrypted handoff (the earlier short-code ff1-cli
+     pairing that carried a profile; superseded by §5.6). The short-code
+     handoff stays only as a topic handoff for devices without the protocol
+     (no `control` block in status), where it carries no profile;
    - for `requestAccess`, the pins on the screen QR (every state, §11); a
      second phone MUST pin from them when the QR carries them, because the
      approval code alone can be ground by a network attacker (§5.4);
