@@ -1122,7 +1122,12 @@ showed what goes wrong without them.
    - an owner's end-to-end encrypted handoff (the earlier short-code ff1-cli
      pairing that carried a profile; superseded by §5.6). The short-code
      handoff stays only as a topic handoff for devices without the protocol
-     (no `control` block in status), where it carries no profile;
+     (no `control` block in status) or with no owner yet (`legacy`), where it
+     carries no profile. That choice is made from unauthenticated status, so a
+     client that already holds or held a grant for the device never takes
+     it unless the user forces it, and a topic that arrives inside a
+     registration result is never used before the controller's verified
+     enroll;
    - for `requestAccess`, the pins on the screen QR (every state, §11); a
      second phone MUST pin from them when the QR carries them, because the
      approval code alone can be ground by a network attacker (§5.4);
