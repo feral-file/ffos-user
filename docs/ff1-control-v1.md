@@ -1159,6 +1159,16 @@ and the ff1-cli test suite does the same with `jose`.
   copy captured on the relay can be replayed if the owner registers those
   keys within its `exp` + 30 s. The §5.6 flow sends nothing before the
   protected `enroll`, and ff-cli sends no command while a pairing is open.
+- Residual, accepted while dual-stack: the v2 device channel is public and
+  the relay cannot tell the device from a stranger (a legacy topic is not
+  bound to a device ID and anyone can mint one). Per-address limits (IPv4
+  address, IPv6 /64), idle close and refusal at capacity raise the cost, but
+  a party with a handful of addresses that keep pinging can still fill a
+  channel. The effect is a 429 at connect, which is proven undelivered, so
+  clients fall back to the legacy relayer and the device's legacy session is
+  unaffected. **v2-only firmware requires** a connection slot the relay can
+  attribute to the device itself (for example a device credential the relay
+  can verify) before the legacy relayer is retired.
 - Residual, accepted: in a 2.0.x migration whoever scans the enroll QR
   first becomes the first owner; a lost sole owner still means a factory
   reset.

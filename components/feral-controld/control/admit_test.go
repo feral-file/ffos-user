@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -537,6 +538,42 @@ func TestStateAndStatus(t *testing.T) {
 	b, _ := json.Marshal(st)
 	if !strings.HasPrefix(string(b), `{"v":1,"state":"enforced","profile":{"v":1,"dev":"FF1-TESTUNIT"`) {
 		t.Fatalf("status json = %s", b)
+	}
+}
+
+func TestStatusTransports(t *testing.T) {
+	d, _, _ := ownerDevice(t)
+	if b, _ := json.Marshal(d.a.Status()); strings.Contains(string(b), "transports") {
+		t.Fatalf("unset transports reported: %s", b)
+	}
+	ts := []string{TransportLAN, TransportRelayer}
+	d.a.SetTransports(ts)
+	ts[1] = TransportRelayV2 // the caller's slice is not retained
+	st := d.a.Status()
+	if !slices.Equal(st.Transports, []string{TransportLAN, TransportRelayer}) {
+		t.Fatalf("transports = %v", st.Transports)
+	}
+	st.Transports[0] = "x" // nor is the returned one shared
+	if got := d.a.Status().Transports[0]; got != TransportLAN {
+		t.Fatalf("transports aliased: %s", got)
+	}
+}
+
+func TestGrantActive(t *testing.T) {
+	owner, ctl, gone := newTestCtl(t, "owner"), newTestCtl(t, "ctl"), newTestCtl(t, "gone")
+	g, r := ctl.grant(RoleController), gone.grant(RoleController)
+	g.ExpiresAt = testNow + 10
+	r.RevokedAt = testNow - 1
+	d := newTestDevice(t, owner.grant(RoleOwner), g, r)
+	if !d.a.GrantActive(owner.ctl) || !d.a.GrantActive(ctl.ctl) {
+		t.Fatal("active grant reported inactive")
+	}
+	if d.a.GrantActive(gone.ctl) || d.a.GrantActive("unknown") {
+		t.Fatal("revoked or unknown grant reported active")
+	}
+	d.advance(10)
+	if d.a.GrantActive(ctl.ctl) {
+		t.Fatal("expired grant reported active")
 	}
 }
 
