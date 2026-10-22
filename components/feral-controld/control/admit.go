@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -272,6 +273,8 @@ type Authority struct {
 	enforced bool
 	now      func() time.Time
 
+	transports atomic.Pointer[[]string]
+
 	randMu sync.Mutex
 	rand   io.Reader
 
@@ -413,12 +416,31 @@ type Status struct {
 	V       int      `json:"v"`
 	State   State    `json:"state"`
 	Profile *Profile `json:"profile,omitempty"`
+	// Transports are the routes this daemon carries envelopes on (§11).
+	Transports []string `json:"transports,omitempty"`
+}
+
+// Transport names in Status.Transports (§11).
+const (
+	TransportLAN     = "lan"
+	TransportRelayer = "relayer"
+	TransportRelayV2 = "relayV2"
+)
+
+// SetTransports records the configured transports reported in Status. Call
+// once at wiring time.
+func (a *Authority) SetTransports(ts []string) {
+	ts = slices.Clone(ts)
+	a.transports.Store(&ts)
 }
 
 // Status returns the public status block. A locked device has no profile it
 // can vouch for, so it omits it.
 func (a *Authority) Status() Status {
 	st := Status{V: 1, State: a.State()}
+	if ts := a.transports.Load(); ts != nil {
+		st.Transports = slices.Clone(*ts)
+	}
 	if id := a.store.Identity(); id != nil && st.State != StateLocked {
 		p := id.Profile()
 		st.Profile = &p
@@ -1558,6 +1580,14 @@ func marshalRes(res any) (json.RawMessage, error) {
 		return raw, nil
 	}
 	return marshalJSON(res)
+}
+
+// GrantActive reports whether ctl holds an active grant right now.
+func (a *Authority) GrantActive(ctl string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	g, ok := a.store.Grant(ctl)
+	return ok && g.Active(a.now().Unix())
 }
 
 // Seal builds a §9 sealed notification for one active grant.

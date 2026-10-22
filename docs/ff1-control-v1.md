@@ -977,6 +977,11 @@ reply rather than `bad_envelope`.
   `"control":{"v":1,"state":"legacy|enrolled|enforced|locked","profile":profile}`.
   The presence of `control` is the capability signal. A `locked` device omits
   `profile`: it cannot vouch for an identity it could not read.
+  `control.transports` lists the routes this device is configured to carry
+  envelopes on, in this order: `"lan"` (always), `"relayer"` (a legacy
+  relayer endpoint is configured), `"relayV2"` (the device dials the v2 relay,
+  §7.2 dual-stack rules). It reports configuration, not whether a socket is
+  up right now. Clients treat an absent `transports` as `["lan","relayer"]`.
 - With the protocol on, the claim QR appends four pipe fields to the
   existing six in every state but `locked`:
   `…|<setup_phase>|<inv>|<thumb(sig)>|<thumb(enc)>|<gen>`. `<inv>` is the
