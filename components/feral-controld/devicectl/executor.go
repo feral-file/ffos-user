@@ -127,6 +127,14 @@ type executor struct {
 	invTimer  *time.Timer
 	invExpiry time.Time
 
+	// sshMu guards sshTail, the end of the queue that runs SSH changes
+	// (sshAccess and the first-owner revocation) one at a time in the order
+	// they were requested. Order matters, not just exclusion: the revocation
+	// queued when the first owner enrolls must not run after an sshAccess
+	// that owner sends next, or it deletes the key that command installed.
+	sshMu   sync.Mutex
+	sshTail chan struct{}
+
 	// nameObserver, when set, is notified after the device name is stored so
 	// the mDNS record can be re-registered with it. Same wiring discipline as
 	// claimObserver: set once before commands are served, so no lock.
@@ -673,8 +681,15 @@ func (e *executor) ControlOwnerEnrolled() {
 	// to the LAN on an unclaimed device and to any topic holder in legacy)
 	// must not outlive the owner's arrival (review round 4 L6). Same steps
 	// as sshAccess{enabled:false}; off the request goroutine.
+	// The turn is taken here, before the enrollment reply goes out, so any
+	// sshAccess the new owner sends afterwards runs after this revocation.
 	if e.exec != nil {
+		prev, done := e.sshTurn()
 		go func() {
+			defer done()
+			if prev != nil {
+				<-prev
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if _, err := e.setSshAccess(ctx, []byte(`{"enabled":false}`)); err != nil {
@@ -794,7 +809,7 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 	case commands.CMD_TOGGLE_MUTE:
 		result, err = e.toggleMute(ctx)
 	case commands.CMD_SSH_ACCESS:
-		result, err = e.setSshAccess(ctx, bytes)
+		result, err = e.setSshAccessInOrder(ctx, bytes)
 	case commands.CMD_DDC_PANEL_CONTROL:
 		result, err = e.ddcPanelControl(ctx, bytes)
 	case commands.CMD_DDC_PANEL_STATUS:
@@ -2889,6 +2904,37 @@ func (e *executor) setBetaFeaturesToggle(_ context.Context, args []byte) (interf
 	e.logger.Info("Beta features disabled (toggle file removed)", zap.String("path", BetaFeaturesToggleOnFile))
 
 	return CmdOK, nil
+}
+
+// sshTurn queues one SSH change. The caller waits for prev (nil: nothing
+// queued) and must call done when its change has finished, whatever happened.
+func (e *executor) sshTurn() (prev <-chan struct{}, done func()) {
+	e.sshMu.Lock()
+	defer e.sshMu.Unlock()
+	mine := make(chan struct{})
+	if e.sshTail != nil {
+		prev = e.sshTail
+	}
+	e.sshTail = mine
+	return prev, func() { close(mine) }
+}
+
+// setSshAccessInOrder runs sshAccess after every SSH change requested
+// before it (see sshMu).
+func (e *executor) setSshAccessInOrder(ctx context.Context, args []byte) (interface{}, error) {
+	prev, done := e.sshTurn()
+	if prev != nil {
+		select {
+		case <-prev:
+		case <-ctx.Done():
+			// Keep the queue intact: release this turn only after the
+			// earlier change has finished.
+			go func() { <-prev; done() }()
+			return nil, ctx.Err()
+		}
+	}
+	defer done()
+	return e.setSshAccess(ctx, args)
 }
 
 func (e *executor) setSshAccess(ctx context.Context, args []byte) (interface{}, error) {
