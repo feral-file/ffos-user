@@ -350,10 +350,12 @@ Agreed with Anh on feral-file#3551 (comments 6331809819, 6332549323,
   Show this code / locked screens, CLI QR pairing with staging and
   `--resume`, the shared QR/result/crypto fixtures.
 - **Anh's** (ff-relayer#26, ffos-user#408, ff-app#1139, ff-cli#134,
-  play#24, rebased onto ours): the generic-channel adapters
+  rebased onto ours): the generic-channel adapters
   (`/v2/channels/{channelId}/connections`) for device traffic and the
   pairing exchange, `relayV2.endpoint`, peer context/targeted send/disconnect
-  hooks for the gate, split legacy retirement in the relay.
+  hooks for the gate, split legacy retirement in the relay. play#24 (also
+  Anh's) no longer carries a browser v2 client: it documents that Play stays
+  on mint pairing until display grants are defined (final review S3).
 - The QR pairing flow is a joint release dependency: it ships only with a
   working adapter. Our endpoint and OTA protections ship on the LAN and the
   legacy relayer without waiting for v2.
@@ -384,6 +386,6 @@ Agreed with Anh on feral-file#3551 (comments 6331809819, 6332549323,
 | B15 | Controller self-revoke; CLI jumps ctr forward on a verified `replay` | device done (#412); clients #1141/#135 |
 | B16 | Last owner's Remove blocked; first scanner wins in migration; lost sole owner = reset | spec §13/§14.7; app #1141 |
 | B17 | One sealed request on every socket open; one device socket per FF1 for owners | clients (Anh's adapter) |
-| B18 | Browser uses the same QR flow; `role:"display"` later | play#24 (Anh) |
+| B18 | Browser uses the same QR flow; `role:"display"` later | deferred until display grants; Play stays on mint pairing (play#24 docs), a browser carrier is then ported from ff-cli |
 | B19 | CLI cannot be first owner; pairing needs internet; terminal QR + pasteable string; `expiresAt` stored | #135 |
 | B20 | "Secure this FF1" may trigger the pre-claim OTA gate; hostname fallback `FF1` never dials v2 | app copy #1141; spec §7.2 |
