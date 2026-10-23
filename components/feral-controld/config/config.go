@@ -283,6 +283,11 @@ type Config struct {
 	// before restarting). Existing keys keep their existing strict behavior.
 	Provisioning json.RawMessage `json:"provisioning,omitempty"`
 
+	// Control is the feral-file#3551 controller-authorization block
+	// (docs/ff1-control-v1.md), raw and decoded permissively by
+	// ControlTuning() for the same crash-loop reason as Provisioning.
+	Control json.RawMessage `json:"control,omitempty"`
+
 	// MACInfo contains MAC addresses for all network interfaces
 	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
 	MACInfo map[string]string `json:"-"`
@@ -310,6 +315,56 @@ func (c *Config) ContentPolicyTuning(logger *zap.Logger) ContentPolicyConfig {
 				zap.Error(err), zap.String("raw", string(c.ContentPolicy)))
 		}
 		return ContentPolicyConfig{}
+	}
+	return t
+}
+
+// ControlConfig is the decoded "control" block.
+//
+// controld.json is replaced on every full-image OTA from a release-level
+// secret (plan fact F11), so this block is a RELEASE setting, not a device
+// one, and it must never be able to reopen a device that already has control
+// state: main forces the protocol on whenever .state/control (or its
+// retirement tombstone) exists, whatever Enabled says. See control_wiring.go.
+type ControlConfig struct {
+	// Enabled decides only whether a device WITHOUT control state starts the
+	// protocol (creates its identity and offers invitations).
+	Enabled bool `json:"enabled"`
+	// Enforced is the §7.2 "enforced" switch (phase 2). It can only make a
+	// device stricter than enrolled, never less strict.
+	Enforced bool `json:"enforced"`
+	// Malformed records that the block (or one of its fields) did not
+	// decode; the affected fields read false.
+	Malformed bool `json:"-"`
+}
+
+// ControlTuning decodes the control block field by field, so one bad value
+// does not take the other with it. Absent means disabled and not enforced.
+// A malformed field reads false and sets Malformed: for Enabled that only
+// affects devices without control state, and for Enforced false is still
+// the enrolled policy, so both degrade safely.
+func (c *Config) ControlTuning(logger *zap.Logger) ControlConfig {
+	var t ControlConfig
+	if len(c.Control) == 0 || string(c.Control) == "null" {
+		return t
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(c.Control, &fields); err != nil {
+		t.Malformed = true
+	}
+	for name, dst := range map[string]*bool{"enabled": &t.Enabled, "enforced": &t.Enforced} {
+		raw, ok := fields[name]
+		if !ok {
+			continue
+		}
+		if err := json.Unmarshal(raw, dst); err != nil {
+			*dst = false
+			t.Malformed = true
+		}
+	}
+	if t.Malformed && logger != nil {
+		logger.Error("control config block malformed; bad fields read as false (devices with control state keep enforcing it)",
+			zap.String("raw", string(c.Control)))
 	}
 	return t
 }

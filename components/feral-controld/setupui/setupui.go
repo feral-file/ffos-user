@@ -710,6 +710,40 @@ func (s *Service) RefreshClaimQRName(resolve func() string) {
 	})
 }
 
+// RefreshClaimQRURL rewrites the url of the claim-QR narration while claim_qr
+// is the current intent, keeping its device_name. build runs only then, so a
+// caller whose url carries a fresh single-use credential (the control
+// invitation, feral-file#3551) mints one only for a QR that is on screen.
+// Same conditional-commit discipline as RefreshClaimQRName: a narrator that
+// took the screen meanwhile is never overwritten.
+func (s *Service) RefreshClaimQRURL(build func() string) {
+	cur, has := s.ctrl.Current()
+	if !has || setupState(cur) != stateClaimQR {
+		return
+	}
+	url := build()
+	if url == "" {
+		return
+	}
+	req := map[string]any{"state": stateClaimQR, "url": url}
+	s.pushIf(req, func(last map[string]any) bool {
+		if stringField(last, "state") != stateClaimQR {
+			return false
+		}
+		if name := stringField(last, "device_name"); name != "" {
+			req["device_name"] = name
+		}
+		return true
+	})
+}
+
+// ClaimQRShowing reports whether the claim QR is the current narration
+// intent.
+func (s *Service) ClaimQRShowing() bool {
+	cur, has := s.ctrl.Current()
+	return has && setupState(cur) == stateClaimQR
+}
+
 // ShowReady narrates that setup completed successfully.
 func (s *Service) ShowReady() {
 	s.push(map[string]any{"state": stateReady})
@@ -801,6 +835,11 @@ func (s *Service) HideIfShowing(states ...string) {
 		return false
 	})
 }
+
+// StateClaimQR is exported for HideIfShowing callers that take the claim QR
+// down when it is no longer claimable: the first owner enrolled with the
+// control invitation it carried (feral-file#3551 §5.1).
+const StateClaimQR = stateClaimQR
 
 // StateFinalizing is exported for HideIfShowing callers that need to name the
 // narration they own (the auto-claim flow's post-join gap overlay).

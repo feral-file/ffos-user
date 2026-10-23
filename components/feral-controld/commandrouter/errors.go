@@ -10,6 +10,13 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 )
 
+// ErrPermissionDenied is returned by Process when the envelope principal on
+// ctx lacks the command's tier (feral-file#3551, docs/ff1-control-v1.md
+// §7.1). The authority already refused such a request before execution; this
+// is the second check, placed before the CDP fallthrough so a router bug can
+// never forward an owner-tier or internal command for a controller.
+var ErrPermissionDenied = errors.New("permission denied for this controller")
+
 // RateLimitedError is returned by the command storm gate when a command is
 // rejected to protect the device from flooding. Callers (the LAN hub and the
 // relayer mediator) detect it to report a legible failure instead of treating

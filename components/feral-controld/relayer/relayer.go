@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
@@ -91,6 +93,8 @@ type Message struct {
 	// re-marshal whose HTML escaping can inflate it past the verifier's size
 	// bound (feral-file/ffos-user#307). Set by UnmarshalJSON only.
 	RawRequest json.RawMessage `json:"-"`
+	// Ambiguous: see commands.Command.Ambiguous.
+	Ambiguous bool `json:"-"`
 }
 
 type messageWire struct {
@@ -110,6 +114,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	m.Command, m.Request, m.TopicID = w.Command, w.Request, w.TopicID
+	m.Ambiguous = commands.AmbiguousTopLevel(data)
 	m.RawRequest = nil
 	if raw, ok := tokens["request"]; ok && len(raw) > 0 && string(raw) != "null" {
 		m.RawRequest = raw
@@ -285,7 +290,7 @@ func (r *relayer) RetryableConnect(ctx context.Context) error {
 		r.logger.Info("Connecting to Relayer",
 			zap.String("endpoint", r.endpoint),
 			zap.Int("attempts", attempts),
-			zap.String("topicID", topicID),
+			zap.String("topic_fp", helper.TopicFingerprint(topicID)),
 			zap.Bool("topic_ready", topicID != ""),
 			zap.Bool("currently_connected", r.IsConnected()),
 		)
@@ -365,7 +370,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 	claim := state.ClaimSnapshot()
 	topicID := claim.TopicID
 	r.logger.Info("Retrieved topic ID from state",
-		zap.String("topicID", topicID),
+		zap.String("topic_fp", helper.TopicFingerprint(topicID)),
 		zap.Bool("isEmpty", topicID == ""),
 		zap.Bool("isReady", claim.TopicReady))
 
@@ -388,7 +393,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 		r.logger.Warn("Relayer dial failed",
 			zap.Error(err),
 			zap.String("endpoint", r.endpoint),
-			zap.String("topicID", topicID),
+			zap.String("topic_fp", helper.TopicFingerprint(topicID)),
 			zap.Int("status_code", statusCode),
 		)
 		return r.categorizeWebsocketError(err, resp)
@@ -422,7 +427,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 	}
 	r.logger.Info("Relayer websocket dial succeeded",
 		zap.String("endpoint", r.endpoint),
-		zap.String("topicID", topicID),
+		zap.String("topic_fp", helper.TopicFingerprint(topicID)),
 		zap.String("cf_ray", cfRay),
 	)
 
@@ -603,12 +608,17 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 					continue
 				}
 
+				// A system frame carries the topic, a bearer credential:
+				// never log its raw body.
+				if payload.MessageID == MESSAGE_ID_SYSTEM {
+					logMsg = []byte("[system frame redacted]")
+				}
 				r.logger.Info("Received message",
 					zap.ByteString("message", logMsg),
 					zap.String("type", payload.Type),
 					zap.String("messageID", payload.MessageID),
 					zap.String("command", derefString(payload.Message.Command)),
-					zap.String("topicID", derefString(payload.Message.TopicID)),
+					zap.String("topic_fp", helper.TopicFingerprint(derefString(payload.Message.TopicID))),
 					zap.Int("message_length", len(msg)),
 				)
 
@@ -663,7 +673,7 @@ func (r *relayer) dispatchMessage(ctx context.Context, payload Payload, done cha
 			// legible rejection is neither expected nor possible — dropping is
 			// the correct backstop against a spoofed control-plane storm.
 			r.logger.Warn("Relayer control-plane lane saturated, dropping system message",
-				zap.String("topicID", derefString(payload.Message.TopicID)),
+				zap.String("topic_fp", helper.TopicFingerprint(derefString(payload.Message.TopicID))),
 			)
 		}
 		return

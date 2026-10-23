@@ -143,6 +143,93 @@ source preflight notes for the conditions that are deliberately never
 rejected (scheduled playlists, cached captures, and every non-definitive
 probe outcome).
 
+## Control Protocol Envelope (`ff1Envelope`, feral-file#3551)
+
+Active when `controld.json` sets `"control":{"enabled":true}`, and always on
+a device that already has control state (`.state/control/` or the
+factory-reset tombstone), whatever the config says: the config is replaced by
+every full-image OTA and must never reopen an owned device. With the
+protocol off, `ff1Envelope` is an unknown command like any other (forwarded
+to the player, which rejects it) and nothing below applies. The normative
+contract is `docs/ff1-control-v1.md`; this section is the message-level
+summary.
+
+### Request
+
+Same JSON on both routes (LAN `POST /api/cast`, relayer topic cast):
+
+```json
+{"command":"ff1Envelope","request":{"v":1,"jwe":"<compact JWE>"}}
+```
+
+`request` has exactly the members `v` (=1) and `jwe`. The JWE is the §3
+request: an ECDH-ES/A256GCM JWE to the device's `devEnc`, wrapping an ES256
+JWS by the controller over claims carrying `op` (`cmd`, `enroll`,
+`requestAccess`), `cmd`, and `req` — the inner command name and its usual
+`request` object, unchanged. The admitted command runs through the same
+router, storm gate and handlers as a plaintext one.
+
+### Reply
+
+- Authenticated outcomes (success, `command_failed`, and every encrypted
+  error: `invalid_request`, `expired`, `replay`, `permission_denied`,
+  `access_revoked`, `invitation_invalid`, `pending`, `not_approved`,
+  `rate_limited`, `locked`, `internal_error`): LAN `200` /
+  relayer RPC `message`, body `{"v":1,"jwe":"<compact>"}`, readable only with
+  the request's reply key and verified against the pinned device key.
+  A handler's own reply (including bodies with `ok:false` that the handler
+  returns rather than raises) is `ok:true` with that body as `res`; a handler
+  error is `command_failed` with `res` =
+  `{"ok":false,"error":"rate_limited|sourceUnreachable|contentBlocked|playlistInvalid|failed","command","message"}`.
+- Public errors, when no reply key can be trusted: body
+  `{"error":{"code":"bad_envelope|unknown_controller|bad_signature|locked|busy"}}`,
+  LAN status 401 (`busy`: 503, retry), relayer RPC `message`. The plaintext
+  refusals `enrollment_required`, `envelope_required`, `screen_protected`
+  (403) and `invalid_message` (400) are listed under the plaintext policy
+  below; the full table is the spec §4.4.
+
+### Owner commands handled by the authority
+
+`approveController {ctl, role, expiresAt?}`, `revokeController {ctl}`,
+`registerController {sig, enc, label, platform, role, expiresAt?}` and
+`listControllers {}` are owner-tier envelope commands answered by the
+authority itself; they never reach the router (see the spec §5.5 and §5.6.4
+for results and `command_failed` reasons). `revokeController` of the
+signer's own `ctl` is also accepted from a controller grant (self-revoke).
+
+### Plaintext policy (state-dependent, spec §7.2)
+
+`/api/v2/status` (and `getDeviceStatus`) carry
+`"control":{"v":1,"state":"legacy|enrolled|enforced|locked","profile":…}`.
+
+| State | LAN plaintext `/api/cast` | Relayer plaintext |
+|---|---|---|
+| `legacy` | allowed (phase-0 topic gate still applies) | allowed |
+| `enrolled` | `403 {"error":{"code":"enrollment_required"}}` | controller-tier commands only |
+| `enforced` | `403 enrollment_required` | only the exact Play `displayPlaylist` shape |
+| `locked` | `401 {"error":{"code":"locked"}}` | controller-tier commands only |
+
+A refused relayer plaintext command gets the RPC `message`
+`{"ok":false,"error":"envelope_required"|"locked","command":"<name>","message":"<text>"}`:
+`ok:false` and a flat string `error`, the shape every released client
+(ff-app, ff1-cli, Play) reports as a failure without crashing. Outside
+`legacy`, `GET /api/screenshot` answers `403 enrollment_required` and status
+serves `topic_id:""`.
+
+Two more refusals apply whenever the protocol is on:
+- A plaintext message whose top level repeats a member name, exactly or in
+  another case (`"request"` and `"Request"`), is refused in every state:
+  LAN `400 {"error":{"code":"invalid_message"}}`, relayer
+  `{"ok":false,"error":"invalid_message",…}`. Accepted plaintext runs with
+  its `request` decoded from the exact bytes the policy judged. Behaviour change
+  when the protocol is wired: a message whose ONLY request member is a
+  case variant (`"Request"`, no `"request"`) used to reach the handler
+  through encoding/json's case-insensitive decode; it now runs with no
+  arguments, because only the exact `request` token is judged and used.
+- In `legacy`, `GET /api/screenshot` answers
+  `403 {"error":{"code":"screen_protected"}}` while the first-owner
+  invitation is live (the claim QR carries it).
+
 ## Shared Success Responses
 
 Most side-effect commands return:
@@ -202,6 +289,12 @@ Current error cases:
 - `primaryAddress` is accepted but not currently used by the executor.
 
 Current relayer error response: none standardized; command failure is logged.
+
+LAN hub (`POST :1111/api/cast`): `connect` needs no `X-FF1-Topic` header,
+claimed or not. It is a feral-file#3551 phase-0 residual: the released ff-app
+sends it LAN-first before every cast without the header, so it stays open until
+the phase-1 control protocol makes it owner-tier. An open `connect` only
+rewrites the claim record and confers no authority.
 
 ### showPairingQRCode
 
@@ -1091,6 +1184,16 @@ Current error cases:
   authorized keys.
 
 Current relayer error response: none standardized; command failure is logged.
+
+LAN hub (`POST :1111/api/cast`) requirement (feral-file#3551 phase 0): on a
+**claimed** device, `sshAccess` (enable and disable alike) must carry the header
+`X-FF1-Topic` equal to the device's current relayer topic. A missing or wrong
+header, or a claimed device that holds no topic yet, is refused with HTTP `401`
+and the body `{"error":{"code":"topic_required"}}` before the executor runs.
+The topic is compared in constant time and never logged. An unclaimed device
+accepts `sshAccess` without the header. Relayer-delivered `sshAccess` is
+unaffected. A client that gets `topic_required` should tell the user to re-pair
+it (ff1-cli reads the topic from its keyring).
 
 ### updateToLatestVersion
 
@@ -3143,3 +3246,10 @@ Rules:
 - Device-control commands with destructive side effects (`shutdown`, `reboot`,
   `factoryReset`, `updateToLatestVersion`, `sshAccess`) should remain explicit
   command names with narrow request bodies.
+- LAN hub authorization is phase 0 of feral-file#3551 (containment): on a
+  claimed device, only `sshAccess` (plus `GET /api/screenshot`) requires the
+  `X-FF1-Topic` header; see that section. Every other command, including
+  `connect`, `factoryReset`, `startWifiSetup`, `showPairingQRCode`, and the
+  keyboard/mouse/gesture input commands, stays open to any LAN caller while
+  the device is in the control protocol's `legacy` state (or the protocol is
+  off). With an owner enrolled, see "Control Protocol Envelope" above.
