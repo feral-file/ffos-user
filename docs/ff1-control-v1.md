@@ -1157,6 +1157,12 @@ and the ff1-cli test suite does the same with `jose`.
   could then forge a registration result for those keys during the
   exchange. The relay alone cannot. The controller still enrolls only under
   a profile whose device then answers its sealed `enroll` with a grant.
+  If that party is also a LAN man-in-the-middle answering as the device, the
+  fake enrollment completes over the LAN; if it also takes the real device
+  off the relayer, the relayer's 1003 for the controller's held topic (what
+  a reset and an offline device both look like) lets a client store the
+  forged result's topic in its place, so the impersonation continues over
+  the relayer after the controller leaves that LAN.
 - Residual, accepted: a request a controller signs **before** its keys are
   registered is answered `unknown_controller` and never enters a window, so a
   copy captured on the relay can be replayed if the owner registers those
