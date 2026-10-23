@@ -2934,6 +2934,10 @@ func (e *executor) setSshAccessInOrder(ctx context.Context, args []byte) (interf
 		}
 	}
 	defer done()
+	// Bounded like the enrollment revocation: a hung sudo call must not
+	// hold the queue, and every later SSH change, forever.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	return e.setSshAccess(ctx, args)
 }
 
