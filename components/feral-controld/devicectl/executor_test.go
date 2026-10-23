@@ -4116,32 +4116,32 @@ func TestExecutor_SshAccess_Enable_CapsTtlAndSchedulesDisable(t *testing.T) {
 
 	gomock.InOrder(
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".timer").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".timer").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".service").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".service").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "reset-failed", constants.SSH_DISABLE_UNIT+".service").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "reset-failed", constants.SSH_DISABLE_UNIT+".service").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "start", "sshd.service").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "start", "sshd.service").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
 			CommandContext(
-				ts.ctx,
+				gomock.Any(),
 				"sudo",
 				"systemd-run",
 				"--unit",
@@ -4201,25 +4201,25 @@ func TestExecutor_SshAccess_Disable_StopsService(t *testing.T) {
 
 	gomock.InOrder(
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".timer").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".timer").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".service").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".service").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "reset-failed", constants.SSH_DISABLE_UNIT+".service").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "reset-failed", constants.SSH_DISABLE_UNIT+".service").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "stop", "sshd.service").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "stop", "sshd.service").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
