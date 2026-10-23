@@ -182,15 +182,20 @@ router, storm gate and handlers as a plaintext one.
   error is `command_failed` with `res` =
   `{"ok":false,"error":"rate_limited|sourceUnreachable|contentBlocked|playlistInvalid|failed","command","message"}`.
 - Public errors, when no reply key can be trusted: body
-  `{"error":{"code":"bad_envelope|unknown_controller|bad_signature|locked"}}`,
-  LAN status 401, relayer RPC `message`.
+  `{"error":{"code":"bad_envelope|unknown_controller|bad_signature|locked|busy"}}`,
+  LAN status 401 (`busy`: 503, retry), relayer RPC `message`. The plaintext
+  refusals `enrollment_required`, `envelope_required`, `screen_protected`
+  (403) and `invalid_message` (400) are listed under the plaintext policy
+  below; the full table is the spec §4.4.
 
 ### Owner commands handled by the authority
 
-`approveController {ctl, role, expiresAt?}`, `revokeController {ctl}` and
+`approveController {ctl, role, expiresAt?}`, `revokeController {ctl}`,
+`registerController {sig, enc, label, platform, role, expiresAt?}` and
 `listControllers {}` are owner-tier envelope commands answered by the
-authority itself; they never reach the router (see the spec §5.5 for
-results and `command_failed` reasons).
+authority itself; they never reach the router (see the spec §5.5 and §5.6.4
+for results and `command_failed` reasons). `revokeController` of the
+signer's own `ctl` is also accepted from a controller grant (self-revoke).
 
 ### Plaintext policy (state-dependent, spec §7.2)
 

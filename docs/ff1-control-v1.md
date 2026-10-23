@@ -683,7 +683,8 @@ it. On v2 (`RouteRelayV2`) every plaintext command is refused in every state:
 before the retired `factoryReset` exception, which stays for the LAN and the
 legacy relayer only. Envelopes are admitted exactly as on any other route.
 `requestAccess` is refused on v2 (§5.2) and so is first-owner `enroll` with
-`inv` (§5.1). There is no plaintext exception on v2, not even a profile read:
+`inv` (§5.1). `enroll` without `inv` (§5.3) is admitted on v2 as on any
+route; keeping it off v2 is a client rule (§10). There is no plaintext exception on v2, not even a profile read:
 a controller learns the profile from the screen QR pins (first owner, on the
 LAN or the legacy relayer) or from its registration result (§5.6), so v2
 carries envelopes only.
@@ -957,6 +958,11 @@ public device ID and anyone can join it, so a v2 reply that verifies under a
 profile the controller has not yet confirmed proves nothing: whoever forged
 that profile can answer. Enrollment goes over the LAN or the legacy relayer
 with a topic the controller held before the pairing (§5.6, §14.1).
+This is a client rule, not a device refusal. The device admits `enroll`
+without `inv` on v2 exactly as on the LAN: it succeeds only for a `ctl` an
+owner already approved or registered, so the device gains nothing by
+refusing it there. The risk is the controller's, which would trust an
+unconfirmed profile, so a client MUST NOT send `enroll` on v2.
 
 At most 4 envelopes are authenticated at a time (decrypt, verify, parse);
 an envelope that cannot get a slot within 1 s is answered with the public
