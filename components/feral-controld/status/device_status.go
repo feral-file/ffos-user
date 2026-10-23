@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
@@ -161,12 +162,35 @@ type DeviceStatusResponse struct {
 	// It reflects intended FF1 sleep mode; FFP panel DDC power may lag after transitions
 	// because controld aligns panel power asynchronously (best-effort, eventual vs. ddcPanelStatus).
 	SleepSchedule *sleepschedule.Status `json:"sleepSchedule,omitempty"`
+	// Control is the feral-file#3551 capability block (docs/ff1-control-v1.md
+	// §11), from SetControlStatusSource; omitted while control.enabled is
+	// false. Typed any so this package does not depend on package control.
+	Control any `json:"control,omitempty"`
+}
+
+// controlStatusSource supplies DeviceStatusResponse.Control. A package-level
+// seam (like netmetrics' setters) because deviceStatus is a value type built
+// before the control authority, and both the pulled getDeviceStatus reply and
+// the poller's pushed device_status go through GetStatus.
+var controlStatusSource atomic.Pointer[func() any]
+
+// SetControlStatusSource wires the control block source. Call before the
+// poller starts; nil clears it.
+func SetControlStatusSource(fn func() any) {
+	if fn == nil {
+		controlStatusSource.Store(nil)
+		return
+	}
+	controlStatusSource.Store(&fn)
 }
 
 // GetStatus retrieves comprehensive device status information
 // This function can be used by both command handlers and status polling
 func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, error) {
 	response := &DeviceStatusResponse{Contract: DeviceStatusContract}
+	if fn := controlStatusSource.Load(); fn != nil {
+		response.Control = (*fn)()
+	}
 
 	// Use errgroup for parallel execution
 	g, ctx := errgroup.WithContext(ctx)
