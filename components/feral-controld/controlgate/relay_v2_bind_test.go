@@ -176,6 +176,38 @@ func TestV2PlaintextRefusedByState(t *testing.T) {
 	}
 }
 
+// §13: a v2 frame labeled messageID "system" is a no-op, whatever it carries:
+// no reply, no execution, no binding.
+func TestV2SystemMessageIDIsNoop(t *testing.T) {
+	r := newV2Rig(t)
+	owner := enrollOwner(t, r.g, r.a)
+	p := newFakePeer()
+	deliver := func(cast []byte) {
+		t.Helper()
+		var payload relayer.Payload
+		if err := json.Unmarshal([]byte(`{"messageID":"system","message":`+string(cast)+`}`), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.adapter.Handle(r.from(p), payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deliver([]byte(`{"command":"getDeviceStatus","request":{}}`))
+	s := owner.build(control.OpCmd, "getDeviceStatus", `{}`, "")
+	deliver(s.cast)
+	p.quiet(t)
+	if r.rec.count() != 0 {
+		t.Fatal("a system-labeled v2 frame ran")
+	}
+	// Nothing was bound: a notification reaches no one.
+	r.adapter.Publish("device_status", json.RawMessage(`{"v":1}`), true)
+	p.quiet(t)
+	// The same envelope under a client messageID is answered and runs.
+	if reply := owner.open(s, r.cast(t, p, s.cast)); !reply.OK || r.rec.count() != 1 {
+		t.Fatalf("control request after the no-op: %+v", reply)
+	}
+}
+
 // §9: an op the authority answers itself binds like an executed command, and
 // the binding is followed by the current status snapshot after the reply.
 func TestV2BindsOnAuthorityAnsweredOpAndSendsSnapshot(t *testing.T) {

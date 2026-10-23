@@ -231,6 +231,11 @@ func (r *RelayV2) Handle(ctx context.Context, payload relayer.Payload) error {
 	if !ok || payload.MessageID == "" || payload.Message.Command == nil {
 		return nil
 	}
+	// §13: on v2 the client picks the messageID, so "system" is no
+	// relayer-originated frame and MUST be a no-op: not run, not answered.
+	if payload.MessageID == relayer.MESSAGE_ID_SYSTEM {
+		return nil
+	}
 	// After the reply (deferred calls run after the Send below), so a client
 	// that pins the peer from its first verified reply drops nothing.
 	defer r.releaseAfterReply(peer)
