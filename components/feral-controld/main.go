@@ -1051,7 +1051,14 @@ func initializeApp(
 	if !sigVerifyEnabled {
 		logger.Warn("DP-1 signature verification disabled by config; casts carry no signature verdict")
 	}
-	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug, sigVerifyEnabled)
+	// Raster read key for address-playlist wallet walks (feral-file#3576).
+	// Absent means the walk runs unauthenticated; whether Raster then answers
+	// is Raster's call, so say so once at startup rather than per cast.
+	rasterCfg := config.Get().RasterTuning(logger)
+	if rasterCfg.APIKey == "" {
+		logger.Warn("raster.apiKey not configured; Raster wallet casts run unauthenticated")
+	}
+	dp1 := dp1.New(ffIndexer, httpClient, dp1.NewRasterHTTPClient(), json, io, logger, debug, sigVerifyEnabled, rasterCfg.APIKey)
 
 	// displayAt scheduler: filters playlists with displayAt items before CDP
 	// and advances them on timer / wake / CDP reconnect. Durable state stores
