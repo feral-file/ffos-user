@@ -197,19 +197,94 @@ func rasterWorkIDStandard(standard string) string {
 	}
 }
 
-// sortRasterItems puts a walk in the order the app shows an address
-// playlist: newest acquisition first, ties broken by work id descending
-// (ff-app app_database.dart orders playlist entries by sortKeyUs DESC, then
-// itemId DESC, and an address playlist's itemId is the work id).
+// sortRasterItems puts a Raster wallet walk in the order ff-app shows the
+// same address playlist.
 //
-// Raster also returns newest acquisition first, but breaks ties by its own
-// token id ascending, and that tie rule is observed behavior, not a documented
-// contract. Ties are common, not an edge case: one probed wallet had 332 of
-// its 595 tokens sharing a timestamp with another token (a whole mint or
-// transfer batch lands in one block). Sorting here makes the wall's order a
-// function of the wallet alone, identical to the phone's, whatever order a
-// page comes back in. Stable, so two items with the same work id (which
-// cannot happen in one wallet) would still keep a defined order.
+// --- CROSS-REPO TIE-BREAK RULE (ff-app <-> FF1). TEMPORARY, see "Removal". ---
+//
+// The rule, applied identically on the phone and on the wall:
+//
+//  1. lastAcquiredAt DESC, compared in microseconds since the epoch. Absent
+//     or unparsable sorts as 0, i.e. oldest.
+//  2. work id DESC, as a plain string comparison. The work id is
+//     `<namespace>:<standard>:<contract>:<tokenId>`, e.g.
+//     `eip155:1:erc721:0x059e…ac3a:78000001` or
+//     `tezos:mainnet:fa2:KT1R…xton:42`.
+//
+// Where the app defines each piece. These live in another repository, so
+// nothing here fails to compile or fails a test when they change:
+//
+//   - Order: lib/infra/database/app_database.dart, the playlist-entry
+//     queries' `orderBy([OrderingTerm.desc(playlistEntries.sortKeyUs),
+//     OrderingTerm.desc(playlistEntries.itemId)])`. An address playlist's
+//     itemId is the work id.
+//   - sortKeyUs: lib/domain/utils/raster_token_mapper.dart, `mapOwned`:
+//     `ownership.lastAcquiredAt?.microsecondsSinceEpoch ?? 0`, parsed with
+//     `DateTime.tryParse` (lib/domain/models/raster/raster_token.dart).
+//     Mirrored by rasterAcquiredUs.
+//   - Work id: lib/domain/utils/token_cid.dart, `cidForRasterToken` and
+//     `tokenStandardSegment`. The namespace comes from ChainRegistry
+//     (lib/domain/models/chain_info.dart): `eip155:<n>` as Raster sends it,
+//     and Tezos rewritten to `tezos:mainnet`. EVM contracts are lowercased,
+//     Tezos contracts are kept verbatim. Mirrored by rasterWorkIDStandard and
+//     the workID built in rasterNodeToWalkItem.
+//
+// Change any of those in the app and this function must change in the same
+// release, or the wall and the phone silently disagree on order, which no
+// test in either repository catches. String comparison is Dart's
+// `String.compareTo` (UTF-16 code units) there and Go's byte order here.
+// The two agree only because every work id is ASCII; keep it that way.
+//
+// Why the device sorts at all. DP-1's dynamicQuery has no ordering field,
+// and Raster's `tokensOwned` takes only `first` and `after`, so a document
+// cannot ask for an order. Raster returns newest acquisition first, but
+// breaks ties by its own token id ascending. That tie rule is observed
+// behavior, not a documented contract: three full walks of one wallet agreed,
+// but nothing promises the next reindex keeps it. Ties are common, not an
+// edge case, because a whole mint or transfer batch lands in one block. One
+// probed wallet had 332 of its 595 tokens sharing a timestamp. Raster's
+// order differed from the app's in 260 positions, 34 of them in the first
+// 50, which is all a cast shows. So without this sort, which works a large
+// wallet puts on the wall depends on Raster's undocumented tie order.
+//
+// How the indexer era differed. ff-indexer-v2 owned the order server side:
+// for an owner query, `tokens(...)` sorts by the owner's latest provenance
+// timestamp DESC, then last_tx_index DESC, then tokens.id DESC, written in
+// its store code as the tie-break "for deterministic results". controld
+// played pages in the order received and never sorted. The app sorted its
+// own list with the rule above, so the phone and the wall could already
+// differ inside a block then; nobody depended on exact agreement. What
+// changed with Raster is only that the server's tie order stopped being a
+// written contract.
+//
+// What depends on this function:
+//
+//   - processRasterWalk's maxItems stop. It reads on until a page ends
+//     strictly older than the item at the cap, because a tied token on the
+//     next page may sort above it under rule 2. If this sort goes away, that
+//     read-ahead goes with it, and the walk can stop at the cap again.
+//   - Tests: TestRasterWalk_OrderIsTheAppsWhateverRasterReturns,
+//     TestRasterWalk_CapReadsOnThroughATieGroup,
+//     TestRasterWalk_CapStopsWhenThePageEndsOlder,
+//     TestRasterNodeToWalkItem_WorkID, TestRasterAcquiredUs,
+//     TestRasterWorkIDStandard.
+//
+// Removal. This is a stopgap, accepted on purpose so the wall and the phone
+// agree today (feral-file/feral-file#3576; recorded on ffos-user#413). It
+// should be replaced by an order that is part of a contract, not a copy of
+// another repository's database query. Either of these would do it:
+//
+//   - Raster documents a deterministic `tokensOwned` order, ideally with a
+//     transaction-level tie-break like the indexer's. Then the device keeps
+//     server order and deletes this function and the read-ahead.
+//   - DP-1's dynamicQuery gains a declared ordering (field path, direction,
+//     tie-break) that the app writes into the document. Then controld applies
+//     what the document declares, the app sorts by the same declared rule,
+//     and neither copies the other. This fits the dp1-go change already
+//     planned for `pagination`.
+//
+// Stable, so two items with the same work id, which cannot happen within one
+// wallet, would still keep a defined order.
 func sortRasterItems(items []rasterWalkItem) {
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].acquiredUs != items[j].acquiredUs {
@@ -577,7 +652,9 @@ func (d *dp1) planRasterWalk(playlist Playlist) (rasterWalkPlan, error) {
 // it also stops after the first page for a minimal resolve, and fails past
 // rasterMaxPages.
 //
-// Order is the app's, not Raster's (see sortRasterItems). That makes the
+// Order is the app's, not Raster's. This is a temporary cross-repo tie-break
+// rule shared with ff-app; sortRasterItems documents the rule, where the app
+// defines it, and how it gets removed. It makes the
 // maxItems cap subtle: Raster pages newest first, so once maxItems items are
 // in hand the walk may only stop when the page it just read ends strictly
 // OLDER than the item at the cap. If the page ends inside the cap item's
