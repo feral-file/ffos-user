@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type testSetup struct {
@@ -779,4 +780,45 @@ func TestControlTuning(t *testing.T) {
 	assert.Equal(t, config.ControlConfig{Malformed: true}, c.ControlTuning(zap.NewNop()))
 	c = &config.Config{Control: []byte(`[true]`)}
 	assert.Equal(t, config.ControlConfig{Malformed: true}, c.ControlTuning(zap.NewNop()))
+}
+
+// TestRasterTuningPermissiveDecode pins the same §3 config hazard rule for the
+// raster block: a malformed credential block costs the wallet walk its key,
+// never the daemon its boot. The warning must not echo the block, which holds
+// the key.
+func TestRasterTuningPermissiveDecode(t *testing.T) {
+	t.Run("absent block yields no key", func(t *testing.T) {
+		c := &config.Config{}
+		assert.Equal(t, config.RasterConfig{}, c.RasterTuning(zap.NewNop()))
+	})
+
+	t.Run("well-formed block decodes", func(t *testing.T) {
+		c := &config.Config{Raster: []byte(`{"apiKey":"rk_live_abc"}`)}
+		assert.Equal(t, "rk_live_abc", c.RasterTuning(zap.NewNop()).APIKey)
+	})
+
+	t.Run("wrong-typed value yields no key without failing", func(t *testing.T) {
+		c := &config.Config{Raster: []byte(`{"apiKey":123}`)}
+		assert.Equal(t, config.RasterConfig{}, c.RasterTuning(zap.NewNop()))
+	})
+
+	t.Run("wrong-typed block survives the whole-config parse", func(t *testing.T) {
+		var c config.Config
+		err := json.Unmarshal([]byte(`{"raster": {"apiKey": ["x"]}, "enableHub": true}`), &c)
+		require.NoError(t, err, "a wrong-typed raster block must not fail the parse")
+		assert.Equal(t, config.RasterConfig{}, c.RasterTuning(zap.NewNop()))
+	})
+
+	t.Run("malformed block is not echoed into the log", func(t *testing.T) {
+		core, logs := observer.New(zap.WarnLevel)
+		c := &config.Config{Raster: []byte(`{"apiKey":123}`)}
+		c.RasterTuning(zap.New(core))
+		require.Equal(t, 1, logs.Len())
+		for _, entry := range logs.All() {
+			assert.NotContains(t, entry.Message, "123")
+			for _, field := range entry.Context {
+				assert.NotContains(t, field.String, "123")
+			}
+		}
+	})
 }
