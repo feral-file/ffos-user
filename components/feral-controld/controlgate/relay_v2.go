@@ -188,11 +188,14 @@ func (r *RelayV2) drain(bctx context.Context, b *v2Binding) {
 	}
 }
 
-func (r *RelayV2) enqueue(b *v2Binding, wire []byte) {
+// enqueue reports whether the binding's queue accepted the copy.
+func (r *RelayV2) enqueue(b *v2Binding, wire []byte) bool {
 	select {
 	case b.queue <- wire:
+		return true
 	default:
 		r.logger.Info("V2 notification queue full; dropping notification")
+		return false
 	}
 }
 
@@ -358,7 +361,8 @@ func (r *RelayV2) notifyLocked(typ string, body any, onlyController string, skip
 }
 
 // deliverLocked seals one copy for ctl and queues it for bs. queued reports
-// whether it did; keep is false when ctl's bindings were dropped because
+// whether at least one of their queues accepted it (a full queue drops, and
+// a dropped copy was never delivered); keep is false when ctl's bindings were dropped because
 // its grant is no longer active (§9: a later reactivation needs a fresh
 // request). A transient seal failure keeps them, and so does an owner-only
 // notification reaching a non-owner binding, which is skipped silently.
@@ -372,9 +376,9 @@ func (r *RelayV2) deliverLocked(ctl, typ string, body any, bs []*v2Binding, owne
 		var wire []byte
 		if wire, err = sealed.Wire(); err == nil {
 			for _, b := range bs {
-				r.enqueue(b, wire)
+				queued = r.enqueue(b, wire) || queued
 			}
-			return true, true
+			return queued, true
 		}
 	}
 	if errors.Is(err, control.ErrNotOwner) {

@@ -452,6 +452,38 @@ func TestV2NewBindingHeldUntilReply(t *testing.T) {
 	p.quiet(t)
 }
 
+// PR review F1: a mint pairing copy that an owner's full queue dropped was
+// never queued, so Publish must say so, or the producer would report the
+// approval delivered while the browser waits for nothing.
+func TestV2MintPairingNotQueuedWhenOwnerQueueIsFull(t *testing.T) {
+	r := newV2Rig(t)
+	owner := enrollOwner(t, r.g, r.a)
+	p := newFakePeer()
+	s := owner.build(control.OpCmd, "getDeviceStatus", `{}`, "")
+	owner.open(s, r.cast(t, p, s.cast))
+	p.block = true
+	legacy := &toggleRelayer{connected: make(chan struct{})}
+	wrapped := controlgate.WrapRelayer(legacy, r.a, zap.NewNop())
+	wrapped.NotifyV2 = func(typ string, body json.RawMessage, snapshot bool) bool {
+		return r.adapter.Publish(typ, body, snapshot)
+	}
+	send := func() error {
+		return wrapped.Send(context.Background(), map[string]any{"type": "notification", "notification_type": "mint_pairing_approval_request",
+			"message": map[string]any{}, "persist_record_count": 10})
+	}
+	if err := send(); err != nil {
+		t.Fatalf("first copy, queue empty: %v", err)
+	}
+	full := false
+	for i := 0; i < 64 && !full; i++ {
+		full = errors.Is(send(), relayer.ErrNotConnected)
+	}
+	if !full {
+		t.Fatal("a blocked owner's queue never reported a dropped copy")
+	}
+	r.adapter.Admitted(context.Background(), &control.Admission{RevokedCtls: []string{owner.ctl}})
+}
+
 // Review item 12: a peer that never acknowledges stalls neither the producer
 // nor PublishAdmission, its queue drops when full, and its sender exits when
 // the binding goes.
