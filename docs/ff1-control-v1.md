@@ -1032,9 +1032,8 @@ rejected by the device with `approval_expired` once its approval deadline
 (5 min by default) passes, until the device is Secured. The device cannot
 tell earlier that nobody received the request: its own send still succeeds
 at the relay. A browser whose own wait is shorter than that deadline
-reports its timeout first (Play: `approval_timeout`, whose default wait
-equals the deadline; a longer wait sees the rejection as a plain
-`mint_rejected`). Sends never wait on a peer: each binding has a
+may report its own wait timeout first (Play maps both its own wait and
+`approval_expired` to `approval_timeout`). Sends never wait on a peer: each binding has a
 small queue that drops when full, and each send is bounded. A reply goes to
 the peer and socket generation its request came from. A closed device socket
 drops every binding it held, so after a reconnect a controller is bound again
