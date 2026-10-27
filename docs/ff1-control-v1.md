@@ -1027,8 +1027,9 @@ browser is not told `approval_unavailable`. On the legacy relayer `SealAll`
 still sends the mint pairing types to every active grant, controllers
 included; "owner only" is a v2 rule. A `legacy` device has no owner
 binding, so after the legacy relayer is retired it cannot deliver an
-approval: existing display grants keep casting and a new pairing fails
-`approval_unavailable` until the device is Secured. Sends never wait on a peer: each binding has a
+approval: existing display grants keep casting and a new pairing ends in
+`approval_timeout` until the device is Secured (the device's own send still
+succeeds at the relay, so it cannot tell that nobody received it). Sends never wait on a peer: each binding has a
 small queue that drops when full, and each send is bounded. A reply goes to
 the peer and socket generation its request came from. A closed device socket
 drops every binding it held, so after a reconnect a controller is bound again
@@ -1360,7 +1361,7 @@ and the ff1-cli test suite does the same with `jose`.
   delivery of §9 (older firmware carries approval requests over
   `/api/notification` only), the app force-update floor must be raised,
   and the share of unsecured (`legacy`) devices must be acceptable: on
-  those a new 0.5 pairing fails `approval_unavailable` after retirement
+  those a new 0.5 pairing ends in `approval_timeout` after retirement
   while existing grants keep casting. A grant issued in `legacy` carries
   the trust of today's session token (display only) and stays valid after
   the device is Secured.
