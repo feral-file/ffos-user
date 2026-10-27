@@ -87,6 +87,10 @@ type Store struct {
 	id      *Identity
 	grants  []Grant
 	lockErr error
+	// display is the separate display-grant store (display.go). displayErr
+	// disables it alone; it never contributes to lockErr.
+	display    []DisplayGrant
+	displayErr error
 }
 
 // InitDir provisions a fresh control directory holding id and grants. The
@@ -167,7 +171,11 @@ func LoadStore(fsys FS, dir, deviceID string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrLocked, err)
 	}
-	return &Store{fs: fsys, dir: dir, id: id, grants: grants}, nil
+	s := &Store{fs: fsys, dir: dir, id: id, grants: grants}
+	// Loaded last and never fatal: a bad display file disables display
+	// grants only (§5.7), so an older or newer build cannot lock on it.
+	s.display, s.displayErr = loadDisplayGrants(fsys, dir, id.gen)
+	return s, nil
 }
 
 // OpenStore loads dir, creating a fresh identity when (and only when) the
@@ -244,7 +252,7 @@ func (s *Store) Retire() error {
 	// The tombstone is what a restart reads from here on, so memory follows
 	// it even if its directory fsync failed (reported below).
 	s.lockErr = ErrRetired
-	s.grants = nil
+	s.grants, s.display = nil, nil
 	if err != nil {
 		return err
 	}

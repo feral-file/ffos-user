@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strconv"
 	"time"
 
@@ -43,7 +44,9 @@ type DeviceKeys struct {
 }
 
 // ControllerKeys is one fixture controller. Role is empty for a controller
-// that has no grant (the "stranger").
+// that has no grant (the "stranger"). The "display" controller is a Play
+// site's display grant (§5.7): role display, platform web, an origin and no
+// nk (display peers get no notifications); it is never in grants.json.
 type ControllerKeys struct {
 	Ctl       string     `json:"ctl"`
 	Sig       PrivateJWK `json:"sig"`
@@ -51,6 +54,7 @@ type ControllerKeys struct {
 	Label     string     `json:"label"`
 	Platform  string     `json:"platform"`
 	Role      string     `json:"role,omitempty"`
+	Origin    string     `json:"origin,omitempty"`
 	NK        string     `json:"nk,omitempty"`
 	CreatedAt int64      `json:"createdAt,omitempty"`
 	RevokedAt int64      `json:"revokedAt,omitempty"`
@@ -61,6 +65,9 @@ type Setup struct {
 	Now int64 `json:"now"`
 	// Grants lists the keys.json controllers present in grants.json.
 	Grants []string `json:"grants"`
+	// DisplayGrants lists the display records in display_grants.json,
+	// issued at Now by the owner (or with no approver on a legacy device).
+	DisplayGrants []DisplaySpec `json:"displayGrants,omitempty"`
 	// Windows overrides a grant's replay window.
 	Windows map[string]WindowSpec `json:"windows,omitempty"`
 	// Invitation: call IssueInvitation once after start (first rand draw).
@@ -68,6 +75,12 @@ type Setup struct {
 	// RandSeed seeds the device's ChaCha8 stream (math/rand/v2), which
 	// supplies reply IVs, nk and the invitation.
 	RandSeed string `json:"randSeed"`
+}
+
+// DisplaySpec names a keys.json display controller and its expiry (0: kept).
+type DisplaySpec struct {
+	Name      string `json:"name"`
+	ExpiresAt int64  `json:"expiresAt,omitempty"`
 }
 
 // WindowSpec is a §6 window in the grants.json encoding.
@@ -165,6 +178,10 @@ func NewKeys() Keys {
 	add("controller", "Living room tablet", "android", "controller", 0)
 	add("revoked", "Old laptop", "cli", "controller", Now-600)
 	add("stranger", "Stranger", "other", "", 0)
+	display := ControllerKeys{Sig: jwkFromScalar(scalar("ctl/display/sig")), Enc: jwkFromScalar(scalar("ctl/display/enc")),
+		Label: "artblocks.io", Platform: "web", Role: string(control.RoleDisplay), Origin: "https://artblocks.io", CreatedAt: Now}
+	display.Ctl = display.Sig.Thumb()
+	k.Controllers["display"] = display
 	return k
 }
 
@@ -191,8 +208,8 @@ func BuildDevice(k Keys, s Setup) (*control.Authority, string, error) {
 	var grants []control.Grant
 	for _, name := range s.Grants {
 		c, ok := k.Controllers[name]
-		if !ok || c.Role == "" {
-			return nil, "", fmt.Errorf("setup grant %q has no role in keys.json", name)
+		if !ok || c.Role == "" || c.Role == string(control.RoleDisplay) {
+			return nil, "", fmt.Errorf("setup grant %q has no grants.json role in keys.json", name)
 		}
 		g := control.Grant{Ctl: c.Ctl, Sig: pub(c.Sig), Enc: pub(c.Enc), Role: control.Role(c.Role), Label: c.Label,
 			Platform: c.Platform, CreatedAt: c.CreatedAt, ApprovedBy: "invitation", RevokedAt: c.RevokedAt}
@@ -220,6 +237,22 @@ func BuildDevice(k Keys, s Setup) (*control.Authority, string, error) {
 	}
 	if err := a.LockErr(); err != nil {
 		return nil, "", err
+	}
+	// Display records are issued through the production path: by the owner
+	// when there is one, else on the legacy device with no approver.
+	approver := ""
+	if slices.Contains(s.Grants, "owner") {
+		approver = k.Controllers["owner"].Ctl
+	}
+	for _, d := range s.DisplayGrants {
+		c, ok := k.Controllers[d.Name]
+		if !ok || c.Role != string(control.RoleDisplay) {
+			return nil, "", fmt.Errorf("setup display grant %q is not a display controller in keys.json", d.Name)
+		}
+		if _, err := a.IssueDisplayGrant(approver, control.DisplayGrantRequest{Sig: pub(c.Sig), Enc: pub(c.Enc),
+			Origin: c.Origin, OriginAttested: true, ExpiresAt: d.ExpiresAt}); err != nil {
+			return nil, "", err
+		}
 	}
 	var inv string
 	if s.Invitation {

@@ -409,7 +409,7 @@ never reach the command router):
 | `approveController` | `{"ctl","role":"owner"|"controller","expiresAt"?}` | `{}` |
 | `revokeController` | `{"ctl"}` | `{}` |
 | `registerController` | `{"sig":JWK,"enc":JWK,"label","platform","role":"owner"\|"controller","expiresAt"?}` | `{"ctl","role","expiresAt"?}` |
-| `listControllers` | `{}` | `{"controllers":[{"ctl","role","label","platform","createdAt","expiresAt"?,"revokedAt"?,"self":bool}],"pending":[{"ctl","label","platform","code","expiresAt"}]}` |
+| `listControllers` | `{}` | `{"controllers":[{"ctl","role","label","platform","createdAt","expiresAt"?,"revokedAt"?,"self":bool}, …, {"ctl","role":"display","label","origin","originAttested":bool,"platform":"web","createdAt","expiresAt"?,"revokedAt"?}],"pending":[{"ctl","label","platform","code","expiresAt"}]}` |
 
 - `approveController` with a live pending request for `ctl` grants it: the
   grant takes its keys, label and platform from that request. Without one it
@@ -437,7 +437,19 @@ never reach the command router):
   step back cannot revive it). Otherwise the grant must be active
   (`not_found`).
 - `registerController` is owner-initiated registration (§5.6.4).
-- `listControllers` lists every record, revoked ones included.
+- `listControllers` lists every record, revoked ones included: the
+  `grants.json` records first, in their shape, then every display record
+  (§5.7) in the display shape (`role:"display"`, `origin`,
+  `originAttested`, `platform:"web"`, no `self`). Clients MUST tolerate both
+  shapes and the `display` role in one array.
+- `revokeController` on a `ctl` held by the display store revokes that
+  display record (§5.7): two writes, the owner's window in `grants.json`
+  first, then `display_grants.json`; if the second fails the reply is
+  `internal_error` and the owner re-lists. An already revoked display
+  record is `not_found`.
+- `approveController` and `registerController` accept only
+  `role:"owner"|"controller"`: `"display"` is `invalid_request`, and so is
+  a `ctl` that the display store holds (a `ctl` is never in both stores).
 
 An owner cannot revoke the last active owner (`last_owner`). That would make
 the device unowned without a reset. An owner may revoke itself while another
@@ -571,6 +583,111 @@ idempotent per `ctl`:
   changing an active grant's role in place (§5.5). Adding new keys is
   `registerController`.
 
+### 5.7 Display grants
+
+A **display grant** is what a Play site (`@feralfile/play` 0.5 and later)
+holds after an owner approved it through mint pairing: a display-only
+controller record, issued by the FF1, that the site uses to cast as sealed
+envelopes over the v2 relay. It replaces the relayer session token of
+earlier Play versions (§15.3). The approval UX is the mint pairing one, in
+every control state but `locked`: `legacy` included, where the device
+accepts the decision from whoever it accepts mint pairing decisions from
+today, and from an active owner's sealed `mintPairingApprovalDecision`
+otherwise.
+
+**Store.** Display records live in their own file, `display_grants.json`
+(§8), never in `grants.json`. The role `display` and the platform `web`
+exist only there: the role parsers of `approveController`,
+`registerController`, `enroll` and the controller QR keep accepting
+`owner|controller`, so the role is never wire-assignable. A file that cannot
+be trusted (unreadable or invalid) disables display admission
+and issuance only; it never locks the device. One written under another `gen`
+is discarded as empty (§8). A controld that predates
+this section ignores the file.
+
+Record: `{ctl, sig, enc, origin, label, platform:"web", originAttested,
+createdAt, approvedBy, expiresAt?, revokedAt?, window}`. `ctl` =
+`thumb(sig)`; `origin` is the site's full origin (≤ 2 KiB);
+`originAttested` is true when the broker attested the origin (a site-created
+channel the FF1 joined) and false on a device-initiated channel; `label` is
+the origin's host, punycoded and cut to the §5 label rules; `approvedBy` is
+the approving owner's `ctl`, or `""` when the grant was issued in `legacy`;
+`expiresAt` 0 means kept until removed. There is no `nk`: a display grant
+is never bound (§9) and gets no notification.
+
+Caps: at most 16 active display records and 64 records, with the same
+eviction as `grants.json` (§5.5). Over the active cap the request is
+refused `too_many_sites`. Issuing a grant revokes any other active display
+record with the same `origin` **and** the same `originAttested`, so a
+re-pair keeps one active grant per origin; an asserted origin never evicts
+an attested one. A `ctl` is never in both stores: issuance refuses a `ctl`
+that `grants.json` or the display store already holds (pairing keys are
+fresh, so a repeat is never legitimate), and every insert into
+`grants.json` refuses a `ctl` the display store holds (`invalid_request`).
+
+**Wire (mint pairing).** The site sends
+`"displayGrant": {"v":1,"sig":<P-256 public JWK>,"enc":<P-256 public JWK>}`
+in both its clear create-call `mintRequest` (the announced request, which
+the FF1 reads when it joins a site-created channel) and its encrypted
+`mint_request`. The presence of the member, well formed or not, marks a 0.5
+request; a request without it is answered with a session exactly as before.
+When the FF1 answers the announced request those keys are used alone; when
+it holds both copies they MUST be identical (keys in only one of them is a
+mismatch too), else no grant is issued and no session either. A 0.5 request
+the FF1 cannot honor at all (no control authority or no v2 endpoint on
+this FF1, keys that do not parse or disagree) is refused
+`display_grant_unavailable` **before** the owner is asked; the same checks
+run again at issuance. The
+approval request the owner app receives carries `"grantsDisplayAccess":true`
+for a 0.5 request. On approval the FF1 issues the grant **before** the
+result is sent and answers `mint_succeeded` with a top-level
+
+```json
+"displayGrant":{"v":1,"ctl":"…","profile":{"v":1,"dev":"FF1-…","gen":"…","sig":JWK,"enc":JWK},"relayV2Endpoint":"wss://…","expiresAt":"<RFC 3339>"}
+```
+
+and **no** `session` (`expiresAt` absent = kept). The expiry follows the
+owner's decision as a session's would: timed → now + the effective session
+TTL; kept → none; kept for a requester that did not declare
+`supportsPersistentSessions` → the longest timed life. A 0.5 request never
+gets a session. It is refused `mint_rejected` with reason `too_many_sites`
+(the cap) or `display_grant_unavailable` (malformed or mismatching keys, no
+v2 endpoint or no control authority on this FF1, a locked device, or a
+write the FF1 could not confirm durable; in that last case the committed
+record is revoked best-effort first and the rejection is the only
+`retryable` one). The outcome notification to the owner
+carries `ctl` on completion and the same `reason` on a refusal. The grant is
+revoked wherever a session would have been: a claim or pairing superseded
+before delivery, or a delivery the broker provably refused. A claim change
+never revokes other display grants.
+
+The approver is read where the decision arrives (the sealed envelope's
+principal; none in `legacy`) and re-checked at issuance under the
+authority's lock: an empty approver is accepted only while the device is
+still `legacy`, otherwise the approver must be an active owner, because a
+first owner can enroll between the decision and the issuance.
+
+**Authorization.** A display `ctl` is looked up after `grants.json` (§3.4
+step 2) and is admitted in every state but `locked` (§7.2), `legacy`
+included, with its own replay window persisted in `display_grants.json`
+before execution (§6). It may send exactly two things:
+`op:"cmd"`, `cmd:"displayPlaylist"` whose `req` is the exact Play shape of
+§7.2 (`isPlayCastShape`), executed as the principal
+`{controllerId, role:"display"}`; and its own self-revoke
+(`revokeController{ctl:<own>}`, the site's unpair). Every other command,
+every other `req` shape, and every non-`cmd` op (`enroll`,
+`requestAccess`) is `permission_denied` with the `ctr` spent. A revoked or
+expired display record is `access_revoked` whatever it sent, checked before
+what it asked for (after the replay check and a future `iat`). The command
+router re-checks
+the same rule (`control.Permits`) before any handler runs. No status read,
+no `connect`, no notifications: `GrantActive`, `Seal`, `SealAll`, the v2
+binding layer and the owner count never see display records.
+
+**Site rules** are in §14 (browser). A site that moves to 0.5 re-pairs
+once; a 0.5 site on firmware without this section receives a session it
+cannot use and reports `device_unsupported`.
+
 ## 6. Replay window
 
 Each controller record holds `hi` (the highest accepted `ctr`) and a 64-bit
@@ -614,6 +731,7 @@ Unknown commands fail closed: they are owner-only.
 | owner | everything not listed below; specifically `sshAccess`, `factoryReset`, `startWifiSetup`, `updateToLatestVersion`, `setDeviceName`, `showPairingQRCode`, `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, `mintPairingApprovalDecision`, `setContentPolicy`, `analyticsToggle`, `betaFeaturesToggle`, `uploadLogs`, `sendKeyboardEvent`, `tapGesture`, `doubleTapGesture`, `longPressGesture`, `dragGesture`, `clickAndDragGesture`, `zoomGesture`, `cursorUpdate`, `disconnect`, `approveController`, `revokeController` (a controller may name only its own `ctl`, §5.5), `listControllers`, `registerController` |
 | controller | playback: `displayPlaylist`, `displayDefaultPlaylist`, `refreshArtwork`, `refreshPlaylist`, `checkStatus`, `moveToArtwork`, `updateIndex`, `setShuffle`, `setLoop`, `updateArtFraming`, `updateDisplaySettings`, `updateDefaultDuration`, `getRecentlyPlayed`, `playRecentlyPlayed`; offline cache: `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`, `clearPlaylistCache`, `getOfflineCacheStatus`; claim: `connect` (see below); device: `getDeviceStatus`, `deviceMetrics`, `rotate`, `setVolume`, `toggleMute`, `ddcPanelControl`, `ddcPanelStatus`, `setSleepSchedule`, `setSleepMode`, `sleepNow`, `wakeNow`, `reboot`, `shutdown`, `runNetworkDiagnostics`, `getContentPolicy` |
 | internal | never accepted from any external principal, owner included (`permission_denied`): `resolveRecentlyPlayed` (router-internal), `ping`, `mintPairingDisplay`, `setupDisplay` (controld → player paint/probe commands that would otherwise fall through to the player over CDP), and `ff1Envelope` (an envelope inside an envelope) |
+| display (§5.7) | not a tier but a role outside the table: `displayPlaylist` in the exact Play shape of §7.2, and the self-revoke; everything else `permission_denied`. `control.Permits(principal, cmd, req)` decides it, in the authority and in the router's re-check |
 
 `connect` is controller tier because every ff-app cast, released and new,
 starts with it. Only an owner claims or rebinds: under the protocol (any
@@ -638,10 +756,10 @@ phantom entry, so a new command cannot ship without a tier.
 
 | State | Condition | Plaintext on LAN `/api/cast` | Plaintext via relayer | Envelopes |
 |---|---|---|---|---|
-| `legacy` | no active owner grant | allowed (phase-0 rules apply) | allowed | `enroll` (with inv); `requestAccess` and `enroll` without inv → `not_approved` |
+| `legacy` | no active owner grant | allowed (phase-0 rules apply) | allowed | `enroll` (with inv); `requestAccess` and `enroll` without inv → `not_approved`; a `grants.json` `cmd` → `not_approved`; a display grant's cast (§5.7) is admitted |
 | `enrolled` | ≥1 active owner grant, `control.enforced=false` | refused: `enrollment_required` | controller tier only; anything else → `envelope_required` | full |
 | `enforced` | ≥1 active owner grant, `control.enforced=true` | refused: `enrollment_required` | only the exact Play shape `{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{…}}}`: `request` has exactly the members `intent` and `dp1_call`, `intent` is exactly `{"action":"now_display"}`, `dp1_call` is an object; anything else → `envelope_required` | full |
-| `locked` | identity or grant store unreadable/corrupt | refused: `locked` | controller tier only, else `locked` | refused: public `locked` |
+| `locked` | identity or grant store unreadable/corrupt | refused: `locked` | controller tier only, else `locked` | refused: public `locked` (display grants included) |
 
 Every plaintext message, on either route and in every state, is refused with
 `invalid_message` when its top level repeats a member name, exactly or in
@@ -715,6 +833,21 @@ Directory: `/home/feralfile/.state/control/`, mode 0700. Files are mode 0600.
   - `nk` is `b64u(32)`;
   - `bitmap` is the §6 bitmap as 16 lowercase hex digits (a JSON number would
     lose bits above 2^53 in non-Go readers).
+- `display_grants.json` (§5.7, optional): `{"v":1,"gen","grants":[{"ctl","sig","enc","origin","label","platform":"web","originAttested","createdAt","approvedBy","expiresAt"?,"revokedAt"?,"hi","bitmap"}]}`
+  - `approvedBy` is the approving owner's `ctl` or `""` (issued in
+    `legacy`); the label, window and time rules of `grants.json` apply,
+    `origin` is 1–2048 bytes of UTF-8 without the label's control or
+    formatting characters.
+  - Parsed as strictly as `grants.json`, but a missing file is an empty
+    store, a file whose `gen` is not the identity's is **discarded** as an
+    empty store (its records belong to a dead identity; the next write
+    overwrites it), and **any other failure disables display grants
+    only** (admission and issuance), logged once at start, never
+    `locked`: a rollback to a controld that does not know the file must
+    not lock the device, and neither must the file itself. A disabled
+    store recovers when the file is deleted (the next start is an empty
+    store) or the device is factory-reset. The factory reset retires it
+    with the directory; the OTA carry (`control/` as a whole) keeps it.
 
 Rules:
 - A missing directory on start means create a new identity, in state `legacy`.
@@ -869,8 +1002,10 @@ for either, so a reactivated controller gets notifications again only
 after a fresh request. A binding whose grant is inactive when a copy is
 sealed is dropped too; a transient seal failure (no entropy) is not a
 reason to drop it.
-`mint_pairing_*` notifications are legacy-only and never sent on v2. A
-controller that wants notifications therefore sends one envelope (any
+A display grant (§5.7) is never bound: `Seal`, `SealAll` and the binding
+layer see `grants.json` only, so a display peer receives no sealed
+notification on any channel. A
+controller that wants notifications sends one envelope (any
 command) after connecting, on the same connection it reads notifications
 from. Admission
 notifications (`controller_approval_request`) are published on a context
@@ -879,7 +1014,21 @@ cannot hand the owners' copies to the requester. A new binding is sent the
 newest copy of each status type (`device_status`, `player_status`,
 `ddc_status`, `offline_cache_status`) after the reply to the request that
 created it, and v2 deduplicates those types against what it last sent, apart
-from the legacy channels. Sends never wait on a peer: each binding has a
+from the legacy channels. **Mint pairing on v2.** `mint_pairing_approval_request`
+and `mint_pairing_approval_outcome` are sealed to **owner** bindings only
+(an active non-owner binding is skipped, not dropped) and are never a
+snapshot: they are not kept for later bindings and not deduplicated,
+whatever their legacy `persist_record_count` says, because a decided
+request must not replay to a binding made later. The snapshot set stays
+the four status types. The producer counts a copy queued to at least one
+owner binding (queued, not acknowledged) as delivered, so with the legacy
+relayer down or retired the owner still gets the approval request and the
+browser is not told `approval_unavailable`. On the legacy relayer `SealAll`
+still sends the mint pairing types to every active grant, controllers
+included; "owner only" is a v2 rule. A `legacy` device has no owner
+binding, so after the legacy relayer is retired it cannot deliver an
+approval: existing display grants keep casting and a new pairing fails
+`approval_unavailable` until the device is Secured. Sends never wait on a peer: each binding has a
 small queue that drops when full, and each send is bounded. A reply goes to
 the peer and socket generation its request came from. A closed device socket
 drops every binding it held, so after a reconnect a controller is bound again
@@ -1043,10 +1192,12 @@ reply rather than `bad_envelope`.
 
 `components/feral-controld/control/testdata/fixtures/` holds:
 - `keys.json`: the fixed device (`device`: `dev`, `gen`, private `sig`/`enc`,
-  `profile`, `pins`) and four controllers (`controllers.owner`, `.controller`,
-  `.revoked`, `.stranger`) with private `sig`/`enc`, `ctl`, `label`,
+  `profile`, `pins`) and five controllers (`controllers.owner`, `.controller`,
+  `.revoked`, `.stranger`, `.display`) with private `sig`/`enc`, `ctl`, `label`,
   `platform`, and for the first three `role`, `nk`, `createdAt` (and
-  `revokedAt`); `stranger` has no grant. `now` is the fixed clock.
+  `revokedAt`); `stranger` has no grant; `display` is a Play site's display
+  grant (§5.7: role `display`, platform `web`, an `origin`, no `nk`) and is
+  only ever in `display_grants.json`. `now` is the fixed clock.
 - `positive/*.json`, `kind` `request` or `notification`. A request vector has
   `setup` (below), `from` (the signing controller), the exact signed
   `payload` and its parsed `claims`, the fixed `ephemeralKey` (private JWK)
@@ -1080,7 +1231,14 @@ reply rather than `bad_envelope`.
     (JWS) and `RSA-OAEP-256` (JWE), off-curve `epk`, oversize body, forged
     signature, unknown `kid`, revoked controller, `exp - iat > 120`,
     `ctl ≠ kid`, owner-tier command from a controller, `registerController`
-    from a controller, `revokeController` of another `ctl` from a controller.
+    from a controller, `revokeController` of another `ctl` from a controller;
+    display grants (§5.7): `getDeviceStatus`, `connect`, a non-Play-shape
+    `displayPlaylist`, `registerController` and `op:"enroll"` from the
+    display `ctl` (`permission_denied`), an expired display grant
+    (`access_revoked`), and `approveController{role:"display"}` from the
+    owner (`command_failed`, `res.error` `invalid_request`). The positive
+    display vectors are `cmd-display-displayPlaylist` (also `-legacy`),
+    `cmd-display-self-revoke` and `cmd-owner-listControllers-display`.
   - `kind:"reply"` / `kind:"notification"`: vectors a controller MUST reject:
     wrong `rk`, tampered, signed by a key other than the pinned `devSig`,
     unbound `rid` (`bind` gives the dev/gen/ctl/rid the controller sent), extra
@@ -1089,6 +1247,8 @@ reply rather than `bad_envelope`.
 
 `setup` describes the device a request vector is opened against: `now`,
 `grants` (which `keys.json` controllers are in `grants.json`), optional
+`displayGrants` (`[{name, expiresAt?}]`, the display records of §5.7,
+issued at `now`), optional
 `windows` (`{name:{hi,bitmap}}`), `invitation` (issue one invitation at
 start), and `randSeed`, the 32-byte seed of the device's ChaCha8 stream (Go
 `math/rand/v2`) that supplies reply IVs, `nk` and the invitation.
@@ -1120,7 +1280,8 @@ and the ff1-cli test suite does the same with `jose`.
   device never logs it raw (logs carry an 8-hex SHA-256 fingerprint, and
   system frames are logged redacted).
 - Play browser sessions never subscribe to the notification channel, so
-  sealing notifications (§9) cannot strand a Play session.
+  sealing notifications (§9) cannot strand a Play session; a display grant
+  (§5.7) is never bound or sealed to either.
 - Residual, accepted: on a claimed device still in `legacy`, any LAN peer
   can send `showPairingQRCode{show:true,purpose:"enroll"}` and a person at
   the screen can then take ownership with the invitation it shows. This is
@@ -1192,6 +1353,21 @@ and the ff1-cli test suite does the same with `jose`.
 - Residual, accepted: in a 2.0.x migration whoever scans the enroll QR
   first becomes the first owner; a lost sole owner still means a factory
   reset.
+- Display grants (§5.7) and the controller-API retirement: before the
+  legacy controller endpoints (`/api/cast` with a session token,
+  `/api/notification`) are turned off, integrators must be on Play ≥ 0.5,
+  the fleet must run firmware with §5.7 **and** the v2 mint pairing
+  delivery of §9 (older firmware carries approval requests over
+  `/api/notification` only), the app force-update floor must be raised,
+  and the share of unsecured (`legacy`) devices must be acceptable: on
+  those a new 0.5 pairing fails `approval_unavailable` after retirement
+  while existing grants keep casting. A grant issued in `legacy` carries
+  the trust of today's session token (display only) and stays valid after
+  the device is Secured.
+- Residual, accepted: the mint pairing broker is trusted for the announced
+  display-grant keys as it is today for session tokens. A compromised
+  broker can substitute keys and obtain at most a display-only, revocable
+  grant for the origin it attested.
 - `/api/status` (v1) also carries the `control` block. The enforced purge
   gives up after 10 minutes without a relayer connection. The invitation
   watch can miss one re-arm when another narration takes the panel between
@@ -1220,7 +1396,12 @@ showed what goes wrong without them.
      approval code alone can be ground by a network attacker (§5.4);
    - only when the QR carries no pins (firmware before them), the
      unauthenticated LAN status, or off the LAN an `enrolled` device's
-     relayer `getDeviceStatus` reply.
+     relayer `getDeviceStatus` reply;
+   - for a Play site, the `profile` inside the encrypted `mint_succeeded`
+     `displayGrant` (§5.7). The mint pairing channel is end-to-end
+     encrypted to the browser's channel key, but that key was distributed
+     by the broker, so this pin source trusts the broker exactly as the
+     session token did; the owner's approval is the check.
 
    Whenever the scanned QR carries pins, a client MUST compare them with
    any profile it reads from the network and MUST NOT proceed on a
@@ -1309,6 +1490,23 @@ showed what goes wrong without them.
    current client sends one (both seal whenever they hold a grant), so in
    practice the retry is the factory reset on the device itself. Plain
    `locked` (corrupt state) refuses even the plaintext one.
+10. **Browser (display grant, §5.7).** A Play site generates fresh
+    non-extractable keys for every pairing and keeps keys, counter and
+    grant as one record; a re-pair replaces the record only on a
+    `mint_succeeded` that carries a `displayGrant`, then self-revokes the
+    old grant best-effort with the old keys. It connects to the v2 relay
+    per cast and closes right after (never an idle socket), fans the
+    envelope out and pins the first reply that verifies under the pinned
+    `profile.sig`. Rules 4 and 5 apply: every attempt is a new envelope, and
+    a `replay` on v2 is an unknown outcome, which the browser (no LAN path
+    to resync) answers by moving its counter past the window without a
+    resend. A verified `access_revoked` or `expired` deletes the grant and
+    re-pairs on the user's next cast; an unverified public
+    `unknown_controller` or `bad_envelope` seen after the deadline is
+    reported as "unrecognized" and **never** deletes the grant (rule 3:
+    any channel peer can forge it); only a user action re-pairs. A
+    `mint_succeeded` without `displayGrant` (older firmware) is
+    `device_unsupported`: the session it carries is discarded.
 
 ## 15. Rollout and retirement
 
@@ -1365,6 +1563,7 @@ release operator applies them.
 - Turning the legacy relayer off is gated on fleet telemetry of
   `control.state`, not on firmware version: a `legacy` device has no grants
   and v2 admits no plaintext (§7.2), so retirement strands every unmigrated
-  device off the LAN. It also waits for Play to move from mint pairing to
-  device-issued display grants, and for the v2 device-slot requirement in
-  §13.
+  device off the LAN. It also waits for Play to move from relayer session
+  tokens to device-issued display grants (§5.7, Play 0.5), with the
+  retirement prerequisites listed in §13, and for the v2 device-slot
+  requirement in §13.

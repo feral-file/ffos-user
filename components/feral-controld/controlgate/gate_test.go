@@ -464,7 +464,10 @@ func TestSealingRelayerV2OnlyReadiness(t *testing.T) {
 	live := true
 	wrapped.V2Connected = func() bool { return live }
 	called := false
-	wrapped.NotifyV2 = func(typ string, _ json.RawMessage, snapshot bool) { called = typ == "device_status" && snapshot }
+	wrapped.NotifyV2 = func(typ string, _ json.RawMessage, snapshot bool) bool {
+		called = typ == "device_status" && snapshot
+		return false
+	}
 	if !wrapped.IsConnected() {
 		t.Fatal("v2 readiness suppressed by legacy outage")
 	}
@@ -480,5 +483,30 @@ func TestSealingRelayerV2OnlyReadiness(t *testing.T) {
 	live = false
 	if wrapped.IsConnected() {
 		t.Fatal("disconnected carriers reported ready")
+	}
+}
+
+// Q6: with the legacy relayer down, a mint pairing notification an owner
+// received on v2 is a success to its producer (which would otherwise answer
+// the browser approval_unavailable); any other type still reports the
+// legacy outage, and so does mint pairing nobody was bound for.
+func TestSealingRelayerMintPairingSucceedsOnV2Alone(t *testing.T) {
+	a, _ := newAuthority(t, false)
+	legacy := &toggleRelayer{connected: make(chan struct{})}
+	wrapped := controlgate.WrapRelayer(legacy, a, zap.NewNop())
+	queued := true
+	wrapped.NotifyV2 = func(string, json.RawMessage, bool) bool { return queued }
+	send := func(typ string) error {
+		return wrapped.Send(context.Background(), map[string]any{"type": "notification", "notification_type": typ, "message": map[string]any{}, "persist_record_count": 10})
+	}
+	if err := send("mint_pairing_approval_request"); err != nil {
+		t.Fatalf("owner reached on v2: %v", err)
+	}
+	if err := send("device_status"); !errors.Is(err, relayer.ErrNotConnected) {
+		t.Fatalf("status with legacy down: %v", err)
+	}
+	queued = false
+	if err := send("mint_pairing_approval_request"); !errors.Is(err, relayer.ErrNotConnected) {
+		t.Fatalf("nobody reached: %v", err)
 	}
 }

@@ -241,16 +241,58 @@ func TestV2BindsOnAuthorityAnsweredOpAndSendsSnapshot(t *testing.T) {
 	p.quiet(t)
 }
 
-// §9: mint pairing is legacy-only.
-func TestV2NeverCarriesMintPairing(t *testing.T) {
+// §9 (Q6): mint pairing goes to owner bindings only on v2, is never a
+// snapshot (a decided request must not replay to later bindings), and
+// Publish reports whether an owner copy was queued. A controller binding is
+// skipped, not dropped.
+func TestV2MintPairingToOwnersOnly(t *testing.T) {
 	r := newV2Rig(t)
 	owner := enrollOwner(t, r.g, r.a)
-	p := newFakePeer()
+	nk := owner.nkFrom(t, r.g)
+	// No owner bound yet: nothing queued.
+	if r.adapter.Publish("mint_pairing_approval_request", json.RawMessage(`{"n":0}`), true) {
+		t.Fatal("queued with no binding")
+	}
+	cli := addController(t, r, r.g, owner)
+	cliNK := cli.nkFrom(t, r.g)
+	p, q := newFakePeer(), newFakePeer()
+	for _, c := range []struct {
+		c *client
+		p *fakePeer
+	}{{owner, p}, {cli, q}} {
+		s := c.c.build(control.OpCmd, "getDeviceStatus", `{}`, "")
+		if reply := c.c.open(s, r.cast(t, c.p, s.cast)); !reply.OK {
+			t.Fatalf("bind: %+v", reply)
+		}
+	}
+	if !r.adapter.Publish("mint_pairing_approval_request", json.RawMessage(`{"n":1}`), true) {
+		t.Fatal("owner copy not queued")
+	}
+	if n := openNotification(t, p.next(t), owner, nk); n.Type != "mint_pairing_approval_request" || string(n.Body) != `{"n":1}` {
+		t.Fatalf("owner got %+v", n)
+	}
+	q.quiet(t)
+	if len(r.adapter.Bound(cli.ctl)) != 1 {
+		t.Fatal("controller binding dropped by an owner-only notification")
+	}
+	// The controller still gets every other type.
+	r.adapter.Publish("device_status", json.RawMessage(`{"v":1}`), true)
+	openNotification(t, p.next(t), owner, nk)
+	openNotification(t, q.next(t), cli, cliNK)
+	// A binding made after the request is sent the status snapshot, never
+	// the request.
+	p2 := newFakePeer()
 	s := owner.build(control.OpCmd, "getDeviceStatus", `{}`, "")
-	owner.open(s, r.cast(t, p, s.cast))
-	r.adapter.Publish("mint_pairing_approval_request", json.RawMessage(`{}`), true)
-	r.adapter.Publish("mint_pairing_approval_outcome", json.RawMessage(`{}`), true)
-	p.quiet(t)
+	owner.open(s, r.cast(t, p2, s.cast))
+	if n := openNotification(t, p2.next(t), owner, nk); n.Type != "device_status" {
+		t.Fatalf("late binding got %+v", n)
+	}
+	p2.quiet(t)
+	// Same body twice is not deduplicated: mint pairing is not a snapshot.
+	r.adapter.Publish("mint_pairing_approval_outcome", json.RawMessage(`{"n":2}`), true)
+	r.adapter.Publish("mint_pairing_approval_outcome", json.RawMessage(`{"n":2}`), true)
+	openNotification(t, p.next(t), owner, nk)
+	openNotification(t, p.next(t), owner, nk)
 }
 
 // §9: at most 2 peers per ctl; a third evicts the least recently bound.

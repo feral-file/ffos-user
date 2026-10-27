@@ -20,17 +20,22 @@ func TestProcessEnforcesPrincipalTier(t *testing.T) {
 	defer ts.teardown()
 	ctl := control.WithPrincipal(context.Background(), control.Principal{ControllerID: "c", Role: control.RoleController})
 	owner := control.WithPrincipal(context.Background(), control.Principal{ControllerID: "o", Role: control.RoleOwner})
+	display := control.WithPrincipal(context.Background(), control.Principal{ControllerID: "d", Role: control.RoleDisplay})
 	for _, tc := range []struct {
 		ctx context.Context
 		cmd commands.Type
+		raw string
 	}{
-		{ctl, commands.CMD_FACTORY_RESET},
-		{ctl, commands.CMD_SSH_ACCESS},
-		{ctl, "someUnknownCommand"},   // unknown: owner-only, never forwarded
-		{owner, "mintPairingDisplay"}, // internal: nobody from outside
-		{owner, commands.Type(control.CmdEnvelope)},
+		{ctl, commands.CMD_FACTORY_RESET, ""},
+		{ctl, commands.CMD_SSH_ACCESS, ""},
+		{ctl, "someUnknownCommand", ""},   // unknown: owner-only, never forwarded
+		{owner, "mintPairingDisplay", ""}, // internal: nobody from outside
+		{owner, commands.Type(control.CmdEnvelope), ""},
+		// A display grant (§5.7) runs the Play-shape cast and nothing else.
+		{display, commands.CMD_DEVICE_STATUS, `{}`},
+		{display, commands.CMD_DISPLAY_PLAYLIST, `{"dp1_call":{}}`},
 	} {
-		_, err := ts.handler.Process(tc.ctx, commands.Command{Type: tc.cmd})
+		_, err := ts.handler.Process(tc.ctx, commands.Command{Type: tc.cmd, RawArguments: []byte(tc.raw)})
 		if !errors.Is(err, commandrouter.ErrPermissionDenied) {
 			t.Errorf("%s: err = %v, want ErrPermissionDenied", tc.cmd, err)
 		}

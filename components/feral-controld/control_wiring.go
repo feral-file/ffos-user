@@ -81,6 +81,12 @@ func newControlWiring(cfg config.ControlConfig, deviceID, dir string, fsys contr
 	} else {
 		logger.Info("Control protocol state", fields...)
 	}
+	if derr := auth.Store().DisplayErr(); derr != nil {
+		// Display grants only (spec §8): the device runs on; delete the file
+		// or factory-reset to recover.
+		logger.Warn("Display grant store unreadable; display grants disabled until the file is removed",
+			zap.Error(derr))
+	}
 	status.SetControlStatusSource(func() any { return auth.Status() })
 	return &controlWiring{auth: auth}
 }
@@ -111,10 +117,8 @@ func (c *controlWiring) notificationHandles(r relayer.Relayer, w ws.WS, logger *
 	}
 	wrapped := controlgate.WrapRelayer(r, c.auth, logger)
 	wrapped.V2Connected = func() bool { return c.v2 != nil && c.v2.IsConnected() }
-	wrapped.NotifyV2 = func(typ string, body json.RawMessage, snapshot bool) {
-		if c.v2Gate != nil {
-			c.v2Gate.Publish(typ, body, snapshot)
-		}
+	wrapped.NotifyV2 = func(typ string, body json.RawMessage, snapshot bool) bool {
+		return c.v2Gate != nil && c.v2Gate.Publish(typ, body, snapshot)
 	}
 	return wrapped, controlgate.WrapWS(w, c.auth, logger)
 }
