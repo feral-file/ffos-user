@@ -252,6 +252,12 @@ type Config struct {
 	// SignatureVerification is nil-safe: an absent section keeps
 	// verification on. Read via SignatureVerificationEnabled().
 	SignatureVerification *SignatureVerificationConfig `json:"signatureVerification,omitempty"`
+	// Raster carries the device's Raster read key as RAW bytes, decoded
+	// permissively by RasterTuning() — same treatment, and the same reason,
+	// as ContentPolicy above: the block is optional and hand-provisioned, and
+	// a wrong-typed value in it must cost a wallet cast its authentication,
+	// never crash-loop the daemon and take every recovery surface with it.
+	Raster json.RawMessage `json:"raster,omitempty"`
 	// GatewayUserAgent scopes the kiosk User-Agent rewrite (see the
 	// uarewrite package), carried as RAW bytes and decoded permissively by
 	// GatewayUserAgentTuning() — same treatment, and the same reason, as
@@ -310,6 +316,33 @@ func (c *Config) ContentPolicyTuning(logger *zap.Logger) ContentPolicyConfig {
 				zap.Error(err), zap.String("raw", string(c.ContentPolicy)))
 		}
 		return ContentPolicyConfig{}
+	}
+	return t
+}
+
+// RasterConfig is the device's own credential for Raster (api.raster.art),
+// the token index ff-app's address playlists walk (feral-file#3576). The
+// playlist document never carries a key — it is cast and may be published —
+// so the device supplies this one as x-api-key on every wallet-walk request.
+type RasterConfig struct {
+	APIKey string `json:"apiKey"`
+}
+
+// RasterTuning decodes the raw raster block permissively: an absent block, or
+// one that decodes to the wrong shape, yields the zero value (no key, so the
+// walk runs unauthenticated and Raster decides) — see the Raster field for
+// why this must never fail the load. The raw block is NOT logged on a decode
+// failure, unlike ContentPolicyTuning's: it holds the credential.
+func (c *Config) RasterTuning(logger *zap.Logger) RasterConfig {
+	var t RasterConfig
+	if len(c.Raster) == 0 {
+		return t
+	}
+	if err := json.Unmarshal(c.Raster, &t); err != nil {
+		if logger != nil {
+			logger.Warn("raster config block malformed; Raster wallet walks run without an API key", zap.Error(err))
+		}
+		return RasterConfig{}
 	}
 	return t
 }

@@ -7,6 +7,7 @@ require github.com/gorilla/websocket v1.5.3
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/display-protocol/dp1-go v0.6.2
+	github.com/ethereum/go-ethereum v1.17.2
 	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260925215950-2dcfaa962a19
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
 	github.com/godbus/dbus/v5 v5.1.0
@@ -32,7 +33,6 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/ethereum/c-kzg-4844/v2 v2.1.6 // indirect
-	github.com/ethereum/go-ethereum v1.17.2 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/gowebpki/jcs v1.0.0 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
