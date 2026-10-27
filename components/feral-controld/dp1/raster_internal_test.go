@@ -2,7 +2,18 @@ package dp1
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"slices"
+	"strings"
 	"testing"
+
+	"github.com/display-protocol/dp1-go/extension/playlists"
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
+	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -205,4 +216,145 @@ func TestGraphQLErrorMessage(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(`{"data":{},"errors":[]}`), &root))
 	_, failed = graphqlErrorMessage(root)
 	assert.False(t, failed, "an empty errors array is not a failure")
+}
+
+// pagedHTTP answers successive Do calls with the queued bodies and records
+// how many requests were made.
+type pagedHTTP struct {
+	wrapper.HTTPClient
+	bodies []string
+	calls  int
+}
+
+func (p *pagedHTTP) Do(*http.Request) (*http.Response, error) {
+	if p.calls >= len(p.bodies) {
+		return nil, fmt.Errorf("unexpected request %d", p.calls+1)
+	}
+	body := p.bodies[p.calls]
+	p.calls++
+	return &http.Response{StatusCode: 200, Status: "200 OK", Body: io.NopCloser(strings.NewReader(body))}, nil
+}
+
+// walkNode is one tokensOwned node on an EVM contract whose lowercase address
+// is `0x` + 40 times hexDigit, so tests can steer the work-id tie-break.
+func walkNode(hexDigit, tokenID, acquired string) string {
+	return fmt.Sprintf(`{"lastAcquiredAt":%q,"token":{"id":"r-%s-%s","chainId":"eip155:1","contractAddress":"0x%s","tokenId":%q,"tokenStandard":"ERC721","name":"w-%s-%s","media":{"contentUrl":"https://a.example/%s/%s"}}}`,
+		acquired, hexDigit, tokenID, strings.Repeat(hexDigit, 40), tokenID, hexDigit, tokenID, hexDigit, tokenID)
+}
+
+func walkPage(hasNext bool, cursor string, nodes ...string) string {
+	return fmt.Sprintf(`{"data":{"address":{"tokensOwned":{"pageInfo":{"hasNextPage":%t,"endCursor":%q},"nodes":[%s]}}}}`,
+		hasNext, cursor, strings.Join(nodes, ","))
+}
+
+func walkPlaylist() Playlist {
+	return Playlist{
+		Playlist: dp1playlist.Playlist{DynamicQuery: &playlists.DynamicQuery{
+			Profile:  dp1playlist.ProfileGraphQLV1,
+			Endpoint: "https://api.raster.art/graphql",
+			Query:    "query WalletWalk($after: String) { x }",
+			ResponseMapping: playlists.ResponseMapping{
+				ItemsPath:  "data.address.tokensOwned.nodes",
+				ItemSchema: RasterTokensOwnedItemSchema,
+			},
+		}},
+		DynamicQueryPagination: &DynamicQueryPagination{
+			Variable:    "after",
+			CursorPath:  "data.address.tokensOwned.pageInfo.endCursor",
+			HasNextPath: "data.address.tokensOwned.pageInfo.hasNextPage",
+		},
+	}
+}
+
+func walkTitles(t *testing.T, d *dp1, maxItems int) []string {
+	t.Helper()
+	result, err := d.processRasterWalk(t.Context(), walkPlaylist(), false, maxItems)
+	require.NoError(t, err)
+	titles := make([]string, 0, len(result.Items))
+	for _, item := range result.Items {
+		titles = append(titles, item.Title)
+	}
+	return titles
+}
+
+const (
+	t3 = "2026-10-03T00:00:00Z"
+	t2 = "2026-10-02T00:00:00Z"
+	t1 = "2026-10-01T00:00:00Z"
+)
+
+// TestRasterWalk_OrderIsTheAppsWhateverRasterReturns pins the order the app
+// shows (newest acquisition first, then work id descending) and that it does
+// not depend on the order Raster lists a page in.
+func TestRasterWalk_OrderIsTheAppsWhateverRasterReturns(t *testing.T) {
+	nodes := []string{
+		walkNode("a", "1", t2),
+		walkNode("c", "1", t2),
+		walkNode("b", "1", t2),
+		walkNode("1", "9", t3),
+		walkNode("2", "10", t1),
+		walkNode("2", "9", t1),
+	}
+	want := []string{"w-1-9", "w-c-1", "w-b-1", "w-a-1", "w-2-9", "w-2-10"}
+
+	forward := &dp1{rasterHTTP: &pagedHTTP{bodies: []string{walkPage(false, "", nodes...)}}, logger: zap.NewNop()}
+	assert.Equal(t, want, walkTitles(t, forward, 0), "work id compares as a string, as the app's does: :9 sorts above :10")
+
+	reversed := append([]string(nil), nodes...)
+	slices.Reverse(reversed)
+	backward := &dp1{rasterHTTP: &pagedHTTP{bodies: []string{walkPage(false, "", reversed...)}}, logger: zap.NewNop()}
+	assert.Equal(t, want, walkTitles(t, backward, 0), "the same wallet in any page order resolves identically")
+}
+
+// TestRasterWalk_CapReadsOnThroughATieGroup: when the page ends inside the cap
+// item's timestamp, a tied token on the next page may sort above it, so the
+// walk must read that page before cutting.
+func TestRasterWalk_CapReadsOnThroughATieGroup(t *testing.T) {
+	fake := &pagedHTTP{bodies: []string{
+		walkPage(true, "c1", walkNode("1", "1", t3), walkNode("a", "1", t2)),
+		walkPage(true, "c2", walkNode("f", "1", t2), walkNode("2", "1", t1)),
+	}}
+	d := &dp1{rasterHTTP: fake, logger: zap.NewNop()}
+	assert.Equal(t, []string{"w-1-1", "w-f-1"}, walkTitles(t, d, 2),
+		"the tied 0xfff… token from page two outranks page one's 0xaaa…")
+	assert.Equal(t, 2, fake.calls, "page two ends older than the cap item, so the walk stops there")
+}
+
+func TestRasterWalk_CapStopsWhenThePageEndsOlder(t *testing.T) {
+	fake := &pagedHTTP{bodies: []string{
+		walkPage(true, "c1", walkNode("1", "1", t3), walkNode("a", "1", t2), walkNode("b", "1", t1)),
+	}}
+	d := &dp1{rasterHTTP: fake, logger: zap.NewNop()}
+	assert.Equal(t, []string{"w-1-1", "w-a-1"}, walkTitles(t, d, 2))
+	assert.Equal(t, 1, fake.calls, "nothing unread can make the cut, so no second request")
+}
+
+func TestRasterAcquiredUs(t *testing.T) {
+	assert.Equal(t, int64(0), rasterAcquiredUs(""))
+	assert.Equal(t, int64(0), rasterAcquiredUs("yesterday"))
+	assert.Equal(t, rasterAcquiredUs("2026-10-01T00:00:00.000001Z"), rasterAcquiredUs("2026-10-01T00:00:00.0000019Z"),
+		"microsecond precision, like the app's sortKeyUs")
+	assert.Equal(t, rasterAcquiredUs("2026-10-01T07:00:00+07:00"), rasterAcquiredUs("2026-10-01T00:00:00Z"))
+}
+
+func TestRasterWorkIDStandard(t *testing.T) {
+	for in, want := range map[string]string{
+		"ERC721": "erc721", "erc1155": "erc1155", " FA2 ": "fa2",
+		"CRYPTOPUNKS": "cryptopunks", "ORDINAL_INSCRIPTION": "ordinal", "ERC-1155": "other", "": "other",
+	} {
+		assert.Equal(t, want, rasterWorkIDStandard(in), in)
+	}
+}
+
+func TestRasterNodeToWalkItem_WorkID(t *testing.T) {
+	evm, reason := rasterNodeToWalkItem(tokenFromJSON(t,
+		`{"lastAcquiredAt":"2026-10-01T00:00:00Z","token":{"chainId":"eip155:8453","contractAddress":"0x059EDD72Cd353dF5106D2B9cC5ab83a52287aC3a","tokenId":"7","tokenStandard":"ERC721","media":{"contentUrl":"https://a.example/1"}}}`))
+	require.Empty(t, reason)
+	assert.Equal(t, "eip155:8453:erc721:0x059edd72cd353df5106d2b9cc5ab83a52287ac3a:7", evm.workID)
+
+	tezos, reason := rasterNodeToWalkItem(tokenFromJSON(t,
+		`{"token":{"chainId":"tezos:NetXdQprcVkpaWU","contractAddress":"KT1RJ6PbjHpwc3M5rw5s2Nbmefwbuwbdxton","tokenId":"42","tokenStandard":"FA2","media":{"contentUrl":"https://a.example/1"}}}`))
+	require.Empty(t, reason)
+	assert.Equal(t, "tezos:mainnet:fa2:KT1RJ6PbjHpwc3M5rw5s2Nbmefwbuwbdxton:42", tezos.workID)
+	assert.Equal(t, int64(0), tezos.acquiredUs, "no date sorts as oldest, like the app's sortKeyUs 0")
 }

@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
+	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/ethereum/go-ethereum/common"
@@ -147,7 +149,74 @@ var evmChainLabels = map[string]string{
 // Scalars that Raster may send as a number or a string (`id`, `tokenId`) are
 // held raw and read through rasterScalar.
 type rasterOwnedNode struct {
-	Token *rasterToken `json:"token"`
+	// LastAcquiredAt is when the walked address last acquired the token, the
+	// primary sort key (see sortRasterItems).
+	LastAcquiredAt string       `json:"lastAcquiredAt"`
+	Token          *rasterToken `json:"token"`
+}
+
+// rasterWalkItem is a mapped item with the two keys the walk orders by.
+type rasterWalkItem struct {
+	item dp1playlist.PlaylistItem
+	// acquiredUs is lastAcquiredAt in microseconds since the epoch, 0 when
+	// Raster has no date or sends one that does not parse.
+	acquiredUs int64
+	// workID is the app's work id (CID) for the token, the tie-break.
+	workID string
+}
+
+// rasterAcquiredUs mirrors the app's sortKeyUs: `DateTime.tryParse(...)
+// .microsecondsSinceEpoch`, 0 when absent or unparsable. Microseconds, not
+// nanoseconds, so two acquisitions the app sees as a tie are a tie here too.
+func rasterAcquiredUs(value string) int64 {
+	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
+	if err != nil {
+		return 0
+	}
+	return t.UnixMicro()
+}
+
+// rasterWorkIDStandard mirrors ff-app's tokenStandardSegment. It is the
+// work-id spelling, which is NOT the DP-1 provenance enum
+// (rasterTokenStandard): CryptoPunks and ordinals keep their own segment
+// here, and a hyphenated standard is `other` exactly as the app reads it.
+func rasterWorkIDStandard(standard string) string {
+	switch strings.ToUpper(strings.TrimSpace(standard)) {
+	case "ERC721":
+		return "erc721"
+	case "ERC1155":
+		return "erc1155"
+	case "FA2":
+		return "fa2"
+	case "CRYPTOPUNKS":
+		return "cryptopunks"
+	case "ORDINAL_INSCRIPTION":
+		return "ordinal"
+	default:
+		return "other"
+	}
+}
+
+// sortRasterItems puts a walk in the order the app shows an address
+// playlist: newest acquisition first, ties broken by work id descending
+// (ff-app app_database.dart orders playlist entries by sortKeyUs DESC, then
+// itemId DESC, and an address playlist's itemId is the work id).
+//
+// Raster also returns newest acquisition first, but breaks ties by its own
+// token id ascending, and that tie rule is observed behavior, not a documented
+// contract. Ties are common, not an edge case: one probed wallet had 332 of
+// its 595 tokens sharing a timestamp with another token (a whole mint or
+// transfer batch lands in one block). Sorting here makes the wall's order a
+// function of the wallet alone, identical to the phone's, whatever order a
+// page comes back in. Stable, so two items with the same work id (which
+// cannot happen in one wallet) would still keep a defined order.
+func sortRasterItems(items []rasterWalkItem) {
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].acquiredUs != items[j].acquiredUs {
+			return items[i].acquiredUs > items[j].acquiredUs
+		}
+		return items[i].workID > items[j].workID
+	})
 }
 
 type rasterToken struct {
@@ -242,28 +311,33 @@ func lookupRasterChain(id string) (rasterChain, bool) {
 // token as a bare row so wallet counts match the chain; a wall has nothing to
 // show for it.
 func rasterNodeToItem(node rasterOwnedNode) (dp1playlist.PlaylistItem, string) {
+	walkItem, reason := rasterNodeToWalkItem(node)
+	return walkItem.item, reason
+}
+
+func rasterNodeToWalkItem(node rasterOwnedNode) (rasterWalkItem, string) {
 	token := node.Token
 	if token == nil {
-		return dp1playlist.PlaylistItem{}, "no token"
+		return rasterWalkItem{}, "no token"
 	}
 	chain, ok := lookupRasterChain(token.ChainID)
 	if !ok {
-		return dp1playlist.PlaylistItem{}, fmt.Sprintf("unsupported chain %q", token.ChainID)
+		return rasterWalkItem{}, fmt.Sprintf("unsupported chain %q", token.ChainID)
 	}
 	contract := strings.TrimSpace(token.ContractAddress)
 	if contract == "" {
-		return dp1playlist.PlaylistItem{}, "no contract address"
+		return rasterWalkItem{}, "no contract address"
 	}
 	if chain.kind == rasterChainEVM && !evmAddressRE.MatchString(contract) {
-		return dp1playlist.PlaylistItem{}, "malformed EVM contract address"
+		return rasterWalkItem{}, "malformed EVM contract address"
 	}
 	tokenID := rasterScalar(token.TokenID)
 	if tokenID == "" {
-		return dp1playlist.PlaylistItem{}, "no token id"
+		return rasterWalkItem{}, "no token id"
 	}
 	source := rasterSourceURL(token.Media, token.platformName())
 	if source == "" {
-		return dp1playlist.PlaylistItem{}, "no playable media URL"
+		return rasterWalkItem{}, "no playable media URL"
 	}
 
 	// Id parity with the legacy indexer path (buildPlaylistItem): ff-indexer-v2
@@ -295,9 +369,16 @@ func rasterNodeToItem(node rasterOwnedNode) (dp1playlist.PlaylistItem, string) {
 		},
 	}
 	if err := validateMappedItem(item); err != nil {
-		return dp1playlist.PlaylistItem{}, "mapped item invalid: " + err.Error()
+		return rasterWalkItem{}, "mapped item invalid: " + err.Error()
 	}
-	return item, ""
+	return rasterWalkItem{
+		item:       item,
+		acquiredUs: rasterAcquiredUs(node.LastAcquiredAt),
+		// The app's cidForRasterToken: `<namespace>:<standard>:<contract>:
+		// <tokenId>`, EVM contract lowercased, Tezos verbatim, Tezos named
+		// `tezos:mainnet` like the legacy indexer.
+		workID: chain.indexerChain + ":" + rasterWorkIDStandard(token.TokenStandard) + ":" + provenanceAddress + ":" + tokenID,
+	}, ""
 }
 
 // rasterTokenStandard lowercases Raster's `tokenStandard` (`ERC721`, `ERC-1155`,
@@ -493,9 +574,18 @@ func (d *dp1) planRasterWalk(playlist Playlist) (rasterWalkPlan, error) {
 // page sends `variables: {<pagination.variable>: <cursor>}`, where the cursor
 // is read at `cursorPath` and the continue flag at `hasNextPath`. The walk
 // stops when the flag is false, the cursor is empty, or the cursor repeats;
-// it also stops once maxItems is reached and after the first page for a
-// minimal resolve, and fails past rasterMaxPages. Raster's order (newest
-// acquisition first, the order the app shows) is kept.
+// it also stops after the first page for a minimal resolve, and fails past
+// rasterMaxPages.
+//
+// Order is the app's, not Raster's (see sortRasterItems). That makes the
+// maxItems cap subtle: Raster pages newest first, so once maxItems items are
+// in hand the walk may only stop when the page it just read ends strictly
+// OLDER than the item at the cap. If the page ends inside the cap item's
+// timestamp, the tie group continues on the next page and a member of it may
+// sort above the cap item, so the walk reads on until the group is complete
+// (bounded by rasterMaxPages like any walk). A minimal resolve deliberately
+// does not: it is one request by contract, so a tie group cut by its page
+// boundary is ordered within what that page holds.
 //
 // ACCEPTED DEPARTURE from processDynamicPlaylistSpec's fail-closed rule: a
 // node the mapper cannot turn into a playable item (no contract, no media
@@ -514,7 +604,7 @@ func (d *dp1) processRasterWalk(ctx context.Context, playlist Playlist, minimal 
 			zap.String("playlist_id", playlist.ID))
 	}
 
-	var items []dp1playlist.PlaylistItem
+	var items []rasterWalkItem
 	skipped := 0
 	cursor := ""
 	seen := map[string]bool{}
@@ -532,9 +622,8 @@ func (d *dp1) processRasterWalk(ctx context.Context, playlist Playlist, minimal 
 		if err != nil {
 			return nil, fmt.Errorf("%w: page %d: %w", ErrRasterQuery, pages, err)
 		}
-		reachedMax := false
 		for _, node := range nodes {
-			item, reason := rasterNodeToItem(node)
+			item, reason := rasterNodeToWalkItem(node)
 			if reason != "" {
 				skipped++
 				d.logger.Warn("raster node skipped",
@@ -544,12 +633,15 @@ func (d *dp1) processRasterWalk(ctx context.Context, playlist Playlist, minimal 
 				continue
 			}
 			items = append(items, item)
-			if maxItems > 0 && len(items) >= maxItems {
-				reachedMax = true
-				break
-			}
 		}
-		if reachedMax || minimal {
+		if minimal {
+			break
+		}
+		if maxItems > 0 && len(items) >= maxItems && len(nodes) > 0 &&
+			rasterAcquiredUs(nodes[len(nodes)-1].LastAcquiredAt) < items[maxItems-1].acquiredUs {
+			// Everything still unread is older than the cap item; it cannot
+			// make the cut. Skipped nodes count here too: they carry the
+			// timestamp, and the page's last node marks how far the page got.
 			break
 		}
 		hasNext, err := rasterBoolAt(root, plan.pagination.HasNextPath)
@@ -575,18 +667,27 @@ func (d *dp1) processRasterWalk(ctx context.Context, playlist Playlist, minimal 
 		cursor = next
 	}
 
-	if minimal && len(items) > MINIMAL_PLAYLIST_ITEMS_LIMIT {
-		items = items[:MINIMAL_PLAYLIST_ITEMS_LIMIT]
+	sortRasterItems(items)
+	limit := len(items)
+	if maxItems > 0 && limit > maxItems {
+		limit = maxItems
+	}
+	if minimal && limit > MINIMAL_PLAYLIST_ITEMS_LIMIT {
+		limit = MINIMAL_PLAYLIST_ITEMS_LIMIT
+	}
+	resolved := make([]dp1playlist.PlaylistItem, 0, limit)
+	for _, walkItem := range items[:limit] {
+		resolved = append(resolved, walkItem.item)
 	}
 	d.logger.Info("raster wallet walk resolved",
 		zap.String("playlist_id", playlist.ID),
 		zap.Int("pages", pages),
-		zap.Int("items", len(items)),
+		zap.Int("items", len(resolved)),
 		zap.Int("skipped", skipped))
 
 	// Same replacement rule as the other dynamic paths: resolved items replace
 	// whatever static items the document carried.
-	playlist.Items = items
+	playlist.Items = resolved
 	return &playlist, nil
 }
 

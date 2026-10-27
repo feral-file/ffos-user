@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/ethereum/go-ethereum/common"
@@ -113,8 +114,23 @@ func rasterToken(id int, overrides map[string]any) map[string]any {
 	return token
 }
 
+// rasterNode wraps a token as a walk node. Its lastAcquiredAt is derived from
+// the fixture's "raster-<n>" id, one second older per n, so fixtures built in
+// ascending n arrive newest first exactly as Raster pages them and keep their
+// order through the walk's sort. A token with no such id gets the base time.
 func rasterNode(token map[string]any) map[string]any {
-	return map[string]any{"quantity": "1", "lastAcquiredAt": "2026-10-01T00:00:00Z", "token": token}
+	acquired := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	if id, ok := token["id"].(string); ok {
+		var n int
+		if _, err := fmt.Sscanf(id, "raster-%d", &n); err == nil {
+			acquired = acquired.Add(-time.Duration(n) * time.Second)
+		}
+	}
+	return rasterNodeAt(token, acquired.Format(time.RFC3339))
+}
+
+func rasterNodeAt(token map[string]any, lastAcquiredAt string) map[string]any {
+	return map[string]any{"quantity": "1", "lastAcquiredAt": lastAcquiredAt, "token": token}
 }
 
 func rasterPage(t *testing.T, nodes []map[string]any, hasNext bool, endCursor string) string {
