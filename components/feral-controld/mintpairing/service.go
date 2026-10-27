@@ -24,6 +24,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/qrdisplay"
@@ -940,7 +941,7 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 		s.closeChannel(channel)
 		s.logger.Warn("Dropping a mint pairing channel that outlived its claim",
 			zap.String("channelID", channel.PairingDisplay().ChannelID),
-			zap.String("startedForTopicID", startGuard.topicID))
+			zap.String("startedForTopicFP", helper.TopicFingerprint(startGuard.topicID)))
 		return commandError("topic_changed", "the relayer topic changed while the pairing session was starting", true), nil
 	}
 
@@ -1175,7 +1176,7 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 		s.closeChannel(joined.channel)
 		s.logger.Warn("Dropping a joined mint pairing channel that outlived its claim",
 			zap.String("channelID", joined.channelID),
-			zap.String("startedForTopicID", startGuard.topicID))
+			zap.String("startedForTopicFP", helper.TopicFingerprint(startGuard.topicID)))
 		return commandError("topic_changed", "the relayer topic changed while joining the pairing channel", true), nil
 	}
 
@@ -1618,7 +1619,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 			zap.String("channelID", request.ChannelID),
 			zap.String("requestMessageID", request.MessageID),
 			zap.String("origin", request.Origin),
-			zap.String("pairedForTopicID", guard.topicID))
+			zap.String("pairedForTopicFP", helper.TopicFingerprint(guard.topicID)))
 		return
 	}
 
@@ -2174,7 +2175,7 @@ func (s *service) completeDecisionFor(ctx context.Context, active *activePairing
 		} else {
 			s.logger.Warn("Left a possibly delivered mint pairing session in place after a failed browser delivery",
 				zap.Error(err),
-				zap.String("topicID", topicID),
+				zap.String("topic_fp", helper.TopicFingerprint(topicID)),
 				zap.String("sessionID", session.SessionID),
 				zap.Bool("persistent", session.Persistent))
 		}
@@ -2187,8 +2188,8 @@ func (s *service) completeDecisionFor(ctx context.Context, active *activePairing
 	// terminal message is already delivered and is not taken back.
 	if after := currentTopicGuard(); !after.sameAs(guard) {
 		s.logger.Warn("Relayer topic changed while delivering a mint pairing session; revoking the session it was minted for",
-			zap.String("mintedForTopicID", topicID),
-			zap.String("currentTopicID", after.topicID),
+			zap.String("mintedForTopicFP", helper.TopicFingerprint(topicID)),
+			zap.String("currentTopicFP", helper.TopicFingerprint(after.topicID)),
 			zap.String("sessionID", session.SessionID),
 			zap.Bool("persistent", session.Persistent))
 		s.revokeAbandonedSession(topicID, session.SessionID)
@@ -2377,7 +2378,7 @@ func (s *service) revokeAbandonedSession(topicID string, sessionID string) {
 	if err := s.sessionCreator.RevokeEphemeralSession(ctx, topicID, sessionID); err != nil {
 		s.logger.Warn("Failed to revoke abandoned mint pairing session",
 			zap.Error(err),
-			zap.String("topicID", topicID),
+			zap.String("topic_fp", helper.TopicFingerprint(topicID)),
 			zap.String("sessionID", sessionID))
 	}
 }
