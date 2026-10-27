@@ -463,6 +463,8 @@ func (f *fakeMintPairingService) Painter() overlay.Painter { return nil }
 
 func (f *fakeMintPairingService) SetSession(mintpairing.NavigationSession) {}
 
+func (f *fakeMintPairingService) SetDisplayGrants(mintpairing.DisplayGrantIssuer, string) {}
+
 func (f *fakeMintPairingService) RevokeTopicSessions(context.Context, string) (int, error) {
 	return 0, nil
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"sort"
 	"strings"
@@ -187,11 +188,14 @@ func (r *RelayV2) drain(bctx context.Context, b *v2Binding) {
 	}
 }
 
-func (r *RelayV2) enqueue(b *v2Binding, wire []byte) {
+// enqueue reports whether the binding's queue accepted the copy.
+func (r *RelayV2) enqueue(b *v2Binding, wire []byte) bool {
 	select {
 	case b.queue <- wire:
+		return true
 	default:
 		r.logger.Info("V2 notification queue full; dropping notification")
+		return false
 	}
 }
 
@@ -292,7 +296,7 @@ func (r *RelayV2) releaseAfterReply(peer v2Peer) {
 		held = append(held, <-b.queue)
 	}
 	for _, typ := range types {
-		if !r.deliverLocked(b.ctl, typ, r.latest[typ], []*v2Binding{b}) {
+		if _, keep := r.deliverLocked(b.ctl, typ, r.latest[typ], []*v2Binding{b}, false); !keep {
 			break
 		}
 	}
@@ -302,14 +306,17 @@ func (r *RelayV2) releaseAfterReply(peer v2Peer) {
 	close(b.release)
 }
 
-// Publish is the notification producers' path (SealingRelayer). Mint pairing
-// stays legacy-only (§9). A snapshot type (one the legacy relayer persists:
-// the status types) is deduplicated against what v2 last sent and kept for
-// bindings made later; a pending binding gets it with its snapshot instead.
-func (r *RelayV2) Publish(typ string, body json.RawMessage, snapshot bool) {
-	if strings.HasPrefix(typ, "mint_pairing_") {
-		return
-	}
+// Publish is the notification producers' path (SealingRelayer). A snapshot
+// type (one the legacy relayer persists: the status types) is deduplicated
+// against what v2 last sent and kept for bindings made later; a pending
+// binding gets it with its snapshot instead. mint_pairing_* goes to owner
+// bindings only and is never a snapshot, whatever the producer's
+// persist_record_count says (§9): kept in latest, a decided request would
+// replay to every later binding. It reports whether a copy was queued for
+// at least one owner binding (queued, not acknowledged).
+func (r *RelayV2) Publish(typ string, body json.RawMessage, snapshot bool) bool {
+	ownerOnly := isMintPairing(typ)
+	snapshot = snapshot && !ownerOnly
 	if len(body) == 0 {
 		body = json.RawMessage("null")
 	}
@@ -317,12 +324,14 @@ func (r *RelayV2) Publish(typ string, body json.RawMessage, snapshot bool) {
 	defer r.mu.Unlock()
 	if snapshot {
 		if prev, ok := r.latest[typ]; ok && bytes.Equal(prev, body) {
-			return
+			return false
 		}
 		r.latest[typ] = append(json.RawMessage(nil), body...)
 	}
-	r.notifyLocked(typ, body, "", snapshot)
+	return r.notifyLocked(typ, body, "", snapshot, ownerOnly) > 0
 }
+
+func isMintPairing(typ string) bool { return strings.HasPrefix(typ, "mint_pairing_") }
 
 // Notify seals once per bound controller and queues the copy for each of its
 // live peers; it never waits on a peer. Authority.Seal rechecks current grant
@@ -330,10 +339,11 @@ func (r *RelayV2) Publish(typ string, body json.RawMessage, snapshot bool) {
 func (r *RelayV2) Notify(typ string, body any, onlyController string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.notifyLocked(typ, body, onlyController, false)
+	r.notifyLocked(typ, body, onlyController, false, false)
 }
 
-func (r *RelayV2) notifyLocked(typ string, body any, onlyController string, skipPending bool) {
+// notifyLocked returns how many controllers a copy was queued for.
+func (r *RelayV2) notifyLocked(typ string, body any, onlyController string, skipPending, ownerOnly bool) int {
 	r.pruneLocked()
 	byCtl := make(map[string][]*v2Binding)
 	for _, b := range r.bindings {
@@ -341,34 +351,47 @@ func (r *RelayV2) notifyLocked(typ string, body any, onlyController string, skip
 			byCtl[b.ctl] = append(byCtl[b.ctl], b)
 		}
 	}
+	queued := 0
 	for ctl, bs := range byCtl {
-		r.deliverLocked(ctl, typ, body, bs)
+		if q, _ := r.deliverLocked(ctl, typ, body, bs, ownerOnly); q {
+			queued++
+		}
 	}
+	return queued
 }
 
-// deliverLocked seals one copy for ctl and queues it for bs. It reports false
-// when ctl's bindings were dropped because its grant is no longer active
-// (§9: a later reactivation needs a fresh request); a transient seal failure
-// keeps them.
-func (r *RelayV2) deliverLocked(ctl, typ string, body any, bs []*v2Binding) bool {
-	sealed, err := r.gate.auth.Seal(ctl, typ, body)
+// deliverLocked seals one copy for ctl and queues it for bs. queued reports
+// whether at least one of their queues accepted it (a full queue drops, and
+// a dropped copy was never delivered); keep is false when ctl's bindings were dropped because
+// its grant is no longer active (§9: a later reactivation needs a fresh
+// request). A transient seal failure keeps them, and so does an owner-only
+// notification reaching a non-owner binding, which is skipped silently.
+func (r *RelayV2) deliverLocked(ctl, typ string, body any, bs []*v2Binding, ownerOnly bool) (queued, keep bool) {
+	seal := r.gate.auth.Seal
+	if ownerOnly {
+		seal = r.gate.auth.SealOwner
+	}
+	sealed, err := seal(ctl, typ, body)
 	if err == nil {
 		var wire []byte
 		if wire, err = sealed.Wire(); err == nil {
 			for _, b := range bs {
-				r.enqueue(b, wire)
+				queued = r.enqueue(b, wire) || queued
 			}
-			return true
+			return queued, true
 		}
+	}
+	if errors.Is(err, control.ErrNotOwner) {
+		return false, true
 	}
 	if !r.gate.auth.GrantActive(ctl) {
 		for _, b := range bs {
 			r.dropLocked(b)
 		}
-		return false
+		return false, false
 	}
 	r.logger.Warn("Failed to seal v2 notification", zap.String("notification_type", typ), zap.Error(err))
-	return true
+	return false, true
 }
 
 // Disconnected retires routing state immediately; grants remain authority-owned.

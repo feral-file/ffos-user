@@ -1103,6 +1103,12 @@ func initializeApp(
 	// Mint Pairing
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
 	mintPairing := mintpairing.New(mintPairingOpts, notifyRelayer, cdp, httpClient, relayerAPIKey, json, logger)
+	// Display grants for Play 0.5 sites need the control authority and the
+	// v2 endpoint the site will cast through; with either missing every 0.5
+	// request is refused display_grant_unavailable (spec §5.7).
+	if controlWire != nil && controlWire.v2 != nil {
+		mintPairing.SetDisplayGrants(controlWire.auth, v2Config[0].Endpoint)
+	}
 	// Factory reset ends the outgoing topic's browser sessions before it clears
 	// the claim: they live on the relayer, and an owner-kept one has no expiry
 	// to reclaim it.

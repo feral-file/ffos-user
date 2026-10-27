@@ -461,7 +461,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 	// internal callers (OOM recovery, the playRecentlyPlayed re-entry, which
 	// keeps the caller's ctx and is controller tier anyway) carry none and are
 	// governed by the transport policy instead.
-	if p, ok := control.PrincipalFrom(ctx); ok && !control.TierOf(string(commandType)).Allows(p.Role) {
+	if p, ok := control.PrincipalFrom(ctx); ok && !control.Permits(p, string(commandType), command.RawArguments) {
 		h.logger.Warn("Rejecting command outside the controller's tier",
 			zap.String("command", commandType.String()), zap.String("role", string(p.Role)))
 		return nil, ErrPermissionDenied

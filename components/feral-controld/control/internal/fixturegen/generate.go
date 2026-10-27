@@ -185,6 +185,16 @@ func (g *gen) positives() error {
 			func(c *control.RequestClaims) {
 				c.Cmd, c.Req = control.CmdRevokeController, json.RawMessage(`{"ctl":"`+g.k.Controllers["controller"].Ctl+`"}`)
 			}, nil, false, ""},
+		{"cmd-display-displayPlaylist", "A Play site's display grant casts in the exact Play shape (§5.7); the caller executes it as the display principal.", "display", nil,
+			nil, map[string]any{"ok": true}, true, ""},
+		{"cmd-display-displayPlaylist-legacy", "The same cast on a legacy device (no owner yet): display grants are admitted in every state but locked (§5.7).", "display", nil,
+			nil, map[string]any{"ok": true}, true, ""},
+		{"cmd-display-self-revoke", "A display grant revokes itself (the site's unpair), the one control command it may send (§5.7).", "display", nil,
+			func(c *control.RequestClaims) {
+				c.Cmd, c.Req = control.CmdRevokeController, json.RawMessage(`{"ctl":"`+g.k.Controllers["display"].Ctl+`"}`)
+			}, nil, false, ""},
+		{"cmd-owner-listControllers-display", "listControllers on a device holding a display grant: the display row follows the grant records with role display, origin, originAttested and platform web (§5.5).", "owner", nil,
+			func(c *control.RequestClaims) { c.Cmd, c.Req = control.CmdListControllers, json.RawMessage(`{}`) }, nil, false, ""},
 	}
 	for _, p := range list {
 		f := &Fixture{Name: p.name, Kind: "request", Description: p.desc, From: p.from, Setup: g.setup(p.name)}
@@ -192,6 +202,11 @@ func (g *gen) positives() error {
 		case "enroll-invitation":
 			f.Setup.Grants = []string{}
 			f.Setup.Invitation = true
+		case "cmd-display-displayPlaylist", "cmd-display-self-revoke", "cmd-owner-listControllers-display":
+			f.Setup.DisplayGrants = []DisplaySpec{{Name: "display"}}
+		case "cmd-display-displayPlaylist-legacy":
+			f.Setup.Grants = []string{}
+			f.Setup.DisplayGrants = []DisplaySpec{{Name: "display"}}
 		case "cmd-owner-reordered-ctr":
 			// hi=50; 50 and 49 seen (bits 0, 1); ctr 40 (bit 10) unseen.
 			f.Setup.Windows = map[string]WindowSpec{"owner": {Hi: 50, Bitmap: "0000000000000003"}}
@@ -342,6 +357,33 @@ func (g *gen) negativeRequests() error {
 			mutate: func(c *control.RequestClaims) {
 				c.Cmd, c.Req = control.CmdRevokeController, json.RawMessage(`{"ctl":"`+g.k.Controllers["owner"].Ctl+`"}`)
 			}},
+		// Display grants (§5.7): the Play cast and the self-revoke are all a
+		// display ctl may send; nothing else, in any state.
+		{name: "display-getDeviceStatus", desc: "A display grant has no status read.", from: "display", reply: control.CodePermissionDenied,
+			mutate: func(c *control.RequestClaims) { c.Cmd, c.Req = "getDeviceStatus", json.RawMessage(`{}`) }},
+		{name: "display-connect", desc: "A display grant cannot connect (claim).", from: "display", reply: control.CodePermissionDenied,
+			mutate: func(c *control.RequestClaims) {
+				c.Cmd, c.Req = "connect", json.RawMessage(`{"clientDevice":{"deviceId":"x"}}`)
+			}},
+		{name: "display-displayPlaylist-not-play-shape", desc: "displayPlaylist from a display grant outside the exact Play shape (an extra member).", from: "display", reply: control.CodePermissionDenied,
+			mutate: func(c *control.RequestClaims) {
+				c.Req = json.RawMessage(`{"intent":{"action":"now_display"},"dp1_call":{"dpVersion":"1.0.0","title":"fixture","items":[]},"extra":1}`)
+			}},
+		{name: "display-registerController", desc: "A display grant cannot register a controller.", from: "display", reply: control.CodePermissionDenied,
+			mutate: func(c *control.RequestClaims) {
+				c.Cmd, c.Req = control.CmdRegisterController, g.registerReq("stranger", "controller", "")
+			}},
+		{name: "display-enroll", desc: "op=enroll from a display ctl: every non-cmd op is refused (the ctl is in the display store, not a pending request).", from: "display", reply: control.CodePermissionDenied,
+			mutate: func(c *control.RequestClaims) {
+				c.Op, c.Cmd, c.Req = control.OpEnroll, "", nil
+				c.Enroll = g.enroll("display", "")
+				c.Enroll.Platform = "other"
+			}},
+		{name: "display-expired", desc: "An expired display grant: access_revoked, as for a grant record.", from: "display", reply: control.CodeAccessRevoked},
+		{name: "approveController-role-display", desc: "The display role is never wire-assignable: approveController{role:\"display\"} is command_failed with res.error invalid_request, like any invalid role.", reply: control.CodeCommandFailed,
+			mutate: func(c *control.RequestClaims) {
+				c.Cmd, c.Req = control.CmdApproveController, json.RawMessage(`{"ctl":"`+g.k.Controllers["stranger"].Ctl+`","role":"display"}`)
+			}},
 	}
 	for _, v := range list {
 		from := v.from
@@ -354,6 +396,11 @@ func (g *gen) negativeRequests() error {
 			f.Setup.Windows = map[string]WindowSpec{"owner": {Hi: 10, Bitmap: "0000000000000001"}}
 		case "out-of-window-ctr":
 			f.Setup.Windows = map[string]WindowSpec{"owner": {Hi: 100, Bitmap: "0000000000000001"}}
+		case "display-expired":
+			f.Setup.DisplayGrants = []DisplaySpec{{Name: "display", ExpiresAt: Now - 1}}
+		}
+		if from == "display" && f.Setup.DisplayGrants == nil {
+			f.Setup.DisplayGrants = []DisplaySpec{{Name: "display"}}
 		}
 		rc := g.claims(v.name, from)
 		if v.mutate != nil {

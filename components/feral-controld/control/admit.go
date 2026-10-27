@@ -608,6 +608,10 @@ func (a *Authority) OpenFrom(compact string, origin Origin) (*Admission, error) 
 	grant, known := a.store.Grant(pre.adm.ctl)
 	if known {
 		pre.adm.SignerRole = grant.Role
+	} else if dg, ok := a.store.DisplayGrant(pre.adm.ctl); ok {
+		// grants.json first, then the display store (§5.7); a ctl is never
+		// in both.
+		return a.admitDisplay(pre, dg, now)
 	}
 	c := pre.claims
 	a.prunePending(now)
@@ -689,7 +693,14 @@ func (a *Authority) authenticate(compact string) (authenticated, *Admission, *Pu
 	}
 	grant, known := a.store.Grant(p.kid)
 	key := grant.Sig
+	display, isDisplay := DisplayGrant{}, false
 	if !known {
+		display, isDisplay = a.store.DisplayGrant(p.kid)
+	}
+	switch {
+	case isDisplay:
+		key = display.Sig
+	case !known:
 		if len(p.payload) > maxEnrollPayload {
 			return authenticated{}, nil, publicErr(CodeUnknownController, errors.New("kid not in grant store"))
 		}
@@ -712,8 +723,11 @@ func (a *Authority) authenticate(compact string) (authenticated, *Admission, *Pu
 	// From here on the request is authentic and every failure is an
 	// encrypted reply to the signer (ctl = the verified kid).
 	adm := &Admission{auth: a, rk: h.rk, ctl: p.kid, RequestID: h.rid, Signer: p.kid}
-	if known {
+	switch {
+	case known:
 		adm.SignerRole = grant.Role
+	case isDisplay:
+		adm.SignerRole = RoleDisplay
 	}
 	finish := func(code string) (authenticated, *Admission, *PublicError) {
 		out, err := a.fail(adm, code, nil)
@@ -829,11 +843,11 @@ func (a *Authority) admitCmd(adm *Admission, c RequestClaims, g Grant, now int64
 	if a.stateLocked(now) == StateLegacy {
 		return a.refuse(adm, g.Ctl, window, CodeNotApproved)
 	}
-	if !TierOf(c.Cmd).Allows(g.Role) && !isSelfRevoke(c, g) {
+	p := Principal{ControllerID: g.Ctl, Role: g.Role}
+	if !Permits(p, c.Cmd, c.Req) && !isSelfRevoke(c, g.Ctl) {
 		return a.refuse(adm, g.Ctl, window, CodePermissionDenied)
 	}
-	adm.Command, adm.Request = c.Cmd, c.Req
-	adm.Principal = Principal{ControllerID: g.Ctl, Role: g.Role}
+	adm.Command, adm.Request, adm.Principal = c.Cmd, c.Req, p
 
 	switch c.Cmd {
 	case CmdApproveController, CmdRevokeController, CmdListControllers, CmdRegisterController:
@@ -850,7 +864,7 @@ func (a *Authority) admitCmd(adm *Admission, c RequestClaims, g Grant, now int64
 // ctl: the one owner-tier form a controller grant may send (§5.5), so a
 // controller that removes an FF1 does not leave an orphan grant behind. The
 // last_owner guard in revoke still applies to an owner revoking itself.
-func isSelfRevoke(c RequestClaims, g Grant) bool {
+func isSelfRevoke(c RequestClaims, ctl string) bool {
 	if c.Cmd != CmdRevokeController {
 		return false
 	}
@@ -858,7 +872,7 @@ func isSelfRevoke(c RequestClaims, g Grant) bool {
 	if err != nil {
 		return false
 	}
-	return expectString(m, "ctl", g.Ctl) == nil
+	return expectString(m, "ctl", ctl) == nil
 }
 
 // controlResult is the outcome of an owner control command executed inside
@@ -875,7 +889,10 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 	var out controlResult
 	// Memory-only side effects (pending table, seq) are applied after the
 	// store commit, so a failed write leaves them untouched too.
-	var approvedPending, deniedPending, revoked, registered string
+	var approvedPending, deniedPending, revoked, registered, revokedDisplay string
+	// The display store is read before the write, not inside it (Update holds
+	// the store lock); it only changes under a.mu, which is held here.
+	display := a.store.DisplayGrants()
 	err := a.store.Update(func(gs []Grant) ([]Grant, error) {
 		gs, err := setWindow(adm.ctl, window)(gs)
 		if err != nil {
@@ -883,13 +900,13 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 		}
 		switch c.Cmd {
 		case CmdApproveController:
-			gs, out, approvedPending = a.approve(gs, adm.ctl, c.Req, now)
+			gs, out, approvedPending = a.approve(gs, display, adm.ctl, c.Req, now)
 		case CmdRevokeController:
-			gs, out, deniedPending, revoked = a.revoke(gs, c.Req, now)
+			gs, out, deniedPending, revoked, revokedDisplay = a.revoke(gs, display, c.Req, now)
 		case CmdRegisterController:
-			gs, out, registered = a.register(gs, adm.ctl, c.Req, now)
+			gs, out, registered = a.register(gs, display, adm.ctl, c.Req, now)
 		default:
-			out = a.list(gs, adm.ctl, now)
+			out = a.list(gs, display, adm.ctl)
 		}
 		return gs, nil
 	})
@@ -923,6 +940,19 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 	if out.activated != "" {
 		adm.ReactivatedCtls = append(adm.ReactivatedCtls, out.activated)
 	}
+	if revokedDisplay != "" {
+		// Second write, after the owner's window: an owner revoking a
+		// display record (§5.5). Its failure is internal_error like any
+		// other, and the owner re-lists.
+		derr := a.store.UpdateDisplay(revokeDisplay(revokedDisplay, now))
+		if derr != nil && !errors.Is(derr, ErrDurability) {
+			return a.persistFailure(adm)
+		}
+		adm.RevokedCtls = append(adm.RevokedCtls, revokedDisplay)
+		if derr != nil {
+			return a.persistFailure(adm)
+		}
+	}
 	if err != nil {
 		return a.persistFailure(adm)
 	}
@@ -932,7 +962,7 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 	return a.succeed(adm, out.res)
 }
 
-func (a *Authority) approve(gs []Grant, approver string, req json.RawMessage, now int64) ([]Grant, controlResult, string) {
+func (a *Authority) approve(gs []Grant, display []DisplayGrant, approver string, req json.RawMessage, now int64) ([]Grant, controlResult, string) {
 	m, err := strictObject(req, []string{"ctl", "role"}, []string{"expiresAt"})
 	if err != nil {
 		return gs, controlResult{failure: "invalid_request"}, ""
@@ -959,6 +989,10 @@ func (a *Authority) approve(gs []Grant, approver string, req json.RawMessage, no
 		}
 		gs[existing].Role, gs[existing].ExpiresAt, gs[existing].ApprovedBy = Role(role), expiresAt, approver
 		return gs, controlResult{res: struct{}{}}, ""
+	}
+	if indexOfDisplay(display, ctl) >= 0 {
+		// A ctl is never in both stores (§5.7).
+		return gs, controlResult{failure: "invalid_request"}, ""
 	}
 	nk, err := a.randBytes(32)
 	if err != nil {
@@ -1028,7 +1062,7 @@ func putGrant(gs []Grant, g Grant, now int64) ([]Grant, bool) {
 		return gs, true
 	}
 	if len(gs) >= maxGrantRecords {
-		j := evictable(gs, now)
+		j := evictableIn(gs, now, Grant.inactiveSince)
 		if j < 0 {
 			return gs, false
 		}
@@ -1056,7 +1090,7 @@ type registerResult struct {
 //     a second enc for the same sig is never silently swapped in.
 //
 // It returns the registered ctl for the caller's post-commit cleanup.
-func (a *Authority) register(gs []Grant, approver string, req json.RawMessage, now int64) ([]Grant, controlResult, string) {
+func (a *Authority) register(gs []Grant, display []DisplayGrant, approver string, req json.RawMessage, now int64) ([]Grant, controlResult, string) {
 	bad := controlResult{failure: "invalid_request"}
 	m, err := strictObject(req, []string{"sig", "enc", "label", "platform", "role"}, []string{"expiresAt"})
 	if err != nil {
@@ -1084,7 +1118,7 @@ func (a *Authority) register(gs []Grant, approver string, req json.RawMessage, n
 	ctl := sig.Thumbprint()
 	res := controlResult{res: registerResult{Ctl: ctl, Role: Role(role), ExpiresAt: expiresAt}}
 	i := indexOf(gs, ctl)
-	if i >= 0 && !gs[i].Enc.Equal(enc) {
+	if (i >= 0 && !gs[i].Enc.Equal(enc)) || indexOfDisplay(display, ctl) >= 0 {
 		return gs, bad, ""
 	}
 	if demotesLastOwner(gs, ctl, Role(role), now) {
@@ -1123,21 +1157,32 @@ func (a *Authority) register(gs []Grant, approver string, req json.RawMessage, n
 // expiryGrace).
 const recordRetention = futureSkew + maxLifetime + expiryGrace
 
-// evictable returns the index of the record that has been inactive longest,
-// once past recordRetention, or -1. Active records are never evicted. It
-// frees a slot at the record cap, which revoked and expired records would
-// otherwise hold forever.
-func evictable(gs []Grant, now int64) int {
+// inactiveSince is when an inactive record stopped conferring authority
+// (false for an active one).
+func inactiveSince(active bool, revokedAt, expiresAt int64) (int64, bool) {
+	if active {
+		return 0, false
+	}
+	since := revokedAt
+	if since == 0 || (expiresAt != 0 && expiresAt < since) {
+		since = expiresAt
+	}
+	return since, true
+}
+
+func (g Grant) inactiveSince(now int64) (int64, bool) {
+	return inactiveSince(g.Active(now), g.RevokedAt, g.ExpiresAt)
+}
+
+// evictableIn returns the index of the record that has been inactive
+// longest, once past recordRetention, or -1. Active records are never
+// evicted. It frees a slot at the record cap, which revoked and expired
+// records would otherwise hold forever. Shared by both stores.
+func evictableIn[T any](gs []T, now int64, inactiveSince func(T, int64) (int64, bool)) int {
 	best, bestSince := -1, int64(0)
 	for i, g := range gs {
-		if g.Active(now) {
-			continue
-		}
-		since := g.RevokedAt
-		if since == 0 || (g.ExpiresAt != 0 && g.ExpiresAt < since) {
-			since = g.ExpiresAt
-		}
-		if now-since <= recordRetention {
+		since, ok := inactiveSince(g, now)
+		if !ok || now-since <= recordRetention {
 			continue
 		}
 		if best < 0 || since < bestSince {
@@ -1147,17 +1192,18 @@ func evictable(gs []Grant, now int64) int {
 	return best
 }
 
-// revoke returns the next records, the result, a pending request it denied
-// and a grant it revoked (for the caller's post-commit cleanup).
-func (a *Authority) revoke(gs []Grant, req json.RawMessage, now int64) ([]Grant, controlResult, string, string) {
+// revoke returns the next records, the result, a pending request it denied,
+// a grant it revoked and a display record to revoke (for the caller's
+// post-commit work).
+func (a *Authority) revoke(gs []Grant, display []DisplayGrant, req json.RawMessage, now int64) ([]Grant, controlResult, string, string, string) {
 	bad := controlResult{failure: "invalid_request"}
 	m, err := strictObject(req, []string{"ctl"}, nil)
 	if err != nil {
-		return gs, bad, "", ""
+		return gs, bad, "", "", ""
 	}
 	ctl, err := stringMember(m, "ctl")
 	if err != nil {
-		return gs, bad, "", ""
+		return gs, bad, "", "", ""
 	}
 	i := indexOf(gs, ctl)
 	if i >= 0 && gs[i].RevokedAt == 0 && !gs[i].Active(now) {
@@ -1168,14 +1214,19 @@ func (a *Authority) revoke(gs []Grant, req json.RawMessage, now int64) ([]Grant,
 		if _, ok := a.pending[ctl]; ok {
 			denied = ctl
 		}
-		return gs, controlResult{res: struct{}{}}, denied, ctl
+		return gs, controlResult{res: struct{}{}}, denied, ctl, ""
 	}
 	if i < 0 || !gs[i].Active(now) {
 		// Revoking a pending request denies it.
 		if _, ok := a.pending[ctl]; ok {
-			return gs, controlResult{res: struct{}{}}, ctl, ""
+			return gs, controlResult{res: struct{}{}}, ctl, "", ""
 		}
-		return gs, controlResult{failure: "not_found"}, "", ""
+		// A display record (§5.7) is revoked by a second write after this
+		// one commits; expired ones durably, as above.
+		if j := indexOfDisplay(display, ctl); j >= 0 && display[j].RevokedAt == 0 {
+			return gs, controlResult{res: struct{}{}}, "", "", ctl
+		}
+		return gs, controlResult{failure: "not_found"}, "", "", ""
 	}
 	if gs[i].Role == RoleOwner {
 		owners := 0
@@ -1185,11 +1236,11 @@ func (a *Authority) revoke(gs []Grant, req json.RawMessage, now int64) ([]Grant,
 			}
 		}
 		if owners <= 1 {
-			return gs, controlResult{failure: "last_owner"}, "", ""
+			return gs, controlResult{failure: "last_owner"}, "", "", ""
 		}
 	}
 	gs[i].RevokedAt = now
-	return gs, controlResult{res: struct{}{}}, "", ctl
+	return gs, controlResult{res: struct{}{}}, "", ctl, ""
 }
 
 type controllerView struct {
@@ -1211,13 +1262,17 @@ type pendingView struct {
 	ExpiresAt int64  `json:"expiresAt"`
 }
 
-func (a *Authority) list(gs []Grant, self string, _ int64) controlResult {
+func (a *Authority) list(gs []Grant, display []DisplayGrant, self string) controlResult {
 	res := struct {
-		Controllers []controllerView `json:"controllers"`
-		Pending     []pendingView    `json:"pending"`
-	}{Controllers: []controllerView{}, Pending: []pendingView{}}
+		Controllers []any         `json:"controllers"`
+		Pending     []pendingView `json:"pending"`
+	}{Controllers: []any{}, Pending: []pendingView{}}
 	for _, g := range gs {
 		res.Controllers = append(res.Controllers, controllerView{g.Ctl, g.Role, g.Label, g.Platform, g.CreatedAt, g.ExpiresAt, g.RevokedAt, g.Ctl == self})
+	}
+	// Display records follow (§5.5), in their own shape.
+	for _, g := range display {
+		res.Controllers = append(res.Controllers, displayView{g.Ctl, RoleDisplay, g.Label, g.Origin, g.OriginAttested, platformWeb, g.CreatedAt, g.ExpiresAt, g.RevokedAt})
 	}
 	for _, p := range a.sortedPending() {
 		res.Pending = append(res.Pending, pendingView{p.ctl, p.enroll.Label, p.enroll.Platform, a.approvalCode(p.ctl), p.expiresAt})
@@ -1598,6 +1653,23 @@ func (a *Authority) Seal(ctl, typ string, body any) (Sealed, error) {
 	g, ok := a.store.Grant(ctl)
 	if !ok || !g.Active(now) {
 		return Sealed{}, fmt.Errorf("control: no active grant %s", ctl)
+	}
+	return a.sealLocked(g, typ, body, now)
+}
+
+// SealOwner is Seal for an active OWNER grant only (§9 v2 rule for
+// mint_pairing_*): an active non-owner grant gets ErrNotOwner, which the v2
+// relay skips silently and keeps the binding for.
+func (a *Authority) SealOwner(ctl, typ string, body any) (Sealed, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now().Unix()
+	g, ok := a.store.Grant(ctl)
+	if !ok || !g.Active(now) {
+		return Sealed{}, fmt.Errorf("control: no active grant %s", ctl)
+	}
+	if g.Role != RoleOwner {
+		return Sealed{}, ErrNotOwner
 	}
 	return a.sealLocked(g, typ, body, now)
 }

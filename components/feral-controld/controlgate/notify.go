@@ -117,8 +117,9 @@ type SealingRelayer struct {
 	relayer.Relayer
 	// NotifyV2 hands a notification to the v2 relay: type, message and
 	// whether it is a snapshot type (persist_record_count > 0). It must not
-	// block (RelayV2.Publish queues).
-	NotifyV2    func(string, json.RawMessage, bool)
+	// block (RelayV2.Publish queues) and reports whether a copy was queued
+	// for at least one owner binding.
+	NotifyV2    func(string, json.RawMessage, bool) bool
 	V2Connected func() bool
 	auth        *control.Authority
 	logger      *zap.Logger
@@ -134,19 +135,28 @@ func (s *SealingRelayer) IsConnected() bool {
 	return s.Relayer.IsConnected() || (s.V2Connected != nil && s.V2Connected())
 }
 
-// Send applies the §9 plan to notifications.
+// Send applies the §9 plan to notifications. For mint_pairing_* the result
+// is nil once EITHER carrier took it: a copy queued to an owner on v2 or a
+// legacy send that succeeded (§9). Mint pairing answers the browser
+// approval_unavailable on an error, so with the legacy relayer down or
+// retired an owner bound on v2 must still count as reached.
 func (s *SealingRelayer) Send(ctx context.Context, data any) error {
 	n, ok := notification(data)
 	if !ok {
 		return s.Relayer.Send(ctx, data)
 	}
+	queuedV2 := false
 	if s.NotifyV2 != nil {
-		s.NotifyV2(n.NotificationType, n.Message, n.PersistRecordCount > 0)
+		queuedV2 = s.NotifyV2(n.NotificationType, n.Message, n.PersistRecordCount > 0)
 	}
+	mint := isMintPairing(n.NotificationType) && queuedV2
 	if !s.Relayer.IsConnected() {
 		// Only v2 is up: skip the legacy sends (and the relayer's warning
 		// for each); the producer keeps its legacy dedupe state and resends
 		// once the relayer reconnects.
+		if mint {
+			return nil
+		}
 		return relayer.ErrNotConnected
 	}
 	plain, sealed := channelPlan(s.auth.State(), true)
@@ -160,6 +170,9 @@ func (s *SealingRelayer) Send(ctx context.Context, data any) error {
 				firstErr = err
 			}
 		}
+	}
+	if mint {
+		return nil
 	}
 	return firstErr
 }

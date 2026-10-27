@@ -24,6 +24,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
@@ -179,6 +180,12 @@ type Service interface {
 	// a request arriving after the wipe has begun belongs to a claim that is
 	// gone.
 	CloseActivePairing(ctx context.Context) (closed bool, err error)
+	// SetDisplayGrants wires the control authority that issues display grants
+	// to Play 0.5 sites and the v2 endpoint those sites cast through
+	// (docs/ff1-control-v1.md §5.7). Call once at wiring time. Not called,
+	// or called with a nil issuer or an empty endpoint, every 0.5 request is
+	// answered display_grant_unavailable.
+	SetDisplayGrants(issuer DisplayGrantIssuer, relayV2Endpoint string)
 }
 
 // NavigationSession is the narrow slice of playersession.Session the display
@@ -246,6 +253,11 @@ type service struct {
 	// contract as session above.
 	navigationParkPollInterval time.Duration
 	navigationParkTimeout      time.Duration
+
+	// displayGrants and relayV2Endpoint are set by SetDisplayGrants; see
+	// displaygrant.go.
+	displayGrants   DisplayGrantIssuer
+	relayV2Endpoint string
 }
 
 // createGate counts session creations that have been handed to the relayer and
@@ -388,6 +400,9 @@ type brokerChannel interface {
 	MinterPublicKeyJWK() minter.PublicJWK
 	PollMintRequest(ctx context.Context, afterSeq int64) (*minter.MintRequest, int64, error)
 	SendMintSuccess(ctx context.Context, request minter.MintRequest, result minter.MintResult) (*minter.SendMessageResult, error)
+	// SendMintDisplayGrant answers a 0.5 request with a display grant and no
+	// session (§5.7 of docs/ff1-control-v1.md).
+	SendMintDisplayGrant(ctx context.Context, request minter.MintRequest, grant minter.DisplayGrantResult) (*minter.SendMessageResult, error)
 	SendMintRejection(ctx context.Context, request minter.MintRequest, rejection minter.MintRejection) (*minter.SendMessageResult, error)
 	Close(ctx context.Context) error
 }
@@ -434,8 +449,19 @@ func (b brokerChannelAdapter) SendMintSuccess(ctx context.Context, request minte
 	return b.channel.SendMintSuccess(ctx, request, result)
 }
 
+func (b brokerChannelAdapter) SendMintDisplayGrant(ctx context.Context, request minter.MintRequest, grant minter.DisplayGrantResult) (*minter.SendMessageResult, error) {
+	return b.channel.SendMintSuccessResult(ctx, request, minter.MintSuccess{DisplayGrant: &grant})
+}
+
 func (b brokerChannelAdapter) SendMintRejection(ctx context.Context, request minter.MintRequest, rejection minter.MintRejection) (*minter.SendMessageResult, error) {
 	return b.channel.SendMintRejection(ctx, request, rejection)
+}
+
+// JoinedMintRequest is the request the site announced at create (play#19),
+// read by displayGrantKeysFor so the announced display keys and the
+// encrypted ones are compared.
+func (b brokerChannelAdapter) JoinedMintRequest() (minter.MintRequest, bool) {
+	return b.channel.JoinedMintRequest()
 }
 
 func (b brokerChannelAdapter) Close(ctx context.Context) error {
@@ -626,6 +652,13 @@ type approvalDecisionRequest struct {
 	// something malformed. parseDecision resolves it into KeepPaired.
 	KeepPairedRaw json.RawMessage `json:"keepPaired,omitempty"`
 	KeepPaired    bool            `json:"-"`
+	// Approver is the ctl of the owner whose sealed envelope carried the
+	// decision, or "" for a plaintext decision (a legacy device). It is the
+	// approver a display grant records (§5.7); it is read only here, where
+	// the request context is still at hand, and IssueDisplayGrant re-checks
+	// it. Not part of sameDecision: the same owner retrying is the same
+	// decision.
+	Approver string `json:"-"`
 }
 
 type approvalResponse struct {
@@ -1433,6 +1466,9 @@ func (s *service) HandleApprovalDecision(ctx context.Context, args map[string]an
 	if err != nil {
 		return approvalError(decision.ApprovalRequestID, "invalid_request", err.Error(), false), nil
 	}
+	if p, ok := control.PrincipalFrom(ctx); ok {
+		decision.Approver = p.ControllerID
+	}
 
 	s.mu.Lock()
 	s.pruneCompletedLocked()
@@ -1627,6 +1663,16 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	// request; the approval wait must not end at the stale one.
 	s.extendJoinedDeadline(active)
 
+	// A 0.5 request this device cannot honor is refused before the owner
+	// is asked (§5.7), never answered with a session.
+	display := isDisplayRequest(active.channel, *request)
+	if display {
+		if _, err := s.displayGrantPrecheck(active.channel, *request); err != nil {
+			terminalSent = s.rejectDisplayUnavailable(active.channel, *request, err)
+			return
+		}
+	}
+
 	approvalRequestID, err := newApprovalRequestID()
 	if err != nil {
 		s.logger.Warn("Failed to create mint pairing approval request id", zap.Error(err), zap.String("channelID", active.channelID))
@@ -1664,7 +1710,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		}
 	}
 
-	if err := s.sendApprovalRequest(ctx, approvalRequestID, guard.topicID, *request, active.channel.MinterPublicKeyJWK(), expiresAt); err != nil {
+	if err := s.sendApprovalRequest(ctx, approvalRequestID, guard.topicID, *request, active.channel.MinterPublicKeyJWK(), expiresAt, display); err != nil {
 		_, sendErr := active.channel.SendMintRejection(ctx, *request, minter.MintRejection{Reason: "approval_unavailable", Retryable: true})
 		if sendErr != nil {
 			s.logger.Warn("Failed to send approval request and browser rejection", zap.Error(errors.Join(err, sendErr)), zap.String("channelID", active.channelID))
@@ -2085,6 +2131,12 @@ func (s *service) completeDecisionFor(ctx context.Context, active *activePairing
 		}
 	}
 
+	// A 0.5 request (display-grant keys sent) never gets a session: it is
+	// issued a display grant instead (§5.7), under the same fences.
+	if isDisplayRequest(channel, request) {
+		return s.completeDisplayGrant(ctx, active, channel, request, guard, approvalRequestID, decision)
+	}
+
 	// Admission comes BEFORE the guard check, not after it. A factory reset
 	// that lands in between would otherwise find the gate drained, sweep an
 	// empty topic, and only then would this mint POST — leaving a session
@@ -2429,6 +2481,12 @@ func (s *service) rejectTopicChanged(channel brokerChannel, request minter.MintR
 }
 
 func (s *service) sendTerminalRejectionAndOutcome(channel brokerChannel, request minter.MintRequest, approvalRequestID string, rejectionReason string, retryable bool, outcomeStatus string) error {
+	return s.sendTerminalRejectionAndOutcomeWithReason(channel, request, approvalRequestID, rejectionReason, retryable, outcomeStatus, "")
+}
+
+// sendTerminalRejectionAndOutcomeWithReason also names outcomeReason on the
+// controller outcome (empty omits it).
+func (s *service) sendTerminalRejectionAndOutcomeWithReason(channel brokerChannel, request minter.MintRequest, approvalRequestID string, rejectionReason string, retryable bool, outcomeStatus string, outcomeReason string) error {
 	rejectionCtx, cancelRejection := context.WithTimeout(context.Background(), terminalOperationTimeout)
 	_, err := channel.SendMintRejection(rejectionCtx, request, minter.MintRejection{Reason: rejectionReason, Retryable: retryable})
 	cancelRejection()
@@ -2437,7 +2495,7 @@ func (s *service) sendTerminalRejectionAndOutcome(channel brokerChannel, request
 	// budget so a canceled or exhausted session-creation context cannot hide
 	// the terminal state from both sides of the handoff.
 	outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
-	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, outcomeStatus, "")
+	s.sendApprovalOutcomeFull(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, outcomeStatus, "", outcomeReason, "")
 	cancelOutcome()
 	return err
 }
@@ -2476,7 +2534,8 @@ func browserDisplayName(info minter.BrowserInfo) string {
 	return "the browser"
 }
 
-func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID string, topicID string, request minter.MintRequest, minterPublicKey minter.PublicJWK, expiresAt time.Time) error {
+// grantsDisplayAccess marks a 0.5 request (§5.7), for the owner app's copy.
+func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID string, topicID string, request minter.MintRequest, minterPublicKey minter.PublicJWK, expiresAt time.Time, grantsDisplayAccess bool) error {
 	msg := map[string]any{
 		"v":                          1,
 		"topicID":                    topicID,
@@ -2496,6 +2555,11 @@ func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID str
 			"minterPublicKeyFingerprint":  fingerprintPublicJWK(minterPublicKey),
 		},
 	}
+	if grantsDisplayAccess {
+		// An approval gives the site a display grant it keeps using while
+		// the owner is away; the app words the dialog accordingly.
+		msg["grantsDisplayAccess"] = true
+	}
 	return s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST, approvalRequestID, msg, 10)
 }
 
@@ -2510,6 +2574,12 @@ func (s *service) sendApprovalOutcome(ctx context.Context, approvalRequestID str
 // machine-readable reason (e.g. browser_gone on a cancellation outcome); empty
 // omits the field, keeping every existing outcome byte-identical.
 func (s *service) sendApprovalOutcomeWithReason(ctx context.Context, approvalRequestID string, channelID string, requestMessageID string, status string, lifetime string, reason string) {
+	s.sendApprovalOutcomeFull(ctx, approvalRequestID, channelID, requestMessageID, status, lifetime, reason, "")
+}
+
+// sendApprovalOutcomeFull adds ctl, the display grant a completed 0.5 request
+// was issued (§5.7); empty omits it.
+func (s *service) sendApprovalOutcomeFull(ctx context.Context, approvalRequestID string, channelID string, requestMessageID string, status string, lifetime string, reason string, ctl string) {
 	message := map[string]any{
 		"v":                 1,
 		"approvalRequestID": approvalRequestID,
@@ -2523,6 +2593,9 @@ func (s *service) sendApprovalOutcomeWithReason(ctx context.Context, approvalReq
 	}
 	if reason != "" {
 		message["reason"] = reason
+	}
+	if ctl != "" {
+		message["ctl"] = ctl
 	}
 	err := s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME, approvalRequestID, message, 10)
 	if err != nil {

@@ -21,6 +21,9 @@ const (
 	TierInternal Tier = "internal"
 )
 
+// cmdDisplayPlaylist is the one command a display grant may run (§5.7).
+const cmdDisplayPlaylist = string(commands.CMD_DISPLAY_PLAYLIST)
+
 // Command names owned by this package (§5.5). They are handled by the
 // Authority itself and never reach commandrouter.
 const (

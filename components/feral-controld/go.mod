@@ -8,7 +8,7 @@ require (
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/display-protocol/dp1-go v0.6.2
 	github.com/ethereum/go-ethereum v1.17.2
-	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260925215950-2dcfaa962a19
+	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20261027140929-82d5ebae13e4
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
 	github.com/go-jose/go-jose/v4 v4.1.3
 	github.com/godbus/dbus/v5 v5.1.0
@@ -20,6 +20,7 @@ require (
 	github.com/prometheus/client_model v0.6.2
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/zap v1.27.0
+	golang.org/x/net v0.56.0
 )
 
 require (
@@ -53,7 +54,6 @@ require (
 	github.com/supranational/blst v0.3.16 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
