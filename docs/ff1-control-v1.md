@@ -1543,6 +1543,11 @@ release operator applies them.
   `control.state` shows owners have enrolled. `enforced` cuts the released
   app off the relayer too, except Play's exact `displayPlaylist` shape
   (§7.2).
+- Display grants (§5.7) ship in this order: the app and ff-cli that list
+  display rows (role `display`, platform `web`) before any FF OS with
+  §5.7; Play 0.5 is published only once FF OS with §5.7 **and** a
+  configured `relayV2.endpoint` is broadly deployed, because 0.5 answers
+  `device_unsupported` on anything else.
 
 ### 15.2 Rollout levers and rollback
 
@@ -1567,8 +1572,8 @@ release operator applies them.
 - Legacy retirement is split: controller-facing relayer endpoints first,
   device-facing topic issuance last.
 - Turning the legacy relayer off is gated on fleet telemetry of
-  `control.state`, not on firmware version: a `legacy` device has no grants
-  and v2 admits no plaintext (§7.2), so retirement strands every unmigrated
+  `control.state`, not on firmware version: a `legacy` device has no
+  controller grants and v2 admits no plaintext (§7.2), so retirement strands every unmigrated
   device off the LAN. It also waits for Play to move from relayer session
   tokens to device-issued display grants (§5.7, Play 0.5), with the
   retirement prerequisites listed in §13, and for the v2 device-slot
