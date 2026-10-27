@@ -37,6 +37,7 @@ type Gate struct {
 
 	publisher       *Publisher
 	onOwnerEnrolled func()
+	onAdmitted      func(context.Context, *control.Admission)
 }
 
 // New builds a gate over auth that executes admitted commands on handler
@@ -123,6 +124,13 @@ func (g *Gate) HandleEnvelope(ctx context.Context, raw json.RawMessage, origin c
 	}
 	if adm.OwnerEnrolled && g.onOwnerEnrolled != nil {
 		g.onOwnerEnrolled()
+	}
+	// Every authentic admission, executed or answered by the authority: the
+	// v2 gate binds on a conferred Principal, and every gate the v2 relay
+	// watches retires bindings on RevokedCtls/ReactivatedCtls (§9).
+	// Signer is audit-only and must never establish a notification binding.
+	if g.onAdmitted != nil {
+		g.onAdmitted(ctx, adm)
 	}
 	if !adm.Execute() {
 		// Audit fields only: the verified signer (a public thumbprint), its

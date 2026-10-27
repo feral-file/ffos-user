@@ -18,12 +18,16 @@ type Publisher struct {
 	relayer relayer.Relayer
 	ws      ws.WS
 	logger  *zap.Logger
+	v2      *RelayV2
 }
 
 // NewPublisher builds a publisher over the RAW (unwrapped) handles.
 func NewPublisher(r relayer.Relayer, w ws.WS, logger *zap.Logger) *Publisher {
 	return &Publisher{relayer: r, ws: w, logger: logger}
 }
+
+// SetRelayV2 adds the independent targeted carrier before serving.
+func (p *Publisher) SetRelayV2(v2 *RelayV2) { p.v2 = v2 }
 
 // publishTimeout bounds the relayer sends of one admission's notifications.
 const publishTimeout = 10 * time.Second
@@ -37,6 +41,12 @@ const publishTimeout = 10 * time.Second
 // to the peer a request came from) would otherwise deliver the owners'
 // approval requests to the requester instead of the owners.
 func (p *Publisher) PublishAdmission(_ context.Context, auth *control.Authority, adm *control.Admission) {
+	if p.v2 != nil {
+		// Queued per peer: never waits on a v2 peer's acknowledgement.
+		for _, n := range adm.Notices {
+			p.v2.Notify(n.Type, n.Body, n.Ctl)
+		}
+	}
 	if p.relayer != nil && p.relayer.IsConnected() {
 		ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
 		defer cancel()
@@ -105,8 +115,13 @@ func channelPlan(st control.State, relayerChannel bool) (plaintext, sealed bool)
 // RPC replies and every non-notification pass through untouched.
 type SealingRelayer struct {
 	relayer.Relayer
-	auth   *control.Authority
-	logger *zap.Logger
+	// NotifyV2 hands a notification to the v2 relay: type, message and
+	// whether it is a snapshot type (persist_record_count > 0). It must not
+	// block (RelayV2.Publish queues).
+	NotifyV2    func(string, json.RawMessage, bool)
+	V2Connected func() bool
+	auth        *control.Authority
+	logger      *zap.Logger
 }
 
 // WrapRelayer returns r wrapped for notification sealing.
@@ -114,11 +129,25 @@ func WrapRelayer(r relayer.Relayer, auth *control.Authority, logger *zap.Logger)
 	return &SealingRelayer{Relayer: r, auth: auth, logger: logger}
 }
 
+// IsConnected keeps notification producers active when either transport works.
+func (s *SealingRelayer) IsConnected() bool {
+	return s.Relayer.IsConnected() || (s.V2Connected != nil && s.V2Connected())
+}
+
 // Send applies the §9 plan to notifications.
 func (s *SealingRelayer) Send(ctx context.Context, data any) error {
 	n, ok := notification(data)
 	if !ok {
 		return s.Relayer.Send(ctx, data)
+	}
+	if s.NotifyV2 != nil {
+		s.NotifyV2(n.NotificationType, n.Message, n.PersistRecordCount > 0)
+	}
+	if !s.Relayer.IsConnected() {
+		// Only v2 is up: skip the legacy sends (and the relayer's warning
+		// for each); the producer keeps its legacy dedupe state and resends
+		// once the relayer reconnects.
+		return relayer.ErrNotConnected
 	}
 	plain, sealed := channelPlan(s.auth.State(), true)
 	var firstErr error
