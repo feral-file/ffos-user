@@ -138,7 +138,7 @@ func TestDP1_ProcessPlaylistURL_VerificationDisabled_NoVerdict(t *testing.T) {
 	mockHTTP := mocks.NewMockHTTPClient(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	client := dp1.New(mocks.NewMockFFIndexer(ctrl), mockHTTP, mockJSON, mockIO, logger, false, false)
+	client := dp1.New(mocks.NewMockFFIndexer(ctrl), mockHTTP, mockJSON, mockIO, logger, false, false, "")
 
 	url := "https://feed.example/p.json"
 	body := signedFixture(t)

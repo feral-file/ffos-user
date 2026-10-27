@@ -47,6 +47,9 @@
   "signatureVerification": {
     "disabled": false
   },
+  "raster": {
+    "apiKey": "YOUR_RASTER_READ_API_KEY"
+  },
   "offlineCache": {
     "enabled": false,
     "automaticPlaybackDisabled": false,
