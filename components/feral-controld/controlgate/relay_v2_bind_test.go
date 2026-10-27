@@ -241,7 +241,7 @@ func TestV2BindsOnAuthorityAnsweredOpAndSendsSnapshot(t *testing.T) {
 	p.quiet(t)
 }
 
-// §9 (Q6): mint pairing goes to owner bindings only on v2, is never a
+// §9: mint pairing goes to owner bindings only on v2, is never a
 // snapshot (a decided request must not replay to later bindings), and
 // Publish reports whether an owner copy was queued. A controller binding is
 // skipped, not dropped.

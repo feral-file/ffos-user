@@ -137,7 +137,7 @@ func (s *SealingRelayer) IsConnected() bool {
 
 // Send applies the §9 plan to notifications. For mint_pairing_* the result
 // is nil once EITHER carrier took it: a copy queued to an owner on v2 or a
-// legacy send that succeeded (Q6). Mint pairing answers the browser
+// legacy send that succeeded (§9). Mint pairing answers the browser
 // approval_unavailable on an error, so with the legacy relayer down or
 // retired an owner bound on v2 must still count as reached.
 func (s *SealingRelayer) Send(ctx context.Context, data any) error {

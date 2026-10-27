@@ -486,7 +486,7 @@ func TestSealingRelayerV2OnlyReadiness(t *testing.T) {
 	}
 }
 
-// Q6: with the legacy relayer down, a mint pairing notification an owner
+// §9: with the legacy relayer down, a mint pairing notification an owner
 // received on v2 is a success to its producer (which would otherwise answer
 // the browser approval_unavailable); any other type still reports the
 // legacy outage, and so does mint pairing nobody was bound for.

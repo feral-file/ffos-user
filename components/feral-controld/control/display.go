@@ -16,7 +16,7 @@ import (
 // through mint pairing. They live in their own file, display_grants.json,
 // never in grants.json: an older controld ignores the file, so a rollback
 // can never lock a device on a role it does not know, and a load failure
-// here disables display admission only (never the device, §3.1 of the plan).
+// here disables display admission only, never the device (§8).
 
 // RoleDisplay is the display-store-only role. It is never wire-assignable:
 // Role.valid, and so every role parser, keeps accepting owner|controller.
@@ -28,7 +28,7 @@ const platformWeb = "web"
 const (
 	displayGrantsFile = "display_grants.json"
 	// maxActiveDisplayGrants and maxDisplayRecords are the display store's own
-	// caps (Q1): separate from maxActiveGrants, which bounds the sealed
+	// caps (§5.7): separate from maxActiveGrants, which bounds the sealed
 	// fan-out display peers never take part in.
 	maxActiveDisplayGrants = 16
 	maxDisplayRecords      = 64
@@ -247,7 +247,7 @@ func (a *Authority) admitDisplay(pre authenticated, g DisplayGrant, now int64) (
 }
 
 // Permits reports whether p may run cmd with req (§7.1). A display grant is
-// confined to the Play cast (§5.7, Q2): displayPlaylist in the exact Play
+// confined to the Play cast (§5.7): displayPlaylist in the exact Play
 // shape, nothing else, not even a status read. Every other role is decided
 // by the tier table. admitCmd and commandrouter's re-check both use it.
 func Permits(p Principal, cmd string, req json.RawMessage) bool {
