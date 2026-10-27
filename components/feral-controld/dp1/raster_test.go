@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -46,7 +48,7 @@ func setupRaster(t *testing.T, apiKey string) *rasterSetup {
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	mockHTTP := mocks.NewMockHTTPClient(ctrl)
 	mockFFIdx := mocks.NewMockFFIndexer(ctrl)
-	client := dp1.New(mockFFIdx, mockHTTP, mocks.NewMockJSON(ctrl), mocks.NewMockIO(ctrl), logger, false, true, apiKey)
+	client := dp1.New(mockFFIdx, mockHTTP, mockHTTP, mocks.NewMockJSON(ctrl), mocks.NewMockIO(ctrl), logger, false, true, apiKey)
 	return &rasterSetup{ctrl: ctrl, mockHTTP: mockHTTP, mockFFIdx: mockFFIdx, client: client}
 }
 
@@ -508,4 +510,70 @@ func TestPlaylist_NonObjectPaginationIsIgnoredNotFatal(t *testing.T) {
 	var playlist dp1.Playlist
 	require.NoError(t, json.Unmarshal([]byte(doc), &playlist), "a non-Raster document is not refused for a stray pagination value")
 	assert.Nil(t, playlist.DynamicQueryPagination)
+}
+
+// TestNewRasterHTTPClient_DoesNotFollowRedirects pins the credential
+// boundary: the host allowlist checks only the URL the document names, so the
+// client that carries x-api-key must hand a 3xx back instead of following it.
+func TestNewRasterHTTPClient_DoesNotFollowRedirects(t *testing.T) {
+	var leaked atomic.Int32
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") != "" {
+			leaked.Add(1)
+		}
+		w.WriteHeader(200)
+	}))
+	defer elsewhere.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/graphql", http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, origin.URL+"/graphql", strings.NewReader("{}"))
+	require.NoError(t, err)
+	req.Header.Set("x-api-key", rasterDeviceKey)
+	resp, err := dp1.NewRasterHTTPClient().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode, "the 3xx is returned, not followed")
+	assert.Equal(t, int32(0), leaked.Load(), "the key never reached the redirect target")
+}
+
+// TestRaster_RedirectedResponseFailsThePage covers the injected-client
+// backstop: a client that did follow a redirect is reported, not trusted.
+func TestRaster_RedirectedResponseFailsThePage(t *testing.T) {
+	rs := setupRaster(t, rasterDeviceKey)
+	rs.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(req *http.Request) (*http.Response, error) {
+		moved := req.Clone(req.Context())
+		moved.URL, _ = moved.URL.Parse("https://elsewhere.example/graphql")
+		resp, _ := respond(200, rasterPage(t, nil, false, ""))
+		resp.Request = moved
+		return resp, nil
+	})
+
+	_, err := rs.client.ProcessDynamicPlaylist(t.Context(), rasterPlaylist(t), false)
+	require.ErrorIs(t, err, dp1.ErrRasterQuery)
+	assert.Contains(t, err.Error(), "redirected")
+}
+
+// TestRaster_NumericTokenIDsKeepTheirDigits: Raster may send tokenId as a
+// JSON number; past 2^53 a float64 decode would round it and change both the
+// provenance and the item id.
+func TestRaster_NumericTokenIDsKeepTheirDigits(t *testing.T) {
+	rs := setupRaster(t, rasterDeviceKey)
+	page := `{"data":{"address":{"tokensOwned":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
+		{"token":{"id":1,"chainId":"eip155:1","contractAddress":"` + artBlocksContract + `","tokenId":9007199254740993,"tokenStandard":"ERC721","media":{"contentUrl":"https://a.example/1"}}},
+		{"token":{"id":2,"chainId":"eip155:1","contractAddress":"` + artBlocksContract + `","tokenId":115792089237316195423570985008687907853269984665640564039457584007913129639935,"tokenStandard":"ERC721","media":{"contentUrl":"https://a.example/2"}}}
+	]}}}}`
+	rs.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
+		return respond(200, page)
+	})
+
+	result, err := rs.client.ProcessDynamicPlaylist(t.Context(), rasterPlaylist(t), false)
+	require.NoError(t, err)
+	require.Len(t, result.Items, 2)
+	assert.Equal(t, "9007199254740993", result.Items[0].Provenance.Contract.TokenID)
+	assert.Equal(t, "115792089237316195423570985008687907853269984665640564039457584007913129639935", result.Items[1].Provenance.Contract.TokenID)
+	assert.Equal(t, "Ethereum 0x059e…ac3a #9007199254740993", result.Items[0].Title)
 }

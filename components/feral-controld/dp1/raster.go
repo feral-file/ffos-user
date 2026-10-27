@@ -17,6 +17,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // Raster wallet walk (feral-file/feral-file#3576, step 6).
@@ -94,6 +96,20 @@ const (
 // (httptest servers), the same switch that relaxes dp1-go's endpoint policy.
 var rasterHosts = map[string]bool{
 	"api.raster.art": true,
+}
+
+// NewRasterHTTPClient builds the client the Raster walk sends the device key
+// through: the daemon's usual whole-request timeout, and NO redirect
+// following. A 3xx comes back as the response it is, fetchRasterPage reports
+// it as a failed page, and the key never leaves the allowlisted host. Pinned
+// by TestNewRasterHTTPClient_DoesNotFollowRedirects.
+func NewRasterHTTPClient() wrapper.HTTPClient {
+	return wrapper.NewHTTPClientFrom(&http.Client{
+		Timeout: wrapper.HTTPClientTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	})
 }
 
 // ErrRasterQuery marks a Raster walk the device cannot or will not run:
@@ -608,11 +624,17 @@ func (d *dp1) fetchRasterPage(ctx context.Context, plan rasterWalkPlan, cursor s
 		req.Header.Set(rasterAPIKeyHeader, d.rasterAPIKey)
 	}
 
-	resp, err := d.httpClient.Do(req)
+	resp, err := d.rasterHTTP.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// rasterHTTP does not follow redirects, so the response's request is the
+	// one built above. If it is not, the injected client followed one and the
+	// key may already have left the host: fail loudly rather than carry on.
+	if resp.Request != nil && resp.Request.URL != nil && resp.Request.URL.String() != plan.endpoint {
+		return nil, fmt.Errorf("request was redirected to %q; the Raster client must not follow redirects", resp.Request.URL.Host)
+	}
 	body, err := goio.ReadAll(goio.LimitReader(resp.Body, rasterMaxPageBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
@@ -623,8 +645,15 @@ func (d *dp1) fetchRasterPage(ctx context.Context, plan rasterWalkPlan, cursor s
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("status %s", resp.Status)
 	}
+	// UseNumber keeps a numeric `tokenId` as its digits: through `any` a
+	// number is a float64, which rounds anything past 2^53 and prints large
+	// values in scientific notation, and the id feeds both provenance and the
+	// item UUID. The nodes are re-encoded from this tree in rasterNodesAt,
+	// where json.Number marshals back as the literal it was read from.
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
 	var root any
-	if err := json.Unmarshal(body, &root); err != nil {
+	if err := dec.Decode(&root); err != nil {
 		return nil, fmt.Errorf("decode body: %w", err)
 	}
 	if msg, failed := graphqlErrorMessage(root); failed {

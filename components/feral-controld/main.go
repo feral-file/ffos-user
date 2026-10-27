@@ -1049,7 +1049,7 @@ func initializeApp(
 	if rasterCfg.APIKey == "" {
 		logger.Warn("raster.apiKey not configured; Raster wallet casts run unauthenticated")
 	}
-	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug, sigVerifyEnabled, rasterCfg.APIKey)
+	dp1 := dp1.New(ffIndexer, httpClient, dp1.NewRasterHTTPClient(), json, io, logger, debug, sigVerifyEnabled, rasterCfg.APIKey)
 
 	// displayAt scheduler: filters playlists with displayAt items before CDP
 	// and advances them on timer / wake / CDP reconnect. Durable state stores

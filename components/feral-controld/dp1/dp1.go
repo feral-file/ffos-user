@@ -258,12 +258,21 @@ type dp1 struct {
 	// sent as x-api-key on every Raster wallet-walk request. It is never
 	// logged and never read from a document; empty means unauthenticated.
 	rasterAPIKey string
+	// rasterHTTP carries the key, so it MUST NOT follow redirects: the host
+	// allowlist checks only the URL the document names, and a 3xx from that
+	// host would otherwise carry x-api-key wherever Location points (Go
+	// strips Authorization and Cookie across hosts, not custom headers).
+	// Build it with NewRasterHTTPClient; fetchRasterPage additionally refuses
+	// a response whose request moved. Separate from httpClient because the
+	// rest of the daemon relies on redirects being followed.
+	rasterHTTP wrapper.HTTPClient
 }
 
-func New(ffIndexer ffindexer.FFIndexer, httpClient wrapper.HTTPClient, json wrapper.JSON, io wrapper.IO, logger *zap.Logger, debug, verify bool, rasterAPIKey string) DP1 {
+func New(ffIndexer ffindexer.FFIndexer, httpClient, rasterHTTP wrapper.HTTPClient, json wrapper.JSON, io wrapper.IO, logger *zap.Logger, debug, verify bool, rasterAPIKey string) DP1 {
 	return &dp1{
 		ffIndexer:    ffIndexer,
 		httpClient:   httpClient,
+		rasterHTTP:   rasterHTTP,
 		json:         json,
 		io:           io,
 		logger:       logger,
