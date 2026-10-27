@@ -292,8 +292,9 @@ Current relayer error response: none standardized; command failure is logged.
 
 LAN hub (`POST :1111/api/cast`): `connect` needs no `X-FF1-Topic` header,
 claimed or not. It is a feral-file#3551 phase-0 residual: the released ff-app
-sends it LAN-first before every cast without the header, so it stays open until
-the phase-1 control protocol makes it owner-tier. An open `connect` only
+sends it LAN-first before every cast without the header, so it stays open; under
+the phase-1 control protocol only an owner claims or rebinds with it
+(`ff1-control-v1.md` §7.1). An open `connect` only
 rewrites the claim record and confers no authority.
 
 ### showPairingQRCode
