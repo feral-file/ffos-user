@@ -696,7 +696,8 @@ rail never rewrites it), so a controld updated on an old image keeps a
 working legacy relayer. The device dials v2 only when **all** hold:
 `relayV2.endpoint` is configured, a control authority exists (judged from
 the device's state, not from `control.enabled`), and the device ID is the
-stable MAC-derived one (a hostname that fell back to `FF1` never dials v2).
+stable MAC-derived one (a hostname that fell back to `FF1`, or the
+`FF1-UNKNOWN` placeholder, never dials v2).
 Otherwise it stays legacy-only.
 
 Internal callers (OOM recovery, `playRecentlyPlayed` re-entry) are not subject
@@ -879,7 +880,10 @@ newest copy of each status type (`device_status`, `player_status`,
 `ddc_status`, `offline_cache_status`) after the reply to the request that
 created it, and v2 deduplicates those types against what it last sent, apart
 from the legacy channels. Sends never wait on a peer: each binding has a
-small queue that drops when full, and each send is bounded.
+small queue that drops when full, and each send is bounded. A reply goes to
+the peer and socket generation its request came from. A closed device socket
+drops every binding it held, so after a reconnect a controller is bound again
+only by a fresh sealed request.
 
 ff-relayer persists plaintext notifications per topic and replays them to
 every new subscriber: `device_status`, `player_status`, `ddc_status` and
@@ -920,7 +924,11 @@ effective plaintext limit on any sealed route is about 2.25 MiB. Clients
 should check the sealed size before sending and say so, rather than fail
 generically.
 
-On v2 the `messageID` is chosen by the client and only routes the reply; the
+On v2 the device holds one socket to `/v2/channels/{deviceId}/connections`
+(WebSocket subprotocol `ff-relay.v2`), independent of its legacy relayer
+socket. Peers on the channel have no roles or tokens; every request from one
+enters the gate as `RouteRelayV2` (§7.2) and must be an `ff1Envelope`.
+The `messageID` is chosen by the client and only routes the reply; the
 authenticated correlation is `rid` (§3.3). Relay acknowledgements are
 transport receipts, never success.
 
@@ -1347,12 +1355,11 @@ release operator applies them.
 
 ### 15.3 v2 integration and legacy retirement
 
-- The device dials v2 only when the control wiring is non-nil, and the
-  change that adds the dial also adds the `RouteRelayV2` wiring, the
-  route-aware `system` handling and reply target (§13), the per-controller
-  notification binding (§9) and the topic-independent claim QR (§11). A
-  build that dials v2 without all of them is open to anyone who knows the
-  device ID.
+- The device dials v2 only when the control wiring is non-nil, and only
+  together with the `RouteRelayV2` wiring, the route-aware `system`
+  handling and reply target (§13), the per-controller notification binding
+  (§9) and the topic-independent claim QR (§11). A build that dials v2
+  without all of them is open to anyone who knows the device ID.
 - Legacy retirement is split: controller-facing relayer endpoints first,
   device-facing topic issuance last.
 - Turning the legacy relayer off is gated on fleet telemetry of
