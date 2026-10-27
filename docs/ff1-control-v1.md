@@ -1301,3 +1301,63 @@ showed what goes wrong without them.
    current client sends one (both seal whenever they hold a grant), so in
    practice the retry is the factory reset on the device itself. Plain
    `locked` (corrupt state) refuses even the plaintext one.
+
+## 15. Rollout and retirement
+
+These are release rules. The device cannot enforce most of them; a human
+release operator applies them.
+
+### 15.1 Turning the protocol on
+
+- `control.enabled` MUST NOT be set in `controld.json` for a channel before
+  an ffos image with the OTA carry step (`ota-control-state.sh`: carries
+  `control/`, `control.new/` and `control.retired`, §8.1) is on that
+  channel's OTA path. An image without it drops `.state/control` on update
+  (owners lose their grants) or, after a downgrade and re-upgrade,
+  resurrects stale grants. The ffos image workflows force `del(.control)`
+  when the ffos or ffos-user ref lacks the carry step or the `control`
+  package; a workflow file from a ref that predates that check does not, so
+  dispatching one with `.control.enabled=true` in the environment secret
+  ships an image that creates state and loses it on its next OTA.
+- Raise the app force-update floor before setting `control.enabled=true` in
+  production. A released app cannot cast on the same LAN as an `enrolled`
+  device (LAN plaintext is refused and the released app does not fall back
+  to the relayer after an HTTP error); off the LAN it keeps controller-tier
+  playback through the relayer until `enforced`.
+- Release notes of the first control-enabled release state: once it runs, the
+  device refuses to OTA to an image without the control marker (§8.1, a
+  permanent refusal); the only way back is a factory reset.
+- `control.enforced=true` ships in a later release, after fleet telemetry of
+  `control.state` shows owners have enrolled. `enforced` cuts the released
+  app off the relayer too, except Play's exact `displayPlaylist` shape
+  (§7.2).
+
+### 15.2 Rollout levers and rollback
+
+- A required update is driven by `min_runtime_version` (otagate
+  `isUpdateRequired`), raised once and deliberately. Never
+  `min_upgradeable_version`: below it a device is too old to upgrade and
+  needs a USB reflash (otagate `isTooOldToUpgrade`).
+- No channel rolls back below a dual-stack image (one that runs the
+  protocol on the LAN, the legacy relayer and v2).
+- Factory-reset images (`@recovery_candidate`/`@factory_reset`) and shelf
+  stock are pre-protocol: a reset onto one has no grants and an open hub
+  until its next OTA. Raise `update_recovery_version` to a dual-stack image
+  before the legacy relayer is retired.
+
+### 15.3 v2 integration and legacy retirement
+
+- The device dials v2 only when the control wiring is non-nil, and the
+  change that adds the dial also adds the `RouteRelayV2` wiring, the
+  route-aware `system` handling and reply target (§13), the per-controller
+  notification binding (§9) and the topic-independent claim QR (§11). A
+  build that dials v2 without all of them is open to anyone who knows the
+  device ID.
+- Legacy retirement is split: controller-facing relayer endpoints first,
+  device-facing topic issuance last.
+- Turning the legacy relayer off is gated on fleet telemetry of
+  `control.state`, not on firmware version: a `legacy` device has no grants
+  and v2 admits no plaintext (§7.2), so retirement strands every unmigrated
+  device off the LAN. It also waits for Play to move from mint pairing to
+  device-issued display grants, and for the v2 device-slot requirement in
+  §13.
