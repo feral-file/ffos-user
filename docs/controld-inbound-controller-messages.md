@@ -191,8 +191,8 @@ router, storm gate and handlers as a plaintext one.
 ### Owner commands handled by the authority
 
 `approveController {ctl, role, expiresAt?}`, `revokeController {ctl}`,
-`registerController {sig, enc, label, platform, role, expiresAt?}` and
-`listControllers {}` are owner-tier envelope commands answered by the
+`registerController {sig, enc, label, platform, role, expiresAt?}`,
+`releaseOwnership {}` and `listControllers {}` are owner-tier envelope commands answered by the
 authority itself; they never reach the router (see the spec §5.5 and §5.6.4
 for results and `command_failed` reasons). `revokeController` of the
 signer's own `ctl` is also accepted from a controller grant (self-revoke).

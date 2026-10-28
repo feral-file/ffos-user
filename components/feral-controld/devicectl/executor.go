@@ -679,23 +679,66 @@ func (e *executor) ControlOwnerEnrolled() {
 	e.setupUI().HideIfShowing(setupui.StateClaimQR)
 	// Remote shell granted while the device had no owner (sshAccess is open
 	// to the LAN on an unclaimed device and to any topic holder in legacy)
-	// must not outlive the owner's arrival (review round 4 L6). Same steps
-	// as sshAccess{enabled:false}; off the request goroutine.
-	// The turn is taken here, before the enrollment reply goes out, so any
-	// sshAccess the new owner sends afterwards runs after this revocation.
-	if e.exec != nil {
-		prev, done := e.sshTurn()
-		go func() {
-			defer done()
-			if prev != nil {
-				<-prev
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if _, err := e.setSshAccess(ctx, []byte(`{"enabled":false}`)); err != nil {
-				e.logger.Warn("Could not revoke legacy-era SSH access after owner enrollment", zap.Error(err))
-			}
-		}()
+	// must not outlive the owner's arrival (review round 4 L6).
+	e.revokeSshAccess("owner enrollment")
+}
+
+// ControlReleased runs after the owner released the device (§5.5
+// releaseOwnership): every grant is revoked and the device is legacy and
+// still claimed. It closes the remote access the previous owner may have
+// opened (SSH, owner Tailscale) and paints the claim QR with an invitation
+// so a new owner can enroll from the screen. Closing SSH is cleanup, not a
+// guarantee: in legacy a topic holder may open it again (spec §13).
+// Everything runs off the request goroutine: the Tailscale reset alone may
+// take a minute.
+func (e *executor) ControlReleased() {
+	e.revokeSshAccess("ownership release")
+	go func() {
+		e.enrollQR.Store(true)
+		// Not automatic: an automatic paint is refused while another
+		// overlay owns the screen, and nothing would repaint it later.
+		e.paintClaimQRWithInvitation(context.Background(), false)
+		e.resetOwnerTailscale()
+	}()
+}
+
+// revokeSshAccess runs the sshAccess{enabled:false} steps off the request
+// goroutine. The turn is taken here, before the caller's reply goes out, so
+// any sshAccess sent afterwards runs after this revocation.
+func (e *executor) revokeSshAccess(after string) {
+	if e.exec == nil {
+		return
+	}
+	prev, done := e.sshTurn()
+	go func() {
+		defer done()
+		if prev != nil {
+			<-prev
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := e.setSshAccess(ctx, []byte(`{"enabled":false}`)); err != nil {
+			e.logger.Warn("Could not revoke SSH access", zap.String("after", after), zap.Error(err))
+		}
+	}()
+}
+
+// ownerTailscaleBin is ffos's owner Tailscale helper; images without it
+// have no owner Tailscale access to revoke.
+const ownerTailscaleBin = "/usr/local/bin/feral-tailscale"
+
+// resetOwnerTailscale revokes owner Tailscale access, best effort, with the
+// same bound as ffos factory_reset.sh: owner access otherwise lasts until it
+// is revoked or the device is factory reset (ffos docs/OWNER_TAILSCALE.md).
+func (e *executor) resetOwnerTailscale() {
+	if e.exec == nil || e.os == nil {
+		return
+	}
+	if _, err := e.os.Stat(ownerTailscaleBin); err != nil {
+		return
+	}
+	if err := e.runSudoCommand(context.Background(), "timeout", "-k", "5", "60", ownerTailscaleBin, "reset"); err != nil {
+		e.logger.Warn("Could not revoke owner Tailscale access after ownership release", zap.Error(err))
 	}
 }
 

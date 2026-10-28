@@ -84,7 +84,7 @@ func TestEveryCommandHasATier(t *testing.T) {
 
 func TestTierTableHasNoPhantoms(t *testing.T) {
 	known := map[string]bool{CmdApproveController: true, CmdRevokeController: true, CmdListControllers: true,
-		CmdRegisterController: true, CmdEnvelope: true}
+		CmdRegisterController: true, CmdReleaseOwnership: true, CmdEnvelope: true}
 	for _, v := range commandConstants(t) {
 		known[v] = true
 	}

@@ -218,10 +218,15 @@ type Admission struct {
 	// OwnerEnrolled is set when the first-owner invitation was consumed:
 	// the caller takes the claim/invitation QR off the screen (§5.1).
 	OwnerEnrolled bool
+	// Released is set when releaseOwnership's grant write committed, even
+	// unconfirmed (ErrDurability): the caller puts the invitation QR on screen
+	// and closes the previous owner's remote access whatever the reply says,
+	// because a retry is answered access_revoked (§5.5).
+	Released bool
 	// RevokedCtls lists the controllers this admission made inactive
-	// (revokeController, including a self-revoke), once the store write
-	// committed. A transport that binds connections to controllers (the v2
-	// relay, §9) unbinds them.
+	// (revokeController, including a self-revoke, and releaseOwnership),
+	// once the store write committed. A transport that binds connections to
+	// controllers (the v2 relay, §9) unbinds them.
 	RevokedCtls []string
 	// ReactivatedCtls lists the controllers this admission gave authority
 	// (a new grant, or a revoked/expired record reactivated by
@@ -850,7 +855,7 @@ func (a *Authority) admitCmd(adm *Admission, c RequestClaims, g Grant, now int64
 	adm.Command, adm.Request, adm.Principal = c.Cmd, c.Req, p
 
 	switch c.Cmd {
-	case CmdApproveController, CmdRevokeController, CmdListControllers, CmdRegisterController:
+	case CmdApproveController, CmdRevokeController, CmdListControllers, CmdRegisterController, CmdReleaseOwnership:
 		return a.controlCommand(adm, c, window, now)
 	}
 	// Step 6: durable before the caller executes anything.
@@ -889,10 +894,23 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 	var out controlResult
 	// Memory-only side effects (pending table, seq) are applied after the
 	// store commit, so a failed write leaves them untouched too.
-	var approvedPending, deniedPending, revoked, registered, revokedDisplay string
+	var approvedPending, deniedPending, registered, revokedDisplay string
+	var revoked []string
+	released := false
 	// The display store is read before the write, not inside it (Update holds
 	// the store lock); it only changes under a.mu, which is held here.
 	display := a.store.DisplayGrants()
+	var releasedDisplay []string
+	if c.Cmd == CmdReleaseOwnership {
+		// Display records go first: once the grant write commits, the
+		// owner's retry is answered access_revoked and nobody could finish
+		// a display revocation left behind. A failure here has released
+		// nothing, so the owner retries.
+		var derr error
+		if releasedDisplay, derr = a.releaseDisplay(display, c.Req, now); derr != nil && !errors.Is(derr, ErrDurability) {
+			return a.persistFailure(adm)
+		}
+	}
 	err := a.store.Update(func(gs []Grant) ([]Grant, error) {
 		gs, err := setWindow(adm.ctl, window)(gs)
 		if err != nil {
@@ -902,7 +920,14 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 		case CmdApproveController:
 			gs, out, approvedPending = a.approve(gs, display, adm.ctl, c.Req, now)
 		case CmdRevokeController:
-			gs, out, deniedPending, revoked, revokedDisplay = a.revoke(gs, display, c.Req, now)
+			var r string
+			gs, out, deniedPending, r, revokedDisplay = a.revoke(gs, display, c.Req, now)
+			if r != "" {
+				revoked = []string{r}
+			}
+		case CmdReleaseOwnership:
+			gs, out, revoked = release(gs, c.Req, now)
+			released = out.failure == ""
 		case CmdRegisterController:
 			gs, out, registered = a.register(gs, display, adm.ctl, c.Req, now)
 		default:
@@ -932,11 +957,17 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 		a.denied[deniedPending] = p.expiresAt
 		delete(a.pending, deniedPending)
 	}
+	if released {
+		// Nobody is left to answer a pending request, and an owner's deny
+		// does not outlive the owner.
+		a.pending = map[string]*pendingRequest{}
+		a.denied = map[string]int64{}
+		adm.Released = true
+	}
 	// The revoked controller's seq is kept: a re-approval continues the
 	// sequence instead of restarting below what it already saw (§9).
-	if revoked != "" {
-		adm.RevokedCtls = append(adm.RevokedCtls, revoked)
-	}
+	adm.RevokedCtls = append(adm.RevokedCtls, revoked...)
+	adm.RevokedCtls = append(adm.RevokedCtls, releasedDisplay...)
 	if out.activated != "" {
 		adm.ReactivatedCtls = append(adm.ReactivatedCtls, out.activated)
 	}
@@ -1241,6 +1272,51 @@ func (a *Authority) revoke(gs []Grant, display []DisplayGrant, req json.RawMessa
 	}
 	gs[i].RevokedAt = now
 	return gs, controlResult{res: struct{}{}}, "", ctl, ""
+}
+
+// release is §5.5 releaseOwnership: every record not yet revoked gets
+// revokedAt, owners included (the one exception to last_owner) and expired
+// ones too, so a wall-clock step back cannot revive them (as in revoke).
+func release(gs []Grant, req json.RawMessage, now int64) ([]Grant, controlResult, []string) {
+	if _, err := strictObject(req, nil, nil); err != nil {
+		return gs, controlResult{failure: "invalid_request"}, nil
+	}
+	var revoked []string
+	for i := range gs {
+		if gs[i].RevokedAt == 0 {
+			gs[i].RevokedAt = now
+			revoked = append(revoked, gs[i].Ctl)
+		}
+	}
+	return gs, controlResult{res: map[string]bool{"released": true}}, revoked
+}
+
+// releaseDisplay revokes every display record not yet revoked, the write
+// releaseOwnership makes before its grant write, and returns their ctls. A
+// malformed request writes nothing; release refuses it.
+func (a *Authority) releaseDisplay(display []DisplayGrant, req json.RawMessage, now int64) ([]string, error) {
+	if _, err := strictObject(req, nil, nil); err != nil {
+		return nil, nil
+	}
+	var ctls []string
+	for _, g := range display {
+		if g.RevokedAt == 0 {
+			ctls = append(ctls, g.Ctl)
+		}
+	}
+	if len(ctls) == 0 {
+		return nil, nil
+	}
+	err := a.store.UpdateDisplay(func(ds []DisplayGrant) ([]DisplayGrant, error) {
+		var err error
+		for _, ctl := range ctls {
+			if ds, err = revokeDisplay(ctl, now)(ds); err != nil {
+				return nil, err
+			}
+		}
+		return ds, nil
+	})
+	return ctls, err
 }
 
 type controllerView struct {

@@ -95,6 +95,36 @@ func TestHandleEnvelopeRunsAsPrincipal(t *testing.T) {
 	}
 }
 
+// §5.5: a committed releaseOwnership fires the released hook, so the
+// invitation QR goes up; the router never sees it.
+func TestHandleEnvelopeReleaseHook(t *testing.T) {
+	a, _ := newAuthority(t, false)
+	rec := &recorder{}
+	g := controlgate.New(a, rec, zap.NewNop())
+	released := 0
+	g.SetReleasedHook(func() { released++ })
+	owner := enrollOwner(t, g, a)
+	s := owner.build(control.OpCmd, control.CmdReleaseOwnership, `{}`, "")
+	wire, perr := g.HandleEnvelope(context.Background(), s.body, control.Origin{})
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	b, _ := json.Marshal(wire)
+	if r := owner.open(s, b); !r.OK || string(r.Res) != `{"released":true}` {
+		t.Fatalf("reply = %+v %s", r, r.Res)
+	}
+	if released != 1 || rec.count() != 0 || a.State() != control.StateLegacy {
+		t.Fatalf("hook %d, routed %d, state %s", released, rec.count(), a.State())
+	}
+	// The retry is access_revoked and does not fire the hook again.
+	s = owner.build(control.OpCmd, control.CmdReleaseOwnership, `{}`, "")
+	wire, _ = g.HandleEnvelope(context.Background(), s.body, control.Origin{})
+	b, _ = json.Marshal(wire)
+	if r := owner.open(s, b); r.Code != control.CodeAccessRevoked || released != 1 {
+		t.Fatalf("retry = %+v, hook %d", r, released)
+	}
+}
+
 func TestHandleEnvelopeRequestShape(t *testing.T) {
 	a, _ := newAuthority(t, false)
 	g := controlgate.New(a, &recorder{}, zap.NewNop())
