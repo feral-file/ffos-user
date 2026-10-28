@@ -1380,7 +1380,9 @@ and the ff1-cli test suite does the same with `jose`.
   release is cleanup, not a guarantee: in `legacy` a topic holder may open
   it again with plaintext `sshAccess`. Topic holders (pre-protocol app, Play
   0.4 sessions) keep `legacy` control after a release, as on any `legacy`
-  device; a factory reset is what cuts everyone off.
+  device; a factory reset is what cuts everyone off. If the display write
+  fails after the grant write committed, display records stay active until
+  the next owner revokes them (they show in its `listControllers`).
 - Residual, accepted: in a 2.0.x migration whoever scans the enroll QR
   first becomes the first owner; a lost sole owner still means a factory
   reset.

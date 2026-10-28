@@ -132,7 +132,7 @@ func TestControlReleased_PaintsInvitationAndClosesAccess(t *testing.T) {
 		}).AnyTimes()
 
 	fc := &fakeControl{fields: []string{"i", "s", "e", "g"}, ok: true}
-	spy := &narratorSpy{}
+	spy := &autoSpy{narratorSpy: &narratorSpy{}}
 	e := &executor{logger: zap.NewNop(), setupNarrator: spy, os: mockOS, exec: mockExec, json: wrapper.NewJSON()}
 	e.SetControl(fc)
 	e.ControlReleased()
@@ -143,8 +143,9 @@ func TestControlReleased_PaintsInvitationAndClosesAccess(t *testing.T) {
 			t.Fatalf("%s did not run", name)
 		}
 	}
-	// The paint precedes the Tailscale reset on the same goroutine.
+	// Both run on one goroutine, the paint first, so it is done by now.
 	assert.True(t, e.enrollQR.Load())
+	assert.False(t, spy.automatic, "an automatic paint is refused while another overlay owns the screen")
 	assert.Equal(t, []string{"claim"}, spy.calls)
 	assert.Contains(t, spy.lastURL, "|i|s|e|g", "a claimed device's QR must carry the invitation")
 	assert.Equal(t, int32(1), fc.issued.Load())
@@ -287,6 +288,17 @@ func TestConnectUnderControl_OnlyOwnerClaims(t *testing.T) {
 		_, err := e.connect(context.Background(), args)
 		require.NoError(t, err)
 	})
+}
+
+// autoSpy records whether a claim paint asked for automatic priority.
+type autoSpy struct {
+	*narratorSpy
+	automatic bool
+}
+
+func (a *autoSpy) ShowClaimQRAutomatic(url, name string) {
+	a.automatic = true
+	a.narratorSpy.ShowClaimQRAutomatic(url, name)
 }
 
 // refusingSpy refuses automatic claim paints, like setupui does while
