@@ -409,6 +409,7 @@ never reach the command router):
 | `approveController` | `{"ctl","role":"owner"|"controller","expiresAt"?}` | `{}` |
 | `revokeController` | `{"ctl"}` | `{}` |
 | `registerController` | `{"sig":JWK,"enc":JWK,"label","platform","role":"owner"\|"controller","expiresAt"?}` | `{"ctl","role","expiresAt"?}` |
+| `releaseOwnership` | `{}` | `{"released":true}` |
 | `listControllers` | `{}` | `{"controllers":[{"ctl","role","label","platform","createdAt","expiresAt"?,"revokedAt"?,"self":bool}, …, {"ctl","role":"display","label","origin","originAttested":bool,"platform":"web","createdAt","expiresAt"?,"revokedAt"?}],"pending":[{"ctl","label","platform","code","expiresAt"}]}` |
 
 - `approveController` with a live pending request for `ctl` grants it: the
@@ -437,6 +438,22 @@ never reach the command router):
   step back cannot revive it). Otherwise the grant must be active
   (`not_found`).
 - `registerController` is owner-initiated registration (§5.6.4).
+- `releaseOwnership` gives the device up (the app's Forget I exist). In one
+  write it sets `revokedAt` on every grant record that has none, owners
+  (the signer included) and controllers alike, expired ones too, as
+  `revokeController` does; then a second write revokes every display record
+  (§5.7) the same way, and every pending request and owner deny is dropped.
+  The device is `legacy` (§7.2) and still claimed: identity, claim and topic
+  are unchanged. Every former holder, the signer included, gets
+  `access_revoked` for its next request; a client that retries after an
+  `internal_error` counts a verified `access_revoked` as success, because
+  the device runs the release side effects once the grant write commits,
+  even when the reply is `internal_error`. Those side effects are: the
+  device closes SSH, resets owner Tailscale access, and paints the claim QR
+  with a fresh invitation (§5.1; not timed, and memory only: after a reboot
+  `showPairingQRCode{purpose:"enroll"}` paints it again). A new owner,
+  including a former controller with the same keys, enrolls with it; the
+  new grant replaces the revoked record.
 - `listControllers` lists every record, revoked ones included: the
   `grants.json` records first, in their shape, then every display record
   (§5.7) in the display shape (`role:"display"`, `origin`,
@@ -453,7 +470,8 @@ never reach the command router):
 
 An owner cannot revoke the last active owner (`last_owner`). That would make
 the device unowned without a reset. An owner may revoke itself while another
-active owner exists.
+active owner exists. `releaseOwnership` is the one exception: it makes the
+device unowned on purpose.
 
 **Self-revoke.** `revokeController` whose `ctl` is the signer's own is the
 one owner-tier form a **controller** grant may send: a controller that
@@ -728,7 +746,7 @@ Unknown commands fail closed: they are owner-only.
 
 | Tier | Commands |
 |---|---|
-| owner | everything not listed below; specifically `sshAccess`, `factoryReset`, `startWifiSetup`, `updateToLatestVersion`, `setDeviceName`, `showPairingQRCode`, `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, `mintPairingApprovalDecision`, `setContentPolicy`, `analyticsToggle`, `betaFeaturesToggle`, `uploadLogs`, `sendKeyboardEvent`, `tapGesture`, `doubleTapGesture`, `longPressGesture`, `dragGesture`, `clickAndDragGesture`, `zoomGesture`, `cursorUpdate`, `disconnect`, `approveController`, `revokeController` (a controller may name only its own `ctl`, §5.5), `listControllers`, `registerController` |
+| owner | everything not listed below; specifically `sshAccess`, `factoryReset`, `startWifiSetup`, `updateToLatestVersion`, `setDeviceName`, `showPairingQRCode`, `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, `mintPairingApprovalDecision`, `setContentPolicy`, `analyticsToggle`, `betaFeaturesToggle`, `uploadLogs`, `sendKeyboardEvent`, `tapGesture`, `doubleTapGesture`, `longPressGesture`, `dragGesture`, `clickAndDragGesture`, `zoomGesture`, `cursorUpdate`, `disconnect`, `approveController`, `revokeController` (a controller may name only its own `ctl`, §5.5), `listControllers`, `registerController`, `releaseOwnership` |
 | controller | playback: `displayPlaylist`, `displayDefaultPlaylist`, `refreshArtwork`, `refreshPlaylist`, `checkStatus`, `moveToArtwork`, `updateIndex`, `setShuffle`, `setLoop`, `updateArtFraming`, `updateDisplaySettings`, `updateDefaultDuration`, `getRecentlyPlayed`, `playRecentlyPlayed`; offline cache: `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`, `clearPlaylistCache`, `getOfflineCacheStatus`; claim: `connect` (see below); device: `getDeviceStatus`, `deviceMetrics`, `rotate`, `setVolume`, `toggleMute`, `ddcPanelControl`, `ddcPanelStatus`, `setSleepSchedule`, `setSleepMode`, `sleepNow`, `wakeNow`, `reboot`, `shutdown`, `runNetworkDiagnostics`, `getContentPolicy` |
 | internal | never accepted from any external principal, owner included (`permission_denied`): `resolveRecentlyPlayed` (router-internal), `ping`, `mintPairingDisplay`, `setupDisplay` (controld → player paint/probe commands that would otherwise fall through to the player over CDP), and `ff1Envelope` (an envelope inside an envelope) |
 | display (§5.7) | not a tier but a role outside the table: `displayPlaylist` in the exact Play shape of §7.2, and the self-revoke; everything else `permission_denied`. `control.Permits(principal, cmd, req)` decides it, in the authority and in the router's re-check |
@@ -1355,6 +1373,14 @@ and the ff1-cli test suite does the same with `jose`.
   unaffected. **v2-only firmware requires** a connection slot the relay can
   attribute to the device itself (for example a device credential the relay
   can verify) before the legacy relayer is retired.
+- Residual, accepted: `releaseOwnership` (§5.5) changes who holds a grant,
+  nothing else. The identity and the root subvolume stay, so a former owner
+  who had root through SSH or owner Tailscale may have left something
+  behind; hand a device to a stranger with a factory reset. Closing SSH on
+  release is cleanup, not a guarantee: in `legacy` a topic holder may open
+  it again with plaintext `sshAccess`. Topic holders (pre-protocol app, Play
+  0.4 sessions) keep `legacy` control after a release, as on any `legacy`
+  device; a factory reset is what cuts everyone off.
 - Residual, accepted: in a 2.0.x migration whoever scans the enroll QR
   first becomes the first owner; a lost sole owner still means a factory
   reset.

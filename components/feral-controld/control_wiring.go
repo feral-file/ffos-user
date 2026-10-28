@@ -169,6 +169,7 @@ func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler,
 	if ex, ok := executor.(interface {
 		SetControl(devicectl.ControlClaim)
 		ControlOwnerEnrolled()
+		ControlReleased()
 	}); ok {
 		ex.SetControl(controlgate.ClaimQR{Auth: c.auth})
 		// The authority refuses first-owner enroll on v2 (§5.1); the v2 gate
@@ -176,6 +177,7 @@ func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler,
 		// if that ever changes.
 		for _, g := range gates {
 			g.SetOwnerEnrolledHook(ex.ControlOwnerEnrolled)
+			g.SetReleasedHook(ex.ControlReleased)
 		}
 	} else {
 		logger.Error("Executor does not accept the control claim; invitation QR and retire disabled")

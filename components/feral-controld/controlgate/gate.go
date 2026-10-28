@@ -37,6 +37,7 @@ type Gate struct {
 
 	publisher       *Publisher
 	onOwnerEnrolled func()
+	onReleased      func()
 	onAdmitted      func(context.Context, *control.Admission)
 }
 
@@ -56,6 +57,11 @@ func (g *Gate) SetPublisher(p *Publisher) { g.publisher = p }
 // SetOwnerEnrolledHook is called (on the request goroutine) after the first
 // owner enrolled with the invitation, so the claim QR can come down (§5.1).
 func (g *Gate) SetOwnerEnrolledHook(fn func()) { g.onOwnerEnrolled = fn }
+
+// SetReleasedHook is called (on the request goroutine) after the owner
+// released the device (§5.5 releaseOwnership), so the invitation QR goes on
+// screen. fn must not block the reply.
+func (g *Gate) SetReleasedHook(fn func()) { g.onReleased = fn }
 
 // State is the current control state.
 func (g *Gate) State() control.State { return g.auth.State() }
@@ -124,6 +130,9 @@ func (g *Gate) HandleEnvelope(ctx context.Context, raw json.RawMessage, origin c
 	}
 	if adm.OwnerEnrolled && g.onOwnerEnrolled != nil {
 		g.onOwnerEnrolled()
+	}
+	if adm.Released && g.onReleased != nil {
+		g.onReleased()
 	}
 	// Every authentic admission, executed or answered by the authority: the
 	// v2 gate binds on a conferred Principal, and every gate the v2 relay

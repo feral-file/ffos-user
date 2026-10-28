@@ -100,6 +100,57 @@ func TestControlOwnerEnrolled_TakesClaimQRDown(t *testing.T) {
 	assert.Equal(t, []string{setupui.StateClaimQR}, spy.hidden)
 }
 
+// §5.5: after a release the invitation QR is painted (not automatic, so no
+// overlay refuses it), SSH is closed and owner Tailscale is reset, all off
+// the request goroutine.
+func TestControlReleased_PaintsInvitationAndClosesAccess(t *testing.T) {
+	sm := mocks.NewMockStateManager(gomock.NewController(t))
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{Claimed: true, TopicID: "topic"}).AnyTimes()
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+
+	ctrl := gomock.NewController(t)
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(gomock.Any()).Return(nil, errors.New("absent")).AnyTimes()
+	mockOS.EXPECT().IsNotExist(gomock.Any()).Return(true).AnyTimes()
+	mockOS.EXPECT().Remove(gomock.Any()).Return(nil).AnyTimes()
+	mockOS.EXPECT().Stat(ownerTailscaleBin).Return(nil, nil)
+	mockOS.EXPECT().Stat(gomock.Any()).Return(nil, errors.New("absent")).AnyTimes()
+	mockCmd := mocks.NewMockExecCmd(ctrl)
+	mockCmd.EXPECT().CombinedOutput().Return(nil, nil).AnyTimes()
+	mockExec := mocks.NewMockExec(ctrl)
+	sshStopped, tailscaleReset := make(chan struct{}), make(chan struct{})
+	mockExec.EXPECT().CommandContext(gomock.Any(), "sudo", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, args ...string) wrapper.ExecCmd {
+			switch strings.Join(args, " ") {
+			case "systemctl stop sshd.service":
+				close(sshStopped)
+			case "timeout -k 5 60 " + ownerTailscaleBin + " reset":
+				close(tailscaleReset)
+			}
+			return mockCmd
+		}).AnyTimes()
+
+	fc := &fakeControl{fields: []string{"i", "s", "e", "g"}, ok: true}
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, os: mockOS, exec: mockExec, json: wrapper.NewJSON()}
+	e.SetControl(fc)
+	e.ControlReleased()
+	for name, ch := range map[string]chan struct{}{"sshd stop": sshStopped, "tailscale reset": tailscaleReset} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not run", name)
+		}
+	}
+	// The paint precedes the Tailscale reset on the same goroutine.
+	assert.True(t, e.enrollQR.Load())
+	assert.Equal(t, []string{"claim"}, spy.calls)
+	assert.Contains(t, spy.lastURL, "|i|s|e|g", "a claimed device's QR must carry the invitation")
+	assert.Equal(t, int32(1), fc.issued.Load())
+	e.stopInvitationRefresh()
+}
+
 func TestRefreshInvitationQR_OnlyWhileShowing(t *testing.T) {
 	stateUnclaimed(t)
 	fc := &fakeControl{fields: []string{"i", "s", "e", "g"}, ok: true}

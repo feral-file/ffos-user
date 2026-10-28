@@ -1228,3 +1228,114 @@ func TestRevokeExpiredGrantSticks(t *testing.T) {
 	d.advance(-120)
 	d.expectCode(guest, d.cmdClaims(guest, "rotate", `{}`), CodeAccessRevoked)
 }
+
+// §5.5 releaseOwnership: every record is revoked, the sole owner included,
+// and the device is legacy again with nobody pending.
+func TestReleaseOwnership(t *testing.T) {
+	owner, ctl, guest := newTestCtl(t, "owner"), newTestCtl(t, "ctl"), newTestCtl(t, "guest")
+	expired := guest.grant(RoleController)
+	expired.ExpiresAt = testNow + 60
+	d := newTestDevice(t, owner.grant(RoleOwner), ctl.grant(RoleController), expired)
+	site := newTestCtl(t, "site")
+	d.issue(owner.ctl, site, "https://a.example")
+	tab := newTestCtl(t, "tab")
+	rc := d.claims(tab, OpRequestAccess)
+	rc.Enroll = tab.enroll("")
+	d.expectOK(tab, rc)
+	d.advance(120)
+
+	rc = d.cmdClaims(owner, CmdReleaseOwnership, `{}`)
+	adm := d.send(owner, rc)
+	if r := d.final(adm, rc); !r.OK || string(r.Res) != `{"released":true}` {
+		t.Fatalf("release = %+v %s", r, r.Res)
+	}
+	if !adm.Released {
+		t.Fatal("Released not set")
+	}
+	want := []string{owner.ctl, ctl.ctl, guest.ctl, site.ctl}
+	if !slices.Equal(adm.RevokedCtls, want) {
+		t.Fatalf("RevokedCtls = %v, want %v", adm.RevokedCtls, want)
+	}
+	if d.a.State() != StateLegacy {
+		t.Fatalf("state = %s", d.a.State())
+	}
+	if len(d.a.pending) != 0 {
+		t.Fatal("pending request survived the release")
+	}
+	if g, _ := d.a.Store().DisplayGrant(site.ctl); g.RevokedAt != d.now.Load() {
+		t.Fatal("display grant not revoked")
+	}
+
+	// Every former holder gets a verifiable access_revoked, the expired
+	// record too after a clock step back, and the releaser's own retry.
+	d.expectCode(ctl, d.cmdClaims(ctl, "rotate", `{}`), CodeAccessRevoked)
+	d.expectCode(site, d.cmdClaims(site, "displayPlaylist", testCast), CodeAccessRevoked)
+	d.expectCode(owner, d.cmdClaims(owner, CmdReleaseOwnership, `{}`), CodeAccessRevoked)
+	d.advance(-120)
+	d.expectCode(guest, d.cmdClaims(guest, "rotate", `{}`), CodeAccessRevoked)
+
+	// A restart reads the same: legacy.
+	d.reopen(false)
+	if d.a.State() != StateLegacy {
+		t.Fatalf("state after restart = %s", d.a.State())
+	}
+
+	// The screen invitation makes a former controller the new owner,
+	// overwriting its revoked record.
+	inv, err := d.a.IssueInvitation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc = d.claims(ctl, OpEnroll)
+	rc.Enroll = ctl.enroll(inv.Value)
+	if adm := d.send(ctl, rc); !d.final(adm, rc).OK || !adm.OwnerEnrolled {
+		t.Fatal("invitation enroll after release failed")
+	}
+	if g, _ := d.a.Store().Grant(ctl.ctl); g.Role != RoleOwner || !g.Active(d.now.Load()) {
+		t.Fatalf("grant = %+v", g)
+	}
+	d.expectExecute(ctl, d.cmdClaims(ctl, "sshAccess", `{}`))
+	d.expectCode(owner, d.cmdClaims(owner, "rotate", `{}`), CodeAccessRevoked)
+}
+
+func TestReleaseOwnershipIsOwnerOnly(t *testing.T) {
+	d, owner, ctl := ownerDevice(t)
+	d.expectCode(ctl, d.cmdClaims(ctl, CmdReleaseOwnership, `{}`), CodePermissionDenied)
+	r := d.expectCode(owner, d.cmdClaims(owner, CmdReleaseOwnership, `{"x":1}`), CodeCommandFailed)
+	if string(r.Res) != `{"error":"invalid_request"}` {
+		t.Fatalf("res = %s", r.Res)
+	}
+	if d.a.State() != StateEnrolled {
+		t.Fatalf("state = %s", d.a.State())
+	}
+}
+
+func TestReleaseOwnershipPersistFailure(t *testing.T) {
+	d, owner, ctl := ownerDevice(t)
+	d.fs.FailWrite = func(string) error { return errors.New("disk full") }
+	rc := d.cmdClaims(owner, CmdReleaseOwnership, `{}`)
+	adm := d.send(owner, rc)
+	if d.final(adm, rc).Code != CodeInternalError || adm.Released {
+		t.Fatal("an uncommitted release must fail and leave nothing to do")
+	}
+	d.fs.FailWrite = nil
+	if d.a.State() != StateEnrolled {
+		t.Fatalf("state = %s", d.a.State())
+	}
+
+	// Committed but unconfirmed: the reply is internal_error, the release
+	// stands, and the caller still runs its side effects.
+	d.fs.FailSync = func(string) error { return errors.New("eio") }
+	rc = d.cmdClaims(owner, CmdReleaseOwnership, `{}`)
+	adm = d.send(owner, rc)
+	if d.final(adm, rc).Code != CodeInternalError || !adm.Released {
+		t.Fatal("a committed release must set Released")
+	}
+	d.fs.FailSync = nil
+	if d.a.State() != StateLegacy {
+		t.Fatalf("state = %s", d.a.State())
+	}
+	// The retry is answered access_revoked: the client counts it as done.
+	d.expectCode(owner, d.cmdClaims(owner, CmdReleaseOwnership, `{}`), CodeAccessRevoked)
+	d.expectCode(ctl, d.cmdClaims(ctl, "rotate", `{}`), CodeAccessRevoked)
+}

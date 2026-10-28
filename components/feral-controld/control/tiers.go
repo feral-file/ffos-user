@@ -32,6 +32,9 @@ const (
 	CmdListControllers   = "listControllers"
 	// CmdRegisterController is owner-initiated registration (§5.6).
 	CmdRegisterController = "registerController"
+	// CmdReleaseOwnership revokes every grant, owners included, and leaves
+	// the device legacy and claimed (§5.5, Forget I exist).
+	CmdReleaseOwnership = "releaseOwnership"
 	// CmdEnvelope is the carrier command name on LAN and the legacy relayer
 	// (§10). An envelope whose inner cmd is itself ff1Envelope is refused.
 	CmdEnvelope = "ff1Envelope"
@@ -72,6 +75,7 @@ var commandTiers = map[string]Tier{
 	CmdRevokeController:   TierOwner,
 	CmdListControllers:    TierOwner,
 	CmdRegisterController: TierOwner,
+	CmdReleaseOwnership:   TierOwner,
 	// Player CastCommand names that reach the player over the CDP
 	// fallthrough. cursorUpdate is pointer injection like the gestures;
 	// disconnect tears down the player's cast session.
