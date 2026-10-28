@@ -829,13 +829,13 @@ func TestRelayV2Endpoint(t *testing.T) {
 		cfg  config.Config
 		want string
 	}{
-		"absent derives origin":          {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com")}, "wss://relay.feralfile.com"},
-		"absent derives trailing slash":  {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com/")}, "wss://relay.feralfile.com"},
-		"absent derives port":            {config.Config{RelayerConfig: relayer("ws://127.0.0.1:8787")}, "ws://127.0.0.1:8787"},
-		"override wins":                  {config.Config{RelayV2: &config.RelayV2Config{Endpoint: "wss://dev-relay.test"}, RelayerConfig: relayer("wss://relay.feralfile.com")}, "wss://dev-relay.test"},
-		"explicit empty disables":        {config.Config{RelayV2: &config.RelayV2Config{}, RelayerConfig: relayer("wss://relay.feralfile.com")}, ""},
+		"derives origin":                 {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com")}, "wss://relay.feralfile.com"},
+		"derives trailing slash":         {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com/")}, "wss://relay.feralfile.com"},
+		"derives port":                   {config.Config{RelayerConfig: relayer("ws://127.0.0.1:8787")}, "ws://127.0.0.1:8787"},
 		"relayer with path not derived":  {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com/api/connection")}, ""},
 		"relayer with query not derived": {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com?apiKey=x")}, ""},
+		"relayer userinfo not derived":   {config.Config{RelayerConfig: relayer("wss://u:p@relay.feralfile.com")}, ""},
+		"relayer fragment not derived":   {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com#x")}, ""},
 		"relayer https not derived":      {config.Config{RelayerConfig: relayer("https://relay.feralfile.com")}, ""},
 		"relayer invalid not derived":    {config.Config{RelayerConfig: relayer("::not a url")}, ""},
 		"no relayer block":               {config.Config{}, ""},
@@ -847,21 +847,15 @@ func TestRelayV2Endpoint(t *testing.T) {
 	}
 }
 
-// Presence of the relayV2 block is what separates "derive" from "off", so the
-// JSON shapes must decode to the right pointer state.
-func TestRelayV2EndpointJSONPresence(t *testing.T) {
-	for raw, want := range map[string]string{
-		`{"relayer":{"endpoint":"wss://r.test"}}`:                                       "wss://r.test",
-		`{"relayer":{"endpoint":"wss://r.test"},"relayV2":null}`:                        "wss://r.test",
-		`{"relayer":{"endpoint":"wss://r.test"},"relayV2":{"endpoint":""}}`:             "",
-		`{"relayer":{"endpoint":"wss://r.test"},"relayV2":{"endpoint":"wss://d.test"}}`: "wss://d.test",
-	} {
-		var c config.Config
-		if err := json.Unmarshal([]byte(raw), &c); err != nil {
-			t.Fatal(err)
-		}
-		if got := c.RelayV2Endpoint(nil); got != want {
-			t.Errorf("%s: got %q, want %q", raw, got, want)
-		}
+// The relayV2 key was removed before it shipped; a config that still carries
+// one decodes cleanly and cannot redirect or disable v2.
+func TestRelayV2EndpointIgnoresStaleRelayV2Key(t *testing.T) {
+	var c config.Config
+	raw := `{"relayer":{"endpoint":"wss://r.test"},"relayV2":{"endpoint":"wss://elsewhere.test"}}`
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.RelayV2Endpoint(nil); got != "wss://r.test" {
+		t.Fatalf("got %q", got)
 	}
 }

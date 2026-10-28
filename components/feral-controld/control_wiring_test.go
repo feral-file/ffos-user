@@ -123,7 +123,7 @@ func TestControlWiring_UnreadableHostnameWithStateFailsClosed(t *testing.T) {
 	}
 }
 
-func TestV2EligibilityUsesActualAuthorityAndExplicitConfig(t *testing.T) {
+func TestV2EligibilityUsesActualAuthorityAndEndpoint(t *testing.T) {
 	w := wiringFor(t, config.ControlConfig{}, ownedState(t))
 	const ep = "wss://relay.test"
 	if !relayV2Eligible(ep, w, "FF1-SKYZ2E3A") {
@@ -145,7 +145,7 @@ func TestV2EligibilityUsesActualAuthorityAndExplicitConfig(t *testing.T) {
 	}
 }
 
-// The v2 endpoint is derived from relayer.endpoint by default, so every
+// The v2 endpoint is always derived from relayer.endpoint, so every
 // fielded controld.json now resolves one. A device with no control block and
 // no control state must still stay legacy-only: authority, not the endpoint,
 // gates the dial.

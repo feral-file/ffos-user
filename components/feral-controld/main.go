@@ -1016,8 +1016,8 @@ func initializeApp(
 	// Control protocol: enabled by config OR forced on by persisted state. The
 	// notification producers get sealing handles when it is on (§9).
 	controlWire := newControlWiring(controlConfig, deviceIDFromHostname(), control.DefaultDir, &control.OSFS{}, logger)
-	// v2Endpoint is the resolved origin (config.RelayV2Endpoint: override,
-	// else derived from relayer.endpoint); it alone never dials v2.
+	// v2Endpoint is the relayer.endpoint origin (config.RelayV2Endpoint);
+	// it alone never dials v2.
 	relayV2Endpoint := ""
 	if len(v2Endpoint) > 0 {
 		relayV2Endpoint = v2Endpoint[0]

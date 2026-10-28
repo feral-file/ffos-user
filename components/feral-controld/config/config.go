@@ -25,13 +25,6 @@ type CDPConfig struct {
 	Endpoint string `json:"endpoint"`
 }
 
-// RelayV2Config is an optional override of the relay v2 origin; it never
-// replaces legacy relayer configuration. Read via RelayV2Endpoint(), never
-// directly: the block's PRESENCE is meaningful (see there).
-type RelayV2Config struct {
-	Endpoint string `json:"endpoint"`
-}
-
 type RelayerConfig struct {
 	Endpoint string `json:"endpoint"`
 	APIKey   string `json:"apiKey"`
@@ -233,7 +226,6 @@ type NetlogConfig struct {
 // Configuration for all components
 type Config struct {
 	CDPConfig         *CDPConfig         `json:"cdp"`
-	RelayV2           *RelayV2Config     `json:"relayV2,omitempty"`
 	RelayerConfig     *RelayerConfig     `json:"relayer"`
 	MintPairingConfig *MintPairingConfig `json:"mintPairing"`
 	// LogStreaming is decoded permissively because telemetry is optional and
@@ -308,28 +300,23 @@ type Config struct {
 	MACInfo map[string]string `json:"-"`
 }
 
-// RelayV2Endpoint resolves the relay v2 origin the device dials (spec §7.2).
-// Production serves v2 from the same worker as the legacy relayer, so the
-// default needs no extra per-environment field:
-//   - relayV2 block absent: derive the bare ws/wss origin of relayer.endpoint;
-//   - relayV2.endpoint non-empty: use it (override, e.g. a separate dev relay);
-//   - relayV2 block present with an empty endpoint: v2 off (explicit opt-out).
+// RelayV2Endpoint derives the relay v2 origin the device dials (spec §7.2).
+// There is no separate v2 setting: the relayer worker serves both the legacy
+// /api/* and the v2 /v2/* routes, so v2 always uses the bare ws/wss origin of
+// relayer.endpoint.
 //
 // A relayer.endpoint that is not a bare ws/wss origin (path, query, userinfo,
-// unparsable) is never trimmed into one: v2 stays off and this logs a warning.
-// Called once at startup, so the warning is logged once per boot. The result
-// only selects an endpoint; dialing still requires control authority
-// (relayer.V2Eligible).
+// fragment, unparsable) is never trimmed into one: v2 stays off and this logs
+// a warning. Called once at startup, so the warning is logged once per boot.
+// The result only selects an endpoint; dialing still requires control
+// authority (relayer.V2Eligible).
 func (c *Config) RelayV2Endpoint(logger *zap.Logger) string {
-	if c.RelayV2 != nil {
-		return c.RelayV2.Endpoint
-	}
 	if c.RelayerConfig == nil || c.RelayerConfig.Endpoint == "" {
 		return ""
 	}
 	origin, ok := bareWSOrigin(c.RelayerConfig.Endpoint)
 	if !ok && logger != nil {
-		logger.Warn("relayer.endpoint is not a bare ws/wss origin; not deriving the relay v2 endpoint (set relayV2.endpoint to override)",
+		logger.Warn("relayer.endpoint is not a bare ws/wss origin; relay v2 stays off",
 			zap.String("relayer_endpoint", c.RelayerConfig.Endpoint))
 	}
 	return origin
