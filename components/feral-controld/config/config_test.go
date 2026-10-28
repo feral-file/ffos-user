@@ -822,3 +822,46 @@ func TestRasterTuningPermissiveDecode(t *testing.T) {
 		}
 	})
 }
+
+func TestRelayV2Endpoint(t *testing.T) {
+	relayer := func(ep string) *config.RelayerConfig { return &config.RelayerConfig{Endpoint: ep, APIKey: "k"} }
+	for name, tc := range map[string]struct {
+		cfg  config.Config
+		want string
+	}{
+		"absent derives origin":          {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com")}, "wss://relay.feralfile.com"},
+		"absent derives trailing slash":  {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com/")}, "wss://relay.feralfile.com"},
+		"absent derives port":            {config.Config{RelayerConfig: relayer("ws://127.0.0.1:8787")}, "ws://127.0.0.1:8787"},
+		"override wins":                  {config.Config{RelayV2: &config.RelayV2Config{Endpoint: "wss://dev-relay.test"}, RelayerConfig: relayer("wss://relay.feralfile.com")}, "wss://dev-relay.test"},
+		"explicit empty disables":        {config.Config{RelayV2: &config.RelayV2Config{}, RelayerConfig: relayer("wss://relay.feralfile.com")}, ""},
+		"relayer with path not derived":  {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com/api/connection")}, ""},
+		"relayer with query not derived": {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com?apiKey=x")}, ""},
+		"relayer https not derived":      {config.Config{RelayerConfig: relayer("https://relay.feralfile.com")}, ""},
+		"relayer invalid not derived":    {config.Config{RelayerConfig: relayer("::not a url")}, ""},
+		"no relayer block":               {config.Config{}, ""},
+		"empty relayer endpoint":         {config.Config{RelayerConfig: relayer("")}, ""},
+	} {
+		if got := tc.cfg.RelayV2Endpoint(zap.NewNop()); got != tc.want {
+			t.Errorf("%s: got %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// Presence of the relayV2 block is what separates "derive" from "off", so the
+// JSON shapes must decode to the right pointer state.
+func TestRelayV2EndpointJSONPresence(t *testing.T) {
+	for raw, want := range map[string]string{
+		`{"relayer":{"endpoint":"wss://r.test"}}`:                                       "wss://r.test",
+		`{"relayer":{"endpoint":"wss://r.test"},"relayV2":null}`:                        "wss://r.test",
+		`{"relayer":{"endpoint":"wss://r.test"},"relayV2":{"endpoint":""}}`:             "",
+		`{"relayer":{"endpoint":"wss://r.test"},"relayV2":{"endpoint":"wss://d.test"}}`: "wss://d.test",
+	} {
+		var c config.Config
+		if err := json.Unmarshal([]byte(raw), &c); err != nil {
+			t.Fatal(err)
+		}
+		if got := c.RelayV2Endpoint(nil); got != want {
+			t.Errorf("%s: got %q, want %q", raw, got, want)
+		}
+	}
+}

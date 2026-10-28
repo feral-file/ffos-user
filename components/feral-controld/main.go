@@ -218,7 +218,7 @@ func main() {
 		dbus.NAME,
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
-		}, config.RelayV2)
+		}, config.RelayV2Endpoint(finalLogger))
 	if streamErr == nil {
 		if sink, ok := app.Relayer.(interface{ SetBeforeExit(func()) }); ok {
 			sink.SetBeforeExit(func() {
@@ -953,7 +953,7 @@ func initializeApp(
 	controlConfig config.ControlConfig,
 	dbusName string,
 	dbusOpts []dbus_v5.MatchOption,
-	v2Config ...*config.RelayV2Config,
+	v2Endpoint ...string,
 ) *app {
 	// Basic components. This is the daemon-lifetime context: it flows into every
 	// long-lived component built below, and main cancels it (app.Cancel) on
@@ -1016,8 +1016,14 @@ func initializeApp(
 	// Control protocol: enabled by config OR forced on by persisted state. The
 	// notification producers get sealing handles when it is on (§9).
 	controlWire := newControlWiring(controlConfig, deviceIDFromHostname(), control.DefaultDir, &control.OSFS{}, logger)
-	if len(v2Config) > 0 && relayV2Eligible(v2Config[0], controlWire, deviceIDFromHostname()) {
-		controlWire.v2 = newRelayV2(v2Config[0].Endpoint, deviceIDFromHostname(), webSocketDialer, randomizer, clock, os, json, logger)
+	// v2Endpoint is the resolved origin (config.RelayV2Endpoint: override,
+	// else derived from relayer.endpoint); it alone never dials v2.
+	relayV2Endpoint := ""
+	if len(v2Endpoint) > 0 {
+		relayV2Endpoint = v2Endpoint[0]
+	}
+	if relayV2Eligible(relayV2Endpoint, controlWire, deviceIDFromHostname()) {
+		controlWire.v2 = newRelayV2(relayV2Endpoint, deviceIDFromHostname(), webSocketDialer, randomizer, clock, os, json, logger)
 	}
 	controlWire.setTransports(relayerEndpoint != "")
 	notifyRelayer, notifyWS := controlWire.notificationHandles(relayer, wsHandler, logger)
@@ -1107,7 +1113,7 @@ func initializeApp(
 	// v2 endpoint the site will cast through; with either missing every 0.5
 	// request is refused display_grant_unavailable (spec §5.7).
 	if controlWire != nil && controlWire.v2 != nil {
-		mintPairing.SetDisplayGrants(controlWire.auth, v2Config[0].Endpoint)
+		mintPairing.SetDisplayGrants(controlWire.auth, relayV2Endpoint)
 	}
 	// Factory reset ends the outgoing topic's browser sessions before it clears
 	// the claim: they live on the relayer, and an owner-kept one has no expiry

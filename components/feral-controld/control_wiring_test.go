@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/json"
 	"slices"
 	"testing"
 
@@ -124,24 +125,50 @@ func TestControlWiring_UnreadableHostnameWithStateFailsClosed(t *testing.T) {
 
 func TestV2EligibilityUsesActualAuthorityAndExplicitConfig(t *testing.T) {
 	w := wiringFor(t, config.ControlConfig{}, ownedState(t))
-	cfg := &config.RelayV2Config{Endpoint: "wss://relay.test"}
-	if !relayV2Eligible(cfg, w, "FF1-SKYZ2E3A") {
+	const ep = "wss://relay.test"
+	if !relayV2Eligible(ep, w, "FF1-SKYZ2E3A") {
 		t.Fatal("persisted authority with config off must dial v2")
 	}
 	for _, tc := range []struct {
-		cfg       *config.RelayV2Config
+		endpoint  string
 		authority *controlWiring
 		id        string
 	}{
-		{nil, w, "FF1-SKYZ2E3A"},
-		{&config.RelayV2Config{}, w, "FF1-SKYZ2E3A"},
-		{cfg, nil, "FF1-SKYZ2E3A"},
-		{cfg, w, "FF1"},
-		{cfg, w, unknownDeviceID},
+		{"", w, "FF1-SKYZ2E3A"},
+		{ep, nil, "FF1-SKYZ2E3A"},
+		{ep, w, "FF1"},
+		{ep, w, unknownDeviceID},
 	} {
-		if relayV2Eligible(tc.cfg, tc.authority, tc.id) {
+		if relayV2Eligible(tc.endpoint, tc.authority, tc.id) {
 			t.Fatalf("ineligible v2 dial: %+v", tc)
 		}
+	}
+}
+
+// The v2 endpoint is derived from relayer.endpoint by default, so every
+// fielded controld.json now resolves one. A device with no control block and
+// no control state must still stay legacy-only: authority, not the endpoint,
+// gates the dial.
+func TestV2DerivedEndpointDoesNotDialWithoutAuthority(t *testing.T) {
+	var cfg config.Config
+	if err := json.Unmarshal([]byte(`{"relayer":{"endpoint":"wss://relay.test","apiKey":"k"}}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	ep := cfg.RelayV2Endpoint(zap.NewNop())
+	if ep != "wss://relay.test" {
+		t.Fatalf("derived endpoint %q", ep)
+	}
+	fsys := control.NewMemFS()
+	w := wiringFor(t, cfg.ControlTuning(zap.NewNop()), fsys)
+	if w != nil {
+		t.Fatal("control protocol started without a control block or state")
+	}
+	if relayV2Eligible(ep, w, "FF1-SKYZ2E3A") {
+		t.Fatal("derived v2 endpoint dialed without control authority")
+	}
+	// The same derived endpoint dials once authority exists on disk.
+	if !relayV2Eligible(ep, wiringFor(t, cfg.ControlTuning(zap.NewNop()), ownedState(t)), "FF1-SKYZ2E3A") {
+		t.Fatal("derived v2 endpoint not dialed with persisted authority")
 	}
 }
 
