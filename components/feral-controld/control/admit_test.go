@@ -1339,3 +1339,36 @@ func TestReleaseOwnershipPersistFailure(t *testing.T) {
 	d.expectCode(owner, d.cmdClaims(owner, CmdReleaseOwnership, `{}`), CodeAccessRevoked)
 	d.expectCode(ctl, d.cmdClaims(ctl, "rotate", `{}`), CodeAccessRevoked)
 }
+
+// A display write that fails releases nothing, so the owner can retry: the
+// grant write would otherwise leave the owner only access_revoked and the
+// display record active with no one able to revoke it.
+func TestReleaseOwnershipDisplayWriteFailure(t *testing.T) {
+	d, owner, ctl := ownerDevice(t)
+	site := newTestCtl(t, "site")
+	d.issue(owner.ctl, site, "https://a.example")
+	d.fs.FailWrite = func(name string) error {
+		if strings.HasSuffix(name, displayGrantsFile) {
+			return errors.New("enospc")
+		}
+		return nil
+	}
+	rc := d.cmdClaims(owner, CmdReleaseOwnership, `{}`)
+	adm := d.send(owner, rc)
+	if d.final(adm, rc).Code != CodeInternalError || adm.Released {
+		t.Fatal("a failed display write must release nothing")
+	}
+	d.fs.FailWrite = nil
+	if d.a.State() != StateEnrolled {
+		t.Fatalf("state = %s", d.a.State())
+	}
+	d.expectExecute(site, d.cmdClaims(site, "displayPlaylist", testCast))
+
+	rc = d.cmdClaims(owner, CmdReleaseOwnership, `{}`)
+	adm = d.send(owner, rc)
+	if r := d.final(adm, rc); !r.OK || !adm.Released {
+		t.Fatalf("retry = %+v", r)
+	}
+	d.expectCode(site, d.cmdClaims(site, "displayPlaylist", testCast), CodeAccessRevoked)
+	d.expectCode(ctl, d.cmdClaims(ctl, "rotate", `{}`), CodeAccessRevoked)
+}

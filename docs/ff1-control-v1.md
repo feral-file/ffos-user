@@ -438,11 +438,13 @@ never reach the command router):
   step back cannot revive it). Otherwise the grant must be active
   (`not_found`).
 - `registerController` is owner-initiated registration (§5.6.4).
-- `releaseOwnership` gives the device up (the app's Forget I exist). In one
-  write it sets `revokedAt` on every grant record that has none, owners
-  (the signer included) and controllers alike, expired ones too, as
-  `revokeController` does; then a second write revokes every display record
-  (§5.7) the same way, and every pending request and owner deny is dropped.
+- `releaseOwnership` gives the device up (the app's Forget I exist). A first
+  write revokes every display record (§5.7) that has no `revokedAt`; then one
+  write sets `revokedAt` on every grant record that has none, owners (the
+  signer included) and controllers alike, expired ones too, as
+  `revokeController` does, and every pending request and owner deny is
+  dropped. Display records go first because after the grant write the owner
+  can no longer retry; a failed display write releases nothing.
   The device is `legacy` (§7.2) and still claimed: identity, claim and topic
   are unchanged. Every former holder, the signer included, gets
   `access_revoked` for its next request; a client that retries after an
@@ -1380,9 +1382,7 @@ and the ff1-cli test suite does the same with `jose`.
   release is cleanup, not a guarantee: in `legacy` a topic holder may open
   it again with plaintext `sshAccess`. Topic holders (pre-protocol app, Play
   0.4 sessions) keep `legacy` control after a release, as on any `legacy`
-  device; a factory reset is what cuts everyone off. If the display write
-  fails after the grant write committed, display records stay active until
-  the next owner revokes them (they show in its `listControllers`).
+  device; a factory reset is what cuts everyone off.
 - Residual, accepted: in a 2.0.x migration whoever scans the enroll QR
   first becomes the first owner; a lost sole owner still means a factory
   reset.

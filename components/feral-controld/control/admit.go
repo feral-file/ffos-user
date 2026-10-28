@@ -894,12 +894,23 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 	var out controlResult
 	// Memory-only side effects (pending table, seq) are applied after the
 	// store commit, so a failed write leaves them untouched too.
-	var approvedPending, deniedPending, registered string
-	var revoked, revokedDisplay []string
+	var approvedPending, deniedPending, registered, revokedDisplay string
+	var revoked []string
 	released := false
 	// The display store is read before the write, not inside it (Update holds
 	// the store lock); it only changes under a.mu, which is held here.
 	display := a.store.DisplayGrants()
+	var releasedDisplay []string
+	if c.Cmd == CmdReleaseOwnership {
+		// Display records go first: once the grant write commits, the
+		// owner's retry is answered access_revoked and nobody could finish
+		// a display revocation left behind. A failure here has released
+		// nothing, so the owner retries.
+		var derr error
+		if releasedDisplay, derr = a.releaseDisplay(display, c.Req, now); derr != nil && !errors.Is(derr, ErrDurability) {
+			return a.persistFailure(adm)
+		}
+	}
 	err := a.store.Update(func(gs []Grant) ([]Grant, error) {
 		gs, err := setWindow(adm.ctl, window)(gs)
 		if err != nil {
@@ -909,16 +920,13 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 		case CmdApproveController:
 			gs, out, approvedPending = a.approve(gs, display, adm.ctl, c.Req, now)
 		case CmdRevokeController:
-			var r, rd string
-			gs, out, deniedPending, r, rd = a.revoke(gs, display, c.Req, now)
+			var r string
+			gs, out, deniedPending, r, revokedDisplay = a.revoke(gs, display, c.Req, now)
 			if r != "" {
 				revoked = []string{r}
 			}
-			if rd != "" {
-				revokedDisplay = []string{rd}
-			}
 		case CmdReleaseOwnership:
-			gs, out, revoked, revokedDisplay = release(gs, display, c.Req, now)
+			gs, out, revoked = release(gs, c.Req, now)
 			released = out.failure == ""
 		case CmdRegisterController:
 			gs, out, registered = a.register(gs, display, adm.ctl, c.Req, now)
@@ -959,26 +967,19 @@ func (a *Authority) controlCommand(adm *Admission, c RequestClaims, window Windo
 	// The revoked controller's seq is kept: a re-approval continues the
 	// sequence instead of restarting below what it already saw (§9).
 	adm.RevokedCtls = append(adm.RevokedCtls, revoked...)
+	adm.RevokedCtls = append(adm.RevokedCtls, releasedDisplay...)
 	if out.activated != "" {
 		adm.ReactivatedCtls = append(adm.ReactivatedCtls, out.activated)
 	}
-	if len(revokedDisplay) > 0 {
+	if revokedDisplay != "" {
 		// Second write, after the owner's window: an owner revoking a
 		// display record (§5.5). Its failure is internal_error like any
 		// other, and the owner re-lists.
-		derr := a.store.UpdateDisplay(func(ds []DisplayGrant) ([]DisplayGrant, error) {
-			var err error
-			for _, ctl := range revokedDisplay {
-				if ds, err = revokeDisplay(ctl, now)(ds); err != nil {
-					return nil, err
-				}
-			}
-			return ds, nil
-		})
+		derr := a.store.UpdateDisplay(revokeDisplay(revokedDisplay, now))
 		if derr != nil && !errors.Is(derr, ErrDurability) {
 			return a.persistFailure(adm)
 		}
-		adm.RevokedCtls = append(adm.RevokedCtls, revokedDisplay...)
+		adm.RevokedCtls = append(adm.RevokedCtls, revokedDisplay)
 		if derr != nil {
 			return a.persistFailure(adm)
 		}
@@ -1275,26 +1276,47 @@ func (a *Authority) revoke(gs []Grant, display []DisplayGrant, req json.RawMessa
 
 // release is §5.5 releaseOwnership: every record not yet revoked gets
 // revokedAt, owners included (the one exception to last_owner) and expired
-// ones too, so a wall-clock step back cannot revive them (as in revoke). It
-// returns the revoked ctls and the display records the caller revokes in its
-// second write.
-func release(gs []Grant, display []DisplayGrant, req json.RawMessage, now int64) ([]Grant, controlResult, []string, []string) {
+// ones too, so a wall-clock step back cannot revive them (as in revoke).
+func release(gs []Grant, req json.RawMessage, now int64) ([]Grant, controlResult, []string) {
 	if _, err := strictObject(req, nil, nil); err != nil {
-		return gs, controlResult{failure: "invalid_request"}, nil, nil
+		return gs, controlResult{failure: "invalid_request"}, nil
 	}
-	var revoked, revokedDisplay []string
+	var revoked []string
 	for i := range gs {
 		if gs[i].RevokedAt == 0 {
 			gs[i].RevokedAt = now
 			revoked = append(revoked, gs[i].Ctl)
 		}
 	}
+	return gs, controlResult{res: map[string]bool{"released": true}}, revoked
+}
+
+// releaseDisplay revokes every display record not yet revoked, the write
+// releaseOwnership makes before its grant write, and returns their ctls. A
+// malformed request writes nothing; release refuses it.
+func (a *Authority) releaseDisplay(display []DisplayGrant, req json.RawMessage, now int64) ([]string, error) {
+	if _, err := strictObject(req, nil, nil); err != nil {
+		return nil, nil
+	}
+	var ctls []string
 	for _, g := range display {
 		if g.RevokedAt == 0 {
-			revokedDisplay = append(revokedDisplay, g.Ctl)
+			ctls = append(ctls, g.Ctl)
 		}
 	}
-	return gs, controlResult{res: map[string]bool{"released": true}}, revoked, revokedDisplay
+	if len(ctls) == 0 {
+		return nil, nil
+	}
+	err := a.store.UpdateDisplay(func(ds []DisplayGrant) ([]DisplayGrant, error) {
+		var err error
+		for _, ctl := range ctls {
+			if ds, err = revokeDisplay(ctl, now)(ds); err != nil {
+				return nil, err
+			}
+		}
+		return ds, nil
+	})
+	return ctls, err
 }
 
 type controllerView struct {
