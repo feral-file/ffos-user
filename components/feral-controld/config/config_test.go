@@ -822,3 +822,40 @@ func TestRasterTuningPermissiveDecode(t *testing.T) {
 		}
 	})
 }
+
+func TestRelayV2Endpoint(t *testing.T) {
+	relayer := func(ep string) *config.RelayerConfig { return &config.RelayerConfig{Endpoint: ep, APIKey: "k"} }
+	for name, tc := range map[string]struct {
+		cfg  config.Config
+		want string
+	}{
+		"derives origin":                 {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com")}, "wss://relay.feralfile.com"},
+		"derives trailing slash":         {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com/")}, "wss://relay.feralfile.com"},
+		"derives port":                   {config.Config{RelayerConfig: relayer("ws://127.0.0.1:8787")}, "ws://127.0.0.1:8787"},
+		"relayer with path not derived":  {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com/api/connection")}, ""},
+		"relayer with query not derived": {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com?apiKey=x")}, ""},
+		"relayer userinfo not derived":   {config.Config{RelayerConfig: relayer("wss://u:p@relay.feralfile.com")}, ""},
+		"relayer fragment not derived":   {config.Config{RelayerConfig: relayer("wss://relay.feralfile.com#x")}, ""},
+		"relayer https not derived":      {config.Config{RelayerConfig: relayer("https://relay.feralfile.com")}, ""},
+		"relayer invalid not derived":    {config.Config{RelayerConfig: relayer("::not a url")}, ""},
+		"no relayer block":               {config.Config{}, ""},
+		"empty relayer endpoint":         {config.Config{RelayerConfig: relayer("")}, ""},
+	} {
+		if got := tc.cfg.RelayV2Endpoint(zap.NewNop()); got != tc.want {
+			t.Errorf("%s: got %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// The relayV2 key was removed before it shipped; a config that still carries
+// one decodes cleanly and cannot redirect or disable v2.
+func TestRelayV2EndpointIgnoresStaleRelayV2Key(t *testing.T) {
+	var c config.Config
+	raw := `{"relayer":{"endpoint":"wss://r.test"},"relayV2":{"endpoint":"wss://elsewhere.test"}}`
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.RelayV2Endpoint(nil); got != "wss://r.test" {
+		t.Fatalf("got %q", got)
+	}
+}

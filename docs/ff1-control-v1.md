@@ -646,7 +646,8 @@ result is sent and answers `mint_succeeded` with a top-level
 "displayGrant":{"v":1,"ctl":"…","profile":{"v":1,"dev":"FF1-…","gen":"…","sig":JWK,"enc":JWK},"relayV2Endpoint":"wss://…","expiresAt":"<RFC 3339>"}
 ```
 
-and **no** `session` (`expiresAt` absent = kept). The expiry follows the
+and **no** `session` (`expiresAt` absent = kept). `relayV2Endpoint` is the
+device's v2 origin, the `relayer.endpoint` origin (§7.2). The expiry follows the
 owner's decision as a session's would: timed → now + the effective session
 TTL; kept → none; kept for a requester that did not declare
 `supportsPersistentSessions` → the longest timed life. A 0.5 request never
@@ -807,15 +808,20 @@ a controller learns the profile from the screen QR pins (first owner, on the
 LAN or the legacy relayer) or from its registration result (§5.6), so v2
 carries envelopes only.
 
-**Dual-stack transport config.** The v2 endpoint is its own `controld.json`
-key, `relayV2.endpoint`; `relayer.endpoint` and `relayer.apiKey` keep their
-legacy meaning. `controld.json` changes only with a full image (the package
-rail never rewrites it), so a controld updated on an old image keeps a
-working legacy relayer. The device dials v2 only when **all** hold:
-`relayV2.endpoint` is configured, a control authority exists (judged from
-the device's state, not from `control.enabled`), and the device ID is the
-stable MAC-derived one (a hostname that fell back to `FF1`, or the
-`FF1-UNKNOWN` placeholder, never dials v2).
+**Dual-stack transport config.** There is no separate v2 setting: the v2
+endpoint is always the bare `ws`/`wss` origin of `relayer.endpoint`, so the
+relayer worker must serve both the legacy `/api/*` and the v2 `/v2/*` routes.
+A `relayer.endpoint` carrying a path, query, userinfo, or fragment is not
+trimmed: v2 stays off and controld logs a warning. (A pre-release
+`relayV2` key is gone; controld ignores it if present.) `relayer.endpoint`
+and `relayer.apiKey` keep their legacy meaning. `controld.json` changes only
+with a full image (the package rail never rewrites it), so a controld updated
+on an old image keeps a working legacy relayer. The device dials v2 only when
+**all** hold: a v2 origin derives from `relayer.endpoint`, a control
+authority exists (judged from the device's state, not from
+`control.enabled`), and the device ID is the stable MAC-derived one (a
+hostname that fell back to `FF1`, or the `FF1-UNKNOWN` placeholder, never
+dials v2).
 Otherwise it stays legacy-only.
 
 Internal callers (OOM recovery, `playRecentlyPlayed` re-entry) are not subject
@@ -1546,7 +1552,7 @@ release operator applies them.
 - Display grants (§5.7) ship in this order: the app and ff-cli that list
   display rows (role `display`, platform `web`) before any FF OS with
   §5.7; Play 0.5 is published only once FF OS with §5.7 **and** a
-  configured `relayV2.endpoint` is broadly deployed, because 0.5 answers
+  relayer worker serving `/v2/*` (§7.2) is broadly deployed, because 0.5 answers
   `device_unsupported` on anything else.
 
 ### 15.2 Rollout levers and rollback
