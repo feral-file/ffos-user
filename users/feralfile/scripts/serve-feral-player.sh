@@ -187,6 +187,8 @@ start_server() {
 # start_works_server starts the works server, fail-open: a bundle without the
 # shell (an older player), or a works server that dies, leaves the player on
 # its fallback for data: works, so neither may block or fail the player unit.
+# The player re-probes the server at most once a minute, when a work chooses
+# its path, so works it opens after a server death fall back on their own.
 start_works_server() {
 	if [[ ! -f "${FF_PLAYER_WORKS_ROOT}/index.html" ]]; then
 		echo "serve-feral-player: no data-document shell at ${FF_PLAYER_WORKS_ROOT}; data: works keep the player's fallback" >&2
