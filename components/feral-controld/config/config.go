@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -22,6 +21,11 @@ import (
 var macRegex = regexp.MustCompile(`^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$`)
 
 type CDPConfig struct {
+	Endpoint string `json:"endpoint"`
+}
+
+// RelayV2Config is optional and never replaces legacy relayer configuration.
+type RelayV2Config struct {
 	Endpoint string `json:"endpoint"`
 }
 
@@ -226,6 +230,7 @@ type NetlogConfig struct {
 // Configuration for all components
 type Config struct {
 	CDPConfig         *CDPConfig         `json:"cdp"`
+	RelayV2           *RelayV2Config     `json:"relayV2,omitempty"`
 	RelayerConfig     *RelayerConfig     `json:"relayer"`
 	MintPairingConfig *MintPairingConfig `json:"mintPairing"`
 	// LogStreaming is decoded permissively because telemetry is optional and
@@ -298,39 +303,6 @@ type Config struct {
 	// MACInfo contains MAC addresses for all network interfaces
 	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
 	MACInfo map[string]string `json:"-"`
-}
-
-// RelayV2Endpoint derives the relay v2 origin the device dials (spec §7.2).
-// There is no separate v2 setting: the relayer worker serves both the legacy
-// /api/* and the v2 /v2/* routes, so v2 always uses the bare ws/wss origin of
-// relayer.endpoint.
-//
-// A relayer.endpoint that is not a bare ws/wss origin (path, query, userinfo,
-// fragment, unparsable) is never trimmed into one: v2 stays off and this logs
-// a warning. Called once at startup, so the warning is logged once per boot.
-// The result only selects an endpoint; dialing still requires control
-// authority (relayer.V2Eligible).
-func (c *Config) RelayV2Endpoint(logger *zap.Logger) string {
-	if c.RelayerConfig == nil || c.RelayerConfig.Endpoint == "" {
-		return ""
-	}
-	origin, ok := bareWSOrigin(c.RelayerConfig.Endpoint)
-	if !ok && logger != nil {
-		logger.Warn("relayer.endpoint is not a bare ws/wss origin; relay v2 stays off",
-			zap.String("relayer_endpoint", c.RelayerConfig.Endpoint))
-	}
-	return origin
-}
-
-// bareWSOrigin returns scheme://host for a ws/wss URL with nothing beyond an
-// optional trailing "/". It mirrors what relaywire.ConnectionURL accepts.
-func bareWSOrigin(raw string) (string, bool) {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || (u.Scheme != "ws" && u.Scheme != "wss") || u.User != nil ||
-		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "" && u.Path != "/") || u.Opaque != "" {
-		return "", false
-	}
-	return u.Scheme + "://" + u.Host, true
 }
 
 // ContentPolicyConfig contains the operator-only unrated archive audit gate.
