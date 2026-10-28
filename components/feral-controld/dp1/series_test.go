@@ -1,35 +1,29 @@
 package dp1_test
 
 import (
+	encjson "encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
+	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/golang/mock/gomock"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
-	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
 )
 
 // A seriesRegistry item: core 1.1.0 §6's whole-series form, no tokenId and
 // no contract address — a Feral File series whose editions sit under more
-// than one contract cannot be named by a single address.
+// than one contract cannot be named by a single address, and after the
+// registry landed the item names the registry alone (Sang, 2026-10-28).
 //
-// Its `seriesId` is left off here, and not because an item lacks one. Feral
-// File's V1–V3 series carry a 256-bit id as decimal digits, and the dp1-go
-// this daemon builds against (v0.6.0) types the field `*int`, so such an
-// item fails to parse before any of this runs:
-//
-//	json: cannot unmarshal string into Go struct field
-//	ProvenanceContract.seriesId of type int
-//
-// display-protocol/dp1-go#12 makes the field accept either form. Until that
-// release is pinned here, a playlist of those series never reaches this
-// code. The expansion below does not read `seriesId` in any case — it keys
-// on the item's slug — so the gap is in parsing, not in resolving.
+// Its `seriesId` is left off here, and that is faithful rather than
+// convenient: the expansion keys on the playlist's id and the item's, which
+// is what the catalog addresses a series by, and never reads `seriesId`.
+// The catalog reads it, from its own copy of the same item.
 func seriesItem() dp1playlist.PlaylistItem {
 	return dp1playlist.PlaylistItem{
 		ID:     "item-series",
@@ -75,23 +69,53 @@ func servePlaylist(ts *testSetup, url string, items []dp1playlist.PlaylistItem) 
 		})
 }
 
-func TestDP1_ExpandsASeriesIntoItsEditions(t *testing.T) {
+// editionsURL is the route the catalog addresses one series item by.
+func editionsURL(playlistID, itemID string) string {
+	return fmt.Sprintf(
+		"https://catalog.feralfile.io/api/v1/playlists/%s/items/%s/editions?limit=255",
+		playlistID, itemID)
+}
+
+// serveEditions answers that route with the catalog's own envelope, decoded
+// by the real encoding/json so the struct tags are under test too.
+func serveEditions(ts *testSetup, playlistID, itemID string, body string) {
+	ts.mockHTTP.EXPECT().Get(editionsURL(playlistID, itemID)).
+		Return(createMockResponse(http.StatusOK, body), nil)
+	ts.mockIO.EXPECT().ReadAll(gomock.Any()).Return([]byte(body), nil)
+	ts.mockJSON.EXPECT().Unmarshal([]byte(body), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
+}
+
+// editionsBody is the shape the catalog actually returns, as measured:
+// {revisionId, playlistId, itemId, series, total, limit, offset, items}.
+// Only `total` and `items` are read here; the rest is carried so a change
+// to the envelope that drops them is caught.
+func editionsBody(total int, items ...dp1playlist.PlaylistItem) string {
+	envelope := map[string]any{
+		"revisionId": "editions_e4c3a49b8bf7f92c7b2697b58234f03c47c51868199d359e1bb7fd94ca8a0ba8",
+		"playlistId": "playlist-1",
+		"itemId":     "item-series",
+		"series":     map[string]any{"chain": "evm", "seriesId": "387"},
+		"total":      total,
+		"limit":      255,
+		"offset":     0,
+		"items":      items,
+	}
+	encoded, err := encjson.Marshal(envelope)
+	if err != nil {
+		panic(err)
+	}
+	return string(encoded)
+}
+
+func TestDP1_ExpandsASeriesIntoItsEditionsFromTheCatalog(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
-
-	// The slug is the only key an item and the index share: the index has no
-	// column for a contract address plus a series id.
-	ts.mockFFIndexer.EXPECT().
-		QueryTokens(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ interface{}, endpoint string, params map[string]string) ([]ffindexer.Token, error) {
-			assert.Equal(t, "https://indexer-v2.feralfile.com/graphql", endpoint)
-			assert.Equal(t, "feralfile", params["release_vendor"])
-			assert.Equal(t, "scrampled-auw", params["release_vendor_slug"])
-			return createMockTokens(), nil
-		})
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBody(2, editionItem("a"), editionItem("b")))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
 
@@ -104,37 +128,50 @@ func TestDP1_ExpandsASeriesIntoItsEditions(t *testing.T) {
 	}
 }
 
-func TestDP1_KeepsASeriesWhoseEditionsTheIndexCannotReturn(t *testing.T) {
+func TestDP1_KeepsASeriesWhenTheCatalogIsUnreachable(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
-
-	ts.mockFFIndexer.EXPECT().
-		QueryTokens(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(nil, errors.New("index unreachable"))
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+		Return(nil, errors.New("catalog unreachable"))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
 
-	// The representative still plays. A screen that goes blank because an
-	// index was down is the one outcome this must not produce.
+	// The representative still plays. A screen that goes blank because the
+	// catalog was down is the one outcome this must not produce.
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
 	assert.Equal(t, "item-series", result.Items[0].ID)
 	assert.Equal(t, dp1playlist.ProvenanceSeriesRegistry, result.Items[0].Provenance.Type)
 }
 
-func TestDP1_KeepsASeriesTheIndexKnowsNothingAbout(t *testing.T) {
+func TestDP1_KeepsASeriesThePlaylistTheCatalogDoesNotHold(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
+	// A cast of something never published, or an older channel revision:
+	// the catalog 404s and the body is never read.
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+		Return(createMockResponse(http.StatusNotFound, `{"status":404}`), nil)
 
-	ts.mockFFIndexer.EXPECT().
-		QueryTokens(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return([]ffindexer.Token{}, nil)
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1)
+	assert.Equal(t, "item-series", result.Items[0].ID)
+}
+
+func TestDP1_KeepsASeriesTheCatalogReturnsNoEditionsFor(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	url := "http://example.com/exhibition.json"
+	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
+	serveEditions(ts, "playlist-1", "item-series", editionsBody(0))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
 
@@ -153,7 +190,7 @@ func TestDP1_LeavesEditionItemsAlone(t *testing.T) {
 		editionItem("b"),
 	})
 
-	// No index call at all: a playlist of editions has nothing to expand.
+	// No catalog call at all: a playlist of editions has nothing to expand.
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
 
 	require.NoError(t, err)
@@ -171,10 +208,8 @@ func TestDP1_ExpandsOnlyTheSeriesInAMixedPlaylist(t *testing.T) {
 		seriesItem(),
 		editionItem("after"),
 	})
-
-	ts.mockFFIndexer.EXPECT().
-		QueryTokens(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(createMockTokens(), nil)
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBody(2, editionItem("a"), editionItem("b")))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
 
@@ -185,19 +220,67 @@ func TestDP1_ExpandsOnlyTheSeriesInAMixedPlaylist(t *testing.T) {
 	assert.Equal(t, "after", result.Items[3].ID)
 }
 
-func TestDP1_SeriesWithNoSlugStaysAsItIs(t *testing.T) {
+func TestDP1_SeriesWithNoItemIDStaysAsItIs(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	url := "http://example.com/exhibition.json"
 	item := seriesItem()
-	item.Slug = ""
+	item.ID = ""
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
 
-	// Nothing to key the index query by, so no call is made.
+	// Nothing to address the catalog with, so no call is made.
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
 
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
 	assert.Equal(t, dp1playlist.ProvenanceSeriesRegistry, result.Items[0].Provenance.Type)
+}
+
+// An edition of a V1–V3 series carries a 256-bit `seriesId` as decimal
+// digits, which is what the catalog returns. The dp1-go this daemon builds
+// against (v0.6.0) types the field `*int`, so decoding that answer fails:
+//
+//	json: cannot unmarshal string into Go struct field
+//	ProvenanceContract.seriesId of type int
+//
+// display-protocol/dp1-go#12 makes the field accept either form. Until that
+// release is pinned here, `full` playback of those series is unreachable —
+// and this test is what says so, rather than the behaviour looking like a
+// catalog fault. When #12 lands this test flips to asserting the expansion.
+func TestDP1_A256BitSeriesIDOnAnEditionIsNotYetReadable(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	url := "http://example.com/exhibition.json"
+	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
+
+	const bigSeriesID = "8520038953287439433536834341059117372268365319568716555346026339118809853347"
+	body := fmt.Sprintf(`{"total":1,"items":[{"id":"a","source":"https://example.com/a.mp4",`+
+		`"provenance":{"type":"onChain","contract":{"chain":"evm","standard":"erc721",`+
+		`"address":"0xe59B7D60d7d7183E09d8ABb6DF8B20EB4CF66632","tokenId":%[1]q,"seriesId":%[1]q}}}]}`,
+		bigSeriesID)
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+		Return(createMockResponse(http.StatusOK, body), nil)
+	ts.mockIO.EXPECT().ReadAll(gomock.Any()).Return([]byte(body), nil)
+	ts.mockJSON.EXPECT().Unmarshal([]byte(body), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
+
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	// The decode fails, so the series keeps its representative rather than
+	// the screen losing the work.
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1)
+	assert.Equal(t, "item-series", result.Items[0].ID)
+}
+
+func TestDP1_TheCatalogEndpointIsHTTPSAndAllowlisted(t *testing.T) {
+	// The base URL is a constant, not something a playlist supplies, but the
+	// guard is what keeps it that way: the answer decides what the screen
+	// plays, so the set of servers that may give it stays closed.
+	assert.True(t, dp1.CATALOG_HOSTS["catalog.feralfile.io"])
+	assert.True(t, dp1.CATALOG_HOSTS["art-catalog-service.bitmark-development.workers.dev"])
+	assert.False(t, dp1.CATALOG_HOSTS["catalog.feralfile.io.attacker.example"])
+	assert.False(t, dp1.CATALOG_HOSTS["catalog.feralfile.io:8788"])
 }
