@@ -118,7 +118,9 @@ func (d *dp1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) 
 		return d.ProcessDynamicPlaylist(ctx, playlist, minimal)
 	}
 
-	return &playlist, nil
+	// A curated playlist can still name series rather than editions.
+	resolved := d.expandSeriesItems(ctx, playlist, 0)
+	return &resolved, nil
 }
 
 func (d *dp1) ProcessPlaylistURLForCast(ctx context.Context, url string) (*Playlist, error) {
@@ -133,7 +135,10 @@ func (d *dp1) ProcessPlaylistURLForCast(ctx context.Context, url string) (*Playl
 		return d.ProcessDynamicPlaylistForCast(ctx, playlist)
 	}
 
-	return &playlist, nil
+	// Bounded like the dynamic cast path: a cast carries at most
+	// CAST_PLAYLIST_ITEMS_LIMIT items however many editions a series holds.
+	resolved := d.expandSeriesItems(ctx, playlist, CAST_PLAYLIST_ITEMS_LIMIT)
+	return &resolved, nil
 }
 
 func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
