@@ -1806,3 +1806,54 @@ func TestCommandHandler_DownloadPlaylist_NoClearDuringResolveProceeds(t *testing
 	resp := assertOkResponse(t, result)
 	require.Equal(t, "queued", resp["status"])
 }
+
+// A download resolve is held to dp1.MAX_PLAYLIST_ITEMS_LIMIT items, the bound
+// resolveOfflineCachePlaylist's own doc comment has always claimed.
+//
+// Series expansion resolves each seriesRegistry item into up to a full page of
+// editions, and every resolver this path calls is given an uncapped result
+// size, so a conforming request naming a few large series can resolve into
+// tens of thousands of items — which this path would then classify, enqueue
+// and download as media files. The editions come from the catalog, not from
+// the signed document, so the item count the publisher signed bounds nothing.
+// CMD_DOWNLOAD_PLAYLIST is reachable from the LAN with no pairing under the
+// shipped default (run-reviewer round 3, F1).
+//
+// The ceiling lives here and not in expandSeriesItems, which the display paths
+// share: a blanket clamp there would truncate the tail of a publisher's signed
+// item list on any oversized playlist that merely also names a series.
+func TestCommandHandler_DownloadPlaylist_HoldsTheResolveToTheItemCeiling(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	items := make([]dp1playlist.PlaylistItem, 0, 300)
+	for i := 0; i < 300; i++ {
+		items = append(items, dp1playlist.PlaylistItem{
+			ID:     fmt.Sprintf("edition-%d", i),
+			Source: fmt.Sprintf("https://example.com/%d.mp4", i),
+		})
+	}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: items}}
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	// What actually reaches the download, read off the playlist handed to
+	// Marshal rather than the opaque bytes it returns.
+	queued := -1
+	ts.mockJSON.EXPECT().Marshal(playlist).DoAndReturn(func(v any) ([]byte, error) {
+		queued = len(v.(*dp1.Playlist).Items)
+		return marshaled, nil
+	}).Times(1)
+	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL).
+		Return(1, 2, nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST,
+		Arguments: map[string]any{"playlistUrl": playlistURL},
+	})
+
+	require.NoError(t, err)
+	assertOkResponse(t, result)
+	assert.Equal(t, dp1.MAX_PLAYLIST_ITEMS_LIMIT, queued)
+}

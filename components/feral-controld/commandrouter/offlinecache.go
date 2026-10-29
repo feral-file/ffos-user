@@ -591,7 +591,42 @@ func parseStatusRequest(args map[string]any) (offlinecache.StatusRequest, map[st
 // items), not the minimal first batch a live display uses. Kept as its own
 // helper (rather than sharing displayPlaylist's inline switch) so the
 // display-integration todo can evolve that path independently.
+//
+// The ceiling in that first sentence is now enforced here rather than assumed.
+// Series expansion resolves each seriesRegistry item into up to
+// dp1.MAX_PLAYLIST_ITEMS_LIMIT editions, and every resolver this helper calls
+// is given an uncapped result size, so a conforming request naming a handful
+// of large series can resolve into tens of thousands of items — which this
+// path then classifies, enqueues and downloads as media files. The editions
+// come from the catalog rather than from the signed document, so the item
+// count the publisher signed is no bound on the work. CMD_DOWNLOAD_PLAYLIST is
+// reachable from the LAN with no pairing under the shipped
+// control.enabled=false default, which is what makes the ceiling worth
+// enforcing rather than documenting (run-reviewer round 3, F1).
+//
+// It is applied here, at the download boundary, and NOT inside
+// expandSeriesItems: that function is shared with the display paths, where a
+// blanket clamp would newly truncate the tail of a publisher's own signed item
+// list on any oversized playlist that merely happens to also name a series —
+// silent data loss neither origin/develop nor this branch does anywhere else.
 func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[string]any) (*dp1.Playlist, error) {
+	playlist, err := h.resolveOfflineCachePlaylistUncapped(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	if playlist != nil && len(playlist.Items) > dp1.MAX_PLAYLIST_ITEMS_LIMIT {
+		h.logger.Warn("offline cache: resolved playlist truncated to the item ceiling",
+			zap.String("playlist_id", playlist.ID),
+			zap.Int("items", len(playlist.Items)),
+			zap.Int("limit", dp1.MAX_PLAYLIST_ITEMS_LIMIT))
+		playlist.Items = playlist.Items[:dp1.MAX_PLAYLIST_ITEMS_LIMIT]
+	}
+	return playlist, nil
+}
+
+// resolveOfflineCachePlaylistUncapped is the resolution itself; its caller
+// above applies the item ceiling.
+func (h *handler) resolveOfflineCachePlaylistUncapped(ctx context.Context, args map[string]any) (*dp1.Playlist, error) {
 	switch {
 	case args["playlistUrl"] != nil:
 		url, ok := args["playlistUrl"].(string)

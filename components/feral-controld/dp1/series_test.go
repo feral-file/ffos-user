@@ -1,6 +1,7 @@
 package dp1_test
 
 import (
+	"context"
 	encjson "encoding/json"
 	"errors"
 	"fmt"
@@ -21,11 +22,15 @@ import (
 // than one contract cannot be named by a single address, and after the
 // registry landed the item names the registry alone (Sang, 2026-10-28).
 //
-// Its `seriesId` is left off here, and that is faithful rather than
-// convenient: the expansion keys on the playlist's id and the item's, which
-// is what the catalog addresses a series by, and never reads `seriesId`.
-// The catalog reads it, from its own copy of the same item.
+// It states a `seriesId`, which an earlier version of this fixture left off
+// on the grounds that the route is addressed by the playlist's id and the
+// item's. That was wrong about the shape: §6 gives `seriesRegistry` two forms
+// and `seriesId` present with `tokenId` absent is what makes this one the
+// series rather than one named edition of it, so an item without it is not a
+// series at all (feralfile-bot F2, 2026-10-29). The catalog reads the value
+// itself, from its own copy of the same item.
 func seriesItem() dp1playlist.PlaylistItem {
+	seriesID := 387
 	return dp1playlist.PlaylistItem{
 		ID:     "item-series",
 		Slug:   "scrampled-auw",
@@ -34,7 +39,8 @@ func seriesItem() dp1playlist.PlaylistItem {
 		Provenance: &dp1playlist.ProvenanceBlock{
 			Type: dp1playlist.ProvenanceSeriesRegistry,
 			Contract: &dp1playlist.ProvenanceContract{
-				Chain: "evm",
+				Chain:    "evm",
+				SeriesID: &seriesID,
 			},
 		},
 	}
@@ -530,5 +536,389 @@ func TestDP1_AnEditionsOwnSeriesIDSurvivesExpansion(t *testing.T) {
 	for _, edition := range result.Items {
 		require.NotNil(t, edition.Provenance.Contract.SeriesID)
 		assert.Equal(t, seriesID, *edition.Provenance.Contract.SeriesID)
+	}
+}
+
+// Only the whole-series form of `seriesRegistry` provenance is a series. The
+// same type carrying a `tokenId` names one specific edition (core 1.1.0 §6),
+// and an item with no `seriesId` names nothing the catalog can resolve —
+// neither is expanded, and neither costs a catalog round trip.
+//
+// The cost is why this is a defect rather than a tidiness point: expansion
+// fetches one series at a time, so a playlist of explicitly-named editions
+// used to serialize one doomed request per item in front of playback, each
+// answered `item-not-a-series` (feralfile-bot F2, 2026-10-29). No editions
+// route is mocked below, so any attempt to call it fails the test.
+func TestDP1_OnlyTheWholeSeriesFormIsExpanded(t *testing.T) {
+	tests := []struct {
+		name string
+		item func() dp1playlist.PlaylistItem
+	}{
+		{
+			name: "seriesRegistry with a tokenId names one edition, not the series",
+			item: func() dp1playlist.PlaylistItem {
+				item := seriesItem()
+				item.Provenance.Contract.TokenID = "42"
+				return item
+			},
+		},
+		{
+			name: "seriesRegistry with no seriesId has no series to resolve",
+			item: func() dp1playlist.PlaylistItem {
+				item := seriesItem()
+				item.Provenance.Contract.SeriesID = nil
+				return item
+			},
+		},
+		{
+			name: "seriesRegistry with no contract block at all",
+			item: func() dp1playlist.PlaylistItem {
+				item := seriesItem()
+				item.Provenance.Contract = nil
+				return item
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			url := "http://example.com/exhibition.json"
+			servePlaylist(ts, url, []dp1playlist.PlaylistItem{tt.item()})
+
+			result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+			require.NoError(t, err)
+			require.Len(t, result.Items, 1)
+			assert.Equal(t, "item-series", result.Items[0].ID)
+		})
+	}
+}
+
+// durationOf is a *float64 for a literal, which the item struct needs.
+func durationOf(seconds float64) *float64 {
+	return &seconds
+}
+
+// editionWithDuration is an edition as the catalog returns it: the duration it
+// carries was inherited from the catalog's OWN copy of the series item, not
+// stated by the edition, which is why every edition of a series shows the same
+// one.
+func editionWithDuration(id string, seconds float64) dp1playlist.PlaylistItem {
+	item := editionItem(id)
+	item.Duration = durationOf(seconds)
+	return item
+}
+
+// The playlist instance being played is the authority for the playback
+// settings the catalog inherited from its own stored copy of the series item.
+//
+// The catalog merges each edition on top of that stored copy, so duration,
+// license, display and override come back as the STORED series item stated
+// them — and an inline dp1_call payload, or a playlist edited after the
+// catalog ingested it, carries values that copy never had. Before the fix a
+// cast setting duration 99 played the catalog's 5 (feralfile-bot F3).
+func TestDP1_ExpandedEditionsTakePlaybackSettingsFromTheSeriesItemInHand(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	item := seriesItem()
+	item.Duration = durationOf(99)
+	item.License = "open"
+	item.Display = &dp1playlist.DisplayPrefs{Scaling: "fit", Background: "#000000"}
+	item.Override = encjson.RawMessage(`{"ff":{"hint":"instance"}}`)
+
+	url := "http://example.com/exhibition.json"
+	servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
+	catalogCopy := func(id string) dp1playlist.PlaylistItem {
+		edition := editionWithDuration(id, 5)
+		edition.License = "token"
+		edition.Display = &dp1playlist.DisplayPrefs{Scaling: "cover"}
+		edition.Override = encjson.RawMessage(`{"ff":{"hint":"catalog"}}`)
+		return edition
+	}
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBody(2, catalogCopy("a"), catalogCopy("b")))
+
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.NoError(t, err)
+	require.Len(t, result.Items, 2)
+	for _, edition := range result.Items {
+		require.NotNil(t, edition.Duration)
+		assert.Equal(t, float64(99), *edition.Duration)
+		assert.Equal(t, "open", edition.License)
+		require.NotNil(t, edition.Display)
+		assert.Equal(t, "fit", edition.Display.Scaling)
+		assert.JSONEq(t, `{"ff":{"hint":"instance"}}`, string(edition.Override))
+	}
+	// Per edition, not shared: the same rule the schedule fields follow, and
+	// DisplayPrefs is a struct of pointers, so sharing one would let an edit
+	// to one edition's render preferences reach its siblings.
+	assert.NotSame(t, result.Items[0].Display, result.Items[1].Display)
+	assert.NotSame(t, result.Items[0].Duration, result.Items[1].Duration)
+}
+
+// An edition that states a playback setting for ITSELF keeps it. The catalog
+// merges every edition of one series against a single copy of the series item,
+// so a value that differs across the answer can only have come from the
+// editions — which is the one signal available here, and what keeps the
+// re-basing above from overwriting a genuine per-edition override.
+//
+// Two editions disagreeing is the even split pluralityIndex refuses to call:
+// nothing says which half the catalog supplied, so both are left as they
+// arrived.
+func TestDP1_AnEditionsOwnPlaybackSettingSurvivesExpansion(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	item := seriesItem()
+	item.Duration = durationOf(99)
+
+	url := "http://example.com/exhibition.json"
+	servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBody(2, editionWithDuration("a", 5), editionWithDuration("b", 7)))
+
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.NoError(t, err)
+	require.Len(t, result.Items, 2)
+	require.NotNil(t, result.Items[0].Duration)
+	require.NotNil(t, result.Items[1].Duration)
+	assert.Equal(t, float64(5), *result.Items[0].Duration)
+	assert.Equal(t, float64(7), *result.Items[1].Duration)
+}
+
+// A series item that states no playback setting leaves the editions exactly as
+// the catalog sent them — the common case, where the catalog's copy of the
+// series item IS the item in hand and there is nothing to re-base.
+func TestDP1_ASeriesItemStatingNoPlaybackSettingsLeavesTheEditionsAlone(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	url := "http://example.com/exhibition.json"
+	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBody(2, editionWithDuration("a", 5), editionWithDuration("b", 5)))
+
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.NoError(t, err)
+	require.Len(t, result.Items, 2)
+	for _, edition := range result.Items {
+		require.NotNil(t, edition.Duration)
+		assert.Equal(t, float64(5), *edition.Duration)
+	}
+}
+
+// One edition stating its own value must not strand its siblings on the
+// catalog's stale one.
+//
+// This is the `multi_unique` shape — a series whose editions genuinely differ —
+// and the case an all-or-nothing agreement check got wrong: it skipped the
+// re-base for the whole answer the moment any single edition disagreed, which
+// is the same "a cast's duration is silently ignored" defect the re-basing
+// exists to fix, just narrowed to the series that have a customized edition
+// (run-reviewer round 1, F1).
+func TestDP1_OneCustomizedEditionDoesNotStrandItsSiblings(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	item := seriesItem()
+	item.Duration = durationOf(99)
+
+	url := "http://example.com/exhibition.json"
+	servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
+	// Two editions carry the catalog's inherited 5, one states its own 7.
+	serveEditions(ts, "playlist-1", "item-series", editionsBody(3,
+		editionWithDuration("a", 5),
+		editionWithDuration("b", 7),
+		editionWithDuration("c", 5)))
+
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.NoError(t, err)
+	require.Len(t, result.Items, 3)
+	durations := make([]float64, 0, 3)
+	for _, edition := range result.Items {
+		require.NotNil(t, edition.Duration)
+		durations = append(durations, *edition.Duration)
+	}
+	// The two inherited ones take the item in hand; the one that stated its
+	// own keeps it.
+	assert.Equal(t, []float64{99, 7, 99}, durations)
+}
+
+// A schedule the catalog still holds but the document in hand no longer states
+// is cleared, not carried.
+//
+// The catalog answers from a snapshot of the series item taken at its last
+// ingest, so a curator who removes a series' `displayAt` keeps getting editions
+// that carry the old timestamp until the next ingest. Unlike a content rating,
+// a stale schedule has no safe direction to fail in: it makes the cast
+// preflight read an unscheduled playlist as scheduled and skip the dead-link
+// probe, and it arms a Daily timer that delays a cast nothing intends to delay
+// (run-reviewer round 1, F2).
+func TestDP1_AStaleCatalogScheduleDoesNotSurviveExpansion(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	staleSchedule := func(id string) dp1playlist.PlaylistItem {
+		edition := editionItem(id)
+		at := "2026-11-01T18:00:00Z"
+		edition.DisplayAt = &at
+		return edition
+	}
+
+	url := "http://example.com/exhibition.json"
+	// The series item in hand states no schedule at all.
+	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBody(2, staleSchedule("a"), staleSchedule("b")))
+
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.NoError(t, err)
+	require.Len(t, result.Items, 2)
+	for _, edition := range result.Items {
+		assert.Nil(t, edition.DisplayAt)
+	}
+}
+
+// A content rating is the opposite case, and deliberately so: it is only ever
+// re-applied, never cleared. Clearing is the permissive direction — a `mature`
+// series whose rating reached the catalog but not the copy in hand has to stay
+// mature, or contentpolicy.FilterLocked stops refusing it.
+func TestDP1_ACatalogContentRatingSurvivesASeriesItemThatStatesNone(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	rated := func(id string) dp1playlist.PlaylistItem {
+		edition := editionItem(id)
+		rating := contentrating.Rating(contentrating.RatingMature)
+		edition.ContentRating = &rating
+		return edition
+	}
+
+	url := "http://example.com/exhibition.json"
+	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBody(2, rated("a"), rated("b")))
+
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.NoError(t, err)
+	require.Len(t, result.Items, 2)
+	for _, edition := range result.Items {
+		require.NotNil(t, edition.ContentRating)
+		assert.Equal(t, contentrating.Rating(contentrating.RatingMature), *edition.ContentRating)
+	}
+}
+
+// The walk spends at most maxSeriesPerPlaylist catalog calls, whatever
+// maxItems says.
+//
+// maxItems bounds the RESULT, and is 0 — unbounded — on four of
+// expandSeriesItems' six call sites, CMD_DOWNLOAD_PLAYLIST's among them. So a
+// document carrying more series items than a conforming playlist could ever
+// show used to buy one sequential 30s-timeout catalog round trip per item,
+// with nothing to stop it (run-reviewer round 2, F1). The 300 items below are
+// served through the uncapped ProcessPlaylistURL; the mock allows exactly 255
+// editions requests and gomock fails the test on the 256th.
+func TestDP1_TheExpansionWalkSpendsABoundedNumberOfCatalogCalls(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// One item id for all of them, so the 255 permitted calls share one URL
+	// and one expectation can count them.
+	items := make([]dp1playlist.PlaylistItem, 0, 300)
+	for i := 0; i < 300; i++ {
+		items = append(items, seriesItem())
+	}
+
+	url := "http://example.com/exhibition.json"
+	servePlaylist(ts, url, items)
+
+	// Every permitted call answers "no editions", so each series keeps its
+	// representative and the result length is not what bounds the walk.
+	empty := editionsBody(0)
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+		Return(createMockResponse(http.StatusOK, empty), nil).Times(255)
+	ts.mockIO.EXPECT().ReadAll(gomock.Any()).Return([]byte(empty), nil).Times(255)
+	ts.mockJSON.EXPECT().Unmarshal([]byte(empty), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) }).
+		Times(255)
+
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.NoError(t, err)
+	// Nothing is dropped: the items past the budget keep their representative,
+	// exactly as an unreachable catalog leaves them.
+	require.Len(t, result.Items, 300)
+	for _, item := range result.Items {
+		assert.Equal(t, dp1playlist.ProvenanceSeriesRegistry, item.Provenance.Type)
+	}
+}
+
+// A caller whose context is already done buys no catalog calls at all: there
+// is no one left waiting for the answer. No editions route is mocked, so any
+// attempt fails the test.
+func TestDP1_ADoneContextStopsTheExpansionWalk(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ctx, cancel := context.WithCancel(ts.ctx)
+	cancel()
+
+	url := "http://example.com/exhibition.json"
+	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
+
+	result, err := ts.client.ProcessPlaylistURL(ctx, url, false)
+
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1)
+	assert.Equal(t, "item-series", result.Items[0].ID)
+}
+
+// Re-basing holds at the largest page the catalog will serve into one series.
+//
+// Every test above works at two or three editions, which left the per-field
+// re-basing untested at the only scale that makes its cost interesting:
+// pluralityIndex compares every edition against every other, so a full page is
+// where an O(n²) pass would show up, and where a future rewrite would most
+// easily change behavior (run-reviewer round 3, F2).
+func TestDP1_RebasingHoldsAcrossAFullEditionPage(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	item := seriesItem()
+	item.Duration = durationOf(99)
+
+	const page = 255
+	editions := make([]dp1playlist.PlaylistItem, 0, page)
+	for i := 0; i < page; i++ {
+		editions = append(editions, editionWithDuration(fmt.Sprintf("e%d", i), 5))
+	}
+	// One edition of the page states its own duration and must keep it.
+	editions[page-1].Duration = durationOf(7)
+
+	url := "http://example.com/exhibition.json"
+	servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
+	serveEditions(ts, "playlist-1", "item-series", editionsBody(page, editions...))
+
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.NoError(t, err)
+	require.Len(t, result.Items, page)
+	for i, edition := range result.Items {
+		require.NotNil(t, edition.Duration)
+		if i == page-1 {
+			assert.Equal(t, float64(7), *edition.Duration)
+			continue
+		}
+		assert.Equal(t, float64(99), *edition.Duration)
 	}
 }

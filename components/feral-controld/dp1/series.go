@@ -2,8 +2,10 @@ package dp1
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"reflect"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
@@ -56,6 +58,15 @@ const (
 	// than a whole dynamic answer may. Raising this to 500 would let one
 	// series carry nearly twice MAX_PLAYLIST_ITEMS_LIMIT.
 	seriesPageLimit = MAX_PLAYLIST_ITEMS_LIMIT
+
+	// The most series items one playlist is allowed to spend a catalog call
+	// on. Derived rather than chosen: a conforming playlist holds at most
+	// MAX_PLAYLIST_ITEMS_LIMIT items and every expansion contributes at least
+	// one, so beyond this point no further call can change a conforming
+	// result — while an unbounded loop costs one sequential fetch, at the
+	// shared client's 30s timeout, for every series item a caller cares to
+	// put in the document.
+	maxSeriesPerPlaylist = MAX_PLAYLIST_ITEMS_LIMIT
 )
 
 // CATALOG_HOSTS is the allowlist validateCatalogEndpoint checks the base URL
@@ -88,30 +99,61 @@ type catalogEditions struct {
 // An item the catalog cannot answer for is left exactly as it is: a series
 // that fails to expand still plays its representative edition, which is the
 // one outcome a screen must never lose. maxItems bounds the whole playlist,
-// 0 meaning unbounded.
+// 0 meaning unbounded; the catalog calls the walk will make are bounded
+// separately by maxSeriesPerPlaylist, which 0 does not lift.
 func (d *dp1) expandSeriesItems(ctx context.Context, playlist Playlist, maxItems int) Playlist {
 	if !hasSeriesItems(playlist.Items) {
 		return playlist
 	}
 
 	expanded := make([]dp1playlist.PlaylistItem, 0, len(playlist.Items))
+	attempts := 0
 	for _, item := range playlist.Items {
-		if !isSeriesItem(item) {
+		switch {
+		case !isSeriesItem(item):
 			expanded = append(expanded, item)
-		} else if editions, err := d.seriesEditions(ctx, playlist.ID, item); err == nil && len(editions) > 0 {
-			d.logger.Info("expanded a series into its editions",
+
+		// Bounded independently of maxItems, which bounds the RESULT and is
+		// 0 — unbounded — on four of this method's six call sites, among them
+		// CMD_DOWNLOAD_PLAYLIST's, which a LAN caller reaches with no pairing
+		// under the shipped control.enabled=false default. Each series item
+		// costs one sequential catalog round trip, so without a budget of its
+		// own a document carrying N series items buys N of them, at the
+		// shared HTTP client's 30s timeout each (run-reviewer round 2, F1).
+		//
+		// The context is checked on the same branch so a caller whose
+		// deadline has passed stops paying for a result nobody is waiting
+		// for. An already-issued request still runs to its own timeout: the
+		// shared client takes no context, and threading one through it
+		// reaches well past this expansion.
+		//
+		// Either way a series keeps its representative, which is exactly what
+		// an unreachable catalog leaves behind — no new degraded shape.
+		case attempts >= maxSeriesPerPlaylist || ctx.Err() != nil:
+			d.logger.Warn("series item kept unexpanded; expansion budget spent",
 				zap.String("playlist_id", playlist.ID),
 				zap.String("item_slug", item.Slug),
-				zap.Int("editions", len(editions)))
-			expanded = append(expanded, inheritInstanceFields(item, editions)...)
-		} else {
-			if err != nil {
-				d.logger.Warn("series item kept unexpanded; its representative still plays",
+				zap.Int("attempts", attempts),
+				zap.Error(ctx.Err()))
+			expanded = append(expanded, item)
+
+		default:
+			attempts++
+			if editions, err := d.seriesEditions(ctx, playlist.ID, item); err == nil && len(editions) > 0 {
+				d.logger.Info("expanded a series into its editions",
 					zap.String("playlist_id", playlist.ID),
 					zap.String("item_slug", item.Slug),
-					zap.Error(err))
+					zap.Int("editions", len(editions)))
+				expanded = append(expanded, inheritInstanceFields(item, editions)...)
+			} else {
+				if err != nil {
+					d.logger.Warn("series item kept unexpanded; its representative still plays",
+						zap.String("playlist_id", playlist.ID),
+						zap.String("item_slug", item.Slug),
+						zap.Error(err))
+				}
+				expanded = append(expanded, item)
 			}
-			expanded = append(expanded, item)
 		}
 
 		// Checked after every append, not only a successful expansion's:
@@ -169,8 +211,30 @@ func (d *dp1) ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 // item does not state is left exactly as the edition had it. Values are copied
 // per edition rather than shared, so a later edit that mutates one edition's
 // schedule cannot reach its siblings.
+//
+// These three are the item in hand's outright because an edition cannot
+// meaningfully state them: a schedule and a content rating are curation, made
+// about an item's place in a playlist, not about the work. They still differ
+// from each other in which way they fail. A rating is only ever re-applied,
+// never cleared, because clearing is the PERMISSIVE direction — a `mature`
+// series whose editions came back unrated has to stay mature even if the
+// rating reached the catalog and not this copy. A schedule has no such safe
+// direction and is reset, for the reason given at the assignment below.
+//
+// The playback settings the catalog also inherited are a different case again,
+// and are handled by inheritPlaybackSettings.
 func inheritInstanceFields(item dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
 	for i := range editions {
+		// Cleared before being re-applied, unlike the two rating fields
+		// below. The catalog answers from a snapshot of the series item taken
+		// at its last ingest, so a schedule a curator has since removed can
+		// still come back on every edition — and `displayAt` has no safe
+		// direction to fail in: a stale timestamp both makes the cast
+		// preflight treat an unscheduled playlist as scheduled (skipping the
+		// dead-link probe) and arms a Daily timer that delays a cast the
+		// document in hand no longer delays. So the item in hand decides
+		// whether there is a schedule at all, not merely which one.
+		editions[i].DisplayAt = nil
 		if item.DisplayAt != nil {
 			at := *item.DisplayAt
 			editions[i].DisplayAt = &at
@@ -185,7 +249,168 @@ func inheritInstanceFields(item dp1playlist.PlaylistItem, editions []dp1playlist
 			editions[i].ContentReasons = &reasons
 		}
 	}
+	inheritPlaybackSettings(item, editions)
 	return editions
+}
+
+// inheritPlaybackSettings re-bases the playback settings the catalog inherited
+// from ITS copy of the series item onto the copy actually being played.
+//
+// The catalog builds an edition by starting from its stored series item and
+// letting the edition override it field by field — only `id`, `source` and
+// `provenance` are always the edition's own (`editionItem` in
+// art-catalog-service's series-editions.ts). So an expanded edition's
+// `duration`, `license`, `display` and `override` are the STORED series item's
+// values unless that edition stated its own, and the stored copy is not
+// necessarily the item in hand: an inline dp1_call payload, or a playlist
+// edited after the catalog ingested it, carries its own. Before this, a cast
+// setting duration 99 on the series item silently played the catalog's 5
+// (feralfile-bot F3, 2026-10-29).
+//
+// Only settings that are statements of the playlist instance are re-based.
+// Left to the edition deliberately: `repro` (a seed and a frame hash describe
+// that edition, not the series), `title`/`slug` (an edition is "#42"), and
+// `ref`/`refHash`/`inlineManifest` (the work's manifest, where the catalog's
+// own one-level metadata merge already keeps per-edition credits).
+//
+// Unlike the curation fields above, each is re-based per edition rather than
+// across the whole answer, so the item in hand wins over the catalog's stale
+// copy but never over a value an edition stated for itself — see rebaseField.
+func inheritPlaybackSettings(item dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) {
+	if item.Duration != nil {
+		rebaseField(editions,
+			func(e dp1playlist.PlaylistItem) any { return e.Duration },
+			func(e *dp1playlist.PlaylistItem) {
+				duration := *item.Duration
+				e.Duration = &duration
+			})
+	}
+	if item.License != "" {
+		rebaseField(editions,
+			func(e dp1playlist.PlaylistItem) any { return e.License },
+			func(e *dp1playlist.PlaylistItem) { e.License = item.License })
+	}
+	if len(item.Override) > 0 {
+		rebaseField(editions,
+			func(e dp1playlist.PlaylistItem) any { return e.Override },
+			func(e *dp1playlist.PlaylistItem) {
+				override := make(json.RawMessage, len(item.Override))
+				copy(override, item.Override)
+				e.Override = override
+			})
+	}
+	if item.Display != nil {
+		rebaseField(editions,
+			func(e dp1playlist.PlaylistItem) any { return e.Display },
+			func(e *dp1playlist.PlaylistItem) {
+				// A failed copy leaves the edition's own display rather than
+				// blanking it: losing the re-base is a stale preference,
+				// losing the field is an item with no render preferences.
+				if display := copyDisplayPrefs(item.Display); display != nil {
+					e.Display = display
+				}
+			})
+	}
+}
+
+// rebaseField applies set to every edition that carries the field's inherited
+// value, and leaves the rest alone.
+//
+// The inherited value is the one most editions share. That is what separates a
+// value the catalog supplied from one an edition stated, without the daemon
+// ever seeing the catalog's own copy of the series item: every edition of one
+// series is merged against a SINGLE such copy, so the field comes back
+// identical on every edition that did not state it, and an edition holding
+// anything else stated it for itself.
+//
+// Taking the most common value per field, rather than requiring the whole
+// answer to agree, is what makes a `multi_unique` series work: one edition of
+// twenty stating its own duration must not strand the other nineteen on the
+// catalog's stale one, which is the same defect this re-basing exists to fix.
+func rebaseField(
+	editions []dp1playlist.PlaylistItem,
+	get func(dp1playlist.PlaylistItem) any,
+	set func(*dp1playlist.PlaylistItem),
+) {
+	inherited := pluralityIndex(editions, get)
+	if inherited < 0 {
+		return
+	}
+	// Read before the loop mutates anything. Every comparison below is against
+	// this original value, and an edition is only ever written after it has
+	// been compared, so a rewritten edition cannot change a later verdict.
+	value := get(editions[inherited])
+	for i := range editions {
+		if reflect.DeepEqual(get(editions[i]), value) {
+			set(&editions[i])
+		}
+	}
+}
+
+// pluralityIndex returns the index of an edition holding the most common value
+// for the field get reads, or -1 when no single value is most common.
+//
+// Pointers are followed, so two editions whose durations hold the same number
+// count as the same value even though the pointers differ. A one-edition answer
+// returns that edition: with no sibling to compare against, the document in
+// hand is still the more current of the two copies. A true tie returns -1 and
+// nothing is re-based — with the set split evenly there is no evidence which
+// half the catalog supplied, and leaving both as they arrived is the reading
+// that invents nothing.
+//
+// Editions that all state the same value are indistinguishable from
+// inheritance and are re-based. Accepted: a value the whole set shares is the
+// series' as far as anything here can tell, and the item in hand is the better
+// authority for it.
+//
+// Cost: O(n²) reflect.DeepEqual comparisons per field, n bounded by
+// seriesPageLimit, so at most ~65k narrow comparisons per field for the
+// largest page the catalog will serve into one series. Kept as a plain pass
+// rather than an O(n) hash of each value, because the bound is already far
+// below the sequential-fetch latency the same expansion accepts — one 30s
+// catalog round trip per series item — and a hashing pass would trade tested
+// comparison semantics for a key function that has to agree with
+// reflect.DeepEqual on pointers, maps and raw JSON. Pinned at the page ceiling
+// by TestDP1_RebasingHoldsAcrossAFullEditionPage (run-reviewer round 3, F2).
+func pluralityIndex(editions []dp1playlist.PlaylistItem, get func(dp1playlist.PlaylistItem) any) int {
+	best, bestCount, tied := -1, 0, false
+	for i := range editions {
+		count := 0
+		for j := range editions {
+			if reflect.DeepEqual(get(editions[j]), get(editions[i])) {
+				count++
+			}
+		}
+		switch {
+		case count > bestCount:
+			best, bestCount, tied = i, count, false
+		case count == bestCount && !reflect.DeepEqual(get(editions[i]), get(editions[best])):
+			tied = true
+		}
+	}
+	if tied {
+		return -1
+	}
+	return best
+}
+
+// copyDisplayPrefs deep-copies display preferences, returning nil when they
+// cannot be copied.
+//
+// Through JSON rather than by assignment because DisplayPrefs is a struct of
+// pointers and maps: a shallow copy would leave every edition sharing the same
+// Interaction, Autoplay and UserOverrides, which is exactly the aliasing the
+// per-edition copy rule above exists to prevent.
+func copyDisplayPrefs(prefs *dp1playlist.DisplayPrefs) *dp1playlist.DisplayPrefs {
+	encoded, err := json.Marshal(prefs)
+	if err != nil {
+		return nil
+	}
+	var copied dp1playlist.DisplayPrefs
+	if err := json.Unmarshal(encoded, &copied); err != nil {
+		return nil
+	}
+	return &copied
 }
 
 // seriesEditions asks the catalog for one series' editions.
@@ -296,9 +521,27 @@ func validateCatalogEndpoint(base string) error {
 }
 
 // isSeriesItem reports whether item names a series rather than one edition.
+//
+// `seriesRegistry` provenance has TWO forms in core 1.1.0 §6 and only one of
+// them is a series: `contract.seriesId` with no `tokenId` is the whole series,
+// while the same type WITH a `tokenId` names one specific edition of it.
+// Reading the type alone treated that second form as a series, so a playlist
+// of explicitly-named editions spent one catalog round trip per item — each
+// answered `item-not-a-series` — and serialized that many network waits in
+// front of playback for nothing (feralfile-bot F2, 2026-10-29).
+//
+// This is deliberately the same predicate the catalog resolves a series by
+// (`isSeriesItem` in art-catalog-service's series-editions.ts). The two must
+// agree: asking for the editions of something the catalog does not consider a
+// series can only ever fail. That is also why a missing `seriesId` is not a
+// series here — there is nothing for the catalog to resolve — even though the
+// route is addressed by the playlist and item ids rather than by that id.
 func isSeriesItem(item dp1playlist.PlaylistItem) bool {
-	return item.Provenance != nil &&
-		item.Provenance.Type == dp1playlist.ProvenanceSeriesRegistry
+	if item.Provenance == nil || item.Provenance.Type != dp1playlist.ProvenanceSeriesRegistry {
+		return false
+	}
+	contract := item.Provenance.Contract
+	return contract != nil && contract.SeriesID != nil && contract.TokenID == ""
 }
 
 func hasSeriesItems(items []dp1playlist.PlaylistItem) bool {
