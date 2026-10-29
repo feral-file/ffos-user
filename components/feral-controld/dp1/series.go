@@ -47,9 +47,14 @@ const (
 	// Editions fetched per request, and the ceiling on one series. A series
 	// of 9,048 editions exists in the catalog; expanding it whole would
 	// swamp a playlist whose other items are single works, so it is capped
-	// at the same ceiling a dynamic playlist already respects. The catalog's
-	// own page maximum is 500, so this asks for everything it will give in
-	// one request.
+	// at the same ceiling a dynamic playlist already respects.
+	//
+	// This is deliberately BELOW what the catalog would serve — its own page
+	// maximum is 500 (SERIES_EDITIONS_PAGE_MAX in art-catalog-service's
+	// read.ts) — because the binding limit here is the playlist's, not the
+	// route's: a single series must not be able to fill more of a playlist
+	// than a whole dynamic answer may. Raising this to 500 would let one
+	// series carry nearly twice MAX_PLAYLIST_ITEMS_LIMIT.
 	seriesPageLimit = MAX_PLAYLIST_ITEMS_LIMIT
 )
 
@@ -67,6 +72,11 @@ var CATALOG_HOSTS = map[string]bool{
 // catalogEditions is the catalog's answer, of which only these two fields
 // are read: `items` is the editions and `total` says how many exist, which
 // is how a truncated expansion knows it was truncated.
+//
+// The answer's `series` block (the identity the catalog resolved
+// `contract.seriesId` to) is deliberately NOT read. Stamping it onto each
+// edition would let ff-player group the run — and its grouping default is
+// what makes that harmful; see the note on seriesEditions.
 type catalogEditions struct {
 	Total int                        `json:"total"`
 	Items []dp1playlist.PlaylistItem `json:"items"`
@@ -93,7 +103,7 @@ func (d *dp1) expandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 				zap.String("playlist_id", playlist.ID),
 				zap.String("item_slug", item.Slug),
 				zap.Int("editions", len(editions)))
-			expanded = append(expanded, editions...)
+			expanded = append(expanded, inheritInstanceFields(item, editions)...)
 		} else {
 			if err != nil {
 				d.logger.Warn("series item kept unexpanded; its representative still plays",
@@ -128,19 +138,85 @@ func (d *dp1) ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 	return d.expandSeriesItems(ctx, playlist, maxItems)
 }
 
+// inheritInstanceFields copies the series item's playlist-instance fields onto
+// the editions that replace it.
+//
+// The catalog merges each edition with its OWN copy of the series item, which
+// is not necessarily the item in the document being played: a dp1_call payload,
+// or a cast of a playlist edited after the catalog ingested it, can carry a
+// schedule or a rating the catalog's copy never had. Everything else an edition
+// needs is already merged catalog-side (duration, license, display, repro, the
+// manifest's artists), so only the fields that belong to THIS playlist instance
+// are propagated here.
+//
+// Three consumers read these fields after expansion, which is why losing them
+// is not cosmetic:
+//
+//   - the cast preflight's scheduled-playlist scan (commandrouter/handler.go):
+//     a series whose editions carry no displayAt is read as unscheduled, so the
+//     dead-link probe runs against a premiere whose sources are legitimately
+//     not up yet and REJECTS the cast outright.
+//   - the displayAt scheduler (playlistschedule): no displayAt on any item is
+//     the "nothing scheduled" branch, which clears the Daily timer and plays a
+//     scheduled series immediately.
+//   - the content policy filter (contentpolicy.FilterLocked): a `mature` series
+//     expanding into unrated editions stops tripping the mature refusal, which
+//     is the PERMISSIVE direction — the one failure here that must not be left
+//     to a follow-up.
+//
+// The series item's own stated value wins over whatever the catalog supplied:
+// the item in hand is the playlist instance being played. A field the series
+// item does not state is left exactly as the edition had it. Values are copied
+// per edition rather than shared, so a later edit that mutates one edition's
+// schedule cannot reach its siblings.
+func inheritInstanceFields(item dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
+	for i := range editions {
+		if item.DisplayAt != nil {
+			at := *item.DisplayAt
+			editions[i].DisplayAt = &at
+		}
+		if item.ContentRating != nil {
+			rating := *item.ContentRating
+			editions[i].ContentRating = &rating
+		}
+		if item.ContentReasons != nil {
+			reasons := make([]string, len(*item.ContentReasons))
+			copy(reasons, *item.ContentReasons)
+			editions[i].ContentReasons = &reasons
+		}
+	}
+	return editions
+}
+
 // seriesEditions asks the catalog for one series' editions.
 //
-// The keys are the playlist's id and the item's, which is what the catalog
-// addresses a series by — and they are the same ids wherever the playlist
-// was fetched from, because ff3 derives both deterministically and the feed
-// and the catalog carry them unchanged. A playlist the catalog does not hold
-// (a cast of something never published, an older channel revision) answers
-// 404, and the caller keeps the item.
+// UNRESOLVED, and deliberately left alone by the review round of 2026-10-29
+// (feral-file/ffos-user#421): what a `first` device override does with an
+// expanded series.
 //
-// The result is incomplete for a Bitmark-era series whose editions never
-// swapped to a contract: those have no token on chain, and reading them
-// needs the Archive manifest registered on Ethereum (feral-file#3576 step
-// 4). Until that lands, `full` plays the editions that are on chain.
+// The editions this returns may already carry a shared
+// `provenance.contract.seriesId`. The daemon does not add it — it reads only
+// `total` and `items` from the answer and never copies the series item's own
+// id onto them — but the catalog passes each edition's OWN provenance through
+// wholesale (`EDITION_OWN_FIELDS` in art-catalog-service's series-editions.ts),
+// so an edition whose on-chain provenance names its series arrives labeled and
+// nothing here strips it.
+//
+// That matters because ff-player#320 groups a run by exactly that key and then
+// resolves the run's mode from the DEVICE override alone — expansion has
+// already discarded the item's own intent — and that override is null ("auto")
+// on any device a controller has not configured, which `coerceSeriesPlayback`
+// reads as `first`. So a labeled run can collapse to a single edition on a
+// default device, which is not what this branch set out to deliver.
+//
+// Three directions were considered and none is taken here: stamping the id on
+// (tried and reverted — it creates the collapse where editions arrive
+// unlabeled), stripping it off (rejected for now — it removes a true
+// provenance field to steer another component's default), and carrying the
+// publisher's `seriesPlayback` across the boundary (impossible today — no
+// dp1-go release has the field, absent in v0.6.2 and v0.7.1 alike). The
+// likeliest real fix is in the player's own default for an expanded run.
+// Pinned by TestDP1_AnEditionsOwnSeriesIDSurvivesExpansion.
 func (d *dp1) seriesEditions(ctx context.Context, playlistID string, item dp1playlist.PlaylistItem) ([]dp1playlist.PlaylistItem, error) {
 	if playlistID == "" || item.ID == "" {
 		return nil, fmt.Errorf("series item has no playlist id and item id to resolve editions by")

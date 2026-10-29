@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/display-protocol/dp1-go/extension/contentrating"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -287,7 +288,7 @@ func TestDP1_SeriesStaysUnexpandedWhenThePlaylistHasNoID(t *testing.T) {
 //
 // display-protocol/dp1-go#12 makes the field accept either form. Until that
 // release is pinned here, `full` playback of those series is unreachable —
-// and this test is what says so, rather than the behaviour looking like a
+// and this test is what says so, rather than the behavior looking like a
 // catalog fault. When #12 lands this test flips to asserting the expansion.
 func TestDP1_A256BitSeriesIDOnAnEditionIsNotYetReadable(t *testing.T) {
 	ts := setup(t)
@@ -375,4 +376,159 @@ func TestDP1_TheCatalogEndpointIsHTTPSAndAllowlisted(t *testing.T) {
 	assert.True(t, dp1.CATALOG_HOSTS["art-catalog-service.bitmark-development.workers.dev"])
 	assert.False(t, dp1.CATALOG_HOSTS["catalog.feralfile.io.attacker.example"])
 	assert.False(t, dp1.CATALOG_HOSTS["catalog.feralfile.io:8788"])
+}
+
+// An edition replaces the series item in the playlist, so it has to carry the
+// fields that belong to THIS playlist instance rather than to the series: the
+// catalog merged each edition with its own copy of the item, which can predate
+// a schedule or a rating the document in hand carries.
+//
+// All three fields are pinned together because they are one mechanism, not
+// three bugs — every consumer that reads them runs AFTER expansion
+// (commandrouter's scheduled-cast scan, playlistschedule's timer,
+// contentpolicy's filter), and `contentRating` is the one whose loss fails
+// open: a mature series would expand into unrated editions.
+func TestDP1_ExpandedEditionsInheritTheSeriesItemsInstanceFields(t *testing.T) {
+	const displayAt = "2026-11-01T18:00:00Z"
+	mature := contentrating.Rating(contentrating.RatingMature)
+	reasons := []string{"violence"}
+
+	tests := []struct {
+		name   string
+		series func() dp1playlist.PlaylistItem
+		verify func(t *testing.T, edition dp1playlist.PlaylistItem)
+	}{
+		{
+			name: "displayAt keeps a scheduled series recognizable as scheduled",
+			series: func() dp1playlist.PlaylistItem {
+				item := seriesItem()
+				at := displayAt
+				item.DisplayAt = &at
+				return item
+			},
+			verify: func(t *testing.T, edition dp1playlist.PlaylistItem) {
+				require.NotNil(t, edition.DisplayAt)
+				assert.Equal(t, displayAt, *edition.DisplayAt)
+			},
+		},
+		{
+			name: "contentRating keeps a mature series mature after expansion",
+			series: func() dp1playlist.PlaylistItem {
+				item := seriesItem()
+				rating := mature
+				item.ContentRating = &rating
+				item.ContentReasons = &reasons
+				return item
+			},
+			verify: func(t *testing.T, edition dp1playlist.PlaylistItem) {
+				require.NotNil(t, edition.ContentRating)
+				assert.Equal(t, mature, *edition.ContentRating)
+				require.NotNil(t, edition.ContentReasons)
+				assert.Equal(t, reasons, *edition.ContentReasons)
+			},
+		},
+		{
+			name:   "a series item stating nothing leaves the edition as the catalog sent it",
+			series: seriesItem,
+			verify: func(t *testing.T, edition dp1playlist.PlaylistItem) {
+				assert.Nil(t, edition.DisplayAt)
+				assert.Nil(t, edition.ContentRating)
+				assert.Nil(t, edition.ContentReasons)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			url := "http://example.com/exhibition.json"
+			servePlaylist(ts, url, []dp1playlist.PlaylistItem{tt.series()})
+			serveEditions(ts, "playlist-1", "item-series",
+				editionsBody(2, editionItem("a"), editionItem("b")))
+
+			result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+			require.NoError(t, err)
+			require.Len(t, result.Items, 2)
+			// Every edition, not just the first: the scan that reads these
+			// fields stops at the first item that carries one.
+			for _, edition := range result.Items {
+				tt.verify(t, edition)
+			}
+		})
+	}
+}
+
+// The propagated value is a copy per edition, so a caller that rewrites one
+// edition's schedule cannot silently move its siblings'.
+func TestDP1_EachExpandedEditionOwnsItsCopyOfTheInstanceFields(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	item := seriesItem()
+	at := "2026-11-01T18:00:00Z"
+	item.DisplayAt = &at
+
+	url := "http://example.com/exhibition.json"
+	servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBody(2, editionItem("a"), editionItem("b")))
+
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.NoError(t, err)
+	require.Len(t, result.Items, 2)
+	require.NotNil(t, result.Items[0].DisplayAt)
+	require.NotNil(t, result.Items[1].DisplayAt)
+	assert.NotSame(t, result.Items[0].DisplayAt, result.Items[1].DisplayAt)
+}
+
+// labeledEditionItem is editionItem with its own series id, which is the shape
+// a real catalog answer has: the catalog passes each edition's own provenance
+// through wholesale, so an edition whose on-chain provenance names its series
+// arrives carrying `seriesId`. editionItem() omits it, so any test built only
+// on that helper cannot see this at all.
+func labeledEditionItem(id string, seriesID int) dp1playlist.PlaylistItem {
+	item := editionItem(id)
+	item.Provenance.Contract.SeriesID = &seriesID
+	return item
+}
+
+// What the daemon does today with an edition that arrives already labeled with
+// its series id: nothing. It is passed through untouched.
+//
+// This is recorded rather than asserted as desirable, because it is the open
+// question the 2026-10-29 review round stopped on. ff-player#320 groups a run
+// by this key and narrows it using the device override alone, which is `auto`
+// (read as `first`) on an unconfigured device — so the run this test produces
+// can play as a single edition there instead of the whole series. Whether the
+// daemon should strip the field, or the player should default an expanded run
+// to `full`, is the owner's call; see the note on seriesEditions.
+//
+// The test exists so that call is made against the real shape. An earlier
+// version of it used editionItem(), which never sets SeriesID, and so passed
+// no matter what the code did.
+func TestDP1_AnEditionsOwnSeriesIDSurvivesExpansion(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	const seriesID = 387
+
+	url := "http://example.com/exhibition.json"
+	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBody(2, labeledEditionItem("a", seriesID), labeledEditionItem("b", seriesID)))
+
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.NoError(t, err)
+	require.Len(t, result.Items, 2)
+	// Both editions, so the run really does share one key — that sameness is
+	// what the player groups on.
+	for _, edition := range result.Items {
+		require.NotNil(t, edition.Provenance.Contract.SeriesID)
+		assert.Equal(t, seriesID, *edition.Provenance.Contract.SeriesID)
+	}
 }
