@@ -2,10 +2,8 @@ package dp1
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
-	"reflect"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
@@ -221,8 +219,29 @@ func (d *dp1) ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 // rating reached the catalog and not this copy. A schedule has no such safe
 // direction and is reset, for the reason given at the assignment below.
 //
-// The playback settings the catalog also inherited are a different case again,
-// and are handled by inheritPlaybackSettings.
+// The playback settings the catalog also inherited — `duration`, `license`,
+// `display`, `override` — are deliberately NOT propagated: they stand exactly
+// as the catalog merged them.
+//
+// Re-basing them would need an answer to "did this edition state this value,
+// or inherit it from the catalog's copy of the series item", and nothing in
+// the /editions answer says — it carries merged items and no field origin.
+// Guessing the origin from how many editions share a value, which this file
+// did between 98bf3057 and the review of ab7283d8, reads a normal curation
+// pattern backwards: a series whose editions mostly carry the same deliberate
+// override looks exactly like a set that all inherited one, so every one of
+// them is overwritten with the series item's value (feralfile-bot F4,
+// 2026-10-29: series duration 5, editions stating 20/20/5, expanded to
+// 5/5/5 — playback silently shortened). Frequency cannot establish
+// inheritance for any number of editions, so the guess is removed rather than
+// narrowed.
+//
+// What that costs is the opposite direction, and it is the staleness this
+// whole path already degrades to elsewhere: a series item edited after the
+// catalog ingested it plays its editions on the catalog's older playback
+// settings until the next ingest. Closing it for real needs the catalog to
+// state which fields each edition stated for itself — a cross-repo change,
+// recorded under `Out of scope` on ffos-user#421.
 func inheritInstanceFields(item dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
 	for i := range editions {
 		// Cleared before being re-applied, unlike the two rating fields
@@ -249,168 +268,7 @@ func inheritInstanceFields(item dp1playlist.PlaylistItem, editions []dp1playlist
 			editions[i].ContentReasons = &reasons
 		}
 	}
-	inheritPlaybackSettings(item, editions)
 	return editions
-}
-
-// inheritPlaybackSettings re-bases the playback settings the catalog inherited
-// from ITS copy of the series item onto the copy actually being played.
-//
-// The catalog builds an edition by starting from its stored series item and
-// letting the edition override it field by field — only `id`, `source` and
-// `provenance` are always the edition's own (`editionItem` in
-// art-catalog-service's series-editions.ts). So an expanded edition's
-// `duration`, `license`, `display` and `override` are the STORED series item's
-// values unless that edition stated its own, and the stored copy is not
-// necessarily the item in hand: an inline dp1_call payload, or a playlist
-// edited after the catalog ingested it, carries its own. Before this, a cast
-// setting duration 99 on the series item silently played the catalog's 5
-// (feralfile-bot F3, 2026-10-29).
-//
-// Only settings that are statements of the playlist instance are re-based.
-// Left to the edition deliberately: `repro` (a seed and a frame hash describe
-// that edition, not the series), `title`/`slug` (an edition is "#42"), and
-// `ref`/`refHash`/`inlineManifest` (the work's manifest, where the catalog's
-// own one-level metadata merge already keeps per-edition credits).
-//
-// Unlike the curation fields above, each is re-based per edition rather than
-// across the whole answer, so the item in hand wins over the catalog's stale
-// copy but never over a value an edition stated for itself — see rebaseField.
-func inheritPlaybackSettings(item dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) {
-	if item.Duration != nil {
-		rebaseField(editions,
-			func(e dp1playlist.PlaylistItem) any { return e.Duration },
-			func(e *dp1playlist.PlaylistItem) {
-				duration := *item.Duration
-				e.Duration = &duration
-			})
-	}
-	if item.License != "" {
-		rebaseField(editions,
-			func(e dp1playlist.PlaylistItem) any { return e.License },
-			func(e *dp1playlist.PlaylistItem) { e.License = item.License })
-	}
-	if len(item.Override) > 0 {
-		rebaseField(editions,
-			func(e dp1playlist.PlaylistItem) any { return e.Override },
-			func(e *dp1playlist.PlaylistItem) {
-				override := make(json.RawMessage, len(item.Override))
-				copy(override, item.Override)
-				e.Override = override
-			})
-	}
-	if item.Display != nil {
-		rebaseField(editions,
-			func(e dp1playlist.PlaylistItem) any { return e.Display },
-			func(e *dp1playlist.PlaylistItem) {
-				// A failed copy leaves the edition's own display rather than
-				// blanking it: losing the re-base is a stale preference,
-				// losing the field is an item with no render preferences.
-				if display := copyDisplayPrefs(item.Display); display != nil {
-					e.Display = display
-				}
-			})
-	}
-}
-
-// rebaseField applies set to every edition that carries the field's inherited
-// value, and leaves the rest alone.
-//
-// The inherited value is the one most editions share. That is what separates a
-// value the catalog supplied from one an edition stated, without the daemon
-// ever seeing the catalog's own copy of the series item: every edition of one
-// series is merged against a SINGLE such copy, so the field comes back
-// identical on every edition that did not state it, and an edition holding
-// anything else stated it for itself.
-//
-// Taking the most common value per field, rather than requiring the whole
-// answer to agree, is what makes a `multi_unique` series work: one edition of
-// twenty stating its own duration must not strand the other nineteen on the
-// catalog's stale one, which is the same defect this re-basing exists to fix.
-func rebaseField(
-	editions []dp1playlist.PlaylistItem,
-	get func(dp1playlist.PlaylistItem) any,
-	set func(*dp1playlist.PlaylistItem),
-) {
-	inherited := pluralityIndex(editions, get)
-	if inherited < 0 {
-		return
-	}
-	// Read before the loop mutates anything. Every comparison below is against
-	// this original value, and an edition is only ever written after it has
-	// been compared, so a rewritten edition cannot change a later verdict.
-	value := get(editions[inherited])
-	for i := range editions {
-		if reflect.DeepEqual(get(editions[i]), value) {
-			set(&editions[i])
-		}
-	}
-}
-
-// pluralityIndex returns the index of an edition holding the most common value
-// for the field get reads, or -1 when no single value is most common.
-//
-// Pointers are followed, so two editions whose durations hold the same number
-// count as the same value even though the pointers differ. A one-edition answer
-// returns that edition: with no sibling to compare against, the document in
-// hand is still the more current of the two copies. A true tie returns -1 and
-// nothing is re-based — with the set split evenly there is no evidence which
-// half the catalog supplied, and leaving both as they arrived is the reading
-// that invents nothing.
-//
-// Editions that all state the same value are indistinguishable from
-// inheritance and are re-based. Accepted: a value the whole set shares is the
-// series' as far as anything here can tell, and the item in hand is the better
-// authority for it.
-//
-// Cost: O(n²) reflect.DeepEqual comparisons per field, n bounded by
-// seriesPageLimit, so at most ~65k narrow comparisons per field for the
-// largest page the catalog will serve into one series. Kept as a plain pass
-// rather than an O(n) hash of each value, because the bound is already far
-// below the sequential-fetch latency the same expansion accepts — one 30s
-// catalog round trip per series item — and a hashing pass would trade tested
-// comparison semantics for a key function that has to agree with
-// reflect.DeepEqual on pointers, maps and raw JSON. Pinned at the page ceiling
-// by TestDP1_RebasingHoldsAcrossAFullEditionPage (run-reviewer round 3, F2).
-func pluralityIndex(editions []dp1playlist.PlaylistItem, get func(dp1playlist.PlaylistItem) any) int {
-	best, bestCount, tied := -1, 0, false
-	for i := range editions {
-		count := 0
-		for j := range editions {
-			if reflect.DeepEqual(get(editions[j]), get(editions[i])) {
-				count++
-			}
-		}
-		switch {
-		case count > bestCount:
-			best, bestCount, tied = i, count, false
-		case count == bestCount && !reflect.DeepEqual(get(editions[i]), get(editions[best])):
-			tied = true
-		}
-	}
-	if tied {
-		return -1
-	}
-	return best
-}
-
-// copyDisplayPrefs deep-copies display preferences, returning nil when they
-// cannot be copied.
-//
-// Through JSON rather than by assignment because DisplayPrefs is a struct of
-// pointers and maps: a shallow copy would leave every edition sharing the same
-// Interaction, Autoplay and UserOverrides, which is exactly the aliasing the
-// per-edition copy rule above exists to prevent.
-func copyDisplayPrefs(prefs *dp1playlist.DisplayPrefs) *dp1playlist.DisplayPrefs {
-	encoded, err := json.Marshal(prefs)
-	if err != nil {
-		return nil
-	}
-	var copied dp1playlist.DisplayPrefs
-	if err := json.Unmarshal(encoded, &copied); err != nil {
-		return nil
-	}
-	return &copied
 }
 
 // seriesEditions asks the catalog for one series' editions.

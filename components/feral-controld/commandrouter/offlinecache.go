@@ -79,7 +79,17 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// that window visible: see Service.ClearBarrier.
 	barrier := h.offlineCache.ClearBarrier()
 
-	playlist, err := h.resolveOfflineCachePlaylist(ctx, args)
+	// Resolved WITHOUT the item ceiling the bulk sibling applies. That
+	// ceiling bounds the download work CMD_DOWNLOAD_PLAYLIST enqueues for a
+	// whole playlist; this command enqueues exactly ONE item, selected by an
+	// exact-match scan whose cost does not grow with the list — so the
+	// ceiling buys nothing here and costs correctness: an item genuinely
+	// present past the 255th resolved position answered a non-retryable
+	// not_found, which uncapped origin/develop did not (run-reviewer round 4,
+	// F1). It also decides what the save below persists, and ClearPlaylist
+	// enumerates the member sources to clear FROM that record, so a truncated
+	// resolve here would orphan every item past the cut.
+	playlist, err := h.resolveOfflineCachePlaylistUncapped(ctx, args)
 	if err != nil {
 		return errorResponse("resolve_failed", err.Error(), true), nil
 	}
@@ -609,6 +619,14 @@ func parseStatusRequest(args map[string]any) (offlinecache.StatusRequest, map[st
 // blanket clamp would newly truncate the tail of a publisher's own signed item
 // list on any oversized playlist that merely happens to also name a series —
 // silent data loss neither origin/develop nor this branch does anywhere else.
+//
+// It is also NOT what handleDownloadPlaylistItem resolves through, which calls
+// the uncapped helper below on purpose: the ceiling bounds enqueued downloads,
+// and a single-item request enqueues one item whichever position it sits at.
+// Capping that lookup turned a resolvable source past the ceiling into a
+// permanent not_found (run-reviewer round 4, F1) — see the comment at its
+// resolve. Only CMD_DOWNLOAD_PLAYLIST, which enqueues the whole list, goes
+// through this wrapper.
 func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[string]any) (*dp1.Playlist, error) {
 	playlist, err := h.resolveOfflineCachePlaylistUncapped(ctx, args)
 	if err != nil {

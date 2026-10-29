@@ -1857,3 +1857,61 @@ func TestCommandHandler_DownloadPlaylist_HoldsTheResolveToTheItemCeiling(t *test
 	assertOkResponse(t, result)
 	assert.Equal(t, dp1.MAX_PLAYLIST_ITEMS_LIMIT, queued)
 }
+
+// A single-item download reaches an item past the ceiling the bulk download
+// holds itself to.
+//
+// The two commands share one resolve, and the ceiling above belongs to the
+// bulk one: it bounds how many items CMD_DOWNLOAD_PLAYLIST enqueues and
+// fetches. This command enqueues exactly one, found by an exact-match scan, so
+// applying the ceiling to it only hid the item — a source genuinely present at
+// position 280 answered a non-retryable not_found, which uncapped
+// origin/develop did not, and no other path could reach it either because the
+// bulk download truncates at the same cut (run-reviewer round 4, F1).
+//
+// The playlist the handler saves is asserted at full length for the second
+// half of the same defect: ClearPlaylist enumerates the member sources to
+// clear FROM that record, so a truncated save would leave every item past the
+// cut cached with nothing able to clear it.
+func TestCommandHandler_DownloadPlaylistItem_ReachesAnItemPastTheBulkCeiling(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	const want = 280
+	items := make([]dp1playlist.PlaylistItem, 0, 300)
+	for i := 0; i < 300; i++ {
+		items = append(items, dp1playlist.PlaylistItem{
+			ID:     fmt.Sprintf("edition-%d", i),
+			Source: fmt.Sprintf("https://example.com/%d.mp4", i),
+		})
+	}
+	require.Greater(t, want, dp1.MAX_PLAYLIST_ITEMS_LIMIT,
+		"the item has to sit past the bulk ceiling for this to pin anything")
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: items}}
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	const sampledGen = uint64(7)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(sampledGen).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, items[want]).Return(nil).Times(1)
+	saved := -1
+	ts.mockJSON.EXPECT().Marshal(playlist).DoAndReturn(func(v any) ([]byte, error) {
+		saved = len(v.(*dp1.Playlist).Items)
+		return marshaled, nil
+	}).Times(1)
+	mockOfflineCache.EXPECT().
+		IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, sampledGen).
+		Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": items[want].Source},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	assert.Equal(t, "queued", resp["status"])
+	assert.Equal(t, items[want].Source, resp["source"])
+	assert.Equal(t, len(items), saved)
+}

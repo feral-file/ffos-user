@@ -612,15 +612,22 @@ func editionWithDuration(id string, seconds float64) dp1playlist.PlaylistItem {
 	return item
 }
 
-// The playlist instance being played is the authority for the playback
-// settings the catalog inherited from its own stored copy of the series item.
+// The catalog's merge of duration, license, display and override stands as it
+// arrived, even when the series item in hand states something else.
 //
-// The catalog merges each edition on top of that stored copy, so duration,
-// license, display and override come back as the STORED series item stated
-// them — and an inline dp1_call payload, or a playlist edited after the
-// catalog ingested it, carries values that copy never had. Before the fix a
-// cast setting duration 99 played the catalog's 5 (feralfile-bot F3).
-func TestDP1_ExpandedEditionsTakePlaybackSettingsFromTheSeriesItemInHand(t *testing.T) {
+// This is the limitation the expansion accepts, and it is pinned rather than
+// merely documented because the branch tried the other reading twice. The
+// catalog merges each edition on top of ITS stored copy of the series item, so
+// those four fields come back as that copy stated them — and an inline
+// dp1_call payload, or a playlist edited after the catalog ingested it, can
+// carry values the copy never had (feralfile-bot F3). Re-basing them onto the
+// item in hand needs to know which editions stated a value for themselves, and
+// the /editions answer does not say; inferring it from how many editions share
+// a value overwrote deliberate per-edition overrides instead (feralfile-bot
+// F4 — see TestDP1_EditionsThatShareAnOverrideKeepIt). So the daemon leaves
+// them alone: the editions play the catalog's settings until its next ingest,
+// the same staleness an unreachable catalog degrades to.
+func TestDP1_PlaybackSettingsStandAsTheCatalogMergedThem(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -648,28 +655,24 @@ func TestDP1_ExpandedEditionsTakePlaybackSettingsFromTheSeriesItemInHand(t *test
 	require.Len(t, result.Items, 2)
 	for _, edition := range result.Items {
 		require.NotNil(t, edition.Duration)
-		assert.Equal(t, float64(99), *edition.Duration)
-		assert.Equal(t, "open", edition.License)
+		assert.Equal(t, float64(5), *edition.Duration)
+		assert.Equal(t, "token", edition.License)
 		require.NotNil(t, edition.Display)
-		assert.Equal(t, "fit", edition.Display.Scaling)
-		assert.JSONEq(t, `{"ff":{"hint":"instance"}}`, string(edition.Override))
+		assert.Equal(t, "cover", edition.Display.Scaling)
+		assert.JSONEq(t, `{"ff":{"hint":"catalog"}}`, string(edition.Override))
 	}
-	// Per edition, not shared: the same rule the schedule fields follow, and
-	// DisplayPrefs is a struct of pointers, so sharing one would let an edit
-	// to one edition's render preferences reach its siblings.
+	// Still per edition, not shared: DisplayPrefs is a struct of pointers, so
+	// two editions sharing one would let an edit to one edition's render
+	// preferences reach its siblings.
 	assert.NotSame(t, result.Items[0].Display, result.Items[1].Display)
 	assert.NotSame(t, result.Items[0].Duration, result.Items[1].Duration)
 }
 
-// An edition that states a playback setting for ITSELF keeps it. The catalog
-// merges every edition of one series against a single copy of the series item,
-// so a value that differs across the answer can only have come from the
-// editions — which is the one signal available here, and what keeps the
-// re-basing above from overwriting a genuine per-edition override.
-//
-// Two editions disagreeing is the even split pluralityIndex refuses to call:
-// nothing says which half the catalog supplied, so both are left as they
-// arrived.
+// An edition that states a playback setting for ITSELF keeps it, whatever the
+// series item in hand says — the same rule as the test above, read from the
+// other side: nothing is re-based, so nothing can overwrite a per-edition
+// override. Pinned separately because this is the direction a future re-base
+// would break first.
 func TestDP1_AnEditionsOwnPlaybackSettingSurvivesExpansion(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -693,8 +696,9 @@ func TestDP1_AnEditionsOwnPlaybackSettingSurvivesExpansion(t *testing.T) {
 }
 
 // A series item that states no playback setting leaves the editions exactly as
-// the catalog sent them — the common case, where the catalog's copy of the
-// series item IS the item in hand and there is nothing to re-base.
+// the catalog sent them — as does one that states them, above; this pins the
+// common case, where the catalog's copy of the series item IS the item in hand
+// and the two readings cannot be told apart.
 func TestDP1_ASeriesItemStatingNoPlaybackSettingsLeavesTheEditionsAlone(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -714,16 +718,16 @@ func TestDP1_ASeriesItemStatingNoPlaybackSettingsLeavesTheEditionsAlone(t *testi
 	}
 }
 
-// One edition stating its own value must not strand its siblings on the
-// catalog's stale one.
+// A series whose editions genuinely differ — the `multi_unique` shape — comes
+// through edition by edition, with no edition's value moved onto another's.
 //
-// This is the `multi_unique` shape — a series whose editions genuinely differ —
-// and the case an all-or-nothing agreement check got wrong: it skipped the
-// re-base for the whole answer the moment any single edition disagreed, which
-// is the same "a cast's duration is silently ignored" defect the re-basing
-// exists to fix, just narrowed to the series that have a customized edition
-// (run-reviewer round 1, F1).
-func TestDP1_OneCustomizedEditionDoesNotStrandItsSiblings(t *testing.T) {
+// This set is what two rounds of re-basing rules disagreed about: an
+// all-or-nothing agreement check left all three on the catalog's values, a
+// plurality check moved the two that matched onto the item in hand. Neither
+// could tell which of the three stated a duration for itself, and the answer
+// does not say, so all three are now left as they arrived (run-reviewer round
+// 1 F1, feralfile-bot F4).
+func TestDP1_EditionsThatDifferAreLeftAsTheyArrived(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -732,7 +736,9 @@ func TestDP1_OneCustomizedEditionDoesNotStrandItsSiblings(t *testing.T) {
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
-	// Two editions carry the catalog's inherited 5, one states its own 7.
+	// Two editions carry 5 and one carries 7. Which of those the catalog
+	// supplied and which an edition stated is exactly what the answer does
+	// not say.
 	serveEditions(ts, "playlist-1", "item-series", editionsBody(3,
 		editionWithDuration("a", 5),
 		editionWithDuration("b", 7),
@@ -747,9 +753,75 @@ func TestDP1_OneCustomizedEditionDoesNotStrandItsSiblings(t *testing.T) {
 		require.NotNil(t, edition.Duration)
 		durations = append(durations, *edition.Duration)
 	}
-	// The two inherited ones take the item in hand; the one that stated its
-	// own keeps it.
-	assert.Equal(t, []float64{99, 7, 99}, durations)
+	assert.Equal(t, []float64{5, 7, 5}, durations)
+}
+
+// Editions that share an override keep it, even when they are most of the
+// answer and the series item in hand states something else.
+//
+// The catalog gives an edition the series' value unless the edition states its
+// own, and a curator applying one override to most of a series is ordinary
+// curation — so "most editions carry this value" is not evidence that the
+// catalog supplied it. Reading it as evidence overwrote exactly those editions
+// with the series item's value: series duration 5, two editions stating 20 and
+// one carrying 5, expanded to 5/5/5, which silently shortens playback
+// (feralfile-bot F4, 2026-10-29, reproduced against the real catalog merger).
+//
+// All four fields that merge covers are asserted, not only the duration the
+// finding named, because one rule read them all.
+func TestDP1_EditionsThatShareAnOverrideKeepIt(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// The series item in hand and the catalog's copy of it agree: 5 is the
+	// series' duration, and the two editions below departed from it.
+	item := seriesItem()
+	item.Duration = durationOf(5)
+	item.License = "token"
+	item.Display = &dp1playlist.DisplayPrefs{Scaling: "cover"}
+	item.Override = encjson.RawMessage(`{"ff":{"hint":"series"}}`)
+
+	stated := func(id string) dp1playlist.PlaylistItem {
+		edition := editionWithDuration(id, 20)
+		edition.License = "open"
+		edition.Display = &dp1playlist.DisplayPrefs{Scaling: "fit"}
+		edition.Override = encjson.RawMessage(`{"ff":{"hint":"edition"}}`)
+		return edition
+	}
+	inherited := func(id string) dp1playlist.PlaylistItem {
+		edition := editionWithDuration(id, 5)
+		edition.License = "token"
+		edition.Display = &dp1playlist.DisplayPrefs{Scaling: "cover"}
+		edition.Override = encjson.RawMessage(`{"ff":{"hint":"series"}}`)
+		return edition
+	}
+
+	url := "http://example.com/exhibition.json"
+	servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBody(3, stated("a"), stated("b"), inherited("c")))
+
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.NoError(t, err)
+	require.Len(t, result.Items, 3)
+	for i, edition := range result.Items {
+		want := map[bool]struct {
+			duration float64
+			license  string
+			scaling  string
+			hint     string
+		}{
+			true:  {20, "open", "fit", "edition"},
+			false: {5, "token", "cover", "series"},
+		}[i < 2]
+		require.NotNil(t, edition.Duration)
+		assert.Equal(t, want.duration, *edition.Duration)
+		assert.Equal(t, want.license, edition.License)
+		require.NotNil(t, edition.Display)
+		assert.Equal(t, want.scaling, edition.Display.Scaling)
+		assert.JSONEq(t, `{"ff":{"hint":"`+want.hint+`"}}`, string(edition.Override))
+	}
 }
 
 // A schedule the catalog still holds but the document in hand no longer states
@@ -881,44 +953,4 @@ func TestDP1_ADoneContextStopsTheExpansionWalk(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
 	assert.Equal(t, "item-series", result.Items[0].ID)
-}
-
-// Re-basing holds at the largest page the catalog will serve into one series.
-//
-// Every test above works at two or three editions, which left the per-field
-// re-basing untested at the only scale that makes its cost interesting:
-// pluralityIndex compares every edition against every other, so a full page is
-// where an O(n²) pass would show up, and where a future rewrite would most
-// easily change behavior (run-reviewer round 3, F2).
-func TestDP1_RebasingHoldsAcrossAFullEditionPage(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	item := seriesItem()
-	item.Duration = durationOf(99)
-
-	const page = 255
-	editions := make([]dp1playlist.PlaylistItem, 0, page)
-	for i := 0; i < page; i++ {
-		editions = append(editions, editionWithDuration(fmt.Sprintf("e%d", i), 5))
-	}
-	// One edition of the page states its own duration and must keep it.
-	editions[page-1].Duration = durationOf(7)
-
-	url := "http://example.com/exhibition.json"
-	servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
-	serveEditions(ts, "playlist-1", "item-series", editionsBody(page, editions...))
-
-	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
-
-	require.NoError(t, err)
-	require.Len(t, result.Items, page)
-	for i, edition := range result.Items {
-		require.NotNil(t, edition.Duration)
-		if i == page-1 {
-			assert.Equal(t, float64(7), *edition.Duration)
-			continue
-		}
-		assert.Equal(t, float64(99), *edition.Duration)
-	}
 }
