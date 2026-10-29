@@ -1153,8 +1153,11 @@ pairing first. That topic reaches the real FF1's authenticated legacy
 socket, and the real FF1 cannot open an enroll sealed to a profile forged by
 someone holding `ps`, so the forgery fails there instead of being answered
 (§14.1). Only when that topic answers 1003/410, or none is held: the LAN, then
-v2. A topic taken from the registration result itself carries no such
-assurance and goes last. The device admits `enroll` without `inv` on v2
+v2. A client that cannot tell whether it holds such a topic (its credential
+store is unreadable) MUST NOT send this `enroll` over v2, where a forged
+profile is answered from anywhere; it MAY use the LAN, the exposure every
+client had before v2. A topic taken from the registration result itself
+carries no such assurance and goes last. The device admits `enroll` without `inv` on v2
 exactly as on the LAN: it succeeds only for a `ctl` an owner already approved
 or registered. (Until 2026-10 this was a blanket client rule that kept every
 `enroll` off v2, which would have made adding a controller impossible off the
