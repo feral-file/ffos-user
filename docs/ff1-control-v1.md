@@ -1134,7 +1134,8 @@ relay's `backpressure`) is **transient**: the device and every client retry
 with backoff and never treat it as permanent. The device-ID channel is
 public, so strangers can contend for it. (The legacy relayer's handshake
 semantics are unchanged: released firmware treats a 4xx there as permanent,
-which is why device-facing topic issuance is retired last.)
+which is why the legacy host's shutdown waits for the device population,
+ffos-user `docs/relay-v2-only-g3.md` §6 Gate B.)
 
 First-owner `enroll` with `inv` (§5.1) is never carried on v2, and the
 device refuses it there. `enroll` without `inv` (§5.3) MAY be carried on v2
@@ -1152,14 +1153,16 @@ Route order for a §5.6 newcomer: a legacy topic it held from **before** the
 pairing first. That topic reaches the real FF1's authenticated legacy
 socket, and the real FF1 cannot open an enroll sealed to a profile forged by
 someone holding `ps`, so the forgery fails there instead of being answered
-(§14.1). Only when that topic answers 1003/410, or none is held: the LAN, then
-v2. A client that cannot tell whether it holds such a topic (its credential
-store is unreadable) MUST NOT send this `enroll` over v2, where a forged
-profile is answered from anywhere; it MAY use the LAN, the exposure every
-client had before v2. A topic taken from the registration result itself
-carries no such assurance and goes last. The device admits `enroll` without `inv` on v2
-exactly as on the LAN: it succeeds only for a `ctl` an owner already approved
-or registered. (Until 2026-10 this was a blanket client rule that kept every
+(§14.1). Only when that topic answers 1003/410, or the legacy origin answers
+404 (a shut-down host), or none is held: the LAN, then v2. A DNS failure
+(NXDOMAIN) is never such an answer: a LAN peer can spoof it. A client that
+cannot tell whether it holds such a topic (its credential store is
+unreadable) MUST NOT send this `enroll` over v2, where a forged profile is
+answered from anywhere; it MAY use the LAN, the exposure every client had
+before v2. A topic taken from the registration result itself carries no
+such assurance and goes last. The device admits `enroll` without `inv` on
+v2 exactly as on the LAN: it succeeds only for a `ctl` an owner already
+approved or registered. (Until 2026-10 this was a blanket client rule that kept every
 `enroll` off v2, which would have made adding a controller impossible off the
 LAN once the legacy relayer is retired; ffos-user `docs/relay-v2-only-g3.md`.)
 
@@ -1388,16 +1391,22 @@ and the ff1-cli test suite does the same with `jose`.
   copy captured on the relay can be replayed if the owner registers those
   keys within its `exp` + 30 s. The §5.6 flow sends nothing before the
   protected `enroll`, and ff-cli sends no command while a pairing is open.
-- Residual, accepted while dual-stack: the v2 device channel is public and
-  the relay cannot tell the device from a stranger (a legacy topic is not
-  bound to a device ID and anyone can mint one). Per-address limits (IPv4
-  address, IPv6 /64), idle close and refusal at capacity raise the cost, but
-  a party with a handful of addresses that keep pinging can still fill a
-  channel. The effect is a 429 at connect, which is proven undelivered, so
-  clients fall back to the legacy relayer and the device's legacy session is
-  unaffected. **v2-only firmware requires** a connection slot the relay can
-  attribute to the device itself (for example a device credential the relay
-  can verify) before the legacy relayer is retired.
+- Residual, accepted: the v2 device channel is public and the relay cannot
+  tell the device from a stranger (a legacy topic is not bound to a device
+  ID and anyone can mint one). Per-address limits (IPv4 address, IPv6 /64),
+  idle close and refusal at capacity raise the cost, but a party with a
+  handful of addresses that keep pinging can still fill a channel. While
+  the legacy relayer exists the effect is a 429 at connect, which is proven
+  undelivered, so clients fall back to the legacy relayer and the device's
+  legacy session is unaffected. After the legacy relayer is gone, a device
+  whose channel is held full has no remote route until the squatters leave;
+  the LAN is unaffected. Until 2026-10-30 this section required a relay
+  connection slot attributable to the device before retirement; that was
+  withdrawn (ffos-user `docs/relay-v2-only-g3.md` §1): the squat needs no
+  credential and grants nothing, and a device credential on the relay would
+  make the relay hold device identity for the first time. If it is ever
+  exploited, the remedy is a relay change (a reserved slot proved with
+  `devSig`), not a firmware change.
 - Residual, accepted: `releaseOwnership` (§5.5) changes who holds a grant,
   nothing else. The identity and the root subvolume stay, so a former owner
   who had root through SSH or owner Tailscale may have left something
@@ -1620,12 +1629,19 @@ release operator applies them.
   handling and reply target (§13), the per-controller notification binding
   (§9) and the topic-independent claim QR (§11). A build that dials v2
   without all of them is open to anyone who knows the device ID.
-- Legacy retirement is split: controller-facing relayer endpoints first,
-  device-facing topic issuance last.
+- Legacy retirement is one step, decided 2026-10-30: the legacy host is
+  shut down, not flag-retired, and afterwards its URL answers HTTP 404, or
+  NXDOMAIN once its zone is gone, never 410. Firmware treats both as
+  permanent. Clients treat the 404 as retirement but never NXDOMAIN (a LAN
+  peer can spoof it); the app also takes a remote config flag, and ff-cli
+  a release with the legacy relayer off (ffos-user
+  `docs/relay-v2-only-g3.md` §3.3, §5.1.6, §5.2, §6). The relayer's
+  split flags remain for a relay that is still up with a route switched
+  off, which is how a test deployment simulates retirement.
 - Turning the legacy relayer off is gated on fleet telemetry of
   `control.state`, not on firmware version: a `legacy` device has no
   controller grants and v2 admits no plaintext (§7.2), so retirement strands every unmigrated
   device off the LAN. It also waits for Play to move from relayer session
   tokens to device-issued display grants (§5.7, Play 0.5), with the
-  retirement prerequisites listed in §13, and for the v2 device-slot
-  requirement in §13.
+  retirement prerequisites listed in §13, and for the §6 gates of
+  `relay-v2-only-g3.md` (controller traffic and device population).
