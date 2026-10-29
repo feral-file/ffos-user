@@ -83,6 +83,16 @@ type DP1 interface {
 	// ProcessDynamicPlaylistForCast applies the initial-cast bounded hydration
 	// policy described on ProcessPlaylistURLForCast.
 	ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playlist) (*Playlist, error)
+
+	// ExpandSeriesItems replaces every seriesRegistry item in playlist with
+	// the editions the catalog returns for it, bounded by maxItems (0 means
+	// unbounded). ProcessPlaylistURL(ForCast) and ProcessDynamicPlaylist(ForCast)
+	// already apply this internally to whatever they fetch or resolve; this
+	// is for a caller that already holds a decoded, static playlist it did
+	// NOT get from one of those four — an inline dp1_call payload, or a
+	// playlist echoed back in player status — and so needs the same
+	// expansion applied by hand before treating the playlist as final.
+	ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems int) Playlist
 }
 
 type dp1 struct {
@@ -144,20 +154,18 @@ func (d *dp1) ProcessPlaylistURLForCast(ctx context.Context, url string) (*Playl
 func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
 	d.logger.Info("Processing dynamic playlist", zap.String("playlist_id", playlist.ID))
 
-	if playlist.DynamicQuery != nil {
-		if len(playlist.DynamicQueries) > 0 {
-			d.logger.Warn("playlist has both dynamicQuery and legacy dynamicQueries; using dynamicQuery only",
-				zap.String("playlist_id", playlist.ID))
-		}
-		return d.processDynamicPlaylistSpec(ctx, playlist, minimal, 0)
+	resolved, err := d.processDynamicPlaylist(ctx, playlist, minimal, 0)
+	if err != nil {
+		return nil, err
 	}
 
-	// --- LEGACY: dynamicQueries[] + FFIndexer (remove with LegacyDynamicQuery) ---
-	if len(playlist.DynamicQueries) > 0 {
-		return d.processDynamicPlaylistLegacy(ctx, playlist, minimal, 0)
-	}
-
-	return nil, fmt.Errorf("playlist has no dynamic query configuration")
+	// A dynamically-resolved item can itself name a series: the core
+	// schema's dynamicQuery/legacy answer is not restricted to onChain
+	// items, only buildPlaylistItem's own legacy construction happens to
+	// always produce one. Expand it the same way the curated (non-dynamic)
+	// branch of ProcessPlaylistURL already does, rather than only there.
+	expanded := d.expandSeriesItems(ctx, *resolved, 0)
+	return &expanded, nil
 }
 
 func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playlist) (*Playlist, error) {
@@ -165,11 +173,18 @@ func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playli
 	if err != nil {
 		return nil, err
 	}
-	if hasDisplayAtItems(resolved.Items) || len(resolved.Items) <= MINIMAL_PLAYLIST_ITEMS_LIMIT {
-		return resolved, nil
+
+	// Same series expansion as above, bounded by the same cast cap the
+	// batch accumulation inside processDynamicPlaylist already respects —
+	// expanding can only grow the item count further, so the cap is
+	// re-applied here rather than assumed to still hold.
+	expanded := d.expandSeriesItems(ctx, *resolved, CAST_PLAYLIST_ITEMS_LIMIT)
+
+	if hasDisplayAtItems(expanded.Items) || len(expanded.Items) <= MINIMAL_PLAYLIST_ITEMS_LIMIT {
+		return &expanded, nil
 	}
-	resolved.Items = resolved.Items[:MINIMAL_PLAYLIST_ITEMS_LIMIT]
-	return resolved, nil
+	expanded.Items = expanded.Items[:MINIMAL_PLAYLIST_ITEMS_LIMIT]
+	return &expanded, nil
 }
 
 func (d *dp1) processDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool, maxItems int) (*Playlist, error) {

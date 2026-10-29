@@ -699,7 +699,11 @@ func (r *refresher) resolveDisplayedPlaylist(playerStatus *status.PlayerStatus) 
 		return playlist, nil
 	case playerStatus.Playlist != nil:
 		if !playerStatus.Playlist.HasDynamicContent() {
-			return playerStatus.Playlist, nil
+			// Defensive, not load-bearing: see
+			// commandrouter/offlinecache.go's resolveDisplayedPlaylist,
+			// which mirrors this same shape for the same reason.
+			expanded := r.dp1.ExpandSeriesItems(r.context, *playerStatus.Playlist, 0)
+			return &expanded, nil
 		}
 		return r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false)
 	default:

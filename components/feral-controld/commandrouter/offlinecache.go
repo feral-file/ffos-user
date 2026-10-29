@@ -437,7 +437,13 @@ func (h *handler) resolveDisplayedPlaylist(ctx context.Context, playerStatus *st
 		return playlist, nil
 	case playerStatus.Playlist != nil:
 		if !playerStatus.Playlist.HasDynamicContent() {
-			return playerStatus.Playlist, nil
+			// Defensive, not load-bearing: every CMD_DISPLAY_PLAYLIST path
+			// now expands a series before it reaches the player, so
+			// playerStatus.Playlist should already carry editions — but
+			// this is a no-op (hasSeriesItems short-circuits) whenever
+			// that holds, and correct if it ever doesn't.
+			expanded := h.dp1.ExpandSeriesItems(ctx, *playerStatus.Playlist, 0)
+			return &expanded, nil
 		}
 		return h.dp1.ProcessDynamicPlaylist(ctx, *playerStatus.Playlist, false)
 	default:
@@ -612,7 +618,11 @@ func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[stri
 		if playlist.HasDynamicContent() {
 			return h.dp1.ProcessDynamicPlaylist(ctx, *playlist, false)
 		}
-		return playlist, nil
+		// Static dp1_call: mirror the uncapped expansion
+		// ProcessPlaylistURL above already applies, so a download of an
+		// inline series plays — and caches — its editions too.
+		expanded := h.dp1.ExpandSeriesItems(ctx, *playlist, 0)
+		return &expanded, nil
 
 	default:
 		return nil, fmt.Errorf("request must include playlistUrl or dp1_call")

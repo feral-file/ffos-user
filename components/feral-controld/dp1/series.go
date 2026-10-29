@@ -88,11 +88,13 @@ func (d *dp1) expandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 	for _, item := range playlist.Items {
 		if !isSeriesItem(item) {
 			expanded = append(expanded, item)
-			continue
-		}
-
-		editions, err := d.seriesEditions(ctx, playlist.ID, item)
-		if err != nil || len(editions) == 0 {
+		} else if editions, err := d.seriesEditions(ctx, playlist.ID, item); err == nil && len(editions) > 0 {
+			d.logger.Info("expanded a series into its editions",
+				zap.String("playlist_id", playlist.ID),
+				zap.String("item_slug", item.Slug),
+				zap.Int("editions", len(editions)))
+			expanded = append(expanded, editions...)
+		} else {
 			if err != nil {
 				d.logger.Warn("series item kept unexpanded; its representative still plays",
 					zap.String("playlist_id", playlist.ID),
@@ -100,15 +102,14 @@ func (d *dp1) expandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 					zap.Error(err))
 			}
 			expanded = append(expanded, item)
-			continue
 		}
 
-		d.logger.Info("expanded a series into its editions",
-			zap.String("playlist_id", playlist.ID),
-			zap.String("item_slug", item.Slug),
-			zap.Int("editions", len(editions)))
-		expanded = append(expanded, editions...)
-
+		// Checked after every append, not only a successful expansion's:
+		// a plain item or a kept-unexpanded representative can cross
+		// maxItems just as a batch of editions can, and the cast path
+		// that passes a non-zero cap here must never hand the player
+		// more than it asked for regardless of which branch grew the
+		// slice (see CAST_PLAYLIST_ITEMS_LIMIT at the call site).
 		if maxItems > 0 && len(expanded) >= maxItems {
 			expanded = expanded[:maxItems]
 			break
@@ -117,6 +118,14 @@ func (d *dp1) expandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 
 	playlist.Items = expanded
 	return playlist
+}
+
+// ExpandSeriesItems is expandSeriesItems, exported for a caller outside this
+// package that already holds a decoded, static playlist it did not get from
+// ProcessPlaylistURL/ProcessPlaylistURLForCast/ProcessDynamicPlaylist(ForCast)
+// — see the DP1 interface doc for why those four need no separate call.
+func (d *dp1) ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems int) Playlist {
+	return d.expandSeriesItems(ctx, playlist, maxItems)
 }
 
 // seriesEditions asks the catalog for one series' editions.

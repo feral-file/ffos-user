@@ -773,6 +773,16 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 		}).
 		Times(1)
 
+	// Static dp1_call: no dynamic content, so Process expands series items
+	// by hand (see handler.go's CMD_DISPLAY_PLAYLIST branch) rather than
+	// through ProcessDynamicPlaylistForCast. mockPlaylist has none, so the
+	// expansion is a no-op; returning it unchanged is what the real
+	// expandSeriesItems would do too.
+	ts.mockDP1.EXPECT().
+		ExpandSeriesItems(ts.ctx, *mockPlaylist, dp1.CAST_PLAYLIST_ITEMS_LIMIT).
+		Return(*mockPlaylist).
+		Times(1)
+
 	ts.mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
 		Return(cdpResult, nil).
@@ -823,8 +833,19 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesInlineManifest(t *testi
 	ctx := context.Background()
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	// Static dp1_call again (see WithPlaylistObject above); echo the
+	// playlist straight back since what this test pins is the
+	// inlineManifest round-trip through the real JSON wrapper, not series
+	// expansion.
+	mockDP1.EXPECT().
+		ExpandSeriesItems(ctx, gomock.Any(), dp1.CAST_PLAYLIST_ITEMS_LIMIT).
+		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist {
+			return playlist
+		}).
+		Times(1)
 	handler := commandrouter.New(
-		newRoutableExecutor(ctrl), mockCDP, mocks.NewMockDP1(ctrl), mockStatusPoller,
+		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,
 		nil, nil, nil, nil, wrapper.NewJSON(), logger)
 
 	var playlistMap map[string]interface{}

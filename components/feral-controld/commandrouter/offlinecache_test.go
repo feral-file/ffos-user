@@ -160,6 +160,9 @@ func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistPersistsBodyWithEmpty
 		*p = playlist
 		return nil
 	}).Times(1)
+	// Static dp1_call: resolveOfflineCachePlaylist expands series items by
+	// hand (see offlinecache.go). This playlist has none, so echo it back.
+	ts.mockDP1.EXPECT().ExpandSeriesItems(ts.ctx, *playlist, 0).Return(*playlist).Times(1)
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(7)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
@@ -200,6 +203,7 @@ func TestCommandHandler_DownloadPlaylistItem_InlineItemPersistsBody(t *testing.T
 		*p = playlist
 		return nil
 	}).Times(1)
+	ts.mockDP1.EXPECT().ExpandSeriesItems(ts.ctx, *playlist, 0).Return(*playlist).Times(1)
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrItemInlineNotQueued).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
@@ -385,6 +389,7 @@ func TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL(t *t
 		*p = playlist
 		return nil
 	}).Times(1)
+	ts.mockDP1.EXPECT().ExpandSeriesItems(ts.ctx, *playlist, 0).Return(*playlist).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaledResolved, nil).Times(1)
 	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaledResolved), "").Return(0, 0, nil).Times(1)
 
@@ -424,6 +429,13 @@ func TestCommandHandler_DownloadPlaylist_PersistsInlineManifest(t *testing.T) {
 			"inlineManifest": `+inlineManifestJSON+`
 		}]
 	}`), &playlistMap))
+
+	ts.mockDP1.EXPECT().
+		ExpandSeriesItems(ts.ctx, gomock.Any(), 0).
+		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist {
+			return playlist
+		}).
+		Times(1)
 
 	var persisted json.RawMessage
 	mockOfflineCache.EXPECT().
@@ -648,6 +660,9 @@ func TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope(t *testing.T)
 		Command:  string(commands.CMD_DISPLAY_PLAYLIST),
 		Playlist: inlinePlaylist,
 	}, nil).Times(1)
+	// resolveDisplayedPlaylist's static branch expands defensively (see
+	// offlinecache.go); this playlist has no series items, so echo it back.
+	ts.mockDP1.EXPECT().ExpandSeriesItems(ts.ctx, *inlinePlaylist, 0).Return(*inlinePlaylist).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -690,6 +705,7 @@ func TestCommandHandler_ClearPlaylistCache_ResyncSkipsWhenPlaybackGenerationAdva
 		Command:  string(commands.CMD_DISPLAY_PLAYLIST),
 		Playlist: inlinePlaylist,
 	}, nil).Times(1)
+	ts.mockDP1.EXPECT().ExpandSeriesItems(ts.ctx, *inlinePlaylist, 0).Return(*inlinePlaylist).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
