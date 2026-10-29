@@ -275,6 +275,57 @@ func TestDP1_A256BitSeriesIDOnAnEditionIsNotYetReadable(t *testing.T) {
 	assert.Equal(t, "item-series", result.Items[0].ID)
 }
 
+// TestDP1_CastCapHoldsAcrossPlainAndExpandedAppends is the regression test
+// for the first run-reviewer round's finding: the cast cap
+// (CAST_PLAYLIST_ITEMS_LIMIT, only passed as maxItems by
+// ProcessPlaylistURLForCast) was checked after a successful series
+// expansion's append, but not after a plain item's or a kept-unexpanded
+// representative's — so a series followed by enough plain items overran the
+// limit. The series here expands to 2 editions first (well under the cap),
+// then 300 plain items follow one at a time; before the fix every one of
+// those 300 appends skipped the check.
+func TestDP1_CastCapHoldsAcrossPlainAndExpandedAppends(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	url := "http://example.com/exhibition.json"
+	items := []dp1playlist.PlaylistItem{seriesItem()}
+	for i := 0; i < 300; i++ {
+		items = append(items, editionItem(fmt.Sprintf("plain-%d", i)))
+	}
+	servePlaylist(ts, url, items)
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBody(2, editionItem("a"), editionItem("b")))
+
+	result, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url)
+
+	require.NoError(t, err)
+	assert.Len(t, result.Items, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
+}
+
+// TestDP1_CastCapHoldsWhenASeriesKeepsItsRepresentative is the same
+// regression, for the other previously-unchecked branch: a series that
+// fails to expand keeps its single representative item rather than a
+// batch of editions, and that append must be capped too.
+func TestDP1_CastCapHoldsWhenASeriesKeepsItsRepresentative(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	url := "http://example.com/exhibition.json"
+	items := []dp1playlist.PlaylistItem{seriesItem()}
+	for i := 0; i < 300; i++ {
+		items = append(items, editionItem(fmt.Sprintf("plain-%d", i)))
+	}
+	servePlaylist(ts, url, items)
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+		Return(nil, errors.New("catalog unreachable"))
+
+	result, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url)
+
+	require.NoError(t, err)
+	assert.Len(t, result.Items, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
+}
+
 func TestDP1_TheCatalogEndpointIsHTTPSAndAllowlisted(t *testing.T) {
 	// The base URL is a constant, not something a playlist supplies, but the
 	// guard is what keeps it that way: the answer decides what the screen
