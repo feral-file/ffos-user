@@ -4,10 +4,39 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"time"
 
+	"github.com/display-protocol/dp1-go/extension/contentrating"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
+
+// contentRatingRank orders a rating by how LITTLE the device's content policy
+// admits it, so "stricter" is one comparison instead of a special case per
+// label. It mirrors contentpolicy.Policy.Allows and must be changed with it:
+//
+//   - `mature` is the only label Allows hides outright, so it ranks highest.
+//   - `general` is never withheld, so it ranks lowest.
+//   - anything else — a label from a newer spec revision — is UNRATED to this
+//     build (contentpolicy.isRated), which the operator's blockUnratedCurated
+//     gate withholds on curated content. Stricter than `general`, looser than
+//     `mature`, so it sits between them.
+//
+// An ABSENT rating is deliberately not ranked here: it means the edition
+// states nothing of its own, which is inheritance rather than a comparison,
+// and its caller handles it as such.
+func contentRatingRank(r contentrating.Rating) int {
+	switch r {
+	case contentrating.RatingMature:
+		return 2
+	case contentrating.RatingGeneral:
+		return 0
+	default:
+		return 1
+	}
+}
 
 // A seriesRegistry item is a series, not an edition: core 1.1.0 §6's
 // whole-series form, `contract.seriesId` with no `tokenId` (Sean,
@@ -65,6 +94,40 @@ const (
 	// shared client's 30s timeout, for every series item a caller cares to
 	// put in the document.
 	maxSeriesPerPlaylist = MAX_PLAYLIST_ITEMS_LIMIT
+
+	// The wall clock ONE expansion walk may spend, which maxSeriesPerPlaylist
+	// does not bound: it bounds how many round trips the walk may buy, not
+	// how long they take, and against a catalog that is reachable but SLOW
+	// those are very different numbers — 255 attempts at the shared client's
+	// timeout is ~2.1 hours inside a single synchronous call.
+	//
+	// Every caller is synchronous, and playlist-refresher's is its one
+	// `select` loop: the same loop that services the 5-minute refresh tick,
+	// ForceRefresh (cache-clear, download-complete and reconnect resyncs),
+	// startup escalation and shutdown. A walk that runs for hours starves all
+	// of them, and nothing memoizes the slow answer, so the next tick pays
+	// again (run-reviewer round 5, F2).
+	//
+	// Budgeted as one HTTP timeout for the WHOLE walk, so an expansion can
+	// never cost more wall clock than the single fetch its caller already
+	// may. The deadline is only observed between attempts — the shared client
+	// takes no context, so a request already issued still runs to its own
+	// timeout — which makes the real worst case this budget plus one such
+	// request. A walk cut short keeps each remaining series' representative,
+	// the same shape an unreachable catalog already leaves behind.
+	seriesExpansionBudget = wrapper.HTTPClientTimeout
+
+	// What the three DEFENSIVE ExpandSeriesItems call sites allow instead:
+	// playlist-refresher's processPlayingPlaylist static-inline branch and
+	// both resolveDisplayedPlaylist static branches. Each re-derives "what is
+	// currently displayed" from player status, where every display path has
+	// already expanded, so expansion there is a no-op whenever the invariant
+	// holds (hasSeriesItems short-circuits) and these sites did no network
+	// work at all before this branch. They are not worth the budget above:
+	// the loop they run on must keep servicing its tick and ForceRefresh, and
+	// a series that does not expand in this window simply keeps the
+	// representative the player is already showing.
+	DefensiveSeriesExpansionTimeout = 5 * time.Second
 )
 
 // CATALOG_HOSTS is the allowlist validateCatalogEndpoint checks the base URL
@@ -103,6 +166,14 @@ func (d *dp1) expandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 	if !hasSeriesItems(playlist.Items) {
 		return playlist
 	}
+
+	// Checked only between attempts, on the budget branch below, together
+	// with the caller's own cancellation. WithTimeout keeps whichever
+	// deadline is earlier, so a caller that already bounds itself more
+	// tightly still wins — see seriesExpansionBudget for why the walk needs
+	// one of its own at all.
+	ctx, cancel := context.WithTimeout(ctx, seriesExpansionBudget)
+	defer cancel()
 
 	expanded := make([]dp1playlist.PlaylistItem, 0, len(playlist.Items))
 	attempts := 0
@@ -210,14 +281,33 @@ func (d *dp1) ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 // per edition rather than shared, so a later edit that mutates one edition's
 // schedule cannot reach its siblings.
 //
-// These three are the item in hand's outright because an edition cannot
-// meaningfully state them: a schedule and a content rating are curation, made
-// about an item's place in a playlist, not about the work. They still differ
-// from each other in which way they fail. A rating is only ever re-applied,
-// never cleared, because clearing is the PERMISSIVE direction — a `mature`
-// series whose editions came back unrated has to stay mature even if the
-// rating reached the catalog and not this copy. A schedule has no such safe
-// direction and is reset, for the reason given at the assignment below.
+// The schedule is the item in hand's outright, because an edition cannot
+// meaningfully state one: a `displayAt` is curation, made about an item's
+// place in a playlist, not about the work, and it has no safe direction to
+// fail in — so it is reset before being re-applied, for the reason given at
+// the assignment below.
+//
+// A rating is NOT the item in hand's outright, and that is the one asymmetry
+// here. It only ever moves an edition toward being withheld, never toward
+// being shown: the item in hand fills a rating the edition does not state and
+// may tighten one it does, but an edition the catalog rated more strictly
+// keeps its own. Both directions of loosening are the same defect —
+//
+//   - clearing a rating: a `mature` series whose editions came back unrated
+//     has to stay mature even if the rating reached the catalog and not this
+//     copy, which is why nothing here ever sets ContentRating back to nil;
+//   - overwriting a stricter one: a `general` series can legitimately contain
+//     a single `mature` edition, and the catalog's merger preserves that
+//     (EDITION_OWN_FIELDS). Copying the series item's `general` over it
+//     downgraded the edition and the default policy then ADMITTED it —
+//     a mature work shown on a device configured to hide mature content
+//     (feralfile-bot F5, 2026-10-29).
+//
+// contentRatingRank is what makes "stricter" a comparison rather than a
+// special case for `mature`, so the sibling shapes go the same way: an
+// edition carrying a label this build does not know is UNRATED to
+// contentpolicy and withheld by the operator's blockUnratedCurated gate, so
+// a series item's `general` must not overwrite that either.
 //
 // The playback settings the catalog also inherited — `duration`, `license`,
 // `display`, `override` — are deliberately NOT propagated: they stand exactly
@@ -258,14 +348,40 @@ func inheritInstanceFields(item dp1playlist.PlaylistItem, editions []dp1playlist
 			at := *item.DisplayAt
 			editions[i].DisplayAt = &at
 		}
-		if item.ContentRating != nil {
+		// Applied unless the edition's own rating is STRICTER than the
+		// series item's — see this function's doc. ">=" rather than ">"
+		// keeps the item in hand authoritative everywhere the comparison is
+		// not a loosening (equal ratings included); only a strictly stricter
+		// edition rating survives the series item's.
+		applyItemRating := item.ContentRating != nil &&
+			(editions[i].ContentRating == nil ||
+				contentRatingRank(*item.ContentRating) >= contentRatingRank(*editions[i].ContentRating))
+		if applyItemRating {
 			rating := *item.ContentRating
 			editions[i].ContentRating = &rating
 		}
-		if item.ContentReasons != nil {
-			reasons := make([]string, len(*item.ContentReasons))
-			copy(reasons, *item.ContentReasons)
-			editions[i].ContentReasons = &reasons
+		// Reasons justify a rating, so they travel with the rating that was
+		// applied — cleared first and then re-applied, exactly as DisplayAt
+		// is above, rather than written only when the item states some.
+		// Anything less leaves a reason describing a rating the edition does
+		// not carry, and DP-1's content-rating extension does not require the
+		// two fields to be stated together, so both halves are reachable
+		// (run-reviewer round 5, F1):
+		//
+		//   - item rating applied, item states no reasons: without the clear,
+		//     the edition keeps the reasons it wrote for the rating this just
+		//     overwrote.
+		//   - item states reasons but no rating: the edition's own rating
+		//     survives, so the item's reasons justify a label the series
+		//     never stated. Propagating them was intentional and is now
+		//     dropped — there is no rating of the item's to justify.
+		if applyItemRating {
+			editions[i].ContentReasons = nil
+			if item.ContentReasons != nil {
+				reasons := make([]string, len(*item.ContentReasons))
+				copy(reasons, *item.ContentReasons)
+				editions[i].ContentReasons = &reasons
+			}
 		}
 	}
 	return editions

@@ -954,3 +954,194 @@ func TestDP1_ADoneContextStopsTheExpansionWalk(t *testing.T) {
 	require.Len(t, result.Items, 1)
 	assert.Equal(t, "item-series", result.Items[0].ID)
 }
+
+// Expansion may tighten an edition's rating, never loosen it. A `general`
+// series can legitimately contain one `mature` edition — the catalog's merger
+// preserves each edition's own rating (EDITION_OWN_FIELDS) — and copying the
+// series item's looser rating over it downgraded the edition, after which the
+// default content policy ADMITTED a mature work on a device configured to hide
+// it (feralfile-bot F5, 2026-10-29).
+//
+// The table covers the comparison, not that one pair: the sibling shape is an
+// edition carrying a label this build does not know, which contentpolicy reads
+// as UNRATED and the operator's blockUnratedCurated gate withholds — so a
+// series item's `general` must not overwrite that either.
+func TestDP1_ExpansionNeverLoosensAnEditionsContentRating(t *testing.T) {
+	general := contentrating.Rating(contentrating.RatingGeneral)
+	mature := contentrating.Rating(contentrating.RatingMature)
+	unknown := contentrating.Rating("explicit")
+
+	tests := []struct {
+		name          string
+		seriesRating  *contentrating.Rating
+		editionRating *contentrating.Rating
+		want          contentrating.Rating
+		wantReasons   []string
+	}{
+		{
+			name:          "a mature edition under a general series stays mature",
+			seriesRating:  &general,
+			editionRating: &mature,
+			want:          mature,
+			// The edition's own reason survives with the rating it
+			// justifies; the series item's would describe the `general` the
+			// edition did not keep.
+			wantReasons: []string{"edition-violence"},
+		},
+		{
+			name:          "a rating this build cannot read is not overwritten by general either",
+			seriesRating:  &general,
+			editionRating: &unknown,
+			want:          unknown,
+			wantReasons:   []string{"edition-violence"},
+		},
+		{
+			name:          "a mature series still tightens a general edition",
+			seriesRating:  &mature,
+			editionRating: &general,
+			want:          mature,
+			wantReasons:   []string{"series-violence"},
+		},
+		{
+			name:          "an equal rating stays the item in hand's, reasons included",
+			seriesRating:  &mature,
+			editionRating: &mature,
+			want:          mature,
+			wantReasons:   []string{"series-violence"},
+		},
+		{
+			name:          "an edition that states no rating inherits the series item's",
+			seriesRating:  &general,
+			editionRating: nil,
+			want:          general,
+			wantReasons:   []string{"series-violence"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			item := seriesItem()
+			item.ContentRating = tt.seriesRating
+			seriesReasons := []string{"series-violence"}
+			item.ContentReasons = &seriesReasons
+
+			edition := func(id string) dp1playlist.PlaylistItem {
+				e := editionItem(id)
+				e.ContentRating = tt.editionRating
+				if tt.editionRating != nil {
+					editionReasons := []string{"edition-violence"}
+					e.ContentReasons = &editionReasons
+				}
+				return e
+			}
+
+			url := "http://example.com/exhibition.json"
+			servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
+			serveEditions(ts, "playlist-1", "item-series",
+				editionsBody(2, edition("a"), edition("b")))
+
+			result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+			require.NoError(t, err)
+			require.Len(t, result.Items, 2)
+			for _, got := range result.Items {
+				require.NotNil(t, got.ContentRating)
+				assert.Equal(t, tt.want, *got.ContentRating)
+				require.NotNil(t, got.ContentReasons)
+				assert.Equal(t, tt.wantReasons, *got.ContentReasons)
+			}
+		})
+	}
+}
+
+// Reasons travel with the rating that was applied, cleared first and then
+// re-applied the way DisplayAt is — so no edition is left carrying a
+// justification written for a rating it does not have.
+//
+// DP-1's content-rating extension does not require `contentRating` and
+// `contentReasons` to be stated together, so both halves below are reachable
+// shapes rather than hypotheticals. Writing the reasons only when the series
+// item stated some left each one open (run-reviewer round 5, F1): the tests
+// above never exercise them, because they always set the two fields together.
+func TestDP1_ExpandedEditionReasonsFollowTheRatingThatWasApplied(t *testing.T) {
+	general := contentrating.Rating(contentrating.RatingGeneral)
+	mature := contentrating.Rating(contentrating.RatingMature)
+
+	tests := []struct {
+		name        string
+		series      func(dp1playlist.PlaylistItem) dp1playlist.PlaylistItem
+		edition     func(dp1playlist.PlaylistItem) dp1playlist.PlaylistItem
+		wantRating  contentrating.Rating
+		wantReasons *[]string
+	}{
+		{
+			name: "a tightening series item with no reasons clears the edition's own",
+			series: func(item dp1playlist.PlaylistItem) dp1playlist.PlaylistItem {
+				rating := mature
+				item.ContentRating = &rating
+				return item
+			},
+			edition: func(e dp1playlist.PlaylistItem) dp1playlist.PlaylistItem {
+				rating := general
+				reasons := []string{"written-for-general"}
+				e.ContentRating = &rating
+				e.ContentReasons = &reasons
+				return e
+			},
+			// The edition is mature now; "written-for-general" justified the
+			// rating it no longer carries, so it must not survive.
+			wantRating:  mature,
+			wantReasons: nil,
+		},
+		{
+			name: "reasons on a series item that states no rating do not reach the edition",
+			series: func(item dp1playlist.PlaylistItem) dp1playlist.PlaylistItem {
+				reasons := []string{"series-reason"}
+				item.ContentReasons = &reasons
+				return item
+			},
+			edition: func(e dp1playlist.PlaylistItem) dp1playlist.PlaylistItem {
+				rating := mature
+				reasons := []string{"edition-reason"}
+				e.ContentRating = &rating
+				e.ContentReasons = &reasons
+				return e
+			},
+			// The edition's own rating survives, so its own reasons are the
+			// ones that describe it; the series item has no rating of its own
+			// for "series-reason" to justify.
+			wantRating:  mature,
+			wantReasons: &[]string{"edition-reason"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			url := "http://example.com/exhibition.json"
+			servePlaylist(ts, url, []dp1playlist.PlaylistItem{tt.series(seriesItem())})
+			serveEditions(ts, "playlist-1", "item-series",
+				editionsBody(2, tt.edition(editionItem("a")), tt.edition(editionItem("b"))))
+
+			result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+			require.NoError(t, err)
+			require.Len(t, result.Items, 2)
+			for _, got := range result.Items {
+				require.NotNil(t, got.ContentRating)
+				assert.Equal(t, tt.wantRating, *got.ContentRating)
+				if tt.wantReasons == nil {
+					assert.Nil(t, got.ContentReasons)
+					continue
+				}
+				require.NotNil(t, got.ContentReasons)
+				assert.Equal(t, *tt.wantReasons, *got.ContentReasons)
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"strings"
@@ -1221,7 +1222,7 @@ func TestRefresher_ProcessPlayingPlaylist_NoDynamicQueries(t *testing.T) {
 	// Round 2's regression: the static-inline branch expands series items
 	// defensively too (see TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskReplayScope).
 	ts.mockDP1.EXPECT().
-		ExpandSeriesItems(ts.ctx, *mockPlaylist, 0).
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *mockPlaylist, 0).
 		Return(*mockPlaylist).
 		AnyTimes()
 
@@ -1287,7 +1288,7 @@ func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskRep
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, mockPlaylist), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ExpandSeriesItems(ctx, *mockPlaylist, 0).
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *mockPlaylist, 0).
 		Return(*mockPlaylist).
 		MinTimes(1)
 	mockKioskReplay.EXPECT().
@@ -2662,7 +2663,7 @@ func TestRefresher_StaticInlineDisplayAt_DoesNotOverwriteSchedulerCache(t *testi
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, pl), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ExpandSeriesItems(ctx, *pl, 0).
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *pl, 0).
 		Return(*pl).
 		AnyTimes()
 	mockDP1.EXPECT().
@@ -2716,7 +2717,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeWithoutPlayerIdentit
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, pl), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ExpandSeriesItems(ctx, *pl, 0).
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *pl, 0).
 		Return(*pl).
 		AnyTimes()
 	mockDP1.EXPECT().
@@ -2762,7 +2763,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeEmptyActiveSet(t *te
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, emptyActive), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ExpandSeriesItems(ctx, *emptyActive, 0).
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *emptyActive, 0).
 		Return(*emptyActive).
 		AnyTimes()
 	mockDP1.EXPECT().
@@ -2816,7 +2817,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotOverwriteNewerAcceptedCast
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, newerActive), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ExpandSeriesItems(ctx, *newerActive, 0).
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *newerActive, 0).
 		Return(*newerActive).
 		AnyTimes()
 	mockDP1.EXPECT().
@@ -2868,7 +2869,7 @@ func TestRefresher_StaticInlineRestoredPending_IgnoresNonScheduledStatus(t *test
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, plain), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ExpandSeriesItems(ctx, *plain, 0).
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *plain, 0).
 		Return(*plain).
 		AnyTimes()
 	mockDP1.EXPECT().
@@ -3008,7 +3009,7 @@ func TestRefresher_DefaultPlaylistReconcilesCacheWithoutRecasting(t *testing.T) 
 	// resyncKioskReplayScopeToCurrentDisplay's resolveDisplayedPlaylist
 	// expands series items defensively on its static branch; pl has none.
 	dp.EXPECT().
-		ExpandSeriesItems(ctx, *pl, 0).
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *pl, 0).
 		Return(*pl).
 		AnyTimes()
 	replay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
@@ -3098,4 +3099,33 @@ func TestRefresher_ProcessPlayingPlaylist_EmptyPlayerIsNotAnError(t *testing.T) 
 	ts.refresher.Stop()
 
 	assert.Zero(t, observed.Len(), "empty player state must not log Error-level entries")
+}
+
+// deadlinedWithin matches a context carrying a deadline no further out than
+// max. It is what pins the DEFENSIVE series expansions' own short budget:
+// those call sites re-derive "what is currently displayed" from player
+// status and run on the refresher's single select loop, so handing them the
+// loop's long-lived context let a reachable-but-slow catalog block the loop
+// — and with it the 5-minute tick, ForceRefresh and shutdown — for as long
+// as the walk ran (run-reviewer round 5, F2). Asserting the deadline rather
+// than gomock.Any() keeps that a tested property instead of a comment.
+func deadlinedWithin(max time.Duration) gomock.Matcher { return deadlineMatcher{max: max} }
+
+type deadlineMatcher struct{ max time.Duration }
+
+func (m deadlineMatcher) Matches(x interface{}) bool {
+	ctx, ok := x.(context.Context)
+	if !ok {
+		return false
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return false
+	}
+	remaining := time.Until(deadline)
+	return remaining > 0 && remaining <= m.max
+}
+
+func (m deadlineMatcher) String() string {
+	return fmt.Sprintf("a context carrying a deadline within %s", m.max)
 }

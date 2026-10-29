@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
@@ -356,7 +357,7 @@ func TestCommandHandler_DownloadPlaylist_Success(t *testing.T) {
 
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL).Return(1, 2, nil).Times(1)
+	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT).Return(1, 2, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST,
@@ -391,7 +392,7 @@ func TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL(t *t
 	}).Times(1)
 	ts.mockDP1.EXPECT().ExpandSeriesItems(ts.ctx, *playlist, 0).Return(*playlist).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaledResolved, nil).Times(1)
-	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaledResolved), "").Return(0, 0, nil).Times(1)
+	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaledResolved), "", dp1.MAX_PLAYLIST_ITEMS_LIMIT).Return(0, 0, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST,
@@ -439,8 +440,8 @@ func TestCommandHandler_DownloadPlaylist_PersistsInlineManifest(t *testing.T) {
 
 	var persisted json.RawMessage
 	mockOfflineCache.EXPECT().
-		DownloadPlaylist(ts.ctx, gomock.Any(), "").
-		DoAndReturn(func(_ context.Context, raw json.RawMessage, _ string) (int, int, error) {
+		DownloadPlaylist(ts.ctx, gomock.Any(), "", dp1.MAX_PLAYLIST_ITEMS_LIMIT).
+		DoAndReturn(func(_ context.Context, raw json.RawMessage, _ string, _ int) (int, int, error) {
 			persisted = raw
 			return 1, 1, nil
 		}).
@@ -488,7 +489,7 @@ func TestCommandHandler_DownloadPlaylist_ServiceError(t *testing.T) {
 
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL).Return(0, 0, assertError("disk error")).Times(1)
+	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT).Return(0, 0, assertError("disk error")).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST,
@@ -662,7 +663,7 @@ func TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope(t *testing.T)
 	}, nil).Times(1)
 	// resolveDisplayedPlaylist's static branch expands defensively (see
 	// offlinecache.go); this playlist has no series items, so echo it back.
-	ts.mockDP1.EXPECT().ExpandSeriesItems(ts.ctx, *inlinePlaylist, 0).Return(*inlinePlaylist).Times(1)
+	ts.mockDP1.EXPECT().ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *inlinePlaylist, 0).Return(*inlinePlaylist).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -705,7 +706,7 @@ func TestCommandHandler_ClearPlaylistCache_ResyncSkipsWhenPlaybackGenerationAdva
 		Command:  string(commands.CMD_DISPLAY_PLAYLIST),
 		Playlist: inlinePlaylist,
 	}, nil).Times(1)
-	ts.mockDP1.EXPECT().ExpandSeriesItems(ts.ctx, *inlinePlaylist, 0).Return(*inlinePlaylist).Times(1)
+	ts.mockDP1.EXPECT().ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *inlinePlaylist, 0).Return(*inlinePlaylist).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -1794,7 +1795,7 @@ func TestCommandHandler_DownloadPlaylist_NoClearDuringResolveProceeds(t *testing
 		Return(false).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
 	mockOfflineCache.EXPECT().
-		DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL).
+		DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT).
 		Return(1, 1, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -1807,8 +1808,8 @@ func TestCommandHandler_DownloadPlaylist_NoClearDuringResolveProceeds(t *testing
 	require.Equal(t, "queued", resp["status"])
 }
 
-// A download resolve is held to dp1.MAX_PLAYLIST_ITEMS_LIMIT items, the bound
-// resolveOfflineCachePlaylist's own doc comment has always claimed.
+// A bulk download passes dp1.MAX_PLAYLIST_ITEMS_LIMIT as the QUEUEING bound
+// and records the playlist whole.
 //
 // Series expansion resolves each seriesRegistry item into up to a full page of
 // editions, and every resolver this path calls is given an uncapped result
@@ -1819,10 +1820,20 @@ func TestCommandHandler_DownloadPlaylist_NoClearDuringResolveProceeds(t *testing
 // CMD_DOWNLOAD_PLAYLIST is reachable from the LAN with no pairing under the
 // shipped default (run-reviewer round 3, F1).
 //
-// The ceiling lives here and not in expandSeriesItems, which the display paths
+// Round 3 enforced that by truncating the resolved playlist here, which is
+// the wrong half to cut: the playlist handed to the download is also the
+// membership record persisted for it, and ClearPlaylist enumerates the member
+// sources to clear FROM that record. A bulk download therefore overwrote a
+// complete record (saved earlier by the uncapped single-item download) with a
+// truncated one, after which the clear reported success and left every item
+// past the cut cached and unreachable (feralfile-bot F6). So the resolve stays
+// whole and the bound travels to Service.DownloadPlaylist's maxQueued, which
+// bounds classification and enqueueing without bounding the record.
+//
+// The ceiling is still not in expandSeriesItems, which the display paths
 // share: a blanket clamp there would truncate the tail of a publisher's signed
 // item list on any oversized playlist that merely also names a series.
-func TestCommandHandler_DownloadPlaylist_HoldsTheResolveToTheItemCeiling(t *testing.T) {
+func TestCommandHandler_DownloadPlaylist_BoundsTheQueueWithoutTruncatingTheRecord(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
@@ -1838,14 +1849,16 @@ func TestCommandHandler_DownloadPlaylist_HoldsTheResolveToTheItemCeiling(t *test
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
-	// What actually reaches the download, read off the playlist handed to
-	// Marshal rather than the opaque bytes it returns.
-	queued := -1
+	// What actually gets recorded, read off the playlist handed to Marshal
+	// rather than the opaque bytes it returns.
+	recorded := -1
 	ts.mockJSON.EXPECT().Marshal(playlist).DoAndReturn(func(v any) ([]byte, error) {
-		queued = len(v.(*dp1.Playlist).Items)
+		recorded = len(v.(*dp1.Playlist).Items)
 		return marshaled, nil
 	}).Times(1)
-	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL).
+	// The ceiling is an argument, not a cut: gomock fails the test if the
+	// handler stops passing it, which is the half that bounds the work.
+	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT).
 		Return(1, 2, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -1855,7 +1868,8 @@ func TestCommandHandler_DownloadPlaylist_HoldsTheResolveToTheItemCeiling(t *test
 
 	require.NoError(t, err)
 	assertOkResponse(t, result)
-	assert.Equal(t, dp1.MAX_PLAYLIST_ITEMS_LIMIT, queued)
+	assert.Equal(t, 300, recorded,
+		"the membership record must carry every resolved item; ClearPlaylist reads it to find what to clear")
 }
 
 // A single-item download reaches an item past the ceiling the bulk download
@@ -1914,4 +1928,33 @@ func TestCommandHandler_DownloadPlaylistItem_ReachesAnItemPastTheBulkCeiling(t *
 	assert.Equal(t, "queued", resp["status"])
 	assert.Equal(t, items[want].Source, resp["source"])
 	assert.Equal(t, len(items), saved)
+}
+
+// deadlinedWithin matches a context carrying a deadline no further out than
+// max. It is what pins the DEFENSIVE series expansions' own short budget:
+// those call sites re-derive "what is currently displayed" from player
+// status and run on the refresher's single select loop, so handing them the
+// loop's long-lived context let a reachable-but-slow catalog block the loop
+// — and with it the 5-minute tick, ForceRefresh and shutdown — for as long
+// as the walk ran (run-reviewer round 5, F2). Asserting the deadline rather
+// than gomock.Any() keeps that a tested property instead of a comment.
+func deadlinedWithin(max time.Duration) gomock.Matcher { return deadlineMatcher{max: max} }
+
+type deadlineMatcher struct{ max time.Duration }
+
+func (m deadlineMatcher) Matches(x interface{}) bool {
+	ctx, ok := x.(context.Context)
+	if !ok {
+		return false
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return false
+	}
+	remaining := time.Until(deadline)
+	return remaining > 0 && remaining <= m.max
+}
+
+func (m deadlineMatcher) String() string {
+	return fmt.Sprintf("a context carrying a deadline within %s", m.max)
 }

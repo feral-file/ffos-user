@@ -79,17 +79,14 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// that window visible: see Service.ClearBarrier.
 	barrier := h.offlineCache.ClearBarrier()
 
-	// Resolved WITHOUT the item ceiling the bulk sibling applies. That
-	// ceiling bounds the download work CMD_DOWNLOAD_PLAYLIST enqueues for a
-	// whole playlist; this command enqueues exactly ONE item, selected by an
-	// exact-match scan whose cost does not grow with the list — so the
-	// ceiling buys nothing here and costs correctness: an item genuinely
-	// present past the 255th resolved position answered a non-retryable
-	// not_found, which uncapped origin/develop did not (run-reviewer round 4,
-	// F1). It also decides what the save below persists, and ClearPlaylist
+	// The resolve carries no item ceiling, for either command: this one
+	// enqueues exactly ONE item, selected by an exact-match scan whose cost
+	// does not grow with the list, and the bulk sibling bounds its own
+	// queueing at the service instead (see resolveOfflineCachePlaylist). The
+	// resolve also decides what the save below persists, and ClearPlaylist
 	// enumerates the member sources to clear FROM that record, so a truncated
 	// resolve here would orphan every item past the cut.
-	playlist, err := h.resolveOfflineCachePlaylistUncapped(ctx, args)
+	playlist, err := h.resolveOfflineCachePlaylist(ctx, args)
 	if err != nil {
 		return errorResponse("resolve_failed", err.Error(), true), nil
 	}
@@ -258,7 +255,12 @@ func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]an
 	// existed.
 	sourceURL, _ := stringArg(args["playlistUrl"])
 
-	queued, total, err := h.offlineCache.DownloadPlaylist(ctx, raw, sourceURL)
+	// The item ceiling is passed as the QUEUEING bound, not applied to raw
+	// above: raw is the membership record ClearPlaylist later enumerates, and
+	// truncating it is exactly what orphaned cached items past the cut — see
+	// resolveOfflineCachePlaylist's doc and Service.DownloadPlaylist's
+	// maxQueued.
+	queued, total, err := h.offlineCache.DownloadPlaylist(ctx, raw, sourceURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT)
 	if err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
@@ -452,8 +454,11 @@ func (h *handler) resolveDisplayedPlaylist(ctx context.Context, playerStatus *st
 			// now expands a series before it reaches the player, so
 			// playerStatus.Playlist should already carry editions — but
 			// this is a no-op (hasSeriesItems short-circuits) whenever
-			// that holds, and correct if it ever doesn't.
-			expanded := h.dp1.ExpandSeriesItems(ctx, *playerStatus.Playlist, 0)
+			// that holds, and correct if it ever doesn't. Short-deadlined
+			// for that reason — see dp1.DefensiveSeriesExpansionTimeout.
+			expandCtx, cancel := context.WithTimeout(ctx, dp1.DefensiveSeriesExpansionTimeout)
+			defer cancel()
+			expanded := h.dp1.ExpandSeriesItems(expandCtx, *playerStatus.Playlist, 0)
 			return &expanded, nil
 		}
 		return h.dp1.ProcessDynamicPlaylist(ctx, *playerStatus.Playlist, false)
@@ -602,49 +607,35 @@ func parseStatusRequest(args map[string]any) (offlinecache.StatusRequest, map[st
 // helper (rather than sharing displayPlaylist's inline switch) so the
 // display-integration todo can evolve that path independently.
 //
-// The ceiling in that first sentence is now enforced here rather than assumed.
-// Series expansion resolves each seriesRegistry item into up to
-// dp1.MAX_PLAYLIST_ITEMS_LIMIT editions, and every resolver this helper calls
-// is given an uncapped result size, so a conforming request naming a handful
-// of large series can resolve into tens of thousands of items — which this
-// path then classifies, enqueues and downloads as media files. The editions
-// come from the catalog rather than from the signed document, so the item
-// count the publisher signed is no bound on the work. CMD_DOWNLOAD_PLAYLIST is
-// reachable from the LAN with no pairing under the shipped
-// control.enabled=false default, which is what makes the ceiling worth
-// enforcing rather than documenting (run-reviewer round 3, F1).
+// The ceiling in that first sentence bounds the download WORK, and it is
+// applied where that work is scheduled — Service.DownloadPlaylist's maxQueued
+// — not here on the resolved playlist. Series expansion resolves each
+// seriesRegistry item into up to dp1.MAX_PLAYLIST_ITEMS_LIMIT editions, and
+// every resolver below is given an uncapped result size, so a conforming
+// request naming a handful of large series can resolve into tens of thousands
+// of items; CMD_DOWNLOAD_PLAYLIST is reachable from the LAN with no pairing
+// under the shipped control.enabled=false default, which is what makes the
+// ceiling worth enforcing rather than documenting (run-reviewer round 3, F1).
 //
-// It is applied here, at the download boundary, and NOT inside
-// expandSeriesItems: that function is shared with the display paths, where a
-// blanket clamp would newly truncate the tail of a publisher's own signed item
-// list on any oversized playlist that merely happens to also name a series —
-// silent data loss neither origin/develop nor this branch does anywhere else.
+// Truncating HERE was the wrong place for it, and both download commands show
+// why: what this helper returns is also the playlist record that gets
+// persisted, and ClearPlaylist enumerates the member sources to clear FROM
+// that record. A truncated resolve therefore wrote a short membership list —
+// so a bulk download of an oversized playlist overwrote a complete record
+// saved earlier by a single-item download, and the clear that followed
+// reported success while leaving every item past the cut cached and invisible
+// to it (feralfile-bot F6, 2026-10-29). The same shape is why
+// handleDownloadPlaylistItem was already moved off the capped wrapper in round
+// 4: a source genuinely present past the ceiling answered a permanent
+// not_found. One uncapped resolve now serves both, and the bound sits on the
+// queueing instead.
 //
-// It is also NOT what handleDownloadPlaylistItem resolves through, which calls
-// the uncapped helper below on purpose: the ceiling bounds enqueued downloads,
-// and a single-item request enqueues one item whichever position it sits at.
-// Capping that lookup turned a resolvable source past the ceiling into a
-// permanent not_found (run-reviewer round 4, F1) — see the comment at its
-// resolve. Only CMD_DOWNLOAD_PLAYLIST, which enqueues the whole list, goes
-// through this wrapper.
+// The ceiling is likewise NOT inside expandSeriesItems: that function is
+// shared with the display paths, where a blanket clamp would newly truncate
+// the tail of a publisher's own signed item list on any oversized playlist
+// that merely happens to also name a series — silent data loss neither
+// origin/develop nor this branch does anywhere else.
 func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[string]any) (*dp1.Playlist, error) {
-	playlist, err := h.resolveOfflineCachePlaylistUncapped(ctx, args)
-	if err != nil {
-		return nil, err
-	}
-	if playlist != nil && len(playlist.Items) > dp1.MAX_PLAYLIST_ITEMS_LIMIT {
-		h.logger.Warn("offline cache: resolved playlist truncated to the item ceiling",
-			zap.String("playlist_id", playlist.ID),
-			zap.Int("items", len(playlist.Items)),
-			zap.Int("limit", dp1.MAX_PLAYLIST_ITEMS_LIMIT))
-		playlist.Items = playlist.Items[:dp1.MAX_PLAYLIST_ITEMS_LIMIT]
-	}
-	return playlist, nil
-}
-
-// resolveOfflineCachePlaylistUncapped is the resolution itself; its caller
-// above applies the item ceiling.
-func (h *handler) resolveOfflineCachePlaylistUncapped(ctx context.Context, args map[string]any) (*dp1.Playlist, error) {
 	switch {
 	case args["playlistUrl"] != nil:
 		url, ok := args["playlistUrl"].(string)

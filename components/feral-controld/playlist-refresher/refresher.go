@@ -536,7 +536,11 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			// playerStatus, and relying on that invariant holding forever
 			// (round 1 found it did not, for this exact function) is how the
 			// next reviewer finds it a fourth time.
-			expanded := r.dp1.ExpandSeriesItems(r.context, *playerStatus.Playlist, 0)
+			// Short-deadlined because this runs on the refresher's one
+			// select loop: see dp1.DefensiveSeriesExpansionTimeout.
+			expandCtx, cancel := context.WithTimeout(r.context, dp1.DefensiveSeriesExpansionTimeout)
+			expanded := r.dp1.ExpandSeriesItems(expandCtx, *playerStatus.Playlist, 0)
+			cancel()
 			staticInline = &expanded
 			staticInlineContext = playerStatus.ContentContext
 		default:
@@ -1242,8 +1246,12 @@ func (r *refresher) resolveDisplayedPlaylist(playerStatus *status.PlayerStatus) 
 		if !playerStatus.Playlist.HasDynamicContent() {
 			// Defensive, not load-bearing: see
 			// commandrouter/offlinecache.go's resolveDisplayedPlaylist,
-			// which mirrors this same shape for the same reason.
-			expanded := r.dp1.ExpandSeriesItems(r.context, *playerStatus.Playlist, 0)
+			// which mirrors this same shape for the same reason — and
+			// dp1.DefensiveSeriesExpansionTimeout for why a defensive
+			// expansion on this loop gets its own short deadline.
+			expandCtx, cancel := context.WithTimeout(r.context, dp1.DefensiveSeriesExpansionTimeout)
+			defer cancel()
+			expanded := r.dp1.ExpandSeriesItems(expandCtx, *playerStatus.Playlist, 0)
 			return &expanded, nil
 		}
 		return r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false)

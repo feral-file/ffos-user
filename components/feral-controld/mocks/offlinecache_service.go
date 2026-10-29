@@ -177,9 +177,9 @@ func (mr *MockOfflineCacheServiceMockRecorder) DownloadItem(ctx, item interface{
 }
 
 // DownloadPlaylist mocks base method.
-func (m *MockOfflineCacheService) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (int, int, error) {
+func (m *MockOfflineCacheService) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string, maxQueued int) (int, int, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DownloadPlaylist", ctx, playlistRaw, sourceURL)
+	ret := m.ctrl.Call(m, "DownloadPlaylist", ctx, playlistRaw, sourceURL, maxQueued)
 	ret0, _ := ret[0].(int)
 	ret1, _ := ret[1].(int)
 	ret2, _ := ret[2].(error)
@@ -187,9 +187,9 @@ func (m *MockOfflineCacheService) DownloadPlaylist(ctx context.Context, playlist
 }
 
 // DownloadPlaylist indicates an expected call of DownloadPlaylist.
-func (mr *MockOfflineCacheServiceMockRecorder) DownloadPlaylist(ctx, playlistRaw, sourceURL interface{}) *gomock.Call {
+func (mr *MockOfflineCacheServiceMockRecorder) DownloadPlaylist(ctx, playlistRaw, sourceURL, maxQueued interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DownloadPlaylist", reflect.TypeOf((*MockOfflineCacheService)(nil).DownloadPlaylist), ctx, playlistRaw, sourceURL)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DownloadPlaylist", reflect.TypeOf((*MockOfflineCacheService)(nil).DownloadPlaylist), ctx, playlistRaw, sourceURL, maxQueued)
 }
 
 // HasReplayableItem mocks base method.
