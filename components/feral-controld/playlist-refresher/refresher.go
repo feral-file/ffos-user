@@ -407,7 +407,18 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			// Static inline player status only contains the filtered active set and
 			// no refreshable source identity, so it cannot rebuild future items.
 			r.logger.Debug("Playlist has no dynamic queries, skipping CDP resend")
-			staticInline = playerStatus.Playlist
+			// Defensive, not load-bearing: see resolveDisplayedPlaylist's own
+			// static branch below, which this is the third occurrence of the
+			// same condition for (the second is commandrouter/offlinecache.go's
+			// resolveDisplayedPlaylist). Every display path now expands a
+			// series before the player ever reports a playlist back, so this
+			// is a no-op today — but the replay scope this feeds must agree
+			// with what resolveDisplayedPlaylist would derive from the same
+			// playerStatus, and relying on that invariant holding forever
+			// (round 1 found it did not, for this exact function) is how the
+			// next reviewer finds it a fourth time.
+			expanded := r.dp1.ExpandSeriesItems(r.context, *playerStatus.Playlist, 0)
+			staticInline = &expanded
 		default:
 			// A displayPlaylist status carrying neither a URL nor an inline playlist
 			// is the player's fresh-boot/unconfigured state (nothing assigned yet),

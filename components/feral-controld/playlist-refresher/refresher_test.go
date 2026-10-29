@@ -1218,6 +1218,12 @@ func TestRefresher_ProcessPlayingPlaylist_NoDynamicQueries(t *testing.T) {
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, mockPlaylist), nil).
 		AnyTimes()
+	// Round 2's regression: the static-inline branch expands series items
+	// defensively too (see TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskReplayScope).
+	ts.mockDP1.EXPECT().
+		ExpandSeriesItems(ts.ctx, *mockPlaylist, 0).
+		Return(*mockPlaylist).
+		AnyTimes()
 
 	// Should not call DP1.ProcessDynamicPlaylist since there are no dynamic queries
 	// Should not call CDP.Send since there's nothing to process
@@ -1242,6 +1248,13 @@ func TestRefresher_ProcessPlayingPlaylist_NoDynamicQueries(t *testing.T) {
 // playlist with nothing dynamic to re-resolve. This must still skip
 // ProcessDynamicPlaylist and the CDP resend (the original, intentional
 // "do not re-send an unchanged static playlist" behavior).
+//
+// Also pins round 2's regression: this branch expands series items
+// defensively, the same as resolveDisplayedPlaylist's own static branch
+// (ExpandSeriesItems below must be called before SyncPlaylist sees the
+// items) — round 2 of run-reviewer found this exact branch left out of
+// round 1's fix, which patched only the two functions named
+// resolveDisplayedPlaylist.
 func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskReplayScope(t *testing.T) {
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctrl := gomock.NewController(t)
@@ -1273,6 +1286,10 @@ func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskRep
 		FetchPlayerStatus(ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, mockPlaylist), nil).
 		AnyTimes()
+	mockDP1.EXPECT().
+		ExpandSeriesItems(ctx, *mockPlaylist, 0).
+		Return(*mockPlaylist).
+		MinTimes(1)
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
 		Return(nil).
@@ -2611,6 +2628,10 @@ func TestRefresher_StaticInlineDisplayAt_DoesNotOverwriteSchedulerCache(t *testi
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, pl), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
+		ExpandSeriesItems(ctx, *pl, 0).
+		Return(*pl).
+		AnyTimes()
+	mockDP1.EXPECT().
 		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).
 		Times(0)
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
@@ -2661,6 +2682,10 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeWithoutPlayerIdentit
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, pl), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
+		ExpandSeriesItems(ctx, *pl, 0).
+		Return(*pl).
+		AnyTimes()
+	mockDP1.EXPECT().
 		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).
 		Times(0)
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
@@ -2701,6 +2726,10 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeEmptyActiveSet(t *te
 	mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, emptyActive), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ExpandSeriesItems(ctx, *emptyActive, 0).
+		Return(*emptyActive).
 		AnyTimes()
 	mockDP1.EXPECT().
 		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).
@@ -2753,6 +2782,10 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotOverwriteNewerAcceptedCast
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, newerActive), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
+		ExpandSeriesItems(ctx, *newerActive, 0).
+		Return(*newerActive).
+		AnyTimes()
+	mockDP1.EXPECT().
 		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).
 		Times(0)
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
@@ -2799,6 +2832,10 @@ func TestRefresher_StaticInlineRestoredPending_IgnoresNonScheduledStatus(t *test
 	mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, plain), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ExpandSeriesItems(ctx, *plain, 0).
+		Return(*plain).
 		AnyTimes()
 	mockDP1.EXPECT().
 		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).

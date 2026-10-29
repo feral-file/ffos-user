@@ -237,6 +237,47 @@ func TestDP1_SeriesWithNoItemIDStaysAsItIs(t *testing.T) {
 	assert.Equal(t, dp1playlist.ProvenanceSeriesRegistry, result.Items[0].Provenance.Type)
 }
 
+// TestDP1_SeriesStaysUnexpandedWhenThePlaylistHasNoID pins a known,
+// documented degrade case round 2 of run-reviewer found undocumented: an
+// inline dp1_call playlist — the shape docs/controld-inbound-controller-
+// messages.md's own "Inline DP1" and "Dynamic DP1" examples show, and
+// which DP-1 core's own schema does not require an "id" for — gives
+// seriesEditions nothing to address the catalog by, so a seriesRegistry
+// item arriving that way silently keeps its representative rather than
+// expanding. On the device this is indistinguishable from "catalog
+// unreachable" (see the PR's Out of scope line for the accepted
+// limitation this test pins as deliberate rather than silently
+// discovered).
+func TestDP1_SeriesStaysUnexpandedWhenThePlaylistHasNoID(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	url := "http://example.com/exhibition.json"
+	body := `{"dpVersion":"1.0.0"}`
+	ts.mockHTTP.EXPECT().Get(url).Return(createMockResponse(http.StatusOK, body), nil)
+	ts.mockIO.EXPECT().ReadAll(gomock.Any()).Return([]byte(body), nil)
+	ts.mockJSON.EXPECT().Unmarshal([]byte(body), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			playlist := v.(*dp1.Playlist)
+			// Deliberately left unset: this is the shape an inline
+			// dp1_call payload actually arrives in, unlike servePlaylist's
+			// helper default which always assigns one.
+			playlist.Items = []dp1playlist.PlaylistItem{seriesItem()}
+			return nil
+		})
+
+	// No catalog call is made: seriesEditions refuses to address the
+	// catalog with an empty playlist id, so there is nothing to mock —
+	// a stray *ts.mockHTTP* expectation for the editions route would make
+	// this test fail with "missing call(s)" if the guard ever stopped
+	// holding.
+	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
+
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1)
+	assert.Equal(t, dp1playlist.ProvenanceSeriesRegistry, result.Items[0].Provenance.Type)
+}
+
 // An edition of a V1–V3 series carries a 256-bit `seriesId` as decimal
 // digits, which is what the catalog returns. The dp1-go this daemon builds
 // against (v0.6.0) types the field `*int`, so decoding that answer fails:
