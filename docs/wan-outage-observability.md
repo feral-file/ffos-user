@@ -24,8 +24,8 @@ Verified in code 2026-08-12 (branch `fix/update-command-fire-and-forget`, which
 includes the merged recovery-UX work).
 
 **What "online" means today.** feral-sys-monitord owns internet reachability: a
-raw TCP dial to `8.8.8.8:443` / `8.8.4.4:443`, 5 s timeout, first success wins
-(`components/feral-sys-monitord/connectivity.go:23-26,260`). Adaptive cadence
+raw TCP dial to `8.8.8.8:443` / `8.8.4.4:443`, falling back to `223.5.5.5:443` / `1.12.12.12:443` only when the Google pair has not connected within 1 s or has already failed (feral-file#3539), 5 s total budget, first success wins
+(`components/feral-sys-monitord/connectivity.go`, `PRIMARY_PING_TARGETS` / `FALLBACK_PING_TARGETS` / `CheckConnectivity`). Adaptive cadence
 30 s online / 3 s offline. Published as one edge-triggered D-Bus bool
 (`connectivity_change`), self-healed by the ~2 s `sysmetrics` level signal.
 controld separately polls *link* state via `nmcli` (`status/linkcheck.go`) and
@@ -82,7 +82,13 @@ S3 PUT. And the `device_status` notification feed over the relayer.
   extends to every new gauge and status field: scrapes and polls read caches.
 - **Hub-contact observer exclusions stand.** `/metrics` and the WS are excluded
   from the SoftAP-raise deferral (`hub/hub.go:45-57`); new gauges change no
-  routes. **No new `:1111` routes at all** before #3471.
+  LAN-accessible routes. **No new LAN surface on `:1111`** before #3471. The
+  sole route-registration exception is `POST /api/logs`: it is a device-local
+  browser bridge whose handler rejects non-loopback peers before reading the
+  body and accepts only the fixed player Origin `http://127.0.0.1:8080`.
+  Because it is unreachable from the LAN, it does not bypass the shared
+  middleware authorization rollout; widening either check would violate this
+  exception and must wait for #3471.
 - **Edge + level connectivity pattern.** Any new consumer of
   `connectivity_change` must also reconcile off a level signal (the
   `mediator.go:597-623` pattern) or it will stick wrong after a missed edge.
@@ -134,8 +140,9 @@ S3 PUT. And the `device_status` notification feed over the relayer.
   get current lease params only. Full renewal tracking would need NM D-Bus
   subscription (branch D). First release records lease snapshot + changes
   between snapshots, which is enough to catch churn.
-- **Sentry noise.** The recorder must not route through `logger.Error` (every
-  Error becomes a Sentry event). Classified outages are data, not errors.
+- **Remote-log noise.** The recorder must not route classified outages through
+  `logger.Error`. They are state observations, not application failures, and
+  elevating them distorts the streamed severity signal.
 - **Unknown: `/var/log` writability for the `feralfile` user.** If we later
   want the ring OTA-durable, provisioning a writable dir is a full-image
   change. Explicitly deferred.
@@ -210,7 +217,10 @@ Per-seam, per the testing contract; all runnable via `make verify-go`.
   ticks); `runNetworkDiagnostics` command handler test via the executor's
   existing table, including the reply-before-probe/timeout semantics chosen.
 - **On-device bench (manual, gated before each stage ships):** pull the AP,
-  block DNS only, block 8.8.8.8 only, and portal-intercept on a bench network;
+  block DNS only, block 8.8.8.8 only, block every Google prefix while leaving the
+  rest of the internet open (the mainland-China case, feral-file#3539; since the
+  mainland fallback targets this must report ONLINE, not classify as an outage), and
+  portal-intercept on a bench network;
   confirm the four scenarios classify differently, the timeline appears in
   VictoriaMetrics after reconnect, and the recorder ring stays under cap after
   24 h of forced flapping.

@@ -18,6 +18,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
@@ -65,6 +66,21 @@ type Executor interface {
 	// seam that lets the mediator re-register mDNS with an updated `claimed` TXT
 	// without coupling the executor to the mediator. Set once at wiring time.
 	SetClaimObserver(observer func(claimed bool))
+
+	// SetDeviceNameObserver registers a callback invoked with the stored name
+	// after a successful setDeviceName. mDNS publishes its TXT record once at
+	// Register time, so the advertised name only changes if something
+	// re-registers — the same constraint SetClaimObserver exists for.
+	SetDeviceNameObserver(observer func(name string))
+
+	// SetContentPolicyResetter registers the callback that returns the device's
+	// content policy to defaults during a factory reset. Owner-specific state,
+	// so it falls with the claim for the same rollback reason the device name
+	// does: a reset that rolls back must not leave a resold frame enforcing the
+	// previous owner's audience settings. A seam rather than a direct call
+	// because the executor must not depend on the policy store or the command
+	// router. Set once at wiring time.
+	SetContentPolicyResetter(reset func() error)
 	// SetSetupUI injects the process-wide setup-narration surface so the
 	// controld-owned claim/factory-reset/OTA-failure narration shares ONE
 	// setupui.Service with the provisioning domain. Set once at wiring time; the
@@ -93,6 +109,43 @@ type executor struct {
 	// claimObserver, when set, is notified on claim-state transitions. Set once
 	// at wiring time before commands are served, so it needs no lock.
 	claimObserver func(claimed bool)
+	// contentPolicyResetter, when set, restores default content policy during a
+	// factory reset. See SetContentPolicyResetter.
+	contentPolicyResetter func() error
+
+	// control is the feral-file#3551 claim-QR/reset seam (SetControl); nil
+	// when control.enabled is false, which leaves the claim QR and the
+	// factory reset exactly as before.
+	control ControlClaim
+	// enrollQR is set while the QR on screen was requested with
+	// purpose:"enroll" (the 2.0.x owner migration): it carries the control
+	// invitation even though the device is claimed.
+	enrollQR atomic.Bool
+	// invMu guards invTimer, the pending refresh of an invitation-carrying
+	// claim QR shortly before its invitation expires.
+	invMu     sync.Mutex
+	invTimer  *time.Timer
+	invExpiry time.Time
+
+	// sshMu guards sshTail, the end of the queue that runs SSH changes
+	// (sshAccess and the first-owner revocation) one at a time in the order
+	// they were requested. Order matters, not just exclusion: the revocation
+	// queued when the first owner enrolls must not run after an sshAccess
+	// that owner sends next, or it deletes the key that command installed.
+	sshMu   sync.Mutex
+	sshTail chan struct{}
+
+	// nameObserver, when set, is notified after the device name is stored so
+	// the mDNS record can be re-registered with it. Same wiring discipline as
+	// claimObserver: set once before commands are served, so no lock.
+	nameObserver func(name string)
+
+	// deviceNameMu serializes every mutation of the device-name record and the
+	// observer notification that follows it. Both writers stage through one
+	// shared temp path and both are reachable concurrently (a rename over the
+	// hub while a factory reset runs), so this is what keeps disk, mDNS, and
+	// status from disagreeing. See setDeviceName for the two races it closes.
+	deviceNameMu sync.Mutex
 
 	// Add reference to StatusPoller to get metrics
 	statusPoller status.Poller
@@ -336,6 +389,13 @@ type executor struct {
 	// keeps the silent hide unconditionally.
 	internetProbe func(ctx context.Context) (bool, error)
 
+	// browserSessions, when wired (SetBrowserSessionCleanup), ends the browser
+	// sessions the relayer holds for a topic. Factory reset uses it right
+	// after it invalidates the claim. Optional: nil (mint pairing disabled, or
+	// no relayer credentials) makes the reset skip the step, exactly as it
+	// behaved before owner-kept sessions existed.
+	browserSessions BrowserSessionCleanup
+
 	// otaGateEntryProbe is the startup OTA gate's OWN entry-window predicate
 	// (main wires it to re-read /proc/uptime against the wider
 	// startupOTAGateEntryWindow). Split from bootLifecycleProbe because the
@@ -469,6 +529,11 @@ type executor struct {
 	// session (design doc §4 generation re-check contract). nil reads as
 	// generation 0 always, which never appears to move.
 	sessionGeneration func() uint64
+	// verdictInvalidator, when set (SetVerdictInvalidator), clears the
+	// signature verification active-verdict slot's current entry before the
+	// claim-time displayDefaultPlaylist send (see sendDisplayDefaultPlaylist).
+	// Guarded by sleepApplyMu like sessionGeneration.
+	verdictInvalidator func()
 }
 
 func New(
@@ -499,6 +564,190 @@ func New(
 
 func (e *executor) SetClaimObserver(observer func(claimed bool)) {
 	e.claimObserver = observer
+}
+
+// ControlClaim is the executor's view of the feral-file#3551 control
+// authority (controlgate.ClaimQR implements it).
+type ControlClaim interface {
+	// ClaimQRFields returns the invitation fields to append to the claim URL
+	// (inv, thumb(devSig), thumb(devEnc), gen) and when the invitation
+	// expires; ok is false unless the device is in the legacy state.
+	ClaimQRFields() (fields []string, expiresAt time.Time, ok bool)
+	// ClaimQRPins returns the same four fields with an empty invitation
+	// ("", thumb(devSig), thumb(devEnc), gen) whenever the device can vouch
+	// for its profile, so a QR with no invitation still carries the pins a
+	// new controller must check (§11, §14.1).
+	ClaimQRPins() (fields []string, ok bool)
+	// Enrolled reports whether an active owner grant exists.
+	Enrolled() bool
+	// Retire deletes the control identity (factory reset).
+	Retire() error
+	// ClearInvitation voids the live invitation (its QR is gone).
+	ClearInvitation()
+	// ConnectAuthority reports whether the control protocol guards the
+	// claim (any state but legacy) and whether ctx carries an owner
+	// principal (§7.1 connect).
+	ConnectAuthority(ctx context.Context) (protected, owner bool)
+}
+
+// SetControl wires the control seam. Call before the claim flow starts.
+func (e *executor) SetControl(c ControlClaim) { e.control = c }
+
+// invitationRefreshLead is how long before its invitation expires an
+// on-screen claim QR is repainted with a fresh one.
+const invitationRefreshLead = time.Minute
+
+// invitationWatchInterval is how often a live invitation checks that its QR
+// is still the narration on screen; another narration taking the panel ends
+// the invitation (review F6).
+var invitationWatchInterval = 15 * time.Second
+
+// scheduleInvitationRefresh arms the watch of an invitation-carrying claim
+// QR: every invitationWatchInterval, and invitationRefreshLead before
+// expiresAt at the latest. Replaces any armed one.
+func (e *executor) scheduleInvitationRefresh(expiresAt time.Time) {
+	e.invMu.Lock()
+	defer e.invMu.Unlock()
+	e.invExpiry = expiresAt
+	e.armInvitationTimerLocked()
+}
+
+func (e *executor) armInvitationTimerLocked() {
+	d := time.Until(e.invExpiry) - invitationRefreshLead
+	if d > invitationWatchInterval {
+		d = invitationWatchInterval
+	}
+	if d < time.Second {
+		d = time.Second
+	}
+	if e.invTimer != nil {
+		e.invTimer.Stop()
+	}
+	e.invTimer = time.AfterFunc(d, e.refreshInvitationQR)
+}
+
+// clearControlInvitation voids the invitation and stops its watch.
+func (e *executor) clearControlInvitation() {
+	if e.control == nil {
+		return
+	}
+	e.stopInvitationRefresh()
+	e.control.ClearInvitation()
+}
+
+func (e *executor) stopInvitationRefresh() {
+	e.invMu.Lock()
+	defer e.invMu.Unlock()
+	if e.invTimer != nil {
+		e.invTimer.Stop()
+		e.invTimer = nil
+	}
+}
+
+// refreshInvitationQR repaints the claim QR with a fresh invitation, but only
+// while the claim QR is what is on screen (RefreshClaimQRURL builds — and so
+// mints an invitation and re-arms this timer — only then). A QR that came
+// down lets the chain end.
+func (e *executor) refreshInvitationQR() {
+	if e.control == nil || e.control.Enrolled() {
+		return
+	}
+	if !e.setupUI().ClaimQRShowing() {
+		// Another narration took the panel: the invitation it carried is
+		// not on screen any more and must not stay redeemable.
+		e.clearControlInvitation()
+		return
+	}
+	e.invMu.Lock()
+	due := time.Until(e.invExpiry) <= invitationRefreshLead
+	if !due {
+		e.armInvitationTimerLocked()
+	}
+	e.invMu.Unlock()
+	if due {
+		e.setupUI().RefreshClaimQRURL(func() string { return e.buildDeviceConnectURL(context.Background()) })
+	}
+}
+
+// ControlOwnerEnrolled takes the claim QR down after the first owner enrolled
+// with the invitation it carried (§5.1): that invitation is spent and the
+// device is no longer claimable from the screen.
+func (e *executor) ControlOwnerEnrolled() {
+	e.stopInvitationRefresh()
+	e.enrollQR.Store(false)
+	// The authority consumed the invitation already; nothing to clear.
+	e.setupUI().HideIfShowing(setupui.StateClaimQR)
+	// Remote shell granted while the device had no owner (sshAccess is open
+	// to the LAN on an unclaimed device and to any topic holder in legacy)
+	// must not outlive the owner's arrival (review round 4 L6).
+	e.revokeSshAccess("owner enrollment")
+}
+
+// ControlReleased runs after the owner released the device (§5.5
+// releaseOwnership): every grant is revoked and the device is legacy and
+// still claimed. It closes the remote access the previous owner may have
+// opened (SSH, owner Tailscale) and paints the claim QR with an invitation
+// so a new owner can enroll from the screen. Closing SSH is cleanup, not a
+// guarantee: in legacy a topic holder may open it again (spec §13).
+// Everything runs off the request goroutine: the Tailscale reset alone may
+// take a minute.
+func (e *executor) ControlReleased() {
+	e.revokeSshAccess("ownership release")
+	go func() {
+		e.enrollQR.Store(true)
+		// Not automatic: an automatic paint is refused while another
+		// overlay owns the screen, and nothing would repaint it later.
+		e.paintClaimQRWithInvitation(context.Background(), false)
+		e.resetOwnerTailscale()
+	}()
+}
+
+// revokeSshAccess runs the sshAccess{enabled:false} steps off the request
+// goroutine. The turn is taken here, before the caller's reply goes out, so
+// any sshAccess sent afterwards runs after this revocation.
+func (e *executor) revokeSshAccess(after string) {
+	if e.exec == nil {
+		return
+	}
+	prev, done := e.sshTurn()
+	go func() {
+		defer done()
+		if prev != nil {
+			<-prev
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := e.setSshAccess(ctx, []byte(`{"enabled":false}`)); err != nil {
+			e.logger.Warn("Could not revoke SSH access", zap.String("after", after), zap.Error(err))
+		}
+	}()
+}
+
+// ownerTailscaleBin is ffos's owner Tailscale helper; images without it
+// have no owner Tailscale access to revoke.
+const ownerTailscaleBin = "/usr/local/bin/feral-tailscale"
+
+// resetOwnerTailscale revokes owner Tailscale access, best effort, with the
+// same bound as ffos factory_reset.sh: owner access otherwise lasts until it
+// is revoked or the device is factory reset (ffos docs/OWNER_TAILSCALE.md).
+func (e *executor) resetOwnerTailscale() {
+	if e.exec == nil || e.os == nil {
+		return
+	}
+	if _, err := e.os.Stat(ownerTailscaleBin); err != nil {
+		return
+	}
+	if err := e.runSudoCommand(context.Background(), "timeout", "-k", "5", "60", ownerTailscaleBin, "reset"); err != nil {
+		e.logger.Warn("Could not revoke owner Tailscale access after ownership release", zap.Error(err))
+	}
+}
+
+func (e *executor) SetContentPolicyResetter(reset func() error) {
+	e.contentPolicyResetter = reset
+}
+
+func (e *executor) SetDeviceNameObserver(observer func(name string)) {
+	e.nameObserver = observer
 }
 
 // SetSetupUI injects the shared setup-narration surface so the controld-owned
@@ -557,7 +806,7 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 	var result interface{}
 	switch cmd.Type {
 	case commands.CMD_CONNECT:
-		result, err = e.connect(bytes)
+		result, err = e.connect(ctx, bytes)
 	case commands.CMD_SHOW_PAIRING_QR_CODE:
 		result, err = e.showPairingQRCode(ctx, bytes)
 	case commands.CMD_KEYBOARD_EVENT:
@@ -603,25 +852,27 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 	case commands.CMD_TOGGLE_MUTE:
 		result, err = e.toggleMute(ctx)
 	case commands.CMD_SSH_ACCESS:
-		result, err = e.setSshAccess(ctx, bytes)
+		result, err = e.setSshAccessInOrder(ctx, bytes)
 	case commands.CMD_DDC_PANEL_CONTROL:
 		result, err = e.ddcPanelControl(ctx, bytes)
 	case commands.CMD_DDC_PANEL_STATUS:
 		result, err = e.ddcPanelStatus(ctx, bytes)
 	case commands.CMD_SET_SLEEP_SCHEDULE:
 		result, err = e.setSleepSchedule(ctx, bytes)
+	case commands.CMD_SET_DEVICE_NAME:
+		result, err = e.setDeviceName(ctx, bytes)
 	case commands.CMD_SLEEP_NOW:
 		result, err = e.sleepNow(ctx)
 	case commands.CMD_WAKE_NOW:
 		result, err = e.wakeNow(ctx)
 	default:
-		return nil, fmt.Errorf("invalid command: %s", cmd)
+		return nil, fmt.Errorf("invalid command: %s", cmd.Type)
 	}
 
 	return result, err
 }
 
-func (e *executor) connect(args []byte) (interface{}, error) {
+func (e *executor) connect(ctx context.Context, args []byte) (interface{}, error) {
 	var cmdArgs struct {
 		Device         Device `json:"clientDevice"`
 		PrimaryAddress string `json:"primaryAddress"`
@@ -640,6 +891,19 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 	}
 
 	wasClaimed := e.deviceClaimed()
+
+	// §7.1: connect is controller tier so every controller's cast (which
+	// starts with connect) works, but only an owner claims or rebinds. Under
+	// the protocol, a non-owner connect to a claimed device is answered ok
+	// and changes nothing; one to an unclaimed device is refused.
+	if e.control != nil {
+		if protected, owner := e.control.ConnectAuthority(ctx); protected && !owner {
+			if wasClaimed {
+				return CmdOK, nil
+			}
+			return nil, fmt.Errorf("connect: claiming this device needs owner access")
+		}
+	}
 
 	err = state.SetConnectedDevice(state.Device{
 		ID:       cmdArgs.Device.ID,
@@ -665,6 +929,9 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 	// unrelated overlay.
 	if !wasClaimed {
 		e.setupUI().Hide()
+		// The claim QR (and any invitation it carried) is gone: the
+		// invitation must not outlive it (review F6).
+		e.clearControlInvitation()
 		// First pair: put artwork on screen immediately instead of leaving the
 		// player idle until the cloud gets around to sending content. The claim
 		// QR only paints after the relayer topic-wait, so the device is online
@@ -703,6 +970,21 @@ func (e *executor) sendDisplayDefaultPlaylist() error {
 			return nil, fmt.Errorf("marshal displayDefaultPlaylist payload: %w", err)
 		}
 
+		// This send bypasses commandrouter, so it must do what
+		// commandrouter does before every replacing send: drop the
+		// attested signature verdict. From the moment the send lands the
+		// player may be showing its own default content — bytes controld
+		// never verified — and a status round in that window must omit,
+		// never re-attest, the previous playlist's verdict
+		// (feral-file/ffos-user#307). Inside the push section, before the
+		// send, like every other producer.
+		e.sleepApplyMu.Lock()
+		invalidate := e.verdictInvalidator
+		e.sleepApplyMu.Unlock()
+		if invalidate != nil {
+			invalidate()
+		}
+
 		result, err := e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
 			"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
 		})
@@ -730,10 +1012,14 @@ func (e *executor) sendDisplayDefaultPlaylist() error {
 func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interface{}, error) {
 	var cmdArgs struct {
 		Show bool `json:"show"`
+		// Purpose "enroll" asks for the control invitation on a claimed
+		// legacy device (feral-file#3551 §11, the 2.0.x owner migration).
+		Purpose string `json:"purpose"`
 	}
 	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
+	e.enrollQR.Store(cmdArgs.Show && cmdArgs.Purpose == "enroll")
 
 	// controld drives the claim/pairing QR in-process: on show=true it runs the
 	// mandatory pre-claim OTA gate and, only on a supported build, paints the
@@ -767,13 +1053,17 @@ func (e *executor) showPairingQRCodeInProcess(ctx context.Context, show bool) (i
 		// succeeded.
 		ui.ShowReady()
 		ui.Hide()
+		e.clearControlInvitation()
 		return CmdOK, nil
 	}
 
 	// The relayer command obeys the cloud unconditionally (skipIfSettled
 	// false): an explicit show=true on a claimed device is a deliberate
-	// re-pair request.
-	e.runPreClaimGateAndPaint(ctx, false)
+	// re-pair request. One admitted while the device had no owner is the
+	// exception: if an owner enrolls while the gate runs, the topic QR must
+	// not be painted over the now-owned device (review round 4 L5).
+	ownerlessAtStart := e.control != nil && !e.control.Enrolled()
+	e.runPreClaimGateAndPaint(ctx, false, ownerlessAtStart)
 	return CmdOK, nil
 }
 
@@ -787,7 +1077,7 @@ func (e *executor) showPairingQRCodeInProcess(ctx context.Context, show bool) (i
 // failure so the loop stretches its retry cadence (see
 // autoClaimLadderFailureBackoffMin/Max for why that is neither terminal nor
 // the normal backoff).
-func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bool) (painted, terminal, ladderFailed bool) {
+func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled, ownerlessAtStart bool) (painted, terminal, ladderFailed bool) {
 	// t0 anchors the latch-freshness check in the error branch below. It MUST
 	// be read from the same clock the gate stamps FailureState.At with (both
 	// are e.clock — see otaGateInstance) and MUST stay raw: no .UTC()/.Round()
@@ -855,12 +1145,51 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 	// clear only the finalizing overlay this flow painted — an unconditional
 	// Hide would erase live narration and blind the reload safeguard keyed on
 	// the same intent.
-	if skipIfSettled && e.claimSettled() {
+	if (skipIfSettled && e.claimSettled()) || (ownerlessAtStart && e.control.Enrolled()) {
 		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return false, true, false
 	}
-	e.setupUI().ShowClaimQR(e.buildDeviceConnectURL(ctx), e.deviceID())
+	e.paintClaimQRWithInvitation(ctx, skipIfSettled)
 	return true, false, false
+}
+
+// paintClaimQRWithInvitation builds the claim URL (which mints or reuses the
+// control invitation when one belongs on it) and paints it. If the paint did
+// not take — an automatic paint is refused while another overlay owns the
+// screen — the invitation just minted is voided at once: an invitation must
+// exist only while a QR carrying it is on screen (review N4d).
+func (e *executor) paintClaimQRWithInvitation(ctx context.Context, automatic bool) {
+	// A claim QR that is not on screen now (another narration replaced it)
+	// takes its invitation with it, even before the 15 s watch notices: the
+	// repaint must carry a NEW invitation, never one that was visible to
+	// whoever saw the earlier QR (review I3).
+	if e.control != nil && !e.setupUI().ClaimQRShowing() {
+		e.clearControlInvitation()
+	}
+	e.paintClaimQR(e.buildDeviceConnectURL(ctx), automatic)
+	if e.control != nil && !e.setupUI().ClaimQRShowing() {
+		e.clearControlInvitation()
+	}
+}
+
+// paintClaimQR reads the display name and pushes the claim QR under
+// deviceNameMu — the same lock a rename holds across its own Save and
+// RefreshClaimQRName. Unlocked, a paint whose name read landed before a
+// concurrent rename's Save could push AFTER that rename's refresh, and
+// ShowClaimQR's unconditional push would put the pre-rename label back on
+// screen with nothing to repaint it until the next online/topic transition.
+// The url is built by the caller, outside the lock, so renames never queue
+// behind the connect-URL's own reads; the critical section is the name read
+// and the (non-blocking) push only. Lock edge deviceNameMu → setupui.mu is
+// the one setDeviceName already establishes, one-way.
+func (e *executor) paintClaimQR(url string, automatic bool) {
+	e.deviceNameMu.Lock()
+	defer e.deviceNameMu.Unlock()
+	if automatic {
+		e.setupUI().ShowClaimQRAutomatic(url, e.deviceDisplayName())
+		return
+	}
+	e.setupUI().ShowClaimQR(url, e.deviceDisplayName())
 }
 
 // updateLadderFailureLatchedSince reports whether the OTA gate's failure latch
@@ -901,6 +1230,12 @@ const (
 type setupNarrator interface {
 	ShowFinalizing()
 	ShowClaimQR(url string, deviceName string)
+	// ShowClaimQRAutomatic is ShowClaimQR for a claim paint no owner asked for.
+	ShowClaimQRAutomatic(url string, deviceName string)
+	RefreshClaimQRName(resolve func() string)
+	RefreshClaimQRURL(build func() string)
+	// ClaimQRShowing reports whether the claim QR is the current narration.
+	ClaimQRShowing() bool
 	ShowReady()
 	ShowFactoryReset()
 	ShowJoinFailed(reason string)
@@ -1067,7 +1402,7 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 	backoff := autoClaimRetryMin
 	ladderBackoff := autoClaimLadderFailureBackoffMin
 	for {
-		painted, terminal, ladderFailed := e.runPreClaimGateAndPaint(ctx, true)
+		painted, terminal, ladderFailed := e.runPreClaimGateAndPaint(ctx, true, false)
 		if painted || terminal {
 			return
 		}
@@ -1424,7 +1759,10 @@ func (e *executor) awaitPlayerCommandHandlerReady(ctx context.Context) bool {
 // by the cloud this process lifetime. The auto-claim loop must treat both as
 // terminal; painting the claim QR over a settled device is always wrong.
 func (e *executor) claimSettled() bool {
-	return e.deviceClaimed() || e.pairingConfirmed.Load()
+	// An enrolled control owner settles the device too: the owner enrolled
+	// from the invitation QR and claims next, over an envelope; repainting
+	// the topic-carrying QR in between would hand the topic to the room.
+	return e.deviceClaimed() || e.pairingConfirmed.Load() || (e.control != nil && e.control.Enrolled())
 }
 
 // deviceClaimed mirrors the claim derivation every other surface uses (mDNS
@@ -1462,7 +1800,21 @@ func (e *executor) buildDeviceConnectURL(ctx context.Context) string {
 	} else {
 		e.logger.Warn("Claim QR: could not read local build; branch/version omitted", zap.Error(err))
 	}
-	return formatDeviceConnectURL(e.deviceID(), topicID, true, branch, version, claimSetupPhase)
+	var invitation []string
+	if e.control != nil && (!state.ClaimSnapshot().Claimed || e.enrollQR.Load()) {
+		if fields, expiresAt, ok := e.control.ClaimQRFields(); ok {
+			invitation = fields
+			e.scheduleInvitationRefresh(expiresAt)
+		}
+	}
+	if e.control != nil && invitation == nil {
+		// This QR replaces any invitation-bearing one (review F6).
+		e.clearControlInvitation()
+		if pins, ok := e.control.ClaimQRPins(); ok {
+			invitation = pins
+		}
+	}
+	return formatDeviceConnectURL(e.deviceID(), topicID, true, branch, version, claimSetupPhase, invitation...)
 }
 
 // formatDeviceConnectURL replicates the claim URL built by
@@ -1476,14 +1828,24 @@ func (e *executor) buildDeviceConnectURL(ctx context.Context) string {
 //
 // with the branch's '/' percent-encoded to %2F and nothing else encoded. Ported
 // from feral-setupd startup.rs::build_device_info; the app's parser must not be
-// able to tell this apart from the setupd-built payload.
-func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, version, setupPhase string) string {
+// able to tell this apart from the setupd-built payload. (launcher-ui, the
+// other builder this once had to match, was deleted with feral-setupd.)
+//
+// invitation, when present, is the feral-file#3551 control invitation
+// appended as four more fields (docs/ff1-control-v1.md §11):
+// |<inv>|<thumb(devSig)>|<thumb(devEnc)>|<gen>, with <inv> empty when there is
+// no invitation. Old app parsers read only indices 0, 1 and 3, so the topic
+// stays at index 1.
+func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, version, setupPhase string, invitation ...string) string {
 	internet := "false"
 	if online {
 		internet = "true"
 	}
 	branch = strings.ReplaceAll(branch, "/", "%2F")
 	deviceInfo := fmt.Sprintf("%s|%s|%s|%s|%s|%s", deviceID, topicID, internet, branch, version, setupPhase)
+	for _, f := range invitation {
+		deviceInfo += "|" + f
+	}
 	return deviceConnectURLPrefix + deviceInfo
 }
 
@@ -2587,6 +2949,41 @@ func (e *executor) setBetaFeaturesToggle(_ context.Context, args []byte) (interf
 	return CmdOK, nil
 }
 
+// sshTurn queues one SSH change. The caller waits for prev (nil: nothing
+// queued) and must call done when its change has finished, whatever happened.
+func (e *executor) sshTurn() (prev <-chan struct{}, done func()) {
+	e.sshMu.Lock()
+	defer e.sshMu.Unlock()
+	mine := make(chan struct{})
+	if e.sshTail != nil {
+		prev = e.sshTail
+	}
+	e.sshTail = mine
+	return prev, func() { close(mine) }
+}
+
+// setSshAccessInOrder runs sshAccess after every SSH change requested
+// before it (see sshMu).
+func (e *executor) setSshAccessInOrder(ctx context.Context, args []byte) (interface{}, error) {
+	prev, done := e.sshTurn()
+	if prev != nil {
+		select {
+		case <-prev:
+		case <-ctx.Done():
+			// Keep the queue intact: release this turn only after the
+			// earlier change has finished.
+			go func() { <-prev; done() }()
+			return nil, ctx.Err()
+		}
+	}
+	defer done()
+	// Bounded like the enrollment revocation: a hung sudo call must not
+	// hold the queue, and every later SSH change, forever.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return e.setSshAccess(ctx, args)
+}
+
 func (e *executor) setSshAccess(ctx context.Context, args []byte) (interface{}, error) {
 	var cmdArgs struct {
 		Enabled    bool   `json:"enabled"`
@@ -2889,6 +3286,21 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	// concurrent relayer message.
 	e.resetStaged.Store(true)
 
+	// Retire the control identity (feral-file#3551 §8) before anything else
+	// changes: delete .state/control and refuse every envelope from now on.
+	// A failure FAILS the reset, latch released, nothing else touched: the
+	// candidate boot can roll back onto this subvolume, and a "reset" device
+	// that kept the previous owner's grants would hand the next owner a frame
+	// someone else still controls.
+	if e.control != nil {
+		e.stopInvitationRefresh()
+		if err := e.control.Retire(); err != nil {
+			e.resetStaged.Store(false)
+			e.logger.Error("Factory reset refused: retiring the control identity failed", zap.Error(err))
+			return nil, fmt.Errorf("factory reset refused: retiring control identity: %w", err)
+		}
+	}
+
 	// Topic rotation (security invariant): set-factory-boot.service does NOT
 	// swap the running root. It snapshots the factory image to
 	// @snapshots/@factory_reset_new and arms a ONE-SHOT boot entry
@@ -2906,7 +3318,52 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	// /home/feralfile/.state/ inside the root subvolume (no separate @home —
 	// the install creates only @log, @pkg and @snapshots), so booting the
 	// candidate discards it wholesale. It is kept for the rollback path alone.
+	// Order matters here, and it is the opposite of the obvious one.
+	//
+	// Browser sessions are held by the RELAYER, which knows nothing about a
+	// factory reset, and an owner-kept session has no expiry to reclaim it. So
+	// they have to be swept from here — but sweeping FIRST leaves a hole: an
+	// approval accepted a moment before the reset can mint its session after
+	// the sweep has already listed the topic, and that session would then
+	// survive the wipe. So the claim is invalidated first, in one locked step
+	// that also hands back the topic id: from that instant the topic
+	// generation has moved, so any mint in flight fails its own guard check
+	// (before creation, or after delivery) and revokes the session it made.
+	// The sweep then runs against the captured id and cleans up everything
+	// that existed before, and the rest of the claim is cleared after.
+	//
+	// Between the two, the reset waits for creations already sent to the
+	// relayer: a POST in flight can commit its session AFTER the sweep has
+	// enumerated, and the enumeration would never see it. A create that
+	// returns after the invalidation revokes itself (its guard sees the moved
+	// generation), so waiting for those returns is what makes the sweep's
+	// enumeration complete.
+	outgoingTopicID := e.invalidateRelayerTopic()
+	e.cleanupBrowserSessions(outgoingTopicID)
+
 	e.clearPersistedClaim()
+
+	// The owner's name for this unit falls with the claim, and for the same
+	// rollback reason: on the success path the record is discarded with the
+	// subvolume, but a reset that rolls back must not leave a resold frame
+	// still announcing the previous owner's vocabulary over mDNS. Best-effort
+	// — a name that outlives a failed reset is cosmetic, and failing the reset
+	// over it would trade a real outcome for a label.
+	if err := e.clearDeviceName(); err != nil {
+		e.logger.Warn("Failed to clear device name during factory reset", zap.Error(err))
+	}
+	// The content policy is the owner's audience setting, so it falls with the
+	// claim for exactly the rollback reason above: on the success path the
+	// durable file is discarded with the subvolume, but a reset that rolls back
+	// would otherwise hand a resold frame the previous owner's admission rules
+	// — including a mature-content allowance the next owner never chose.
+	// Best-effort, like the device name: failing the reset over it would trade
+	// a real outcome for a setting the success path erases anyway.
+	if e.contentPolicyResetter != nil {
+		if err := e.contentPolicyResetter(); err != nil {
+			e.logger.Warn("Failed to reset content policy during factory reset", zap.Error(err))
+		}
+	}
 
 	// The process-lifetime pairing latch must fall with the persisted claim,
 	// or claimSettled() would still read true and withhold the claim QR after
@@ -2943,6 +3400,158 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 // Best-effort: a save failure is logged but does not abort the reset (the
 // reboot into the factory snapshot still discards both). A no-op when nothing
 // is persisted.
+// invalidateRelayerTopic clears the persisted relayer topic and returns the id
+// it cleared, so the caller can clean up remotely for a topic this device has
+// already stopped answering to. The clear is what moves the topic generation,
+// which is how work already in flight learns its claim is gone.
+func (e *executor) invalidateRelayerTopic() string {
+	topicID, changed, err := state.InvalidateRelayerTopic()
+	if err != nil {
+		e.logger.Error("Factory reset: failed to persist the relayer topic invalidation", zap.Error(err))
+	}
+	if !changed {
+		return ""
+	}
+	return strings.TrimSpace(topicID)
+}
+
+// revokeTopicBrowserSessions revokes the relayer's browser sessions for the
+// topic this device has just stopped answering to. Best effort and bounded:
+// the reset completes regardless. A failure is logged at error level on
+// purpose — what survives it is a live session against a device its previous
+// owner no longer holds, and this log is the only trace of it, since the
+// re-claimed device cannot reach the old topic to try again.
+// The reset's browser-session cleanup runs inside ONE budget, because the
+// reset is synchronous: a factoryReset over LAN is answered on the hub, whose
+// server write timeout is 30s (hub.WRITE_TIMEOUT), and the reply cannot start
+// until this returns. 20s total leaves the response real margin, and the
+// relayer work is best effort anyway — the wipe is coming either way.
+const (
+	// browserSessionCleanupBudget is the whole cleanup: closing the active
+	// pairing, waiting for creations in flight, and the sweep. The per-step
+	// caps below add up to exactly this.
+	browserSessionCleanupBudget = 20 * time.Second
+	// pairingCloseBudget caps the wait for the pairing worker to exit.
+	pairingCloseBudget = 5 * time.Second
+	// inFlightCreateWaitBudget caps the wait alone, so a stuck creation can
+	// never eat the sweep's share of the budget.
+	inFlightCreateWaitBudget = 12 * time.Second
+	// minSweepBudget is what the sweep gets even when the earlier steps
+	// overran: a sweep with no time at all is the same as no sweep.
+	minSweepBudget = 3 * time.Second
+)
+
+// sweepBudget is what is left of the cleanup budget for the sweep, floored so
+// the sweep always gets a real chance to run.
+func sweepBudget(remaining time.Duration) time.Duration {
+	if remaining < minSweepBudget {
+		return minSweepBudget
+	}
+	return remaining
+}
+
+// cleanupBrowserSessions ends the browser sessions the relayer holds for the
+// topic this device has just stopped answering to: it lets creations already
+// in flight settle (they then revoke themselves against the invalidated
+// claim), then sweeps what the relayer still holds. Both steps share one
+// budget; overrunning it is logged and never blocks the reset.
+func (e *executor) cleanupBrowserSessions(topicID string) {
+	if e.browserSessions == nil {
+		return
+	}
+	deadline := time.Now().Add(browserSessionCleanupBudget)
+	e.closeActivePairing(deadline)
+	e.waitForInFlightBrowserSessionCreates(deadline)
+	e.revokeTopicBrowserSessions(topicID, deadline)
+}
+
+// closeActivePairing ends a pairing session in progress and waits for its
+// worker to exit. It runs first, before the wait and the sweep: the worker
+// polls the broker on a socket this device still holds, so until it is gone a
+// browser request can still arrive for the claim being wiped. Bounded and best
+// effort — the worker also drops such a request on its own topic check, so
+// this is belt and braces, not the only guard.
+func (e *executor) closeActivePairing(deadline time.Time) {
+	budget := stepBudget(time.Until(deadline), pairingCloseBudget)
+	if budget <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	closed, err := e.browserSessions.CloseActivePairing(ctx)
+	if err != nil {
+		e.logger.Error("Factory reset: the active mint pairing session did not close in time",
+			zap.Error(err),
+			zap.Duration("waited", budget))
+		return
+	}
+	if closed {
+		e.logger.Info("Factory reset: closed the active mint pairing session")
+	}
+}
+
+// stepBudget caps one cleanup step at its own share and at whatever is left of
+// the shared budget.
+func stepBudget(remaining time.Duration, share time.Duration) time.Duration {
+	if remaining > share {
+		return share
+	}
+	return remaining
+}
+
+// waitForInFlightBrowserSessionCreates lets creations that are already at the
+// relayer finish, so the sweep that follows enumerates a settled set. Bounded
+// twice — by its own share of the budget and by the budget itself — because a
+// create that never returns must not hold a wipe. Giving up is logged at error
+// level with what was still outstanding: those are exactly the sessions the
+// sweep can miss.
+func (e *executor) waitForInFlightBrowserSessionCreates(deadline time.Time) {
+	wait := stepBudget(time.Until(deadline), inFlightCreateWaitBudget)
+	if wait <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	inFlight, err := e.browserSessions.WaitForInFlightCreates(ctx)
+	if err != nil {
+		e.logger.Error("Factory reset: gave up waiting for in-flight browser session creations; sessions they commit will survive the sweep",
+			zap.Error(err),
+			zap.Int("inFlight", inFlight),
+			zap.Duration("waited", wait))
+	}
+}
+
+// revokeTopicBrowserSessions revokes the relayer's browser sessions for the
+// topic this device has just stopped answering to, inside whatever is left of
+// the cleanup budget. Best effort: the reset completes regardless. A failure
+// is logged at error level on purpose — what survives it is a live session
+// against a device its previous owner no longer holds, and this log is the
+// only trace of it, since the re-claimed device cannot reach the old topic to
+// try again.
+func (e *executor) revokeTopicBrowserSessions(topicID string, deadline time.Time) {
+	if topicID == "" {
+		return
+	}
+	// Rooted on Background with the budget's remainder: the command context
+	// may already be canceled by the caller that asked for the reset, and this
+	// cleanup is worth doing either way.
+	ctx, cancel := context.WithTimeout(context.Background(), sweepBudget(time.Until(deadline)))
+	defer cancel()
+	revoked, err := e.browserSessions.RevokeTopicSessions(ctx, topicID)
+	if err != nil {
+		e.logger.Error("Factory reset: failed to revoke browser sessions for the outgoing topic; sessions may survive the reset",
+			zap.Error(err),
+			zap.String("topic_fp", helper.TopicFingerprint(topicID)),
+			zap.Int("revoked", revoked))
+		return
+	}
+	if revoked > 0 {
+		e.logger.Info("Factory reset: revoked browser sessions for the outgoing topic",
+			zap.String("topic_fp", helper.TopicFingerprint(topicID)),
+			zap.Int("revoked", revoked))
+	}
+}
+
 func (e *executor) clearPersistedClaim() {
 	changed, err := state.ClearClaim()
 	if !changed {
@@ -3020,6 +3629,7 @@ func (e *executor) releaseStuckResetLatch(why string) {
 	e.logger.Warn("Releasing the staged factory-reset latch", zap.String("reason", why))
 	e.resetStaged.Store(false)
 	e.setupUI().HideIfShowing(setupui.StateFactoryReset)
+
 }
 
 func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, error) {
@@ -3068,10 +3678,10 @@ const logUploadTimeout = 10 * time.Minute
 // logUploadTimeout so the guard always releases.
 // selfInitiated selects the completion-failure log level: controller-initiated
 // uploads keep Error (a support engineer explicitly asked for this bundle and
-// the fire-and-forget reply makes Sentry the only failure signal), while the
+// the fire-and-forget reply makes the Error log the only failure signal), while the
 // AUTOMATIC netlog self-upload logs at Warn — it fires on freshly-healed,
 // often still-restricted networks where failure is routine, and the netlog
-// posture pins that outage-driven telemetry must not become Sentry noise (the
+// posture pins that outage-driven telemetry must not become remote error noise (the
 // ring records the attempt either way).
 func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundleID string, selfInitiated bool) (interface{}, error) {
 	if !e.tryStartLogUpload(ctx, apiKey, supportBundleID, selfInitiated) {
@@ -3194,6 +3804,37 @@ func (e *executor) deviceID() string {
 		return "FF1"
 	}
 	return id
+}
+
+// deviceDisplayName resolves the label the claim QR's guidance text names the
+// frame by: the owner-set name when one is stored, otherwise the serial
+// (deviceID). Mirrors resolveMDNSDeviceInfo's same fallback so the QR
+// guidance and the mDNS advertisement agree on what an unnamed (or
+// just-renamed) unit is called — a rename takes effect here on the next
+// claim-QR paint since this loads the record fresh rather than caching it,
+// unlike deviceID's hostname read it sits beside. (status.device_status's
+// deviceName field does NOT take this fallback: it deliberately reports ""
+// for an unnamed unit as a capability signal a controller gates rename UI
+// on, so it is not a third surface to match here.)
+// A read failure or corrupt record falls back to the serial rather than
+// erroring the claim flow over a cosmetic field.
+func (e *executor) deviceDisplayName() string {
+	record, err := devicename.Load(e.os, e.json)
+	if err != nil {
+		e.logger.Warn("Failed to read device name for claim QR", zap.Error(err))
+		return e.deviceID()
+	}
+	return e.displayNameFor(record.Name)
+}
+
+// displayNameFor applies deviceDisplayName's fallback to a name already in
+// hand — the stored form a rename or clear just wrote — so the paint-time
+// read and the rename-time repaint resolve an unnamed unit to the same label.
+func (e *executor) displayNameFor(storedName string) string {
+	if storedName != "" {
+		return storedName
+	}
+	return e.deviceID()
 }
 
 func (e *executor) setVolume(ctx context.Context, args []byte) (interface{}, error) {

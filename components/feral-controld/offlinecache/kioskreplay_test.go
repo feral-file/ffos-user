@@ -23,6 +23,10 @@ import (
 // an empty result keyed to its id, mirroring how a real DevTools peer
 // answers a command. Returns the parsed outbound message so a caller can
 // assert on its method/params/sessionId.
+// syncErr adapts SyncPlaylist's (enabled, err) return for the many
+// assertions here that only care about the error half.
+func syncErr(_ int, err error) error { return err }
+
 func ackOutbound(t *testing.T, conn *fakeWSConn) map[string]interface{} {
 	t.Helper()
 	msg := conn.nextOutbound(t)
@@ -407,7 +411,7 @@ func TestKioskReplay_SyncPlaylist_EnablesOnlyCachedItemsAsMixedScope(t *testing.
 	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
 		nil, nil, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
 
-	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{sourceFor("cached-1"), sourceFor("uncached-1"), ""}))
+	require.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{sourceFor("cached-1"), sourceFor("uncached-1"), ""})))
 }
 
 // TestKioskReplay_SyncPlaylist_DuplicateSourcesCollapseInScope pins
@@ -440,9 +444,9 @@ func TestKioskReplay_SyncPlaylist_DuplicateSourcesCollapseInScope(t *testing.T) 
 	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
 		nil, nil, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
 
-	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{
+	require.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{
 		sourceFor("cached-1"), sourceFor("cached-1"), sourceFor("uncached-1"),
-	}))
+	})))
 }
 
 // TestKioskReplay_SyncPlaylist_AllItemsCachedWithDuplicatesIsNotMixed is
@@ -466,9 +470,9 @@ func TestKioskReplay_SyncPlaylist_AllItemsCachedWithDuplicatesIsNotMixed(t *test
 	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
 		nil, nil, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
 
-	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{
+	require.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{
 		sourceFor("cached-1"), sourceFor("cached-1"),
-	}))
+	})))
 }
 
 func TestKioskReplay_SyncPlaylist_AllItemsCachedIsNotMixedScope(t *testing.T) {
@@ -490,7 +494,7 @@ func TestKioskReplay_SyncPlaylist_AllItemsCachedIsNotMixedScope(t *testing.T) {
 	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
 		nil, nil, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
 
-	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{sourceFor("cached-1"), sourceFor("cached-2"), ""}))
+	require.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{sourceFor("cached-1"), sourceFor("cached-2"), ""})))
 }
 
 func TestKioskReplay_SyncPlaylist_NoCachedItemsDisables(t *testing.T) {
@@ -505,7 +509,7 @@ func TestKioskReplay_SyncPlaylist_NoCachedItemsDisables(t *testing.T) {
 	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
 		nil, nil, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
 
-	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{sourceFor("uncached-1"), sourceFor("uncached-2")}))
+	require.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{sourceFor("uncached-1"), sourceFor("uncached-2")})))
 }
 
 func TestKioskReplay_SyncPlaylist_EmptySourceListDisables(t *testing.T) {
@@ -520,7 +524,7 @@ func TestKioskReplay_SyncPlaylist_EmptySourceListDisables(t *testing.T) {
 	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
 		nil, nil, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
 
-	require.NoError(t, kr.SyncPlaylist(context.Background(), nil))
+	require.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), nil)))
 }
 
 // redialHarness wires a KioskReplay whose dial always succeeds against a
@@ -606,7 +610,7 @@ func TestKioskReplay_SyncPlaylist_RedialsWhenTheRootDiedWithPrimaryCDPHealthy(t 
 			Return(nil).Times(1),
 	)
 
-	require.NoError(t, h.kr.SyncPlaylist(context.Background(), []string{sourceFor("item-1")}),
+	require.NoError(t, syncErr(h.kr.SyncPlaylist(context.Background(), []string{sourceFor("item-1")})),
 		"the sync must recover within itself, not leave replay dead until the next kiosk restart")
 	assert.Equal(t, 1, *h.dials, "exactly one re-dial")
 }
@@ -628,7 +632,7 @@ func TestKioskReplay_SyncPlaylist_DoesNotRedialWhenTheRootIsStillAttached(t *tes
 	// No Attach expectation: gomock's strict controller fails the test if
 	// a re-dial happens anyway.
 
-	err := h.kr.SyncPlaylist(context.Background(), []string{sourceFor("item-1")})
+	_, err := h.kr.SyncPlaylist(context.Background(), []string{sourceFor("item-1")})
 	require.ErrorIs(t, err, assert.AnError, "the original failure must be reported, not masked by a recovery attempt")
 	assert.Equal(t, 0, *h.dials)
 }
@@ -657,12 +661,12 @@ func TestKioskReplay_SyncPlaylist_RedialIsRateLimited(t *testing.T) {
 
 	// First sync re-dials; the fresh session's own enable fails too (the
 	// kiosk is genuinely unwell), so the error is reported.
-	require.Error(t, h.kr.SyncPlaylist(context.Background(), []string{sourceFor("item-1")}))
+	require.Error(t, syncErr(h.kr.SyncPlaylist(context.Background(), []string{sourceFor("item-1")})))
 	assert.Equal(t, 1, *h.dials)
 
 	// Second sync, one second later: no second dial, and the caller still
 	// learns the real failure rather than a misleading dial error.
-	err := h.kr.SyncPlaylist(context.Background(), []string{sourceFor("item-1")})
+	_, err := h.kr.SyncPlaylist(context.Background(), []string{sourceFor("item-1")})
 	require.ErrorIs(t, err, offlinecache.ErrCDPTransport)
 	assert.Equal(t, 1, *h.dials, "a re-dial inside the cooldown must not be attempted")
 }

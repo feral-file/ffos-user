@@ -2,6 +2,7 @@ package mediator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
+	"github.com/feral-file/ffos-user/components/feral-controld/controlgate"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
@@ -39,6 +42,7 @@ type Mediator interface {
 	// LAN even with no upstream internet.
 	InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, link status.LinkState)
 	SetClaimed(claimed bool)
+	SetDeviceName(name string)
 	// SetTopicObserver registers a callback invoked when the relayer assigns
 	// this device its system topic (empty -> non-empty transition). Wired once
 	// at composition time, before Start; main uses it to re-trigger the
@@ -162,6 +166,38 @@ type mediator struct {
 
 	// connPushHook is the test-only completion seam (SetConnectivityPushHook).
 	connPushHook atomic.Pointer[func()]
+
+	// control is the feral-file#3551 control gate; nil when control.enabled
+	// is false, which keeps the relayer path exactly as before. Set once
+	// before Start (SetControl).
+	control ControlGate
+}
+
+// ControlGate is the mediator's view of controlgate.Gate.
+type ControlGate interface {
+	HandleEnvelope(ctx context.Context, raw json.RawMessage, origin control.Origin) (*controlgate.Wire, *control.PublicError)
+	Plaintext(route control.Route, cmd commands.Command) (control.Decision, commands.Command)
+}
+
+// SetControl wires the control gate (type-asserted seam, like
+// SetInternetObserver, so the Mediator interface and its mocks stay as
+// they are). Call before Start.
+func (m *mediator) SetControl(g ControlGate) { m.control = g }
+
+// plaintextDenial is the relayer RPC message for a plaintext command the
+// §7.2 policy refuses. ok:false is load-bearing and error is a flat string:
+// it is the only shape every released client reports as a failure without
+// crashing (ff-app casts error to String; ff1-cli and Play treat a body
+// without ok:false as success).
+func plaintextDenial(cmd commands.Type, code string) map[string]any {
+	msg := "this FF1 requires a signed control envelope for " + string(cmd) + "; update the Feral File app or ff-cli"
+	switch code {
+	case control.CodeLocked:
+		msg = "this FF1's control state is locked; factory reset it on the device itself to recover"
+	case control.CodeInvalidMessage:
+		msg = "message has duplicate or case-variant member names"
+	}
+	return map[string]any{"ok": false, "error": code, "command": string(cmd), "message": msg}
 }
 
 // startMDNSLocked registers the advertiser with the current device info and
@@ -258,6 +294,17 @@ func (m *mediator) Stop() {
 // present. Advertising is keyed on link state, not internet reachability: the
 // LAN hub is the BLE-replacement recovery channel and must be discoverable on
 // any LAN even with no upstream internet.
+//
+// Known, accepted boot-window race: the hub starts serving setDeviceName
+// before main reads the stored record and calls this, and the wholesale
+// `m.mdnsDeviceInfo = info` assignment discards a Name (or Claimed) that a
+// concurrent SetDeviceName/SetClaimed already wrote — those setters return
+// early on a nil advertiser, leaving nothing registered to preserve. A rename
+// landing in that sub-millisecond window is persisted and reported in status
+// but advertised stale until the next rename or restart. Accepted because the
+// window requires a LAN caller racing boot; if it ever matters, merge instead
+// of replace here (keep an already-set Name/Claimed) rather than reordering
+// startup.
 func (m *mediator) InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, link status.LinkState) {
 	m.mdnsMu.Lock()
 	defer m.mdnsMu.Unlock()
@@ -531,6 +578,37 @@ func (m *mediator) SetClaimed(claimed bool) {
 	}
 }
 
+// SetDeviceName updates the advertised device name. Same mechanism and same
+// reason as SetClaimed: zeroconf publishes its TXT record once at Register
+// time, so a name change only reaches the network through a Stop+Start.
+//
+// The name is also the mDNS service-instance label, so re-registering moves
+// the device to a new instance name — controllers see the old instance go and
+// a new one arrive. That is safe because discovery identity is the TXT `id`
+// (the serial), which does not change here; a resolver keying on the instance
+// name alone would already be broken by an ordinary re-register.
+func (m *mediator) SetDeviceName(name string) {
+	m.mdnsMu.Lock()
+	defer m.mdnsMu.Unlock()
+
+	if m.mdnsDeviceInfo.Name == name {
+		return
+	}
+	m.mdnsDeviceInfo.Name = name
+
+	if m.mdnsAdvertiser == nil {
+		return
+	}
+
+	m.logger.Info("Re-registering mDNS after device-name change")
+	m.stopMDNSLocked()
+	// Link-keyed, exactly as SetClaimed: with no link the periodic reconcile
+	// brings the advertiser back carrying the updated name.
+	if m.linkState != nil && m.linkState.HasLink(context.Background()) {
+		m.startMDNSLocked()
+	}
+}
+
 // reconcileRelayer drives the relayer connection to its desired state —
 // connected whenever the device is online — off the periodic SYSMETRICS
 // heartbeat. It is deliberately cheap on the steady path: a connected relayer
@@ -598,6 +676,15 @@ func (m *mediator) handleDBusSignal(
 	ctx context.Context,
 	payload godbus.DBusPayload) ([]interface{}, error) {
 	if payload.Member.IsACK() {
+		return nil, nil
+	}
+
+	// The match rule covers the whole /com/feralfile namespace (main.go),
+	// which includes controld's own object path, so every signal controld
+	// emits (cdp_stuck, ffos-user#356) is delivered back here. Those are
+	// reports for other daemons, not input: drop them before logging, or
+	// each periodic cdp_stuck send adds an Info + "Unknown signal" Warn pair.
+	if payload.Path == dbus.PATH {
 		return nil, nil
 	}
 
@@ -741,6 +828,10 @@ func (m *mediator) handleDBusSignal(
 func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Payload) error {
 	payloadJSON, _ := m.json.Marshal(payload)
 	logPayload := helper.TruncateBytes(payloadJSON, logger.MAX_FIELD_LENGTH)
+	if payload.MessageID == relayer.MESSAGE_ID_SYSTEM {
+		// The system frame carries the topic, a bearer credential: never log it.
+		logPayload = []byte("[system frame redacted]")
+	}
 	m.logger.Info("handle received relayer message",
 		zap.ByteString("payload", logPayload),
 		zap.String("messageID", payload.MessageID),
@@ -786,10 +877,55 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 			commandType = commands.Type(*payload.Message.Command)
 		}
 		command := commands.Command{
-			Type:      commandType,
-			Arguments: payload.Message.Request,
+			Type:         commandType,
+			Arguments:    payload.Message.Request,
+			RawArguments: payload.Message.RawRequest,
+			Ambiguous:    payload.Message.Ambiguous,
 		}
-		result, err := m.cmdHandler.Process(ctx, command)
+		// Control protocol (feral-file#3551, docs/ff1-control-v1.md §7.2,
+		// §10): an envelope is answered by the authority, the RPC message is
+		// {"v":1,"jwe"} or the public error; plaintext is policy-checked
+		// on RouteRelayer before it can reach the router.
+		if m.control != nil {
+			// A frame with no command (the relayer's own error frames, e.g.
+			// {"error":{"code":2000,"message":"Invalid messageID"}}) is
+			// never answered: TierOf("") is owner, and a denial without a
+			// messageID draws the same relayer error back, looping forever.
+			// A reply without a messageID has no caller either (the rule
+			// sendShedResponse applies).
+			if payload.Message.Command == nil {
+				m.logger.Debug("Relayer frame without a command ignored under control")
+				return nil
+			}
+			if commandType == control.CmdEnvelope {
+				// No messageID, no caller: do not spend a window or run the
+				// command for a reply that would be discarded.
+				if payload.MessageID == "" {
+					m.logger.Debug("Relayer envelope without a messageID ignored")
+					return nil
+				}
+				var message any
+				wire, perr := m.control.HandleEnvelope(ctx, payload.Message.RawRequest, control.Origin{Route: control.RouteRelayer, Known: true})
+				if perr != nil {
+					message = json.RawMessage(perr.Body())
+				} else {
+					message = wire
+				}
+				return m.relayer.Send(ctx, relayer.Response{Type: "RPC", MessageID: payload.MessageID, Message: message})
+			}
+			d, normalized := m.control.Plaintext(control.RouteRelayer, command)
+			if !d.Allow {
+				m.logger.Warn("Relayer plaintext command refused by control policy",
+					zap.String("command", commandType.String()), zap.String("code", d.Code))
+				if payload.MessageID == "" {
+					return nil
+				}
+				return m.relayer.Send(ctx, relayer.Response{Type: "RPC", MessageID: payload.MessageID,
+					Message: plaintextDenial(commandType, d.Code)})
+			}
+			command = normalized
+		}
+		result, err := m.cmdHandler.Process(commands.FromController(ctx), command)
 		if err != nil {
 			if commandrouter.IsRateLimited(err) {
 				// Report a legible rejection back to the caller rather than
@@ -807,6 +943,55 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 						"message": err.Error(),
 					},
 				}
+				return m.relayer.Send(ctx, resp)
+			}
+			if commandrouter.IsSourceUnreachable(err) {
+				// A dead-source cast rejection is the CALLER's problem to act
+				// on, and remote casts are exactly the audience #304 exists
+				// for (a publisher pushing to someone else's wall must learn
+				// the link is dead) — so it gets a legible RPC error reply,
+				// mirroring the rate_limited shape above, rather than the
+				// reply-less logger.Error fallthrough below, which the
+				// caller can only experience as its own RPC timeout. Warn,
+				// not Error: this is client input being rejected, not a
+				// daemon fault, and must not be promoted to an Error log.
+				m.logger.Warn("Cast rejected: no playlist item source is loadable",
+					zap.String("command", commandType.String()),
+					zap.Error(err),
+				)
+				resp := relayer.Response{
+					Type:      "RPC",
+					MessageID: payload.MessageID,
+					Message: map[string]any{
+						// ok:false is the load-bearing field for current
+						// controllers, not decoration: ff-cli's relayer
+						// helper decides success by hunting for a boolean
+						// ok (nestedOk in ff1-relayer.ts) and treats a
+						// body with none as SUCCESS, and ff-app casts the
+						// ok field and throws when it is absent. An
+						// error-only body would tell both clients the
+						// dead-link cast worked — the exact failure this
+						// reply exists to surface. (rate_limited above
+						// predates this and ships without ok; changing
+						// that shape is a separate decision.)
+						"ok":      false,
+						"error":   "sourceUnreachable",
+						"command": commandType.String(),
+						"message": err.Error(),
+					},
+				}
+				return m.relayer.Send(ctx, resp)
+			}
+			if commandrouter.IsContentBlocked(err) {
+				resp := relayer.Response{Type: "RPC", MessageID: payload.MessageID, Message: map[string]any{
+					"ok": false, "error": "contentBlocked", "command": commandType.String(), "message": err.Error(),
+				}}
+				return m.relayer.Send(ctx, resp)
+			}
+			if commandrouter.IsPlaylistInvalid(err) {
+				resp := relayer.Response{Type: "RPC", MessageID: payload.MessageID, Message: map[string]any{
+					"ok": false, "error": "playlistInvalid", "command": commandType.String(), "message": err.Error(),
+				}}
 				return m.relayer.Send(ctx, resp)
 			}
 			m.logger.Error("Failed to process command", zap.Error(err))

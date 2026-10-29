@@ -265,6 +265,17 @@ func (c *capturer) newDiskBudget() *captureDiskBudget {
 // is bounded by the identical whole-store disk ceiling, computed the
 // same way.
 func newDiskBudgetFromStore(store Store, maxDiskBytes int64, logger *zap.Logger) *captureDiskBudget {
+	if bounded, ok := store.(*budgetStore); ok {
+		used, err := store.DiskUsage()
+		if err != nil {
+			return newCaptureDiskBudget(0, false)
+		}
+		limit, err := bounded.policy.currentLimit(used)
+		if err != nil {
+			return newCaptureDiskBudget(0, false)
+		}
+		return newCaptureDiskBudget(limit-used-64*1024, false)
+	}
 	if maxDiskBytes <= 0 {
 		return newCaptureDiskBudget(0, true)
 	}

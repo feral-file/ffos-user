@@ -99,6 +99,70 @@ func (a *fakeAP) Status(context.Context) (softap.Status, error) {
 	return softap.Status{}, nil
 }
 
+// PortalURL is recorded so tests can pin its place in the raise sequence: it
+// must run only after the portal has bound :80 (see ensureAPUp).
+func (a *fakeAP) PortalURL(context.Context) string {
+	a.rec.add("ap.PortalURL")
+	return a.info.PortalURL
+}
+
+// The identities the station-poll tests run on: the phone that attaches (its
+// portal request comes from attachIP, and the neighbor table resolves that to
+// attachedMAC) and a second device that shares the hotspot with it.
+const (
+	attachIP    = "10.42.0.22"
+	attachedMAC = "aa:bb:cc:dd:ee:01"
+	otherIP     = "10.42.0.23"
+	otherMAC    = "aa:bb:cc:dd:ee:02"
+)
+
+// fakeStations scripts the AP's station list the attached phase polls. The
+// harness never runs the loop, so the poll goroutine never starts; tests feed
+// readings straight into applyStationPoll or call readAttachedPresence.
+// Guarded anyway because a loop-running test could start the goroutine.
+type fakeStations struct {
+	mu   sync.Mutex
+	macs []string
+	ok   bool
+}
+
+func (f *fakeStations) set(macs []string, ok bool) {
+	f.mu.Lock()
+	f.macs, f.ok = macs, ok
+	f.mu.Unlock()
+}
+
+func (f *fakeStations) AttachedStations(context.Context) ([]string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.macs, f.ok
+}
+
+// fakeNeighbors is the kernel neighbor table the poll resolves the attached
+// phone's request IP through (softap.NeighborMAC in production). Guarded for
+// the same reason as fakeStations: the poll goroutine reads it.
+type fakeNeighbors struct {
+	mu   sync.Mutex
+	byIP map[string]string
+}
+
+func newFakeNeighbors() *fakeNeighbors {
+	return &fakeNeighbors{byIP: map[string]string{attachIP: attachedMAC, otherIP: otherMAC}}
+}
+
+func (f *fakeNeighbors) set(byIP map[string]string) {
+	f.mu.Lock()
+	f.byIP = byIP
+	f.mu.Unlock()
+}
+
+func (f *fakeNeighbors) lookup(ip string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	mac, ok := f.byIP[ip]
+	return mac, ok
+}
+
 type fakeWifi struct {
 	rec        *recorder
 	mu         sync.Mutex
@@ -428,6 +492,8 @@ type harness struct {
 	conn     *fakeConn
 	clk      *fakeClock
 	notifier *fakeNotifier
+	stations *fakeStations
+	neigh    *fakeNeighbors
 	portals  []*fakePortal
 	// portalStartErr, when set, makes every NEW portal's Start fail with it.
 	portalStartErr error
@@ -437,12 +503,16 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	rec := &recorder{}
 	h := &harness{
-		rec:      rec,
-		ap:       &fakeAP{rec: rec, info: softap.Info{SSID: "FF1-abc", PSK: "abc12345"}},
+		rec: rec,
+		ap: &fakeAP{rec: rec, info: softap.Info{
+			SSID: "FF1-abc", PSK: "abc12345", PortalURL: "http://10.42.0.1",
+		}},
 		wifi:     &fakeWifi{rec: rec},
 		conn:     &fakeConn{},
 		clk:      newFakeClock(),
 		notifier: &fakeNotifier{rec: rec},
+		stations: &fakeStations{macs: []string{attachedMAC}, ok: true},
+		neigh:    newFakeNeighbors(),
 	}
 	h.m = New(Config{
 		AP:            h.ap,
@@ -451,6 +521,8 @@ func newHarness(t *testing.T) *harness {
 		Clock:         h.clk,
 		Logger:        zap.NewNop(),
 		Notifier:      h.notifier,
+		Stations:      h.stations,
+		NeighborMAC:   h.neigh.lookup,
 		OfflineWindow: 5 * time.Minute,
 		CheckInterval: 15 * time.Second,
 		PortalAddr:    "127.0.0.1:0",
@@ -986,6 +1058,8 @@ func TestPortalBindFailureTearsAPBackDown(t *testing.T) {
 	require.NotEqual(t, -1, iStart, "portal start must be attempted: %v", events)
 	require.NotEqual(t, -1, iDown, "AP must be torn back down after the portal failed to bind: %v", events)
 	assert.Less(t, iStart, iDown, "teardown must follow the failed portal start: %v", events)
+	assert.Equal(t, 0, h.rec.count("ap.PortalURL"),
+		"no address lookup on a failed bind — there is nothing to publish: %v", events)
 	assert.Equal(t, StateAPActive, h.m.State(), "machine stays in APActive so the tick retries")
 
 	// Retry with the bind conflict resolved: the full constraint-1 sequence
@@ -1002,6 +1076,24 @@ func TestPortalBindFailureTearsAPBackDown(t *testing.T) {
 	last := events[indexOf(events[iDown:], "wifi.RefreshScanCache")+iDown:]
 	assert.Less(t, indexOf(last, "wifi.RefreshScanCache"), indexOf(last, "ap.Up"),
 		"retry must scan before re-raising the AP: %v", events)
+}
+
+// TestPortalURLResolvedOnlyAfterPortalBind pins the raise ordering: the
+// optional direct-address lookup must never sit between the AP going live
+// (beacons out, phone re-associating) and the portal binding :80 — a captive
+// probe landing in that gap gets a RST, which iOS reads as "no portal here"
+// and never raises the sign-in sheet.
+func TestPortalURLResolvedOnlyAfterPortalBind(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false) // unprovisioned
+	h.m.onConnectivity(context.Background(), false, false)
+
+	events := h.rec.list()
+	iStart := indexOf(events, "portal.Start")
+	iURL := indexOf(events, "ap.PortalURL")
+	require.NotEqual(t, -1, iStart, "portal must start: %v", events)
+	require.NotEqual(t, -1, iURL, "address lookup must run on a successful raise: %v", events)
+	assert.Less(t, iStart, iURL, "address lookup must wait for the portal bind: %v", events)
 }
 
 // TestFreshAPRaiseResetsStaleJoinStatus: a join outcome from a past setup must
@@ -1185,6 +1277,7 @@ func TestScanningNarrationPrecedesAPRaise(t *testing.T) {
 	require.NotEqual(t, -1, scanIdx, "scanning announcement must fire")
 	require.NotEqual(t, -1, apIdx, "credential-bearing AP-up announcement must fire")
 	assert.Less(t, scanIdx, apIdx)
+	assert.Equal(t, "http://10.42.0.1", h.notifier.details()[apIdx].Detail.PortalURL)
 }
 
 // --- portal rescan bounce ----------------------------------------------------

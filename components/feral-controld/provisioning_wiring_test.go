@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,9 @@ import (
 // spyNarrationUI records the narration calls the notifier makes.
 type spyNarrationUI struct {
 	calls []string
+	// softAPPortalURLs records the DNS-independent fallback carried with each
+	// successfully raised setup AP.
+	softAPPortalURLs []string
 	// joinFailedReasons records ShowJoinFailed bodies in order (real join
 	// failures re-announced with the AP raise).
 	joinFailedReasons []string
@@ -40,8 +44,20 @@ func (s *spyNarrationUI) ShowSetupError(reason string) {
 	s.setupErrorReasons = append(s.setupErrorReasons, reason)
 }
 
-func (s *spyNarrationUI) ShowScanning()                 { s.calls = append(s.calls, "scanning") }
-func (s *spyNarrationUI) ShowSoftAPQR(ssid, psk string) { s.calls = append(s.calls, "softap") }
+func (s *spyNarrationUI) ShowScanning() { s.calls = append(s.calls, "scanning") }
+func (s *spyNarrationUI) ShowSoftAPQR(ssid, psk, portalURL string) {
+	s.calls = append(s.calls, "softap")
+	s.softAPPortalURLs = append(s.softAPPortalURLs, portalURL)
+}
+func (s *spyNarrationUI) ShowSoftAPPortalQR(ssid, psk, portalURL string) {
+	s.calls = append(s.calls, "softap_portal")
+	s.softAPPortalURLs = append(s.softAPPortalURLs, portalURL)
+}
+func (s *spyNarrationUI) ShowSoftAPQRRetry(ssid, psk, portalURL, reason string) {
+	s.calls = append(s.calls, "softap_retry")
+	s.softAPPortalURLs = append(s.softAPPortalURLs, portalURL)
+	s.joinFailedReasons = append(s.joinFailedReasons, reason)
+}
 func (s *spyNarrationUI) ShowJoinFailed(reason string) {
 	s.calls = append(s.calls, "join_failed")
 	s.joinFailedReasons = append(s.joinFailedReasons, reason)
@@ -73,7 +89,9 @@ func TestSetupNotifierHidesOnlyOwnNarration(t *testing.T) {
 	}
 
 	// A real provisioning cycle: AP up → joining → online must hide exactly once.
-	n.OnStateChange(provisioning.StateAPActive, provisioning.Detail{SSID: "FF1-x", PSK: "p"})
+	n.OnStateChange(provisioning.StateAPActive, provisioning.Detail{
+		SSID: "FF1-x", PSK: "p", PortalURL: "http://10.42.0.1",
+	})
 	n.OnStateChange(provisioning.StateJoining, provisioning.Detail{})
 	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{})
 	want := []string{"softap", "joining", "hide"}
@@ -85,6 +103,7 @@ func TestSetupNotifierHidesOnlyOwnNarration(t *testing.T) {
 			t.Fatalf("calls = %v, want %v", spy.calls, want)
 		}
 	}
+	assert.Equal(t, []string{"http://10.42.0.1"}, spy.softAPPortalURLs)
 
 	// A second →Online (already hidden) must not hide again.
 	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{})
@@ -381,6 +400,17 @@ func TestSetupNotifierClaimContextObservesShutdown(t *testing.T) {
 type stubHubStatusBase struct{ info hub.StatusInfo }
 
 func (s stubHubStatusBase) Status(context.Context) hub.StatusInfo { return s.info }
+func (s stubHubStatusBase) FF1DeviceID() string                   { return s.info.DeviceID }
+
+func TestProvisioningStatusProviderForwardsFF1Identity(t *testing.T) {
+	provider := &provisioningStatusProvider{
+		base: stubHubStatusBase{info: hub.StatusInfo{DeviceID: "FF1-TEST"}},
+	}
+	var identityProvider hub.FF1IdentityProvider = provider
+	if got := identityProvider.FF1DeviceID(); got != "FF1-TEST" {
+		t.Fatalf("FF1DeviceID() = %q, want FF1-TEST", got)
+	}
+}
 
 // TestProvisioningStatusProviderSuppliesInternet: the wrapper must overlay the
 // live internet signal (claim-QR parity) onto the base payload, and leave it
@@ -673,4 +703,90 @@ func TestProvisioningTuningFromConfigRejectsOutOfRangeSeconds(t *testing.T) {
 		assert.Equal(t, []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute},
 			got.EpisodeStationLadder)
 	})
+}
+
+// TestSetupNotifierAttachedClientRepaintsPortalQR pins the #3515 repaint: the
+// credentials-bearing AP-active announcement paints the join QR, and the
+// ClientAttached re-announcement (same credentials, ReasonAPClientAttached)
+// paints the attached phase — the portal-address QR — instead of a second
+// join QR. Both take narration ownership so the eventual online hide fires.
+func TestSetupNotifierAttachedClientRepaintsPortalQR(t *testing.T) {
+	spy := &spyNarrationUI{}
+	n := &setupNotifier{ui: spy}
+
+	raise := provisioning.Detail{SSID: "FF1-abc", PSK: "abc12345", PortalURL: "http://10.42.0.1", Reason: "ap-active"}
+	n.OnStateChange(provisioning.StateAPActive, raise)
+	attached := raise
+	attached.ClientAttached = true
+	attached.Reason = provisioning.ReasonAPClientAttached
+	n.OnStateChange(provisioning.StateAPActive, attached)
+
+	if got, want := strings.Join(spy.calls, ","), "softap,softap_portal"; got != want {
+		t.Fatalf("calls = %q; want %q", got, want)
+	}
+	if got := spy.softAPPortalURLs; len(got) != 2 || got[1] != "http://10.42.0.1" {
+		t.Fatalf("portal URLs = %v; want the raise address carried into the attached repaint", got)
+	}
+	if !n.narrating {
+		t.Fatal("attached repaint must keep narration ownership")
+	}
+
+	// The attached flag without credentials is not a raise announcement:
+	// it must fall through to the join-failed / no-op legs, never paint a
+	// portal QR with an empty address.
+	n.OnStateChange(provisioning.StateAPActive, provisioning.Detail{ClientAttached: true})
+	if got := strings.Join(spy.calls, ","); got != "softap,softap_portal" {
+		t.Fatalf("credential-less attached detail painted: %q", got)
+	}
+}
+
+// TestSetupNotifierClientLeftPaintsTheJoinQRWithTheLine: the repaint after
+// the attached phone dropped off the hotspot paints the join QR with the
+// phone-left line, and that line wins over a still-current failure reason
+// because it is the more recent event; the attached repaint still wins over
+// both.
+func TestSetupNotifierClientLeftPaintsTheJoinQRWithTheLine(t *testing.T) {
+	spy := &spyNarrationUI{}
+	n := &setupNotifier{ui: spy}
+	d := provisioning.Detail{SSID: "FF1-abc", PSK: "abc12345", PortalURL: "http://10.42.0.1",
+		ClientLeft: true, Reason: provisioning.ReasonAPClientLeft}
+	n.OnStateChange(provisioning.StateAPActive, d)
+	if got := strings.Join(spy.calls, ","); got != "softap_retry" {
+		t.Fatalf("calls = %q; want softap_retry", got)
+	}
+	if got := spy.joinFailedReasons; len(got) != 1 || got[0] != phoneLeftLine {
+		t.Fatalf("reasons = %v; want the phone-left line", got)
+	}
+	d.JoinFailure = "Wrong Wi-Fi password. Please check it and try again."
+	n.OnStateChange(provisioning.StateAPActive, d)
+	if got := spy.joinFailedReasons; len(got) != 2 || got[1] != phoneLeftLine {
+		t.Fatalf("reasons = %v; the phone-left line wins over a stale failure", got)
+	}
+	d.ClientAttached = true
+	n.OnStateChange(provisioning.StateAPActive, d)
+	if got := strings.Join(spy.calls, ","); got != "softap_retry,softap_retry,softap_portal" {
+		t.Fatalf("calls = %q; the attached repaint wins over the phone-left line", got)
+	}
+}
+
+// TestSetupNotifierRetryQRCarriesTheFailure: the AP-up announcement that
+// follows a failed join paints the join QR WITH the failure reason, and the
+// attached repaint still takes precedence when both are set.
+func TestSetupNotifierRetryQRCarriesTheFailure(t *testing.T) {
+	spy := &spyNarrationUI{}
+	n := &setupNotifier{ui: spy}
+	d := provisioning.Detail{SSID: "FF1-abc", PSK: "abc12345", PortalURL: "http://10.42.0.1",
+		JoinFailure: "Wrong Wi-Fi password. Please check it and try again.", Reason: "ap-active"}
+	n.OnStateChange(provisioning.StateAPActive, d)
+	if got := strings.Join(spy.calls, ","); got != "softap_retry" {
+		t.Fatalf("calls = %q; want softap_retry", got)
+	}
+	if got := spy.joinFailedReasons; len(got) != 1 || got[0] != d.JoinFailure {
+		t.Fatalf("reasons = %v; want the failure message", got)
+	}
+	d.ClientAttached = true
+	n.OnStateChange(provisioning.StateAPActive, d)
+	if got := strings.Join(spy.calls, ","); got != "softap_retry,softap_portal" {
+		t.Fatalf("calls = %q; the attached repaint wins over the retry line", got)
+	}
 }

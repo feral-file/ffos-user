@@ -3,6 +3,40 @@
 This document defines the canonical API and protocol design direction for `ffos-user`.
 Agents should treat these rules as stable constraints when adding, changing, or removing any interface.
 
+## FF1 log streaming
+
+`feral-controld` mirrors its emitted zap records to the public FF1 Cloudflare
+Pipeline Stream documented by the sibling `ff-logging` repository. Records use
+service `feral-controld` and the hostname-backed FF1 device ID. The optional
+`logStreaming.sampleRate` configures `feral-controld`, while
+`logStreaming.playerSampleRate` independently configures player sessions.
+Each value is evaluated once per log session, defaults to `1` when absent, and
+uses `0` to disable that service's remote delivery. The browser always hands
+complete player sessions to controld, so fractional values are never
+multiplied by a second client-side sampling decision.
+
+A log session ends after five seconds without a record or after one minute of
+continuous records, whichever happens first. Every record carries the shared
+session ID in `context.session_id`. Routine heartbeat, ping/pong, and unchanged
+status-poll messages must not be logged because they would join otherwise
+independent activity into artificial long-running sessions.
+
+The public stream receives the stable log message, logger name, device ID, and
+session context, but not arbitrary zap fields. Those fields can contain signed
+URLs, Wi-Fi identifiers, MAC addresses, and command payloads, so they remain in
+the local journal. Message sanitization strips URL credentials/query strings
+and recognizable credential assignments before upload.
+
+The bundled player posts its already-sessionized records to
+`POST http://127.0.0.1:1111/api/logs`. The route accepts only loopback requests
+with Origin `http://127.0.0.1:8080`, validates the narrow browser payload, and
+overwrites `service`, `device_id`, and `environment` before forwarding it to
+Cloudflare. The browser session ID is replaced with a stable opaque digest, so
+browser-controlled context never enters the public stream. Trace and debug
+records remain local; remote player delivery starts at Info. The browser
+therefore owns neither trusted attribution nor public Cloudflare credentials
+and does not depend on public Cloudflare CORS configuration.
+
 ---
 
 ## Version posture and API v2 transition
@@ -98,12 +132,13 @@ There is currently no version suffix in any D-Bus name. Adding a version suffix 
 
 | Bus name | Object path | Interface | Type | Members |
 |---|---|---|---|---|
-| `com.feralfile.controld` | — | — | Bus name only (no exported RPCs currently) | — |
+| `com.feralfile.controld` | — | — | Bus name only (no exported RPCs) | — |
+| `com.feralfile.controld` | `/com/feralfile/controld` | `com.feralfile.controld` | Signal emitter | `cdp_stuck` (ffos-user#356) |
 | `com.feralfile.sysmonitord` | `/com/feralfile/sysmonitord` | `com.feralfile.sysmonitord` | RPC | `GetConnectivityStatus(refresh bool) → (bool, error)`, `GetSysMetrics() → (*SysDBusMetrics, error)` |
 | `com.feralfile.sysmonitord` | `/com/feralfile/sysmonitord` | `com.feralfile.sysmonitord` | Signal emitter | `sysmetrics`, `connectivity_change`, `sysevent` |
-| `com.feralfile.watchdog` | — | — | Bus name only (no exported RPCs currently) | — |
+| `com.feralfile.watchdog` | — | — | Bus name only (no exported RPCs or signals) | — |
 
-Before the setupd merge, `feral-controld` exported a `GetRelayerTopicID` RPC and emitted `show_pairing_qr_code` / `factory_reset` / `system_update` / `upload_logs` / `upload_logs_with_bundle` signals to `feral-setupd` on its own bus. Those handlers are now in-process inside `feral-controld`, so it exports no RPCs and emits none of those signals; its `dbus` package holds only the inbound `com.feralfile.sysmonitord` constants it consumes.
+Before the setupd merge, `feral-controld` exported a `GetRelayerTopicID` RPC and emitted `show_pairing_qr_code` / `factory_reset` / `system_update` / `upload_logs` / `upload_logs_with_bundle` signals to `feral-setupd` on its own bus. Those handlers are now in-process inside `feral-controld`, so it exports no RPCs and emits none of those legacy signals. Its `dbus` package holds the inbound `com.feralfile.sysmonitord` constants it consumes, plus (ffos-user#356) its own outbound `cdp_stuck` — the first signal `feral-controld` emits since the setupd merge. `feral-watchdog` consumes `cdp_stuck` the same way it consumes sysmonitord's signals: by duplicating the member-name string locally, since the two are separate Go modules and neither imports the other's `dbus`-equivalent package. `cdp_stuck` is report-only — see architecture.md invariant 12 — `feral-controld` must never itself restart `chromium-kiosk.service` or reboot.
 
 ---
 
@@ -119,8 +154,10 @@ Before the setupd merge, `feral-controld` exported a `GetRelayerTopicID` RPC and
 ### D-Bus Signals
 
 Signals carry either:
-- A single primitive value (e.g. `connectivity_change` carries a single `bool`)
+- A single primitive value (e.g. `connectivity_change` carries a single `bool`; so does `cdp_stuck` — `true` when feral-controld's CDP page-target dial has been stuck for `cdphealth.StuckThreshold` and re-affirmed every threshold while it stays stuck, `false` the moment it reconnects and re-confirmed every threshold while it stays healthy)
 - A JSON-serialized byte slice for structured data (e.g. `sysmetrics` carries `[]byte` which is a JSON-encoded metrics struct)
+
+A daemon whose match rule covers the `/com/feralfile` path namespace also receives the signals it emits itself: godbus skips a client's own signals by comparing the sender's unique name with the name from `NameAcquired`, which is the well-known name once `RequestName` succeeds, so the skip never matches. Signal handlers must drop payloads on their own object path before logging or dispatching them (feral-controld's mediator does this for `/com/feralfile/controld`).
 
 Do not add ad-hoc fields to signal bodies without updating all consumers. Prefer the byte-slice JSON pattern for structured payloads so the schema can evolve with additive fields.
 
@@ -151,6 +188,8 @@ All messages are JSON. The message envelope is:
 }
 ```
 
+**Relayer reconnect diagnosis:** transient network errors use a randomized 1–5 second retry delay. Server-busy errors (HTTP 429/5xx or connection refused) use 10–60 seconds to reduce pressure on an unavailable endpoint. Unclassified errors also use 10–60 seconds, returning after the eleventh failed attempt; permanent errors stop immediately. The LAN relayer fields report socket state, not a changed recovery policy. A faster first retry for unclassified errors remains unvalidated: capture the actual dial/read error during a failed installation and test recovery against both a brief link interruption and a busy endpoint before reducing this delay.
+
 **Relayer keepalive control messages:**
 - `controld` sends both a transport-level WebSocket `Ping` frame and an application-level `{"type":"ping"}` message on the relayer WebSocket.
 - The relayer should reply to the transport ping with a WebSocket `Pong` frame and to the application ping with `{"type":"pong"}` once the new keepalive path is deployed.
@@ -163,6 +202,10 @@ All messages are JSON. The message envelope is:
   as a commandrouter pre-CDP special case that creates or reuses the Mint
   Pairing Broker session and drives the player overlay through
   `mintPairingDisplay`.
+- If `command == "joinMintPairingChannel"` → handle inside `feral-controld`
+  as a commandrouter pre-CDP special case that joins a site-created Mint
+  Pairing Broker channel on the device's configured broker; no overlay is
+  painted for it (see `docs/controld-inbound-controller-messages.md`).
 - If `command == "mintPairingApprovalDecision"` → handle inside
   `feral-controld` as a commandrouter pre-CDP special case that validates and
   completes a pending browser-session approval request.
@@ -179,6 +222,13 @@ All messages are JSON. The message envelope is:
   contract and on-disk design.
 - Otherwise → route to Chromium via CDP (`Runtime.evaluate`).
 
+On `checkStatus` replies, the command router removes noncanonical
+`deviceSettings.showingKey` values before both LAN and relayer responses.
+This shares the UUID rule used by `player_status` notifications: older player
+identities may contain signed source URLs. Other direct-response fields and
+the player's envelope remain intact; the reply is not projected through the
+lightweight notification schema.
+
 **Device-control relayer commands**
 
 The following command names are routed to `devicectl` and use the standard relayer/hub envelope (`command` plus `request`):
@@ -194,10 +244,15 @@ The following command names are routed to `devicectl` and use the standard relay
 | `setSleepSchedule` | `enabled`, optional `sleepTime`, `wakeTime` (HH:MM), optional `days` | Persists the FF1 sleep/wake window plus active weekdays and enables or disables automatic transitions. See the active-days contract below. |
 | `sleepNow` | — | Manual override toward sleep until the next schedule boundary (when the schedule is enabled). |
 | `wakeNow` | — | Manual override toward awake until the next schedule boundary (when the schedule is enabled). |
+| `setDeviceName` | `name` (required, non-null string) | Sets the owner-visible label for this unit. `""` clears it. See the device-name contract below. |
 
 `devicectl` also exposes two device-control commands for panel control over DDC/CI via `ddcutil`: `ddcPanelControl` (set brightness, contrast, speaker volume, mute, or power using a single JSON request body that selects the action) and `ddcPanelStatus` (query the same VCPs and return a structured status object). Both share the standard relayer/hub envelope; detailed field shapes live alongside the executor in `devicectl/ddc.go`.
 
+**Device name (contract):** `setDeviceName` stores an owner-chosen label in `/home/feralfile/.state/device-name.json`. It is a **display label, never an identity**: the hostname stays the device's serial and remains the value advertised as mDNS TXT `id`, the key the pairing app, registry, telemetry, and owner-contact record all resolve on. `name` is **required and must not be null** — `{}`, `null`, and `{"name":null}` are rejected as invalid arguments, because an incomplete controller request must not silently erase a label; an **explicit empty string is the supported clear**, after which the unit falls back to its serial. The stored value is normalized before it is written: control characters become a space, formatting characters (zero-width, bidi overrides and isolates, BOM, line/paragraph separators) are removed, whitespace is collapsed, and the result is truncated to **32 runes** with no ellipsis. The success response and the mDNS/status values all carry the **stored** form, not the caller's input, so a controller must read the reply rather than echo what it sent. The name reaches controllers two ways: **mDNS**, where a change forces a Stop+Start re-registration (TXT is published once at Register time) and where an empty name resolves back to the serial rather than dropping the `name` key — the DNS-SD **service-instance** label is bounded separately and falls back to the serial when the name exceeds 63 octets **or contains a dot or a backslash** (RFC 6763 §4.3 makes the instance name a single DNS label, and the zeroconf library does no escaping, so both DNS presentation-format metacharacters are live: consecutive dots would produce an empty label that silently kills every mDNS response while registration still reports success, a trailing backslash would escape the label separator and publish the record outside the browsed service type, and `\DDD` would be consumed as a decimal escape advertising a different label than stored; a serial containing either character falls through to a literal `FF1`), while TXT carries the full name; and **`device_status.message.deviceName`**, which is **always present on firmware that supports the command** (empty string when unnamed) and absent on older firmware, making its presence the capability gate a controller should use to decide whether to offer renaming. Mutations are serialized with **factory reset**, which clears the record: a rename admitted before a reset staged itself is rejected once the reset latches, so a rolled-back reset cannot retain the previous owner's label.
+
 **Sleep schedule vs. FFP panel power (contract):** `setSleepSchedule`, `sleepNow`, and `wakeNow` apply **FF1 player sleep mode** over CDP **synchronously** for the purpose of command success: if the handler returns success, the player has been asked to enter or leave sleep mode on that request path. **FFP panel power** (DDC standby / on) is aligned **asynchronously** in a dedicated worker so slow or flaky `ddcutil` calls do not block relayer or hub deadlines. DDC failures are **best-effort** (logged; command success is still possible). Rapid sleep/wake transitions are **coalesced** so an older in-flight DDC call cannot overwrite a newer intended state. **`device_status.message.sleepSchedule`** (and the `sleepSchedule` object returned on these commands) reflects the **schedule and player sleep intent**; **DDC-derived fields** (for example from `ddcPanelStatus`) may **temporarily disagree** until alignment completes (**eventual consistency**). **`device_status` refresh** after a transition may run before DDC finishes, so consumers must not assume panel power and player sleep mode flip in the same notification. On **process exit**, `feral-controld` does **not** wait for queued or in-flight DDC alignment work.
+
+**Casts while asleep (contract):** a `displayPlaylist` or `displayDefaultPlaylist` that arrives from a controller (the LAN hub or the relayer) while the player is asleep first applies the `wakeNow` override, then casts; the wake expires at the next schedule boundary like any manual override, and a wake that fails fails the cast. Casts the device originates itself (`displayAt` cutovers from the playlist scheduler, OOM-recovery re-casts) do not wake a sleeping player. Before this contract a controller's cast was accepted with `ok: true` and reached a page parked on `/sleep`, so the screen did not change.
 
 **Sleep schedule active days (contract):** `setSleepSchedule` accepts an optional `days` array of lowercase three-letter weekday tokens (`sun`, `mon`, `tue`, `wed`, `thu`, `fri`, `sat`; matching is case- and whitespace-insensitive, duplicates are dropped, and the stored list is canonicalized Sunday-first). On days **in** the selection the panel follows the normal wake/sleep window; on days **not** in the selection the panel sleeps for the **entire civil day** (so deselecting Sat and Sun sleeps at Friday's sleep time and wakes at Monday's wake time). Field semantics on `setSleepSchedule`: **omitted or `null` `days` preserves the currently stored selection** (same preserve-when-absent rule as empty `sleepTime` / `wakeTime`); an **explicit empty array is rejected** as invalid arguments (a schedule with no awake day is not representable); a **full seven-day selection normalizes back to omitted**, which also means the pre-days record shape (no `days` key) is exactly the every-day schedule, so older apps and older firmware interoperate without migration (older firmware ignores the unknown key). **Manual overrides are day-blind:** `sleepNow` / `wakeNow` expire at the next clock occurrence of the opposite schedule boundary regardless of day selection — for example `wakeNow` on an unselected Saturday lasts until Saturday's sleep time, not until Monday — after which the day-aware schedule resumes.
 
@@ -211,29 +266,32 @@ The `uploadLogs` command accepts `userId`, `apiKey`, and `title`, plus optional 
 
 The `startMintPairingSession` command is a controller-to-controld request to create one Mint Pairing Broker channel and display its pairing code through the player overlay via CDP command `mintPairingDisplay`. The command returns explicit `RPC` payloads with `ok`, `status`, `channelID`, `pairingCode`, and `expiresAt` on success; failures return `ok: false` with `error.code`. If a non-expired session is already active, it returns `already_started` and re-displays the same code. The broker short code is intentionally visible; raw browser session tokens are not. Any terminal pairing state hides the overlay so the bundled local player continues normal artwork playback. Shutdown cleanup is bounded within `feral-controld`'s process-level forced-exit window, so late terminal delivery is explicitly best-effort once that internal budget is exhausted.
 
-The `mintPairingApprovalDecision` command is a controller-to-controld approval response for browser-session mint pairing. It is handled inside `feral-controld`, not forwarded to Chromium. Success and validation failures both return explicit `RPC` payloads with `ok`, `status` or `error.code`, and `approvalRequestID` where available. Raw browser session tokens and DP1 playlist content must never appear in this command or in `mint_pairing_approval_request` / `mint_pairing_approval_outcome` relayer messages.
+The `mintPairingApprovalDecision` command is a controller-to-controld approval response for browser-session mint pairing. It is handled inside `feral-controld`, not forwarded to Chromium. Success and validation failures both return explicit `RPC` payloads with `ok`, `status` or `error.code`, and `approvalRequestID` where available. An approval may carry optional `keepPaired: true`, which asks for an owner-kept browser session: `feral-controld` requests `persistent: true` from `ff-relayer` with no `expiresInSeconds` and ignores the browser's `requestedExpiresInSeconds`. That request is made only for a requester whose mint request declared `supportsPersistentSessions`; one that did not cannot parse a session without an expiry, so its `keepPaired` approval is minted as a timed session at the 86400 s maximum and reported to the controller as `lifetime: "timed_fallback_requester"` on the approval outcome. The delivered session's persistence and expiry follow the relayer's answer, not the request: `persistent: true` with a null `expiresAt` when the relayer mints the kept session — it then ends when the owner removes the site, not on a clock — or an ordinary timed session with a real `expiresAt` when the relayer does not honor `persistent`, delivered as the timed session it is rather than re-labelled as kept. Without the flag the controld-owned TTL policy applies (default 3600 s, floor 90 s, cap 86400 s). Raw browser session tokens and DP1 playlist content must never appear in this command or in `mint_pairing_approval_request` / `mint_pairing_approval_outcome` relayer messages.
 
 **Outbound notifications (`feral-controld`):** The device periodically pushes status notifications over the relayer WebSocket and local hub clients with an envelope that includes `notification_type` and a structured `message`. Mint-pairing approval notifications are relayer-only because the controller/mobile approval UI is reached through the relayer topic, not through the trusted-local hub socket. At minimum:
 
-- `player_status` — playback/UI state from Chromium via CDP `checkStatus` (cast command, playlist, pause, etc.). This is not a substitute for hardware or OS-level facts. It now includes a numeric `renderStatus` beside `index` so consumers can branch on stable render outcome codes: `0` pending, `1` loading, `2` ready, `3` failed. `renderStatus` is the authoritative artwork render outcome and should be forwarded unchanged by controller relays and notifications.
-- `device_status` — device-oriented fields assembled by `status.DeviceStatus.GetStatus` (screen rotation, Wi‑Fi name, installed/latest version, volume, feature toggles, MAC info, best-effort `displayURL`, optional `sleepSchedule`, and the optional additive `lastOutage` summary `{start, end, class, count24h}` from the netlog flight recorder — attached inside `GetStatus` so the pushed feed and the pulled `getDeviceStatus` reply carry the same object; omitted until an outage has closed since process start, not persisted across restarts). The `displayURL` field is the top-level URL of the sole Chromium **page** debug target (DevTools `/json`), when exactly one such target exists; it is omitted when the URL cannot be resolved. Consumers that previously read a Chrome document URL from player payloads should use `device_status.message.displayURL` instead. When present, `sleepSchedule` follows the same **sleep vs. DDC** eventual-consistency rules as the `setSleepSchedule` / `sleepNow` / `wakeNow` contract above.
+- `player_status` — playback/UI state from Chromium via CDP `checkStatus` (cast command, playlist, pause, etc.). This is not a substitute for hardware or OS-level facts. It now includes a numeric `renderStatus` beside `index` so consumers can branch on stable render outcome codes: `0` pending, `1` loading, `2` ready, `3` failed. `renderStatus` is the authoritative artwork render outcome and should be forwarded unchanged by controller relays and notifications. It also carries an optional controld-owned `signatureStatus` (`valid|invalid|unsigned`, feral-file/ffos-user#307): the DP-1 signature verdict of the playlist controld last pushed, attached only when the reply identifies the playlist controld last pushed to the player with a verdict — by `playlist.id` when both sides carry one (a document republished at the same URL is a different document and never inherits), by `playlistURL` only when either side lacks an id —, and omitted otherwise (player-fetched default playlist, the offline cached-copy fallback — which also clears any earlier verdict for the same URL —, a cast from before this process started, verification disabled). A displayAt-deferred cast parks its verdict as pending until the scheduler's cutover push proves the cohort reached the screen; until then the still-showing playlist keeps its own annotation. Every producer that replaces the schedule restages pending (the refresher's future-only path included), and a scheduled document without a verdict is staged as "unverified" so its promotion clears the field rather than inheriting the previous document's. The refresher's soft refresh (`refresh: true`) may leave the previous item on screen after the player accepts, so it never attests on acceptance: the annotation is kept when the verdict is unchanged; when the two documents' ids differ and the verdict changed, the slot becomes id-only (a reply naming the old id still matches, a URL-only reply no longer does) and stays so across any later soft refresh until a force cast or cutover; otherwise it is cleared. Every refresh that replaces the scheduler's cache — future-only or with an active cohort — restages the pending verdict to the document the schedule now holds. Player-owned replacement — any player-session generation bump (CDP reconnect, navigation, stamp mismatch), cleared synchronously inside the bump so the very status round that detected it cannot re-attest, or an accepted `displayDefaultPlaylist` — clears the attested verdict too, preserving a parked schedule verdict that the re-push promotes again. Every producer that can replace the screen (cast, refresher, scheduler cutover, the claim-time default-playlist push) invalidates the slot immediately before its CDP send and publishes only after the accepted reply, so the window in which the player already shows the new document but controld has not yet judged the reply is an omission, never a stale claim; and publication is fenced on the player-session generation, so a reply that arrives after the page was replaced publishes nothing. The field is controld-owned: any `signatureStatus` a player reply carries is discarded before annotation. Absent means "not verified", never "unsigned". It also carries a controld-owned `overlay` object (issue #381; #388, #389) on both `player_status` notifications and direct `checkStatus` replies: `{owner, state, channelId?, pairingCode?, expiresAt?}`. `owner` is `mint` or `setup` — whichever painter of the shared overlay controller currently owns the screen — and `state` is that painter's own state name (`pairing_code` | `request_received` | `creating_token` for mint; setupui's narration state, `claim_qr` among others, for setup). The mint identifiers are set only for `owner: mint`, and `pairingCode`/`expiresAt` only while `state` is `pairing_code`. The whole object is omitted when nothing is showing; there is never a `hidden` state. Like `signatureStatus`, any `overlay` a player reply carries is discarded before annotation.
+  Current composition fields and their typed relay contract: [player composition status](player-composition-status.md).
+- `device_status` — device-oriented fields assembled by `status.DeviceStatus.GetStatus` (screen rotation, Wi‑Fi name, installed/latest version, volume, feature toggles, MAC info, best-effort `displayURL`, optional `sleepSchedule`, the always-present `deviceName` (empty when unnamed; see the device-name contract above), and the optional additive `lastOutage` summary `{start, end, class, count24h}` from the netlog flight recorder — attached inside `GetStatus` so the pushed feed and the pulled `getDeviceStatus` reply carry the same object; omitted until an outage has closed since process start, not persisted across restarts). The `displayURL` field is the top-level URL of the sole Chromium **page** debug target (DevTools `/json`), when exactly one such target exists; it is omitted when the URL cannot be resolved. Consumers that previously read a Chrome document URL from player payloads should use `device_status.message.displayURL` instead. When present, `sleepSchedule` follows the same **sleep vs. DDC** eventual-consistency rules as the `setSleepSchedule` / `sleepNow` / `wakeNow` contract above.
 - `mint_pairing_approval_request` — browser-session mint request details sent to controller/mobile approval UI, including browser information and the E2EE challenge.
 - `mint_pairing_approval_outcome` — terminal mint-pairing result used to clear controller/mobile approval UI.
 
 ### LAN hub HTTP surface (port 1111)
 
-`feral-controld`'s `hub` package binds `0.0.0.0:1111`. The listener is up unconditionally when `enableHub` is set (default on) — it is the BLE-replacement LAN recovery channel, not an optional feature. Every route is registered through one shared middleware (`hub/middleware.go`) that applies an in-flight storm cap (HTTP `429` over `MAX_INFLIGHT_REQUESTS = 64`) and per-request logging. That middleware is the single chokepoint and the designated insertion point for the future LAN-authorization layer (#3471); today all routes are **unauthenticated**.
+`feral-controld`'s `hub` package binds `0.0.0.0:1111`. The listener is up unconditionally when `enableHub` is set (default on) — it is the BLE-replacement LAN recovery channel, not an optional feature. Every route is registered through one shared middleware (`hub/middleware.go`) that applies an in-flight storm cap (HTTP `429` over `MAX_INFLIGHT_REQUESTS = 64`) and per-request logging. That middleware is the single chokepoint and the designated insertion point for the future LAN-authorization layer (#3471). Phase 0 of feral-file#3551 gates a few surfaces on a **claimed** device behind the header `X-FF1-Topic` (the current relayer topic, compared in constant time): the `sshAccess` cast and `GET /api/screenshot`. A refusal is `401` with `{"error":{"code":"topic_required"}}`; a claimed device without a topic refuses too. Unclaimed devices, and every other route and command (`connect` included, until phase 1), stay **unauthenticated** (see `docs/architecture.md` "Deliberately-open LAN surface" for the residuals).
 
 | Route | Method | Purpose |
 |---|---|---|
 | `/api/cast` | POST | Same JSON command envelope as the relayer (`command` + `request`); routed through the same `commandrouter`, including the pre-CDP mint-pairing commands. Non-POST → `405`. A per-command token-bucket gate inside `commandrouter` can additionally return `429`. |
 | `/api/status` | GET | LEGACY device/setup status JSON (below), `contract: "1"`. Kept for transitional tooling; not the pairing surface. Non-GET → `405`. |
 | `/api/v2/status` | GET | The LAN **pairing** surface: identical payload, `contract: "2"`. The versioned route is the firmware gate — old firmware 404s here (and advertises no `api` mDNS TXT key), which is how the app tells LAN-pairable devices from old ones. Non-GET → `405`. |
-| `/api/screenshot` | GET | PNG observation of the sole Chromium page target. Optional `width` and `height` query parameters define an aspect-ratio-preserving bounding box. Browser-originated requests are rejected. Non-GET → `405`. |
+| `/api/screenshot` | GET | PNG observation of the sole Chromium page target. Optional `width` and `height` query parameters define an aspect-ratio-preserving bounding box. Browser-originated requests are rejected. On a claimed device, requires `X-FF1-Topic` (else `401 topic_required`): the screen can show the claim QR, which carries the topic. With the control protocol on (feral-file#3551, `docs/ff1-control-v1.md` §7.2): `403 {"error":{"code":"enrollment_required"}}` in every state but `legacy`; in `legacy`, `403 {"error":{"code":"screen_protected"}}` while a first-owner invitation is live, re-checked after the capture (an invitation minted during it discards the image). Non-GET → `405`. |
 | `/api/notification` | GET → WS | Upgrades to a WebSocket that streams the same outbound notifications the relayer receives. Non-GET → `405`. |
 | `/metrics` | GET | Prometheus text exposition: playback metrics plus the stage-0 network-observability gauges (`net_link_state`, `net_wifi_signal_percent`, `net_wifi_link_info`, `relayer_connected`, `relayer_last_close_code`, `relayer_disconnects_total`; see [`wan-outage-observability.md`](wan-outage-observability.md)). Cache-only — a scrape never triggers probe work. |
 
 The hub does not carry `messageID == "system"` messages; topic assignment is relayer-only.
+
+For installation diagnosis, `curl --fail http://<device-ip>:1111/api/screenshot -o screenshot.png` saves the current renderer output (on a claimed device add `-H "X-FF1-Topic: <topic>"`). Read `/api/v2/status` alongside it to distinguish LAN connectivity from the relay socket state.
 
 `GET /api/screenshot` uses an isolated, short-lived CDP connection so PNG encoding cannot block the persistent command/status connection. `width` and `height` are optional positive integers up to 4096; either may be supplied alone. Two-axis boxes must not exceed 8,294,400 pixels (3840×2160, the 4K-UHD pixel budget); a one-axis request is proportionally scaled down when its derived surface would exceed that budget. This preserves aspect ratio without cropping or stretching while keeping every accepted capture deliverable within the 40 MiB PNG and 64 MiB CDP-frame limits. With neither parameter, the route reads viewport metrics first: it preserves native output when the viewport fits both budgets and sends a full-viewport scaled clip before encoding when it does not. Capture plus response delivery is single-flight and has a 10-second capture deadline; the Hub's 30-second write deadline bounds a backpressured client. The PNG is evidence of Chromium renderer output, not proof of compositor, HDMI, or physical-panel output. The route remains inside the Hub's unauthenticated trusted-LAN boundary; rejecting `Origin` and `Sec-Fetch-Site` requests reduces browser/DNS-rebinding exposure but is not a substitute for the planned shared Hub authorization layer.
 
@@ -247,19 +305,26 @@ The hub does not carry `messageID == "system"` messages; topic assignment is rel
   "contract": "1",
   "claimed": true,
   "internet": true,
+  "relayer_connected": true,
+  "relayer_last_connected_at": "2026-10-14T02:00:00Z",
   "setup_state": "online",
   "connectivity": "...",
-  "topic_id": "..."
+  "topic_id": "...",
+  "control": {"v": 1, "state": "legacy|enrolled|enforced|locked", "profile": {"v": 1, "dev": "...", "gen": "...", "sig": {}, "enc": {}}}
 }
 ```
 
+- `control` (feral-file#3551, `docs/ff1-control-v1.md` §11) is present only when the control protocol runs on this device; its presence is the capability signal. A `locked` device omits `profile`. Outside `legacy`, `topic_id` is `""` even before the relayer claim. `getDeviceStatus` and the `device_status` notification carry the same block.
+
 - `contract` is owned by the hub (not the status provider): `"1"` on the legacy route, `"2"` on `/api/v2/status`. The versioned route — not the field — is the firmware gate the pairing app uses: a device that 404s on `/api/v2/status` (or lacks the `api` mDNS TXT key) is old firmware and must be treated as **not LAN-pairable** (no discovery notification, no pairing offer). The field remains the dual-running-window signal for retiring the open `:1111` surface.
 - `setup_state` is a coarse provisioning-state string. When the provisioning machine is wired in (production), it is the live machine state: `starting`, `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joining`. The bare status provider falls back to `claimed` / `unclaimed`.
+- `relayer_connected` reports the cached relayer WebSocket lifecycle state, independently of LAN link and internet reachability. It is not proof that a cloud command will complete. `relayer_last_connected_at` is the UTC RFC3339 timestamp of the most recent successful socket dial in this daemon process; it remains after disconnect and is `null` until the first successful dial (including after restart). Status reads trigger no relayer probe.
 - `claimed` mirrors the mDNS TXT `claimed` value.
+- `topic_id` is served only while the device is unclaimed; once claimed the key stays present with the value `""` (feral-file#3551 phase 0). The released app reads claimed + empty `topic_id` as `alreadyClaimed`. Additional phones pair from the on-screen claim QR an existing phone shows ("Show Pairing QR Code").
 - `branch` and `version` are read from the same `ff1-config.json` the OTA gate uses, so the LAN payload can never disagree with the claim QR.
 - `internet` is live internet reachability (sys-monitord's cached signal, one local D-Bus round-trip per poll). It is distinct from `connectivity`, which is LAN-link state: a device on a healthy LAN with a dead WAN is `connectivity: "connected"`, `internet: false`.
 
-**Claim-QR parity.** The `device_connect` claim QR encodes `device_id|topic_id|internet|branch|version|setup_phase`. Every segment is recoverable from this endpoint, so a LAN client that discovered the device over mDNS needs nothing the QR has: `device_id` → `device_id`, `topic_id` → `topic_id` (served claimed or not: FF1 is multi-controller, so additional phones — and a replacement phone after the original is lost — pair over LAN without a QR; LAN-presence is the authorization boundary, matching the BLE-era posture), `internet` → `internet`, `branch` → `branch`, `version` → `version`, and the QR's constant `pairing` phase → derivable as `claimed == false` with a non-empty `topic_id` (`setup_state` + `claimed` carry strictly more information).
+**Claim-QR parity.** The `device_connect` claim QR encodes `device_id|topic_id|internet|branch|version|setup_phase`. Every segment is recoverable from this endpoint, so a LAN client that discovered the device over mDNS needs nothing the QR has: `device_id` → `device_id`, `topic_id` → `topic_id` (served only while unclaimed — the window the first claim needs it. The topic is a bearer credential on ff-relayer, so a claimed device withholds it from LAN peers; additional phones pair from the claim QR an existing phone puts on screen, and a sole-phone owner who lost the phone recovers by factory reset), `internet` → `internet`, `branch` → `branch`, `version` → `version`, and the QR's constant `pairing` phase → derivable as `claimed == false` with a non-empty `topic_id` (`setup_state` + `claimed` carry strictly more information).
 
 **mDNS advertisement** (`mdns` package): service type `_ff1._tcp` in `local.`, port `1111`. TXT keys: `id`, `name`, `claimed` (always published, even when `false`, so resolvers can rely on the key's presence), and `api` (always published; value mirrors the v2 status contract, currently `api=2`). `api` is the discovery-time firmware gate: the pairing app requires it before treating a discovered device as pairable, so old firmware — whose records lack the key — never triggers a pairing notification, without a per-device HTTP probe. Discoverability is link-keyed (advertised whenever there is any network link, torn down when the link drops), and a claim-state flip triggers a Stop+Start re-registration so the TXT `claimed` value is refreshed.
 
@@ -273,7 +338,7 @@ First-run and offline-recovery Wi-Fi provisioning is done over a NetworkManager 
 
 - **SSID:** `FF1-<device_id>` (constant prefix `FF1-`, device id read from `/etc/hostname`).
 - **PSK (WPA2):** a deterministic **8-digit numeric code** derived from the device id: the first 4 bytes of `SHA-256(device_id)` reduced modulo 10⁸ and zero-padded to exactly 8 digits (WPA2's minimum key length). Digits-only because users type it on a phone keyboard while reading it off the TV; deterministic so the same device always advertises the same key. Same convenience-level security posture as the earlier id-derived scheme — the on-screen QR carries the credentials, and the AP is short-lived and offline.
-- **Backend:** NetworkManager shared mode via `nmcli device wifi hotspot con-name ff1-softap ssid <SSID> password <PSK>`. NM runs the DHCP/NAT/gateway itself; the gateway IP is NM's shared-mode default and is not set by our code. The `softap.Backend` interface is the A/B containment boundary (NM hotspot vs. standalone hostapd+dnsmasq); flipping it touches only that package.
+- **Backend:** NetworkManager shared mode via `nmcli device wifi hotspot con-name ff1-softap ssid <SSID> password <PSK>`. NM runs the DHCP/NAT/gateway itself; the gateway IP is NM's shared-mode choice and is not pinned by our code. The active profile's `IP4.ADDRESS` is read by a separate `Backend.PortalURL` call — invoked by the provisioning machine **only after the captive portal has bound `:80`**, never inside `Up`: `Up` returns with beacons already out and DHCP answering, and on the rescan path the phone auto-rejoins the saved SSID immediately, so any lookup sitting between AP activation and the portal bind widens the window where the phone's captive probe gets a RST and the sign-in sheet never raises. The result is an optional direct `http://<gateway>` portal URL; reading it rather than assuming `10.42.0.1` remains correct if NM chooses a different shared subnet to avoid a collision. The screen first tells Android users to accept the unvalidated setup Wi-Fi (`Stay connected` / `Use this network without internet`); Android then makes that explicitly accepted network available to normal apps, and the on-link IP bypasses Private DNS or cellular DNS. Discovery failure is non-fatal: the AP and automatic captive flow still work, while the player omits the manual-address instruction. The `softap.Backend` interface is the A/B containment boundary (NM hotspot vs. standalone hostapd+dnsmasq); flipping it touches only that package.
 
 ### Captive portal HTTP endpoints
 
@@ -292,8 +357,8 @@ The portal binds `:80` (permitted by the system-wide `net.ipv4.ip_unprivileged_p
 
 Captive detection is a three-layer design split across the `ffos` image and this portal:
 
-- **DNS layer (image-shipped, `ffos` repo):** the hotspot's dedicated dnsmasq instance resolves every name to `192.0.2.1` (`address=/#/192.0.2.1` in `archiso-ff1/airootfs/etc/NetworkManager/dnsmasq-shared.d/captive.conf`, plus an explicit `address=/ff1.config/192.0.2.1` pin for the canonical name). The answer is a public-looking RFC 5737 TEST-NET address, NOT the hotspot gateway: Samsung One UI's NetworkStack refuses captive detection when probe hostnames resolve to private IPs ("DNS response to the URL is private IP", verified on a Galaxy S23 Ultra), so answering with the gateway's RFC 1918 address would break the sign-in prompt on Samsung phones. The canonical **human-facing** portal address is `http://ff1.config` — it rides the catch-all like any other name, and it is what the frame's setup screen (ff-player `SetupOverlay`) and the portal pages tell users to type; the raw `192.0.2.1` form still works but is no longer surfaced, and the old `10.42.0.1` form is retired. The name is only resolvable on the isolated hotspot; keep it in sync across `captive.conf`, `SetupOverlay`, and the portal templates.
-- **NAT layer (image-shipped, `ffos` repo):** `/etc/nftables.conf` redirects client traffic to `192.0.2.1:80` back to the local portal, and `192.0.2.1:443` to a closed local port so HTTPS probes fail fast with a RST instead of hanging. The fast `:443` RST also makes browsers' HTTPS-first upgrade of a typed `ff1.config` fall back to HTTP promptly. The NAT rule matches only the destination IP, so `ff1.config` needs no dedicated rule.
+- **DNS layer (image-shipped, `ffos` repo):** the hotspot's dedicated dnsmasq instance resolves every name to `192.0.2.1` (`address=/#/192.0.2.1` in `archiso-ff1/airootfs/etc/NetworkManager/dnsmasq-shared.d/captive.conf`, plus an explicit legacy `address=/ff1.config/192.0.2.1` pin). The answer is a public-looking RFC 5737 TEST-NET address, NOT the hotspot gateway: Samsung One UI's NetworkStack refuses captive detection when probe hostnames resolve to private IPs ("DNS response to the URL is private IP", verified on a Galaxy S23 Ultra), so answering probes with the gateway's RFC 1918 address would break the sign-in prompt on Samsung phones. This DNS path exists for OS captive detection, not as the human recovery path: a normal browser can resolve through Android Private DNS, a VPN, or cellular and bypass the hotspot's dnsmasq. The TV therefore shows the active hotspot's direct on-link IP from `softap.Info.PortalURL`; `ff1.config` remains compatible inside the captive-network context but is not surfaced in setup instructions.
+- **NAT layer (image-shipped, `ffos` repo):** `/etc/nftables.conf` redirects client traffic to `192.0.2.1:80` back to the local portal, and `192.0.2.1:443` to a closed local port so HTTPS probes fail fast with a RST instead of hanging. The NAT rule matches only the synthetic destination IP; the direct on-link gateway address reaches the portal normally because it binds `:80` on every local interface.
 - **HTTP layer (this service):** once the redirected probe lands on the routes above, the `302`-on-probe (rather than returning the 204/success body each OS expects) is what makes the phone conclude it is behind a captive portal and auto-open the page.
 
 The DNS and NAT layers only make the probe request arrive; the HTTP layer is what makes it look like a captive portal.
@@ -311,7 +376,7 @@ Machine states: `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joi
 - **App-triggered setup (`startWifiSetup`):** the app can put the frame into this same setup mode over the relayer or LAN cast (command reference in [`controld-inbound-controller-messages.md`](controld-inbound-controller-messages.md)). The reply (`{ok, ssid}` or `{ok:false, code}` with `wired_link_active`/`busy`) is produced before the raise is queued — not synchronized against the transport, which is why the app treats a timed-out send as success: a raise that severs the station link can drop the reply in flight on either transport. Acceptance queues the standard entry sequence and the session runs under the `user-requested` policy row. The relayer `getDeviceStatus` reply carries `contract:"2"` (equal to the hub's v2 contract — one firmware gate, two transports) so the app can identify a v2 frame off-LAN.
 - **Join sequencing (the "AP bounce"):** on credential submit the machine tears the AP down *before* the station-mode join (the single radio cannot host the AP and join at once), then joins via `wifictl` under a **120s deadline** (`Config.JoinTimeout` — the one long blocking call on the loop goroutine; expiry surfaces as the timeout failure, D10). On **any** join failure (including wrong password) the AP is re-raised so the user can retry; the portal `/status` reports `failed` with a reason.
 
-`wifictl` wraps `nmcli` for saved-profile enumeration, scanning (with a pre-AP scan cache, TTL 10m, because NM serializes Wi-Fi operations on the single radio), and joining. A hidden-network join passes `hidden yes` and skips the scan-visibility wait; an open network omits the `password` argument entirely; the pre-join stale-profile purge matches the profile's **target SSID** (not its name) and deletes only PSK/open profiles — never 802.1X (D9). Join errors are classified as auth / SSID-not-found / timeout / unknown and mapped to portal messages.
+`wifictl` wraps `nmcli` for saved-profile enumeration, scanning (with a pre-AP scan cache, because NM serializes Wi-Fi operations on the single radio and the driver rejects every scan while the setup AP holds it: the portal reads the cache at any age and never scans live (#261); an empty refresh keeps a list younger than 10m), and joining. A hidden-network join passes `hidden yes` and skips the scan-visibility wait; an open network omits the `password` argument entirely; the pre-join stale-profile purge matches the profile's **target SSID** (not its name) and deletes only PSK/open profiles — never 802.1X (D9). Join errors are classified as auth / SSID-not-found / timeout / unknown and mapped to portal messages.
 
 ### Setup narration (`setupDisplay`) extension states and send-time downgrades
 
@@ -359,15 +424,57 @@ follow the separate explicit gates above and in the migration plan.
 
 ## Error Payload Conventions
 
+### Content policy commands
+
+`getContentPolicy` accepts `{}`. `setContentPolicy` accepts exactly
+`{"showMatureContent":bool,"strictPersonal":bool}`; controllers cannot set the
+operator-owned `blockUnratedCurated` audit gate. Success is reported only after
+the daemon's atomic store is durable and the current player generation returns
+a matching awaited acknowledgement:
+
+```json
+{"ok":true,"contentPolicy":{"version":1,"showMatureContent":false,"strictPersonal":false,"blockUnratedCurated":false},"active":true}
+```
+
+Unsupported or unsynchronized players return `ok:false` with `unsupported` or
+`contentPolicyUnavailable`; they never return a false `active:true`. An optional
+`contentContext` on `displayPlaylist` is `curated` or `personal`; absence means
+`curated`. This context is outside the signed DP-1 document and is preserved by
+refresh and display-at scheduling. `retireBlockedCurrent:true` is a narrow
+daemon-to-player, refresh-only flag: it tells the player to retire a current
+item whose newly refreshed label is blocked, selecting an allowed replacement
+or blacking the display if the projection is empty. Controllers do not send it.
+
 ### D-Bus errors
 
 Use `dbus.NewError(message, []interface{}{})` for all D-Bus method errors. The first argument is a human-readable error message. The second is an empty slice (no additional error body values). Do not put structured data in the error body.
+
+### DP-1 signature verification contract notes
+
+`feral-controld` verifies every `displayPlaylist` document with dp1-go's §7.1 verifier and reports a three-way verdict — `valid|invalid|unsigned` — on the cast reply (`signatureStatus`, `signers[]`, `legacySignature`) and on `player_status` (feral-file/ffos-user#307; wire shapes in [`controld-inbound-controller-messages.md`](controld-inbound-controller-messages.md)). Verification is over the JCS-canonical form, so re-marshaled bytes verify identically to wire bytes; a dropped field does not, which is why the inline path verifies the caller's original `dp1_call` token (retained verbatim by both ingress decoders as `Command.RawArguments`) rather than a re-marshal of the decoded map — `encoding/json` HTML-escapes `&`/`<`/`>`, which can inflate an honest document past the verifier's size bound; its float64 rounding of large integers is absorbed by JCS — or the typed struct, and why the offline cached copy — a typed, hydrated re-marshal — carries no verdict at all rather than a false one (persisting the download-time verdict beside the record is the follow-up). Bounds: every ingress caps the document at 4 MiB before decoding — the hub's request body, the relayer's websocket frame (`relayer.MAX_MESSAGE_BYTES`), and the URL fetch — and the verifier refuses anything larger on its own as well (`sigverify.MaxDocumentBytes`, defense in depth); verification stops at 16 `signatures[]` entries (counted by streaming the array and halting at the 17th, so the cap costs no per-entry allocation), and signer fields (`alg`/`role`/`kid`) past 32/32/256 bytes are blanked and reported as malformed before any cryptography runs (in-bounds siblings are reported as `unverified`) — so the unauthenticated hub cannot buy hours of JCS canonicalization or megabytes of log with one cast. The verdict is cryptographic only: it does not establish that the signer is one the device trusts. Trust anchoring is a later, separate layer; the reported `kid`s are its input.
+
+Two divergences from the v2 contract (`ff1-v2-api-contract.md` §10, §12.3) are recorded here rather than settled in code:
+
+- **Algorithms.** The v2 profile lists `ed25519` and `ecdsa-p256`. dp1-go v0.6.0 implements `ed25519` and `eip191` (did:pkh), and the production feed already carries an `eip191` signature. An `ecdsa-p256` entry therefore verifies as `unsupported alg` → `invalid` today. The profile or the library needs to move; until then the `signatureVerification.disabled` config flag is the remedy if such documents appear first.
+- **Vocabulary.** v2's `signatureStatus` is `verified|verification_pending|failed` and has no value for an unsigned document because v2 rejects those outright. The v1 surfaces use `valid|invalid|unsigned` (mapping valid→verified, invalid→failed); `unsigned` needs a v2 value to be proposed when v2 lands.
+
+Signature verification is informational only: no verdict blocks a cast, refresh, or scheduled cutover, and no signature notice is shown. The phone preference, device modes, and setter are retired; persisted mode records are ignored. Release the daemon before or with the phone setting removal. Verification on original bytes, internal verdicts, and generation fencing remain unchanged.
+
+### DP-1 `dynamicQuery` resolution
+
+`feral-controld` picks the resolver for a `dynamicQuery` by `responseMapping.itemSchema`, and the choice is a contract with every publisher that casts to an FF1:
+
+- **`dp1/<major>.<minor>`** (or an absent schema, for documents that predate the check): dp1-go hydration. The device pages by filling `{{limit}}`/`{{offset}}` placeholders in `query`, and every object at `itemsPath` must be a valid DP-1 item; one invalid item fails the whole cast (fail-closed, see `processDynamicPlaylistSpec`).
+- **`raster/tokensOwned/1.0`**: the Raster wallet walk ff-app casts for an address playlist (feral-file/feral-file#3576, step 6; wire example in [`controld-inbound-controller-messages.md`](controld-inbound-controller-messages.md)). The document must carry `profile: graphql-v1`, an `https://api.raster.art` endpoint, and a `dynamicQuery.pagination` object (`variable`, `cursorPath`, `hasNextPath`). The device pages by cursor — page one sends `variables: {}`, each later page sends `variables: {<variable>: <cursor>}` — and stops on `hasNextPath` false, an empty or repeated cursor, `maxItems`, the first page for a minimal resolve, or a hard cap of 200 pages (an error, not a truncation). Each node is mapped to a DP-1 item by the rules shared with ff-app's `RasterTokenMapper` and art-catalog-service (title, gateway table, provenance, 300 s duration, `open` license), and its `id` is the same UUID the retired indexer path produced for that token, so ids are stable across the switch. Items are ordered as the app orders an address playlist, not as Raster lists them: newest `lastAcquiredAt` first (microseconds, absent = oldest), ties broken by the app's work id (`<namespace>:<standard>:<contract>:<tokenId>`) descending. Raster breaks ties by its own token id, an undocumented rule, and ties are common (a probed wallet had 332 of 595 tokens in one); on that wallet 34 of the first 50 positions differed from the app. A capped walk reads on until the page it last read ends strictly older than the item at the cap, so a tie group split across a page boundary is ordered whole; a minimal resolve stays one request and orders only what its page holds. **This tie-break is a temporary cross-repo rule:** controld copies ff-app's address-playlist query (`app_database.dart`: `sortKeyUs` DESC, then `itemId` DESC) and its work-id format (`token_cid.dart`), so a change to either in the app must ship with the same change in `dp1/raster.go` (`sortRasterItems`), and no test in either repository catches a divergence. Under ff-indexer-v2 the server owned a written total order (latest provenance timestamp, tx index, token id) and controld did not sort. The rule is to be replaced by a documented Raster order or a declared ordering in DP-1's `dynamicQuery`; until then it stays. A node the wall cannot play (no contract, no media URL, unsupported chain) is **skipped and logged with its Raster token id** — the one per-node departure from fail-closed, so one metadata-less token cannot blank a wallet of a thousand — while a failed page, a GraphQL `errors` array, or a non-2xx status still fails the whole resolve with no partial playlist. The device authenticates with its own key from config `raster.apiKey` (`x-api-key`); a key in the document is ignored, the endpoint allowlist exists so a crafted document cannot aim that key at another host, and the client that carries the key does not follow redirects (a 3xx is a failed page), so the host that was checked is the only host that ever sees it. Numeric Raster scalars are decoded with `UseNumber` so a `tokenId` past 2^53 keeps its digits.
+- **Any other schema** is refused by name (`dp1.ErrUnsupportedItemSchema`) before any request is made.
+
+`dynamicQuery.pagination` has no field in dp1-go's typed `DynamicQuery`; `dp1.Playlist` carries it through its own JSON hooks, written back inside the `dynamicQuery` object so it survives the round trip through `player_status` that the refresher re-resolves from. dp1-go learning the block (and an item-mapper hook keyed by `itemSchema`) is the recorded follow-up; until then controld is the only interpreter of this shape.
 
 ### Relayer errors
 
 Most command failures are not standardized: when an executor command fails, `controld` logs the error and does not send an explicit error response to the relayer unless the command protocol requires a reply. When adding new commands that need error responses, document the response shape in code comments near the command handler.
 
-**Command-storm rejection (standardized).** Command-storm protection (see below) is the one path with a defined controller-visible error envelope. When the command router rejects a command (rate limit or concurrency budget) or the relayer sheds a command under dispatch saturation, the controller receives an RPC response whose `message` body is:
+**Command-storm rejection (standardized).** Command-storm protection (see below) is one of two paths with a defined controller-visible error envelope (the other is the dead-source cast rejection below). When the command router rejects a command (rate limit or concurrency budget) or the relayer sheds a command under dispatch saturation, the controller receives an RPC response whose `message` body is:
 
 ```json
 {
@@ -380,6 +487,23 @@ Most command failures are not standardized: when an executor command fails, `con
 The command-router rejection reply (rate limit / concurrency budget) is reliable. The relayer-side shed reply under **dispatch saturation** is **best-effort**: to avoid blocking its read loop under a sustained storm, the relayer drops the reply when its shed-response writers are all busy. Controllers must not rely on receiving it for that case and should fall back to a request timeout and retry.
 
 The LAN-hub ingress reports the same condition with HTTP `429 Too Many Requests`. Controllers should treat both as "device busy" and back off; the command was not applied.
+
+**Dead-source cast rejection (standardized).** A `displayPlaylist` cast whose every resolved item source is definitively unreachable (an identity-independent HTTP 4xx answer, or a `data:` URI with malformed metadata (payload bytes are not validated)) is rejected at accept time instead of being forwarded to the player and reported as playing (feral-file/ffos-user#304). The controller receives a reliable RPC response (command-router path, never the best-effort shed path) whose `message` body is:
+
+```json
+{
+  "ok": false,
+  "error": "sourceUnreachable",
+  "command": "displayPlaylist",
+  "message": "sourceUnreachable: no playlist item source is loadable (item 0: HTTP 400; item 1: HTTP 404)"
+}
+```
+
+`ok: false` is contractual — existing controllers decide success by that field. The human-readable `message` names items by INDEX and HTTP STATUS only, capped at 10 entries plus an `and N more` count; it never carries source URLs (resolved sources are playlist content the caller may not have supplied, and signed CDN URLs carry credentials in their query strings). The error name matches DP-1 core spec §14's `sourceUnreachable` player error code.
+
+The LAN-hub ingress reports the same condition with HTTP `422 Unprocessable Entity`, body = the same `message` text. In both transports the command was **not applied** — the device keeps displaying what it had. This is a caller-input error, not "device busy": retrying without fixing the sources fails again. Two conditions are deliberately never rejected by this path: a `displayAt`-scheduled playlist (its sources may legitimately be dead until go-live, so it is not probed at all — the preflight adds no latency in front of a due cutover), and a playlist with at least one cached offline capture whose replay scope also arms at least one cached source at cast time (replay can then serve it regardless of origin state; if the scope sync fails or arms nothing, the rejection stands). ONE cached item out of N is the intended rescue bar: a mostly-dead cast with a single capture is accepted and reported `ok` — the uncached items render as failures, which is strictly better than discarding the one item that can play — and a controller gets no distinct signal for the partial case. Anything short of a definitive dead verdict for every item — network errors, timeouts, auth walls/bot challenges (401/403/406/407/408/416/429), 5xx — fails open and the cast proceeds.
+
+The preflight has an operator kill switch: `{"sourceProbe": {"disabled": true}}` in the controld config restores the pre-#304 always-forward behavior at the next daemon start. It exists because the verdict table's accepted residual — an origin that answers this probe's identity an HTTP 4xx while still rendering in the kiosk (the `uarewrite` class) — must be recoverable in the field by a config edit rather than a package rollback.
 
 ### Command-storm protection
 
@@ -396,8 +520,8 @@ It is on by default with tuned defaults. The optional `commandStorm` config sect
 }
 ```
 
-- `disabled` (default `false`) — turn the gate off entirely.
-- `maxConcurrent` (default `16`, used when `> 0`) — global in-flight command budget. A command's internal weight is clamped to this budget, so setting it below a heavy command's weight throttles that command (it reserves the whole budget while in flight) rather than rejecting it forever.
+- `disabled` (default `false`) — turn the gate off entirely. Cast-time source probes still enforce their own process-wide 8 MiB TLS/header parsing budget; disabling the command gate does not disable that resource bound.
+- `maxConcurrent` (default `16`, used when `> 0`) — requested global in-flight command budget. A command's internal weight is clamped to this budget, so setting it below a heavy command's weight throttles that command (it reserves the whole budget while in flight) rather than rejecting it forever. Source-preflight memory admission is independent: a probe uses a status-only HTTP/1 client that accepts at most 64 KiB and 128 fields across informational plus final header blocks, discards fields through a fixed reader rather than building a `MIMEHeader` map, and closes before the body so trailers are never parsed. Its shared 8 MiB semaphore has 32 x 256 KiB budget units: HTTP spends one; HTTPS spends four (1 MiB), limits all peer handshake bytes to 64 KiB before certificate parsing, and does not retain TLS connection state. Slow probes queue on those weighted units instead of shrinking the command gate and rejecting unrelated controls. `commandStorm.disabled: true` removes the command gate but not the probe parsing-memory bound; `sourceProbe.disabled: true` removes the probe surface entirely.
 
 ### Provisioning join errors
 

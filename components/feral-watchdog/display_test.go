@@ -122,3 +122,30 @@ func TestIsDisplayConnectedFailsOpen(t *testing.T) {
 		}
 	})
 }
+
+// ttyActiveFixture writes a fake /sys/class/tty/tty0/active holding vt (with
+// the trailing newline sysfs emits) and returns its path.
+func ttyActiveFixture(t *testing.T, vt string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "active")
+	if err := os.WriteFile(path, []byte(vt+"\n"), 0o600); err != nil {
+		t.Fatalf("failed to write tty active fixture: %v", err)
+	}
+	return path
+}
+
+// TestIsKioskVTActive pins the developer-console predicate: only tty1 counts
+// as the kiosk VT, any other VT means a developer console is up, and a
+// missing file fails open so the watchdog is never silently disabled where
+// the VT subsystem is absent (CI, containers).
+func TestIsKioskVTActive(t *testing.T) {
+	if !isKioskVTActive(ttyActiveFixture(t, "tty1")) {
+		t.Fatal("tty1 must count as kiosk VT active")
+	}
+	if isKioskVTActive(ttyActiveFixture(t, "tty2")) {
+		t.Fatal("tty2 must count as developer console")
+	}
+	if !isKioskVTActive(filepath.Join(t.TempDir(), "missing")) {
+		t.Fatal("missing tty active file must fail open")
+	}
+}

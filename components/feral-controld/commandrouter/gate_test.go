@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 )
 
 // stubHandler is a controllable inner Handler for gate tests.
@@ -333,6 +334,16 @@ func TestDefaultGateConfig_ClassifiesCommands(t *testing.T) {
 	assert.True(t, netdiag.Dedupe)
 	assert.Less(t, netdiag.Rate, 1.0)
 	assert.Greater(t, netdiag.Weight, query.Weight)
+
+	// setDeviceName is a persisted eMMC write plus a full mDNS Stop+Start
+	// re-registration per accepted change, reachable from the unauthenticated
+	// LAN hub, and the mediator's unchanged-name early return is defeated by
+	// alternating two names — so it must never regress to the Default budget.
+	rename, ok := cfg.Policies[commands.CMD_SET_DEVICE_NAME]
+	require.True(t, ok, "setDeviceName must be explicitly classified, not Default")
+	assert.True(t, rename.Dedupe)
+	assert.Less(t, rename.Rate, 1.0)
+
 }
 
 // TestDefaultGateConfig_ClassifiesOfflineCacheCommands is the regression
@@ -367,4 +378,77 @@ func TestDefaultGateConfig_ClassifiesOfflineCacheCommands(t *testing.T) {
 	status := cfg.Policies[commands.CMD_GET_OFFLINE_CACHE_STATUS]
 	assert.NotEqual(t, cfg.Default.Rate, status.Rate, "getOfflineCacheStatus must not silently fall through to Default")
 	assert.Equal(t, query.Weight, status.Weight)
+}
+
+// TestDefaultGateConfig_ClassifiesHistoryAndPolicyCommands pins that all four
+// commands behind the app's History and Content screens are classified rather
+// than inheriting the generous Default. Both content-policy commands hold the
+// policy-store lock across a CDP round trip, and setContentPolicy also does a
+// persisted .state write, so Default (10/s, burst 20, no dedupe) would let one
+// unauthenticated LAN caller park the global concurrency budget on them.
+func TestDefaultGateConfig_ClassifiesHistoryAndPolicyCommands(t *testing.T) {
+	cfg := DefaultGateConfig()
+	query := cfg.Policies[commands.CMD_DEVICE_STATUS]
+	reboot := cfg.Policies[commands.CMD_REBOOT]
+
+	for _, cmd := range []commands.Type{
+		commands.CMD_GET_RECENTLY_PLAYED,
+		commands.CMD_PLAY_RECENTLY_PLAYED,
+		commands.CMD_GET_CONTENT_POLICY,
+		commands.CMD_SET_CONTENT_POLICY,
+	} {
+		p, ok := cfg.Policies[cmd]
+		require.True(t, ok, "%s must be explicitly classified, not Default", cmd)
+		assert.NotEqual(t, cfg.Default.Rate, p.Rate, "%s must not silently fall through to Default", cmd)
+	}
+
+	// Reading the policy is a cheap, dedupable query, same class as
+	// getDeviceStatus. Dedupe is what bounds it, which is why the handler
+	// rejects a non-empty get request instead of ignoring it.
+	get := cfg.Policies[commands.CMD_GET_CONTENT_POLICY]
+	assert.True(t, get.Dedupe)
+	assert.Equal(t, query.Weight, get.Weight)
+
+	// Writing it is a persisted flash write: the same tier as the other
+	// persisted-write commands, never looser than a reboot.
+	set := cfg.Policies[commands.CMD_SET_CONTENT_POLICY]
+	assert.True(t, set.Dedupe)
+	assert.LessOrEqual(t, set.Rate, reboot.Rate)
+}
+
+// TestGate_DedupeIsPerPrincipal pins feral-file#3551 F4: identical in-flight
+// commands from DIFFERENT controllers execute separately; the same
+// controller's duplicates (and plaintext duplicates) still collapse.
+func TestGate_DedupeIsPerPrincipal(t *testing.T) {
+	inner := &stubHandler{result: "r", block: make(chan struct{}), entered: make(chan struct{}, 4)}
+	cfg := GateConfig{
+		Enabled: true, MaxConcurrent: 16,
+		Policies: map[commands.Type]Policy{testCmd: {Rate: 0, Weight: 1, Dedupe: true}},
+		now:      frozenClock(),
+	}
+	g := NewGate(inner, cfg, zap.NewNop())
+	cmd := commands.Command{Type: testCmd, Arguments: map[string]any{"a": 1}}
+	a := control.WithPrincipal(context.Background(), control.Principal{ControllerID: "a", Role: control.RoleOwner})
+	b := control.WithPrincipal(context.Background(), control.Principal{ControllerID: "b", Role: control.RoleOwner})
+
+	var wg sync.WaitGroup
+	run := func(ctx context.Context) {
+		wg.Add(1)
+		go func() { defer wg.Done(); _, _ = g.Process(ctx, cmd) }()
+	}
+	run(a)
+	<-inner.entered
+	run(b)
+	<-inner.entered // b did not join a's flight
+	run(context.Background())
+	<-inner.entered // plaintext is its own (pre-existing) key
+	run(a)          // joins a's flight
+	// Give the follower a moment to coalesce (same idiom as
+	// TestGate_DedupeCollapsesConcurrentIdentical), then release.
+	time.Sleep(50 * time.Millisecond)
+	close(inner.block)
+	wg.Wait()
+	if got := inner.calls.Load(); got != 3 {
+		t.Fatalf("inner ran %d times, want 3 (a, b, plaintext)", got)
+	}
 }

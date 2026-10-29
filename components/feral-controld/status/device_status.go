@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
@@ -134,9 +136,10 @@ type DeviceStatusResponse struct {
 	// machine's snapshot (see NetworkHealth); nil (omitted) only when that
 	// seam is unwired.
 	Network *NetworkHealth `json:"network,omitempty"`
-	// LastOutage is attached by the devicectl executor from the netlog
-	// recorder (see LastOutage); nil (omitted) when the recorder is disabled
-	// or no outage has closed since process start.
+	// LastOutage is attached inside GetStatus from the netlog recorder (see
+	// LastOutage and the lastOutage field's doc comment for why it lives
+	// here rather than on the executor); nil (omitted) when the recorder is
+	// disabled or no outage has closed since process start.
 	LastOutage          *LastOutage       `json:"lastOutage,omitempty"`
 	ScreenRotation      string            `json:"screenRotation,omitempty"`
 	ConnectedWifi       string            `json:"connectedWifi,omitempty"`
@@ -148,16 +151,46 @@ type DeviceStatusResponse struct {
 	Volume              *int              `json:"volume,omitempty"`
 	IsMuted             *bool             `json:"isMuted,omitempty"`
 	DisplayURL          *string           `json:"displayURL,omitempty"` // Chrome UI URL from CDP; omitted if unavailable.
+	// DeviceName is the owner's label for this unit, empty when nobody has set
+	// one. Deliberately no omitempty, for the same reason as Contract above:
+	// its PRESENCE is the capability signal a controller gates its rename
+	// affordance on, and an unnamed device is the ordinary case — omitting the
+	// key there would report "this firmware cannot be renamed" on every frame
+	// that simply has not been.
+	DeviceName string `json:"deviceName"`
 	// SleepSchedule is derived from persisted schedule + wall clock (see sleepschedule).
 	// It reflects intended FF1 sleep mode; FFP panel DDC power may lag after transitions
 	// because controld aligns panel power asynchronously (best-effort, eventual vs. ddcPanelStatus).
 	SleepSchedule *sleepschedule.Status `json:"sleepSchedule,omitempty"`
+	// Control is the feral-file#3551 capability block (docs/ff1-control-v1.md
+	// §11), from SetControlStatusSource; omitted while control.enabled is
+	// false. Typed any so this package does not depend on package control.
+	Control any `json:"control,omitempty"`
+}
+
+// controlStatusSource supplies DeviceStatusResponse.Control. A package-level
+// seam (like netmetrics' setters) because deviceStatus is a value type built
+// before the control authority, and both the pulled getDeviceStatus reply and
+// the poller's pushed device_status go through GetStatus.
+var controlStatusSource atomic.Pointer[func() any]
+
+// SetControlStatusSource wires the control block source. Call before the
+// poller starts; nil clears it.
+func SetControlStatusSource(fn func() any) {
+	if fn == nil {
+		controlStatusSource.Store(nil)
+		return
+	}
+	controlStatusSource.Store(&fn)
 }
 
 // GetStatus retrieves comprehensive device status information
 // This function can be used by both command handlers and status polling
 func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, error) {
 	response := &DeviceStatusResponse{Contract: DeviceStatusContract}
+	if fn := controlStatusSource.Load(); fn != nil {
+		response.Control = (*fn)()
+	}
 
 	// Use errgroup for parallel execution
 	g, ctx := errgroup.WithContext(ctx)
@@ -169,6 +202,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	var isMuted *bool
 	var displayURL *string
 	var sleepScheduleStatus *sleepschedule.Status
+	var deviceName string
 
 	// Chrome UI document URL. This is the same target listing the poller uses, but
 	// keeping it here preserves the response shape for direct CMD_DEVICE_STATUS calls.
@@ -182,6 +216,23 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 			return nil
 		}
 		displayURL = &u
+		return nil
+	})
+
+	// Owner-set device name. A read failure or a corrupt record yields the
+	// empty name rather than an error: the field is cosmetic, every consumer
+	// falls back to the serial, and failing the whole status collection over a
+	// label would take the frame's health readout down with it. Logged though
+	// (parity with resolveMDNSDeviceInfo's warning): silently reporting
+	// "unnamed" while a corrupt record still sits on disk would otherwise
+	// leave nothing to diagnose the owner's "my frame forgot its name" by.
+	g.Go(func() error {
+		record, err := devicename.Load(d.os, d.json)
+		if err != nil {
+			log.Printf("Failed to read device name for status: %v", err)
+			return nil
+		}
+		deviceName = record.Name
 		return nil
 	})
 
@@ -363,6 +414,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.Volume = volume
 	response.IsMuted = isMuted
 	response.DisplayURL = displayURL
+	response.DeviceName = deviceName
 	response.SleepSchedule = sleepScheduleStatus
 
 	// Get MAC info from config (fetched once at startup)

@@ -877,16 +877,70 @@ func TestBootRecovery_BackoffTimerExpiresWhenBootWindowClosed(t *testing.T) {
 	mockCDP.EXPECT().Initialized().Return(false).AnyTimes()
 
 	e := settledExecutor(mockCDP)
-	e.clock = &instantClock{}
+	// A GATED clock, not instantClock: the assertion below is about the
+	// intermediate deferred state, and a zero-delay backoff timer races past
+	// it — it is the only thing distinguishing "deferred, then expired at the
+	// timer's window check" from "expired immediately", so it cannot just be
+	// dropped. Holding the timer here makes the observation deterministic
+	// instead of a data race on bootRecoveryState (the timer goroutine writes
+	// it under bootRecoveryMu).
+	clock := newGatedClock()
+	e.clock = clock
 	e.bootLifecycleProbe = func() bool { return false } // window closed
 
 	e.MaybeRecoverPlayerOnBootOnline(context.Background())
-	assert.Equal(t, bootRecDeferred, e.bootRecoveryState, "the no-connection fast-fail must not gate on the window")
+	clock.awaitSleeping(t)
+	e.bootRecoveryMu.Lock()
+	state := e.bootRecoveryState
+	e.bootRecoveryMu.Unlock()
+	assert.Equal(t, bootRecDeferred, state, "the no-connection fast-fail must not gate on the window")
 
-	// The instant-clock backoff timer fires immediately; its re-entry must
-	// see the closed window and expire instead of attempting another round.
+	// Release the backoff timer; its re-entry must see the closed window and
+	// expire instead of attempting another round.
+	clock.release()
 	awaitBootRecoveryState(t, e, bootRecExpired)
-	assert.Equal(t, 0, e.bootRecoveryAttempts, "no attempt must have executed")
+	e.bootRecoveryMu.Lock()
+	attempts := e.bootRecoveryAttempts
+	e.bootRecoveryMu.Unlock()
+	assert.Equal(t, 0, attempts, "no attempt must have executed")
+}
+
+// gatedClock is instantClock with a hold: SleepContext announces that it has
+// been entered, then waits for the test to release it. It lets a test observe
+// the state a backoff timer is about to leave, without racing that timer.
+type gatedClock struct {
+	sleeping chan struct{}
+	proceed  chan struct{}
+	once     sync.Once
+}
+
+func newGatedClock() *gatedClock {
+	return &gatedClock{sleeping: make(chan struct{}), proceed: make(chan struct{})}
+}
+
+func (c *gatedClock) awaitSleeping(t *testing.T) {
+	t.Helper()
+	select {
+	case <-c.sleeping:
+	case <-time.After(2 * time.Second):
+		t.Fatal("backoff timer never armed")
+	}
+}
+
+func (c *gatedClock) release() { close(c.proceed) }
+
+func (c *gatedClock) Now() time.Time                         { return time.Now() }
+func (c *gatedClock) Sleep(time.Duration)                    {}
+func (c *gatedClock) NewTicker(time.Duration) wrapper.Ticker { panic("unused") }
+
+func (c *gatedClock) SleepContext(ctx context.Context, _ time.Duration) error {
+	c.once.Do(func() { close(c.sleeping) })
+	select {
+	case <-c.proceed:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // instantClock is a wrapper.Clock whose SleepContext returns immediately

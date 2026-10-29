@@ -1,6 +1,11 @@
 package commands
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"unicode"
+)
 
 type Type string
 
@@ -39,6 +44,7 @@ var deviceCtlCommands = map[Type]bool{
 	CMD_DDC_PANEL_CONTROL:          true,
 	CMD_DDC_PANEL_STATUS:           true,
 	CMD_SET_SLEEP_SCHEDULE:         true,
+	CMD_SET_DEVICE_NAME:            true,
 	CMD_SLEEP_NOW:                  true,
 	CMD_WAKE_NOW:                   true,
 	CMD_START_WIFI_SETUP:           true,
@@ -48,6 +54,129 @@ var deviceCtlCommands = map[Type]bool{
 type Command struct {
 	Type      Type           `json:"command,omitempty"` // FIXME: rename json key after decouple the player and relayer concepts
 	Arguments map[string]any `json:"request,omitempty"` // FIXME: rename json key after decouple the player and relayer concepts
+	// RawArguments is the `request` object exactly as it arrived on the
+	// wire, kept beside the decoded map (feral-file/ffos-user#307). The map
+	// is what handlers work with, but re-encoding it is not the caller's
+	// document: encoding/json HTML-escapes `&`/`<`/`>` (six bytes each), so
+	// a signed inline DP-1 playlist verified from a re-marshal of the map can
+	// inflate past the verifier's size bound and be reported as invalid when
+	// it is not. (Decoding also rounds integers past 2^53 to float64, which
+	// JCS canonicalization happens to absorb — the signer's digest is over
+	// the same ES6-number form — so size, not numeric fidelity, is the reason
+	// the original token is kept.)
+	// Populated only by UnmarshalJSON (both ingress paths decode through it);
+	// nil for commands built in-process, which have no wire form.
+	RawArguments json.RawMessage `json:"-"`
+	// Ambiguous is set by UnmarshalJSON when the message's top level repeats
+	// a member name, exactly or in another letter case ("request" twice, or
+	// "request" and "Request"). encoding/json resolves such a document
+	// differently for the typed fields (case-insensitive, merging) and for
+	// RawArguments (exact key), so a policy that inspects one could be
+	// bypassed through the other (feral-file#3551 review F3). The control
+	// policy refuses ambiguous messages; legacy routing ignores the flag.
+	Ambiguous bool `json:"-"`
+}
+
+// foldKey maps s to a canonical representative of its simple case-folding
+// class, rune by rune: two keys get the same foldKey exactly when
+// bytes.EqualFold (the folding encoding/json uses to match object keys to
+// struct fields) says they are equal. strings.ToLower is not enough:
+// encoding/json matches "ſ" (U+017F) to "s" and "K" (U+212A) to "k"
+// (review N2).
+func foldKey(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		lowest := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < lowest {
+				lowest = f
+			}
+		}
+		b.WriteRune(lowest)
+	}
+	return b.String()
+}
+
+// AmbiguousTopLevel reports whether data is a JSON object whose top-level
+// member names collide under encoding/json's case folding (which includes
+// exact duplicates). Anything that is not a well-formed object reports false;
+// the regular decode rejects it.
+func AmbiguousTopLevel(data []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return false
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return false
+		}
+		k := foldKey(key)
+		if seen[k] {
+			return true
+		}
+		seen[k] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return false
+		}
+	}
+	return false
+}
+
+// commandWire is Command minus the custom decoder, so UnmarshalJSON can
+// decode the ordinary fields without recursing into itself.
+type commandWire struct {
+	Type      Type            `json:"command,omitempty"`
+	Arguments map[string]any  `json:"request,omitempty"`
+	Raw       json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON decodes the envelope and additionally retains the `request`
+// token verbatim in RawArguments. It reads the envelope twice (typed, then
+// as a map of raw tokens); both reads are bounded by the ingress body limit.
+func (c *Command) UnmarshalJSON(data []byte) error {
+	var w commandWire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	var tokens map[string]json.RawMessage
+	if err := json.Unmarshal(data, &tokens); err != nil {
+		return err
+	}
+	c.Type = w.Type
+	c.Arguments = w.Arguments
+	c.Ambiguous = AmbiguousTopLevel(data)
+	c.RawArguments = nil
+	if raw, ok := tokens["request"]; ok && len(raw) > 0 && string(raw) != "null" {
+		c.RawArguments = raw
+	}
+	return nil
+}
+
+// RawArgument returns the wire token for one key of `request`, when the
+// command arrived over the wire (RawArguments set) and the key was present.
+// The token is an exact byte slice of the original document: verify it,
+// never a re-marshal of Arguments.
+func (c Command) RawArgument(key string) (json.RawMessage, bool) {
+	if len(c.RawArguments) == 0 {
+		return nil, false
+	}
+	var tokens map[string]json.RawMessage
+	if err := json.Unmarshal(c.RawArguments, &tokens); err != nil {
+		return nil, false
+	}
+	raw, ok := tokens[key]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return nil, false
+	}
+	return raw, true
 }
 
 func (c Command) JSON() ([]byte, error) {
@@ -81,10 +210,24 @@ const (
 	CMD_SSH_ACCESS                 Type = "sshAccess"
 	CMD_DISPLAY_DEFAULT_PLAYLIST   Type = "displayDefaultPlaylist"
 	CMD_REFRESH_ARTWORK            Type = "refreshArtwork"
-	CMD_SET_SLEEP_SCHEDULE         Type = "setSleepSchedule"
-	CMD_SLEEP_NOW                  Type = "sleepNow"
-	CMD_WAKE_NOW                   Type = "wakeNow"
-	CMD_SET_SLEEP_MODE             Type = "setSleepMode"
+	// Recently played is a device-owned history. getRecentlyPlayed returns
+	// bounded presentation metadata only; playRecentlyPlayed resolves the
+	// opaque record locally then re-enters CMD_DISPLAY_PLAYLIST.
+	CMD_GET_RECENTLY_PLAYED  Type = "getRecentlyPlayed"
+	CMD_PLAY_RECENTLY_PLAYED Type = "playRecentlyPlayed"
+	// Internal only: its reply contains the device-retained DP-1 item rather
+	// than bounded list metadata, so the public router must refuse it.
+	CMD_RESOLVE_RECENTLY_PLAYED Type = "resolveRecentlyPlayed"
+	CMD_SET_SLEEP_SCHEDULE      Type = "setSleepSchedule"
+	CMD_SLEEP_NOW               Type = "sleepNow"
+	CMD_WAKE_NOW                Type = "wakeNow"
+	CMD_SET_SLEEP_MODE          Type = "setSleepMode"
+	// CMD_SET_DEVICE_NAME sets the owner-visible name for this unit. The name
+	// is a display label only — the serial stays the identity every other
+	// system keys on — and it is reported back in device status, which is the
+	// capability gate: a controller offers renaming only to a frame whose
+	// status carries the field.
+	CMD_SET_DEVICE_NAME Type = "setDeviceName"
 	// CMD_START_WIFI_SETUP puts the frame into its existing SoftAP setup mode
 	// on the app's request (docs/app-triggered-wifi-setup.md). The reply is
 	// produced BEFORE any radio work — raising the AP severs the link that
@@ -93,6 +236,10 @@ const (
 	// (mDNS TXT api=2 + /api/v2/status contract "2") is the capability gate.
 	CMD_START_WIFI_SETUP           Type = "startWifiSetup"
 	CMD_START_MINT_PAIRING_SESSION Type = "startMintPairingSession"
+	// CMD_JOIN_MINT_PAIRING_CHANNEL joins a Mint Pairing Broker channel a site
+	// created (site-initiated pairing). The app sends `{channelId,
+	// pairingToken}` or `{shortCode}`; the broker is always the device's own.
+	CMD_JOIN_MINT_PAIRING_CHANNEL  Type = "joinMintPairingChannel"
 	CMD_CLOSE_MINT_PAIRING_SESSION Type = "closeMintPairingSession"
 	CMD_MINT_PAIRING_APPROVAL      Type = "mintPairingApprovalDecision"
 	// CMD_DDC_PANEL_CONTROL drives the attached panel over DDC via ddcutil (brightness, contrast,
@@ -118,6 +265,8 @@ const (
 	CMD_CLEAR_PLAYLIST_ITEM_CACHE Type = "clearPlaylistItemCache"
 	CMD_CLEAR_PLAYLIST_CACHE      Type = "clearPlaylistCache"
 	CMD_GET_OFFLINE_CACHE_STATUS  Type = "getOfflineCacheStatus"
+	CMD_GET_CONTENT_POLICY        Type = "getContentPolicy"
+	CMD_SET_CONTENT_POLICY        Type = "setContentPolicy"
 )
 
 func (c Type) DeviceCtlCommand() bool {

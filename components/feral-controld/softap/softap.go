@@ -16,8 +16,10 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -27,8 +29,9 @@ import (
 // Info describes the credentials the running AP advertises. The captive portal
 // and any QR/onboarding surface read these back.
 type Info struct {
-	SSID string
-	PSK  string
+	SSID      string
+	PSK       string
+	PortalURL string
 }
 
 // Status reports whether the AP is currently up.
@@ -41,12 +44,28 @@ type Status struct {
 // Up on an already-up AP succeeds by REPLACING it (a brief bounce, never a
 // same-name duplicate), and Down on an already-down AP succeeds.
 type Backend interface {
-	// Up raises the AP and returns the advertised credentials.
+	// Up raises the AP and returns the advertised credentials. Info.PortalURL
+	// is NOT filled here — see PortalURL for why the lookup is a separate call.
 	Up(ctx context.Context) (Info, error)
 	// Down tears the AP down. Missing/inactive is treated as success.
 	Down(ctx context.Context) error
 	// Status reports whether the AP is active.
 	Status(ctx context.Context) (Status, error)
+	// PortalURL resolves the direct HTTP portal address on the active AP's own
+	// subnet, best-effort: empty when unavailable, never an error. Only
+	// meaningful while the AP is up.
+	//
+	// A separate call rather than part of Up so the caller can sequence it
+	// AFTER the portal binds :80. Up returns with beacons already going out
+	// and NM's DHCP answering, and on the rescan path the phone re-joins the
+	// saved SSID the moment beacons return — its captive probe races the
+	// portal bind. An optional, up-to-3s nmcli round-trip inside that gap
+	// widens it from a net.Listen to a subprocess timeout, and a probe landing
+	// there gets a RST, which iOS in particular reads as "no portal here"
+	// without retrying soon (the sign-in sheet never raises). The address is
+	// only the manual-fallback line on the TV, so it must never sit between
+	// the AP going live and the portal answering.
+	PortalURL(ctx context.Context) string
 }
 
 const (
@@ -69,6 +88,10 @@ const (
 
 	// defaultHostnamePath is the source of the MAC-derived device_id.
 	defaultHostnamePath = "/etc/hostname"
+
+	// portalURLLookupTimeout keeps optional address discovery from delaying
+	// portal startup when NetworkManager is unresponsive.
+	portalURLLookupTimeout = 3 * time.Second
 )
 
 // HostnameFunc yields the device_id used to derive the SSID and PSK. It is a
@@ -85,6 +108,10 @@ type nmBackend struct {
 
 	// iface optionally pins the AP to a Wi-Fi device. Empty lets nmcli choose.
 	iface string
+
+	// portalURLTimeout is configurable only so the blocking-query regression
+	// test can run quickly. Production always receives the constant above.
+	portalURLTimeout time.Duration
 }
 
 // NewNetworkManager builds the nmcli-backed AP. hostname may be nil to read the
@@ -93,11 +120,15 @@ func NewNetworkManager(exec wrapper.Exec, logger *zap.Logger, iface string, host
 	if hostname == nil {
 		hostname = readEtcHostname
 	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &nmBackend{
-		exec:     exec,
-		logger:   logger,
-		hostname: hostname,
-		iface:    iface,
+		exec:             exec,
+		logger:           logger,
+		hostname:         hostname,
+		iface:            iface,
+		portalURLTimeout: portalURLLookupTimeout,
 	}
 }
 
@@ -132,6 +163,41 @@ func (b *nmBackend) Up(ctx context.Context) (Info, error) {
 		return Info{}, err
 	}
 	return info, nil
+}
+
+// PortalURL returns the HTTP portal address on the hotspot's own IPv4 subnet.
+// It reads the address NetworkManager actually assigned instead of publishing
+// its usual 10.42.0.1 as a constant: shared mode may choose another subnet to
+// avoid a collision, and only the active profile is authoritative. A direct
+// on-link address is the deterministic browser fallback once the user accepts
+// the no-internet Wi-Fi — it bypasses Private DNS and cellular DNS entirely.
+//
+// Discovery is best-effort: a failure here must not tear down an otherwise
+// usable AP whose captive portal can still open automatically. The player
+// omits the manual-address instruction when PortalURL is blank. See the
+// Backend interface doc for why this runs after the portal binds, not
+// inside Up.
+func (b *nmBackend) PortalURL(ctx context.Context) string {
+	lookupCtx, cancel := context.WithTimeout(ctx, b.portalURLTimeout)
+	defer cancel()
+
+	out, err := b.run(lookupCtx, "-g", "IP4.ADDRESS", "connection", "show", "id", ProfileName)
+	if err != nil {
+		b.logger.Warn("setup AP active address unavailable; omitting direct portal fallback", zap.Error(err))
+		return ""
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		prefix, parseErr := netip.ParsePrefix(strings.TrimSpace(line))
+		if parseErr != nil {
+			continue
+		}
+		addr := prefix.Addr().Unmap()
+		if addr.Is4() && !addr.IsUnspecified() && !addr.IsLoopback() {
+			return "http://" + addr.String()
+		}
+	}
+	b.logger.Warn("setup AP active address missing; omitting direct portal fallback")
+	return ""
 }
 
 func (b *nmBackend) Down(ctx context.Context) error {

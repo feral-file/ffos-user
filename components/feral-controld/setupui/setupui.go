@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 )
 
@@ -169,10 +170,13 @@ type Service struct {
 
 	mu      sync.Mutex
 	support support
-	// extSupport holds, per downgradeable extension state (the sendFallbacks
-	// keys), the LAST manifest verdict derived from a successfully read
-	// manifest (can the running player render it, or must the send apply the
-	// state's fallback?). Resolved on the WORKER at send time, never at
+	// extSupport holds, per EXTENSION state (every state outside
+	// requiredStates, not only the downgradeable sendFallbacks keys), the
+	// LAST manifest verdict derived from a successfully read manifest: can
+	// the running player render it, or must the send apply the state's
+	// fallback — and, for a state with no fallback, does anything reach the
+	// screen at all (what CurrentNarrationState reads it for)? Resolved on
+	// the WORKER at send time, never at
 	// Show-time — see resolveExtensionState for why the retained intent must
 	// stay neutral. Unlike support, these are deliberately NOT process-lifetime
 	// latches: the player bundle (and its manifest) is OTA-replaced without a
@@ -186,29 +190,29 @@ type Service struct {
 	// ordering, OTA mid-replace, a torn write) with the last real evidence.
 	// Absent key = supportUnknown = no successful read yet.
 	extSupport map[string]support
-	// last is the most recently intended narration state. It is retained (not
-	// cleared after sending) so it can be re-pushed when CDP reconnects.
-	last map[string]any
-	// pending is the ordered queue of states the worker still needs to push.
-	// Coalescing rule: a new push REPLACES a queued entry with the same "state"
-	// value in place (so an OTA progress burst collapses to one trailing
-	// "updating" send), but DISTINCT states are all delivered in order. The
-	// distinction matters: the claim flow's ShowReady()+Hide() are two
-	// back-to-back different states and both must reach the player — a
-	// single-slot newest-intent-wins design silently dropped the Ready. Bounded
-	// by maxPendingStates (drop-oldest) purely as a leak guard; in practice the
-	// setup flow never queues more than a handful of distinct states.
-	pending []map[string]any
-	// running guards against spawning more than one worker goroutine at a time.
-	running bool
+	// ctrl owns the screen overlay. Every SHOWN narration is recorded as its
+	// current overlay, so Resync can just replay it — but a plain Hide()
+	// clears ctrl's current overlay to nothing, which is indistinguishable
+	// from "nothing has been shown" or "a different owner has since taken the
+	// screen". hiddenIntent below is what Resync needs that ctrl alone
+	// cannot tell it (round 5 review, F2).
+	ctrl *overlay.Controller
+	// narrated is set once this process has sent any narration. The boot sweep
+	// hides a stale overlay only while it is false, since an overlay this
+	// process painted is not stale.
+	narrated bool
+	// hiddenIntent is set once a hide this service decided (hideIf, via
+	// pushIf's plain Hide() path or HideIfShowing) actually commits, and
+	// cleared the next time a show commits (see showOwned). A hide's CDP send
+	// can fail exactly like a show's, but unlike a show there is nothing left
+	// in ctrl.Current() for Resync to find and replay — ctrl's current
+	// overlay is simply nil either way, whether the clear never reached the
+	// player or reached it fine. hiddenIntent is what lets Resync replay a
+	// failed clear on reconnect anyway, the same way it already replays a
+	// failed show: unconditionally, since a hide's delivery outcome is never
+	// observed by setupui (it must never block the caller to find out).
+	hiddenIntent bool
 }
-
-// maxPendingStates bounds the pending queue. Setup narration has 12 distinct
-// states total (including the scanning/finalizing/factory_reset/connecting/
-// setup_error extensions), so a deeper queue only ever means a stalled CDP
-// send; dropping the oldest intent is the correct staleness policy for a
-// courtesy overlay.
-const maxPendingStates = 13
 
 // New builds a narration Service. A blank contractPath falls back to
 // DefaultContractPath. logger may be nil (narration then stays silent about its
@@ -220,11 +224,14 @@ func New(sender CDPSender, contractPath string, logger *zap.Logger) *Service {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &Service{
+	s := &Service{
 		cdp:          sender,
 		contractPath: contractPath,
 		logger:       logger,
 	}
+	// A private controller until SetController shares one with mintpairing.
+	s.ctrl = overlay.New(setupPainter{s: s})
+	return s
 }
 
 // SetSession wires the playersession.Session the worker consults to avoid
@@ -237,15 +244,62 @@ func (s *Service) SetSession(session NavigationSession) {
 }
 
 // ShowSoftAPQR narrates the soft-AP onboarding step: the phone should join the
-// device's setup Wi-Fi. ssid is required; psk (the WPA2 passphrase) is optional
-// and omitted from the payload when blank.
-func (s *Service) ShowSoftAPQR(ssid string, psk string) {
+// device's setup Wi-Fi. ssid is required; psk (the WPA2 passphrase) and
+// portalURL (the direct on-link HTTP fallback) are optional and omitted from
+// the payload when blank.
+func (s *Service) ShowSoftAPQR(ssid string, psk string, portalURL string) {
 	req := map[string]any{
 		"state": stateSoftAPQR,
 		"ssid":  ssid,
 	}
 	if strings.TrimSpace(psk) != "" {
 		req["password"] = psk
+	}
+	if strings.TrimSpace(portalURL) != "" {
+		req["portal_url"] = portalURL
+	}
+	s.push(req)
+}
+
+// ShowSoftAPPortalQR narrates the attached phase of the soft-AP step: a phone
+// has joined the setup Wi-Fi (the portal saw its first request), so the panel
+// should swap the join QR for one carrying the portal address the phone's
+// still-open camera can scan straight into its browser. Same state and
+// fields as ShowSoftAPQR plus `client_attached: true`; a player that predates
+// the field ignores it and keeps the join QR up (the pre-#3515 screen), so no
+// send-time downgrade is needed. portalURL is optional here too — without it
+// the player has no address to encode and stays on the join QR by design.
+func (s *Service) ShowSoftAPPortalQR(ssid string, psk string, portalURL string) {
+	req := map[string]any{
+		"state":           stateSoftAPQR,
+		"ssid":            ssid,
+		"client_attached": true,
+	}
+	if strings.TrimSpace(psk) != "" {
+		req["password"] = psk
+	}
+	if strings.TrimSpace(portalURL) != "" {
+		req["portal_url"] = portalURL
+	}
+	s.push(req)
+}
+
+// ShowSoftAPQRRetry narrates the join QR coming back after a failed join:
+// same payload as ShowSoftAPQR plus `reason`, the failure's user-facing
+// message, which the player shows under the title so the screen says why
+// the code is back (the preceding join_failed paint lives a millisecond).
+// Players that predate the field ignore it and paint the plain join QR.
+func (s *Service) ShowSoftAPQRRetry(ssid string, psk string, portalURL string, reason string) {
+	req := map[string]any{
+		"state":  stateSoftAPQR,
+		"ssid":   ssid,
+		"reason": reason,
+	}
+	if strings.TrimSpace(psk) != "" {
+		req["password"] = psk
+	}
+	if strings.TrimSpace(portalURL) != "" {
+		req["portal_url"] = portalURL
 	}
 	s.push(req)
 }
@@ -315,6 +369,79 @@ var sendFallbacks = map[string]sendFallback{
 	stateSetupError: {state: stateJoinFailed},
 }
 
+// requiredStates names the setupDisplay states EVERY manifest that passes the
+// gate is guaranteed to list (validateSetupDisplayManifest enforces exactly
+// this set). Every other state is an extension state: a manifest that
+// predates one accepts it with {ok:true} and renders NOTHING (see the state
+// constants' extensibility note), so for those — and only those — the running
+// player's actual support has to be resolved from the manifest before anything
+// may claim the state is on the screen. Shared by the validator and by
+// isExtensionState so the two readings of "required" cannot drift apart.
+var requiredStates = []string{
+	stateSoftAPQR, stateJoining, stateJoinFailed, stateUpdating,
+	stateClaimQR, stateReady, stateHidden,
+}
+
+// isExtensionState reports whether state is outside requiredStates, i.e.
+// whether a fielded manifest may legitimately not list it. The empty string
+// reads as an extension state, which is the conservative answer: no manifest
+// lists it, so nothing renders for it.
+func isExtensionState(state string) bool {
+	for _, required := range requiredStates {
+		if state == required {
+			return false
+		}
+	}
+	return true
+}
+
+// resolvedState applies the send-time downgrade table to one intent state,
+// given the manifest verdict for it. It is the ONE place the table's outcome
+// is decided, so once a delivery has resolved, the send path
+// (resolveExtensionState) and the status report (CurrentNarrationState) agree
+// on what the player has on screen — the skew they drifted into was a
+// persistent false `overlay` on checkStatus/player_status after an ap-recheck
+// hide, not a sampling race. Returns the state the player renders, or
+// stateHidden when the downgrade clears the screen instead.
+//
+// "Once resolved" is the real limit of that agreement, and is deliberate: a
+// Show* call commits its decision to the controller synchronously, while the
+// manifest verdict this function is given is written later, on the delivery
+// worker. Between the two, a report reads the previous verdict (or none) for a
+// state whose support has just changed — the same narrow, self-correcting,
+// no-I/O class as the four `ctrl.Current()` races the branch already accepts,
+// and self-correcting for the same reason: the next poll re-reads a verdict
+// the worker has by then written.
+//
+// marked/hideMarked are the fallbackHideKey annotation as read off the intent
+// (present-as-bool, and its value); unsupported is POSITIVE evidence that the
+// running player predates state — the send path derives it from a fresh
+// manifest read, the report path from the last cached verdict (see
+// cachedStateUnsupported for why those two sources are deliberately
+// different).
+//
+// A state with no fallback and no hide marker is returned UNCHANGED even when
+// unsupported: the send must still go out (the player no-ops it, and guessing
+// a hide would clear an overlay a newer player would have rendered). It is the
+// report path's job to omit it — see CurrentNarrationState.
+func resolvedState(state string, marked, hideMarked, unsupported bool) string {
+	if !unsupported {
+		return state
+	}
+	if marked && hideMarked {
+		// The per-push hide override (see fallbackHideKey) wins over the
+		// state table's fallback.
+		return stateHidden
+	}
+	if fb, inTable := sendFallbacks[state]; inTable {
+		if fb.hide {
+			return stateHidden
+		}
+		return fb.state
+	}
+	return state
+}
+
 // resolveExtensionState maps a queued extension-state intent to what the
 // RUNNING player can render, at send time rather than Show-time. The stored
 // intent (last / the pending queue) always keeps the neutral state: resolving
@@ -323,19 +450,28 @@ var sendFallbacks = map[string]sendFallback{
 // the exact flash stateConnecting exists to remove. Copy-on-write so the
 // retained maps are never mutated. Runs on the worker goroutine (trySend),
 // which also keeps the manifest read off the provisioning state machine's
-// goroutine. Returns req unchanged for every state outside the fallback
-// table.
+// goroutine. Returns req unchanged for every required state.
+//
+// It resolves EVERY extension state, not only the two in sendFallbacks. For
+// scanning/finalizing/factory_reset the resolution cannot change the wire
+// payload (they have no fallback, so resolvedState returns them unchanged),
+// but it is what records their manifest verdict in extSupport — the cache
+// CurrentNarrationState needs in order not to advertise an overlay for a
+// state the running player silently no-ops. Resolving only the downgradeable
+// pair left the other three permanently supportUnknown, which read as
+// "supported" everywhere (round 2 review, F1).
 func (s *Service) resolveExtensionState(req map[string]any) map[string]any {
 	state := stringField(req, "state")
 	hideMarked, marked := req[fallbackHideKey].(bool)
-	fb, inTable := sendFallbacks[state]
-	if !inTable && !marked {
+	if !isExtensionState(state) && !marked {
+		// A required state is listed by every manifest that passes the gate,
+		// so there is nothing to resolve and the common path — `updating`'s
+		// per-percent pushes across a whole OTA among it — never pays for the
+		// manifest read.
 		return req
 	}
-	unsupported := s.stateUnsupported(state)
-	if unsupported && marked && hideMarked {
-		// The per-push hide override (see fallbackHideKey) wins over the
-		// state table's fallback.
+	resolved := resolvedState(state, marked, hideMarked, s.stateUnsupported(state))
+	if resolved == stateHidden {
 		return map[string]any{"state": stateHidden}
 	}
 	// Copy-on-write: the retained intent keeps the neutral state AND the
@@ -348,12 +484,7 @@ func (s *Service) resolveExtensionState(req map[string]any) map[string]any {
 		}
 		out[k] = v
 	}
-	if unsupported && inTable {
-		if fb.hide {
-			return map[string]any{"state": stateHidden}
-		}
-		out["state"] = fb.state
-	}
+	out["state"] = resolved
 	return out
 }
 
@@ -410,7 +541,7 @@ func (s *Service) stateUnsupported(target string) bool {
 	}
 	s.mu.Lock()
 	if s.extSupport == nil {
-		s.extSupport = make(map[string]support, len(sendFallbacks))
+		s.extSupport = make(map[string]support)
 	}
 	changed := s.extSupport[target] != verdict
 	s.extSupport[target] = verdict
@@ -516,6 +647,17 @@ func (s *Service) ShowFinalizing() {
 // "open the app on the same Wi-Fi and it finds this frame automatically"
 // guidance — the QR itself is the backup path.
 func (s *Service) ShowClaimQR(url string, deviceName string) {
+	s.showClaimQR(url, deviceName, overlay.Owner)
+}
+
+// ShowClaimQRAutomatic paints the claim QR on a timer's behalf (the auto-claim
+// loop). It is accepted only on an empty screen, so it never replaces an
+// overlay the owner asked for, such as a browser-pairing code.
+func (s *Service) ShowClaimQRAutomatic(url string, deviceName string) {
+	s.showClaimQR(url, deviceName, overlay.Automatic)
+}
+
+func (s *Service) showClaimQR(url string, deviceName string, pr overlay.Priority) {
 	req := map[string]any{
 		"state": stateClaimQR,
 		"url":   url,
@@ -523,7 +665,83 @@ func (s *Service) ShowClaimQR(url string, deviceName string) {
 	if strings.TrimSpace(deviceName) != "" {
 		req["device_name"] = deviceName
 	}
-	s.push(req)
+	s.showOwned(req, pr, nil)
+}
+
+// RefreshClaimQRName rewrites only the device_name of the claim-QR narration
+// when claim_qr is the current intent; any other intent (or none) is left
+// untouched and resolve is never called. It exists because the claim QR is
+// painted once per online/topic transition and then sits until the unit is
+// claimed, while a rename can land at any time over the LAN hub — without
+// this the guidance text would name the old label until an unrelated
+// repaint, while mDNS already advertised the new one. The url is carried
+// over from the cached intent rather than re-derived: the rename path has no
+// claim context, and the QR itself did not change.
+//
+// resolve is a callback rather than a value so the caller's fallback read
+// (the serial from /etc/hostname) happens only when there is a claim QR to
+// refresh — a rename on a claimed unit, or with another narrator up, costs
+// no disk read. It runs outside s.mu so a slow read never stalls another
+// narrator's push; the final pushIf re-checks the intent, so a narrator that
+// took the screen in between is never overwritten (same conditional-push
+// semantics as HideIfShowing).
+//
+// The url is taken from the intent at commit time, inside pushIf's critical
+// section, never from the pre-resolve snapshot: a topic (re)assignment
+// re-paints claim_qr with a NEW device-connect url from its own goroutine,
+// and a rename racing it across the unlocked resolve gap would otherwise
+// commit the old url back over it — a QR the app cannot claim with, and
+// nothing repaints until the next unrelated transition.
+func (s *Service) RefreshClaimQRName(resolve func() string) {
+	cur, has := s.ctrl.Current()
+	if !has || setupState(cur) != stateClaimQR {
+		return
+	}
+	req := map[string]any{"state": stateClaimQR}
+	if deviceName := resolve(); strings.TrimSpace(deviceName) != "" {
+		req["device_name"] = deviceName
+	}
+	s.pushIf(req, func(last map[string]any) bool {
+		if stringField(last, "state") != stateClaimQR {
+			return false
+		}
+		req["url"] = stringField(last, "url")
+		return true
+	})
+}
+
+// RefreshClaimQRURL rewrites the url of the claim-QR narration while claim_qr
+// is the current intent, keeping its device_name. build runs only then, so a
+// caller whose url carries a fresh single-use credential (the control
+// invitation, feral-file#3551) mints one only for a QR that is on screen.
+// Same conditional-commit discipline as RefreshClaimQRName: a narrator that
+// took the screen meanwhile is never overwritten.
+func (s *Service) RefreshClaimQRURL(build func() string) {
+	cur, has := s.ctrl.Current()
+	if !has || setupState(cur) != stateClaimQR {
+		return
+	}
+	url := build()
+	if url == "" {
+		return
+	}
+	req := map[string]any{"state": stateClaimQR, "url": url}
+	s.pushIf(req, func(last map[string]any) bool {
+		if stringField(last, "state") != stateClaimQR {
+			return false
+		}
+		if name := stringField(last, "device_name"); name != "" {
+			req["device_name"] = name
+		}
+		return true
+	})
+}
+
+// ClaimQRShowing reports whether the claim QR is the current narration
+// intent.
+func (s *Service) ClaimQRShowing() bool {
+	cur, has := s.ctrl.Current()
+	return has && setupState(cur) == stateClaimQR
 }
 
 // ShowReady narrates that setup completed successfully.
@@ -551,34 +769,64 @@ func (s *Service) Hide() {
 // is in-memory, so after a daemon restart the player may still render the
 // PREVIOUS life's overlay (e.g. a claim QR painted before a crash on a device
 // that has since been claimed) — but an overlay THIS process painted is, by
-// definition, not stale. last == nil is exactly the complement of what
-// Resync can repair: any non-nil intent gets re-pushed on the next CDP
+// definition, not stale. narrated==false is exactly the complement of what
+// Resync can repair: any current overlay gets re-shown on the next CDP
 // (re)connect — even one whose original send failed, since a send failure
 // triggers the reconnect that fires Resync — so the sweep covers precisely
-// the one state Resync cannot, no more. The no-intent check and the hide are
-// one critical section under the same mutex every push takes (pushIf), so a
-// concurrent narrator (the startup OTA gate's ShowUpdating, a factory reset)
-// can never have its live narration erased by the sweep: if its push wins
-// the lock, the sweep no-ops; if the sweep wins, the push is enqueued after
-// the hide and the screen still ends on the narration. A caller-side
-// Narrating() probe followed by Hide() would reintroduce exactly that
-// check-then-act race.
+// the one state Resync cannot, no more.
+//
+// The hide is an Automatic Show of the hidden state (not a bypass, unlike the
+// pre-controller version of this function): it goes through the controller's
+// own decision lock, so a concurrent narrator (the startup OTA gate's
+// ShowUpdating, a factory reset) can never have its live narration erased by
+// the sweep. If the narrator's Owner show wins the lock first, the sweep sees
+// it as current and the Automatic sweep is rejected; if the sweep wins first,
+// the narrator's later Owner show simply replaces it, same as any override. A
+// caller-side Narrating() probe followed by a direct Hide() would reintroduce
+// exactly the check-then-act race the controller's lock exists to remove.
+//
+// That rejection is NOT automatic from priority alone. Every setupui push —
+// whatever flow it belongs to — shares this one *Service as its controller
+// listener, and the controller's same-listener exemption (added so
+// ShowClaimQRAutomatic may replace its own earlier ShowFinalizing) would
+// otherwise read the narrator's Owner show as "this same listener's own
+// earlier overlay" and let the sweep's Automatic show through anyway. The
+// explicit condition below closes exactly that hole: it requires nothing be
+// current at all, not merely nothing from a different listener, so any live
+// setup narration — regardless of which flow committed it, and regardless of
+// whether s.narrated has been flipped yet — still blocks the sweep (round 4
+// review, F2). A current overlay that belongs to mintpairing is unaffected
+// either way: the controller's own listener check rejects that case on its
+// own, independent of this condition.
 func (s *Service) SweepStaleOverlay() {
-	s.pushIf(map[string]any{"state": stateHidden}, func(last map[string]any) bool { return last == nil })
+	s.mu.Lock()
+	narrated := s.narrated
+	s.mu.Unlock()
+	if narrated {
+		return
+	}
+	// See the doc comment above for why this condition — not nil — is required.
+	s.showOwned(map[string]any{"state": stateHidden}, overlay.Automatic, func(last map[string]any) bool {
+		return len(last) == 0
+	})
 }
 
 // HideIfShowing hides only when the current narration intent is one of
 // states, so a flow can clear the narration IT painted without erasing a
-// concurrent narrator's. Same atomicity argument as SweepStaleOverlay: the
-// state comparison and the hide share every push's critical section, so a
-// racing ShowUpdating/ShowFactoryReset either lands first (the hide then
-// no-ops) or is queued behind the hide (and the screen still ends on it).
-// The canonical caller is the auto-claim flow clearing its own finalizing
+// concurrent narrator's. The state comparison and the hide run under the
+// overlay controller's own decision lock (see HideIf), so a racing
+// ShowUpdating/ShowFactoryReset either commits first (this hide then reads a
+// state not in states and no-ops) or commits after (simply replacing the
+// cleared screen, same as any other override). The canonical caller is the
+// auto-claim flow clearing its own finalizing
 // overlay after discovering mid-flow that the device settled — the exact
 // moment another narrator may have taken the screen.
 func (s *Service) HideIfShowing(states ...string) {
-	s.pushIf(map[string]any{"state": stateHidden}, func(last map[string]any) bool {
-		current := stringField(last, "state")
+	s.hideIf(func(cur overlay.Overlay, has bool) bool {
+		if !has || !isSetup(cur) {
+			return false
+		}
+		current := setupState(cur)
 		for _, st := range states {
 			if current == st {
 				return true
@@ -587,6 +835,11 @@ func (s *Service) HideIfShowing(states ...string) {
 		return false
 	})
 }
+
+// StateClaimQR is exported for HideIfShowing callers that take the claim QR
+// down when it is no longer claimable: the first owner enrolled with the
+// control invitation it carried (feral-file#3551 §5.1).
+const StateClaimQR = stateClaimQR
 
 // StateFinalizing is exported for HideIfShowing callers that need to name the
 // narration they own (the auto-claim flow's post-join gap overlay).
@@ -613,135 +866,173 @@ const StateFactoryReset = stateFactoryReset
 // still counts, which is the conservative reading for callers deciding whether
 // a destructive page operation would erase someone's narration.
 func (s *Service) Narrating() bool {
+	cur, has := s.ctrl.Current()
+	return has && isSetup(cur) && setupState(cur) != stateHidden
+}
+
+// cachedStateUnsupported reports the LAST manifest verdict for state WITHOUT
+// touching the disk: the read-only, non-blocking half of stateUnsupported, for
+// callers that are not the narration worker. Absent key (supportUnknown, no
+// successful manifest read yet) reports false, the same no-positive-evidence
+// default stateUnsupported uses — downgrading a report on anything short of
+// positive evidence would claim the screen is clear when it is not.
+//
+// It deliberately does NOT re-read the manifest the way stateUnsupported
+// does: that read is documented as safe only on the single narration worker
+// goroutine (the `running` guard), and a status probe must never block behind
+// disk I/O on a degraded filesystem nor race the worker's verdict write. The
+// cached verdict is the one the last delivery actually resolved against,
+// which is exactly what "what is on the screen now" means.
+func (s *Service) cachedStateUnsupported(state string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.last != nil && stringField(s.last, "state") != stateHidden
+	return s.extSupport[state] == supportNo
 }
 
-// Resync re-pushes the last intended narration state. It is the "CDP became
-// available" trigger: wire it to the CDP client's on-connect callback so a
-// reconnecting or freshly-loaded player catches up to the current setup state.
-// It is a no-op if nothing has been shown yet.
-func (s *Service) Resync() {
+// narrationDisabled reports the process-lifetime "this player has no
+// setupDisplay contract at all" latch (see narrationSupported). While it
+// holds, every setup push is skipped before it reaches the player, so the
+// retained intent in the controller describes a screen nobody painted.
+// supportUnknown is NOT disabled: no positive evidence yet, same default as
+// everywhere else in this file.
+func (s *Service) narrationDisabled() bool {
 	s.mu.Lock()
-	if s.last == nil {
-		s.mu.Unlock()
-		return
-	}
-	// Resync now also runs as a generation-ready reconciler (on
-	// EVERY document replacement, not just the original CDP on-connect
-	// wiring), so it can fire while a genuine multi-state sequence is still
-	// queued (e.g. the claim flow's ShowReady()+Hide(), two DISTINCT states
-	// that must both reach the player — see the pending field's doc). The
-	// old unconditional overwrite collapsed that queue down to s.last,
-	// silently dropping the Ready. A non-empty queue is left alone here:
-	// those states will still deliver in order once the worker's park
-	// (parkForNavigation) releases post-generation-ready, so there is
-	// nothing for Resync to add. Only an EMPTY queue means there is
-	// genuinely nothing in flight for the new document to catch up on, and
-	// re-enqueuing the current intent is what a reconnect/new-generation
-	// resync is for.
-	if len(s.pending) > 0 {
-		s.mu.Unlock()
-		return
-	}
-	s.pending = []map[string]any{s.last}
-	starting := !s.running
-	s.running = true
-	s.mu.Unlock()
-	if starting {
-		go s.worker()
-	}
+	defer s.mu.Unlock()
+	return s.support == supportNo
 }
 
-// push enqueues req (see the pending field for the coalescing rule) and ensures
-// a worker is draining the queue. It returns immediately; the CDP send never
-// happens on the caller's goroutine. Retry policy is deliberately "retry on
-// next change", not a hot loop: a failed send is not re-attempted on its own.
-// The last state is retained for Resync so a later CDP reconnect can recover it.
+// CurrentNarrationState reports the narration state currently on the player
+// (the general sibling of mintpairing.Service.DisplayActive/OverlayStatus,
+// same overlay.Controller.Current() source): "", false when nothing from
+// this listener is on screen, else the state string — "claim_qr" among
+// others (see the state constants above) — and true. Every setupui overlay,
+// the claim QR included, is painted by a CDP evaluation, never a page
+// navigation, so the Chromium page URL never reflects any of them; the
+// app's prior signal for the claim QR specifically (`displayURL`'s
+// `step=qr` query parameter) assumed a navigation and has not actually
+// matched this overlay-based painting path. This method is the first
+// authoritative signal for any setupui state, general on purpose (issue
+// #381's owner direction): a status surface reporting only "is it the claim
+// QR" would have to grow a new method for the next state a caller needs,
+// when the controller already has one answer for "what is current" that
+// serves them all.
+//
+// It reports the RESOLVED DISPLAY state, not the raw intent Narrating()
+// returns — the one deliberate difference between the two, and the reason
+// this is not simply Narrating() plus a string. The retained intent must stay
+// neutral for Resync replay (see resolveExtensionState), so on a player whose
+// manifest predates a state the intent and the screen genuinely differ:
+//
+//   - the ap-recheck push (ShowConnectingOrHide, fallbackHideKey) delivers a
+//     HIDE, leaving artwork on screen while the intent still reads
+//     "connecting" — reported as nothing showing, not as an overlay;
+//   - a table fallback (connecting/setup_error -> join_failed) paints the
+//     FALLBACK state, so that is what is reported, not the intent;
+//   - an extension state with no fallback (scanning/finalizing/factory_reset)
+//     on a manifest that predates it is accepted with {ok:true} and renders
+//     NOTHING, so the screen is unchanged and there is no overlay to report;
+//   - a retained setup:hidden intent (ReplayHide's Kind, which Narrating()
+//     screens out by the same reasoning) is nothing showing, never an
+//     overlay whose state is literally "hidden";
+//   - narration disabled outright for the process means no setup overlay
+//     ever reached the screen at all.
+//
+// Narrating() keeps the intent reading on purpose: its callers decide whether
+// a destructive page operation would erase someone's narration, where the
+// conservative answer is the pushed intent. A status surface answering "what
+// is the viewer looking at" needs the opposite, so the resolution lives here.
+// See resolvedState for the one window in which the two can still disagree.
+func (s *Service) CurrentNarrationState() (string, bool) {
+	cur, has := s.ctrl.Current()
+	if !has || !isSetup(cur) || s.narrationDisabled() {
+		return "", false
+	}
+	intent := setupState(cur)
+	hideMarked, marked := payloadOf(cur)[fallbackHideKey].(bool)
+	unsupported := s.cachedStateUnsupported(intent)
+	state := resolvedState(intent, marked, hideMarked, unsupported)
+	if state == stateHidden || state == "" {
+		return "", false
+	}
+	if state == intent && unsupported {
+		// No fallback existed for an unsupported state, so the send went out
+		// as-is and the player no-opped it. state != intent is always a
+		// REQUIRED fallback state (join_failed), which every gated manifest
+		// lists — so it never needs a second verdict read.
+		return "", false
+	}
+	return state, true
+}
+
+// Resync re-shows the current overlay. It is the "CDP became available"
+// trigger: wire it to the CDP client's on-connect callback so a reconnecting
+// or freshly-loaded player catches up to the current setup state. It is a
+// no-op if nothing has been shown yet.
+//
+// Replay (not a Current()-then-Show round trip, which this used before round
+// 5 review's F3) re-reads and re-checks ownership under the controller's own
+// single lock acquisition, so there is no gap in which a newer Owner show
+// from elsewhere — a browser-pairing request — can take the screen between
+// reading what is current and resending it. The old round trip had exactly
+// that gap: an unconditional Owner ShowIf of a stale snapshot would clobber
+// whatever had taken over in between, ending that session.
+//
+// When nothing is current, that is either because nothing has been shown yet
+// (hiddenIntent is false; no-op, same as before) or because this service's
+// own last hide committed (hiddenIntent is true) — see hiddenIntent's doc for
+// why that case still needs a replay here.
+func (s *Service) Resync() {
+	if s.ctrl.Replay(s) {
+		return
+	}
+	s.mu.Lock()
+	hidden := s.hiddenIntent
+	s.mu.Unlock()
+	if !hidden {
+		return
+	}
+	// ReplayHide, not HideIf: HideIf's own delivery is always the CURRENT
+	// overlay, which is nil here by definition (nothing is current) — a
+	// Kind-less delivery the shared Router cannot route to any painter, so it
+	// would be silently dropped in production (caught in review on this very
+	// fix). ReplayHide carries setupui's own Kind explicitly instead, and
+	// still only queues it if nothing has taken the screen in the meantime,
+	// re-checked under its own lock — same gap-closing reasoning as Replay
+	// above.
+	_ = s.ctrl.ReplayHide(overlay.Overlay{Kind: setupKind(stateHidden)})
+}
+
+// push shows req. It returns immediately; the CDP send never happens on the
+// caller's goroutine (see the overlay package doc on decision versus
+// delivery). Retry policy is deliberately "retry on next change", not a hot
+// loop: a failed send is not re-attempted on its own.
 func (s *Service) push(req map[string]any) {
 	s.pushIf(req, nil)
 }
 
-// pushIf is the single enqueue-and-start path every narration intent takes:
-// when ok is non-nil it is evaluated UNDER the queue mutex and a false answer
-// drops the push entirely. Keeping the conditional ops (SweepStaleOverlay,
-// HideIfShowing) on this exact path — rather than duplicating the tail — is
-// what makes their "atomic with every push" claim structural: a future change
-// to queue policy or worker-spawn discipline cannot apply to plain pushes
-// alone and leave the conditional ops silently divergent.
-//
-// ok receives the current intent (s.last) as its argument BECAUSE it runs
-// while s.mu is held: handing the guarded state in leaves the predicate no
-// reason to reach back into the Service, whose exported methods take the same
-// non-reentrant mutex — a predicate calling one (e.g. Narrating) would
-// deadlock holding s.mu and wedge every push from every goroutine, breaking
-// the package's pushes-never-block contract.
+// pushIf shows req, or — when req is the hidden state, the one plain Hide()
+// path — clears the screen. Both run under the overlay controller's own
+// decision lock (see ShowIf/HideIf); a plain hide clears only setup narration
+// the controller shows, never a browser-pairing code or any other owner's
+// overlay. ok, when non-nil, is the condition a conditional caller
+// (ShowConnectingIfShowing, RefreshClaimQRName) checks against the current
+// narration before showing.
 func (s *Service) pushIf(req map[string]any, ok func(last map[string]any) bool) {
-	s.mu.Lock()
-	if ok != nil && !ok(s.last) {
-		s.mu.Unlock()
+	if stringField(req, "state") == stateHidden {
+		s.hideIf(func(cur overlay.Overlay, has bool) bool {
+			return has && isSetup(cur)
+		})
 		return
 	}
-	s.last = req
-	s.enqueueLocked(req)
-	starting := !s.running
-	s.running = true
-	s.mu.Unlock()
-	if starting {
-		go s.worker()
-	}
+	s.showOwned(req, overlay.Owner, ok)
 }
 
-// enqueueLocked applies the coalescing rule: a push matching the TRAILING
-// queued state replaces it in place (newest payload); everything else appends
-// in arrival order. Trailing-only is load-bearing: replacing a same-state
-// entry buried under LATER states would reorder narration — queued
-// softap_qr→joining→join_failed plus a fresh softap_qr would deliver the new
-// QR FIRST and leave the screen on the obsolete failure. The screen must
-// always END on the newest state, so a repeat after intervening states
-// re-appends. Bursts that matter for coalescing (OTA progress) are contiguous,
-// so they still collapse to one trailing entry. Caller holds mu.
-//
-// Overflow (maxPendingStates) silently drops the oldest queued entry — the
-// correct staleness policy for a courtesy overlay.
-func (s *Service) enqueueLocked(req map[string]any) {
-	state := stringField(req, "state")
-	if n := len(s.pending); n > 0 && stringField(s.pending[n-1], "state") == state {
-		s.pending[n-1] = req
-		return
-	}
-	if len(s.pending) >= maxPendingStates {
-		s.pending = s.pending[1:]
-	}
-	s.pending = append(s.pending, req)
-}
-
-// worker drains pending narration states one at a time, in order, until the
-// queue is empty. Same-state bursts (OTA progress) collapse via enqueueLocked;
-// distinct states each get their own send so ordered sequences like
-// Ready→Hidden are delivered, not coalesced away.
-func (s *Service) worker() {
-	for {
-		s.mu.Lock()
-		if len(s.pending) == 0 {
-			s.running = false
-			s.mu.Unlock()
-			return
-		}
-		req := s.pending[0]
-		s.pending = s.pending[1:]
-		s.mu.Unlock()
-
-		s.parkForNavigation()
-		s.trySend(req)
-	}
-}
-
-// parkForNavigation blocks the worker while a playersession.Session recovery
-// navigation is pending, so a narration send cannot race the page
-// underneath it. It is a no-op when no session is wired (SetSession never
-// called), which is every existing test and any pre-session build. The park
+// parkForNavigation blocks the overlay controller's delivery worker — never a
+// caller of Show/Hide, which never block (see the overlay package doc) —
+// while a playersession.Session recovery navigation is pending, so a
+// narration send cannot race the page underneath it. It is a no-op when no
+// session is wired (SetSession never called), which is every existing test
+// and any pre-session build. The park
 // exits on whichever comes FIRST: the navigation's TARGET generation reaching
 // StageHandler; NavigationPending clearing; or the bounded park timeout —
 // on either of the latter two the item is still delivered best-effort right
@@ -844,14 +1135,14 @@ func (s *Service) trySend(req map[string]any) {
 // yields a permanent no-narration fallback so narration-disabled is
 // indistinguishable from narration-working from the state machine's side.
 //
-// LOCKING: the manifest read runs OUTSIDE s.mu, mirroring
-// stateUnsupported — every Show*/Hide caller takes that mutex in
-// pushIf, and the UN-latched first read fires exactly on the boot narration
-// path (the process's first push), so a hung read on a degraded filesystem
-// under the mutex would stall the online Hide that ends the boot narration.
-// Safe without the lock because this only runs on the single narration
-// worker goroutine (the `running` guard); the latch and warnedUnreadable
-// stay mutex-guarded.
+// LOCKING: the manifest read runs OUTSIDE s.mu, mirroring stateUnsupported,
+// and the UN-latched first read fires exactly on the boot narration path (the
+// process's first push), so a hung read on a degraded filesystem under the
+// mutex would stall the online Hide that ends the boot narration. Safe
+// without the lock because trySend — this function's only caller — runs only
+// on the shared overlay.Controller's own single delivery worker goroutine
+// (see setupPainter's doc), not on whichever goroutine called Show/Hide/
+// pushIf; the latch and warnedUnreadable stay mutex-guarded.
 func (s *Service) narrationSupported() bool {
 	s.mu.Lock()
 	cached := s.support
@@ -1087,7 +1378,7 @@ func validateSetupDisplayManifest(manifest playerContractManifest) error {
 	for _, state := range contract.States {
 		states[state] = true
 	}
-	for _, required := range []string{stateSoftAPQR, stateJoining, stateJoinFailed, stateUpdating, stateClaimQR, stateReady, stateHidden} {
+	for _, required := range requiredStates {
 		if !states[required] {
 			return fmt.Errorf("contracts.setupDisplay.states missing %q", required)
 		}

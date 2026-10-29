@@ -205,7 +205,7 @@ func (c *cdp) Init(ctx context.Context) error {
 // shared connection state and does not hold c.mu, so callers own storing the returned conn.
 // Discovery failures are logged at debug because on a headless device the endpoint is
 // expected to be absent and the connect loop retries on an interval — higher log levels
-// here would flood logs/Sentry. The ws debugger URL changes across Chromium restarts, so
+// here would flood local and streamed logs. The ws debugger URL changes across Chromium restarts, so
 // this re-fetches /json on every call rather than caching a target.
 func (c *cdp) dialPageTarget(ctx context.Context) (wrapper.WebSocketConn, error) {
 	// Bind the /json fetch to ctx (plus a cap) so it respects cancellation; raw http.Get
@@ -299,9 +299,8 @@ func (c *cdp) connectLoop(ctx context.Context) {
 
 		conn, err := c.dialPageTarget(ctx)
 		if err != nil {
-			// Absence is the expected steady state on a headless device; keep at debug so
-			// it does not flood logs/Sentry while intentionally without a display.
-			c.logger.Debug("CDP not connected, will retry", zap.Error(err))
+			// Absence is the expected steady state on a headless device. Keep the
+			// retry quiet so it cannot hold a remote log session open forever.
 			if !c.sleep(ctx, c.retryInterval) {
 				return
 			}

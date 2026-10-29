@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/feral-file/ffos-user/components/feral-sys-monitord/metric"
 )
@@ -22,10 +21,43 @@ const (
 	PING_TIMEOUT = 5 * time.Second
 )
 
-var PING_TARGET_ADDRESS = []string{
+// Reachability targets, dialed in two stages (happy-eyeballs style).
+//
+// PRIMARY_PING_TARGETS are dialed first. FALLBACK_PING_TARGETS are dialed only
+// when no primary target has connected within PING_FALLBACK_DELAY, or as soon
+// as every primary target has failed. The first successful TCP connect from
+// either stage wins, and primary dials stay in flight after the fallback
+// starts, so a slow-but-working primary path still counts. Adding the fallback
+// can therefore only turn a false "offline" into "online", never the reverse.
+//
+// Why the fallback exists: the Google pair is unreachable from every
+// mainland-China network (the firewall blocks the prefixes outright), which
+// left a device on working office Wi-Fi narrating "no internet access"
+// forever (feral-file#3539). The AliDNS and DNSPod resolvers answer TCP 443
+// (their DoH endpoints) from inside and outside the mainland.
+//
+// Why it is a fallback rather than a peer: dialing the mainland resolvers on
+// every probe would send every device worldwide a TCP connect to Chinese
+// infrastructure every 30 s, which enterprise and venue IDS/GeoIP policies
+// flag or silently drop. Staging keeps that traffic to networks where Google
+// is already failing. Do not collapse the two lists back into one.
+var PRIMARY_PING_TARGETS = []string{
 	"8.8.8.8:443",
 	"8.8.4.4:443",
 }
+
+var FALLBACK_PING_TARGETS = []string{
+	"223.5.5.5:443",
+	"1.12.12.12:443",
+}
+
+// PING_FALLBACK_DELAY is how long the primary stage runs alone before the
+// fallback stage starts. A TCP connect to anycast 8.8.8.8 finishes well under
+// 1 s on any working link, while a blackholed prefix (the mainland case)
+// never answers. The whole check, fallback included, still ends at the
+// caller's timeout: controld's GetConnectivityStatus caller gives the D-Bus
+// call 7 s against PING_TIMEOUT's 5 s, so staging must not extend the total.
+const PING_FALLBACK_DELAY = 1 * time.Second
 
 type ConnectivityHandler func(ctx context.Context, connected bool)
 
@@ -43,6 +75,18 @@ type Connectivity struct {
 	// deterministically without dialing real ping targets. Set once at
 	// construction, never mutated after.
 	probe func(timeout time.Duration) (bool, error)
+
+	// dial performs one TCP connect to a probe target. Defaults to a
+	// net.Dialer bounded by the per-target timeout; a seam so the staged-probe
+	// tests can script refusals, blackholes, and slow successes without real
+	// sockets. Set once at
+	// construction, never mutated after.
+	dial func(ctx context.Context, target string, timeout time.Duration) (net.Conn, error)
+
+	// fallbackDelay is PING_FALLBACK_DELAY in production; a field so tests
+	// can make the stage boundary deterministic. Set once at construction,
+	// never mutated after.
+	fallbackDelay time.Duration
 }
 
 func NewConnectivity(ctx context.Context, logger *zap.Logger) *Connectivity {
@@ -53,6 +97,11 @@ func NewConnectivity(ctx context.Context, logger *zap.Logger) *Connectivity {
 		doneChan: make(chan struct{}),
 	}
 	c.probe = c.CheckConnectivity
+	c.fallbackDelay = PING_FALLBACK_DELAY
+	c.dial = func(ctx context.Context, target string, timeout time.Duration) (net.Conn, error) {
+		dialer := net.Dialer{Timeout: timeout}
+		return dialer.DialContext(ctx, "tcp", target)
+	}
 	return c
 }
 
@@ -67,7 +116,8 @@ func (c *Connectivity) GetLastConnected() bool {
 
 func (c *Connectivity) Start() {
 	c.logger.Info("Starting Connectivity Watcher",
-		zap.Int("targets", len(PING_TARGET_ADDRESS)),
+		zap.Strings("primary_targets", PRIMARY_PING_TARGETS),
+		zap.Strings("fallback_targets", FALLBACK_PING_TARGETS),
 		zap.Duration("slow_interval", SLOW_PING_INTERVAL),
 		zap.Duration("fast_interval", FAST_PING_INTERVAL),
 	)
@@ -271,60 +321,99 @@ func (c *Connectivity) background() {
 	}()
 }
 
-// CheckConnectivity attempts to connect to the PING_TARGET address to check connectivity
+// CheckConnectivity reports whether any reachability target accepts a TCP
+// connect within timeout. It returns on the first success instead of waiting
+// for every dial: a blackholed target (SYNs silently dropped) would otherwise
+// hold every check for the full timeout even when another target answered in
+// milliseconds, which eats into controld's 7 s D-Bus deadline. The error
+// return is always nil; an unreachable network is a false verdict, not an
+// error.
 func (c *Connectivity) CheckConnectivity(timeout time.Duration) (bool, error) {
-	ctx, cancel := context.WithTimeout(c.ctx, timeout+1*time.Second)
+	// One deadline for both stages, so the fallback never extends the check
+	// past the caller's budget.
+	ctx, cancel := context.WithTimeout(c.ctx, timeout)
 	defer cancel()
 
-	eg, egCtx := errgroup.WithContext(ctx)
 	type targetResult struct {
 		target string
 		ok     bool
 	}
-	resultChan := make(chan targetResult, len(PING_TARGET_ADDRESS))
+	// Buffered for every target so a dial finishing after the verdict never
+	// blocks its goroutine.
+	results := make(chan targetResult, len(PRIMARY_PING_TARGETS)+len(FALLBACK_PING_TARGETS))
 
-	for _, target := range PING_TARGET_ADDRESS {
-		t := target
-		eg.Go(func() error {
-			before := time.Now()
-			dialer := net.Dialer{Timeout: timeout}
-			conn, err := dialer.DialContext(egCtx, "tcp", t)
-			after := time.Now()
-			c.logger.Debug("Connectivity check result", zap.String("target", t), zap.Duration("duration", after.Sub(before)), zap.Error(err))
-			if conn != nil {
-				if err := conn.Close(); err != nil {
-					c.logger.Warn("Failed to close connection", zap.Error(err))
+	var wg sync.WaitGroup
+	pending := 0
+	launch := func(targets []string) {
+		for _, target := range targets {
+			pending++
+			wg.Add(1)
+			go func(t string) {
+				defer wg.Done()
+				before := time.Now()
+				conn, err := c.dial(ctx, t, timeout)
+				c.logger.Debug("Connectivity check result", zap.String("target", t), zap.Duration("duration", time.Since(before)), zap.Error(err))
+				if conn != nil {
+					if err := conn.Close(); err != nil {
+						c.logger.Warn("Failed to close connection", zap.Error(err))
+					}
 				}
-			}
-
-			resultChan <- targetResult{target: t, ok: err == nil}
-
-			return err
-		})
+				// A per-target failure stays local to its target: it must
+				// never cancel a peer dial that is about to succeed.
+				results <- targetResult{target: t, ok: err == nil}
+			}(target)
+		}
 	}
 
-	err := eg.Wait()
-	if err != nil {
-		// We accept not being able to check connectivity and only log the warning
-		c.logger.Warn("Connectivity check failed", zap.Error(err))
+	fallbackTimer := time.NewTimer(c.fallbackDelay)
+	defer fallbackTimer.Stop()
+	fallbackStarted := false
+	startFallback := func() {
+		if fallbackStarted {
+			return
+		}
+		fallbackStarted = true
+		launch(FALLBACK_PING_TARGETS)
+	}
+
+	launch(PRIMARY_PING_TARGETS)
+	if pending == 0 {
+		startFallback()
 	}
 
 	connected := false
 	successfulTarget := ""
-	for range PING_TARGET_ADDRESS {
-		result := <-resultChan
-		if result.ok {
-			connected = true
-			if successfulTarget == "" {
-				successfulTarget = result.target
+	// Every dial is bounded by ctx, so pending always drains to zero; the
+	// loop cannot outlive the timeout.
+wait:
+	for pending > 0 {
+		select {
+		case r := <-results:
+			pending--
+			if r.ok {
+				connected = true
+				successfulTarget = r.target
+				break wait
 			}
-			break
+			// Every primary target failed fast (RST, no route): do not sit
+			// out the rest of the fallback delay.
+			if pending == 0 {
+				startFallback()
+			}
+		case <-fallbackTimer.C:
+			startFallback()
 		}
 	}
+
+	// Abort the losers and join them, so no dial goroutine or socket outlives
+	// the check.
+	cancel()
+	wg.Wait()
 
 	c.logger.Info("Connectivity check summary",
 		zap.Bool("connected", connected),
 		zap.String("successful_target", successfulTarget),
+		zap.Bool("fallback_used", fallbackStarted),
 		zap.Duration("timeout", timeout),
 	)
 

@@ -306,6 +306,8 @@ type Session struct {
 
 	overlayOwners []overlayOwner
 	reconcilers   []reconcilerEntry
+	// generationHook runs synchronously in every bump (SetGenerationHook).
+	generationHook func()
 
 	// navPending is a REFCOUNT, not a bool: NavigateHomeInline can run
 	// concurrently with an async NavigateHome (Inline's own concurrency
@@ -428,6 +430,22 @@ func (s *Session) ObserveStatusStamp(stamp string, present bool) {
 	s.bump("", "stamp-mismatch")
 }
 
+// SetGenerationHook registers fn to run SYNCHRONOUSLY inside every
+// generation bump (CDP connect, a session-executed navigation, a stamp
+// mismatch), in the bumping goroutine, before the new generation's ready
+// worker is even spawned. Unlike a reconciler it therefore runs before the
+// status round that detected a mismatch continues — which is what the one
+// consumer today needs: signature verification's active-verdict slot must
+// be cleared before that same round annotates player_status, or the
+// reloaded/replaced document could be reported with the previous document's
+// verdict (feral-file/ffos-user#307). fn must be cheap and must not call
+// back into the session. Set once before Start; nil is a no-op.
+func (s *Session) SetGenerationHook(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.generationHook = fn
+}
+
 // bump creates a new generation, cancels the previous one's ctx (unblocking
 // any AwaitStage wait pinned to it and aborting its generation-ready worker
 // before it stamps or reconciles a stale document), and spawns the new
@@ -449,8 +467,12 @@ func (s *Session) bump(navNonce string, reason string) *genState {
 		stages:    make(map[Stage]bool, 3),
 	}
 	s.current = gen
+	hook := s.generationHook
 	s.mu.Unlock()
 
+	if hook != nil {
+		hook()
+	}
 	s.logger.Info("playersession: generation bumped", zap.Uint64("generation", id), zap.String("reason", reason))
 	go s.onGenerationReady(gen)
 	return gen

@@ -14,10 +14,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
+	"github.com/feral-file/ffos-user/components/feral-controld/relaywire"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
@@ -36,6 +39,9 @@ const (
 	PING_INTERVAL     = 15 * time.Second
 	PONG_WAIT         = 3 * time.Second
 
+	// MAX_MESSAGE_BYTES caps one inbound relayer frame; mirrors
+	// hub.MAX_REQUEST_BODY_BYTES (not imported: relayer must not depend on hub).
+	MAX_MESSAGE_BYTES = 4 << 20
 	// WRITE_WAIT bounds how long any single websocket write may block. gorilla's
 	// WriteMessage/WriteJSON hold no internal timeout, so without a deadline a
 	// backpressured peer can park a write — and the connection mutex it holds —
@@ -82,6 +88,39 @@ type Message struct {
 	Command *string        `json:"command,omitempty"`
 	Request map[string]any `json:"request,omitempty"`
 	TopicID *string        `json:"topicID,omitempty"`
+	// RawRequest is the `request` token verbatim, for the same reason
+	// commands.Command.RawArguments exists: an inline DP-1 playlist must be
+	// signature-verified from the bytes the caller sent, not from a
+	// re-marshal whose HTML escaping can inflate it past the verifier's size
+	// bound (feral-file/ffos-user#307). Set by UnmarshalJSON only.
+	RawRequest json.RawMessage `json:"-"`
+	// Ambiguous: see commands.Command.Ambiguous.
+	Ambiguous bool `json:"-"`
+}
+
+type messageWire struct {
+	Command *string        `json:"command,omitempty"`
+	Request map[string]any `json:"request,omitempty"`
+	TopicID *string        `json:"topicID,omitempty"`
+}
+
+// UnmarshalJSON decodes the message and retains the `request` token verbatim.
+func (m *Message) UnmarshalJSON(data []byte) error {
+	var w messageWire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	var tokens map[string]json.RawMessage
+	if err := json.Unmarshal(data, &tokens); err != nil {
+		return err
+	}
+	m.Command, m.Request, m.TopicID = w.Command, w.Request, w.TopicID
+	m.Ambiguous = commands.AmbiguousTopLevel(data)
+	m.RawRequest = nil
+	if raw, ok := tokens["request"]; ok && len(raw) > 0 && string(raw) != "null" {
+		m.RawRequest = raw
+	}
+	return nil
 }
 
 type Response struct {
@@ -163,15 +202,23 @@ type relayer struct {
 	json       wrapper.JSON
 
 	// Internal state
-	endpoint     string
-	apiKey       string
-	conn         wrapper.WebSocketConn
-	done         chan struct{}
-	pingDoneChan chan struct{}
-	handlers     []Handler
-	dispatchSem  chan struct{}
-	controlSem   chan struct{}
-	shedSem      chan struct{}
+	endpoint         string
+	deviceID         string
+	session          *deviceSession
+	peerDisconnected func(Peer)
+	apiKey           string
+	conn             wrapper.WebSocketConn
+	done             chan struct{}
+	pingDoneChan     chan struct{}
+	handlers         []Handler
+	dispatchSem      chan struct{}
+	controlSem       chan struct{}
+	shedSem          chan struct{}
+
+	// v2Attempts counts v2 dials since the last stable session and
+	// v2ConnectedAt is when the current one started (see retryV2).
+	v2Attempts    int
+	v2ConnectedAt time.Time
 
 	// connObserver, when set, is told about connection lifecycle transitions:
 	// (true, 0) after a successful dial, (false, 0) on teardown, and
@@ -181,6 +228,9 @@ type relayer struct {
 	// BEFORE any Connect (same plain-field ordering contract as the hub's
 	// contactObserver); nil is a no-op.
 	connObserver func(connected bool, closeCode int)
+	// beforeExit seals best-effort telemetry before the process-level exit used
+	// for an unrecoverable reconnect failure. Set once before Connect.
+	beforeExit func()
 
 	// Logger
 	logger *zap.Logger
@@ -190,6 +240,12 @@ type relayer struct {
 // Call before the first Connect.
 func (r *relayer) SetConnectionObserver(fn func(connected bool, closeCode int)) {
 	r.connObserver = fn
+}
+
+// SetBeforeExit wires a bounded cleanup hook for the terminal reconnect path.
+// Call before the first Connect.
+func (r *relayer) SetBeforeExit(fn func()) {
+	r.beforeExit = fn
 }
 
 // observeConn forwards one lifecycle transition to the observer, if wired.
@@ -236,6 +292,9 @@ func (r *relayer) IsConnected() bool {
 // RetryableConnect attempts to connect to the Relayer server and listens for messages indefinitely
 // This function blocks the current thread and should be called in a separate goroutine unless otherwise specified
 func (r *relayer) RetryableConnect(ctx context.Context) error {
+	if r.deviceID != "" {
+		return r.retryV2(ctx)
+	}
 	var attempts int
 	for {
 		attempts++
@@ -243,7 +302,7 @@ func (r *relayer) RetryableConnect(ctx context.Context) error {
 		r.logger.Info("Connecting to Relayer",
 			zap.String("endpoint", r.endpoint),
 			zap.Int("attempts", attempts),
-			zap.String("topicID", topicID),
+			zap.String("topic_fp", helper.TopicFingerprint(topicID)),
 			zap.Bool("topic_ready", topicID != ""),
 			zap.Bool("currently_connected", r.IsConnected()),
 		)
@@ -310,49 +369,78 @@ func (r *relayer) Connect(ctx context.Context) error {
 		return ErrAlreadyConnected
 	}
 
-	// Create URL with topicID if available
-	connectURL := r.endpoint
-
-	if r.apiKey != "" {
-		connectURL += fmt.Sprintf("/api/connection?apiKey=%s", r.apiKey)
-	}
-
-	// Single snapshot: topicID and isReady must come from the SAME write, not
-	// two separate GetState() reads that could straddle a concurrent
-	// clearPersistedClaim()/topic assignment.
-	claim := state.ClaimSnapshot()
-	topicID := claim.TopicID
-	r.logger.Info("Retrieved topic ID from state",
-		zap.String("topicID", topicID),
-		zap.Bool("isEmpty", topicID == ""),
-		zap.Bool("isReady", claim.TopicReady))
-
-	if topicID != "" {
-		connectURL += fmt.Sprintf("&topicID=%s", topicID)
-		r.logger.Debug("Added topic ID to connection URL", zap.String("connectURL", connectURL))
+	// The v2 carrier is addressed by the device ID and never reads the claim:
+	// no topic goes into its URL or its logs.
+	var connectURL, topicID string
+	var headers http.Header
+	if r.deviceID != "" {
+		var err error
+		connectURL, err = relaywire.ConnectionURL(r.endpoint, r.deviceID)
+		if err != nil {
+			r.Unlock()
+			return PermanentError{Err: err}
+		}
+		headers = http.Header{"Sec-WebSocket-Protocol": []string{relaywire.Subprotocol}}
 	} else {
-		r.logger.Warn("Topic ID is empty, connecting without topic ID",
-			zap.String("connectURL", connectURL),
-			zap.String("stateFile", constants.STATE_FILE))
-	}
+		// Create URL with topicID if available
+		connectURL = r.endpoint
 
-	conn, resp, err := r.dialer.DialContext(ctx, connectURL, nil)
+		if r.apiKey != "" {
+			connectURL += fmt.Sprintf("/api/connection?apiKey=%s", r.apiKey)
+		}
+
+		// Single snapshot: topicID and isReady must come from the SAME write, not
+		// two separate GetState() reads that could straddle a concurrent
+		// clearPersistedClaim()/topic assignment.
+		claim := state.ClaimSnapshot()
+		topicID = claim.TopicID
+		r.logger.Info("Retrieved topic ID from state",
+			zap.String("topic_fp", helper.TopicFingerprint(topicID)),
+			zap.Bool("isEmpty", topicID == ""),
+			zap.Bool("isReady", claim.TopicReady))
+
+		if topicID != "" {
+			connectURL += fmt.Sprintf("&topicID=%s", topicID)
+			r.logger.Debug("Added topic ID to connection URL", zap.String("connectURL", connectURL))
+		} else {
+			r.logger.Warn("Topic ID is empty, connecting without topic ID",
+				zap.String("connectURL", connectURL),
+				zap.String("stateFile", constants.STATE_FILE))
+		}
+	}
+	conn, resp, err := r.dialer.DialContext(ctx, connectURL, headers)
 	if err != nil {
 		r.Unlock()
 		statusCode := 0
 		if resp != nil {
 			statusCode = resp.StatusCode
 		}
-		r.logger.Warn("Relayer dial failed",
-			zap.Error(err),
-			zap.String("endpoint", r.endpoint),
-			zap.String("topicID", topicID),
-			zap.Int("status_code", statusCode),
-		)
+		fields := []zap.Field{zap.Error(err), zap.String("endpoint", r.endpoint), zap.Int("status_code", statusCode)}
+		if r.deviceID == "" {
+			fields = append(fields, zap.String("topic_fp", helper.TopicFingerprint(topicID)))
+		}
+		r.logger.Warn("Relayer dial failed", fields...)
 		return r.categorizeWebsocketError(err, resp)
 	}
 
+	// Bound every inbound frame BEFORE it is decoded. The relayer is the
+	// second ingress for displayPlaylist (the LAN hub is the first, capped by
+	// hub.MAX_REQUEST_BODY_BYTES; URL fetches by dp1.MaxPlaylistBodyBytes),
+	// and an inline playlist's cost downstream — JSON decode into a map, JCS
+	// canonicalization per signature entry — scales with its size, so an
+	// unbounded frame from a remote controller or a compromised relayer is
+	// an unbounded memory and CPU spend. Same limit as the hub so both paths
+	// admit the same worst-case document. gorilla returns ErrReadLimit on an
+	// oversized frame and the read loop reconnects, which is the right
+	// outcome for a peer that sends one.
+	conn.SetReadLimit(MAX_MESSAGE_BYTES)
 	r.conn = conn
+	if r.deviceID != "" {
+		conn.SetReadLimit(relaywire.MaxFrameBytes)
+		r.session = newDeviceSession(conn)
+		r.session.onDisconnect = r.peerDisconnected
+		r.v2ConnectedAt = time.Now()
+	}
 	// Stage-0/1 observability (docs/wan-outage-observability.md): connection
 	// state is exported event-driven from the three lifecycle sites (here,
 	// closeConn, and the read-loop close-frame capture). Published UNDER the
@@ -360,22 +448,23 @@ func (r *relayer) Connect(ctx context.Context) error {
 	// unlocked publish here could interleave with a concurrent Close() so
 	// that the final exported state says "connected" while r.conn is nil,
 	// corrupting the last record sealed into the ring at shutdown.
-	netmetrics.SetRelayerConnected(true)
+	if r.deviceID == "" {
+		netmetrics.SetRelayerConnected(true)
+	}
 	r.observeConn(true, 0)
 	r.Unlock()
 	cfRay := ""
 	if resp != nil {
 		cfRay = resp.Header.Get("cf-ray")
 	}
-	r.logger.Info("Relayer websocket dial succeeded",
-		zap.String("endpoint", r.endpoint),
-		zap.String("topicID", topicID),
-		zap.String("cf_ray", cfRay),
-	)
+	dialFields := []zap.Field{zap.String("endpoint", r.endpoint), zap.String("cf_ray", cfRay)}
+	if r.deviceID == "" {
+		dialFields = append(dialFields, zap.String("topic_fp", helper.TopicFingerprint(topicID)))
+	}
+	r.logger.Info("Relayer websocket dial succeeded", dialFields...)
 
 	// Set pong handler
 	conn.SetPongHandler(func(_ string) error {
-		r.logger.Debug("Received pong from relayer")
 		return conn.SetReadDeadline(time.Time{})
 	})
 
@@ -404,7 +493,11 @@ func (r *relayer) Connect(ctx context.Context) error {
 		r.pingDoneChan = make(chan struct{})
 	}
 	pingDone := r.pingDoneChan
+	session := r.session
 	r.Unlock()
+	if session != nil {
+		go r.v2Keepalive(ctx, done, pingDone, session)
+	}
 
 	// Start pinging
 	ticker := r.clock.NewTicker(PING_INTERVAL)
@@ -493,8 +586,9 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 				}
 
 				conn := r.conn
+				session := r.session
 				r.Unlock()
-				_, msg, err := conn.ReadMessage()
+				kind, msg, err := conn.ReadMessage()
 				if err != nil {
 					// The close code only exists here, at the read that saw the
 					// close frame — record it before any teardown path runs.
@@ -503,7 +597,9 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 					// (docs/wan-outage-observability.md stage 0).
 					var closeErr *websocket.CloseError
 					if errors.As(err, &closeErr) {
-						netmetrics.RecordRelayerCloseCode(closeErr.Code)
+						if r.deviceID == "" {
+							netmetrics.RecordRelayerCloseCode(closeErr.Code)
+						}
 						r.observeConn(false, closeErr.Code)
 					}
 					if r.shouldStop(ctx, done) {
@@ -521,17 +617,51 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 							r.logger.Info("Skipping relayer reconnect failure during shutdown", zap.Error(err))
 							return
 						}
+						if r.deviceID != "" {
+							r.logger.Warn("Optional v2 reconnect stopped", zap.Error(err))
+							return
+						}
 						// Stop the program and let the systemd restart it
 						r.logger.Error("Failed to reconnect to Relayer, the controld will be restarted by systemd shortly", zap.Error(err))
+						if r.beforeExit != nil {
+							r.beforeExit()
+						}
 						r.os.Exit(1)
 					}
 					return
 				}
 
+				messageCtx := ctx
+				if session != nil && kind == websocket.TextMessage && string(msg) == "pong" {
+					// The relay's auto-response to the §10 text ping: liveness only.
+					if err := conn.SetReadDeadline(time.Time{}); err != nil {
+						r.logger.Debug("Failed to clear read deadline after v2 pong", zap.Error(err))
+					}
+					continue
+				}
+				if session != nil {
+					var source string
+					msg, source, err = session.receive(kind, msg)
+					if err != nil || msg == nil {
+						continue
+					}
+					messageCtx = context.WithValue(ctx, relaySourceKey{}, relaySource{session, source})
+				}
+
 				logMsg := helper.TruncateBytes(msg, logger.MAX_FIELD_LENGTH)
+				if session != nil {
+					// v2 bodies are a peer's opaque payloads (sealed
+					// envelopes, or whatever a stranger on the public
+					// channel sent): never log them.
+					logMsg = []byte("[v2 payload redacted]")
+				}
 				var payload Payload
 				if err := json.Unmarshal(msg, &payload); err != nil {
-					r.logger.Error("Invalid JSON received",
+					logInvalid := r.logger.Error
+					if session != nil {
+						logInvalid = r.logger.Debug // any stranger on the channel can send this
+					}
+					logInvalid("Invalid JSON received",
 						zap.ByteString("message", logMsg),
 						zap.Int("message_length", len(msg)),
 					)
@@ -542,23 +672,35 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 				// deadline, then stop before command handlers see the control frame.
 				// Keepalive success is routine — only failures deserve loud logs.
 				if payload.Type == "pong" {
-					r.logger.Debug("Received application pong from relayer")
 					if err := conn.SetReadDeadline(time.Time{}); err != nil {
 						r.logger.Error("Failed to clear read deadline after pong", zap.Error(err))
 					}
 					continue
 				}
 
-				r.logger.Info("Received message",
-					zap.ByteString("message", logMsg),
-					zap.String("type", payload.Type),
-					zap.String("messageID", payload.MessageID),
-					zap.String("command", derefString(payload.Message.Command)),
-					zap.String("topicID", derefString(payload.Message.TopicID)),
-					zap.Int("message_length", len(msg)),
-				)
+				// A system frame carries the topic, a bearer credential:
+				// never log its raw body.
+				if payload.MessageID == MESSAGE_ID_SYSTEM {
+					logMsg = []byte("[system frame redacted]")
+				}
+				if session != nil {
+					r.logger.Debug("Received v2 message",
+						zap.String("messageID", payload.MessageID),
+						zap.String("command", derefString(payload.Message.Command)),
+						zap.Int("message_length", len(msg)),
+					)
+				} else {
+					r.logger.Info("Received message",
+						zap.ByteString("message", logMsg),
+						zap.String("type", payload.Type),
+						zap.String("messageID", payload.MessageID),
+						zap.String("command", derefString(payload.Message.Command)),
+						zap.String("topic_fp", helper.TopicFingerprint(derefString(payload.Message.TopicID))),
+						zap.Int("message_length", len(msg)),
+					)
+				}
 
-				r.dispatchMessage(ctx, payload, done)
+				r.dispatchMessage(messageCtx, payload, done)
 			}
 		}
 	}()
@@ -609,7 +751,7 @@ func (r *relayer) dispatchMessage(ctx context.Context, payload Payload, done cha
 			// legible rejection is neither expected nor possible — dropping is
 			// the correct backstop against a spoofed control-plane storm.
 			r.logger.Warn("Relayer control-plane lane saturated, dropping system message",
-				zap.String("topicID", derefString(payload.Message.TopicID)),
+				zap.String("topic_fp", helper.TopicFingerprint(derefString(payload.Message.TopicID))),
 			)
 		}
 		return
@@ -712,6 +854,18 @@ func (r *relayer) sendShedResponse(ctx context.Context, payload Payload) {
 // Send sends a message to the Relayer server
 func (r *relayer) Send(ctx context.Context, data interface{}) error {
 	r.Lock()
+	if r.deviceID != "" {
+		session := r.session
+		r.Unlock()
+		if session == nil {
+			return ErrNotConnected
+		}
+		body, err := r.json.Marshal(data)
+		if err != nil {
+			return err
+		}
+		return session.send(ctx, body)
+	}
 	defer r.Unlock()
 
 	if r.conn == nil {
@@ -749,11 +903,9 @@ func (r *relayer) ping() {
 	r.Lock()
 	defer r.Unlock()
 	if r.conn == nil {
-		r.logger.Info("Skipping relayer ping because connection is nil")
 		return
 	}
 
-	r.logger.Debug("Sending relayer ping")
 	deadline := r.clock.Now().Add(PONG_WAIT)
 
 	if err := r.conn.SetReadDeadline(deadline); err != nil {
@@ -764,6 +916,9 @@ func (r *relayer) ping() {
 		r.logger.Error("Failed to send transport ping", zap.Error(err))
 	}
 
+	if r.deviceID != "" {
+		return
+	}
 	// WriteControl takes its own deadline, but WriteJSON relies on the
 	// connection write deadline; bound it so a stuck application-ping write
 	// cannot hold the mutex (and starve Close/reconnect) indefinitely.
@@ -830,6 +985,10 @@ func isAbnormalClosure(err error) bool {
 }
 
 func (r *relayer) closeConn() {
+	if r.session != nil {
+		r.session.close()
+		r.session = nil
+	}
 	if r.conn == nil {
 		r.logger.Info("closeConn called with nil connection")
 		return
@@ -854,8 +1013,10 @@ func (r *relayer) closeConn() {
 	// Every real teardown funnels through here (read-error reconnects and
 	// explicit Close alike), so this is the one site that can count
 	// disconnects exactly once per connection.
-	netmetrics.SetRelayerConnected(false)
-	netmetrics.RecordRelayerDisconnect()
+	if r.deviceID == "" {
+		netmetrics.SetRelayerConnected(false)
+		netmetrics.RecordRelayerDisconnect()
+	}
 	r.observeConn(false, 0)
 	r.logger.Info("Relayer connection closed")
 }

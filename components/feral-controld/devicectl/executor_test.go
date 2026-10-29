@@ -4116,32 +4116,32 @@ func TestExecutor_SshAccess_Enable_CapsTtlAndSchedulesDisable(t *testing.T) {
 
 	gomock.InOrder(
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".timer").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".timer").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".service").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".service").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "reset-failed", constants.SSH_DISABLE_UNIT+".service").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "reset-failed", constants.SSH_DISABLE_UNIT+".service").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "start", "sshd.service").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "start", "sshd.service").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
 			CommandContext(
-				ts.ctx,
+				gomock.Any(),
 				"sudo",
 				"systemd-run",
 				"--unit",
@@ -4201,25 +4201,25 @@ func TestExecutor_SshAccess_Disable_StopsService(t *testing.T) {
 
 	gomock.InOrder(
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".timer").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".timer").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".service").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".service").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "reset-failed", constants.SSH_DISABLE_UNIT+".service").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "reset-failed", constants.SSH_DISABLE_UNIT+".service").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte(""), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "sudo", "systemctl", "stop", "sshd.service").
+			CommandContext(gomock.Any(), "sudo", "systemctl", "stop", "sshd.service").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
@@ -4597,8 +4597,16 @@ func TestExecutor_FactoryReset_StartsServiceAndRotatesTopic(t *testing.T) {
 	// are pinned by state_test.go's TestStateManager_ClearClaim_* — this test
 	// only needs to verify factoryReset calls through to ClearClaim.
 	ts.mockStateManager.EXPECT().
+		InvalidateRelayerTopic().
+		Return("topic-1", true, nil)
+	ts.mockStateManager.EXPECT().
 		ClearClaim().
 		Return(true, nil)
+
+	// The reset clears the owner's device name with the claim.
+	// Clear removes the staged temp first (resold-frame leak guard).
+	ts.mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
+	ts.mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
 
 	// The in-process reset starts the system reset unit directly.
 	ts.mockExec.EXPECT().
@@ -4649,8 +4657,16 @@ func TestExecutor_FactoryReset_UnitFailureStillClearsClaim(t *testing.T) {
 		Return([]byte(`{}`), nil)
 
 	ts.mockStateManager.EXPECT().
+		InvalidateRelayerTopic().
+		Return("topic-1", true, nil)
+	ts.mockStateManager.EXPECT().
 		ClearClaim().
 		Return(true, nil)
+
+	// The reset clears the owner's device name with the claim.
+	// Clear removes the staged temp first (resold-frame leak guard).
+	ts.mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE + ".tmp").Return(nil)
+	ts.mockOS.EXPECT().Remove(constants.DEVICE_NAME_FILE).Return(nil)
 
 	ts.mockExec.EXPECT().
 		CommandContext(ts.ctx, "systemctl", "start", "set-factory-boot.service").
@@ -5433,4 +5449,107 @@ func TestExecutor_ScreenRotation_ConcurrentTapsAdvanceTwoSteps(t *testing.T) {
 	// A lost update leaves 270 with both applies targeting 270.
 	assert.Equal(t, "180", stored)
 	assert.Equal(t, []string{"270", "180"}, transforms)
+}
+
+// Review round 4 L6: SSH granted while the device had no owner is revoked
+// when the first owner enrolls (same steps as sshAccess{enabled:false}).
+func TestExecutor_OwnerEnrolledRevokesLegacySsh(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	stopped, done := make(chan struct{}), make(chan struct{})
+	ts.mockJSON.EXPECT().Unmarshal([]byte(`{"enabled":false}`), gomock.Any()).Return(nil)
+	// The authorized_keys removal is the last step.
+	ts.mockOS.EXPECT().IsNotExist(gomock.Any()).DoAndReturn(func(error) bool {
+		close(done)
+		return true
+	})
+	ts.mockExecCmd.EXPECT().CombinedOutput().Return([]byte(""), nil).AnyTimes()
+	ts.mockExec.EXPECT().CommandContext(gomock.Any(), "sudo", "systemctl", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, args ...string) wrapper.ExecCmd {
+			if args[1] == "stop" && args[2] == "sshd.service" {
+				close(stopped)
+			}
+			return ts.mockExecCmd
+		}).AnyTimes()
+
+	ts.executor.(interface{ ControlOwnerEnrolled() }).ControlOwnerEnrolled()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sshd was not stopped after owner enrollment")
+	}
+	<-done
+}
+
+// Hardware round 3: an sshAccess the new owner sends right after the first
+// enrollment ran concurrently with the revocation, which then deleted the
+// key it had just installed. The revocation is queued first and the owner's
+// command waits for it.
+func TestExecutor_OwnerSshAccessRunsAfterEnrollmentRevocation(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	var mu sync.Mutex
+	var events []string
+	record := func(e string) { mu.Lock(); events = append(events, e); mu.Unlock() }
+	release := make(chan struct{})
+
+	ts.mockJSON.EXPECT().Unmarshal([]byte(`{"enabled":false}`), gomock.Any()).Return(nil)
+	ts.mockOS.EXPECT().IsNotExist(gomock.Any()).DoAndReturn(func(error) bool {
+		record("revoke:remove-key")
+		return true
+	})
+	ts.mockExecCmd.EXPECT().CombinedOutput().Return([]byte(""), nil).AnyTimes()
+	ts.mockExec.EXPECT().CommandContext(gomock.Any(), "sudo", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, args ...string) wrapper.ExecCmd {
+			if len(args) == 3 && args[1] == "stop" && args[2] == "sshd.service" {
+				record("revoke:stop-sshd")
+				<-release // hold the revocation mid-way
+			}
+			if len(args) == 3 && args[1] == "start" && args[2] == "sshd.service" {
+				record("enable:start-sshd")
+			}
+			return ts.mockExecCmd
+		}).AnyTimes()
+
+	enable := commands.Command{Type: commands.CMD_SSH_ACCESS, Arguments: map[string]interface{}{
+		"enabled": true, "publicKey": "ssh-ed25519 AAAA-owner", "ttlSeconds": 0,
+	}}
+	raw := []byte(`{"enabled":true,"publicKey":"ssh-ed25519 AAAA-owner","ttlSeconds":0}`)
+	ts.mockJSON.EXPECT().Marshal(enable.Arguments).Return(raw, nil)
+	ts.mockJSON.EXPECT().Unmarshal(raw, gomock.Any()).DoAndReturn(func(_ []byte, v interface{}) error {
+		args := v.(*struct {
+			Enabled    bool   `json:"enabled"`
+			PublicKey  string `json:"publicKey"`
+			TTLSeconds *int   `json:"ttlSeconds"`
+		})
+		zero := 0
+		args.Enabled, args.PublicKey, args.TTLSeconds = true, "ssh-ed25519 AAAA-owner", &zero
+		return nil
+	})
+	ts.mockOS.EXPECT().MkdirAll(gomock.Any(), gomock.Any()).Return(nil)
+	ts.mockOS.EXPECT().WriteFile(constants.SSH_AUTHORIZED_KEYS_FILE, gomock.Any(), gomock.Any()).
+		DoAndReturn(func(string, []byte, os.FileMode) error { record("enable:write-key"); return nil })
+
+	ts.executor.(interface{ ControlOwnerEnrolled() }).ControlOwnerEnrolled()
+	result := make(chan error, 1)
+	go func() { _, err := ts.executor.Execute(ts.ctx, enable); result <- err }()
+
+	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	early := append([]string(nil), events...)
+	mu.Unlock()
+	assert.NotContains(t, early, "enable:write-key", "the owner's sshAccess ran while the revocation was still in progress")
+	close(release)
+
+	select {
+	case err := <-result:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("sshAccess did not finish")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"revoke:stop-sshd", "revoke:remove-key", "enable:write-key", "enable:start-sshd"}, events)
 }

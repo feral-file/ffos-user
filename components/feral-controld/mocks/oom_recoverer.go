@@ -34,6 +34,20 @@ func (m *MockOOMRecoverer) EXPECT() *MockOOMRecovererMockRecorder {
 	return m.recorder
 }
 
+// Done mocks base method.
+func (m *MockOOMRecoverer) Done() <-chan struct{} {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Done")
+	ret0, _ := ret[0].(<-chan struct{})
+	return ret0
+}
+
+// Done indicates an expected call of Done.
+func (mr *MockOOMRecovererMockRecorder) Done() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Done", reflect.TypeOf((*MockOOMRecoverer)(nil).Done))
+}
+
 // Start mocks base method.
 func (m *MockOOMRecoverer) Start(ctx context.Context) {
 	m.ctrl.T.Helper()

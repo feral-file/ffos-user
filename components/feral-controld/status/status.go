@@ -5,6 +5,7 @@ import (
 	//nolint:gosec
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/drm"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
@@ -38,6 +40,7 @@ type PlayerStatus struct {
 	Command        string                      `json:"castCommand,omitempty"`
 	PlaylistURL    *string                     `json:"playlistURL,omitempty"`
 	Playlist       *dp1.Playlist               `json:"playlist,omitempty"`
+	ContentContext string                      `json:"contentContext,omitempty"`
 	Index          *int                        `json:"index"`
 	RenderStatus   *int                        `json:"renderStatus,omitempty"`
 	IsPaused       *bool                       `json:"isPaused,omitempty"`
@@ -45,7 +48,18 @@ type PlayerStatus struct {
 	Ok             bool                        `json:"ok,omitempty"`
 	Error          *string                     `json:"error,omitempty"`
 	DeviceSettings *struct {
-		Scaling     *string `json:"scaling,omitempty"`
+		// Composition is the player's committed showing after DP-1 merging
+		// and ephemeral Control Center writes, not persisted machine defaults.
+		// Keep margin's DP-1 number (pixels) or string (CSS) representation.
+		// ShowingKey is a random player-generated UUID, never a source URL.
+		ShowingKey          *string         `json:"showingKey,omitempty"`
+		CompositionRevision *uint64         `json:"compositionRevision,omitempty"`
+		Margin              json.RawMessage `json:"margin,omitempty"`
+		Background          *string         `json:"background,omitempty"`
+		Scaling             *string         `json:"scaling,omitempty"`
+		// Framing is the saved device preference (artwork, fit, fill), separate
+		// from effective Scaling. Absence keeps unsupported players identifiable.
+		Framing     *string `json:"framing,omitempty"`
 		Orientation *string `json:"orientation,omitempty"`
 		// Device-level default playlist item duration in seconds, set via the
 		// updateDefaultDuration cast command. Absent means "auto" (no
@@ -60,12 +74,146 @@ type PlayerStatus struct {
 	} `json:"deviceSettings,omitempty"`
 	LoopMode *LoopMode `json:"loopMode,omitempty"`
 	Shuffle  *bool     `json:"shuffle,omitempty"`
+	// SignatureStatus is controld-owned (the player never sends it): the DP-1
+	// signature verdict of the playlist currently on screen, "valid",
+	// "invalid", or "unsigned" (feral-file/ffos-user#307). Attached by
+	// pollPlayerStatus from the verification lookup when the reply's
+	// playlist id or URL matches the last cast controld verified; omitted
+	// when it cannot be matched (player-fetched default playlist, a cast
+	// from before this process started, verification disabled). A stable
+	// string that only changes on a cast, so it does not defeat the
+	// notification dedupe hash.
+	SignatureStatus *string `json:"signatureStatus,omitempty"`
 	// Stamp echoes window.__ffosDocStamp back from CheckDeviceStatusReply — the
 	// playersession generation carrier (design doc §2.1 source 3), riding this
 	// EXISTING checkStatus round-trip rather than a second evaluate. Old
 	// players omit it entirely (nil): callers must treat an absent stamp as
 	// "source unavailable", never as a mismatch.
 	Stamp *string `json:"stamp,omitempty"`
+	// Overlay is controld-owned, same contract as SignatureStatus: the
+	// player never sends it, so a reply that carries one is dropped and the
+	// field is set only from annotateOverlay below (issue #381). Whatever
+	// feral-controld's shared overlay.Controller currently has on the
+	// player screen — mint pairing's pairing code / "request received" /
+	// "creating token", or setupui's narration (the claim QR among other
+	// states) — is a CDP evaluation painted over this same player page, not
+	// a navigation, so nothing else on this reply (Command, Playlist,
+	// RenderStatus, displayURL on the sibling DeviceStatusResponse, ...)
+	// ever reflects it; this is the one field that does. One field, not one
+	// per owner: the controller's whole contract is that exactly one
+	// overlay owns the screen at a time, so one field reporting it is the
+	// honest shape — a caller that only cares about one Owner/State
+	// combination reads past the rest, the same way it already ignores any
+	// other field it does not need. Nil (omitted) when nothing is showing.
+	Overlay *Overlay `json:"overlay,omitempty"`
+}
+
+// OverlayOwner identifies which subsystem's overlay.Painter currently owns
+// the player screen — the controller-internal Kind prefix
+// ("mint:"/"setup:"), spelled out for the wire.
+type OverlayOwner string
+
+const (
+	// OverlayOwnerMint is mintpairing's browser-pairing overlay.
+	OverlayOwnerMint OverlayOwner = "mint"
+	// OverlayOwnerSetup is setupui's narration overlay (the claim QR among
+	// its other states).
+	OverlayOwnerSetup OverlayOwner = "setup"
+)
+
+// Overlay is PlayerStatus.Overlay's shape (issue #381): whatever overlay is
+// currently on the player, from whichever owner painted it.
+type Overlay struct {
+	// Owner is which Kind prefix (and therefore which Painter) currently
+	// owns the screen.
+	Owner OverlayOwner `json:"owner"`
+	// State is the overlay's Kind, trimmed of its owner prefix: for
+	// Owner == "mint", "pairing_code" | "request_received" |
+	// "creating_token"; for Owner == "setup", whichever setupui narration
+	// state is currently painted (for example "claim_qr", "scanning",
+	// "joining", "updating", "finalizing" — see setupui's own state
+	// constants; this field reports whatever setupui reports, not a
+	// curated subset). Never "hidden" for either owner: a hidden overlay
+	// is reported by the whole Overlay object being absent, not by a
+	// State value.
+	State string `json:"state"`
+	// ChannelID, PairingCode, ExpiresAt are mint-pairing-specific and set
+	// only when Owner == "mint" — setupui's narration carries no
+	// equivalent identifiers. PairingCode/ExpiresAt are further gated to
+	// State == "pairing_code": once a browser has joined
+	// (request_received/creating_token) there is no code left on screen
+	// to go stale. The app needs ExpiresAt to tell a still-valid displayed
+	// code from one that has silently expired.
+	ChannelID   string     `json:"channelId,omitempty"`
+	PairingCode string     `json:"pairingCode,omitempty"`
+	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
+}
+
+// BuildMintOverlay converts a mintpairing.Service.OverlayStatus() snapshot
+// into this field's wire shape with Owner "mint", or nil when nothing is
+// showing (issue #381). Takes the snapshot's fields rather than the
+// mintpairing type itself so this package does not gain a dependency on
+// mintpairing: shared by the poller's pushed player_status
+// (SetOverlaySource's wiring) and the commandrouter's direct checkStatus
+// reply annotation, so both surfaces derive the wire shape from one
+// conversion and can never disagree on what "showing" maps to. The
+// Owner-"setup" case needs no equivalent builder — it has no conditional
+// sub-fields, so CombineOverlaySources below constructs it inline.
+func BuildMintOverlay(showing bool, state, channelID, pairingCode string, expiresAt time.Time) *Overlay {
+	if !showing {
+		return nil
+	}
+	out := &Overlay{Owner: OverlayOwnerMint, State: state, ChannelID: channelID}
+	// PairingCode/ExpiresAt are only ever set together by
+	// mintpairing.OverlayStatus (State == "pairing_code"); mirror that
+	// pairing here rather than re-deriving it from State.
+	if pairingCode != "" {
+		out.PairingCode = pairingCode
+		if !expiresAt.IsZero() {
+			e := expiresAt
+			out.ExpiresAt = &e
+		}
+	}
+	return out
+}
+
+// CombineOverlaySources builds the one function both status surfaces ask for
+// "whatever overlay is on the player" (issue #381): the poller's pushed
+// player_status (Poller.SetOverlaySource) and the commandrouter's direct
+// checkStatus reply, which bypasses the poller entirely. The composition root
+// wires the SAME returned closure into both, so the two can never disagree
+// about what is on screen.
+//
+// Precedence is mint-then-setup, and it is an ordering, not an arbitration:
+// the shared overlay.Controller already guarantees at most one owner holds
+// the screen, so at most one of these two sources can report something. The
+// order therefore only decides which is consulted first, and mint goes first
+// because its snapshot carries the richer fields (channelId/pairingCode/
+// expiresAt) — reversing it would not change any reachable answer, but it
+// would make the cheaper probe the one that runs on every poll.
+//
+// mint returns the already-converted mint overlay (BuildMintOverlay's result)
+// rather than the mintpairing snapshot, so this package keeps no dependency
+// on mintpairing; setup is setupui.Service.CurrentNarrationState's shape,
+// whose false means "nothing of setupui's is on the screen" — note that it is
+// a RESOLVED-display answer, not the pushed intent, which is what makes nil
+// here mean the viewer is looking at artwork. Either source may be nil (an
+// unwired build), read as "nothing showing", mirroring the nil-safe
+// single-writer contract of the poller's other sources.
+func CombineOverlaySources(mint func() *Overlay, setup func() (string, bool)) func() *Overlay {
+	return func() *Overlay {
+		if mint != nil {
+			if o := mint(); o != nil {
+				return o
+			}
+		}
+		if setup != nil {
+			if state, ok := setup(); ok {
+				return &Overlay{Owner: OverlayOwnerSetup, State: state}
+			}
+		}
+		return nil
+	}
 }
 
 //go:generate mockgen -source=status.go -destination=../mocks/status.go -package=mocks -mock_names=Poller=MockStatusPoller
@@ -88,6 +236,21 @@ type Poller interface {
 	// time, before Start; nil is safe (no-op) and is what a build without a
 	// session leaves it as.
 	SetStampObserver(fn func(stamp string, present bool))
+	// SetVerificationLookup registers the function pollPlayerStatus asks for
+	// the on-screen playlist's signature verdict (see
+	// PlayerStatus.SignatureStatus). Called with the reply's playlist id and
+	// URL (either may be empty); a false return omits the field. Same
+	// set-once-before-Start, single-writer contract as SetStampObserver;
+	// nil is safe (no-op) and is what a build with verification disabled
+	// leaves it as.
+	SetVerificationLookup(fn func(id, url string) (string, bool))
+	// SetOverlaySource registers the function pollPlayerStatus asks for
+	// whatever overlay is currently on screen, from whichever owner (see
+	// PlayerStatus.Overlay, issue #381). Called on every successful
+	// checkStatus round-trip, mirroring SetVerificationLookup's contract
+	// exactly: set once at wiring time before Start, single writer,
+	// nil-safe (no-op, which is what an unwired build leaves it as).
+	SetOverlaySource(fn func() *Overlay)
 }
 
 // poller handles periodic polling of both player status via CDP and device status
@@ -136,7 +299,18 @@ type poller struct {
 	// present at all. Written once at wiring time before Start; read without
 	// a lock on the polling goroutine, same single-writer contract as
 	// displayConnected.
-	stampObserver func(stamp string, present bool)
+	stampObserver    func(stamp string, present bool)
+	playbackObserver func(*PlayerStatus)
+
+	// verificationLookup, when set (SetVerificationLookup), resolves the
+	// on-screen playlist's signature verdict. Same single-writer contract as
+	// stampObserver.
+	verificationLookup func(id, url string) (string, bool)
+
+	// overlaySource, when set (SetOverlaySource), resolves whatever overlay
+	// is currently on screen, from whichever owner (issue #381). Same
+	// single-writer contract as stampObserver/verificationLookup.
+	overlaySource func() *Overlay
 }
 
 func NewPoller(
@@ -252,6 +426,22 @@ func (s *poller) SetStampObserver(fn func(stamp string, present bool)) {
 	s.stampObserver = fn
 }
 
+// SetPlaybackObserver installs an observe-only hook before Start. The callback
+// runs on the poller and must copy any retained data without doing I/O.
+func SetPlaybackObserver(p Poller, fn func(*PlayerStatus)) {
+	if concrete, ok := p.(*poller); ok {
+		concrete.playbackObserver = fn
+	}
+}
+
+func (s *poller) SetVerificationLookup(fn func(id, url string) (string, bool)) {
+	s.verificationLookup = fn
+}
+
+func (s *poller) SetOverlaySource(fn func() *Overlay) {
+	s.overlaySource = fn
+}
+
 func (s *poller) SuppressPlayerNotifications(suppress bool) {
 	s.Lock()
 	s.suppressPlayerNotifications = suppress
@@ -271,14 +461,20 @@ func (s *poller) ForceRefresh() {
 }
 
 func (s *poller) pollPlayerStatus(ctx context.Context) {
+	// Invalidate a prior snapshot on every unavailable/error path as well.
+	observed := false
+	defer func() {
+		if !observed && s.playbackObserver != nil {
+			s.playbackObserver(nil)
+		}
+	}()
 	// While CDP is intentionally absent (headless boot with no monitor, or mid-reconnect
 	// after a kiosk/Chromium restart) every checkStatus send would fail at Error level and
-	// emit a player-status error notification each interval, flooding logs and Sentry. Skip
+	// emit a player-status error notification each interval, flooding logs. Skip
 	// the poll entirely in that state, but keep playback-duration accounting moving with a
 	// "not playing" sample so metrics do not freeze while disconnected.
 	if !s.cdp.Initialized() {
 		s.updateArtPlaybackMetrics(false, time.Now())
-		s.logger.Debug("Skipping player status poll: CDP not connected")
 		return
 	}
 
@@ -291,9 +487,6 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 		// Chromium on QR/setup screens while keeping playback-duration accounting
 		// moving forward with a "not playing" sample.
 		s.updateArtPlaybackMetrics(false, time.Now())
-		s.logger.Info("Skipping player status poll because Chromium is not on the player page",
-			zap.String("page_url", pageURL),
-		)
 		return
 	}
 
@@ -314,9 +507,12 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	}
 
 	// Handle nil playerStatus (CDP returned nil result when player is not playing in case showing QR code)
+	if s.playbackObserver != nil {
+		s.playbackObserver(playerStatus)
+		observed = true
+	}
 	if playerStatus == nil {
 		s.updateArtPlaybackMetrics(false, now)
-		s.logger.Debug("Player status is nil, skipping notification")
 		return
 	}
 
@@ -342,14 +538,58 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	suppressed := s.suppressPlayerNotifications
 	s.RUnlock()
 	if suppressed {
-		s.logger.Debug("Player notifications suppressed (OOM recovery), skipping")
 		return
 	}
 
+	// Annotate BEFORE lightweightPlayerStatus blanks Playlist: the lookup
+	// keys are the reply's playlist id and URL, and id lives on that struct.
+	s.annotateSignatureStatus(playerStatus)
+	s.annotateOverlay(playerStatus)
+
 	lightweightPlayerStatus := s.lightweightPlayerStatus(playerStatus)
-	s.logger.Debug("Sending lightweight player status", zap.Any("lightweightPlayerStatus_itemsLength", len(*lightweightPlayerStatus.Items)))
 
 	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, lightweightPlayerStatus)
+}
+
+// annotateSignatureStatus fills PlayerStatus.SignatureStatus from the
+// verification lookup, or leaves it nil (omitted) when nothing is wired or
+// the on-screen playlist is not the one controld last verified. A miss is
+// deliberately silent: reporting a verdict for a playlist controld did not
+// verify would be worse than reporting none.
+func (s *poller) annotateSignatureStatus(playerStatus *PlayerStatus) {
+	// The reply was decoded straight into PlayerStatus, so a player (or a
+	// spoofed reply) could have supplied this field. It is controld-owned:
+	// drop whatever arrived and set it only from the lookup below.
+	playerStatus.SignatureStatus = nil
+	if s.verificationLookup == nil {
+		return
+	}
+	id, url := "", ""
+	if playerStatus.Playlist != nil {
+		id = playerStatus.Playlist.ID
+	}
+	if playerStatus.PlaylistURL != nil {
+		url = *playerStatus.PlaylistURL
+	}
+	if status, ok := s.verificationLookup(id, url); ok {
+		playerStatus.SignatureStatus = &status
+	}
+}
+
+// annotateOverlay fills PlayerStatus.Overlay from the overlay source, or
+// leaves it nil (omitted) when nothing is wired or nothing is showing
+// (issue #381). Same drop-then-set contract as annotateSignatureStatus: the
+// reply was decoded straight into PlayerStatus, so a player (or a spoofed
+// reply) could have supplied this field too — it is controld-owned, and
+// whatever overlay is current is the one thing on this page the player's
+// own checkStatus reply never describes (a CDP evaluation painted over the
+// page, not a navigation it would report).
+func (s *poller) annotateOverlay(playerStatus *PlayerStatus) {
+	playerStatus.Overlay = nil
+	if s.overlaySource == nil {
+		return
+	}
+	playerStatus.Overlay = s.overlaySource()
 }
 
 func isPlayerPageURL(url string) bool {
@@ -373,12 +613,6 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 	}
 
 	relayerConnected := s.relayer.IsConnected()
-	s.logger.Debug("Preparing notification delivery",
-		zap.String("notification_type", string(notificationType)),
-		zap.Bool("relayer_connected", relayerConnected),
-		zap.Bool("force_send", forceSend),
-		zap.Bool("hash_available", err == nil),
-	)
 
 	data := map[string]interface{}{
 		"type":                 "notification",
@@ -391,23 +625,21 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 	if relayerConnected {
 		if forceSend || s.shouldSendByHash(s.lastRelayerStatusHashes, notificationType, currentHash) {
 			if err := s.relayer.Send(ctx, data); err != nil {
-				s.logger.Error("Failed to send notification via relayer",
+				// The handle reports connected while only the v2 relay is
+				// up; the legacy send then just finds no socket, every
+				// round, and is retried once it reconnects.
+				logSendFailure := s.logger.Error
+				if errors.Is(err, relayer.ErrNotConnected) {
+					logSendFailure = s.logger.Debug
+				}
+				logSendFailure("Failed to send notification via relayer",
 					zap.String("notification_type", string(notificationType)),
 					zap.Error(err),
 				)
 			} else {
-				s.logger.Info("Notification sent via relayer",
-					zap.String("notification_type", string(notificationType)),
-				)
 				s.updateStatusHash(s.lastRelayerStatusHashes, notificationType, currentHash)
 			}
-		} else {
-			s.logger.Debug("Relayer status unchanged, skipping relayer notification",
-				zap.String("notification_type", string(notificationType)))
 		}
-	} else {
-		s.logger.Debug("Relayer not connected, skipping relayer notification send",
-			zap.String("notification_type", string(notificationType)))
 	}
 
 	// Send the data via websocket
@@ -418,14 +650,8 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 				zap.Error(err),
 			)
 		} else {
-			s.logger.Info("Notification sent via websocket",
-				zap.String("notification_type", string(notificationType)),
-			)
 			s.updateStatusHash(s.lastWSStatusHashes, notificationType, currentHash)
 		}
-	} else {
-		s.logger.Debug("Websocket status unchanged, skipping websocket notification",
-			zap.String("notification_type", string(notificationType)))
 	}
 }
 
@@ -454,7 +680,7 @@ func (s *poller) FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error) {
 
 	if result == nil {
 		// FIXME: This should not happen, resolve the root cause
-		// We accept it for now to avoid flooding sentry with errors
+		// We accept it for now to avoid flooding error logs.
 		s.logger.Warn("CDP returned nil result for player status")
 		return nil, nil
 	}
@@ -521,6 +747,13 @@ func (s *poller) lightweightPlayerStatus(playerStatus *PlayerStatus) *PlayerStat
 
 	playerStatus.Items = &items
 	playerStatus.Playlist = &dp1.Playlist{}
+	// An independently updated daemon may still hear the older source-bearing
+	// showing key. Only canonical UUIDs may cross either notification channel.
+	if settings := playerStatus.DeviceSettings; settings != nil && settings.ShowingKey != nil {
+		if !playerresponse.IsCanonicalShowingKey(*settings.ShowingKey) {
+			settings.ShowingKey = nil
+		}
+	}
 	// Stamp is the playersession generation carrier (§2.1 source 3), an
 	// internal implementation detail of this daemon — it must not leak onto
 	// the relayer-facing player_status payload.
@@ -531,15 +764,8 @@ func (s *poller) lightweightPlayerStatus(playerStatus *PlayerStatus) *PlayerStat
 func (s *poller) pollDeviceStatus(ctx context.Context) {
 	// Check if relayer is connected before polling
 	if !s.relayer.IsConnected() {
-		s.logger.Debug("Relayer not connected, skipping device status poll",
-			zap.Bool("relayer_connected", false),
-		)
 		return
 	}
-
-	s.logger.Debug("Polling device status",
-		zap.Bool("relayer_connected", true),
-	)
 
 	// Get device status using the shared function
 	deviceStatus, err := s.deviceStatus.GetStatus(ctx)
@@ -560,7 +786,6 @@ const ddcPollTimeout = 15 * time.Second
 
 func (s *poller) pollDDCStatus(ctx context.Context) {
 	if !s.relayer.IsConnected() {
-		s.logger.Debug("Relayer not connected, skipping DDC status poll")
 		return
 	}
 
@@ -590,7 +815,6 @@ func (s *poller) pollDDCStatus(ctx context.Context) {
 	// otherwise show stale values forever, because pre-gate code kept emitting
 	// an Errors-carrying status when the panel became unreadable.
 	if s.displayConnected != nil && !s.displayConnected() {
-		s.logger.Debug("Skipping DDC status poll: no display connected")
 		s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatusNoDisplay())
 		return
 	}
@@ -599,12 +823,9 @@ func (s *poller) pollDDCStatus(ctx context.Context) {
 	// re-probes on display changes and on a slow interval. Not a fault — stay
 	// quiet instead of logging every 5s round.
 	if !shouldPoll {
-		s.logger.Debug("Skipping DDC status poll: display does not support DDC/CI")
 		s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatusUnsupported())
 		return
 	}
-
-	s.logger.Debug("Polling DDC panel status")
 
 	ddcCtx, cancel := context.WithTimeout(ctx, ddcPollTimeout)
 	defer cancel()

@@ -17,6 +17,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // newTestServer builds a portal Server with in-memory seams and an httptest
@@ -57,7 +59,7 @@ func TestCaptiveProbesRedirectToPortal(t *testing.T) {
 	}
 }
 
-func TestRootRendersNetworksAndPrewarning(t *testing.T) {
+func TestRootRendersEssentialNetworkPicker(t *testing.T) {
 	_, ts, client := newTestServer(t, Config{
 		APSSID: "FF1-devicexyz",
 		Scan: func(context.Context) ([]string, error) {
@@ -75,9 +77,70 @@ func TestRootRendersNetworksAndPrewarning(t *testing.T) {
 	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	assert.Contains(t, body, "HomeNet")
 	assert.Contains(t, body, "Cafe-5G")
-	// AP-bounce pre-warning names the AP SSID to reconnect to.
-	assert.Contains(t, body, "FF1-devicexyz")
-	assert.Contains(t, body, "reconnect")
+	assert.Contains(t, body, "Choose a Wi-Fi network")
+	// Copy must hold in both form shapes (picker and empty-scan manual
+	// entry), so it never says "selected".
+	assert.Contains(t, body, "Use that network's own password—not the setup password.")
+	assert.Contains(t, body, ">Connect</button>")
+	assert.Contains(t, body, ">Network not listed?</button>")
+	assert.NotContains(t, body, "FF1-devicexyz", "the setup SSID is not destination guidance")
+	assert.NotContains(t, body, "Don't see your Wi-Fi network", "the refresh confirmation owns that explanation")
+}
+
+func TestRootOmitsSetupNetworkAndRequiresAVisibleChoice(t *testing.T) {
+	_, ts, client := newTestServer(t, Config{
+		APSSID: "FF1-devicexyz",
+		Scan: func(context.Context) ([]string, error) {
+			return []string{"FF1-devicexyz", "HomeNet"}, nil
+		},
+	})
+	resp, err := client.Get(ts.URL + "/")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body := readAll(t, resp)
+
+	assert.Equal(t, 0, strings.Count(body, "FF1-devicexyz"),
+		"the active setup SSID must never be offered or presented as the destination")
+	assert.Contains(t, body, `<option value="" selected disabled>Select a network…</option>`,
+		"the first scanned network must not be silently selected")
+	assert.Contains(t, body, `<select id="ssid" name="ssid">`)
+	assert.NotContains(t, body, `<select id="ssid" name="ssid" required>`,
+		"base HTML must allow the visible manual field to submit without JavaScript")
+	assert.Contains(t, body, "select.required = !other;",
+		"JavaScript-capable sheets should still validate the active picker branch")
+	assert.Contains(t, body, `<option value="HomeNet">HomeNet</option>`)
+}
+
+func TestRootFiltersSetupNetworkBeforeDisplayCap(t *testing.T) {
+	destinations := []string{
+		"Net1", "Net2", "Net3", "Net4", "Net5",
+		"Net6", "Net7", "Net8", "Net9",
+	}
+	require.Len(t, destinations, maxDisplayedSSIDs)
+	scan := append([]string{"FF1-devicexyz"}, destinations...)
+	scan = append(scan, "Net10")
+
+	_, ts, client := newTestServer(t, Config{
+		APSSID: "FF1-devicexyz",
+		Scan: func(context.Context) ([]string, error) {
+			return scan, nil
+		},
+	})
+	resp, err := client.Get(ts.URL + "/")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body := readAll(t, resp)
+
+	assert.NotContains(t, body, "FF1-devicexyz")
+	for _, ssid := range destinations {
+		assert.Contains(t, body, `<option value="`+ssid+`">`+ssid+`</option>`)
+	}
+	assert.NotContains(t, body, "Net10",
+		"the display cap still applies after the setup network is removed")
+}
+
+func TestManualSSIDOptionCannotCollideWithARealSSID(t *testing.T) {
+	assert.Greater(t, len(manualSSIDOption), 32)
 }
 
 func TestRootFallsBackToManualEntryOnScanError(t *testing.T) {
@@ -132,10 +195,10 @@ func TestConnectInvokesJoinFuncWithFormValues(t *testing.T) {
 }
 
 // TestConnectRoutesManualEntry pins the two-source SSID rule (D3): a non-blank
-// manual field wins over the picker (the select always submits SOME value),
-// carries Manual so downstream can apply the manual-only trim, and the hidden
-// checkbox is honored only on this branch. The RAW manual value must pass
-// through — trimming is the machine's call, keyed on the Manual flag.
+// manual field wins over any picker value, carries Manual so downstream can
+// apply the manual-only trim, and honors the hidden checkbox only on this
+// branch. The RAW manual value must pass through — trimming is the machine's
+// call, keyed on the Manual flag.
 func TestConnectRoutesManualEntry(t *testing.T) {
 	tests := []struct {
 		name string
@@ -162,6 +225,11 @@ func TestConnectRoutesManualEntry(t *testing.T) {
 		{
 			name: "no picker at all takes the manual branch even when blank",
 			form: url.Values{"ssid_manual": {""}, "password": {"pw"}},
+			want: JoinRequest{SSID: "", Password: "pw", Manual: true},
+		},
+		{
+			name: "manual option sentinel becomes an empty manual value",
+			form: url.Values{"ssid": {manualSSIDOption}, "ssid_manual": {""}, "password": {"pw"}},
 			want: JoinRequest{SSID: "", Password: "pw", Manual: true},
 		},
 	}
@@ -206,8 +274,9 @@ func TestIndexAlwaysOffersManualEntry(t *testing.T) {
 	assert.Contains(t, body, `name="hidden"`, "hidden-network checkbox must render")
 	// The page script collapses manual entry until this option is picked, so
 	// dropping it would make hidden networks unprovisionable again for every
-	// JS-enabled phone. The empty value routes to the manual branch.
-	assert.Contains(t, body, `<option value="">Other network…</option>`,
+	// JS-enabled phone. The impossible-SSID sentinel routes to the manual branch
+	// while no-JS phones can type directly into the always-visible field.
+	assert.Contains(t, body, `<option value="`+manualSSIDOption+`" data-manual>Other network…</option>`,
 		"picker must carry the manual-entry escape option")
 }
 
@@ -226,6 +295,37 @@ func TestConnectRejectionReRendersForm(t *testing.T) {
 	// Back on the picker (form action present), not the result page.
 	assert.Contains(t, body, `action="/connect"`)
 	assert.NotContains(t, body, "Connecting to")
+	// The rejection reason is IN the page. Load-bearing for the no-JS shape:
+	// the machine never saw the submission (Status stays JoinIdle), and the
+	// script-side `required` guard is the only other thing preventing an
+	// empty placeholder-first submission — without this banner a
+	// scripting-disabled sheet re-renders a byte-identical page and the tap
+	// silently did nothing.
+	assert.Contains(t, body, "empty ssid")
+}
+
+// TestConnectEmptyPickerSubmissionExplainsItself is the no-JS regression for
+// the placeholder-first picker: an untouched picker submits ssid="" (the
+// disabled prompt), which must come back with the machine's user-facing
+// rejection visible, not a silently identical page. Uses the real
+// provisioning-side message so the copy contract is pinned end-to-end.
+func TestConnectEmptyPickerSubmissionExplainsItself(t *testing.T) {
+	_, ts, client := newTestServer(t, Config{
+		Scan: func(context.Context) ([]string, error) { return []string{"HomeNet"}, nil },
+		Join: func(req JoinRequest) error {
+			if strings.TrimSpace(req.SSID) == "" {
+				return stubError("please choose a Wi-Fi network")
+			}
+			return nil
+		},
+	})
+	resp, err := client.PostForm(ts.URL+"/connect", url.Values{"ssid": {""}, "ssid_manual": {""}})
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body := readAll(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, body, "please choose a Wi-Fi network")
+	assert.Contains(t, body, `class="status status-failed"`)
 }
 
 func TestStatusReflectsStatusFunc(t *testing.T) {
@@ -346,8 +446,10 @@ func TestInflightCapRejectsExcessRequests(t *testing.T) {
 	t.Cleanup(releaseAll)
 
 	started := make(chan struct{}, maxInflightRequests)
+	core, observed := observer.New(zap.InfoLevel)
 	_, ts, client := newTestServer(t, Config{
 		APSSID: "FF1-abc",
+		Logger: zap.New(core),
 		Status: func() Status {
 			started <- struct{}{}
 			<-release
@@ -379,9 +481,137 @@ func TestInflightCapRejectsExcessRequests(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+	// A shed request writes no access line: the cap's own saturation is the
+	// evidence there, and logging what it rejects is what would let a
+	// sequential stream drive the log (review bot on 6ba6f96).
+	assert.Equal(t, maxInflightRequests, observed.FilterMessage("portal: request").Len(),
+		"only the admitted requests logged")
 
 	releaseAll()
 	wg.Wait()
+}
+
+// TestAccessLineTruncatesClientControlledFields: the path and User-Agent of
+// the access line are attacker-controlled and unbounded on the wire, so the
+// line carries bounded copies of both.
+func TestAccessLineTruncatesClientControlledFields(t *testing.T) {
+	core, observed := observer.New(zap.InfoLevel)
+	h := NewServer(Config{APSSID: "FF1-abc", Logger: zap.New(core)}).Handler()
+	req := httptest.NewRequest(http.MethodGet, "/"+strings.Repeat("a", 4000), nil)
+	req.Header.Set("User-Agent", strings.Repeat("u", 4000))
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	lines := observed.FilterMessage("portal: request").All()
+	require.Len(t, lines, 1)
+	fields := lines[0].ContextMap()
+	path, _ := fields["path"].(string)
+	agent, _ := fields["user_agent"].(string)
+	assert.Equal(t, maxLoggedPathBytes+len("…"), len(path), "the path is cut at its byte bound")
+	assert.True(t, strings.HasSuffix(path, "…"), "a cut value is marked")
+	assert.Equal(t, maxLoggedUserAgentBytes+len("…"), len(agent), "the agent is cut at its byte bound")
+	assert.True(t, strings.HasSuffix(agent, "…"))
+	assert.NotContains(t, fields, "suppressed", "nothing was dropped")
+
+	// A field inside the bound passes through whole.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/status", nil))
+	lines = observed.FilterMessage("portal: request").All()
+	require.Len(t, lines, 2)
+	assert.Equal(t, "/status", lines[1].ContextMap()["path"])
+}
+
+// TestAccessLineOmitsClientAddress: the portal client's address is a device
+// identifier and must not reach the log (review bot on 6eaaf14). The line
+// carries the classified client kind instead — which is what the attached-
+// phase repaint is diagnosed from — and nothing that names the phone. The
+// same holds for the /rescan submission line, which logged the address of
+// its own accord (review bot on 8e5a23d), so the sweep at the end covers
+// every line the portal emits, not just the access line.
+func TestAccessLineOmitsClientAddress(t *testing.T) {
+	core, observed := observer.New(zap.InfoLevel)
+	h := NewServer(Config{
+		APSSID: "FF1-abc",
+		Logger: zap.New(core),
+		Rescan: func() error { return nil },
+	}).Handler()
+
+	apple := httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil)
+	apple.Header.Set("User-Agent", "CaptiveNetworkSupport-355.200.27 wispr")
+	apple.RemoteAddr = "10.42.0.77:51000"
+	h.ServeHTTP(httptest.NewRecorder(), apple)
+
+	other := httptest.NewRequest(http.MethodGet, "/status", nil)
+	other.Header.Set("User-Agent", "Mozilla/5.0")
+	other.RemoteAddr = "10.42.0.78:51001"
+	h.ServeHTTP(httptest.NewRecorder(), other)
+
+	lines := observed.FilterMessage("portal: request").All()
+	require.Len(t, lines, 2)
+	for _, line := range lines {
+		fields := line.ContextMap()
+		assert.NotContains(t, fields, "remote_addr", "the client address stays out of the log")
+		require.Contains(t, fields, "client", "the classified client kind replaces it")
+		assert.NotContains(t, line.Message, "10.42.0.")
+	}
+	assert.Equal(t, "apple", lines[0].ContextMap()["client"])
+	assert.Equal(t, "unknown", lines[1].ContextMap()["client"])
+
+	// The rescan submission is logged on its own, outside the access line.
+	rescan := httptest.NewRequest(http.MethodPost, "/rescan", nil)
+	rescan.Header.Set("User-Agent", "CaptiveNetworkSupport-355.200.27 wispr")
+	rescan.RemoteAddr = "10.42.0.79:51002"
+	h.ServeHTTP(httptest.NewRecorder(), rescan)
+
+	submitted := observed.FilterMessage("portal: rescan submitted").All()
+	require.Len(t, submitted, 1)
+	assert.Equal(t, "apple", submitted[0].ContextMap()["client"], "the classified client kind replaces the address")
+
+	// Nothing the portal logged names the phone.
+	for _, line := range observed.All() {
+		assert.NotContains(t, line.ContextMap(), "remote_addr", "no portal line carries the client address")
+		assert.NotContains(t, line.Message, "10.42.0.")
+	}
+}
+
+// TestAccessLineIsRateLimitedAndReportsWhatItDropped: a client on the open
+// setup subnet can send a sequential stream, and controld.log rotates on time
+// rather than size — so the line is capped at accessLogBurst with an
+// accessLogPerMinute refill, and the flood it swallowed is reported as a
+// count on the next line rather than as silence.
+func TestAccessLineIsRateLimitedAndReportsWhatItDropped(t *testing.T) {
+	core, observed := observer.New(zap.InfoLevel)
+	s := NewServer(Config{APSSID: "FF1-abc", Logger: zap.New(core)})
+	now := time.Now()
+	s.access.now = func() time.Time { return now }
+	h := s.Handler()
+	get := func() {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/status", nil))
+	}
+	lines := func() int { return observed.FilterMessage("portal: request").Len() }
+
+	for i := 0; i < accessLogBurst; i++ {
+		get()
+	}
+	require.Equal(t, accessLogBurst, lines(), "the burst covers a whole setup session")
+
+	const flood = 25
+	for i := 0; i < flood; i++ {
+		get()
+	}
+	assert.Equal(t, accessLogBurst, lines(), "the burst spent, a stream of requests writes nothing")
+
+	// A minute of refill later the line resumes, carrying what the flood cost.
+	now = now.Add(time.Minute)
+	get()
+	all := observed.FilterMessage("portal: request").All()
+	require.Len(t, all, accessLogBurst+1)
+	assert.EqualValues(t, flood, all[len(all)-1].ContextMap()["suppressed"],
+		"a flood shows up as one number, not as silence")
+
+	// The count is claimed exactly once.
+	get()
+	all = observed.FilterMessage("portal: request").All()
+	require.Len(t, all, accessLogBurst+2)
+	assert.NotContains(t, all[len(all)-1].ContextMap(), "suppressed")
 }
 
 // TestSlowBodyClientIsDisconnected: wire-level slowloris guard. A client that
@@ -476,10 +706,11 @@ func TestRescanPostTriggersBounceAndExplainsRejoin(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, 1, called)
-	// The page must warn about the AP restart and tell the user to re-scan the
-	// QR code to reconnect.
-	assert.Contains(t, string(body), "FF1-abc")
-	assert.Contains(t, string(body), "scan it to reconnect")
+	// The transient page only needs the next action; the confirmation already
+	// explained why the phone will disconnect.
+	assert.Contains(t, string(body), "When the QR code returns on your Art Computer, scan it again.")
+	assert.NotContains(t, string(body), "FF1-abc")
+	assert.NotContains(t, string(body), "see the updated list")
 }
 
 // TestRescanGetShowsConfirmationWithoutTriggering: the warning is a plain-HTML
@@ -499,9 +730,16 @@ func TestRescanGetShowsConfirmationWithoutTriggering(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, body, `<form method="POST" action="/rescan">`, "confirm page must carry the POST button")
-	assert.Contains(t, body, "Search for networks again", "confirm button must name the picker's action")
-	assert.Contains(t, body, "FF1-abc")
-	assert.Contains(t, body, "disconnected")
+	assert.Contains(t, body, "Refresh network list", "confirm button must name the disruptive operation")
+	assert.Contains(t, body, "briefly disconnects your phone")
+	assert.Contains(t, body, "scan it again")
+	// The two causes the entry button names — hidden networks and dense
+	// environments — are not fixed by a rescan, so the confirm page must
+	// point at the escape that does fix them before the disruptive bounce.
+	assert.Contains(t, body, "type its name instead",
+		"confirm page must name the manual-entry escape for hidden/dense-scan networks")
+	assert.NotContains(t, body, "FF1-abc")
+	assert.NotContains(t, body, "see the updated list")
 	assert.Zero(t, called, "GET must not trigger a bounce")
 }
 
@@ -537,7 +775,7 @@ func TestRescanRejectedReRendersPicker(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	// Back on the picker, not the rescan page.
-	assert.Contains(t, string(body), "Connect to Wi-Fi")
+	assert.Contains(t, string(body), "Choose a Wi-Fi network")
 }
 
 // TestFontsServeEmbeddedFaces: the /fonts/ subtree must serve the embedded
@@ -663,7 +901,7 @@ func TestTrafficObservedCountsEveryRequest(t *testing.T) {
 		Scan:             func(context.Context) ([]string, error) { return []string{"Net"}, nil },
 		Rescan:           func() error { return nil },
 		ActivityObserved: count(&activity),
-		TrafficObserved:  count(&traffic),
+		TrafficObserved:  func(ClientKind, string) { count(&traffic)() },
 	})
 
 	// The asset routes ride along: a browser auto-fetching the stylesheet or a
@@ -688,4 +926,135 @@ func TestTrafficObservedCountsEveryRequest(t *testing.T) {
 	assert.Equal(t, 6, traffic)
 	assert.Equal(t, 1, activity, "an action request counts as both")
 	mu.Unlock()
+}
+
+// TestIndexCarriesHandOffWatcher pins the picker's /status watcher (the
+// #3515 Safari hand-off): the page must poll /status and be able to turn
+// itself into the hand-off screen on a started join; a failed join never
+// hands off — it reloads an untouched picker for the banner and leaves a
+// touched one alone.
+func TestIndexCarriesHandOffWatcher(t *testing.T) {
+	srv := NewServer(Config{APSSID: "FF1-abc"})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	assert.Contains(t, body, "fetch('/status'")
+	assert.Contains(t, body, "st.state === 'joining' || st.state === 'succeeded'")
+	assert.Contains(t, body, "Setup continues on your Art Computer")
+	// A failed join reaching an UNTOUCHED picker reloads it so the server's
+	// failure banner appears (Safari was frozen under the sheet for the whole
+	// wrong-password round trip); a form holding input or focus stays.
+	assert.Contains(t, body, "if (st && st.state === 'failed' && renderedStatus !== 'failed' && !formTouched()) {")
+	assert.Contains(t, body, `<main data-status="idle">`, "an idle render stamps idle")
+	// The shapes the 2026-09-07 trials and audit forced (see the template
+	// comment): an immediate first poll, a bounded fetch, a visibility hook,
+	// the watcher header, HTTP errors not counted as misses, the form guard,
+	// and the post-hand-off return watch that reloads into the picker.
+	assert.Contains(t, body, "if (!main || !window.fetch || !window.AbortController) return;",
+		"no watcher without a bounded fetch — an unbounded poll would hang the return watch")
+	assert.Contains(t, body, "new AbortController()")
+	assert.NotContains(t, body, "return fetch('/status', opts);", "no unbounded fallback")
+	assert.Contains(t, body, "visibilitychange")
+	assert.Contains(t, body, "if (handedOff) opts.headers = { 'X-Setup-Watcher': '1' };",
+		"only post-hand-off polls are excluded from traffic; an open picker still counts as a human mid-setup")
+	assert.Contains(t, body, "if (!r.ok) { setTimeout(poll, 2000); return; }")
+	assert.Contains(t, body, "misses >= 3 && !formTouched()")
+	assert.Contains(t, body, "window.location.reload()")
+	// html/template elides JS comments in the served body, so the prose
+	// mention of the removed gate never reaches the client; pin the CODE.
+	assert.NotContains(t, body, "var answered", "a page served by the device needs no answered gate")
+	assert.Regexp(t, `\n    poll\(\);\n  \}\)\(\);`, body, "the first poll must run on load, not on a timer")
+}
+
+// TestWatcherPollsAreNotTraffic: the picker's post-hand-off /status watcher
+// must not register as an attached device talking — it would pin the
+// recheck deferral and the address-QR phase open on its own. (Pre-hand-off
+// polls carry no header and count; see the template.)
+func TestWatcherPollsAreNotTraffic(t *testing.T) {
+	var mu sync.Mutex
+	traffic := 0
+	h := NewServer(Config{APSSID: "FF1-abc", TrafficObserved: func(ClientKind, string) {
+		mu.Lock()
+		traffic++
+		mu.Unlock()
+	}}).Handler()
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	req.Header.Set(watcherHeader, "1")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "the watcher poll is still served")
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/status", nil))
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, traffic, "only the unmarked /status counted")
+}
+
+// TestTrafficObservedClassifiesAppleClients pins the ClientKind the seam
+// hands the machine: the iOS/macOS probe agent is Apple, everything else —
+// Android's generic desktop-looking probe agent included — is unknown.
+func TestTrafficObservedClassifiesAppleClients(t *testing.T) {
+	var mu sync.Mutex
+	var kinds []ClientKind
+	h := NewServer(Config{APSSID: "FF1-abc", TrafficObserved: func(k ClientKind, _ string) {
+		mu.Lock()
+		kinds = append(kinds, k)
+		mu.Unlock()
+	}}).Handler()
+	for _, ua := range []string{
+		"CaptiveNetworkSupport-514.160.1.0.1 wispr",
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.32 Safari/537.36",
+		"Dalvik/2.1.0 (Linux; U; Android 17; Pixel 8 Build/BP1A)",
+		"",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil)
+		if ua != "" {
+			req.Header.Set("User-Agent", ua)
+		}
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []ClientKind{ClientApple, ClientUnknown, ClientUnknown, ClientUnknown}, kinds)
+}
+
+// TestFailedPickerRenderStampsItsStatus: the picker rendered WITH the failure
+// banner must stamp data-status="failed" so its watcher does not reload
+// again on the same persisted outcome (the reload loop the review bot caught).
+func TestFailedPickerRenderStampsItsStatus(t *testing.T) {
+	srv := NewServer(Config{APSSID: "FF1-abc", Status: func() Status {
+		return Status{State: JoinFailed, SSID: "Home", Reason: "auth-failure", Message: "Wrong Wi-Fi password."}
+	}})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+	assert.Contains(t, body, `<main data-status="failed">`)
+	assert.Contains(t, body, "Wrong Wi-Fi password.", "the banner the reload exists to show")
+}
+
+// TestTrafficObservedCarriesTheClientIP: the seam hands the machine the host
+// part of RemoteAddr — the key the kernel's neighbor table is looked up by,
+// which is how the station poll tells the phone that raised the address QR
+// from any other device on the hotspot. An address that does not parse is
+// passed through rather than dropped.
+func TestTrafficObservedCarriesTheClientIP(t *testing.T) {
+	var mu sync.Mutex
+	var ips []string
+	h := NewServer(Config{APSSID: "FF1-abc", TrafficObserved: func(_ ClientKind, ip string) {
+		mu.Lock()
+		ips = append(ips, ip)
+		mu.Unlock()
+	}}).Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil)
+	req.RemoteAddr = "10.42.0.22:51234"
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	req = httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil)
+	req.RemoteAddr = "not-an-address"
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"10.42.0.22", "not-an-address"}, ips)
 }

@@ -597,46 +597,27 @@ malformed `item.Source` (which is about to fail `Page.navigate` moments
 later anyway with a clearer error), only the origin-scoped clear is
 skipped; the unconditional cache flush still runs.
 
-`offlineCache.maxDiskBytes` deliberately does NOT default to "unlimited"
-the way most `OfflineCacheConfig` fields default to "off"/"unset" —
-`OptionsFromConfig` falls back to `DefaultMaxDiskBytes` (10 GiB) whenever
-config omits or zeroes it. This feature exists specifically to cache
-potentially gigabyte-scale software-artwork assets (§4.3's 1.1 GB video)
-on disk-constrained embedded devices; a config that merely flips
-`offlineCache.enabled` to `true` without also setting `maxDiskBytes`
-must not silently mean "fill the disk" — `Service.enforceDiskLimit` is a
-complete no-op when `maxDiskBytes <= 0` (see its doc), so an unset budget
-combined with `downloadPlaylist` against large assets could exhaust the
-filesystem.
+The shared store uses 50% of its filesystem by default, additionally capped
+by a positive `offlineCache.maxDiskBytes`. Keep the larger of 5 GiB or 10%
+of the filesystem free. `maxDiskPercent` and `minFreeDiskBytes` tune those
+limits. The effective limit is recomputed before/after capture and at startup,
+then at least once per minute while idle. Streaming writes check available
+space too, so unrelated disk growth can abort an in-flight download safely.
 
-`maxDiskBytes` is enforced as a genuine hard bound, not just a
-"try to make room" heuristic: `enforceDiskLimit`'s eviction loop normally
-protects the just-captured item (`justCapturedID`) while evicting older
-items oldest-first, but if the cache is *still* over budget once every
-older item has been evicted — i.e. the just-captured item's own size
-alone exceeds `maxDiskBytes` — it evicts the just-captured item too
-rather than leaving the cache permanently over budget. The caller sees
-this as the item transitioning to `not_cached` immediately after
-appearing to complete, with `Coverage.Reason` explaining that it alone
-exceeded the disk budget.
+Eviction removes expired automatic records first, then prefers least recently
+played artwork, falling back to capture time until an item has played. Warming
+preserves explicit snapshots and fresh active-playlist members; hard-ceiling
+enforcement may evict either kind. Pre-capture reclaim targets seven eighths of
+the effective budget, with the capture's own source protected unless its
+automatic record has expired. An oversized capture can fail without consuming
+the free-space reserve.
 
-The bound is enforced on BOTH sides of a capture, because eviction only
-on the way out is not enough for a cache that must roll over.
-Post-capture, `enforceDiskLimit` trims back under `maxDiskBytes` as
-above. Pre-capture, `service.process` first runs
-`Service.reclaimDiskForCapture`, which evicts oldest-first (never the
-item about to be captured, and returning quietly rather than warning
-when the target is unreachable — see its doc) until at least
-`maxDiskBytes/8` of the budget is free. Without that step, a store
-sitting at its ceiling starved every new capture up front: both
-capture pipelines seed their disk
-budget with the store's *remaining* room, and the post-capture eviction
-only runs after a *successful* capture, so once full the cache froze on
-its oldest contents forever (feral-file/ffos-user#229 review finding).
-An item larger than the 1/8th headroom floor still captures with
-whatever room eviction actually freed — degrading only itself (partial
-coverage) rather than wiping the rest of the cache for one oversized
-item.
+With offline caching enabled, [automatic playback caching](automatic-playback-cache.md)
+warms current/upcoming media with at least an hour of explicit remaining HTTP
+freshness without a Download command. Its versioned
+record envelope makes old binaries reject and quarantine automatic records
+instead of silently serving them forever. Manual snapshot records retain their
+existing format and offline behavior.
 
 ### 3.3 Direct-download path for media and other single-file items
 
@@ -1168,10 +1149,18 @@ dependency floor is `dp1-go v0.6.0`; the regression tests in
 `commandrouter/handler_test.go` and `commandrouter/offlinecache_test.go`
 pin it across both the player send and this persisted copy.
 
-`feral-controld` verifies no signatures itself — it imports no `dp1-go/sign`
-— so a field lost this way produces no error here. It surfaces downstream,
-as a verification failure in a consumer that does check, or simply as
-metadata that vanished somewhere between the publisher and the screen.
+`feral-controld` now does verify signatures (feral-file/ffos-user#307, the
+`sigverify` package over `dp1-go/sign`) — but deliberately on the bytes
+BEFORE this parse step (the fetched body, or the re-marshaled inline map),
+never on the re-serialized struct, precisely because of the field-loss
+limit above. So a field lost here still produces no verification error in
+the daemon; it surfaces downstream, as a verification failure in a consumer
+that checks the persisted copy, or simply as metadata that vanished
+somewhere between the publisher and the screen. For the same reason the
+cached copy is never verified when loaded as a fallback: its bytes are this
+re-serialization (of an already-hydrated playlist), so a verdict over them
+would be a false tamper claim against an honest publisher. A cast served
+from the cache reports no `signatureStatus` at all.
 
 There is deliberately **no** top-level manifest, no separate
 `capsules/{key}/assets/index.json`, and no `playlists/{id}/items.json`:
@@ -1877,39 +1866,16 @@ Item records are counted but not separately bounded: unlike playlist
 bodies they are deleted with their item, so they scale with a population
 eviction already controls.
 
-The ceiling is also **reported**, as `getOfflineCacheStatus`' `diskLimit`
-alongside the `diskUsed` it bounds, so a controller can show cache usage
-as a proportion rather than a bare byte count and explain why items
-disappear. It is omitted rather than sent as `0` when `maxDiskBytes <= 0`,
-because that case means no ceiling *and no item eviction* — the opposite
-of what a `0` would convey. (Playlist-body pruning above is by count and
-runs regardless, which is why that phrasing says *item*.)
+The effective ceiling is reported as `getOfflineCacheStatus.diskLimit` alongside
+`diskUsed`. It reflects percentage, absolute-cap and free-space constraints.
+Zero means no storage headroom; absence retains the low-level unlimited case.
+Clients clamp the ratio and re-poll rather than infer eviction thresholds.
 
-What `diskLimit` reports is the **budget, not the threshold eviction
-actually fires at** — the two are different numbers, and a controller that
-conflates them draws a gauge that misreads in both directions.
-`reclaimDiskForCapture` above runs before every capture and evicts down to
-`maxDiskBytes - maxDiskBytes/captureReclaimHeadroomDivisor`, so a busy
-store oscillates between roughly seven eighths of the budget and the
-budget itself (a capture is handed the whole freed headroom as its own
-ceiling — see `newDiskBudgetFromStore`); `enforceDiskLimit` only binds
-when one capture writes past the ceiling in a single pass. Usage can also
-sit *above* the budget indefinitely, because eviction runs only on the
-capture path: lowering `maxDiskBytes` on a populated device is not
-reconciled until the next download, and `Start` deliberately does not
-enforce the ceiling (it sweeps and GCs only). Playlist bodies are counted
-but bounded by count, so no eviction reclaims them either.
-
-`docs/controld-inbound-controller-messages.md` states all of this for
-client authors, and quotes the current one-eighth margin as an explicitly
-**illustrative, non-contractual** figure so a client can picture the
-behavior without hardcoding it. Retuning `captureReclaimHeadroomDivisor`
-therefore means updating every figure derived from it: "one eighth" and the
-"~8.75 GiB" example in that doc's "Cache size and eviction" paragraph, and
-"roughly seven eighths" above in this one — not merely rechecking the
-surrounding prose, which stays true at any margin. If a controller ever
-genuinely needs the threshold rather than the budget, add a field for it
-rather than letting clients derive one from the divisor.
+Eviction runs at startup and periodically while idle as well as around captures.
+The pre-capture headroom margin is one eighth of the effective budget. Playlist
+metadata remains bounded by record count; it is counted in disk usage but item
+eviction does not reclaim it. The controller-facing contract is documented in
+`docs/controld-inbound-controller-messages.md`, "Cache size and eviction".
 
 ### A child target is only resumed once interception is armed
 
@@ -2063,9 +2029,13 @@ URL-recoverable, only ID-recoverable, same as before this fallback
 existed). The fallback playlist is a "last known good" copy: it does not
 reflect anything republished at that URL since it was downloaded, and —
 since it can only exist by having been downloaded successfully once
-before — was already signature-verified and fully DP-1-resolved
-(dynamic content materialized) at that time, so no further DP-1
-processing happens on the cached copy. If there is nothing to fall back
+before — was fully DP-1-resolved (dynamic content materialized) at that
+time, so no further DP-1 resolution happens on the cached copy. It was
+NOT signature-verified then (an earlier version of this sentence claimed
+so; nothing ever did), and it is not verified at load either: the stored
+body is a typed, hydrated re-marshal that cannot verify, so the fallback
+cast carries no signature verdict (feral-file/ffos-user#307; see §7.1's
+JCS note above). If there is nothing to fall back
 to (never downloaded, offline caching disabled, or the download was
 since cleared — `LoadPlaylistIDForURL` intentionally is not kept in
 lockstep with `DeletePlaylist`, see its doc), `displayPlaylist` reports
@@ -2118,7 +2088,7 @@ identical cache state.
 |---|---|
 | §5 `repro` block | `assetsSHA256` is the optional, publisher-supplied completeness/verification signal; not consulted automatically today, but a future coverage cross-check could use it |
 | §8 Transport Profile | Confirms `file://`/offline transport is in-scope for DP-1 generally |
-| §7.1 Signing | `source` is never rewritten in `ItemRecord.Item` or the stored playlist document; replay interception keys on the original URL. Signatures verify against a JCS-canonicalized form (`dp1-go`'s `sign` package), not raw bytes, so re-serializing the resolved playlist through `dp1.DP1` (§5) does not affect signature validity even though it is not byte-identical to the original wire document |
+| §7.1 Signing | `source` is never rewritten in `ItemRecord.Item` or the stored playlist document; replay interception keys on the original URL. Signatures verify against a JCS-canonicalized form (`dp1-go`'s `sign` package), not raw bytes, so a re-serialization that preserves every signed field verifies identically even though it is not byte-identical — but the resolved playlist re-serialized through `dp1.DP1` (§5) does NOT qualify: dynamic hydration rewrites `items`, and the typed struct drops any field the pinned `dp1-go` does not model (see §6's JCS note). The cached hydrated copy is therefore never re-verified and carries no verdict; `feral-controld` verifies only the fetched or inline bytes before resolution (feral-file/ffos-user#307) |
 
 ## 8. Known limitations
 
@@ -2245,9 +2215,10 @@ identical cache state.
 A playlist body is untrusted input. It arrives over the LAN hub — which
 binds `0.0.0.0:1111` and is **unauthenticated** — and over the relayer,
 and every `source` inside it is a URL this daemon will dial on the
-playlist's behalf from three separate places:
+playlist's behalf from four separate places:
 
 - `classify.go`'s `HEAD` / ranged-`GET` probe,
+- `probe.go`'s cast-time liveness preflight (#304),
 - `mediacapture.go`'s direct body download,
 - `capture.go`'s `Page.navigate` in the headless browser.
 
@@ -2263,7 +2234,11 @@ browser — both reachable by anyone on the LAN.
 `sourceguard.go` closes that off inside `Classify`, which is the single
 function BOTH enqueue paths (`DownloadItem` and `DownloadPlaylist`) call
 before any I/O and before any job is queued. A rejected source is
-therefore never probed, never downloaded, and never navigated to. It
+therefore never probed, never downloaded, and never navigated to. The
+cast-time preflight does not cross `Classify`: it applies the same guard
+directly (`guard.check` plus the guarded transport, both inside
+`probe.go`), so a policy change in the guard must be re-checked against
+that path separately. It
 rejects, with `ErrUnsafeSource`:
 
 - any scheme outside `http`/`https` — an allowlist, not a denylist, since
@@ -2630,6 +2605,30 @@ addresses are refused. Artwork origins are public CDNs, so this does not
 affect normal operation, but a developer pointing a test playlist at a
 LAN-hosted asset server will see `ErrUnsafeSource` — that is the guard
 working, and would need an explicit opt-in config knob to relax.
+
+**Accepted risk — the preflight as a bounded outbound amplifier.** The
+cast-time source preflight (#304) gives the unauthenticated LAN a new way
+to make the device dial out: a `displayPlaylist` may probe up to 256
+distinct wire URLs at concurrency 16, each on a fresh dial (keep-alives
+are off by design), and the hub's 422 body reflects per-item HTTP status
+back to the caller. Under the storm gate's heavy-tier budget that is on
+the order of 10² outbound requests/second at attacker-chosen **public**
+origins from the device's egress IP — the source guard confines targets
+to public addresses, so this is a reflection/reachability surface, not an
+internal scanner. Accepted alongside the guard's other residuals (#3471:
+the LAN control plane is unauthenticated by design); the storm gate, the
+per-cast probe budget, and the prober's process-wide 8 MiB peer-controlled parsing
+budget are the containment. A probe uses a status-only HTTP/1 client that accepts
+at most 64 KiB and 128 fields across informational plus final header blocks, then
+closes before the body so trailers are never parsed. It discards fields through a
+fixed reader instead of allowing `net/http` to materialize a cardinality-amplified
+header map. The shared semaphore has 32 x 256 KiB budget units. HTTP spends one;
+HTTPS spends four (1 MiB), caps the whole inbound TLS handshake at 64 KiB before
+`crypto/tls` can parse certificates, and does not retain TLS connection state in
+the response. The resulting envelope admits at most 32 HTTP parsers or eight TLS
+parsers. Disabling the storm gate removes its rate and command-concurrency
+controls but not these weighted units; the `sourceProbe` config kill switch
+removes the surface entirely if it is ever abused.
 
 ## 10. See also
 

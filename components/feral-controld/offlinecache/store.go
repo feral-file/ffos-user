@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -104,6 +105,8 @@ type Store interface {
 	// only required field (the DP-1 item id is optional per spec and
 	// informational here — see ItemRecord's doc).
 	SaveItem(rec *ItemRecord) error
+	// TouchItem records playback without resurrecting a cleared item.
+	TouchItem(sourceKey string, at time.Time) error
 	// LoadItem reads the record for sourceKey (a SourceKey value, NOT a
 	// raw source URL — callers at the package boundary hash exactly once
 	// and pass the key everywhere inward).
@@ -198,6 +201,7 @@ type Store interface {
 }
 
 type fsStore struct {
+	itemMu sync.Mutex // serializes record touches with save/delete
 	root   string
 	os     wrapper.OS
 	json   wrapper.JSON
@@ -435,6 +439,23 @@ func (s *fsStore) itemPath(sourceKey string) (string, error) {
 }
 
 func (s *fsStore) SaveItem(rec *ItemRecord) error {
+	s.itemMu.Lock()
+	defer s.itemMu.Unlock()
+	return s.saveItem(rec)
+}
+
+func (s *fsStore) TouchItem(sourceKey string, at time.Time) error {
+	s.itemMu.Lock()
+	defer s.itemMu.Unlock()
+	rec, err := s.LoadItem(sourceKey)
+	if err != nil {
+		return err
+	}
+	rec.LastPlayedAt = at
+	return s.saveItem(rec)
+}
+
+func (s *fsStore) saveItem(rec *ItemRecord) error {
 	if rec == nil || rec.Item.Source == "" {
 		return errors.New("offline cache: item record must have an item source")
 	}
@@ -443,7 +464,11 @@ func (s *fsStore) SaveItem(rec *ItemRecord) error {
 	if err != nil {
 		return err
 	}
-	data, err := s.json.Marshal(rec)
+	var value any = rec
+	if rec.Automatic {
+		value = automaticItemEnvelope{Version: 1, Record: rec}
+	}
+	data, err := s.json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("offline cache: marshal item %s: %w", key, err)
 	}
@@ -463,7 +488,7 @@ func (s *fsStore) LoadItem(sourceKey string) (*ItemRecord, error) {
 		return nil, fmt.Errorf("offline cache: read item %s: %w", sourceKey, err)
 	}
 	var rec ItemRecord
-	if err := s.json.Unmarshal(data, &rec); err != nil {
+	if err := s.decodeItem(data, &rec); err != nil {
 		return nil, fmt.Errorf("%w: item %s: %w", ErrItemRecordCorrupt, sourceKey, err)
 	}
 	// Filename and content must agree on identity, the same way ReadBlob
@@ -494,6 +519,8 @@ func (s *fsStore) LoadItem(sourceKey string) (*ItemRecord, error) {
 }
 
 func (s *fsStore) DeleteItem(sourceKey string) (bool, error) {
+	s.itemMu.Lock()
+	defer s.itemMu.Unlock()
 	path, err := s.itemPath(sourceKey)
 	if err != nil {
 		return false, err
@@ -682,7 +709,7 @@ func (s *fsStore) loadItemByName(name string) (*ItemRecord, error) {
 		return nil, fmt.Errorf("offline cache: read item %s: %w", name, err)
 	}
 	var rec ItemRecord
-	if err := s.json.Unmarshal(data, &rec); err != nil {
+	if err := s.decodeItem(data, &rec); err != nil {
 		return nil, fmt.Errorf("%w: item %s: %w", ErrItemRecordCorrupt, name, err)
 	}
 	return &rec, nil
@@ -834,7 +861,7 @@ func (s *fsStore) GC() (int, int64, error) {
 // metadata that no eviction pass could see and no budget accounted for
 // (feral-file/ffos-user#229 review finding). Counting all three
 // directories is what makes the configured ceiling mean what
-// OptionsFromConfig's DefaultMaxDiskBytes doc says it means.
+// storagePolicy accounts for.
 //
 // See MaxPlaylistRecords for the separate bound that keeps that
 // metadata evictable rather than merely visible.

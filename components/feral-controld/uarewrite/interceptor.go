@@ -259,7 +259,8 @@ func (i *Interceptor) AttachOnReconnect(ctx context.Context) error {
 
 	i.logger.Info("uarewrite: kiosk User-Agent rewrite armed",
 		zap.Strings("hosts", i.policy.Hosts()),
-		zap.String("user_agent", i.policy.UserAgent()))
+		zap.String("user_agent", i.policy.UserAgent()),
+		zap.String("replacement_gateway", i.policy.ReplacementGateway()))
 	return nil
 }
 
@@ -350,22 +351,43 @@ func (i *Interceptor) processPaused(session offlinecache.CDPSession, params json
 	// the shared-seam refactor will arm the UNION of every consumer's
 	// patterns, at which point this handler starts seeing requests that are
 	// not ours and must pass them through untouched.
+	//
+	// Exactly one of the two rules applies to a matching request, and the
+	// URL rule is consulted first: a content-addressed path on a retired
+	// gateway is sent to the replacement gateway with Chromium's own
+	// headers, everything else on the host gets the User-Agent swap. See
+	// Policy.RewriteURL for why they are not combined.
 	rewritten := false
+	redirected := ""
 	if paused.ResponseStatusCode == nil && i.policy.Matches(paused.Request.URL) {
-		args["headers"] = i.policy.RewriteHeaders(paused.Request.Headers)
-		rewritten = true
+		if target, ok := i.policy.RewriteURL(paused.Request.URL); ok {
+			// `url` is applied by Chromium "in a way that's not observable
+			// by page": ff-player, offline-cache identity, and the
+			// artwork itself keep seeing the original source.
+			args["url"] = target
+			redirected = target
+		} else {
+			args["headers"] = i.policy.RewriteHeaders(paused.Request.Headers)
+			rewritten = true
+		}
 	}
 
 	if _, err := session.Send(ctx, "Fetch.continueRequest", args); err != nil {
 		i.logger.Warn("uarewrite: Fetch.continueRequest failed",
 			zap.String("url", paused.Request.URL),
 			zap.Bool("rewritten", rewritten),
+			zap.String("redirected_to", redirected),
 			zap.Error(err))
 		i.recoverFrom(session, err)
 		return
 	}
 
-	if rewritten {
+	switch {
+	case redirected != "":
+		i.logger.Debug("uarewrite: redirected retired-gateway request",
+			zap.String("url", paused.Request.URL),
+			zap.String("to", redirected))
+	case rewritten:
 		i.logger.Debug("uarewrite: rewrote User-Agent",
 			zap.String("url", paused.Request.URL))
 	}

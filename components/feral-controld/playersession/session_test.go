@@ -1041,3 +1041,25 @@ func TestFakeCDP_ExtractQuotedMatchesRealExpressionShapes(t *testing.T) {
 	docStampExpr := fmt.Sprintf(`JSON.stringify({stamped: Boolean(window.__ffosDocStamp = %q)})`, stamp)
 	assert.Equal(t, stamp, extractQuoted(docStampExpr, "window.__ffosDocStamp = "))
 }
+
+// TestGeneration_HookRunsSynchronouslyInBump pins the seam signature
+// verification's active-verdict slot relies on (feral-file/ffos-user#307):
+// the generation hook runs inside the bump itself, in the bumping goroutine,
+// so a status round that reports a stamp mismatch sees the hook's effect
+// before it continues — a reconciler would run too late for that round.
+func TestGeneration_HookRunsSynchronouslyInBump(t *testing.T) {
+	f := newFakeCDP()
+	f.handlerInstalled = true
+	s := newTestSession(t, f)
+	calls := 0
+	s.SetGenerationHook(func() { calls++ })
+
+	s.OnConnect()
+	assert.Equal(t, 1, calls, "connect bump runs the hook before returning")
+	waitFor(t, time.Second, func() bool { return s.StageReady(StageHandler) })
+	gen1 := s.Generation()
+
+	s.ObserveStatusStamp("someone-elses-stamp", true)
+	assert.Equal(t, 2, calls, "a stamp-mismatch bump runs the hook before ObserveStatusStamp returns")
+	waitFor(t, time.Second, func() bool { return s.Generation() == gen1+1 })
+}

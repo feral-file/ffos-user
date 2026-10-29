@@ -239,7 +239,7 @@ func TestCommandHandler_Process_DisplayPlaylist_ScopesFullPlaylistBeforeActiveSe
 
 	syncCall := mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"https://example.com/21.html", "https://example.com/22.html", "https://example.com/23.html"}).
-		Return(nil).Times(1)
+		Return(1, nil).Times(1)
 	sendCall := mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr, ok := params["expression"].(string)
@@ -416,16 +416,24 @@ func (t *trackingScheduler) ClearThenWithPlayerPush(fn func() bool) {
 	t.clearThenFn++
 	t.inner.ClearThenWithPlayerPush(fn)
 }
+
+// SetPushObserver satisfies the interface; the fake never pushes on its own,
+// so the observer is never called.
+func (t *trackingScheduler) SetPushObserver(func(playlistschedule.PushPhase)) {}
+func (t *trackingScheduler) SetInlineDynamicSource(*dp1.Playlist)             {}
+func (t *trackingScheduler) InlineDynamicSource() *dp1.Playlist               { return nil }
+
 func (t *trackingScheduler) WithPlayerPush(fn func()) {
 	t.pushCalls++
 	t.inner.WithPlayerPush(fn)
 }
-func (t *trackingScheduler) AuthorityToken() uint64              { return t.inner.AuthorityToken() }
-func (t *trackingScheduler) Commit()                             { t.inner.Commit() }
-func (t *trackingScheduler) Snapshot() playlistschedule.Snapshot { return t.inner.Snapshot() }
-func (t *trackingScheduler) Restore(s playlistschedule.Snapshot) { t.inner.Restore(s) }
-func (t *trackingScheduler) HasCache() bool                      { return t.inner.HasCache() }
-func (t *trackingScheduler) RestoredPending() bool               { return t.inner.RestoredPending() }
+func (t *trackingScheduler) AuthorityToken() uint64                    { return t.inner.AuthorityToken() }
+func (t *trackingScheduler) Commit()                                   { t.inner.Commit() }
+func (t *trackingScheduler) Snapshot() playlistschedule.Snapshot       { return t.inner.Snapshot() }
+func (t *trackingScheduler) Restore(s playlistschedule.Snapshot)       { t.inner.Restore(s) }
+func (t *trackingScheduler) HasCache() bool                            { return t.inner.HasCache() }
+func (t *trackingScheduler) SetProjector(p playlistschedule.Projector) { t.inner.SetProjector(p) }
+func (t *trackingScheduler) RestoredPending() bool                     { return t.inner.RestoredPending() }
 func (t *trackingScheduler) SourceMatches(s playlistschedule.Source) bool {
 	return t.inner.SourceMatches(s)
 }

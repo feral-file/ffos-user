@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -29,6 +30,15 @@ const (
 // Call Start once at boot; it returns immediately.
 type Recoverer interface {
 	Start(ctx context.Context)
+	// Done is closed once the recovery goroutine started by Start has fully
+	// exited, or immediately when Start found nothing to recover. It is the
+	// only way to know the goroutine is gone: the handled-count file and the
+	// SuppressPlayerNotifications(false) call both happen BEFORE the final
+	// log line, so observing either of them does not mean the goroutine has
+	// finished writing to its logger. Tests must wait on Done before
+	// returning, otherwise a test-scoped logger (zaptest) panics with
+	// "Log in goroutine after Test... has completed".
+	Done() <-chan struct{}
 }
 
 type recoverer struct {
@@ -37,6 +47,17 @@ type recoverer struct {
 	retryInterval time.Duration
 	maxRetries    int
 	logger        *zap.Logger
+
+	// done is closed by doneOnce when the recovery goroutine exits (or when
+	// Start decides no goroutine is needed). doneOnce only makes the close
+	// idempotent; it does NOT make a second Start safe. Start re-reads the
+	// counter files, and the handled count is written only at the end of a
+	// run, so two Start calls before that write both launch a goroutine and
+	// done closes when the FIRST of them exits while the second is still
+	// logging. That is exactly the "Log in goroutine after Test completed"
+	// panic this channel exists to prevent, so Start must be called once.
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 func New(
@@ -61,7 +82,19 @@ func NewWithOptions(
 		retryInterval: retryInterval,
 		maxRetries:    maxRetries,
 		logger:        logger,
+		done:          make(chan struct{}),
 	}
+}
+
+func (r *recoverer) Done() <-chan struct{} {
+	return r.done
+}
+
+// signalDone closes the done channel. Calling it twice is a no-op rather
+// than a panic, but see the doneOnce comment: that is not permission to
+// call Start twice.
+func (r *recoverer) signalDone() {
+	r.doneOnce.Do(func() { close(r.done) })
 }
 
 func (r *recoverer) Start(ctx context.Context) {
@@ -69,6 +102,7 @@ func (r *recoverer) Start(ctx context.Context) {
 	handledCount := readCountFile(constants.CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE, r.logger)
 
 	if oomKillCount <= handledCount {
+		r.signalDone()
 		return
 	}
 
@@ -80,6 +114,10 @@ func (r *recoverer) Start(ctx context.Context) {
 }
 
 func (r *recoverer) run(ctx context.Context, oomKillCount int) {
+	// Deferred so the channel closes after the last log line in every exit
+	// path (success, max retries, context cancel), never before it.
+	defer r.signalDone()
+
 	r.statusPoller.SuppressPlayerNotifications(true)
 
 	r.logger.Warn("OOM recovery started, player notifications suppressed",

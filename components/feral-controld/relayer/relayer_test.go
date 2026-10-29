@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // timeoutError implements net.Error interface for testing
@@ -70,6 +71,12 @@ func setup(t *testing.T) *testSetup {
 	mockConn.EXPECT().
 		SetWriteDeadline(gomock.Any()).
 		Return(nil).
+		AnyTimes()
+
+	// Every dialed connection is read-limited before use (inbound frame
+	// bound, feral-file/ffos-user#307); pin the exact value here once.
+	mockConn.EXPECT().
+		SetReadLimit(int64(relayer.MAX_MESSAGE_BYTES)).
 		AnyTimes()
 
 	client := relayer.New("ws://localhost:8080", "test-api-key", mockDialer, mockRandomizer, mockClock, mockOS, mockJSON, logger)
@@ -1367,6 +1374,9 @@ func TestClient_ReceiveMessage_Error(t *testing.T) {
 	mockConn2.EXPECT().
 		SetPongHandler(gomock.Any()).
 		Times(1)
+	mockConn2.EXPECT().
+		SetReadLimit(int64(relayer.MAX_MESSAGE_BYTES)).
+		Times(1)
 
 	// Expect second conn to write ping
 	mockConn2.EXPECT().
@@ -1949,9 +1959,18 @@ func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
 
 	// Expect os.Exit(1) to be called when reconnection fails with PermanentError
 	exitCalled := make(chan struct{})
+	flushCalled := make(chan struct{})
+	flushHook, ok := ts.client.(interface{ SetBeforeExit(func()) })
+	require.True(t, ok)
+	flushHook.SetBeforeExit(func() { close(flushCalled) })
 	ts.mockOS.EXPECT().
 		Exit(1).
 		DoAndReturn(func(code int) {
+			select {
+			case <-flushCalled:
+			default:
+				t.Error("expected stream flush before os.Exit")
+			}
 			close(exitCalled)
 		}).
 		Times(1)
@@ -1974,5 +1993,118 @@ func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
 		// Exit was called as expected
 	case <-time.After(5 * time.Second):
 		t.Fatal("Expected os.Exit(1) to be called within timeout")
+	}
+}
+
+func TestV2ReadFailureNeverExitsDaemon(t *testing.T) {
+	ts := setup(t)
+	defer ts.ctrl.Finish()
+
+	var cancel context.CancelFunc
+	ts.ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	ts.client = relayer.NewV2("wss://relay.test", "FF1-SKYZ2E3A", ts.mockDialer, ts.mockRandomizer, ts.mockClock, ts.mockOS, ts.mockJSON, zap.NewNop())
+	ts.mockConn.EXPECT().SetReadLimit(int64(65536)).AnyTimes()
+	// Set up mock ticker
+	setupMockTicker(ts)
+
+	// Expect time.Now() to return default time
+	ts.mockClock.EXPECT().
+		Now().
+		Return(time.Time{}).
+		AnyTimes()
+
+	// Setup ordered expectations for initial connection
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), gomock.Any()).
+		Return(ts.mockConn, &http.Response{StatusCode: http.StatusOK}, nil).
+		Times(1)
+
+	// Expect conn to set pong handler
+	ts.mockConn.EXPECT().
+		SetPongHandler(gomock.Any()).
+		Times(1)
+
+	// Expect conn to write ping
+	ts.mockConn.EXPECT().
+		WriteJSON(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	// Expect conn to set read deadline
+	ts.mockConn.EXPECT().
+		SetReadDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	// Expect conn to read message with error (this triggers reconnection attempt)
+	readErrorOccurred := make(chan struct{})
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		DoAndReturn(func() (int, []byte, error) {
+			close(readErrorOccurred)
+			return 0, []byte{}, errors.New("test read error")
+		}).
+		Times(1)
+
+	// Expect cleanup when first connection closes due to error
+	ts.mockConn.EXPECT().
+		WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), gomock.Any()).
+		Return(nil).
+		Times(1)
+
+	ts.mockConn.EXPECT().
+		Close().
+		Return(nil).
+		Times(1)
+
+	rejected := make(chan struct{})
+	ts.mockDialer.EXPECT().DialContext(ts.ctx, gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, string, http.Header) (wrapper.WebSocketConn, *http.Response, error) {
+		close(rejected)
+		return nil, &http.Response{StatusCode: http.StatusNotFound}, websocket.ErrBadHandshake
+	}).Times(1)
+	// The rejected redial backs off (§10) instead of dialing again at once.
+	ts.mockRandomizer.EXPECT().Duration(gomock.Any(), gomock.Any()).Return(time.Hour).AnyTimes()
+	// No os.Exit expectation: any call is a regression.
+	// Test - Connect (this automatically starts background message reading)
+	err := ts.client.Connect(ts.ctx)
+	assert.NoError(t, err, "expected no error during initial connection, got %v", err)
+
+	// Wait for ReadMessage error to occur
+	select {
+	case <-readErrorOccurred:
+		// ReadMessage error occurred, continue
+	case <-time.After(5 * time.Second):
+		t.Fatal("Expected ReadMessage error to occur within timeout")
+	}
+
+	select {
+	case <-rejected:
+	case <-time.After(time.Second):
+		t.Fatal("v2 did not attempt reconnect")
+	}
+	cancel()
+	ts.client.Close()
+}
+
+// The v2 dial never reads the claim: no topic in its URL or its logs, at any
+// level (review low: the raw topic was built into connectURL and debug-logged).
+func TestV2DialCarriesNoTopic(t *testing.T) {
+	ts := setup(t)
+	defer ts.ctrl.Finish()
+	core, logs := observer.New(zap.DebugLevel)
+	client := relayer.NewV2("wss://relay.test", "FF1-SKYZ2E3A", ts.mockDialer, ts.mockRandomizer, ts.mockClock, ts.mockOS, ts.mockJSON, zap.New(core))
+	ts.mockDialer.EXPECT().DialContext(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, u string, _ http.Header) (wrapper.WebSocketConn, *http.Response, error) {
+			assert.NotContains(t, u, "topicID")
+			return nil, &http.Response{StatusCode: http.StatusTooManyRequests}, websocket.ErrBadHandshake
+		})
+	require.Error(t, client.Connect(context.Background()))
+	for _, e := range logs.All() {
+		for _, f := range e.Context {
+			if f.Key == "topic_fp" || f.Key == "connectURL" {
+				t.Fatalf("v2 log %q carries %s", e.Message, f.Key)
+			}
+		}
 	}
 }

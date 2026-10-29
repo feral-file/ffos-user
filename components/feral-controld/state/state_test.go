@@ -1209,6 +1209,42 @@ func TestStateManager_SetConnectedDevice_SaveErrorPropagates(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to create state directory")
 }
 
+func TestStateManager_TopicGenerationMovesOnlyOnRealTopicChanges(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	anyWriteExpectations(ts)
+
+	sm := state.NewStateManagerWithDeps(ts.mockOS, ts.mockJSON)
+	start := sm.ClaimSnapshot().TopicGeneration
+
+	if _, err := sm.SetRelayerTopicID("topic-1"); err != nil {
+		t.Fatalf("SetRelayerTopicID: %v", err)
+	}
+	first := sm.ClaimSnapshot().TopicGeneration
+	assert.Greater(t, first, start, "a new topic moves the generation")
+
+	if _, err := sm.SetRelayerTopicID("topic-1"); err != nil {
+		t.Fatalf("SetRelayerTopicID: %v", err)
+	}
+	assert.Equal(t, first, sm.ClaimSnapshot().TopicGeneration,
+		"re-writing the same topic is not a change")
+
+	changed, err := sm.ClearClaim()
+	assert.True(t, changed)
+	assert.NoError(t, err)
+	cleared := sm.ClaimSnapshot().TopicGeneration
+	assert.Greater(t, cleared, first, "clearing the topic moves the generation")
+
+	// A claim onto the SAME topic id after a clear is still a different
+	// pairing: the id alone cannot tell the two apart, the generation can.
+	if _, err := sm.SetRelayerTopicID("topic-1"); err != nil {
+		t.Fatalf("SetRelayerTopicID: %v", err)
+	}
+	reclaimed := sm.ClaimSnapshot()
+	assert.Equal(t, "topic-1", reclaimed.TopicID)
+	assert.Greater(t, reclaimed.TopicGeneration, cleared)
+}
+
 func TestStateManager_ClearClaim_NoopWhenNothingPersisted(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

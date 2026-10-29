@@ -470,7 +470,7 @@ func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
 		AnyTimes()
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
-		Return(nil).
+		Return(1, nil).
 		MinTimes(1)
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
@@ -630,7 +630,7 @@ func TestRefresher_ProcessPlayingPlaylist_HoldsPlaybackLockAcrossSyncAndSend(t *
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
 		Do(func(_ context.Context, _ []string) { observeLockHeld("SyncPlaylist") }).
-		Return(nil).
+		Return(1, nil).
 		MinTimes(1)
 	// MarkPlaybackChanged must also run under the lock (it announces the
 	// scope change the resync must defer to — see
@@ -711,9 +711,9 @@ func TestRefresher_ForceRefresh_TriggersImmediateSyncBeforeNextTick(t *testing.T
 	syncCount := make(chan struct{}, 8)
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
-		DoAndReturn(func(context.Context, []string) error {
+		DoAndReturn(func(context.Context, []string) (int, error) {
 			syncCount <- struct{}{}
-			return nil
+			return 1, nil
 		}).
 		MinTimes(1)
 
@@ -805,7 +805,7 @@ func TestRefresher_ProcessPlayingPlaylist_FallsBackToCachedPlaylistWhenOffline(t
 		AnyTimes()
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
-		Return(nil).
+		Return(1, nil).
 		MinTimes(1)
 	// The device is offline (live resolution just failed), but the
 	// cached copy must still be pushed to the player, exactly as a live
@@ -925,7 +925,7 @@ func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefr
 		AnyTimes()
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
-		Return(errors.New("dial failed")).
+		Return(0, errors.New("dial failed")).
 		MinTimes(1)
 	// The authoritative generation bump must still fire even when the
 	// SyncPlaylist above errors (see KioskReplay.PlaybackGeneration).
@@ -1036,17 +1036,17 @@ func TestRefresher_ProcessPlayingPlaylist_CDPSendFailureRevertsKioskReplayScope(
 
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"https://example.com/item-new"}).
-		Return(nil).
+		Return(1, nil).
 		MinTimes(1)
 	reverted := make(chan struct{}, 8)
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"https://example.com/item-old"}).
-		DoAndReturn(func(context.Context, []string) error {
+		DoAndReturn(func(context.Context, []string) (int, error) {
 			select {
 			case reverted <- struct{}{}:
 			default:
 			}
-			return nil
+			return 1, nil
 		}).
 		MinTimes(1)
 
@@ -1121,7 +1121,7 @@ func TestRefresher_ProcessPlayingPlaylist_PlayerRejectionRevertsKioskReplayScope
 			Return(newPlaylist, nil),
 		mockKioskReplay.EXPECT().
 			SyncPlaylist(ctx, []string{"https://example.com/item-new"}).
-			Return(nil),
+			Return(1, nil),
 		mockCDP.EXPECT().
 			Send(cdp.METHOD_EVALUATE, gomock.Any()).
 			Return(playerNotOkResponse(), nil),
@@ -1136,7 +1136,7 @@ func TestRefresher_ProcessPlayingPlaylist_PlayerRejectionRevertsKioskReplayScope
 			Return(oldPlaylist, nil),
 		mockKioskReplay.EXPECT().
 			SyncPlaylist(ctx, []string{"https://example.com/item-old"}).
-			Return(nil),
+			Return(1, nil),
 	)
 
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
@@ -1292,7 +1292,7 @@ func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskRep
 		MinTimes(1)
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
-		Return(nil).
+		Return(1, nil).
 		MinTimes(1)
 	// Neither must ever be called: a static playlist has nothing dynamic
 	// to re-resolve, and it must not be re-sent to CDP on every refresh
@@ -1673,6 +1673,8 @@ func TestRefresher_Background_DoneChannel(t *testing.T) {
 	// Create a mock ticker with a controllable channel
 	mockTicker := mocks.NewMockTicker(ts.ctrl)
 	tickerChan := make(chan time.Time, 1)
+	started := make(chan struct{})
+	stopped := make(chan struct{}, 2)
 
 	// Mock the ticker's C() method to return our controllable channel
 	mockTicker.EXPECT().
@@ -1685,12 +1687,16 @@ func TestRefresher_Background_DoneChannel(t *testing.T) {
 	// 2. Once explicitly when done channel is triggered
 	mockTicker.EXPECT().
 		Stop().
+		Do(func() { stopped <- struct{}{} }).
 		Times(2)
 
 	// Expect clock to create ticker
 	ts.mockClock.EXPECT().
 		NewTicker(gomock.Any()).
-		Return(mockTicker).
+		DoAndReturn(func(time.Duration) wrapper.Ticker {
+			close(started)
+			return mockTicker
+		}).
 		Times(1)
 
 	// Create a playlist URL for the test
@@ -1717,14 +1723,24 @@ func TestRefresher_Background_DoneChannel(t *testing.T) {
 	// Start the refresher
 	ts.refresher.Start()
 
-	// Give it a moment to process the initial playlist and create the ticker
-	time.Sleep(100 * time.Millisecond)
+	// Wait for startup before stopping; CI scheduling cannot guarantee a sleep is long enough.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresher did not create its ticker")
+	}
 
 	// Stop the refresher (this sends the done signal)
 	ts.refresher.Stop()
 
-	// Give it a moment to process the done signal
-	time.Sleep(50 * time.Millisecond)
+	// Join both Stop calls before gomock teardown checks its expectations.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("ticker.Stop() called %d times, want 2", i)
+		}
+	}
 }
 
 // TestRefresher_HeadlessBoot_CDPNotInitialized pins the headless expected-state
@@ -1867,6 +1883,7 @@ type fakePlaylistScheduler struct {
 	restores        int
 	commits         int
 	source          playlistschedule.Source
+	inlineDynamic   *dp1.Playlist
 	restored        chan struct{}
 }
 
@@ -1910,6 +1927,21 @@ func (f *fakePlaylistScheduler) ClearThenWithPlayerPush(fn func() bool) {
 	f.mu.Unlock()
 	fn()
 }
+
+// SetPushObserver satisfies the interface; the fake never pushes on its own,
+// so the observer is never called.
+func (f *fakePlaylistScheduler) SetPushObserver(func(playlistschedule.PushPhase)) {}
+func (f *fakePlaylistScheduler) SetInlineDynamicSource(p *dp1.Playlist) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inlineDynamic = p
+}
+func (f *fakePlaylistScheduler) InlineDynamicSource() *dp1.Playlist {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inlineDynamic
+}
+
 func (f *fakePlaylistScheduler) WithPlayerPush(fn func()) {
 	f.mu.Lock()
 	f.pushCalls++
@@ -1947,6 +1979,8 @@ func (f *fakePlaylistScheduler) Restore(playlistschedule.Snapshot) {
 		}
 	}
 }
+func (f *fakePlaylistScheduler) SetProjector(playlistschedule.Projector) {}
+
 func (f *fakePlaylistScheduler) HasCache() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -2895,6 +2929,7 @@ func TestRefresher_PrepareSendFailure_RestoresSchedulerCache(t *testing.T) {
 }
 
 func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
+	retryStarted := make(chan struct{})
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -2912,6 +2947,11 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 	// the 5m ticker as if the pass succeeded.
 	mockClock.EXPECT().
 		SleepContext(gomock.Any(), refresher.PLAYER_STATUS_POLLING_INTERVAL).
+		DoAndReturn(func(ctx context.Context, _ time.Duration) error {
+			close(retryStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		}).
 		MinTimes(1)
 	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
 
@@ -2938,9 +2978,55 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("player rejection did not restore the scheduler cache")
 	}
+	// Restore fires inside the refresh pass, before the retry sleep. Wait for
+	// both observations so teardown cannot verify the mock before its call.
+	select {
+	case <-retryStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("player rejection did not enter the startup retry wait")
+	}
 	r.Stop()
 
 	assert.GreaterOrEqual(t, fakeSched.restoresCount(), 1, "player rejection must restore scheduler snapshot")
+}
+
+func TestRefresher_DefaultPlaylistReconcilesCacheWithoutRecasting(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cdpClient := mocks.NewMockCDP(ctrl)
+	poller := mocks.NewMockStatusPoller(ctrl)
+	dp := mocks.NewMockDP1(ctrl)
+	clock := mocks.NewMockClock(ctrl)
+	replay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: clock})
+	cdpClient.EXPECT().Initialized().Return(true).AnyTimes()
+	cdpClient.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
+	pl := createMockPlaylist()
+	pl.DynamicQueries = nil
+	poller.EXPECT().FetchPlayerStatus(ctx).Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST), nil, pl), nil).AnyTimes()
+	// resyncKioskReplayScopeToCurrentDisplay's resolveDisplayedPlaylist
+	// expands series items defensively on its static branch; pl has none.
+	dp.EXPECT().
+		ExpandSeriesItems(ctx, *pl, 0).
+		Return(*pl).
+		AnyTimes()
+	replay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	replay.EXPECT().LockPlayback().AnyTimes()
+	replay.EXPECT().UnlockPlayback().AnyTimes()
+	synced := make(chan struct{})
+	replay.EXPECT().SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).DoAndReturn(func(context.Context, []string) (int, error) {
+		close(synced)
+		return 1, nil
+	})
+	r := refresher.New(ctx, dp, poller, cdpClient, replay, nil, wrapper.NewJSON(), nil, clock, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r.Start()
+	defer r.Stop()
+	select {
+	case <-synced:
+	case <-time.After(time.Second):
+		t.Fatal("default playback did not reconcile replay scope")
+	}
 }
 
 func TestRefresher_MalformedPlayerResponse_RestoresSchedulerCache(t *testing.T) {

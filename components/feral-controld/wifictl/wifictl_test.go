@@ -499,36 +499,62 @@ func TestJoinScanRetriesToleratesErrors(t *testing.T) {
 	require.NoError(t, c.Join(context.Background(), "Home", "secret12", false))
 }
 
-// --- Scan cache TTL ----------------------------------------------------------
+// --- Scan cache --------------------------------------------------------------
 
-func TestCachedScanServesWithinTTLThenRefreshes(t *testing.T) {
-	var scans int
+// TestCachedScanNeverScans pins #261: the portal reads CachedScan only while
+// the setup AP holds the radio, where every scan fails. However old the cache
+// is — and even when it was never filled — a read must serve what is stored
+// without running nmcli. The old read-side TTL fell through to a live scan
+// here, which hung the picker ~15s and then rendered it blank.
+func TestCachedScanNeverScans(t *testing.T) {
+	var calls int
 	c, _, clock := newController(func(argv []string) ([]byte, error) {
-		joined := strings.Join(argv, " ")
-		if strings.Contains(joined, "device wifi list") {
-			scans++
+		calls++
+		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
 			return []byte("Alpha\nBravo\n"), nil
 		}
 		return nil, nil
 	})
 
-	// First call populates the cache with one live scan.
-	got, err := c.CachedScan(context.Background())
+	cached, err := c.CachedScan(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, []string{"Alpha", "Bravo"}, got)
-	assert.Equal(t, 1, scans)
+	assert.Empty(t, cached, "an unfilled cache reads empty")
+	assert.Zero(t, calls, "an unfilled cache must not trigger a scan")
 
-	// Within TTL: served from cache, no new scan.
-	clock.advance(scanCacheTTL - time.Minute)
-	_, err = c.CachedScan(context.Background())
+	_, err = c.RefreshScanCache(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 1, scans)
+	calls = 0
 
-	// Past TTL: a fresh scan runs.
-	clock.advance(2 * time.Minute)
-	_, err = c.CachedScan(context.Background())
+	clock.advance(scanRetainWindow + time.Hour)
+	cached, err = c.CachedScan(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 2, scans)
+	assert.Equal(t, []string{"Alpha", "Bravo"}, cached)
+	assert.Zero(t, calls, "an aged cache must not trigger a scan")
+}
+
+func TestRefreshScanCachePreservesCandidatesBeyondDisplayCap(t *testing.T) {
+	var ssids []string
+	// One past the portal's nine-slot display cap (portal.maxDisplayedSSIDs —
+	// the only live cap; wifictl itself no longer caps anything).
+	for i := 0; i < 10; i++ {
+		ssids = append(ssids, fmt.Sprintf("Net%02d", i))
+	}
+	scanOutput := []byte(strings.Join(ssids, "\n") + "\n")
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
+			return scanOutput, nil
+		}
+		return nil, nil
+	})
+
+	live, err := c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, ssids, live)
+
+	cached, err := c.CachedScan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, ssids, cached,
+		"the portal cache must remain uncapped until the setup SSID is removed")
 }
 
 // --- scan readiness gate -----------------------------------------------------
@@ -686,10 +712,10 @@ func TestScanReadyPinsIface(t *testing.T) {
 }
 
 // TestRefreshScanCacheKeepsCacheOnEmptyScan is the regression for the portal's
-// "search for networks again" button blanking its own picker: the button
+// "Network not listed?" refresh blanking its own picker: the button
 // bounces the AP, and the refresh that follows catches NM's BSS list still
 // empty from the AP-mode flip. That empty result must not evict the entries the
-// picker is showing, and must not extend their expiry either.
+// picker is showing, and must not extend their retain window either.
 func TestRefreshScanCacheKeepsCacheOnEmptyScan(t *testing.T) {
 	var out []byte
 	c, _, clock := newController(func(argv []string) ([]byte, error) {
@@ -716,52 +742,18 @@ func TestRefreshScanCacheKeepsCacheOnEmptyScan(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"Alpha", "Bravo"}, cached)
 
-	// The retained entries keep their ORIGINAL expiry: the empty scan bought no
-	// extra life, so a stale list still ages out on schedule.
-	clock.advance(scanCacheTTL - time.Minute)
-	out = []byte("Charlie\n")
+	// The retained entries keep their ORIGINAL retain window: the empty scan
+	// bought no extra life, so the next empty scan past it clears them.
+	clock.advance(scanRetainWindow)
+	_, err = c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
 	cached, err = c.CachedScan(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, []string{"Charlie"}, cached)
-}
-
-// TestRefreshScanCacheEmptyWithNoCacheExpiresFast: with nothing worth keeping,
-// the empty result is cached only briefly — long enough that portal page loads
-// do not each fire a live scan under the AP, short enough to retry soon.
-func TestRefreshScanCacheEmptyWithNoCacheExpiresFast(t *testing.T) {
-	var scans int
-	var out []byte
-	c, _, clock := newController(func(argv []string) ([]byte, error) {
-		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
-			scans++
-			return out, nil
-		}
-		return nil, nil
-	})
-
-	got, err := c.RefreshScanCache(context.Background())
-	require.NoError(t, err)
-	require.Empty(t, got)
-	require.Equal(t, 1, scans)
-
-	// Within the short TTL the empty answer is served from cache.
-	clock.advance(emptyScanCacheTTL / 2)
-	cached, err := c.CachedScan(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, cached)
-	assert.Equal(t, 1, scans, "no live scan while the AP holds the radio")
-
-	// Past it, the next read scans again — and picks up the recovered networks.
-	clock.advance(emptyScanCacheTTL)
-	out = []byte("Alpha\n")
-	cached, err = c.CachedScan(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, []string{"Alpha"}, cached)
-	assert.Equal(t, 2, scans)
 }
 
-// TestRefreshScanCacheEmptyDoesNotReviveExpiredCache: an expired list is not
-// "usable" — an empty scan past its TTL must not resurrect it.
+// TestRefreshScanCacheEmptyDoesNotReviveExpiredCache: a list older than
+// scanRetainWindow is not kept — an empty scan past the window clears it.
 func TestRefreshScanCacheEmptyDoesNotReviveExpiredCache(t *testing.T) {
 	var out []byte
 	c, _, clock := newController(func(argv []string) ([]byte, error) {
@@ -775,7 +767,7 @@ func TestRefreshScanCacheEmptyDoesNotReviveExpiredCache(t *testing.T) {
 	_, err := c.RefreshScanCache(context.Background())
 	require.NoError(t, err)
 
-	clock.advance(scanCacheTTL + time.Minute)
+	clock.advance(scanRetainWindow + time.Minute)
 	out = nil
 	_, err = c.RefreshScanCache(context.Background())
 	require.NoError(t, err)
@@ -815,13 +807,15 @@ func TestScanForcesRescan(t *testing.T) {
 	c, exec, _ := newController(func(argv []string) ([]byte, error) {
 		return []byte("Alpha\n"), nil
 	})
-	_, err := c.Scan(context.Background(), true)
+	_, err := c.scan(context.Background(), true)
 	require.NoError(t, err)
 	assert.Contains(t, strings.Join(exec.recorded()[0], " "), "--rescan yes")
 }
 
-func TestParseSSIDsDedupOrderAndCap(t *testing.T) {
-	// Duplicates collapse, order is preserved, and the list caps at maxSSIDs.
+func TestParseSSIDsDedupAndOrder(t *testing.T) {
+	// Duplicates collapse, order is preserved, and nothing is truncated:
+	// display capping is the portal's concern (portal.maxDisplayedSSIDs), and
+	// a cap at this layer would fabricate absence for the evidence callers.
 	var b strings.Builder
 	b.WriteString("First\nFirst\nSecond\n\n")
 	for i := 0; i < 20; i++ {
@@ -830,7 +824,7 @@ func TestParseSSIDsDedupOrderAndCap(t *testing.T) {
 		b.WriteString("\n")
 	}
 	got := parseSSIDs(b.String())
-	assert.Len(t, got, maxSSIDs)
+	assert.Len(t, got, 22)
 	assert.Equal(t, "First", got[0])
 	assert.Equal(t, "Second", got[1])
 }
@@ -1039,12 +1033,14 @@ func TestScanAllSSIDsPinsConfiguredInterface(t *testing.T) {
 	}
 }
 
-// TestScanAllSSIDsIsUncapped: Scan truncates at the portal display cap
-// (maxSSIDs); ScanAllSSIDs must not — a saved network ranked below the cap
-// would otherwise read as absent and fire a false relocation.
+// TestScanAllSSIDsIsUncapped: ScanAllSSIDs must return the FULL list — its
+// callers treat scan presence as relocation evidence, and a saved network
+// truncated out by any cap (the portal's display cap is nine) would read as
+// absent and fire a false relocation.
 func TestScanAllSSIDsIsUncapped(t *testing.T) {
+	const total = 12 // comfortably past the portal's nine-slot display cap
 	var lines []string
-	for i := 0; i < maxSSIDs+3; i++ {
+	for i := 0; i < total; i++ {
 		lines = append(lines, fmt.Sprintf("Net%02d", i))
 	}
 	out := []byte(strings.Join(lines, "\n") + "\n")
@@ -1052,20 +1048,12 @@ func TestScanAllSSIDsIsUncapped(t *testing.T) {
 		return out, nil
 	})
 
-	capped, err := c.Scan(context.Background(), false)
-	if err != nil {
-		t.Fatalf("Scan: %v", err)
-	}
-	if len(capped) != maxSSIDs {
-		t.Fatalf("Scan returned %d SSIDs, want the %d display cap", len(capped), maxSSIDs)
-	}
-
 	all, err := c.ScanAllSSIDs(context.Background())
 	if err != nil {
 		t.Fatalf("ScanAllSSIDs: %v", err)
 	}
-	if len(all) != maxSSIDs+3 {
-		t.Fatalf("ScanAllSSIDs returned %d SSIDs, want %d (uncapped)", len(all), maxSSIDs+3)
+	if len(all) != total {
+		t.Fatalf("ScanAllSSIDs returned %d SSIDs, want %d (uncapped)", len(all), total)
 	}
 	// And it must force a fresh scan: stale results are not relocation evidence.
 	last := exec.recorded()[len(exec.recorded())-1]

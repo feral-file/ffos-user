@@ -66,10 +66,18 @@ for relayer topic assignment:
   until the current artwork duration ends. URL / dynamic playlist refresh still
   uses `refresh: true`, except the first scheduled reconstruction after a
   controld restart force-casts because scheduler ownership may need to be
-  restored from persisted state. Playlists without item-level `displayAt` are
-  otherwise forwarded unchanged.
-- `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
+  restored from persisted state. Every cast is then filtered against the
+  device's content policy for the cast's `contentContext` before it reaches
+  CDP, so a playlist without item-level `displayAt` is forwarded unchanged only
+  when the policy admits all of its items (see "Content policy effect on
+  playlists" below).
+- `startMintPairingSession`, `joinMintPairingChannel`,
+  `closeMintPairingSession`, and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
+- `getRecentlyPlayed`, `playRecentlyPlayed`, `getContentPolicy`, and
+  `setContentPolicy` are likewise handled by `feral-controld` as commandrouter
+  pre-CDP special cases (see "Recently Played and Content Policy Inbound
+  Messages" below).
 - `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`,
   `clearPlaylistCache`, and `getOfflineCacheStatus` are likewise handled by
   `feral-controld` as commandrouter pre-CDP special cases, owned by the
@@ -85,7 +93,7 @@ send a standardized RPC error response over the relayer for most failures, so
 new inbound message families that require controller-visible errors must define
 their own response shape.
 
-The one standardized exception is **command-storm rejection**. When the device
+There are three standardized exceptions. The first is **command-storm rejection**. When the device
 sheds a command to protect itself from flooding (rate limit, concurrency
 budget, or relayer dispatch saturation — see feral-file/ffos-user#208), it
 sends an RPC response whose `message` body is:
@@ -109,6 +117,118 @@ The LAN-hub ingress reports the same condition as HTTP `429`. Controllers
 should treat this as "device busy", back off, and retry; the command was not
 applied. Control-plane messages (e.g. the `system`/topic-state message above)
 are never shed by command pressure.
+
+The second is the **dead-source cast rejection** on `displayPlaylist`
+(feral-file/ffos-user#304): when every resolved item source is definitively
+unreachable (an identity-independent HTTP 4xx, or a malformed `data:` URI),
+the cast is rejected at accept time and the controller receives a reliable
+RPC response whose `message` body is:
+
+```json
+{
+  "ok": false,
+  "error": "sourceUnreachable",
+  "command": "displayPlaylist",
+  "message": "sourceUnreachable: no playlist item source is loadable (item 0: HTTP 400)"
+}
+```
+
+`ok: false` is contractual (existing controllers decide success by that
+field). The detail names items by index and HTTP status only, capped at 10
+entries plus an omitted count — never source URLs. The LAN hub reports the
+same condition as HTTP `422`, body = the same message text. The command was
+not applied, and this is a caller-input error, not "device busy": retrying
+without fixing the sources fails again. See the `displayPlaylist` section's
+source preflight notes for the conditions that are deliberately never
+rejected (scheduled playlists, cached captures, and every non-definitive
+probe outcome).
+
+## Control Protocol Envelope (`ff1Envelope`, feral-file#3551)
+
+Active when `controld.json` sets `"control":{"enabled":true}`, and always on
+a device that already has control state (`.state/control/` or the
+factory-reset tombstone), whatever the config says: the config is replaced by
+every full-image OTA and must never reopen an owned device. With the
+protocol off, `ff1Envelope` is an unknown command like any other (forwarded
+to the player, which rejects it) and nothing below applies. The normative
+contract is `docs/ff1-control-v1.md`; this section is the message-level
+summary.
+
+### Request
+
+Same JSON on both routes (LAN `POST /api/cast`, relayer topic cast):
+
+```json
+{"command":"ff1Envelope","request":{"v":1,"jwe":"<compact JWE>"}}
+```
+
+`request` has exactly the members `v` (=1) and `jwe`. The JWE is the §3
+request: an ECDH-ES/A256GCM JWE to the device's `devEnc`, wrapping an ES256
+JWS by the controller over claims carrying `op` (`cmd`, `enroll`,
+`requestAccess`), `cmd`, and `req` — the inner command name and its usual
+`request` object, unchanged. The admitted command runs through the same
+router, storm gate and handlers as a plaintext one.
+
+### Reply
+
+- Authenticated outcomes (success, `command_failed`, and every encrypted
+  error: `invalid_request`, `expired`, `replay`, `permission_denied`,
+  `access_revoked`, `invitation_invalid`, `pending`, `not_approved`,
+  `rate_limited`, `locked`, `internal_error`): LAN `200` /
+  relayer RPC `message`, body `{"v":1,"jwe":"<compact>"}`, readable only with
+  the request's reply key and verified against the pinned device key.
+  A handler's own reply (including bodies with `ok:false` that the handler
+  returns rather than raises) is `ok:true` with that body as `res`; a handler
+  error is `command_failed` with `res` =
+  `{"ok":false,"error":"rate_limited|sourceUnreachable|contentBlocked|playlistInvalid|failed","command","message"}`.
+- Public errors, when no reply key can be trusted: body
+  `{"error":{"code":"bad_envelope|unknown_controller|bad_signature|locked|busy"}}`,
+  LAN status 401 (`busy`: 503, retry), relayer RPC `message`. The plaintext
+  refusals `enrollment_required`, `envelope_required`, `screen_protected`
+  (403) and `invalid_message` (400) are listed under the plaintext policy
+  below; the full table is the spec §4.4.
+
+### Owner commands handled by the authority
+
+`approveController {ctl, role, expiresAt?}`, `revokeController {ctl}`,
+`registerController {sig, enc, label, platform, role, expiresAt?}`,
+`releaseOwnership {}` and `listControllers {}` are owner-tier envelope commands answered by the
+authority itself; they never reach the router (see the spec §5.5 and §5.6.4
+for results and `command_failed` reasons). `revokeController` of the
+signer's own `ctl` is also accepted from a controller grant (self-revoke).
+
+### Plaintext policy (state-dependent, spec §7.2)
+
+`/api/v2/status` (and `getDeviceStatus`) carry
+`"control":{"v":1,"state":"legacy|enrolled|enforced|locked","profile":…}`.
+
+| State | LAN plaintext `/api/cast` | Relayer plaintext |
+|---|---|---|
+| `legacy` | allowed (phase-0 topic gate still applies) | allowed |
+| `enrolled` | `403 {"error":{"code":"enrollment_required"}}` | controller-tier commands only |
+| `enforced` | `403 enrollment_required` | only the exact Play `displayPlaylist` shape |
+| `locked` | `401 {"error":{"code":"locked"}}` | controller-tier commands only |
+
+A refused relayer plaintext command gets the RPC `message`
+`{"ok":false,"error":"envelope_required"|"locked","command":"<name>","message":"<text>"}`:
+`ok:false` and a flat string `error`, the shape every released client
+(ff-app, ff1-cli, Play) reports as a failure without crashing. Outside
+`legacy`, `GET /api/screenshot` answers `403 enrollment_required` and status
+serves `topic_id:""`.
+
+Two more refusals apply whenever the protocol is on:
+- A plaintext message whose top level repeats a member name, exactly or in
+  another case (`"request"` and `"Request"`), is refused in every state:
+  LAN `400 {"error":{"code":"invalid_message"}}`, relayer
+  `{"ok":false,"error":"invalid_message",…}`. Accepted plaintext runs with
+  its `request` decoded from the exact bytes the policy judged. Behaviour change
+  when the protocol is wired: a message whose ONLY request member is a
+  case variant (`"Request"`, no `"request"`) used to reach the handler
+  through encoding/json's case-insensitive decode; it now runs with no
+  arguments, because only the exact `request` token is judged and used.
+- In `legacy`, `GET /api/screenshot` answers
+  `403 {"error":{"code":"screen_protected"}}` while the first-owner
+  invitation is live (the claim QR carries it).
 
 ## Shared Success Responses
 
@@ -169,6 +289,13 @@ Current error cases:
 - `primaryAddress` is accepted but not currently used by the executor.
 
 Current relayer error response: none standardized; command failure is logged.
+
+LAN hub (`POST :1111/api/cast`): `connect` needs no `X-FF1-Topic` header,
+claimed or not. It is a feral-file#3551 phase-0 residual: the released ff-app
+sends it LAN-first before every cast without the header, so it stays open; under
+the phase-1 control protocol only an owner claims or rebinds with it
+(`ff1-control-v1.md` §7.1). An open `connect` only
+rewrites the claim record and confers no authority.
 
 ### showPairingQRCode
 
@@ -231,10 +358,18 @@ Current success response example:
     },
     "volume": 75,
     "isMuted": false,
-    "displayURL": "http://127.0.0.1:8080/"
+    "displayURL": "http://127.0.0.1:8080/",
+    "deviceName": "Living Room"
   }
 }
 ```
+
+`deviceName` is the owner-set display label (see `setDeviceName`). Like
+`contract`, it is **always present** on firmware that supports it and carries
+`""` when the unit has never been named — so its PRESENCE, not its value, is
+the capability signal: a controller offers renaming when the key exists and
+withholds the affordance when it does not. An empty value means "unnamed, show
+the serial", never "this frame cannot be renamed".
 
 `contract` is always `"2"` on this firmware (equal to the hub's
 `/api/v2/status` contract — one firmware gate, two transports): it lets the
@@ -283,7 +418,7 @@ ENDED in the 24 h before the reply. `class: "online"` on a closed outage is
 meaningful, not contradictory: connectivity was reported down while the ladder
 measured a healthy network — the connectivity probe's target itself is suspect,
 not the venue (bench-reproduced 2026-08-14 by blocking only monitord's
-8.8.8.8/8.8.4.4 probe targets). Consumers must not treat it as a no-op or a
+8.8.8.8/8.8.4.4 probe targets; the 223.5.5.5/1.12.12.12 fallback added later for feral-file#3539 means a repro now has to block both families). Consumers must not treat it as a no-op or a
 bug. Omitted when the recorder is disabled or
 nothing has closed yet; not persisted across daemon restarts (the on-device
 netlog ring keeps the full history and rides every `uploadLogs` bundle).
@@ -436,6 +571,42 @@ fallback and does not clear controld's displayAt cache; with
 `onlyIfNoPlaylist`, a successful response may mean the player no-opped because
 content was already playing.
 
+**Signature verification (feral-file/ffos-user#307, verify-and-report).**
+Every `displayPlaylist` document is verified with dp1-go's DP-1 §7.1 verifier
+at accept time, before dynamic hydration: the URL path verifies the fetched
+bytes and the inline path verifies the caller's own `dp1_call` token exactly
+as it arrived — both ingress decoders retain the `request` object verbatim
+beside the decoded map — never a re-marshal of the map (whose HTML escaping
+of `&`/`<`/`>` can inflate a valid document past the 4 MiB verifier bound)
+and never the typed struct (which drops fields the signer covered). The offline
+cached-copy fallback carries NO verdict — the stored body is a typed,
+hydrated re-marshal, not the signed bytes — so a cast served from it omits
+the fields below. Bounds, all aimed at untrusted ingress: a document larger than 4 MiB is
+refused before decoding on every path (hub body limit, relayer frame limit,
+URL fetch limit, and the verifier's own cap); at most 16 `signatures[]` entries are verified and a document
+with more is `invalid` (`too many signatures`) without any cryptography
+running; an entry whose `alg`, `role`, or `kid` exceeds 32/32/256 bytes makes the
+document `invalid` before any cryptography runs: that entry is reported as
+`malformed signature` with the oversized field blanked, and its in-bounds
+siblings as `unverified`. The outcome is one of three `signatureStatus` values:
+`valid`
+(every `signatures[]` entry verifies), `invalid` (signatures present, at
+least one fails: tampered content, placeholder or wrong-key signature,
+unsupported `alg`, malformed entry), or `unsigned` (no `signatures[]`; a
+legacy v1.0 `signature` string alone also counts as unsigned and is flagged).
+Verification is informational only: the cast reply, `player_status`, and device
+logs retain diagnostic verdicts, but signatures never block playback or trigger
+alerts. The silent/notify/strict modes and their setter are retired, and existing
+`signature-verification.json` records are ignored. `device_status` omits the
+mode field, which also hides the setting in older apps. Release this daemon
+before or with the phone change that removes the setting, so older Strict
+devices cannot be left with a hidden blocking preference.
+
+Validity is cryptographic only: it proves the document is what the
+key named in each `kid` signed, not that the signer is trusted. The
+`signatureVerification.disabled` config flag skips verification entirely and
+omits every field below (the shape old firmware has).
+
 Playlist URL example:
 
 ```json
@@ -498,8 +669,50 @@ Dynamic DP1 example:
 }
 ```
 
+Raster wallet-walk example (what ff-app casts for an address playlist with
+no hidden works; the address is inlined in the query, the page cursor is the
+only variable, and no API key travels in the document — the device adds its
+own `x-api-key` from config `raster.apiKey`; contract in
+[`api-design.md`](api-design.md), "DP-1 `dynamicQuery` resolution"):
+
+```json
+{
+  "messageID": "msg-display-4",
+  "message": {
+    "command": "displayPlaylist",
+    "request": {
+      "dp1_call": {
+        "id": "7c1b1f7e-5b2a-4d2e-9d7a-1a2b3c4d5e6f",
+        "items": [],
+        "dynamicQuery": {
+          "profile": "graphql-v1",
+          "endpoint": "https://api.raster.art/graphql",
+          "method": "POST",
+          "headers": { "Content-Type": "application/json" },
+          "query": "query WalletWalk($after: String) { address(address: \"0xabc…\") { tokensOwned(first: 250, after: $after) { pageInfo { hasNextPage endCursor } nodes { quantity lastAcquiredAt token { id chainId contractAddress tokenId tokenStandard name media { previewHash previewType contentUrl normalizedContentUrl contentType } artworks { id slug title isSeries platform { name } artists { id name slug addresses } } artists { id name slug addresses } } } } } }",
+          "pagination": {
+            "variable": "after",
+            "cursorPath": "data.address.tokensOwned.pageInfo.endCursor",
+            "hasNextPath": "data.address.tokensOwned.pageInfo.hasNextPage"
+          },
+          "responseMapping": {
+            "itemsPath": "data.address.tokensOwned.nodes",
+            "itemSchema": "raster/tokensOwned/1.0"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+A wallet with hidden works is cast as a static snapshot (items, no
+`dynamicQuery`) and takes the inline path above unchanged.
+
 Current success response: Chromium/player response from
-`window.handleCDPRequest(...)`, commonly:
+`window.handleCDPRequest(...)`, with the signature verdict merged in as
+additive keys beside `ok` (the displayAt-deferred acceptance
+`{"ok": true, "deferred": true}` carries them too):
 
 ```json
 {
@@ -507,11 +720,27 @@ Current success response: Chromium/player response from
   "messageID": "msg-display-1",
   "message": {
     "message": {
-      "ok": true
+      "ok": true,
+      "signatureStatus": "valid",
+      "signers": [
+        {"alg": "ed25519", "kid": "did:key:z6Mk…", "role": "feed", "ok": true}
+      ]
     }
   }
 }
 ```
+
+`signatureStatus` is `valid|invalid|unsigned`. `signers` lists every
+`signatures[]` entry (at most 16) in document order with its own `ok`, plus
+a `reason` on a failed entry (`payload_hash mismatch`, `signature invalid`,
+`unsupported alg` — the algorithm itself is in `alg` — `malformed signature`); it is omitted when
+unsigned or when the document exceeded the entry cap (`too many
+signatures (N > 16)` is then the document-level reason). `legacySignature: true` appears only when a v1.0 `signature`
+string was present. Kids are DIDs (public keys) and safe to relay; no field
+ever carries a URL. All three keys are absent when verification is disabled
+by config, when the cast was served from the offline cached copy, or on
+firmware that predates it — controllers must treat absence as "not
+verified", never as unsigned. `ok` alone still decides success.
 
 If offline caching is enabled and `playlistUrl` was previously used with
 `downloadPlaylist` for this exact URL, a live DP1 fetch/processing
@@ -541,14 +770,34 @@ Current error cases:
   cleared).
 - `dp1_call` is not an object.
 - Inline DP1 cannot be marshaled/unmarshaled.
-- Dynamic query resolution fails.
+- Dynamic query resolution fails. For a `dynamicQuery` whose
+  `responseMapping.itemSchema` names a vendor shape this firmware has no
+  mapper for, the error names the schema (`dynamicQuery: unsupported
+  itemSchema "<schema>"`) and no request is made. For a Raster wallet walk,
+  a missing `pagination` block, a non-Raster or non-https endpoint, a
+  GraphQL `errors` array, a non-2xx page, a page whose `cursorPath`/
+  `hasNextPath` cannot be read, or a walk past 200 pages fails the whole
+  cast with no partial playlist (`raster dynamicQuery: …`); an individual
+  node the wall cannot play is skipped, not fatal.
 - CDP send to Chromium fails.
 - Player response is not `{"message":{"ok":true}}`; this records playback
   failure metrics but the raw player response is still returned if CDP
   succeeded.
+- Every resolved item source definitively unreachable (source preflight,
+  #304), unless the playlist is `displayAt`-scheduled or has a cached
+  offline capture: standardized `sourceUnreachable` rejection — see the
+  standardized error envelopes near the top of this document for the RPC body (`ok:false`, capped index+status detail)
+  and the LAN hub's 422 mapping. Anything short of a definitive dead
+  verdict for every item (network errors, timeouts, 401/403/406/407/408/
+  416/429, 5xx) fails open and the cast proceeds. The preflight stops after
+  its first reachable or inline source; unfinished probes are canceled and
+  remain inconclusive. It is an all-dead admission check, not a full playlist
+  health audit. Completed verdicts still govern a policy change that removes
+  the reachable item; unprobed sources cannot be treated as dead.
 
-Current relayer error response: none standardized for processing failures;
-command failure is logged.
+Current relayer error response: the `sourceUnreachable` rejection above is
+standardized (`ok:false` RPC body, HTTP `422` on the LAN hub); all other processing failures remain
+non-standardized and are logged as command failures.
 
 ### displayDefaultPlaylist
 
@@ -834,6 +1083,57 @@ Current error cases:
 
 Current relayer error response: none standardized; command failure is logged.
 
+### setDeviceName
+
+Purpose: set the owner-visible display label for this Art Computer. The label
+is not an identity — the hostname remains the device serial and the advertised
+mDNS TXT `id`.
+
+Example:
+
+```json
+{
+  "messageID": "msg-device-name-1",
+  "message": {
+    "command": "setDeviceName",
+    "request": {
+      "name": "Living Room"
+    }
+  }
+}
+```
+
+Current success response: `{"ok": true, "deviceName": "Living Room"}`. The
+returned value is the **stored** form after normalization (control characters
+to a space, formatting characters removed, whitespace collapsed, truncated to
+32 runes), which may differ from what was sent. Controllers should adopt the
+returned value rather than echoing their own input.
+
+Clearing: send `{"name": ""}`. The record is removed from the display path.
+**mDNS** falls back to the serial, so the unit still announces something a
+person can read. **Status does not**: `device_status.message.deviceName` is
+always present on firmware carrying this command and becomes the empty string,
+because its presence is the capability gate a controller uses to decide whether
+to offer renaming, and a serial there would be indistinguishable from a name
+somebody chose. A controller reading status for a cleared unit gets `""`, not
+the serial. This matches `docs/api-design.md`.
+
+Current error cases:
+
+- `request` absent or `null`, `name` absent, or `name` explicitly `null` —
+  rejected as invalid arguments. This is deliberate: an incomplete request must
+  not silently erase an owner-set label, and `""` remains the way to clear.
+- A factory reset has staged. The rename is rejected rather than racing the
+  reset's clear.
+- State directory creation, temp write, or rename fails.
+
+`setDeviceName` is classified as a disruptive command in the storm gate
+(~1 per 5 s, deduped): every accepted change is a persisted write plus a
+full mDNS re-registration, so a flood of renames answers with the
+standardized command-storm rejection above rather than churning the LAN.
+
+Current relayer error response: none standardized; command failure is logged.
+
 ### betaFeaturesToggle
 
 Purpose: enable or disable beta features by updating the local sentinel file.
@@ -933,6 +1233,16 @@ Current error cases:
   authorized keys.
 
 Current relayer error response: none standardized; command failure is logged.
+
+LAN hub (`POST :1111/api/cast`) requirement (feral-file#3551 phase 0): on a
+**claimed** device, `sshAccess` (enable and disable alike) must carry the header
+`X-FF1-Topic` equal to the device's current relayer topic. A missing or wrong
+header, or a claimed device that holds no topic yet, is refused with HTTP `401`
+and the body `{"error":{"code":"topic_required"}}` before the executor runs.
+The topic is compared in constant time and never logged. An unclaimed device
+accepts `sshAccess` without the header. Relayer-delivered `sshAccess` is
+unaffected. A client that gets `topic_required` should tell the user to re-pair
+it (ff1-cli reads the topic from its keyring).
 
 ### updateToLatestVersion
 
@@ -1341,14 +1651,112 @@ The mint-pairing flow adds an approval decision message from
 3. A controller client sends `mintPairingApprovalDecision` inbound to
    `feral-controld`.
 4. `feral-controld` accepts exactly one valid decision.
-5. On approval, `feral-controld` creates an ephemeral browser session through
+5. On approval, `feral-controld` creates a browser session through
    `ff-relayer` and sends the raw token only inside encrypted
-   `mint_succeeded` to the browser.
+   `mint_succeeded` to the browser. An approval with `keepPaired` asks for an
+   owner-kept session instead: `feral-controld` sends `persistent: true` to
+   `ff-relayer` and sends no `expiresInSeconds` — but only for a requester that
+   declared `supportsPersistentSessions` in its mint request. A requester that
+   did not (every client released before owner-kept sessions existed) requires
+   a real `expiresAt` and cannot parse a session without one, so a `keepPaired`
+   approval for it is minted as a timed session at the policy maximum (86400
+   seconds) instead, logged with the requesting origin. The approval is not
+   rejected — the owner still approved the site; it simply lapses and has to be
+   approved again. **The delivered session's shape follows the relayer's
+   answer, not the request.** When the relayer
+   mints the owner-kept session, the delivered session carries
+   `persistent: true` with a null `expiresAt` and ends only when the owner
+   removes the site from the app's paired-sites screen. When the relayer
+   answers with an ordinary timed session — an older relayer, or one that does
+   not honor `persistent` — `feral-controld` delivers exactly that: no
+   `persistent`, a real `expiresAt`, and a session that expires on its own. It
+   is never re-labelled as kept, because a session the relayer will expire must
+   not be presented as one that never will. Anything read from the delivered
+   session — the app's paired-sites row, its copy, the browser client's local
+   expiry — must follow the delivered shape rather than what was requested.
 6. On rejection or terminal failure, `feral-controld` sends encrypted
-   `mint_rejected` to the browser.
+   `mint_rejected` to the browser. If the session was already created when the
+   failure landed, `feral-controld` revokes it through
+   `DELETE /api/ephemeral-sessions/{sessionID}?topicID=...` — best effort,
+   logged on failure — but only when the browser provably never received it:
+   the device topic changed before the send, or the broker refused the message
+   outright (a client-error status). A failed send that leaves delivery in
+   doubt — a timeout, a transport error, a broker 5xx — is **not** revoked: the
+   browser may already hold that session, so `feral-controld` logs it with the
+   session id and leaves it alone. A timed session then expires on its own; an
+   owner-kept one appears in the app's paired-sites list, where the owner can
+   remove it. `feral-controld` also revokes a session it refuses as
+   contradictory (see the session-shape rules above), so a reply it will not
+   deliver never holds one of the topic's persistent-session slots — including
+   a reply that grants MORE than was asked: a `persistent` session for an
+   approval that did not send `keepPaired` is refused, never delivered.
+   One more revoke happens after a successful delivery: `feral-controld`
+   re-reads the relayer topic once the encrypted `mint_succeeded` has gone out,
+   and if the topic moved while it was being sent — reassigned, cleared, or
+   factory reset — it revokes the session, because the topic it was minted for
+   no longer exists. The browser's terminal message is not taken back and the
+   outcome still reports `completed`; the session simply no longer exists on
+   the relayer, and the site pairs again when the owner approves it under the
+   current topic.
 
 `ff-controller` must not receive raw browser session tokens or DP1 playlist
 content.
+
+Factory reset ends every browser session too, in this order:
+
+1. **Invalidate the claim.** `feral-controld` clears the persisted relayer
+   topic in one locked step that hands back the topic id. From that instant the
+   device's topic generation has moved, so any mint already in flight fails its
+   own guard check — before creation, or after delivery — and revokes the
+   session it made.
+2. **Close the pairing session in progress.** The pairing worker sits in a
+   broker poll on a socket the device still holds, so until it is gone a
+   browser request can still arrive for the claim being wiped. The reset closes
+   it and waits, boundedly, for the worker to exit; a pairing that is still
+   *starting* — its broker call in flight, nothing published yet — is canceled
+   and awaited the same way, and the close repeats until neither exists, since
+   a start it is waiting on can publish a session while it waits. Every one of
+   those surfaces also guards itself against the claim moving: a start whose
+   claim went while the broker answered closes its channel and returns
+   `topic_changed` rather than painting a code, the same check runs again once
+   the code is on screen (taking it back down instead of publishing a session
+   for a claim that went while it painted), and a request read after the claim
+   moved is dropped with a log — never displayed on the panel, never sent to a
+   controller.
+3. **Let creations already at `ff-relayer` settle.** A session-creation POST
+   sent a moment earlier can commit AFTER the sweep below has listed the topic,
+   and that listing would never see it. So the reset waits for those creations
+   to return — each one then runs its own guard, sees the invalidated claim,
+   and revokes the session it made. A decision counts as in flight from the
+   moment it is admitted — before it re-reads the claim, not after — so a reset
+   can never slip between that read and the POST. The wait is bounded: a create
+   that never returns must not hold a wipe, and giving up is logged at error
+   level with the number still outstanding, since those are exactly the
+   sessions the sweep can miss. This wait and the sweep below share ONE 20 s
+   budget with the close above (5 s closing, up to 12 s waiting, the remainder
+   for the sweep, never less than 3 s), because the reset is answered
+   synchronously: over LAN the reply cannot
+   start until the cleanup returns, against the hub's 30 s write timeout. A creation whose response is lost entirely is the relay
+   idempotency case — the device never learns the session id — tracked as
+   ff-relayer #20.
+4. **Sweep the topic.** It lists that topic's sessions
+   (`GET /api/ephemeral-sessions?topicID=...`) and revokes each one. Sessions
+   live on `ff-relayer`, keyed by topic, and an owner-kept one has no expiry to
+   reclaim it, so this is the last moment anything can end them: afterwards the
+   device cannot name the topic they belong to, and the re-claimed device's
+   paired-sites screen reads a new one.
+5. **Clear the rest of the claim.**
+
+The order is deliberate. Sweeping first would leave a hole: an approval
+accepted a moment before the reset could mint its session after the sweep had
+already listed the topic, and that session would survive the wipe. The sweep is
+bounded and best effort — a reset completes even if `ff-relayer` is unreachable,
+and what could not be revoked is logged at error level, because a session that
+survives is a live session against a device its previous owner no longer
+holds. The cleanup does NOT depend on mint pairing being enabled: a device can mint an
+owner-kept session, be restarted with the feature turned off, and only then be
+reset — the credential outlives the flag. Having no topic is the only thing
+that keeps the reset off the network, because then there is nothing to name.
 
 Implementation note: `feral-controld` embeds the temporary Go minter client from
 `ff-art-computer-handoff` for Mint Pairing Broker channels, encrypted browser
@@ -1357,7 +1765,7 @@ requests, and encrypted browser results. Relayer approval dispatch and
 `feral-controld`; the minter library does not know relayer API keys, approval
 transport, or token minting policy. Runtime support is opt-in through
 `mintPairing.enabled` in `feral-controld` config and starts only after a
-controller sends `startMintPairingSession`.
+controller sends `startMintPairingSession` or `joinMintPairingChannel`.
 
 ### startMintPairingSession
 
@@ -1457,6 +1865,135 @@ cleanup are bounded so mint-pairing cleanup fits within `feral-controld`'s
 two-second forced-exit guard; if a terminal delivery exceeds that budget, it is
 logged and treated as best-effort.
 
+### joinMintPairingChannel
+
+Purpose: join a Mint Pairing Broker channel that a site created
+(site-initiated pairing). The site shows an app link, a QR code of it, or a
+six-digit code; the app brings the Art Computer to the channel by sending this
+command. The device joins on its own configured broker (`mintPairing.brokerBaseURL`),
+becomes the channel's minter, and from there runs the same flow as
+`startMintPairingSession`: the site's encrypted `mint_request` produces a
+`mint_pairing_approval_request`, the controller answers with
+`mintPairingApprovalDecision`, and the session is minted and delivered. Nothing
+is shown on the panel for a joined channel: no `mintPairingDisplay` call is
+made at any stage, including the terminal `hidden`.
+
+Arguments, exactly one of:
+
+```json
+{ "channelId": "ch_...", "pairingToken": "pt_..." }
+```
+
+```json
+{ "shortCode": "123456" }
+```
+
+No broker URL is accepted from the controller; any key other than these is
+refused with `invalid_request`.
+
+Example:
+
+```json
+{
+  "messageID": "msg-join-mint-pairing-1",
+  "message": {
+    "command": "joinMintPairingChannel",
+    "request": { "channelId": "ch_pQ9Yab...", "pairingToken": "pt_..." }
+  }
+}
+```
+
+Success response (flat on the LAN hub, wrapped in the RPC envelope over the
+relayer, exactly as `startMintPairingSession`):
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-join-mint-pairing-1",
+  "message": {
+    "ok": true,
+    "status": "joined",
+    "channelId": "ch_pQ9Yab...",
+    "origin": "https://www.artblocks.io",
+    "browserInfo": { "name": "Art Blocks", "label": "artblocks.io" }
+  }
+}
+```
+
+`origin` is the site origin the broker attested when the site created the
+channel (from the site's HTTP `Origin` header), not a value the site chose.
+The controller uses it for its "Connecting <site> to <device>" line.
+
+A join replaces any pairing in progress: a device-initiated pairing (its code
+on the panel, or a request pending approval) or an older joined channel is
+cancelled the way `closeMintPairingSession` cancels it, including the
+`cancelled` rejection to its browser and approval outcome to the controller.
+This happens before the broker is called, so the replaced pairing is gone even
+if the join then fails; a start or another join still inside its broker call
+is canceled rather than waited for. The same join sent twice
+(for example a LAN attempt whose reply was lost, retried over the relayer) is
+answered from the pairing it already made, without spending the single-use
+token again.
+
+A replaced pairing the owner had already approved is fenced by pairing
+identity, not only by claim: if its session has not been handed to the broker
+yet, it is not delivered (a session already created is revoked) and both its
+browser and the controller get the `cancelled` rejection and outcome. If the
+delivery is already in flight it cannot be recalled, so the join waits for it
+to finish before taking the active slot; if the join's own request ends first,
+it answers `replace_in_progress` (retryable).
+
+A joined pairing's lifetime is owned by its worker, which follows the broker's
+extended expiry. Other commands never expire it from its join-time deadline,
+so a retry or a `startMintPairingSession` that arrives while a poll is
+extending the deadline finds the pairing live.
+
+While a joined pairing waits for the site's request, `startMintPairingSession`
+answers `site_pairing_active` (retryable) instead of painting a code; once the
+request is pending approval it answers `pending_approval` without painting.
+`closeMintPairingSession` closes a joined pairing like any other.
+
+Error cases (`ok: false`):
+
+- `disabled`: `mintPairing.enabled` is false.
+- `invalid_request`: missing, extra, or malformed arguments.
+- `invalid_config`: the broker base URL is not configured.
+- `topic_not_ready`: device has no current relayer topic ID.
+- `topic_changed`: the claim changed while the device was joining.
+- `replace_in_progress` (retryable): the pairing being replaced was still
+  delivering its approved session when the join's request ended.
+- `pairing_closed` (not retryable): a `closeMintPairingSession` (or a newer
+  join) canceled this join while it was inside its broker call. If the broker
+  accepted the join anyway, the device closes that channel instead of
+  publishing it, so no approval is ever asked for it.
+
+`closeMintPairingSession` also reaches a start or join still inside its broker
+call: it cancels it, waits for it to unwind, and answers `closed`.
+- `code_not_found` (broker 404, not retryable): no channel for this code or
+  token.
+- `code_expired` (broker 410, not retryable): the channel expired.
+- `code_used` (broker 401, not retryable): the token or code was already used
+  by another join.
+- `rate_limited` (broker 429, retryable).
+- `broker_error` (retryable): any other broker failure or a transport error.
+
+Attestation check: if the site's `mint_request` names an origin other than the
+attested one, or was encrypted with a browser key other than the one the broker
+returned at join, the minter refuses it and the owner is not asked.
+`feral-controld` sends the browser an encrypted `mint_rejected` with reason
+`origin_mismatch` or `browser_key_mismatch` (not retryable), sends the
+controller a `mint_pairing_approval_outcome` with `status: "cancelled"`, the
+same `reason`, the joined `channelID`, and the refused request's
+`requestMessageID` (its `approvalRequestID` is fresh, since no approval request
+was ever sent; match it by `channelID` and `requestMessageID`), and then closes
+the channel.
+
+A joined pairing waits for the site's request until the broker's channel
+expiry as reported at join, or for the device's idle TTL when the broker
+reports none. The broker extends its idle deadline on every accepted message,
+so once the request arrives the deadline moves to the later of the two, and
+the approval wait (bounded by the approval timeout) runs to that.
+
 ### Outbound Approval Request
 
 This is included for context because it creates the pending inbound decision.
@@ -1483,6 +2020,7 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
     },
     "requestedExpiresInSeconds": 86400,
     "effectiveExpiresInSeconds": 86400,
+    "supportsPersistentSessions": true,
     "requestedAt": "2026-06-16T03:00:00Z",
     "expiresAt": "2026-06-16T03:05:00Z",
     "challenge": {
@@ -1499,7 +2037,15 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
 will request from `ff-relayer` if the controller approves. `feral-controld`
 owns this policy: omitted or non-positive requests default to 3600 seconds,
 requests below 90 seconds are raised to 90 seconds, and requests above 86400
-seconds are capped at 86400 seconds.
+seconds are capped at 86400 seconds. Both fields are moot when the
+controller approves with `keepPaired` and the requester can hold an owner-kept
+session: it has no TTL and the browser's request is ignored.
+
+`supportsPersistentSessions` says whether this requester declared that it can
+hold a session with no expiry. It is `false` for every client released before
+owner-kept sessions existed. A `keepPaired` approval for such a requester is
+minted as a timed session at 86400 seconds, so a controller may use this field
+to tell the owner up front that this site cannot be kept paired yet.
 
 ### mintPairingApprovalDecision
 
@@ -1519,6 +2065,7 @@ Approve example:
       "channelID": "ch_pQ9Yab...",
       "requestMessageID": "msg_2WaF8D7xV9zJvdm8SK5LSA",
       "decision": "approve",
+      "keepPaired": true,
       "decidedAt": "2026-06-16T03:00:20Z",
       "controller": {
         "clientID": "ios_abc123",
@@ -1562,6 +2109,15 @@ Required fields:
 
 Optional fields:
 
+- `keepPaired`: meaningful for `approve`, ignored for `reject`, default
+  `false` when absent. Only a literal `true` or `false` is accepted — `null`
+  or any non-boolean is `invalid_request`, never a silent `false`. `true` asks
+  for an owner-kept session: `persistent: true` to
+  `ff-relayer`, no `expiresInSeconds`. Two things can still make the delivered
+  session timed — a requester that did not declare
+  `supportsPersistentSessions` (minted at 86400 seconds instead) and a relayer
+  that answers with a timed session — so read the shape from what was
+  delivered, not from the request (see the flow above)
 - `reason`: required for `reject`, ignored for `approve`
 - `retryable`: meaningful for `reject`, default `false`
 - `decidedAt`
@@ -1617,13 +2173,14 @@ Error cases:
 
 | Case | Detection | controld response to controller | Browser result |
 |---|---|---|---|
-| Malformed decision payload | Missing required fields, invalid `decision`, non-object `request` | `ok: false`, `invalid_request`, `retryable: false` | Keep waiting until approval timeout |
+| Malformed decision payload | Missing required fields, invalid `decision`, non-object `request`, non-boolean `keepPaired` (`null` included) | `ok: false`, `invalid_request`, `retryable: false` | Keep waiting until approval timeout |
 | Unknown approval request | No pending request for `approvalRequestID` | `ok: false`, `not_found`, `retryable: false` | No change |
-| Topic mismatch | Decision `topicID` differs from current device topic | `ok: false`, `topic_mismatch`, `retryable: false` | Keep waiting until timeout |
+| Topic mismatch | Decision `topicID` differs from the current device topic, or the claim the pairing began under was cleared and re-taken (a factory reset and re-claim, even onto the same topic id) | `ok: false`, `topic_mismatch`, `retryable: false` | Keep waiting until timeout |
 | Channel/request mismatch | `channelID` or `requestMessageID` differs from pending request | `ok: false`, `request_mismatch`, `retryable: false` | Keep waiting until timeout |
 | Expired decision | Request deadline passed before valid decision | `ok: false`, `expired`, `retryable: false` | Encrypted `mint_rejected` with `approval_expired` |
+| Channel gone before the decision | While the approval is pending, controld polls the channel every few seconds. The broker answered 404 or 409 `closed` (the page canceled, timed out, or retried onto a new channel), or 410 `expired` | `ok: false`, `browser_gone` (404/409) or `expired` (410), `retryable: false` (`not_found` once controld has finished ending it). A 404 counts only when the broker names it `not_found`, so a bare 404 from a proxy cannot end a live approval. The outcome already sent is `cancelled` with `reason: "browser_gone"` for 404/409, and `expired` for 410: on a joined pairing the approval deadline is the broker's, so a 410 is the owner not answering in time, not the site leaving. The split is best-effort: the broker sweeps expired channels to 404, and a page whose own wait ran out closes its channel (409) just before controld's timer fires, so an unanswered prompt can end either way; both dismiss it. A reload or closed tab is not detected, because the page leaves its channel open | None: a gone channel carries nothing, and no session is minted. A decision accepted before controld saw the channel go is answered without minting: an approve reports outcome `failed`, a reject reports `rejected` |
 | Duplicate same decision | Same accepted decision delivered again | `ok: true`, `status: "already_accepted"` | No duplicate minting |
-| Conflicting duplicate decision | Different terminal decision after one was accepted | `ok: false`, `already_decided`, `retryable: false` | No change |
+| Conflicting duplicate decision | Different terminal decision, or the same decision with a different `keepPaired`, after one was accepted | `ok: false`, `already_decided`, `retryable: false` | No change |
 | Controller rejects | Valid `decision: "reject"` | `ok: true`, `status: "accepted"` | Encrypted `mint_rejected` with controller reason or `rejected_by_user` |
 | Topic changes after approval | Current device topic no longer matches the approval request topic before relayer session creation or browser delivery | Optional outcome `failed`; ACK remains accepted | Encrypted `mint_rejected` with `topic_changed` |
 | Session creation fails after approval | `ff-relayer` ephemeral-session creation fails | Optional outcome `failed`; ACK remains accepted | Encrypted `mint_rejected` with `session_create_failed` |
@@ -1637,6 +2194,7 @@ Recommended mint-pairing error codes:
 - `request_mismatch`
 - `expired`
 - `already_decided`
+- `browser_gone`
 - `session_create_failed`
 - `browser_delivery_failed`
 
@@ -1659,10 +2217,25 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
     "channelID": "ch_pQ9Yab...",
     "requestMessageID": "msg_2WaF8D7xV9zJvdm8SK5LSA",
     "status": "completed",
+    "lifetime": "persistent",
     "completedAt": "2026-06-16T03:00:22Z"
   }
 }
 ```
+
+`lifetime` is present only on `completed` and is read from the session the
+browser actually received, never from what the approval asked for — a
+`keepPaired` approval answered by `ff-relayer` with a timed session reports
+`timed`. It names the shape:
+
+- `persistent`: an owner-kept session; it ends when the owner removes the site.
+- `timed`: an ordinary session with an expiry.
+- `timed_fallback_requester`: the owner approved with `keepPaired`, but the
+  requester had not declared `supportsPersistentSessions`, so it received a
+  timed session at 86400 seconds. A controller showing "kept until you remove
+  it" should correct that copy when it sees this value — as it should for a
+  plain `timed` after a `keepPaired` approval, which means `ff-relayer` did not
+  mint a kept session.
 
 Allowed `status` values:
 
@@ -1671,6 +2244,15 @@ Allowed `status` values:
 - `failed`
 - `expired`
 - `cancelled`
+
+`reason` is optional and present only on `cancelled`. `origin_mismatch` and
+`browser_key_mismatch` mark a joined channel whose request contradicted the
+broker's attestation. `browser_gone` marks an approval ended because the
+browser closed or abandoned its channel (broker 404/409) while the owner had
+not yet decided; a broker expiry (410) is reported as `expired` instead. A
+controller should dismiss the prompt and may tell the owner the website
+stopped waiting. Absent means a replace, close, or shutdown. Controllers must
+ignore reasons they do not know.
 
 The outcome must not include the browser session token.
 
@@ -1948,11 +2530,16 @@ before — a request that ends up returning `offline_cache_error` above
 (every eligible item failed classification) persists neither, so a
 failed download can never leave a "last known good" offline fallback
 that looks like a successful one. This is not
-guaranteed to be byte-identical to whatever a publisher
-originally served (`dp1` resolution re-serializes the Go struct, so key
-order/whitespace can differ), but DP-1 signatures verify against a
-JCS-canonicalized form rather than raw bytes, so this does not affect
-signature validity — see `docs/offline-artwork-capture.md`.
+guaranteed to be byte-identical to whatever a publisher originally served
+(`dp1` resolution re-serializes the Go struct, so key order/whitespace can
+differ). DP-1 signatures verify against a JCS-canonicalized form rather
+than raw bytes, which neutralizes serialization differences ONLY while
+every signed field survives — and this copy does not qualify: dynamic
+hydration has rewritten `items`, and the typed struct drops any field the
+pinned `dp1-go` does not model. The cached copy therefore carries no
+signature verdict and is never re-verified; a `displayPlaylist` served
+from it omits `signatureStatus` (see that section and
+`docs/offline-artwork-capture.md` §6/§7.1).
 
 Error cases: `resolve_failed`, `offline_cache_error`.
 
@@ -2191,54 +2778,36 @@ still present, so a `0` is not distinguishable on the wire from a genuinely
 empty cache. Do not present a lone `0` as authoritative "cache is empty"
 if other fields — a nonzero `totals.ready`, say — contradict it.
 
-**Cache size and eviction.** `diskLimit` is the cache's byte budget: the device's
-`offlineCache.maxDiskBytes`, or 10 GiB when the operator left it unset.
-It is why cached items are evicted at all. Both it and `diskUsed` are in
-**bytes** — note the `deviceMetrics` command reports device filesystem
-figures in KiB, so the two cannot be mixed without conversion.
+**Cache size and eviction.** `diskLimit` is the effective artwork-cache byte
+budget: 50% of its filesystem by default (`offlineCache.maxDiskPercent`), capped
+by a positive `offlineCache.maxDiskBytes`, and reduced when needed to preserve
+the larger of 5 GiB (`minFreeDiskBytes`) or 10% of the filesystem as free space.
+These are ceilings, not reserved/preallocated files. `diskUsed` and `diskLimit`
+are bytes; `deviceMetrics` filesystem figures use KiB.
 
-**The ratio is not bounded to 0..100%, in either direction.** Render
-`diskUsed / diskLimit` as a proportion by all means, but clamp it, and do
-not label any fixed percentage "full":
+Eviction removes expired automatic records first, then prefers least recently
+played artwork, using capture time until an item has played. Speculative warming
+preserves explicit offline snapshots and fresh members of the active playlist.
+No item is exempt from the hard ceiling. Evicted records leave the whole-store
+listing; explicit source queries and eviction notifications still report
+`not_cached`. Reclaim runs before/after captures, on startup and at least
+once per minute while idle. Downloads also check available space while streaming.
+The pre-capture margin is currently one eighth of the effective budget; this is
+an implementation detail that clients must not hardcode.
 
-- *It usually rests below the budget.* The device reclaims room **ahead of**
-  each download, evicting oldest-captured items until a headroom margin is
-  free, so a busy cache typically settles below `diskLimit` and climbs back
-  toward it as each download lands. A gauge that only reads "full at
-  `diskLimit`" will rarely look full. Items are therefore evicted — and
-  eviction notifications sent — while `diskUsed` still shows room left.
-- *It can also exceed the budget.* Eviction runs only on the download path,
-  so lowering `offlineCache.maxDiskBytes` on a device that already holds a
-  larger cache leaves `diskUsed` above `diskLimit` until the next download
-  runs. Playlist metadata is also counted in `diskUsed` but bounded by
-  count rather than bytes, and no eviction can reclaim it.
+Clamp `diskUsed / diskLimit`: metadata and asynchronous enforcement can leave
+usage temporarily above the limit. A zero limit means no storage headroom.
+An absent first-page `diskLimit` means unlimited (only lower-level constructors
+support this); absence on later pages means carry forward the first page's value.
+Do not substitute a default budget. Use "removed to make room" for eviction copy.
 
-For user-facing copy: "removed to make room for newer downloads" is honest
-at any fill level; "evicted because the cache is full" is not.
-
-The current headroom margin is one eighth of the budget (a 10 GiB budget
-starts reclaiming past ~8.75 GiB). That figure is **illustrative, not
-contractual** — it is a device-side tuning constant that may change
-without a contract revision, so do not hardcode it or derive a threshold
-from it.
-
-`diskLimit` is **not** bounded by the device's actual free disk space, and
-is a different quantity from the device filesystem usage `deviceMetrics`
-reports. It is a policy budget, not reserved space: on a device with less
-free space than the budget, downloads can start failing while `diskUsed`
-is still well under `diskLimit`. A client showing both device storage and
-cache usage must present them as two separate quantities, never as parts
-of one total.
-
-**On a first-page response, an absent `diskLimit` means there is no
-ceiling** — the cache is unlimited and no *item* is ever evicted (playlist
-metadata is still pruned by count). Do not confuse this with its absence
-on a continuation page, which means only "carry forward what the first
-page reported". No supported configuration produces the unlimited case
-today (`offlineCache.maxDiskBytes <= 0` means "use the 10 GiB default"),
-but handle it anyway: render it as "no limit", never as `0`, and never by
-substituting the 10 GiB default, which an operator may have overridden.
-`diskUsed` is still reported.
+Automatic caching is enabled with the offline-cache feature unless
+`automaticPlaybackDisabled` is true. It warms the actual playing item list,
+requires at least an hour of explicit remaining HTTP freshness, and serves expired/missing resources from the
+network. Software, streams, ambiguous types and redirect-followed responses stay
+on their normal live path. Explicit downloads retain snapshot semantics and
+playlist-URL offline recovery. Automatic warming alone does not persist a full
+playlist for offline recovery. See [automatic playback cache](automatic-playback-cache.md).
 
 To keep a live gauge current, re-poll with `totalsOnly: true` — the
 `offline_cache_status` notifications below carry per-item state only, never
@@ -2436,6 +3005,253 @@ entire time. Clients should treat this notification as "this attempt's
 result", and use `getOfflineCacheStatus` as the source of truth for
 "is this item currently cached" when the two might disagree.
 
+## Recently Played and Content Policy Inbound Messages
+
+These four commands back the mobile app's **History** and **Content** screens
+(feral-file/ff-app#788). All four are commandrouter pre-CDP special cases: the
+daemon owns the reply shape rather than passing the player's answer through.
+
+### getRecentlyPlayed
+
+Purpose: list the works this device actually rendered, newest first, so the
+owner can put back a work they replaced without knowing its title or artist.
+
+Request: `{}` — no fields, and a **non-empty request is rejected** rather than
+forwarded, for the same storm-gate reason as `getContentPolicy` below: the
+gate's dedupe key is command type plus arguments.
+
+The history is device-owned. The player appends a record only at a *successful
+render*, which is why the list includes automatic playlist advances and
+survives a player restart; a selected-but-never-rendered item produces no
+record. The reply carries only the bounded label snapshot — `recordId`,
+`playedAtMs`, `isActive`, `itemId`, `title`, `artist`, `thumbnailUrl` (query
+string stripped, like any other URL the device hands out), plus
+`status`, `activeOccurrenceKnown` and `incomplete`. Item source and the full
+DP-1 item stay device-local and are never sent to a controller.
+
+Controld rebuilds a successful reply from that allow-list rather than
+forwarding what the player returned, and bounds it by **rows and by bytes** —
+each label is truncated to 512 bytes on a rune boundary, and the reply stops
+adding rows once its label payload reaches 128 KiB. `recordId` is exempt from
+truncation — it is the opaque replay handle `playRecentlyPlayed` forwards
+verbatim, so clipping it would advertise a row that cannot play; a handle too
+long to be plausible drops its row instead. Rows alone are not a bound:
+the LAN hub accepts a 4 MiB inline playlist, its metadata becomes retained
+history labels, and those come back through this reply. The bound is
+enforced on this side of CDP because item sources can be signed URLs carrying
+credentials in their query strings and this query is reachable from the
+unauthenticated LAN hub — a guarantee that held only while the player happened
+to honor it would not be a guarantee.
+
+```json
+{
+  "messageID": "msg-history-1",
+  "message": { "command": "getRecentlyPlayed", "request": {} }
+}
+```
+
+A player that predates this feature answers the unknown command with a bare
+`ok:false` — no `status`, no `error`, nothing else. Controld classifies exactly
+that shape as an explicit **`unsupported`** capability reply. It is never
+flattened into an empty history: "this device cannot do it" and "this device
+has played nothing yet" are different answers, and the app renders them
+differently.
+
+A failure that carries any explanation of its own (an `error`, a code, or a
+result field) is a modern player failing for a real reason — an evicted or
+malformed record, say. Controld gives it `status: "error"` and keeps the
+player's own error rather than relabelling it `unsupported`, so a retryable
+failure is not reported as a missing capability.
+
+Error cases: `unsupported` (older player), `error` (a real player-side
+failure), plus transport errors. A transport failure is an error, never an
+empty list.
+
+Failure replies are rebuilt from the allow-list too — `ok`, `status` and
+`error` only — and the player's explanation is sanitized: query strings are
+stripped from any URL it names. A failure is exactly where a player tends to
+quote the source it could not load, and a signed CDN URL carries its
+credentials there.
+
+### playRecentlyPlayed
+
+Purpose: put a listed work back on this device.
+
+Request: exactly `{"recordId": "<opaque id from getRecentlyPlayed>"}`. Any
+other field is rejected rather than ignored — the storm gate dedupes on the
+whole arguments map while this command uses only `recordId`, so an ignored
+extra field would miss dedupe and repeat the same resolve-and-replay work.
+
+The command never accepts a controller-supplied source. Controld resolves the
+opaque record on the device, rebuilds a one-work unsigned DP-1 call from the
+retained item, and re-enters its ordinary `displayPlaylist` path — which is what
+preserves scheduler ownership, playback/replay-scope locking, cast-time source
+preflight, and the content-policy gate. Extracting one item from a signed
+playlist invalidates that playlist's signature, so the rebuilt call carries no
+signature; only the work's `defaults` are preserved.
+
+The replay is re-admitted under **the content context the work was recorded
+under**, not the default. A work that played as `personal` is replayed as
+`personal`, so History cannot offer a work the policy gate then refuses.
+
+The acknowledgement names the requested occurrence and is bounded — `ok`, and
+`status`/`error` when present, rebuilt from an allow-list rather than forwarded
+from the player. The retained item never leaves the device, so an
+acknowledgement that echoed the request must not carry its source out either.
+It does not claim a successful wall render. Callers still wait for `player_status`,
+particularly when the same work is deliberately replayed twice.
+
+Error cases: `recordId is required`; an evicted, malformed, or unknown record;
+`contentBlocked` if policy refuses the rebuilt cast; plus every
+`displayPlaylist` error, since that is the path it re-enters. A source that was
+valid when recorded can still fail later during rendering; that is reported
+honestly rather than promised away.
+
+### getContentPolicy
+
+Purpose: read the device's durable audience policy for the app's Content
+screen.
+
+Request: `{}` — no fields, and a **non-empty request is rejected** with
+`invalidRequest` rather than ignored. This is a storm-gate contract, not
+pedantry: the gate deduplicates on command type plus arguments, so ignoring
+junk arguments would let one LAN caller mint unlimited distinct dedupe keys.
+
+```json
+{ "ok": true, "contentPolicy": { "version": 1, "showMatureContent": false, "strictPersonal": false, "blockUnratedCurated": false }, "active": true }
+```
+
+`active:true` is only ever returned when the durable store is readable **and**
+the current player generation returned a matching acknowledgement. If the
+policy file could not be read, the device keeps admitting content on safe
+defaults but answers `contentPolicyUnavailable` — it never presents defaults as
+the owner's saved setting.
+
+Error cases: `invalidRequest`, `unsupported` (older player),
+`contentPolicyUnavailable`. A player that predates these commands answers the
+unknown command with a bare `{"ok":false}`; controld classifies that shape as
+`unsupported`, the same way it classifies the legacy history reply. A transport
+failure, or a modern player whose acknowledged policy does not match, stays
+`contentPolicyUnavailable` — the app retries one and not the other.
+
+### setContentPolicy
+
+Purpose: change the audience policy from the app.
+
+Request: exactly `{"showMatureContent": bool, "strictPersonal": bool}`. Any
+other argument count, or a non-boolean value, is `invalidRequest`.
+
+`blockUnratedCurated` is **operator-owned** and cannot be set by a controller.
+It comes from the daemon's `contentPolicy` config block and is re-applied from
+that config on every boot, so neither a controller request nor a stale
+persisted file can turn it on or off.
+
+An accepted change also re-sends the current playlist, because the playlist on
+screen was projected under the *old* policy: enabling mature content cannot
+bring back items the previous projection removed, and disabling it leaves
+blocked items up, until something re-resolves. A refused change re-sends
+nothing.
+
+If the displayed source cannot be resolved at all — a 404 or an outage, with
+offline caching off and no scheduled cohort to fall back to — there is nothing
+to re-project, so the on-screen item is judged on its own rating instead and
+retired if the policy refuses it. The wall goes blank until the source returns,
+which is the accepted trade: a work the owner has just blocked must not keep
+playing. An item the policy has nothing to say about — unrated, or carrying a
+label this build does not recognize — is left alone.
+
+That applies to a **static inline** cast too — the shape an app cast usually
+takes, with no URL or dynamic query to re-resolve. A newly blocked item is
+removed and the player is told to retire it if it is the frame on screen.
+Restoring items a previous projection removed is the one thing this cannot do:
+the device holds only the filtered set that was cast, so relaxing a policy takes
+effect on the next cast rather than retroactively.
+
+Success is reported only after the atomic durable write succeeds *and* the
+player returns a matching acknowledgement. A repeated identical set performs no
+durable write, so holding the toggle does not amplify flash writes.
+
+A factory reset clears the content policy along with the claim and the device
+name, and pushes the default to the player. On the success path the file is
+discarded with the subvolume anyway; this is for the rollback path, so a resold
+device cannot inherit the previous owner's admission rules. The operator-owned
+`blockUnratedCurated` gate survives, because it is device configuration rather
+than an owner setting.
+
+The order is **acknowledgement first, then the durable write**. Only values the
+current player generation has accepted are ever written or enforced, so a caller
+told the update failed is never left with a device that quietly changed its
+filtering — and since the file is the only thing a restart restores, a refused
+policy cannot come back as the active one after a reboot. If the write fails
+after the player accepted, the device keeps its previous policy and reports the
+failure; the next reconnect sync re-pushes the stored policy and puts the player
+back in step. If the write lands but its directory entry cannot be confirmed
+durable even on retry, the reply is `contentPolicyUnavailable` rather than
+success — a restart could still revert it, and `ok:true` means saved. That
+applies to later reads too: `getContentPolicy` keeps answering
+`contentPolicyUnavailable` until a confirmation succeeds, so the owner is never
+told the setting is safely saved while its directory entry is unconfirmed. The
+factory reset's deletion is made durable the same way.
+
+Error cases: `invalidRequest`, `unsupported`, `contentPolicyUnavailable`.
+
+### Content policy effect on playlists
+
+`displayPlaylist` takes an optional `contentContext`, whose only valid present
+values are `curated` and `personal`; an absent field means `curated`. Present
+but empty (`""`) or `null` is **rejected**, not treated as absent: at public
+ingress that is a malformed request, and silently widening it into the default
+audience would hide the client bug. (Scheduler state persisted before this
+field existed omits the key entirely, which stays compatible.)
+
+The device filters the playlist against its policy before casting:
+
+- A `mature`-labelled item is withheld unless `showMatureContent` is on, or the
+  cast is `personal` and `strictPersonal` is off.
+- An *unrated* item is withheld only from a `curated` cast, and only while the
+  operator's `blockUnratedCurated` gate is on.
+- When any item is removed, the projection's signatures are cleared: the source
+  document's signature does not describe the projection. Rating fields
+  themselves remain signed in the source.
+- When the projection is empty, the cast is refused with `contentBlocked`
+  (HTTP 422 on the LAN hub, `"error":"contentBlocked"` over the relayer). A
+  scheduled **cutover** whose cohort projects empty is different: there is no
+  caller to refuse, so the empty list is sent with `retireBlockedCurrent` —
+  retiring the frame rather than leaving blocked content on screen because the
+  only cohort that could replace it is the one the policy emptied.
+
+**Only `mature` hides anything.** A `contentRating` this build does not
+recognize is treated exactly as **unrated** — `general`, an absent rating, and
+any other string all take the same path — and a document is never refused for
+carrying one (DP-1 §3.3, display-protocol/dp1#52). Nothing is assumed from a
+label the daemon cannot interpret, so an unrated item is withheld only by the
+operator's `blockUnratedCurated` gate, and an unknown label is withheld on
+exactly the same terms.
+
+A `contentRating` of the wrong **type** is different and still fails closed: it
+cannot decode as a rating at all, so the playlist is rejected as
+`playlistInvalid`. That rejection names the failing field by **JSON pointer
+only** — `playlistInvalid: at /items/0/contentRating` — never the offending
+value: the underlying validator prints the value whole, and this text is
+returned verbatim to LAN and relayer callers. The
+rejection is carried as a typed error to both transports — HTTP 422 on the LAN
+hub, `"error":"playlistInvalid"` over the relayer — for inline `dp1_call` and
+for fetched `playlistUrl` documents alike. Inline bytes are validated before
+they are decoded into typed structures, so a wrong-typed rating
+(`"contentRating": 123`) is classified rather than surfacing as a generic
+decode failure.
+
+The context survives refresh. When a periodic refresh has to rebuild the source
+from player status and that status omits `contentContext` — only a player
+predating this feature does — the origin is treated as **unknown** and that
+refresh is left unprojected, rather than reclassified as `curated`. Guessing
+`curated` would strip the mature items an owner deliberately cast as
+`personal`. Such a player has no policy mirror of its own either
+(`setContentPolicy` answers `unsupported`).
+
+`retireBlockedCurrent:true` is a narrow daemon-to-player, refresh-only flag.
+Controllers do not send it.
+
 ## Response Shape Recommendation for New Inbound Commands
 
 Existing commands keep current behavior unless changed intentionally. New
@@ -2479,3 +3295,10 @@ Rules:
 - Device-control commands with destructive side effects (`shutdown`, `reboot`,
   `factoryReset`, `updateToLatestVersion`, `sshAccess`) should remain explicit
   command names with narrow request bodies.
+- LAN hub authorization is phase 0 of feral-file#3551 (containment): on a
+  claimed device, only `sshAccess` (plus `GET /api/screenshot`) requires the
+  `X-FF1-Topic` header; see that section. Every other command, including
+  `connect`, `factoryReset`, `startWifiSetup`, `showPairingQRCode`, and the
+  keyboard/mouse/gesture input commands, stays open to any LAN caller while
+  the device is in the control protocol's `legacy` state (or the protocol is
+  off). With an owner enrolled, see "Control Protocol Envelope" above.

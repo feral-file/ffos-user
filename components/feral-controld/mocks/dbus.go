@@ -93,6 +93,20 @@ func (mr *MockDBusMockRecorder) RemoveBusSignal(handler interface{}) *gomock.Cal
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemoveBusSignal", reflect.TypeOf((*MockDBus)(nil).RemoveBusSignal), handler)
 }
 
+// Send mocks base method.
+func (m *MockDBus) Send(payload godbus.DBusPayload) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Send", payload)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Send indicates an expected call of Send.
+func (mr *MockDBusMockRecorder) Send(payload interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Send", reflect.TypeOf((*MockDBus)(nil).Send), payload)
+}
+
 // Start mocks base method.
 func (m *MockDBus) Start() error {
 	m.ctrl.T.Helper()

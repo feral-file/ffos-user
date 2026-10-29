@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -15,10 +16,12 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
-	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	fflogger "github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
+	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
@@ -39,16 +42,23 @@ type Hub interface {
 }
 
 type hub struct {
-	ctx             context.Context
-	logger          *zap.Logger
-	server          wrapper.HTTPServer
-	wsHandler       ws.WS
-	cmdHandler      commandrouter.Handler
-	statusProvider  StatusProvider
-	capturer        screenshot.Capturer
-	json            wrapper.JSON
-	reqSlots        chan struct{}
-	screenshotSlots chan struct{}
+	ctx                 context.Context
+	logger              *zap.Logger
+	server              wrapper.HTTPServer
+	wsHandler           ws.WS
+	cmdHandler          commandrouter.Handler
+	statusProvider      StatusProvider
+	capturer            screenshot.Capturer
+	json                wrapper.JSON
+	reqSlots            chan struct{}
+	screenshotSlots     chan struct{}
+	logEndpoint         string
+	logAPIKey           string
+	logEnvironment      string
+	logSampleRate       float64
+	logSessionSampler   func(deviceID, sessionID string, sampleRate float64) bool
+	logHTTPClient       *http.Client
+	logDeliveryDisabled bool
 
 	// contactObserver, when set, is invoked once per request on the counted
 	// control-plane routes (cast, status, status_v2) from a NON-loopback
@@ -63,6 +73,15 @@ type hub struct {
 	// executor's probes); invoked on request goroutines, so the observer must
 	// be internally synchronized and non-blocking.
 	contactObserver func()
+
+	// claimSnapshot is the claim-state source for the LAN topic gate (see
+	// lanauth.go). Nil in production — the gate then reads the global
+	// state.ClaimSnapshot — and set by tests to pin a claim state.
+	claimSnapshot func() state.ClaimInfo
+
+	// control is the feral-file#3551 control gate (see control.go); nil when
+	// control.enabled is false.
+	control ControlGate
 }
 
 // SetContactObserver wires the control-plane contact signal (see
@@ -81,6 +100,41 @@ func New(
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Hub {
+	return NewWithLogEndpoint(ctx, wsHandler, cmdHandler, statusProvider, capturer, server, json, logger, "")
+}
+
+// NewWithLogEndpoint creates the hub with the same effective FF1 stream used
+// by the daemon logger, so player and controld records cannot split pipelines.
+func NewWithLogEndpoint(
+	ctx context.Context,
+	wsHandler ws.WS,
+	cmdHandler commandrouter.Handler,
+	statusProvider StatusProvider,
+	capturer screenshot.Capturer,
+	server wrapper.HTTPServer,
+	json wrapper.JSON,
+	logger *zap.Logger,
+	logEndpoint string,
+) Hub {
+	return NewWithLogDelivery(ctx, wsHandler, cmdHandler, statusProvider, capturer, server, json, logger, logEndpoint, "", fflogger.DefaultEnvironment, 1)
+}
+
+// NewWithLogDelivery creates the hub with the resolved endpoint and upload
+// policy shared by daemon logging and the player proxy.
+func NewWithLogDelivery(
+	ctx context.Context,
+	wsHandler ws.WS,
+	cmdHandler commandrouter.Handler,
+	statusProvider StatusProvider,
+	capturer screenshot.Capturer,
+	server wrapper.HTTPServer,
+	json wrapper.JSON,
+	logger *zap.Logger,
+	logEndpoint string,
+	logAPIKey string,
+	logEnvironment string,
+	logSampleRate float64,
+) Hub {
 	if server == nil {
 		httpServer := &http.Server{
 			Addr:              HUB_ADDRESS,
@@ -91,6 +145,17 @@ func New(
 			IdleTimeout:       IDLE_TIMEOUT,
 		}
 		server = wrapper.NewHTTPServer(httpServer)
+	}
+	if strings.TrimSpace(logEndpoint) == "" {
+		logEndpoint = fflogger.DefaultStreamEndpoint
+	}
+	if strings.TrimSpace(logEnvironment) == "" {
+		logEnvironment = fflogger.DefaultEnvironment
+	}
+	if logSampleRate < 0 {
+		logSampleRate = 0
+	} else if logSampleRate > 1 {
+		logSampleRate = 1
 	}
 	h := &hub{
 		ctx:            ctx,
@@ -105,7 +170,14 @@ func New(
 		// Keep the renderer capture and its potentially backpressured HTTP write
 		// in one single-flight lifetime. The capturer's own slot ends when it
 		// returns and therefore cannot bound retained response images by itself.
-		screenshotSlots: make(chan struct{}, 1),
+		screenshotSlots:     make(chan struct{}, 1),
+		logEndpoint:         logEndpoint,
+		logAPIKey:           strings.TrimSpace(logAPIKey),
+		logEnvironment:      strings.TrimSpace(logEnvironment),
+		logSampleRate:       logSampleRate,
+		logSessionSampler:   samplePlayerSession,
+		logHTTPClient:       &http.Client{Timeout: 10 * time.Second},
+		logDeliveryDisabled: logSampleRate <= 0 || strings.TrimSpace(logAPIKey) == "",
 	}
 	h.routes()
 	return h
@@ -114,7 +186,7 @@ func New(
 // routes registers every hub endpoint through the shared middleware. Each route
 // MUST be wrapped by withMiddleware — it is the single chokepoint for the
 // in-flight storm cap, request logging, and the future LAN authorization check
-// (issue #3471). Do not register a bare handler here.
+// (feral-file#3551). Do not register a bare handler here.
 func (h *hub) routes() {
 	handler := h.server.Handler()
 	mux, ok := handler.(*http.ServeMux)
@@ -136,6 +208,7 @@ func (h *hub) routes() {
 	mux.HandleFunc("/api/notification", h.withMiddleware("notification", h.handleNotification))
 	mux.HandleFunc("/api/status", h.withMiddleware("status", h.handleStatus))
 	mux.HandleFunc("/api/v2/status", h.withMiddleware("status_v2", h.handleStatusV2))
+	mux.HandleFunc("/api/logs", h.withMiddleware("player_logs", h.handlePlayerLogs))
 	mux.HandleFunc("/api/screenshot", h.withMiddleware("screenshot", h.handleScreenshot))
 	mux.HandleFunc("/metrics", h.withMiddleware("metrics", metrics.ServeHTTP))
 
@@ -224,18 +297,70 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payloadJSON, _ := payload.JSON()
-	h.logger.Info("Received cast request", zap.ByteString("payload", helper.TruncateBytes(payloadJSON, logger.MAX_FIELD_LENGTH)))
+	h.logger.Info("Received cast request", zap.ByteString("payload", helper.TruncateBytes(payloadJSON, fflogger.MAX_FIELD_LENGTH)))
 
 	if payload.Type == "" {
 		http.Error(w, "Command type is required", http.StatusBadRequest)
 		return
 	}
 
-	result, err := h.cmdHandler.Process(h.ctx, payload)
+	// Control protocol (feral-file#3551 phase 1, docs/ff1-control-v1.md):
+	// envelopes go to the authority; plaintext goes through the §7.2 policy
+	// (RouteLAN — every hub caller, VPN and Tailscale included). Both run
+	// before the phase-0 topic gate, which still guards the legacy state.
+	if h.control != nil {
+		if payload.Type == control.CmdEnvelope {
+			h.serveEnvelope(w, r, payload)
+			return
+		}
+		d, normalized := h.control.Plaintext(control.RouteLAN, payload)
+		if !d.Allow {
+			h.logger.Warn("Hub plaintext cast refused by control policy",
+				zap.String("command", string(payload.Type)), zap.String("code", d.Code))
+			writeControlError(w, d.Code)
+			return
+		}
+		payload = normalized
+	}
+
+	// LAN containment (feral-file#3551 phase 0): on a claimed device the
+	// commands that grant more than the relayer topic itself (shell access)
+	// require that topic as proof. This is the one
+	// policy that needs the command name, so it runs here, after the single
+	// body decode, rather than in the middleware seam (which would have to
+	// read the body twice). See topicGatedCommands.
+	if topicGatedCommands[payload.Type] && h.refuseWithoutTopic(w, r, string(payload.Type)) {
+		return
+	}
+
+	result, err := h.cmdHandler.Process(commands.FromController(h.ctx), payload)
 	if err != nil {
 		if commandrouter.IsRateLimited(err) {
 			h.logger.Warn("Cast request rejected by storm protection", zap.Error(err))
 			http.Error(w, "Too many commands, slow down", http.StatusTooManyRequests)
+			return
+		}
+		// A dead-source rejection is the CALLER's problem to act on (the
+		// playlist it sent points nowhere loadable), so it gets a 4xx and
+		// the full per-item detail — err.Error() carries per-item HTTP
+		// statuses with sources already log-truncated at probe time — not
+		// the generic 500 below, which would tell the caster nothing
+		// (#304, the dead-link-cast bug this exists to surface).
+		if commandrouter.IsSourceUnreachable(err) {
+			h.logger.Warn("Cast rejected: no playlist item source is loadable", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		if commandrouter.IsContentBlocked(err) {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		// Malformed DP-1 is caller input, not a device fault: answer the
+		// documented classification rather than a 500 that tells the caster
+		// nothing about its own payload.
+		if commandrouter.IsPlaylistInvalid(err) {
+			h.logger.Warn("Cast rejected: playlist is invalid", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
 		h.logger.Error("Failed to process cast request", zap.Error(err))
@@ -292,7 +417,13 @@ func (h *hub) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), screenshot.CaptureTimeout)
 	defer cancel()
 
+	invGen := h.screenshotGeneration()
 	image, err := h.capturer.Capture(ctx, bounds)
+	if err == nil && h.screenshotRaced(invGen) {
+		h.logger.Warn("Screenshot discarded: an invitation appeared during the capture")
+		writeControlError(w, control.CodeScreenProtected)
+		return
+	}
 	if err != nil {
 		statusCode := screenshotErrorStatus(err)
 		h.logger.Warn("Failed to capture screenshot", zap.Int("status", statusCode), zap.Error(err))

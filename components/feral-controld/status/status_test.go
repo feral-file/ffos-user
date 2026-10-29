@@ -299,7 +299,7 @@ func TestPollPlayerStatus_ContinuesWhenPageURLReadFails(t *testing.T) {
 
 func TestPollPlayerStatus_SkipsWhenCDPNotConnected(t *testing.T) {
 	// Headless / mid-reconnect: CDP reports not connected. The poll must skip entirely
-	// (no checkStatus send, no error notification) so logs and Sentry are not flooded.
+	// (no checkStatus send, no error notification) so logs are not flooded.
 	mockCDP := &fakeCDP{
 		notInitialized:    true,
 		pageNavigationURL: constants.WEBAPP_URL,

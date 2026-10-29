@@ -45,7 +45,7 @@ verify-go-component-lint:
 	@test -n "$(GO_COMPONENT)" || (echo "GO_COMPONENT is required" >&2; exit 2)
 	@cd components/$(GO_COMPONENT) && go mod download
 	@cd components/$(GO_COMPONENT) && go vet ./...
-	@cd components/$(GO_COMPONENT) && golangci-lint run ./...
+	@cd components/$(GO_COMPONENT) && golangci-lint run $(GOLANGCI_LINT_FLAGS) ./...
 	@cd components/$(GO_COMPONENT) && \
 		unformatted="$$(gofmt -s -l .)"; \
 		if [ -n "$$unformatted" ]; then \
@@ -62,10 +62,15 @@ verify-go-component-test:
 	@cd components/$(GO_COMPONENT) && go test -v -race $$(go list ./... | grep -vE "/mocks|/wrapper")
 
 # verify-scripts pins the user-session shell contracts that ship only on the
-# full-image rail (feral-player static serving + the headless startup contract).
-# These have no cargo/go test to run them, so they are their own verify target.
+# full-image rail (feral-player static serving + the headless startup contract),
+# plus the agent ISO build guard (AGENTS.md "Release guardrail: ISO image
+# builds"). These have no cargo/go test to run them, so they are their own
+# verify target.
 .PHONY: verify-scripts
 verify-scripts:
 	@./scripts/test-serve-feral-player.sh
 	@./scripts/test-headless-startup-contract.sh
 	@./scripts/test-enable-wake-on-lan.sh
+	@./scripts/test-wifi-reading.sh
+	@./scripts/test-agent-iso-build-guard.sh
+	@./scripts/test-agent-branch-flow-guard.sh

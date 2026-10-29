@@ -22,6 +22,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -148,7 +149,7 @@ func TestMetricsRouteServesAllRegistries(t *testing.T) {
 	defer ts.teardown()
 
 	mux := ts.hub.(*hub).server.Handler()
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/metrics", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -289,7 +290,7 @@ func TestUnmatchedRouteGoesThroughMiddleware(t *testing.T) {
 
 	// Unsaturated: unmatched path 404s (served through the middleware).
 	rr := httptest.NewRecorder()
-	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/definitely-not-a-route", nil))
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/definitely-not-a-route", nil))
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 
 	// Saturated: every slot held -> the unmatched request must be shed by the
@@ -303,7 +304,7 @@ func TestUnmatchedRouteGoesThroughMiddleware(t *testing.T) {
 		}
 	}()
 	rr = httptest.NewRecorder()
-	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/definitely-not-a-route", nil))
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/definitely-not-a-route", nil))
 	assert.Equal(t, http.StatusTooManyRequests, rr.Code)
 }
 
@@ -561,7 +562,7 @@ func TestHandleCast_Success(t *testing.T) {
 
 	// Mock command handler to return success (use gomock.Any() for payload)
 	ts.mockCmd.EXPECT().
-		Process(ts.ctx, gomock.Any()).
+		Process(fromControllerCtx{}, gomock.Any()).
 		Return(expectedResult, nil).
 		Times(1)
 
@@ -673,7 +674,7 @@ func TestHandleCast_ProcessError(t *testing.T) {
 	// Mock command handler to return error
 	processErr := errors.New("process error")
 	ts.mockCmd.EXPECT().
-		Process(ts.ctx, gomock.Any()).
+		Process(fromControllerCtx{}, gomock.Any()).
 		Return(nil, processErr).
 		Times(1)
 
@@ -700,6 +701,60 @@ func TestHandleCast_ProcessError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
 
+// TestHandleCast_SourceUnreachableRejected422 pins the one behavior LAN
+// callers observe from the #304 cast-time source preflight: an all-dead
+// playlist maps to 422 with the per-item detail in the body, not the
+// generic 500 above — that detail is what tells the caster WHICH links
+// are dead.
+func TestHandleCast_SourceUnreachableRejected422(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	payload := commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": "https://example.com/playlist.json"},
+	}
+
+	ts.mockJSONDec.EXPECT().
+		Decode(gomock.Any()).
+		DoAndReturn(func(p *commands.Command) error {
+			*p = payload
+			return nil
+		}).
+		Times(1)
+
+	ts.mockCmd.EXPECT().
+		Process(fromControllerCtx{}, gomock.Any()).
+		Return(nil, &commandrouter.SourceUnreachableError{
+			Results: []offlinecache.SourceProbeResult{
+				{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
+			},
+		}).
+		Times(1)
+
+	ts.mockJSON.EXPECT().
+		NewDecoder(gomock.Any()).
+		Return(ts.mockJSONDec).
+		Times(1)
+
+	jsonPayload := `{"messageID":"test-123","message":{"command":"displayPlaylist","request":{"playlistUrl":"https://example.com/playlist.json"}}}`
+	req, err := http.NewRequest("POST", "/api/cast", strings.NewReader(jsonPayload))
+	assert.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	hubImpl := ts.hub.(*hub)
+	hubImpl.handleCast(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	assert.Contains(t, w.Body.String(), "sourceUnreachable")
+	assert.Contains(t, w.Body.String(), "item 0: HTTP 400")
+	// Sanitization contract: resolved source URLs (signed CDN queries
+	// carry credentials) must never reach the response body — items are
+	// named by index and status only.
+	assert.NotContains(t, w.Body.String(), "origin.example")
+}
+
 func TestHandleCast_ProcessNilResult(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -722,7 +777,7 @@ func TestHandleCast_ProcessNilResult(t *testing.T) {
 
 	// Mock command handler to return nil result (no error, but no content)
 	ts.mockCmd.EXPECT().
-		Process(ts.ctx, gomock.Any()).
+		Process(fromControllerCtx{}, gomock.Any()).
 		Return(nil, nil).
 		Times(1)
 
@@ -760,7 +815,7 @@ func TestHandleScreenshot_SuccessWithCustomBounds(t *testing.T) {
 		SHA256:     "abc123",
 		CapturedAt: time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC),
 	}
-	req := httptest.NewRequest(http.MethodGet, "/api/screenshot?width=800&height=800", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot?width=800&height=800", nil)
 	w := httptest.NewRecorder()
 
 	ts.mux.ServeHTTP(w, req)
@@ -782,7 +837,7 @@ func TestHandleScreenshot_UsesNativeSizeWhenBoundsAreOmitted(t *testing.T) {
 	defer ts.teardown()
 
 	ts.capturer.image = &screenshot.Image{Data: []byte("png-data"), Width: 1920, Height: 1080}
-	req := httptest.NewRequest(http.MethodGet, "/api/screenshot", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil)
 	w := httptest.NewRecorder()
 
 	ts.hub.(*hub).handleScreenshot(w, req)
@@ -814,7 +869,7 @@ func TestHandleScreenshot_HoldsSlotUntilResponseWriteCompletes(t *testing.T) {
 	go func() {
 		ts.hub.(*hub).handleScreenshot(
 			firstWriter,
-			httptest.NewRequest(http.MethodGet, "/api/screenshot", nil),
+			httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil),
 		)
 		close(firstDone)
 	}()
@@ -828,7 +883,7 @@ func TestHandleScreenshot_HoldsSlotUntilResponseWriteCompletes(t *testing.T) {
 	secondWriter := httptest.NewRecorder()
 	ts.hub.(*hub).handleScreenshot(
 		secondWriter,
-		httptest.NewRequest(http.MethodGet, "/api/screenshot", nil),
+		httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil),
 	)
 
 	assert.Equal(t, http.StatusTooManyRequests, secondWriter.Code)
@@ -893,7 +948,7 @@ func TestHandleScreenshot_RejectsBrowserRequest(t *testing.T) {
 			ts := setup(t)
 			defer ts.teardown()
 
-			req := httptest.NewRequest(http.MethodGet, "/api/screenshot", nil)
+			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil)
 			req.Header.Set(tt.header, tt.value)
 			w := httptest.NewRecorder()
 
@@ -923,7 +978,7 @@ func TestHandleScreenshot_MapsCaptureErrors(t *testing.T) {
 			defer ts.teardown()
 
 			ts.capturer.err = tt.captureErr
-			req := httptest.NewRequest(http.MethodGet, "/api/screenshot", nil)
+			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil)
 			w := httptest.NewRecorder()
 
 			ts.hub.(*hub).handleScreenshot(w, req)
@@ -1037,6 +1092,19 @@ func TestRespondJSON_Success(t *testing.T) {
 
 // countingHandler is a real inner Handler that counts how many commands reach
 // it, used to prove the storm gate sheds excess before they hit the device.
+
+// fromControllerCtx matches a context the hub marked with
+// commands.FromController: every cast that enters through the LAN API is a
+// controller's, and the router wakes a sleeping player only for those.
+type fromControllerCtx struct{}
+
+func (fromControllerCtx) Matches(x interface{}) bool {
+	ctx, ok := x.(context.Context)
+	return ok && commands.IsFromController(ctx)
+}
+
+func (fromControllerCtx) String() string { return "a context marked commands.FromController" }
+
 type countingHandler struct {
 	calls atomic.Int64
 }
@@ -1110,13 +1178,12 @@ func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
 	}}
 	h := New(ctx, mockWS, mockCmd, provider, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
 
-	req := httptest.NewRequest("GET", "/api/status", nil)
+	req := httptest.NewRequest("GET", "http://127.0.0.1:1111/api/status", nil)
 	w := httptest.NewRecorder()
 	h.withMiddleware("status", h.handleStatus)(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
-
 	var got map[string]any
 	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 	assert.Equal(t, "ff1-abc", got["device_id"])
@@ -1152,7 +1219,7 @@ func TestHandleCast_OversizedBodyRejected413(t *testing.T) {
 	New(context.Background(), mockWS, mockCmd, nil, nil, mockServer, wrapper.NewJSON(), logger)
 
 	body := strings.NewReader(`{"command":"` + strings.Repeat("a", MAX_REQUEST_BODY_BYTES+1024) + `"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/cast", body)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/cast", body)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -1201,7 +1268,7 @@ func TestHandleStatusV2_SamePayloadContract2(t *testing.T) {
 	// Through the real mux, so the route registration itself is covered.
 	get := func(path string) map[string]any {
 		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		mux.ServeHTTP(w, httptest.NewRequest("GET", "http://127.0.0.1:1111"+path, nil))
 		require.Equal(t, http.StatusOK, w.Code, path)
 		var got map[string]any
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got), path)
@@ -1222,41 +1289,55 @@ func TestHandleStatusV2_SamePayloadContract2(t *testing.T) {
 	assert.Equal(t, v1, v2, "v1 and v2 must serve the identical provider payload")
 }
 
-// TestHandleStatus_ClaimedDeviceStillServesTopicID pins the multi-controller
-// contract: FF1 is controlled by several phones, and a frame whose original
-// phone is lost/wiped must stay pairable from any LAN peer, so a CLAIMED
-// device keeps serving its topic_id (LAN-presence = authorization, matching
-// the BLE-era posture). The claimed flag stays visible so the app can
-// suppress the unprompted app-open claim offer — manual pairing only.
-func TestHandleStatus_ClaimedDeviceStillServesTopicID(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
-	ctx := context.Background()
+// TestHandleStatus_ClaimedDeviceWithholdsTopicID pins feral-file#3551 phase
+// 0: the topic is a bearer credential on ff-relayer, so once the device is
+// claimed neither status route hands it to LAN peers. The key stays present
+// as "" (the pre-multi-phone shape) because the released app maps claimed +
+// empty topic_id to its known alreadyClaimed result; dropping the key or
+// inventing a marker would break that mapping.
+func TestHandleStatus_ClaimedDeviceWithholdsTopicID(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		claimed   bool
+		wantTopic string
+	}{
+		{"claimed withholds the topic", true, ""},
+		{"unclaimed serves the topic for the first claim", false, "topic-xyz"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 
-	mockWS := mocks.NewMockWS(ctrl)
-	mockCmd := mocks.NewMockCommandHandler(ctrl)
-	mockServer := mocks.NewMockHTTPServer(ctrl)
-	mockServer.EXPECT().Handler().Return(http.NewServeMux()).AnyTimes()
+			mockServer := mocks.NewMockHTTPServer(ctrl)
+			mux := http.NewServeMux()
+			mockServer.EXPECT().Handler().Return(mux).AnyTimes()
 
-	provider := stubStatusProvider{info: StatusInfo{
-		DeviceID: "ff1-abc",
-		Claimed:  true,
-		TopicID:  "topic-xyz",
-	}}
-	h := New(ctx, mockWS, mockCmd, provider, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
+			provider := stubStatusProvider{info: StatusInfo{
+				DeviceID: "ff1-abc",
+				Claimed:  tt.claimed,
+				TopicID:  "topic-xyz",
+			}}
+			New(context.Background(), mocks.NewMockWS(ctrl), mocks.NewMockCommandHandler(ctrl),
+				provider, nil, mockServer, wrapper.NewJSON(), logger)
 
-	req := httptest.NewRequest("GET", "/api/status", nil)
-	w := httptest.NewRecorder()
-	h.withMiddleware("status", h.handleStatus)(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	var got map[string]any
-	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
-	assert.Equal(t, true, got["claimed"])
-	assert.Equal(t, "topic-xyz", got["topic_id"],
-		"a claimed device keeps serving its topic — multi-phone pairing "+
-			"and lost-phone recovery depend on it")
+			for _, path := range []string{"/api/status", "/api/v2/status"} {
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111"+path, nil))
+				require.Equal(t, http.StatusOK, w.Code, path)
+				var got map[string]any
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got), path)
+				assert.Equal(t, tt.claimed, got["claimed"], path)
+				topic, present := got["topic_id"]
+				assert.True(t, present, "%s: topic_id key must stay present", path)
+				assert.Equal(t, tt.wantTopic, topic, path)
+				if tt.claimed {
+					assert.NotContains(t, w.Body.String(), "topic-xyz",
+						"%s: a claimed device's topic must appear nowhere in the payload", path)
+				}
+			}
+		})
+	}
 }
 
 // TestHandleStatus_NilProviderReturnsContract verifies a nil provider still
@@ -1267,7 +1348,7 @@ func TestHandleStatus_NilProviderReturnsContract(t *testing.T) {
 	defer ts.teardown()
 
 	hubImpl := ts.hub.(*hub) // setup() wires a nil status provider
-	req := httptest.NewRequest("GET", "/api/status", nil)
+	req := httptest.NewRequest("GET", "http://127.0.0.1:1111/api/status", nil)
 	w := httptest.NewRecorder()
 
 	// setup()'s hub uses a mocked JSON encoder, so drive a real one here.
@@ -1286,7 +1367,7 @@ func TestHandleStatus_InvalidMethod(t *testing.T) {
 	defer ts.teardown()
 
 	hubImpl := ts.hub.(*hub)
-	req := httptest.NewRequest("POST", "/api/status", nil)
+	req := httptest.NewRequest("POST", "http://127.0.0.1:1111/api/status", nil)
 	w := httptest.NewRecorder()
 	hubImpl.handleStatus(w, req)
 
@@ -1315,7 +1396,7 @@ func TestMiddleware_EnvelopeRoundTrip(t *testing.T) {
 	h := New(ctx, mockWS, gated, nil, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
 
 	body := `{"command":"roundtrip","request":{"k":"v"}}`
-	req := httptest.NewRequest("POST", "/api/cast", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://127.0.0.1:1111/api/cast", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -1356,7 +1437,7 @@ func TestHandleCast_StormProtection(t *testing.T) {
 	var accepted, limited int
 	for i := 0; i < total; i++ {
 		body := fmt.Sprintf(`{"command":"stormtest","request":{"i":%d}}`, i)
-		req := httptest.NewRequest("POST", "/api/cast", strings.NewReader(body))
+		req := httptest.NewRequest("POST", "http://127.0.0.1:1111/api/cast", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 

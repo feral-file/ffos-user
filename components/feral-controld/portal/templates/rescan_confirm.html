@@ -3,20 +3,35 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Art Computer setup — Search for networks again?</title>
+<title>Art Computer setup — Refresh network list?</title>
 <link rel="stylesheet" href="/setup.css">
 </head>
 <body>
 <main>
   <p class="brand">Feral File · Art Computer</p>
-  <h1>Search for networks again?</h1>
-  <p class="note note-warn">
-    Your Art Computer will restart its setup network
-    (<strong>{{.APSSID}}</strong>) to look for nearby networks. You&#39;ll be disconnected while it searches. When the QR code appears on the
-    screen again, scan it to reconnect and see the updated list.
+  <h1>Refresh network list?</h1>
+  <p class="lede">
+    This briefly disconnects your phone. When the QR code returns on your Art
+    Computer, scan it again.
+  </p>
+  {{- /* Refreshing only helps a network that could appear in a scan (just
+       switched on, briefly missed). The two causes the entry button names —
+       hidden networks, and networks ranked below the displayed list in a
+       dense environment — are not fixed by any number of refreshes, so this
+       page must point at the escape that DOES fix them (typing the name)
+       before the user commits to the disruptive bounce. */}}
+  {{- /* "type its name" must hold in BOTH index shapes: with scan results the
+       manual field sits behind "Other network…", and on the empty-scan page it
+       is the always-visible field — so the copy names the action, then the
+       picker option only as the way to reach it. */}}
+  <p class="lede">
+    Refreshing helps when the network was recently switched on. If your
+    network is hidden, or there are many networks nearby, refreshing won't
+    reveal it — go back and type its name instead (choose “Other network…”
+    if you see the list).
   </p>
   <form method="POST" action="/rescan">
-    <button type="submit" class="primary">Search for networks again</button>
+    <button type="submit" class="primary">Refresh network list</button>
   </form>
   <a class="cancel" href="/">Cancel</a>
 </main>

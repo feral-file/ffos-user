@@ -197,7 +197,7 @@ make verify
 - Go components: `go mod download`, `go vet ./...`, `golangci-lint run ./...`, `gofmt -s -l .`, and `go test -v` for `feral-controld`, `feral-sys-monitord`, and `feral-watchdog`.
 - Startup contract smoke test: `scripts/test-serve-feral-player.sh` validates the `serve-feral-player.sh` static bundle failure path and systemd notify readiness contract with temporary fakes.
 
-Local prerequisites are Go 1.26.0 or compatible for `feral-controld`, Go 1.23.5 or compatible for the other Go components, and `golangci-lint` v2.4.0. `feral-controld` uses Go 1.26.0 because its mint-pairing handoff minter dependency declares Go 1.26.
+Local prerequisites are Go 1.26.0 or compatible for `feral-controld`, Go 1.23.5 or compatible for the other Go components, and `golangci-lint` v2.13.2. Earlier linter releases cannot read Go 1.26 export data. `feral-controld` uses Go 1.26.0 because its mint-pairing handoff minter dependency declares Go 1.26.
 
 After the recovery daemon is submitted at user-session startup, the
 timeout-bounded `enable-wake-on-lan.service` persists magic-packet wake on

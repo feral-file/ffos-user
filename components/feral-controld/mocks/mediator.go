@@ -48,6 +48,18 @@ func (mr *MockMediatorMockRecorder) InitializeMDNS(advertiser, info, link interf
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InitializeMDNS", reflect.TypeOf((*MockMediator)(nil).InitializeMDNS), advertiser, info, link)
 }
 
+// SetDeviceName mocks base method.
+func (m *MockMediator) SetDeviceName(name string) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetDeviceName", name)
+}
+
+// SetDeviceName indicates an expected call of SetDeviceName.
+func (mr *MockMediatorMockRecorder) SetDeviceName(name interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetDeviceName", reflect.TypeOf((*MockMediator)(nil).SetDeviceName), name)
+}
+
 // SetClaimed mocks base method.
 func (m *MockMediator) SetClaimed(claimed bool) {
 	m.ctrl.T.Helper()

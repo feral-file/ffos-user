@@ -92,8 +92,18 @@ func main() {
 		cancel()
 	}()
 
-	// Initialize DBus client
-	mo := dbus.WithMatchPathNamespace(dbus.ObjectPath("/com/feralfile/sysmonitord"))
+	// Initialize DBus client. Match the common /com/feralfile ancestor, not
+	// sysmonitord's and controld's object paths as two separate
+	// WithMatchPathNamespace options: AddMatchSignalContext joins every
+	// option into ONE bus match-rule string, so two different
+	// path_namespace keys in that one rule collapse to a single predicate
+	// rather than an OR — the first match attempt for (ffos-user#356)
+	// controld's EVENT_CDP_STUCK did exactly that and would have silently
+	// dropped one of the two namespaces (which one is bus-implementation
+	// dependent). components/feral-controld/main.go already solved this
+	// identical problem the same way for its own match rule — follow that
+	// precedent here instead of inventing a second one.
+	mo := dbus.WithMatchPathNamespace(dbus.ObjectPath("/com/feralfile"))
 	dbusClient := godbus.NewDBusClient(ctx, log, DBUS_NAME, mo)
 	err = dbusClient.Start()
 	if err != nil {
@@ -128,8 +138,15 @@ func main() {
 	cpuHandler := NewCPUHandler(log, cdpClient)
 	defer gpuHandler.GracefulShutdown(ctx)
 
+	// Chromium monitor is constructed before the mediator so the mediator
+	// can route feral-controld's EVENT_CDP_STUCK signal to it
+	// (ffos-user#356) — this daemon stays the sole place that decides to
+	// restart chromium-kiosk.service or reboot.
+	chromiumMonitor := NewChromiumMonitor(config.CDPConfig.Endpoint, log, commandHandler)
+	defer chromiumMonitor.Stop()
+
 	// Initialize mediator
-	mediator := NewMediator(dbusClient, diskHandler, ramHandler, gpuHandler, cpuHandler, log)
+	mediator := NewMediator(dbusClient, diskHandler, ramHandler, gpuHandler, cpuHandler, chromiumMonitor, log)
 	mediator.Start()
 	defer mediator.Stop()
 
@@ -145,8 +162,6 @@ func main() {
 	}()
 
 	// Start Chromium monitor
-	chromiumMonitor := NewChromiumMonitor(config.CDPConfig.Endpoint, log, commandHandler)
-	defer chromiumMonitor.Stop()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

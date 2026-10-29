@@ -427,3 +427,37 @@ func TestCheckSourceLength_BoundsDialableSourcesOnly(t *testing.T) {
 	require.NoError(t, checkSourceLength("DATA:text/html,"+strings.Repeat("x", 5*MaxSourceURLBytes)),
 		"scheme comparison must be case-insensitive")
 }
+
+// TestSourceGuard_RedirectStripsReferer pins the redirect hook's Referer
+// removal: Go's default redirect handling forwards the previous hop's full
+// URL — query string (and any signed-URL credential in it) included — as
+// Referer to the next origin. These hops are between origins a hostile
+// playlist chose, and nothing on this transport needs a Referer.
+func TestSourceGuard_RedirectStripsReferer(t *testing.T) {
+	var sawReferer string
+	sawRefererSet := false
+	dest := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		sawReferer = r.Header.Get("Referer")
+		sawRefererSet = true
+		w.WriteHeader(go_http.StatusOK)
+	}))
+	defer dest.Close()
+	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		w.Header().Set("Location", dest.URL)
+		w.WriteHeader(go_http.StatusFound)
+	}))
+	defer origin.Close()
+
+	guard := sourceGuard{isReserved: loopbackIsPublic}
+	client := newGuardedHTTPClientFor(guard, 0)
+
+	req, err := client.NewRequest(go_http.MethodGet, origin.URL+"/signed?token=secret", nil)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+
+	require.True(t, sawRefererSet, "the redirect destination must have been reached")
+	assert.Empty(t, sawReferer,
+		"the signed previous-hop URL must not ride Referer to the next origin")
+}

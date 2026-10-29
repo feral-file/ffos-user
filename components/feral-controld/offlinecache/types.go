@@ -45,9 +45,12 @@ const (
 // deliberately dropped: role/note/failedRequests/size all derive from
 // these or from the blob file itself).
 type Resource struct {
-	URL    string `json:"url"`
-	Status int    `json:"status"`
-	SHA256 string `json:"sha256,omitempty"`
+	// FreshUntil is set only for automatic entries. Zero retains explicit
+	// offline snapshot semantics; expiry must be checked on every replay.
+	FreshUntil time.Time `json:"freshUntil,omitempty"`
+	URL        string    `json:"url"`
+	Status     int       `json:"status"`
+	SHA256     string    `json:"sha256,omitempty"`
 	// ContentType is the Content-Type the ORIGIN declared for this
 	// response, verbatim (parameters included), or "" when the origin
 	// declared none at all. Replay's fulfill emits the header only when
@@ -368,6 +371,8 @@ func SourceKey(source string) string {
 // them, and deleting it removes the cached artifact for all of them (no
 // refcount, by design — see Store.DeleteItem's doc).
 type ItemRecord struct {
+	LastPlayedAt time.Time `json:"lastPlayedAt,omitempty"`
+	Automatic    bool      `json:"automatic,omitempty"`
 	// Item is the DP-1 playlist item as resolved by dp1.DP1. Item.Source
 	// is this record's identity (see SourceKey) and is never rewritten —
 	// replay interception keys on the original URL — which preserves the

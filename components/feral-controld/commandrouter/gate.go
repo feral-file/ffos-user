@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 )
 
 // Policy describes how the storm gate protects a single command type.
@@ -84,6 +85,25 @@ func DefaultGateConfig() GateConfig {
 		commands.CMD_UPDATE_TO_LATEST:   disruptive,
 		commands.CMD_SET_SLEEP_SCHEDULE: disruptive,
 		commands.CMD_SET_SLEEP_MODE:     disruptive,
+		// setDeviceName is a persisted eMMC write PLUS a full mDNS Stop+Start
+		// re-registration (goodbye multicast, socket rebind, probe/announce
+		// cycle) on every accepted change, reachable from the unauthenticated
+		// LAN hub. The mediator's unchanged-name early return is defeated by
+		// simply alternating two names, so without a policy the Default
+		// budget (10/s) lets a LAN caller sustain multicast churn and flash
+		// write amplification. Same tier as setSleepSchedule, the closest
+		// persisted-write analog; renaming is a rare deliberate act, so
+		// ~1-per-5s cannot reject legitimate use.
+		commands.CMD_SET_DEVICE_NAME: disruptive,
+		// setContentPolicy is a persisted .state write (fsync'd file + parent
+		// dir) plus a CDP round trip taken under the policy-store lock, and it
+		// is reachable from the unauthenticated LAN hub. Same persisted-write
+		// tier as setSleepSchedule and setDeviceName; changing the audience
+		// setting is a rare deliberate act, so ~1-per-5s cannot reject
+		// legitimate use. handleContentPolicy additionally skips the durable
+		// write when the requested values already match, so a repeated
+		// identical set costs no flash write at all.
+		commands.CMD_SET_CONTENT_POLICY: disruptive,
 
 		// User-initiated power toggles: loosely capped (executor coalesces).
 		commands.CMD_SLEEP_NOW: userAction,
@@ -93,6 +113,7 @@ func DefaultGateConfig() GateConfig {
 		commands.CMD_DISPLAY_PLAYLIST:         heavy,
 		commands.CMD_DISPLAY_DEFAULT_PLAYLIST: heavy,
 		commands.CMD_REFRESH_ARTWORK:          heavy,
+		commands.CMD_PLAY_RECENTLY_PLAYED:     heavy,
 		commands.CMD_UPLOAD_LOGS:              heavy,
 		commands.CMD_SSH_ACCESS:               heavy,
 
@@ -145,6 +166,16 @@ func DefaultGateConfig() GateConfig {
 		commands.CMD_PROFILE:                  query,
 		commands.CMD_DDC_PANEL_STATUS:         query,
 		commands.CMD_GET_OFFLINE_CACHE_STATUS: query,
+		commands.CMD_GET_RECENTLY_PLAYED:      query,
+		// getContentPolicy holds the content-policy store lock across a CDP
+		// round trip, so at the unlisted Default (10/s, burst 20, no dedupe) an
+		// unauthenticated LAN caller could park every global concurrency slot
+		// on policy reads while the player is slow. Dedupe is what makes the
+		// query tier bite here, and dedupe keys on type+arguments — which is
+		// why handleContentPolicy now REJECTS a non-empty get request instead
+		// of ignoring it: otherwise a caller mints unlimited distinct keys
+		// ({"a":1}, {"a":2}, ...) that each miss the dedupe and take a slot.
+		commands.CMD_GET_CONTENT_POLICY: query,
 
 		// High-frequency input events: shared generous budget.
 		commands.CMD_KEYBOARD_EVENT:             input,
@@ -253,6 +284,13 @@ func (g *gate) Process(ctx context.Context, command commands.Command) (interface
 	// failure is legible to every caller, and any caller may simply retry.
 	if p.Dedupe {
 		flightKey := key + "\x00" + argsHash(command.Arguments)
+		// An envelope-admitted command dedupes only with the SAME controller's
+		// identical in-flight command (feral-file#3551 F4): sharing one
+		// execution across principals would hand one controller a result
+		// produced on another's authority. Plaintext keeps today's key.
+		if p, ok := control.PrincipalFrom(ctx); ok {
+			flightKey = "ctl\x00" + p.ControllerID + "\x00" + flightKey
+		}
 		res, err, _ := g.flight.Do(flightKey, func() (interface{}, error) {
 			return g.admit(ctx, command, p, key)
 		})

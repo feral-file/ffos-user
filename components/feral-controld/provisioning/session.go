@@ -23,6 +23,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/portal"
 	"github.com/feral-file/ffos-user/components/feral-controld/wifictl"
 )
 
@@ -373,13 +374,57 @@ func (m *Machine) observePortalActivity() {
 // observePortalTraffic records one portal request of ANY kind — captive
 // probes and root fetches included (wired into portal.Config.TrafficObserved
 // by ensureAPUp). Weaker evidence than observePortalActivity: it proves a
-// phone is attached to the AP, not that a human acted. Consumed only by the
-// recheck blink's attached-phone deferral in sessionExpiryDue.
+// phone is attached to the AP, not that a human acted. Consumed by the
+// recheck blink's attached-phone deferral in sessionExpiryDue, and — on the
+// FIRST Apple request of a raise only — it queues evPortalClient so the loop
+// can repaint the on-screen QR for the attached phone
+// (applyPortalClientAttached). Apple only: the repaint exists for the iOS
+// Camera join, and on Android it is a dead link — the phone keeps cellular
+// as its default route while the hotspot is unvalidated, and Google Camera
+// has already handed off to Wi-Fi Settings (portal.ClientKind). Non-Apple
+// traffic still stamps lastPortalTraffic, so the deferral and the idle
+// re-arm see every attached device.
+// The queue send is non-blocking: a full event buffer drops the repaint (the
+// join QR stays up, which is today's behavior) rather than stalling a
+// request goroutine, and the latch is NOT rolled back on a drop because the
+// buffer only fills under a storm this courtesy repaint should not add to.
+// gen is the raise the calling portal was built for (ensureAPUp binds it):
+// a callback outliving its hotspot across a stop and a re-raise is dropped
+// before it can stamp traffic or take the fresh raise's latch.
+// remoteIP is the request's source address: on the first Apple request it
+// becomes the identity of the attached phone (apAttachIP), which the station
+// poll resolves through the kernel's neighbor table so a second device on the
+// hotspot cannot mask this one leaving (readAttachedPresence).
 // Request-goroutine-safe.
-func (m *Machine) observePortalTraffic() {
+func (m *Machine) observePortalTraffic(gen uint64, kind portal.ClientKind, remoteIP string) {
 	m.mu.Lock()
+	if gen != m.apRaiseGen {
+		m.mu.Unlock()
+		return
+	}
 	m.lastPortalTraffic = m.clock.Now()
+	first := kind == portal.ClientApple && !m.apClientSeen
+	if first {
+		m.apClientSeen = true
+		// The source of THIS request is the phone the address QR goes up
+		// for; the station poll resolves it to a station address and
+		// watches for that one leaving, not for the list emptying.
+		m.apAttachIP = remoteIP
+		m.apAttachMAC = ""
+		// A fresh attach starts the station poll from zero evidence: a
+		// re-attach after the idle re-arm must not inherit the streak that
+		// preceded it.
+		m.resetStationPollLocked()
+	}
 	m.mu.Unlock()
+	if !first {
+		return
+	}
+	select {
+	case m.events <- event{kind: evPortalClient, gen: gen}:
+	default:
+		m.logger.Warn("provisioning: event queue full, dropping attached-client repaint")
+	}
 }
 
 // hubContactFresh reports whether a counted hub contact landed within the
@@ -642,12 +687,17 @@ func (m *Machine) sessionExpiryDue() bool {
 	// policies keep the probes-never-count rule because their phases were
 	// never shortened.
 	//
-	// Best-effort, not a guarantee: the portal page itself never polls, so
-	// after the initial page load this signal is only as fresh as the OS's
-	// own captive re-probe cadence — minutes-scale and backing off on some
-	// platforms. A phone whose OS goes quiet for a full activity window is
-	// treated as absent and the blink proceeds; the mitigation narrows R1,
-	// it does not close it.
+	// Freshness comes from two sources. An OPEN picker polls /status every
+	// two seconds (the #3515 hand-off watcher, before it hands off), and
+	// those polls count: a human on the form keeps the AP up, bounded by
+	// the deferral ceiling below. Once the page has handed off its polls
+	// carry X-Setup-Watcher and are excluded (portal.Config.TrafficObserved),
+	// so a tab left open after the user moved on cannot hold the AP. With
+	// no page open, the signal is only as fresh as the OS's own captive
+	// re-probe cadence — minutes-scale and backing off on some platforms —
+	// so a phone whose OS goes quiet for a full activity window is treated
+	// as absent and the blink proceeds; best-effort, the mitigation narrows
+	// R1, it does not close it.
 	if m.sessionPolicy == sessionRecheck {
 		m.mu.Lock()
 		lastTraffic := m.lastPortalTraffic

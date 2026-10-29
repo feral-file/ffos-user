@@ -24,6 +24,11 @@ type CDPConfig struct {
 	Endpoint string `json:"endpoint"`
 }
 
+// RelayV2Config is optional and never replaces legacy relayer configuration.
+type RelayV2Config struct {
+	Endpoint string `json:"endpoint"`
+}
+
 type RelayerConfig struct {
 	Endpoint string `json:"endpoint"`
 	APIKey   string `json:"apiKey"`
@@ -44,7 +49,48 @@ type CommandStormConfig struct {
 	// Disabled turns the storm gate off entirely. Default (false) keeps it on.
 	Disabled bool `json:"disabled"`
 	// MaxConcurrent overrides the global in-flight command budget when > 0.
+	// Source-preflight parsing has a separate process-wide weighted admission
+	// budget and does not alter this command budget.
 	MaxConcurrent int64 `json:"maxConcurrent"`
+}
+
+// SourceProbeConfig tunes the displayPlaylist source preflight (#304): the
+// probe that rejects a cast whose every item source is definitively dead.
+// Follows CommandStormConfig's optional-section + Disabled opt-out convention.
+//
+// The Disabled switch exists because the preflight turns a previously
+// always-accept command path into one that can REFUSE, based on a verdict
+// table (identity-independent 4xx = dead) whose accepted residual is an
+// origin that answers this probe a 4xx while still rendering in the kiosk —
+// a class the repo has shipped evidence of (see uarewrite). If that residual
+// materializes on the fleet, this flag is the remedy; without it the only
+// recovery is a package rollback. Same reasoning as uarewrite's operator-
+// editable host list: new hostile origin behavior should be a config edit,
+// not a release.
+type SourceProbeConfig struct {
+	// Disabled turns the cast-time source preflight off entirely (casts are
+	// forwarded unprobed, the pre-#304 behavior). Default (false) keeps it on.
+	Disabled bool `json:"disabled"`
+}
+
+// SignatureVerificationConfig tunes DP-1 playlist signature verification on
+// the displayPlaylist path (feral-file/ffos-user#307). Follows
+// SourceProbeConfig's optional-section + Disabled opt-out convention, and for
+// the same reason: today the verdict is report-only, but the planned
+// per-device strict mode (a later phase) will turn an always-accept command
+// into one that can REFUSE the device's primary function, on the word of a
+// verifier (dp1-go + JCS canonicalization) whose accepted residual is a
+// document class that canonicalizes differently on the device than on the
+// signer. Shipping the switch with the verifier means that residual, if it
+// materializes on the fleet, is a config edit rather than a package rollback
+// — and even report-only, a systematically false "invalid" on the fleet is
+// worth being able to silence.
+type SignatureVerificationConfig struct {
+	// Disabled skips verification entirely: no verdict is computed and the
+	// signatureStatus fields are omitted from every reply and notification
+	// (indistinguishable from old firmware). Default (false) keeps
+	// verification on.
+	Disabled bool `json:"disabled"`
 }
 
 // OfflineCacheConfig tunes the offlinecache package (see
@@ -56,16 +102,15 @@ type CommandStormConfig struct {
 // the kiosk (see offlinecache.KioskReplay's doc on that risk), so it must
 // be explicitly opted into per the plan's "Open risks".
 type OfflineCacheConfig struct {
-	Enabled bool `json:"enabled"`
+	// Automatic playback warms fresh media without an explicit download.
+	AutomaticPlaybackDisabled bool  `json:"automaticPlaybackDisabled,omitempty"`
+	MaxDiskPercent            int   `json:"maxDiskPercent,omitempty"`
+	MinFreeDiskBytes          int64 `json:"minFreeDiskBytes,omitempty"`
+	Enabled                   bool  `json:"enabled"`
 	// RootDir is the on-disk store root (blobs/items/playlists).
 	RootDir string `json:"rootDir,omitempty"`
-	// MaxDiskBytes bounds total store size. Unlike most fields here,
-	// <=0 does NOT mean "unlimited" — offlinecache.OptionsFromConfig
-	// deliberately treats an unset/non-positive value as "use
-	// offlinecache.DefaultMaxDiskBytes" instead, since this feature
-	// caches potentially gigabyte-scale software-artwork assets and a
-	// config that merely omits this field must not silently let the
-	// cache grow unbounded on a disk-constrained device.
+	// MaxDiskBytes, when positive, additionally caps the percentage budget.
+	// An absent/non-positive value keeps the percentage and free-space limits.
 	MaxDiskBytes int64 `json:"maxDiskBytes,omitempty"`
 	// CaptureWindowMs bounds how long one capture observes network
 	// activity before finalizing; <=0 uses the capturer's own default.
@@ -184,18 +229,41 @@ type NetlogConfig struct {
 
 // Configuration for all components
 type Config struct {
-	CDPConfig         *CDPConfig           `json:"cdp"`
-	RelayerConfig     *RelayerConfig       `json:"relayer"`
-	MintPairingConfig *MintPairingConfig   `json:"mintPairing"`
-	SentryConfig      *logger.SentryConfig `json:"sentry"`
+	CDPConfig         *CDPConfig         `json:"cdp"`
+	RelayV2           *RelayV2Config     `json:"relayV2,omitempty"`
+	RelayerConfig     *RelayerConfig     `json:"relayer"`
+	MintPairingConfig *MintPairingConfig `json:"mintPairing"`
+	// LogStreaming is decoded permissively because telemetry is optional and
+	// must never crash-loop this recovery-critical daemon. Read it only via
+	// LogStreamingConfig.
+	LogStreaming json.RawMessage `json:"logStreaming,omitempty"`
 	// EnableHub gates the LAN hub. It is a pointer so an absent key can default
 	// ON: the hub is the BLE-replacement recovery channel, so it must run
 	// unless an operator explicitly sets "enableHub": false. Read via
 	// HubEnabled(), never directly.
 	EnableHub    *bool               `json:"enableHub"`
 	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
+	SourceProbe  *SourceProbeConfig  `json:"sourceProbe,omitempty"`
 	OfflineCache *OfflineCacheConfig `json:"offlineCache,omitempty"`
 	Netlog       *NetlogConfig       `json:"netlog,omitempty"`
+	// ContentPolicy carries the operator-only unrated-archive audit gate as RAW
+	// bytes, decoded permissively by ContentPolicyTuning() — same treatment,
+	// and the same reason, as GatewayUserAgent and Provisioning below. As a
+	// typed struct, one hand-edited typo that is still valid JSON
+	// (`{"blockUnratedCurated": "true"}`) failed the top-level unmarshal, which
+	// made config.Load fail, which is FATAL under Restart=always: an unbounded
+	// crash loop that takes the LAN hub, captive portal, provisioning and
+	// claiming down with it, over one optional block.
+	ContentPolicy json.RawMessage `json:"contentPolicy,omitempty"`
+	// SignatureVerification is nil-safe: an absent section keeps
+	// verification on. Read via SignatureVerificationEnabled().
+	SignatureVerification *SignatureVerificationConfig `json:"signatureVerification,omitempty"`
+	// Raster carries the device's Raster read key as RAW bytes, decoded
+	// permissively by RasterTuning() — same treatment, and the same reason,
+	// as ContentPolicy above: the block is optional and hand-provisioned, and
+	// a wrong-typed value in it must cost a wallet cast its authentication,
+	// never crash-loop the daemon and take every recovery surface with it.
+	Raster json.RawMessage `json:"raster,omitempty"`
 	// GatewayUserAgent scopes the kiosk User-Agent rewrite (see the
 	// uarewrite package), carried as RAW bytes and decoded permissively by
 	// GatewayUserAgentTuning() — same treatment, and the same reason, as
@@ -227,15 +295,149 @@ type Config struct {
 	// before restarting). Existing keys keep their existing strict behavior.
 	Provisioning json.RawMessage `json:"provisioning,omitempty"`
 
+	// Control is the feral-file#3551 controller-authorization block
+	// (docs/ff1-control-v1.md), raw and decoded permissively by
+	// ControlTuning() for the same crash-loop reason as Provisioning.
+	Control json.RawMessage `json:"control,omitempty"`
+
 	// MACInfo contains MAC addresses for all network interfaces
 	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
 	MACInfo map[string]string `json:"-"`
+}
+
+// ContentPolicyConfig contains the operator-only unrated archive audit gate.
+type ContentPolicyConfig struct {
+	BlockUnratedCurated bool `json:"blockUnratedCurated"`
+}
+
+// ContentPolicyTuning decodes the raw contentPolicy block permissively: an
+// absent block, or one that decodes to the wrong shape, yields the zero value
+// (gate inactive) — see the ContentPolicy field for why this must never fail
+// the load. The gate can only ever be turned ON by a well-formed block, which
+// is the safe direction: the failure mode of ignoring a typo is that an
+// operator audit gate stays off, not that the daemon stops booting.
+func (c *Config) ContentPolicyTuning(logger *zap.Logger) ContentPolicyConfig {
+	var t ContentPolicyConfig
+	if len(c.ContentPolicy) == 0 {
+		return t
+	}
+	if err := json.Unmarshal(c.ContentPolicy, &t); err != nil {
+		if logger != nil {
+			logger.Warn("contentPolicy config block malformed; leaving the unrated-archive gate inactive",
+				zap.Error(err), zap.String("raw", string(c.ContentPolicy)))
+		}
+		return ContentPolicyConfig{}
+	}
+	return t
+}
+
+// ControlConfig is the decoded "control" block.
+//
+// controld.json is replaced on every full-image OTA from a release-level
+// secret (plan fact F11), so this block is a RELEASE setting, not a device
+// one, and it must never be able to reopen a device that already has control
+// state: main forces the protocol on whenever .state/control (or its
+// retirement tombstone) exists, whatever Enabled says. See control_wiring.go.
+type ControlConfig struct {
+	// Enabled decides only whether a device WITHOUT control state starts the
+	// protocol (creates its identity and offers invitations).
+	Enabled bool `json:"enabled"`
+	// Enforced is the §7.2 "enforced" switch (phase 2). It can only make a
+	// device stricter than enrolled, never less strict.
+	Enforced bool `json:"enforced"`
+	// Malformed records that the block (or one of its fields) did not
+	// decode; the affected fields read false.
+	Malformed bool `json:"-"`
+}
+
+// ControlTuning decodes the control block field by field, so one bad value
+// does not take the other with it. Absent means disabled and not enforced.
+// A malformed field reads false and sets Malformed: for Enabled that only
+// affects devices without control state, and for Enforced false is still
+// the enrolled policy, so both degrade safely.
+func (c *Config) ControlTuning(logger *zap.Logger) ControlConfig {
+	var t ControlConfig
+	if len(c.Control) == 0 || string(c.Control) == "null" {
+		return t
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(c.Control, &fields); err != nil {
+		t.Malformed = true
+	}
+	for name, dst := range map[string]*bool{"enabled": &t.Enabled, "enforced": &t.Enforced} {
+		raw, ok := fields[name]
+		if !ok {
+			continue
+		}
+		if err := json.Unmarshal(raw, dst); err != nil {
+			*dst = false
+			t.Malformed = true
+		}
+	}
+	if t.Malformed && logger != nil {
+		logger.Error("control config block malformed; bad fields read as false (devices with control state keep enforcing it)",
+			zap.String("raw", string(c.Control)))
+	}
+	return t
+}
+
+// RasterConfig is the device's own credential for Raster (api.raster.art),
+// the token index ff-app's address playlists walk (feral-file#3576). The
+// playlist document never carries a key — it is cast and may be published —
+// so the device supplies this one as x-api-key on every wallet-walk request.
+type RasterConfig struct {
+	APIKey string `json:"apiKey"`
+}
+
+// RasterTuning decodes the raw raster block permissively: an absent block, or
+// one that decodes to the wrong shape, yields the zero value (no key, so the
+// walk runs unauthenticated and Raster decides) — see the Raster field for
+// why this must never fail the load. The raw block is NOT logged on a decode
+// failure, unlike ContentPolicyTuning's: it holds the credential.
+func (c *Config) RasterTuning(logger *zap.Logger) RasterConfig {
+	var t RasterConfig
+	if len(c.Raster) == 0 {
+		return t
+	}
+	if err := json.Unmarshal(c.Raster, &t); err != nil {
+		if logger != nil {
+			logger.Warn("raster config block malformed; Raster wallet walks run without an API key", zap.Error(err))
+		}
+		return RasterConfig{}
+	}
+	return t
+}
+
+// LogStreamingConfig decodes optional remote-log settings without making a
+// malformed block fatal to the daemon. Invalid configuration fails closed to
+// local-only logging; an absent block retains the default upload-all policy.
+func (c *Config) LogStreamingConfig(log *zap.Logger) *logger.StreamingConfig {
+	if len(c.LogStreaming) == 0 || string(c.LogStreaming) == "null" {
+		return nil
+	}
+	var stream logger.StreamingConfig
+	if err := json.Unmarshal(c.LogStreaming, &stream); err != nil {
+		if log != nil {
+			log.Warn("logStreaming config block malformed; disabling remote delivery", zap.Error(err))
+		}
+		zero := 0.0
+		return &logger.StreamingConfig{SampleRate: &zero}
+	}
+	return &stream
 }
 
 // HubEnabled reports whether the LAN hub should run. It defaults ON: only an
 // explicit "enableHub": false disables it.
 func (c *Config) HubEnabled() bool {
 	return c.EnableHub == nil || *c.EnableHub
+}
+
+// SignatureVerificationEnabled reports whether DP-1 signature verification
+// runs. It defaults ON: only an explicit "signatureVerification": {"disabled":
+// true} turns it off (see SignatureVerificationConfig for why the switch
+// exists at all).
+func (c *Config) SignatureVerificationEnabled() bool {
+	return c.SignatureVerification == nil || !c.SignatureVerification.Disabled
 }
 
 // GatewayUserAgentConfig scopes the kiosk User-Agent rewrite that keeps
@@ -269,6 +471,18 @@ type GatewayUserAgentConfig struct {
 	// back to the defaults — the same landing point an unreadable block
 	// gets. See uarewrite.NewFromOperatorHosts.
 	Hosts []string `json:"hosts,omitempty"`
+	// ReplacementGateway is where a `/ipfs/<cid>` request bound for one of
+	// Hosts is sent instead, now that ipfs.io and dweb.link serve content
+	// only through an in-browser service worker (see uarewrite.RewriteURL).
+	// Scheme and host, e.g. "https://ipfs.filebase.io"; a trailing path is
+	// tolerated and dropped. Empty uses uarewrite.DefaultReplacementGateway.
+	// An unusable value, including one that names one of Hosts (a listed
+	// host does not serve content, so it cannot be the fallback), is
+	// DROPPED and named in an Error log, and the default applies — same
+	// salvage rule as Hosts. If the default is itself listed, the CID
+	// redirect is turned off and the User-Agent rule alone remains, which
+	// is also logged. The interceptor is never disabled over this field.
+	ReplacementGateway string `json:"replacementGateway,omitempty"`
 }
 
 // IsEnabled reports whether the rewrite should run. It defaults ON: this is
@@ -572,7 +786,7 @@ func (m *defaultConfigManager) Get() *Config {
 			CDPConfig:         &CDPConfig{},
 			RelayerConfig:     &RelayerConfig{},
 			MintPairingConfig: &MintPairingConfig{},
-			SentryConfig:      &logger.SentryConfig{},
+			LogStreaming:      nil,
 		}
 	}
 	return m.config

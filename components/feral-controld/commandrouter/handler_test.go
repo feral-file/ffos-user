@@ -23,6 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -264,6 +265,47 @@ func TestCommandHandler_Process_StartMintPairingSessionRoutesToMintPairing(t *te
 	assert.Equal(t, 1, mintSvc.startCalls)
 }
 
+func TestCommandHandler_Process_JoinMintPairingChannelDisabled(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_JOIN_MINT_PAIRING_CHANNEL,
+		Arguments: map[string]interface{}{"shortCode": "123456"},
+	})
+
+	assert.NoError(t, err)
+	resp, ok := result.(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, false, resp["ok"])
+	errObj, ok := resp["error"].(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, "disabled", errObj["code"])
+}
+
+func TestCommandHandler_Process_JoinMintPairingChannelRoutesToMintPairing(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	assert.Equal(t, commands.Type("joinMintPairingChannel"), commands.CMD_JOIN_MINT_PAIRING_CHANNEL)
+
+	args := map[string]any{"channelId": "ch_1", "pairingToken": "pt_1"}
+	want := map[string]any{"ok": true, "status": "joined"}
+	mintSvc := &fakeMintPairingService{joinResult: want}
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_JOIN_MINT_PAIRING_CHANNEL,
+		Arguments: args,
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, result)
+	assert.Equal(t, args, mintSvc.joinArgs)
+	assert.Equal(t, 1, mintSvc.joinCalls)
+	assert.Equal(t, 0, mintSvc.startCalls)
+}
+
 func TestCommandHandler_Process_CloseMintPairingSessionDisabled(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -363,14 +405,22 @@ func TestCommandHandler_Process_NewGestureCommandsRouteToExecutor(t *testing.T) 
 
 type fakeMintPairingService struct {
 	startCalls     int
+	joinCalls      int
 	closeCalls     int
 	approvalCalls  int
 	startArgs      map[string]any
+	joinArgs       map[string]any
 	closeArgs      map[string]any
 	approvalArgs   map[string]any
 	startResult    any
+	joinResult     any
 	closeResult    any
 	approvalResult any
+
+	// overlayStatus is what OverlayStatus() returns; the zero value (Showing
+	// false) matches this fake's behavior before issue #381's direct-reply
+	// annotation needed it to be settable.
+	overlayStatus mintpairing.OverlayStatus
 }
 
 func (f *fakeMintPairingService) Start(context.Context) {}
@@ -381,6 +431,12 @@ func (f *fakeMintPairingService) HandleStartPairingSession(_ context.Context, ar
 	f.startCalls++
 	f.startArgs = args
 	return f.startResult, nil
+}
+
+func (f *fakeMintPairingService) HandleJoinPairingChannel(_ context.Context, args map[string]any) (any, error) {
+	f.joinCalls++
+	f.joinArgs = args
+	return f.joinResult, nil
 }
 
 func (f *fakeMintPairingService) HandleClosePairingSession(_ context.Context, args map[string]any) (any, error) {
@@ -397,7 +453,29 @@ func (f *fakeMintPairingService) HandleApprovalDecision(_ context.Context, args 
 
 func (f *fakeMintPairingService) DisplayActive() bool { return false }
 
+func (f *fakeMintPairingService) OverlayStatus() mintpairing.OverlayStatus {
+	return f.overlayStatus
+}
+
+func (f *fakeMintPairingService) SetController(*overlay.Controller) {}
+
+func (f *fakeMintPairingService) Painter() overlay.Painter { return nil }
+
 func (f *fakeMintPairingService) SetSession(mintpairing.NavigationSession) {}
+
+func (f *fakeMintPairingService) SetDisplayGrants(mintpairing.DisplayGrantIssuer, string) {}
+
+func (f *fakeMintPairingService) RevokeTopicSessions(context.Context, string) (int, error) {
+	return 0, nil
+}
+
+func (f *fakeMintPairingService) WaitForInFlightCreates(context.Context) (int, error) {
+	return 0, nil
+}
+
+func (f *fakeMintPairingService) CloseActivePairing(context.Context) (bool, error) {
+	return false, nil
+}
 
 func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
 	ts := setup(t)
@@ -451,7 +529,7 @@ func TestCommandHandler_Process_DisplayPlaylist_SyncsKioskReplayScope(t *testing
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/video.mp4", "https://example.com/app.js"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/video.mp4", "https://example.com/app.js"}).Return(1, nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	command := commands.Command{
@@ -489,7 +567,7 @@ func TestCommandHandler_Process_DisplayPlaylist_HoldsPlaybackLockAcrossSyncAndSe
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	lock := mockKioskReplay.EXPECT().LockPlayback().Times(1)
-	sync := mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/video.mp4"}).Return(nil).Times(1)
+	sync := mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/video.mp4"}).Return(1, nil).Times(1)
 	// MarkPlaybackChanged must be announced UNDER the lock, after the sync
 	// and before the unlock, so a concurrent resync defers to this
 	// authoritative scope change (see KioskReplay.PlaybackGeneration).
@@ -525,7 +603,7 @@ func TestCommandHandler_Process_DisplayPlaylist_KioskReplaySyncFailureDoesNotBlo
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/video.mp4"}).Return(errors.New("dial failed")).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/video.mp4"}).Return(0, errors.New("dial failed")).Times(1)
 	// The authoritative generation bump MUST still fire even though the
 	// SyncPlaylist above errored: this display path is authoritative for
 	// what SHOULD be on screen, so a concurrent corrective resync must
@@ -570,7 +648,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplay
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-new"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-new"}).Return(1, nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	ts.mockCDP.EXPECT().
@@ -587,7 +665,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplay
 		PlaylistURL: &oldURL,
 	}, nil).Times(1)
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, oldURL, false).Return(oldPlaylist, nil).Times(1)
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-old"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-old"}).Return(1, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -617,7 +695,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskRepla
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-new"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-new"}).Return(1, nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	ts.mockCDP.EXPECT().
@@ -635,7 +713,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskRepla
 		PlaylistURL: &oldURL,
 	}, nil).Times(1)
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, oldURL, false).Return(oldPlaylist, nil).Times(1)
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-old"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-old"}).Return(1, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -890,6 +968,62 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesInlineManifest(t *testi
 	// field but broke an existing one would otherwise pass the check above.
 	assert.Equal(t, "Item Title", item["title"])
 	assert.Equal(t, "https://example.com/video.mp4", item["source"])
+}
+
+// A recent-played replay must not become a side channel to CanvasService. The
+// second CDP call below is the ordinary displayPlaylist command, so it keeps
+// the scheduler, offline-replay scope, validation and future policy seam that
+// every other cast uses. The controller-only request contains an opaque id;
+// only the device-internal resolver ever sees the retained source.
+func TestCommandHandler_Process_PlayRecentlyPlayed_ReentersDisplayPlaylist(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx := context.Background()
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	// Re-entering displayPlaylist with the retained item goes through the
+	// static dp1_call branch, which expands series items by hand; this
+	// playlist has none, so echo it back.
+	mockDP1.EXPECT().
+		ExpandSeriesItems(ctx, gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist { return playlist }).
+		AnyTimes()
+	handler := commandrouter.New(
+		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,
+		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	var displayExpression string
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			assert.Contains(t, expr, "resolveRecentlyPlayed")
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok": true, "status": "ok", "item": map[string]interface{}{
+					"id": "retained-work", "source": "https://example.test/retained", "license": "open",
+				},
+			}}, nil
+		}).Times(1)
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			displayExpression = params["expression"].(string)
+			return playerOkResponse(), nil
+		}).Times(1)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_PLAY_RECENTLY_PLAYED,
+		Arguments: map[string]interface{}{"recordId": "rp-42"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "rp-42", result.(map[string]interface{})["recordId"])
+	assert.Contains(t, displayExpression, "displayPlaylist")
+	item := firstCastItem(t, displayExpression)
+	assert.Equal(t, "https://example.test/retained", item["source"])
+	assert.NotContains(t, displayExpression, "rp-42")
 }
 
 // firstCastItem digs the first playlist item out of the CDP expression the
@@ -1688,6 +1822,7 @@ func TestCommandHandler_Process_StagedFactoryReset_RejectsEveryFamily(t *testing
 		commands.CMD_UPDATE_TO_LATEST,           // arms a competing bootctl one-shot
 		commands.CMD_SHOW_PAIRING_QR_CODE,       // paints the claim QR
 		commands.CMD_START_MINT_PAIRING_SESSION, // mint pairing: own overlay + token minting
+		commands.CMD_JOIN_MINT_PAIRING_CHANNEL,  // mint pairing: joins a broker channel + token minting
 		commands.CMD_DOWNLOAD_PLAYLIST,          // offline cache: writes under the root subvolume
 		commands.CMD_CLEAR_PLAYLIST_CACHE,       // offline cache: deletes under it
 		commands.CMD_FACTORY_RESET,              // a duplicate adds nothing while one is staged
