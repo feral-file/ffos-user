@@ -552,6 +552,24 @@ func TestRelayerSessionCreator_ListEphemeralSessionIDsReportsAFailedList(t *test
 	require.Error(t, err, "an unreadable list must never look like an empty one")
 }
 
+// A retired legacy relayer (410 on its session routes) holds no usable
+// sessions, so a factory reset's sweep is done, not failed.
+func TestRevokeTopicSessions_RetiredRelayerIsNothingToRevoke(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusGone)
+	}))
+	defer server.Close()
+
+	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+	_, err := creator.ListEphemeralSessionIDs(context.Background(), "topic-1")
+	require.ErrorIs(t, err, errRelayerSessionsRetired)
+
+	s := newService(Options{}, nil, creator, nil, nil, wrapper.NewJSON(), zap.NewNop()).(*service)
+	revoked, err := s.RevokeTopicSessions(context.Background(), "topic-1")
+	require.NoError(t, err)
+	assert.Zero(t, revoked)
+}
+
 func TestRelayerSessionCreator_RevokeTreatsAMissingSessionAsRevoked(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

@@ -3,6 +3,7 @@ package mediator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -634,8 +635,11 @@ func (m *mediator) reconcileRelayer(ctx context.Context) {
 		return
 	}
 
-	m.logger.Info("Relayer reconcile: device online with relayer disconnected, connecting")
-	if err := m.relayer.RetryableConnect(ctx); err != nil {
+	// Retired is the steady state once the legacy host is gone: Debug, since
+	// this runs on every heartbeat and dials nothing (see legacyRetiredGate).
+	if err := m.relayer.RetryableConnect(ctx); errors.Is(err, relayer.ErrLegacyRetired) {
+		m.logger.Debug("Relayer reconcile: legacy relayer retired", zap.Error(err))
+	} else if err != nil {
 		m.logger.Error("Relayer reconcile: connect failed, retrying on a later heartbeat", zap.Error(err))
 	} else {
 		m.logger.Info("Relayer reconcile: relayer connected")
@@ -781,10 +785,19 @@ func (m *mediator) handleDBusSignal(
 		// Reconnect the relayer if it's not already connected
 		if connected && !m.relayer.IsConnected() {
 			m.logger.Info("Connectivity restored, reconnecting relayer")
+			// An online edge earns a latched-retired legacy relayer one dial:
+			// the permanent error it latched on may have come from the network
+			// just left (a captive portal's DNS answer), not from the relayer.
+			if p, ok := m.relayer.(interface{ AllowRetiredProbe() }); ok {
+				p.AllowRetiredProbe()
+			}
 			err := m.relayer.RetryableConnect(ctx)
-			if err != nil {
+			switch {
+			case errors.Is(err, relayer.ErrLegacyRetired):
+				m.logger.Info("Legacy relayer still retired after connectivity change", zap.Error(err))
+			case err != nil:
 				m.logger.Error("Failed to reconnect to relayer", zap.Error(err))
-			} else {
+			default:
 				m.logger.Info("Relayer reconnected after connectivity change")
 			}
 		}

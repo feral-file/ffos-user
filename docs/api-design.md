@@ -287,7 +287,7 @@ The `mintPairingApprovalDecision` command is a controller-to-controld approval r
 | `/api/v2/status` | GET | The LAN **pairing** surface: identical payload, `contract: "2"`. The versioned route is the firmware gate — old firmware 404s here (and advertises no `api` mDNS TXT key), which is how the app tells LAN-pairable devices from old ones. Non-GET → `405`. |
 | `/api/screenshot` | GET | PNG observation of the sole Chromium page target. Optional `width` and `height` query parameters define an aspect-ratio-preserving bounding box. Browser-originated requests are rejected. On a claimed device, requires `X-FF1-Topic` (else `401 topic_required`): the screen can show the claim QR, which carries the topic. With the control protocol on (feral-file#3551, `docs/ff1-control-v1.md` §7.2): `403 {"error":{"code":"enrollment_required"}}` in every state but `legacy`; in `legacy`, `403 {"error":{"code":"screen_protected"}}` while a first-owner invitation is live, re-checked after the capture (an invitation minted during it discards the image). Non-GET → `405`. |
 | `/api/notification` | GET → WS | Upgrades to a WebSocket that streams the same outbound notifications the relayer receives. Non-GET → `405`. |
-| `/metrics` | GET | Prometheus text exposition: playback metrics plus the stage-0 network-observability gauges (`net_link_state`, `net_wifi_signal_percent`, `net_wifi_link_info`, `relayer_connected`, `relayer_last_close_code`, `relayer_disconnects_total`; see [`wan-outage-observability.md`](wan-outage-observability.md)). Cache-only — a scrape never triggers probe work. |
+| `/metrics` | GET | Prometheus text exposition: playback metrics plus the stage-0 network-observability gauges (`net_link_state`, `net_wifi_signal_percent`, `net_wifi_link_info`, `relayer_connected`, `relayer_last_close_code`, `relayer_disconnects_total`; see [`wan-outage-observability.md`](wan-outage-observability.md)) and the legacy-relayer retirement gauges (`relay_v2_connected`, `relayer_legacy_retired`, `control_state{state}`, `legacy_topic_present`, `device_claimed`, `reset_target_version_info{version}`; see [`relay-v2-only-g3.md`](relay-v2-only-g3.md) §3.6). Cache-only — a scrape never triggers probe work. |
 
 The hub does not carry `messageID == "system"` messages; topic assignment is relayer-only.
 
@@ -307,6 +307,7 @@ For installation diagnosis, `curl --fail http://<device-ip>:1111/api/screenshot 
   "internet": true,
   "relayer_connected": true,
   "relayer_last_connected_at": "2026-10-14T02:00:00Z",
+  "relay_v2_connected": true,
   "setup_state": "online",
   "connectivity": "...",
   "topic_id": "...",
@@ -318,7 +319,7 @@ For installation diagnosis, `curl --fail http://<device-ip>:1111/api/screenshot 
 
 - `contract` is owned by the hub (not the status provider): `"1"` on the legacy route, `"2"` on `/api/v2/status`. The versioned route — not the field — is the firmware gate the pairing app uses: a device that 404s on `/api/v2/status` (or lacks the `api` mDNS TXT key) is old firmware and must be treated as **not LAN-pairable** (no discovery notification, no pairing offer). The field remains the dual-running-window signal for retiring the open `:1111` surface.
 - `setup_state` is a coarse provisioning-state string. When the provisioning machine is wired in (production), it is the live machine state: `starting`, `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joining`. The bare status provider falls back to `claimed` / `unclaimed`.
-- `relayer_connected` reports the cached relayer WebSocket lifecycle state, independently of LAN link and internet reachability. It is not proof that a cloud command will complete. `relayer_last_connected_at` is the UTC RFC3339 timestamp of the most recent successful socket dial in this daemon process; it remains after disconnect and is `null` until the first successful dial (including after restart). Status reads trigger no relayer probe.
+- `relayer_connected` reports the cached relayer WebSocket lifecycle state, independently of LAN link and internet reachability. It is not proof that a cloud command will complete. `relayer_last_connected_at` is the UTC RFC3339 timestamp of the most recent successful socket dial in this daemon process; it remains after disconnect and is `null` until the first successful dial (including after restart). Status reads trigger no relayer probe. These two describe the legacy relayer only; `relay_v2_connected` is the v2 device-ID relay socket (additive, `docs/relay-v2-only-g3.md` §3.5).
 - `claimed` mirrors the mDNS TXT `claimed` value.
 - `topic_id` is served only while the device is unclaimed; once claimed the key stays present with the value `""` (feral-file#3551 phase 0). The released app reads claimed + empty `topic_id` as `alreadyClaimed`. Additional phones pair from the on-screen claim QR an existing phone shows ("Show Pairing QR Code").
 - `branch` and `version` are read from the same `ff1-config.json` the OTA gate uses, so the LAN payload can never disagree with the claim QR.

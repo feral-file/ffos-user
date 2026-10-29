@@ -109,6 +109,17 @@ func buildNetlogRecorder(
 	return rec
 }
 
+// netlogProbeEndpoint picks the endpoint whose host the ladder probes as "the
+// backend": the v2 relay when configured (the legacy relayer may be retired,
+// and a dead host would read every outage as backend-only-down), else the
+// legacy relayer endpoint.
+func netlogProbeEndpoint(relayV2Endpoint, relayerEndpoint string) string {
+	if relayV2Endpoint != "" {
+		return relayV2Endpoint
+	}
+	return relayerEndpoint
+}
+
 // netlogBackendHost extracts the relayer endpoint's hostname — the backend
 // whose reachability the ladder's TCP/DNS rungs measure. A malformed endpoint
 // falls back to the support-logs host (also a Feral File backend) so the

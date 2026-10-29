@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -32,6 +33,22 @@ var (
 	// Errors
 	ErrAlreadyConnected = fmt.Errorf("relayer is already connected")
 	ErrNotConnected     = fmt.Errorf("relayer is not connected")
+	// ErrLegacyRetired is returned by the legacy relayer while it is latched
+	// retired: its last dial failed permanently (the host answers 404/410 or
+	// no longer resolves) or no endpoint is configured. See legacyRetiredGate.
+	ErrLegacyRetired = errors.New("legacy relayer retired or not configured")
+)
+
+// A latched-retired legacy relayer is still dialed on an escalating probe:
+// first after retiredProbeMin, doubling to retiredProbeMax, reset by a
+// successful dial. The short first steps keep a transient permanent-looking
+// answer (a Cloudflare 403/404 mid-deploy, a negatively cached NXDOMAIN) from
+// costing a legacy-only device more than a few minutes of remote control; the
+// cap keeps a truly retired host to one dial an hour. An offline→online edge
+// also allows one dial (AllowRetiredProbe).
+const (
+	retiredProbeMin = time.Minute
+	retiredProbeMax = time.Hour
 )
 
 const (
@@ -228,9 +245,21 @@ type relayer struct {
 	// BEFORE any Connect (same plain-field ordering contract as the hub's
 	// contactObserver); nil is a no-op.
 	connObserver func(connected bool, closeCode int)
-	// beforeExit seals best-effort telemetry before the process-level exit used
-	// for an unrecoverable reconnect failure. Set once before Connect.
-	beforeExit func()
+
+	// Legacy-retirement latch (legacy instance only; guarded by the mutex,
+	// except retiredFlag). Every permanent dial error survives a restart
+	// (404/410, NXDOMAIN, a bad URL), so redialing on every heartbeat only
+	// spends CPU and log volume, and exiting the daemon fixes nothing.
+	// retiredAt is the zero time until the first gate check after latching;
+	// probeIn is the current probe interval; probeArmed allows one dial on the
+	// next check (an offline→online edge). retiredFlag mirrors retired for
+	// readers that must not wait on the mutex, which Connect holds across a
+	// dial (the /metrics scrape).
+	retired     bool
+	retiredAt   time.Time
+	probeIn     time.Duration
+	probeArmed  bool
+	retiredFlag atomic.Bool
 
 	// Logger
 	logger *zap.Logger
@@ -242,10 +271,72 @@ func (r *relayer) SetConnectionObserver(fn func(connected bool, closeCode int)) 
 	r.connObserver = fn
 }
 
-// SetBeforeExit wires a bounded cleanup hook for the terminal reconnect path.
-// Call before the first Connect.
-func (r *relayer) SetBeforeExit(fn func()) {
-	r.beforeExit = fn
+// AllowRetiredProbe lets a latched-retired legacy relayer dial once on its next
+// connect attempt. The mediator calls it on an offline→online edge: a captive
+// portal or filtering resolver also answers with a permanent DNS error, and
+// without this a device behind one would stay off the legacy relayer for up to
+// the current probe interval after the network recovers.
+func (r *relayer) AllowRetiredProbe() {
+	r.Lock()
+	defer r.Unlock()
+	if r.retired {
+		r.probeArmed = true
+	}
+}
+
+// Retired reports whether the legacy relayer is latched retired (see
+// legacyRetiredGate). It feeds the relayer_legacy_retired gauge.
+func (r *relayer) Retired() bool {
+	return r.retiredFlag.Load()
+}
+
+// legacyRetiredGate decides whether the legacy relayer may dial now. It
+// returns ErrLegacyRetired when no endpoint is configured, or while latched
+// and neither the escalating probe nor an armed edge probe is due.
+func (r *relayer) legacyRetiredGate() error {
+	r.Lock()
+	defer r.Unlock()
+	if r.endpoint == "" {
+		r.setRetiredLocked(true)
+		return ErrLegacyRetired
+	}
+	if !r.retired {
+		return nil
+	}
+	now := r.clock.Now()
+	if r.probeArmed {
+		r.probeArmed = false
+		r.retiredAt = now
+		return nil
+	}
+	if !r.retiredAt.IsZero() && now.Sub(r.retiredAt) >= r.probeIn {
+		r.retiredAt = now
+		r.probeIn = min(2*r.probeIn, retiredProbeMax)
+		return nil
+	}
+	if r.retiredAt.IsZero() {
+		r.retiredAt = now
+	}
+	return ErrLegacyRetired
+}
+
+// setRetired latches or clears the legacy-retirement latch.
+func (r *relayer) setRetired(retired bool) {
+	r.Lock()
+	defer r.Unlock()
+	r.setRetiredLocked(retired)
+}
+
+func (r *relayer) setRetiredLocked(retired bool) {
+	if retired && !r.retired {
+		r.retiredAt = time.Time{}
+		r.probeIn = retiredProbeMin
+	}
+	r.retired = retired
+	r.retiredFlag.Store(retired)
+	if !retired {
+		r.probeArmed = false
+	}
 }
 
 // observeConn forwards one lifecycle transition to the observer, if wired.
@@ -295,6 +386,9 @@ func (r *relayer) RetryableConnect(ctx context.Context) error {
 	if r.deviceID != "" {
 		return r.retryV2(ctx)
 	}
+	if err := r.legacyRetiredGate(); err != nil {
+		return err
+	}
 	var attempts int
 	for {
 		attempts++
@@ -309,6 +403,7 @@ func (r *relayer) RetryableConnect(ctx context.Context) error {
 
 		err := r.Connect(ctx)
 		if err == nil {
+			r.setRetired(false)
 			return nil
 		}
 
@@ -322,8 +417,11 @@ func (r *relayer) RetryableConnect(ctx context.Context) error {
 		case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 			return err
 		case errors.As(err, &permanentErr):
-			r.logger.Error("Relayer connection failed permanently", zap.Error(err))
-			return err
+			// Latch: the next attempts return ErrLegacyRetired without dialing
+			// until a probe is due (see legacyRetiredGate).
+			r.setRetired(true)
+			r.logger.Warn("Legacy relayer failed permanently; latched retired", zap.Error(err))
+			return fmt.Errorf("%w: %w", ErrLegacyRetired, err)
 		case errors.As(err, &transientErr):
 			r.logger.Warn("Relayer connection failed transiently, will retry",
 				zap.Error(err),
@@ -361,6 +459,12 @@ func (r *relayer) RetryableConnect(ctx context.Context) error {
 
 // Connect connects to the Relayer server and listens for messages
 func (r *relayer) Connect(ctx context.Context) error {
+	// A config without a legacy endpoint means "no legacy relayer": never dial
+	// an empty URL (it would be retried as an unknown error forever).
+	if r.deviceID == "" && r.endpoint == "" {
+		r.setRetired(true)
+		return ErrLegacyRetired
+	}
 	// Ensure the relayer is not connected
 	r.Lock()
 	if r.conn != nil {
@@ -450,6 +554,8 @@ func (r *relayer) Connect(ctx context.Context) error {
 	// corrupting the last record sealed into the ring at shutdown.
 	if r.deviceID == "" {
 		netmetrics.SetRelayerConnected(true)
+	} else {
+		netmetrics.SetRelayV2Connected(true)
 	}
 	r.observeConn(true, 0)
 	r.Unlock()
@@ -621,12 +727,11 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 							r.logger.Warn("Optional v2 reconnect stopped", zap.Error(err))
 							return
 						}
-						// Stop the program and let the systemd restart it
-						r.logger.Error("Failed to reconnect to Relayer, the controld will be restarted by systemd shortly", zap.Error(err))
-						if r.beforeExit != nil {
-							r.beforeExit()
-						}
-						r.os.Exit(1)
+						// Never exit the daemon: v2 and the LAN hub must keep
+						// running. A permanent failure is latched (ErrLegacyRetired)
+						// and anything else is redialed by the mediator's reconcile
+						// heartbeat, which owns legacy reconnection.
+						r.logger.Warn("Legacy relayer reconnect stopped; the mediator reconcile owns the next attempt", zap.Error(err))
 					}
 					return
 				}
@@ -1016,6 +1121,8 @@ func (r *relayer) closeConn() {
 	if r.deviceID == "" {
 		netmetrics.SetRelayerConnected(false)
 		netmetrics.RecordRelayerDisconnect()
+	} else {
+		netmetrics.SetRelayV2Connected(false)
 	}
 	r.observeConn(false, 0)
 	r.logger.Info("Relayer connection closed")

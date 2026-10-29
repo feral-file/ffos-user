@@ -120,6 +120,18 @@ type autoClaimFlow interface {
 	MaybeShowClaimQROnOnline(ctx context.Context)
 }
 
+// relayV2RouteSink receives the v2 relay seams the claim flow's remote-route
+// wait consults (devicectl executor.SetRelayV2Route).
+type relayV2RouteSink interface {
+	SetRelayV2Route(wired, connected func() bool)
+}
+
+// claimQRRefresher is the topic observer's entry point when the executor has
+// one: refresh an on-screen claim QR in place, else run the claim flow.
+type claimQRRefresher interface {
+	RefreshOrRunClaimQR(ctx context.Context)
+}
+
 // startupOTAGateFlow is the narrow slice of the executor the online startup
 // update trigger needs (the claimed-device counterpart of autoClaimFlow).
 // Asserted at wiring time so test doubles without the method simply leave the

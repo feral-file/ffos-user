@@ -1893,7 +1893,7 @@ func TestClient_Ping_ContextCanceled(t *testing.T) {
 	assert.False(t, ts.client.IsConnected(), "expected client to be disconnected after close")
 }
 
-func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
+func TestClient_ReadMessage_PermanentError_LatchesRetiredWithoutExit(t *testing.T) {
 	ts := setup(t)
 	defer ts.ctrl.Finish()
 
@@ -1957,23 +1957,10 @@ func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
 		Return(nil, nil, permanentErr).
 		Times(1)
 
-	// Expect os.Exit(1) to be called when reconnection fails with PermanentError
-	exitCalled := make(chan struct{})
-	flushCalled := make(chan struct{})
-	flushHook, ok := ts.client.(interface{ SetBeforeExit(func()) })
+	// No os.Exit expectation: mockOS is strict, so an Exit call fails the test.
+	// v2 and the LAN hub must outlive a retired legacy relayer.
+	retired, ok := ts.client.(interface{ Retired() bool })
 	require.True(t, ok)
-	flushHook.SetBeforeExit(func() { close(flushCalled) })
-	ts.mockOS.EXPECT().
-		Exit(1).
-		DoAndReturn(func(code int) {
-			select {
-			case <-flushCalled:
-			default:
-				t.Error("expected stream flush before os.Exit")
-			}
-			close(exitCalled)
-		}).
-		Times(1)
 
 	// Test - Connect (this automatically starts background message reading)
 	err := ts.client.Connect(ts.ctx)
@@ -1982,18 +1969,17 @@ func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
 	// Wait for ReadMessage error to occur
 	select {
 	case <-readErrorOccurred:
-		// ReadMessage error occurred, continue
 	case <-time.After(5 * time.Second):
 		t.Fatal("Expected ReadMessage error to occur within timeout")
 	}
 
-	// Wait for os.Exit(1) to be called
-	select {
-	case <-exitCalled:
-		// Exit was called as expected
-	case <-time.After(5 * time.Second):
-		t.Fatal("Expected os.Exit(1) to be called within timeout")
-	}
+	// The failed reconnect latches retired instead of exiting.
+	require.Eventually(t, retired.Retired, 5*time.Second, 10*time.Millisecond)
+
+	// Latched: the next attempt returns ErrLegacyRetired without dialing (the
+	// dialer expectation above is Times(1)).
+	err = ts.client.RetryableConnect(ts.ctx)
+	assert.ErrorIs(t, err, relayer.ErrLegacyRetired)
 }
 
 func TestV2ReadFailureNeverExitsDaemon(t *testing.T) {

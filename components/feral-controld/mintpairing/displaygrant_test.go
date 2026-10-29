@@ -415,3 +415,101 @@ func TestWaitForBrowserAndApproval_RefusesAnUnservableDisplayRequestBeforeAsking
 		})
 	}
 }
+
+// TestHandleJoinPairingChannel_NoTopicWithDisplayGrantsProceeds: a device that
+// can issue display grants pairs without a legacy topic (it may never get one
+// once the legacy relayer is retired); without display grants the topic is
+// still required (docs/relay-v2-only-g3.md §3.2).
+func TestHandleJoinPairingChannel_NoTopicWithDisplayGrantsProceeds(t *testing.T) {
+	joiner := &fakeBrokerJoiner{joined: joinedFor(&fakeBrokerChannel{}, "ch_site")}
+	s := newDisplayJoinTestService(t, joiner, nil)
+
+	result, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+	if resp, ok := result.(map[string]any); ok {
+		if errPayload, ok := resp["error"].(map[string]any); ok {
+			assert.NotEqual(t, "topic_not_ready", errPayload["code"])
+		}
+	}
+	assert.Eventually(t, func() bool { return len(joiner.Requests()) > 0 }, 2*time.Second, 10*time.Millisecond,
+		"the join must reach the broker")
+}
+
+// TestCompleteDecision_DisplayRequestWithoutTopic: with no legacy topic the
+// approval carries an empty topicID, and the display grant is still issued.
+func TestCompleteDecision_DisplayRequestWithoutTopic(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = ""
+	keys, _ := displayGrantKeysJSON(t)
+	r := newDisplayRig(t)
+
+	request := minter.MintRequest{Origin: "https://gallery.example", DisplayGrant: keys, ChannelID: "ch_1", MessageID: "msg_1"}
+	decision := approvalDecisionRequest{Approver: "owner-ctl", ApprovalRequestID: "mpa_1", ChannelID: "ch_1", RequestMessageID: "msg_1", Decision: "approve"}
+	terminalSent, err := r.s.completeDecision(context.Background(), r.ch, request, topicGuard{}, "mpa_1", decision)
+	require.NoError(t, err)
+	assert.True(t, terminalSent)
+	assert.Len(t, r.ch.DeliveredGrants(), 1)
+	assert.Zero(t, r.creator.calls)
+}
+
+// TestJoinedPairing_SessionRequestWithoutTopicIsRefused: a 0.4 (session)
+// request on a device with no legacy topic is refused before the owner is
+// asked, and no relayer session is ever requested with an empty topic.
+func TestJoinedPairing_SessionRequestWithoutTopicIsRefused(t *testing.T) {
+	ch := &fakeBrokerChannel{
+		channelID:     "ch_site",
+		request:       &minter.MintRequest{ChannelID: "ch_site", MessageID: "msg_1", Origin: testSiteOrigin},
+		rejectionSent: make(chan struct{}, 1),
+	}
+	joiner := &fakeBrokerJoiner{joined: joinedFor(ch, "ch_site")}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newDisplayJoinTestService(t, joiner, relayerClient)
+
+	_, err := s.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
+	require.NoError(t, err)
+	select {
+	case <-ch.rejectionSent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected the session request to be refused")
+	}
+	ch.mu.Lock()
+	reasons := append([]string(nil), ch.rejectionReasons...)
+	ch.mu.Unlock()
+	assert.Equal(t, []string{"topic_not_ready"}, reasons)
+	select {
+	case msg := <-relayerClient.sent:
+		t.Fatalf("no approval request may reach the owner, got %v", msg)
+	default:
+	}
+}
+
+// newDisplayJoinTestService is newJoinTestService with display grants wired
+// BEFORE Start (SetDisplayGrants is a wiring-time setter), and with the global
+// state reset registered first so it runs after the service's Stop cleanup:
+// a reset while the worker still reads state is a data race.
+func newDisplayJoinTestService(t *testing.T, joiner *fakeBrokerJoiner, relayerClient relayer.Relayer) *service {
+	t.Helper()
+	t.Cleanup(state.ResetForTesting)
+	state.GetState().Relayer.TopicID = ""
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: 2 * time.Second,
+			PollInterval:    time.Millisecond,
+			IdleTTL:         time.Minute,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		nil,
+		fakeSessionCreator{},
+		relayerClient,
+		&fakeCDP{},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.joiner = joiner
+	s.SetDisplayGrants(&fakeDisplayGrantIssuer{}, "wss://relay.example")
+	s.Start(context.Background())
+	t.Cleanup(s.Stop)
+	return s
+}

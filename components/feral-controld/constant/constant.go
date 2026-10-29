@@ -19,6 +19,12 @@ const (
 	DEVICE_NAME_FILE = "/home/feralfile/.state/device-name.json"
 	CONFIG_FILE      = "/home/feralfile/.config/controld.json"
 
+	// RESET_TARGET_VERSION_FILE is written by ffos feral-recovery-update.sh:
+	// the version a factory reset would boot (the recovery candidate if
+	// present, else @factory_reset). Read-only here; feeds the
+	// reset_target_version_info gauge (docs/relay-v2-only-g3.md §3.6, §4.4).
+	RESET_TARGET_VERSION_FILE = "/home/feralfile/.state/reset_target_version"
+
 	SSH_AUTHORIZED_KEYS_FILE = "/home/feralfile/.ssh/authorized_keys"
 	SSH_DISABLE_UNIT         = "ff1-ssh-disable"
 )
