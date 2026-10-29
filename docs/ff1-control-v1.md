@@ -822,7 +822,8 @@ before the retired `factoryReset` exception, which stays for the LAN and the
 legacy relayer only. Envelopes are admitted exactly as on any other route.
 `requestAccess` is refused on v2 (§5.2) and so is first-owner `enroll` with
 `inv` (§5.1). `enroll` without `inv` (§5.3) is admitted on v2 as on any
-route; keeping it off v2 is a client rule (§10). There is no plaintext exception on v2, not even a profile read:
+route; a client sends it there only with a profile pinned from a §5.6
+registration result or confirmed by a grant it holds (§10). There is no plaintext exception on v2, not even a profile read:
 a controller learns the profile from the screen QR pins (first owner, on the
 LAN or the legacy relayer) or from its registration result (§5.6), so v2
 carries envelopes only.
@@ -1135,16 +1136,29 @@ public, so strangers can contend for it. (The legacy relayer's handshake
 semantics are unchanged: released firmware treats a 4xx there as permanent,
 which is why device-facing topic issuance is retired last.)
 
-`enroll` is never carried on v2. The device channel is addressed by the
-public device ID and anyone can join it, so a v2 reply that verifies under a
-profile the controller has not yet confirmed proves nothing: whoever forged
-that profile can answer. Enrollment goes over the LAN or the legacy relayer
-with a topic the controller held before the pairing (§5.6, §14.1).
-This is a client rule, not a device refusal. The device admits `enroll`
-without `inv` on v2 exactly as on the LAN: it succeeds only for a `ctl` an
-owner already approved or registered, so the device gains nothing by
-refusing it there. The risk is the controller's, which would trust an
-unconfirmed profile, so a client MUST NOT send `enroll` on v2.
+First-owner `enroll` with `inv` (§5.1) is never carried on v2, and the
+device refuses it there. `enroll` without `inv` (§5.3) MAY be carried on v2
+by a controller whose profile is already trustworthy: pinned from a verified
+§5.6 registration result (sealed to the controller under `ps`, which exists
+only in the controller QR, so the profile is the owner's verified view of the
+FF1), or confirmed by a grant the controller already holds (a role refresh,
+whose ordinary sealed commands already use v2 under the same profile). A
+profile from any other source (an unconfirmed LAN status, a pairing reply
+that verifies only under itself) MUST NOT be enrolled over v2: the device
+channel is addressed by the public device ID and anyone can join it, so a v2
+reply that verifies under an unconfirmed profile proves nothing.
+
+Route order for a §5.6 newcomer: a legacy topic it held from **before** the
+pairing first. That topic reaches the real FF1's authenticated legacy
+socket, and the real FF1 cannot open an enroll sealed to a profile forged by
+someone holding `ps`, so the forgery fails there instead of being answered
+(§14.1). Only when that topic answers 1003/410, or none is held: the LAN, then
+v2. A topic taken from the registration result itself carries no such
+assurance and goes last. The device admits `enroll` without `inv` on v2
+exactly as on the LAN: it succeeds only for a `ctl` an owner already approved
+or registered. (Until 2026-10 this was a blanket client rule that kept every
+`enroll` off v2, which would have made adding a controller impossible off the
+LAN once the legacy relayer is retired; ffos-user `docs/relay-v2-only-g3.md`.)
 
 At most 4 envelopes are authenticated at a time (decrypt, verify, parse);
 an envelope that cannot get a slot within 1 s is answered with the public
@@ -1359,7 +1373,13 @@ and the ff1-cli test suite does the same with `jose`.
   off the relayer, the relayer's 1003 for the controller's held topic (what
   a reset and an offline device both look like) lets a client store the
   forged result's topic in its place, so the impersonation continues over
-  the relayer after the controller leaves that LAN.
+  the relayer after the controller leaves that LAN. With the §10 v2 enroll,
+  the same party no longer needs the LAN once the controller has no
+  pre-pairing topic (or that topic is retired): holding `ps`, it forges the
+  result under its own profile and answers the controller's sealed `enroll`
+  on the public device channel. The reach is unchanged: the controller believes in a
+  fake FF1 (what it sends goes to the forger), and the real FF1 grants that
+  party nothing.
 - Residual, accepted: a request a controller signs **before** its keys are
   registered is answered `unknown_controller` and never enters a window, so a
   copy captured on the relay can be replayed if the owner registers those

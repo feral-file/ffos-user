@@ -23,7 +23,11 @@ Non-goals, decided:
   the relayer (`ff-relayer/src/utils/hmac.ts`); the device cannot mint one,
   and v2 never reads one. G3 removes topic dependencies instead.
 - No v2 enrollment of the first owner and no remote `requestAccess`
-  (`ff1-control-v1.md` §5.1/§10 unchanged).
+  (`ff1-control-v1.md` §5.1/§5.2 unchanged). A controller added by owner
+  registration (§5.6) MAY send its final `enroll` (without `inv`) over v2
+  when its profile came from the verified registration result (§10, amended
+  2026-10-29): otherwise adding a controller would need the LAN once the
+  legacy relayer is gone. The device needs no change; it already admits it.
 - Legacy-state devices (no owner) are not made remotely controllable over v2.
   v2 accepts envelopes only (§7.2). They stay LAN-only until enrolled.
 
