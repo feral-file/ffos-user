@@ -576,9 +576,10 @@ open for a genuine one until its timeout):
 4. For `approved`: `profile` parses; when the user named a device (ff-cli
    `--device`), `profile.dev` matches it; `deviceName` and `role` are valid;
    `expiresAt`, if present, is in the future and the role is `controller`.
-5. Only then: pin `profile`, store `topicId` if present, and enroll (§5.3).
-   An unsolicited result never replaces a controller's existing grant
-   record for another device or generation.
+5. Only then: pin `profile` and enroll (§5.3). `topicId`, if present, is
+   stored only after that enroll's reply verified under the pinned profile
+   (§14.1). An unsolicited result never replaces a controller's
+   existing grant record for another device or generation.
 
 #### 5.6.4 `registerController`
 
@@ -1160,7 +1161,8 @@ cannot tell whether it holds such a topic (its credential store is
 unreadable) MUST NOT send this `enroll` over v2, where a forged profile is
 answered from anywhere; it MAY use the LAN, the exposure every client had
 before v2. A topic taken from the registration result itself carries no
-such assurance and goes last. The device admits `enroll` without `inv` on
+such assurance and never carries that enroll; it is stored only after the
+verified enroll (§14.1). The device admits `enroll` without `inv` on
 v2 exactly as on the LAN: it succeeds only for a `ctl` an owner already
 approved or registered. (Until 2026-10 this was a blanket client rule that kept every
 `enroll` off v2, which would have made adding a controller impossible off the
@@ -1712,9 +1714,11 @@ running would be a second host to keep.
   team controls, latches the same state on every install.
 - **ff-cli** has no remote config. The release after the shutdown turns
   its legacy relayer off. Until then, a sealed command (`op=cmd`) whose
-  held topic is gone (the set above, or a 1003) may try v2 even when the
-  record does not list `relayV2`: with the legacy host gone there is no
-  fallback a v2 ambiguity could cost.
+  held topic is gone (the set above, or a 1003), or that holds no topic or
+  cannot read its topic store, may try v2 even when the record does not
+  list `relayV2`: with no working topic there is no fallback a v2
+  ambiguity could cost. The app does the same once its legacy route is
+  latched retired.
 
 **Gates.** Both are preconditions of the one step; they are kept apart
 because they are measured differently.
@@ -1745,7 +1749,9 @@ the shutdown, not part of its preparation:
 
 1. Gate A and Gate B both hold.
 2. The worker `tv-cast-coordination` is deleted.
-3. Only then is the flag set to `true`.
+3. Only then is the flag set to `true`, as a JSON boolean: the app reads
+   the remote config as JSON and compares with `true`, so the string
+   `"true"` does nothing.
 
 The flag is immediate and fleet-wide: every app install latches "legacy
 retired" on its next config read and stops dialing the legacy route for
@@ -1760,7 +1766,11 @@ relaunch.
 **After the shutdown:**
 
 - G3 devices latch retired, probe on the escalating schedule, and keep v2
-  and the LAN hub.
+  and the LAN hub. On a network where the dead host only times out or is
+  reset instead of answering (a filtered `workers.dev`, as in mainland
+  China), no permanent error arrives: the legacy relayer keeps retrying
+  (1–5 s after each failed dial; at most the startup retry and one
+  mediator loop) until the empty-endpoint release below.
 - G0–G2 devices: the daemon exits once on the live-socket drop and systemd
   restarts it; from 2.0.0 it then redials the dead host on every heartbeat
   for as long as it runs that firmware. Playback, the LAN hub and OTA keep
@@ -1776,6 +1786,23 @@ relaunch.
   is not tried over v2. Accepted residual (2026-10-30); the remedy is
   updating ff-cli.
 - Play 0.4 sites: their session casts fail; they move to 0.5 (Gate A).
+
+**After the shutdown, the empty-endpoint release.** Once the worker is
+deleted, a full image sets `relayer.endpoint` to `""` in every
+environment's `FERAL_CONTROLD_CONFIG_JSON`, keeping the `relayer` block
+(see above). G3 controld then never dials the legacy host (an empty
+endpoint is "no legacy relayer"); a pre-G3 controld on such an image never
+connects either (the empty URL fails locally, with no network traffic; read
+from the code, not measured). This release is what finally stops devices
+using the old hostname. Ship it, and let it reach the fleet, **before**
+the Cloudflare account that owns the `autonomy-system.workers.dev` zone is
+deleted: until then a deleted worker answers 404, which every client reads
+as retired, while after the account is gone the name may be registered
+again by someone else, and any device still dialing it (G3 on its probe,
+pre-G3 on every heartbeat) would connect to that host, which as a legacy
+relayer can assign a topic and send the plaintext commands a device admits
+on the relayer route (§7.2: everything in `legacy`, the controller tier in
+`enrolled` and `locked`, a Play cast in `enforced`).
 
 Populations left between G3 and Gate B: legacy-claimed G3 devices waiting
 for an owner at the LAN; devices whose OTA keeps failing (free space, slow
