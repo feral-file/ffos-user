@@ -65,17 +65,22 @@ func ResolveSeriesPlaybackMode(document, device *SeriesPlaybackMode) SeriesPlayb
 }
 
 // NarrowEditions returns the editions a cast in mode actually carries.
-// full casts every edition; first and random both narrow to the
-// representative — FF1 has no re-roll-per-loop behavior, so random has
-// nothing to randomize AT CAST TIME and resolves to the same single edition
-// first would (owner decision, 2026-10-30; AC4 of feral-file/ffos-user#425).
-// random is still stored and returned as its own value everywhere else — only
-// this narrowing step collapses it.
-func NarrowEditions(mode SeriesPlaybackMode, editions []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
-	if mode == SeriesPlaybackFull || len(editions) <= 1 {
+// full casts every catalog edition; first and random both narrow to
+// representative — the series item's OWN declared edition (dp1/series.go:
+// "its own `source` is one representative edition"), not editions[0]. The
+// catalog's ordering has no guarantee of matching what the document itself
+// named as representative (feralfile-bot F1, 2026-10-30), so first/random
+// must use representative directly rather than slicing the catalog's
+// answer. FF1 has no re-roll-per-loop behavior, so random has nothing to
+// randomize AT CAST TIME and resolves to the same single edition first
+// would (owner decision, 2026-10-30; AC4 of feral-file/ffos-user#425).
+// random is still stored and returned as its own value everywhere else —
+// only this narrowing step collapses it.
+func NarrowEditions(mode SeriesPlaybackMode, representative dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
+	if mode == SeriesPlaybackFull {
 		return editions
 	}
-	return editions[:1]
+	return []dp1playlist.PlaylistItem{representative}
 }
 
 // SeriesGroupKey identifies one series for grouping and caching purposes:
@@ -105,14 +110,17 @@ func seriesGroupKey(item dp1playlist.PlaylistItem) (SeriesGroupKey, bool) {
 }
 
 // ResolvedSeriesGroup is one series item's resolved expansion: its identity,
-// the document's own stated mode (nil if absent or unrecognized), and the
-// FULL edition set the catalog returned — kept un-narrowed so a later device
-// setting change can re-narrow it (CastPlan.Narrow) without a second catalog
-// round trip (AC5 of feral-file/ffos-user#425).
+// the document's own stated mode (nil if absent or unrecognized), the series
+// item itself (Representative — what first/random actually cast, per
+// NarrowEditions' doc), and the FULL edition set the catalog returned — kept
+// un-narrowed so a later device setting change can re-narrow it
+// (CastPlan.Narrow) without a second catalog round trip (AC5 of
+// feral-file/ffos-user#425).
 type ResolvedSeriesGroup struct {
-	Key          SeriesGroupKey
-	DocumentMode *SeriesPlaybackMode
-	Editions     []dp1playlist.PlaylistItem
+	Key            SeriesGroupKey
+	DocumentMode   *SeriesPlaybackMode
+	Representative dp1playlist.PlaylistItem
+	Editions       []dp1playlist.PlaylistItem
 }
 
 // CastSegment is one position in a playlist as resolveSeriesCastPlan walked
@@ -125,9 +133,15 @@ type CastSegment struct {
 
 // CastPlan is what one cast resolved, in playlist order. Narrow rebuilds the
 // actual item list to send for a given device setting; a plan with no
-// series groups at all narrows to exactly the original items.
+// series groups at all narrows to exactly the original items. maxItems is
+// applied by Narrow itself, not while the plan is built: Segments carries
+// every item the resolve walk saw, regardless of how many a given mode
+// narrows to, so a later re-narrow under a DIFFERENT mode (full, after an
+// earlier first) still has every trailing segment to work with (feralfile-
+// bot F3, 2026-10-30). The zero value (maxItems 0) narrows unbounded.
 type CastPlan struct {
 	Segments []CastSegment
+	maxItems int
 }
 
 // HasSeriesGroups reports whether this plan carries any series group —
@@ -147,15 +161,22 @@ func (p CastPlan) HasSeriesGroups() bool {
 // document mode"). Every group resolves independently: two series in the
 // same playlist can carry different document modes, and only an EXPLICIT
 // device override applies identically to all of them.
+//
+// maxItems is applied HERE, not while the plan was built — see CastPlan's
+// doc — so each flatten independently caps at the same result length a
+// direct expansion would, whichever mode it narrows to.
 func (p CastPlan) Narrow(device *SeriesPlaybackMode) []dp1playlist.PlaylistItem {
 	items := make([]dp1playlist.PlaylistItem, 0, len(p.Segments))
 	for _, seg := range p.Segments {
 		if seg.Item != nil {
 			items = append(items, *seg.Item)
-			continue
+		} else {
+			mode := ResolveSeriesPlaybackMode(seg.Group.DocumentMode, device)
+			items = append(items, NarrowEditions(mode, seg.Group.Representative, seg.Group.Editions)...)
 		}
-		mode := ResolveSeriesPlaybackMode(seg.Group.DocumentMode, device)
-		items = append(items, NarrowEditions(mode, seg.Group.Editions)...)
+		if p.maxItems > 0 && len(items) >= p.maxItems {
+			return items[:p.maxItems]
+		}
 	}
 	return items
 }
@@ -214,15 +235,18 @@ func (d *dp1) readItemSeriesPlaybackModes(raw json.RawMessage, n int) []*SeriesP
 // caller can narrow it per the resolved playback mode and cache the group for
 // a later, network-free re-narrow.
 //
-// Bounded exactly as expandSeriesItems: the same walk budget
-// (seriesExpansionBudget), the same per-playlist catalog-call cap
-// (maxSeriesPerPlaylist), and the same maxItems result cap (applied to the
-// mode-narrowed count, so a cast this bounds never exceeds maxItems
-// regardless of how many editions a full expansion would have produced). A
-// series this walk cannot expand — the catalog is unreachable, holds nothing
-// for it, or the budget is spent — is kept exactly as expandSeriesItems keeps
-// it: as its own representative, unflattened. deviceMode may be nil (follow
-// the document).
+// Bounded exactly as expandSeriesItems on the catalog side: the same walk
+// budget (seriesExpansionBudget) and the same per-playlist catalog-call cap
+// (maxSeriesPerPlaylist). maxItems is NOT applied here — the plan keeps
+// every segment the walk saw regardless of how many items the initially
+// resolved mode narrows to; it is applied by CastPlan.Narrow instead, once
+// per flatten, so a later re-narrow under a wider mode is never missing the
+// trailing segments an earlier, narrower flatten had no room for
+// (feralfile-bot F3, 2026-10-30; see CastPlan's doc). A series this walk
+// cannot expand — the catalog is unreachable, holds nothing for it, or the
+// budget is spent — is kept exactly as expandSeriesItems keeps it: as its
+// own representative, unflattened. deviceMode may be nil (follow the
+// document).
 func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawPlaylist json.RawMessage, deviceMode *SeriesPlaybackMode, maxItems int) CastPlan {
 	if !hasSeriesItems(playlist.Items) {
 		segments := make([]CastSegment, len(playlist.Items))
@@ -230,7 +254,7 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 			item := playlist.Items[i]
 			segments[i] = CastSegment{Item: &item}
 		}
-		return CastPlan{Segments: segments}
+		return CastPlan{Segments: segments, maxItems: maxItems}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, seriesExpansionBudget)
@@ -238,8 +262,7 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 
 	documentModes := d.readItemSeriesPlaybackModes(rawPlaylist, len(playlist.Items))
 
-	var plan CastPlan
-	castCount := 0
+	plan := CastPlan{maxItems: maxItems}
 	attempts := 0
 	for i, item := range playlist.Items {
 		var seg CastSegment
@@ -247,7 +270,6 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 		case !isSeriesItem(item):
 			it := item
 			seg = CastSegment{Item: &it}
-			castCount++
 
 		case attempts >= maxSeriesPerPlaylist || ctx.Err() != nil:
 			d.logger.Warn("series item kept unexpanded; expansion budget spent",
@@ -257,7 +279,6 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 				zap.Error(ctx.Err()))
 			it := item
 			seg = CastSegment{Item: &it}
-			castCount++
 
 		default:
 			attempts++
@@ -271,11 +292,10 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 				}
 				it := item
 				seg = CastSegment{Item: &it}
-				castCount++
 				break
 			}
 			inherited := inheritInstanceFields(item, editions)
-			group := &ResolvedSeriesGroup{Editions: inherited}
+			group := &ResolvedSeriesGroup{Representative: item, Editions: inherited}
 			if key, ok := seriesGroupKey(item); ok {
 				group.Key = key
 			}
@@ -284,7 +304,6 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 			}
 			seg = CastSegment{Group: group}
 			mode := ResolveSeriesPlaybackMode(group.DocumentMode, deviceMode)
-			castCount += len(NarrowEditions(mode, inherited))
 			d.logger.Info("resolved a series for cast",
 				zap.String("playlist_id", playlist.ID),
 				zap.String("item_slug", item.Slug),
@@ -293,9 +312,6 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 		}
 
 		plan.Segments = append(plan.Segments, seg)
-		if maxItems > 0 && castCount >= maxItems {
-			break
-		}
 	}
 	return plan
 }

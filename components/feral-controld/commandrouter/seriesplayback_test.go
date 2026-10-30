@@ -173,8 +173,13 @@ func TestCommandHandler_SetSeriesPlayback_RecastsTheCurrentlyDisplayedSeries(t *
 	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
+	// Representative is deliberately a different item than editions[0]: it
+	// pins that the re-cast narrows to the DOCUMENT's own representative
+	// (feralfile-bot F1, 2026-10-30), not whichever edition the catalog
+	// happened to return first.
 	group := &dp1.ResolvedSeriesGroup{
-		Editions: []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b"), seriesEditionItem("c")},
+		Representative: seriesEditionItem("item-series"),
+		Editions:       []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b"), seriesEditionItem("c")},
 	}
 	initialPlan := dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}
 	mockDP1.EXPECT().
@@ -237,7 +242,76 @@ func TestCommandHandler_SetSeriesPlayback_RecastsTheCurrentlyDisplayedSeries(t *
 	require.Len(t, expressions, 2, "setSeriesPlayback must re-cast the currently displayed series")
 	narrowed := castedItems(t, expressions[1])
 	require.Len(t, narrowed, 1, "the new device override (first) must narrow the re-cast to the representative")
-	assert.Equal(t, "a", narrowed[0]["id"])
+	assert.Equal(t, "item-series", narrowed[0]["id"], "first must cast the document's own representative, not the catalog's first-returned edition")
+}
+
+// feralfile-bot F2, 2026-10-30: once displayDefaultPlaylist has (possibly)
+// replaced a resolved series on screen, controld can no longer prove a
+// series is still there — the exact uncertainty clearVerdictForDefaultPlayback
+// already carries for the verdict. A later setSeriesPlayback must then be a
+// pure persist, never a re-cast of the stale series over whatever is now
+// actually showing.
+func TestCommandHandler_SetSeriesPlayback_DefaultPlaybackInvalidatesTheSeriesCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	logger := zaptest.NewLogger(t)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
+	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
+
+	group := &dp1.ResolvedSeriesGroup{
+		Representative: seriesEditionItem("item-series"),
+		Editions:       []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b"), seriesEditionItem("c")},
+	}
+	initialPlan := dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(initialPlan).
+		Times(1)
+
+	// Exactly two CDP sends: the initial series cast, then
+	// displayDefaultPlaylist. setSeriesPlayback below must NOT trigger a
+	// third — recastForMode must see an invalidated cache.
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(playerOkResponse(), nil).
+		Times(2)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(2)
+
+	playlistMap := map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"items": []interface{}{map[string]interface{}{
+			"id":     "item-series",
+			"source": "https://cdn.artworks.feralfile.io/0.mp4",
+			"provenance": map[string]interface{}{
+				"type":     "seriesRegistry",
+				"contract": map[string]interface{}{"chain": "evm", "seriesId": 387},
+			},
+		}},
+	}
+	_, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"dp1_call": playlistMap},
+	})
+	require.NoError(t, err)
+
+	_, err = handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
+		Arguments: map[string]interface{}{},
+	})
+	require.NoError(t, err)
+
+	result, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_SET_SERIES_PLAYBACK,
+		Arguments: map[string]interface{}{"seriesPlayback": "first"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, true, result.(map[string]interface{})["ok"], "the setting itself must still persist")
 }
 
 // AC5's other half: when nothing currently displayed resolved any series

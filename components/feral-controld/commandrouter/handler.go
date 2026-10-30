@@ -1345,6 +1345,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if h.activeVerdict != nil {
 				h.activeVerdict.ClearCurrent()
 			}
+			// See clearSeriesCast's doc: the same inability to prove a real
+			// replacement (vs. an onlyIfNoPlaylist no-op) applies to the
+			// cached series this device may be tracking.
+			h.clearSeriesCast()
 		}
 
 		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the

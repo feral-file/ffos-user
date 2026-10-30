@@ -2,6 +2,7 @@ package dp1_test
 
 import (
 	encjson "encoding/json"
+	"fmt"
 	"testing"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -48,25 +49,29 @@ func TestParseSeriesPlaybackMode_RejectsAnUnrecognizedValue(t *testing.T) {
 
 func TestNarrowEditions_FullKeepsEveryEdition(t *testing.T) {
 	editions := []dp1playlist.PlaylistItem{editionItem("a"), editionItem("b"), editionItem("c")}
-	got := dp1.NarrowEditions(dp1.SeriesPlaybackFull, editions)
+	got := dp1.NarrowEditions(dp1.SeriesPlaybackFull, editionItem("representative"), editions)
 	assert.Len(t, got, 3)
 }
 
+// feralfile-bot F1, 2026-10-30: first must cast the DOCUMENT's own
+// representative, not editions[0] — the catalog's ordering has no
+// guarantee of matching what the item itself named as representative, so
+// the representative here is deliberately absent from editions.
 func TestNarrowEditions_FirstKeepsOnlyTheRepresentative(t *testing.T) {
 	editions := []dp1playlist.PlaylistItem{editionItem("a"), editionItem("b"), editionItem("c")}
-	got := dp1.NarrowEditions(dp1.SeriesPlaybackFirst, editions)
+	got := dp1.NarrowEditions(dp1.SeriesPlaybackFirst, editionItem("representative"), editions)
 	require.Len(t, got, 1)
-	assert.Equal(t, "a", got[0].ID)
+	assert.Equal(t, "representative", got[0].ID)
 }
 
 // FF1 has no re-roll-per-loop behavior (AC4 of feral-file/ffos-user#425):
 // random has nothing to randomize at cast time and narrows to the same
-// single edition first would.
+// single representative first would.
 func TestNarrowEditions_RandomResolvesToFirstAtCastTime(t *testing.T) {
 	editions := []dp1playlist.PlaylistItem{editionItem("a"), editionItem("b")}
-	got := dp1.NarrowEditions(dp1.SeriesPlaybackRandom, editions)
+	got := dp1.NarrowEditions(dp1.SeriesPlaybackRandom, editionItem("representative"), editions)
 	require.Len(t, got, 1)
-	assert.Equal(t, "a", got[0].ID)
+	assert.Equal(t, "representative", got[0].ID)
 }
 
 // castPlanBody is the raw dp1_call bytes a static cast would have been
@@ -107,7 +112,7 @@ func TestResolveSeriesCastPlan_ReadsTheItemsOwnSeriesPlaybackFromRawBytes(t *tes
 	require.True(t, plan.HasSeriesGroups())
 	narrowed := plan.Narrow(nil)
 	require.Len(t, narrowed, 1, "the item's own seriesPlayback:first must narrow the cast to the representative")
-	assert.Equal(t, "a", narrowed[0].ID)
+	assert.Equal(t, "item-series", narrowed[0].ID, "first must cast the item's own representative, not the catalog's first-returned edition")
 }
 
 func TestResolveSeriesCastPlan_DeviceOverrideWinsOverTheDocument(t *testing.T) {
@@ -208,6 +213,46 @@ func TestResolveSeriesCastPlan_KeepsTheFullEditionSetForANetworkFreeRenarrow(t *
 	require.Len(t, plan.Narrow(nil), 1, "the document's own first narrows the initial cast")
 	full := mode(dp1.SeriesPlaybackFull)
 	require.Len(t, plan.Narrow(full), 3, "re-narrowing the SAME plan under a new device mode needs no second catalog call")
+}
+
+// feralfile-bot F3, 2026-10-30: a series whose initial resolution already
+// fills the item-count cap by itself (full, 255 editions) used to make the
+// resolve walk stop right there, permanently discarding the ordinary tail
+// item it had not visited yet. A later re-narrow under a mode with room to
+// spare (first) could then never recover it from the cache. The cap must
+// apply only when flattening (Narrow), never while resolving the plan.
+func TestResolveSeriesCastPlan_PreservesTrailingSegmentsForALaterNarrowerMode(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	editions := make([]dp1playlist.PlaylistItem, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
+	for i := range editions {
+		editions[i] = editionItem(fmt.Sprintf("e%d", i))
+	}
+	serveEditions(ts, "playlist-1", "item-series", editionsBody(len(editions), editions...))
+	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
+		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
+
+	tail := editionItem("tail")
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    "playlist-1",
+		Items: []dp1playlist.PlaylistItem{seriesItem(), tail},
+	}}
+
+	// No raw bytes and no device override: the series item states nothing,
+	// so ResolveSeriesPlaybackMode's own default (full) applies, and full
+	// alone already reaches the cap — exactly the shape that used to cut
+	// the walk short before it ever reached the tail item.
+	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
+
+	full := plan.Narrow(nil)
+	require.Len(t, full, dp1.CAST_PLAYLIST_ITEMS_LIMIT, "full narrows to exactly the cap, leaving no room for the tail")
+
+	first := mode(dp1.SeriesPlaybackFirst)
+	narrowed := plan.Narrow(first)
+	require.Len(t, narrowed, 2, "first leaves room for both the representative and the tail — the SAME plan must still carry it")
+	assert.Equal(t, "item-series", narrowed[0].ID)
+	assert.Equal(t, "tail", narrowed[1].ID)
 }
 
 // feralfile-bot's F1 evidence on ff-player#320 was exactly two different

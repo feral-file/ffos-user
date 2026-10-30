@@ -114,6 +114,30 @@ func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, c
 	h.lastSeriesCast.contentContext = contentContext
 }
 
+// clearSeriesCast invalidates the displayed-series cache without recording a
+// replacement — used when a command other than CMD_DISPLAY_PLAYLIST may have
+// taken over the screen but has no plan of its own to remember.
+// CMD_DISPLAY_DEFAULT_PLAYLIST is exactly that case (feralfile-bot F2,
+// 2026-10-30): clearVerdictForDefaultPlayback's own doc already establishes
+// that a successful player response does not PROVE default playback
+// replaced the current content — it may have no-opped under
+// onlyIfNoPlaylist — but leaving the series cache valid on that uncertainty
+// risks the opposite failure: a later setSeriesPlayback's recastForMode
+// would replace genuine default content with the stale series. Clearing on
+// an uncertain accept is the same safe direction clearVerdictForDefaultPlayback
+// already takes for the verdict (an omission, never a stale claim): the
+// worst case of a GENUINE no-op is one missed network-free re-narrow, which
+// the series' own next CMD_DISPLAY_PLAYLIST cast repopulates.
+func (h *handler) clearSeriesCast() {
+	h.lastSeriesCast.mu.Lock()
+	defer h.lastSeriesCast.mu.Unlock()
+	h.lastSeriesCast.seq++
+	h.lastSeriesCast.valid = false
+	h.lastSeriesCast.shell = dp1.Playlist{}
+	h.lastSeriesCast.plan = dp1.CastPlan{}
+	h.lastSeriesCast.contentContext = ""
+}
+
 // handleSeriesPlayback serves getSeriesPlayback/setSeriesPlayback. Both are
 // controld-owned and never forwarded to window.handleCDPRequest: the player
 // has no notion of a series to configure (see commands.CMD_GET_SERIES_PLAYBACK's
