@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -219,15 +220,6 @@ func main() {
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
 		}, config.RelayV2)
-	if streamErr == nil {
-		if sink, ok := app.Relayer.(interface{ SetBeforeExit(func()) }); ok {
-			sink.SetBeforeExit(func() {
-				if err := streamCloser.Close(); err != nil {
-					fmt.Fprintf(go_os.Stderr, "Failed to flush Cloudflare logs before relayer exit: %s\n", err)
-				}
-			})
-		}
-	}
 
 	// Graceful shutdown cancels the app-lifetime context created in
 	// initializeApp (see app.Cancel).
@@ -457,12 +449,16 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 			// heartbeat reconcile also re-attempt the connection, and
 			// RetryableConnect tolerates racing them (ErrAlreadyConnected is
 			// success).
-			app.Logger.Error("Failed initial relayer connection, retrying in background", zap.Error(err))
-			go func() {
-				if retryErr := app.Relayer.RetryableConnect(ctx); retryErr != nil {
-					app.Logger.Error("Background relayer connection retry gave up", zap.Error(retryErr))
-				}
-			}()
+			if errors.Is(err, relayer.ErrLegacyRetired) {
+				app.Logger.Info("No legacy relayer configured; skipping it", zap.Error(err))
+			} else {
+				app.Logger.Error("Failed initial relayer connection, retrying in background", zap.Error(err))
+				go func() {
+					if retryErr := app.Relayer.RetryableConnect(ctx); retryErr != nil {
+						app.Logger.Warn("Background relayer connection retry gave up", zap.Error(retryErr))
+					}
+				}()
+			}
 		} else {
 			app.Logger.Info("Initial relayer connection established")
 		}
@@ -1339,7 +1335,13 @@ func initializeApp(
 	// mediator's applied internet verdicts, the relayer's connection
 	// lifecycle, the provisioning machine's transitions via the Config field
 	// at construction below) — the recorder never calls back into any of them.
-	netlogRecorder := buildNetlogRecorder(context, netlogConfig, linkChecker, exec, clock, dbusClient, relayerEndpoint, executor, deviceStatus, logger)
+	registerRelayRetirementMetrics(relayer, controlWire, os)
+	relayV2Endpoint := ""
+	if len(v2Config) > 0 && v2Config[0] != nil {
+		relayV2Endpoint = v2Config[0].Endpoint
+	}
+	netlogRecorder := buildNetlogRecorder(context, netlogConfig, linkChecker, exec, clock, dbusClient,
+		netlogProbeEndpoint(relayV2Endpoint, relayerEndpoint), executor, deviceStatus, logger)
 	if netlogRecorder != nil {
 		if sink, ok := mediator.(interface{ SetInternetObserver(func(bool)) }); ok {
 			sink.SetInternetObserver(netlogRecorder.ObserveInternet)
@@ -1518,6 +1520,13 @@ func initializeApp(
 	// slow" (§4.6, the unclaimed wired no-WAN black screen). Same cached
 	// monitord read the hub status provider serves; never a live probe.
 	wireInternetProbe(executor, dbusClient, logger)
+	// The claim flow's remote-route wait ends on a live v2 socket too, so a
+	// device that never gets a legacy topic is still claimable (see
+	// executor.v2Wired). Only wired when this device actually carries v2.
+	if rv, ok := executor.(relayV2RouteSink); ok && controlWire != nil && controlWire.v2 != nil {
+		v2 := controlWire.v2
+		rv.SetRelayV2Route(func() bool { return true }, v2.IsConnected)
+	}
 	if ac, ok := executor.(autoClaimFlow); ok {
 		provisioningNotifier.claim = ac.MaybeShowClaimQROnOnline
 		// Topic assignment re-triggers the claim flow: a factory-fresh device
@@ -1525,8 +1534,14 @@ func initializeApp(
 		// flow's bounded topic wait expired — with no further online
 		// transition, nothing else would ever re-run it. The flow itself
 		// no-ops when settled or already in flight, so a spurious fire is
-		// harmless.
-		mediator.SetTopicObserver(func() { go ac.MaybeShowClaimQROnOnline(context) })
+		// harmless. With v2 the QR is often already up when the topic lands:
+		// RefreshOrRunClaimQR then only rebuilds the URL, keeping the
+		// invitation a phone may have scanned.
+		trigger := ac.MaybeShowClaimQROnOnline
+		if rr, ok := executor.(claimQRRefresher); ok {
+			trigger = rr.RefreshOrRunClaimQR
+		}
+		mediator.SetTopicObserver(func() { go trigger(context) })
 	}
 	// Boot-scoped online hooks. The startup OTA gate is the claimed-device
 	// counterpart of the claim flow: a boot online transition re-runs the

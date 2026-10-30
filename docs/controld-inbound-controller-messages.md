@@ -1829,7 +1829,11 @@ Error cases:
 - `disabled`: `mintPairing.enabled` is false.
 - `invalid_config`: broker base URL is missing, or mint pairing is enabled
   without a valid player contract manifest.
-- `topic_not_ready`: device has no current relayer topic ID.
+- `topic_not_ready`: device has no current relayer topic ID and cannot
+  issue display grants (§5.7 of `ff1-control-v1.md`). A device that issues
+  display grants pairs without a topic; its approval request and decision
+  then carry `topicID: ""`, and a Play 0.4 session request (no display
+  keys) on it is refused on the channel before the owner is asked.
 - `broker_unavailable`: broker channel creation failed before a pairing code
   was available.
 - `broker_response_invalid`: broker did not return a pairing code.
@@ -1958,7 +1962,11 @@ Error cases (`ok: false`):
 - `disabled`: `mintPairing.enabled` is false.
 - `invalid_request`: missing, extra, or malformed arguments.
 - `invalid_config`: the broker base URL is not configured.
-- `topic_not_ready`: device has no current relayer topic ID.
+- `topic_not_ready`: device has no current relayer topic ID and cannot
+  issue display grants (§5.7 of `ff1-control-v1.md`). A device that issues
+  display grants pairs without a topic; its approval request and decision
+  then carry `topicID: ""`, and a Play 0.4 session request (no display
+  keys) on it is refused on the channel before the owner is asked.
 - `topic_changed`: the claim changed while the device was joining.
 - `replace_in_progress` (retryable): the pairing being replaced was still
   delivering its approved session when the join's request ended.

@@ -140,6 +140,28 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 	assert.Equal(t, "11:22:33:44:55:66", result.MACInfo["wlp2s0"])
 }
 
+// A config without a "relayer" block loads as an empty one ("no legacy
+// relayer"); main.go reads RelayerConfig.Endpoint unconditionally.
+func TestConfigManager_Load_NoRelayerBlockYieldsEmptyConfig(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	configData := `{"relayV2":{"endpoint":"wss://relayer.feralfile.io"}}`
+	ts.mockOS.EXPECT().ReadFile(constants.CONFIG_FILE).Return([]byte(configData), nil).Times(1)
+	ts.mockOS.EXPECT().IsNotExist(nil).Return(false).Times(1)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(configData), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error { return json.Unmarshal(data, v) }).
+		Times(1)
+	ts.setupMACExpectations()
+
+	result, err := ts.cm.Load(ts.logger)
+	require.NoError(t, err)
+	require.NotNil(t, result.RelayerConfig)
+	assert.Empty(t, result.RelayerConfig.Endpoint)
+	assert.Empty(t, result.RelayerConfig.APIKey)
+}
+
 func TestLogStreamingConfigIsPermissiveAndFailsClosed(t *testing.T) {
 	t.Run("valid block", func(t *testing.T) {
 		var c config.Config

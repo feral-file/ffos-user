@@ -3,6 +3,7 @@ package mediator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -106,11 +107,13 @@ type mediator struct {
 	// single-writer discipline as topicObserver.
 	sysMetricsObserver func(raw []byte)
 
-	// relayerReconciling collapses overlapping heartbeat-driven relayer
-	// reconciles to one in flight: signal handlers run on per-signal
-	// goroutines and heartbeats outpace RetryableConnect's transient-retry
-	// loop. Overlaps would be tolerated (ErrAlreadyConnected is success) but
-	// are pointless work against the relayer endpoint.
+	// relayerReconciling collapses overlapping relayer reconnects (the
+	// heartbeat reconcile and the online-edge reconnect) to one in flight:
+	// signal handlers run on per-signal goroutines and heartbeats outpace
+	// RetryableConnect's transient-retry loop, which never ends while the
+	// legacy host keeps timing out. Overlaps would be tolerated
+	// (ErrAlreadyConnected is success) but each would be one more endless
+	// dial loop against the relayer endpoint.
 	relayerReconciling atomic.Bool
 
 	mdnsMu         sync.Mutex
@@ -634,8 +637,11 @@ func (m *mediator) reconcileRelayer(ctx context.Context) {
 		return
 	}
 
-	m.logger.Info("Relayer reconcile: device online with relayer disconnected, connecting")
-	if err := m.relayer.RetryableConnect(ctx); err != nil {
+	// Retired is the steady state once the legacy host is gone: Debug, since
+	// this runs on every heartbeat and dials nothing (see legacyRetiredGate).
+	if err := m.relayer.RetryableConnect(ctx); errors.Is(err, relayer.ErrLegacyRetired) {
+		m.logger.Debug("Relayer reconcile: legacy relayer retired", zap.Error(err))
+	} else if err != nil {
 		m.logger.Error("Relayer reconcile: connect failed, retrying on a later heartbeat", zap.Error(err))
 	} else {
 		m.logger.Info("Relayer reconcile: relayer connected")
@@ -778,17 +784,6 @@ func (m *mediator) handleDBusSignal(
 		m.connMu.Unlock()
 		m.enqueueConnectivityPush()
 
-		// Reconnect the relayer if it's not already connected
-		if connected && !m.relayer.IsConnected() {
-			m.logger.Info("Connectivity restored, reconnecting relayer")
-			err := m.relayer.RetryableConnect(ctx)
-			if err != nil {
-				m.logger.Error("Failed to reconnect to relayer", zap.Error(err))
-			} else {
-				m.logger.Info("Relayer reconnected after connectivity change")
-			}
-		}
-
 		// Re-register mDNS on connectivity changes. The Stop+Start is preserved
 		// from the original interface-change handling: a connectivity event can
 		// accompany an interface set change, and the advertiser's sockets bind
@@ -817,6 +812,41 @@ func (m *mediator) handleDBusSignal(
 			}
 		}
 		m.mdnsMu.Unlock()
+
+		// Reconnect the relayer if it's not already connected. Last in this
+		// handler, after the mDNS re-registration above: RetryableConnect
+		// keeps retrying transient and busy failures for as long as they
+		// last, so on a network where the legacy host only ever times out or
+		// is reset (a filtered workers.dev, feral-file#3551 G3) it never
+		// returns, and nothing after it may depend on it. The same
+		// relayerReconciling guard as the heartbeat reconcile keeps the
+		// mediator to one such loop (main.go's startup retry is the only
+		// other): each online edge would otherwise start another.
+		if connected && !m.relayer.IsConnected() {
+			m.logger.Info("Connectivity restored, reconnecting relayer")
+			// An online edge earns a latched-retired legacy relayer one dial:
+			// the permanent error it latched on may have come from the network
+			// just left (a captive portal's DNS answer), not from the relayer.
+			// Armed even when a reconnect is already running: the next
+			// RetryableConnect spends it.
+			if p, ok := m.relayer.(interface{ AllowRetiredProbe() }); ok {
+				p.AllowRetiredProbe()
+			}
+			if !m.relayerReconciling.CompareAndSwap(false, true) {
+				m.logger.Info("Relayer reconnect already in progress; not starting another")
+				return nil, nil
+			}
+			defer m.relayerReconciling.Store(false)
+			err := m.relayer.RetryableConnect(ctx)
+			switch {
+			case errors.Is(err, relayer.ErrLegacyRetired):
+				m.logger.Info("Legacy relayer still retired after connectivity change", zap.Error(err))
+			case err != nil:
+				m.logger.Error("Failed to reconnect to relayer", zap.Error(err))
+			default:
+				m.logger.Info("Relayer reconnected after connectivity change")
+			}
+		}
 
 	default:
 		m.logger.Warn("Unknown signal", zap.String("member", payload.Member.String()))

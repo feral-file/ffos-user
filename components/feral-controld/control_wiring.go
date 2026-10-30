@@ -183,3 +183,12 @@ func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler,
 		logger.Error("Executor does not accept the control claim; invitation QR and retire disabled")
 	}
 }
+
+// controlStateName is the control_state gauge label: the authority's state,
+// or "off" when the control protocol is not running on this device.
+func (c *controlWiring) controlStateName() string {
+	if c == nil || c.auth == nil {
+		return "off"
+	}
+	return string(c.auth.Status().State)
+}
