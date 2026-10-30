@@ -617,7 +617,11 @@ warms current/upcoming media with at least an hour of explicit remaining HTTP
 freshness without a Download command. Its versioned
 record envelope makes old binaries reject and quarantine automatic records
 instead of silently serving them forever. Manual snapshot records retain their
-existing format and offline behavior.
+existing format and offline behavior. Automatic captures are not reported to
+controllers: `getOfflineCacheStatus` leaves them out of the whole-store
+listing and its totals and answers `not_cached` for a request naming one, and
+`offline_cache_status` does not announce them, so the app's Downloads lists
+only what someone downloaded.
 
 ### 3.3 Direct-download path for media and other single-file items
 
