@@ -55,11 +55,15 @@ Inline or oversized sources are skipped individually. Switching playlists
 cancels speculative transfers for works absent from the new list; an explicit
 Download that joined the transfer retains its requested snapshot.
 
-Speculative attempts do not emit queued/downloading/failure notifications or
-expose progress in status queries or leave failed entries in whole-store status. Eviction removes records from that
-listing; explicit source queries and eviction notifications still say not_cached.
-Successful captures publish their cached state;
-an explicit Download joining an automatic attempt retains manual semantics.
+Automatic captures are the FF1's own and are never reported to a controller,
+so the app's Downloads lists only the works someone asked the FF1 to keep.
+Attempts emit no queued/downloading/failure/success notifications. Status
+leaves automatic records out of the whole-store listing and its totals, and
+answers not_cached for a source query naming one. Playback, the offline
+rescue, kiosk replay and eviction still use them. Eviction and clears push
+not_cached, matching that answer. An explicit Download of an automatic
+entry, whether it joins an attempt in flight or recaptures a finished one,
+retains manual semantics and is reported like any download.
 
 Automatic entries require an explicit HTTP freshness lifetime. Honor no-store,
 no-cache, private, Age and expiry, and decline request-dependent responses that

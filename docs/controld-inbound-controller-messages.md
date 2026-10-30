@@ -2661,7 +2661,24 @@ Example (specific items):
 ```
 
 Omitting `sources` (or passing an empty array) reports on every item this
-process currently knows about, on disk and in flight.
+process currently knows about, on disk and in flight, except automatic
+playback captures (below). That whole-store listing carries no
+`not_cached` entries: it lists what the device holds or is working on.
+
+**Automatic playback captures are not reported.** Media the FF1 captured
+on its own while playing (see
+[automatic playback cache](automatic-playback-cache.md)) is kept for its
+own playback and offline replay, not because anyone asked, so the app's
+Downloads lists only the works someone downloaded. A whole-store request
+leaves these captures out of `items` and `totals`; a request that names
+one in `sources` gets `state: "not_cached"` for it, with no
+`coverageComplete`, `bytes` or `reason`, so the app offers Download.
+`downloadPlaylistItem`/`downloadPlaylist` for such a source is reported
+like any other download: `queued`/`downloading` while it runs, then the
+finished capture's state, because the download makes it an explicit one.
+`diskUsed` still counts their bytes, since it measures the whole store
+(see below) and they occupy it until evicted. `offline_cache_status`
+never announces them either (see that notification).
 
 Request fields, all optional:
 
@@ -2887,6 +2904,14 @@ Clears are pushed even though the clearing client already got an `ok: true`
 response, because *other* connected controllers (and local hub WebSocket
 clients) would otherwise keep rendering a stale `queued`/`ready` entry
 until they next poll.
+
+Automatic playback captures are not announced: an automatic attempt
+pushes no `queued`, `downloading`, failure or finished state (see
+`getOfflineCacheStatus`). The only push that names one is the
+`not_cached` sent when eviction or a clear removes it, which is the same
+answer a `getOfflineCacheStatus` request naming it gets. When an explicit
+download joins an automatic attempt already in flight, that attempt's
+finished state is pushed like any download's.
 
 Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`, and mirrored
 to local hub WebSocket clients.
