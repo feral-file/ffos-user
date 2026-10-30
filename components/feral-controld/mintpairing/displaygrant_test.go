@@ -419,7 +419,7 @@ func TestWaitForBrowserAndApproval_RefusesAnUnservableDisplayRequestBeforeAsking
 // TestHandleJoinPairingChannel_NoTopicWithDisplayGrantsProceeds: a device that
 // can issue display grants pairs without a legacy topic (it may never get one
 // once the legacy relayer is retired); without display grants the topic is
-// still required (docs/relay-v2-only-g3.md §3.2).
+// still required (docs/controld-inbound-controller-messages.md, topic_not_ready).
 func TestHandleJoinPairingChannel_NoTopicWithDisplayGrantsProceeds(t *testing.T) {
 	joiner := &fakeBrokerJoiner{joined: joinedFor(&fakeBrokerChannel{}, "ch_site")}
 	s := newDisplayJoinTestService(t, joiner, nil)

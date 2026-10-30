@@ -1908,7 +1908,7 @@ func TestStartWifiSetupCommand(t *testing.T) {
 }
 
 // TestMaybeShowClaimQROnOnline_RelayV2Route pins the G3 claim rule
-// (docs/relay-v2-only-g3.md §3.1): the remote-route wait ends on a legacy topic
+// (docs/setup-flow.md, "Claim QR → ready"): the remote-route wait ends on a legacy topic
 // OR a live v2 socket; on expiry a v2-carrying device that is confirmed online
 // still paints (first-owner enrollment is LAN-only), and every other expiry
 // keeps today's narration. A device without v2 wiring is unchanged.

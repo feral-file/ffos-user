@@ -19,7 +19,7 @@ func relayV2Eligible(cfg *config.RelayV2Config, authority *controlWiring, device
 var newRelayV2 = relayer.NewV2
 
 // registerRelayRetirementMetrics wires the scrape-time readers for the
-// legacy-relayer retirement gauges (docs/relay-v2-only-g3.md §3.6).
+// legacy-relayer retirement gauges (docs/api-design.md, /metrics).
 func registerRelayRetirementMetrics(legacy relayer.Relayer, cw *controlWiring, os wrapper.OS) {
 	src := netmetrics.DeviceStateSources{
 		LegacyTopicPresent: func() bool { return state.ClaimSnapshot().TopicID != "" },

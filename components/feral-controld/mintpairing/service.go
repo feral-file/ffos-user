@@ -1543,8 +1543,9 @@ func (s *service) parseDecision(args map[string]any) (approvalDecisionRequest, e
 		return decision, errors.New("approval decision version must be 1")
 	}
 	// topicID may be empty: a device with display grants pairs without a
-	// legacy topic, and its approval request carries "" (docs/relay-v2-only-g3.md
-	// §3.2). The caller still requires it to equal the pending request's topic.
+	// legacy topic, and its approval request carries "" (see topic_not_ready
+	// in docs/controld-inbound-controller-messages.md). The caller still
+	// requires it to equal the pending request's topic.
 	if decision.ApprovalRequestID == "" || decision.ChannelID == "" || decision.RequestMessageID == "" {
 		return decision, errors.New("approvalRequestID, channelID, and requestMessageID are required")
 	}

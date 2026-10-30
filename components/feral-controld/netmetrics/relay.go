@@ -6,7 +6,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Relay-retirement gauges (docs/relay-v2-only-g3.md §3.6). They answer the
+// Relay-retirement gauges (docs/api-design.md /metrics; Gate B of
+// docs/ff1-control-v1.md §15.4). They answer the
 // questions the legacy-relayer retirement gates ask of the fleet: is the
 // device on v2, does it still depend on the legacy relayer, and what would a
 // factory reset boot. relay_v2_connected is event-driven (the v2 socket's own

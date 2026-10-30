@@ -22,7 +22,7 @@ const (
 	// RESET_TARGET_VERSION_FILE is written by ffos feral-recovery-update.sh:
 	// the version a factory reset would boot (the recovery candidate if
 	// present, else @factory_reset). Read-only here; feeds the
-	// reset_target_version_info gauge (docs/relay-v2-only-g3.md §3.6, §4.4).
+	// reset_target_version_info gauge (docs/api-design.md, /metrics).
 	RESET_TARGET_VERSION_FILE = "/home/feralfile/.state/reset_target_version"
 
 	SSH_AUTHORIZED_KEYS_FILE = "/home/feralfile/.ssh/authorized_keys"

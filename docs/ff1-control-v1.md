@@ -1135,7 +1135,7 @@ with backoff and never treat it as permanent. The device-ID channel is
 public, so strangers can contend for it. (The legacy relayer's handshake
 semantics are unchanged: released firmware treats a 4xx there as permanent,
 which is why the legacy host's shutdown waits for the device population,
-ffos-user `docs/relay-v2-only-g3.md` §6 Gate B.)
+§15.4 Gate B.)
 
 First-owner `enroll` with `inv` (§5.1) is never carried on v2, and the
 device refuses it there. `enroll` without `inv` (§5.3) MAY be carried on v2
@@ -1164,7 +1164,7 @@ such assurance and goes last. The device admits `enroll` without `inv` on
 v2 exactly as on the LAN: it succeeds only for a `ctl` an owner already
 approved or registered. (Until 2026-10 this was a blanket client rule that kept every
 `enroll` off v2, which would have made adding a controller impossible off the
-LAN once the legacy relayer is retired; ffos-user `docs/relay-v2-only-g3.md`.)
+LAN once the legacy relayer is retired.)
 
 At most 4 envelopes are authenticated at a time (decrypt, verify, parse);
 an envelope that cannot get a slot within 1 s is answered with the public
@@ -1402,7 +1402,7 @@ and the ff1-cli test suite does the same with `jose`.
   whose channel is held full has no remote route until the squatters leave;
   the LAN is unaffected. Until 2026-10-30 this section required a relay
   connection slot attributable to the device before retirement; that was
-  withdrawn (ffos-user `docs/relay-v2-only-g3.md` §1): the squat needs no
+  withdrawn: the squat needs no
   credential and grants nothing, and a device credential on the relay would
   make the relay hold device identity for the first time. If it is ever
   exploited, the remedy is a relay change (a reserved slot proved with
@@ -1630,18 +1630,156 @@ release operator applies them.
   (§9) and the topic-independent claim QR (§11). A build that dials v2
   without all of them is open to anyone who knows the device ID.
 - Legacy retirement is one step, decided 2026-10-30: the legacy host is
-  shut down, not flag-retired, and afterwards its URL answers HTTP 404, or
-  NXDOMAIN once its zone is gone, never 410. Firmware treats both as
-  permanent. Clients treat the 404 as retirement but never NXDOMAIN (a LAN
-  peer can spoof it); the app also takes a remote config flag, and ff-cli
-  a release with the legacy relayer off (ffos-user
-  `docs/relay-v2-only-g3.md` §3.3, §5.1.6, §5.2, §6). The relayer's
-  split flags remain for a relay that is still up with a route switched
-  off, which is how a test deployment simulates retirement.
+  shut down, not flag-retired (§15.4). The relayer's split flags remain for
+  a relay that is still up with a route switched off, which is how a test
+  deployment simulates retirement.
 - Turning the legacy relayer off is gated on fleet telemetry of
   `control.state`, not on firmware version: a `legacy` device has no
   controller grants and v2 admits no plaintext (§7.2), so retirement strands every unmigrated
   device off the LAN. It also waits for Play to move from relayer session
   tokens to device-issued display grants (§5.7, Play 0.5), with the
-  retirement prerequisites listed in §13, and for the §6 gates of
-  `relay-v2-only-g3.md` (controller traffic and device population).
+  retirement prerequisites listed in §13, and for the §15.4 gates
+  (controller traffic and device population).
+- There is no topic-to-grant migration and no locally generated topic. A
+  legacy topic is an HMAC credential minted by the relayer, and v2 never
+  reads one. A device claimed under legacy (topic, no owner) becomes
+  v2-reachable only when its owner enrolls it on the LAN with the screen
+  QR: the "Secure this Art Computer" flow sends plaintext
+  `showPairingQRCode{purpose:"enroll"}` by topic, LAN first, and enrolls
+  from the invitation QR (§5.1). It needs the phone that holds the topic;
+  without it the remedy is a factory reset.
+- A client sends a sealed command on v2 only when the device's last status
+  listed `relayV2` in `control.transports` (§11), or under the ff-cli
+  exception in §15.4: a v2 send to a device that is not on v2 can be
+  receipted by another peer and become ambiguous instead of falling back.
+  Every G3 image lists `relayV2`: the ffos image workflows refuse a
+  `controld.json` without `relayV2.endpoint` for an ffos-user ref that
+  carries the v2 relay client (`relaywire/`). The record is refreshed over
+  whatever route works while the legacy relayer exists.
+- One v2 host. Every environment's `relayV2.endpoint`, the app's and the
+  CLI's defaults, and the endpoint a display grant hands a Play site name
+  `wss://relayer.feralfile.io` (worker `ff-relayer-v2`). The legacy worker
+  also serves `/v2/` on its own Durable Object namespace; it is never a v2
+  target, and no client routes to a host the device reports (status
+  `control.transports` lists `relayV2` without a URL).
+
+### 15.4 Legacy relayer shutdown
+
+Firmware generations this section refers to:
+
+| Generation | Versions | Relayer |
+|---|---|---|
+| G0 | 1.0.17–1.0.21 | legacy only (BLE setup) |
+| G1 | 2.0.0–2.0.11 | legacy only; no `control`, no `relayV2` |
+| G2 | develop builds after 2.0.11 without G3 (unreleased as of 2026-10-30) | dual-stack; the claim QR and mint pairing still need a legacy topic |
+| G3 | feral-file#3551 | dual-stack, legacy optional |
+
+G0–G2 controld exits when a live legacy socket drops and the reconnect
+returns a permanent error, and from 2.0.0 its mediator redials the legacy
+relayer on every SYSMETRICS heartbeat (about 30 times a minute). 404/410
+handshakes and non-temporary DNS failures are permanent there. Their
+pre-claim OTA gate runs only after the claim flow got a legacy topic, so
+after the shutdown an unclaimed pre-G3 device waits for the daily updater
+(`feral-updater@.timer` talks to the version API only), and the image a
+factory reset boots matters as much as the running one.
+
+**The step.** After the transition the worker `tv-cast-coordination` is
+deleted. From then on its URL answers HTTP 404 with the text body
+`error code: 1042` (a deleted `workers.dev` worker, WebSocket upgrades
+included), or NXDOMAIN once the account's `workers.dev` zone is gone. The
+old hostname is not pointed anywhere: it is under another account's zone,
+so it cannot be aliased to `ff-relayer-v2`, and a flag-retired worker left
+running would be a second host to keep.
+
+**What reads as retired:**
+
+- **Device (G3).** Any permanent legacy dial error (404/410 handshake,
+  NXDOMAIN, bad URL) or an empty endpoint latches the legacy relayer
+  retired; v2 and the LAN hub keep running (ffos-user `architecture.md`,
+  "External transport").
+- **Controllers.** A 410 body (`legacy_*_retired`), or an HTTP 404 from the
+  legacy origin on `/api/cast`, `/api/notification` or `/api/connection`.
+  A live relayer never answers 404 there (its "no device" is `400` id
+  1003); it does answer `404 {"error":{"id":1006}}` on the
+  ephemeral-session routes for a missing session, so a 404 there is never
+  retirement. The latch lasts the session: no retry, the held-topic leg of
+  a §5.6 enroll moves on as after a 1003 (§10), and the device row says
+  why. A DNS failure, a refused connection or a timeout is **never**
+  retirement: a LAN peer that saw the controller QR can spoof NXDOMAIN
+  over plain DNS (§10, §14.1).
+- **App, for NXDOMAIN.** The remote config flag
+  `features.ff1.legacy_relayer_retired`, fetched over TLS from a host the
+  team controls, latches the same state on every install.
+- **ff-cli** has no remote config. The release after the shutdown turns
+  its legacy relayer off. Until then, a sealed command (`op=cmd`) whose
+  held topic is gone (the set above, or a 1003) may try v2 even when the
+  record does not list `relayV2`: with the legacy host gone there is no
+  fallback a v2 ambiguity could cost.
+
+**Gates.** Both are preconditions of the one step; they are kept apart
+because they are measured differently.
+
+| Gate | What it covers | Condition |
+|---|---|---|
+| A (controllers) | `/api/cast`, `/api/notification`, `/api/ephemeral-sessions` | app floor raised past the G3 app release (device identity by `deviceId`, LAN bind by QR pins without a topic, retirement read as above); the G3 ff-cli release published (v2 default, retirement read as above, the held-topic-gone v2 exception); Play integrators on 0.5; `tv-ws-usage` `/api/cast` traffic ~0 |
+| B (devices) | `/api/connection` (topic issuance) | from the device gauges (ffos-user `api-design.md`, `/metrics`): running version ≥ G3 AND `reset_target_version_info` ≥ G3 (`unknown` counts as below) for nearly all devices; legacy-dependent devices (claimed, topic present, `control_state=legacy`) under an agreed threshold; known remote installs contacted; shelf stock reflashed |
+
+`tv-ws-usage` (one sampled row per legacy request that reached a topic)
+shows controller traffic falling. It cannot measure devices: a device that
+stays connected for days writes one row, and the v2 worker has no
+analytics binding. The device gauges are the only source for Gate B.
+
+G3 is a full-image release (declared in ffos-user `RELEASES.md`), because
+`controld.json` changes only with a full image. The image secrets
+(`FERAL_CONTROLD_CONFIG_JSON`) keep a `relayer` block, even after the
+shutdown, until no pre-G3 controld can run on them: pre-G3 controld
+dereferences it without a nil check and would crash-loop on an image built
+from an older ffos-user ref. Before Gate B, once G3 is on a channel (human
+operator, recorded in ffos-user `RELEASES.md`): `update_min_version=true` (`min_runtime_version`
+= G3; never `update_required_version`, which stops auto-update and demands
+a reflash), `update_recovery_version=true` (`recovery_version` = G3), and
+shelf stock reflashed with G3.
+
+**Flag order.** `features.ff1.legacy_relayer_retired` is the last action of
+the shutdown, not part of its preparation:
+
+1. Gate A and Gate B both hold.
+2. The worker `tv-cast-coordination` is deleted.
+3. Only then is the flag set to `true`.
+
+The flag is immediate and fleet-wide: every app install latches "legacy
+retired" on its next config read and stops dialing the legacy route for
+the rest of the session, including for an FF1 still on legacy-only
+firmware or still `control_state=legacy`. Set before the gates hold, it
+would cut off-LAN control for exactly the population Gate B counts; set
+before the worker is gone, it would hide a working route. If it is set by
+mistake, setting it back to `false` restores the route on the next config
+read for installs that have not latched yet; latched sessions recover on
+relaunch.
+
+**After the shutdown:**
+
+- G3 devices latch retired, probe on the escalating schedule, and keep v2
+  and the LAN hub.
+- G0–G2 devices: the daemon exits once on the live-socket drop and systemd
+  restarts it; from 2.0.0 it then redials the dead host on every heartbeat
+  for as long as it runs that firmware. Playback, the LAN hub and OTA keep
+  working; remote control is gone until the device is on G3 and enrolled.
+- App: latches on the 404 or the flag. Under NXDOMAIN without the flag its
+  legacy notification socket redials every 5 s while foregrounded (the
+  backoff does not grow; measured 2026-10-30), and a phone holding a
+  pre-pairing topic cannot add a controller. Set the flag at the latest
+  when the zone disappears.
+- ff-cli: the same 404 counts. Under NXDOMAIN an ff-cli older than the
+  release with the legacy relayer off keeps failing on the held topic: a
+  §5.6 enroll stops there, and a command whose FF1 never listed `relayV2`
+  is not tried over v2. Accepted residual (2026-10-30); the remedy is
+  updating ff-cli.
+- Play 0.4 sites: their session casts fail; they move to 0.5 (Gate A).
+
+Populations left between G3 and Gate B: legacy-claimed G3 devices waiting
+for an owner at the LAN; devices whose OTA keeps failing (free space, slow
+links, probation rollback); devices that are off; devices whose reset
+target is still old; controllers outside the force-update floor (old CLI,
+Play 0.4, app fail-open); networks that reach the old host but block
+relayer.feralfile.io.
