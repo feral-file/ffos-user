@@ -877,6 +877,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						h.logger.Error("Failed to process dynamic playlist", zap.Error(err))
 						return nil, err
 					}
+				} else {
+					// Static dp1_call: unlike playlistUrl above, nothing
+					// upstream of this unmarshal has resolved a
+					// seriesRegistry item into its editions — do it here,
+					// bounded the same way ProcessPlaylistURLForCast
+					// bounds an initial cast.
+					expanded := h.dp1.ExpandSeriesItems(ctx, *playlist, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
+					playlist = &expanded
 				}
 
 			default:

@@ -493,7 +493,20 @@ type Service interface {
 	// against a JCS-canonicalized form (dp1-go's sign package), not raw
 	// bytes, so this does not affect signature validity — see
 	// docs/offline-artwork-capture.md.
-	DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (queued, total int, err error)
+	//
+	// maxQueued bounds the WORK this call does — how many of the
+	// playlist's items it classifies (one network-bound probe each) and
+	// enqueues — without bounding what it RECORDS. 0 means unbounded.
+	// The two have to be separable: the record this writes is the
+	// playlist's membership list, and ClearPlaylist enumerates the member
+	// sources to clear from it, so a record short of the real membership
+	// leaves items cached that a playlist-scoped clear then cannot reach
+	// (feralfile-bot F6 on ffos-user#421 — a bulk download overwriting a
+	// complete record saved earlier by a single-item download, after
+	// which the clear reported success and left the tail on disk).
+	// Callers that need the bound pass it here rather than truncating
+	// playlistRaw.
+	DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string, maxQueued int) (queued, total int, err error)
 	// ClearItem removes the item with this source URL from the cache: its
 	// record, any blob it was the last referent of, and any
 	// not-yet-started download queued for it. Because cached records are
@@ -1891,7 +1904,7 @@ type queuedItem struct {
 	class MediaClass
 }
 
-func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (int, int, error) {
+func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string, maxQueued int) (int, int, error) {
 	if !s.started.Load() {
 		return 0, 0, ErrServiceNotStarted
 	}
@@ -1916,11 +1929,24 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 	// never leave already-accepted capture jobs running in the
 	// background for a call this method is about to report as failed.
 	total := len(playlist.Items)
+	// maxQueued bounds the items this call WORKS on, and nothing else:
+	// `considered` is what gets classified and enqueued, while playlistRaw
+	// — persisted below as the playlist's membership record — and the
+	// `total` reported back both stay whole. Bounding the record instead is
+	// the defect this parameter exists to prevent; see the interface doc.
+	considered := playlist.Items
+	if maxQueued > 0 && len(considered) > maxQueued {
+		s.logger.Warn("offline cache: bounding the items queued for download to the ceiling; the playlist record stays complete",
+			zap.String("playlist_id", playlist.ID),
+			zap.Int("items", len(considered)),
+			zap.Int("limit", maxQueued))
+		considered = considered[:maxQueued]
+	}
 	// Pair each queued item with the clear-epoch sampled just before its
 	// classify, so a ClearItem/ClearPlaylist landing during this (per
 	// item, network-bound) loop or the SavePlaylist below is detected at
 	// enqueue and cannot be silently undone — see downloadEpoch's doc.
-	toQueue, classifyFailed := s.classifyPlaylistItems(ctx, playlist.Items)
+	toQueue, classifyFailed := s.classifyPlaylistItems(ctx, considered)
 	if len(toQueue) == 0 && classifyFailed > 0 {
 		// Distinguish "classification itself is broken" from "this
 		// playlist genuinely has no cacheable items" — the latter is a
@@ -1937,7 +1963,7 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 		// not because it genuinely has none.
 		return 0, total, fmt.Errorf(
 			"offline cache: classify playlist %s items: %d of %d item(s) failed classification, none queued",
-			playlist.ID, classifyFailed, total)
+			playlist.ID, classifyFailed, len(considered))
 	}
 
 	// savePlaylistAndURLIndex re-checks plEpoch under playlistRecordMu and

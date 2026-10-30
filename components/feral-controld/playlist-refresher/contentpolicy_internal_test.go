@@ -251,11 +251,19 @@ func newInlineRefresher(t *testing.T, statusContext string, store *contentpolicy
 			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
 		}).AnyTimes()
 
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	// processPlayingPlaylist's static-inline branch expands series items
+	// defensively; inline's items have none, so echo the playlist back.
+	mockDP1.EXPECT().
+		ExpandSeriesItems(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist { return playlist }).
+		AnyTimes()
+
 	r := &refresher{
 		context:       context.Background(),
 		cdp:           mockCDP,
 		statusPoller:  mockPoller,
-		dp1:           mocks.NewMockDP1(ctrl),
+		dp1:           mockDP1,
 		json:          wrapper.NewJSON(),
 		contentPolicy: store,
 		logger:        zaptest.NewLogger(t),

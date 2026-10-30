@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"strings"
@@ -1218,6 +1219,12 @@ func TestRefresher_ProcessPlayingPlaylist_NoDynamicQueries(t *testing.T) {
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, mockPlaylist), nil).
 		AnyTimes()
+	// Round 2's regression: the static-inline branch expands series items
+	// defensively too (see TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskReplayScope).
+	ts.mockDP1.EXPECT().
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *mockPlaylist, 0).
+		Return(*mockPlaylist).
+		AnyTimes()
 
 	// Should not call DP1.ProcessDynamicPlaylist since there are no dynamic queries
 	// Should not call CDP.Send since there's nothing to process
@@ -1242,6 +1249,13 @@ func TestRefresher_ProcessPlayingPlaylist_NoDynamicQueries(t *testing.T) {
 // playlist with nothing dynamic to re-resolve. This must still skip
 // ProcessDynamicPlaylist and the CDP resend (the original, intentional
 // "do not re-send an unchanged static playlist" behavior).
+//
+// Also pins round 2's regression: this branch expands series items
+// defensively, the same as resolveDisplayedPlaylist's own static branch
+// (ExpandSeriesItems below must be called before SyncPlaylist sees the
+// items) — round 2 of run-reviewer found this exact branch left out of
+// round 1's fix, which patched only the two functions named
+// resolveDisplayedPlaylist.
 func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskReplayScope(t *testing.T) {
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctrl := gomock.NewController(t)
@@ -1273,6 +1287,10 @@ func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskRep
 		FetchPlayerStatus(ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, mockPlaylist), nil).
 		AnyTimes()
+	mockDP1.EXPECT().
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *mockPlaylist, 0).
+		Return(*mockPlaylist).
+		MinTimes(1)
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
 		Return(1, nil).
@@ -2645,6 +2663,10 @@ func TestRefresher_StaticInlineDisplayAt_DoesNotOverwriteSchedulerCache(t *testi
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, pl), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *pl, 0).
+		Return(*pl).
+		AnyTimes()
+	mockDP1.EXPECT().
 		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).
 		Times(0)
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
@@ -2695,6 +2717,10 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeWithoutPlayerIdentit
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, pl), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *pl, 0).
+		Return(*pl).
+		AnyTimes()
+	mockDP1.EXPECT().
 		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).
 		Times(0)
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
@@ -2735,6 +2761,10 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeEmptyActiveSet(t *te
 	mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, emptyActive), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *emptyActive, 0).
+		Return(*emptyActive).
 		AnyTimes()
 	mockDP1.EXPECT().
 		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).
@@ -2787,6 +2817,10 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotOverwriteNewerAcceptedCast
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, newerActive), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *newerActive, 0).
+		Return(*newerActive).
+		AnyTimes()
+	mockDP1.EXPECT().
 		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).
 		Times(0)
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
@@ -2833,6 +2867,10 @@ func TestRefresher_StaticInlineRestoredPending_IgnoresNonScheduledStatus(t *test
 	mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, plain), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *plain, 0).
+		Return(*plain).
 		AnyTimes()
 	mockDP1.EXPECT().
 		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).
@@ -2968,6 +3006,12 @@ func TestRefresher_DefaultPlaylistReconcilesCacheWithoutRecasting(t *testing.T) 
 	pl := createMockPlaylist()
 	pl.DynamicQueries = nil
 	poller.EXPECT().FetchPlayerStatus(ctx).Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST), nil, pl), nil).AnyTimes()
+	// resyncKioskReplayScopeToCurrentDisplay's resolveDisplayedPlaylist
+	// expands series items defensively on its static branch; pl has none.
+	dp.EXPECT().
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *pl, 0).
+		Return(*pl).
+		AnyTimes()
 	replay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	replay.EXPECT().LockPlayback().AnyTimes()
 	replay.EXPECT().UnlockPlayback().AnyTimes()
@@ -3055,4 +3099,188 @@ func TestRefresher_ProcessPlayingPlaylist_EmptyPlayerIsNotAnError(t *testing.T) 
 	ts.refresher.Stop()
 
 	assert.Zero(t, observed.Len(), "empty player state must not log Error-level entries")
+}
+
+// deadlinedWithin matches a context carrying a deadline no further out than
+// max. It is what pins the DEFENSIVE series expansions' own short budget:
+// those call sites re-derive "what is currently displayed" from player
+// status and run on the refresher's single select loop, so handing them the
+// loop's long-lived context let a reachable-but-slow catalog block the loop
+// — and with it the 5-minute tick, ForceRefresh and shutdown — for as long
+// as the walk ran (run-reviewer round 5, F2). Asserting the deadline rather
+// than gomock.Any() keeps that a tested property instead of a comment.
+func deadlinedWithin(max time.Duration) gomock.Matcher { return deadlineMatcher{max: max} }
+
+type deadlineMatcher struct{ max time.Duration }
+
+func (m deadlineMatcher) Matches(x interface{}) bool {
+	ctx, ok := x.(context.Context)
+	if !ok {
+		return false
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return false
+	}
+	remaining := time.Until(deadline)
+	return remaining > 0 && remaining <= m.max
+}
+
+func (m deadlineMatcher) String() string {
+	return fmt.Sprintf("a context carrying a deadline within %s", m.max)
+}
+
+// TestRefresher_StaticInlineFallbackKeepsDisplayedReplayScope is the
+// regression test for feralfile-bot #421 F7, on the static-inline refresh
+// path that sends the player nothing.
+//
+// The sequence: a seriesRegistry item is cast while the catalog is
+// unreachable, so expansion fails and the representative is what reaches the
+// player and what the automatic cache captures. The catalog then recovers. On
+// the next refresh pass the defensive ExpandSeriesItems on this branch now
+// SUCCEEDS and returns the real editions — but this path deliberately does
+// not re-send a static playlist, so the kiosk is still showing the
+// representative. Scoping replay to the editions would hand SyncPlaylist
+// nothing that is cached, which disables interception outright
+// (offlinecache.applyScope), breaking offline replay for a representative
+// that is cached and on screen.
+//
+// So the scope must be the items the PLAYER reported, not the expansion's:
+// see playlistForReplayScope. The expansion itself still runs — the
+// SyncPlaylist assertion, not the absence of the call, is what pins this.
+func TestRefresher_StaticInlineFallbackKeepsDisplayedReplayScope(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	// What the player holds: the representative the failed expansion left
+	// behind, and the only source the cache captured.
+	displayed := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Items: []dp1playlist.PlaylistItem{
+				{ID: "series-representative", Source: "http://example.com/representative.mp4"},
+			},
+		},
+		DynamicQueries: []dp1.LegacyDynamicQuery{},
+	}
+	// What the recovered catalog now answers with: editions that were never
+	// displayed and never cached.
+	expanded := dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Items: []dp1playlist.PlaylistItem{
+				{ID: "edition-1", Source: "http://example.com/edition-1.mp4"},
+				{ID: "edition-2", Source: "http://example.com/edition-2.mp4"},
+			},
+		},
+		DynamicQueries: []dp1.LegacyDynamicQuery{},
+	}
+
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, displayed), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *displayed, 0).
+		Return(expanded).
+		MinTimes(1)
+	// The assertion: the representative the player actually holds. A strict
+	// mock fails on the editions, which is what this path used to pass.
+	mockKioskReplay.EXPECT().
+		SyncPlaylist(ctx, []string{"http://example.com/representative.mp4"}).
+		Return(1, nil).
+		MinTimes(1)
+	// And nothing is re-sent, which is why the scope had to come from the
+	// player in the first place (gomock fails the test on an unexpected Send).
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
+	r.Start()
+	time.Sleep(100 * time.Millisecond)
+	r.Stop()
+}
+
+// TestRefresher_ResyncScopeToCurrentDisplayKeepsDisplayedReplayScope is the
+// same F7 regression on the OTHER no-send path in this package:
+// resyncKioskReplayScopeToCurrentDisplay, reached here via the
+// displayDefaultPlaylist branch, which resolves through
+// resolveDisplayedPlaylist's own defensive expansion and then only re-points
+// interception. Same mechanism, second of the three sites — the bot's Action
+// asks for the rule on "both static resolveDisplayedPlaylist branches", and
+// this is this package's one.
+func TestRefresher_ResyncScopeToCurrentDisplayKeepsDisplayedReplayScope(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	displayed := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Items: []dp1playlist.PlaylistItem{
+				{ID: "series-representative", Source: "http://example.com/representative.mp4"},
+			},
+		},
+		DynamicQueries: []dp1.LegacyDynamicQuery{},
+	}
+	expanded := dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Items: []dp1playlist.PlaylistItem{
+				{ID: "edition-1", Source: "http://example.com/edition-1.mp4"},
+			},
+		},
+		DynamicQueries: []dp1.LegacyDynamicQuery{},
+	}
+
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST), nil, displayed), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *displayed, 0).
+		Return(expanded).
+		MinTimes(1)
+	mockKioskReplay.EXPECT().
+		SyncPlaylist(ctx, []string{"http://example.com/representative.mp4"}).
+		Return(1, nil).
+		MinTimes(1)
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
+	r.Start()
+	time.Sleep(100 * time.Millisecond)
+	r.Stop()
 }

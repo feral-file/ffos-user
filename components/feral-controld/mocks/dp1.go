@@ -36,6 +36,20 @@ func (m *MockDP1) EXPECT() *MockDP1MockRecorder {
 	return m.recorder
 }
 
+// ExpandSeriesItems mocks base method.
+func (m *MockDP1) ExpandSeriesItems(ctx context.Context, playlist dp1.Playlist, maxItems int) dp1.Playlist {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ExpandSeriesItems", ctx, playlist, maxItems)
+	ret0, _ := ret[0].(dp1.Playlist)
+	return ret0
+}
+
+// ExpandSeriesItems indicates an expected call of ExpandSeriesItems.
+func (mr *MockDP1MockRecorder) ExpandSeriesItems(ctx, playlist, maxItems interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExpandSeriesItems", reflect.TypeOf((*MockDP1)(nil).ExpandSeriesItems), ctx, playlist, maxItems)
+}
+
 // ProcessDynamicPlaylist mocks base method.
 func (m *MockDP1) ProcessDynamicPlaylist(ctx context.Context, playlist dp1.Playlist, minimal bool) (*dp1.Playlist, error) {
 	m.ctrl.T.Helper()
