@@ -1958,3 +1958,64 @@ func (m deadlineMatcher) Matches(x interface{}) bool {
 func (m deadlineMatcher) String() string {
 	return fmt.Sprintf("a context carrying a deadline within %s", m.max)
 }
+
+// TestCommandHandler_ClearPlaylistCache_ResyncKeepsDisplayedReplayScope is the
+// feralfile-bot #421 F7 regression on this package's no-send path: the
+// post-clear resync resolves "what is currently displayed" through
+// resolveDisplayedPlaylist's defensive series expansion, then only re-points
+// interception — it never sends the player a playlist.
+//
+// A seriesRegistry item cast while the catalog was unreachable keeps its
+// representative, so that is what the kiosk holds and what the cache
+// captured. If the catalog has recovered by the time a clear triggers this
+// resync, the expansion now answers with the real editions; scoping replay to
+// those hands SyncPlaylist nothing cached, which disables interception
+// outright while the cached representative is still on screen. The scope must
+// therefore be the items the player reported — see playlistForReplayScope.
+func TestCommandHandler_ClearPlaylistCache_ResyncKeepsDisplayedReplayScope(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	mockOfflineCache.EXPECT().ClearPlaylist("playlist-1").Return(nil).Times(1)
+
+	// What the player holds: the representative the failed expansion left.
+	displayed := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{
+		{ID: "series-representative", Source: "https://example.com/representative.mp4"},
+	}}}
+	// What the recovered catalog now answers with: never displayed, never cached.
+	expanded := dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{
+		{ID: "edition-1", Source: "https://example.com/edition-1.mp4"},
+		{ID: "edition-2", Source: "https://example.com/edition-2.mp4"},
+	}}}
+
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
+		Command:  string(commands.CMD_DISPLAY_PLAYLIST),
+		Playlist: displayed,
+	}, nil).Times(1)
+	ts.mockDP1.EXPECT().
+		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *displayed, 0).
+		Return(expanded).
+		Times(1)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
+	// The assertion: the representative, not the editions. A strict mock
+	// fails on the editions, which is what this path used to pass.
+	mockKioskReplay.EXPECT().
+		SyncPlaylist(ts.ctx, []string{"https://example.com/representative.mp4"}).
+		Return(1, nil).
+		Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_CACHE,
+		Arguments: map[string]any{"playlistId": "playlist-1"},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	assert.Equal(t, "playlist-1", resp["playlistId"])
+}

@@ -885,11 +885,18 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 // original document, the same retained-state change deferred for scheduled
 // playlists.
 func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext string, contextUnknown bool, playerStatus *status.PlayerStatus, authorityToken uint64) error {
+	// Both no-send exits below scope replay from what the PLAYER reports, not
+	// from the expanded playlist this pass resolved: nothing is sent on either,
+	// so a scope built from the expansion would describe items the kiosk will
+	// never fetch — see playlistForReplayScope. The re-send path further down
+	// is the opposite case and keeps scoping from the playlist it sends.
+	displayed := playlistForReplayScope(playerStatus, playlist)
+
 	if r.contentPolicy == nil || contextUnknown {
 		if contextUnknown {
 			r.logger.Warn("Player status omits contentContext; leaving this inline playlist unprojected rather than reclassifying it as curated")
 		}
-		return r.syncStaticInlineScope(playlist)
+		return r.syncStaticInlineScope(displayed)
 	}
 
 	origin, contextErr := contentpolicy.NormalizeContext(rawContext)
@@ -906,7 +913,7 @@ func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext strin
 	if len(projected.Items) == len(playlist.Items) {
 		// Nothing newly blocked: the common case, and it must stay as cheap as
 		// it was before this path did any projection at all.
-		return r.syncStaticInlineScope(playlist)
+		return r.syncStaticInlineScope(displayed)
 	}
 
 	retire := currentBlockedByRefresh(playerStatus, playlist, r.contentPolicy.CurrentLocked(), origin)
@@ -1121,6 +1128,36 @@ func currentBlockedByRefresh(playerStatus *status.PlayerStatus, fresh *dp1.Playl
 	return false
 }
 
+// playlistForReplayScope returns the playlist whose items offline-replay
+// scope must be derived from, for a pass that sends the player NOTHING.
+//
+// Interception is keyed on the URLs the kiosk actually fetches, so the scope
+// has to describe what the PLAYER holds — not what the daemon would resolve
+// the same status to now. Whenever player status carries a concrete item list
+// (a static inline playlist: the filtered active set the player was cast),
+// that list IS what it holds, and re-resolving it can only diverge from the
+// screen: a seriesRegistry item cast while the catalog was unreachable keeps
+// its representative, so a later pass whose expansion succeeds would scope
+// replay to editions that were never displayed and never cached. SyncPlaylist
+// then finds nothing cached and disables replay outright
+// (offlinecache.applyScope), while the cached representative is still on the
+// wall (feralfile-bot #421 F7).
+//
+// A URL status carries no item list at all, and a dynamic one carries queries
+// rather than resolved items, so there the resolved playlist is the only
+// answer available — and it is also the one the player was given.
+//
+// Callers that DO send a replacement playlist must scope from what they send,
+// not from this: see refreshStaticInline's re-send path. Mirrored by
+// commandrouter/offlinecache.go's own copy, for the same reason
+// resolveDisplayedPlaylist is duplicated there (see that function's doc).
+func playlistForReplayScope(playerStatus *status.PlayerStatus, resolved *dp1.Playlist) *dp1.Playlist {
+	if playerStatus != nil && playerStatus.Playlist != nil && !playerStatus.Playlist.HasDynamicContent() {
+		return playerStatus.Playlist
+	}
+	return resolved
+}
+
 // syncReplayScopeLocked points offline-cache replay at playlist's items and
 // announces the change. Callers MUST already hold the playback coordinator
 // (KioskReplay.LockPlayback) and keep holding it across whatever CDP send
@@ -1319,8 +1356,13 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 		return
 	}
 
-	sources := make([]string, 0, len(playlist.Items))
-	for _, item := range playlist.Items {
+	// This resync never sends the player a playlist — it only re-points
+	// interception at what is already on screen — so the scope comes from the
+	// items the player reported, not from the resolve above. See
+	// playlistForReplayScope.
+	scoped := playlistForReplayScope(playerStatus, playlist)
+	sources := make([]string, 0, len(scoped.Items))
+	for _, item := range scoped.Items {
 		sources = append(sources, item.Source)
 	}
 	// Serialize this scope resync against any concurrent displayPlaylist/
