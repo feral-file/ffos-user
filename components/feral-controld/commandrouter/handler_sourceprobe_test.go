@@ -508,12 +508,12 @@ func TestCommandHandler_Process_DisplayPlaylist_InlineDP1Call_AllDead_RejectsCas
 			return nil
 		}).
 		Times(1)
-	// Static dp1_call: Process expands series items by hand before the
+	// Static dp1_call: Process resolves series items by hand before the
 	// source preflight runs (see handler.go). mockPlaylist has none, so echo
-	// it back.
+	// it back as plain segments.
 	ts.mockDP1.EXPECT().
-		ExpandSeriesItems(ts.ctx, *mockPlaylist, dp1.CAST_PLAYLIST_ITEMS_LIMIT).
-		Return(*mockPlaylist).
+		ResolveSeriesCastPlan(ts.ctx, *mockPlaylist, gomock.Any(), gomock.Any(), dp1.CAST_PLAYLIST_ITEMS_LIMIT).
+		DoAndReturn(passthroughCastPlan).
 		Times(1)
 	// No CDP Send / ForceRefresh expectations: the rejection precedes both.
 

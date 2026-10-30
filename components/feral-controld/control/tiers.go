@@ -59,6 +59,10 @@ var commandTiers = map[string]Tier{
 	string(commands.CMD_CLOSE_MINT_PAIRING_SESSION): TierOwner,
 	string(commands.CMD_MINT_PAIRING_APPROVAL):      TierOwner,
 	string(commands.CMD_SET_CONTENT_POLICY):         TierOwner,
+	// setSeriesPlayback is the same category of owner-level device setting
+	// as setContentPolicy (feral-file/ffos-user#425): it changes what plays
+	// on the device, not merely what a controller is shown.
+	string(commands.CMD_SET_SERIES_PLAYBACK):        TierOwner,
 	string(commands.CMD_ANALYTICS_TOGGLE):           TierOwner,
 	string(commands.CMD_BETA_FEATURES_TOGGLE):       TierOwner,
 	string(commands.CMD_UPLOAD_LOGS):                TierOwner,
@@ -112,6 +116,7 @@ var commandTiers = map[string]Tier{
 	string(commands.CMD_SHUTDOWN):                  TierController,
 	string(commands.CMD_RUN_NETWORK_DIAGNOSTICS):   TierController,
 	string(commands.CMD_GET_CONTENT_POLICY):        TierController,
+	string(commands.CMD_GET_SERIES_PLAYBACK):       TierController,
 	// Player CastCommand names forwarded over CDP.
 	"checkStatus":           TierController,
 	"moveToArtwork":         TierController,

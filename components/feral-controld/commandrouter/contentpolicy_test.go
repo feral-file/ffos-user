@@ -28,11 +28,12 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-// newPassthroughMockDP1 returns a MockDP1 whose ExpandSeriesItems echoes
-// back whatever playlist it's given. The content-policy tests in this file
-// construct playlists with no seriesRegistry items and never assert on this
-// method themselves — they predate ExpandSeriesItems existing at all — so a
-// generic no-op stub is what the real expandSeriesItems would do for them
+// newPassthroughMockDP1 returns a MockDP1 whose ExpandSeriesItems and
+// ResolveSeriesCastPlan both echo back whatever playlist they're given, as
+// plain (non-series) segments. The content-policy tests in this file
+// construct playlists with no seriesRegistry items and never assert on
+// either method themselves — they predate both existing at all — so a
+// generic no-op stub is what the real implementations would do for them
 // anyway (hasSeriesItems short-circuits), without requiring each test to
 // know about a call it has nothing to do with.
 func newPassthroughMockDP1(ctrl *gomock.Controller) *mocks.MockDP1 {
@@ -41,7 +42,23 @@ func newPassthroughMockDP1(ctrl *gomock.Controller) *mocks.MockDP1 {
 		ExpandSeriesItems(gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist { return playlist }).
 		AnyTimes()
+	m.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
+		AnyTimes()
 	return m
+}
+
+// passthroughCastPlan is ResolveSeriesCastPlan's no-op shape: one plain Item
+// segment per input item, no series groups — exactly what the real
+// implementation returns for a playlist hasSeriesItems says has none.
+func passthroughCastPlan(_ context.Context, playlist dp1.Playlist, _ json.RawMessage, _ *dp1.SeriesPlaybackMode, _ int) dp1.CastPlan {
+	segments := make([]dp1.CastSegment, len(playlist.Items))
+	for i := range playlist.Items {
+		item := playlist.Items[i]
+		segments[i] = dp1.CastSegment{Item: &item}
+	}
+	return dp1.CastPlan{Segments: segments}
 }
 
 func newPolicyHandler(t *testing.T) (commandrouter.Handler, *mocks.MockCDP, *contentpolicy.Store) {

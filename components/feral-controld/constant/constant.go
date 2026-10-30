@@ -12,6 +12,7 @@ const (
 	SLEEP_SCHEDULE_FILE      = "/home/feralfile/.state/sleep-schedule.json"
 	DISPLAY_AT_PLAYLIST_FILE = "/home/feralfile/.state/display-at-playlist.json"
 	CONTENT_POLICY_FILE      = "/home/feralfile/.state/content-policy.json"
+	SERIES_PLAYBACK_FILE     = "/home/feralfile/.state/series-playback.json"
 	// DEVICE_NAME_FILE holds the owner's name for this unit. Deliberately not
 	// the hostname: the hostname is the serial, which is the device's identity
 	// on the network and the key the registry, telemetry, and the owner-contact

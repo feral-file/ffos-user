@@ -49,6 +49,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
+	"github.com/feral-file/ffos-user/components/feral-controld/seriesplayback"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/softap"
@@ -1219,6 +1220,16 @@ func initializeApp(
 	// to re-resolve what is on screen, or the Content screen reports success
 	// while the display stays on the previous projection until the periodic
 	// refresh.
+	// Series-playback device override (feral-file/ffos-user#425): same
+	// durable-file location/pattern as content policy, but no player
+	// acknowledgement to await — see seriesplayback's package doc.
+	seriesPlaybackStore, seriesPlaybackErr := seriesplayback.Open(constants.SERIES_PLAYBACK_FILE)
+	if seriesPlaybackErr != nil {
+		logger.Error("series playback setting store unreadable; following each document's own intent until a durable update succeeds",
+			zap.Error(seriesPlaybackErr))
+		seriesPlaybackStore = seriesplayback.Fallback(constants.SERIES_PLAYBACK_FILE)
+	}
+	commandrouter.SetSeriesPlayback(rawCmdHandler, seriesPlaybackStore, logger)
 	// Cast-time source preflight (#304): a displayPlaylist whose every item
 	// source definitively answers an HTTP error is rejected at accept time
 	// instead of being forwarded and self-reported as playing. Wired against
@@ -1290,6 +1301,14 @@ func initializeApp(
 	// The owner's content policy falls with the claim on a factory reset, for
 	// the same rollback reason the device name does (see factoryReset).
 	executor.SetContentPolicyResetter(func() error {
+		// The owner's series-playback override falls with the claim on a
+		// factory reset too, for the same rollback reason content policy's
+		// does. Both run under this one callback — devicectl.Executor holds
+		// a single resetter slot, not a list — so the device name's claim
+		// cannot roll back only one of a device's two owner settings.
+		if err := commandrouter.ResetSeriesPlayback(rawCmdHandler); err != nil {
+			logger.Error("factory reset: series playback setting could not be reset", zap.Error(err))
+		}
 		return commandrouter.ResetContentPolicy(rawCmdHandler)
 	})
 	if sigVerifyEnabled {

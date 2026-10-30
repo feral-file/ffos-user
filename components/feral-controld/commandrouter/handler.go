@@ -23,6 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
+	"github.com/feral-file/ffos-user/components/feral-controld/seriesplayback"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -107,6 +108,16 @@ type handler struct {
 	// change. nil (tests, a build wired before the seam) degrades to the old
 	// behavior: the change applies to the next cast or periodic refresh.
 	policyRefresher PolicyRefresher
+	// seriesPlayback is the device-level series-playback override store
+	// (feral-file/ffos-user#425). nil (tests, a build wired before the seam)
+	// makes getSeriesPlayback/setSeriesPlayback answer unavailable and makes
+	// every cast resolve as if no device override were set (follow the
+	// document). See seriesplayback.go.
+	seriesPlayback *seriesplayback.Store
+	// lastSeriesCast is the most recently cast playlist's resolved series
+	// groups, kept so setSeriesPlayback can re-narrow and re-cast without a
+	// catalog round trip. See seriesplayback.go.
+	lastSeriesCast displayedSeriesCast
 	// verifySignatures and activeVerdict are set together by
 	// SetSignatureVerification. verifySignatures gates the inline
 	// (dp1_call) and cached-copy verification this package performs itself;
@@ -416,10 +427,11 @@ func New(
 // is already staged has nothing to add, and once the stuck-reset watchdog
 // releases the latch a retry is accepted normally again.
 var servedDuringFactoryReset = map[commands.Type]bool{
-	commands.CMD_DEVICE_STATUS:      true,
-	commands.CMD_PROFILE:            true, // == CMD_SYS_METRICS ("deviceMetrics")
-	commands.CMD_DDC_PANEL_STATUS:   true,
-	commands.CMD_GET_CONTENT_POLICY: true,
+	commands.CMD_DEVICE_STATUS:       true,
+	commands.CMD_PROFILE:             true, // == CMD_SYS_METRICS ("deviceMetrics")
+	commands.CMD_DDC_PANEL_STATUS:    true,
+	commands.CMD_GET_CONTENT_POLICY:  true,
+	commands.CMD_GET_SERIES_PLAYBACK: true,
 }
 
 // Process processes the command and returns the result
@@ -662,6 +674,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		return h.handleContentPolicy(command)
 	}
 
+	if commandType == commands.CMD_GET_SERIES_PLAYBACK || commandType == commands.CMD_SET_SERIES_PLAYBACK {
+		return h.handleSeriesPlayback(ctx, command)
+	}
+
 	if commandType.DeviceCtlCommand() {
 		// Handle device control command
 		result, err = h.executor.Execute(ctx,
@@ -718,6 +734,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// projection can be re-checked against them without re-probing. See the
 		// re-check below the reprojection.
 		var probeVerdicts map[string]offlinecache.SourceProbeResult
+		// seriesCastPlan is set only by the static dp1_call branch below
+		// (the one call site with the raw bytes a per-item seriesPlayback
+		// read needs -- see ResolveSeriesCastPlan's doc). Its zero value
+		// (no segments) is indistinguishable from "no series groups",
+		// which rememberSeriesCast treats as nothing to remember.
+		var seriesCastPlan dp1.CastPlan
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			delete(command.Arguments, "retireBlockedCurrent") // internal refresh-only signal
 			// The content-policy lock is taken further down, immediately before
@@ -881,10 +903,22 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// Static dp1_call: unlike playlistUrl above, nothing
 					// upstream of this unmarshal has resolved a
 					// seriesRegistry item into its editions — do it here,
-					// bounded the same way ProcessPlaylistURLForCast
-					// bounds an initial cast.
-					expanded := h.dp1.ExpandSeriesItems(ctx, *playlist, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
-					playlist = &expanded
+					// bounded the same way ProcessPlaylistURLForCast bounds
+					// an initial cast. Unlike the old ExpandSeriesItems (kept
+					// for the three defensive call sites that never see a
+					// seriesRegistry item post-fix — see its doc),
+					// ResolveSeriesCastPlan reads each item's own
+					// seriesPlayback from playlistBytes and narrows to the
+					// resolved mode rather than always casting every edition
+					// (feral-file/ffos-user#425).
+					deviceSeriesMode := h.currentSeriesPlaybackMode()
+					seriesCastPlan = h.dp1.ResolveSeriesCastPlan(ctx, *playlist, playlistBytes, deviceSeriesMode, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
+					narrowed := *playlist
+					narrowed.Items = seriesCastPlan.Narrow(deviceSeriesMode)
+					if dp1.CAST_PLAYLIST_ITEMS_LIMIT > 0 && len(narrowed.Items) > dp1.CAST_PLAYLIST_ITEMS_LIMIT {
+						narrowed.Items = narrowed.Items[:dp1.CAST_PLAYLIST_ITEMS_LIMIT]
+					}
+					playlist = &narrowed
 				}
 
 			default:
@@ -907,6 +941,15 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if contextErr != nil {
 				return nil, contextErr
 			}
+			// Remembered for every CMD_DISPLAY_PLAYLIST cast, not only a
+			// static dp1_call: seriesCastPlan is the zero value (no
+			// segments) for the playlistUrl and dynamic branches above, so
+			// this call CLEARS any series this device was previously
+			// tracking whenever the screen moves to content this pass did
+			// not resolve series groups for — a stale entry must not
+			// outlive what is actually being cast. See rememberSeriesCast's
+			// doc for why this runs eagerly rather than after the CDP send.
+			h.rememberSeriesCast(*playlist, seriesCastPlan, contentContext)
 			// Filter under the policy lock, then RELEASE it: the source
 			// preflight below is network-bound (a 10s phase ceiling, and up to
 			// four heavy casts can be admitted at once), and holding this lock
