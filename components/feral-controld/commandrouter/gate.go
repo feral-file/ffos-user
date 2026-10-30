@@ -105,6 +105,15 @@ func DefaultGateConfig() GateConfig {
 		// identical set costs no flash write at all.
 		commands.CMD_SET_CONTENT_POLICY: disruptive,
 
+		// setSeriesPlayback persists a small .state write (same durable-file
+		// pattern as setContentPolicy, no CDP round trip) but, when a series
+		// is currently on screen, synchronously re-enters the
+		// CMD_DISPLAY_PLAYLIST path to re-narrow it under the new setting —
+		// the same cast-time preflight/resolution cost that path's own heavy
+		// tier exists for (see CMD_DISPLAY_PLAYLIST below), so this command
+		// shares that tier rather than the cheaper disruptive one.
+		commands.CMD_SET_SERIES_PLAYBACK: heavy,
+
 		// User-initiated power toggles: loosely capped (executor coalesces).
 		commands.CMD_SLEEP_NOW: userAction,
 		commands.CMD_WAKE_NOW:  userAction,
@@ -176,6 +185,10 @@ func DefaultGateConfig() GateConfig {
 		// of ignoring it: otherwise a caller mints unlimited distinct keys
 		// ({"a":1}, {"a":2}, ...) that each miss the dedupe and take a slot.
 		commands.CMD_GET_CONTENT_POLICY: query,
+		// getSeriesPlayback only reads the local store under its own lock —
+		// no CDP round trip — but is still deduped at the query tier for the
+		// same unlisted-Default concurrency-slot reason as getContentPolicy.
+		commands.CMD_GET_SERIES_PLAYBACK: query,
 
 		// High-frequency input events: shared generous budget.
 		commands.CMD_KEYBOARD_EVENT:             input,

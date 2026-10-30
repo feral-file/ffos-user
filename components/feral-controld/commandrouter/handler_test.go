@@ -851,14 +851,14 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 		}).
 		Times(1)
 
-	// Static dp1_call: no dynamic content, so Process expands series items
+	// Static dp1_call: no dynamic content, so Process resolves series items
 	// by hand (see handler.go's CMD_DISPLAY_PLAYLIST branch) rather than
 	// through ProcessDynamicPlaylistForCast. mockPlaylist has none, so the
-	// expansion is a no-op; returning it unchanged is what the real
-	// expandSeriesItems would do too.
+	// resolution is a no-op; returning plain segments unchanged is what the
+	// real resolveSeriesCastPlan would do too.
 	ts.mockDP1.EXPECT().
-		ExpandSeriesItems(ts.ctx, *mockPlaylist, dp1.CAST_PLAYLIST_ITEMS_LIMIT).
-		Return(*mockPlaylist).
+		ResolveSeriesCastPlan(ts.ctx, *mockPlaylist, gomock.Any(), gomock.Any(), dp1.CAST_PLAYLIST_ITEMS_LIMIT).
+		DoAndReturn(passthroughCastPlan).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -913,14 +913,12 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesInlineManifest(t *testi
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	// Static dp1_call again (see WithPlaylistObject above); echo the
-	// playlist straight back since what this test pins is the
-	// inlineManifest round-trip through the real JSON wrapper, not series
-	// expansion.
+	// playlist straight back as plain segments since what this test pins is
+	// the inlineManifest round-trip through the real JSON wrapper, not
+	// series resolution.
 	mockDP1.EXPECT().
-		ExpandSeriesItems(ctx, gomock.Any(), dp1.CAST_PLAYLIST_ITEMS_LIMIT).
-		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist {
-			return playlist
-		}).
+		ResolveSeriesCastPlan(ctx, gomock.Any(), gomock.Any(), gomock.Any(), dp1.CAST_PLAYLIST_ITEMS_LIMIT).
+		DoAndReturn(passthroughCastPlan).
 		Times(1)
 	handler := commandrouter.New(
 		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,
@@ -984,11 +982,11 @@ func TestCommandHandler_Process_PlayRecentlyPlayed_ReentersDisplayPlaylist(t *te
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	// Re-entering displayPlaylist with the retained item goes through the
-	// static dp1_call branch, which expands series items by hand; this
-	// playlist has none, so echo it back.
+	// static dp1_call branch, which resolves series items by hand; this
+	// playlist has none, so echo it back as plain segments.
 	mockDP1.EXPECT().
-		ExpandSeriesItems(ctx, gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist { return playlist }).
+		ResolveSeriesCastPlan(ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
 		AnyTimes()
 	handler := commandrouter.New(
 		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,

@@ -3220,6 +3220,68 @@ factory reset's deletion is made durable the same way.
 
 Error cases: `invalidRequest`, `unsupported`, `contentPolicyUnavailable`.
 
+### getSeriesPlayback
+
+Purpose: read the device-level series-playback override (feral-file/ffos-user#425) — the
+one setting that forces every series on this device into a single playback
+mode, regardless of what each document asks for.
+
+Request: `{}` — no fields, and a **non-empty request is rejected** with
+`invalidRequest` rather than ignored, the same storm-gate reason
+`getContentPolicy` rejects one.
+
+```json
+{ "ok": true, "seriesPlayback": null, "active": true }
+```
+
+```json
+{ "ok": true, "seriesPlayback": "first", "active": true }
+```
+
+`seriesPlayback` is `null` when no override is set — "follow each document's
+own `seriesPlayback`" — or one of `"first"`, `"full"`, `"random"` when an
+owner has configured one. `null` is distinguishable from an explicit `"first"`:
+the two mean different things (one series item's own intent followed per item,
+versus every series on the device forced to its representative).
+
+Unlike `getContentPolicy`, there is no player acknowledgement to check: the
+player has no notion of a series to configure, so `active:true` reports only
+whether the durable store is readable.
+
+Error cases: `invalidRequest`, `seriesPlaybackUnavailable` (the store could not
+be read).
+
+### setSeriesPlayback
+
+Purpose: set or clear the device-level series-playback override.
+
+Request: exactly `{"seriesPlayback": "first" | "full" | "random" | null}`. Any
+other argument count, an unrecognized string, or any other JSON type, is
+`invalidRequest`.
+
+Unlike `setContentPolicy`, there is no CDP round trip: the player never sees
+this setting, so a write either commits durably or it does not — there is no
+second, player-held state to reconcile against it.
+
+An accepted change re-casts the currently displayed playlist **only if** it
+currently holds a series controld resolved this way (a static `dp1_call`
+cast with at least one `seriesRegistry` item). The full edition set for every
+such series is kept from the cast that resolved it, so the re-cast narrows
+under the new setting without a second catalog call. If nothing currently
+displayed went through that resolution this boot — a freshly started process,
+or the screen simply shows non-series content — the setting is saved with no
+re-cast: once a series is narrowed and cast, the playlist the player holds
+carries no marker telling controld a series was ever there, so there is
+nothing to re-narrow.
+
+A factory reset clears the series-playback override along with content policy,
+the claim, and the device name — the owner's preference must not outlive
+their claim.
+
+Error cases: `invalidRequest`, `seriesPlaybackUnavailable` (the durable write
+failed, or its directory entry could not be confirmed durable even on retry —
+`ok:true` means saved, the same contract `setContentPolicy` holds).
+
 ### Content policy effect on playlists
 
 `displayPlaylist` takes an optional `contentContext`, whose only valid present
