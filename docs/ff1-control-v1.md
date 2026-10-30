@@ -834,9 +834,10 @@ key, `relayV2.endpoint`; `relayer.endpoint` and `relayer.apiKey` keep their
 legacy meaning. `controld.json` changes only with a full image (the package
 rail never rewrites it), so a controld updated on an old image keeps a
 working legacy relayer. The device dials v2 only when **all** hold:
-`relayV2.endpoint` is configured, a control authority exists (judged from
-the device's state, not from `control.enabled`), and the device ID is the
-stable MAC-derived one (a hostname that fell back to `FF1`, or the
+`relayV2.endpoint` is configured, a control authority exists (control state
+on disk forces one whatever `control.enabled` says; a device without state,
+fresh or factory-reset, gets one only when `control.enabled` is `true`), and
+the device ID is the stable MAC-derived one (a hostname that fell back to `FF1`, or the
 `FF1-UNKNOWN` placeholder, never dials v2).
 Otherwise it stays legacy-only.
 
@@ -1633,8 +1634,9 @@ release operator applies them.
   without all of them is open to anyone who knows the device ID.
 - Legacy retirement is one step, decided 2026-10-30: the legacy host is
   shut down, not flag-retired (§15.4). The relayer's split flags remain for
-  a relay that is still up with a route switched off, which is how a test
-  deployment simulates retirement.
+  a relay that is still up with a route switched off: `ff-relayer-v2`
+  (`relayer.feralfile.io`) sets all three to `false` permanently, and a test
+  deployment uses them to simulate retirement.
 - Turning the legacy relayer off is gated on fleet telemetry of
   `control.state`, not on firmware version: a `legacy` device has no
   controller grants and v2 admits no plaintext (§7.2), so retirement strands every unmigrated
@@ -1654,9 +1656,11 @@ release operator applies them.
   listed `relayV2` in `control.transports` (§11), or under the ff-cli
   exception in §15.4: a v2 send to a device that is not on v2 can be
   receipted by another peer and become ambiguous instead of falling back.
-  Every G3 image lists `relayV2`: the ffos image workflows refuse a
-  `controld.json` without `relayV2.endpoint` for an ffos-user ref that
-  carries the v2 relay client (`relaywire/`). The app refreshes the record
+  Every G3 device with a control authority and a stable device ID (§7.2)
+  lists `relayV2`: the ffos image workflows refuse a `controld.json` without
+  `relayV2.endpoint` for an ffos-user ref that carries the v2 relay client
+  (`relaywire/`), and the release operator sets `control.enabled=true`
+  (§15.4). The app refreshes the record
   from any status it receives; ff-cli only from a sealed status read on the
   LAN or a verified v2 reply, so a CLI used only off the LAN learns
   `relayV2` through the no-working-topic exception (§15.4) and, while it
@@ -1754,7 +1758,17 @@ below), because `controld.json` changes only with a full image. The image
 secrets (`FERAL_CONTROLD_CONFIG_JSON`) keep a `relayer` block, even after
 the shutdown, until no pre-G3 controld can run on them: pre-G3 controld
 dereferences it without a nil check and would crash-loop on an image built
-from an older ffos-user ref. Before Gate B, once G3 is on a channel (human
+from an older ffos-user ref. They also set `control.enabled` to `true`: a
+device without control state on disk (fresh from the factory or just
+factory-reset onto a G3 reset target) builds no control authority otherwise (`newControlWiring`),
+so it never dials v2 and its claim QR keeps waiting for a legacy topic; once
+the legacy host is gone such a device can be neither claimed nor reached
+remotely. No workflow checks this one: the release operator confirms it in
+the secret of every environment a G3 image is built on, and that the build
+log has no `forcing del(.control)` warning (an older ffos ref strips the
+block). In production G3 is therefore the first
+control-enabled release, and §15.1's preconditions (app force-update floor,
+OTA carry step, release notes) apply to it. Before Gate B, once G3 is on a channel (human
 operator, recorded in that entry): `update_min_version=true`
 (`min_runtime_version` = G3; never `update_required_version`, which stops
 auto-update and demands a reflash), `update_recovery_version=true`
@@ -1776,8 +1790,10 @@ firmware or still `control_state=legacy`. Set before the gates hold, it
 would cut off-LAN control for exactly the population Gate B counts; set
 before the worker is gone, it would hide a working route. If it is set by
 mistake, setting it back to `false` restores the route on the next config
-read for installs that have not latched yet; latched sessions recover on
-relaunch.
+read for installs that have not latched yet; a latched session recovers
+once the corrected config has been fetched and the app relaunched (the app
+applies its disk-cached config before fetching, so a relaunch before that
+fetch reads the cached `true` again).
 
 **After the shutdown:**
 
@@ -1819,6 +1835,19 @@ pre-G3 on every heartbeat) would connect to that host, which as a legacy
 relayer can assign a topic and send the plaintext commands a device admits
 on the relayer route (§7.2: everything in `legacy`, the controller tier in
 `enrolled` and `locked`, a Play cast in `enforced`).
+
+"Reach the fleet" includes the image a factory reset boots: before the
+account is deleted, the empty-endpoint image is also the server's
+`recovery_version` (`update_recovery_version=true` on its dispatch) and
+shelf stock is reflashed with it, and `reset_target_version_info` shows
+it on nearly all devices (as Gate B measures G3). Otherwise a reset boots a reset target
+whose `controld.json` still dials the old hostname, and so does every
+device shipped from older stock. Two more preconditions of the account
+deletion: the ff-cli release with its legacy relayer off is published
+(today's ff-cli has no setting that turns it off; an empty
+`ff1Relayer.baseUrl` falls back to the default host), since an ff-cli
+holding a topic ends a §5.6 enroll on it under NXDOMAIN even with the FF1
+on the LAN (above); and the app flag is set (above).
 
 Populations left between G3 and Gate B: legacy-claimed G3 devices waiting
 for an owner at the LAN; devices whose OTA keeps failing (free space, slow
