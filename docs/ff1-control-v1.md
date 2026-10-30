@@ -1656,8 +1656,11 @@ release operator applies them.
   receipted by another peer and become ambiguous instead of falling back.
   Every G3 image lists `relayV2`: the ffos image workflows refuse a
   `controld.json` without `relayV2.endpoint` for an ffos-user ref that
-  carries the v2 relay client (`relaywire/`). The record is refreshed over
-  whatever route works while the legacy relayer exists.
+  carries the v2 relay client (`relaywire/`). The app refreshes the record
+  from any status it receives; ff-cli only from a sealed status read on the
+  LAN or a verified v2 reply, so a CLI used only off the LAN learns
+  `relayV2` through the no-working-topic exception (§15.4) and, while it
+  holds a topic, under NXDOMAIN not at all (the accepted residual there).
 - One v2 host. Every environment's `relayV2.endpoint`, the app's and the
   CLI's defaults, and the endpoint a display grant hands a Play site name
   `wss://relayer.feralfile.io` (worker `ff-relayer-v2`). The legacy worker
@@ -1725,7 +1728,7 @@ because they are measured differently.
 
 | Gate | What it covers | Condition |
 |---|---|---|
-| A (controllers) | `/api/cast`, `/api/notification`, `/api/ephemeral-sessions` | app floor raised past the G3 app release (device identity by `deviceId`, LAN bind by QR pins without a topic, retirement read as above); the G3 ff-cli release published (v2 default, retirement read as above, the held-topic-gone v2 exception); Play integrators on 0.5; `tv-ws-usage` `/api/cast` traffic ~0 |
+| A (controllers) | `/api/cast`, `/api/notification`, `/api/ephemeral-sessions` | app floor raised past the G3 app release (device identity by `deviceId`, LAN bind by QR pins without a topic, retirement read as above); the G3 ff-cli release published (v2 default, retirement read as above, the no-working-topic v2 exception); Play integrators on 0.5; `tv-ws-usage` `/api/cast` traffic ~0 |
 | B (devices) | `/api/connection` (topic issuance) | from the device gauges (ffos-user `api-design.md`, `/metrics`): running version ≥ G3 AND `reset_target_version_info` ≥ G3 (`unknown` counts as below) for nearly all devices; legacy-dependent devices (claimed, topic present, `control_state=legacy`) under an agreed threshold; known remote installs contacted; shelf stock reflashed |
 
 `tv-ws-usage` (one sampled row per legacy request that reached a topic)
@@ -1733,16 +1736,29 @@ shows controller traffic falling. It cannot measure devices: a device that
 stays connected for days writes one row, and the v2 worker has no
 analytics binding. The device gauges are the only source for Gate B.
 
-G3 is a full-image release (declared in ffos-user `RELEASES.md`), because
-`controld.json` changes only with a full image. The image secrets
-(`FERAL_CONTROLD_CONFIG_JSON`) keep a `relayer` block, even after the
-shutdown, until no pre-G3 controld can run on them: pre-G3 controld
+The gauges miss two groups: a device with the analytics opt-out
+(`/home/feralfile/.state/analytics-toggle-off`) runs vmagent push-only and
+is not scraped (`run-vmagent.sh`), and a device that is off or has no WAN
+reports nothing (vmagent buffers on disk, so a device back on WAN reports
+late). "Nearly all" is therefore measured against a fleet count from
+outside the gauges (the claimed devices the operator knows of), not
+against the devices that report, and every claimed device without a sample
+in the window the operator agrees counts as legacy-dependent and below G3
+until contacted. Unclaimed devices are outside the count: the daily
+updater moves them to G3 without the relayer, and shelf stock is its own
+condition.
+
+G3 is a full-image release (its `RELEASES.md` entry, written at the cut,
+declares it with the `build-image-to-cf.yml` inputs and the human steps
+below), because `controld.json` changes only with a full image. The image
+secrets (`FERAL_CONTROLD_CONFIG_JSON`) keep a `relayer` block, even after
+the shutdown, until no pre-G3 controld can run on them: pre-G3 controld
 dereferences it without a nil check and would crash-loop on an image built
 from an older ffos-user ref. Before Gate B, once G3 is on a channel (human
-operator, recorded in ffos-user `RELEASES.md`): `update_min_version=true` (`min_runtime_version`
-= G3; never `update_required_version`, which stops auto-update and demands
-a reflash), `update_recovery_version=true` (`recovery_version` = G3), and
-shelf stock reflashed with G3.
+operator, recorded in that entry): `update_min_version=true`
+(`min_runtime_version` = G3; never `update_required_version`, which stops
+auto-update and demands a reflash), `update_recovery_version=true`
+(`recovery_version` = G3), and shelf stock reflashed with G3.
 
 **Flag order.** `features.ff1.legacy_relayer_retired` is the last action of
 the shutdown, not part of its preparation:
