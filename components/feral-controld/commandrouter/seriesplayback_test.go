@@ -459,10 +459,19 @@ func TestCommandHandler_SetSeriesPlayback_DefaultPlaybackInvalidatesTheSeriesCac
 }
 
 // deadSourcesProber answers ProbeDead (HTTP 404) for every source in dead
-// and ProbeAlive for everything else.
-type deadSourcesProber struct{ dead map[string]bool }
+// and ProbeAlive for everything else. during, if set, runs inside the first
+// probe only — i.e. while the first cast's preflight is still pending.
+type deadSourcesProber struct {
+	dead   map[string]bool
+	during func()
+	probes int
+}
 
-func (p deadSourcesProber) ProbeSources(_ context.Context, sources []string) []offlinecache.SourceProbeResult {
+func (p *deadSourcesProber) ProbeSources(_ context.Context, sources []string) []offlinecache.SourceProbeResult {
+	p.probes++
+	if p.probes == 1 && p.during != nil {
+		p.during()
+	}
 	results := make([]offlinecache.SourceProbeResult, len(sources))
 	for i, source := range sources {
 		results[i] = offlinecache.SourceProbeResult{Source: source, Verdict: offlinecache.ProbeAlive, Status: 200}
@@ -497,7 +506,7 @@ func TestCommandHandler_SetSeriesPlayback_RejectedCastIsNotRecast(t *testing.T) 
 	for _, edition := range editions {
 		dead[edition.Source] = true
 	}
-	commandrouter.SetSourceProber(handler, deadSourcesProber{dead: dead}, logger)
+	commandrouter.SetSourceProber(handler, &deadSourcesProber{dead: dead}, logger)
 
 	group := &dp1.ResolvedSeriesGroup{
 		Representative: seriesEditionItem("item-series"),
@@ -537,6 +546,160 @@ func TestCommandHandler_SetSeriesPlayback_RejectedCastIsNotRecast(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, true, result.(map[string]interface{})["ok"], "the setting itself must still persist")
 	assert.Equal(t, "first", result.(map[string]interface{})["seriesPlayback"])
+}
+
+// The other half of PR #431 review F2: a re-cast the player refuses leaves
+// the accepted series on screen, so recastForMode must restore it AS
+// ACCEPTED and a later setting change must still re-cast it. (On a
+// successful re-cast the nested settle already marks it accepted; only this
+// path depends on the restore doing so.)
+func TestCommandHandler_SetSeriesPlayback_FailedRecastKeepsTheDisplayedSeries(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	logger := zaptest.NewLogger(t)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
+	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
+
+	group := &dp1.ResolvedSeriesGroup{
+		Representative: seriesEditionItem("item-series"),
+		Editions:       []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b"), seriesEditionItem("c")},
+		Resolved:       true,
+	}
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}).
+		Times(1)
+	// Re-casts carry concrete editions; see the passthrough's rationale in
+	// TestCommandHandler_SetSeriesPlayback_RecastsTheCurrentlyDisplayedSeries.
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ interface{}, playlist dp1.Playlist, _ json.RawMessage, _ *dp1.SeriesPlaybackMode, _ int) dp1.CastPlan {
+			segments := make([]dp1.CastSegment, len(playlist.Items))
+			for i := range playlist.Items {
+				item := playlist.Items[i]
+				segments[i] = dp1.CastSegment{Item: &item}
+			}
+			return dp1.CastPlan{Segments: segments}
+		}).
+		AnyTimes()
+
+	// Send 1: the original cast (accepted). Send 2: the "first" re-cast,
+	// refused by the player. Send 3: the "full" re-cast.
+	var expressions []string
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			expressions = append(expressions, expr)
+			if len(expressions) == 2 {
+				return playerNotOkResponse(), nil
+			}
+			return playerOkResponse(), nil
+		}).
+		Times(3)
+	mockStatusPoller.EXPECT().ForceRefresh().AnyTimes()
+
+	playlistMap := map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"items": []interface{}{map[string]interface{}{
+			"id":     "item-series",
+			"source": "https://cdn.artworks.feralfile.io/0.mp4",
+			"provenance": map[string]interface{}{
+				"type":     "seriesRegistry",
+				"contract": map[string]interface{}{"chain": "evm", "seriesId": 387},
+			},
+		}},
+	}
+	_, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"dp1_call": playlistMap},
+	})
+	require.NoError(t, err)
+
+	for _, mode := range []string{"first", "full"} {
+		result, err := handler.Process(context.Background(), commands.Command{
+			Type:      commands.CMD_SET_SERIES_PLAYBACK,
+			Arguments: map[string]interface{}{"seriesPlayback": mode},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, true, result.(map[string]interface{})["ok"])
+	}
+
+	require.Len(t, expressions, 3, "the series is still on screen after the refused re-cast, so the next setting change must re-cast it")
+	assert.Len(t, castedItems(t, expressions[2]), 3, "full must re-cast every edition")
+}
+
+// PR #431 review F2: the same rejected series must stay out of reach when a
+// setting change overlaps its pending preflight. setSeriesPlayback("full")
+// lands while the cast is still being probed; its re-cast must not run on
+// that unaccepted plan (it would also fail, move seq on, and restore the
+// plan, leaving the original cast unable to retract it). After the cast
+// rejects, setSeriesPlayback("first") must still send nothing.
+func TestCommandHandler_SetSeriesPlayback_OverlappingSettingChangeDoesNotRecastAPendingCast(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	logger := zaptest.NewLogger(t)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
+	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
+
+	editions := []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b"), seriesEditionItem("c")}
+	dead := map[string]bool{}
+	for _, edition := range editions {
+		dead[edition.Source] = true
+	}
+	setMode := func(mode string) {
+		result, err := handler.Process(context.Background(), commands.Command{
+			Type:      commands.CMD_SET_SERIES_PLAYBACK,
+			Arguments: map[string]interface{}{"seriesPlayback": mode},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, true, result.(map[string]interface{})["ok"], "the setting itself must still persist")
+	}
+	commandrouter.SetSourceProber(handler, &deadSourcesProber{dead: dead, during: func() { setMode("full") }}, logger)
+
+	group := &dp1.ResolvedSeriesGroup{
+		Representative: seriesEditionItem("item-series"),
+		Editions:       editions,
+		Resolved:       true,
+	}
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}).
+		Times(1)
+	// No CDP Send and no ForceRefresh expectations: nothing may reach the
+	// player.
+
+	playlistMap := map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"items": []interface{}{map[string]interface{}{
+			"id":     "item-series",
+			"source": "https://cdn.artworks.feralfile.io/0.mp4",
+			"provenance": map[string]interface{}{
+				"type":     "seriesRegistry",
+				"contract": map[string]interface{}{"chain": "evm", "seriesId": 387},
+			},
+		}},
+	}
+	_, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"dp1_call": playlistMap},
+	})
+	var unreachable *commandrouter.SourceUnreachableError
+	require.ErrorAs(t, err, &unreachable, "every edition is dead, so the full cast must be rejected")
+
+	setMode("first")
 }
 
 // The player-refusal half of the same rule: a series cast the preflight
