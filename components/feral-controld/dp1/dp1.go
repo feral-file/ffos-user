@@ -251,6 +251,17 @@ type DP1 interface {
 	// playlist echoed back in player status — and so needs the same
 	// expansion applied by hand before treating the playlist as final.
 	ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems int) Playlist
+
+	// ResolveSeriesCastPlan is ExpandSeriesItems's cast-aware sibling: it
+	// reads each series item's own seriesPlayback from rawPlaylist (the
+	// verbatim bytes playlist was decoded from; nil when none exists, e.g. an
+	// internally rebuilt re-cast), resolves a per-item mode against
+	// deviceMode (the device-level override; nil follows the document), and
+	// returns a CastPlan that narrows to exactly that mode's editions while
+	// keeping every group's full edition set for a later, network-free
+	// re-narrow (feral-file/ffos-user#425). maxItems bounds the result the
+	// same way it bounds ExpandSeriesItems.
+	ResolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawPlaylist json.RawMessage, deviceMode *SeriesPlaybackMode, maxItems int) CastPlan
 }
 
 type dp1 struct {

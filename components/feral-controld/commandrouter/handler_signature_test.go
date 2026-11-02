@@ -116,13 +116,13 @@ func inlineCast(ts *testSetup, rawBytes []byte, typed *dp1.Playlist) commands.Co
 			return nil
 		}).
 		Times(1)
-	// Static dp1_call: Process expands series items by hand (see
+	// Static dp1_call: Process resolves series items by hand (see
 	// handler.go's CMD_DISPLAY_PLAYLIST branch). None of this file's fixtures
-	// carry one, so echo the playlist back — what the real expandSeriesItems
-	// would do too.
+	// carry one, so echo the playlist back as plain segments — what the real
+	// resolveSeriesCastPlan would do too.
 	ts.mockDP1.EXPECT().
-		ExpandSeriesItems(ts.ctx, gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist { return playlist }).
+		ResolveSeriesCastPlan(ts.ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
 		AnyTimes()
 	return commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -227,8 +227,8 @@ func TestCommandHandler_Process_DisplayPlaylist_Inline_VerifiesWireTokenNotRemar
 		return nil
 	}).Times(1)
 	ts.mockDP1.EXPECT().
-		ExpandSeriesItems(ts.ctx, gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist { return playlist }).
+		ResolveSeriesCastPlan(ts.ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
 		AnyTimes()
 	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
 	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
@@ -506,8 +506,8 @@ func TestCommandHandler_Process_ScheduledCast_SurvivesReconnectRepush(t *testing
 		return nil
 	}).Times(1)
 	mockDP1.EXPECT().
-		ExpandSeriesItems(ctx, gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist { return playlist }).
+		ResolveSeriesCastPlan(ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
 		AnyTimes()
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
 	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
