@@ -180,6 +180,7 @@ func TestCommandHandler_SetSeriesPlayback_RecastsTheCurrentlyDisplayedSeries(t *
 	group := &dp1.ResolvedSeriesGroup{
 		Representative: seriesEditionItem("item-series"),
 		Editions:       []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b"), seriesEditionItem("c")},
+		Resolved:       true,
 	}
 	initialPlan := dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}
 	mockDP1.EXPECT().
@@ -266,6 +267,7 @@ func TestCommandHandler_SetSeriesPlayback_DefaultPlaybackInvalidatesTheSeriesCac
 	group := &dp1.ResolvedSeriesGroup{
 		Representative: seriesEditionItem("item-series"),
 		Editions:       []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b"), seriesEditionItem("c")},
+		Resolved:       true,
 	}
 	initialPlan := dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}
 	mockDP1.EXPECT().
@@ -332,4 +334,72 @@ func TestCommandHandler_SetSeriesPlayback_NoOpWhenNothingDisplayedIsASeries(t *t
 	})
 	require.NoError(t, err)
 	assert.Equal(t, true, result.(map[string]interface{})["ok"])
+}
+
+// feralfile-bot F1 on feralfile-bot F5's own fix, 2026-11-02: a series whose
+// catalog lookup failed must no-op setSeriesPlayback exactly like
+// TestCommandHandler_SetSeriesPlayback_NoOpWhenNothingDisplayedIsASeries
+// above (dp1/seriesplayback_test.go pins the same contract from the dp1
+// package's own side: HasSeriesGroups() reads false for an unresolved
+// fallback). A fix for a DIFFERENT bug (F5, preserving the unresolved item's
+// seriesPlayback marker across an internal rebuild) briefly made this cast
+// register as "tracked" too, so setSeriesPlayback attempted a real re-cast —
+// and because the only "edition" an unresolved fallback has is the item
+// itself, still carrying the series marker, that re-cast would have
+// re-entered ResolveSeriesCastPlan and re-fetched the catalog synchronously
+// inside the command handler. Only ONE mockDP1.ResolveSeriesCastPlan
+// expectation and ONE CDP send are registered below — a second of either
+// would fail this test outright.
+func TestCommandHandler_SetSeriesPlayback_NoOpWhenTheDisplayedSeriesNeverResolved(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	logger := zaptest.NewLogger(t)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
+	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
+
+	unresolved := &dp1.ResolvedSeriesGroup{
+		Representative: seriesEditionItem("item-series"),
+		Editions:       []dp1playlist.PlaylistItem{seriesEditionItem("item-series")},
+		Resolved:       false,
+	}
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(dp1.CastPlan{Segments: []dp1.CastSegment{{Group: unresolved}}}).
+		Times(1)
+
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(playerOkResponse(), nil).
+		Times(1)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	playlistMap := map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"items": []interface{}{map[string]interface{}{
+			"id":     "item-series",
+			"source": "https://cdn.artworks.feralfile.io/0.mp4",
+			"provenance": map[string]interface{}{
+				"type":     "seriesRegistry",
+				"contract": map[string]interface{}{"chain": "evm", "seriesId": 387},
+			},
+		}},
+	}
+	_, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"dp1_call": playlistMap},
+	})
+	require.NoError(t, err)
+
+	result, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_SET_SERIES_PLAYBACK,
+		Arguments: map[string]interface{}{"seriesPlayback": "full"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, true, result.(map[string]interface{})["ok"], "the setting itself must still persist")
 }

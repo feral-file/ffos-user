@@ -220,11 +220,135 @@ func TestResolveSeriesCastPlan_CatalogUnreachableKeepsTheRepresentative(t *testi
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
 	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
 
+	// Wrapped as its own one-edition group now (feralfile-bot F5,
+	// 2026-11-02; unresolvedSeriesGroup), not a bare Item, so the document's
+	// mode survives into the cache — but it is NOT a "resolved" group
+	// (Resolved stays false), so HasSeriesGroups must still read false: a
+	// lone unresolved series is not worth tracking for a re-cast, and
+	// treating it as tracked reintroduced a synchronous catalog retry on the
+	// next setSeriesPlayback call (feralfile-bot F1 on this fix,
+	// 2026-11-02). The marker is cleared unconditionally at construction
+	// (feralfile-bot F1 pass 2 on this fix, 2026-11-02), not only for
+	// first/random: there is only ever this one item to show, under any
+	// mode, so there is nothing lost by never letting it look like an
+	// unresolved series again.
 	assert.False(t, plan.HasSeriesGroups())
 	narrowed := plan.Narrow(nil)
 	require.Len(t, narrowed, 1)
 	assert.Equal(t, "item-series", narrowed[0].ID)
-	assert.Equal(t, dp1playlist.ProvenanceSeriesRegistry, narrowed[0].Provenance.Type)
+	assert.Nil(t, narrowed[0].Provenance.Contract.SeriesID, "full must not carry the series marker either — there is no catalog data behind this fallback to re-resolve from")
+}
+
+// feralfile-bot F5, 2026-11-02, end to end: an unresolved series item (the
+// catalog failed) used to come through as a plain Item segment, still
+// carrying the document's series marker. commandrouter's recastForMode
+// rebuilds a fresh dp1_call from exactly this kind of Narrow output and
+// re-enters Process with it — so a marker-carrying fallback there still
+// satisfied isSeriesItem and was resolved a second time, and because that
+// rebuild's JSON round trip has already dropped the document's own
+// seriesPlayback (not a typed field), the second resolution silently
+// defaulted to full instead of the document's actual first, re-fetching the
+// catalog along the way. No mockHTTP expectation is registered for a second
+// fetch of item-b below — an unexpected call there would fail this test
+// outright, exactly the regression wrapping the fallback as its own group
+// prevents.
+func TestResolveSeriesCastPlan_AnUnresolvedRepresentativeNeverReExpandsEither(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	seriesIDA, seriesIDB := 387, 512
+	itemA := dp1playlist.PlaylistItem{
+		ID: "item-a", Source: "https://cdn/a.mp4",
+		Provenance: &dp1playlist.ProvenanceBlock{
+			Type:     dp1playlist.ProvenanceSeriesRegistry,
+			Contract: &dp1playlist.ProvenanceContract{Chain: "evm", SeriesID: &seriesIDA},
+		},
+	}
+	itemB := dp1playlist.PlaylistItem{
+		ID: "item-b", Source: "https://cdn/b.mp4",
+		Provenance: &dp1playlist.ProvenanceBlock{
+			Type:     dp1playlist.ProvenanceSeriesRegistry,
+			Contract: &dp1playlist.ProvenanceContract{Chain: "evm", SeriesID: &seriesIDB},
+		},
+	}
+	raw := castPlanBody(
+		map[string]any{"id": "item-a", "source": "https://cdn/a.mp4", "seriesPlayback": "first"},
+		map[string]any{"id": "item-b", "source": "https://cdn/b.mp4", "seriesPlayback": "first"},
+	)
+
+	serveEditions(ts, "playlist-1", "item-a", editionsBody(3, editionItem("a1"), editionItem("a2"), editionItem("a3")))
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-b")).
+		Return(nil, assert.AnError)
+	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
+		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
+
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{itemA, itemB}}}
+	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, raw, nil, 0)
+
+	// A's genuine resolution alone makes the MIXED plan worth tracking —
+	// unaffected by F1's fix, which only changes the LONE-unresolved case
+	// (see TestResolveSeriesCastPlan_CatalogUnreachableKeepsTheRepresentative).
+	require.True(t, plan.HasSeriesGroups())
+	narrowed := plan.Narrow(nil)
+	require.Len(t, narrowed, 2, "A's representative and B's still-unresolved representative must both survive the first narrow")
+	assert.Equal(t, "item-a", narrowed[0].ID)
+	assert.Equal(t, "item-b", narrowed[1].ID)
+
+	// The internal rebuild: no raw bytes, exactly as recastForMode's re-entry
+	// has none, and critically no second mockHTTP expectation for item-b.
+	rebuilt := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: narrowed}}
+	again := ts.client.ResolveSeriesCastPlan(ts.ctx, rebuilt, nil, nil, 0)
+
+	require.Len(t, again.Narrow(nil), 2, "must cast both through unchanged, not re-fetch and re-expand either")
+	assert.Equal(t, "item-a", again.Narrow(nil)[0].ID)
+	assert.Equal(t, "item-b", again.Narrow(nil)[1].ID)
+}
+
+// feralfile-bot F1 pass 2 on this fix, 2026-11-02: the sibling of the test
+// above, under the (common, default) full mode instead of first. A, the
+// genuinely resolved series, alone keeps this MIXED plan tracked
+// (HasSeriesGroups true) — B's still-unresolved fallback rides along inside
+// it. First/random already cleared B's marker (the test above); full did
+// not, until unresolvedSeriesGroup started clearing it unconditionally. No
+// mockHTTP expectation is registered for a second fetch of item-b below.
+func TestResolveSeriesCastPlan_AnUnresolvedRepresentativeNeverReExpandsUnderFullEither(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	seriesIDA, seriesIDB := 387, 512
+	itemA := dp1playlist.PlaylistItem{
+		ID: "item-a", Source: "https://cdn/a.mp4",
+		Provenance: &dp1playlist.ProvenanceBlock{
+			Type:     dp1playlist.ProvenanceSeriesRegistry,
+			Contract: &dp1playlist.ProvenanceContract{Chain: "evm", SeriesID: &seriesIDA},
+		},
+	}
+	itemB := dp1playlist.PlaylistItem{
+		ID: "item-b", Source: "https://cdn/b.mp4",
+		Provenance: &dp1playlist.ProvenanceBlock{
+			Type:     dp1playlist.ProvenanceSeriesRegistry,
+			Contract: &dp1playlist.ProvenanceContract{Chain: "evm", SeriesID: &seriesIDB},
+		},
+	}
+
+	serveEditions(ts, "playlist-1", "item-a", editionsBody(3, editionItem("a1"), editionItem("a2"), editionItem("a3")))
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-b")).
+		Return(nil, assert.AnError)
+
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{itemA, itemB}}}
+	// No raw bytes: neither item states a mode, so both default to full.
+	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
+	require.True(t, plan.HasSeriesGroups(), "A's genuine resolution alone keeps this mixed plan worth tracking")
+
+	narrowed := plan.Narrow(nil)
+	require.Len(t, narrowed, 4, "full keeps every one of A's 3 editions, plus B's single unresolved representative")
+	assert.Nil(t, narrowed[3].Provenance.Contract.SeriesID, "B's fallback must not carry the series marker under full either — there is nothing else to show")
+
+	rebuilt := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: narrowed}}
+	again := ts.client.ResolveSeriesCastPlan(ts.ctx, rebuilt, nil, nil, 0)
+
+	assert.False(t, again.HasSeriesGroups(), "neither A's editions nor B's cleared fallback must look like a series again")
+	require.Len(t, again.Narrow(nil), 4, "must cast all four through unchanged, not re-fetch and re-expand B")
 }
 
 func TestResolveSeriesCastPlan_LeavesAPlainPlaylistAlone(t *testing.T) {

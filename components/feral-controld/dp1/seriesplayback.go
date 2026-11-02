@@ -134,6 +134,54 @@ func seriesGroupKey(item dp1playlist.PlaylistItem) (SeriesGroupKey, bool) {
 	return SeriesGroupKey{Chain: contract.Chain, Address: contract.Address, SeriesID: *contract.SeriesID}, true
 }
 
+// unresolvedSeriesGroup wraps a series item the walk could not expand — the
+// catalog is unreachable, holds nothing for it, or the budget is spent — as
+// its own one-edition group, rather than a plain Item segment. A plain Item
+// would carry the document's series marker (contract.seriesId) straight
+// through Narrow untouched: harmless for a cast built fresh from a real
+// document, but not for commandrouter's internal rebuild (recastForMode),
+// which feeds Narrow's own output back into Process as a new dp1_call — a
+// marker-carrying item there still satisfies isSeriesItem, so it is resolved
+// a second time, and because that rebuild's JSON round trip has already
+// dropped the document's un-typed seriesPlayback field, the second
+// resolution silently defaults to full instead of the original mode
+// (feralfile-bot F5, 2026-11-02).
+//
+// The marker is stripped HERE, unconditionally, rather than left to
+// NarrowEditions' per-mode clearSeriesMarker call: this representative IS
+// the one and only "edition" regardless of which mode it is later narrowed
+// under (there is no catalog data to pick a different edition from), so
+// full and first/random show identical content either way — unlike a
+// GENUINELY resolved group, where full's whole point is to show editions
+// the catalog returned, not the representative. Clearing only for
+// first/random (the first attempt at this fix, feralfile-bot F1 pass 1 on
+// this fix, 2026-11-02) left full's narrow still marker-carrying, which is
+// the branch's own documented DEFAULT mode when neither the document nor
+// the device states one — so a plan mixing this fallback with a genuinely
+// resolved sibling (tracked because of that sibling) still re-triggered the
+// synchronous catalog retry on every recast under the common case
+// (feralfile-bot F1 pass 2 on this fix, 2026-11-02).
+//
+// Resolved is deliberately left false (the zero value): this group has no
+// real catalog data behind it, only the one item it was given, and
+// CastPlan.HasSeriesGroups must not count a LONE one of these as something
+// worth tracking for a later re-cast — see that method's doc.
+func unresolvedSeriesGroup(item dp1playlist.PlaylistItem, documentMode *SeriesPlaybackMode) *ResolvedSeriesGroup {
+	representative := clearSeriesMarker(item)
+	group := &ResolvedSeriesGroup{
+		Representative: representative,
+		Editions:       []dp1playlist.PlaylistItem{representative},
+		DocumentMode:   documentMode,
+	}
+	// seriesGroupKey reads Contract.SeriesID, which the cleared copy above
+	// no longer has — it must run against the original, marker-carrying
+	// item to still identify this group correctly.
+	if key, ok := seriesGroupKey(item); ok {
+		group.Key = key
+	}
+	return group
+}
+
 // ResolvedSeriesGroup is one series item's resolved expansion: its identity,
 // the document's own stated mode (nil if absent or unrecognized), the series
 // item itself (Representative — what first/random actually cast, per
@@ -141,11 +189,18 @@ func seriesGroupKey(item dp1playlist.PlaylistItem) (SeriesGroupKey, bool) {
 // un-narrowed so a later device setting change can re-narrow it
 // (CastPlan.Narrow) without a second catalog round trip (AC5 of
 // feral-file/ffos-user#425).
+//
+// Resolved is true only when the catalog actually answered for this series —
+// false for unresolvedSeriesGroup's fallback, whose "editions" is just the
+// one item itself. CastPlan.HasSeriesGroups reads this to decide whether a
+// cast is worth caching for a later re-narrow; Narrow and NarrowEditions do
+// not care and treat both the same way.
 type ResolvedSeriesGroup struct {
 	Key            SeriesGroupKey
 	DocumentMode   *SeriesPlaybackMode
 	Representative dp1playlist.PlaylistItem
 	Editions       []dp1playlist.PlaylistItem
+	Resolved       bool
 }
 
 // CastSegment is one position in a playlist as resolveSeriesCastPlan walked
@@ -169,12 +224,29 @@ type CastPlan struct {
 	maxItems int
 }
 
-// HasSeriesGroups reports whether this plan carries any series group —
-// callers use it to decide whether a cast is worth remembering for a later
-// re-narrow (CastPlan.Narrow) when the device setting changes.
+// HasSeriesGroups reports whether this plan carries any GENUINELY RESOLVED
+// series group — commandrouter's rememberSeriesCast reads this to decide
+// whether a cast is worth caching for a later, network-free re-narrow
+// (CastPlan.Narrow) when the device setting changes.
+//
+// An unresolved fallback (unresolvedSeriesGroup: Resolved false) does not
+// count, even though it is a Group segment: it carries no real catalog data
+// to re-narrow, so caching it buys nothing, and caching it was actively
+// harmful (feralfile-bot F1 on this fix, 2026-11-02) — a cast with no OTHER
+// resolved group would then be remembered as "tracked", so a later
+// setSeriesPlayback call would re-enter recastForMode's rebuild-and-Process
+// path instead of no-opping, and for the (default) full mode that rebuild's
+// item still carries the series marker, re-triggering a synchronous catalog
+// retry inside the command handler — exactly the blocking round trip the
+// cache exists to avoid. A plan that mixes a resolved group with an
+// unresolved one is unaffected: the resolved group alone makes it worth
+// tracking, and the unresolved one's marker is already stripped at
+// construction (unresolvedSeriesGroup), so Narrow/NarrowEditions never
+// re-trigger a catalog call for it regardless of which mode it narrows
+// under.
 func (p CastPlan) HasSeriesGroups() bool {
 	for _, seg := range p.Segments {
-		if seg.Group != nil {
+		if seg.Group != nil && seg.Group.Resolved {
 			return true
 		}
 	}
@@ -269,9 +341,12 @@ func (d *dp1) readItemSeriesPlaybackModes(raw json.RawMessage, n int) []*SeriesP
 // trailing segments an earlier, narrower flatten had no room for
 // (feralfile-bot F3, 2026-10-30; see CastPlan's doc). A series this walk
 // cannot expand — the catalog is unreachable, holds nothing for it, or the
-// budget is spent — is kept exactly as expandSeriesItems keeps it: as its
-// own representative, unflattened. deviceMode may be nil (follow the
-// document).
+// budget is spent — still casts exactly as expandSeriesItems would (its own
+// representative, unflattened), but is wrapped as its own one-edition group
+// (unresolvedSeriesGroup) rather than a plain item, so the document's mode
+// survives into the cache and a later internal rebuild never re-resolves or
+// re-fetches it (feralfile-bot F5, 2026-11-02; see unresolvedSeriesGroup's
+// doc). deviceMode may be nil (follow the document).
 func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawPlaylist json.RawMessage, deviceMode *SeriesPlaybackMode, maxItems int) CastPlan {
 	if !hasSeriesItems(playlist.Items) {
 		segments := make([]CastSegment, len(playlist.Items))
@@ -302,8 +377,11 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 				zap.String("item_slug", item.Slug),
 				zap.Int("attempts", attempts),
 				zap.Error(ctx.Err()))
-			it := item
-			seg = CastSegment{Item: &it}
+			var documentMode *SeriesPlaybackMode
+			if i < len(documentModes) {
+				documentMode = documentModes[i]
+			}
+			seg = CastSegment{Group: unresolvedSeriesGroup(item, documentMode)}
 
 		default:
 			attempts++
@@ -315,12 +393,15 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 						zap.String("item_slug", item.Slug),
 						zap.Error(err))
 				}
-				it := item
-				seg = CastSegment{Item: &it}
+				var documentMode *SeriesPlaybackMode
+				if i < len(documentModes) {
+					documentMode = documentModes[i]
+				}
+				seg = CastSegment{Group: unresolvedSeriesGroup(item, documentMode)}
 				break
 			}
 			inherited := inheritInstanceFields(item, editions)
-			group := &ResolvedSeriesGroup{Representative: item, Editions: inherited}
+			group := &ResolvedSeriesGroup{Representative: item, Editions: inherited, Resolved: true}
 			if key, ok := seriesGroupKey(item); ok {
 				group.Key = key
 			}
