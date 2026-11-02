@@ -688,6 +688,12 @@ func (m *defaultConfigManager) Load(logger *zap.Logger) (*Config, error) {
 	if err := m.json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
+	// A config without a "relayer" block means "no legacy relayer" (the
+	// relayer latches retired on an empty endpoint), not a nil dereference
+	// at startup.
+	if c.RelayerConfig == nil {
+		c.RelayerConfig = &RelayerConfig{}
+	}
 
 	// Fetch MAC info at startup
 	c.MACInfo = m.getMACInfo(logger)

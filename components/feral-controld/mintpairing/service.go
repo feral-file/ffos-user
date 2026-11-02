@@ -864,7 +864,7 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 		return commandError("invalid_config", "mint pairing player contract is not valid", false), nil
 	}
 	startGuard := currentTopicGuard()
-	if startGuard.topicID == "" {
+	if startGuard.topicID == "" && !s.displayGrantsWired() {
 		return commandError("topic_not_ready", "relayer topic is not ready", true), nil
 	}
 
@@ -1097,7 +1097,7 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 		return commandError("invalid_config", "mint pairing broker is not configured", false), nil
 	}
 	startGuard := currentTopicGuard()
-	if startGuard.topicID == "" {
+	if startGuard.topicID == "" && !s.displayGrantsWired() {
 		return commandError("topic_not_ready", "relayer topic is not ready", true), nil
 	}
 	credential := join.credentialDigest()
@@ -1542,8 +1542,12 @@ func (s *service) parseDecision(args map[string]any) (approvalDecisionRequest, e
 	if decision.Version != 1 {
 		return decision, errors.New("approval decision version must be 1")
 	}
-	if decision.ApprovalRequestID == "" || decision.TopicID == "" || decision.ChannelID == "" || decision.RequestMessageID == "" {
-		return decision, errors.New("approvalRequestID, topicID, channelID, and requestMessageID are required")
+	// topicID may be empty: a device with display grants pairs without a
+	// legacy topic, and its approval request carries "" (see topic_not_ready
+	// in docs/controld-inbound-controller-messages.md). The caller still
+	// requires it to equal the pending request's topic.
+	if decision.ApprovalRequestID == "" || decision.ChannelID == "" || decision.RequestMessageID == "" {
+		return decision, errors.New("approvalRequestID, channelID, and requestMessageID are required")
 	}
 	if err := s.resolveKeepPaired(&decision); err != nil {
 		return decision, err
@@ -1671,6 +1675,12 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 			terminalSent = s.rejectDisplayUnavailable(active.channel, *request, err)
 			return
 		}
+	} else if guard.topicID == "" {
+		// A 0.4 request needs a relayer session, which needs the legacy
+		// topic; a device pairing without one (display grants only) refuses
+		// it before the owner is asked, never calling the relayer with "".
+		terminalSent = s.rejectSessionWithoutTopic(active.channel, *request)
+		return
 	}
 
 	approvalRequestID, err := newApprovalRequestID()
@@ -2385,10 +2395,14 @@ func (s *service) WaitForInFlightCreates(ctx context.Context) (int, error) {
 	return s.creates.wait(ctx)
 }
 
+// errRelayerSessionsRetired is the legacy relayer answering 410 on its
+// session routes (LEGACY_API_ENABLED=false or the device API retired).
+var errRelayerSessionsRetired = errors.New("legacy relayer session routes are retired")
+
 // RevokeTopicSessions revokes every session the relayer holds for topicID.
 // See Service. It keeps going after a failure so one unreachable session
 // cannot strand the rest, and reports the count it did revoke alongside the
-// joined failures.
+// joined failures. A retired relayer (410) holds no usable sessions: 0, nil.
 func (s *service) RevokeTopicSessions(ctx context.Context, topicID string) (int, error) {
 	if s == nil || s.sessionCreator == nil {
 		return 0, nil
@@ -2401,6 +2415,12 @@ func (s *service) RevokeTopicSessions(ctx context.Context, topicID string) (int,
 		return 0, nil
 	}
 	sessionIDs, err := s.sessionCreator.ListEphemeralSessionIDs(ctx, topicID)
+	if errors.Is(err, errRelayerSessionsRetired) {
+		// The legacy relayer has retired its session routes (410): every
+		// session it held is unusable already, so there is nothing to revoke.
+		s.logger.Info("Legacy relayer session routes are retired; no browser sessions to revoke")
+		return 0, nil
+	}
 	if err != nil {
 		return 0, fmt.Errorf("list relayer sessions: %w", err)
 	}
@@ -3434,6 +3454,9 @@ func (c *RelayerSessionCreator) ListEphemeralSessionIDs(ctx context.Context, top
 	defer func() {
 		_ = resp.Body.Close()
 	}()
+	if resp.StatusCode == http.StatusGone {
+		return nil, errRelayerSessionsRetired
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("relayer session list failed with status %d", resp.StatusCode)
 	}

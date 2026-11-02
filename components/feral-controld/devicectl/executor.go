@@ -389,6 +389,17 @@ type executor struct {
 	// keeps the silent hide unconditionally.
 	internetProbe func(ctx context.Context) (bool, error)
 
+	// v2Wired / v2Connected, when wired (SetRelayV2Route), report whether this
+	// device carries the v2 relay and whether its socket is up right now. The
+	// claim flow's remote-route wait ends on a legacy topic OR a live v2
+	// socket, and with v2 wired an online device paints even when neither
+	// arrived: first-owner enrollment is LAN-only, so a claim never needs a
+	// remote route, and the app reaches the device by device ID afterwards.
+	// nil (an old controld.json with no relayV2, no control wiring) keeps the
+	// legacy rule exactly: no topic, no QR.
+	v2Wired     func() bool
+	v2Connected func() bool
+
 	// browserSessions, when wired (SetBrowserSessionCleanup), ends the browser
 	// sessions the relayer holds for a topic. Factory reset uses it right
 	// after it invalidates the claim. Optional: nil (mint pairing disabled, or
@@ -1356,7 +1367,7 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 	// would otherwise be a silent black screen.
 	e.setupUI().ShowFinalizing()
 
-	if !e.waitForRelayerTopic(ctx) {
+	if !e.waitForRemoteRoute(ctx) && !e.claimWithoutRemoteRoute(ctx) {
 		e.logger.Warn("Auto claim flow: relayer topic not ready; withholding claim QR until the next online transition")
 		// The topic wait is 60s — the longest window in this flow for another
 		// narrator to take the screen (a link drop re-raises the setup AP and
@@ -1402,7 +1413,11 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 	backoff := autoClaimRetryMin
 	ladderBackoff := autoClaimLadderFailureBackoffMin
 	for {
+		topicBefore := state.ClaimSnapshot().TopicID
 		painted, terminal, ladderFailed := e.runPreClaimGateAndPaint(ctx, true, false)
+		if painted {
+			e.refreshIfTopicLanded(topicBefore)
+		}
 		if painted || terminal {
 			return
 		}
@@ -1696,6 +1711,37 @@ func (e *executor) SetInternetProbe(probe func(ctx context.Context) (bool, error
 	e.internetProbe = probe
 }
 
+// SetRelayV2Route injects the v2 relay seams (see v2Wired). Same
+// wiring-before-run ordering contract as SetInternetProbe.
+func (e *executor) SetRelayV2Route(wired, connected func() bool) {
+	e.v2Wired, e.v2Connected = wired, connected
+}
+
+// refreshIfTopicLanded closes the one window RefreshOrRunClaimQR cannot see: a
+// topic that lands after this flow built the QR URL but before claim_qr was
+// on screen. The observer then found no QR to refresh and the in-flight flow
+// only took a wake poke, so the QR would stay topic-less until the next
+// invitation refresh. Rebuilding in place keeps the invitation.
+func (e *executor) refreshIfTopicLanded(topicBefore string) {
+	if state.ClaimSnapshot().TopicID == topicBefore || !e.setupUI().ClaimQRShowing() {
+		return
+	}
+	e.setupUI().RefreshClaimQRURL(func() string { return e.buildDeviceConnectURL(context.Background()) })
+}
+
+// RefreshOrRunClaimQR is the topic observer's entry point. While the claim QR
+// is on screen it only rebuilds the URL in place, which keeps the invitation
+// a phone may already have scanned (buildDeviceConnectURL reuses an
+// unexpired one); re-running the flow would paint "finalizing" over the QR
+// and void that invitation. Otherwise it runs the flow as before.
+func (e *executor) RefreshOrRunClaimQR(ctx context.Context) {
+	if e.setupUI().ClaimQRShowing() {
+		e.setupUI().RefreshClaimQRURL(func() string { return e.buildDeviceConnectURL(context.Background()) })
+		return
+	}
+	e.MaybeShowClaimQROnOnline(ctx)
+}
+
 // Defaults for awaitPlayerCommandHandlerReady. The timeout is shorter than the
 // connectivity re-seed's: on timeout this path still proceeds (and escalates
 // to the reload), so it only delays the dead-page repair, never skips it.
@@ -1775,12 +1821,12 @@ func (e *executor) deviceClaimed() bool {
 	return state.ClaimSnapshot().Claimed
 }
 
-// waitForRelayerTopic polls persisted state until the relayer topic is
-// available, the wait window closes, or ctx ends.
-func (e *executor) waitForRelayerTopic(ctx context.Context) bool {
+// waitForRemoteRoute polls until the device has a remote route — a legacy
+// relayer topic or a live v2 socket — the wait window closes, or ctx ends.
+func (e *executor) waitForRemoteRoute(ctx context.Context) bool {
 	deadline := e.clock.Now().Add(autoClaimTopicWait)
 	for {
-		if state.ClaimSnapshot().TopicReady {
+		if state.ClaimSnapshot().TopicReady || (e.v2Connected != nil && e.v2Connected()) {
 			return true
 		}
 		if e.clock.Now().Add(autoClaimTopicPoll).After(deadline) {
@@ -1790,6 +1836,23 @@ func (e *executor) waitForRelayerTopic(ctx context.Context) bool {
 			return false
 		}
 	}
+}
+
+// claimWithoutRemoteRoute decides, after the remote-route wait expired, whether
+// the claim flow may still paint: only on a device that carries v2 and whose
+// cached internet verdict is a confirmed "online". Without v2 the legacy rule
+// stands (a topic-less QR would point the app at an unroutable device), and a
+// probe error or "offline" must fall through to the no-WAN narration below.
+func (e *executor) claimWithoutRemoteRoute(ctx context.Context) bool {
+	if e.v2Wired == nil || !e.v2Wired() || e.internetProbe == nil {
+		return false
+	}
+	online, err := e.internetProbe(ctx)
+	if err != nil || !online {
+		return false
+	}
+	e.logger.Info("Auto claim flow: no remote route yet, but v2 is wired and the device is online; painting (first-owner enrollment is LAN-only)")
+	return true
 }
 
 func (e *executor) buildDeviceConnectURL(ctx context.Context) string {

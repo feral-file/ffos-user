@@ -90,15 +90,18 @@ type StatusInfo struct {
 type statusResponse struct {
 	RelayerConnected       bool       `json:"relayer_connected"`
 	RelayerLastConnectedAt *time.Time `json:"relayer_last_connected_at"`
-	DeviceID               string     `json:"device_id"`
-	Version                string     `json:"version"`
-	Branch                 string     `json:"branch"`
-	Contract               string     `json:"contract"`
-	Claimed                bool       `json:"claimed"`
-	Internet               bool       `json:"internet"`
-	SetupState             string     `json:"setup_state"`
-	Connectivity           string     `json:"connectivity"`
-	TopicID                string     `json:"topic_id"`
+	// RelayV2Connected is the v2 device-ID relay socket; additive.
+	// RelayerConnected keeps meaning the legacy socket.
+	RelayV2Connected bool   `json:"relay_v2_connected"`
+	DeviceID         string `json:"device_id"`
+	Version          string `json:"version"`
+	Branch           string `json:"branch"`
+	Contract         string `json:"contract"`
+	Claimed          bool   `json:"claimed"`
+	Internet         bool   `json:"internet"`
+	SetupState       string `json:"setup_state"`
+	Connectivity     string `json:"connectivity"`
+	TopicID          string `json:"topic_id"`
 	// network is the additive §4.7 health object (docs/network-recovery-ux.md);
 	// omitted when no provisioning machine is wired.
 	Network *status.NetworkHealth `json:"network,omitempty"`
@@ -177,6 +180,7 @@ func (h *hub) serveStatus(w http.ResponseWriter, r *http.Request, contract strin
 	resp := statusResponse{
 		RelayerConnected:       connected,
 		RelayerLastConnectedAt: lastConnectedAt,
+		RelayV2Connected:       netmetrics.RelayV2Connected(),
 		DeviceID:               info.DeviceID,
 		Version:                info.Version,
 		Branch:                 info.Branch,

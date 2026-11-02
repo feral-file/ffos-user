@@ -261,6 +261,28 @@ func (s *service) rejectDisplayUnavailable(channel brokerChannel, request minter
 	return err == nil
 }
 
+// displayGrantsWired reports whether this device can answer 0.5 requests with
+// a display grant (control authority and a v2 endpoint). Such a device may
+// pair without a legacy topic. Set once at wiring time, before serving.
+func (s *service) displayGrantsWired() bool {
+	return s.displayGrants != nil && s.relayV2Endpoint != ""
+}
+
+// rejectSessionWithoutTopic answers a 0.4 (session) request on a device that
+// has no legacy topic. The owner was never asked, so there is no approval
+// outcome to send.
+func (s *service) rejectSessionWithoutTopic(channel brokerChannel, request minter.MintRequest) bool {
+	s.logger.Warn("Refusing a browser session request: no legacy relayer topic",
+		zap.String("channelID", request.ChannelID), zap.String("origin", request.Origin))
+	ctx, cancel := context.WithTimeout(context.Background(), terminalOperationTimeout)
+	defer cancel()
+	_, err := channel.SendMintRejection(ctx, request, minter.MintRejection{Reason: "topic_not_ready", Retryable: true})
+	if err != nil {
+		s.logger.Warn("Failed to send session rejection", zap.Error(err), zap.String("channelID", request.ChannelID))
+	}
+	return err == nil
+}
+
 // displayGrantResult is the mint_succeeded displayGrant member (§5.7).
 func (s *service) displayGrantResult(grant control.DisplayGrant, profile control.Profile) (minter.DisplayGrantResult, error) {
 	sig, err := json.Marshal(profile.Sig)
