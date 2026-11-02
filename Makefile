@@ -71,5 +71,6 @@ verify-scripts:
 	@./scripts/test-serve-feral-player.sh
 	@./scripts/test-headless-startup-contract.sh
 	@./scripts/test-enable-wake-on-lan.sh
+	@./scripts/test-wifi-reading.sh
 	@./scripts/test-agent-iso-build-guard.sh
 	@./scripts/test-agent-branch-flow-guard.sh

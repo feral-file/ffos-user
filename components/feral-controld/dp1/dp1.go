@@ -1,7 +1,9 @@
 package dp1
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	goio "io"
@@ -64,6 +66,12 @@ func ValidationPointers(err error) []string {
 // classification instead of a generic failure.
 var ErrPlaylistInvalid = errors.New("playlistInvalid")
 
+// ErrUnsupportedItemSchema marks a dynamicQuery whose
+// responseMapping.itemSchema names a vendor shape this build has no mapper
+// for. Refused by name, before any request, rather than letting dp1-go
+// validate foreign nodes as DP-1 items and fail with validation noise.
+var ErrUnsupportedItemSchema = errors.New("dynamicQuery: unsupported itemSchema")
+
 const (
 	// MaxPlaylistBodyBytes bounds a playlist document fetched by URL, matching
 	// hub.MAX_REQUEST_BODY_BYTES for inline casts so both ingress paths admit
@@ -99,11 +107,32 @@ type LegacyDynamicQuery struct {
 	Params   map[string]string `json:"params"`
 }
 
+// DynamicQueryPagination is the `dynamicQuery.pagination` block: cursor
+// paging for a resolver that cannot page by `{{limit}}`/`{{offset}}`
+// placeholders. The next page sends the value read at CursorPath as GraphQL
+// variable Variable, and the walk continues while the boolean at HasNextPath
+// is true. Today only the Raster wallet walk (raster.go) reads it.
+type DynamicQueryPagination struct {
+	Variable    string `json:"variable"`
+	CursorPath  string `json:"cursorPath"`
+	HasNextPath string `json:"hasNextPath"`
+}
+
 // Playlist is a DP-1 playlist plus optional dynamic resolution config.
 type Playlist struct {
 	dp1playlist.Playlist
 	// LEGACY: see LegacyDynamicQuery. Omit from JSON when using spec dynamicQuery only.
 	DynamicQueries []LegacyDynamicQuery `json:"dynamicQueries,omitempty"`
+	// DynamicQueryPagination is `dynamicQuery.pagination`, held beside
+	// DynamicQuery because dp1-go's typed playlists.DynamicQuery has no such
+	// field and a plain decode would silently drop it. It is carried by the
+	// MarshalJSON/UnmarshalJSON hooks below, NOT by a struct tag: it must
+	// survive the round trip through the player (the dp1_call payload comes
+	// back in player_status, and the refresher re-resolves the dynamic source
+	// from that copy), so it is written back INSIDE the `dynamicQuery` object
+	// on marshal, where it came from, never as a sibling key the document's
+	// signer did not cover. nil when the document carries none.
+	DynamicQueryPagination *DynamicQueryPagination `json:"-"`
 	// Verification is the DP-1 signature verdict computed over the document
 	// bytes this playlist was decoded from (feral-file/ffos-user#307). nil
 	// means "not verified": verification disabled by config, or a playlist
@@ -114,6 +143,68 @@ type Playlist struct {
 	// Hydration (ProcessDynamicPlaylist*) takes Playlist by value and copies
 	// the struct, so a verdict attached at decode time survives it.
 	Verification *sigverify.Verdict `json:"-"`
+}
+
+// playlistJSON is Playlist without its methods, so the hooks below can lean on
+// encoding/json's struct decoding without recursing into themselves.
+type playlistJSON Playlist
+
+// UnmarshalJSON decodes the document as the plain struct, then peeks
+// `dynamicQuery.pagination` out of the same bytes (see
+// DynamicQueryPagination on Playlist for why it cannot be a struct field).
+// A `pagination` that is present but not an object is left nil rather than
+// failing the decode: a document that is not a Raster walk is not refused for
+// carrying one, and a Raster walk without a usable block is refused later by
+// name, with a clearer error than a decode failure would give.
+func (p *Playlist) UnmarshalJSON(data []byte) error {
+	var decoded playlistJSON
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var peek struct {
+		DynamicQuery *struct {
+			Pagination json.RawMessage `json:"pagination"`
+		} `json:"dynamicQuery"`
+	}
+	// The plain decode above already typed dynamicQuery as an object (or
+	// failed), so this second pass can only fail on `pagination` itself.
+	if err := json.Unmarshal(data, &peek); err == nil && peek.DynamicQuery != nil {
+		var pagination DynamicQueryPagination
+		if json.Unmarshal(peek.DynamicQuery.Pagination, &pagination) == nil &&
+			bytes.HasPrefix(bytes.TrimSpace(peek.DynamicQuery.Pagination), []byte("{")) {
+			decoded.DynamicQueryPagination = &pagination
+		}
+	}
+	*p = Playlist(decoded)
+	return nil
+}
+
+// MarshalJSON is the plain encoding, plus `pagination` written back inside
+// the `dynamicQuery` object when the playlist carries one. A playlist without
+// pagination encodes exactly as the plain struct does, byte for byte, so
+// nothing that is not a Raster walk changes shape on the wire.
+func (p Playlist) MarshalJSON() ([]byte, error) {
+	out, err := json.Marshal(playlistJSON(p))
+	if err != nil || p.DynamicQueryPagination == nil || p.DynamicQuery == nil {
+		return out, err
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(out, &top); err != nil {
+		return nil, err
+	}
+	var dq map[string]json.RawMessage
+	if err := json.Unmarshal(top["dynamicQuery"], &dq); err != nil {
+		return nil, err
+	}
+	pagination, err := json.Marshal(p.DynamicQueryPagination)
+	if err != nil {
+		return nil, err
+	}
+	dq["pagination"] = pagination
+	if top["dynamicQuery"], err = json.Marshal(dq); err != nil {
+		return nil, err
+	}
+	return json.Marshal(top)
 }
 
 // HasDynamicContent returns true when the playlist requests dynamic item resolution (spec or legacy).
@@ -150,6 +241,27 @@ type DP1 interface {
 	// ProcessDynamicPlaylistForCast applies the initial-cast bounded hydration
 	// policy described on ProcessPlaylistURLForCast.
 	ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playlist) (*Playlist, error)
+
+	// ExpandSeriesItems replaces every seriesRegistry item in playlist with
+	// the editions the catalog returns for it, bounded by maxItems (0 means
+	// unbounded). ProcessPlaylistURL(ForCast) and ProcessDynamicPlaylist(ForCast)
+	// already apply this internally to whatever they fetch or resolve; this
+	// is for a caller that already holds a decoded, static playlist it did
+	// NOT get from one of those four — an inline dp1_call payload, or a
+	// playlist echoed back in player status — and so needs the same
+	// expansion applied by hand before treating the playlist as final.
+	ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems int) Playlist
+
+	// ResolveSeriesCastPlan is ExpandSeriesItems's cast-aware sibling: it
+	// reads each series item's own seriesPlayback from rawPlaylist (the
+	// verbatim bytes playlist was decoded from; nil when none exists, e.g. an
+	// internally rebuilt re-cast), resolves a per-item mode against
+	// deviceMode (the device-level override; nil follows the document), and
+	// returns a CastPlan that narrows to exactly that mode's editions while
+	// keeping every group's full edition set for a later, network-free
+	// re-narrow (feral-file/ffos-user#425). maxItems bounds the result the
+	// same way it bounds ExpandSeriesItems.
+	ResolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawPlaylist json.RawMessage, deviceMode *SeriesPlaybackMode, maxItems int) CastPlan
 }
 
 type dp1 struct {
@@ -163,17 +275,31 @@ type dp1 struct {
 	// verify gates signature verification of fetched documents (see
 	// Playlist.Verification). Off only via config.SignatureVerificationConfig.
 	verify bool
+	// rasterAPIKey is the device's own Raster read key (config `raster.apiKey`),
+	// sent as x-api-key on every Raster wallet-walk request. It is never
+	// logged and never read from a document; empty means unauthenticated.
+	rasterAPIKey string
+	// rasterHTTP carries the key, so it MUST NOT follow redirects: the host
+	// allowlist checks only the URL the document names, and a 3xx from that
+	// host would otherwise carry x-api-key wherever Location points (Go
+	// strips Authorization and Cookie across hosts, not custom headers).
+	// Build it with NewRasterHTTPClient; fetchRasterPage additionally refuses
+	// a response whose request moved. Separate from httpClient because the
+	// rest of the daemon relies on redirects being followed.
+	rasterHTTP wrapper.HTTPClient
 }
 
-func New(ffIndexer ffindexer.FFIndexer, httpClient wrapper.HTTPClient, json wrapper.JSON, io wrapper.IO, logger *zap.Logger, debug, verify bool) DP1 {
+func New(ffIndexer ffindexer.FFIndexer, httpClient, rasterHTTP wrapper.HTTPClient, json wrapper.JSON, io wrapper.IO, logger *zap.Logger, debug, verify bool, rasterAPIKey string) DP1 {
 	return &dp1{
-		ffIndexer:  ffIndexer,
-		httpClient: httpClient,
-		json:       json,
-		io:         io,
-		logger:     logger,
-		debug:      debug,
-		verify:     verify,
+		ffIndexer:    ffIndexer,
+		httpClient:   httpClient,
+		rasterHTTP:   rasterHTTP,
+		json:         json,
+		io:           io,
+		logger:       logger,
+		debug:        debug,
+		verify:       verify,
+		rasterAPIKey: rasterAPIKey,
 	}
 }
 
@@ -189,7 +315,9 @@ func (d *dp1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) 
 		return d.ProcessDynamicPlaylist(ctx, playlist, minimal)
 	}
 
-	return &playlist, nil
+	// A curated playlist can still name series rather than editions.
+	resolved := d.expandSeriesItems(ctx, playlist, 0)
+	return &resolved, nil
 }
 
 func (d *dp1) ProcessPlaylistURLForCast(ctx context.Context, url string) (*Playlist, error) {
@@ -204,26 +332,27 @@ func (d *dp1) ProcessPlaylistURLForCast(ctx context.Context, url string) (*Playl
 		return d.ProcessDynamicPlaylistForCast(ctx, playlist)
 	}
 
-	return &playlist, nil
+	// Bounded like the dynamic cast path: a cast carries at most
+	// CAST_PLAYLIST_ITEMS_LIMIT items however many editions a series holds.
+	resolved := d.expandSeriesItems(ctx, playlist, CAST_PLAYLIST_ITEMS_LIMIT)
+	return &resolved, nil
 }
 
 func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
 	d.logger.Info("Processing dynamic playlist", zap.String("playlist_id", playlist.ID))
 
-	if playlist.DynamicQuery != nil {
-		if len(playlist.DynamicQueries) > 0 {
-			d.logger.Warn("playlist has both dynamicQuery and legacy dynamicQueries; using dynamicQuery only",
-				zap.String("playlist_id", playlist.ID))
-		}
-		return d.processDynamicPlaylistSpec(ctx, playlist, minimal, 0)
+	resolved, err := d.processDynamicPlaylist(ctx, playlist, minimal, 0)
+	if err != nil {
+		return nil, err
 	}
 
-	// --- LEGACY: dynamicQueries[] + FFIndexer (remove with LegacyDynamicQuery) ---
-	if len(playlist.DynamicQueries) > 0 {
-		return d.processDynamicPlaylistLegacy(ctx, playlist, minimal, 0)
-	}
-
-	return nil, fmt.Errorf("playlist has no dynamic query configuration")
+	// A dynamically-resolved item can itself name a series: the core
+	// schema's dynamicQuery/legacy answer is not restricted to onChain
+	// items, only buildPlaylistItem's own legacy construction happens to
+	// always produce one. Expand it the same way the curated (non-dynamic)
+	// branch of ProcessPlaylistURL already does, rather than only there.
+	expanded := d.expandSeriesItems(ctx, *resolved, 0)
+	return &expanded, nil
 }
 
 func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playlist) (*Playlist, error) {
@@ -231,11 +360,18 @@ func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playli
 	if err != nil {
 		return nil, err
 	}
-	if hasDisplayAtItems(resolved.Items) || len(resolved.Items) <= MINIMAL_PLAYLIST_ITEMS_LIMIT {
-		return resolved, nil
+
+	// Same series expansion as above, bounded by the same cast cap the
+	// batch accumulation inside processDynamicPlaylist already respects —
+	// expanding can only grow the item count further, so the cap is
+	// re-applied here rather than assumed to still hold.
+	expanded := d.expandSeriesItems(ctx, *resolved, CAST_PLAYLIST_ITEMS_LIMIT)
+
+	if hasDisplayAtItems(expanded.Items) || len(expanded.Items) <= MINIMAL_PLAYLIST_ITEMS_LIMIT {
+		return &expanded, nil
 	}
-	resolved.Items = resolved.Items[:MINIMAL_PLAYLIST_ITEMS_LIMIT]
-	return resolved, nil
+	expanded.Items = expanded.Items[:MINIMAL_PLAYLIST_ITEMS_LIMIT]
+	return &expanded, nil
 }
 
 func (d *dp1) processDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool, maxItems int) (*Playlist, error) {
@@ -317,9 +453,25 @@ func hasDisplayAtItems(items []dp1playlist.PlaylistItem) bool {
 //
 // Pinned by TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation,
 // which asserts both directions so a future change cannot quietly flip either.
+//
+// The resolver is chosen by responseMapping.itemSchema. `dp1/*` (and an
+// absent schema, for documents published before anything checked it) is the
+// dp1-go path above. `raster/tokensOwned/1.0` is the Raster wallet walk in
+// raster.go, which pages by cursor and maps vendor nodes to items itself; it
+// is the one place that departs from the fail-closed rule, per node, and
+// says so on processRasterWalk. Any other schema is refused by name.
 func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist, minimal bool, maxItems int) (*Playlist, error) {
 	if playlist.DynamicQuery == nil {
 		return nil, fmt.Errorf("internal: dynamicQuery is nil")
+	}
+
+	switch schema := playlist.DynamicQuery.ResponseMapping.ItemSchema; {
+	case schema == "" || strings.HasPrefix(schema, "dp1/"):
+		// dp1-go hydration below.
+	case schema == RasterTokensOwnedItemSchema:
+		return d.processRasterWalk(ctx, playlist, minimal, maxItems)
+	default:
+		return nil, fmt.Errorf("%w %q", ErrUnsupportedItemSchema, schema)
 	}
 
 	client := d.httpClientAsHTTPClient()

@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 )
 
 // stubHandler is a controllable inner Handler for gate tests.
@@ -413,4 +414,143 @@ func TestDefaultGateConfig_ClassifiesHistoryAndPolicyCommands(t *testing.T) {
 	set := cfg.Policies[commands.CMD_SET_CONTENT_POLICY]
 	assert.True(t, set.Dedupe)
 	assert.LessOrEqual(t, set.Rate, reboot.Rate)
+}
+
+// TestGate_DedupeIsPerPrincipal pins feral-file#3551 F4: identical in-flight
+// commands from DIFFERENT controllers execute separately; the same
+// controller's duplicates (and plaintext duplicates) still collapse.
+func TestGate_DedupeIsPerPrincipal(t *testing.T) {
+	inner := &stubHandler{result: "r", block: make(chan struct{}), entered: make(chan struct{}, 4)}
+	cfg := GateConfig{
+		Enabled: true, MaxConcurrent: 16,
+		Policies: map[commands.Type]Policy{testCmd: {Rate: 0, Weight: 1, Dedupe: true}},
+		now:      frozenClock(),
+	}
+	g := NewGate(inner, cfg, zap.NewNop())
+	cmd := commands.Command{Type: testCmd, Arguments: map[string]any{"a": 1}}
+	a := control.WithPrincipal(context.Background(), control.Principal{ControllerID: "a", Role: control.RoleOwner})
+	b := control.WithPrincipal(context.Background(), control.Principal{ControllerID: "b", Role: control.RoleOwner})
+
+	var wg sync.WaitGroup
+	run := func(ctx context.Context) {
+		wg.Add(1)
+		go func() { defer wg.Done(); _, _ = g.Process(ctx, cmd) }()
+	}
+	run(a)
+	<-inner.entered
+	run(b)
+	<-inner.entered // b did not join a's flight
+	run(context.Background())
+	<-inner.entered // plaintext is its own (pre-existing) key
+	run(a)          // joins a's flight
+	// Give the follower a moment to coalesce (same idiom as
+	// TestGate_DedupeCollapsesConcurrentIdentical), then release.
+	time.Sleep(50 * time.Millisecond)
+	close(inner.block)
+	wg.Wait()
+	if got := inner.calls.Load(); got != 3 {
+		t.Fatalf("inner ran %d times, want 3 (a, b, plaintext)", got)
+	}
+}
+
+// TestDefaultGateConfig_SeriesPlaybackSetIsNotDeduped pins feralfile-bot F8
+// (PR #426): setSeriesPlayback must share displayPlaylist's rate and weight
+// but NOT its dedupe, unlike every other heavy command.
+func TestDefaultGateConfig_SeriesPlaybackSetIsNotDeduped(t *testing.T) {
+	cfg := DefaultGateConfig()
+	cast := cfg.Policies[commands.CMD_DISPLAY_PLAYLIST]
+	set := cfg.Policies[commands.CMD_SET_SERIES_PLAYBACK]
+
+	assert.Equal(t, cast.Rate, set.Rate, "setSeriesPlayback should carry the same rate as the heavy tier")
+	assert.Equal(t, cast.Weight, set.Weight, "setSeriesPlayback should carry the same weight as the heavy tier")
+	assert.False(t, set.Dedupe, "setSeriesPlayback must not dedupe: a later call repeating an earlier in-flight call's mode must still reach the handler")
+
+	// getSeriesPlayback is a read-only query and keeps dedupe, like
+	// getContentPolicy.
+	get := cfg.Policies[commands.CMD_GET_SERIES_PLAYBACK]
+	assert.True(t, get.Dedupe)
+}
+
+// seriesPlaybackModeProbe is a Handler that reports every call it receives
+// and blocks only the very first call it is given, letting every later call
+// (regardless of mode) return immediately — modeling the real
+// recastForMode preflight, which only ever stalls the one call racing it.
+type seriesPlaybackModeProbe struct {
+	calls     atomic.Int64
+	mu        sync.Mutex
+	seen      []string
+	entered   chan struct{}
+	block     chan struct{}
+	firstDone atomic.Bool
+}
+
+func (p *seriesPlaybackModeProbe) Process(_ context.Context, command commands.Command) (interface{}, error) {
+	p.calls.Add(1)
+	mode, _ := command.Arguments["seriesPlayback"].(string)
+	p.mu.Lock()
+	p.seen = append(p.seen, mode)
+	p.mu.Unlock()
+	// sync.Once.Do would block a second CONCURRENT caller until the first
+	// invocation's function returns, which is the opposite of what this probe
+	// needs (request B must run to completion while request A is still
+	// stalled) — so the "am I first" check is a plain CAS instead.
+	if p.firstDone.CompareAndSwap(false, true) {
+		p.entered <- struct{}{}
+		<-p.block
+	}
+	return map[string]interface{}{"ok": true, "seriesPlayback": mode}, nil
+}
+
+// TestGate_SetSeriesPlaybackDoesNotDropALaterIdenticalRequest is the
+// regression test for feralfile-bot F8 (PR #426). With dedupe left on,
+// request C ("first") below used to be coalesced into request A's still
+// in-flight singleflight call (byte-identical arguments), so C never ran its
+// own execution. Request B ("full"), with different arguments, ran and
+// completed independently in between. The gate then returned A's own
+// ("first") result to C, even though B's call was the last to actually
+// persist and re-cast — exactly the "controller is told its setting saved
+// when it did not" bug the finding reported. With dedupe off, every accepted
+// call reaches the handler, so C runs for real.
+func TestGate_SetSeriesPlaybackDoesNotDropALaterIdenticalRequest(t *testing.T) {
+	inner := &seriesPlaybackModeProbe{
+		entered: make(chan struct{}, 1),
+		block:   make(chan struct{}),
+	}
+	cfg := DefaultGateConfig()
+	cfg.now = frozenClock()
+	g := NewGate(inner, cfg, zap.NewNop())
+
+	first := commands.Command{Type: commands.CMD_SET_SERIES_PLAYBACK, Arguments: map[string]any{"seriesPlayback": "first"}}
+	full := commands.Command{Type: commands.CMD_SET_SERIES_PLAYBACK, Arguments: map[string]any{"seriesPlayback": "full"}}
+
+	// Request A ("first") enters and stalls, mirroring a live recast's
+	// blocking preflight.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = g.Process(context.Background(), first)
+	}()
+	<-inner.entered
+
+	// Request B ("full") has a different argsHash, so it runs to completion
+	// on its own, independently of A.
+	_, err := g.Process(context.Background(), full)
+	require.NoError(t, err)
+
+	// Request C, byte-identical to A, arrives while A is still in flight.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = g.Process(context.Background(), first)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	close(inner.block)
+	wg.Wait()
+
+	assert.Equal(t, int64(3), inner.calls.Load(), "a later setSeriesPlayback call must reach the handler even when it repeats an earlier, still in-flight request's mode")
+	inner.mu.Lock()
+	defer inner.mu.Unlock()
+	assert.Equal(t, []string{"first", "full", "first"}, inner.seen, "each accepted call must run independently, in arrival order")
 }

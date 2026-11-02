@@ -617,7 +617,11 @@ warms current/upcoming media with at least an hour of explicit remaining HTTP
 freshness without a Download command. Its versioned
 record envelope makes old binaries reject and quarantine automatic records
 instead of silently serving them forever. Manual snapshot records retain their
-existing format and offline behavior.
+existing format and offline behavior. Automatic captures are not reported to
+controllers: `getOfflineCacheStatus` leaves them out of the whole-store
+listing and its totals and answers `not_cached` for a request naming one, and
+`offline_cache_status` does not announce them, so the app's Downloads lists
+only what someone downloaded.
 
 ### 3.3 Direct-download path for media and other single-file items
 
@@ -1762,6 +1766,23 @@ Replay is only enabled while a cached item is on screen:
 item source URLs before/after the CDP display call, which enables `Fetch`
 interception scoped to whichever of those sources are actually cached
 (`EnableForPlaylist` in `replay.go`) and disables it entirely when none are.
+
+"The current playlist's item source URLs" means the items the **player
+holds**, not whatever the daemon would resolve the same player status to
+now — interception is keyed on the URLs the kiosk actually fetches. The two
+differ on every pass that sends the player nothing: both
+`resyncKioskReplayScopeToCurrentDisplay`s and `playlist-refresher`'s
+static-inline refresh re-derive "what is displayed" from player status, and
+that re-derivation now expands `seriesRegistry` items. A series cast while
+the art catalog was unreachable keeps its representative, so a later pass
+whose expansion succeeds would scope replay to editions that were never
+displayed and never captured — `SyncPlaylist` then finds nothing cached and
+disables interception while the cached representative is still on the wall.
+`playlistForReplayScope` (one copy per package, same reason
+`resolveDisplayedPlaylist` is duplicated) therefore prefers the item list
+player status already carries, and falls back to the resolved playlist only
+for a `PlaylistURL` or dynamic status, which carry no item list to prefer. A
+pass that *does* send a replacement playlist scopes from what it sends.
 `commandrouter`'s `displayPlaylist` handler calls `SyncPlaylist` for the
 *new* playlist **before** asking CDP to actually display it — deliberately,
 so `Fetch` interception is already scoped correctly by the time the kiosk

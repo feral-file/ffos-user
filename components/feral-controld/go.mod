@@ -7,8 +7,10 @@ require github.com/gorilla/websocket v1.5.3
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/display-protocol/dp1-go v0.6.2
-	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260925215950-2dcfaa962a19
+	github.com/ethereum/go-ethereum v1.17.2
+	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20261027140929-82d5ebae13e4
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
+	github.com/go-jose/go-jose/v4 v4.1.3
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.6.0
@@ -18,6 +20,7 @@ require (
 	github.com/prometheus/client_model v0.6.2
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/zap v1.27.0
+	golang.org/x/net v0.56.0
 )
 
 require (
@@ -32,7 +35,6 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/ethereum/c-kzg-4844/v2 v2.1.6 // indirect
-	github.com/ethereum/go-ethereum v1.17.2 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/gowebpki/jcs v1.0.0 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
@@ -52,7 +54,6 @@ require (
 	github.com/supranational/blst v0.3.16 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect

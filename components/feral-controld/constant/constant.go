@@ -12,12 +12,19 @@ const (
 	SLEEP_SCHEDULE_FILE      = "/home/feralfile/.state/sleep-schedule.json"
 	DISPLAY_AT_PLAYLIST_FILE = "/home/feralfile/.state/display-at-playlist.json"
 	CONTENT_POLICY_FILE      = "/home/feralfile/.state/content-policy.json"
+	SERIES_PLAYBACK_FILE     = "/home/feralfile/.state/series-playback.json"
 	// DEVICE_NAME_FILE holds the owner's name for this unit. Deliberately not
 	// the hostname: the hostname is the serial, which is the device's identity
 	// on the network and the key the registry, telemetry, and the owner-contact
 	// record all share. A label the owner can change must not be able to move it.
 	DEVICE_NAME_FILE = "/home/feralfile/.state/device-name.json"
 	CONFIG_FILE      = "/home/feralfile/.config/controld.json"
+
+	// RESET_TARGET_VERSION_FILE is written by ffos feral-recovery-update.sh:
+	// the version a factory reset would boot (the recovery candidate if
+	// present, else @factory_reset). Read-only here; feeds the
+	// reset_target_version_info gauge (docs/api-design.md, /metrics).
+	RESET_TARGET_VERSION_FILE = "/home/feralfile/.state/reset_target_version"
 
 	SSH_AUTHORIZED_KEYS_FILE = "/home/feralfile/.ssh/authorized_keys"
 	SSH_DISABLE_UNIT         = "ff1-ssh-disable"

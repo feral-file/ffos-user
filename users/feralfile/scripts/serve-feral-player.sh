@@ -9,6 +9,17 @@ readonly FF_PLAYER_READY_POLL_SECONDS="${FF_PLAYER_READY_POLL_SECONDS:-1}"
 readonly FF_PLAYER_CONTRACT_FILE="${FF_PLAYER_ROOT}/ffos-player-contract.json"
 readonly FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT="${FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT:-0}"
 readonly FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT="${FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT:-1}"
+# The works server: device-local origins for fully on-chain (data:) artworks.
+# The player loads each such work at http://<label>.localhost:<port>/, where
+# <label> is a hash of the work's bytes, so every work gets a secure context
+# and storage of its own. Its root is the player bundle's data-document/
+# directory, which holds only the shell page that opens a work: no other
+# bundle page can be booted inside a work's origin. ff-player owns the shell
+# and the port it probes (src/utils/workOrigin.ts); keep the two in step.
+readonly FF_PLAYER_WORKS_ROOT="${FF_PLAYER_WORKS_ROOT:-${FF_PLAYER_ROOT}/data-document}"
+readonly FF_PLAYER_WORKS_PORT="${FF_PLAYER_WORKS_PORT:-8081}"
+# Set by start_server's --header probe; the works server reuses it.
+cache_header_args=()
 
 require_binary() {
 	if ! command -v "$1" >/dev/null 2>&1; then
@@ -158,7 +169,7 @@ start_server() {
 	else
 		darkhttpd_usage=$(darkhttpd 2>&1 || true)
 	fi
-	local -a cache_header_args=()
+	cache_header_args=()
 	if grep -Eq -- '(^|[^-[:alnum:]])--header([[:space:]]|$)' <<<"$darkhttpd_usage"; then
 		cache_header_args=(--header 'Cache-Control: no-cache')
 	else
@@ -171,6 +182,22 @@ start_server() {
 	darkhttpd "${FF_PLAYER_ROOT}" --port "${FF_PLAYER_PORT}" --addr 127.0.0.1 \
 		${cache_header_args[@]+"${cache_header_args[@]}"} &
 	server_pid=$!
+}
+
+# start_works_server starts the works server, fail-open: a bundle without the
+# shell (an older player), or a works server that dies, leaves the player on
+# its fallback for data: works, so neither may block or fail the player unit.
+# The player re-probes the server at most once a minute, when a work chooses
+# its path, so works it opens after a server death fall back on their own.
+start_works_server() {
+	if [[ ! -f "${FF_PLAYER_WORKS_ROOT}/index.html" ]]; then
+		echo "serve-feral-player: no data-document shell at ${FF_PLAYER_WORKS_ROOT}; data: works keep the player's fallback" >&2
+		return 0
+	fi
+
+	darkhttpd "${FF_PLAYER_WORKS_ROOT}" --port "${FF_PLAYER_WORKS_PORT}" --addr 127.0.0.1 \
+		${cache_header_args[@]+"${cache_header_args[@]}"} &
+	works_pid=$!
 }
 
 wait_for_ready() {
@@ -196,15 +223,19 @@ wait_for_ready() {
 }
 
 cleanup() {
-	if [[ -n "${server_pid:-}" ]] && kill -0 "${server_pid}" >/dev/null 2>&1; then
-		kill "${server_pid}" >/dev/null 2>&1 || true
-		wait "${server_pid}" >/dev/null 2>&1 || true
-	fi
+	local pid
+	for pid in "${server_pid:-}" "${works_pid:-}"; do
+		if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
+			kill "${pid}" >/dev/null 2>&1 || true
+			wait "${pid}" >/dev/null 2>&1 || true
+		fi
+	done
 }
 
 trap cleanup EXIT INT TERM
 
 start_server
 wait_for_ready
+start_works_server
 systemd-notify --ready --status="feral-player static ready on ${FF_PLAYER_URL}"
 wait "${server_pid}"

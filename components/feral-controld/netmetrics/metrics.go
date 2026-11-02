@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -128,10 +129,30 @@ func ClearWifiStation() {
 	netWifiLinkInfo.Reset()
 }
 
+// relayerSnapshot shares the lifecycle producer with the LAN status surface.
+// Keep the pair atomic; lastConnected survives disconnects but not restarts.
+var relayerSnapshot struct {
+	sync.RWMutex
+	connected     bool
+	lastConnected time.Time
+}
+
+// RelayerSnapshot returns cached socket state and the most recent successful
+// dial time. A zero time means no successful dial in this daemon process.
+func RelayerSnapshot() (bool, time.Time) {
+	relayerSnapshot.RLock()
+	defer relayerSnapshot.RUnlock()
+	return relayerSnapshot.connected, relayerSnapshot.lastConnected
+}
+
 // SetRelayerConnected records the relayer websocket connection state.
 func SetRelayerConnected(connected bool) {
+	relayerSnapshot.Lock()
+	defer relayerSnapshot.Unlock()
+	relayerSnapshot.connected = connected
 	v := 0.0
 	if connected {
+		relayerSnapshot.lastConnected = time.Now().UTC()
 		v = 1.0
 	}
 	relayerConnected.Set(v)

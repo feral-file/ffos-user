@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -25,12 +26,14 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
@@ -47,6 +50,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
+	"github.com/feral-file/ffos-user/components/feral-controld/seriesplayback"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/softap"
@@ -212,19 +216,11 @@ func main() {
 		config.GatewayUserAgentTuning(finalLogger),
 		config.Netlog,
 		provisioningTuningFromConfig(config.ProvisioningTuning(finalLogger), finalLogger),
+		config.ControlTuning(finalLogger),
 		dbus.NAME,
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
-		})
-	if streamErr == nil {
-		if sink, ok := app.Relayer.(interface{ SetBeforeExit(func()) }); ok {
-			sink.SetBeforeExit(func() {
-				if err := streamCloser.Close(); err != nil {
-					fmt.Fprintf(go_os.Stderr, "Failed to flush Cloudflare logs before relayer exit: %s\n", err)
-				}
-			})
-		}
-	}
+		}, config.RelayV2)
 
 	// Graceful shutdown cancels the app-lifetime context created in
 	// initializeApp (see app.Cancel).
@@ -431,7 +427,7 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	app.Logger.Info("Initial relayer connection gate evaluated",
 		zap.Bool("internet_connected", connected),
 		zap.Bool("relayer_ready", startupClaim.TopicReady),
-		zap.String("topic_id", startupClaim.TopicID),
+		zap.String("topic_fp", helper.TopicFingerprint(startupClaim.TopicID)),
 	)
 	// Gate on reachability ONLY, never on IsReady(): connecting with an empty
 	// topic is the designed topic-ASSIGNMENT path (relayer.Connect omits the
@@ -454,12 +450,16 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 			// heartbeat reconcile also re-attempt the connection, and
 			// RetryableConnect tolerates racing them (ErrAlreadyConnected is
 			// success).
-			app.Logger.Error("Failed initial relayer connection, retrying in background", zap.Error(err))
-			go func() {
-				if retryErr := app.Relayer.RetryableConnect(ctx); retryErr != nil {
-					app.Logger.Error("Background relayer connection retry gave up", zap.Error(retryErr))
-				}
-			}()
+			if errors.Is(err, relayer.ErrLegacyRetired) {
+				app.Logger.Info("No legacy relayer configured; skipping it", zap.Error(err))
+			} else {
+				app.Logger.Error("Failed initial relayer connection, retrying in background", zap.Error(err))
+				go func() {
+					if retryErr := app.Relayer.RetryableConnect(ctx); retryErr != nil {
+						app.Logger.Warn("Background relayer connection retry gave up", zap.Error(retryErr))
+					}
+				}()
+			}
 		} else {
 			app.Logger.Info("Initial relayer connection established")
 		}
@@ -947,8 +947,10 @@ func initializeApp(
 	gatewayUserAgentConfig *config.GatewayUserAgentConfig,
 	netlogConfig *config.NetlogConfig,
 	provTuning provisioning.Tuning,
+	controlConfig config.ControlConfig,
 	dbusName string,
 	dbusOpts []dbus_v5.MatchOption,
+	v2Config ...*config.RelayV2Config,
 ) *app {
 	// Basic components. This is the daemon-lifetime context: it flows into every
 	// long-lived component built below, and main cancels it (app.Cancel) on
@@ -1008,8 +1010,17 @@ func initializeApp(
 	})
 	wsHandler := ws.NewWSHandler(context, wsUpgrader, clock, logger)
 
+	// Control protocol: enabled by config OR forced on by persisted state. The
+	// notification producers get sealing handles when it is on (§9).
+	controlWire := newControlWiring(controlConfig, deviceIDFromHostname(), control.DefaultDir, &control.OSFS{}, logger)
+	if len(v2Config) > 0 && relayV2Eligible(v2Config[0], controlWire, deviceIDFromHostname()) {
+		controlWire.v2 = newRelayV2(v2Config[0].Endpoint, deviceIDFromHostname(), webSocketDialer, randomizer, clock, os, json, logger)
+	}
+	controlWire.setTransports(relayerEndpoint != "")
+	notifyRelayer, notifyWS := controlWire.notificationHandles(relayer, wsHandler, logger)
+
 	// StatusPoller
-	poller := status.NewPoller(cdp, relayer, wsHandler, deviceStatus, ddcPanel, json, logger)
+	poller := status.NewPoller(cdp, notifyRelayer, notifyWS, deviceStatus, ddcPanel, json, logger)
 
 	// Watchdog
 	watchdog := watchdog.New(logger)
@@ -1042,7 +1053,14 @@ func initializeApp(
 	if !sigVerifyEnabled {
 		logger.Warn("DP-1 signature verification disabled by config; casts carry no signature verdict")
 	}
-	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug, sigVerifyEnabled)
+	// Raster read key for address-playlist wallet walks (feral-file#3576).
+	// Absent means the walk runs unauthenticated; whether Raster then answers
+	// is Raster's call, so say so once at startup rather than per cast.
+	rasterCfg := config.Get().RasterTuning(logger)
+	if rasterCfg.APIKey == "" {
+		logger.Warn("raster.apiKey not configured; Raster wallet casts run unauthenticated")
+	}
+	dp1 := dp1.New(ffIndexer, httpClient, dp1.NewRasterHTTPClient(), json, io, logger, debug, sigVerifyEnabled, rasterCfg.APIKey)
 
 	// displayAt scheduler: filters playlists with displayAt items before CDP
 	// and advances them on timer / wake / CDP reconnect. Durable state stores
@@ -1081,7 +1099,13 @@ func initializeApp(
 
 	// Mint Pairing
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
-	mintPairing := mintpairing.New(mintPairingOpts, relayer, cdp, httpClient, relayerAPIKey, json, logger)
+	mintPairing := mintpairing.New(mintPairingOpts, notifyRelayer, cdp, httpClient, relayerAPIKey, json, logger)
+	// Display grants for Play 0.5 sites need the control authority and the
+	// v2 endpoint the site will cast through; with either missing every 0.5
+	// request is refused display_grant_unavailable (spec §5.7).
+	if controlWire != nil && controlWire.v2 != nil {
+		mintPairing.SetDisplayGrants(controlWire.auth, v2Config[0].Endpoint)
+	}
 	// Factory reset ends the outgoing topic's browser sessions before it clears
 	// the claim: they live on the relayer, and an owner-kept one has no expiry
 	// to reclaim it.
@@ -1112,7 +1136,7 @@ func initializeApp(
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
 		ocRuntime := offlinecache.Bootstrap(
-			ocOpts, relayer, wsHandler, httpClient, webSocketDialer,
+			ocOpts, notifyRelayer, notifyWS, httpClient, webSocketDialer,
 			os, io, json, exec, clock, logger,
 		)
 		offlineCache = ocRuntime.Service
@@ -1192,6 +1216,16 @@ func initializeApp(
 	// to re-resolve what is on screen, or the Content screen reports success
 	// while the display stays on the previous projection until the periodic
 	// refresh.
+	// Series-playback device override (feral-file/ffos-user#425): same
+	// durable-file location/pattern as content policy, but no player
+	// acknowledgement to await — see seriesplayback's package doc.
+	seriesPlaybackStore, seriesPlaybackErr := seriesplayback.Open(constants.SERIES_PLAYBACK_FILE)
+	if seriesPlaybackErr != nil {
+		logger.Error("series playback setting store unreadable; following each document's own intent until a durable update succeeds",
+			zap.Error(seriesPlaybackErr))
+		seriesPlaybackStore = seriesplayback.Fallback(constants.SERIES_PLAYBACK_FILE)
+	}
+	commandrouter.SetSeriesPlayback(rawCmdHandler, seriesPlaybackStore, logger)
 	// Cast-time source preflight (#304): a displayPlaylist whose every item
 	// source definitively answers an HTTP error is rejected at accept time
 	// instead of being forwarded and self-reported as playing. Wired against
@@ -1263,6 +1297,14 @@ func initializeApp(
 	// The owner's content policy falls with the claim on a factory reset, for
 	// the same rollback reason the device name does (see factoryReset).
 	executor.SetContentPolicyResetter(func() error {
+		// The owner's series-playback override falls with the claim on a
+		// factory reset too, for the same rollback reason content policy's
+		// does. Both run under this one callback — devicectl.Executor holds
+		// a single resetter slot, not a list — so the device name's claim
+		// cannot roll back only one of a device's two owner settings.
+		if err := commandrouter.ResetSeriesPlayback(rawCmdHandler); err != nil {
+			logger.Error("factory reset: series playback setting could not be reset", zap.Error(err))
+		}
 		return commandrouter.ResetContentPolicy(rawCmdHandler)
 	})
 	if sigVerifyEnabled {
@@ -1312,7 +1354,13 @@ func initializeApp(
 	// mediator's applied internet verdicts, the relayer's connection
 	// lifecycle, the provisioning machine's transitions via the Config field
 	// at construction below) — the recorder never calls back into any of them.
-	netlogRecorder := buildNetlogRecorder(context, netlogConfig, linkChecker, exec, clock, dbusClient, relayerEndpoint, executor, deviceStatus, logger)
+	registerRelayRetirementMetrics(relayer, controlWire, os)
+	relayV2Endpoint := ""
+	if len(v2Config) > 0 && v2Config[0] != nil {
+		relayV2Endpoint = v2Config[0].Endpoint
+	}
+	netlogRecorder := buildNetlogRecorder(context, netlogConfig, linkChecker, exec, clock, dbusClient,
+		netlogProbeEndpoint(relayV2Endpoint, relayerEndpoint), executor, deviceStatus, logger)
 	if netlogRecorder != nil {
 		if sink, ok := mediator.(interface{ SetInternetObserver(func(bool)) }); ok {
 			sink.SetInternetObserver(netlogRecorder.ObserveInternet)
@@ -1491,6 +1539,13 @@ func initializeApp(
 	// slow" (§4.6, the unclaimed wired no-WAN black screen). Same cached
 	// monitord read the hub status provider serves; never a live probe.
 	wireInternetProbe(executor, dbusClient, logger)
+	// The claim flow's remote-route wait ends on a live v2 socket too, so a
+	// device that never gets a legacy topic is still claimable (see
+	// executor.v2Wired). Only wired when this device actually carries v2.
+	if rv, ok := executor.(relayV2RouteSink); ok && controlWire != nil && controlWire.v2 != nil {
+		v2 := controlWire.v2
+		rv.SetRelayV2Route(func() bool { return true }, v2.IsConnected)
+	}
 	if ac, ok := executor.(autoClaimFlow); ok {
 		provisioningNotifier.claim = ac.MaybeShowClaimQROnOnline
 		// Topic assignment re-triggers the claim flow: a factory-fresh device
@@ -1498,8 +1553,14 @@ func initializeApp(
 		// flow's bounded topic wait expired — with no further online
 		// transition, nothing else would ever re-run it. The flow itself
 		// no-ops when settled or already in flight, so a spurious fire is
-		// harmless.
-		mediator.SetTopicObserver(func() { go ac.MaybeShowClaimQROnOnline(context) })
+		// harmless. With v2 the QR is often already up when the topic lands:
+		// RefreshOrRunClaimQR then only rebuilds the URL, keeping the
+		// invitation a phone may have scanned.
+		trigger := ac.MaybeShowClaimQROnOnline
+		if rr, ok := executor.(claimQRRefresher); ok {
+			trigger = rr.RefreshOrRunClaimQR
+		}
+		mediator.SetTopicObserver(func() { go trigger(context) })
 	}
 	// Boot-scoped online hooks. The startup OTA gate is the claimed-device
 	// counterpart of the claim flow: a boot online transition re-runs the
@@ -1574,6 +1635,7 @@ func initializeApp(
 	if sink, ok := hub.(interface{ SetContactObserver(func()) }); ok {
 		sink.SetContactObserver(provMachine.ObserveHubContact)
 	}
+	controlWire.wire(context, cmdHandler, relayer, wsHandler, hub, mediator, executor, logger)
 	// The claim observer registered above fans out here (declared before the
 	// machine existed).
 	provMachineForClaim = provMachine
