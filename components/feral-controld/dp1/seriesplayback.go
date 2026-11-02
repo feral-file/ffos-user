@@ -76,11 +76,36 @@ func ResolveSeriesPlaybackMode(document, device *SeriesPlaybackMode) SeriesPlayb
 // would (owner decision, 2026-10-30; AC4 of feral-file/ffos-user#425).
 // random is still stored and returned as its own value everywhere else —
 // only this narrowing step collapses it.
+//
+// The representative itself still carries the document's series marker
+// (contract.seriesId, no tokenId) — it IS the series item, unmodified — so
+// emitting it as-is would still satisfy isSeriesItem. clearSeriesMarker
+// strips that marker from the copy returned here, never from representative
+// itself, so a later re-entry into Process built from this output (a
+// setSeriesPlayback re-cast, a recently-played replay) is never re-read as
+// an unresolved series (feralfile-bot F4, 2026-10-30).
 func NarrowEditions(mode SeriesPlaybackMode, representative dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
 	if mode == SeriesPlaybackFull {
 		return editions
 	}
-	return []dp1playlist.PlaylistItem{representative}
+	return []dp1playlist.PlaylistItem{clearSeriesMarker(representative)}
+}
+
+// clearSeriesMarker returns a copy of item with its seriesRegistry series
+// marker (contract.seriesId) cleared. Provenance and Contract are replaced
+// wholesale rather than edited through their shared pointers, so the
+// caller's own representative — kept inside ResolvedSeriesGroup for a later
+// re-narrow under a different mode — is never mutated by this.
+func clearSeriesMarker(item dp1playlist.PlaylistItem) dp1playlist.PlaylistItem {
+	if item.Provenance == nil || item.Provenance.Contract == nil || item.Provenance.Contract.SeriesID == nil {
+		return item
+	}
+	provenance := *item.Provenance
+	contract := *item.Provenance.Contract
+	contract.SeriesID = nil
+	provenance.Contract = &contract
+	item.Provenance = &provenance
+	return item
 }
 
 // SeriesGroupKey identifies one series for grouping and caching purposes:

@@ -74,6 +74,25 @@ func TestNarrowEditions_RandomResolvesToFirstAtCastTime(t *testing.T) {
 	assert.Equal(t, "representative", got[0].ID)
 }
 
+// feralfile-bot F4, 2026-10-30: first/random used to hand back representative
+// completely unchanged — still carrying the document's own series marker
+// (contract.seriesId, no tokenId) — so a cast built from that output still
+// satisfied isSeriesItem and re-triggered catalog expansion on any later
+// re-entry (setSeriesPlayback's re-cast, a recently-played replay). The
+// caller's own representative — kept inside ResolvedSeriesGroup for a later
+// re-narrow under a different mode — must come through unmutated.
+func TestNarrowEditions_FirstClearsTheSeriesMarkerWithoutMutatingTheCallersRepresentative(t *testing.T) {
+	representative := seriesItem()
+	editions := []dp1playlist.PlaylistItem{editionItem("a")}
+
+	got := dp1.NarrowEditions(dp1.SeriesPlaybackFirst, representative, editions)
+
+	require.Len(t, got, 1)
+	assert.Nil(t, got[0].Provenance.Contract.SeriesID, "the narrowed copy must no longer look like an unresolved series")
+	require.NotNil(t, representative.Provenance.Contract.SeriesID, "the caller's own representative must be unaffected by narrowing a copy of it")
+	assert.Equal(t, 387, *representative.Provenance.Contract.SeriesID)
+}
+
 // castPlanBody is the raw dp1_call bytes a static cast would have been
 // decoded from — the ONE thing ResolveSeriesCastPlan reads seriesPlayback
 // from that the typed dp1playlist.PlaylistItem has no field for.
@@ -113,6 +132,35 @@ func TestResolveSeriesCastPlan_ReadsTheItemsOwnSeriesPlaybackFromRawBytes(t *tes
 	narrowed := plan.Narrow(nil)
 	require.Len(t, narrowed, 1, "the item's own seriesPlayback:first must narrow the cast to the representative")
 	assert.Equal(t, "item-series", narrowed[0].ID, "first must cast the item's own representative, not the catalog's first-returned edition")
+}
+
+// feralfile-bot F4, 2026-10-30, end to end: recastForMode and
+// CMD_PLAY_RECENTLY_PLAYED both rebuild a fresh dp1_call whose sole item IS
+// a previous narrow's own output, then re-enter ResolveSeriesCastPlan on it.
+// No mockHTTP expectation is registered for that second call below — if the
+// narrowed representative still satisfied isSeriesItem, the unexpected
+// catalog call would fail this test outright, exactly the regression
+// clearing the series marker on the narrowed copy prevents.
+func TestResolveSeriesCastPlan_ANarrowedRepresentativeNeverReExpands(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	raw := castPlanBody(seriesItemRaw("first"))
+	serveEditions(ts, "playlist-1", "item-series", editionsBody(3, editionItem("a"), editionItem("b"), editionItem("c")))
+	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
+		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
+
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
+	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, raw, nil, 0)
+	narrowed := plan.Narrow(nil)
+	require.Len(t, narrowed, 1, "the document's own first narrows the initial cast to the representative")
+
+	rebuilt := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: narrowed}}
+	again := ts.client.ResolveSeriesCastPlan(ts.ctx, rebuilt, nil, nil, 0)
+
+	assert.False(t, again.HasSeriesGroups(), "a narrowed representative must never satisfy isSeriesItem again")
+	require.Len(t, again.Narrow(nil), 1, "and must cast through unchanged, not re-fetch and re-expand to full")
+	assert.Equal(t, "item-series", again.Narrow(nil)[0].ID)
 }
 
 func TestResolveSeriesCastPlan_DeviceOverrideWinsOverTheDocument(t *testing.T) {
