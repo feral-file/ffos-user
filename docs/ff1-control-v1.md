@@ -1647,11 +1647,15 @@ release operator applies them.
 - There is no topic-to-grant migration and no locally generated topic. A
   legacy topic is an HMAC credential minted by the relayer, and v2 never
   reads one. A device claimed under legacy (topic, no owner) becomes
-  v2-reachable only when its owner enrolls it on the LAN with the screen
+  v2-reachable only when an owner enrolls it on the LAN with the screen
   QR: the "Secure this Art Computer" flow sends plaintext
   `showPairingQRCode{purpose:"enroll"}` by topic, LAN first, and enrolls
-  from the invitation QR (§5.1). It needs the phone that holds the topic;
-  without it the remedy is a factory reset.
+  from the invitation QR (§5.1). The request needs no topic on the LAN
+  (the §13 residual: any LAN peer may send it in `legacy`), so a phone on
+  the device's Wi-Fi that never held the topic sets up a claimed `legacy`
+  device the same way, including one released by "Forget I exist"
+  (§5.5), whose invitation QR is memory only and gone after a reboot.
+  Off the LAN, without the topic, there is no route.
 - A client sends a sealed command on v2 only when the device's last status
   listed `relayV2` in `control.transports` (§11), or under the ff-cli
   exception in §15.4: a v2 send to a device that is not on v2 can be
@@ -1732,8 +1736,8 @@ because they are measured differently.
 
 | Gate | What it covers | Condition |
 |---|---|---|
-| A (controllers) | `/api/cast`, `/api/notification`, `/api/ephemeral-sessions` | app floor raised past the G3 app release (device identity by `deviceId`, LAN bind by QR pins without a topic, retirement read as above); the G3 ff-cli release published (v2 default, retirement read as above, the no-working-topic v2 exception); Play integrators on 0.5; `tv-ws-usage` `/api/cast` traffic ~0 |
-| B (devices) | `/api/connection` (topic issuance) | from the device gauges (ffos-user `api-design.md`, `/metrics`): running version ≥ G3 AND `reset_target_version_info` ≥ G3 (`unknown` counts as below) for nearly all devices; legacy-dependent devices (claimed, topic present, `control_state=legacy`) under an agreed threshold; known remote installs contacted; shelf stock reflashed |
+| A (controllers) | `/api/cast`, `/api/notification`, `/api/ephemeral-sessions` | app floor raised past the G3 app release (device identity by `deviceId`, LAN bind by QR pins without a topic, retirement read as above) AND past the release that sets up a claimed `legacy` device from its own invitation code over the LAN (ff-app#1199: bind by QR pins for a claimed device, ask a discovered one to show its code); before it, a released or unsecured claimed device cannot be set up by a phone without the topic once legacy is gone (G3 bench 2026-11-03, F1/F4); the G3 ff-cli release published (v2 default, retirement read as above, the no-working-topic v2 exception); Play integrators on 0.5; `tv-ws-usage` `/api/cast` traffic ~0 |
+| B (devices) | `/api/connection` (topic issuance) | from the device gauges (ffos-user `api-design.md`, `/metrics`): running version ≥ G3 AND `reset_target_version_info` ≥ G3 (`unknown` counts as below) for nearly all devices; legacy-dependent devices (claimed, topic present, `control_state=legacy`) under an agreed threshold; known remote installs contacted; shelf stock reflashed; and either nearly all devices run a controld that redials v2 on an online edge (ffos-user#432; without it every network change costs 2–3 minutes with no remote control, G3 bench F2) or that window is accepted |
 
 `tv-ws-usage` (one sampled row per legacy request that reached a topic)
 shows controller traffic falling. It cannot measure devices: a device that
