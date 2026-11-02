@@ -19,6 +19,230 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
+## 3.0.0 — full-image (cross-rail; paired with the ffos release)
+
+The first control-enabled production release (feral-file#3551: controller
+authorization, relay v2, and G3 "keeps working when the legacy relayer is
+gone"). Everything on `develop` since `v2.0.11` ships. The ffos-user diff
+touches both `components/**` and `users/**`, so `check-release-rail.sh`
+requires this entry, and the ffos half (OTA control-state carry, the
+relayV2 build check) has no package path either.
+
+The version is 3.0.0 rather than 2.0.12: 2.0.12 and 2.0.13 were used by
+Development builds (see 2.0.11 "Version numbers"), and once a device runs
+this release it refuses to OTA to an image without the control marker
+(spec §8.1), so it cannot be downgraded except by a factory reset.
+
+ffos-user, package rail (`components/**`):
+
+- **Controller authorization (feral-file#3551).**
+  - LAN containment and the control protocol: owners and controllers hold
+    grants, commands are sealed, the LAN hub refuses plaintext from a
+    phone once the device is `enrolled` (#412; it reopens #410, which was merged into `develop` by mistake
+    and removed by a hand reset of `develop`).
+  - The generic v2 carrier wired to the control authority (#408).
+  - Display grants for Play sites over relay v2 (#414).
+  - `releaseOwnership` for the app's Forget I exist (#417).
+  - G3: the device keeps working when the legacy relayer is gone; a
+    permanent legacy error latches it retired while v2 and the LAN hub keep
+    running (#420). #415 was reverted by #416; neither ships.
+- **Hub and player.**
+  - Browser-originated requests refused on every hub route (#376).
+  - Relayer connectivity in the LAN status (#397).
+  - A controller's cast wakes a sleeping player (#409).
+  - Device-local origins for on-chain data (#418, cross-rail: controld
+    plus `serve-feral-player.sh`, below); the player contract fixture
+    resynced (#419).
+- **Playlists.**
+  - The Raster wallet walk ff-app casts is resolved on the device (#413).
+  - A `seriesRegistry` item expands into the series' editions (#421), and
+    the series playback mode is resolved in controld, not the player
+    (#426, merged 2026-11-02, after the G3 bench rounds).
+  - Automatic playback captures stay out of cache reports (#424).
+
+ffos-user, image rail (`users/**`):
+
+- Wi-Fi reading and factory check scripts (#406): `factory-check.sh`,
+  `wifi-reading.sh`, `.file_permissions.sh`.
+- `serve-feral-player.sh` serves the device-local works origin (#418, with
+  ff-player#313).
+
+`ffos`, image rail only:
+
+- OTA carry of the control state (`ota-control-state.sh`) and the controld
+  capability marker (ffos#174; it reopens ffos#172, merged by mistake and
+  removed by a hand reset of `develop`).
+- The image build refuses a ref with the v2 relay client and no
+  `relayV2.endpoint`; the reset target version is recorded; the OTA online
+  check is TCP 443 with a mainland fallback (ffos#175).
+- Factory check boot entry (ffos#171).
+
+### Before dispatch
+
+- **App first** (spec §15.1). Publish the G3 app (ff-app 1.8.44 or later:
+  #1166, #1193, #1194) to App Store and Google Play production and finish
+  the rollout before S1: it lists display rows (since ff-app #1151, 1.8.34),
+  and §15.1 puts the app, like ff-cli below, ahead of any FF OS with §5.7,
+  Staging included. Then, before P1, raise remote config
+  `app_update.ios.required_version` and `app_update.android.required_version`
+  to it: a released app older than G3 cannot cast on the LAN to an
+  `enrolled` device.
+- **ff-cli first, too** (spec §15.1: the app and ff-cli that list display
+  rows ship before any FF OS with §5.7, which #414 brings). The latest
+  ff-cli release, 3.0.0 (2026-10-23), predates ff1-cli#140 (display
+  grants) and #146 (G3); it predates the control protocol client (#135)
+  too, so it cannot control an `enrolled` device at all. Publish ff-cli
+  4.0.0 from `main` before S1: Staging is a floor-gated customer channel,
+  and S1 is the first FF OS with §5.7 there. #146 also counts toward
+  Gate A later.
+- **Remote config `features.secure_control.min_ffos_version` = `"3.0.0"`.**
+  It is fail-closed and applies on `release`, `staging` and `demo`: without
+  it a release-mode app never offers Secure or enrolls a first owner, and
+  3.0.0 devices stay legacy-claimed. Set it before the Staging bench. Debug
+  app builds bypass it (`kDebugMode`), so the bench uses a release-mode app
+  (TestFlight / Play internal).
+  `features.browser_pairing.display_grants_min_ffos_version` gates both the
+  display rows on Paired sites and the approval copy that promises a site
+  direct access (ff-app `ff1_paired_sites_provider`,
+  `mint_pairing_approval_dialog`). Decide once: set it to `"3.0.0"` and
+  accept that copy shown to sites still on Play 0.4, or leave it unset
+  until Play 0.5 publishes. remote-config#22 sets it; drop it there for the
+  second choice.
+- **Image secrets** (`FERAL_CONTROLD_CONFIG_JSON`, Staging and Production),
+  confirmed by the release operator: `relayV2.endpoint` =
+  `wss://relayer.feralfile.io`; `control.enabled` = JSON `true` (no
+  `control.enforced`); the `relayer` block kept with the live legacy
+  endpoint (pre-G3 controld dereferences it without a nil check).
+- **Build log of each run:** "keeping .control as configured", no
+  "forcing del(.control)", and no "`.relayV2.endpoint` is empty" error
+  (the check prints nothing when it passes; it fails the build otherwise).
+- **Player.** `ff_player_ref` pinned to `da3662b4` (ff-player `main` on
+  2026-11-02, ff-player#319) in S1, S2 and P1, so all three build the same
+  player; P2 follows its own release.
+- **Bench a Staging image on an FF1** before the Production run, with a
+  release-mode app:
+  - 2.0.11 → 3.0.0 on a legacy-claimed device: `control.state` `legacy`,
+    the Secure banner, Secure on the same Wi-Fi, then control over relay v2
+    off the LAN.
+  - A fresh first-owner claim, and a second FF1 in the same app.
+  - An OTA of an `enrolled` device keeps its grants: passed on a develop
+    image (2026-11-02); not repeatable on Staging, since `feral-updater.sh`
+    only OTAs to a different version. 3.0.1 repeats it as 3.0.0 → 3.0.1.
+  - Factory reset onto the Staging recovery (2.0.0), then the boot gate
+    update to 3.0.0 (the 2.0.11 round could not join the 2.0.0 portal from
+    a phone); afterwards `reset_target_version_info` reads `2.0.0` (the
+    3.0.0 recovery updater writes it; `unknown` before that).
+  - Series playback (#426, merged after the G3 bench rounds): cast a
+    `seriesRegistry` playlist, then change the series playback mode
+    (`setSeriesPlayback` / `getSeriesPlayback`).
+  - iOS (not covered by the develop bench rounds).
+- **Order of the version-API flags (decided).** Each `update_*` flag sets
+  its server value to that dispatch's own `version`; an unchecked flag keeps
+  the existing value. `recovery_version` is what a factory reset boots
+  (`feral-recovery-update.sh` installs it daily as `@recovery_candidate`);
+  Production's is 2.0.1, pre-protocol. Moving it ties the last way out of
+  a broken install to that image, so it moves only after 3.0.0 has been
+  seen to be stable, and is tested on Staging first. `min_runtime_version`
+  moves with it. `update_required_version` stays `false` throughout (it
+  moves `min_upgradeable_version`; below it a device needs a USB reflash).
+- **Merge order.** This entry merges into `develop` before the
+  `develop -> staging` promotion PR, or `check-release-rail.sh` fails on
+  that PR.
+
+### Release action (human)
+
+Four dispatches of `build-image-to-cf.yml` in `ffos`, in this order. S1
+and S2 run on `ffos` `staging` after both repos have promoted
+`develop -> staging`; P1 and P2 run on `ffos` `release` after both Staging
+benches (S1's and S2's) pass and both repos have promoted
+`staging -> release`.
+
+| Input | S1 Staging | S2 Staging (recovery) | P1 Production | P2 Production (later) |
+|---|---|---|---|---|
+| `version` | `3.0.0` | `3.0.0` | `3.0.0` | the release it rides on (see below) |
+| `soak-test` | `false` | `false` | `false` | `false` |
+| `environment` | `Staging` | `Staging` | `Production` | `Production` |
+| `pacman_snapshot` | `2026/07/13` | `2026/07/13` | `2026/07/13` | as that release |
+| `ffos_user_ref` | `staging` | `staging` | `release` | `release` |
+| `ff_player_ref` | `da3662b4a006927a8726842f3ac51382991613cb` | same | same | as that release |
+| `dev_iso` | `false` | `false` | `false` | `false` |
+| `update_min_version` | `true` | `true` | **`false`** (uncheck: the form defaults to `true`) | `true` |
+| `update_required_version` | `false` | `false` | `false` | `false` |
+| `update_recovery_version` | `false` | **`true`** | `false` | **`true`** |
+
+- **S1, then the Staging bench above.**
+- **S2** rebuilds 3.0.0 with only the recovery flag added. Preconditions,
+  as for a P2 rebuild below: the `staging` heads of ffos and ffos-user and
+  the player pin are unchanged since S1 (if a head moved, rerun the S1
+  bench items, or bump the version), and the dispatch is outside the
+  nightly update window. Bench: after the
+  next `feral-recovery-update` run, `reset_target_version_info` reads
+  `3.0.0`; a factory reset boots a fresh 3.0.0; a release-mode app claims
+  it as first owner and controls it over relay v2 off the LAN. This path
+  (reset onto G3, then a first-owner claim) has not been run before, and it
+  is the one every reset and new device takes once the legacy relayer is
+  gone. Rebuilding a version is a new build published in place: it
+  overwrites the ISO and its signature, re-uploads every component package
+  at the same pkgver to `{branch}/os/x86_64/`, and regenerates that
+  branch's pacman repo db. A device downloading at that moment fails
+  verification and retries the next night.
+- **P1**, then watch the fleet for about a week: OTA success, controld
+  restarts, `control_state`, Secure completions.
+- **P2** moves `min_runtime_version` and `recovery_version` to G3, before
+  Gate B is evaluated (§15.4: running and reset-target versions at G3 or
+  later). Two ways:
+  - **Preferred: ride on 3.0.1.** Its own version becomes both values, so
+    3.0.1 becomes the recovery image: its Staging run carries
+    `update_recovery_version=true` too, and repeats the S2 bench (reset
+    onto it, first-owner claim, relay v2 off the LAN) before its Production
+    run.
+  - **Otherwise rebuild 3.0.0** on `release` with P1's inputs and these two
+    flags. That replaces the fleet's ISO, packages and repo db with a fresh
+    build, not the image watched for a week: first confirm the ffos
+    `release` head, the ffos-user `release` head and the player pin are
+    unchanged since P1, and dispatch outside the nightly update window
+    (03:00 updater, 05:30 recovery).
+
+After P1, tag `v3.0.0` on the ffos-user `staging -> release` merge commit,
+as every prior tag. Agents never dispatch a Production run, and dispatch a
+Staging one only after explicit in-session confirmation
+(`scripts/agent-iso-build-guard.sh`).
+
+### Release notes (must say)
+
+- An Art Computer can now be secured: the first phone to set it up becomes
+  its owner, and once secured, other phones and computers need the
+  owner's permission to control it. One set up before this release keeps
+  working as before until it is secured from "Secure this Art Computer",
+  on the same Wi-Fi.
+- Once updated, the Art Computer cannot go back to an earlier version
+  except by a factory reset.
+
+### After the Production run
+
+- P2 (above) before Gate B.
+- Reflash shelf stock with 3.0.0.
+- Play 0.5 stays unpublished until 3.0.0 is broadly deployed (§15.1: FF OS
+  with §5.7 and `relayV2.endpoint`). Until then, on 3.0.0 devices the
+  approval copy that promises a site direct access shows to sites still on
+  Play 0.4 (remote config `display_grants_min_ffos_version`).
+- Watch `control_state`, `relay_v2_connected`, `relayer_legacy_retired`,
+  OTA success and controld restarts on the fleet gauges.
+- Legacy shutdown is a later, separate step (spec §15.4): Gate A and
+  Gate B, then delete `tv-cast-coordination` (disable its `deploy.yml`
+  first: ff-relayer docs, ff-relayer#32), then set
+  `features.ff1.legacy_relayer_retired` to JSON `true`, then the
+  empty-endpoint release as `recovery_version`, before the Cloudflare
+  account is deleted.
+- Also before that account is deleted: ff-player's built-in default
+  playlist (`src/constants.ts`, in this release's `da3662b4`) and ff-cli's
+  default feed (`src/config.ts`) still name
+  `dp1-feed-operator-api-prod.autonomy-system.workers.dev`, a worker
+  already deleted (HTTP 404). Devices read `display.json`
+  (`feed.feralfile.com`) first, but once the zone can be registered again
+  that name would serve playlists and feeds. Move both to
+  `feed.feralfile.com` in a later player/CLI release.
+
 ## 2.0.11 — full-image (ffos-user single-rail, paired with ffos#166)
 
 Everything on `develop` since `v2.0.10` (2.0.10 staging PR #373), promoted
