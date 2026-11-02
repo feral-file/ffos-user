@@ -958,7 +958,20 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// not resolve series groups for — a stale entry must not
 			// outlive what is actually being cast. See rememberSeriesCast's
 			// doc for why this runs eagerly rather than after the CDP send.
-			h.rememberSeriesCast(*playlist, seriesCastPlan, contentContext)
+			//
+			// Retracted on any outcome other than an accepted cast. Judged
+			// from result, not err: Process's returns are unnamed, so a
+			// rejection such as `return nil, filterErr` never assigns err,
+			// but every rejection leaves result without ok:true (it is nil
+			// until the player send, and the send's own reply otherwise).
+			// A displayAt-deferred acceptance reports ok:true and keeps the
+			// entry, same as the scheduler keeps the cast.
+			seriesCastSeq := h.rememberSeriesCast(*playlist, seriesCastPlan, contentContext)
+			defer func() {
+				if err != nil || !playerresponse.OK(result) {
+					h.forgetSeriesCast(seriesCastSeq)
+				}
+			}()
 			// Filter under the policy lock, then RELEASE it: the source
 			// preflight below is network-bound (a 10s phase ceiling, and up to
 			// four heavy casts can be admitted at once), and holding this lock

@@ -90,12 +90,16 @@ type displayedSeriesCast struct {
 // correctly CLEARS any series this device was previously tracking — a stale
 // entry must not outlive what is actually on screen.
 //
-// Called eagerly, before this cast's own preflight/CDP send: a cast whose
-// plan this remembers but that the preflight rejects or the player refuses
-// is already reported as a failure through Process's normal error path, so a
-// stale entry here only risks a LATER setSeriesPlayback re-cast attempting
-// the same content again — which fails the same way, not silently.
-func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, contentContext contentpolicy.Context) {
+// Called eagerly, before this cast's own preflight/CDP send, so the
+// returned seq lets Process retract the entry with forgetSeriesCast when the
+// cast is then rejected (preflight, policy, or the player). The retraction
+// is load-bearing, not tidiness: a rejected entry left valid would let a
+// LATER setSeriesPlayback re-cast content that never reached the screen, and
+// that re-cast does NOT fail the same way — narrowing changes which sources
+// the preflight checks, so a series whose editions all 404 but whose
+// representative is reachable is rejected in full yet accepted narrowed to
+// "first", replacing whatever is actually on screen (PR #429 review F2).
+func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, contentContext contentpolicy.Context) uint64 {
 	h.lastSeriesCast.mu.Lock()
 	defer h.lastSeriesCast.mu.Unlock()
 	h.lastSeriesCast.seq++
@@ -104,7 +108,7 @@ func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, c
 		h.lastSeriesCast.shell = dp1.Playlist{}
 		h.lastSeriesCast.plan = dp1.CastPlan{}
 		h.lastSeriesCast.contentContext = ""
-		return
+		return h.lastSeriesCast.seq
 	}
 	shell := playlist
 	shell.Items = nil // rebuilt from plan.Narrow on re-cast; the shell carries only playlist-level metadata.
@@ -112,6 +116,29 @@ func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, c
 	h.lastSeriesCast.shell = shell
 	h.lastSeriesCast.plan = plan
 	h.lastSeriesCast.contentContext = contentContext
+	return h.lastSeriesCast.seq
+}
+
+// forgetSeriesCast retracts the entry rememberSeriesCast recorded as seq,
+// for a cast that never reached the screen. A no-op when anything has
+// written the cache since (seq moved on): that later write describes a
+// newer cast and must stand.
+//
+// Deliberately does NOT advance seq. recastForMode tells "only my own
+// re-entrant cast wrote this cache" by seq == seqBefore+1; when that
+// re-entrant cast fails, this retraction must not disturb the count, so
+// recastForMode still restores the series that IS on screen (the failed
+// re-cast left it there).
+func (h *handler) forgetSeriesCast(seq uint64) {
+	h.lastSeriesCast.mu.Lock()
+	defer h.lastSeriesCast.mu.Unlock()
+	if h.lastSeriesCast.seq != seq {
+		return
+	}
+	h.lastSeriesCast.valid = false
+	h.lastSeriesCast.shell = dp1.Playlist{}
+	h.lastSeriesCast.plan = dp1.CastPlan{}
+	h.lastSeriesCast.contentContext = ""
 }
 
 // clearSeriesCast invalidates the displayed-series cache without recording a
