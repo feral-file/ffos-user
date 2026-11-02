@@ -118,6 +118,11 @@ type handler struct {
 	// groups, kept so setSeriesPlayback can re-narrow and re-cast without a
 	// catalog round trip. See seriesplayback.go.
 	lastSeriesCast displayedSeriesCast
+	// seriesRecast coalesces concurrent setSeriesPlayback re-casts so a burst
+	// of calls performs at most two real re-casts instead of racing or fully
+	// serializing (feralfile-bot F7 fix review, PR #426 finding F1). See
+	// seriesRecastCoalescer/scheduleRecast in seriesplayback.go.
+	seriesRecast seriesRecastCoalescer
 	// verifySignatures and activeVerdict are set together by
 	// SetSignatureVerification. verifySignatures gates the inline
 	// (dp1_call) and cached-copy verification this package performs itself;

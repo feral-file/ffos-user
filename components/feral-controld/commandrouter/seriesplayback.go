@@ -194,10 +194,74 @@ func (h *handler) applySeriesPlayback(ctx context.Context, args map[string]inter
 
 	// Best-effort from here: the setting is already saved and reported below
 	// regardless of what this does. What is currently on screen is a
-	// separate concern — see recastForMode's doc.
-	h.recastForMode(ctx, setting.Mode)
+	// separate concern — see scheduleRecast/recastForMode's own docs.
+	h.scheduleRecast(ctx, setting.Mode)
 
 	return map[string]interface{}{"ok": true, "seriesPlayback": seriesPlaybackModeOrNil(setting.Mode), "active": true}, nil
+}
+
+// seriesRecastCoalescer bounds how many real re-casts a burst of
+// setSeriesPlayback calls performs. Without it, applySeriesPlayback would
+// need to hold something across recastForMode's own re-entrant, network-bound
+// preflight to stop two concurrent recastForMode calls from racing
+// lastSeriesCast.valid through each other's preflight window (feralfile-bot
+// F7) — but that lock would also hold the command gate's shared heavy-tier
+// dispatch weight for the SUM of every stacked call's preflight instead of
+// at most two of them (F7 fix review, PR #426 finding F1: the gate's
+// MaxConcurrent semaphore is shared across every command type, and the
+// weight is released only when the call returns). Coalescing avoids both:
+// at most one recastForMode runs at a time, and a call that arrives while
+// one is running only records the newest mode for the in-flight run's own
+// final pass, rather than queuing a second full run or racing it directly.
+type seriesRecastCoalescer struct {
+	mu          sync.Mutex
+	running     bool
+	havePending bool
+	pendingMode *dp1.SeriesPlaybackMode
+}
+
+// scheduleRecast re-narrows and re-casts the currently displayed series for
+// mode (see recastForMode's own doc for the no-op cases), coalescing with any
+// recast already in flight: if one is running, mode is recorded as the
+// latest request and this call returns immediately — relying on the running
+// call to perform exactly one more pass for whatever mode is newest once it
+// finishes, then check again. A single burst of N calls arriving while one
+// recast runs therefore performs at most two real re-casts (the first
+// caller's own, plus one coalesced follow-up for the latest superseding
+// mode), not N serialized ones; only sustained, continuous arrivals — a new
+// request landing after every check, not just during the first pass — could
+// extend that past two, and only ever by picking up the single latest mode
+// per pass, never by queuing or re-running a superseded one. Either way,
+// only the one call actually driving a recastForMode call at any moment
+// holds its gate dispatch weight for a preflight's duration — every other
+// stacked call returns as soon as its own persist (and, if it loses the race
+// to start the run, its enqueue) completes.
+func (h *handler) scheduleRecast(ctx context.Context, mode *dp1.SeriesPlaybackMode) {
+	h.seriesRecast.mu.Lock()
+	if h.seriesRecast.running {
+		h.seriesRecast.havePending = true
+		h.seriesRecast.pendingMode = mode
+		h.seriesRecast.mu.Unlock()
+		return
+	}
+	h.seriesRecast.running = true
+	h.seriesRecast.mu.Unlock()
+
+	current := mode
+	for {
+		h.recastForMode(ctx, current)
+
+		h.seriesRecast.mu.Lock()
+		if !h.seriesRecast.havePending {
+			h.seriesRecast.running = false
+			h.seriesRecast.mu.Unlock()
+			return
+		}
+		current = h.seriesRecast.pendingMode
+		h.seriesRecast.havePending = false
+		h.seriesRecast.pendingMode = nil
+		h.seriesRecast.mu.Unlock()
+	}
 }
 
 // recastForMode re-narrows the currently displayed series (if any) under

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
@@ -244,6 +246,145 @@ func TestCommandHandler_SetSeriesPlayback_RecastsTheCurrentlyDisplayedSeries(t *
 	narrowed := castedItems(t, expressions[1])
 	require.Len(t, narrowed, 1, "the new device override (first) must narrow the re-cast to the representative")
 	assert.Equal(t, "item-series", narrowed[0]["id"], "first must cast the document's own representative, not the catalog's first-returned edition")
+}
+
+// feralfile-bot F7, 2026-11-02 (plus the F1 finding from this fix's own
+// review, PR #426): applySeriesPlayback persists the requested mode and
+// releases the store lock before recastForMode's re-entrant Process call
+// spends seconds in network-bound source preflight, during which
+// lastSeriesCast.valid is temporarily false (rememberSeriesCast already ran
+// for the rebuilt, group-less document). A second, concurrent
+// setSeriesPlayback arriving in that window must not see !valid and silently
+// skip its own re-cast while still reporting {"ok": true} (F7) — but it also
+// must not be forced to BLOCK until the first fully finishes, which would
+// hold the command gate's shared heavy-tier dispatch weight for the sum of
+// every stacked call's preflight instead of at most two (F1). This pins
+// both: the second request returns promptly (persist, then enqueue as a
+// pending follow-up, per scheduleRecast's coalescing), and the in-flight
+// recast still performs exactly one more pass for the latest mode once it
+// finishes, so the final re-cast matches the final persisted setting.
+func TestCommandHandler_SetSeriesPlayback_ConcurrentRequestsCoalesceWithoutLosingTheLatestSetting(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	logger := zaptest.NewLogger(t)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
+	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
+
+	group := &dp1.ResolvedSeriesGroup{
+		Representative: seriesEditionItem("item-series"),
+		Editions:       []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b"), seriesEditionItem("c")},
+		Resolved:       true,
+	}
+	initialPlan := dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(initialPlan).
+		Times(1)
+	// The re-cast's rebuilt document carries concrete editions, not a
+	// seriesRegistry item, so every later ResolveSeriesCastPlan call (both
+	// recasts below) sees no series groups — a passthrough is correct.
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ interface{}, playlist dp1.Playlist, _ json.RawMessage, _ *dp1.SeriesPlaybackMode, _ int) dp1.CastPlan {
+			segments := make([]dp1.CastSegment, len(playlist.Items))
+			for i := range playlist.Items {
+				item := playlist.Items[i]
+				segments[i] = dp1.CastSegment{Item: &item}
+			}
+			return dp1.CastPlan{Segments: segments}
+		}).
+		AnyTimes()
+
+	var mu sync.Mutex
+	var expressions []string
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			mu.Lock()
+			expressions = append(expressions, expr)
+			mu.Unlock()
+			return playerOkResponse(), nil
+		}).
+		Times(3) // initial cast + the "first" recast + the "full" recast
+	mockStatusPoller.EXPECT().ForceRefresh().Times(3)
+
+	// probeCalls counts every ProbeSources invocation: 1 = the initial cast's
+	// own preflight, 2 = setSeriesPlayback("first")'s own recast preflight
+	// (the window this test targets), 3 = the coalesced follow-up recast's
+	// preflight, run by the SAME goroutine once call 2 returns. Only call 2
+	// stalls; the follow-up (3) must not, since nothing else is waiting on it.
+	probeCalls := 0
+	var secondResult interface{}
+	secondDone := make(chan struct{})
+	commandrouter.SetSourceProber(handler, &stallingProber{during: func() {
+		probeCalls++
+		if probeCalls != 2 {
+			return
+		}
+		go func() {
+			result, err := handler.Process(context.Background(), commands.Command{
+				Type:      commands.CMD_SET_SERIES_PLAYBACK,
+				Arguments: map[string]interface{}{"seriesPlayback": "full"},
+			})
+			require.NoError(t, err)
+			secondResult = result
+			close(secondDone)
+		}()
+		select {
+		case <-secondDone:
+			// Expected: scheduleRecast sees a recast already running, records
+			// "full" as the pending mode, and returns immediately instead of
+			// either racing recastForMode directly (F7) or blocking behind
+			// this whole in-flight preflight (F1).
+		case <-time.After(2 * time.Second):
+			t.Fatal("setSeriesPlayback(\"full\") did not return promptly — it must enqueue as a pending follow-up rather than block behind the in-flight recast")
+		}
+	}}, logger)
+
+	initialPlaylist := map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"items": []interface{}{map[string]interface{}{
+			"id":     "item-series",
+			"source": "https://cdn.artworks.feralfile.io/0.mp4",
+			"provenance": map[string]interface{}{
+				"type":     "seriesRegistry",
+				"contract": map[string]interface{}{"chain": "evm", "seriesId": 387},
+			},
+		}},
+	}
+	_, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"dp1_call": initialPlaylist},
+	})
+	require.NoError(t, err)
+
+	result, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_SET_SERIES_PLAYBACK,
+		Arguments: map[string]interface{}{"seriesPlayback": "first"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, true, result.(map[string]interface{})["ok"])
+
+	<-secondDone
+	assert.Equal(t, true, secondResult.(map[string]interface{})["ok"])
+	assert.Equal(t, "full", secondResult.(map[string]interface{})["seriesPlayback"])
+
+	mu.Lock()
+	require.Len(t, expressions, 3, "the coalesced follow-up for \"full\" must have actually run, not been silently skipped")
+	last := castedItems(t, expressions[2])
+	mu.Unlock()
+	assert.Len(t, last, 3, "the LAST re-cast must carry the LAST saved setting (full, all three editions)")
+
+	getResult, err := handler.Process(context.Background(), commands.Command{Type: commands.CMD_GET_SERIES_PLAYBACK, Arguments: map[string]interface{}{}})
+	require.NoError(t, err)
+	assert.Equal(t, "full", getResult.(map[string]interface{})["seriesPlayback"], "the persisted setting must match what is actually on screen")
 }
 
 // feralfile-bot F2, 2026-10-30: once displayDefaultPlaylist has (possibly)
