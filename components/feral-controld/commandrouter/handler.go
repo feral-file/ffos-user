@@ -911,13 +911,17 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// seriesPlayback from playlistBytes and narrows to the
 					// resolved mode rather than always casting every edition
 					// (feral-file/ffos-user#425).
+					// CastPlan.Narrow already enforces CAST_PLAYLIST_ITEMS_LIMIT
+					// itself (and only when it actually expanded a series —
+					// see resolveSeriesCastPlan's no-series early return), so
+					// clamping narrowed.Items again here is both redundant for
+					// a series cast and wrong for an ordinary one: it would
+					// truncate a playlist that was never subject to the cap
+					// (feralfile-bot F6, 2026-11-02).
 					deviceSeriesMode := h.currentSeriesPlaybackMode()
 					seriesCastPlan = h.dp1.ResolveSeriesCastPlan(ctx, *playlist, playlistBytes, deviceSeriesMode, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
 					narrowed := *playlist
 					narrowed.Items = seriesCastPlan.Narrow(deviceSeriesMode)
-					if dp1.CAST_PLAYLIST_ITEMS_LIMIT > 0 && len(narrowed.Items) > dp1.CAST_PLAYLIST_ITEMS_LIMIT {
-						narrowed.Items = narrowed.Items[:dp1.CAST_PLAYLIST_ITEMS_LIMIT]
-					}
 					playlist = &narrowed
 				}
 

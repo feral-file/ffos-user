@@ -349,12 +349,19 @@ func (d *dp1) readItemSeriesPlaybackModes(raw json.RawMessage, n int) []*SeriesP
 // doc). deviceMode may be nil (follow the document).
 func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawPlaylist json.RawMessage, deviceMode *SeriesPlaybackMode, maxItems int) CastPlan {
 	if !hasSeriesItems(playlist.Items) {
+		// No series to narrow, so this plan is a straight pass-through — the
+		// same guarantee expandSeriesItems's own early return gives ordinary
+		// playlists. maxItems is deliberately NOT carried into the plan here:
+		// Narrow treats a zero maxItems as unbounded, and feeding it the
+		// series-expansion cap would truncate an ordinary playlist longer
+		// than that cap, which never expanded anything to bound (feralfile-
+		// bot F6, 2026-11-02).
 		segments := make([]CastSegment, len(playlist.Items))
 		for i := range playlist.Items {
 			item := playlist.Items[i]
 			segments[i] = CastSegment{Item: &item}
 		}
-		return CastPlan{Segments: segments, maxItems: maxItems}
+		return CastPlan{Segments: segments}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, seriesExpansionBudget)

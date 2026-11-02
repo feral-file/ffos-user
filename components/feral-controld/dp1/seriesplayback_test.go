@@ -365,6 +365,33 @@ func TestResolveSeriesCastPlan_LeavesAPlainPlaylistAlone(t *testing.T) {
 	assert.Equal(t, "b", narrowed[1].ID)
 }
 
+// feralfile-bot F6, 2026-11-02: a plain playlist (no series items at all)
+// was still handed the series-expansion item cap as its maxItems, so
+// CastPlan.Narrow truncated it exactly like a series expansion would —
+// silently dropping every item past CAST_PLAYLIST_ITEMS_LIMIT from content
+// that never expanded anything to bound. The cap must apply only to a
+// narrowed series expansion, never to an ordinary pass-through.
+func TestResolveSeriesCastPlan_APlainPlaylistLongerThanTheCastCapIsNotTruncated(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	items := make([]dp1playlist.PlaylistItem, dp1.CAST_PLAYLIST_ITEMS_LIMIT+1)
+	for i := range items {
+		items[i] = editionItem(fmt.Sprintf("plain-%d", i))
+	}
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: items}}
+
+	// maxItems set exactly as the live-cast call site does, so this
+	// reproduces the handler's real call shape rather than only the
+	// zero-maxItems case TestResolveSeriesCastPlan_LeavesAPlainPlaylistAlone
+	// already covers.
+	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
+
+	assert.False(t, plan.HasSeriesGroups())
+	narrowed := plan.Narrow(nil)
+	require.Len(t, narrowed, dp1.CAST_PLAYLIST_ITEMS_LIMIT+1, "no series was expanded, so nothing here is subject to the cast cap")
+}
+
 // The full edition set is kept on the plan regardless of which mode it
 // narrows to — AC5 of feral-file/ffos-user#425: a later device-setting
 // change re-narrows the SAME plan without a second catalog call.
