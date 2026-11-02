@@ -25,6 +25,7 @@ func NewV2(endpoint, deviceID string, dialer wrapper.WebSocketDialer, randomizer
 	clock wrapper.Clock, os wrapper.OS, json wrapper.JSON, logger *zap.Logger) Relayer {
 	r := New(endpoint, "", dialer, randomizer, clock, os, json, logger).(*relayer)
 	r.deviceID = deviceID
+	r.v2Wake = make(chan struct{}, 1)
 	return r
 }
 
@@ -65,15 +66,16 @@ func (p Peer) Send(ctx context.Context, payload []byte) error {
 // leaves. Install before connecting; the handler must not call the relayer.
 func (r *relayer) SetPeerDisconnectHandler(fn func(Peer)) { r.peerDisconnected = fn }
 
-// v2 redial backoff. §10: a refusal at connect or admission (HTTP 429, close
-// code 1008) is transient, and so, for an optional carrier, is everything
-// else, a malformed endpoint included; none of them may become a tight loop.
+// v2 redial backoff. §10: a refusal at connect time (HTTP 429 at the upgrade:
+// the relay's `rate limited` and `capacity` answers) is transient, and so, for
+// an optional carrier, is everything else, a malformed endpoint included; none
+// of them may become a tight loop.
 const (
 	v2RetryFloor   = 5 * time.Second
 	v2RetryCeiling = 5 * time.Minute
 	// v2StableAfter is how long a session must have lasted for the next
 	// redial to start the backoff over. A relay that accepts and then closes
-	// at once (1008) keeps backing off.
+	// at once keeps backing off.
 	v2StableAfter = time.Minute
 )
 
@@ -90,6 +92,47 @@ func v2RetryDelay(attempt int) time.Duration {
 	return min(d, v2RetryCeiling)
 }
 
+// WakeV2 restarts the backoff at the floor and ends the current redial wait. The
+// mediator calls it on an offline→online connectivity edge, the same edge that
+// redials the legacy socket: the count grown while offline says nothing about
+// the network the device just joined.
+//
+// The reset happens even while a socket is up: in the F2 shape the edge for
+// the new network arrives while the socket dialed on the old one still looks
+// connected, and when that socket dies the reset must still apply. The dial a
+// wake releases counts as the first, so a failure there waits the floor. The
+// token is sent only while no socket is up (a waiting loop is the only reader);
+// retryV2 drains a token left by a wake that raced a dial. A wake racing the
+// v2Up flag itself can still leave one, which skips one floor wait: accepted.
+//
+// Never blocks: it takes only v2Mu, which no dial holds (Connect holds the
+// relayer mutex across the handshake), and the buffered token coalesces
+// bursts, so it is safe from the mediator's signal handler. A no-op on the
+// legacy instance.
+func (r *relayer) WakeV2() {
+	if r.v2Wake == nil {
+		return
+	}
+	r.v2Mu.Lock()
+	r.v2Attempts = 1
+	r.v2Mu.Unlock()
+	if r.v2Up.Load() {
+		return
+	}
+	select {
+	case r.v2Wake <- struct{}{}:
+	default:
+	}
+}
+
+// drainV2Wake drops a wake token that is no longer for a waiting loop.
+func (r *relayer) drainV2Wake() {
+	select {
+	case <-r.v2Wake:
+	default:
+	}
+}
+
 // retryV2 keeps an optional endpoint outage local, including configuration/404
 // failures. It never exits controld or disables a healthy legacy/LAN carrier.
 func (r *relayer) retryV2(ctx context.Context) error {
@@ -97,17 +140,21 @@ func (r *relayer) retryV2(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// v2ConnectedAt lives under the relayer mutex (Connect writes it), the
+		// counter under v2Mu (WakeV2 writes it and must never wait on a dial).
+		// Never hold both.
 		r.Lock()
-		if !r.v2ConnectedAt.IsZero() {
-			if time.Since(r.v2ConnectedAt) >= v2StableAfter {
-				r.v2Attempts = 0
-			}
-			r.v2ConnectedAt = time.Time{}
+		stable := !r.v2ConnectedAt.IsZero() && r.clock.Now().Sub(r.v2ConnectedAt) >= v2StableAfter
+		r.v2ConnectedAt = time.Time{}
+		done := r.done
+		r.Unlock()
+		r.v2Mu.Lock()
+		if stable {
+			r.v2Attempts = 0
 		}
 		delay := v2RetryDelay(r.v2Attempts)
 		r.v2Attempts++
-		done := r.done
-		r.Unlock()
+		r.v2Mu.Unlock()
 		if delay > 0 {
 			// Jitter so devices refused together do not redial together.
 			delay = r.randomizer.Duration(delay/2, delay)
@@ -120,11 +167,17 @@ func (r *relayer) retryV2(ctx context.Context) error {
 			case <-done:
 				timer.Stop()
 				return ErrNotConnected
+			case <-r.v2Wake:
+				timer.Stop()
+				r.logger.Info("Connectivity restored; redialing v2 now")
 			case <-timer.C:
 			}
 		}
 		err := r.Connect(ctx)
 		if err == nil || errors.Is(err, ErrAlreadyConnected) {
+			// A wake that raced this dial has done its job (the reset);
+			// its token must not skip the wait after this session ends.
+			r.drainV2Wake()
 			return nil
 		}
 		r.logger.Warn("Optional v2 connection unavailable; retrying", zap.Error(err))

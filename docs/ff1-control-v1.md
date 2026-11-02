@@ -1131,13 +1131,25 @@ leaving, a socket closing, a deadline firing while a receipt is pending,
 or any other silence is ambiguous: the device acknowledges before it
 executes, so a departed device may already have run the command.
 
-A v2 refusal at connect or admission time (HTTP 429, close code 1008, the
-relay's `backpressure`) is **transient**: the device and every client retry
-with backoff and never treat it as permanent. The device-ID channel is
-public, so strangers can contend for it. (The legacy relayer's handshake
-semantics are unchanged: released firmware treats a 4xx there as permanent,
-which is why the legacy host's shutdown waits for the device population,
-§15.4 Gate B.)
+A v2 refusal (HTTP 429 at the upgrade, which the relay answers with
+`rate limited` or `capacity`, or its `rate_limited`/`backpressure` error
+frames on a live socket) is **transient**: the device and every client retry
+with backoff and never treat it as permanent. Close code 1008 is not an
+admission refusal: the relay sends it to a socket that held a forwarded
+frame unacknowledged for 30 s. It is retried with backoff all the same. The
+device-ID channel is public, so strangers can contend for it. (The legacy
+relayer's handshake semantics are unchanged: released firmware treats a 4xx
+there as permanent, which is why the legacy host's shutdown waits for the
+device population, §15.4 Gate B.)
+
+**Device redial.** The device's backoff starts over after a session that
+lasted a minute. An offline→online connectivity edge ends any redial wait
+in progress and restarts the backoff at the floor, including an edge that
+arrives while a socket is still up: that socket was often dialed on the
+network just left, and when it dies the next redial waits at most the
+floor. Without this the backoff grown while the device was offline outlives
+the network change, and the device has no v2 for minutes after every
+Configure Wi-Fi (feral-file#3551 G3 bench, finding F2).
 
 First-owner `enroll` with `inv` (§5.1) is never carried on v2, and the
 device refuses it there. `enroll` without `inv` (§5.3) MAY be carried on v2
