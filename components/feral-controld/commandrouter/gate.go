@@ -111,8 +111,24 @@ func DefaultGateConfig() GateConfig {
 		// CMD_DISPLAY_PLAYLIST path to re-narrow it under the new setting —
 		// the same cast-time preflight/resolution cost that path's own heavy
 		// tier exists for (see CMD_DISPLAY_PLAYLIST below), so this command
-		// shares that tier rather than the cheaper disruptive one.
-		commands.CMD_SET_SERIES_PLAYBACK: heavy,
+		// shares that tier's rate and weight. Dedupe is OFF unlike the rest
+		// of heavy (feralfile-bot F8, PR #426): the gate's dedupe key is
+		// type+arguments, so a later call requesting the SAME mode as an
+		// earlier call that is still in flight gets silently joined to it
+		// instead of running — and never reaches applySeriesPlayback's own
+		// persist. Between the two, a THIRD call with a different mode can
+		// land and overwrite the store, after which the joined call's
+		// response still reports the first (now stale) mode as saved,
+		// while persistence and the screen both hold the other one. Every
+		// other heavy command is a request to (re)do the same cast/upload,
+		// where coalescing truly-concurrent duplicates is safe and intended
+		// (see the gate's own Dedupe doc); setSeriesPlayback is a setter
+		// whose later identical-looking call must still take effect
+		// independently. Flood protection is unaffected: the handler's own
+		// seriesRecastCoalescer (seriesplayback.go) already bounds the real
+		// re-cast count to at most two per burst regardless of how many
+		// setSeriesPlayback calls the gate admits.
+		commands.CMD_SET_SERIES_PLAYBACK: {Rate: heavy.Rate, Burst: heavy.Burst, Weight: heavy.Weight, Dedupe: false},
 
 		// User-initiated power toggles: loosely capped (executor coalesces).
 		commands.CMD_SLEEP_NOW: userAction,
