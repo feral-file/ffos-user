@@ -1486,7 +1486,18 @@ showed what goes wrong without them.
 
    Whenever the scanned QR carries pins, a client MUST compare them with
    any profile it reads from the network and MUST NOT proceed on a
-   mismatch, whichever path it is on.
+   mismatch, whichever path it is on. Two exceptions (feral-file#3551,
+   feral-file/ff-app#1216):
+   - the §5.6 registration result is owner-authenticated (the owner's
+     `registerController` reply was verified under its grant, and the
+     result is sealed to this controller's minter key), so a newcomer pins
+     from it and does not compare it with pins read off an owned device's
+     screen. Current apps never ask an owned device to paint its claim QR,
+     so there are no such pins to compare;
+   - an owned (`enrolled`/`enforced`) device's LAN status is never a pin
+     source. A client that reaches one writes nothing and sends no
+     `connect`: it opens the device when it already holds a grant, and
+     otherwise shows its controller QR to an owner (§5.6).
 
    The handoff authenticates the receiving client to the sending phone, not
    the sender to the receiver: whoever joins the handoff channel first with
