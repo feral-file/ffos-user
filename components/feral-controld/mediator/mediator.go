@@ -167,6 +167,14 @@ type mediator struct {
 	// must be internally synchronized and non-blocking.
 	internetObserver func(connected bool)
 
+	// relayV2Waker, when set, is called on every online connectivity edge
+	// (relayer.WakeV2): the v2 socket owns its own redial loop, and without a
+	// nudge the backoff it grew while the device was offline outlives the
+	// network change by minutes (feral-file#3551 G3 bench F2). Set once
+	// before Start via SetRelayV2Waker (type-asserted seam, like
+	// SetInternetObserver); must be non-blocking.
+	relayV2Waker func()
+
 	// connPushHook is the test-only completion seam (SetConnectivityPushHook).
 	connPushHook atomic.Pointer[func()]
 
@@ -186,6 +194,10 @@ type ControlGate interface {
 // SetInternetObserver, so the Mediator interface and its mocks stay as
 // they are). Call before Start.
 func (m *mediator) SetControl(g ControlGate) { m.control = g }
+
+// SetRelayV2Waker wires the v2 carrier's wake (see the relayV2Waker field).
+// Call before Start.
+func (m *mediator) SetRelayV2Waker(fn func()) { m.relayV2Waker = fn }
 
 // plaintextDenial is the relayer RPC message for a plaintext command the
 // §7.2 policy refuses. ok:false is load-bearing and error is a flat string:
@@ -757,6 +769,17 @@ func (m *mediator) handleDBusSignal(
 		if !ok {
 			m.logger.Error("Invalid body type", zap.String("expected", "bool"), zap.String("actual", reflect.TypeOf(payload.Body[0]).String()))
 			return nil, fmt.Errorf("invalid body type")
+		}
+
+		// Wake the v2 carrier first, before anything here that touches the
+		// legacy relayer: its IsConnected (the log below) waits on the mutex a
+		// legacy Connect holds across its handshake, and the legacy reconnect
+		// at the end may block for as long as the legacy host keeps failing.
+		// v2 must not wait on either. WakeV2 never blocks; while a v2 socket
+		// is up it only restarts the backoff, for when that socket (often
+		// dialed on the network just left) dies.
+		if connected && m.relayV2Waker != nil {
+			m.relayV2Waker()
 		}
 
 		m.logger.Info("Received connectivity change event",

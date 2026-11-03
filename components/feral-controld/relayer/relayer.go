@@ -232,10 +232,17 @@ type relayer struct {
 	controlSem       chan struct{}
 	shedSem          chan struct{}
 
-	// v2Attempts counts v2 dials since the last stable session and
-	// v2ConnectedAt is when the current one started (see retryV2).
-	v2Attempts    int
+	// v2 redial state (see retryV2 and WakeV2). v2ConnectedAt, when the
+	// current session started (clock time), is under the relayer mutex.
+	// v2Attempts, dials since the backoff last started over, is under v2Mu,
+	// which no dial holds, so WakeV2 never waits on a handshake. v2Up mirrors
+	// "a v2 socket is up" for WakeV2; v2Wake carries its token to a waiting
+	// retryV2 (both unused on legacy, where v2Wake is nil).
 	v2ConnectedAt time.Time
+	v2Mu          sync.Mutex
+	v2Attempts    int
+	v2Up          atomic.Bool
+	v2Wake        chan struct{}
 
 	// connObserver, when set, is told about connection lifecycle transitions:
 	// (true, 0) after a successful dial, (false, 0) on teardown, and
@@ -543,7 +550,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 		conn.SetReadLimit(relaywire.MaxFrameBytes)
 		r.session = newDeviceSession(conn)
 		r.session.onDisconnect = r.peerDisconnected
-		r.v2ConnectedAt = time.Now()
+		r.v2ConnectedAt = r.clock.Now()
 	}
 	// Stage-0/1 observability (docs/wan-outage-observability.md): connection
 	// state is exported event-driven from the three lifecycle sites (here,
@@ -556,6 +563,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 		netmetrics.SetRelayerConnected(true)
 	} else {
 		netmetrics.SetRelayV2Connected(true)
+		r.v2Up.Store(true)
 	}
 	r.observeConn(true, 0)
 	r.Unlock()
@@ -1123,6 +1131,7 @@ func (r *relayer) closeConn() {
 		netmetrics.RecordRelayerDisconnect()
 	} else {
 		netmetrics.SetRelayV2Connected(false)
+		r.v2Up.Store(false)
 	}
 	r.observeConn(false, 0)
 	r.logger.Info("Relayer connection closed")

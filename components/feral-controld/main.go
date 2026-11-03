@@ -1336,6 +1336,23 @@ func initializeApp(
 	// Mediator
 	mediator := mediator.New(context, relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, json, logger)
 
+	// An online edge also restarts the v2 carrier's redial backoff (see
+	// mediator.SetRelayV2Waker). Wired whenever this device carries v2,
+	// independent of the netlog recorder that owns SetInternetObserver.
+	if controlWire != nil && controlWire.v2 != nil {
+		waker, okWaker := controlWire.v2.(interface{ WakeV2() })
+		sink, okSink := mediator.(interface{ SetRelayV2Waker(func()) })
+		if okWaker && okSink {
+			sink.SetRelayV2Waker(waker.WakeV2)
+		} else {
+			// Both are this module's own types; a miss means a rename broke
+			// the seam and v2 is back to minutes of downtime per network
+			// change (pinned by TestRelayV2CarrierIsWakeable).
+			logger.Error("Relay v2 online-edge wake not wired",
+				zap.Bool("carrier_wakeable", okWaker), zap.Bool("mediator_sink", okSink))
+		}
+	}
+
 	// Feed monitord's sysmetrics into the offline cache's admission gate
 	// (see offlinecache.Runtime.SysMetricsSink). Wired here for the same
 	// no-cross-import reason as the claim observer below: the mediator
