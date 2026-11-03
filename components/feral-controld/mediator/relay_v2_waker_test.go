@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/feral-file/godbus"
 	"github.com/golang/mock/gomock"
@@ -82,4 +83,59 @@ func TestMediator_ConnectivityEdgeWakesRelayV2(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// A legacy Connect holds the relayer mutex across its handshake, so any legacy
+// IsConnected in the handler waits up to the handshake timeout. The v2 wake
+// must not wait behind it.
+func TestMediator_ConnectivityEdgeWakesRelayV2BeforeAnyLegacyQuery(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	pr := &probingRelayer{MockRelayer: ts.mockRelayer}
+	ts.mediator = mediator.New(ts.ctx, pr, ts.mockDbus, ts.mockCDP, ts.mockCommandHandler,
+		ts.mockExecutor, ts.mockRefresher, ts.mockJSON, ts.logger)
+	ts.mediator.SetConnectivityPushHook(func() {
+		select {
+		case ts.connPushDone <- struct{}{}:
+		default:
+		}
+	})
+	woke := make(chan struct{})
+	sink, ok := ts.mediator.(interface{ SetRelayV2Waker(func()) })
+	require.True(t, ok)
+	sink.SetRelayV2Waker(func() { close(woke) })
+	wireConnectivitySession(t, ts)
+
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, map[string]interface{}{"expression": "window.handleConnectivityChange(true)"}).
+		Return(map[string]interface{}{"result": "ok"}, nil).
+		Times(1)
+	// The legacy handshake is in progress: IsConnected blocks until released.
+	release := make(chan struct{})
+	ts.mockRelayer.EXPECT().IsConnected().DoAndReturn(func() bool {
+		<-release
+		return true
+	}).AnyTimes()
+
+	var handler func(context.Context, godbus.DBusPayload) ([]interface{}, error)
+	ts.mockDbus.EXPECT().OnBusSignal(gomock.Any()).DoAndReturn(
+		func(h func(context.Context, godbus.DBusPayload) ([]interface{}, error)) { handler = h }).Times(1)
+	ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
+	ts.mediator.Start()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := handler(ts.ctx, godbus.DBusPayload{
+			Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE, Body: []interface{}{true},
+		})
+		done <- err
+	}()
+	select {
+	case <-woke:
+	case <-time.After(2 * time.Second):
+		t.Fatal("v2 was not woken while a legacy IsConnected was blocked")
+	}
+	close(release)
+	require.NoError(t, <-done)
+	ts.waitForConnectivityPush(t)
 }

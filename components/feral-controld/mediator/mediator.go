@@ -771,6 +771,17 @@ func (m *mediator) handleDBusSignal(
 			return nil, fmt.Errorf("invalid body type")
 		}
 
+		// Wake the v2 carrier first, before anything here that touches the
+		// legacy relayer: its IsConnected (the log below) waits on the mutex a
+		// legacy Connect holds across its handshake, and the legacy reconnect
+		// at the end may block for as long as the legacy host keeps failing.
+		// v2 must not wait on either. WakeV2 never blocks; while a v2 socket
+		// is up it only restarts the backoff, for when that socket (often
+		// dialed on the network just left) dies.
+		if connected && m.relayV2Waker != nil {
+			m.relayV2Waker()
+		}
+
 		m.logger.Info("Received connectivity change event",
 			zap.Bool("connected", connected),
 			zap.Bool("relayer_connected", m.relayer.IsConnected()),
@@ -824,16 +835,6 @@ func (m *mediator) handleDBusSignal(
 			}
 		}
 		m.mdnsMu.Unlock()
-
-		// Wake the v2 carrier before the legacy reconnect below, which may
-		// block for as long as the legacy host keeps failing: v2 must not
-		// depend on it. Independent of the legacy socket's state too, since
-		// a live legacy socket says nothing about v2. WakeV2 never blocks;
-		// while a v2 socket is up it only restarts the backoff, for when
-		// that socket (often dialed on the network just left) dies.
-		if connected && m.relayV2Waker != nil {
-			m.relayV2Waker()
-		}
 
 		// Reconnect the relayer if it's not already connected. Last in this
 		// handler, after the mDNS re-registration above: RetryableConnect
