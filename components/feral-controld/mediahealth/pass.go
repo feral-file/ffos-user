@@ -102,27 +102,28 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 	}
 	at := now()
 
-	// Dedup by wire key; settle data: URIs and stored verdicts inline;
-	// budget the rest. Capacity hints are capped at the budget so a
-	// playlist repeating one tiny URL cannot size an allocation.
+	// Settle data: URIs and stored verdicts per RAW source first, then
+	// dedup the network work by wire key and budget it. The order matters:
+	// a stored verdict belongs to the exact source (two fragment variants
+	// of one URL are two items with two records — one may have played ok
+	// while the other is broken), so a sibling's verdict must never be
+	// copied onto it; only the request is shared (PR #438 review, round
+	// 2, F9). Capacity hints are capped at the budget so a playlist
+	// repeating one tiny URL cannot size an allocation.
+	settled := make([]bool, len(sources))
 	firstIndex := make(map[string]int, min(len(sources), maxAttempts))
 	keyOf := make([]string, len(sources))
 	uniqueIndices := make([]int, 0, min(len(sources), maxAttempts))
 	for i, source := range sources {
-		key := wireKey(source)
-		keyOf[i] = key
-		if _, seen := firstIndex[key]; seen {
-			continue
-		}
 		if IsDataURI(source) {
-			firstIndex[key] = i
 			results[i] = probeDataURI(source)
+			settled[i] = true
 			continue
 		}
 		if rec := stored[source]; rec != nil {
 			if fromStoreVerdict(rec, at) != "" {
-				firstIndex[key] = i
 				results[i] = storedResult(rec, at)
+				settled[i] = true
 				continue
 			}
 			if !rec.Due(at) {
@@ -130,10 +131,15 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 				// cast must not re-dial an origin asking to be left
 				// alone, and nothing conclusive is known — inconclusive,
 				// fail-open, no request.
-				firstIndex[key] = i
 				results[i] = ProbeResult{Source: redactForLog(source), Verdict: VerdictInconclusive, FromStore: true, Err: errRetryHold}
+				settled[i] = true
 				continue
 			}
+		}
+		key := wireKey(source)
+		keyOf[i] = key
+		if _, seen := firstIndex[key]; seen {
+			continue
 		}
 		if len(uniqueIndices) == maxAttempts {
 			results[i] = ProbeResult{
@@ -141,6 +147,7 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 				Verdict: VerdictInconclusive,
 				Err:     errBudgetExhausted,
 			}
+			settled[i] = true
 			continue
 		}
 		firstIndex[key] = i
@@ -155,6 +162,10 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 		workers = len(uniqueIndices)
 	}
 	indices := make(chan int)
+	// probed marks the unique positions whose request actually ran (not
+	// cut off by the ceiling), so a shared verdict is recorded for the
+	// siblings only when it is a real verdict.
+	probed := make([]bool, len(sources))
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Go(func() {
@@ -169,6 +180,7 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 					continue
 				}
 				results[i] = p.Probe.ProbeOne(ctx, sources[i])
+				probed[i] = true
 				p.record(sources[i], results[i], logger)
 			}
 		})
@@ -187,11 +199,22 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 	close(indices)
 	wg.Wait()
 
-	// Fan the unique verdicts back out to the duplicate positions, after the
-	// barrier so every read sees a settled result.
+	// Fan each probed verdict back out to the wire-identical siblings that
+	// had no verdict of their own, after the barrier so every read sees a
+	// settled result — and record it under every sibling's own key, so a
+	// freshly probed variant carries its own record (and hint) too.
 	for i := range sources {
-		if first, probed := firstIndex[keyOf[i]]; probed && first != i {
-			results[i] = results[first]
+		if settled[i] {
+			continue
+		}
+		first := firstIndex[keyOf[i]]
+		if first == i {
+			continue
+		}
+		results[i] = results[first]
+		results[i].Source = redactForLog(sources[i])
+		if probed[first] {
+			p.record(sources[i], results[i], logger)
 		}
 	}
 	return results

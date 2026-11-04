@@ -51,6 +51,17 @@ type Lookahead struct {
 	wake    chan struct{}
 	once    sync.Once
 
+	// held parks sources the worker just probed until the time recorded,
+	// whatever the store says. A probe that writes no record (a source
+	// guard or URL-length refusal: a policy objection, deliberately never
+	// a verdict) leaves the record due forever; without this hold the
+	// worker would re-probe that one source every tick and nothing behind
+	// it — later window items, the current item's recheck, the sweep —
+	// would ever run (PR #438 review, round 2, F10). probeHold matches the
+	// store's shortest recheck, so a recorded source is never held longer
+	// than its own record already holds it. Pruned on use.
+	held map[string]time.Time
+
 	sweepTokens float64
 	sweepLast   time.Time
 }
@@ -61,6 +72,9 @@ const (
 	DefaultSweepPerHour = 20
 	// idleTick is how often the worker looks for due work with no wake.
 	idleTick = time.Minute
+	// probeHold is how long a just-probed source is left alone by the
+	// worker regardless of its record (see Lookahead.held).
+	probeHold = RetryTransient
 	// maxObservedItems bounds the retained snapshot: a hostile 4 MiB cast
 	// could otherwise park a huge slice here on every poll.
 	maxObservedItems = 4096
@@ -140,17 +154,50 @@ func (l *Lookahead) step(ctx context.Context, logger *zap.Logger) bool {
 	if l.Now != nil {
 		now = l.Now
 	}
-	if src := l.nextAhead(now()); src != "" {
+	at := now()
+	l.pruneHeld(at)
+	if src := l.nextAhead(at); src != "" {
+		l.hold(src, at)
 		res := l.Prober.ProbeAndRecord(ctx, src)
 		logger.Debug("media health: lookahead probe", zap.String("source", res.Source), zap.String("verdict", string(res.Verdict)))
 		return true
 	}
-	if src := l.nextDue(now()); src != "" {
+	if src := l.nextDue(at); src != "" {
+		l.hold(src, at)
 		res := l.Prober.ProbeAndRecord(ctx, src)
 		logger.Debug("media health: sweep probe", zap.String("source", res.Source), zap.String("verdict", string(res.Verdict)))
 		return true
 	}
 	return false
+}
+
+func (l *Lookahead) hold(src string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.held == nil {
+		l.held = make(map[string]time.Time)
+	}
+	l.held[src] = now.Add(probeHold)
+}
+
+// pruneHeld drops expired holds. The map is bounded by the probe rate
+// (one per Gap) times probeHold, so pruning on every step keeps it small.
+func (l *Lookahead) pruneHeld(now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for src, until := range l.held {
+		if !now.Before(until) {
+			delete(l.held, src)
+		}
+	}
+}
+
+// isHeld reports whether src is under an active hold (after pruneHeld).
+func (l *Lookahead) isHeld(src string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.held[src]
+	return ok
 }
 
 // nextAhead returns the first upcoming source that wants a look, or "".
@@ -188,7 +235,7 @@ func (l *Lookahead) nextAhead(now time.Time) string {
 		return ""
 	}
 	for _, src := range candidates {
-		if records[src].Due(now) {
+		if records[src].Due(now) && !l.isHeld(src) {
 			return src
 		}
 	}
@@ -218,15 +265,19 @@ func (l *Lookahead) nextDue(now time.Time) string {
 		l.mu.Unlock()
 		return ""
 	}
-	onWall := make(map[string]struct{}, len(l.sources))
+	exclude := make(map[string]struct{}, len(l.sources)+len(l.held))
 	for _, s := range l.sources {
-		onWall[s] = struct{}{}
+		exclude[s] = struct{}{}
+	}
+	for s := range l.held {
+		exclude[s] = struct{}{}
 	}
 	l.mu.Unlock()
 
-	// On-wall sources are excluded inside the query, so the rows the
-	// lookahead owns can never shadow the off-wall rows behind them.
-	due, err := l.Store.Due(now, 8, onWall)
+	// On-wall and held sources are excluded inside the query, so the rows
+	// the lookahead owns, or just probed without a verdict, can never
+	// shadow the off-wall rows behind them.
+	due, err := l.Store.Due(now, 8, exclude)
 	if err != nil {
 		return ""
 	}

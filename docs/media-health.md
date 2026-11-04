@@ -113,8 +113,9 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
 `commandrouter`'s `displayPlaylist` runs `mediahealth.Prober.Preflight` over
 the resolved sources after DP-1 resolution and before the playback lock. Shape
 kept from the preflight: a fixed worker pool (16), wire-identical sources
-probed once (fragment-stripped key), a per-pass budget of 256 distinct wire
-URLs, a 5 s per-item deadline covering guard DNS, a 10 s phase ceiling, the
+probed once (fragment-stripped key — the request is shared, the verdict is
+recorded under every variant's own source, and a variant with its own stored
+verdict keeps it), a per-pass budget of 256 distinct wire URLs, a 5 s per-item deadline covering guard DNS, a 10 s phase ceiling, the
 2048-item skip, and `displayAt` playlists skipped entirely. What changed: no
 early exit on the first alive source — every source inside the budget is
 probed and recorded — and a source with a **conclusive stored verdict**
@@ -135,8 +136,11 @@ one-item playlist still gets its recheck) whose record is missing or due, one
 at a time with a 1 s gap, and — when nothing is ahead — one due record not on
 the wall (excluded inside the index scan, so on-wall rows never shadow them)
 under a budget of 20 per hour, so a fixed source heals without being cast
-again and a 100k-record store never becomes 100k probes a day. New hints ride
-the next push.
+again and a 100k-record store never becomes 100k probes a day. A source the
+worker just probed is left alone for 1 h whatever its record says: a probe the
+source guard or the URL-length limit refuses writes no record (a policy
+objection is never a verdict), so without that hold it would stay due and
+block everything behind it. New hints ride the next push.
 
 ## The hint (controld → player): `mediaHealth` on `displayPlaylist`
 
@@ -173,10 +177,15 @@ and reports `{kind:"skip", stage:"hint"}` in its outcome ring.
 
 The last 64 entries; `seq` counts for the lifetime of the player page and
 `castSeq` increments per cast. controld keeps a seq cursor that survives casts
-(a cast must not re-apply the entries still in the ring), resets it on a
-player-session generation bump or when the ring's highest seq falls below it
-(a page restart), and logs when the ring wrapped between polls. Live-only on
-the player.
+(a cast must not re-apply the entries still in the ring), resets it when the
+ring's highest seq falls below it (a page restart), and logs when the ring
+wrapped between polls. A player-session generation bump only flags the cursor:
+a bump can be a CDP reconnect to the surviving page as well as a new page, so
+controld remembers the identity of the entries it consumed (`seq`, `source`,
+stage, attempt, `at`) and treats the next ring as the same page when it still
+holds any of them, re-applying nothing; a ring holding none is a new page.
+`at` is what tells one page's `seq: 1` from the next page's — always send it.
+Live-only on the player.
 
 | stage | kind | code |
 |---|---|---|

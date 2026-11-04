@@ -3,6 +3,7 @@ package mediahealth
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -28,6 +29,12 @@ type Service struct {
 	now        func() time.Time
 	online     func() bool
 	replayable func(source string) bool
+
+	// mu serializes the per-page outcome state below (drainer, the play
+	// run, the inferred-failure memory): ObservePlayback runs on the status
+	// poller goroutine and ResetOutcomeCursor on the player-session
+	// generation-ready worker, so they can overlap on a reconnect.
+	mu sync.Mutex
 
 	// Play-run tracking for the corroboration rule: consecutive failing
 	// entries for one source with a non-decreasing attempt counter are ONE
@@ -127,12 +134,16 @@ func (s *Service) Hints(sources []string) map[string]Hint {
 	return hints
 }
 
-// ResetOutcomeCursor forgets the outcome-ring cursor and the play run: the
-// player page was replaced (a player-session generation bump), so its
-// numbering restarts and nothing in the next ring was seen before.
+// ResetOutcomeCursor tells the drainer the player-session generation
+// bumped. The page MAY have been replaced (its numbering restarting) or
+// the bump may be a transport reconnect to the same page; the drainer
+// settles which from the next ring (Drainer), and the play run is cleared
+// only when the page really restarted — clearing it here let a reconnect
+// count one failing play twice.
 func (s *Service) ResetOutcomeCursor() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.drainer.Reset()
-	s.runSource, s.runAttempt, s.runEnded = "", 0, false
 }
 
 // HintArgument returns the displayPlaylist `mediaHealth` argument for
@@ -190,8 +201,14 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 		s.lookahead.Observe(sources, index)
 	}
 	online := s.online != nil && s.online()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if outcomes != nil {
-		fresh, gap := s.drainer.Drain(outcomes)
+		fresh, gap, restarted := s.drainer.Drain(outcomes)
+		if restarted {
+			// A new page: a failing run cannot continue across it.
+			s.runSource, s.runAttempt, s.runEnded = "", 0, false
+		}
 		if gap > 0 {
 			s.logger.Warn("media health: player outcome ring wrapped between polls; outcomes were lost",
 				zap.Int64("missed", gap))

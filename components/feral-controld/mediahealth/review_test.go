@@ -21,21 +21,21 @@ import (
 func TestDrainer_CursorSurvivesCastsAndResetsOnRollback(t *testing.T) {
 	var d Drainer
 	ring := []Outcome{{Seq: 1, Source: "a", Kind: OutcomeFail, Stage: StageLoad}}
-	fresh, _ := d.Drain(&Outcomes{CastSeq: 1, Entries: ring})
+	fresh, _, _ := d.Drain(&Outcomes{CastSeq: 1, Entries: ring})
 	assert.Len(t, fresh, 1)
-	fresh, _ = d.Drain(&Outcomes{CastSeq: 2, Entries: ring})
+	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 2, Entries: ring})
 	assert.Empty(t, fresh, "a cast with the same ring re-applies nothing")
-	fresh, _ = d.Drain(&Outcomes{CastSeq: 2, Entries: append(ring, Outcome{Seq: 2, Source: "b", Kind: OutcomeOK, Stage: StageReady})})
+	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 2, Entries: append(ring, Outcome{Seq: 2, Source: "b", Kind: OutcomeOK, Stage: StageReady})})
 	assert.Equal(t, []string{"b"}, sourcesOf(fresh))
 
 	// Page restart with the same castSeq: numbering restarts below the cursor.
-	fresh, gap := d.Drain(&Outcomes{CastSeq: 2, Entries: []Outcome{{Seq: 1, Source: "c", Kind: OutcomeOK, Stage: StageReady}}})
+	fresh, gap, _ := d.Drain(&Outcomes{CastSeq: 2, Entries: []Outcome{{Seq: 1, Source: "c", Kind: OutcomeOK, Stage: StageReady}}})
 	assert.Equal(t, []string{"c"}, sourcesOf(fresh), "a rollback means everything present is new")
 	assert.Equal(t, int64(0), gap)
 
 	d.Reset()
-	fresh, _ = d.Drain(&Outcomes{CastSeq: 3, Entries: []Outcome{{Seq: 1, Source: "c", Kind: OutcomeOK, Stage: StageReady}}})
-	assert.Equal(t, []string{"c"}, sourcesOf(fresh), "an explicit reset (generation bump) forgets the cursor")
+	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 3, Entries: []Outcome{{Seq: 1, Source: "c", Kind: OutcomeOK, Stage: StageReady, At: "new-page"}}})
+	assert.Equal(t, []string{"c"}, sourcesOf(fresh), "an explicit reset (generation bump) followed by a new page's ring forgets the cursor")
 }
 
 func TestService_SameRingAcrossCastsDoesNotCorroborate(t *testing.T) {
@@ -216,4 +216,178 @@ func TestLookahead_SweepSkipsOnWallRowsInsideTheQuery(t *testing.T) {
 
 func writeManifest(path string) error {
 	return os.WriteFile(path, []byte(manifestWithContract), 0o600)
+}
+
+// Regressions from the PR #438 review (feralfile-bot, round 2).
+
+// F1 (round 2): a generation bump that is a CDP reconnect to the SAME page
+// must not re-apply the ring the page still holds; one that is a new page
+// must. The drainer tells them apart by the identities it consumed.
+func TestDrainer_ReconnectToSamePageReappliesNothing(t *testing.T) {
+	var d Drainer
+	ring := []Outcome{
+		{Seq: 1, Source: "a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1, At: "t1"},
+		{Seq: 2, Source: "a", Kind: OutcomeFail, Stage: StageWatchdog, Attempt: 1, At: "t2"},
+	}
+	fresh, _, restarted := d.Drain(&Outcomes{CastSeq: 1, Entries: ring})
+	assert.Len(t, fresh, 2)
+	assert.False(t, restarted)
+
+	d.Reset() // generation bump: a transport reconnect
+	fresh, gap, restarted := d.Drain(&Outcomes{CastSeq: 1, Entries: ring})
+	assert.Empty(t, fresh, "the surviving page's ring was consumed already")
+	assert.False(t, restarted, "a ring holding remembered entries is the same page")
+	assert.Equal(t, int64(0), gap)
+
+	more := append(ring, Outcome{Seq: 3, Source: "b", Kind: OutcomeOK, Stage: StageReady, At: "t3"})
+	fresh, gap, restarted = d.Drain(&Outcomes{CastSeq: 1, Entries: more})
+	assert.Equal(t, []string{"b"}, sourcesOf(fresh), "the cursor moved past the remembered entries")
+	assert.Equal(t, int64(0), gap, "no gap is reported across the reconnect")
+	assert.False(t, restarted)
+
+	d.Reset() // generation bump: a real reload, numbering restarts
+	fresh, _, restarted = d.Drain(&Outcomes{CastSeq: 1, Entries: []Outcome{
+		{Seq: 1, Source: "a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1, At: "t9"},
+	}})
+	assert.Equal(t, []string{"a"}, sourcesOf(fresh), "a ring holding nothing remembered is a new page")
+	assert.True(t, restarted)
+
+	d.Reset()
+	fresh, _, restarted = d.Drain(&Outcomes{CastSeq: 1})
+	assert.Empty(t, fresh)
+	assert.False(t, restarted, "an empty ring cannot be classified yet")
+	fresh, _, restarted = d.Drain(&Outcomes{CastSeq: 1, Entries: []Outcome{
+		{Seq: 1, Source: "a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1, At: "t9"},
+	}})
+	assert.Empty(t, fresh, "the reset stays pending until a ring shows up; this one is the surviving page")
+	assert.False(t, restarted)
+}
+
+func TestDrainer_SeenMemoryIsBounded(t *testing.T) {
+	var d Drainer
+	for seq := int64(1); seq <= 3*seenCap; seq++ {
+		d.Drain(&Outcomes{CastSeq: 1, Entries: []Outcome{{Seq: seq, Source: "a", At: "t"}}})
+	}
+	assert.Len(t, d.seen, seenCap)
+	assert.Len(t, d.order, seenCap)
+}
+
+// F1 (round 2), end to end: a reconnect between two polls of one failing
+// play must not turn that play into two.
+func TestService_ReconnectDoesNotCorroborate(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	s := newTestService(t, newTableFetcher(), clock, manifestWithContract)
+	defer func() { _ = s.Close() }()
+	list := items("https://o/a")
+	ring := []Outcome{{Seq: 1, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1, At: "t1"}}
+	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 1, Entries: ring})
+	s.ResetOutcomeCursor()
+	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 1, Entries: ring})
+	rec, err := s.Store().Get("https://o/a")
+	require.NoError(t, err)
+	assert.Equal(t, 1, rec.Plays.Fail, "the same failed play seen again after a reconnect counts once")
+	assert.Empty(t, rec.State)
+
+	// The retry of the same play after the reconnect is still the same run.
+	ring = append(ring, Outcome{Seq: 2, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 2, At: "t2"})
+	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 1, Entries: ring})
+	rec, err = s.Store().Get("https://o/a")
+	require.NoError(t, err)
+	assert.Equal(t, 1, rec.Plays.Fail, "attempt 2 of the run is not a distinct play")
+
+	// A real page restart is a distinct play: the second failure corroborates.
+	s.ResetOutcomeCursor()
+	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 1, Entries: []Outcome{
+		{Seq: 1, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1, At: "t9"},
+	}})
+	rec, err = s.Store().Get("https://o/a")
+	require.NoError(t, err)
+	assert.Equal(t, 2, rec.Plays.Fail)
+	assert.Equal(t, StateBroken, rec.State, "a failure on a new page is a second distinct play")
+}
+
+// F9: fragment variants of one wire URL are two sources with two records;
+// the pass shares the request, never the stored verdict.
+func TestPreflight_FragmentVariantsKeepTheirOwnVerdicts(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := newTableFetcher()
+	p := newPassProber(t, f, clock)
+	_, err := p.Store.ApplyProbe("https://o/a#one", ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
+	require.NoError(t, err)
+	_, err = p.Store.ApplyOutcome(Outcome{Source: "https://o/a#two", Kind: OutcomeOK, Stage: StageReady}, true)
+	require.NoError(t, err)
+
+	results := p.Preflight(context.Background(), []string{"https://o/a#one", "https://o/a#two"})
+	assert.Equal(t, VerdictDead, results[0].Verdict)
+	assert.True(t, results[0].FromStore)
+	assert.Equal(t, VerdictAlive, results[1].Verdict, "the sibling keeps its own play-ready verdict")
+	assert.True(t, results[1].FromStore)
+	assert.Equal(t, 0, f.count("https://o/a#one")+f.count("https://o/a#two"), "both answered from the store")
+
+	// Two unknown variants: one request (the fake keys by the URL the pass
+	// hands it; net/http drops the fragment on the wire), two records.
+	f.answers["https://o/b#one"] = ok(404, "", nil, -1)
+	results = p.Preflight(context.Background(), []string{"https://o/b#one", "https://o/b#two"})
+	assert.Equal(t, VerdictDead, results[0].Verdict)
+	assert.Equal(t, VerdictDead, results[1].Verdict)
+	assert.Equal(t, 1, f.count("https://o/b#one"), "wire-identical sources still share one request")
+	assert.Equal(t, 0, f.count("https://o/b#two"))
+	for _, src := range []string{"https://o/b#one", "https://o/b#two"} {
+		rec, err := p.Store.Get(src)
+		require.NoError(t, err)
+		require.NotNil(t, rec, src)
+		assert.Equal(t, StateBroken, rec.State, src)
+	}
+
+	// A stored verdict for one variant does not spare an unknown sibling
+	// its own request.
+	f.answers["https://o/a#three"] = ok(503, "", nil, -1)
+	results = p.Preflight(context.Background(), []string{"https://o/a#one", "https://o/a#three"})
+	assert.True(t, results[0].FromStore)
+	assert.Equal(t, VerdictInconclusive, results[1].Verdict)
+	assert.Equal(t, 1, f.count("https://o/a#three"), "the unknown variant is probed on its own")
+	rec, err := p.Store.Get("https://o/a#three")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Equal(t, "HTTP 503", rec.LastError, "the transient lands on the variant's own record")
+}
+
+// F10: a source the guard refuses writes no record and so stays due; the
+// worker must step past it rather than probe it every tick.
+func TestLookahead_StepsPastRefusedSources(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := newTableFetcher()
+	f.answers["https://o/cur"] = ok(200, "image/png", minimalPNG(1, 1), -1)
+	f.answers["https://o/refused"] = scriptedAnswer{err: &FetchError{Kind: FetchErrTooLong, Err: errors.New("too long")}}
+	f.answers["https://o/next"] = ok(200, "image/png", minimalPNG(1, 1), -1)
+	l := newTestLookahead(t, f, clock)
+	l.Observe([]string{"https://o/cur", "https://o/refused", "https://o/next"}, 0)
+
+	assert.True(t, l.step(context.Background(), nil))
+	assert.Equal(t, 1, f.count("https://o/refused"))
+	assert.True(t, l.step(context.Background(), nil))
+	assert.Equal(t, 1, f.count("https://o/next"), "the item behind the refused one is reached")
+	assert.True(t, l.step(context.Background(), nil))
+	assert.Equal(t, 1, f.count("https://o/cur"), "and so is the current item's recheck")
+	assert.False(t, l.step(context.Background(), nil))
+	assert.Equal(t, 1, f.count("https://o/refused"), "the refusal was probed exactly once")
+	rec, err := l.Store.Get("https://o/refused")
+	require.NoError(t, err)
+	assert.Nil(t, rec, "a refusal is never a verdict, nor a record")
+
+	clock.Advance(probeHold + time.Second)
+	assert.True(t, l.step(context.Background(), nil), "past the hold the refused source gets another look")
+	assert.Equal(t, 2, f.count("https://o/refused"))
+
+	// The sweep holds too: a due off-wall record that the guard now refuses
+	// does not eat the sweep budget every tick.
+	l.Observe(nil, 0)
+	_, err = l.Store.ApplyProbe("https://o/swept", ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
+	require.NoError(t, err)
+	f.answers["https://o/swept"] = scriptedAnswer{err: &FetchError{Kind: FetchErrGuard, Err: errors.New("reserved")}}
+	clock.Advance(RecheckBroken + time.Second)
+	assert.True(t, l.step(context.Background(), nil))
+	assert.Equal(t, 1, f.count("https://o/swept"))
+	assert.False(t, l.step(context.Background(), nil), "held until probeHold passes")
+	assert.Equal(t, 1, f.count("https://o/swept"))
 }

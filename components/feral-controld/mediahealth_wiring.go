@@ -111,9 +111,11 @@ func installedControldVersion() string {
 	return cfg.Version
 }
 
-// mediaHealthCursorReconciler forgets the outcome-ring cursor on every
-// player-session generation: a new page restarts the ring's numbering, so
-// nothing in the fresh ring was seen before (see mediahealth.Drainer).
+// mediaHealthCursorReconciler flags the outcome-ring cursor on every
+// player-session generation. A generation can be a new page (numbering
+// restarts) or a CDP reconnect to the surviving page (the session cannot
+// tell: it re-stamps the document either way), so the service decides
+// from the ring itself which it was (see mediahealth.Drainer).
 func mediaHealthCursorReconciler(svc *mediahealth.Service) func(context.Context) {
 	return func(context.Context) { svc.ResetOutcomeCursor() }
 }
