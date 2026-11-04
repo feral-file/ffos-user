@@ -2144,6 +2144,7 @@ func (h *handler) sendCDPRequest(command commands.Command) (interface{}, error) 
 	if command.Type == "checkStatus" {
 		playerresponse.SanitizeShowingKey(result)
 		annotateOverlayReply(result, h.overlaySource)
+		stripOutcomesReply(result)
 	}
 
 	return result, nil

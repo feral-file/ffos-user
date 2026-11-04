@@ -2,11 +2,14 @@ package mediahealth
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"time"
 
@@ -508,8 +511,87 @@ func transientDetail(res ProbeResult) string {
 //     two distinct plays — or when an L0 broken verdict is already standing
 //     (corroborated either way). A single failure is recorded, not concluded.
 func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
+	if err := s.checkDisk(); err != nil {
+		return nil, err
+	}
 	now := s.now()
-	return s.update(o.Source, func(rec *Record, _ bool) bool {
+	// A ring entry (Seq > 0) is applied at most once for the life of the
+	// store: its digest is written to the consumed ring in the SAME
+	// transaction as the record update, so a controld restart under a
+	// surviving player page — the whole ring drained again by a fresh
+	// process with no cursor — re-applies nothing. In-process dedup
+	// (Drainer) is not enough: it let a restart turn one failed play into
+	// a corroborated broken verdict (PR #438 review, round 4, F15). The
+	// inferred fallback (no seq) carries no identity and is bounded by
+	// the service's once-per-mount rule instead.
+	var digest string
+	if o.Seq > 0 {
+		digest = outcomeDigest(o)
+	}
+	var out *Record
+	err := s.db.Batch(func(tx *bolt.Tx) error {
+		meta := tx.Bucket(bucketMeta)
+		var consumed []string
+		if digest != "" {
+			if raw := meta.Get(metaConsumedKey); raw != nil {
+				// An unreadable ring reads as empty: the cost is one
+				// possible double count, never a lost observation.
+				_ = json.Unmarshal(raw, &consumed)
+			}
+			if slices.Contains(consumed, digest) {
+				rec, derr := s.decode(tx.Bucket(bucketItems).Get([]byte(Key(o.Source))))
+				if derr != nil {
+					return derr
+				}
+				out = rec
+				return nil
+			}
+		}
+		rec, err := s.applyTx(tx, o.Source, outcomeMutation(o, count, now))
+		if err != nil {
+			return err
+		}
+		out = rec
+		if digest == "" {
+			return nil
+		}
+		consumed = append(consumed, digest)
+		if len(consumed) > consumedCap {
+			consumed = consumed[len(consumed)-consumedCap:]
+		}
+		raw, err := json.Marshal(consumed)
+		if err != nil {
+			return err
+		}
+		return meta.Put(metaConsumedKey, raw)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// metaConsumedKey holds the digests of the last consumedCap ring entries
+// applied, in order, under bucketMeta.
+var metaConsumedKey = []byte("consumed")
+
+// consumedCap is four rings' worth: the player keeps 64 entries, so a
+// restart can never show an entry older than the ring that is remembered
+// here, whatever was applied in between.
+const consumedCap = 256
+
+// outcomeDigest is the stored identity of one ring entry: the same fields
+// the Drainer keys on (seq, source, kind, stage, attempt, at), hashed so
+// the consumed ring holds no source URLs.
+func outcomeDigest(o Outcome) string {
+	id := identityOf(o)
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00%d\x00%s", id.Seq, id.Source, id.Kind, id.Stage, id.Attempt, id.At)))
+	return hex.EncodeToString(sum[:16])
+}
+
+// outcomeMutation is the record update one play outcome applies.
+func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, existed bool) bool {
+	return func(rec *Record, _ bool) bool {
 		switch o.Kind {
 		case OutcomeOK:
 			rec.Plays.OK++
@@ -566,7 +648,7 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 			return true
 		}
 		return false
-	})
+	}
 }
 
 // playCategory maps a play-layer conclusion to its category: a detect-stage

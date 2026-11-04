@@ -500,3 +500,91 @@ func TestPreflight_RecordsMalformedDataURIs(t *testing.T) {
 	assert.Equal(t, 2, rec.ConsecutiveBroken)
 	assert.Equal(t, 1, f.count("https://o/alive"), "no network for a data: recheck")
 }
+
+// Regressions from the PR #438 review (feralfile-bot, round 4).
+
+// F15: a ring entry is applied once for the life of the store, so a
+// controld restart under a surviving player page re-applies nothing.
+func TestStore_ApplyOutcomeIsIdempotentPerRingEntry(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := openTestStore(t, clock)
+	entry := Outcome{Seq: 1, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1, At: "t1"}
+	for i := 0; i < 3; i++ {
+		_, err := store.ApplyOutcome(entry, true)
+		require.NoError(t, err)
+	}
+	rec, err := store.Get("https://o/a")
+	require.NoError(t, err)
+	assert.Equal(t, 1, rec.Plays.Fail, "the same entry counts once")
+	assert.Equal(t, 1, rec.Plays.ConsecutiveFail)
+
+	okEntry := Outcome{Seq: 2, Source: "https://o/a", Kind: OutcomeOK, Stage: StageReady, At: "t2"}
+	_, err = store.ApplyOutcome(okEntry, true)
+	require.NoError(t, err)
+	_, err = store.ApplyOutcome(okEntry, true)
+	require.NoError(t, err)
+	rec, err = store.Get("https://o/a")
+	require.NoError(t, err)
+	assert.Equal(t, 1, rec.Plays.OK)
+
+	// The inferred fallback carries no seq: it is bounded by the service's
+	// once-per-mount rule, not by identity, so two mounts count twice.
+	inferred := Outcome{Source: "https://o/b", Kind: OutcomeFail, Stage: StageInferred}
+	_, err = store.ApplyOutcome(inferred, true)
+	require.NoError(t, err)
+	_, err = store.ApplyOutcome(inferred, true)
+	require.NoError(t, err)
+	rec, err = store.Get("https://o/b")
+	require.NoError(t, err)
+	assert.Equal(t, 2, rec.Plays.Fail)
+
+	// The consumed ring is bounded; the oldest identities fall out.
+	for seq := int64(10); seq < int64(10+consumedCap+8); seq++ {
+		_, err := store.ApplyOutcome(Outcome{Seq: seq, Source: "https://o/c", Kind: OutcomeSkip, Stage: StageHint, At: "t"}, true)
+		require.NoError(t, err)
+	}
+	_, err = store.ApplyOutcome(entry, true)
+	require.NoError(t, err)
+	rec, err = store.Get("https://o/a")
+	require.NoError(t, err)
+	assert.Equal(t, 2, rec.Plays.Fail, "an identity older than the ring is forgotten (one possible double count, never a lost observation)")
+}
+
+func TestService_RestartDoesNotCorroborate(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "store.db")
+	manifest := filepath.Join(dir, "ffos-player-contract.json")
+	require.NoError(t, os.WriteFile(manifest, []byte(manifestWithContract), 0o600))
+	open := func() *Service {
+		store, err := Open(dbPath, Options{Now: clock.Now})
+		require.NoError(t, err)
+		return New(Config{Store: store, Contract: &PlayerContract{Path: manifest}, Now: clock.Now, Online: func() bool { return true }})
+	}
+	list := items("https://o/a")
+	ring := []Outcome{{Seq: 1, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1, At: "t1"}}
+
+	s := open()
+	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 1, Entries: ring})
+	require.NoError(t, s.Close())
+
+	// controld restarts; Chromium keeps its page and its ring.
+	s = open()
+	defer func() { _ = s.Close() }()
+	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 1, Entries: ring})
+	rec, err := s.Store().Get("https://o/a")
+	require.NoError(t, err)
+	assert.Equal(t, 1, rec.Plays.Fail, "the play consumed before the restart is not a second play")
+	assert.Empty(t, rec.State)
+	assert.Nil(t, s.HintArgument(list), "no hint was manufactured")
+
+	// A genuinely new play after the restart still corroborates.
+	ring = append(ring,
+		Outcome{Seq: 2, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, At: "t2"},
+		Outcome{Seq: 3, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1, At: "t3"})
+	s.ObservePlayback(items("https://o/a", "https://o/b"), 0, nil, &Outcomes{CastSeq: 1, Entries: ring})
+	rec, err = s.Store().Get("https://o/a")
+	require.NoError(t, err)
+	assert.Equal(t, 2, rec.Plays.Fail)
+	assert.Equal(t, StateBroken, rec.State)
+}

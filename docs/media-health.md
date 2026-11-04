@@ -194,7 +194,11 @@ controld remembers the identity of the entries it consumed (`seq`, `source`,
 stage, attempt, `at`) and treats the next ring as the same page when it still
 holds any of them, re-applying nothing; a ring holding none is a new page.
 `at` is what tells one page's `seq: 1` from the next page's — always send it.
-Live-only on the player.
+The store keeps the same identity (hashed, no URLs) for the last 256 entries
+it applied, written in the same transaction as the record, so a controld
+restart under a surviving page — a fresh process draining the whole ring
+again — applies each entry once for the life of the store. Live-only on the
+player.
 
 | stage | kind | code |
 |---|---|---|
@@ -233,7 +237,9 @@ sighting for the item at `index` counts as one failure per mount (stage
   with `items`: `{"state":"ok"}`, `{"state":"unknown"}`,
   `{"state":"broken","category":"…","reason":"…","layer":"l0"}` or
   `{"state":"suspect","category":"render_blank","layer":"l1"}`. Nothing else is
-  pushed. The raw `outcomes` ring is stripped from the notification.
+  pushed. The raw `outcomes` ring is stripped from the notification and from
+  direct `checkStatus` replies (hub and relayer): it carries item sources and
+  play history, and is consumed on the device only.
 - `getMediaHealth` (controller tier, query class, no arguments) returns the
   whole playlist on screen: `{ok, status, items:[{index, id, title, state,
   category, reason, layer, checkedAt, plays:{ok,fail}}], total, truncated,
