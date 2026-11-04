@@ -54,6 +54,44 @@ func checkControllerQR(t *testing.T, sub, name string) {
 	}
 }
 
+// checkControllerLink runs controller-link.json (§5.6.1.1): every positive
+// link parses to its QR and device id, every build renders byte for byte,
+// and every negative link is rejected as a whole.
+func checkControllerLink(t *testing.T, sub, name string) {
+	var v fixturegen.ControllerLinkVectors
+	readVector(t, sub, name, &v)
+	if len(v.Cases) == 0 {
+		t.Fatal("no cases")
+	}
+	for _, c := range v.Cases {
+		q, dev, err := control.ParseControllerLink(c.Link)
+		if sub == "negative" {
+			if err == nil {
+				t.Errorf("%s: accepted", c.Description)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%s: %v", c.Description, err)
+		}
+		if q.String() != c.QR || dev != c.DeviceID {
+			t.Fatalf("%s: parsed %q / %q", c.Description, q.String(), dev)
+		}
+	}
+	if sub == "positive" && len(v.Builds) == 0 {
+		t.Fatal("no builds")
+	}
+	for _, b := range v.Builds {
+		q, err := control.ParseControllerQR(b.QR)
+		if err != nil {
+			t.Fatalf("%s: %v", b.Description, err)
+		}
+		if got := control.ControllerLink(q, b.DeviceID); got != b.Link {
+			t.Fatalf("%s: rendered %q", b.Description, got)
+		}
+	}
+}
+
 // checkRegistration runs a registration vector (§5.6.2-3). A positive one is
 // also decrypted from the spec text with stdlib primitives, independently of
 // OpenRegistration, and its wire is reproduced byte for byte.
