@@ -26,6 +26,7 @@ type Service struct {
 	drainer   Drainer
 	logger    *zap.Logger
 	now       func() time.Time
+	online    func() bool
 
 	// inferredFailed remembers the last (castSeq-less) renderStatus==3
 	// sighting so the fallback counts one failure per item mount, not one
@@ -41,8 +42,14 @@ type Config struct {
 	Contract *PlayerContract
 	// Lookahead may be nil (no during-play probing).
 	Lookahead *Lookahead
-	Logger    *zap.Logger
-	Now       func() time.Time
+	// Online reports the device's current internet verdict (the mediator's
+	// applied connectivity state). Play failures observed while it is false
+	// are recorded but never counted toward a verdict. nil means "unknown",
+	// which is treated as OFFLINE: until the daemon has a verdict, a
+	// failure cannot be blamed on the source.
+	Online func() bool
+	Logger *zap.Logger
+	Now    func() time.Time
 }
 
 // New wires a Service. The lookahead's Run must be driven by the caller.
@@ -54,6 +61,7 @@ func New(cfg Config) *Service {
 		contract:      cfg.Contract,
 		logger:        cfg.Logger,
 		now:           cfg.Now,
+		online:        cfg.Online,
 		inferredIndex: -1,
 	}
 	if s.logger == nil {
@@ -147,6 +155,7 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 	if s.lookahead != nil {
 		s.lookahead.Observe(sources, index)
 	}
+	online := s.online != nil && s.online()
 	if outcomes != nil {
 		fresh, gap := s.drainer.Drain(outcomes)
 		if gap > 0 {
@@ -154,7 +163,7 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 				zap.Int64("missed", gap))
 		}
 		for _, o := range fresh {
-			if _, err := s.store.ApplyOutcome(o); err != nil && !errors.Is(err, ErrLowDisk) {
+			if _, err := s.store.ApplyOutcome(o, online); err != nil && !errors.Is(err, ErrLowDisk) {
 				s.logger.Warn("media health: recording play outcome failed", zap.String("stage", o.Stage), zap.Error(err))
 			}
 		}
@@ -173,7 +182,7 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 		return
 	}
 	s.inferredIndex, s.inferredSource = index, src
-	if _, err := s.store.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageInferred}); err != nil && !errors.Is(err, ErrLowDisk) {
+	if _, err := s.store.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageInferred}, online); err != nil && !errors.Is(err, ErrLowDisk) {
 		s.logger.Warn("media health: recording inferred failure failed", zap.Error(err))
 	}
 }

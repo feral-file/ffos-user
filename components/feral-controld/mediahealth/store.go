@@ -416,19 +416,24 @@ func transientDetail(res ProbeResult) string {
 }
 
 // ApplyOutcome folds one player-reported outcome into source's record.
+// online is the device's own connectivity verdict at the time of the poll.
 //
 // Rules (the corroboration contract):
 //   - kind ok    → State ok, Layer play, recheck in RecheckOK; consecutive
 //     fail reset. A play success is the strongest positive evidence and
-//     heals a broken verdict.
+//     heals a broken verdict — whatever online says: a work that rendered
+//     (from cache, from a LAN origin) rendered.
 //   - kind skip  → Plays.Skipped only.
-//   - kind fail, device-local stage (webgl) → Plays.LastFail only, with the
-//     device_limit category; never a verdict.
-//   - kind fail, other stage → Plays.Fail and ConsecutiveFail advance. The
+//   - kind fail, device-local (deviceLocal: webgl, or detect/network) or
+//     observed while the device was OFFLINE → Plays.LastFail only; never a
+//     verdict and never a count. An outage says nothing about a source,
+//     and a verdict earned during one would be skipped before the play
+//     layer could ever heal it.
+//   - kind fail, otherwise → Plays.Fail and ConsecutiveFail advance. The
 //     record becomes broken (Layer play) when ConsecutiveFail reaches 2, or
 //     when an L0 broken verdict is already standing (corroborated either
 //     way). A single failure is recorded, not concluded.
-func (s *Store) ApplyOutcome(o Outcome) (*Record, error) {
+func (s *Store) ApplyOutcome(o Outcome, online bool) (*Record, error) {
 	now := s.now()
 	return s.update(o.Source, func(rec *Record, _ bool) bool {
 		switch o.Kind {
@@ -458,9 +463,10 @@ func (s *Store) ApplyOutcome(o Outcome) (*Record, error) {
 				rec.MediaType = o.MediaType
 			}
 			reason := reasonForStage(o.Stage)
-			if reason == "" || CategoryOf(reason, 0) == CategoryDeviceLimit {
+			if reason == "" || deviceLocal(o) || !online {
 				// Recorded for the app and the support bundle; the source
-				// is not the thing that failed.
+				// is not the thing that failed (or nothing could be told
+				// about it while the device was offline).
 				return true
 			}
 			rec.Plays.Fail++
@@ -490,10 +496,12 @@ func (s *Store) ApplyOutcome(o Outcome) (*Record, error) {
 }
 
 // playCategory maps a play-layer conclusion to its category: a detect-stage
-// HTTP status is the kiosk's own answer, so 401/403 are source_blocked and
-// 404/410-class source_missing; everything else is render_failed.
+// 4xx is the kiosk's own answer, so 401/403 are source_blocked and
+// 404/410-class source_missing; a 5xx means the origin is up but failing,
+// which (corroborated across plays) is render_failed, like every other
+// stage.
 func playCategory(reason Reason, status int) Category {
-	if reason == ReasonRenderDetect && status >= 400 {
+	if reason == ReasonRenderDetect && status >= 400 && status < 500 {
 		return CategoryOf(ReasonHTTPStatus, status)
 	}
 	return CategoryOf(reason, status)

@@ -1131,6 +1131,10 @@ func initializeApp(
 	// health); one combined observer is installed below, before the poller
 	// starts.
 	var playbackObservers []func(*status.PlayerStatus)
+	// internetObservers collects every consumer of the mediator's applied
+	// internet verdict (the netlog recorder, media health); the mediator has
+	// ONE observer seam, so a fan-out is installed once below.
+	var internetObservers []func(connected bool)
 	var kioskReplay offlinecache.KioskReplay
 	var offlineCacheScopeLost offlinecache.ScopeLostRegistrar
 	var offlineCacheStaticServer offlinecache.StaticServer
@@ -1247,7 +1251,14 @@ func initializeApp(
 	// pass can REFUSE the device's primary function, so a verdict rule that
 	// misjudges an origin class on the fleet must be recoverable by a config
 	// edit, not a package rollback.
-	mediaHealthSvc, mediaHealthLookahead := wireMediaHealth(config.Get().MediaHealthTuning(logger), uaPolicy, logger)
+	// mediaHealthOnline mirrors the mediator's applied internet verdict for
+	// the media health service (false until the first verdict is applied:
+	// "unknown" must not blame a source). Fed through the internet-observer
+	// fan-out installed after the netlog recorder below, which shares the
+	// mediator's single observer seam.
+	var mediaHealthOnline atomic.Bool
+	internetObservers = append(internetObservers, func(connected bool) { mediaHealthOnline.Store(connected) })
+	mediaHealthSvc, mediaHealthLookahead := wireMediaHealth(config.Get().MediaHealthTuning(logger), uaPolicy, mediaHealthOnline.Load, logger)
 	if mediaHealthSvc != nil {
 		defer func() { _ = mediaHealthSvc.Close() }()
 		commandrouter.SetMediaHealth(rawCmdHandler, mediaHealthSvc, logger)
@@ -1411,13 +1422,20 @@ func initializeApp(
 	netlogRecorder := buildNetlogRecorder(context, netlogConfig, linkChecker, exec, clock, dbusClient,
 		netlogProbeEndpoint(relayV2Endpoint, relayerEndpoint), executor, deviceStatus, logger)
 	if netlogRecorder != nil {
-		if sink, ok := mediator.(interface{ SetInternetObserver(func(bool)) }); ok {
-			sink.SetInternetObserver(netlogRecorder.ObserveInternet)
-		}
+		internetObservers = append(internetObservers, netlogRecorder.ObserveInternet)
 		if sink, ok := relayer.(interface {
 			SetConnectionObserver(func(connected bool, closeCode int))
 		}); ok {
 			sink.SetConnectionObserver(netlogRecorder.ObserveRelayer)
+		}
+	}
+	if len(internetObservers) > 0 {
+		if sink, ok := mediator.(interface{ SetInternetObserver(func(bool)) }); ok {
+			sink.SetInternetObserver(func(connected bool) {
+				for _, observe := range internetObservers {
+					observe(connected)
+				}
+			})
 		}
 	}
 

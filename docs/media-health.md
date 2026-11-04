@@ -170,7 +170,7 @@ between polls. Live-only on the player.
 
 | stage | kind | code |
 |---|---|---|
-| `detect` | fail | the content-type HEAD's HTTP status, or `network` |
+| `detect` | fail | the content-type HEAD's HTTP status, or `network` (the device is offline: device-local, never a verdict) |
 | `load` | fail | the element kind (image, video, audio, iframe, object, model) |
 | `decode` | fail | the `MediaError` name |
 | `watchdog` | fail | the deadline (`15s`, `45s`) |
@@ -182,7 +182,14 @@ between polls. Live-only on the player.
 **Corroboration.** One failure is recorded, not concluded. A record becomes
 `broken` (layer `play`) on a second failure in a distinct play, or on one
 failure when an L0 broken verdict is already standing. A `ready` writes `ok`
-and heals a broken record: the wall itself is the strongest probe.
+and heals a broken record: the wall itself is the strongest probe. Entries
+are applied in `seq` order, so a detect failure whose iframe fallback then
+rendered nets out to `ok`. Two classes never count: device-local failures
+(`webgl`, `detect`/`network`) and any failure observed while controld's own
+internet verdict is offline (or not yet known) — an outage says nothing about
+a source, and a verdict earned during one would be skipped before the play
+layer could ever heal it. A `ready` counts whatever the verdict says: a work
+that rendered from cache rendered.
 
 Without the contract, controld falls back to inference: a `renderStatus == 3`
 sighting for the item at `index` counts as one failure per mount (stage

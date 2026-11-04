@@ -35,7 +35,11 @@ const mediaHealthMinFreeBytes = offlinecache.DefaultMinFreeDiskBytes
 // replacement gateway; other paths on those hosts get the policy agent).
 // A nil *uarewrite.Policy must NOT be assigned to the interface field — a
 // typed nil would pass the nil check inside the probe — hence the guard.
-func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, logger *zap.Logger) (*mediahealth.Service, *mediahealth.Lookahead) {
+//
+// online is the device's applied internet verdict (the mediator's
+// connectivity edges, see main): play failures observed while it is false
+// are recorded but never counted, so an outage cannot mark the wall broken.
+func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, online func() bool, logger *zap.Logger) (*mediahealth.Service, *mediahealth.Lookahead) {
 	if cfg.Disabled {
 		logger.Warn("media health disabled by config; casts are forwarded unprobed and carry no hints")
 		return nil, nil
@@ -74,6 +78,7 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, l
 		Prober:    prober,
 		Contract:  &mediahealth.PlayerContract{Path: setupui.DefaultContractPath},
 		Lookahead: lookahead,
+		Online:    online,
 		Logger:    logger,
 	})
 	count, _ := store.Count()

@@ -19,7 +19,7 @@ func newTestService(t *testing.T, f Fetcher, clock *testClock, manifest string) 
 	if manifest != "" {
 		require.NoError(t, os.WriteFile(path, []byte(manifest), 0o600))
 	}
-	return New(Config{Store: p.Store, Prober: p, Contract: &PlayerContract{Path: path}, Now: clock.Now})
+	return New(Config{Store: p.Store, Prober: p, Contract: &PlayerContract{Path: path}, Now: clock.Now, Online: func() bool { return true }})
 }
 
 const manifestWithContract = `{"contracts":{"mediaHealth":{"version":1}}}`
@@ -87,6 +87,43 @@ func TestService_InferredFailureWithoutTheContract(t *testing.T) {
 	assert.Equal(t, 2, rec.Plays.Fail, "a ready in between is a new mount")
 	assert.Equal(t, StateBroken, rec.State)
 	assert.Nil(t, s.Hints([]string{"https://o/b"}))
+}
+
+func TestService_OfflineFailuresAreNotCounted(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	p := newPassProber(t, newTableFetcher(), clock)
+	online := false
+	s := New(Config{Store: p.Store, Prober: p, Contract: &PlayerContract{Path: filepath.Join(t.TempDir(), "none")}, Now: clock.Now, Online: func() bool { return online }})
+	defer func() { _ = s.Close() }()
+	list := items("https://o/a")
+	failed := 3
+	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 1, Entries: []Outcome{
+		{Seq: 1, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad},
+		{Seq: 2, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad},
+	}})
+	s.ObservePlayback(list, 0, &failed, nil)
+	rec, err := s.Store().Get("https://o/a")
+	require.NoError(t, err)
+	assert.Empty(t, rec.State, "two failures and an inferred one, all offline: no verdict")
+	assert.Equal(t, 0, rec.Plays.Fail)
+
+	online = true
+	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 2, Entries: []Outcome{
+		{Seq: 1, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad},
+		{Seq: 2, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad},
+	}})
+	rec, err = s.Store().Get("https://o/a")
+	require.NoError(t, err)
+	assert.Equal(t, StateBroken, rec.State, "the same two failures online conclude")
+
+	unknown := New(Config{Store: p.Store, Prober: p, Contract: &PlayerContract{}, Now: clock.Now})
+	unknown.ObservePlayback(items("https://o/b"), 0, nil, &Outcomes{CastSeq: 1, Entries: []Outcome{
+		{Seq: 1, Source: "https://o/b", Kind: OutcomeFail, Stage: StageLoad},
+		{Seq: 2, Source: "https://o/b", Kind: OutcomeFail, Stage: StageLoad},
+	}})
+	rec, err = p.Store.Get("https://o/b")
+	require.NoError(t, err)
+	assert.Empty(t, rec.State, "no connectivity verdict wired reads as offline")
 }
 
 func TestService_PreflightAndReset(t *testing.T) {

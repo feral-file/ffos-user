@@ -108,13 +108,13 @@ func TestStore_ApplyOutcome_Corroboration(t *testing.T) {
 	s := openTestStore(t, clock)
 	const src = "https://origin.example/v.mp4"
 
-	rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageDecode, Code: "decode", MediaType: "video"})
+	rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageDecode, Code: "decode", MediaType: "video"}, true)
 	require.NoError(t, err)
 	assert.Empty(t, rec.State, "one failure is recorded, not concluded")
 	assert.Equal(t, 1, rec.Plays.Fail)
 	assert.Equal(t, "decode", rec.Plays.LastFail.Code)
 
-	rec, err = s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageDecode, Code: "decode"})
+	rec, err = s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageDecode, Code: "decode"}, true)
 	require.NoError(t, err)
 	assert.Equal(t, StateBroken, rec.State, "a second failure in a distinct play concludes")
 	assert.Equal(t, LayerPlay, rec.Layer)
@@ -122,7 +122,7 @@ func TestStore_ApplyOutcome_Corroboration(t *testing.T) {
 	assert.Equal(t, ReasonRenderDecode, rec.Reason)
 	assert.True(t, rec.Conclusive(clock.t))
 
-	rec, err = s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "video"})
+	rec, err = s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "video"}, true)
 	require.NoError(t, err)
 	assert.Equal(t, StateOK, rec.State, "a play success heals")
 	assert.Equal(t, 0, rec.Plays.ConsecutiveFail)
@@ -136,7 +136,7 @@ func TestStore_ApplyOutcome_SingleFailCorroboratedByL0(t *testing.T) {
 	const src = "https://origin.example/a"
 	_, err := s.ApplyProbe(src, ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
 	require.NoError(t, err)
-	rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageExhausted, Attempt: 3})
+	rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageExhausted, Attempt: 3}, true)
 	require.NoError(t, err)
 	assert.Equal(t, StateBroken, rec.State)
 	assert.Equal(t, LayerPlay, rec.Layer, "one play failure plus a standing L0 verdict is corroborated")
@@ -149,10 +149,10 @@ func TestStore_ApplyOutcome_DetectStatusCategories(t *testing.T) {
 	for _, tc := range []struct {
 		code string
 		want Category
-	}{{"404", CategorySourceMissing}, {"403", CategorySourceBlocked}, {"network", CategoryRenderFailed}} {
+	}{{"404", CategorySourceMissing}, {"403", CategorySourceBlocked}, {"503", CategoryRenderFailed}} {
 		src := "https://origin.example/" + tc.code
-		_, _ = s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: tc.code})
-		rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: tc.code})
+		_, _ = s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: tc.code}, true)
+		rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: tc.code}, true)
 		require.NoError(t, err)
 		assert.Equal(t, tc.want, rec.Category, tc.code)
 	}
@@ -163,16 +163,61 @@ func TestStore_ApplyOutcome_DeviceLocalAndSkipNeverConclude(t *testing.T) {
 	s := openTestStore(t, clock)
 	const src = "https://origin.example/a"
 	for i := 0; i < 5; i++ {
-		rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageWebGL})
+		rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageWebGL}, true)
 		require.NoError(t, err)
 		assert.Empty(t, rec.State)
 		assert.Equal(t, 0, rec.Plays.Fail, "webgl is recorded on lastFail only")
 		assert.Equal(t, StageWebGL, rec.Plays.LastFail.Stage)
 	}
-	rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeSkip, Stage: StageHint})
+	rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeSkip, Stage: StageHint}, true)
 	require.NoError(t, err)
 	assert.Equal(t, 1, rec.Plays.Skipped)
 	assert.Empty(t, rec.State)
+}
+
+func TestStore_ApplyOutcome_OfflineAndDetectNetworkNeverConclude(t *testing.T) {
+	clock := &testClock{t: time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)}
+	s := openTestStore(t, clock)
+	const src = "https://origin.example/a"
+
+	// detect/network is the device's own outage, whatever online says.
+	for i := 0; i < 3; i++ {
+		rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: CodeNetwork}, true)
+		require.NoError(t, err)
+		assert.Empty(t, rec.State)
+		assert.Equal(t, 0, rec.Plays.Fail)
+		assert.Equal(t, CodeNetwork, rec.Plays.LastFail.Code)
+	}
+	// Any failure observed offline is recorded, never counted.
+	for i := 0; i < 3; i++ {
+		rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageLoad, Code: "image"}, false)
+		require.NoError(t, err)
+		assert.Empty(t, rec.State)
+		assert.Equal(t, 0, rec.Plays.Fail)
+		assert.Equal(t, StageLoad, rec.Plays.LastFail.Stage)
+	}
+	// A success while offline (cache, LAN origin) is still a success.
+	rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeOK, Stage: StageReady}, false)
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State)
+	// A standing L0 verdict is not corroborated by an offline failure either.
+	_, err = s.ApplyProbe(src, ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
+	require.NoError(t, err)
+	rec, err = s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageExhausted}, false)
+	require.NoError(t, err)
+	assert.Equal(t, LayerL0, rec.Layer, "the L0 verdict stands on its own; the offline failure adds nothing")
+}
+
+func TestStore_ApplyOutcome_DetectFailThenReadyInOnePlayIsOK(t *testing.T) {
+	clock := &testClock{t: time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)}
+	s := openTestStore(t, clock)
+	const src = "https://origin.example/a"
+	_, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: "404"}, true)
+	require.NoError(t, err)
+	rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeOK, Stage: StageReady}, true)
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State, "the iframe fallback rendered: applied in seq order, the ready wins")
+	assert.Equal(t, 0, rec.Plays.ConsecutiveFail)
 }
 
 func TestStore_HintsAndItemHealths(t *testing.T) {

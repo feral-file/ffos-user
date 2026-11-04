@@ -50,7 +50,31 @@ const (
 	StageHint      = "hint"
 	StageReady     = "ready"
 	StageInferred  = "inferred"
+
+	// CodeNetwork is the detect-stage code the player reports when its
+	// content-type HEAD failed at the transport layer (no HTTP answer at
+	// all). The player raises it only once it has corroborated that the
+	// device is offline, so it describes the device's network, not the
+	// source.
+	CodeNetwork = "network"
 )
+
+// deviceLocal reports whether a failing outcome describes the device rather
+// than the source: a lost WebGL context, or a detect-stage transport failure
+// (the device is offline). Such outcomes are recorded on the play stats for
+// the app and the support bundle but never advance a verdict — counting
+// them would let an outage mark every work on the wall broken, and a
+// conclusive broken record is skipped before it is mounted, so the play
+// layer could never heal it once the network returned.
+func deviceLocal(o Outcome) bool {
+	switch o.Stage {
+	case StageWebGL:
+		return true
+	case StageDetect:
+		return o.Code == CodeNetwork
+	}
+	return false
+}
 
 // reasonForStage maps a failing stage to the record reason; "" for a stage
 // that is not a failure of the source (hint, ready) or unknown.
