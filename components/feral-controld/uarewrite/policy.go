@@ -28,7 +28,7 @@
 // <video>, or iframe navigation can never run. No header can fix that, so
 // for a matching host whose path is a content-addressed `/ipfs/<cid>...` the
 // policy instead hands Chromium a REPLACEMENT URL on a working gateway (see
-// RewriteURL). The DP-1 item source stays byte-for-byte what the app cast:
+// RewriteURL). The DP-1 item source stays byte-for-byte what the app sent:
 // `Fetch.continueRequest`'s `url` override is invisible to the page, so
 // ff-player, the offline-cache identity (`sha256(item.source)`), and every
 // log still see the original URL. Anything on a matching host that is NOT a

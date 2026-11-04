@@ -488,14 +488,14 @@ func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
 // is the regression test for the scope-overwrite hole the refresher's
 // authority guard closes (feral-file/ffos-user#229 review finding): the
 // pass samples the scheduler's AuthorityToken, then does slow URL/dynamic
-// resolution; if a scheduler-owned cast lands in that window, the send is
+// resolution; if a scheduler-owned display request lands in that window, the send is
 // already skipped on the token mismatch — but the scope sync used to run
 // anyway, overwriting (under the same playback lock, after it ran) the
-// scope that cast just installed, and leaving interception pointed at the
+// scope that display request just installed, and leaving interception pointed at the
 // previous playlist until the next pass. The guard must skip BOTH.
 //
 // The interleaving is deterministic: the DP1 resolution mock — the exact
-// step the token window spans — stands in for the concurrent cast by
+// step the token window spans — stands in for the concurrent display request by
 // bumping playlist authority (a real scheduler's PrepareWithSource)
 // before returning. The strict kiosk-replay mock then pins the fix: any
 // SyncPlaylist (or CDP send, also unexpected) fails the test, while the
@@ -538,7 +538,7 @@ func TestRefresher_ProcessPlayingPlaylist_SkipsScopeSyncWhenAuthorityChangesMidR
 	mockDP1.EXPECT().
 		ProcessPlaylistURL(ctx, playlistURL, false).
 		DoAndReturn(func(context.Context, string, bool) (*dp1.Playlist, error) {
-			// The concurrent scheduler-owned cast: bumps AuthorityToken
+			// The concurrent scheduler-owned display request: bumps AuthorityToken
 			// exactly inside the pass's sample→guard window.
 			sched.PrepareWithSource(mockPlaylist, playlistschedule.Source{})
 			return mockPlaylist, nil
@@ -2089,7 +2089,7 @@ func TestRefresher_SchedulerOwnedFutureSourceDoesNotUseStalePlayerStatus(t *test
 	).AnyTimes()
 	scheduler := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC },
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
-	// Seed B exactly as the accepted cast path does. Its first item is future-only,
+	// Seed B exactly as the accepted display path does. Its first item is future-only,
 	// so the player remains on stale A and the scheduler owns B's source.
 	require.Empty(t, scheduler.PrepareWithSource(futureOnlyPlaylist(now.Add(time.Hour)), playlistschedule.Source{PlaylistURL: futureURL}).Items)
 
@@ -2098,7 +2098,7 @@ func TestRefresher_SchedulerOwnedFutureSourceDoesNotUseStalePlayerStatus(t *test
 
 	// The accepted future-only schedule is B, while the player is still
 	// displaying A. Its status must not be consulted: B is scheduler-owned
-	// authority until a newer cast/default replaces it.
+	// authority until a newer display request/default replaces it.
 	mockStatusPoller.EXPECT().FetchPlayerStatus(gomock.Any()).Times(0)
 	resolved := make(chan struct{}, 1)
 	mockDP1.EXPECT().
@@ -2246,7 +2246,7 @@ func TestRefresher_TransientURLError_RestoredPendingDoesNotResumeCache(t *testin
 // TestRefresher_StartupLoop_EscalatesToForceCastAfterRepeatedPlayerRejection
 // pins the fix for a soft refresh that is permanently rejected because the
 // player has no active playlist to refresh, while the scheduler cache is
-// already warm. PrepareWithSource's own force-cast escape
+// already warm. PrepareWithSource's own force-display escape
 // (scheduler.HasCache() && (!hadDisplayAtCache || hadRestoredPending)) does
 // not fire in that state (the cache was warm both before and after
 // PrepareWithSource), so without escalation the startup loop would retry the
@@ -2307,12 +2307,12 @@ func TestRefresher_StartupLoop_EscalatesToForceCastAfterRepeatedPlayerRejection(
 	select {
 	case <-forceCastSucceeded:
 	case <-time.After(2 * time.Second):
-		t.Fatal("expected the startup loop to escalate to a forced now_display cast")
+		t.Fatal("expected the startup loop to escalate to a forced now_display push")
 	}
 	r.Stop()
 
 	assert.GreaterOrEqual(t, atomic.LoadInt32(&rejectedSends), int32(2),
-		"expected repeated rejected soft refreshes before the loop escalated to force-cast")
+		"expected repeated rejected soft refreshes before the loop escalated to force-display")
 }
 
 func TestRefresher_URLRefresh_PreparesAndUsesWithPlayerPush(t *testing.T) {
@@ -2399,7 +2399,7 @@ func TestRefresher_URLRefresh_SkipsObsoleteResultAfterAuthorityChange(t *testing
 	r.Start()
 	<-resolveStarted
 
-	// Simulate a newer accepted cast or displayDefaultPlaylist while the old
+	// Simulate a newer accepted display request or displayDefaultPlaylist while the old
 	// refresh is still resolving. Once it gets the push lock it must discard
 	// the obsolete result instead of sending it to the player.
 	fakeSched.AdvanceAuthority()
@@ -2454,7 +2454,7 @@ func TestRefresher_URLRefresh_SkipsObsoleteStatusAfterAuthorityChange(t *testing
 	r.Start()
 	<-statusReadStarted
 
-	// The status response was requested before this newer cast/default took
+	// The status response was requested before this newer display request/default took
 	// authority. The refresh result must be discarded even if URL resolution
 	// itself happens after the newer authority is visible.
 	fakeSched.AdvanceAuthority()
@@ -2678,7 +2678,7 @@ func TestRefresher_StaticInlineDisplayAt_DoesNotOverwriteSchedulerCache(t *testi
 	r.Stop()
 
 	assert.Zero(t, fakeSched.preparesCount(), "player status only has the filtered active set and must not replace the full cache")
-	assert.Zero(t, fakeSched.resumePersistedCount(), "steady-state inline displayAt status must not force-cast on every refresh tick")
+	assert.Zero(t, fakeSched.resumePersistedCount(), "steady-state inline displayAt status must not force-display on every refresh tick")
 	assert.Zero(t, fakeSched.pushCallsCount(), "static inline status must not trigger a refresher send")
 }
 
@@ -2801,7 +2801,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotOverwriteNewerAcceptedCast
 	displayAt := "2026-07-22T00:00:00Z"
 	newerActive := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title: "Newer accepted cast",
+			Title: "Newer accepted display request",
 			Items: []dp1playlist.PlaylistItem{
 				{
 					ID:        "newer-active",
@@ -2832,7 +2832,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotOverwriteNewerAcceptedCast
 	r.Stop()
 
 	assert.Zero(t, fakeSched.preparesCount(), "filtered static status cannot rebuild scheduler state from persisted source")
-	assert.Zero(t, fakeSched.resumePersistedCount(), "persisted source must not be force-cast over a newer accepted static cast")
+	assert.Zero(t, fakeSched.resumePersistedCount(), "persisted source must not be force-displayed over a newer accepted static display request")
 	assert.Zero(t, fakeSched.pushCallsCount())
 }
 
@@ -3134,7 +3134,7 @@ func (m deadlineMatcher) String() string {
 // regression test for feralfile-bot #421 F7, on the static-inline refresh
 // path that sends the player nothing.
 //
-// The sequence: a seriesRegistry item is cast while the catalog is
+// The sequence: a seriesRegistry item is displayed while the catalog is
 // unreachable, so expansion fails and the representative is what reaches the
 // player and what the automatic cache captures. The catalog then recovers. On
 // the next refresh pass the defensive ExpandSeriesItems on this branch now

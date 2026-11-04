@@ -1168,7 +1168,7 @@ that checks the persisted copy, or simply as metadata that vanished
 somewhere between the publisher and the screen. For the same reason the
 cached copy is never verified when loaded as a fallback: its bytes are this
 re-serialization (of an already-hydrated playlist), so a verdict over them
-would be a false tamper claim against an honest publisher. A cast served
+would be a false tamper claim against an honest publisher. A playlist served
 from the cache reports no `signatureStatus` at all.
 
 There is deliberately **no** top-level manifest, no separate
@@ -1778,7 +1778,7 @@ now — interception is keyed on the URLs the kiosk actually fetches. The two
 differ on every pass that sends the player nothing: both
 `resyncKioskReplayScopeToCurrentDisplay`s and `playlist-refresher`'s
 static-inline refresh re-derive "what is displayed" from player status, and
-that re-derivation now expands `seriesRegistry` items. A series cast while
+that re-derivation now expands `seriesRegistry` items. A series displayed while
 the art catalog was unreachable keeps its representative, so a later pass
 whose expansion succeeds would scope replay to editions that were never
 displayed and never captured — `SyncPlaylist` then finds nothing cached and
@@ -1795,23 +1795,23 @@ starts requesting that playlist's resources, rather than racing the first
 few requests against a scope switch that has not happened yet. "Before
 the send" never means "before the send is even certain to happen",
 though: the sync runs only after the `displayAt` scheduler has filtered
-the cast and something will actually be pushed. A future-only cast that
+the request and something will actually be pushed. A future-only request that
 the scheduler defers (`ok: true, deferred: true`, no player write)
 leaves scope untouched, because the previous playlist keeps displaying
 and switching interception to the deferred playlist would — under a
 fail_closed scope — block the on-screen playlist's own requests even
-with live network. When a filtered cast IS pushed, the scope is synced
+with live network. When a filtered request IS pushed, the scope is synced
 with the FULL playlist's item sources rather than the active cohort: the
 scheduler's timer/wake/retry cutovers push later cohorts of the same
 playlist directly with no replay-scope hook of their own, so the
-cast-time scope must already cover every cohort a cutover can display
+accept-time scope must already cover every cohort a cutover can display
 (uncached future items only dilute the scope to `mixed`, whose miss
 policy is pass-through — the safe direction — and the
 `playlist-refresher`'s periodic pass re-syncs as downloads complete).
 The refresher guards its own pre-send sync the same way it already
 guards the send: a playlist-authority change observed under the
 playback lock skips both, so a stale refresh pass can no longer
-overwrite the scope a newer scheduler-owned cast just installed. If the
+overwrite the scope a newer scheduler-owned push just installed. If the
 CDP send itself then fails, or the player rejects the command (`ok:false`),
 the kiosk never actually switched — it is still genuinely showing whatever
 it displayed before — so that early scope switch left replay pointed at a
@@ -2060,7 +2060,7 @@ time, so no further DP-1 resolution happens on the cached copy. It was
 NOT signature-verified then (an earlier version of this sentence claimed
 so; nothing ever did), and it is not verified at load either: the stored
 body is a typed, hydrated re-marshal that cannot verify, so the fallback
-cast carries no signature verdict (feral-file/ffos-user#307; see §7.1's
+display request carries no signature verdict (feral-file/ffos-user#307; see §7.1's
 JCS note above). If there is nothing to fall back
 to (never downloaded, offline caching disabled, or the download was
 since cleared — `LoadPlaylistIDForURL` intentionally is not kept in
@@ -2244,7 +2244,7 @@ and every `source` inside it is a URL this daemon will dial on the
 playlist's behalf from four separate places:
 
 - `classify.go`'s `HEAD` / ranged-`GET` probe,
-- `probe.go`'s cast-time liveness preflight (#304),
+- `probe.go`'s accept-time liveness preflight (#304),
 - `mediacapture.go`'s direct body download,
 - `capture.go`'s `Page.navigate` in the headless browser.
 
@@ -2261,7 +2261,7 @@ browser — both reachable by anyone on the LAN.
 function BOTH enqueue paths (`DownloadItem` and `DownloadPlaylist`) call
 before any I/O and before any job is queued. A rejected source is
 therefore never probed, never downloaded, and never navigated to. The
-cast-time preflight does not cross `Classify`: it applies the same guard
+accept-time preflight does not cross `Classify`: it applies the same guard
 directly (`guard.check` plus the guarded transport, both inside
 `probe.go`), so a policy change in the guard must be re-checked against
 that path separately. It
@@ -2633,7 +2633,7 @@ LAN-hosted asset server will see `ErrUnsafeSource` — that is the guard
 working, and would need an explicit opt-in config knob to relax.
 
 **Accepted risk — the preflight as a bounded outbound amplifier.** The
-cast-time source preflight (#304) gives the unauthenticated LAN a new way
+accept-time source preflight (#304) gives the unauthenticated LAN a new way
 to make the device dial out: a `displayPlaylist` may probe up to 256
 distinct wire URLs at concurrency 16, each on a fresh dial (keep-alives
 are off by design), and the hub's 422 body reflects per-item HTTP status
@@ -2643,7 +2643,7 @@ origins from the device's egress IP — the source guard confines targets
 to public addresses, so this is a reflection/reachability surface, not an
 internal scanner. Accepted alongside the guard's other residuals (#3471:
 the LAN control plane is unauthenticated by design); the storm gate, the
-per-cast probe budget, and the prober's process-wide 8 MiB peer-controlled parsing
+per-request probe budget, and the prober's process-wide 8 MiB peer-controlled parsing
 budget are the containment. A probe uses a status-only HTTP/1 client that accepts
 at most 64 KiB and 128 fields across informational plus final header blocks, then
 closes before the body so trailers are never parsed. It discards fields through a

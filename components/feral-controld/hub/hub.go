@@ -61,7 +61,7 @@ type hub struct {
 	logDeliveryDisabled bool
 
 	// contactObserver, when set, is invoked once per request on the counted
-	// control-plane routes (cast, status, status_v2) from a NON-loopback
+	// control-plane routes (command, status, status_v2) from a NON-loopback
 	// source. It feeds the provisioning escape policy's "a human's app is
 	// talking to this device" deferral signal (docs/network-recovery-ux.md
 	// §4.1). The exclusions are load-bearing, not hygiene: /metrics is scraped
@@ -287,17 +287,17 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		// not 400 (the caller sent garbage).
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			h.logger.Warn("Cast payload exceeds body limit", zap.Int64("limit", maxErr.Limit))
+			h.logger.Warn("Command payload exceeds body limit", zap.Int64("limit", maxErr.Limit))
 			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		h.logger.Error("Failed to decode cast payload", zap.Error(err))
+		h.logger.Error("Failed to decode command payload", zap.Error(err))
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 
 	payloadJSON, _ := payload.JSON()
-	h.logger.Info("Received cast request", zap.ByteString("payload", helper.TruncateBytes(payloadJSON, fflogger.MAX_FIELD_LENGTH)))
+	h.logger.Info("Received command", zap.ByteString("payload", helper.TruncateBytes(payloadJSON, fflogger.MAX_FIELD_LENGTH)))
 
 	if payload.Type == "" {
 		http.Error(w, "Command type is required", http.StatusBadRequest)
@@ -315,7 +315,7 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		}
 		d, normalized := h.control.Plaintext(control.RouteLAN, payload)
 		if !d.Allow {
-			h.logger.Warn("Hub plaintext cast refused by control policy",
+			h.logger.Warn("Hub plaintext command refused by control policy",
 				zap.String("command", string(payload.Type)), zap.String("code", d.Code))
 			writeControlError(w, d.Code)
 			return
@@ -336,7 +336,7 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 	result, err := h.cmdHandler.Process(commands.FromController(h.ctx), payload)
 	if err != nil {
 		if commandrouter.IsRateLimited(err) {
-			h.logger.Warn("Cast request rejected by storm protection", zap.Error(err))
+			h.logger.Warn("Command rejected by storm protection", zap.Error(err))
 			http.Error(w, "Too many commands, slow down", http.StatusTooManyRequests)
 			return
 		}
@@ -344,10 +344,10 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		// playlist it sent points nowhere loadable), so it gets a 4xx and
 		// the full per-item detail — err.Error() carries per-item HTTP
 		// statuses with sources already log-truncated at probe time — not
-		// the generic 500 below, which would tell the caster nothing
-		// (#304, the dead-link-cast bug this exists to surface).
+		// the generic 500 below, which would tell the sender nothing
+		// (#304, the dead-link bug this exists to surface).
 		if commandrouter.IsSourceUnreachable(err) {
-			h.logger.Warn("Cast rejected: no playlist item source is loadable", zap.Error(err))
+			h.logger.Warn("Command rejected: no playlist item source is loadable", zap.Error(err))
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
@@ -356,15 +356,15 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Malformed DP-1 is caller input, not a device fault: answer the
-		// documented classification rather than a 500 that tells the caster
+		// documented classification rather than a 500 that tells the sender
 		// nothing about its own payload.
 		if commandrouter.IsPlaylistInvalid(err) {
-			h.logger.Warn("Cast rejected: playlist is invalid", zap.Error(err))
+			h.logger.Warn("Command rejected: playlist is invalid", zap.Error(err))
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
-		h.logger.Error("Failed to process cast request", zap.Error(err))
-		http.Error(w, "Failed to process cast request", http.StatusInternalServerError)
+		h.logger.Error("Failed to process command", zap.Error(err))
+		http.Error(w, "Failed to process command", http.StatusInternalServerError)
 		return
 	}
 	if result == nil {

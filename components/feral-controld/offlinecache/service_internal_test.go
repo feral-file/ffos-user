@@ -239,7 +239,7 @@ func (o *recordingProgressObserver) states() []ItemState {
 
 // TestService_HasReplayableItem pins the preflight's cache-rescue
 // predicate (#305 review F4): a prior successful capture on disk —
-// complete (ready) or partial — rescues an all-dead cast, while
+// complete (ready) or partial — rescues an all-dead display request, while
 // broken-online (fails even with network), not-cached, and unknown
 // sources do not. Empty input reports false.
 func TestService_HasReplayableItem(t *testing.T) {

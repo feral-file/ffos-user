@@ -198,7 +198,7 @@ func (a *Authority) refuseDisplay(adm *Admission, ctl string, window Window, cod
 // admitDisplay is §3.4 steps 5-6 for a display record, in every state but
 // locked (OpenFrom answered that already): legacy included, because a
 // legacy device issues display grants too (§5.7). A display ctl may send
-// exactly two things, the Play cast (Permits) and its own self-revoke. An
+// exactly two things, the Play display request (Permits) and its own self-revoke. An
 // inactive record is access_revoked; for an active one every other op or
 // command is permission_denied. Refusals spend the ctr.
 func (a *Authority) admitDisplay(pre authenticated, g DisplayGrant, now int64) (*Admission, error) {
@@ -247,7 +247,7 @@ func (a *Authority) admitDisplay(pre authenticated, g DisplayGrant, now int64) (
 }
 
 // Permits reports whether p may run cmd with req (§7.1). A display grant is
-// confined to the Play cast (§5.7): displayPlaylist in the exact Play
+// confined to the Play display request (§5.7): displayPlaylist in the exact Play
 // shape, nothing else, not even a status read. Every other role is decided
 // by the tier table. admitCmd and commandrouter's re-check both use it.
 func Permits(p Principal, cmd string, req json.RawMessage) bool {

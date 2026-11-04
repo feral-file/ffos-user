@@ -56,18 +56,18 @@ for relayer topic assignment:
 - Device-control commands are handled by the `devicectl` executor.
 - `displayPlaylist` is resolved through DP1 first, then forwarded to Chromium
   through CDP as `window.handleCDPRequest(...)`. Controld defaults missing CDP
-  `intent.action` to `now_display` so the player accepts the cast. When the
+  `intent.action` to `now_display` so the player accepts the request. When the
   playlist contains item-level `displayAt` values, controld filters them to the
   current active set before CDP, commits only the refreshable source identity to
-  durable cache after the player accepts that filtered cast, keeps the resolved
+  durable cache after the player accepts that filtered request, keeps the resolved
   full playlist in memory, and advances the player on the next `displayAt`
-  (timer), sleep-schedule wake, or CDP reconnect with a force cast
+  (timer), sleep-schedule wake, or CDP reconnect with a force display
   (`intent.action=now_display`, not `refresh: true`) so cutover is not deferred
   until the current artwork duration ends. URL / dynamic playlist refresh still
   uses `refresh: true`, except the first scheduled reconstruction after a
-  controld restart force-casts because scheduler ownership may need to be
-  restored from persisted state. Every cast is then filtered against the
-  device's content policy for the cast's `contentContext` before it reaches
+  controld restart force-displays because scheduler ownership may need to be
+  restored from persisted state. Every display request is then filtered against the
+  device's content policy for the request's `contentContext` before it reaches
   CDP, so a playlist without item-level `displayAt` is forwarded unchanged only
   when the policy admits all of its items (see "Content policy effect on
   playlists" below).
@@ -118,10 +118,10 @@ should treat this as "device busy", back off, and retry; the command was not
 applied. Control-plane messages (e.g. the `system`/topic-state message above)
 are never shed by command pressure.
 
-The second is the **dead-source cast rejection** on `displayPlaylist`
+The second is the **dead-source display rejection** on `displayPlaylist`
 (feral-file/ffos-user#304): when every resolved item source is definitively
 unreachable (an identity-independent HTTP 4xx, or a malformed `data:` URI),
-the cast is rejected at accept time and the controller receives a reliable
+the request is rejected at accept time and the controller receives a reliable
 RPC response whose `message` body is:
 
 ```json
@@ -292,7 +292,7 @@ Current relayer error response: none standardized; command failure is logged.
 
 LAN hub (`POST :1111/api/cast`): `connect` needs no `X-FF1-Topic` header,
 claimed or not. It is a feral-file#3551 phase-0 residual: the released ff-app
-sends it LAN-first before every cast without the header, so it stays open; under
+sends it LAN-first before every command without the header, so it stays open; under
 the phase-1 control protocol only an owner claims or rebinds with it
 (`ff1-control-v1.md` §7.1). An open `connect` only
 rewrites the claim record and confers no authority.
@@ -543,7 +543,7 @@ CDP payload if the controller request did not already include an intent action.
 The player rejects `displayPlaylist` without a known DP1 action
 (`Unknown DP1 action: undefined` → `ok: false`). Soft refresh remains on the
 5-minute URL/dynamic refresher path (`refresh: true`), which does not use this
-cast default.
+default.
 
 When the resolved playlist contains item-level `displayAt` values, controld
 computes an active set
@@ -552,8 +552,8 @@ that filtered playlist to Chromium. Timezone-less `displayAt` values use device
 local time; values with `Z`/offset are absolute. Date-only (`YYYY-MM-DD`) is
 rejected per DP-1 §3.5.2 (not evergreen). If no playlist item has `displayAt`,
 controld forwards the full playlist unchanged. Controld keeps the resolved full
-playlist in memory while casting, persists only its refreshable source identity
-after the player accepts the filtered cast, and uses the in-memory playlist to
+playlist in memory while displaying, persists only its refreshable source identity
+after the player accepts the filtered request, and uses the in-memory playlist to
 arm the next `displayAt` transition and to recompute after wake or CDP
 reconnect. After a controld-only restart, the refresher must fetch the source
 again before scheduler cutovers resume; if that fetch fails, controld leaves the
@@ -561,7 +561,7 @@ current player artwork alone and retries later. Static inline player status
 contains only the filtered active set and no stable full-playlist identity, so
 controld does not restart-resume a persisted static inline schedule from player
 status alone.
-Initial casts and timed / wake / reconnect pushes are force casts
+Initial display requests and timed / wake / reconnect pushes are force displays
 (`intent.action=now_display`
 without `refresh`) so the player applies the playlist immediately even if the
 current artwork still has remaining duration; the 5-minute URL/dynamic
@@ -580,7 +580,7 @@ beside the decoded map — never a re-marshal of the map (whose HTML escaping
 of `&`/`<`/`>` can inflate a valid document past the 4 MiB verifier bound)
 and never the typed struct (which drops fields the signer covered). The offline
 cached-copy fallback carries NO verdict — the stored body is a typed,
-hydrated re-marshal, not the signed bytes — so a cast served from it omits
+hydrated re-marshal, not the signed bytes — so a display request served from it omits
 the fields below. Bounds, all aimed at untrusted ingress: a document larger than 4 MiB is
 refused before decoding on every path (hub body limit, relayer frame limit,
 URL fetch limit, and the verifier's own cap); at most 16 `signatures[]` entries are verified and a document
@@ -594,7 +594,7 @@ siblings as `unverified`. The outcome is one of three `signatureStatus` values:
 least one fails: tampered content, placeholder or wrong-key signature,
 unsupported `alg`, malformed entry), or `unsigned` (no `signatures[]`; a
 legacy v1.0 `signature` string alone also counts as unsigned and is flagged).
-Verification is informational only: the cast reply, `player_status`, and device
+Verification is informational only: the display reply, `player_status`, and device
 logs retain diagnostic verdicts, but signatures never block playback or trigger
 alerts. The silent/notify/strict modes and their setter are retired, and existing
 `signature-verification.json` records are ignored. `device_status` omits the
@@ -669,7 +669,7 @@ Dynamic DP1 example:
 }
 ```
 
-Raster wallet-walk example (what ff-app casts for an address playlist with
+Raster wallet-walk example (what ff-app sends for an address playlist with
 no hidden works; the address is inlined in the query, the page cursor is the
 only variable, and no API key travels in the document — the device adds its
 own `x-api-key` from config `raster.apiKey`; contract in
@@ -706,7 +706,7 @@ own `x-api-key` from config `raster.apiKey`; contract in
 }
 ```
 
-A wallet with hidden works is cast as a static snapshot (items, no
+A wallet with hidden works is displayed as a static snapshot (items, no
 `dynamicQuery`) and takes the inline path above unchanged.
 
 Current success response: Chromium/player response from
@@ -738,7 +738,7 @@ unsigned or when the document exceeded the entry cap (`too many
 signatures (N > 16)` is then the document-level reason). `legacySignature: true` appears only when a v1.0 `signature`
 string was present. Kids are DIDs (public keys) and safe to relay; no field
 ever carries a URL. All three keys are absent when verification is disabled
-by config, when the cast was served from the offline cached copy, or on
+by config, when the request was served from the offline cached copy, or on
 firmware that predates it — controllers must treat absence as "not
 verified", never as unsigned. `ok` alone still decides success.
 
@@ -777,7 +777,7 @@ Current error cases:
   a missing `pagination` block, a non-Raster or non-https endpoint, a
   GraphQL `errors` array, a non-2xx page, a page whose `cursorPath`/
   `hasNextPath` cannot be read, or a walk past 200 pages fails the whole
-  cast with no partial playlist (`raster dynamicQuery: …`); an individual
+  request with no partial playlist (`raster dynamicQuery: …`); an individual
   node the wall cannot play is skipped, not fatal.
 - CDP send to Chromium fails.
 - Player response is not `{"message":{"ok":true}}`; this records playback
@@ -789,7 +789,7 @@ Current error cases:
   standardized error envelopes near the top of this document for the RPC body (`ok:false`, capped index+status detail)
   and the LAN hub's 422 mapping. Anything short of a definitive dead
   verdict for every item (network errors, timeouts, 401/403/406/407/408/
-  416/429, 5xx) fails open and the cast proceeds. The preflight stops after
+  416/429, 5xx) fails open and the request proceeds. The preflight stops after
   its first reachable or inline source; unfinished probes are canceled and
   remain inconclusive. It is an all-dead admission check, not a full playlist
   health audit. Completed verdicts still govern a policy change that removes
@@ -3118,7 +3118,7 @@ extra field would miss dedupe and repeat the same resolve-and-replay work.
 The command never accepts a controller-supplied source. Controld resolves the
 opaque record on the device, rebuilds a one-work unsigned DP-1 call from the
 retained item, and re-enters its ordinary `displayPlaylist` path — which is what
-preserves scheduler ownership, playback/replay-scope locking, cast-time source
+preserves scheduler ownership, playback/replay-scope locking, accept-time source
 preflight, and the content-policy gate. Extracting one item from a signed
 playlist invalidates that playlist's signature, so the rebuilt call carries no
 signature; only the work's `defaults` are preserved.
@@ -3135,7 +3135,7 @@ It does not claim a successful wall render. Callers still wait for `player_statu
 particularly when the same work is deliberately replayed twice.
 
 Error cases: `recordId is required`; an evicted, malformed, or unknown record;
-`contentBlocked` if policy refuses the rebuilt cast; plus every
+`contentBlocked` if policy refuses the rebuilt request; plus every
 `displayPlaylist` error, since that is the path it re-enters. A source that was
 valid when recorded can still fail later during rendering; that is reported
 honestly rather than promised away.
@@ -3193,12 +3193,12 @@ which is the accepted trade: a work the owner has just blocked must not keep
 playing. An item the policy has nothing to say about — unrated, or carrying a
 label this build does not recognize — is left alone.
 
-That applies to a **static inline** cast too — the shape an app cast usually
+That applies to a **static inline** request too — the shape an app's request usually
 takes, with no URL or dynamic query to re-resolve. A newly blocked item is
 removed and the player is told to retire it if it is the frame on screen.
 Restoring items a previous projection removed is the one thing this cannot do:
-the device holds only the filtered set that was cast, so relaxing a policy takes
-effect on the next cast rather than retroactively.
+the device holds only the filtered set that was displayed, so relaxing a policy takes
+effect on the next display request rather than retroactively.
 
 Success is reported only after the atomic durable write succeeds *and* the
 player returns a matching acknowledgement. A repeated identical set performs no
@@ -3271,14 +3271,14 @@ Unlike `setContentPolicy`, there is no CDP round trip: the player never sees
 this setting, so a write either commits durably or it does not — there is no
 second, player-held state to reconcile against it.
 
-An accepted change re-casts the currently displayed playlist **only if** it
+An accepted change re-displays the currently displayed playlist **only if** it
 currently holds a series controld resolved this way (a static `dp1_call`
-cast with at least one `seriesRegistry` item). The full edition set for every
-such series is kept from the cast that resolved it, so the re-cast narrows
+request with at least one `seriesRegistry` item). The full edition set for every
+such series is kept from the request that resolved it, so the re-display narrows
 under the new setting without a second catalog call. If nothing currently
 displayed went through that resolution this boot — a freshly started process,
 or the screen simply shows non-series content — the setting is saved with no
-re-cast: once a series is narrowed and cast, the playlist the player holds
+re-display: once a series is narrowed and displayed, the playlist the player holds
 carries no marker telling controld a series was ever there, so there is
 nothing to re-narrow.
 
@@ -3299,16 +3299,16 @@ ingress that is a malformed request, and silently widening it into the default
 audience would hide the client bug. (Scheduler state persisted before this
 field existed omits the key entirely, which stays compatible.)
 
-The device filters the playlist against its policy before casting:
+The device filters the playlist against its policy before displaying:
 
 - A `mature`-labelled item is withheld unless `showMatureContent` is on, or the
-  cast is `personal` and `strictPersonal` is off.
-- An *unrated* item is withheld only from a `curated` cast, and only while the
+  request is `personal` and `strictPersonal` is off.
+- An *unrated* item is withheld only from a `curated` request, and only while the
   operator's `blockUnratedCurated` gate is on.
 - When any item is removed, the projection's signatures are cleared: the source
   document's signature does not describe the projection. Rating fields
   themselves remain signed in the source.
-- When the projection is empty, the cast is refused with `contentBlocked`
+- When the projection is empty, the request is refused with `contentBlocked`
   (HTTP 422 on the LAN hub, `"error":"contentBlocked"` over the relayer). A
   scheduled **cutover** whose cohort projects empty is different: there is no
   caller to refuse, so the empty list is sent with `retireBlockedCurrent` —
@@ -3340,7 +3340,7 @@ The context survives refresh. When a periodic refresh has to rebuild the source
 from player status and that status omits `contentContext` — only a player
 predating this feature does — the origin is treated as **unknown** and that
 refresh is left unprojected, rather than reclassified as `curated`. Guessing
-`curated` would strip the mature items an owner deliberately cast as
+`curated` would strip the mature items an owner deliberately sent as
 `personal`. Such a player has no policy mirror of its own either
 (`setContentPolicy` answers `unsupported`).
 

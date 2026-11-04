@@ -83,10 +83,10 @@ const (
 	PlayerStatusBootHydrationPending = `{"protocol":1,"route":"/playlist","handlerRegistered":true,"hasArtwork":false,"bootHydration":"pending"}`
 
 	// PlayerStatusBootHydrationOK: hydration completed normally with
-	// something cast.
+	// something displayed.
 	PlayerStatusBootHydrationOK = `{"protocol":1,"route":"/playlist","handlerRegistered":true,"hasArtwork":true,"bootHydration":"ok"}`
 
-	// PlayerStatusBootHydrationHaltedCleared: a disconnect cleared the cast
+	// PlayerStatusBootHydrationHaltedCleared: a disconnect cleared the display request
 	// mid-boot; the wall is intentionally dark.
 	PlayerStatusBootHydrationHaltedCleared = `{"protocol":1,"route":"/playlist","handlerRegistered":true,"hasArtwork":false,"bootHydration":"halted_cleared"}`
 
@@ -134,7 +134,7 @@ const (
 // byte-accurate to the real reply shape, per this package's copied-verbatim
 // invariant. castCommand/playlist/playlistUrl/items/defaultDuration are
 // omitted because they decode from `undefined` fields on an idle player with
-// nothing cast, and JSON.stringify drops undefined object properties.
+// nothing displayed, and JSON.stringify drops undefined object properties.
 
 const (
 	// CheckStatusReplyStampPresentEmpty: a new player whose current document

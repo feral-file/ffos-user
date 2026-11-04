@@ -71,7 +71,7 @@ func TestHandleEnvelopeRunsAsPrincipal(t *testing.T) {
 		t.Fatalf("principal = %+v", c)
 	}
 	if !c.fromController {
-		t.Fatal("an admitted envelope must carry commands.FromController (#409 wake-on-cast)")
+		t.Fatal("an admitted envelope must carry commands.FromController (#409 wake-on-display)")
 	}
 	if string(c.cmd.RawArguments) != `{"dp1_call":{"items":[]}}` || c.cmd.Arguments["dp1_call"] == nil {
 		t.Fatalf("command = %+v", c.cmd)
@@ -333,7 +333,7 @@ func TestPlaintextAmbiguityAndNormalization(t *testing.T) {
 			t.Errorf("%s: %+v", msg, d)
 		}
 	}
-	// A clean Play cast is allowed and its Arguments are exactly the raw bytes.
+	// A clean Play display request is allowed and its Arguments are exactly the raw bytes.
 	var cmd commands.Command
 	_ = json.Unmarshal([]byte(`{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{"items":[]}}}`), &cmd)
 	cmd.Arguments = map[string]any{"evil": 1} // whatever the typed decode said

@@ -1,7 +1,7 @@
 package commandrouter_test
 
-// Cast-time source preflight (feral-file/ffos-user#304): the displayPlaylist
-// path rejects a cast only when EVERY resolved item source earned a
+// Accept-time source preflight (feral-file/ffos-user#304): the displayPlaylist
+// path rejects a display request only when EVERY resolved item source earned a
 // definitive dead verdict, and fails open on everything else. The probe
 // mechanics themselves (the single ranged GET, guard, timeouts) are covered in
 // offlinecache's probe tests; these cover the handler's decision rule and
@@ -76,7 +76,7 @@ func TestCommandHandler_Process_DisplayPlaylist_AllSourcesDead_RejectsCast(t *te
 	assert.True(t, commandrouter.IsSourceUnreachable(err))
 	assert.Contains(t, err.Error(), "sourceUnreachable")
 	assert.Contains(t, err.Error(), "item 0: HTTP 400")
-	// Sanitization contract: the error is returned verbatim to casters,
+	// Sanitization contract: the error is returned verbatim to senders,
 	// and resolved source URLs are playlist content they may never have
 	// supplied (signed CDN queries carry credentials) — items are named
 	// by index and status only.
@@ -88,9 +88,9 @@ func TestCommandHandler_Process_DisplayPlaylist_AllSourcesDead_RejectsCast(t *te
 
 // TestCommandHandler_Process_DisplayPlaylist_AllDeadButCached_CastsForReplay
 // pins the cache rescue (#305 review F4): a definitively dead origin is not
-// a dead cast when the offline cache holds a prior capture — replay serves
+// a dead display request when the offline cache holds a prior capture — replay serves
 // cached items regardless of origin state — so an all-dead preflight
-// consults the cache before rejecting, and a replayable item lets the cast
+// consults the cache before rejecting, and a replayable item lets the display request
 // proceed.
 func TestCommandHandler_Process_DisplayPlaylist_AllDeadButCached_CastsForReplay(t *testing.T) {
 	ts := setup(t)
@@ -102,7 +102,7 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadButCached_CastsForReplay(
 		Return(true).
 		Times(1)
 	// The rescue requires replay to actually arm: successful scope sync is
-	// what lets the cast proceed (see the sync-failure test below for the
+	// what lets the display request proceed (see the sync-failure test below for the
 	// other half of that contract).
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().Times(1)
@@ -128,8 +128,8 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadButCached_CastsForReplay(
 
 // TestCommandHandler_Process_DisplayPlaylist_CachedButScopeSyncFails_Rejects
 // pins the second half of the rescue contract (#308 review): a cache
-// record replay cannot arm rescues nothing — a rescued cast's ONLY path to
-// the screen is replay, so a scope-sync failure must reject the cast with
+// record replay cannot arm rescues nothing — a rescued request's ONLY path to
+// the screen is replay, so a scope-sync failure must reject the display request with
 // the preflight's own error instead of forwarding it to render origins
 // already proven dead.
 func TestCommandHandler_Process_DisplayPlaylist_CachedButScopeSyncFails_Rejects(t *testing.T) {
@@ -165,7 +165,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedButScopeSyncFails_Rejects(
 		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(probeTestPlaylist("https://origin.example/dead"), nil).
 		Times(1)
-	// No CDP Send expectation: the sync failure must stop the cast.
+	// No CDP Send expectation: the sync failure must stop the display request.
 
 	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
 		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
@@ -218,7 +218,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedButScopeArmsNothing_Reject
 		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(probeTestPlaylist("https://origin.example/dead"), nil).
 		Times(1)
-	// No CDP Send expectation: an empty armed scope must stop the cast.
+	// No CDP Send expectation: an empty armed scope must stop the display request.
 
 	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
 		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
@@ -299,7 +299,7 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadNotCached_StillRejects(t 
 
 // TestCommandHandler_Process_DisplayPlaylist_Scheduled_SkipsPreflightEntirely
 // pins the premiere carve-out in its #308-round-3 form: a scheduled
-// playlist's probe verdict could never affect the cast (dead-now is not
+// playlist's probe verdict could never affect the display request (dead-now is not
 // dead-at-display-time), so the preflight must not run AT ALL — its only
 // possible contribution is up to probePhaseCeiling of latency sitting in
 // front of the scheduler arming a due cutover.
@@ -312,7 +312,7 @@ func TestCommandHandler_Process_DisplayPlaylist_Scheduled_SkipsPreflightEntirely
 	playlist.Items[0].DisplayAt = &displayAt
 
 	playlistURL := "https://example.com/playlist.json"
-	// No scheduler wired in this setup, so the cast proceeds down the
+	// No scheduler wired in this setup, so the display request proceeds down the
 	// default send path — the assertions are that it PROCEEDS and that
 	// the prober was never consulted.
 	expectDisplayPlaylistSuccess(ts, playlistURL, playlist)
@@ -438,7 +438,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PartiallyDead_StillCasts(t *test
 
 // TestCommandHandler_Process_DisplayPlaylist_AllInconclusive_FailsOpen pins
 // the offline-device contract: when no probe got a definitive answer (the
-// shape an offline device produces for every item), the cast proceeds —
+// shape an offline device produces for every item), the display request proceeds —
 // otherwise the cached-copy fallback would be unreachable exactly when it
 // is needed.
 func TestCommandHandler_Process_DisplayPlaylist_AllInconclusive_FailsOpen(t *testing.T) {

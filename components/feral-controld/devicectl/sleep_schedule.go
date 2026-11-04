@@ -886,12 +886,12 @@ func PlayerSleepGate(exec Executor) func() bool {
 }
 
 // PlayerCastWakeGate returns the predicate commandrouter consults before a
-// controller's cast: does the player need waking first? It is deliberately
+// controller's display request: does the player need waking first? It is deliberately
 // wider than PlayerSleepGate. The navigation gate asks whether navigating
 // would route a sleeping wall out of /sleep, so a FAILED wake (tracker
 // playerUnknownFailed, attempted awake, desired awake) reads as not
-// blocked. For a cast that answer is wrong: the player was last confirmed
-// sleeping and its page is still parked on /sleep, so the cast must retry
+// blocked. For a display request that answer is wrong: the player was last confirmed
+// sleeping and its page is still parked on /sleep, so the display request must retry
 // the wake rather than forward into it. The predicate therefore takes the
 // onAwake edge's own view of "was sleeping" (onAwakeWasSleepingLocked,
 // which keeps a failed wake eligible through sleepLastGood) OR the

@@ -49,12 +49,12 @@ ffos-user, package rail (`components/**`):
 - **Hub and player.**
   - Browser-originated requests refused on every hub route (#376).
   - Relayer connectivity in the LAN status (#397).
-  - A controller's cast wakes a sleeping player (#409).
+  - A controller's display request wakes a sleeping player (#409).
   - Device-local origins for on-chain data (#418, cross-rail: controld
     plus `serve-feral-player.sh`, below); the player contract fixture
     resynced (#419).
 - **Playlists.**
-  - The Raster wallet walk ff-app casts is resolved on the device (#413).
+  - The Raster wallet walk ff-app sends is resolved on the device (#413).
   - A `seriesRegistry` item expands into the series' editions (#421), and
     the series playback mode is resolved in controld, not the player
     (#426, merged 2026-11-02, after the G3 bench rounds).
@@ -85,7 +85,7 @@ ffos-user, image rail (`users/**`):
   and §15.1 puts the app, like ff-cli below, ahead of any FF OS with §5.7,
   Staging included. Then, before P1, raise remote config
   `app_update.ios.required_version` and `app_update.android.required_version`
-  to it: a released app older than G3 cannot cast on the LAN to an
+  to it: a released app older than G3 cannot send commands on the LAN to an
   `enrolled` device.
 - **ff-cli first, too** (spec §15.1: the app and ff-cli that list display
   rows ship before any FF OS with §5.7, which #414 brings). The latest
@@ -132,7 +132,7 @@ ffos-user, image rail (`users/**`):
     update to 3.0.0 (the 2.0.11 round could not join the 2.0.0 portal from
     a phone); afterwards `reset_target_version_info` reads `2.0.0` (the
     3.0.0 recovery updater writes it; `unknown` before that).
-  - Series playback (#426, merged after the G3 bench rounds): cast a
+  - Series playback (#426, merged after the G3 bench rounds): display a
     `seriesRegistry` playlist, then change the series playback mode
     (`setSeriesPlayback` / `getSeriesPlayback`).
   - iOS (not covered by the develop bench rounds).

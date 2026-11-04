@@ -329,7 +329,7 @@ func TestVerify_AtCap_StillVerified(t *testing.T) {
 
 // TestVerify_OversizedKid_MalformedAndNotEchoed pins the field bounds: an
 // entry whose kid exceeds MaxKidLen is malformed, its kid is blanked so
-// nothing caster-sized reaches the reply or the log, and nothing is verified.
+// nothing sender-sized reaches the reply or the log, and nothing is verified.
 func TestVerify_OversizedKid_MalformedAndNotEchoed(t *testing.T) {
 	doc := unsignedDoc()
 	signWith(t, doc, newKey(t), dp1playlist.RoleFeed)

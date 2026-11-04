@@ -31,7 +31,7 @@ type Policy struct {
 	Weight int64
 	// Dedupe collapses identical in-flight commands (same type + arguments)
 	// into a single execution whose result is shared. Suitable for idempotent
-	// commands such as casting a playlist or polling status.
+	// commands such as displaying a playlist or polling status.
 	Dedupe bool
 }
 
@@ -64,7 +64,7 @@ const inputGroup = "input"
 // while capping floods of high-cost or disruptive commands.
 func DefaultGateConfig() GateConfig {
 	disruptive := Policy{Rate: 0.2, Burst: 2, Weight: 1, Dedupe: true} // ~1 per 5s
-	heavy := Policy{Rate: 1, Burst: 3, Weight: 4, Dedupe: true}        // casting / uploads
+	heavy := Policy{Rate: 1, Burst: 3, Weight: 4, Dedupe: true}        // display requests / uploads
 	query := Policy{Rate: 5, Burst: 10, Weight: 1, Dedupe: true}       // status polls
 	input := Policy{Group: inputGroup, Rate: 50, Burst: 100, Weight: 1}
 	// slowWrite covers state-changing writes that shell out and are physically
@@ -109,7 +109,7 @@ func DefaultGateConfig() GateConfig {
 		// pattern as setContentPolicy, no CDP round trip) but, when a series
 		// is currently on screen, synchronously re-enters the
 		// CMD_DISPLAY_PLAYLIST path to re-narrow it under the new setting —
-		// the same cast-time preflight/resolution cost that path's own heavy
+		// the same accept-time preflight/resolution cost that path's own heavy
 		// tier exists for (see CMD_DISPLAY_PLAYLIST below), so this command
 		// shares that tier's rate and weight. Dedupe is OFF unlike the rest
 		// of heavy (feralfile-bot F8, PR #426): the gate's dedupe key is
@@ -120,13 +120,13 @@ func DefaultGateConfig() GateConfig {
 		// land and overwrite the store, after which the joined call's
 		// response still reports the first (now stale) mode as saved,
 		// while persistence and the screen both hold the other one. Every
-		// other heavy command is a request to (re)do the same cast/upload,
+		// other heavy command is a request to (re)do the same display request/upload,
 		// where coalescing truly-concurrent duplicates is safe and intended
 		// (see the gate's own Dedupe doc); setSeriesPlayback is a setter
 		// whose later identical-looking call must still take effect
 		// independently. Flood protection is unaffected: the handler's own
 		// seriesRecastCoalescer (seriesplayback.go) already bounds the real
-		// re-cast count to at most two per burst regardless of how many
+		// re-display count to at most two per burst regardless of how many
 		// setSeriesPlayback calls the gate admits.
 		commands.CMD_SET_SERIES_PLAYBACK: {Rate: heavy.Rate, Burst: heavy.Burst, Weight: heavy.Weight, Dedupe: false},
 
@@ -134,7 +134,7 @@ func DefaultGateConfig() GateConfig {
 		commands.CMD_SLEEP_NOW: userAction,
 		commands.CMD_WAKE_NOW:  userAction,
 
-		// Heavy: the externally reachable cast path and other costly work.
+		// Heavy: the externally reachable display path and other costly work.
 		commands.CMD_DISPLAY_PLAYLIST:         heavy,
 		commands.CMD_DISPLAY_DEFAULT_PLAYLIST: heavy,
 		commands.CMD_REFRESH_ARTWORK:          heavy,
@@ -303,11 +303,11 @@ func (g *gate) Process(ctx context.Context, command commands.Command) (interface
 	// Deduped commands collapse identical in-flight requests into one
 	// execution. Only the leader consumes rate/concurrency budget; followers
 	// share its result. Doing this before the rate check means a burst of
-	// identical casts costs a single token rather than being rejected.
+	// identical display requests costs a single token rather than being rejected.
 	//
 	// Followers share the leader's outcome, including its error: if the leader
 	// is rate-limited every follower sees RateLimitedError, and if the leader's
-	// underlying execution fails transiently (e.g. a cast backend error) the
+	// underlying execution fails transiently (e.g. a display request backend error) the
 	// coalesced followers see that same failure rather than re-running. This is
 	// intended — only truly concurrent, byte-identical commands coalesce, the
 	// failure is legible to every caller, and any caller may simply retry.

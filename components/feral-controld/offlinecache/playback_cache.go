@@ -14,7 +14,7 @@ import (
 const maxAutomaticItems = 2048
 const automaticRetryInterval = 5 * time.Minute
 
-// playbackCache is fed by player status, not cast intent: scheduled and
+// playbackCache is fed by player status, not display intent: scheduled and
 // restored playlists therefore warm the same cache. Only the service's one
 // capture worker calls prepare; Observe performs no network or disk I/O.
 type playbackCache struct {

@@ -25,7 +25,7 @@ import (
 
 // Raster wallet walk (feral-file/feral-file#3576, step 6).
 //
-// ff-app casts an address playlist as a DP-1 `dynamicQuery` whose items are
+// ff-app sends an address playlist as a DP-1 `dynamicQuery` whose items are
 // not DP-1 items but Raster `tokensOwned` nodes, paged by cursor, with the
 // wallet address inlined in the query text. dp1-go's hydration cannot run it:
 // its typed DynamicQuery drops `pagination`, its loop pages by `{{limit}}`/
@@ -48,7 +48,7 @@ const (
 	RasterTokensOwnedItemSchema = "raster/tokensOwned/1.0" //nolint:gosec // a schema name, not a credential
 
 	// rasterAPIKeyHeader carries the device's own Raster read key. It is never
-	// read from the document: the playlist is cast and may be published.
+	// read from the document: the playlist is displayed and may be published.
 	rasterAPIKeyHeader = "x-api-key"
 
 	// rasterMaxPages caps one walk. At Raster's 250-per-page cap that is 50,000
@@ -244,7 +244,7 @@ func rasterWorkIDStandard(standard string) string {
 // edge case, because a whole mint or transfer batch lands in one block. One
 // probed wallet had 332 of its 595 tokens sharing a timestamp. Raster's
 // order differed from the app's in 260 positions, 34 of them in the first
-// 50, which is all a cast shows. So without this sort, which works a large
+// 50, which is all a display request shows. So without this sort, which works a large
 // wallet puts on the wall depends on Raster's undocumented tie order.
 //
 // How the indexer era differed. ff-indexer-v2 owned the order server side:
@@ -668,7 +668,7 @@ func (d *dp1) planRasterWalk(playlist Playlist) (rasterWalkPlan, error) {
 // node the mapper cannot turn into a playable item (no contract, no media
 // URL, an unsupported chain) is skipped and logged with its Raster token id,
 // not fatal. Raster carries on the order of a hundred metadata-less tokens in
-// our catalog, and failing the cast on one of them would blank a wallet of
+// our catalog, and failing the display request on one of them would blank a wallet of
 // over a thousand. A failed PAGE, by contrast, is still fatal and yields no
 // partial playlist: the skip is per node, never per page.
 func (d *dp1) processRasterWalk(ctx context.Context, playlist Playlist, minimal bool, maxItems int) (*Playlist, error) {

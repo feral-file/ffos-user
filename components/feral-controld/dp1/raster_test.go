@@ -25,7 +25,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 )
 
-// The wallet walk ff-app casts (lib/domain/extensions/playlist_ext.dart,
+// The wallet walk ff-app sends (lib/domain/extensions/playlist_ext.dart,
 // walletDynamicQuery), verbatim apart from the address.
 const rasterWalkQuery = `query WalletWalk($after: String) { address(address: "0xabc") { tokensOwned(first: 250, after: $after) { pageInfo { hasNextPage endCursor } nodes { quantity lastAcquiredAt token { id chainId contractAddress tokenId tokenStandard name media { previewHash previewType contentUrl normalizedContentUrl contentType } artworks { id slug title isSeries platform { name } artists { id name slug addresses } } artists { id name slug addresses } } } } } }`
 
@@ -53,7 +53,7 @@ func setupRaster(t *testing.T, apiKey string) *rasterSetup {
 	return &rasterSetup{ctrl: ctrl, mockHTTP: mockHTTP, mockFFIdx: mockFFIdx, client: client}
 }
 
-// rasterPlaylist is the document ff-app casts for a wallet with no hidden
+// rasterPlaylist is the document ff-app sends for a wallet with no hidden
 // works: no items, only the dynamicQuery and its pagination block.
 func rasterPlaylist(t *testing.T) dp1.Playlist {
 	t.Helper()

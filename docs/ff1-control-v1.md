@@ -661,8 +661,10 @@ idempotent per `ctl`:
 
 A **display grant** is what a Play site (`@feralfile/play` 0.5 and later)
 holds after an owner approved it through mint pairing: a display-only
-controller record, issued by the FF1, that the site uses to cast as sealed
-envelopes over the v2 relay. It replaces the relayer session token of
+controller record, issued by the FF1, with which the site sends display
+requests as sealed envelopes over the v2 relay. A display request is a
+`displayPlaylist` command in the exact Play shape (§7.2); it is the one
+command a display grant may send. It replaces the relayer session token of
 earlier Play versions (§15.3). The approval UX is the mint pairing one, in
 every control state but `locked`: `legacy` included, where the device
 accepts the decision from whoever it accepts mint pairing decisions from
@@ -807,7 +809,7 @@ Unknown commands fail closed: they are owner-only.
 | internal | never accepted from any external principal, owner included (`permission_denied`): `resolveRecentlyPlayed` (router-internal), `ping`, `mintPairingDisplay`, `setupDisplay` (controld → player paint/probe commands that would otherwise fall through to the player over CDP), and `ff1Envelope` (an envelope inside an envelope) |
 | display (§5.7) | not a tier but a role outside the table: `displayPlaylist` in the exact Play shape of §7.2, and the self-revoke; everything else `permission_denied`. `control.Permits(principal, cmd, req)` decides it, in the authority and in the router's re-check |
 
-`connect` is controller tier because every ff-app cast, released and new,
+`connect` is controller tier because every ff-app command, released and new,
 starts with it. Only an owner claims or rebinds: under the protocol (any
 state but `legacy`) a non-owner `connect` to a claimed device is answered
 `ok` and changes nothing, and one to an unclaimed device is refused. In
@@ -817,7 +819,7 @@ The names are the real catalog: `commands/types.go`, the literal names
 `commandrouter` special-cases, and ff-player's `CastCommand` plus
 `CDPRequestHandler` commands. `pause`, `resume`, `pauseCasting`,
 `resumeCasting`, `nextArtwork` and `previousArtwork` exist in neither controld
-nor the player (ff-app's legacy cast enum still names some of them; the
+nor the player (ff-app's legacy command enum still names some of them; the
 player answers them `{ok:false}`), so they are unknown and owner-only.
 
 The implementation MUST keep this list in one table in code
@@ -830,7 +832,7 @@ phantom entry, so a new command cannot ship without a tier.
 
 | State | Condition | Plaintext on LAN `/api/cast` | Plaintext via relayer | Envelopes |
 |---|---|---|---|---|
-| `legacy` | no active owner grant | allowed (phase-0 rules apply) | allowed | `enroll` (with inv); `requestAccess` and `enroll` without inv → `not_approved`; a `grants.json` `cmd` → `not_approved`; a display grant's cast (§5.7) is admitted |
+| `legacy` | no active owner grant | allowed (phase-0 rules apply) | allowed | `enroll` (with inv); `requestAccess` and `enroll` without inv → `not_approved`; a `grants.json` `cmd` → `not_approved`; a display grant's display request (§5.7) is admitted |
 | `enrolled` | ≥1 active owner grant, `control.enforced=false` | refused: `enrollment_required` | controller tier only; anything else → `envelope_required` | full |
 | `enforced` | ≥1 active owner grant, `control.enforced=true` | refused: `enrollment_required` | only the exact Play shape `{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{…}}}`: `request` has exactly the members `intent` and `dp1_call`, `intent` is exactly `{"action":"now_display"}`, `dp1_call` is an object; anything else → `envelope_required` | full |
 | `locked` | identity or grant store unreadable/corrupt | refused: `locked` | controller tier only, else `locked` | refused: public `locked` (display grants included) |
@@ -850,7 +852,7 @@ topic gate, and a screenshot would hand any LAN host the first-owner
 invitation. Otherwise the phase-0 rules apply.
 
 The `legacy` state is open on the LAN by design (§11 migration and first
-claim depend on it): plaintext casts, input and `showPairingQRCode` remain
+claim depend on it): plaintext commands, input and `showPairingQRCode` remain
 available to any LAN caller until an owner enrolls, exactly as in phase 0.
 What protects the first enrollment is that the invitation is shown only on
 the physical screen and never served over the network.
@@ -1103,7 +1105,7 @@ browser is not told `approval_unavailable`. On the legacy relayer `SealAll`
 still sends the mint pairing types to every active grant, controllers
 included; "owner only" is a v2 rule. A `legacy` device has no owner
 binding, so after the legacy relayer is retired it cannot deliver an
-approval: existing display grants keep casting, and a new pairing is
+approval: existing display grants keep working, and a new pairing is
 rejected by the device with `approval_expired` once its approval deadline
 (5 min by default) passes, until the device is Secured. The device cannot
 tell earlier that nobody received the request: its own send still succeeds
@@ -1139,7 +1141,7 @@ no marker.
 | Route | Request | Reply |
 |---|---|---|
 | LAN | `POST /api/cast`, body `{"command":"ff1Envelope","request":{"v":1,"jwe":"<compact>"}}` | 200 `{"v":1,"jwe":"<compact>"}` |
-| legacy relayer | the same JSON as a topic cast | RPC `message` = `{"v":1,"jwe":"<compact>"}` |
+| legacy relayer | the same JSON as a topic command | RPC `message` = `{"v":1,"jwe":"<compact>"}` |
 | v2 relay | frame payload = `{"messageID":<client id>,"message":{"command":"ff1Envelope","request":{"v":1,"jwe":"<compact>"}}}`, split into `{"relayChunk":{…}}` frames above 32 KiB (whole message ≤ 4 MiB, reassembled within 180 s) | `{"type":"RPC","messageID":<same>,"message":{"v":1,"jwe":"<compact>"}}`, or `message` = the public `{"error":{"code"}}` |
 
 The `request` carrier is parsed strictly (§1): exactly the members `v` (the
@@ -1147,7 +1149,7 @@ integer 1) and `jwe` (a non-empty string), no duplicate, case-variant or
 extra member; anything else is `bad_envelope`.
 
 The LAN hub caps the whole request body at 4 MiB, so on the LAN the compact
-must leave room for the ~50-byte cast wrapper. The v2 relay caps the whole
+must leave room for the ~50-byte command wrapper. The v2 relay caps the whole
 JSON message at 4 MiB the same way. Because the request is base64url-encoded
 twice (JWS, then JWE), the compact is about 16/9 of the plaintext `req`: the
 effective plaintext limit on any sealed route is about 2.25 MiB. Clients
@@ -1394,7 +1396,7 @@ and the ff1-cli test suite does the same with `jose`.
 ## 13. Security notes
 
 - The relayer's `messageID:"system"` topic message is not a controller path
-  on the legacy relayer: ff-relayer generates every cast's `messageID` server
+  on the legacy relayer: ff-relayer generates every command's `messageID` server
   side (`crypto.randomUUID()` in `handleCast`), and the system message is
   relayer-originated on connect, so a controller cannot forge one. On the v2
   relay the `messageID` is chosen by the client, so a v2 frame with
@@ -1528,7 +1530,7 @@ and the ff1-cli test suite does the same with `jose`.
   and the share of unsecured (`legacy`) devices must be acceptable: on
   those a new 0.5 pairing is rejected `approval_expired` after the
   device's approval deadline (§9; the browser's own timeout may come
-  first) while existing grants keep casting. A grant issued in `legacy` carries
+  first) while existing grants keep sending display requests. A grant issued in `legacy` carries
   the trust of today's session token (display only) and stays valid after
   the device is Secured.
 - Residual, accepted: the mint pairing broker is trusted for the announced
@@ -1673,13 +1675,13 @@ showed what goes wrong without them.
     grant as one record; a re-pair replaces the record only on a
     `mint_succeeded` that carries a `displayGrant`, then self-revokes the
     old grant best-effort with the old keys. It connects to the v2 relay
-    per cast and closes right after (never an idle socket), fans the
+    per display request and closes right after (never an idle socket), fans the
     envelope out and pins the first reply that verifies under the pinned
     `profile.sig`. Rules 4 and 5 apply: every attempt is a new envelope, and
     a `replay` on v2 is an unknown outcome, which the browser (no LAN path
     to resync) answers by moving its counter past the window without a
     resend. A verified `access_revoked` or `expired` deletes the grant and
-    re-pairs on the user's next cast; an unverified public
+    re-pairs on the user's next display request; an unverified public
     `unknown_controller` or `bad_envelope` seen after the deadline is
     reported as "unrecognized" and **never** deletes the grant (rule 3:
     any channel peer can forge it); only a user action re-pairs. A
@@ -1732,7 +1734,7 @@ release operator applies them.
   dispatching one with `.control.enabled=true` in the environment secret
   ships an image that creates state and loses it on its next OTA.
 - Raise the app force-update floor before setting `control.enabled=true` in
-  production. A released app cannot cast on the same LAN as an `enrolled`
+  production. A released app cannot send commands on the same LAN as an `enrolled`
   device (LAN plaintext is refused and the released app does not fall back
   to the relayer after an HTTP error); off the LAN it keeps controller-tier
   playback through the relayer until `enforced`.
@@ -1961,7 +1963,7 @@ fetch reads the cached `true` again).
   §5.6 enroll stops there, and a command whose FF1 never listed `relayV2`
   is not tried over v2. Accepted residual (2026-10-30); the remedy is
   updating ff-cli.
-- Play 0.4 sites: their session casts fail; they move to 0.5 (Gate A).
+- Play 0.4 sites: their session display requests fail; they move to 0.5 (Gate A).
 
 **After the shutdown, the empty-endpoint release.** Once the worker is
 deleted, a full image sets `relayer.endpoint` to `""` in every
@@ -1978,7 +1980,7 @@ again by someone else, and any device still dialing it (G3 on its probe,
 pre-G3 on every heartbeat) would connect to that host, which as a legacy
 relayer can assign a topic and send the plaintext commands a device admits
 on the relayer route (§7.2: everything in `legacy`, the controller tier in
-`enrolled` and `locked`, a Play cast in `enforced`).
+`enrolled` and `locked`, a Play display request in `enforced`).
 
 "Reach the fleet" includes the image a factory reset boots: before the
 account is deleted, the empty-endpoint image is also the server's

@@ -31,7 +31,7 @@ import (
 // this does not anticipate. A pointer is structural (indices and field names
 // from the schema), never document content, which matters because dp1-go's
 // format assertions print the offending VALUE whole and these errors are
-// returned verbatim to casters on both transports.
+// returned verbatim to senders on both transports.
 func ValidationPointers(err error) []string {
 	if err == nil {
 		return nil
@@ -74,7 +74,7 @@ var ErrUnsupportedItemSchema = errors.New("dynamicQuery: unsupported itemSchema"
 
 const (
 	// MaxPlaylistBodyBytes bounds a playlist document fetched by URL, matching
-	// hub.MAX_REQUEST_BODY_BYTES for inline casts so both ingress paths admit
+	// hub.MAX_REQUEST_BODY_BYTES for inline display requests so both ingress paths admit
 	// the same worst-case document. It is read before decoding or signature
 	// verification: every signatures[] entry costs two JCS canonicalizations
 	// of the whole body, so an unbounded remote response — reachable by any
@@ -238,7 +238,7 @@ type DP1 interface {
 	// and return the playlist quickly
 	ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error)
 
-	// ProcessDynamicPlaylistForCast applies the initial-cast bounded hydration
+	// ProcessDynamicPlaylistForCast applies the initial-request bounded hydration
 	// policy described on ProcessPlaylistURLForCast.
 	ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playlist) (*Playlist, error)
 
@@ -252,10 +252,10 @@ type DP1 interface {
 	// expansion applied by hand before treating the playlist as final.
 	ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems int) Playlist
 
-	// ResolveSeriesCastPlan is ExpandSeriesItems's cast-aware sibling: it
+	// ResolveSeriesCastPlan is ExpandSeriesItems's display-aware sibling: it
 	// reads each series item's own seriesPlayback from rawPlaylist (the
 	// verbatim bytes playlist was decoded from; nil when none exists, e.g. an
-	// internally rebuilt re-cast), resolves a per-item mode against
+	// internally rebuilt re-display), resolves a per-item mode against
 	// deviceMode (the device-level override; nil follows the document), and
 	// returns a CastPlan that narrows to exactly that mode's editions while
 	// keeping every group's full edition set for a later, network-free
@@ -321,7 +321,7 @@ func (d *dp1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) 
 }
 
 func (d *dp1) ProcessPlaylistURLForCast(ctx context.Context, url string) (*Playlist, error) {
-	d.logger.Info("Processing playlist from URL for initial cast", zap.String("url", url))
+	d.logger.Info("Processing playlist from URL for initial display", zap.String("url", url))
 
 	playlist, err := d.fetchPlaylist(url)
 	if err != nil {
@@ -332,7 +332,7 @@ func (d *dp1) ProcessPlaylistURLForCast(ctx context.Context, url string) (*Playl
 		return d.ProcessDynamicPlaylistForCast(ctx, playlist)
 	}
 
-	// Bounded like the dynamic cast path: a cast carries at most
+	// Bounded like the dynamic display path: a display request carries at most
 	// CAST_PLAYLIST_ITEMS_LIMIT items however many editions a series holds.
 	resolved := d.expandSeriesItems(ctx, playlist, CAST_PLAYLIST_ITEMS_LIMIT)
 	return &resolved, nil
@@ -361,7 +361,7 @@ func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playli
 		return nil, err
 	}
 
-	// Same series expansion as above, bounded by the same cast cap the
+	// Same series expansion as above, bounded by the same display cap the
 	// batch accumulation inside processDynamicPlaylist already respects —
 	// expanding can only grow the item count further, so the cap is
 	// re-applied here rather than assumed to still hold.
@@ -434,7 +434,7 @@ func hasDisplayAtItems(items []dp1playlist.PlaylistItem) bool {
 // ACCEPTED FAIL-CLOSED: dp1-go validates every hydrated item against the core
 // PlaylistItem schema plus the playlists-extension overlay, and its hydration
 // loop RETURNS on the first item that fails rather than skipping it — so one
-// malformed item fails the whole cast, and the error surfaces to the caller
+// malformed item fails the whole display request, and the error surfaces to the caller
 // (commandrouter returns it; the dp1_call branch has no cached fallback, only
 // the playlistUrl branch does). This is deliberate, but note it widened at
 // dp1-go v0.6.0: the single-item overlay now $refs the ref-manifest schema, so

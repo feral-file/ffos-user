@@ -55,7 +55,7 @@ type CommandStormConfig struct {
 }
 
 // SourceProbeConfig tunes the displayPlaylist source preflight (#304): the
-// probe that rejects a cast whose every item source is definitively dead.
+// probe that rejects a display request whose every item source is definitively dead.
 // Follows CommandStormConfig's optional-section + Disabled opt-out convention.
 //
 // The Disabled switch exists because the preflight turns a previously
@@ -68,7 +68,7 @@ type CommandStormConfig struct {
 // editable host list: new hostile origin behavior should be a config edit,
 // not a release.
 type SourceProbeConfig struct {
-	// Disabled turns the cast-time source preflight off entirely (casts are
+	// Disabled turns the accept-time source preflight off entirely (display requests are
 	// forwarded unprobed, the pre-#304 behavior). Default (false) keeps it on.
 	Disabled bool `json:"disabled"`
 }
@@ -261,7 +261,7 @@ type Config struct {
 	// Raster carries the device's Raster read key as RAW bytes, decoded
 	// permissively by RasterTuning() — same treatment, and the same reason,
 	// as ContentPolicy above: the block is optional and hand-provisioned, and
-	// a wrong-typed value in it must cost a wallet cast its authentication,
+	// a wrong-typed value in it must cost a wallet display request its authentication,
 	// never crash-loop the daemon and take every recovery surface with it.
 	Raster json.RawMessage `json:"raster,omitempty"`
 	// GatewayUserAgent scopes the kiosk User-Agent rewrite (see the
@@ -383,7 +383,7 @@ func (c *Config) ControlTuning(logger *zap.Logger) ControlConfig {
 
 // RasterConfig is the device's own credential for Raster (api.raster.art),
 // the token index ff-app's address playlists walk (feral-file#3576). The
-// playlist document never carries a key — it is cast and may be published —
+// playlist document never carries a key — it is displayed and may be published —
 // so the device supplies this one as x-api-key on every wallet-walk request.
 type RasterConfig struct {
 	APIKey string `json:"apiKey"`

@@ -16,13 +16,13 @@ import (
 )
 
 // errProbeBudgetExhausted marks a source the preflight never probed
-// because the cast already spent maxProbeAttempts distinct wire URLs.
+// because the display request already spent maxProbeAttempts distinct wire URLs.
 // Always an Inconclusive verdict — unprobed can never be dead.
-var errProbeBudgetExhausted = errors.New("source probe: per-cast probe budget exhausted")
+var errProbeBudgetExhausted = errors.New("source probe: per-request probe budget exhausted")
 
 // probe.go answers one question for the DISPLAY path — "does this item's
-// source answer HTTP right now?" — at cast-accept time, so a playlist
-// whose every source is definitively dead fails the cast loudly instead
+// source answer HTTP right now?" — at accept time, so a playlist
+// whose every source is definitively dead fails the display request loudly instead
 // of being forwarded to the player and reported as playing
 // (feral-file/ffos-user#304). The player cannot make this call itself: a
 // cross-origin iframe pointed at an HTTP error renders the error body
@@ -56,10 +56,10 @@ const (
 	// timeout, the phase ceiling, a guard refusal, an over-long URL, or
 	// an HTTP status whose meaning depends on request identity or server
 	// health (401/403/407/429, and all 5xx — see verdictForStatus).
-	// Deliberately NOT dead: an offline device casting a fully-cached
+	// Deliberately NOT dead: an offline device displaying a fully-cached
 	// playlist (the displayPlaylist cached-copy fallback) probes this
 	// way for every item and must keep working, so callers treat
-	// inconclusive exactly like alive when deciding a cast's fate.
+	// inconclusive exactly like alive when deciding a request's fate.
 	ProbeInconclusive SourceProbeVerdict = "inconclusive"
 	// ProbeInline: a data: URI with well-formed RFC 2397 METADATA — its
 	// bytes travel inside the playlist body and there is nothing to
@@ -79,7 +79,7 @@ const (
 //
 // Source is query-redacted and truncated via redactSourceForLog at
 // construction and is for the DAEMON LOG ONLY. It must never ride an
-// error message or any response to a caster: resolved item sources are
+// error message or any response to a sender: resolved item sources are
 // playlist content a playlistUrl or dynamic-playlist caller never
 // supplied, and signed CDN URLs carry credentials in their query
 // strings — the controller contract requires sanitized error messages.
@@ -105,7 +105,7 @@ type SourceProbeResult struct {
 //go:generate mockgen -source=probe.go -destination=../mocks/offlinecache_probe.go -package=mocks -mock_names=SourceProber=MockSourceProber
 type SourceProber interface {
 	// ProbeSources probes sources concurrently until one is Alive or Inline,
-	// then cancels outstanding work: the cast cannot be all-dead. It returns
+	// then cancels outstanding work: the display request cannot be all-dead. It returns
 	// one result per source, in input order; unstarted/canceled sources are
 	// Inconclusive, never fabricated Alive or Dead. It never fails as a whole:
 	// anything that prevents a definitive answer is that item's
@@ -122,7 +122,7 @@ type sourceProber struct {
 
 const (
 	// maxAggregateProbeHeaderBytes is the process-wide ceiling charged for
-	// peer-controlled TLS and response-header parsing during cast-time source
+	// peer-controlled TLS and response-header parsing during accept-time source
 	// preflights. It is independent of the operator-configurable command storm
 	// gate: disabling or widening that gate must not widen this bound.
 	maxAggregateProbeHeaderBytes int64 = 8 << 20
@@ -161,7 +161,7 @@ const (
 
 var processSourceProbeHeaderSlots = semaphore.NewWeighted(maxConcurrentHeaderProbes)
 
-// NewSourceProber builds the cast-time source prober. resolver is the
+// NewSourceProber builds the accept-time source prober. resolver is the
 // DNS seam the source guard uses — pass net.DefaultResolver in
 // production (see ErrUnsafeSource and bootstrap.go's classifier
 // construction for why the system resolver specifically).
@@ -174,7 +174,7 @@ func NewSourceProber(resolver AddrResolver) SourceProber {
 	guard := sourceGuard{resolver: resolver}
 	// No-redirect client on purpose: the probe's request-count bound is
 	// ONE request per probed source, hard — following would multiply the
-	// per-cast budget by up to maxSourceRedirects against attacker-chosen
+	// per-request budget by up to maxSourceRedirects against attacker-chosen
 	// origins. A 3xx answer is an answer (< 400 → alive, fail-open); the
 	// kiosk follows it itself. See newGuardedNoRedirectHTTPClientFor.
 	return newSourceProberWith(guard, newGuardedNoRedirectHTTPClientFor(guard, probeItemTimeout))
@@ -211,28 +211,28 @@ func newSourceProberWithHeaderSlots(guard sourceGuard, httpClient wrapper.HTTPCl
 // (the client's own Timeout carries the same value as a backstop).
 // Deliberately tighter than classifyItemTimeout: classification decides
 // whether an item is cacheable and can afford patience, while this
-// probe sits on the synchronous cast path where a slow origin must cost
+// probe sits on the synchronous display path where a slow origin must cost
 // seconds, not tens of them — and a slow origin is Inconclusive, which
-// counts in the cast's favor, so cutting a straggler short never kills
-// a good cast.
+// counts in the request's favor, so cutting a straggler short never kills
+// a good display request.
 const probeItemTimeout = 5 * time.Second
 
 // probePhaseCeiling is the bound on the whole preflight. Same
 // two-nested-bounds shape as classifyItemTimeout/classifyPhaseCeiling
 // and for the same reason (a single shared budget silently starves the
 // tail of a large playlist): the per-item timeout decides an item's
-// fate, this ceiling only bounds the PROBE'S OWN share of the cast
+// fate, this ceiling only bounds the PROBE'S OWN share of the display request
 // request's time budget. It deliberately does NOT guarantee the whole
 // command answers inside the hub's 30s write deadline: the DP-1
 // resolution that precedes the probe on the same request rides the
 // daemon client's own 30s per-request timeout (multiple sequential
 // fetches for dynamic playlists) and nothing bounds the sum — the hub
 // hands Process a deadline-less context, so no downstream stage can see
-// the write deadline to subdivide it. What the ceiling does buy: a cast
+// the write deadline to subdivide it. What the ceiling does buy: a display request
 // that previously answered with T seconds to spare still answers with
 // T-10 to spare, worst case, and a probe against a black-holing origin
 // can never hang the command. Items still in flight at the ceiling land
-// Inconclusive, in the cast's favor.
+// Inconclusive, in the request's favor.
 const probePhaseCeiling = 10 * time.Second
 
 // probeConcurrency reuses classifyConcurrency deliberately: same
@@ -242,11 +242,11 @@ const probePhaseCeiling = 10 * time.Second
 // goroutine bound for a probe pass: ProbeSources runs a fixed worker
 // pool of this size over an index feed, never a goroutine per item —
 // the unauthenticated hub accepts a 4 MiB playlist body with no item
-// cap, so per-item goroutines would let one hostile cast queue tens of
+// cap, so per-item goroutines would let one hostile display request queue tens of
 // thousands of stacks on a constrained device.
 const probeConcurrency = classifyConcurrency
 
-// maxProbeAttempts caps how many DISTINCT DIALING wire URLs one cast may
+// maxProbeAttempts caps how many DISTINCT DIALING wire URLs one display request may
 // probe. data: URIs are settled synchronously outside this budget — they
 // never dial, and letting them consume attempts would let inline items
 // shield a real dead HTTP source from its verdict (see the dedup pass).
@@ -284,7 +284,7 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 	// pass), and it removes the request amplifier the worker pool alone
 	// does not: the pool bounds concurrency, not request COUNT, so a
 	// hostile 4 MiB playlist repeating one tiny public URL thousands of
-	// times would otherwise turn a single unauthenticated cast into
+	// times would otherwise turn a single unauthenticated display request into
 	// transport-speed traffic against that origin for the whole phase
 	// ceiling. Keyed on probeWireKey, not the raw string — see its doc.
 	// maxProbeAttempts is the second half of the same bound, for
@@ -305,7 +305,7 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 		// they never dial, so charging them attempts would let a
 		// playlist packed with malformed inline items (a pure-CPU Dead
 		// verdict) exhaust the budget and push a real dead HTTP source
-		// into Inconclusive — forwarding an entirely unusable cast past
+		// into Inconclusive — forwarding an entirely unusable display request past
 		// the rejection contract (#308 review round 5). probeOne's data:
 		// branch is a bounded metadata scan, no I/O, so settling it here
 		// costs what the dedup pass already costs.
@@ -358,7 +358,7 @@ func (p *sourceProber) ProbeSources(ctx context.Context, sources []string) []Sou
 				results[i] = p.probeOne(ctx, sources[i])
 				if results[i].Verdict == ProbeAlive {
 					// This is an admission check, not a playlist health audit.
-					// One reachable source rules out rejecting the cast; waiting
+					// One reachable source rules out rejecting the display request; waiting
 					// for the rest made AB500 pay hundreds of TLS handshakes
 					// before the player even received it (#361). Keep completed
 					// verdicts and cancel peers under the same resource bounds.
@@ -489,7 +489,7 @@ func (p *sourceProber) probeOne(ctx context.Context, source string) SourceProbeR
 	// display path forwards such a source to the player today (whether
 	// it should is #3471's territory, not this probe's), so reporting
 	// it Dead would smuggle a security-policy change into a liveness
-	// check. Inconclusive keeps the cast's behavior unchanged while the
+	// check. Inconclusive keeps the request's behavior unchanged while the
 	// refusal still lands in the log.
 	if err := p.guard.check(ctx, source); err != nil {
 		result.Verdict, result.Err = ProbeInconclusive, err
@@ -517,7 +517,7 @@ func (p *sourceProber) probeOne(ctx context.Context, source string) SourceProbeR
 //   - 401/403/407/429 are Inconclusive: an auth wall, a bot challenge,
 //     or a rate limit can answer differently for the player, and #296
 //     is the shipped proof that a 403 to one client is a 200 to
-//     another. Judging these dead would reject casts the kiosk renders.
+//     another. Judging these dead would reject display requests the kiosk renders.
 //   - 406 is Inconclusive: content negotiation answers the probe's
 //     request headers, not the kiosk's — an origin can refuse the
 //     probe's representation while serving one Chromium renders.
@@ -528,7 +528,7 @@ func (p *sourceProber) probeOne(ctx context.Context, source string) SourceProbeR
 //     document fetch does not send, so a zero-length or range-hostile
 //     resource can 416 the probe while serving the player fine.
 //   - 5xx is Inconclusive: server trouble is routinely transient, and
-//     the fail-open bias says a maybe-down origin does not kill a cast.
+//     the fail-open bias says a maybe-down origin does not kill a display request.
 //   - The remaining 4xx (400, 404, 410, ...) are Dead: the origin
 //     understood the request and said the resource is not there for
 //     anyone. This is #304's repro class.
@@ -572,7 +572,7 @@ func verdictForStatus(status int) SourceProbeVerdict {
 // the deviation where it can bite: 416, the one status Range itself can
 // provoke, is Inconclusive.
 // Residual, accepted: an edge/WAF that 400s ranged or Go-UA requests
-// wholesale reads as dead; it only affects a cast when EVERY item sits
+// wholesale reads as dead; it only affects a display request when EVERY item sits
 // behind such an edge, and fail-open on 400 would give up the #304
 // repro class itself.
 func (p *sourceProber) rangedGETStatus(ctx context.Context, url string) (int, error) {

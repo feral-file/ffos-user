@@ -1168,7 +1168,7 @@ func TestFirstOwnerEnrollRetryAfterUnconfirmedWrite(t *testing.T) {
 	}
 }
 
-// §7.1: every ff-app cast starts with connect, so a controller's sealed
+// §7.1: every ff-app command starts with connect, so a controller's sealed
 // connect is admitted (the executor keeps the claim itself owner-only).
 func TestControllerConnectAdmitted(t *testing.T) {
 	d, _, ctl := ownerDevice(t)

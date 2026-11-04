@@ -959,7 +959,7 @@ var errRouteLandedOnErrorPage = fmt.Errorf("playersession: navigation landed on 
 // Page.navigate always lands the document on "/" first, and the auto-route to
 // /playlist (AppWrapper.tsx) only fires once hydration finishes (isInitialized) —
 // well after StageHandler resolves. "/" is ALSO a legitimate steady state
-// (nothing currently cast), not just a transient. So this polls the route
+// (nothing currently displayed), not just a transient. So this polls the route
 // (bounded by ctx, the same cap NavigateHome/Inline already apply) until
 // either it reaches /playlist or /sleep (immediate success), it reaches
 // /error (errRouteLandedOnErrorPage — see the navigateAndVerify call site for

@@ -26,7 +26,7 @@ const MAX_INFLIGHT_REQUESTS = 64
 
 // MAX_REQUEST_BODY_BYTES bounds every hub request body via http.MaxBytesReader.
 // The in-flight cap alone bounds concurrency, not allocations: without a body
-// limit, 64 concurrent LAN casts could each make the provisioning-owning
+// limit, 64 concurrent LAN commands could each make the provisioning-owning
 // daemon buffer an arbitrarily large JSON value while decoding. Sized by the
 // largest legitimate envelope: displayPlaylist's `dp1_call` variant carries a
 // FULL INLINE DP1 playlist (not just a URL), which scales with artwork count —

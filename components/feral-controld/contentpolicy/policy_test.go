@@ -379,16 +379,16 @@ func TestAllowsStillHidesMature(t *testing.T) {
 	generalItem := dp1playlist.PlaylistItem{Source: "https://a", ContentRating: &general}
 
 	if Default().Allows(matureItem, ContextCurated) {
-		t.Fatal("a mature item must be hidden from a curated cast by default")
+		t.Fatal("a mature item must be hidden from a curated display request by default")
 	}
 	if !(Policy{Version: Version, ShowMatureContent: true}).Allows(matureItem, ContextCurated) {
 		t.Fatal("an explicitly allowed mature item must play")
 	}
 	if !Default().Allows(matureItem, ContextPersonal) {
-		t.Fatal("a personal cast admits mature while strictPersonal is off")
+		t.Fatal("a personal display request admits mature while strictPersonal is off")
 	}
 	if (Policy{Version: Version, StrictPersonal: true}).Allows(matureItem, ContextPersonal) {
-		t.Fatal("strictPersonal must hide mature on a personal cast too")
+		t.Fatal("strictPersonal must hide mature on a personal display request too")
 	}
 	if !Default().Allows(generalItem, ContextCurated) {
 		t.Fatal("a general item must play")

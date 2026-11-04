@@ -52,13 +52,13 @@ type handler struct {
 	scheduler   playlistschedule.Scheduler
 	logger      *zap.Logger
 
-	// asleep reports whether a cast must wake the player first; see
+	// asleep reports whether a display request must wake the player first; see
 	// devicectl.PlayerCastWakeGate (wider than the navigation gate: a failed
 	// wake stays eligible). Read by wakeForControllerCast. nil never wakes
 	// (a build wired without the sleep tracker).
 	asleep func() bool
 
-	// sourceProber, when set (SetSourceProber), is the cast-time source
+	// sourceProber, when set (SetSourceProber), is the accept-time source
 	// preflight (#304). Independent of offlineCache above on purpose: the
 	// probe must run whether or not offline caching is enabled — it only
 	// LIVES in that package because that is where dialing untrusted
@@ -106,20 +106,20 @@ type handler struct {
 	contentPolicy   *contentpolicy.Store
 	// policyRefresher re-sends the current playlist after an accepted policy
 	// change. nil (tests, a build wired before the seam) degrades to the old
-	// behavior: the change applies to the next cast or periodic refresh.
+	// behavior: the change applies to the next display request or periodic refresh.
 	policyRefresher PolicyRefresher
 	// seriesPlayback is the device-level series-playback override store
 	// (feral-file/ffos-user#425). nil (tests, a build wired before the seam)
 	// makes getSeriesPlayback/setSeriesPlayback answer unavailable and makes
-	// every cast resolve as if no device override were set (follow the
+	// every display request resolve as if no device override were set (follow the
 	// document). See seriesplayback.go.
 	seriesPlayback *seriesplayback.Store
-	// lastSeriesCast is the most recently cast playlist's resolved series
-	// groups, kept so setSeriesPlayback can re-narrow and re-cast without a
+	// lastSeriesCast is the most recently displayed playlist's resolved series
+	// groups, kept so setSeriesPlayback can re-narrow and re-display without a
 	// catalog round trip. See seriesplayback.go.
 	lastSeriesCast displayedSeriesCast
-	// seriesRecast coalesces concurrent setSeriesPlayback re-casts so a burst
-	// of calls performs at most two real re-casts instead of racing or fully
+	// seriesRecast coalesces concurrent setSeriesPlayback re-displays so a burst
+	// of calls performs at most two real re-displays instead of racing or fully
 	// serializing (feralfile-bot F7 fix review, PR #426 finding F1). See
 	// seriesRecastCoalescer/scheduleRecast in seriesplayback.go.
 	seriesRecast seriesRecastCoalescer
@@ -164,18 +164,18 @@ func (h *handler) setContentPolicy(policy *contentpolicy.Store) {
 	if h.scheduler == nil || policy == nil {
 		return
 	}
-	// A displayAt cutover is the one cast this router does not mediate: it
+	// A displayAt cutover is the one display request this router does not mediate: it
 	// replays a later cohort of a document that was policy-filtered once, when
-	// it was cast. Without this projection a policy tightened afterwards would
+	// it was displayed. Without this projection a policy tightened afterwards would
 	// never reach those cohorts. Reads the store's lock-free Snapshot because
 	// this runs on the scheduler's push path — see playlistschedule.Projector.
 	h.scheduler.SetProjector(func(playlist *dp1.Playlist, contentContext string) (*dp1.Playlist, bool) {
 		// An EMPTY context on a scheduler source means the schedule was
 		// persisted before this field existed, not that it was curated: the
 		// router sets the field on every source it hands the scheduler. Guessing
-		// curated here would strip the mature items an owner cast as personal
-		// at the first cutover after an upgrade, so the cohort is cast as the
-		// original cast admitted it — matching what the refresher does with the
+		// curated here would strip the mature items an owner sent as personal
+		// at the first cutover after an upgrade, so the cohort is displayed as the
+		// original display request admitted it — matching what the refresher does with the
 		// same signal.
 		if contentContext == "" {
 			return playlist, false
@@ -199,13 +199,13 @@ func (h *handler) setContentPolicy(policy *contentpolicy.Store) {
 // SyncContentPolicy pushes the stored policy to the current player generation.
 // It runs on reconnect, when the player has just come up on ITS defaults.
 //
-// Serialized against scheduler-owned pushes, not only against casts: a due
+// Serialized against scheduler-owned pushes, not only against display requests: a due
 // timer or wake recompute holds pushMu and reads the lock-free policy snapshot,
 // so without this barrier it could deliver a cohort to the freshly defaulted
 // player before this acknowledgement lands — and the scheduler records that
 // cohort as delivered, so nothing replays it once the sync succeeds. An
 // acknowledged showMatureContent:true would then visibly fail after a player
-// restart until some later cast, refresh or cutover.
+// restart until some later display request, refresh or cutover.
 //
 // Lock order is the same one displayPlaylist and setContentPolicy use: content
 // policy store, then pushMu.
@@ -337,7 +337,7 @@ func (h *handler) setOverlaySource(fn func() *status.Overlay) {
 	h.overlaySource = fn
 }
 
-// SetSourceProber injects the cast-time source preflight onto h, if h
+// SetSourceProber injects the accept-time source preflight onto h, if h
 // supports it (the concrete *handler built by New — NOT the
 // storm-protection gate wrapper, so callers must wire it against the raw
 // handler before NewGate wraps it, mirroring SetSessionGeneration's
@@ -367,7 +367,7 @@ type SignatureVerificationOptions struct {
 }
 
 // SetSignatureVerification turns on DP-1 signature verification of every
-// displayPlaylist cast (feral-file/ffos-user#307) on h, if h supports it —
+// displayPlaylist display request (feral-file/ffos-user#307) on h, if h supports it —
 // the concrete *handler built by New, NOT the storm-protection gate wrapper,
 // so callers must wire it against the raw handler before NewGate wraps it
 // (SetSourceProber's contract). Not called ⇒ verification off: playlists
@@ -715,13 +715,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// immediate error reply, in the worst case past the hub's write
 		// deadline.
 		var replayScopeTouched bool
-		// rescuedByCache marks an all-dead cast that proceeded ONLY because
-		// the offline cache holds a prior capture. Such a cast has exactly
+		// rescuedByCache marks an all-dead display request that proceeded ONLY because
+		// the offline cache holds a prior capture. Such a display request has exactly
 		// one way to actually show artwork — replay serving from cache — so
-		// unlike an ordinary live cast (where replay is a best-effort
+		// unlike an ordinary live display request (where replay is a best-effort
 		// enhancement and a scope-sync failure is just logged), a rescued
-		// cast REQUIRES the replay scope to arm: if syncReplayScope fails
-		// below, the cast is rejected with the preflight's own error rather
+		// display request REQUIRES the replay scope to arm: if syncReplayScope fails
+		// below, the display request is rejected with the preflight's own error rather
 		// than forwarded to render every origin already proven dead (#308
 		// review). rescueProbeResults carries the probe evidence for that
 		// late rejection; scopeSyncErr is the closure's outcome seam.
@@ -730,7 +730,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var scopeSyncErr error
 		// scopeSyncEnabled is SyncPlaylist's enabled-count for the same one
 		// consumer: a rescue with an errorless sync that armed ZERO cached
-		// sources is still a dead cast — HasReplayableItem now grants a
+		// sources is still a dead display request — HasReplayableItem now grants a
 		// rescue only on a confirmed hit, but that hit can go stale (the
 		// record cleared between lookup and sync), so the installed
 		// scope's own count remains the final authority (#310 review).
@@ -879,7 +879,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				if err = contentrating.ValidatePlaylistFragment(playlistBytes); err != nil {
 					// Pointers only: the validator's message can quote the
 					// offending value, and this error is returned verbatim to
-					// the caster on both transports.
+					// the sender on both transports.
 					err = &PlaylistInvalidError{Locations: dp1.ValidationPointers(err)}
 					return nil, err
 				}
@@ -909,18 +909,18 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// upstream of this unmarshal has resolved a
 					// seriesRegistry item into its editions — do it here,
 					// bounded the same way ProcessPlaylistURLForCast bounds
-					// an initial cast. Unlike the old ExpandSeriesItems (kept
+					// an initial display request. Unlike the old ExpandSeriesItems (kept
 					// for the three defensive call sites that never see a
 					// seriesRegistry item post-fix — see its doc),
 					// ResolveSeriesCastPlan reads each item's own
 					// seriesPlayback from playlistBytes and narrows to the
-					// resolved mode rather than always casting every edition
+					// resolved mode rather than always displaying every edition
 					// (feral-file/ffos-user#425).
 					// CastPlan.Narrow already enforces CAST_PLAYLIST_ITEMS_LIMIT
 					// itself (and only when it actually expanded a series —
 					// see resolveSeriesCastPlan's no-series early return), so
 					// clamping narrowed.Items again here is both redundant for
-					// a series cast and wrong for an ordinary one: it would
+					// a series display request and wrong for an ordinary one: it would
 					// truncate a playlist that was never subject to the cap
 					// (feralfile-bot F6, 2026-11-02).
 					deviceSeriesMode := h.currentSeriesPlaybackMode()
@@ -950,30 +950,30 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if contextErr != nil {
 				return nil, contextErr
 			}
-			// Remembered for every CMD_DISPLAY_PLAYLIST cast, not only a
+			// Remembered for every CMD_DISPLAY_PLAYLIST display request, not only a
 			// static dp1_call: seriesCastPlan is the zero value (no
 			// segments) for the playlistUrl and dynamic branches above, so
 			// this call CLEARS any series this device was previously
 			// tracking whenever the screen moves to content this pass did
 			// not resolve series groups for — a stale entry must not
-			// outlive what is actually being cast. See rememberSeriesCast's
+			// outlive what is actually being displayed. See rememberSeriesCast's
 			// doc for why this runs eagerly rather than after the CDP send.
 			//
 			// Settled once the outcome is known: marked accepted only for an
-			// accepted cast, retracted otherwise. Judged from result, not
+			// accepted display request, retracted otherwise. Judged from result, not
 			// err alone: Process's returns are unnamed, so a rejection such
 			// as `return nil, filterErr` never assigns err, but every
 			// rejection leaves result without ok:true (it is nil until the
 			// player send, and the send's own reply otherwise). A
 			// displayAt-deferred acceptance reports ok:true and counts as
-			// accepted, same as the scheduler keeps the cast.
+			// accepted, same as the scheduler keeps the display request.
 			seriesCastSeq := h.rememberSeriesCast(*playlist, seriesCastPlan, contentContext)
 			defer func() {
 				h.settleSeriesCast(seriesCastSeq, err == nil && playerresponse.OK(result))
 			}()
 			// Filter under the policy lock, then RELEASE it: the source
 			// preflight below is network-bound (a 10s phase ceiling, and up to
-			// four heavy casts can be admitted at once), and holding this lock
+			// four heavy display requests can be admitted at once), and holding this lock
 			// across it would make History and Content controls wait on
 			// whatever an unauthenticated LAN caller's playlist origin chooses
 			// to do. Filtering still happens BEFORE probing, as the plan
@@ -1003,17 +1003,17 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			command.Arguments["contentContext"] = string(contentContext)
 			schedulerSource.ContentContext = string(contentContext)
 
-			// Cast-time source preflight (#304). Without it, a cast whose
+			// Accept-time source preflight (#304). Without it, a display request whose
 			// every source 400s is forwarded, self-reported ok by the
 			// player (an iframe cannot see HTTP status), and shown as
-			// "playing" — so neither the casting end nor the device ever
-			// learns the links are dead. The probe rejects the cast ONLY
+			// "playing" — so neither the sending end nor the device ever
+			// learns the links are dead. The probe rejects the display request ONLY
 			// when every item earned a definitive dead verdict (an actual
 			// HTTP >= 400 answer — or a malformed data: URI, the one
 			// non-HTTP verdict that is equally definitive because it is a
 			// parse, not a network guess): network errors, timeouts, guard
-			// refusals, and well-formed data: items all count in the cast's favor, so
-			// an offline device casting a fully-cached playlist (the
+			// refusals, and well-formed data: items all count in the request's favor, so
+			// an offline device displaying a fully-cached playlist (the
 			// cached-copy fallback above) still plays. A partially-dead
 			// playlist also still plays — rejecting it would punish nine
 			// good artworks for one dead link — with the dead items logged.
@@ -1033,10 +1033,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// the current cohort can be dead NOW and live at display
 				// time — publish-then-upload is the normal premiere
 				// ordering, so a scheduled drop's sources routinely 404
-				// until go-live, and rejecting would silently lose the cast
+				// until go-live, and rejecting would silently lose the display request
 				// the scheduler was about to defer-accept and arm a timer
 				// for (the {ok:true, deferred:true} path below). Since the
-				// probe can therefore never affect a scheduled cast, it is
+				// probe can therefore never affect a scheduled display request, it is
 				// skipped entirely for them — see the branch below.
 				scheduledPlaylist := false
 				for _, item := range playlist.Items {
@@ -1070,7 +1070,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// query-redacted and truncated for the daemon log (see
 					// SourceProbeResult's doc), so keying on it would miss
 					// every signed URL — and a miss makes the re-check below
-					// fail open and forward a cast already proven dead.
+					// fail open and forward a display request already proven dead.
 					// ProbeSources returns one result per source in input
 					// order, which is what makes the index safe.
 					probeVerdicts = make(map[string]offlinecache.SourceProbeResult, len(probeResults))
@@ -1080,7 +1080,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						}
 					}
 					// Per-item log detail is capped: the hub accepts a 4 MiB
-					// playlist with no item cap, so an all-dead hostile cast
+					// playlist with no item cap, so an all-dead hostile display request
 					// must not be able to mint one log line per item on a
 					// device whose logs are size-rotated files. The first few
 					// carry the query-redacted, truncated sources an operator
@@ -1115,7 +1115,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					if dead == len(probeResults) {
 						switch {
 						case h.offlineCache != nil && h.kioskReplay != nil && h.offlineCache.HasReplayableItem(sources...):
-							// A definitively dead ORIGIN is not a dead CAST
+							// A definitively dead ORIGIN is not a dead REQUEST
 							// when the offline cache holds a prior capture:
 							// replay serves cached items regardless of origin
 							// state, and origin rot is exactly the case the
@@ -1130,7 +1130,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 							// nothing.
 							rescuedByCache = true
 							rescueProbeResults = probeResults
-							h.logger.Warn("displayPlaylist: every item source is unreachable but cached captures exist; casting for offline replay",
+							h.logger.Warn("displayPlaylist: every item source is unreachable but cached captures exist; displaying for offline replay",
 								zap.Int("items", len(sources)))
 						default:
 							err = &SourceUnreachableError{Results: probeResults}
@@ -1152,17 +1152,17 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// from here through the scheduler prepare and the player send —
 			// the ordering the policy contract needs. Reapply the projection
 			// under the policy in force NOW: one tightened while the probe ran
-			// must not be outrun by this cast. A policy RELAXED during the
+			// must not be outrun by this display request. A policy RELAXED during the
 			// probe does not re-admit what was already filtered out, matching
 			// the rest of this path — those items were never probed, and a
-			// relaxed policy takes effect on the next cast, refresh or cutover.
+			// relaxed policy takes effect on the next display request, refresh or cutover.
 			//
 			// LOCK ORDER, load-bearing: content policy BEFORE the kiosk replay
 			// playback lock, which is acquired a few lines below. The
 			// playlist-refresher takes the same two in that order
 			// (processPlayingPlaylist: policy, then LockPlayback), and both are
 			// non-reentrant, so acquiring them the other way round here would
-			// let a concurrent cast and refresh deadlock permanently — no
+			// let a concurrent display request and refresh deadlock permanently — no
 			// further policy update, refresh or playback command until
 			// controld restarts.
 			if h.contentPolicy != nil && playlist != nil {
@@ -1181,7 +1181,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				playlist.Playlist = *reprojected
 				command.Arguments["dp1_call"] = playlist
 				// A policy tightened while the probe ran can remove the very
-				// item whose reachability made this cast acceptable, leaving
+				// item whose reachability made this display request acceptable, leaving
 				// only sources already proven dead. Re-check the retained
 				// verdicts against the final set rather than re-probing: the
 				// answers are seconds old and the items are a subset of the
@@ -1192,7 +1192,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						if h.offlineCache != nil && h.kioskReplay != nil && h.offlineCache.HasReplayableItem(playlistSources(playlist)...) {
 							rescuedByCache = true
 							rescueProbeResults = deadResults
-							h.logger.Warn("displayPlaylist: the policy projection left only unreachable sources but cached captures exist; casting for offline replay",
+							h.logger.Warn("displayPlaylist: the policy projection left only unreachable sources but cached captures exist; displaying for offline replay",
 								zap.Int("items", len(playlist.Items)))
 						} else {
 							err = &SourceUnreachableError{Results: deadResults}
@@ -1204,7 +1204,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 			// Player CanvasService rejects displayPlaylist without a known
 			// intent.action ("Unknown DP1 action: undefined" → ok:false).
-			// Controller casts are force-display, same contract as
+			// Controller display requests are force-displays, same contract as
 			// playlistschedule push (now_display, never soft refresh).
 			ensureDisplayPlaylistIntent(command.Arguments)
 
@@ -1231,9 +1231,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// replay is a strict enhancement over the live path.
 		//
 		// Callers invoke this ONLY once a CDP send for p is actually
-		// going to happen, immediately before it — never for a cast the
+		// going to happen, immediately before it — never for a display request the
 		// scheduler defers or rejects. Scope must keep tracking what is
-		// genuinely on screen: a deferred (future-only) cast leaves the
+		// genuinely on screen: a deferred (future-only) display request leaves the
 		// previous playlist displaying, and switching interception to the
 		// new playlist anyway would — under a fail_closed scope — start
 		// blocking the on-screen playlist's own requests even with live
@@ -1254,9 +1254,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 			// scopeSyncErr/scopeSyncEnabled surface the outcome for the ONE
 			// caller that must treat a failure — or an empty armed scope —
-			// as fatal: the cache-rescued all-dead cast (see
+			// as fatal: the cache-rescued all-dead display request (see
 			// rescuedByCache's and scopeSyncEnabled's docs). Ordinary live
-			// casts keep the best-effort contract: log and proceed.
+			// display requests keep the best-effort contract: log and proceed.
 			scopeSyncEnabled, scopeSyncErr = h.kioskReplay.SyncPlaylist(ctx, sources)
 			if scopeSyncErr != nil {
 				h.logger.Warn("offline cache: failed to sync kiosk replay scope for playlist", zap.Error(scopeSyncErr))
@@ -1279,14 +1279,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
-		// publishVerdict records what this cast did to the screen in the
+		// publishVerdict records what this display request did to the screen in the
 		// active-verdict slot (#307). It MUST run inside the same player-push
 		// critical section as the send it describes: WithPlayerPush orders
-		// casts, refreshes, and scheduler cutovers, and a publication after
-		// the lock is released could land after a later cast's, leaving the
-		// slot describing a playlist that is no longer on screen. A cast
+		// display requests, refreshes, and scheduler cutovers, and a publication after
+		// the lock is released could land after a later request's, leaving the
+		// slot describing a playlist that is no longer on screen. A display request
 		// without a verdict (the cached-copy fallback) CLEARS the slot rather
-		// than leaving a previous cast's verdict standing for the same URL.
+		// than leaving a previous request's verdict standing for the same URL.
 		// A displayAt-deferred acceptance parks the verdict as pending: the
 		// previous playlist keeps showing, and the scheduler's push observer
 		// promotes the pending verdict only when a cohort actually reaches
@@ -1314,7 +1314,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			default:
 				h.activeVerdict.Clear()
 			}
-			// An immediately displayed SCHEDULED cast is also the document
+			// An immediately displayed SCHEDULED display request is also the document
 			// the scheduler will re-push later — the next cohort's cutover,
 			// or the reconnect recompute after the player reloads (which
 			// first cleared current). Those pushes promote pending, so the
@@ -1374,7 +1374,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the
 		// scheduler push lock with RecomputeNow so a stale timed push cannot land
-		// after a newer cast or OOM-recovery fallback.
+		// after a newer display request or OOM-recovery fallback.
 		// displayDefaultPlaylist is player-owned fallback today; it may no-op
 		// successfully, so this path must not clear scheduler authority until
 		// controld can prove that default playback replaced the current playlist.
@@ -1421,10 +1421,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// Replayer.EnableForPlaylist), and the playlist-refresher's
 				// periodic pass re-syncs as downloads complete.
 				syncReplayScope(fullPlaylist)
-				// A cache-rescued cast can only show artwork through replay,
+				// A cache-rescued display request can only show artwork through replay,
 				// so a scope-sync failure means the rescue's one path to the
 				// screen is gone: reject with the preflight's own evidence
-				// instead of forwarding a cast whose every origin is proven
+				// instead of forwarding a display request whose every origin is proven
 				// dead (see rescuedByCache's doc). Restore mirrors the other
 				// pre-send failure exits from this closure.
 				if rescuedByCache && (scopeSyncErr != nil || scopeSyncEnabled == 0) {
@@ -1452,7 +1452,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			})
 		default:
 			if commandType == commands.CMD_DISPLAY_PLAYLIST {
-				// No scheduler configured: every cast reaches the player
+				// No scheduler configured: every display request reaches the player
 				// unfiltered, so scope-sync immediately precedes the send.
 				syncReplayScope(playlist)
 				// Same fatal-for-rescue rule as the scheduler branch above
@@ -1550,9 +1550,9 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 		return policyFailure("contentPolicyUnavailable"), nil
 	}
 	// Argument validation happens BEFORE the lock. A malformed request is
-	// rejected on its own shape, so it must not queue behind a cast that is
+	// rejected on its own shape, so it must not queue behind a display request that is
 	// holding the policy lock — otherwise the cheapest possible bad request
-	// still pays a cast's latency.
+	// still pays a request's latency.
 	var show, strict bool
 	if command.Type == commands.CMD_SET_CONTENT_POLICY {
 		if len(command.Arguments) != 2 {
@@ -1577,7 +1577,7 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 	defer h.contentPolicy.Unlock()
 	policy := h.contentPolicy.CurrentLocked()
 	if command.Type == commands.CMD_SET_CONTENT_POLICY {
-		// Serialized against scheduler-owned pushes, not just against casts.
+		// Serialized against scheduler-owned pushes, not just against display requests.
 		// A timer push holding pushMu has already read the old policy through
 		// the lock-free Snapshot and built its payload; without this barrier
 		// setContentPolicy could persist, be acknowledged, and answer
@@ -1685,7 +1685,7 @@ func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
 // allSourcesDead reports whether EVERY item left in playlist has a retained
 // preflight verdict and every one of those verdicts is definitively dead. A
 // single item with no verdict (never probed, or the preflight was skipped)
-// makes it false: this must only ever reject a cast the preflight itself would
+// makes it false: this must only ever reject a display request the preflight itself would
 // have rejected, never one it never judged.
 func allSourcesDead(playlist *dp1.Playlist, verdicts map[string]offlinecache.SourceProbeResult) ([]offlinecache.SourceProbeResult, bool) {
 	if playlist == nil || len(playlist.Items) == 0 || len(verdicts) == 0 {
@@ -2067,7 +2067,7 @@ func isBareLegacyFailure(message map[string]interface{}) bool {
 	return hasOK && !okValue
 }
 
-// ensureDisplayPlaylistIntent sets intent.action=now_display when the cast
+// ensureDisplayPlaylistIntent sets intent.action=now_display when the display request
 // request has no action yet. Controllers historically send only playlistUrl /
 // dp1_call; the player still requires a known DP1 action. Soft refresh keeps
 // its own path (playlist-refresher sets refresh:true and does not use this
@@ -2088,15 +2088,15 @@ func ensureDisplayPlaylistIntent(args map[string]interface{}) {
 	}
 }
 
-// wakeForControllerCast wakes a sleeping player before a controller's cast
+// wakeForControllerCast wakes a sleeping player before a controller's display request
 // (commands.FromController: the app over the hub or the relayer, a CLI, an
 // agent). A person pressing Play in front of a dark or paused wall means
-// "show it now"; forwarding the cast to a page parked on /sleep answered ok
+// "show it now"; forwarding the display request to a page parked on /sleep answered ok
 // while the screen did nothing. The wake is the same manual override wakeNow
 // applies, so it expires at the next schedule boundary and the schedule then
-// resumes. The device's own casts (playlistschedule cutovers, OOM recovery)
+// resumes. The device's own display requests (playlistschedule cutovers, OOM recovery)
 // are built in-process, carry no controller mark, and leave the wall asleep.
-// A failed wake fails the cast: the reply must not claim a display that
+// A failed wake fails the display request: the reply must not claim a display that
 // cannot happen. Only commands that put artwork on screen wake.
 func (h *handler) wakeForControllerCast(ctx context.Context, commandType commands.Type) error {
 	if commandType != commands.CMD_DISPLAY_PLAYLIST && commandType != commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
@@ -2105,7 +2105,7 @@ func (h *handler) wakeForControllerCast(ctx context.Context, commandType command
 	if !commands.IsFromController(ctx) || h.asleep == nil || !h.asleep() {
 		return nil
 	}
-	h.logger.Info("Controller cast while the player is asleep; waking it first",
+	h.logger.Info("Controller display request while the player is asleep; waking it first",
 		zap.String("command", commandType.String()))
 	if _, err := h.executor.Execute(ctx, commands.Command{Type: commands.CMD_WAKE_NOW}); err != nil {
 		return fmt.Errorf("wake the player for %s: %w", commandType, err)
@@ -2133,7 +2133,7 @@ func (h *handler) sendCDPRequest(command commands.Command) (interface{}, error) 
 	// Generation re-check (design doc §4): unlike devicectl's sleep apply,
 	// a command reply answered by a document that is no longer current is not
 	// something the relayer/hub caller can safely trust as "delivered" — a
-	// cast or control command silently landing on (or being silently
+	// display request or control command silently landing on (or being silently
 	// swallowed by) a torn-down page must surface loudly rather than report
 	// success, so the caller retries instead of believing a phantom ACK.
 	if genAfter := h.currentGeneration(); genAfter != genBefore {

@@ -50,19 +50,19 @@ type Scheduler interface {
 	// and are returned unchanged.
 	Prepare(playlist *dp1.Playlist) *dp1.Playlist
 	// PrepareWithSource is Prepare plus the original refreshable source identity.
-	// URL casts must keep playlistUrl on scheduler-owned pushes so the player
+	// URL display requests must keep playlistUrl on scheduler-owned pushes so the player
 	// status remains refreshable and restart validation can tie persisted cache
 	// ownership back to a stable source.
 	PrepareWithSource(playlist *dp1.Playlist, source Source) *dp1.Playlist
-	// RecomputeNow re-filters the cached playlist and force-casts it to the
+	// RecomputeNow re-filters the cached playlist and force-displays it to the
 	// player (now_display, not refresh). Used on timer fire, wake, CDP
 	// reconnect, and after a transient network refresh failure that still has
-	// a usable cache. Force-cast is required so a displayAt cutover is not
+	// a usable cache. Force-display is required so a displayAt cutover is not
 	// deferred until the current artwork finishes its duration. No-op when
 	// nothing is cached, or when a restart-restored source has not yet been
 	// refetched into an in-memory playlist.
 	RecomputeNow(ctx context.Context)
-	// ResumePersisted arms timers and force-casts from the in-memory full
+	// ResumePersisted arms timers and force-displays from the in-memory full
 	// playlist. It is used only after the refresher has reconstructed scheduler
 	// state from a fetched source or after a transient refresh failure while a
 	// non-pending in-memory cache already exists.
@@ -92,12 +92,12 @@ type Scheduler interface {
 	// did not accept the transition.
 	ClearThenWithPlayerPush(fn func() bool)
 	// WithPlayerPush serializes CDP playlist updates against timer/wake
-	// recomputes. Cast and refresh paths must wrap their displayPlaylist CDP
-	// send so a stale RecomputeNow cannot overwrite a newer cast mid-flight.
+	// recomputes. Display request and refresh paths must wrap their displayPlaylist CDP
+	// send so a stale RecomputeNow cannot overwrite a newer display request mid-flight.
 	WithPlayerPush(fn func())
 	// SetPushObserver registers fn to run around every scheduler-owned push
 	// (timer cutover, wake, CDP reconnect, retry), under the player-push
-	// lock so it is ordered against cast/refresh sends: once with
+	// lock so it is ordered against display request/refresh sends: once with
 	// PushStarting just before the CDP send, and once with PushAccepted
 	// after a reply the player accepted (never after a rejection). The one
 	// consumer today is signature verification's active-verdict slot: it
@@ -107,9 +107,9 @@ type Scheduler interface {
 	// cohort actually reached the screen (feral-file/ffos-user#307). Set
 	// once at wiring time before any push; nil is a no-op.
 	SetPushObserver(fn func(PushPhase))
-	// SetInlineDynamicSource retains the last inline dynamic playlist a cast
+	// SetInlineDynamicSource retains the last inline dynamic playlist a display request
 	// accepted, WITH its signature verdict, or clears it with nil. A
-	// non-displayAt cast makes PrepareWithSource drop the scheduler source,
+	// non-displayAt display request makes PrepareWithSource drop the scheduler source,
 	// and player status serializes without the verdict (dp1.Playlist.
 	// Verification is json:"-"), so without this a refresh would lose the
 	// original verdict in its diagnostics (feral-file/ffos-user#307). Survives
@@ -122,10 +122,10 @@ type Scheduler interface {
 	// AuthorityToken changes whenever scheduler-owned playlist authority
 	// changes. Refreshers snapshot it before slow URL/dynamic resolution and
 	// re-check under WithPlayerPush so stale refresh results cannot overwrite a
-	// newer scheduler-owned cast.
+	// newer scheduler-owned display request.
 	AuthorityToken() uint64
 	// Commit persists the scheduler state currently accepted by the player.
-	// Cast paths call it only after CDP returns ok so durable restart recovery
+	// Display request paths call it only after CDP returns ok so durable restart recovery
 	// never leads the player-visible playlist.
 	Commit()
 	Snapshot() Snapshot
@@ -143,13 +143,13 @@ type Scheduler interface {
 }
 
 // Projector re-applies the device's CURRENT content policy to a scheduler-owned
-// active set just before it is cast, returning the admitted items and whether
+// active set just before it is displayed, returning the admitted items and whether
 // the projection came out empty.
 //
-// It exists because a cutover is the one cast the command router does not
-// mediate: the router filters a playlist once, at cast time, and the scheduler
+// It exists because a cutover is the one display request the command router does not
+// mediate: the router filters a playlist once, at accept time, and the scheduler
 // then replays cohorts of that cached document at each displayAt boundary. A
-// policy tightened after the cast would otherwise never reach those later
+// policy tightened after the display request would otherwise never reach those later
 // cohorts, so a work blocked at 23:59 would still appear at midnight.
 //
 // It MUST NOT take the content-policy store lock: the router holds that lock
@@ -173,7 +173,7 @@ type LocationFunc func() *time.Location
 type scheduler struct {
 	mu sync.Mutex
 	// pushMu serializes player playlist CDP writes from RecomputeNow against
-	// cast/refresh sends wrapped in WithPlayerPush. Cache mutations under mu
+	// display request/refresh sends wrapped in WithPlayerPush. Cache mutations under mu
 	// stay unlocked during CDP so Prepare latency is not gated on Chromium.
 	pushMu sync.Mutex
 
@@ -188,11 +188,11 @@ type scheduler struct {
 	// only ever receives the filtered active set derived from this cache.
 	full *dp1.Playlist
 	// lastActive tracks the active set last sent or about to be sent by the
-	// owning cast path. Bounded timer rechecks use it to absorb wall-clock jumps
-	// without force-casting the same playlist every minute.
+	// owning display path. Bounded timer rechecks use it to absorb wall-clock jumps
+	// without force-displaying the same playlist every minute.
 	lastActive []dp1playlist.PlaylistItem
 	// generation increments on every Prepare/clear so a RecomputeNow that
-	// snapshotted an older cache can drop its push after a newer cast wins.
+	// snapshotted an older cache can drop its push after a newer display request wins.
 	generation uint64
 	// restoredPending marks a durable source loaded at startup but not yet
 	// refreshed into a full in-memory playlist. CDP reconnect/wake/timer paths
@@ -214,7 +214,7 @@ type scheduler struct {
 	source Source
 
 	// cancelTimer cancels the in-flight next-displayAt wait. Controld must not
-	// keep a stale timer after a new cast or after Stop — otherwise a late fire
+	// keep a stale timer after a new display request or after Stop — otherwise a late fire
 	// would push an obsolete active set over the current playlist.
 	cancelTimer context.CancelFunc
 
@@ -400,7 +400,7 @@ func (s *scheduler) PrepareWithSource(playlist *dp1.Playlist, source Source) *dp
 	for _, item := range playlist.Items {
 		if item.DisplayAt != nil && !displayat.Parse(*item.DisplayAt, s.locFn()).IsValid() {
 			// Do not let an invalid scheduling value quietly remove an item from
-			// playback. Returning nil makes the cast/refresh fail before CDP sees
+			// playback. Returning nil makes the display request/refresh fail before CDP sees
 			// a filtered (possibly empty) playlist.
 			s.logger.Warn("Rejecting playlist with invalid displayAt",
 				zap.String("itemID", item.ID), zap.String("displayAt", *item.DisplayAt))
@@ -409,8 +409,8 @@ func (s *scheduler) PrepareWithSource(playlist *dp1.Playlist, source Source) *dp
 	}
 
 	if !HasDisplayAtSchedule(playlist) {
-		// A non-scheduled cast must cancel any prior Daily timer; otherwise the
-		// previous playlist's next displayAt would overwrite the new cast.
+		// A non-scheduled display request must cancel any prior Daily timer; otherwise the
+		// previous playlist's next displayAt would overwrite the new display request.
 		s.clearLocked()
 		return playlist
 	}
@@ -421,7 +421,7 @@ func (s *scheduler) PrepareWithSource(playlist *dp1.Playlist, source Source) *dp
 	s.restoredPending = false
 	// A newly prepared schedule starts with a clean retry slate: a pending
 	// retry from the previous schedule's failed cutover must not fire against
-	// this one, and this cast must not inherit the previous schedule's
+	// this one, and this display request must not inherit the previous schedule's
 	// backoff/give-up state.
 	s.cancelPushRetryLocked()
 	s.pushRetryAttempt = 0
@@ -443,7 +443,7 @@ func (s *scheduler) ResumePersisted(ctx context.Context) {
 	if s.resumePersisted(ctx) {
 		// A transient source outage must not restart the current artwork just
 		// because the cached active set is unchanged. Timers, wakes, and CDP
-		// reconnects still use RecomputeNow's force-cast semantics.
+		// reconnects still use RecomputeNow's force-display semantics.
 		s.recompute(ctx, false)
 	}
 }
@@ -465,7 +465,7 @@ func (s *scheduler) resumePersisted(ctx context.Context) bool {
 }
 
 func (s *scheduler) recompute(ctx context.Context, force bool) {
-	// Hold pushMu for the whole read+push loop so a cast/refresh
+	// Hold pushMu for the whole read+push loop so a display request/refresh
 	// WithPlayerPush cannot interleave mid-update. If Prepare bumps generation
 	// during CDP Send, loop once more and push the newer active set before
 	// releasing — avoiding a stale playlist stuck on screen.
@@ -625,7 +625,7 @@ func (s *scheduler) restoreLocked(snapshot Snapshot) {
 	if s.full != nil && !s.restoredPending {
 		s.armTimerLocked()
 		// snapshot.lastActive is the last push CONFIRMED accepted by the player,
-		// not necessarily what is due right now: a losing cast/refresh can
+		// not necessarily what is due right now: a losing display request/refresh can
 		// restore a schedule whose own cutover push had failed and was mid-retry
 		// at snapshot time (that retry was just canceled above by
 		// cancelPushRetryLocked). armTimerLocked alone cannot recover that
@@ -639,7 +639,7 @@ func (s *scheduler) restoreLocked(snapshot Snapshot) {
 		// lastActive as the PROJECTION (see its comparison), so after a policy
 		// tighten hides an item still present in the cached document the two can
 		// never match again. That mismatch made every Restore — every failed
-		// cast, every rejected refresh — arm a retry that force-cast the same
+		// display request, every rejected refresh — arm a retry that force-displays the same
 		// cohort seconds later and restarted the artwork, indefinitely.
 		if active := s.activeLocked(); len(active.Items) > 0 {
 			if sent := s.projectedItemsLocked(active); len(sent) > 0 && !reflect.DeepEqual(sent, s.lastActive) {
@@ -773,7 +773,7 @@ func (s *scheduler) armPushRetryLocked() {
 	}
 	s.pushRetryAttempt++
 	if s.pushRetryAttempt > pushRetryMaxAttempts {
-		s.logger.Error("Giving up on displayAt cutover push retry; relying on next wake/reconnect/cast",
+		s.logger.Error("Giving up on displayAt cutover push retry; relying on next wake/reconnect/display request",
 			zap.Int("attempts", s.pushRetryAttempt-1))
 		return
 	}
@@ -813,7 +813,7 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	}
 
 	// Re-apply the CURRENT content policy. The router filtered this document
-	// once, when it was cast; a policy tightened since then reaches these later
+	// once, when it was displayed; a policy tightened since then reaches these later
 	// cohorts only here (see Projector).
 	//
 	// An EMPTY projection is a retirement, not a no-op. Silently dropping it
@@ -822,7 +822,7 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	// only cohort that could replace it is the one the policy just emptied.
 	// The empty list therefore goes out WITH retireBlockedCurrent, which is the
 	// player's documented signal to retire the current item and black the
-	// display rather than an ordinary cast it would reject.
+	// display rather than an ordinary display request it would reject.
 	retireBlockedCurrent := false
 	s.mu.Lock()
 	projector := s.projector
@@ -838,7 +838,7 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 		}
 	}
 
-	// Force cast via now_display — never refresh:true. Player refreshPlaylist
+	// Force-display via now_display — never refresh:true. Player refreshPlaylist
 	// defers when the current item is absent from the new list (typical
 	// displayAt day/slot swap), which would miss the wall-clock threshold.
 	// URL/dynamic playlist-refresher keeps refresh:true on its own path.

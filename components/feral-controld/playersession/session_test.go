@@ -608,7 +608,7 @@ func TestNavigateHomeInline_RouteMismatchAfterHandlerReady(t *testing.T) {
 // Page.navigate always lands on "/" first, and AppWrapper's auto-route to
 // /playlist only fires after hydration finishes — well after StageHandler
 // resolves. A navigation that lands on "/" and STAYS there through the whole
-// verification window (nothing cast; a legitimate idle steady state) must be
+// verification window (nothing displayed; a legitimate idle steady state) must be
 // reported as a verified success, not a route-mismatch error — a repaired
 // wall must not burn a boot-recovery attempt or report failure to the
 // relayer.

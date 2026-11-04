@@ -21,10 +21,10 @@ func TestMiddlewareRejectsBrowserOrigins(t *testing.T) {
 		wantRun bool
 		want    int
 	}{
-		{"native cast (app, ff-cli, relayer path)", "cast", nil, true, http.StatusOK},
+		{"native command (app, ff-cli, relayer path)", "cast", nil, true, http.StatusOK},
 		{"page with Origin", "cast", map[string]string{"Origin": "https://example.com"}, false, http.StatusForbidden},
 		{"no-cors page with Sec-Fetch-Site only", "cast", map[string]string{"Sec-Fetch-Site": "cross-site"}, false, http.StatusForbidden},
-		{"same-device page on cast", "cast", map[string]string{"Origin": "http://127.0.0.1:8080", "Sec-Fetch-Site": "same-site"}, false, http.StatusForbidden},
+		{"same-device page on /api/cast", "cast", map[string]string{"Origin": "http://127.0.0.1:8080", "Sec-Fetch-Site": "same-site"}, false, http.StatusForbidden},
 		{"page on status", "status", map[string]string{"Origin": "https://example.com"}, false, http.StatusForbidden},
 		{"page on notification upgrade", "notification", map[string]string{"Origin": "https://example.com"}, false, http.StatusForbidden},
 		{"player logs keep their own check", playerLogsRoute, map[string]string{"Origin": "http://127.0.0.1:8080"}, true, http.StatusOK},

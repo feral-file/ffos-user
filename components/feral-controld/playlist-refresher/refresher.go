@@ -33,12 +33,12 @@ const (
 
 // startupForceCastEscalationThreshold bounds how many consecutive
 // errPlayerRejectedRefresh failures the startup loop tolerates from the
-// normal soft-refresh path before it escalates to a forced now_display cast.
+// normal soft-refresh path before it escalates to a forced now_display push.
 // See the loop in background() for the scenario this guards against.
 const startupForceCastEscalationThreshold = 3
 
 // startupEscalation tracks the startup loop's consecutive-rejection streak
-// and the forced-cast escalation it justifies. forceCast is a symmetric
+// and the forced-display escalation it justifies. forceCast is a symmetric
 // latch: it sets when the streak reaches the threshold and clears the
 // instant the streak's justification goes away — a success, or a
 // NON-rejection response breaking the streak (record is the single place
@@ -151,7 +151,7 @@ type refresher struct {
 	// background goroutine only.
 	activeVerdict *sigverify.Active
 	// sessionGeneration, when set (SetSessionGeneration), is the
-	// playersession generation getter. A force cast's verdict is published
+	// playersession generation getter. A force-display's verdict is published
 	// only if the generation is unchanged across the send: a bump in between
 	// means the accepted reply came from a page that is gone (the bump hook
 	// already cleared the slot), and the new generation's reconciliation
@@ -293,13 +293,13 @@ func (r *refresher) background(done <-chan struct{}) {
 	// can be a PERMANENT rejection rather than a transient one: the player
 	// returns ok:false when it has no active playlist to refresh, and that
 	// state persists across retries on its own. PrepareWithSource's own
-	// force-cast escape (scheduler.HasCache() && (!hadDisplayAtCache ||
+	// force-display escape (scheduler.HasCache() && (!hadDisplayAtCache ||
 	// hadRestoredPending), see processPlayingPlaylist) does not fire here
 	// because the scheduler cache is already warm — only the player's live
 	// state is empty. Without escalation this loop would then retry the same
 	// rejected soft refresh at PLAYER_STATUS_POLLING_INTERVAL forever. After
 	// startupForceCastEscalationThreshold consecutive rejections, force a
-	// now_display cast instead, which hydrates an empty player regardless of
+	// now_display push instead, which hydrates an empty player regardless of
 	// prior cache state. Transport/fetch errors are a different error value
 	// and do not count toward this escalation.
 	esc := startupEscalation{}
@@ -332,7 +332,7 @@ func (r *refresher) background(done <-chan struct{}) {
 			// pass now instead of waiting for the ticker" (replay-scope
 			// resync after a CDP reconnect or a cache change), whereas
 			// forceCast escalates a PERMANENTLY rejected soft refresh into a
-			// now_display cast — an escalation only the startup loop above has
+			// now_display push — an escalation only the startup loop above has
 			// evidence for.
 			if err := r.processPlayingPlaylist(false); err != nil {
 				r.logProcessFailure(err)
@@ -387,7 +387,7 @@ func (r *refresher) logProcessFailure(err error) {
 
 // processPlayingPlaylist processes the playing playlist and sends it to CDP.
 //
-// forceCast, when true, sends a forced now_display cast unconditionally
+// forceCast, when true, sends a forced now_display push unconditionally
 // instead of the normal soft refresh — used by background()'s startup loop to
 // escalate out of a permanently rejected soft refresh (see there).
 //
@@ -462,7 +462,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	// contextUnknown marks a source whose origin this daemon cannot know: a
 	// player status that omitted contentContext (only a player predating this
 	// feature does that), or a scheduler source persisted before the field
-	// existed. The router sets the field on every cast it forwards and on every
+	// existed. The router sets the field on every display request it forwards and on every
 	// source it hands the scheduler, so in both cases an empty value means
 	// "from before", never "curated". See the projection guard below for why it
 	// is not just defaulted.
@@ -498,19 +498,19 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		case playerStatus.Playlist != nil && playerStatus.Playlist.HasDynamicContent():
 			contextUnknown = playerStatus.ContentContext == ""
 			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist, ContentContext: playerStatus.ContentContext}
-			// Prefer the verified inline dynamic document the cast retained:
+			// Prefer the verified inline dynamic document the display request retained:
 			// player status drops the verdict (dp1.Playlist.Verification is
 			// json:"-"), so re-resolving its copy loses the original verdict
 			// in diagnostics. The retained
 			// source carries the verdict; ProcessDynamicPlaylist copies the
 			// struct by value, so the verdict survives hydration. Matched on
-			// id so a retained source from a superseded cast is never used
+			// id so a retained source from a superseded display request is never used
 			// (feral-file/ffos-user#307).
 			//
 			// The content context travels WITH it. The retained document is the
-			// same cast, so it is the same audience decision — rebuilding the
+			// same display request, so it is the same audience decision — rebuilding the
 			// source here without the context would silently reclassify a
-			// personal cast as curated on the first refresh, which is the one
+			// personal display request as curated on the first refresh, which is the one
 			// thing the unknown-origin handling below exists to prevent. The
 			// verdict is primary and unweakened; the context rides alongside.
 			if r.scheduler != nil {
@@ -615,14 +615,14 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	retireBlockedCurrent := false
 	// A source rebuilt from a status with no contentContext carries an UNKNOWN
 	// origin, not a curated one. Defaulting it to curated silently reclassifies
-	// a cast the owner made as personal, so the first refresh would strip the
+	// a display request the owner made as personal, so the first refresh would strip the
 	// mature items they deliberately put on the wall — the opposite of the
 	// documented guarantee that context survives refresh. Leave the playlist as
-	// the cast admitted it instead. A player this old has no policy mirror of
+	// the display request admitted it instead. A player this old has no policy mirror of
 	// its own either (setContentPolicy answers unsupported), so there is no
 	// enforcement being bypassed here that ever worked on it.
 	if contextUnknown {
-		r.logger.Warn("Player status omits contentContext; leaving this refresh unprojected rather than reclassifying the cast as curated",
+		r.logger.Warn("Player status omits contentContext; leaving this refresh unprojected rather than reclassifying the display request as curated",
 			zap.String("source", schedulerSource.PlaylistURL))
 	}
 	if r.contentPolicy != nil && !contextUnknown {
@@ -669,10 +669,10 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		// resolving: the send below will be skipped for the exact same
 		// token mismatch, and syncing anyway would overwrite — under this
 		// same lock, AFTER it ran — the scope the new authority's own
-		// cast just installed, leaving interception pointed at the
+		// display request just installed, leaving interception pointed at the
 		// previous playlist while the new one is on screen until the next
 		// pass (feral-file/ffos-user#229 review finding). Checked under
-		// the playback lock so it strictly orders against that cast's own
+		// the playback lock so it strictly orders against that request's own
 		// locked sync+send.
 		if r.scheduler != nil && r.scheduler.AuthorityToken() != authorityToken {
 			r.logger.Debug("Skipping replay scope sync: playlist authority changed during refresh resolution")
@@ -712,8 +712,8 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			}
 			// Sampled here, under the same push lock as the PrepareWithSource
 			// call below, not earlier at the top of this function: an earlier,
-			// unlocked read could be flipped by a concurrent cast/RecomputeNow in
-			// the window before this closure runs, which would force-cast a soft
+			// unlocked read could be flipped by a concurrent display request/RecomputeNow in
+			// the window before this closure runs, which would force-display a soft
 			// refresh (a visible artwork restart) off a stale "cache was cold"
 			// reading even though the cache is actually already warm.
 			hadDisplayAtCache := r.scheduler.HasCache()
@@ -746,7 +746,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				r.scheduler.Commit()
 				// The schedule now holds THIS document; the cutover that
 				// eventually pushes it must promote this verdict, not the
-				// one a previous deferred cast parked (#307). An unverified
+				// one a previous deferred display request parked (#307). An unverified
 				// replacement (cached copy) is staged as such so the
 				// promotion clears rather than inherits.
 				if r.activeVerdict != nil {
@@ -765,7 +765,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			// effectiveForceCast is true for either of two reasons. (1) After a
 			// controld restart the memory cache may be empty, so the refresher may
 			// be the first path to reconstruct scheduler ownership from
-			// URL/dynamic/player status; force-cast that first scheduled
+			// URL/dynamic/player status; force-display that first scheduled
 			// reconstruction, since a soft refresh can defer when the current item
 			// disappeared from the new set. (2) The caller (background()'s startup
 			// loop) is escalating out of a soft refresh the player has rejected
@@ -789,7 +789,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		// Invalidate BEFORE the send (#307): from the moment it lands the
 		// player may show the new document, and the status poller could
 		// match the previous one by URL before the reply is processed. A
-		// force cast clears outright and re-publishes below; a soft refresh
+		// force-display clears outright and re-publishes below; a soft refresh
 		// reconciles now (the player may or may not swap, and acceptance
 		// will not say — see Active.ReconcileSoft); a verdict-less push
 		// clears. A failed send leaves the slot in that state: an omission.
@@ -814,8 +814,8 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			sendErr = errPlayerRejectedRefresh
 		}
 		// Publish what this push did to the screen (#307), inside the send
-		// closure — under WithPlayerPush — so it is ordered against casts
-		// and cutovers. A force cast (now_display) replaces the artwork at
+		// closure — under WithPlayerPush — so it is ordered against display requests
+		// and cutovers. A force-display (now_display) replaces the artwork at
 		// once, so its verdict is published outright; a verdict-less push
 		// (the cached-copy fallback) CLEARS the slot (pending too) rather
 		// than leaving a previous verdict standing for the same URL. A SOFT
@@ -841,7 +841,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			// The scheduler's cache now holds THIS document (Commit below),
 			// so every later cutover pushes its cohorts: restage pending to
 			// match, or a cutover would promote whatever an earlier
-			// deferred cast parked. Set above already dropped pending; the
+			// deferred display request parked. Set above already dropped pending; the
 			// soft path did not. Skipped when the send failed: the snapshot
 			// is restored below and the prior pending stays true.
 			if schedulerMutated && r.scheduler.HasCache() {
@@ -873,14 +873,14 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 // source: an inline playlist with nothing dynamic and no displayAt. It cannot
 // be re-resolved, so this path has always only re-synced replay scope.
 //
-// It must still apply the content policy. A cast from the app is usually
+// It must still apply the content policy. A display request from the app is usually
 // exactly this shape, so without it an owner who turns mature content OFF
 // watches the mature work stay on screen indefinitely — there is no later
 // refresh that would remove it, which is precisely the failure the policy
 // exists to prevent.
 //
 // What it CANNOT do is the relaxing direction: the player's status carries only
-// the already-filtered set that was cast, so items an earlier projection
+// the already-filtered set that was displayed, so items an earlier projection
 // removed are simply not there to restore. That needs the daemon to retain the
 // original document, the same retained-state change deferred for scheduled
 // playlists.
@@ -941,7 +941,7 @@ func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext strin
 	// Serialized against every other authoritative display, exactly like the
 	// ordinary refresh send below. This re-send is built from a status read
 	// taken BEFORE the projection above, so without the push lock and the
-	// authority re-check a cast that completed in between would be overwritten
+	// authority re-check a display request that completed in between would be overwritten
 	// by this stale playlist — and its offline-replay scope with it.
 	var sendErr error
 	send := func() {
@@ -993,7 +993,7 @@ func (r *refresher) syncStaticInlineScope(playlist *dp1.Playlist) error {
 // the same reason it is left unprojected everywhere else.
 //
 // Sends under the player-push barrier with the authority re-check, like every
-// other send on this path, so a cast that landed while the resolution was
+// other send on this path, so a display request that landed while the resolution was
 // failing is not overwritten by this retirement.
 func (r *refresher) retireBlockedCurrentWithoutASource(source playlistschedule.Source) {
 	if r.contentPolicy == nil || source.ContentContext == "" {
@@ -1134,9 +1134,9 @@ func currentBlockedByRefresh(playerStatus *status.PlayerStatus, fresh *dp1.Playl
 // Interception is keyed on the URLs the kiosk actually fetches, so the scope
 // has to describe what the PLAYER holds — not what the daemon would resolve
 // the same status to now. Whenever player status carries a concrete item list
-// (a static inline playlist: the filtered active set the player was cast),
+// (a static inline playlist: the filtered active set the player was sent),
 // that list IS what it holds, and re-resolving it can only diverge from the
-// screen: a seriesRegistry item cast while the catalog was unreachable keeps
+// screen: a seriesRegistry item display request while the catalog was unreachable keeps
 // its representative, so a later pass whose expansion succeeds would scope
 // replay to editions that were never displayed and never cached. SyncPlaylist
 // then finds nothing cached and disables replay outright

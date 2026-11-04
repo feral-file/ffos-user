@@ -22,7 +22,7 @@ const (
 	// each of ten assumed fields as SETTINGS_MAX_HEADER_LIST_SIZE. That means
 	// the peer can legally send this much beyond the configured value for EACH
 	// separately parsed header list. Keep this coupled to the supported Go
-	// implementation and the guarded-fetch transport tests. The cast preflight
+	// implementation and the guarded-fetch transport tests. The accept-time preflight
 	// does not use this parser or HTTP/2; see probeStatusRoundTripper below.
 	http2HeaderListAccountingBytes int64 = 32 * 10
 
@@ -45,7 +45,7 @@ var errProbeTLSHandshakeTooLarge = errors.New("source probe: TLS handshake excee
 // dial it:
 //
 //   - classify.go's HEAD / ranged-GET probe,
-//   - probe.go's cast-time liveness preflight (#304),
+//   - probe.go's accept-time liveness preflight (#304),
 //   - mediacapture.go's direct body download,
 //   - capture.go's Page.navigate in the headless browser.
 //
@@ -400,7 +400,7 @@ func newGuardedHTTPClientFor(g sourceGuard, timeout time.Duration) wrapper.HTTPC
 // FOLLOWING disabled outright: the first response — a 3xx included — is
 // returned as the final answer, and no second request is ever made.
 //
-// Built for the cast preflight, whose request-count bound must be a hard
+// Built for the accept-time preflight, whose request-count bound must be a hard
 // one request per probed source: with following enabled, every probe
 // could legally fan into maxSourceRedirects further requests, turning a
 // budget of N into N x 10 against attacker-chosen origins (#310 review).
@@ -442,7 +442,7 @@ func newGuardedNoRedirectHTTPClientForTLS(
 }
 
 // probeStatusRoundTripper is the deliberately narrow HTTP surface needed by a
-// cast preflight: send one guarded GET and retain only its status. net/http's
+// accept-time preflight: send one guarded GET and retain only its status. net/http's
 // HTTP/1 response parser materializes every header field into a map before a
 // RoundTripper returns; a small wire block containing thousands of distinct
 // names can therefore expand far beyond MaxResponseHeaderBytes. Parsing and
@@ -805,7 +805,7 @@ func (g sourceGuard) transport() *go_http.Transport {
 		// origin, and Go's default response-header ceiling is 10 MiB per
 		// response. Keep the reusable classify/capture client to an effective
 		// 64 KiB list allowance, comfortably above common server defaults.
-		// The more tightly bounded cast preflight deliberately does not use
+		// The more tightly bounded accept-time preflight deliberately does not use
 		// net/http's response parser or this transport; its HTTP/1-only,
 		// status-only parser above discards fields before a map can amplify
 		// their cardinality and owns the process-wide budget in probe.go.

@@ -7,12 +7,12 @@ import "sync"
 // Two slots, no history:
 //
 //   - current is the verdict of the playlist last pushed to the player and
-//     accepted. Set by a cast or refresher re-push that reached the screen,
+//     accepted. Set by a display request or refresher re-push that reached the screen,
 //     inside the player-push critical section so it is ordered against every
 //     other push. A push that reached the screen WITHOUT a verdict (the
-//     offline cached-copy fallback) clears it: a previous cast's verdict must
+//     offline cached-copy fallback) clears it: a previous request's verdict must
 //     never keep standing for bytes nobody verified, and both share the URL.
-//   - pending is the verdict of a displayAt-deferred cast (or a future-only
+//   - pending is the verdict of a displayAt-deferred display request (or a future-only
 //     refresh of the schedule) whose first cohort has not reached the player
 //     yet. The previous playlist keeps showing, so current is left alone.
 //     Promote, called by the scheduler's push observer after a cohort push
@@ -21,20 +21,20 @@ import "sync"
 //     WITHOUT a verdict (the cached-copy fallback) parks an explicit
 //     "unverified" pending, so its promotion CLEARS current rather than
 //     letting an earlier document's verdict survive the cutover. Every
-//     producer that replaces the schedule must restage pending — the cast
+//     producer that replaces the schedule must restage pending — the display request
 //     handler and the refresher's future-only path both do — or a cutover
 //     would promote the verdict of a document the schedule no longer holds.
-//     A fresh cast (Set/Clear) drops pending, since it replaced the schedule.
+//     A fresh display request (Set/Clear) drops pending, since it replaced the schedule.
 //
 // Lookup consults current only. Identity is the playlist id when both the
 // reply and the slot carry one — two documents republished at the same URL
 // have different ids, and the URL must not attribute one's verdict to the
 // other. The URL is consulted only when either side lacks an id (the
-// player's checkStatus reply echoes playlist.id for inline casts and
-// playlistURL for URL casts, not always both). A miss means "controld did not
+// player's checkStatus reply echoes playlist.id for inline display requests and
+// playlistURL for URL display requests, not always both). A miss means "controld did not
 // verify what is on screen" — the player-fetched default playlist, the
-// cached-copy fallback, a cast from before this process started, a deferred
-// cast whose cutover has not happened — and the poller omits the field rather
+// cached-copy fallback, a display request from before this process started, a deferred
+// display request whose cutover has not happened — and the poller omits the field rather
 // than guess. Omission is always the safe direction: it can never assert a
 // verdict for a document other than the one it was computed on.
 type Active struct {
@@ -76,7 +76,7 @@ func (s slot) matches(id, url string) bool {
 }
 
 // Set records the verdict of a playlist that just reached the player, and
-// drops any pending schedule verdict (the cast replaced the schedule).
+// drops any pending schedule verdict (the display request replaced the schedule).
 func (a *Active) Set(id, url string, status Status) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -104,7 +104,7 @@ func (a *Active) ClearCurrent() {
 	a.current = slot{}
 }
 
-// SetPending parks the verdict of a displayAt-deferred cast until Promote.
+// SetPending parks the verdict of a displayAt-deferred display request until Promote.
 // current is untouched: the previous playlist is still what is showing.
 func (a *Active) SetPending(id, url string, status Status) {
 	a.mu.Lock()
@@ -113,7 +113,7 @@ func (a *Active) SetPending(id, url string, status Status) {
 }
 
 // SetPendingUnverified parks "the scheduled document has no verdict" (a
-// deferred cast or future-only refresh served from the cached copy): when
+// deferred display request or future-only refresh served from the cached copy): when
 // its cohort reaches the player, Promote clears current instead of leaving
 // the previous document's verdict standing.
 func (a *Active) SetPendingUnverified() {
@@ -136,7 +136,7 @@ func (a *Active) SetPendingUnverified() {
 //     describes — is a miss too. Id-only is sticky: later soft refreshes
 //     leave the slot untouched, however their verdicts compare, because the
 //     ambiguity they would resolve against is still on screen. Only Set
-//     (force cast, cutover promotion) or a clear ends it.
+//     (force-display, cutover promotion) or a clear ends it.
 //   - identity cannot separate them (URL-only, or same id) and the verdict
 //     changed: current is cleared. Nothing may attest a status that is true
 //     of only one of two documents the poller cannot tell apart.
@@ -153,7 +153,7 @@ func (a *Active) ReconcileSoft(id, url string, status Status) {
 	if a.current.idOnly {
 		// Already unresolved: two documents with different verdicts may be
 		// on screen, and another acceptance does not say which. Only a
-		// force cast, a cutover, or player-owned replacement resolves it.
+		// force-display, a cutover, or player-owned replacement resolves it.
 		return
 	}
 	if a.current.status == status {
@@ -191,7 +191,7 @@ func (a *Active) Promote() {
 // cleared it too) and the new generation's own re-push promotes pending
 // afresh. generation may be nil (tests, a build without a session): the
 // fence is then a no-op. Mirrors commandrouter.sendCDPRequest's own
-// generation re-check for casts.
+// generation re-check for display requests.
 func (a *Active) FencedPromoter(generation func() uint64) (start, accepted func()) {
 	var snapshot uint64
 	start = func() {

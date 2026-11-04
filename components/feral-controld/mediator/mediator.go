@@ -999,8 +999,8 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 				return m.relayer.Send(ctx, resp)
 			}
 			if commandrouter.IsSourceUnreachable(err) {
-				// A dead-source cast rejection is the CALLER's problem to act
-				// on, and remote casts are exactly the audience #304 exists
+				// A dead-source display rejection is the CALLER's problem to act
+				// on, and remote commands are exactly the audience #304 exists
 				// for (a publisher pushing to someone else's wall must learn
 				// the link is dead) — so it gets a legible RPC error reply,
 				// mirroring the rate_limited shape above, rather than the
@@ -1008,7 +1008,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 				// caller can only experience as its own RPC timeout. Warn,
 				// not Error: this is client input being rejected, not a
 				// daemon fault, and must not be promoted to an Error log.
-				m.logger.Warn("Cast rejected: no playlist item source is loadable",
+				m.logger.Warn("Command rejected: no playlist item source is loadable",
 					zap.String("command", commandType.String()),
 					zap.Error(err),
 				)
@@ -1020,10 +1020,10 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 						// controllers, not decoration: ff-cli's relayer
 						// helper decides success by hunting for a boolean
 						// ok (nestedOk in ff1-relayer.ts) and treats a
-						// body with none as SUCCESS, and ff-app casts the
+						// body with none as SUCCESS, and ff-app sends the
 						// ok field and throws when it is absent. An
 						// error-only body would tell both clients the
-						// dead-link cast worked — the exact failure this
+						// dead-link display request worked — the exact failure this
 						// reply exists to surface. (rate_limited above
 						// predates this and ships without ok; changing
 						// that shape is a separate decision.)
