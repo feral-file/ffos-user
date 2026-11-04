@@ -69,6 +69,36 @@ type ControllerQRVectors struct {
 	Cases       []ControllerQRCase `json:"cases"`
 }
 
+// ControllerLinkCase is one entry of positive/negative controller-link.json
+// (§5.6.1.1). A positive case gives the link, the QR payload it carries and
+// the device id it names ("" for none).
+type ControllerLinkCase struct {
+	Description string `json:"description"`
+	Link        string `json:"link"`
+	QR          string `json:"qr,omitempty"`
+	DeviceID    string `json:"deviceId,omitempty"`
+}
+
+// ControllerLinkBuild is how a client renders a link: from a QR payload and
+// the device id it started from (possibly empty or malformed) to the exact
+// link string.
+type ControllerLinkBuild struct {
+	Description string `json:"description"`
+	QR          string `json:"qr"`
+	DeviceID    string `json:"deviceId"`
+	Link        string `json:"link"`
+}
+
+// ControllerLinkVectors is positive/controller-link.json (Cases and Builds)
+// and negative/controller-link.json (Cases only).
+type ControllerLinkVectors struct {
+	Name        string                `json:"name"`
+	Kind        string                `json:"kind"` // controllerLink
+	Description string                `json:"description"`
+	Cases       []ControllerLinkCase  `json:"cases"`
+	Builds      []ControllerLinkBuild `json:"builds,omitempty"`
+}
+
 func (g *gen) controllerQR(name, label string) (control.ControllerQR, PrivateJWK) {
 	c := g.k.Controllers[name]
 	minter := jwkFromScalar(scalar("registration/minter/" + label))
@@ -218,7 +248,10 @@ func (g *gen) registrationVectors() error {
 			return err
 		}
 	}
-	return g.controllerQRVectors(q)
+	if err := g.controllerQRVectors(q); err != nil {
+		return err
+	}
+	return g.controllerLinkVectors(q)
 }
 
 // sealRaw seals exact plaintext bytes, so negative vectors can carry
@@ -282,5 +315,81 @@ func (g *gen) controllerQRVectors(q control.ControllerQR) error {
 	}
 	g.files["negative/controller-qr.json"] = Encode(ControllerQRVectors{Name: "controller-qr", Kind: "controllerQR",
 		Description: "Controller QR payloads a parser MUST reject (§5.6.1).", Cases: bad})
+	return nil
+}
+
+func (g *gen) controllerLinkVectors(q control.ControllerQR) error {
+	// A label that exercises every character the envelope must carry: the
+	// QR's own separator, the fragment's, an escape-looking `%41`, a stray
+	// `%`, a query and a fragment marker, and non-ASCII.
+	hard := q
+	hard.Label = "50% | %41 a&b=c?d#e é 王 🎨"
+	const dev = "FF1-8EVTK3RE"
+	var builds []ControllerLinkBuild
+	for _, c := range []struct {
+		desc, dev string
+		q         control.ControllerQR
+	}{
+		{"No device: the controller started from none.", "", q},
+		{"Started from a device: d names it.", dev, q},
+		{"A hard label, every value percent-encoded once.", dev, hard},
+		{"A device id outside the hostname shape is left out, not written.", "FF1 A/b", q},
+	} {
+		builds = append(builds, ControllerLinkBuild{Description: c.desc, QR: c.q.String(), DeviceID: c.dev,
+			Link: control.ControllerLink(c.q, c.dev)})
+	}
+	code := "c=" + control.EncodeURIComponent(q.String())
+	target := "d=" + dev + "&"
+	var good []ControllerLinkCase
+	for _, c := range []struct {
+		desc, link, dev string
+		q               control.ControllerQR
+	}{
+		{"Untargeted.", control.ControllerLink(q, ""), "", q},
+		{"Targeted.", control.ControllerLink(q, dev), dev, q},
+		{"A hard label survives exactly one decode.", control.ControllerLink(hard, dev), dev, hard},
+		{"A query before the fragment is ignored.", control.ControllerLinkPrefix + "?utm_source=chat#" + target + code, dev, q},
+		{"A slash before the fragment is allowed.", control.ControllerLinkPrefix + "/#" + code, "", q},
+		{"Anything after a raw ? in the fragment is ignored.", control.ControllerLinkPrefix + "#" + target + code + "?utm_source=chat", dev, q},
+	} {
+		parsed, d, err := control.ParseControllerLink(c.link)
+		if err != nil {
+			return fmt.Errorf("controller link %q: %w", c.desc, err)
+		}
+		if parsed.String() != c.q.String() || d != c.dev {
+			return fmt.Errorf("controller link %q parsed wrong", c.desc)
+		}
+		good = append(good, ControllerLinkCase{Description: c.desc, Link: c.link, QR: c.q.String(), DeviceID: c.dev})
+	}
+	g.files["positive/controller-link.json"] = Encode(ControllerLinkVectors{Name: "controller-link", Kind: "controllerLink",
+		Description: "https://link.feralfile.com/controller#[d=<deviceId>&]c=<pct(payload)> (§5.6.1.1). Values are percent-encoded as ECMAScript encodeURIComponent and decoded once; c then parses under §5.6.1. builds are the exact links a client renders.",
+		Cases:       good, Builds: builds})
+	badQR := q.String()[:strings.LastIndex(q.String(), "|")+1] // empty label
+	var bad []ControllerLinkCase
+	for _, c := range []ControllerLinkCase{
+		{Description: "No fragment.", Link: control.ControllerLinkPrefix},
+		{Description: "The payload in the path instead of the fragment.", Link: control.ControllerLinkPrefix + "/" + control.EncodeURIComponent(q.String())},
+		{Description: "A fragment that is the bare encoded payload, without c=.", Link: control.ControllerLinkPrefix + "#" + control.EncodeURIComponent(q.String())},
+		{Description: "Another path that only starts like the prefix.", Link: control.ControllerLinkPrefix + "s#" + code},
+		{Description: "Another host.", Link: "https://evil.example/controller#" + code},
+		{Description: "c missing.", Link: control.ControllerLinkPrefix + "#" + strings.TrimSuffix(target, "&")},
+		{Description: "c repeated.", Link: control.ControllerLinkPrefix + "#" + code + "&" + code},
+		{Description: "d repeated.", Link: control.ControllerLinkPrefix + "#" + target + target + code},
+		{Description: "An unknown member.", Link: control.ControllerLinkPrefix + "#x=1&" + code},
+		{Description: "An empty member.", Link: control.ControllerLinkPrefix + "#" + code + "&"},
+		{Description: "An empty d.", Link: control.ControllerLinkPrefix + "#d=&" + code},
+		{Description: "A d outside the hostname shape.", Link: control.ControllerLinkPrefix + "#d=" + control.EncodeURIComponent("FF1 A/b") + "&" + code},
+		{Description: "A truncated escape.", Link: control.ControllerLinkPrefix + "#c=%E0%A4%A"},
+		{Description: "An escape that is not UTF-8.", Link: control.ControllerLinkPrefix + "#c=%FF"},
+		{Description: "c that is not a controller QR.", Link: control.ControllerLinkPrefix + "#c=not-a-code"},
+		{Description: "c that is a QR §5.6.1 rejects (empty label).", Link: control.ControllerLinkPrefix + "#c=" + control.EncodeURIComponent(badQR)},
+	} {
+		if _, _, err := control.ParseControllerLink(c.Link); err == nil {
+			return fmt.Errorf("controller link %q accepted", c.Description)
+		}
+		bad = append(bad, c)
+	}
+	g.files["negative/controller-link.json"] = Encode(ControllerLinkVectors{Name: "controller-link", Kind: "controllerLink",
+		Description: "Controller links an owner's app MUST reject as a whole (§5.6.1.1).", Cases: bad})
 	return nil
 }

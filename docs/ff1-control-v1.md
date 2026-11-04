@@ -552,17 +552,21 @@ opens the owner's app:
   minter key and the device id stay out of the link host's and CDN's request
   logs and out of chat apps' link-preview fetches. The path is fixed, so
   the request names nothing.
-- `c`: the §5.6.1 payload, percent-encoded as a URI component (no raw `&`,
-  `=`, `?` or `#` remains). The owner decodes it **once** and parses the
+- `pct` is ECMAScript `encodeURIComponent`: every UTF-8 byte outside
+  `A-Z a-z 0-9 - _ . ! ~ * ' ( )` becomes upper-case `%XX`, so no raw `&`,
+  `=`, `?` or `#` remains in a value. Decoding turns every `%XX` back into
+  its byte, leaves `+` as `+`, and requires valid UTF-8.
+- `c`: the §5.6.1 payload, `pct`-encoded. The owner decodes it **once** and parses the
   result under §5.6.1 unchanged; a client MUST NOT percent-decode the link
   as a whole first, because a label may itself contain `%`.
 - `d`: optional, the `deviceId` (§2) of the FF1 the controller started from,
-  percent-encoded the same way. Omitted when the controller started from no
+  `pct`-encoded the same way. It MUST match
+  `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` (the hostname shape). Omitted when the controller started from no
   device. When it is present the owner's app MUST NOT offer another FF1:
   it opens that FF1 when it owns it and otherwise says the code is for
   that device, and an Add controller already opened for another FF1
   refuses the code before `registerController`. A client that holds a
-  device id outside the §2 hostname shape omits `d` rather than write it.
+  device id outside that shape omits `d` rather than write it.
 - The fragment is exactly `c`, optionally preceded by `d`, each once. A
   repeated or unknown key, a missing `c`, a malformed escape or a `d` that
   is not a hostname rejects the whole link. A query before the fragment,
@@ -574,6 +578,8 @@ opens the owner's app:
   device's review, where they decide.
 - The envelope changes neither the payload nor the derivation: `salt` stays
   `SHA-256("ff1-ctl:1|" + channelId)` (§5.6.2).
+- The reference is `control.ControllerLink` / `ParseControllerLink`; the
+  `controller-link.json` vectors (§12) pin both directions.
 - Percent-encoding makes the link longer than the payload (~480 bytes for a
   64-character ASCII label with `d`, about 9 bytes per CJK character), so
   the link QR uses error correction level **M**: QR version 20 or below for
@@ -1319,6 +1325,15 @@ reply rather than `bad_envelope`.
   `negative/controller-qr.json` (`kind:"controllerQR"`): `cases` of a `qr`
   string and, for valid ones, its parsed `channelId`, `minterKey`, `ctl`,
   `sig`, `enc` (canonical JWK JSON), `ps`, `platform`, `label`.
+- App-link envelope (§5.6.1.1). `positive/controller-link.json` and
+  `negative/controller-link.json` (`kind:"controllerLink"`): `cases` of a
+  `link` and, for valid ones, the `qr` payload it carries and the `deviceId`
+  it names (absent for none); the positive file also has `builds`, a `qr`
+  and a `deviceId` (possibly empty or malformed) with the exact `link` a
+  client renders. An owner implementation MUST parse every positive case,
+  reject every negative one as a whole and render every build byte for
+  byte. A client that never opens a controller link (ff-cli, which only
+  shows the bare string) need not run them.
   `positive/controller-registration*.json` and `negative/registration-*.json`
   (`kind:"registration"`): the controller's `qr` and private `minterKey`,
   `controller` (the `keys.json` controller whose keys the QR carries),

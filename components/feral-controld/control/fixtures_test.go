@@ -120,6 +120,9 @@ func TestPositiveFixtures(t *testing.T) {
 			case "controllerQR":
 				checkControllerQR(t, "positive", f.Name)
 				return
+			case "controllerLink":
+				checkControllerLink(t, "positive", f.Name)
+				return
 			case "registration":
 				checkRegistration(t, "positive", f.Name)
 				return
@@ -247,6 +250,9 @@ func TestNegativeFixtures(t *testing.T) {
 			case "controllerQR":
 				checkControllerQR(t, "negative", f.Name)
 				return
+			case "controllerLink":
+				checkControllerLink(t, "negative", f.Name)
+				return
 			case "registration":
 				checkRegistration(t, "negative", f.Name)
 				return
@@ -280,7 +286,7 @@ func TestNegativeFixtures(t *testing.T) {
 	for _, name := range []string{"tampered-tag", "wrong-jwe-kid", "wrong-dev", "wrong-gen", "expired", "replayed-ctr",
 		"out-of-window-ctr", "der-signature", "jwe-extra-header-member", "jws-extra-header-member", "jws-alg-none",
 		"jwe-alg-rsa", "jws-alg-rs256", "oversize", "reply-wrong-rk", "revoked-controller", "unknown-kid",
-		"lifetime-over-120", "ctl-not-kid", "controller-qr", "registration-wrong-ps", "registration-wrong-channel",
+		"lifetime-over-120", "ctl-not-kid", "controller-qr", "controller-link", "registration-wrong-ps", "registration-wrong-channel",
 		"registration-wrong-ctl", "registerController-from-controller", "revoke-other-from-controller"} {
 		if !seen[name] {
 			t.Errorf("negative fixture %s missing", name)
