@@ -90,7 +90,7 @@ func TestNarrowEditions_FirstClearsTheSeriesMarkerWithoutMutatingTheCallersRepre
 	require.Len(t, got, 1)
 	assert.Nil(t, got[0].Provenance.Contract.SeriesID, "the narrowed copy must no longer look like an unresolved series")
 	require.NotNil(t, representative.Provenance.Contract.SeriesID, "the caller's own representative must be unaffected by narrowing a copy of it")
-	assert.Equal(t, 387, *representative.Provenance.Contract.SeriesID)
+	assert.Equal(t, dp1playlist.SeriesID("387"), *representative.Provenance.Contract.SeriesID)
 }
 
 // castPlanBody is the raw dp1_call bytes a static cast would have been
@@ -256,7 +256,7 @@ func TestResolveSeriesCastPlan_AnUnresolvedRepresentativeNeverReExpandsEither(t 
 	ts := setup(t)
 	defer ts.teardown()
 
-	seriesIDA, seriesIDB := 387, 512
+	seriesIDA, seriesIDB := dp1playlist.SeriesID("387"), dp1playlist.SeriesID("512")
 	itemA := dp1playlist.PlaylistItem{
 		ID: "item-a", Source: "https://cdn/a.mp4",
 		Provenance: &dp1playlist.ProvenanceBlock{
@@ -315,7 +315,7 @@ func TestResolveSeriesCastPlan_AnUnresolvedRepresentativeNeverReExpandsUnderFull
 	ts := setup(t)
 	defer ts.teardown()
 
-	seriesIDA, seriesIDB := 387, 512
+	seriesIDA, seriesIDB := dp1playlist.SeriesID("387"), dp1playlist.SeriesID("512")
 	itemA := dp1playlist.PlaylistItem{
 		ID: "item-a", Source: "https://cdn/a.mp4",
 		Provenance: &dp1playlist.ProvenanceBlock{
@@ -461,7 +461,7 @@ func TestResolveSeriesCastPlan_GroupsByChainAddressAndSeriesIdNotSeriesIdAlone(t
 	ts := setup(t)
 	defer ts.teardown()
 
-	seriesID := 387
+	seriesID := dp1playlist.SeriesID("387")
 	itemA := dp1playlist.PlaylistItem{
 		ID: "series-a", Source: "https://cdn/a.mp4",
 		Provenance: &dp1playlist.ProvenanceBlock{

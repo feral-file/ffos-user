@@ -1483,9 +1483,10 @@ func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Gran
 	if a.stateLocked(now) != StateLegacy || origin.Route == RouteRelayV2 {
 		// The device-ID relay is open to anyone who knows the public ID
 		// and has no plaintext profile read, so a first owner never
-		// enrolls over it; the LAN and the legacy relayer keep the
-		// screen-QR migration path (§5.1). Refused before the invitation
-		// is compared, so v2 is no oracle for it.
+		// enrolls over it. The legacy relayer is still admitted here, but
+		// only as the accepted §13 residual: clients enroll a first owner
+		// on the LAN only (§14 rule 11). Refused before the invitation is
+		// compared, so v2 is no oracle for it.
 		return invalid()
 	}
 	if a.inv == nil || now >= a.inv.expiresAt {

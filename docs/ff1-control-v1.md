@@ -1,8 +1,8 @@
 # FF1 control protocol v1 (feral-file#3551)
 
-Status: normative contract for the 3551 implementation. Supersedes
-`ff1-v2-controller-authentication.md` (MQTT/mTLS draft) for controller
-authentication. Every implementation (Go in `feral-controld/control`, Dart in
+Status: normative contract for the 3551 implementation, and the only
+controller-authentication contract (the earlier MQTT/mTLS drafts are
+deleted). Every implementation (Go in `feral-controld/control`, Dart in
 ff-app, TypeScript in ff1-cli, and any relay endpoint adapter for
 feral-file/ff-relayer#25) MUST pass the fixtures in
 `components/feral-controld/control/testdata/fixtures/`.
@@ -269,12 +269,13 @@ The first owner.
 - Valid only in state `legacy` (no active owner grant); otherwise the reply is
   `invitation_invalid`.
 - Refused with `invitation_invalid` on the device-ID relay (`RouteRelayV2`),
-  before the invitation is compared, so v2 is no oracle for it. The LAN and
-  the legacy relayer keep it: the on-screen invitation is the security, and
-  the legacy relayer is how a claimed 2.0.x device off the owner's LAN (or
-  on client-isolated Wi-Fi) is migrated ("Secure this FF1", then scan the
-  screen). On v2 a first owner has no way to seal anyway: there is no
-  plaintext profile read (§7.2).
+  before the invitation is compared, so v2 is no oracle for it. On v2 a first
+  owner has no way to seal anyway: there is no plaintext profile read (§7.2).
+- The device also admits it on the legacy relayer, but a client sends it only
+  on the LAN (§14 rule 11): becoming the first owner needs both the
+  invitation on the screen and a phone on the FF1's own network. The relayer
+  admission is a residual that ends with the legacy relayer (§13); it is not
+  a migration path.
 - `inv` is the current invitation: `b64u(16 random bytes)`, single use, 10-minute
   life, compared in constant time. There is **no attempt limit**: 128 random
   bits need none, and voiding the invitation after some number of misses
@@ -494,9 +495,15 @@ newcomer and no approval code is compared.
    `channelId` (`crypto.randomUUID()`). It joins that channel on the relay
    carrier (`/v2/channels/{channelId}/connections`) and shows the
    controller QR (§5.6.1) on its screen or terminal, plus the same string
-   for pasting.
-2. The owner's app scans it, picks the FF1, the role and an optional expiry,
-   and sends `registerController` (§5.6.4) under its owner grant.
+   for pasting. The Feral File app shows it as the app link of §5.6.1.1,
+   so the owner's system camera opens the app; ff-cli shows the bare
+   string. Either way the text for pasting is the bare string.
+2. The owner's app scans it or opens its link, picks the FF1 (or takes the
+   one the link names, §5.6.1.1), the role and an optional expiry, and
+   sends `registerController` (§5.6.4) under its owner grant. Its review
+   step names the FF1 the controller will be added to and SHOULD warn the
+   owner to add only a controller they expect to add (§13: a link can come
+   from anyone, and no code comparison would tell its maker apart).
 3. Only after a **verified** `ok:true` reply whose `res.ctl` is
    `thumb(QR sig)` does the owner's app join the channel and send the sealed
    result (§5.6.2) to the controller's connection. If the owner declines, it
@@ -511,9 +518,9 @@ newcomer and no approval code is compared.
 
 A leaked QR lets others join the channel, see ciphertext or disrupt the
 exchange, but not forge a result: forging needs `ps`, which is only in the
-QR and inside the ciphertext. A QR image forwarded to a remote owner through
-a chat app carries `ps` through that app; that is the accepted residual
-(§13).
+QR and inside the ciphertext. A QR image or link forwarded to a remote
+owner through a chat app carries `ps` through that app; that is the
+accepted residual (§13), as is a link opened in a browser.
 
 #### 5.6.1 Controller QR
 
@@ -534,6 +541,52 @@ a chat app carries `ps` through that app; that is the accepted residual
   the part after the prefix **at most 9 times**.
 - A parser MUST reject anything else. The QR is about 350 bytes; at error
   correction level H it is QR version 20 or below.
+
+##### 5.6.1.1 App-link envelope
+
+A client MAY show the controller QR as an app link, so a system camera
+opens the owner's app:
+
+`https://link.feralfile.com/controller#[d=<deviceId>&]c=<pct(payload)>`
+
+- Everything is in the **fragment**, which a browser never sends: `ps`, the
+  minter key and the device id stay out of the link host's and CDN's request
+  logs and out of chat apps' link-preview fetches. The path is fixed, so
+  the request names nothing.
+- `pct` is ECMAScript `encodeURIComponent`: every UTF-8 byte outside
+  `A-Z a-z 0-9 - _ . ! ~ * ' ( )` becomes upper-case `%XX`, so no raw `&`,
+  `=`, `?` or `#` remains in a value. Decoding turns every `%XX` back into
+  its byte, leaves `+` as `+`, and requires valid UTF-8.
+- `c`: the §5.6.1 payload, `pct`-encoded. The owner decodes it **once** and parses the
+  result under §5.6.1 unchanged; a client MUST NOT percent-decode the link
+  as a whole first, because a label may itself contain `%`.
+- `d`: optional, the `deviceId` (§2) of the FF1 the controller started from,
+  `pct`-encoded the same way. It MUST match
+  `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` (the hostname shape). Omitted when the controller started from no
+  device. When it is present the owner's app MUST NOT offer another FF1:
+  it opens that FF1 when it owns it and otherwise says the code is for
+  that device, and an Add controller already opened for another FF1
+  refuses the code before `registerController`. A client that holds a
+  device id outside that shape omits `d` rather than write it.
+- The fragment is exactly `c`, optionally preceded by `d`, each once. A
+  repeated or unknown key, a missing `c`, a malformed escape or a `d` that
+  is not a hostname rejects the whole link. A query before the fragment,
+  and anything after a raw `?` inside it, are ignored (messaging apps
+  append tracking parameters).
+- `d` is unauthenticated, a routing hint only: a code's maker can name any
+  device. What the controller pins is still the profile in the owner's
+  sealed result (§5.6.3), so a wrong `d` only sends the owner to the wrong
+  device's review, where they decide.
+- The envelope changes neither the payload nor the derivation: `salt` stays
+  `SHA-256("ff1-ctl:1|" + channelId)` (§5.6.2).
+- The reference is `control.ControllerLink` / `ParseControllerLink`; the
+  `controller-link.json` vectors (§12) pin both directions.
+- Percent-encoding makes the link longer than the payload (~480 bytes for a
+  64-character ASCII label with `d`, about 9 bytes per CJK character), so
+  the link QR uses error correction level **M**: QR version 20 or below for
+  every ASCII label and up to about 28 CJK characters. A longer non-ASCII
+  label gives a denser QR. A phone screen is a clean surface, so level M's
+  margin is enough there.
 
 #### 5.6.2 Sealed registration result
 
@@ -826,7 +879,7 @@ legacy relayer only. Envelopes are admitted exactly as on any other route.
 route; a client sends it there only with a profile pinned from a §5.6
 registration result or confirmed by a grant it holds (§10). There is no plaintext exception on v2, not even a profile read:
 a controller learns the profile from the screen QR pins (first owner, on the
-LAN or the legacy relayer) or from its registration result (§5.6), so v2
+LAN, §14 rule 11) or from its registration result (§5.6), so v2
 carries envelopes only.
 
 **Dual-stack transport config.** The v2 endpoint is its own `controld.json`
@@ -1245,8 +1298,10 @@ reply rather than `bad_envelope`.
   hand, pinned from the screen QR.
 - `showPairingQRCode` with `{"show":true,"purpose":"enroll"}` on a `legacy`,
   claimed device displays the invitation QR. This is the migration path for
-  2.0.x owners. On a device that is not `legacy` the same request paints the
-  ordinary claim QR without invitation fields.
+  2.0.x owners, and for a device released by "Forget I exist" (§5.5) whose
+  claim QR carries no invitation. Clients send it, and the enroll that
+  follows, on the LAN only (§14 rule 11). On a device that is not `legacy`
+  the same request paints the ordinary claim QR without invitation fields.
 
 ## 12. Fixtures
 
@@ -1273,6 +1328,15 @@ reply rather than `bad_envelope`.
   `negative/controller-qr.json` (`kind:"controllerQR"`): `cases` of a `qr`
   string and, for valid ones, its parsed `channelId`, `minterKey`, `ctl`,
   `sig`, `enc` (canonical JWK JSON), `ps`, `platform`, `label`.
+- App-link envelope (§5.6.1.1). `positive/controller-link.json` and
+  `negative/controller-link.json` (`kind:"controllerLink"`): `cases` of a
+  `link` and, for valid ones, the `qr` payload it carries and the `deviceId`
+  it names (absent for none); the positive file also has `builds`, a `qr`
+  and a `deviceId` (possibly empty or malformed) with the exact `link` a
+  client renders. An owner implementation MUST parse every positive case,
+  reject every negative one as a whole and render every build byte for
+  byte. A client that never opens a controller link (ff-cli, which only
+  shows the bare string) need not run them.
   `positive/controller-registration*.json` and `negative/registration-*.json`
   (`kind:"registration"`): the controller's `qr` and private `minterKey`,
   `controller` (the `keys.json` controller whose keys the QR carries),
@@ -1348,6 +1412,14 @@ and the ff1-cli test suite does the same with `jose`.
   the same class as the open legacy `factoryReset` and `connect`: in
   `legacy` the LAN is open by design (§7.2), and the invitation itself only
   ever appears on the physical screen.
+- Residual, accepted: the device still admits a first-owner `enroll` with
+  `inv` on the legacy relayer (§5.1), which §14 rule 11 forbids clients to
+  send. The claim QR carries the topic, so anyone who sees or photographs it
+  during the invitation's 10-minute life can enroll from anywhere with a
+  client of their own. Refusing it on the device would add little while the
+  legacy relayer runs: a topic holder already has every plaintext command of
+  a `legacy` device there (§7.2), `factoryReset` and `sshAccess` included.
+  It closes with the legacy relayer (§15.4).
 - Residual, accepted: the enforced-boot purge (§9) evicts the relayer's
   stored rows of each persisted plaintext type. Any copy a subscriber
   already received, and a purge that failed to send, are outside the
@@ -1401,6 +1473,20 @@ and the ff1-cli test suite does the same with `jose`.
   on the public device channel. The reach is unchanged: the controller believes in a
   fake FF1 (what it sends goes to the forger), and the real FF1 grants that
   party nothing.
+- Residual, accepted: the app-link form of the controller QR (§5.6.1.1)
+  keeps `ps` out of every request, but a phone that opens the link in a
+  browser (no app installed, an in-app browser, a browser chosen for the
+  domain) keeps the whole URL, fragment included, in its browser history,
+  synced histories too. Whoever reads that history during the exchange
+  holds `ps`, with the same reach as the forwarded-QR residual above.
+- Residual, accepted: a controller link can reach an owner from anyone (a
+  chat message, an email, a web page) and opens the owner's review in one
+  tap; the label it shows is its maker's choice. An owner who taps Add
+  registers the maker's keys. A short code compared on both screens would
+  not help: the maker generates the code with the QR and can send it along
+  (and could grind keys to match any short code, §5.4). The owner's app
+  names the FF1 the controller will be added to and warns to add only an
+  expected controller; the owner's tap is the decision.
 - Residual, accepted: a request a controller signs **before** its keys are
   registered is answered `unknown_controller` and never enters a window, so a
   copy captured on the relay can be replayed if the owner registers those
@@ -1486,7 +1572,18 @@ showed what goes wrong without them.
 
    Whenever the scanned QR carries pins, a client MUST compare them with
    any profile it reads from the network and MUST NOT proceed on a
-   mismatch, whichever path it is on.
+   mismatch, whichever path it is on. Two exceptions (feral-file#3551,
+   feral-file/ff-app#1216):
+   - the §5.6 registration result is owner-authenticated (the owner's
+     `registerController` reply was verified under its grant, and the
+     result is sealed to this controller's minter key), so a newcomer pins
+     from it and does not compare it with pins read off an owned device's
+     screen. Current apps never ask an owned device to paint its claim QR,
+     so there are no such pins to compare;
+   - an owned (`enrolled`/`enforced`) device's LAN status is never a pin
+     source. A client that reaches one writes nothing and sends no
+     `connect`: it opens the device when it already holds a grant, and
+     otherwise shows its controller QR to an owner (§5.6).
 
    The handoff authenticates the receiving client to the sending phone, not
    the sender to the receiver: whoever joins the handoff channel first with
@@ -1588,6 +1685,34 @@ showed what goes wrong without them.
     any channel peer can forge it); only a user action re-pairs. A
     `mint_succeeded` without `displayGrant` (older firmware) is
     `device_unsupported`: the session it carries is discarded.
+11. **First owner on the LAN only.** Becoming an FF1's first owner needs
+    the invitation on its screen and a phone on its own network. A
+    controller sends a first-owner `enroll` with `inv` (§5.1) and
+    `showPairingQRCode{purpose:"enroll"}` (§11) only to a LAN endpoint
+    whose identity it validated, never through the legacy relayer or v2,
+    whichever flow it is in (a scanned or opened claim QR, or "Secure this
+    Art Computer"). When a claim falls back to the relayer (the controller
+    found no LAN endpoint for the device) it reads `getDeviceStatus` there
+    first and decides on its `control` block, before any `connect`, write
+    or enroll:
+    - `legacy` (the protocol runs and nobody owns the device): it stops,
+      sends nothing more and writes nothing, and asks the person to join the
+      FF1's Wi-Fi. A plaintext `connect` there would claim a device that
+      should get an owner, leaving it ownerless and, when it was already
+      claimed, with its live invitation QR still on the screen. The
+      guidance covers a phone that is on that Wi-Fi but cannot see the
+      device (client isolation, a denied local-network permission).
+    - `enrolled` or `enforced`: the device has an owner. The controller
+      writes nothing and sends no `connect`, exactly as on the LAN (rule 1):
+      it opens the device when it holds a grant, and otherwise shows its
+      controller QR to an owner (§5.6).
+    - no `control` block (firmware without the protocol): the relayer claim
+      continues as before.
+
+    On the LAN, a claimed `legacy` device whose scanned QR carries no
+    invitation is asked to show one (`showPairingQRCode{purpose:"enroll"}`)
+    and enrolled from it; it is never claimed in plaintext. ff1-cli never
+    becomes a first owner, so in practice this rule binds ff-app.
 
 ## 15. Rollout and retirement
 
@@ -1661,13 +1786,16 @@ release operator applies them.
   reads one. A device claimed under legacy (topic, no owner) becomes
   v2-reachable only when an owner enrolls it on the LAN with the screen
   QR: the "Secure this Art Computer" flow sends plaintext
-  `showPairingQRCode{purpose:"enroll"}` by topic, LAN first, and enrolls
-  from the invitation QR (§5.1). The request needs no topic on the LAN
+  `showPairingQRCode{purpose:"enroll"}` on the LAN, by device ID, and
+  enrolls from the invitation QR (§5.1), never through the relayer (§14
+  rule 11). The request needs no topic on the LAN
   (the §13 residual: any LAN peer may send it in `legacy`), so a phone on
   the device's Wi-Fi that never held the topic sets up a claimed `legacy`
   device the same way, including one released by "Forget I exist"
   (§5.5), whose invitation QR is memory only and gone after a reboot.
-  Off the LAN, without the topic, there is no route.
+  Off the LAN a client has no first-owner route, with or without the topic
+  (§14 rule 11; the device still admits one on the legacy relayer, the §13
+  residual).
 - A client sends a sealed command on v2 only when the device's last status
   listed `relayV2` in `control.transports` (§11), or under the ff-cli
   exception in §15.4: a v2 send to a device that is not on v2 can be
@@ -1749,7 +1877,7 @@ because they are measured differently.
 | Gate | What it covers | Condition |
 |---|---|---|
 | A (controllers) | `/api/cast`, `/api/notification`, `/api/ephemeral-sessions` | app floor raised past the G3 app release (device identity by `deviceId`, LAN bind by QR pins without a topic, retirement read as above) AND past the release that sets up a claimed `legacy` device from its own invitation code over the LAN (ff-app#1199: bind by QR pins for a claimed device, ask a discovered one to show its code); before it, a released or unsecured claimed device cannot be set up by a phone without the topic once legacy is gone (G3 bench 2026-11-03, F1/F4); the G3 ff-cli release published (v2 default, retirement read as above, the no-working-topic v2 exception); Play integrators on 0.5; `tv-ws-usage` `/api/cast` traffic ~0 |
-| B (devices) | `/api/connection` (topic issuance) | from the device gauges (ffos-user `api-design.md`, `/metrics`): running version ≥ G3 AND `reset_target_version_info` ≥ G3 (`unknown` counts as below) for nearly all devices; legacy-dependent devices (claimed, topic present, `control_state=legacy`) under an agreed threshold; known remote installs contacted; shelf stock reflashed; and either nearly all devices run a controld that redials v2 on an online edge (ffos-user#432; without it every network change costs 2–3 minutes with no remote control, G3 bench F2) or that window is accepted |
+| B (devices) | `/api/connection` (topic issuance) | from the device gauges (ffos-user `api-design.md`, `/metrics`): running version ≥ G3 AND `reset_target_version_info{target_version}` ≥ G3 (`unknown` counts as below; a 3.0.0 controld exports this label as `version`, which vmagent overwrites with the running version, so only devices on the renamed-label package report it) for nearly all devices; legacy-dependent devices (claimed, topic present, `control_state=legacy`) under an agreed threshold; known remote installs contacted; shelf stock reflashed; and either nearly all devices run a controld that redials v2 on an online edge (ffos-user#432; without it every network change costs 2–3 minutes with no remote control, G3 bench F2) or that window is accepted |
 
 `tv-ws-usage` (one sampled row per legacy request that reached a topic)
 shows controller traffic falling. It cannot measure devices: a device that

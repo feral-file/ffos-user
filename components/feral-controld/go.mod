@@ -6,7 +6,7 @@ require github.com/gorilla/websocket v1.5.3
 
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0
-	github.com/display-protocol/dp1-go v0.6.2
+	github.com/display-protocol/dp1-go v0.7.2
 	github.com/ethereum/go-ethereum v1.17.2
 	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20261027140929-82d5ebae13e4
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
