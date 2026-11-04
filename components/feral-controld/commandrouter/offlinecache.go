@@ -433,9 +433,9 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 // Interception is keyed on the URLs the kiosk actually fetches, so the scope
 // has to describe what the PLAYER holds — not what the daemon would resolve
 // the same status to now. Whenever player status carries a concrete item list
-// (a static inline playlist: the filtered active set the player was cast),
+// (a static inline playlist: the filtered active set the player was sent),
 // that list IS what it holds, and re-resolving it can only diverge from the
-// screen: a seriesRegistry item cast while the catalog was unreachable keeps
+// screen: a seriesRegistry item display request while the catalog was unreachable keeps
 // its representative, so a later pass whose expansion succeeds would scope
 // replay to editions that were never displayed and never cached. SyncPlaylist
 // then finds nothing cached and disables replay outright (see

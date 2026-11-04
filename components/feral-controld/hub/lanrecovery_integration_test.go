@@ -150,7 +150,7 @@ func newLANRig(t *testing.T, gateCfg commandrouter.GateConfig, statusInfo Status
 	}
 }
 
-// postCast POSTs a cast envelope to the LAN hub and returns the status code and
+// postCast POSTs a command envelope to the LAN hub and returns the status code and
 // body. It mirrors a phone-side LAN recovery client hitting the device.
 func (r *lanRig) postCast(t *testing.T, body string) (int, string) {
 	t.Helper()

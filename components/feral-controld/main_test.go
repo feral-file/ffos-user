@@ -1623,7 +1623,7 @@ func TestInitializeAppGatewayUserAgentKeepsUsableHosts(t *testing.T) {
 // player against those defaults, and nothing re-pushes the scheduler when
 // content-policy syncs a moment later — so a durable, acknowledged
 // showMatureContent setting visibly fails after a player restart until some
-// later cast, refresh or cutover.
+// later display request, refresh or cutover.
 //
 // Asserted against the source rather than a live session because the session
 // exposes no way to read back its registration order; this is the same

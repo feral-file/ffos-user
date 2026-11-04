@@ -375,7 +375,7 @@ func TestRefresher_FutureOnlyCachedFallback_ClearsOnPromote(t *testing.T) {
 }
 
 // TestRefresher_ForceCast_UnpublishedAcrossGenerationBump: the cold-cache
-// reconstruction of a scheduled playlist is a force cast; when the page
+// reconstruction of a scheduled playlist is a force-display; when the page
 // generation moves while the send is in flight, its accepted reply is for a
 // page that is gone, so the verdict is not published — but the schedule was
 // replaced, so pending is still restaged for the new page's re-push.
@@ -405,7 +405,7 @@ func TestRefresher_ForceCast_UnpublishedAcrossGenerationBump(t *testing.T) {
 		AnyTimes()
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(v2, nil).AnyTimes()
 	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(_ string, params map[string]any) (any, error) {
-		assert.Contains(t, params["expression"].(string), `"now_display"`, "cold-cache reconstruction is a force cast")
+		assert.Contains(t, params["expression"].(string), `"now_display"`, "cold-cache reconstruction is a force display")
 		gen++ // the page reloads while the send is in flight
 		select {
 		case sent <- struct{}{}:
@@ -418,7 +418,7 @@ func TestRefresher_ForceCast_UnpublishedAcrossGenerationBump(t *testing.T) {
 	select {
 	case <-sent:
 	case <-time.After(2 * time.Second):
-		t.Fatal("refresher never force-cast")
+		t.Fatal("refresher never force-displayed")
 	}
 	time.Sleep(200 * time.Millisecond)
 	r.Stop()
@@ -474,7 +474,7 @@ func TestRefresher_InlineDynamicUsesRetainedVerifiedSource(t *testing.T) {
 	onScreen.ID = "dyn-1"
 	onScreen.Verification = nil
 	require.True(t, onScreen.HasDynamicContent())
-	// The cast retained the verified document (same id, valid verdict).
+	// The display request retained the verified document (same id, valid verdict).
 	retained := createMockPlaylist()
 	retained.ID = "dyn-1"
 	valid := sigverify.Verdict{Status: sigverify.StatusValid}

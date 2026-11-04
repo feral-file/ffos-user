@@ -31,7 +31,7 @@ func TestProcessEnforcesPrincipalTier(t *testing.T) {
 		{ctl, "someUnknownCommand", ""},   // unknown: owner-only, never forwarded
 		{owner, "mintPairingDisplay", ""}, // internal: nobody from outside
 		{owner, commands.Type(control.CmdEnvelope), ""},
-		// A display grant (§5.7) runs the Play-shape cast and nothing else.
+		// A display grant (§5.7) runs the Play display request and nothing else.
 		{display, commands.CMD_DEVICE_STATUS, `{}`},
 		{display, commands.CMD_DISPLAY_PLAYLIST, `{"dp1_call":{}}`},
 	} {

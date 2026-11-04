@@ -33,7 +33,7 @@ not break existing unsigned feeds by introducing a signature migration.
   internal projection and removes now-invalid signatures from that projection.
 - Playback origin is external context (`curated` by default, `personal` only
   when explicitly supplied) and must survive refresh and schedule ownership.
-- Empty filtered casts fail with `contentBlocked` before replay scope, scheduler,
+- Empty filtered display requests fail with `contentBlocked` before replay scope, scheduler,
   or current-player mutation.
 
 ## Implementation

@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A responsive source must release a cast even while another source is stuck.
+// A responsive source must release a display request even while another source is stuck.
 // The fake waits for both requests to enter, so this exercises cancellation of
 // an in-flight request, not merely skipping the unstarted tail of a playlist.
 type castLatencyClient struct {
@@ -82,5 +82,5 @@ func TestSourceProber_InlineSourceNeedsNoNetworkPreflight(t *testing.T) {
 	})
 	require.Equal(t, ProbeInconclusive, results[0].Verdict)
 	require.Equal(t, ProbeInline, results[1].Verdict)
-	require.Zero(t, client.requests.Load(), "inline content already rules out an all-dead cast")
+	require.Zero(t, client.requests.Load(), "inline content already rules out an all-dead display request")
 }

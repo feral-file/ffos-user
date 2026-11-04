@@ -11,7 +11,7 @@ replay session already provide the necessary device boundaries.
    Office's five Coral images replay quickly once downloaded (31.5 MB total).
 2. Preserve signed source URLs, manual offline downloads, clear/capture fencing,
    bounded background work, resource admission and the playback-generation
-   fence. Capture must never navigate the kiosk or delay a cast acknowledgement.
+   fence. Capture must never navigate the kiosk or delay a display request's acknowledgement.
 3. Risks: caching mutable content forever, prefetch competing with playback,
    repeating downloads for a playlist larger than storage, and unrelated disk
    writers consuming the remaining space during a transfer.

@@ -181,7 +181,7 @@ type Service interface {
 	// gone.
 	CloseActivePairing(ctx context.Context) (closed bool, err error)
 	// SetDisplayGrants wires the control authority that issues display grants
-	// to Play 0.5 sites and the v2 endpoint those sites cast through
+	// to Play 0.5 sites and the v2 endpoint those sites send through
 	// (docs/ff1-control-v1.md §5.7). Call once at wiring time. Not called,
 	// or called with a nil issuer or an empty endpoint, every 0.5 request is
 	// answered display_grant_unavailable.

@@ -1228,7 +1228,7 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 // unexamined. v0.6.0 points that overlay at the unmodified ref-manifest schema,
 // so the field is now checked — and dp1-go's hydration loop returns on the
 // first invalid item rather than skipping it, which makes ONE bad manifest fail
-// the WHOLE cast. See processDynamicPlaylistSpec's doc for why that fail-closed
+// the WHOLE display request. See processDynamicPlaylistSpec's doc for why that fail-closed
 // outcome is accepted rather than softened here.
 //
 // Both directions are pinned deliberately: a test that only asserted the
@@ -1355,7 +1355,7 @@ func TestDP1_ProcessDynamicPlaylist_RejectsWrongTypedResolvedRatings(t *testing.
 	_, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist)
 	require.Error(t, err)
 	// Pointer only — the validator's own message, which can quote the offending
-	// value, must not survive into an error returned to a caster.
+	// value, must not survive into an error returned to a sender.
 	assert.ErrorContains(t, err, "contentRating")
 	assert.NotContains(t, err.Error(), "invalid playlist item",
 		"dp1-go's message must not be carried through verbatim")

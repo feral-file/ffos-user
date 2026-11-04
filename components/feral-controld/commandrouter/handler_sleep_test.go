@@ -26,8 +26,8 @@ func sleepTestPlaylist() *dp1.Playlist {
 	}
 }
 
-// A person's cast (hub or relayer) while the player sleeps wakes it first,
-// then casts. The wake must land before the player send.
+// A person's display request (hub or relayer) while the player sleeps wakes it first,
+// then display requests. The wake must land before the player send.
 func TestCommandHandler_Process_DisplayPlaylist_ControllerCastWakesSleepingPlayer(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -58,7 +58,7 @@ func TestCommandHandler_Process_DisplayPlaylist_ControllerCastWakesSleepingPlaye
 	assert.NotNil(t, result)
 }
 
-// The device's own casts (scheduler cutovers, OOM recovery) carry no
+// The device's own display requests (scheduler cutovers, OOM recovery) carry no
 // controller mark and leave a sleeping player asleep: no wakeNow is issued.
 func TestCommandHandler_Process_DisplayPlaylist_DeviceCastLeavesSleepingPlayerAsleep(t *testing.T) {
 	ts := setup(t)
@@ -77,7 +77,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DeviceCastLeavesSleepingPlayerAs
 	assert.NotNil(t, result)
 }
 
-// An awake player needs no wake, whoever casts.
+// An awake player needs no wake, whoever sends.
 func TestCommandHandler_Process_DisplayPlaylist_ControllerCastWhileAwakeDoesNotWake(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -103,7 +103,7 @@ func TestCommandHandler_Process_DisplayPlaylist_ControllerCastWhileAwakeDoesNotW
 	assert.NotNil(t, result)
 }
 
-// A wake that fails fails the cast: nothing reaches the player, and the reply
+// A wake that fails fails the display request: nothing reaches the player, and the reply
 // does not claim a display that cannot happen.
 func TestCommandHandler_Process_DisplayPlaylist_WakeFailureFailsCast(t *testing.T) {
 	ts := setup(t)

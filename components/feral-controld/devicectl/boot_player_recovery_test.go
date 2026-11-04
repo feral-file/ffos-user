@@ -846,7 +846,7 @@ func TestBootRecovery_BackoffTimerIsPrimaryReentry(t *testing.T) {
 				}, nil
 			}
 			// Second round (fired by the backoff timer): hydration settled with
-			// nothing to cast -> Succeeded, ending the loop.
+			// nothing to display -> Succeeded, ending the loop.
 			return map[string]interface{}{
 				"protocol": float64(1),
 				"route":    statusRoutePlaylist, "handlerRegistered": true,

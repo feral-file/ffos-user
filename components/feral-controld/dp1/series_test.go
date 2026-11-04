@@ -160,7 +160,7 @@ func TestDP1_KeepsASeriesThePlaylistTheCatalogDoesNotHold(t *testing.T) {
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
-	// A cast of something never published, or an older channel revision:
+	// A display request of something never published, or an older channel revision:
 	// the catalog 404s and the body is never read.
 	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
 		Return(createMockResponse(http.StatusNotFound, `{"status":404}`), nil)
@@ -317,7 +317,7 @@ func TestDP1_A256BitSeriesIDOnAnEditionExpands(t *testing.T) {
 }
 
 // TestDP1_CastCapHoldsAcrossPlainAndExpandedAppends is the regression test
-// for the first run-reviewer round's finding: the cast cap
+// for the first run-reviewer round's finding: the display cap
 // (CAST_PLAYLIST_ITEMS_LIMIT, only passed as maxItems by
 // ProcessPlaylistURLForCast) was checked after a successful series
 // expansion's append, but not after a plain item's or a kept-unexpanded
@@ -384,7 +384,7 @@ func TestDP1_TheCatalogEndpointIsHTTPSAndAllowlisted(t *testing.T) {
 //
 // All three fields are pinned together because they are one mechanism, not
 // three bugs — every consumer that reads them runs AFTER expansion
-// (commandrouter's scheduled-cast scan, playlistschedule's timer,
+// (commandrouter's scheduled-request scan, playlistschedule's timer,
 // contentpolicy's filter), and `contentRating` is the one whose loss fails
 // open: a mature series would expand into unrated editions.
 func TestDP1_ExpandedEditionsInheritTheSeriesItemsInstanceFields(t *testing.T) {
@@ -823,9 +823,9 @@ func TestDP1_EditionsThatShareAnOverrideKeepIt(t *testing.T) {
 // The catalog answers from a snapshot of the series item taken at its last
 // ingest, so a curator who removes a series' `displayAt` keeps getting editions
 // that carry the old timestamp until the next ingest. Unlike a content rating,
-// a stale schedule has no safe direction to fail in: it makes the cast
+// a stale schedule has no safe direction to fail in: it makes the display request
 // preflight read an unscheduled playlist as scheduled and skip the dead-link
-// probe, and it arms a Daily timer that delays a cast nothing intends to delay
+// probe, and it arms a Daily timer that delays a display request nothing intends to delay
 // (run-reviewer round 1, F2).
 func TestDP1_AStaleCatalogScheduleDoesNotSurviveExpansion(t *testing.T) {
 	ts := setup(t)

@@ -133,7 +133,7 @@ func newPolicyRefresher(t *testing.T, statusContext string, store *contentpolicy
 
 // A player that predates this feature omits contentContext from its status, so
 // the source the refresher rebuilds carries an UNKNOWN origin — not a curated
-// one. Defaulting it to curated would silently reclassify a cast the owner made
+// one. Defaulting it to curated would silently reclassify a display request the owner made
 // as personal and strip the mature items they deliberately put on the wall on
 // the very next refresh, which is the opposite of the documented guarantee that
 // context survives refresh.
@@ -166,7 +166,7 @@ func TestRefreshProjectsAKnownCuratedContext(t *testing.T) {
 		t.Fatalf("a curated refresh must still withhold mature items; sent=%s", *sent)
 	}
 	if !strings.Contains(*sent, "https://example.test/safe") {
-		t.Fatalf("the allowed item must still be cast; sent=%s", *sent)
+		t.Fatalf("the allowed item must still be sent; sent=%s", *sent)
 	}
 }
 
@@ -218,7 +218,7 @@ func (s *legacySourceScheduler) PrepareWithSource(p *dp1.Playlist, _ playlistsch
 }
 
 // newInlineRefresher builds a refresher whose player is displaying a STATIC
-// inline playlist: the shape an app cast usually takes, and the one with no
+// inline playlist: the shape an app display request usually takes, and the one with no
 // refreshable source to re-resolve.
 func newInlineRefresher(t *testing.T, statusContext string, store *contentpolicy.Store) (*refresher, *string) {
 	t.Helper()
@@ -271,7 +271,7 @@ func newInlineRefresher(t *testing.T, statusContext string, store *contentpolicy
 	return r, &sent
 }
 
-// An inline cast has no source to re-resolve, so this path used to send
+// An inline display request has no source to re-resolve, so this path used to send
 // nothing. That left the one case the policy most needs to cover: an owner
 // turning mature content OFF while a mature work is on screen, with no later
 // refresh that would ever remove it.
@@ -340,7 +340,7 @@ func TestStaticInlineRefreshLeavesAnUnknownContextAlone(t *testing.T) {
 }
 
 // authoritySpyScheduler reports a token that has MOVED since the pass started,
-// standing in for a newer cast completing while this refresh was projecting.
+// standing in for a newer display request completing while this refresh was projecting.
 type authoritySpyScheduler struct {
 	playlistschedule.Scheduler
 	pushed bool
@@ -362,7 +362,7 @@ func (s *authoritySpyScheduler) SetProjector(playlistschedule.Projector) {}
 
 // The inline policy re-send is built from a status read taken BEFORE the
 // projection, so it must run under the scheduler push lock and re-check the
-// authority token: a cast that completed in between would otherwise be
+// authority token: a display request that completed in between would otherwise be
 // overwritten by this stale playlist, restoring the previous artwork and its
 // offline-replay scope.
 func TestStaticInlineRefreshSkipsWhenPlaylistAuthorityMoved(t *testing.T) {
@@ -376,7 +376,7 @@ func TestStaticInlineRefreshSkipsWhenPlaylistAuthorityMoved(t *testing.T) {
 		t.Fatal(err)
 	}
 	if *sent != "" {
-		t.Fatalf("a newer cast must not be overwritten by a stale policy re-send; sent=%s", *sent)
+		t.Fatalf("a newer display request must not be overwritten by a stale policy re-send; sent=%s", *sent)
 	}
 }
 

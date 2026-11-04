@@ -9,20 +9,20 @@ import (
 )
 
 // SeriesPlaybackMode is a seriesRegistry item's own stated intent, or a
-// device's override of it: which of a series' editions a cast actually
+// device's override of it: which of a series' editions a display request actually
 // carries. Not part of DP-1 core (display-protocol/dp1#55 does not define
 // it) and not a dp1-go field — read from the raw document bytes by
 // readItemSeriesPlaybackModes, ahead of a proposal (feral-file/ffos-user#425).
 type SeriesPlaybackMode string
 
 const (
-	// SeriesPlaybackFirst casts only the series' representative edition.
+	// SeriesPlaybackFirst displays only the series' representative edition.
 	SeriesPlaybackFirst SeriesPlaybackMode = "first"
-	// SeriesPlaybackFull casts every edition the catalog returned.
+	// SeriesPlaybackFull displays every edition the catalog returned.
 	SeriesPlaybackFull SeriesPlaybackMode = "full"
 	// SeriesPlaybackRandom is accepted and stored like any other mode, but
 	// FF1 has no re-roll-per-loop behavior and narrowEditions resolves it to
-	// SeriesPlaybackFirst at cast time — see that function's doc.
+	// SeriesPlaybackFirst at accept time — see that function's doc.
 	SeriesPlaybackRandom SeriesPlaybackMode = "random"
 )
 
@@ -40,7 +40,7 @@ func ParseSeriesPlaybackMode(s string) (SeriesPlaybackMode, bool) {
 	}
 }
 
-// ResolveSeriesPlaybackMode decides which mode a series item actually casts
+// ResolveSeriesPlaybackMode decides which mode a series item actually displays
 // in. device is the owner's device-level setting (nil means "follow the
 // document" — the nullable, absent-is-distinguishable-from-first state
 // required by feral-file/ffos-user#425); document is the item's own stated
@@ -52,7 +52,7 @@ func ParseSeriesPlaybackMode(s string) (SeriesPlaybackMode, bool) {
 // for. When device is nil, the document's own stated mode is authoritative.
 // When NEITHER states anything, the default is SeriesPlaybackFull — the
 // behavior every series.go caller already has today (feral-file/ffos-user#421),
-// so content published before this field existed keeps casting exactly as it
+// so content published before this field existed keeps displaying exactly as it
 // does now (owner decision, 2026-10-30).
 func ResolveSeriesPlaybackMode(document, device *SeriesPlaybackMode) SeriesPlaybackMode {
 	if device != nil {
@@ -64,15 +64,15 @@ func ResolveSeriesPlaybackMode(document, device *SeriesPlaybackMode) SeriesPlayb
 	return SeriesPlaybackFull
 }
 
-// NarrowEditions returns the editions a cast in mode actually carries.
-// full casts every catalog edition; first and random both narrow to
+// NarrowEditions returns the editions a display request in mode actually carries.
+// full displays every catalog edition; first and random both narrow to
 // representative — the series item's OWN declared edition (dp1/series.go:
 // "its own `source` is one representative edition"), not editions[0]. The
 // catalog's ordering has no guarantee of matching what the document itself
 // named as representative (feralfile-bot F1, 2026-10-30), so first/random
 // must use representative directly rather than slicing the catalog's
 // answer. FF1 has no re-roll-per-loop behavior, so random has nothing to
-// randomize AT CAST TIME and resolves to the same single edition first
+// randomize At accept time and resolves to the same single edition first
 // would (owner decision, 2026-10-30; AC4 of feral-file/ffos-user#425).
 // random is still stored and returned as its own value everywhere else —
 // only this narrowing step collapses it.
@@ -82,7 +82,7 @@ func ResolveSeriesPlaybackMode(document, device *SeriesPlaybackMode) SeriesPlayb
 // emitting it as-is would still satisfy isSeriesItem. clearSeriesMarker
 // strips that marker from the copy returned here, never from representative
 // itself, so a later re-entry into Process built from this output (a
-// setSeriesPlayback re-cast, a recently-played replay) is never re-read as
+// setSeriesPlayback re-display, a recently-played replay) is never re-read as
 // an unresolved series (feralfile-bot F4, 2026-10-30).
 func NarrowEditions(mode SeriesPlaybackMode, representative dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
 	if mode == SeriesPlaybackFull {
@@ -138,7 +138,7 @@ func seriesGroupKey(item dp1playlist.PlaylistItem) (SeriesGroupKey, bool) {
 // catalog is unreachable, holds nothing for it, or the budget is spent — as
 // its own one-edition group, rather than a plain Item segment. A plain Item
 // would carry the document's series marker (contract.seriesId) straight
-// through Narrow untouched: harmless for a cast built fresh from a real
+// through Narrow untouched: harmless for a display request built fresh from a real
 // document, but not for commandrouter's internal rebuild (recastForMode),
 // which feeds Narrow's own output back into Process as a new dp1_call — a
 // marker-carrying item there still satisfies isSeriesItem, so it is resolved
@@ -165,7 +165,7 @@ func seriesGroupKey(item dp1playlist.PlaylistItem) (SeriesGroupKey, bool) {
 // Resolved is deliberately left false (the zero value): this group has no
 // real catalog data behind it, only the one item it was given, and
 // CastPlan.HasSeriesGroups must not count a LONE one of these as something
-// worth tracking for a later re-cast — see that method's doc.
+// worth tracking for a later re-display — see that method's doc.
 func unresolvedSeriesGroup(item dp1playlist.PlaylistItem, documentMode *SeriesPlaybackMode) *ResolvedSeriesGroup {
 	representative := clearSeriesMarker(item)
 	group := &ResolvedSeriesGroup{
@@ -184,7 +184,7 @@ func unresolvedSeriesGroup(item dp1playlist.PlaylistItem, documentMode *SeriesPl
 
 // ResolvedSeriesGroup is one series item's resolved expansion: its identity,
 // the document's own stated mode (nil if absent or unrecognized), the series
-// item itself (Representative — what first/random actually cast, per
+// item itself (Representative — what first/random actually display, per
 // NarrowEditions' doc), and the FULL edition set the catalog returned — kept
 // un-narrowed so a later device setting change can re-narrow it
 // (CastPlan.Narrow) without a second catalog round trip (AC5 of
@@ -193,7 +193,7 @@ func unresolvedSeriesGroup(item dp1playlist.PlaylistItem, documentMode *SeriesPl
 // Resolved is true only when the catalog actually answered for this series —
 // false for unresolvedSeriesGroup's fallback, whose "editions" is just the
 // one item itself. CastPlan.HasSeriesGroups reads this to decide whether a
-// cast is worth caching for a later re-narrow; Narrow and NarrowEditions do
+// display request is worth caching for a later re-narrow; Narrow and NarrowEditions do
 // not care and treat both the same way.
 type ResolvedSeriesGroup struct {
 	Key            SeriesGroupKey
@@ -211,7 +211,7 @@ type CastSegment struct {
 	Group *ResolvedSeriesGroup
 }
 
-// CastPlan is what one cast resolved, in playlist order. Narrow rebuilds the
+// CastPlan is what one display request resolved, in playlist order. Narrow rebuilds the
 // actual item list to send for a given device setting; a plan with no
 // series groups at all narrows to exactly the original items. maxItems is
 // applied by Narrow itself, not while the plan is built: Segments carries
@@ -226,13 +226,13 @@ type CastPlan struct {
 
 // HasSeriesGroups reports whether this plan carries any GENUINELY RESOLVED
 // series group — commandrouter's rememberSeriesCast reads this to decide
-// whether a cast is worth caching for a later, network-free re-narrow
+// whether a display request is worth caching for a later, network-free re-narrow
 // (CastPlan.Narrow) when the device setting changes.
 //
 // An unresolved fallback (unresolvedSeriesGroup: Resolved false) does not
 // count, even though it is a Group segment: it carries no real catalog data
 // to re-narrow, so caching it buys nothing, and caching it was actively
-// harmful (feralfile-bot F1 on this fix, 2026-11-02) — a cast with no OTHER
+// harmful (feralfile-bot F1 on this fix, 2026-11-02) — a display request with no OTHER
 // resolved group would then be remembered as "tracked", so a later
 // setSeriesPlayback call would re-enter recastForMode's rebuild-and-Process
 // path instead of no-opping, and for the (default) full mode that rebuild's
@@ -253,7 +253,7 @@ func (p CastPlan) HasSeriesGroups() bool {
 	return false
 }
 
-// Narrow flattens the plan into the item list to actually cast under device
+// Narrow flattens the plan into the item list to actually display under device
 // (the current device-level setting; nil means "follow each group's own
 // document mode"). Every group resolves independently: two series in the
 // same playlist can carry different document modes, and only an EXPLICIT
@@ -293,7 +293,7 @@ type rawPlaylistItem struct {
 // caller's parsed item count): short of that on a parse failure or a raw
 // document that named fewer items, nil beyond n's end never happens.
 //
-// raw may be nil — an internally rebuilt re-cast (setSeriesPlayback's
+// raw may be nil — an internally rebuilt re-display (setSeriesPlayback's
 // re-narrow) has no wire form — in which case every item reads as absent,
 // which is correct: there is no document distinct from what controld itself
 // just resolved.
@@ -325,7 +325,7 @@ func (d *dp1) readItemSeriesPlaybackModes(raw json.RawMessage, n int) []*SeriesP
 	return modes
 }
 
-// resolveSeriesCastPlan is expandSeriesItems's cast-aware sibling: instead of
+// resolveSeriesCastPlan is expandSeriesItems's display-aware sibling: instead of
 // flattening every series item into all its editions (always, regardless of
 // intent — the #421 behavior this issue corrects), it keeps each series
 // group's FULL edition set alongside the document's own stated mode, so the
@@ -341,7 +341,7 @@ func (d *dp1) readItemSeriesPlaybackModes(raw json.RawMessage, n int) []*SeriesP
 // trailing segments an earlier, narrower flatten had no room for
 // (feralfile-bot F3, 2026-10-30; see CastPlan's doc). A series this walk
 // cannot expand — the catalog is unreachable, holds nothing for it, or the
-// budget is spent — still casts exactly as expandSeriesItems would (its own
+// budget is spent — still displays exactly as expandSeriesItems would (its own
 // representative, unflattened), but is wrapped as its own one-edition group
 // (unresolvedSeriesGroup) rather than a plain item, so the document's mode
 // survives into the cache and a later internal rebuild never re-resolves or
@@ -417,7 +417,7 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 			}
 			seg = CastSegment{Group: group}
 			mode := ResolveSeriesPlaybackMode(group.DocumentMode, deviceMode)
-			d.logger.Info("resolved a series for cast",
+			d.logger.Info("resolved a series for display",
 				zap.String("playlist_id", playlist.ID),
 				zap.String("item_slug", item.Slug),
 				zap.Int("editions", len(inherited)),
@@ -431,7 +431,7 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 
 // ResolveSeriesCastPlan is resolveSeriesCastPlan, exported for the
 // commandrouter package: the one call site with the raw document bytes a
-// cast needs to read seriesPlayback from (see the DP1 interface doc).
+// display request needs to read seriesPlayback from (see the DP1 interface doc).
 func (d *dp1) ResolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawPlaylist json.RawMessage, deviceMode *SeriesPlaybackMode, maxItems int) CastPlan {
 	return d.resolveSeriesCastPlan(ctx, playlist, rawPlaylist, deviceMode, maxItems)
 }

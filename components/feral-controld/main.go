@@ -844,10 +844,10 @@ func replayScopeResyncReconciler(refresher playlist_refresher.Refresher) func(co
 // contentPolicySyncAttempts bounds the reconnect sync retry. Reconcilers run
 // SEQUENTIALLY in registration order and this one is registered before
 // playlist-recompute, so retrying here is what keeps a transient failure from
-// being followed by a scheduled cast to a player still on its own defaults —
+// being followed by a scheduled display request to a player still on its own defaults —
 // a cohort the scheduler then records as delivered and never re-pushes. Bounded
 // rather than persistent: a player that is genuinely gone must not hold the
-// whole reconnect lane, and every other trigger (cast, refresh, cutover, the
+// whole reconnect lane, and every other trigger (display request, refresh, cutover, the
 // next generation) re-syncs anyway.
 const contentPolicySyncAttempts = 3
 
@@ -878,7 +878,7 @@ func contentPolicyReconciler(handler commandrouter.Handler, store *contentpolicy
 			case <-time.After(contentPolicySyncRetryDelay):
 			}
 		}
-		// Left deliberately non-fatal: the scheduled cast that follows is still
+		// Left deliberately non-fatal: the scheduled display request that follows is still
 		// better than a blank wall, and it is filtered by the daemon either way.
 		// What this cannot do on its own is guarantee the PLAYER is in step —
 		// see the per-generation verification discussion on #349.
@@ -894,7 +894,7 @@ func contentPolicyReconciler(handler commandrouter.Handler, store *contentpolicy
 // soon as CDP reports initialized, so a restarted player can render a refresh
 // under ITS defaults before the owner's policy lands, and nothing re-sends
 // afterwards. A persisted showMatureContent:true then visibly fails until the
-// next periodic pass or cast.
+// next periodic pass or display.
 //
 // Deliberately conditional on the policy being non-default. An unconditional
 // force here would put a soft artwork refresh on EVERY generation bump — every
@@ -1044,21 +1044,21 @@ func initializeApp(
 
 	// DP1
 	// DP-1 signature verification (feral-file/ffos-user#307). Verdicts are
-	// computed on every fetched or inline playlist and reported on the cast
+	// computed on every fetched or inline playlist and reported on the display request
 	// reply and player_status for diagnostics, without changing what plays
 	// or showing notices. The config flag is the kill
 	// switch for a verifier/canonicalization divergence (see
 	// config.SignatureVerificationConfig).
 	sigVerifyEnabled := config.Get().SignatureVerificationEnabled()
 	if !sigVerifyEnabled {
-		logger.Warn("DP-1 signature verification disabled by config; casts carry no signature verdict")
+		logger.Warn("DP-1 signature verification disabled by config; display requests carry no signature verdict")
 	}
 	// Raster read key for address-playlist wallet walks (feral-file#3576).
 	// Absent means the walk runs unauthenticated; whether Raster then answers
-	// is Raster's call, so say so once at startup rather than per cast.
+	// is Raster's call, so say so once at startup rather than per display request.
 	rasterCfg := config.Get().RasterTuning(logger)
 	if rasterCfg.APIKey == "" {
-		logger.Warn("raster.apiKey not configured; Raster wallet casts run unauthenticated")
+		logger.Warn("raster.apiKey not configured; Raster wallet display requests run unauthenticated")
 	}
 	dp1 := dp1.New(ffIndexer, httpClient, dp1.NewRasterHTTPClient(), json, io, logger, debug, sigVerifyEnabled, rasterCfg.APIKey)
 
@@ -1101,7 +1101,7 @@ func initializeApp(
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
 	mintPairing := mintpairing.New(mintPairingOpts, notifyRelayer, cdp, httpClient, relayerAPIKey, json, logger)
 	// Display grants for Play 0.5 sites need the control authority and the
-	// v2 endpoint the site will cast through; with either missing every 0.5
+	// v2 endpoint the site will send through; with either missing every 0.5
 	// request is refused display_grant_unavailable (spec §5.7).
 	if controlWire != nil && controlWire.v2 != nil {
 		mintPairing.SetDisplayGrants(controlWire.auth, v2Config[0].Endpoint)
@@ -1226,7 +1226,7 @@ func initializeApp(
 		seriesPlaybackStore = seriesplayback.Fallback(constants.SERIES_PLAYBACK_FILE)
 	}
 	commandrouter.SetSeriesPlayback(rawCmdHandler, seriesPlaybackStore, logger)
-	// Cast-time source preflight (#304): a displayPlaylist whose every item
+	// Accept-time source preflight (#304): a displayPlaylist whose every item
 	// source definitively answers an HTTP error is rejected at accept time
 	// instead of being forwarded and self-reported as playing. Wired against
 	// the raw handler before NewGate wraps it (SetSourceProber's contract),
@@ -1239,18 +1239,18 @@ func initializeApp(
 	// offline cache's classifier uses it: the guard's view of a name must
 	// match what would actually be dialed (see offlinecache.ErrUnsafeSource).
 	if sp := config.Get().SourceProbe; sp != nil && sp.Disabled {
-		logger.Warn("displayPlaylist source preflight disabled by config; casts are forwarded unprobed")
+		logger.Warn("displayPlaylist source preflight disabled by config; display requests are forwarded unprobed")
 	} else {
 		commandrouter.SetSourceProber(rawCmdHandler, offlinecache.NewSourceProber(net.DefaultResolver), logger)
 	}
 	// Signature verification wiring: the same Active slot feeds the raw
-	// handler (writes on cast), the refresher (writes on re-push, below)
+	// handler (writes on display request), the refresher (writes on re-push, below)
 	// and the status poller (reads on every poll). Wired against the raw
 	// handler for the same reason as SetSourceProber above.
 	activeVerdict := &sigverify.Active{}
 	if sigVerifyEnabled {
 		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict}, logger)
-		// A displayAt-deferred cast parks its verdict as pending; the
+		// A displayAt-deferred display request parks its verdict as pending; the
 		// scheduler's own cutover push is the only point that proves the
 		// cohort reached the screen, so that is where it is promoted — and
 		// the slot is invalidated as the push starts, so no status round
@@ -1309,7 +1309,7 @@ func initializeApp(
 	})
 	if sigVerifyEnabled {
 		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
-		// Same generation fence for the refresher's force casts.
+		// Same generation fence for the refresher's force-displays.
 		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
 	}
 
@@ -1466,7 +1466,7 @@ func initializeApp(
 	// Content policy MUST reconcile before playlist-recompute. A freshly
 	// initialized player starts on default policy, so a recompute that
 	// force-pushes a scheduled cohort first would have its mature items
-	// withheld by the player until some later cast, refresh or cutover —
+	// withheld by the player until some later display request, refresh or cutover —
 	// a durable, acknowledged Content setting visibly failing after a player
 	// restart. Nothing re-pushes the scheduler when the policy syncs later.
 	if policyStore != nil {

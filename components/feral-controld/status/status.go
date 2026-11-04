@@ -62,7 +62,7 @@ type PlayerStatus struct {
 		Framing     *string `json:"framing,omitempty"`
 		Orientation *string `json:"orientation,omitempty"`
 		// Device-level default playlist item duration in seconds, set via the
-		// updateDefaultDuration cast command. Absent means "auto" (no
+		// updateDefaultDuration command. Absent means "auto" (no
 		// override). Must round-trip here or this typed re-marshal drops it
 		// from player_status notifications before controllers can read it.
 		DefaultDuration *float64 `json:"defaultDuration,omitempty"`
@@ -78,10 +78,10 @@ type PlayerStatus struct {
 	// signature verdict of the playlist currently on screen, "valid",
 	// "invalid", or "unsigned" (feral-file/ffos-user#307). Attached by
 	// pollPlayerStatus from the verification lookup when the reply's
-	// playlist id or URL matches the last cast controld verified; omitted
-	// when it cannot be matched (player-fetched default playlist, a cast
+	// playlist id or URL matches the last command controld verified; omitted
+	// when it cannot be matched (player-fetched default playlist, a command
 	// from before this process started, verification disabled). A stable
-	// string that only changes on a cast, so it does not defeat the
+	// string that only changes on a command, so it does not defeat the
 	// notification dedupe hash.
 	SignatureStatus *string `json:"signatureStatus,omitempty"`
 	// Stamp echoes window.__ffosDocStamp back from CheckDeviceStatusReply — the

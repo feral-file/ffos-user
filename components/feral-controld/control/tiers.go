@@ -82,12 +82,12 @@ var commandTiers = map[string]Tier{
 	CmdReleaseOwnership:   TierOwner,
 	// Player CastCommand names that reach the player over the CDP
 	// fallthrough. cursorUpdate is pointer injection like the gestures;
-	// disconnect tears down the player's cast session.
+	// disconnect tears down the player's command session.
 	"cursorUpdate": TierOwner,
 	"disconnect":   TierOwner,
 
 	// --- controller: playback, display, power, read-only status ---
-	// connect starts every ff-app cast. Only an owner claims or rebinds: the
+	// connect starts every ff-app command. Only an owner claims or rebinds: the
 	// executor answers a non-owner connect to a claimed device ok without
 	// changing anything, and refuses one to an unclaimed device (§7.1).
 	string(commands.CMD_CONNECT):                   TierController,

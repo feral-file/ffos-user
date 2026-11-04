@@ -294,7 +294,7 @@ func TestDefaultGateConfig_ClassifiesCommands(t *testing.T) {
 	assert.True(t, reboot.Dedupe)
 	assert.Less(t, reboot.Rate, 1.0)
 
-	// The externally reachable cast path is heavier-weight than a cheap query.
+	// The externally reachable display path is heavier-weight than a cheap query.
 	cast := cfg.Policies[commands.CMD_DISPLAY_PLAYLIST]
 	query := cfg.Policies[commands.CMD_DEVICE_STATUS]
 	assert.Greater(t, cast.Weight, query.Weight)
@@ -358,7 +358,7 @@ func TestDefaultGateConfig_ClassifiesOfflineCacheCommands(t *testing.T) {
 	query := cfg.Policies[commands.CMD_DEVICE_STATUS]
 
 	// Downloads are explicitly classified, not left at Default, and carry
-	// the same heavier weight as the externally reachable cast path.
+	// the same heavier weight as the externally reachable display path.
 	cast := cfg.Policies[commands.CMD_DISPLAY_PLAYLIST]
 	for _, cmd := range []commands.Type{commands.CMD_DOWNLOAD_PLAYLIST_ITEM, commands.CMD_DOWNLOAD_PLAYLIST} {
 		p := cfg.Policies[cmd]
@@ -508,7 +508,7 @@ func (p *seriesPlaybackModeProbe) Process(_ context.Context, command commands.Co
 // own execution. Request B ("full"), with different arguments, ran and
 // completed independently in between. The gate then returned A's own
 // ("first") result to C, even though B's call was the last to actually
-// persist and re-cast — exactly the "controller is told its setting saved
+// persist and re-display — exactly the "controller is told its setting saved
 // when it did not" bug the finding reported. With dedupe off, every accepted
 // call reaches the handler, so C runs for real.
 func TestGate_SetSeriesPlaybackDoesNotDropALaterIdenticalRequest(t *testing.T) {

@@ -30,7 +30,7 @@ var (
 
 // newGateHub builds a hub on a real mux with real JSON, pinned to claim, so
 // requests run the whole route: middleware seam, single body decode, the
-// cast-level gate, and the command router mock.
+// command-level gate, and the command router mock.
 func newGateHub(t *testing.T, claim state.ClaimInfo) (*http.ServeMux, *mocks.MockCommandHandler, *fakeScreenshotCapturer) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
@@ -63,7 +63,7 @@ func strPtr(s string) *string { return &s }
 // TestCastTopicGate pins the feral-file#3551 phase-0 policy on /api/cast:
 // on a claimed device sshAccess needs X-FF1-Topic equal to the current topic
 // (no topic yet = refuse); unclaimed devices and every other command —
-// connect included, which the released app sends before every LAN cast
+// connect included, which the released app sends before every LAN command
 // without the header — are untouched. A refusal never reaches the command router — the
 // mock carries no expectation, so any call through fails the test.
 func TestCastTopicGate(t *testing.T) {
@@ -79,7 +79,7 @@ func TestCastTopicGate(t *testing.T) {
 		{"claimed sshAccess with wrong header", claimedWithTopic, commands.CMD_SSH_ACCESS, strPtr("topic-wrong"), false},
 		{"claimed sshAccess with topic prefix", claimedWithTopic, commands.CMD_SSH_ACCESS, strPtr(testTopic[:len(testTopic)-1]), false},
 		{"claimed sshAccess with right header", claimedWithTopic, commands.CMD_SSH_ACCESS, strPtr(testTopic), true},
-		{"claimed connect without header stays open (released app casts)", claimedWithTopic, commands.CMD_CONNECT, nil, true},
+		{"claimed connect without header stays open (released app sends it)", claimedWithTopic, commands.CMD_CONNECT, nil, true},
 		{"claimed connect with wrong header stays open", claimedWithTopic, commands.CMD_CONNECT, strPtr("topic-wrong"), true},
 		{"claimed but no topic yet refuses sshAccess even with a header", claimedNoTopic, commands.CMD_SSH_ACCESS, strPtr(testTopic), false},
 		{"claimed with no topic yet leaves connect open", claimedNoTopic, commands.CMD_CONNECT, nil, true},

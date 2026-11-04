@@ -213,7 +213,7 @@ exits the instant that specific generation is ready.
 `Page.navigate` always lands the document on `/` first; the client-side
 auto-route to `/playlist` only fires once hydration finishes, well after
 `StageHandler` resolves. `/` is also a legitimate steady state (nothing
-currently cast), not only a transient. `awaitRouteSettled` polls the route
+currently displayed), not only a transient. `awaitRouteSettled` polls the route
 (bounded by the same cap the caller applies — 20s, see §3.4) until:
 
 - it reaches `/playlist` or `/sleep` → verified success;
@@ -351,10 +351,10 @@ Total table, in the order actually checked:
 | 2 | `route == /error` (protocol-independent) | Expired — never navigate |
 | 3 | `route == /sleep` | Deferred (backoff + wake accelerator) |
 | 4 | `bootHydration == pending` | Deferred, no attempt |
-| 5 | `bootHydration == halted_cleared` | Succeeded — disconnect cleared the cast mid-boot, wall intentionally dark |
+| 5 | `bootHydration == halted_cleared` | Succeeded — disconnect cleared the display request mid-boot, wall intentionally dark |
 | 6 | `bootHydration == failed` (scoped to `initCastInfo` failures only, never a display-settings read failure) | attempt: NavigateHome |
 | 7 | `bootHydration == halted_preserving` | no separate action — already covered by rows 2/3 when applicable, otherwise falls through |
-| 8 | `hasArtwork == false && bootHydration == ok` | Succeeded — nothing cast |
+| 8 | `hasArtwork == false && bootHydration == ok` | Succeeded — nothing displayed |
 | 9 | `hasArtwork == true && !handlerRegistered && route == /playlist` | Deferred — route mounted, handler not yet |
 | 10 | structured status answered but nothing above matched | fall through to the live refresh probe below |
 | 11 | structured status unavailable, OR fell through from row 10: `StageHandler` timeout on a live connection | attempt: NavigateHome |
@@ -578,7 +578,7 @@ never destructively:
   old player is invisible to the generation model until the next CDP
   reconnect. Teaching the watchdog a sleep-aware guard is a known follow-up,
   not yet implemented.
-- **Casts remain off-lane.** A cast can race a navigation's teardown
+- **Display requests remain off-lane.** A display request can race a navigation's teardown
   window; the generation re-check (§4) turns silence into a loud failure
   for the caller to retry, it does not prevent the race.
 - **The stamp-mismatch generation source has a narrow, accepted false-negative

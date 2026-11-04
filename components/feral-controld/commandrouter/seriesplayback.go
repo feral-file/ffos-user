@@ -43,7 +43,7 @@ func ResetSeriesPlayback(h Handler) error {
 }
 
 // currentSeriesPlaybackMode reads the device-level override without taking
-// the store's lock, mirroring contentpolicy.Store.Snapshot: the cast path
+// the store's lock, mirroring contentpolicy.Store.Snapshot: the display path
 // this feeds (the static dp1_call branch) already runs ahead of the content-
 // policy lock and the kiosk playback lock, and must not add a third lock to
 // that ordering for a value this cheap to read lock-free. nil means "follow
@@ -56,10 +56,10 @@ func (h *handler) currentSeriesPlaybackMode() *dp1.SeriesPlaybackMode {
 	return h.seriesPlayback.Snapshot().Mode
 }
 
-// displayedSeriesCast is the most recently cast playlist's resolved series
+// displayedSeriesCast is the most recently displayed playlist's resolved series
 // groups (feral-file/ffos-user#425's AC5): kept so a device-setting change
-// can re-narrow and re-cast WITHOUT a catalog round trip, since the full
-// edition set was already fetched to resolve the ORIGINAL cast regardless of
+// can re-narrow and re-display WITHOUT a catalog round trip, since the full
+// edition set was already fetched to resolve the ORIGINAL display request regardless of
 // which mode it narrowed to (see dp1.CastPlan's doc).
 //
 // seq is a write counter guarding the one race this cache has: recastForMode
@@ -67,20 +67,20 @@ func (h *handler) currentSeriesPlaybackMode() *dp1.SeriesPlaybackMode {
 // dp1_call branch immediately overwrites this cache with a group-less plan
 // (the rebuilt, already-narrowed document carries no seriesRegistry marker
 // to resolve) — see recastForMode's doc for how seq lets it tell "nothing
-// else wrote this cache since" from "a concurrent cast took over the screen
-// while we were re-casting" and only restores the group data in the former
+// else wrote this cache since" from "a concurrent display request took over the screen
+// while we were re-displaying" and only restores the group data in the former
 // case.
 //
 // accepted is tracked separately from seq and valid: an entry is recorded
-// before its cast's preflight and player send (see rememberSeriesCast), so
-// valid alone only means "a cast of this series was attempted". Only an
+// before its request's preflight and player send (see rememberSeriesCast), so
+// valid alone only means "a display request of this series was attempted". Only an
 // accepted entry describes what is on screen, and recastForMode acts on
-// nothing else. seq cannot stand in for it: a failed re-cast that overlaps a
-// still-pending cast moves seq on, after which that cast's own settle no
+// nothing else. seq cannot stand in for it: a failed re-display that overlaps a
+// still-pending display request moves seq on, after which that request's own settle no
 // longer matches and could not have retracted the entry (PR #431 review F2).
 //
 // Scoped to ONE playlist, matching the FF1 kiosk's single screen: a new
-// CMD_DISPLAY_PLAYLIST cast (of any kind — see rememberSeriesCast) always
+// CMD_DISPLAY_PLAYLIST display request (of any kind — see rememberSeriesCast) always
 // replaces this wholesale, never merges into it.
 type displayedSeriesCast struct {
 	mu             sync.Mutex
@@ -93,17 +93,17 @@ type displayedSeriesCast struct {
 }
 
 // rememberSeriesCast records what Process just resolved for a
-// CMD_DISPLAY_PLAYLIST cast. Called for EVERY such cast, not only a static
+// CMD_DISPLAY_PLAYLIST display request. Called for EVERY such display request, not only a static
 // dp1_call with series groups: plan is the zero value (no segments) for the
-// playlistUrl and dynamic branches, and for a static cast with none, which
+// playlistUrl and dynamic branches, and for a static display request with none, which
 // correctly CLEARS any series this device was previously tracking — a stale
 // entry must not outlive what is actually on screen.
 //
-// Called eagerly, before this cast's own preflight/CDP send, so the entry
+// Called eagerly, before this request's own preflight/CDP send, so the entry
 // starts unaccepted and Process settles it with settleSeriesCast once the
 // player's answer is known. Acting only on accepted entries is load-bearing,
-// not tidiness: a rejected entry would let a LATER setSeriesPlayback re-cast
-// content that never reached the screen, and that re-cast does NOT fail the
+// not tidiness: a rejected entry would let a LATER setSeriesPlayback re-display
+// content that never reached the screen, and that re-display does NOT fail the
 // same way — narrowing changes which sources the preflight checks, so a
 // series whose editions all 404 but whose representative is reachable is
 // rejected in full yet accepted narrowed to "first", replacing whatever is
@@ -121,7 +121,7 @@ func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, c
 		return h.lastSeriesCast.seq
 	}
 	shell := playlist
-	shell.Items = nil // rebuilt from plan.Narrow on re-cast; the shell carries only playlist-level metadata.
+	shell.Items = nil // rebuilt from plan.Narrow on re-display; the shell carries only playlist-level metadata.
 	h.lastSeriesCast.valid = true
 	h.lastSeriesCast.shell = shell
 	h.lastSeriesCast.plan = plan
@@ -130,17 +130,17 @@ func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, c
 }
 
 // settleSeriesCast records the player's answer for the entry
-// rememberSeriesCast recorded as seq: an accepted cast (including a
+// rememberSeriesCast recorded as seq: an accepted display request (including a
 // displayAt-deferred acceptance) marks it accepted, anything else retracts
 // it. A no-op when anything has written the cache since (seq moved on):
-// that later write describes a newer cast and must stand. If seq moved on
-// while this cast was still unaccepted, the entry it wrote is already gone
+// that later write describes a newer display request and must stand. If seq moved on
+// while this display request was still unaccepted, the entry it wrote is already gone
 // (overwritten), so there is nothing left to retract.
 //
 // Deliberately does NOT advance seq. recastForMode tells "only my own
-// re-entrant cast wrote this cache" by seq == seqBefore+1; settling that
-// re-entrant cast must not disturb the count, so recastForMode still
-// restores the series that IS on screen when the re-cast fails.
+// re-entrant display request wrote this cache" by seq == seqBefore+1; settling that
+// re-entrant display request must not disturb the count, so recastForMode still
+// restores the series that IS on screen when the re-display fails.
 func (h *handler) settleSeriesCast(seq uint64, accepted bool) {
 	h.lastSeriesCast.mu.Lock()
 	defer h.lastSeriesCast.mu.Unlock()
@@ -170,7 +170,7 @@ func (h *handler) settleSeriesCast(seq uint64, accepted bool) {
 // an uncertain accept is the same safe direction clearVerdictForDefaultPlayback
 // already takes for the verdict (an omission, never a stale claim): the
 // worst case of a GENUINE no-op is one missed network-free re-narrow, which
-// the series' own next CMD_DISPLAY_PLAYLIST cast repopulates.
+// the series' own next CMD_DISPLAY_PLAYLIST display request repopulates.
 func (h *handler) clearSeriesCast() {
 	h.lastSeriesCast.mu.Lock()
 	defer h.lastSeriesCast.mu.Unlock()
@@ -212,7 +212,7 @@ func (h *handler) handleSeriesPlayback(ctx context.Context, command commands.Com
 }
 
 // applySeriesPlayback persists the requested override and, when a series is
-// currently displayed, re-casts it under the new resolution.
+// currently displayed, re-displays it under the new resolution.
 func (h *handler) applySeriesPlayback(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	mode, ok := parseSeriesPlaybackRequest(args)
 	if !ok {
@@ -244,7 +244,7 @@ func (h *handler) applySeriesPlayback(ctx context.Context, args map[string]inter
 	return map[string]interface{}{"ok": true, "seriesPlayback": seriesPlaybackModeOrNil(setting.Mode), "active": true}, nil
 }
 
-// seriesRecastCoalescer bounds how many real re-casts a burst of
+// seriesRecastCoalescer bounds how many real re-displays a burst of
 // setSeriesPlayback calls performs. Without it, applySeriesPlayback would
 // need to hold something across recastForMode's own re-entrant, network-bound
 // preflight to stop two concurrent recastForMode calls from racing
@@ -264,13 +264,13 @@ type seriesRecastCoalescer struct {
 	pendingMode *dp1.SeriesPlaybackMode
 }
 
-// scheduleRecast re-narrows and re-casts the currently displayed series for
+// scheduleRecast re-narrows and re-displays the currently displayed series for
 // mode (see recastForMode's own doc for the no-op cases), coalescing with any
 // recast already in flight: if one is running, mode is recorded as the
 // latest request and this call returns immediately — relying on the running
 // call to perform exactly one more pass for whatever mode is newest once it
 // finishes, then check again. A single burst of N calls arriving while one
-// recast runs therefore performs at most two real re-casts (the first
+// recast runs therefore performs at most two real re-displays (the first
 // caller's own, plus one coalesced follow-up for the latest superseding
 // mode), not N serialized ones; only sustained, continuous arrivals — a new
 // request landing after every check, not just during the first pass — could
@@ -309,26 +309,26 @@ func (h *handler) scheduleRecast(ctx context.Context, mode *dp1.SeriesPlaybackMo
 }
 
 // recastForMode re-narrows the currently displayed series (if any) under
-// device and re-casts it, re-entering Process for CMD_DISPLAY_PLAYLIST
+// device and re-displays it, re-entering Process for CMD_DISPLAY_PLAYLIST
 // exactly as CMD_RECENTLY_PLAYED_REPLAY already does to replay a stored
 // record (handler.go) — an established pattern for feeding an internally
-// rebuilt dp1_call back through the whole normal cast pipeline (policy
+// rebuilt dp1_call back through the whole normal display request pipeline (policy
 // filter, preflight, scheduler) rather than re-implementing any of it here.
 //
 // A no-op when nothing is currently tracked as displaying a series — which
 // is the honest answer, not a missing re-fetch: once a series is narrowed
-// and cast, the player's playlist carries no seriesRegistry marker (AC3), so
+// and display, the player's playlist carries no seriesRegistry marker (AC3), so
 // there is no way to learn "a series is on screen" again except from THIS
 // cache. A cache that was never populated this boot (process just started,
 // or the current display never went through a static dp1_call with series
 // groups) has no series identity to re-fetch editions FOR.
 //
-// Also a no-op while the tracked series cast is still unaccepted (its
+// Also a no-op while the tracked series display request is still unaccepted (its
 // preflight or player send is pending) or was never accepted: only a series
 // the player took is on screen to re-narrow. The accepted residual is a
-// setting change that lands while a series cast is still pending: that cast
+// setting change that lands while a series display request is still pending: that display request
 // shows the mode it resolved with, and the new mode applies from the next
-// cast or setting change.
+// display request or setting change.
 func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackMode) {
 	h.lastSeriesCast.mu.Lock()
 	if !h.lastSeriesCast.valid || !h.lastSeriesCast.accepted {
@@ -350,12 +350,12 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 
 	b, err := h.json.Marshal(rebuilt)
 	if err != nil {
-		h.logger.Error("series playback: failed to rebuild the displayed playlist for re-cast", zap.Error(err))
+		h.logger.Error("series playback: failed to rebuild the displayed playlist for re-display", zap.Error(err))
 		return
 	}
 	var dp1Call map[string]interface{}
 	if err := h.json.Unmarshal(b, &dp1Call); err != nil {
-		h.logger.Error("series playback: failed to re-decode the rebuilt playlist for re-cast", zap.Error(err))
+		h.logger.Error("series playback: failed to re-decode the rebuilt playlist for re-display", zap.Error(err))
 		return
 	}
 
@@ -372,9 +372,9 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	// without a catalog call — but only if nothing else wrote the cache in
 	// between: seq advances by exactly 1 for that re-entrant write alone: a
 	// concurrent displayPlaylist landing in the same window advances it
-	// further, and that cast's own cache entry must stand, not this one's.
-	// Restored as accepted whether or not the re-cast succeeded: the plan
-	// was accepted when captured above, and a failed re-cast leaves that
+	// further, and that request's own cache entry must stand, not this one's.
+	// Restored as accepted whether or not the re-display succeeded: the plan
+	// was accepted when captured above, and a failed re-display leaves that
 	// same series on screen.
 	h.lastSeriesCast.mu.Lock()
 	if h.lastSeriesCast.seq == seqBefore+1 {
@@ -387,7 +387,7 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	h.lastSeriesCast.mu.Unlock()
 
 	if procErr != nil {
-		h.logger.Warn("series playback: re-cast after a setting change failed", zap.Error(procErr))
+		h.logger.Warn("series playback: re-display after a setting change failed", zap.Error(procErr))
 	}
 }
 

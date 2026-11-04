@@ -56,8 +56,8 @@ type KioskReplay interface {
 	// enabled reports how many distinct cached sources the applied scope
 	// actually covers — 0 means interception was disabled because
 	// nothing in sources is cached. Most callers only care about err
-	// (scope sync is best-effort for live casts), but the cache-rescued
-	// all-dead cast (#310 review) REQUIRES enabled >= 1: its only path
+	// (scope sync is best-effort for live display requests), but the cache-rescued
+	// all-dead display request (#310 review) REQUIRES enabled >= 1: its only path
 	// to the screen is replay, and HasReplayableItem's answer can be
 	// stale (a clear between lookup and sync) or fail-open (its bounded
 	// scan), so the count from the scope actually installed is the

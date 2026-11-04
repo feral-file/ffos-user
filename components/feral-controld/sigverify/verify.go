@@ -3,7 +3,7 @@
 // the daemon needs to report it (feral-file/ffos-user#307).
 //
 // The package is deliberately narrow: Verify is a pure function over bytes,
-// and the mode/policy that decides what a verdict MEANS for a cast lives in
+// and the mode/policy that decides what a verdict MEANS for a display request lives in
 // the caller (commandrouter) so this package never grows into a second
 // command router. It imports dp1-go's sign package and nothing of ours.
 //
@@ -58,7 +58,7 @@ const (
 
 // Signer is one signatures[] entry's identity plus its own verification
 // outcome. Kid is a DID (did:key / did:pkh), safe to log and to return to
-// casters: it names a public key, never a URL or a credential.
+// senders: it names a public key, never a URL or a credential.
 type Signer struct {
 	Alg  string `json:"alg"`
 	Kid  string `json:"kid"`
@@ -78,7 +78,7 @@ type Verdict struct {
 	// LegacyPresent reports a v1.0.x top-level `signature` string was found.
 	// Informational only (see StatusUnsigned).
 	LegacyPresent bool
-	// Reason is a short, caster-safe explanation for a non-valid status:
+	// Reason is a short, sender-safe explanation for a non-valid status:
 	// "unsigned", "unsigned; legacy signature ignored", or the first failed
 	// signer's "<role> signature invalid: <reason>". Empty when valid.
 	// Never contains a URL or a kid.
@@ -86,7 +86,7 @@ type Verdict struct {
 }
 
 // Reason vocabulary for a failed signer. Stable strings returned in diagnostic
-// cast replies and asserted by tests. No signer reason interpolates document
+// display request replies and asserted by tests. No signer reason interpolates document
 // text; the unsupported algorithm's name lives in Signer.Alg instead.
 const (
 	ReasonPayloadHashMismatch = "payload_hash mismatch"
@@ -105,8 +105,8 @@ const (
 )
 
 // Signer field bounds. alg, kid, and role are copied from an untrusted
-// document into the cast reply and the log line, so their length must not
-// be the caster's choice: an entry past any of these is reported as
+// document into the display reply and the log line, so their length must not
+// be the sender's choice: an entry past any of these is reported as
 // malformed with the oversized field blanked, verified by nothing, and the
 // document is invalid regardless of what dp1-go says about the other
 // entries (dp1-go does not look at role at all, so a valid signature with a
@@ -129,7 +129,7 @@ const MaxDocumentBytes = 4 << 20
 // to dp1-go. Every entry costs two JCS canonicalizations of the WHOLE
 // document (payload_hash check + signing digest), and the unauthenticated
 // LAN hub accepts a 4 MiB body with no entry cap — so an unbounded loop is
-// hours of CPU per hostile cast, holding a command-gate slot the whole
+// hours of CPU per hostile display request, holding a command-gate slot the whole
 // time. DP-1 defines six roles (curator, feed, agent, institution, licensor,
 // publisher); 16 is comfortably above any honest chain. Past it the
 // document is invalid with ReasonTooManySignatures and NO cryptography
@@ -261,7 +261,7 @@ func Verify(raw []byte) Verdict {
 
 // refuseOversized reports the invalid verdict for a document in which any
 // entry exceeds a signer field bound, or (nil, false) when every entry is in
-// bounds. The oversized fields are blanked so nothing caster-sized is echoed;
+// bounds. The oversized fields are blanked so nothing sender-sized is echoed;
 // in-bounds sibling entries are listed as unverified, because the document
 // is refused before any of them is checked.
 func refuseOversized(entries []dp1playlist.Signature, legacy bool) (Verdict, bool) {

@@ -39,7 +39,7 @@ func TestActive_DifferentIDsSameURL_Miss(t *testing.T) {
 }
 
 // TestActive_URLMatchesWhenEitherSideLacksID: the URL is the fallback
-// identity only when an id is missing on one side (URL casts whose reply
+// identity only when an id is missing on one side (URL display requests whose reply
 // echoes no playlist.id, or a slot set without one).
 func TestActive_URLMatchesWhenEitherSideLacksID(t *testing.T) {
 	var a sigverify.Active
@@ -100,7 +100,7 @@ func TestActive_ReconcileSoft_DifferingIDsBecomeIDOnly(t *testing.T) {
 
 	a.Set("fresh", url, sigverify.StatusUnsigned)
 	st, ok = a.Lookup("", url)
-	assert.True(t, ok, "a fresh cast restores the URL fallback")
+	assert.True(t, ok, "a fresh display request restores the URL fallback")
 	assert.Equal(t, sigverify.StatusUnsigned, st)
 }
 
@@ -122,7 +122,7 @@ func TestActive_ReconcileSoft_IDOnlyIsSticky(t *testing.T) {
 	assert.True(t, ok, "a reply naming A is still A")
 	assert.Equal(t, sigverify.StatusValid, st)
 
-	a.Set("C", url, sigverify.StatusValid) // a force cast resolves it
+	a.Set("C", url, sigverify.StatusValid) // a force display resolves it
 	st, ok = a.Lookup("", url)
 	assert.True(t, ok)
 	assert.Equal(t, sigverify.StatusValid, st)
@@ -240,7 +240,7 @@ func TestActive_ClearDropsCurrent(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// TestActive_PendingIsNotLookedUpUntilPromoted: a deferred cast's verdict
+// TestActive_PendingIsNotLookedUpUntilPromoted: a deferred request's verdict
 // must not describe the playlist still on screen, even when both share the
 // URL — only a promotion (the cutover push) moves it into current.
 func TestActive_PendingIsNotLookedUpUntilPromoted(t *testing.T) {
@@ -283,8 +283,8 @@ func TestActive_PromoteIsIdempotentAndNoopWhenNothingPending(t *testing.T) {
 	assert.Equal(t, sigverify.StatusUnsigned, st)
 }
 
-// TestActive_FreshCastDropsPending: a new cast replaces the schedule, so a
-// verdict parked by an earlier deferred cast must never be promoted later.
+// TestActive_FreshCastDropsPending: a new display request replaces the schedule, so a
+// verdict parked by an earlier deferred display request must never be promoted later.
 func TestActive_FreshCastDropsPending(t *testing.T) {
 	var a sigverify.Active
 	a.SetPending("scheduled", "", sigverify.StatusInvalid)

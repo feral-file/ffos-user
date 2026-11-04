@@ -32,8 +32,8 @@ const topicRequiredBody = `{"error":{"code":"topic_required"}}` + "\n"
 // the topic.
 //
 // connect deliberately stays open in phase 0: the released ff-app sends it
-// LAN-first before every cast, without the header and with no relayer fallback
-// on a LAN HTTP error, so gating it would break casting. An open connect only
+// LAN-first before every command, without the header and with no relayer fallback
+// on a LAN HTTP error, so gating it would break sending. An open connect only
 // rewrites the claim record and confers no authority; the phase-1 control
 // protocol makes it owner-tier.
 //

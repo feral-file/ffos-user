@@ -1965,7 +1965,7 @@ func (m deadlineMatcher) String() string {
 // resolveDisplayedPlaylist's defensive series expansion, then only re-points
 // interception — it never sends the player a playlist.
 //
-// A seriesRegistry item cast while the catalog was unreachable keeps its
+// A seriesRegistry item display request while the catalog was unreachable keeps its
 // representative, so that is what the kiosk holds and what the cache
 // captured. If the catalog has recovered by the time a clear triggers this
 // resync, the expansion now answers with the real editions; scoping replay to

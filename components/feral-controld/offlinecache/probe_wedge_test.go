@@ -8,8 +8,8 @@ package offlinecache
 // exist at all. What these pin is the verdict table (#304): only an actual
 // HTTP >= 400 answer is Dead; everything that prevents a definitive answer
 // — network faults, guard refusals, over-long URLs, a spent context — is
-// Inconclusive, because the handler treats Inconclusive in the cast's
-// favor and an offline device must keep casting cached playlists.
+// Inconclusive, because the handler treats Inconclusive in the request's
+// favor and an offline device must keep displaying cached playlists.
 
 import (
 	"context"
@@ -191,7 +191,7 @@ func TestSourceProber_HTTPErrorIsDead(t *testing.T) {
 // kiosk's (no cookies, Go's default User-Agent where uarewrite rewrites
 // the kiosk's for bot-challenging origins — #296 is the shipped proof a
 // 403 to one client is a 200 to another), so an auth wall, bot
-// challenge, or rate limit must never kill a cast the player might
+// challenge, or rate limit must never kill a display request the player might
 // render. Same rule for 5xx: server trouble is routinely transient.
 func TestSourceProber_IdentityDependentStatusIsInconclusive(t *testing.T) {
 	for _, status := range []int{
@@ -299,7 +299,7 @@ func TestSourceProber_ResultsKeepInputOrder(t *testing.T) {
 // TestSourceProber_SpentContextIsInconclusive pins the ceiling shape: a
 // context that is already done (the degenerate form of the phase ceiling
 // firing) yields Inconclusive for every item — never Dead, so a timed-out
-// preflight can never kill a cast.
+// preflight can never kill a display request.
 func TestSourceProber_SpentContextIsInconclusive(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -307,7 +307,7 @@ func TestSourceProber_SpentContextIsInconclusive(t *testing.T) {
 	// Far more items than worker slots, deliberately: the pool must
 	// drain a large list against a spent context quickly (the O(1)
 	// ctx.Err path), and every result must land Inconclusive — never
-	// Dead — so a timed-out preflight can never kill a cast.
+	// Dead — so a timed-out preflight can never kill a display request.
 	sources := make([]string, 50)
 	for i := range sources {
 		sources[i] = fmt.Sprintf("https://origin.example/%d", i)
@@ -325,7 +325,7 @@ func TestSourceProber_SpentContextIsInconclusive(t *testing.T) {
 // TestSourceProber_DuplicateSourcesProbedOnce pins the dedup: the worker
 // pool bounds concurrency but not request count, so identical sources must
 // share one probe — otherwise a playlist repeating one URL turns a single
-// cast into transport-speed traffic against that origin.
+// display request into transport-speed traffic against that origin.
 func TestSourceProber_DuplicateSourcesProbedOnce(t *testing.T) {
 	var requests atomic.Int32
 	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
@@ -371,9 +371,9 @@ func TestSourceProber_FragmentVariantsShareOneProbe(t *testing.T) {
 	}
 }
 
-// TestSourceProber_ProbeBudgetFailsOpen pins the per-cast attempt cap:
+// TestSourceProber_ProbeBudgetFailsOpen pins the per-request attempt cap:
 // wire-distinct URLs past maxProbeAttempts are never probed and land
-// Inconclusive — a cast over budget can therefore never be rejected on
+// Inconclusive — a display request over budget can therefore never be rejected on
 // the strength of unprobed items.
 func TestSourceProber_ProbeBudgetFailsOpen(t *testing.T) {
 	var requests atomic.Int32
@@ -427,7 +427,7 @@ func TestSourceProber_LongValidDataURIMetadataFailsOpen(t *testing.T) {
 // the probe never follows a redirect — the 3xx IS the answer (alive,
 // fail-open; the kiosk follows it itself) — so one probed source is at
 // most ONE outbound request no matter how the origin answers, and a
-// redirect chain cannot multiply the per-cast budget.
+// redirect chain cannot multiply the per-request budget.
 func TestSourceProber_RedirectsAreAnswersNotFollowed(t *testing.T) {
 	var destRequests atomic.Int32
 	dest := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
@@ -495,7 +495,7 @@ func TestSourceProber_RedirectChainCannotExceedBudget(t *testing.T) {
 // TestSourceProber_NoConnectionReuseAcrossProbes pins the #311 round-2
 // fix at its mechanism: every probe dials a FRESH connection (keep-alives
 // disabled), because net/http replays an idempotent GET only on a REUSED
-// idle connection that dies — no reuse, no replay, and the per-cast
+// idle connection that dies — no reuse, no replay, and the per-request
 // request budget stays literal even against an origin that seeds and
 // drops idle connections.
 func TestSourceProber_NoConnectionReuseAcrossProbes(t *testing.T) {
@@ -525,7 +525,7 @@ func TestSourceProber_NoConnectionReuseAcrossProbes(t *testing.T) {
 // rule: inline items never dial, so they must not charge the outbound
 // budget — otherwise a playlist packed with malformed data: URIs (a
 // pure-CPU Dead verdict) would push a real dead HTTP source into
-// budget-exhausted Inconclusive and shield an entirely unusable cast
+// budget-exhausted Inconclusive and shield an entirely unusable display request
 // from rejection.
 func TestSourceProber_DataURIsDoNotConsumeDialBudget(t *testing.T) {
 	var requests atomic.Int32

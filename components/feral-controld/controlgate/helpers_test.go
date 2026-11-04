@@ -59,7 +59,7 @@ type sent struct {
 	claims control.RequestClaims
 	rk     []byte
 	body   json.RawMessage // the ff1Envelope request object
-	cast   []byte          // the whole cast body
+	cast   []byte          // the whole command body
 }
 
 func (c *client) build(op control.Op, cmd string, req string, inv string) sent {

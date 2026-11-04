@@ -15,7 +15,7 @@ import (
 
 // ControlGate is the hub's view of the feral-file#3551 control gate
 // (controlgate.Gate). Nil — the control.enabled=false default — leaves every
-// route exactly as it was before the protocol: an ff1Envelope cast then falls
+// route exactly as it was before the protocol: an ff1Envelope command then falls
 // through to the router like any unknown command.
 type ControlGate interface {
 	HandleEnvelope(ctx context.Context, raw json.RawMessage, origin control.Origin) (*controlgate.Wire, *control.PublicError)
@@ -38,7 +38,7 @@ func writeControlError(w http.ResponseWriter, code string) {
 	_, _ = w.Write(append(control.PublicErrorBody(code), '\n'))
 }
 
-// serveEnvelope answers an ff1Envelope cast (§10): 200 with {"v":1,"jwe"}
+// serveEnvelope answers an ff1Envelope command (§10): 200 with {"v":1,"jwe"}
 // for every authenticated outcome (encrypted errors included), or the public
 // error in clear.
 func (h *hub) serveEnvelope(w http.ResponseWriter, r *http.Request, payload commands.Command) {

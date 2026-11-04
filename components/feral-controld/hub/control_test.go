@@ -53,7 +53,7 @@ func serve(mux *http.ServeMux, req *http.Request) *httptest.ResponseRecorder {
 	return rec
 }
 
-// With control disabled (no gate) an ff1Envelope cast is just an unknown
+// With control disabled (no gate) an ff1Envelope command is just an unknown
 // command for the router, exactly as before the protocol existed, and the
 // status payload has no control key.
 func TestControlDisabledIsUnchanged(t *testing.T) {

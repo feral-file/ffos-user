@@ -10,7 +10,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 )
 
-// A cast reaches the player as the typed Playlist re-encoded, so a display
+// A display request reaches the player as the typed Playlist re-encoded, so a display
 // field the struct does not model is dropped on the way. `imageRendering`
 // (core 1.1.0 §4) was: the player draws a work that sets "pixelated" with
 // hard pixel edges, and on dp1-go v0.6.2 the field never reached it.

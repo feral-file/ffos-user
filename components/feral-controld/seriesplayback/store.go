@@ -10,7 +10,7 @@
 // continuously enforced admission (every item display re-checks it, and the
 // player must acknowledge a change before it is trusted — see
 // contentpolicy.Store's ack-before-persist contract) while series playback
-// is a one-shot CAST-TIME decision. Once a series is narrowed and sent, the
+// is a one-shot Accept-time decision. Once a series is narrowed and sent, the
 // player holds an ordinary DP-1 playlist with no notion of a series and
 // nothing left to acknowledge. Folding this into Policy would require either
 // giving it Policy's CDP round trip for no reason, or special-casing it out
@@ -70,7 +70,7 @@ type Store struct {
 	// fsync did not.
 	durabilityUnconfirmed bool
 	// snap is a lock-free copy for the one read path that must not take mu:
-	// the commandrouter's cast-time resolution, which already holds other
+	// the commandrouter's accept-time resolution, which already holds other
 	// locks across a CDP send and must not invert their order against this
 	// store's own lock (mirrors contentpolicy.Store.snap).
 	snap atomic.Pointer[Setting]

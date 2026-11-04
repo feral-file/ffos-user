@@ -227,7 +227,7 @@ func (d *dp1) expandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 
 		// Checked after every append, not only a successful expansion's:
 		// a plain item or a kept-unexpanded representative can cross
-		// maxItems just as a batch of editions can, and the cast path
+		// maxItems just as a batch of editions can, and the display path
 		// that passes a non-zero cap here must never hand the player
 		// more than it asked for regardless of which branch grew the
 		// slice (see CAST_PLAYLIST_ITEMS_LIMIT at the call site).
@@ -254,7 +254,7 @@ func (d *dp1) ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 //
 // The catalog merges each edition with its OWN copy of the series item, which
 // is not necessarily the item in the document being played: a dp1_call payload,
-// or a cast of a playlist edited after the catalog ingested it, can carry a
+// or a display request of a playlist edited after the catalog ingested it, can carry a
 // schedule or a rating the catalog's copy never had. Everything else an edition
 // needs is already merged catalog-side (duration, license, display, repro, the
 // manifest's artists), so only the fields that belong to THIS playlist instance
@@ -263,10 +263,10 @@ func (d *dp1) ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 // Three consumers read these fields after expansion, which is why losing them
 // is not cosmetic:
 //
-//   - the cast preflight's scheduled-playlist scan (commandrouter/handler.go):
+//   - the accept-time preflight's scheduled-playlist scan (commandrouter/handler.go):
 //     a series whose editions carry no displayAt is read as unscheduled, so the
 //     dead-link probe runs against a premiere whose sources are legitimately
-//     not up yet and REJECTS the cast outright.
+//     not up yet and REJECTS the display request outright.
 //   - the displayAt scheduler (playlistschedule): no displayAt on any item is
 //     the "nothing scheduled" branch, which clears the Daily timer and plays a
 //     scheduled series immediately.
@@ -338,9 +338,9 @@ func inheritInstanceFields(item dp1playlist.PlaylistItem, editions []dp1playlist
 		// below. The catalog answers from a snapshot of the series item taken
 		// at its last ingest, so a schedule a curator has since removed can
 		// still come back on every edition — and `displayAt` has no safe
-		// direction to fail in: a stale timestamp both makes the cast
+		// direction to fail in: a stale timestamp both makes the display request
 		// preflight treat an unscheduled playlist as scheduled (skipping the
-		// dead-link probe) and arms a Daily timer that delays a cast the
+		// dead-link probe) and arms a Daily timer that delays a display request the
 		// document in hand no longer delays. So the item in hand decides
 		// whether there is a schedule at all, not merely which one.
 		editions[i].DisplayAt = nil
