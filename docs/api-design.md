@@ -39,51 +39,18 @@ and does not depend on public Cloudflare CORS configuration.
 
 ---
 
-## Version posture and API v2 transition
+## Version posture
 
-Unless explicitly marked v2, the registries and wire shapes below document the
-currently deployed v1 interfaces. The proposed target is the
-[FF1 communication API v2](ff1-v2-api-contract.md) and its
-[controller-authentication profile](ff1-v2-controller-authentication.md); its
-compatibility gates and coordinated removal sequence live in the
-[migration plan](ff1-v2-migration.md). V2 remains a design draft, not a
-second production contract.
-
-For v2, `feral-controld` remains the only runtime external-control owner. It
-initiates MQTT 5 connections and owns the LAN HTTPS/WebSocket adapter, while
-focused protocol, state, and authentication packages implement the shared
-contract without hiding command policy in transport code. It owns setup and
-recovery UX, including recovery SoftAP; setup and reset coordination is
-in-process, not the explicitly versioned D-Bus interface the v2 draft
-specified for it — one owner holds external admission, confirmation records,
-broker cleanup, identity rotation, controller-authority bootstrap and
-protocol completion together with physical confirmation and durable local
-reset execution.
-
-> This paragraph previously assigned setup/recovery UX to `feral-setupd`,
-> which was merged into `feral-controld` (see
-> [`architecture.md`](architecture.md), "The setupd merge").
-
-The v1 relayer envelope, Mint handoff, port-1111 Hub, and
-`GetRelayerTopicID` remain unchanged only through the migration compatibility
-gates. They are removed together from each successfully promoted v2 device
-image and are never alternative v2 semantics. A rolled-back, below-minimum, or
-current-v1 device keeps all four paths. The hosted relayer and other v1
-infrastructure remain until the remaining legacy fleet passes its separate
-infrastructure-retirement gate. The v2 `_ff1-control._tcp.local` lifecycle is
-independent of the broker, internet, and `enableHub`: advertise only when a
-LAN-usable interface and the complete TLS backend are ready; withdraw on
-listener unavailability and before any of the three pending-reset lifecycles.
-mDNS is discovery, never proof of identity or authority.
-
-The FF OS deployment binding for v2 public TCP 443 is a system-level
-`ff1-control.socket` plus hardened `systemd-socket-proxyd`, forwarding an
-unmodified raw TCP stream from LAN-usable IPv4 and IPv6 addresses to
-unprivileged `feral-controld` on loopback `127.0.0.1:8443`. `feral-controld`
-owns TLS/mTLS and HTTP/WebSocket, runs neither as root nor with
-`CAP_NET_BIND_SERVICE`, and advertises mDNS only after an end-to-end readiness
-check. This least-privilege front end is deployment customization, not a new
-protocol binding.
+The registries and wire shapes below document the deployed interfaces.
+Controller authorization is [`ff1-control-v1.md`](ff1-control-v1.md)
+(feral-file#3551), the normative contract: an `ff1Envelope` carries a
+controller's signed and encrypted request on the LAN hub, the legacy topic
+relayer and the v2 device-ID relay alike, and the per-state plaintext policy
+(§7.2) decides what each route admits without one. The earlier MQTT/mTLS
+"FF1 communication API v2" drafts are deleted; nothing implemented them.
+`feral-controld` is the only runtime external-control owner and owns setup
+and recovery UX in-process (see [`architecture.md`](architecture.md), "The
+setupd merge"). mDNS is discovery, never proof of identity or authority.
 
 ---
 
@@ -454,10 +421,7 @@ Use `dbus.NewError(message, []interface{}{})` for all D-Bus method errors. The f
 
 `feral-controld` verifies every `displayPlaylist` document with dp1-go's §7.1 verifier and reports a three-way verdict — `valid|invalid|unsigned` — on the cast reply (`signatureStatus`, `signers[]`, `legacySignature`) and on `player_status` (feral-file/ffos-user#307; wire shapes in [`controld-inbound-controller-messages.md`](controld-inbound-controller-messages.md)). Verification is over the JCS-canonical form, so re-marshaled bytes verify identically to wire bytes; a dropped field does not, which is why the inline path verifies the caller's original `dp1_call` token (retained verbatim by both ingress decoders as `Command.RawArguments`) rather than a re-marshal of the decoded map — `encoding/json` HTML-escapes `&`/`<`/`>`, which can inflate an honest document past the verifier's size bound; its float64 rounding of large integers is absorbed by JCS — or the typed struct, and why the offline cached copy — a typed, hydrated re-marshal — carries no verdict at all rather than a false one (persisting the download-time verdict beside the record is the follow-up). Bounds: every ingress caps the document at 4 MiB before decoding — the hub's request body, the relayer's websocket frame (`relayer.MAX_MESSAGE_BYTES`), and the URL fetch — and the verifier refuses anything larger on its own as well (`sigverify.MaxDocumentBytes`, defense in depth); verification stops at 16 `signatures[]` entries (counted by streaming the array and halting at the 17th, so the cap costs no per-entry allocation), and signer fields (`alg`/`role`/`kid`) past 32/32/256 bytes are blanked and reported as malformed before any cryptography runs (in-bounds siblings are reported as `unverified`) — so the unauthenticated hub cannot buy hours of JCS canonicalization or megabytes of log with one cast. The verdict is cryptographic only: it does not establish that the signer is one the device trusts. Trust anchoring is a later, separate layer; the reported `kid`s are its input.
 
-Two divergences from the v2 contract (`ff1-v2-api-contract.md` §10, §12.3) are recorded here rather than settled in code:
-
-- **Algorithms.** The v2 profile lists `ed25519` and `ecdsa-p256`. dp1-go v0.6.0 implements `ed25519` and `eip191` (did:pkh), and the production feed already carries an `eip191` signature. An `ecdsa-p256` entry therefore verifies as `unsupported alg` → `invalid` today. The profile or the library needs to move; until then the `signatureVerification.disabled` config flag is the remedy if such documents appear first.
-- **Vocabulary.** v2's `signatureStatus` is `verified|verification_pending|failed` and has no value for an unsigned document because v2 rejects those outright. The v1 surfaces use `valid|invalid|unsigned` (mapping valid→verified, invalid→failed); `unsigned` needs a v2 value to be proposed when v2 lands.
+**Supported algorithms.** dp1-go v0.7.2 implements `ed25519` and `eip191` (did:pkh), and the production feed already carries an `eip191` signature. Any other `alg` (for example `ecdsa-p256`) verifies as `unsupported alg` → `invalid`; until the library supports it, the `signatureVerification.disabled` config flag is the remedy if such documents appear.
 
 Signature verification is informational only: no verdict blocks a cast, refresh, or scheduled cutover, and no signature notice is shown. The phone preference, device modes, and setter are retired; persisted mode records are ignored. Release the daemon before or with the phone setting removal. Verification on original bytes, internal verdicts, and generation fencing remain unchanged.
 

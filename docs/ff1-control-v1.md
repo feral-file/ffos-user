@@ -1,8 +1,8 @@
 # FF1 control protocol v1 (feral-file#3551)
 
-Status: normative contract for the 3551 implementation. Supersedes
-`ff1-v2-controller-authentication.md` (MQTT/mTLS draft) for controller
-authentication. Every implementation (Go in `feral-controld/control`, Dart in
+Status: normative contract for the 3551 implementation, and the only
+controller-authentication contract (the earlier MQTT/mTLS drafts are
+deleted). Every implementation (Go in `feral-controld/control`, Dart in
 ff-app, TypeScript in ff1-cli, and any relay endpoint adapter for
 feral-file/ff-relayer#25) MUST pass the fixtures in
 `components/feral-controld/control/testdata/fixtures/`.
@@ -269,12 +269,13 @@ The first owner.
 - Valid only in state `legacy` (no active owner grant); otherwise the reply is
   `invitation_invalid`.
 - Refused with `invitation_invalid` on the device-ID relay (`RouteRelayV2`),
-  before the invitation is compared, so v2 is no oracle for it. The LAN and
-  the legacy relayer keep it: the on-screen invitation is the security, and
-  the legacy relayer is how a claimed 2.0.x device off the owner's LAN (or
-  on client-isolated Wi-Fi) is migrated ("Secure this FF1", then scan the
-  screen). On v2 a first owner has no way to seal anyway: there is no
-  plaintext profile read (§7.2).
+  before the invitation is compared, so v2 is no oracle for it. On v2 a first
+  owner has no way to seal anyway: there is no plaintext profile read (§7.2).
+- The device also admits it on the legacy relayer, but a client sends it only
+  on the LAN (§14 rule 11): becoming the first owner needs both the
+  invitation on the screen and a phone on the FF1's own network. The relayer
+  admission is a residual that ends with the legacy relayer (§13); it is not
+  a migration path.
 - `inv` is the current invitation: `b64u(16 random bytes)`, single use, 10-minute
   life, compared in constant time. There is **no attempt limit**: 128 random
   bits need none, and voiding the invitation after some number of misses
@@ -878,7 +879,7 @@ legacy relayer only. Envelopes are admitted exactly as on any other route.
 route; a client sends it there only with a profile pinned from a §5.6
 registration result or confirmed by a grant it holds (§10). There is no plaintext exception on v2, not even a profile read:
 a controller learns the profile from the screen QR pins (first owner, on the
-LAN or the legacy relayer) or from its registration result (§5.6), so v2
+LAN, §14 rule 11) or from its registration result (§5.6), so v2
 carries envelopes only.
 
 **Dual-stack transport config.** The v2 endpoint is its own `controld.json`
@@ -1297,8 +1298,10 @@ reply rather than `bad_envelope`.
   hand, pinned from the screen QR.
 - `showPairingQRCode` with `{"show":true,"purpose":"enroll"}` on a `legacy`,
   claimed device displays the invitation QR. This is the migration path for
-  2.0.x owners. On a device that is not `legacy` the same request paints the
-  ordinary claim QR without invitation fields.
+  2.0.x owners, and for a device released by "Forget I exist" (§5.5) whose
+  claim QR carries no invitation. Clients send it, and the enroll that
+  follows, on the LAN only (§14 rule 11). On a device that is not `legacy`
+  the same request paints the ordinary claim QR without invitation fields.
 
 ## 12. Fixtures
 
@@ -1409,6 +1412,14 @@ and the ff1-cli test suite does the same with `jose`.
   the same class as the open legacy `factoryReset` and `connect`: in
   `legacy` the LAN is open by design (§7.2), and the invitation itself only
   ever appears on the physical screen.
+- Residual, accepted: the device still admits a first-owner `enroll` with
+  `inv` on the legacy relayer (§5.1), which §14 rule 11 forbids clients to
+  send. The claim QR carries the topic, so anyone who sees or photographs it
+  during the invitation's 10-minute life can enroll from anywhere with a
+  client of their own. Refusing it on the device would add little while the
+  legacy relayer runs: a topic holder already has every plaintext command of
+  a `legacy` device there (§7.2), `factoryReset` and `sshAccess` included.
+  It closes with the legacy relayer (§15.4).
 - Residual, accepted: the enforced-boot purge (§9) evicts the relayer's
   stored rows of each persisted plaintext type. Any copy a subscriber
   already received, and a purge that failed to send, are outside the
@@ -1674,6 +1685,34 @@ showed what goes wrong without them.
     any channel peer can forge it); only a user action re-pairs. A
     `mint_succeeded` without `displayGrant` (older firmware) is
     `device_unsupported`: the session it carries is discarded.
+11. **First owner on the LAN only.** Becoming an FF1's first owner needs
+    the invitation on its screen and a phone on its own network. A
+    controller sends a first-owner `enroll` with `inv` (§5.1) and
+    `showPairingQRCode{purpose:"enroll"}` (§11) only to a LAN endpoint
+    whose identity it validated, never through the legacy relayer or v2,
+    whichever flow it is in (a scanned or opened claim QR, or "Secure this
+    Art Computer"). When a claim falls back to the relayer (the controller
+    found no LAN endpoint for the device) it reads `getDeviceStatus` there
+    first and decides on its `control` block, before any `connect`, write
+    or enroll:
+    - `legacy` (the protocol runs and nobody owns the device): it stops,
+      sends nothing more and writes nothing, and asks the person to join the
+      FF1's Wi-Fi. A plaintext `connect` there would claim a device that
+      should get an owner, leaving it ownerless and, when it was already
+      claimed, with its live invitation QR still on the screen. The
+      guidance covers a phone that is on that Wi-Fi but cannot see the
+      device (client isolation, a denied local-network permission).
+    - `enrolled` or `enforced`: the device has an owner. The controller
+      writes nothing and sends no `connect`, exactly as on the LAN (rule 1):
+      it opens the device when it holds a grant, and otherwise shows its
+      controller QR to an owner (§5.6).
+    - no `control` block (firmware without the protocol): the relayer claim
+      continues as before.
+
+    On the LAN, a claimed `legacy` device whose scanned QR carries no
+    invitation is asked to show one (`showPairingQRCode{purpose:"enroll"}`)
+    and enrolled from it; it is never claimed in plaintext. ff1-cli never
+    becomes a first owner, so in practice this rule binds ff-app.
 
 ## 15. Rollout and retirement
 
@@ -1747,13 +1786,16 @@ release operator applies them.
   reads one. A device claimed under legacy (topic, no owner) becomes
   v2-reachable only when an owner enrolls it on the LAN with the screen
   QR: the "Secure this Art Computer" flow sends plaintext
-  `showPairingQRCode{purpose:"enroll"}` by topic, LAN first, and enrolls
-  from the invitation QR (§5.1). The request needs no topic on the LAN
+  `showPairingQRCode{purpose:"enroll"}` on the LAN, by device ID, and
+  enrolls from the invitation QR (§5.1), never through the relayer (§14
+  rule 11). The request needs no topic on the LAN
   (the §13 residual: any LAN peer may send it in `legacy`), so a phone on
   the device's Wi-Fi that never held the topic sets up a claimed `legacy`
   device the same way, including one released by "Forget I exist"
   (§5.5), whose invitation QR is memory only and gone after a reboot.
-  Off the LAN, without the topic, there is no route.
+  Off the LAN a client has no first-owner route, with or without the topic
+  (§14 rule 11; the device still admits one on the legacy relayer, the §13
+  residual).
 - A client sends a sealed command on v2 only when the device's last status
   listed `relayV2` in `control.transports` (§11), or under the ff-cli
   exception in §15.4: a v2 send to a device that is not on v2 can be
