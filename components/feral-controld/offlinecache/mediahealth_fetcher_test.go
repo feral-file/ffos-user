@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 )
@@ -330,4 +331,66 @@ func minimalPNGForTest() []byte {
 		0x0D, 0x0A, 0x2D, 0xB4,
 		0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
 	}
+}
+
+// F18 (PR #438 review, round 5): a plain-HTTP probe that redirects to HTTPS
+// must hold the TLS weight before the handshake, with no hold-and-wait.
+func TestMediaHealthFetcher_RedirectToHTTPSPaysTheTLSWeight(t *testing.T) {
+	guard := sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}, isReserved: loopbackIsPublic}
+
+	// The mechanics: an http→https hop grows the hold from 1 to 4; an
+	// https→https hop keeps 4; a refused hop acquires nothing.
+	slots := semaphore.NewWeighted(probeFetchHTTPSWeight)
+	adm := &probeAdmission{slots: slots}
+	require.NoError(t, adm.ensure(context.Background(), 1))
+	ctx := context.WithValue(context.Background(), admissionKey{}, adm)
+	hop, _ := go_http.NewRequestWithContext(ctx, go_http.MethodGet, "https://origin.example/a", nil)
+	require.NoError(t, guard.probeCheckRedirect(hop, nil))
+	assert.Equal(t, probeFetchHTTPSWeight, adm.held)
+	assert.False(t, slots.TryAcquire(1), "the whole TLS weight is held")
+	hop2, _ := go_http.NewRequestWithContext(ctx, go_http.MethodGet, "https://origin.example/b", nil)
+	require.NoError(t, guard.probeCheckRedirect(hop2, []*go_http.Request{hop}))
+	assert.Equal(t, probeFetchHTTPSWeight, adm.held)
+	adm.release()
+	assert.True(t, slots.TryAcquire(probeFetchHTTPSWeight), "released in full")
+	slots.Release(probeFetchHTTPSWeight)
+
+	refused := &probeAdmission{slots: slots}
+	ctxRefused := context.WithValue(context.Background(), admissionKey{}, refused)
+	bad, _ := go_http.NewRequestWithContext(ctxRefused, go_http.MethodGet, "ftp://origin.example/a", nil)
+	require.Error(t, guard.probeCheckRedirect(bad, nil))
+	assert.Equal(t, int64(0), refused.held)
+
+	// End to end: with only one unit free, the upgrade waits for admission
+	// (never starting the handshake) until the deadline, and leaks nothing.
+	tight := semaphore.NewWeighted(probeFetchHTTPSWeight)
+	require.True(t, tight.TryAcquire(probeFetchHTTPSWeight-1))
+	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		go_http.Redirect(w, r, "https://127.0.0.1:1/a", go_http.StatusFound)
+	}))
+	defer origin.Close()
+	f := &mediaHealthFetcher{guard: guard, client: newGuardedProbeHTTPClientFor(guard, 0), slots: tight}
+	ctxTimeout, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	_, err := f.Fetch(ctxTimeout, mediahealth.FetchRequest{URL: origin.URL + "/a", MaxBodyBytes: 16})
+	require.Error(t, err)
+	fe, ok := errors.AsType[*mediahealth.FetchError](err)
+	require.True(t, ok)
+	assert.Equal(t, mediahealth.FetchErrTimeout, fe.Kind, "admission, not the dial, is what the request waited on")
+	tight.Release(probeFetchHTTPSWeight - 1)
+	assert.True(t, tight.TryAcquire(probeFetchHTTPSWeight), "nothing leaked after the failed upgrade")
+
+	// An http→http hop keeps the single unit.
+	one := semaphore.NewWeighted(1)
+	plain := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) { w.WriteHeader(go_http.StatusOK) }))
+	defer plain.Close()
+	hopper := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		go_http.Redirect(w, r, plain.URL+"/b", go_http.StatusFound)
+	}))
+	defer hopper.Close()
+	f = &mediaHealthFetcher{guard: guard, client: newGuardedProbeHTTPClientFor(guard, 0), slots: one}
+	resp, err := f.Fetch(context.Background(), mediahealth.FetchRequest{URL: hopper.URL + "/a", MaxBodyBytes: 16})
+	require.NoError(t, err)
+	assert.Equal(t, go_http.StatusOK, resp.Status)
+	assert.True(t, one.TryAcquire(1))
 }

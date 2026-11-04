@@ -453,7 +453,18 @@ func (g sourceGuard) probeCheckRedirect(req *go_http.Request, via []*go_http.Req
 			req.Header.Del("User-Agent")
 		}
 	}
-	return g.checkRedirect(req, via)
+	if err := g.checkRedirect(req, via); err != nil {
+		return err
+	}
+	// Re-admit at the hop's own weight before it is dialed: an HTTP
+	// request upgrading to HTTPS pays the TLS price here (see
+	// probeAdmission). After the guard, so a refused hop acquires nothing.
+	if adm, ok := req.Context().Value(admissionKey{}).(*probeAdmission); ok && adm != nil {
+		if err := adm.ensure(req.Context(), probeFetchWeight(req.URL.String())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // transport builds the guarded transport. Factored out so a test can

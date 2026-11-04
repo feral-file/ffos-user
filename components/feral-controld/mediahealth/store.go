@@ -590,31 +590,46 @@ func outcomeDigest(o Outcome) string {
 }
 
 // outcomeMutation is the record update one play outcome applies.
+//
+// The outcome is dated by the player's own timestamp (Outcome.At), not by
+// the drain: the ring is retained by the page, and a daemon restart drains
+// entries that may predate a verdict written since (an L0 probe at 12:00,
+// then two failed plays from 11:00 drained at 12:05). An outcome older
+// than the record's current verdict (CheckedAt) is stale: it still counts
+// in the play history the app shows, but it never changes the state,
+// never advances the corroboration run, and never refreshes a verdict —
+// older evidence does not supersede newer (PR #438 review, round 5, F17).
 func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, existed bool) bool {
 	return func(rec *Record, _ bool) bool {
+		at := outcomeTime(o, now)
+		stale := !rec.CheckedAt.IsZero() && at.Before(rec.CheckedAt)
 		switch o.Kind {
 		case OutcomeOK:
 			rec.Plays.OK++
-			rec.Plays.ConsecutiveFail = 0
-			rec.Plays.LastOKAt = new(now)
-			rec.State = StateOK
-			rec.Layer = LayerPlay
-			rec.Category, rec.Reason = "", ""
-			rec.CheckedAt = now
-			rec.RecheckAfter = now.Add(RecheckOK)
-			rec.ConsecutiveBroken = 0
-			rec.LastError, rec.LastErrorAt = "", nil
+			rec.Plays.LastOKAt = laterOf(rec.Plays.LastOKAt, at)
 			if o.MediaType != "" {
 				rec.MediaType = o.MediaType
 			}
+			if stale {
+				return true
+			}
+			rec.Plays.ConsecutiveFail = 0
+			rec.State = StateOK
+			rec.Layer = LayerPlay
+			rec.Category, rec.Reason = "", ""
+			rec.CheckedAt = at
+			rec.RecheckAfter = at.Add(RecheckOK)
+			rec.ConsecutiveBroken = 0
+			rec.LastError, rec.LastErrorAt = "", nil
 			return true
 		case OutcomeSkip:
 			rec.Plays.Skipped++
 			return true
 		case OutcomeFail:
-			fail := &PlayFailure{Stage: o.Stage, Code: o.Code, MediaType: o.MediaType, Attempt: o.Attempt, At: now}
-			rec.Plays.LastFail = fail
-			rec.Plays.LastFailAt = new(now)
+			if rec.Plays.LastFailAt == nil || !at.Before(*rec.Plays.LastFailAt) {
+				rec.Plays.LastFail = &PlayFailure{Stage: o.Stage, Code: o.Code, MediaType: o.MediaType, Attempt: o.Attempt, At: at}
+				rec.Plays.LastFailAt = new(at)
+			}
 			if o.MediaType != "" {
 				rec.MediaType = o.MediaType
 			}
@@ -626,9 +641,14 @@ func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, exi
 				return true
 			}
 			rec.Plays.Fail++
+			if stale {
+				// History only: a failure from before the current verdict
+				// cannot corroborate against it.
+				return true
+			}
 			rec.Plays.ConsecutiveFail++
 			corroborated := rec.Plays.ConsecutiveFail >= 2 ||
-				(rec.State == StateBroken && rec.Layer == LayerL0 && now.Before(rec.RecheckAfter))
+				(rec.State == StateBroken && rec.Layer == LayerL0 && at.Before(rec.RecheckAfter))
 			if !corroborated {
 				return true
 			}
@@ -641,14 +661,36 @@ func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, exi
 			}
 			rec.Category = playCategory(reason, status)
 			rec.HTTPStatus = status
-			rec.CheckedAt = now
-			rec.RecheckAfter = now.Add(RecheckBroken)
+			rec.CheckedAt = at
+			rec.RecheckAfter = at.Add(RecheckBroken)
 			rec.LastError = fmt.Sprintf("player: %s %s", o.Stage, o.Code)
-			rec.LastErrorAt = new(now)
+			rec.LastErrorAt = new(at)
 			return true
 		}
 		return false
 	}
+}
+
+// outcomeTime is when the player observed the outcome: its own RFC 3339
+// timestamp when present, parseable and not after now (a player clock
+// ahead of the device must not date a verdict into the future, which
+// would stretch its recheck window); otherwise the drain time.
+func outcomeTime(o Outcome, now time.Time) time.Time {
+	if o.At == "" {
+		return now
+	}
+	at, err := time.Parse(time.RFC3339Nano, o.At)
+	if err != nil || at.After(now) {
+		return now
+	}
+	return at
+}
+
+func laterOf(have *time.Time, t time.Time) *time.Time {
+	if have != nil && have.After(t) {
+		return have
+	}
+	return new(t)
 }
 
 // playCategory maps a play-layer conclusion to its category: a detect-stage

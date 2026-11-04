@@ -47,6 +47,56 @@ const (
 
 var processProbeFetchSlots = semaphore.NewWeighted(maxConcurrentProbeFetches)
 
+// probeFetchWeight is what one hop to rawURL costs in admission units.
+func probeFetchWeight(rawURL string) int64 {
+	if u, err := go_url.Parse(rawURL); err == nil && strings.EqualFold(u.Scheme, "https") {
+		return probeFetchHTTPSWeight
+	}
+	return 1
+}
+
+// probeAdmission is one request's hold on the process-wide probe budget,
+// re-balanced per hop: a plain-HTTP request that redirects to HTTPS must
+// pay the TLS weight before the handshake, or a playlist of such
+// redirects would put 32 TLS peers in flight against a documented ceiling
+// of 8 (PR #438 review, round 5, F18). It rides the request context so
+// the probe client's CheckRedirect (the one place a hop is known before
+// it is dialed) can reach it; net/http hands every hop the initial
+// request's context, and calls CheckRedirect on the goroutine running Do,
+// so held is never touched concurrently.
+type probeAdmission struct {
+	slots *semaphore.Weighted
+	held  int64
+}
+
+// admissionKey carries the request's *probeAdmission on its context.
+type admissionKey struct{}
+
+// ensure grows the hold to want units. It releases the current hold
+// before acquiring the larger one — never hold-and-wait, which under a
+// burst of upgrading redirects would have every request holding one unit
+// and waiting for three more that nobody can give up. The previous hop's
+// response is already closed by the time CheckRedirect runs, so nothing
+// is in flight on the released units.
+func (a *probeAdmission) ensure(ctx context.Context, want int64) error {
+	if want <= a.held {
+		return nil
+	}
+	a.release()
+	if err := a.slots.Acquire(ctx, want); err != nil {
+		return err
+	}
+	a.held = want
+	return nil
+}
+
+func (a *probeAdmission) release() {
+	if a.held > 0 {
+		a.slots.Release(a.held)
+		a.held = 0
+	}
+}
+
 // NewMediaHealthFetcher builds the production fetcher over the system
 // resolver (net.DefaultResolver — the guard's view of a name must match
 // what would actually be dialed, see ErrUnsafeSource).
@@ -93,14 +143,12 @@ func (f *mediaHealthFetcher) Fetch(ctx context.Context, req mediahealth.FetchReq
 		return nil, classifyFetchError(err)
 	}
 
-	weight := int64(1)
-	if u, err := go_url.Parse(req.URL); err == nil && strings.EqualFold(u.Scheme, "https") {
-		weight = probeFetchHTTPSWeight
-	}
-	if err := f.slots.Acquire(ctx, weight); err != nil {
+	adm := &probeAdmission{slots: f.slots}
+	if err := adm.ensure(ctx, probeFetchWeight(req.URL)); err != nil {
 		return nil, &mediahealth.FetchError{Kind: mediahealth.FetchErrTimeout, Err: err}
 	}
-	defer f.slots.Release(weight)
+	defer adm.release()
+	ctx = context.WithValue(ctx, admissionKey{}, adm)
 
 	httpReq, err := f.client.NewRequest(go_http.MethodGet, req.URL, nil)
 	if err != nil {

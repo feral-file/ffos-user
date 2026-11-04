@@ -588,3 +588,72 @@ func TestService_RestartDoesNotCorroborate(t *testing.T) {
 	assert.Equal(t, 2, rec.Plays.Fail)
 	assert.Equal(t, StateBroken, rec.State)
 }
+
+// Regressions from the PR #438 review (feralfile-bot, round 5).
+
+// F17: an outcome is dated by the player's timestamp; one older than the
+// record's current verdict counts in the history but never supersedes.
+func TestStore_StaleOutcomesNeverSupersedeANewerVerdict(t *testing.T) {
+	base := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	clock := &testClock{t: base}
+	store := openTestStore(t, clock)
+
+	// Healthy L0 at 12:00; two distinct failed plays from 11:00 and 11:01
+	// drained at 12:05 (a restart handed back the page's old ring).
+	_, err := store.ApplyProbe("https://o/a", ProbeResult{Verdict: VerdictAlive, Status: 200})
+	require.NoError(t, err)
+	clock.Advance(5 * time.Minute)
+	for i, at := range []string{"2026-11-04T11:00:00.000Z", "2026-11-04T11:01:00.000Z"} {
+		_, err := store.ApplyOutcome(Outcome{Seq: int64(i + 1), Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1, At: at}, true)
+		require.NoError(t, err)
+	}
+	rec, err := store.Get("https://o/a")
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State, "old failures do not overturn the newer L0 verdict")
+	assert.Equal(t, 2, rec.Plays.Fail, "but they are history")
+	assert.Equal(t, 0, rec.Plays.ConsecutiveFail, "and supply no corroboration")
+	assert.Equal(t, base, rec.CheckedAt)
+	assert.Equal(t, time.Date(2026, 11, 4, 11, 1, 0, 0, time.UTC), *rec.Plays.LastFailAt)
+	hints, err := store.Hints([]string{"https://o/a"}, clock.Now())
+	require.NoError(t, err)
+	assert.Empty(t, hints)
+
+	// The reverse: a 404 at 12:05, then an old `ready` from 11:30.
+	_, err = store.ApplyProbe("https://o/b", ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
+	require.NoError(t, err)
+	_, err = store.ApplyOutcome(Outcome{Seq: 3, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, At: "2026-11-04T11:30:00Z"}, true)
+	require.NoError(t, err)
+	rec, err = store.Get("https://o/b")
+	require.NoError(t, err)
+	assert.Equal(t, StateBroken, rec.State, "an old success does not heal a newer broken verdict")
+	assert.Equal(t, 1, rec.Plays.OK)
+	assert.Equal(t, time.Date(2026, 11, 4, 11, 30, 0, 0, time.UTC), *rec.Plays.LastOKAt)
+
+	// A success dated after the verdict heals it, dated by the player.
+	_, err = store.ApplyOutcome(Outcome{Seq: 4, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, At: "2026-11-04T12:05:00Z"}, true)
+	require.NoError(t, err)
+	rec, err = store.Get("https://o/b")
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State)
+	assert.Equal(t, time.Date(2026, 11, 4, 12, 5, 0, 0, time.UTC), rec.CheckedAt)
+
+	// Fresh failures (after the verdict) still corroborate, dated by the player.
+	clock.Advance(time.Minute)
+	for i, at := range []string{"2026-11-04T12:05:10Z", "2026-11-04T12:05:20Z"} {
+		_, err := store.ApplyOutcome(Outcome{Seq: int64(10 + i), Source: "https://o/b", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1, At: at}, true)
+		require.NoError(t, err)
+	}
+	rec, err = store.Get("https://o/b")
+	require.NoError(t, err)
+	assert.Equal(t, StateBroken, rec.State)
+	assert.Equal(t, time.Date(2026, 11, 4, 12, 5, 20, 0, time.UTC), rec.CheckedAt)
+	assert.Equal(t, rec.CheckedAt.Add(RecheckBroken), rec.RecheckAfter)
+}
+
+func TestOutcomeTime(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	assert.Equal(t, now, outcomeTime(Outcome{}, now), "no timestamp: the drain time")
+	assert.Equal(t, now, outcomeTime(Outcome{At: "t1"}, now), "unparseable: the drain time")
+	assert.Equal(t, now, outcomeTime(Outcome{At: "2026-11-04T13:00:00Z"}, now), "a player clock ahead of the device is clamped")
+	assert.Equal(t, time.Date(2026, 11, 4, 11, 59, 59, 500000000, time.UTC), outcomeTime(Outcome{At: "2026-11-04T11:59:59.500Z"}, now))
+}

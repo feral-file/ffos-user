@@ -82,7 +82,10 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   most 10 hops, each re-checked, Referer stripped), no proxy, keep-alives off
   so `net/http` can never silently replay a request, 64 KiB response-header
   ceiling, a process-wide admission budget on in-flight parses (32 HTTP or 8
-  TLS peers), and a hard cap on body bytes read.
+  TLS peers — re-admitted per hop, so a plain-HTTP request that redirects to
+  HTTPS pays the TLS weight before the handshake; it releases its hold before
+  acquiring the larger one, never hold-and-wait), and a hard cap on body
+  bytes read.
 - The probe dials the **wire the kiosk would**: a content-addressed path on a
   hostile gateway (`ipfs.io`, `dweb.link`) goes to the replacement gateway and
   any other path on those hosts gets the `uarewrite` User-Agent, exactly as the
@@ -194,6 +197,11 @@ controld remembers the identity of the entries it consumed (`seq`, `source`,
 stage, attempt, `at`) and treats the next ring as the same page when it still
 holds any of them, re-applying nothing; a ring holding none is a new page.
 `at` is what tells one page's `seq: 1` from the next page's — always send it.
+It also dates the outcome: the record keeps the player's time (clamped to the
+device clock), and an outcome older than the record's current verdict counts
+in the play history but never changes the state, advances the corroboration
+run or refreshes a verdict — an old ring drained after a restart cannot
+overturn a newer probe.
 The store keeps the same identity (hashed, no URLs) for the last 256 entries
 it applied, written in the same transaction as the record, so a controld
 restart under a surviving page — a fresh process draining the whole ring
