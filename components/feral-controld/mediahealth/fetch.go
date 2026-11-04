@@ -35,7 +35,20 @@ type FetchRequest struct {
 	RangeBytes int
 	// MaxBodyBytes caps how much of the body is read into Body.
 	MaxBodyBytes int
+	// Redirect, when set, is applied to every redirect target before the
+	// guard and the dial: it returns the URL to dial for that hop and the
+	// User-Agent for it ("" = the client default). The kiosk interceptor
+	// evaluates its gateway policy per request, redirect hops included,
+	// so a hop onto a retired gateway's CID path goes to the replacement
+	// gateway there; a probe that followed the raw hop recorded the
+	// retired gateway's 404 as broken for a source the kiosk plays fine
+	// (PR #438 review, round 4, F14).
+	Redirect RedirectHook
 }
+
+// RedirectHook maps one redirect target to the wire URL and User-Agent
+// to use for it (see FetchRequest.Redirect).
+type RedirectHook func(target string) (wireURL, userAgent string)
 
 // FetchResponse is the bounded view of an HTTP answer.
 type FetchResponse struct {

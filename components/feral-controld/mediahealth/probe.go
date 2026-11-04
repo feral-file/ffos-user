@@ -294,6 +294,11 @@ type fetchOutcome struct {
 
 func (p *Probe) fetch(ctx context.Context, wireURL, agent string, maxBytes int, ranged bool) (*fetchOutcome, error) {
 	req := FetchRequest{URL: wireURL, UserAgent: agent, MaxBodyBytes: maxBytes}
+	if p.Rewriter != nil {
+		// The same policy the initial URL went through, applied per hop
+		// by the fetcher (FetchRequest.Redirect).
+		req.Redirect = p.wire
+	}
 	if ranged {
 		req.RangeBytes = maxBytes
 	}

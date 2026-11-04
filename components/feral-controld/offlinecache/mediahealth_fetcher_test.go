@@ -201,3 +201,133 @@ func TestMediaHealthFetcher_ErrorsCarryNoCredentials(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, mediahealth.FetchErrDNS, fe.Kind, "the class still classifies through the redaction")
 }
+
+// hopRewriter is a mediahealth.Rewriter double for the redirect tests: every
+// URL on the retired host is re-pointed at the replacement origin with the
+// policy agent; the replacement itself is unmatched.
+type hopRewriter struct{ retired, replacement string }
+
+func (r hopRewriter) RewriteURL(raw string) (string, bool) {
+	if strings.HasPrefix(raw, r.retired) {
+		return r.replacement + strings.TrimPrefix(raw, r.retired), true
+	}
+	return "", false
+}
+func (r hopRewriter) Matches(raw string) bool { return strings.HasPrefix(raw, r.retired) }
+func (hopRewriter) UserAgent() string         { return "feral-player/2.0" }
+
+// F14 (PR #438 review, round 4): a redirect onto a retired gateway must be
+// re-pointed through the kiosk's policy before the dial — the bot's exact
+// scenario: the retired gateway answers 404, the replacement 200, and the
+// probe used to record `broken` from the hop the kiosk never fetches.
+func TestMediaHealthFetcher_RedirectHopsGoThroughTheGatewayPolicy(t *testing.T) {
+	var retiredHits atomic.Int32
+	retired := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, _ *go_http.Request) {
+		retiredHits.Add(1)
+		w.WriteHeader(go_http.StatusNotFound)
+	}))
+	defer retired.Close()
+	var gotAgent, gotPath string
+	replacement := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		gotAgent, gotPath = r.Header.Get("User-Agent"), r.URL.Path
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(minimalPNGForTest())
+	}))
+	defer replacement.Close()
+	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		go_http.Redirect(w, r, retired.URL+"/ipfs/bafy/a.png", go_http.StatusFound)
+	}))
+	defer origin.Close()
+
+	rw := hopRewriter{retired: retired.URL, replacement: replacement.URL}
+	probe := &mediahealth.Probe{
+		Fetcher:   newTestFetcher(),
+		Validator: mediahealth.NewContentValidator(mediahealth.DefaultProbeMaxBytes, nil),
+		Rewriter:  rw,
+	}
+	res := probe.ProbeOne(context.Background(), origin.URL+"/art")
+	assert.Equal(t, mediahealth.VerdictAlive, res.Verdict, "the destination the kiosk fetches is healthy")
+	assert.Equal(t, replacement.URL+"/ipfs/bafy/a.png", res.WireURL)
+	assert.Equal(t, int32(0), retiredHits.Load(), "the retired gateway is never dialed")
+	assert.Equal(t, "/ipfs/bafy/a.png", gotPath)
+	assert.NotEqual(t, "feral-player/2.0", gotAgent, "the replacement origin is unmatched: client default agent, not the policy one")
+	assert.NotEmpty(t, gotAgent)
+
+	// The policy agent applies on a matched hop that is not rewritten, and
+	// is removed again on a later unmatched hop.
+	var hostileAgent, finalAgent string
+	final := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		finalAgent = r.Header.Get("User-Agent")
+		w.WriteHeader(go_http.StatusOK)
+	}))
+	defer final.Close()
+	hostile := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		hostileAgent = r.Header.Get("User-Agent")
+		go_http.Redirect(w, r, final.URL+"/x", go_http.StatusFound)
+	}))
+	defer hostile.Close()
+	first := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		go_http.Redirect(w, r, hostile.URL+"/ipns/name", go_http.StatusFound)
+	}))
+	defer first.Close()
+	agentOnly := hopRewriter{retired: hostile.URL, replacement: ""}
+	resp, err := newTestFetcher().Fetch(context.Background(), mediahealth.FetchRequest{
+		URL: first.URL + "/a", MaxBodyBytes: 16,
+		Redirect: func(target string) (string, string) {
+			if strings.HasPrefix(target, hostile.URL) {
+				return target, agentOnly.UserAgent()
+			}
+			return target, ""
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, go_http.StatusOK, resp.Status)
+	assert.Equal(t, "feral-player/2.0", hostileAgent)
+	assert.NotEqual(t, "feral-player/2.0", finalAgent, "the policy agent does not leak onto an unmatched hop")
+
+	// Without a hook the client follows the raw hop, as before.
+	resp, err = newTestFetcher().Fetch(context.Background(), mediahealth.FetchRequest{URL: origin.URL + "/art", MaxBodyBytes: 16})
+	require.NoError(t, err)
+	assert.Equal(t, go_http.StatusNotFound, resp.Status)
+	assert.Equal(t, int32(1), retiredHits.Load())
+}
+
+func TestMediaHealthFetcher_RewrittenHopIsGuarded(t *testing.T) {
+	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		go_http.Redirect(w, r, "http://harmless.example/ipfs/bafy", go_http.StatusFound)
+	}))
+	defer origin.Close()
+	_, err := newTestFetcher().Fetch(context.Background(), mediahealth.FetchRequest{
+		URL: origin.URL + "/a", MaxBodyBytes: 16,
+		Redirect: func(string) (string, string) { return "http://169.254.169.254/latest/meta-data", "" },
+	})
+	require.Error(t, err)
+	fe, ok := errors.AsType[*mediahealth.FetchError](err)
+	require.True(t, ok)
+	assert.Equal(t, mediahealth.FetchErrGuard, fe.Kind, "the guard judges the rewritten destination")
+
+	_, err = newTestFetcher().Fetch(context.Background(), mediahealth.FetchRequest{
+		URL: origin.URL + "/a", MaxBodyBytes: 16,
+		Redirect: func(string) (string, string) { return "https://o/" + strings.Repeat("x", MaxSourceURLBytes), "" },
+	})
+	require.Error(t, err)
+	fe, ok = errors.AsType[*mediahealth.FetchError](err)
+	require.True(t, ok)
+	assert.Equal(t, mediahealth.FetchErrTooLong, fe.Kind)
+}
+
+// minimalPNGForTest is a 1×1 PNG: enough for the validator's container
+// check (mediahealth keeps its own copy in its tests; the package cannot
+// be imported for test helpers).
+func minimalPNGForTest() []byte {
+	return []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89,
+		0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54,
+		0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01,
+		0x0D, 0x0A, 0x2D, 0xB4,
+		0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+	}
+}

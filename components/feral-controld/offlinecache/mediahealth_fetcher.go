@@ -106,6 +106,9 @@ func (f *mediaHealthFetcher) Fetch(ctx context.Context, req mediahealth.FetchReq
 	if err != nil {
 		return nil, &mediahealth.FetchError{Kind: mediahealth.FetchErrTransport, Err: fmt.Errorf("build GET request: %w", err)}
 	}
+	if req.Redirect != nil {
+		ctx = context.WithValue(ctx, redirectHookKey{}, req.Redirect)
+	}
 	httpReq = httpReq.WithContext(ctx)
 	if req.RangeBytes > 0 {
 		httpReq.Header.Set("Range", fmt.Sprintf("bytes=0-%d", req.RangeBytes-1))

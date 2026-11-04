@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -407,9 +408,52 @@ func newGuardedProbeHTTPClientFor(g sourceGuard, timeout time.Duration) wrapper.
 	transport.DisableKeepAlives = true
 	return wrapper.NewHTTPClientFrom(&go_http.Client{
 		Timeout:       timeout,
-		CheckRedirect: g.checkRedirect,
+		CheckRedirect: g.probeCheckRedirect,
 		Transport:     transport,
 	})
+}
+
+// redirectHookKey carries a mediahealth.RedirectHook on the request
+// context. The probe client is one shared *http.Client behind the
+// wrapper, which exposes no per-request redirect policy, and net/http
+// hands every hop the initial request's context — so the context is the
+// one per-request channel into CheckRedirect. Set only by
+// mediaHealthFetcher.Fetch; read only by probeCheckRedirect.
+type redirectHookKey struct{}
+
+// probeCheckRedirect is checkRedirect for the media-health probe client:
+// it first re-points the hop through the caller's gateway policy (URL
+// and User-Agent), so the guard below and the guarded dial judge the
+// destination the kiosk would actually fetch, never the raw hop.
+func (g sourceGuard) probeCheckRedirect(req *go_http.Request, via []*go_http.Request) error {
+	if hook, ok := req.Context().Value(redirectHookKey{}).(mediahealth.RedirectHook); ok && hook != nil {
+		target := req.URL.String()
+		wire, agent := hook(target)
+		if wire != target {
+			if err := checkSourceLength(wire); err != nil {
+				return err
+			}
+			u, err := go_url.Parse(wire)
+			if err != nil {
+				return fmt.Errorf("%w: rewritten redirect target does not parse: %w", ErrUnsafeSource, err)
+			}
+			req.URL = u
+			// net/http pins Host from the pre-rewrite URL only when the
+			// initial request overrode it, which Fetch never does; clear
+			// it so the rewritten URL's host is what goes on the wire.
+			req.Host = ""
+		}
+		if agent != "" {
+			req.Header.Set("User-Agent", agent)
+		} else {
+			// The hop does not match the policy: the client default, as
+			// the kiosk sends its own agent to an unmatched origin. The
+			// header copied from the initial request must not leak the
+			// policy agent onto it.
+			req.Header.Del("User-Agent")
+		}
+	}
+	return g.checkRedirect(req, via)
 }
 
 // transport builds the guarded transport. Factored out so a test can

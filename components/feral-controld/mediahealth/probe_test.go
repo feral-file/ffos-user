@@ -265,3 +265,28 @@ func TestParseContentRange(t *testing.T) {
 	_, _, _, ok = parseContentRange("bytes 0-10/10")
 	assert.False(t, ok, "total must exceed end")
 }
+
+// F14 (PR #438 review, round 4): the probe hands its wire policy to the
+// fetcher for every redirect hop; without a policy there is no hook.
+func TestProbeOne_RedirectHookIsTheWirePolicy(t *testing.T) {
+	f := &scriptedFetcher{answers: []scriptedAnswer{ok(200, "image/png", minimalPNG(1, 1), -1)}}
+	p := newProbe(f)
+	p.Rewriter = fakeRewriter{}
+	p.ProbeOne(context.Background(), "https://cdn.example/art")
+	require.Len(t, f.calls, 1)
+	require.NotNil(t, f.calls[0].Redirect)
+	wire, agent := f.calls[0].Redirect("https://ipfs.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/a.png")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/a.png", wire)
+	assert.Empty(t, agent)
+	wire, agent = f.calls[0].Redirect("https://ipfs.io/ipns/name/x")
+	assert.Equal(t, "https://ipfs.io/ipns/name/x", wire)
+	assert.Equal(t, "feral-player/2.0", agent)
+	wire, agent = f.calls[0].Redirect("https://benign.example/x")
+	assert.Equal(t, "https://benign.example/x", wire)
+	assert.Empty(t, agent)
+
+	f = &scriptedFetcher{answers: []scriptedAnswer{ok(200, "image/png", minimalPNG(1, 1), -1)}}
+	newProbe(f).ProbeOne(context.Background(), "https://cdn.example/art")
+	require.Len(t, f.calls, 1)
+	assert.Nil(t, f.calls[0].Redirect, "no policy, no hook")
+}

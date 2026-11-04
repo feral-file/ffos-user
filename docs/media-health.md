@@ -86,7 +86,10 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
 - The probe dials the **wire the kiosk would**: a content-addressed path on a
   hostile gateway (`ipfs.io`, `dweb.link`) goes to the replacement gateway and
   any other path on those hosts gets the `uarewrite` User-Agent, exactly as the
-  kiosk interceptor does.
+  kiosk interceptor does — on the initial URL and on **every redirect hop**
+  (the interceptor evaluates its policy per request), each re-pointed before
+  the guard and the dial, so a source that redirects onto a retired gateway
+  is judged at the replacement, not at the retired gateway's 404.
 - A 206 is trusted only with a `Content-Range` starting at byte 0; otherwise,
   and on 416, and when a valid prefix is shorter than 512 bytes and shorter
   than the resource, the probe retries once without `Range`. A 206 to an
