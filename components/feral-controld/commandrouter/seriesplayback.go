@@ -71,6 +71,14 @@ func (h *handler) currentSeriesPlaybackMode() *dp1.SeriesPlaybackMode {
 // while we were re-casting" and only restores the group data in the former
 // case.
 //
+// accepted is tracked separately from seq and valid: an entry is recorded
+// before its cast's preflight and player send (see rememberSeriesCast), so
+// valid alone only means "a cast of this series was attempted". Only an
+// accepted entry describes what is on screen, and recastForMode acts on
+// nothing else. seq cannot stand in for it: a failed re-cast that overlaps a
+// still-pending cast moves seq on, after which that cast's own settle no
+// longer matches and could not have retracted the entry (PR #431 review F2).
+//
 // Scoped to ONE playlist, matching the FF1 kiosk's single screen: a new
 // CMD_DISPLAY_PLAYLIST cast (of any kind — see rememberSeriesCast) always
 // replaces this wholesale, never merges into it.
@@ -78,6 +86,7 @@ type displayedSeriesCast struct {
 	mu             sync.Mutex
 	seq            uint64
 	valid          bool
+	accepted       bool
 	shell          dp1.Playlist
 	plan           dp1.CastPlan
 	contentContext contentpolicy.Context
@@ -90,21 +99,26 @@ type displayedSeriesCast struct {
 // correctly CLEARS any series this device was previously tracking — a stale
 // entry must not outlive what is actually on screen.
 //
-// Called eagerly, before this cast's own preflight/CDP send: a cast whose
-// plan this remembers but that the preflight rejects or the player refuses
-// is already reported as a failure through Process's normal error path, so a
-// stale entry here only risks a LATER setSeriesPlayback re-cast attempting
-// the same content again — which fails the same way, not silently.
-func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, contentContext contentpolicy.Context) {
+// Called eagerly, before this cast's own preflight/CDP send, so the entry
+// starts unaccepted and Process settles it with settleSeriesCast once the
+// player's answer is known. Acting only on accepted entries is load-bearing,
+// not tidiness: a rejected entry would let a LATER setSeriesPlayback re-cast
+// content that never reached the screen, and that re-cast does NOT fail the
+// same way — narrowing changes which sources the preflight checks, so a
+// series whose editions all 404 but whose representative is reachable is
+// rejected in full yet accepted narrowed to "first", replacing whatever is
+// actually on screen (PR #429 review F2).
+func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, contentContext contentpolicy.Context) uint64 {
 	h.lastSeriesCast.mu.Lock()
 	defer h.lastSeriesCast.mu.Unlock()
 	h.lastSeriesCast.seq++
+	h.lastSeriesCast.accepted = false
 	if !plan.HasSeriesGroups() {
 		h.lastSeriesCast.valid = false
 		h.lastSeriesCast.shell = dp1.Playlist{}
 		h.lastSeriesCast.plan = dp1.CastPlan{}
 		h.lastSeriesCast.contentContext = ""
-		return
+		return h.lastSeriesCast.seq
 	}
 	shell := playlist
 	shell.Items = nil // rebuilt from plan.Narrow on re-cast; the shell carries only playlist-level metadata.
@@ -112,6 +126,35 @@ func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, c
 	h.lastSeriesCast.shell = shell
 	h.lastSeriesCast.plan = plan
 	h.lastSeriesCast.contentContext = contentContext
+	return h.lastSeriesCast.seq
+}
+
+// settleSeriesCast records the player's answer for the entry
+// rememberSeriesCast recorded as seq: an accepted cast (including a
+// displayAt-deferred acceptance) marks it accepted, anything else retracts
+// it. A no-op when anything has written the cache since (seq moved on):
+// that later write describes a newer cast and must stand. If seq moved on
+// while this cast was still unaccepted, the entry it wrote is already gone
+// (overwritten), so there is nothing left to retract.
+//
+// Deliberately does NOT advance seq. recastForMode tells "only my own
+// re-entrant cast wrote this cache" by seq == seqBefore+1; settling that
+// re-entrant cast must not disturb the count, so recastForMode still
+// restores the series that IS on screen when the re-cast fails.
+func (h *handler) settleSeriesCast(seq uint64, accepted bool) {
+	h.lastSeriesCast.mu.Lock()
+	defer h.lastSeriesCast.mu.Unlock()
+	if h.lastSeriesCast.seq != seq {
+		return
+	}
+	if accepted {
+		h.lastSeriesCast.accepted = true
+		return
+	}
+	h.lastSeriesCast.valid = false
+	h.lastSeriesCast.shell = dp1.Playlist{}
+	h.lastSeriesCast.plan = dp1.CastPlan{}
+	h.lastSeriesCast.contentContext = ""
 }
 
 // clearSeriesCast invalidates the displayed-series cache without recording a
@@ -133,6 +176,7 @@ func (h *handler) clearSeriesCast() {
 	defer h.lastSeriesCast.mu.Unlock()
 	h.lastSeriesCast.seq++
 	h.lastSeriesCast.valid = false
+	h.lastSeriesCast.accepted = false
 	h.lastSeriesCast.shell = dp1.Playlist{}
 	h.lastSeriesCast.plan = dp1.CastPlan{}
 	h.lastSeriesCast.contentContext = ""
@@ -278,9 +322,16 @@ func (h *handler) scheduleRecast(ctx context.Context, mode *dp1.SeriesPlaybackMo
 // cache. A cache that was never populated this boot (process just started,
 // or the current display never went through a static dp1_call with series
 // groups) has no series identity to re-fetch editions FOR.
+//
+// Also a no-op while the tracked series cast is still unaccepted (its
+// preflight or player send is pending) or was never accepted: only a series
+// the player took is on screen to re-narrow. The accepted residual is a
+// setting change that lands while a series cast is still pending: that cast
+// shows the mode it resolved with, and the new mode applies from the next
+// cast or setting change.
 func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackMode) {
 	h.lastSeriesCast.mu.Lock()
-	if !h.lastSeriesCast.valid {
+	if !h.lastSeriesCast.valid || !h.lastSeriesCast.accepted {
 		h.lastSeriesCast.mu.Unlock()
 		return
 	}
@@ -322,9 +373,13 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	// between: seq advances by exactly 1 for that re-entrant write alone: a
 	// concurrent displayPlaylist landing in the same window advances it
 	// further, and that cast's own cache entry must stand, not this one's.
+	// Restored as accepted whether or not the re-cast succeeded: the plan
+	// was accepted when captured above, and a failed re-cast leaves that
+	// same series on screen.
 	h.lastSeriesCast.mu.Lock()
 	if h.lastSeriesCast.seq == seqBefore+1 {
 		h.lastSeriesCast.valid = true
+		h.lastSeriesCast.accepted = true
 		h.lastSeriesCast.shell = shell
 		h.lastSeriesCast.plan = plan
 		h.lastSeriesCast.contentContext = contentContext
