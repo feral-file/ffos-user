@@ -322,7 +322,7 @@ func TestCommandHandler_SetSeriesPlayback_ConcurrentRequestsCoalesceWithoutLosin
 	probeCalls := 0
 	var secondResult interface{}
 	secondDone := make(chan struct{})
-	commandrouter.SetSourceProber(handler, &stallingProber{during: func() {
+	commandrouter.SetMediaHealth(handler, &stallingProber{during: func() {
 		probeCalls++
 		if probeCalls != 2 {
 			return

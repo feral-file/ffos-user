@@ -54,23 +54,62 @@ type CommandStormConfig struct {
 	MaxConcurrent int64 `json:"maxConcurrent"`
 }
 
-// SourceProbeConfig tunes the displayPlaylist source preflight (#304): the
-// probe that rejects a cast whose every item source is definitively dead.
-// Follows CommandStormConfig's optional-section + Disabled opt-out convention.
-//
-// The Disabled switch exists because the preflight turns a previously
-// always-accept command path into one that can REFUSE, based on a verdict
-// table (identity-independent 4xx = dead) whose accepted residual is an
-// origin that answers this probe a 4xx while still rendering in the kiosk —
-// a class the repo has shipped evidence of (see uarewrite). If that residual
-// materializes on the fleet, this flag is the remedy; without it the only
-// recovery is a package rollback. Same reasoning as uarewrite's operator-
-// editable host list: new hostile origin behavior should be a config edit,
-// not a release.
+// SourceProbeConfig is the RETIRED "sourceProbe" block of the former
+// cast-time preflight (#304), kept only so a fielded controld.json that sets
+// `sourceProbe.disabled` keeps its meaning: MediaHealthTuning reads it as
+// `mediaHealth.disabled` (the preflight is now the media-health pass) and
+// warns. Do not add fields; new tuning goes on MediaHealthConfig.
 type SourceProbeConfig struct {
-	// Disabled turns the cast-time source preflight off entirely (casts are
-	// forwarded unprobed, the pre-#304 behavior). Default (false) keeps it on.
 	Disabled bool `json:"disabled"`
+}
+
+// MediaHealthConfig tunes the device-side media observation store and its
+// L0 probe (feral-file/ffos-user#392, docs/media-health.md). Carried as RAW
+// bytes on Config and decoded permissively by MediaHealthTuning, for the
+// same reason as ContentPolicy: the block is optional and a hand-edited
+// typo must never crash-loop this recovery-critical daemon.
+type MediaHealthConfig struct {
+	// Disabled turns the whole feature off: no store, no cast-time pass (casts
+	// are forwarded unprobed, the pre-#304 behavior), no hints, no lookahead,
+	// no per-item status. The remedy if a verdict rule ever systematically
+	// misjudges an origin class on the fleet — a config edit, not a rollback.
+	Disabled bool `json:"disabled"`
+	// KnownBadPageMarkers are case-insensitive substrings that identify a
+	// gateway error page served with HTTP 200 (the indexer's
+	// known_bad_page_markers). Operator-editable: a new gateway quirk is an
+	// edit, not a release.
+	KnownBadPageMarkers []string `json:"knownBadPageMarkers,omitempty"`
+	// ProbeMaxBytes is the L0 window (default 32 KiB, the indexer's).
+	ProbeMaxBytes int `json:"probeMaxBytes,omitempty"`
+	// Lookahead is how many upcoming items are probed ahead during play
+	// (default 8); 0 keeps the default, a negative value disables the
+	// lookahead and the background sweep.
+	Lookahead int `json:"lookahead,omitempty"`
+	// Malformed records that the block did not decode; every field then
+	// reads as its default.
+	Malformed bool `json:"-"`
+}
+
+// MediaHealthTuning decodes the mediaHealth block, folding in the retired
+// sourceProbe.disabled switch. Absent means enabled with defaults.
+func (c *Config) MediaHealthTuning(logger *zap.Logger) MediaHealthConfig {
+	var t MediaHealthConfig
+	if len(c.MediaHealth) > 0 {
+		if err := json.Unmarshal(c.MediaHealth, &t); err != nil {
+			if logger != nil {
+				logger.Warn("mediaHealth config block malformed; using defaults",
+					zap.Error(err), zap.String("raw", string(c.MediaHealth)))
+			}
+			t = MediaHealthConfig{Malformed: true}
+		}
+	}
+	if c.SourceProbe != nil && c.SourceProbe.Disabled {
+		if logger != nil {
+			logger.Warn("sourceProbe.disabled is retired; read as mediaHealth.disabled")
+		}
+		t.Disabled = true
+	}
+	return t
 }
 
 // SignatureVerificationConfig tunes DP-1 playlist signature verification on
@@ -244,6 +283,9 @@ type Config struct {
 	EnableHub    *bool               `json:"enableHub"`
 	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
 	SourceProbe  *SourceProbeConfig  `json:"sourceProbe,omitempty"`
+	// MediaHealth is decoded permissively by MediaHealthTuning(); see
+	// MediaHealthConfig.
+	MediaHealth  json.RawMessage     `json:"mediaHealth,omitempty"`
 	OfflineCache *OfflineCacheConfig `json:"offlineCache,omitempty"`
 	Netlog       *NetlogConfig       `json:"netlog,omitempty"`
 	// ContentPolicy carries the operator-only unrated-archive audit gate as RAW

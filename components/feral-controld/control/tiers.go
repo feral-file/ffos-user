@@ -101,6 +101,7 @@ var commandTiers = map[string]Tier{
 	string(commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE): TierController,
 	string(commands.CMD_CLEAR_PLAYLIST_CACHE):      TierController,
 	string(commands.CMD_GET_OFFLINE_CACHE_STATUS):  TierController,
+	string(commands.CMD_GET_MEDIA_HEALTH):          TierController,
 	string(commands.CMD_DEVICE_STATUS):             TierController,
 	string(commands.CMD_SYS_METRICS):               TierController, // == CMD_PROFILE
 	string(commands.CMD_SCREEN_ROTATION):           TierController,

@@ -205,6 +205,11 @@ func DefaultGateConfig() GateConfig {
 		// no CDP round trip — but is still deduped at the query tier for the
 		// same unlisted-Default concurrency-slot reason as getContentPolicy.
 		commands.CMD_GET_SERIES_PLAYBACK: query,
+		// getMediaHealth reads the local store plus one serialized CDP
+		// checkStatus round trip for the item list, so it is deduped at the
+		// query tier like getRecentlyPlayed; the handler rejects a non-empty
+		// request for the same dedupe-key reason.
+		commands.CMD_GET_MEDIA_HEALTH: query,
 
 		// High-frequency input events: shared generous budget.
 		commands.CMD_KEYBOARD_EVENT:             input,

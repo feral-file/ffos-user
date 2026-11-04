@@ -1768,7 +1768,7 @@ const maxLoggedSourceBytes = 256
 // hunting for a source that never existed in that form.
 //
 // This truncates; it does NOT redact. The cast preflight logs through
-// redactSourceForLog (probe.go) instead, which strips query/userinfo
+// redactSourceForLog (mediahealth_fetcher.go) instead, which strips query/userinfo
 // credentials first, because the preflight fires on EVERY cast with a
 // dead item. The download-path call sites in this file keep logging the
 // full (truncated) URL by accepted scope: they fire only on explicit

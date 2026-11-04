@@ -22,8 +22,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
-	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -497,11 +497,17 @@ type stallingProber struct {
 	during func()
 }
 
-func (p *stallingProber) ProbeSources(_ context.Context, sources []string) []offlinecache.SourceProbeResult {
+func (p *stallingProber) HintArgument([]dp1playlist.PlaylistItem) interface{} { return nil }
+
+func (p *stallingProber) Report([]dp1playlist.PlaylistItem) ([]mediahealth.ReportItem, error) {
+	return nil, nil
+}
+
+func (p *stallingProber) Preflight(_ context.Context, sources []string) []mediahealth.ProbeResult {
 	p.during()
-	out := make([]offlinecache.SourceProbeResult, 0, len(sources))
+	out := make([]mediahealth.ProbeResult, 0, len(sources))
 	for _, s := range sources {
-		out = append(out, offlinecache.SourceProbeResult{Source: s})
+		out = append(out, mediahealth.ProbeResult{Source: s})
 	}
 	return out
 }
@@ -521,7 +527,7 @@ func TestDisplayPlaylistDoesNotHoldThePolicyLockAcrossSourcePreflight(t *testing
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
 	lockFree := false
-	commandrouter.SetSourceProber(h, &stallingProber{during: func() {
+	commandrouter.SetMediaHealth(h, &stallingProber{during: func() {
 		acquired := make(chan struct{})
 		go func() {
 			store.Lock()
@@ -572,7 +578,7 @@ func TestDisplayPlaylistReprojectsAfterAPolicyChangeDuringPreflight(t *testing.T
 	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl), poller,
 		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
-	commandrouter.SetSourceProber(h, &stallingProber{during: func() {
+	commandrouter.SetMediaHealth(h, &stallingProber{during: func() {
 		// The owner turns mature content off while the probe is running.
 		store.Lock()
 		_, updateErr := store.UpdateLocked(false, false)
@@ -688,7 +694,7 @@ func TestSyncContentPolicySerializesWithSchedulerPushes(t *testing.T) {
 // reachability made the cast acceptable, leaving only sources already proven
 // dead. Unknown sources after an early exit must continue to fail open.
 func TestDisplayPlaylistProjectionRechecksKnownSourceVerdicts(t *testing.T) {
-	for _, verdict := range []offlinecache.SourceProbeVerdict{offlinecache.ProbeDead, offlinecache.ProbeInconclusive} {
+	for _, verdict := range []mediahealth.Verdict{mediahealth.VerdictDead, mediahealth.VerdictInconclusive} {
 		t.Run(string(verdict), func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			player := mocks.NewMockCDP(ctrl)
@@ -706,9 +712,9 @@ func TestDisplayPlaylistProjectionRechecksKnownSourceVerdicts(t *testing.T) {
 
 			const live = "https://live.example/mature"
 			const dead = "https://dead.example/general"
-			commandrouter.SetSourceProber(h, &verdictProber{
-				verdicts: map[string]offlinecache.SourceProbeVerdict{
-					live: offlinecache.ProbeAlive,
+			commandrouter.SetMediaHealth(h, &verdictProber{
+				verdicts: map[string]mediahealth.Verdict{
+					live: mediahealth.VerdictAlive,
 					dead: verdict,
 				},
 				during: func() {
@@ -723,7 +729,7 @@ func TestDisplayPlaylistProjectionRechecksKnownSourceVerdicts(t *testing.T) {
 
 			// A canceled source remains unknown; the filtered-out witness must
 			// never reach the player even on the fail-open path.
-			if verdict == offlinecache.ProbeInconclusive {
+			if verdict == mediahealth.VerdictInconclusive {
 				player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 					func(_ string, params map[string]interface{}) (interface{}, error) {
 						expression := params["expression"].(string)
@@ -744,7 +750,7 @@ func TestDisplayPlaylistProjectionRechecksKnownSourceVerdicts(t *testing.T) {
 					},
 				}},
 			})
-			if verdict == offlinecache.ProbeDead {
+			if verdict == mediahealth.VerdictDead {
 				var unreachable *commandrouter.SourceUnreachableError
 				require.ErrorAs(t, err, &unreachable)
 			} else {
@@ -757,18 +763,24 @@ func TestDisplayPlaylistProjectionRechecksKnownSourceVerdicts(t *testing.T) {
 // verdictProber answers a fixed verdict per source and runs during() while the
 // probe is "in flight".
 type verdictProber struct {
-	verdicts map[string]offlinecache.SourceProbeVerdict
+	verdicts map[string]mediahealth.Verdict
 	during   func()
 	// redactSources mimics the real prober, whose Source field is
 	// query-redacted and truncated for the daemon log.
 	redactSources bool
 }
 
-func (p *verdictProber) ProbeSources(_ context.Context, sources []string) []offlinecache.SourceProbeResult {
+func (p *verdictProber) HintArgument([]dp1playlist.PlaylistItem) interface{} { return nil }
+
+func (p *verdictProber) Report([]dp1playlist.PlaylistItem) ([]mediahealth.ReportItem, error) {
+	return nil, nil
+}
+
+func (p *verdictProber) Preflight(_ context.Context, sources []string) []mediahealth.ProbeResult {
 	if p.during != nil {
 		p.during()
 	}
-	out := make([]offlinecache.SourceProbeResult, 0, len(sources))
+	out := make([]mediahealth.ProbeResult, 0, len(sources))
 	for _, s := range sources {
 		reported := s
 		if p.redactSources {
@@ -776,7 +788,7 @@ func (p *verdictProber) ProbeSources(_ context.Context, sources []string) []offl
 				reported = reported[:cut] + "?<redacted>"
 			}
 		}
-		out = append(out, offlinecache.SourceProbeResult{Source: reported, Verdict: p.verdicts[s]})
+		out = append(out, mediahealth.ProbeResult{Source: reported, Verdict: p.verdicts[s]})
 	}
 	return out
 }
@@ -974,10 +986,10 @@ func TestDisplayPlaylistRechecksSignedURLsAfterTheProjection(t *testing.T) {
 	// Both sources carry query strings, which is what the log redaction strips.
 	const live = "https://live.example/mature.html?token=abc123&sig=deadbeef"
 	const dead = "https://dead.example/general.html?token=zzz999&sig=cafebabe"
-	commandrouter.SetSourceProber(h, &verdictProber{
-		verdicts: map[string]offlinecache.SourceProbeVerdict{
-			live: offlinecache.ProbeAlive,
-			dead: offlinecache.ProbeDead,
+	commandrouter.SetMediaHealth(h, &verdictProber{
+		verdicts: map[string]mediahealth.Verdict{
+			live: mediahealth.VerdictAlive,
+			dead: mediahealth.VerdictDead,
 		},
 		redactSources: true,
 		during: func() {
@@ -1403,3 +1415,7 @@ func TestValidationPointersDropsAnythingUnrecognized(t *testing.T) {
 	require.Equal(t, []string{"/items/0/source"},
 		dp1.ValidationPointers(errors.New("validation failed\n- at '/items/0/source': '/media/a?token=SECRET' is not valid 'uri'")))
 }
+
+func (*barrierScheduler) SetHintSource(playlistschedule.HintSource) {}
+
+func (*capturingScheduler) SetHintSource(playlistschedule.HintSource) {}

@@ -83,6 +83,8 @@ for relayer topic assignment:
   `feral-controld` as commandrouter pre-CDP special cases, owned by the
   `offlinecache` package (see "Offline Artwork Caching Inbound Messages"
   below).
+- `getMediaHealth` is likewise a commandrouter pre-CDP special case, owned by
+  the `mediahealth` package (see "getMediaHealth" below).
 - `refreshArtwork` clears Chromium cache, then forwards to Chromium through
   CDP.
 - Any other non-device command is forwarded to Chromium through CDP.
@@ -3289,6 +3291,54 @@ their claim.
 Error cases: `invalidRequest`, `seriesPlaybackUnavailable` (the durable write
 failed, or its directory entry could not be confirmed durable even on retry —
 `ok:true` means saved, the same contract `setContentPolicy` holds).
+
+### getMediaHealth
+
+Purpose: read this device's media verdict for every item of the playlist on
+screen (feral-file/ffos-user#392, `docs/media-health.md`), so a controller can
+show which works play and why one does not. The rows are built from the
+player's own item list, so they line up with what the app already displays.
+
+Request: `{}` — no fields, and a **non-empty request is rejected** with an
+error reply rather than ignored, the same storm-gate reason `getContentPolicy`
+rejects one.
+
+```json
+{
+  "ok": true,
+  "status": "ok",
+  "castSeq": 3,
+  "total": 2,
+  "truncated": false,
+  "items": [
+    { "index": 0, "id": "a", "title": "Genome #12", "state": "broken",
+      "category": "source_missing", "reason": "http_status", "layer": "l0",
+      "checkedAt": "2026-11-04T10:00:00Z", "plays": { "ok": 0, "fail": 2 } },
+    { "index": 1, "id": "b", "title": "Study", "state": "ok",
+      "checkedAt": "2026-11-04T09:00:00Z", "plays": { "ok": 12, "fail": 0 } }
+  ]
+}
+```
+
+`state` is `ok`, `broken`, `suspect` (an L1 render verdict, reported but never
+acted on) or `unknown` (never observed). `category` is the closed app-facing
+set — `source_missing`, `source_blocked`, `not_media`, `corrupt_file`,
+`unsupported`, `render_failed`, `render_blank`, `device_limit` — and `reason`
+the detail code beneath it; `layer` says which probe set the state (`l0`,
+`play`, `l1`). `castSeq` echoes the player's outcome-ring cast sequence when
+the player declares the `mediaHealth` contract. Rows are capped at 2048
+(`truncated: true` past that); `total` is the full item count. No source URL
+ever appears in a row.
+
+`{ "ok": true, "status": "empty", "items": [], "total": 0 }` when nothing is
+on screen. `{ "ok": false, "status": "error", "error": "mediaHealthUnavailable" }`
+when the feature is disabled by config or its store could not be opened.
+
+The same verdicts ride every `player_status` notification as the index-aligned
+`mediaHealth` array (state, category, reason, layer only), and every
+`displayPlaylist` push carries a controld-owned `mediaHealth` request field
+naming the conclusively broken items for the player to skip — a controller
+cannot set that field; any value sent is dropped.
 
 ### Content policy effect on playlists
 

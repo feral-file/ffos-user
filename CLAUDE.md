@@ -642,6 +642,8 @@ commands, and a definition of done that this file does not duplicate.
 - `docs/controld-inbound-controller-messages.md` — inbound command/notification
   wire contract
 - `docs/offline-artwork-capture.md` — offline cache capture/replay design
+- `docs/media-health.md` — device-side media probes (L0, play outcomes) and
+  the per-device observation store (feral-file/ffos-user#392)
 - `RELEASES.md` — release ledger (the full-image declarations the release
   guardrail checks)
 - `scripts/agent-iso-build-guard.sh` — pre-shell hook enforcing the ISO build

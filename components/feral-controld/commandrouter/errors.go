@@ -7,7 +7,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
-	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 )
 
 // ErrPermissionDenied is returned by Process when the envelope principal on
@@ -39,8 +39,8 @@ func IsRateLimited(err error) bool {
 }
 
 // SourceUnreachableError is returned by the displayPlaylist path when the
-// cast-time source preflight got a DEFINITIVE dead verdict for every item
-// (see the probe call in handler.go for the fail-open rules that make
+// cast-time L0 media probe pass got a DEFINITIVE dead verdict for every item
+// (see the pass call in handler.go for the fail-open rules that make
 // "every" the only rejectable shape). The name deliberately matches DP-1
 // core spec §14's player error code for this scenario, `sourceUnreachable`,
 // so the string a controller surfaces to its user maps onto the spec's
@@ -48,10 +48,10 @@ func IsRateLimited(err error) bool {
 // report an actionable client-side failure instead of an internal error.
 type SourceUnreachableError struct {
 	// Results holds every item's probe outcome, in playlist order.
-	// Sources inside are log-truncated AND log-only (see
-	// SourceProbeResult's sanitization rule): Error() below must never
-	// render them, because it is returned verbatim to casters.
-	Results []offlinecache.SourceProbeResult
+	// Sources inside are log-redacted AND log-only (see
+	// mediahealth.ProbeResult's sanitization rule): Error() below must
+	// never render them, because it is returned verbatim to casters.
+	Results []mediahealth.ProbeResult
 }
 
 // maxPreflightItems bounds how many playlist items the source preflight
@@ -81,14 +81,14 @@ const maxProbeLogDetailItems = 5
 // omitted-count entry stands in for the rest.
 const maxErrorDetailItems = 10
 
-// Error renders items by INDEX and STATUS only — never the source URL.
-// Resolved item sources are playlist content a playlistUrl or
-// dynamic-playlist caller never supplied, and signed CDN URLs carry
-// credentials in their query strings; the controller contract requires
-// sanitized error messages, and both ingress paths return this string
-// verbatim. The caster holds the playlist, so an index is enough to
-// name the item. Probe error details (r.Err) are excluded for the same
-// reason: they can quote what they were probing.
+// Error renders items by INDEX and STATUS (or the probe's REASON code)
+// only — never the source URL. Resolved item sources are playlist content a
+// playlistUrl or dynamic-playlist caller never supplied, and signed CDN
+// URLs carry credentials in their query strings; the controller contract
+// requires sanitized error messages, and both ingress paths return this
+// string verbatim. The caster holds the playlist, so an index is enough to
+// name the item. Probe error details (r.Err, r.Detail) are excluded for the
+// same reason: they can quote what they were probing.
 func (e *SourceUnreachableError) Error() string {
 	parts := make([]string, 0, min(len(e.Results), maxErrorDetailItems+1))
 	for i, r := range e.Results {
@@ -96,12 +96,18 @@ func (e *SourceUnreachableError) Error() string {
 			parts = append(parts, fmt.Sprintf("and %d more", len(e.Results)-i))
 			break
 		}
-		if r.Status != 0 {
-			parts = append(parts, fmt.Sprintf("item %d: HTTP %d", i, r.Status))
-		} else {
-			// A dead item with no status is the malformed-data:-URI case
-			// (the only non-HTTP dead verdict).
+		switch {
+		case r.Reason == mediahealth.ReasonDataURIInvalid:
 			parts = append(parts, fmt.Sprintf("item %d: unusable data: URI", i))
+		case r.Reason != "" && r.Reason != mediahealth.ReasonHTTPStatus:
+			// A content-rule or DNS verdict: the status (often 200) says
+			// nothing; the reason code is the closed vocabulary of
+			// docs/media-health.md.
+			parts = append(parts, fmt.Sprintf("item %d: %s", i, r.Reason))
+		case r.Status != 0:
+			parts = append(parts, fmt.Sprintf("item %d: HTTP %d", i, r.Status))
+		default:
+			parts = append(parts, fmt.Sprintf("item %d: unloadable", i))
 		}
 	}
 	return fmt.Sprintf("sourceUnreachable: no playlist item source is loadable (%s)",

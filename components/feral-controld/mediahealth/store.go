@@ -1,0 +1,500 @@
+package mediahealth
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	bolt "go.etcd.io/bbolt"
+	"go.uber.org/zap"
+)
+
+// Store is the on-device observation store: one bbolt file holding every
+// record this device has ever made about a source.
+//
+// Why bbolt: the store is PERMANENT (it survives reboot and, once the ffos
+// OTA carry includes its directory, full-image updates; only a factory reset
+// clears it) and UNBOUNDED by count — a collector wall can hold hundreds of
+// thousands of works over the years. The hint path needs one point read per
+// playlist item on every cast, and the status path the same on every poll,
+// which a B+tree over an mmap answers in microseconds without loading
+// anything at startup. Per-record JSON files (the offline cache's shape) or
+// a JSONL log with an in-memory index would both need a startup scan and
+// RAM proportional to the record count on a memory-constrained device.
+//
+// Buckets:
+//
+//	items    Key(source) → JSON Record
+//	recheck  "<recheckAfter unix, zero-padded>|<key>" → "" (due-date index)
+//	meta     "schema" → version
+//
+// The recheck bucket lets the lookahead and the background sweep find due
+// records without scanning items; every write of a record replaces its
+// recheck entry. Writes go through db.Batch so bursts (a 1,000-item
+// preflight) coalesce their fsyncs.
+//
+// Disk guard: the store never evicts, so the one thing it must not do is
+// fill the disk. Writes are refused while the filesystem's free space is
+// under Options.MinFreeBytes; the daemon logs that once per episode and
+// playback carries on without new observations.
+type Store struct {
+	db     *bolt.DB
+	path   string
+	now    func() time.Time
+	build  Build
+	logger *zap.Logger
+
+	minFreeBytes int64
+	freeBytes    func(path string) (int64, error)
+	lowDiskWarn  bool
+}
+
+// Options tunes Open.
+type Options struct {
+	// Now is the clock (time.Now when nil).
+	Now func() time.Time
+	// Build is stamped on every verdict this process writes.
+	Build Build
+	// MinFreeBytes refuses writes when the filesystem has less free space.
+	// 0 disables the guard (tests).
+	MinFreeBytes int64
+	// FreeBytes reports the free space of the filesystem holding path
+	// (statfs when nil).
+	FreeBytes func(path string) (int64, error)
+	Logger    *zap.Logger
+}
+
+var (
+	bucketItems   = []byte("items")
+	bucketRecheck = []byte("recheck")
+	bucketMeta    = []byte("meta")
+	metaSchemaKey = []byte("schema")
+)
+
+// schemaVersion is the bucket layout version, distinct from recordVersion.
+const schemaVersion = 1
+
+// ErrLowDisk is returned by a write refused by the disk guard.
+var ErrLowDisk = errors.New("media health: store write refused, disk below reserve")
+
+// ErrNewerRecord is returned when a record was written by a newer binary.
+var ErrNewerRecord = errors.New("media health: record version is newer than this binary")
+
+// Open opens (creating if needed) the store at path. The parent directory is
+// created with 0750. A store written by a newer schema is refused rather
+// than rewritten.
+func Open(path string, opts Options) (*Store, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, fmt.Errorf("media health: create store dir: %w", err)
+	}
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 2 * time.Second})
+	if err != nil {
+		return nil, fmt.Errorf("media health: open store: %w", err)
+	}
+	s := &Store{
+		db:           db,
+		path:         path,
+		now:          opts.Now,
+		build:        opts.Build,
+		logger:       opts.Logger,
+		minFreeBytes: opts.MinFreeBytes,
+		freeBytes:    opts.FreeBytes,
+	}
+	if s.now == nil {
+		s.now = time.Now
+	}
+	if s.logger == nil {
+		s.logger = zap.NewNop()
+	}
+	if s.freeBytes == nil {
+		s.freeBytes = statfsFree
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		for _, b := range [][]byte{bucketItems, bucketRecheck, bucketMeta} {
+			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
+				return err
+			}
+		}
+		meta := tx.Bucket(bucketMeta)
+		if raw := meta.Get(metaSchemaKey); raw != nil {
+			v, perr := strconv.Atoi(string(raw))
+			if perr != nil || v > schemaVersion {
+				return fmt.Errorf("media health: store schema %q is not readable by this binary", raw)
+			}
+			return nil
+		}
+		return meta.Put(metaSchemaKey, []byte(strconv.Itoa(schemaVersion)))
+	})
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// Close closes the file. Safe to call once; the Store is unusable after.
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
+// Path is the store file.
+func (s *Store) Path() string { return s.path }
+
+// Destroy removes the store directory. The caller must have closed the
+// store; factory reset is the one caller.
+func Destroy(path string) error {
+	dir := filepath.Dir(path)
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("media health: remove store dir: %w", err)
+	}
+	return nil
+}
+
+// Get returns the record for source, nil when none.
+func (s *Store) Get(source string) (*Record, error) {
+	var rec *Record
+	err := s.db.View(func(tx *bolt.Tx) error {
+		var derr error
+		rec, derr = s.decode(tx.Bucket(bucketItems).Get([]byte(Key(source))))
+		return derr
+	})
+	return rec, err
+}
+
+// GetMany returns the records for sources (missing ones absent from the
+// map) in one read transaction.
+func (s *Store) GetMany(sources []string) (map[string]*Record, error) {
+	out := make(map[string]*Record, len(sources))
+	err := s.db.View(func(tx *bolt.Tx) error {
+		items := tx.Bucket(bucketItems)
+		for _, src := range sources {
+			if _, done := out[src]; done {
+				continue
+			}
+			rec, derr := s.decode(items.Get([]byte(Key(src))))
+			if derr != nil {
+				// One unreadable record must not blank a whole playlist's
+				// hints; it reads as unknown and is logged once here.
+				s.logger.Warn("media health: unreadable record skipped", zap.Error(derr))
+				continue
+			}
+			if rec != nil {
+				out[src] = rec
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+// Count returns the number of records.
+func (s *Store) Count() (int, error) {
+	n := 0
+	err := s.db.View(func(tx *bolt.Tx) error {
+		n = tx.Bucket(bucketItems).Stats().KeyN
+		return nil
+	})
+	return n, err
+}
+
+// Due returns up to limit sources whose recheck time is at or before now,
+// earliest first.
+func (s *Store) Due(now time.Time, limit int) ([]string, error) {
+	var out []string
+	err := s.db.View(func(tx *bolt.Tx) error {
+		items := tx.Bucket(bucketItems)
+		c := tx.Bucket(bucketRecheck).Cursor()
+		bound := []byte(recheckPrefix(now.Add(time.Second)))
+		for k, _ := c.First(); k != nil && bytes.Compare(k, bound) < 0 && len(out) < limit; k, _ = c.Next() {
+			_, itemKey, found := bytes.Cut(k, []byte{'|'})
+			if !found {
+				continue
+			}
+			rec, derr := s.decode(items.Get(itemKey))
+			if derr != nil || rec == nil {
+				continue
+			}
+			out = append(out, rec.Source)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// put writes rec under its key and re-indexes its recheck time. prev is the
+// record previously stored (nil when none) so the old index entry is removed.
+func (s *Store) put(tx *bolt.Tx, prev, rec *Record) error {
+	rec.V = recordVersion
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	key := []byte(Key(rec.Source))
+	if err := tx.Bucket(bucketItems).Put(key, raw); err != nil {
+		return err
+	}
+	recheck := tx.Bucket(bucketRecheck)
+	if prev != nil {
+		if err := recheck.Delete(recheckKey(prev.RecheckAfter, key)); err != nil {
+			return err
+		}
+	}
+	return recheck.Put(recheckKey(rec.RecheckAfter, key), []byte{})
+}
+
+func recheckPrefix(t time.Time) string {
+	return fmt.Sprintf("%020d", t.Unix())
+}
+
+func recheckKey(t time.Time, key []byte) []byte {
+	return []byte(recheckPrefix(t) + "|" + string(key))
+}
+
+// decode parses a stored record. A newer record version is an error (the
+// caller treats it as unknown and never rewrites it); nil raw is nil record.
+func (s *Store) decode(raw []byte) (*Record, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	var rec Record
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return nil, fmt.Errorf("media health: decode record: %w", err)
+	}
+	if rec.V > recordVersion {
+		return nil, ErrNewerRecord
+	}
+	return &rec, nil
+}
+
+// update loads source's record, lets fn mutate it (creating it when
+// absent), and writes it back — one Batch transaction, refused under the
+// disk guard. fn returning false skips the write.
+func (s *Store) update(source string, fn func(rec *Record, existed bool) bool) (*Record, error) {
+	if err := s.checkDisk(); err != nil {
+		return nil, err
+	}
+	var out *Record
+	err := s.db.Batch(func(tx *bolt.Tx) error {
+		items := tx.Bucket(bucketItems)
+		prev, derr := s.decode(items.Get([]byte(Key(source))))
+		if errors.Is(derr, ErrNewerRecord) {
+			return derr
+		}
+		var rec Record
+		existed := derr == nil && prev != nil
+		if existed {
+			rec = *prev
+		} else {
+			prev = nil
+			rec = Record{Source: source}
+		}
+		if !fn(&rec, existed) {
+			out = &rec
+			return nil
+		}
+		rec.Build = s.build
+		out = &rec
+		return s.put(tx, prev, &rec)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// checkDisk enforces the free-space reserve, logging the first refusal of
+// an episode and the recovery.
+func (s *Store) checkDisk() error {
+	if s.minFreeBytes <= 0 {
+		return nil
+	}
+	free, err := s.freeBytes(s.path)
+	if err != nil {
+		// Unknown free space is not evidence of pressure.
+		return nil
+	}
+	if free < s.minFreeBytes {
+		if !s.lowDiskWarn {
+			s.lowDiskWarn = true
+			s.logger.Warn("media health: disk below reserve; observations are not being recorded",
+				zap.Int64("free_bytes", free), zap.Int64("reserve_bytes", s.minFreeBytes))
+		}
+		return ErrLowDisk
+	}
+	if s.lowDiskWarn {
+		s.lowDiskWarn = false
+		s.logger.Info("media health: disk back above reserve; observations resume")
+	}
+	return nil
+}
+
+// ApplyProbe folds an L0 probe result into source's record and returns the
+// record as stored (or as it stands, when nothing was written).
+//
+// Rules:
+//   - alive       → State ok, Layer l0, recheck in RecheckOK; consecutive
+//     broken reset. The play stats are kept.
+//   - dead        → State broken, Layer l0, recheck in RecheckBroken (or
+//     RecheckBrokenBackoff after BrokenBackoffAfter consecutive).
+//   - inconclusive with a Reason (transient status, timeout, transport)
+//     → LastError only, recheck in RetryTransient when the record has no
+//     verdict, otherwise untouched. A guard/too-long refusal (no Reason)
+//     writes nothing at all: it is policy, not an observation.
+//   - inline      → nothing: inline items have no origin to observe.
+//   - FromStore   → nothing: the verdict came from this store already.
+func (s *Store) ApplyProbe(source string, res ProbeResult) (*Record, error) {
+	if res.FromStore || res.Verdict == VerdictInline {
+		return s.Get(source)
+	}
+	if res.Verdict == VerdictInconclusive && res.Reason == "" {
+		return s.Get(source)
+	}
+	now := s.now()
+	return s.update(source, func(rec *Record, _ bool) bool {
+		if res.WireURL != "" {
+			rec.WireURL = res.WireURL
+			rec.Host = hostOf(res.WireURL)
+		}
+		switch res.Verdict {
+		case VerdictAlive:
+			rec.State = StateOK
+			rec.Layer = LayerL0
+			rec.Category, rec.Reason = "", ""
+			rec.HTTPStatus = res.Status
+			rec.DeclaredType, rec.SniffedType = res.Declared, res.Sniffed
+			rec.CheckedAt = now
+			rec.RecheckAfter = now.Add(RecheckOK)
+			rec.ConsecutiveBroken = 0
+			rec.LastError, rec.LastErrorAt = "", nil
+		case VerdictDead:
+			if rec.State == StateBroken && rec.Layer == LayerL0 {
+				rec.ConsecutiveBroken++
+			} else {
+				rec.ConsecutiveBroken = 1
+			}
+			rec.State = StateBroken
+			rec.Layer = LayerL0
+			rec.Reason = res.Reason
+			rec.Category = CategoryOf(res.Reason, res.Status)
+			rec.HTTPStatus = res.Status
+			rec.DeclaredType, rec.SniffedType = res.Declared, res.Sniffed
+			rec.CheckedAt = now
+			rec.RecheckAfter = now.Add(brokenRecheck(rec.ConsecutiveBroken))
+			rec.LastError = res.Detail
+			rec.LastErrorAt = new(now)
+		default:
+			rec.LastError = transientDetail(res)
+			rec.LastErrorAt = new(now)
+			if rec.State == "" {
+				rec.RecheckAfter = now.Add(RetryTransient)
+			}
+		}
+		return true
+	})
+}
+
+func brokenRecheck(consecutive int) time.Duration {
+	if consecutive >= BrokenBackoffAfter {
+		return RecheckBrokenBackoff
+	}
+	return RecheckBroken
+}
+
+func transientDetail(res ProbeResult) string {
+	if res.Detail != "" {
+		return res.Detail
+	}
+	if res.Err != nil {
+		return res.Err.Error()
+	}
+	return string(res.Reason)
+}
+
+// ApplyOutcome folds one player-reported outcome into source's record.
+//
+// Rules (the corroboration contract):
+//   - kind ok    → State ok, Layer play, recheck in RecheckOK; consecutive
+//     fail reset. A play success is the strongest positive evidence and
+//     heals a broken verdict.
+//   - kind skip  → Plays.Skipped only.
+//   - kind fail, device-local stage (webgl) → Plays.LastFail only, with the
+//     device_limit category; never a verdict.
+//   - kind fail, other stage → Plays.Fail and ConsecutiveFail advance. The
+//     record becomes broken (Layer play) when ConsecutiveFail reaches 2, or
+//     when an L0 broken verdict is already standing (corroborated either
+//     way). A single failure is recorded, not concluded.
+func (s *Store) ApplyOutcome(o Outcome) (*Record, error) {
+	now := s.now()
+	return s.update(o.Source, func(rec *Record, _ bool) bool {
+		switch o.Kind {
+		case OutcomeOK:
+			rec.Plays.OK++
+			rec.Plays.ConsecutiveFail = 0
+			rec.Plays.LastOKAt = new(now)
+			rec.State = StateOK
+			rec.Layer = LayerPlay
+			rec.Category, rec.Reason = "", ""
+			rec.CheckedAt = now
+			rec.RecheckAfter = now.Add(RecheckOK)
+			rec.ConsecutiveBroken = 0
+			rec.LastError, rec.LastErrorAt = "", nil
+			if o.MediaType != "" {
+				rec.MediaType = o.MediaType
+			}
+			return true
+		case OutcomeSkip:
+			rec.Plays.Skipped++
+			return true
+		case OutcomeFail:
+			fail := &PlayFailure{Stage: o.Stage, Code: o.Code, MediaType: o.MediaType, Attempt: o.Attempt, At: now}
+			rec.Plays.LastFail = fail
+			rec.Plays.LastFailAt = new(now)
+			if o.MediaType != "" {
+				rec.MediaType = o.MediaType
+			}
+			reason := reasonForStage(o.Stage)
+			if reason == "" || CategoryOf(reason, 0) == CategoryDeviceLimit {
+				// Recorded for the app and the support bundle; the source
+				// is not the thing that failed.
+				return true
+			}
+			rec.Plays.Fail++
+			rec.Plays.ConsecutiveFail++
+			corroborated := rec.Plays.ConsecutiveFail >= 2 ||
+				(rec.State == StateBroken && rec.Layer == LayerL0 && now.Before(rec.RecheckAfter))
+			if !corroborated {
+				return true
+			}
+			rec.State = StateBroken
+			rec.Layer = LayerPlay
+			rec.Reason = reason
+			status := 0
+			if o.Stage == StageDetect {
+				status, _ = strconv.Atoi(o.Code)
+			}
+			rec.Category = playCategory(reason, status)
+			rec.HTTPStatus = status
+			rec.CheckedAt = now
+			rec.RecheckAfter = now.Add(RecheckBroken)
+			rec.LastError = fmt.Sprintf("player: %s %s", o.Stage, o.Code)
+			rec.LastErrorAt = new(now)
+			return true
+		}
+		return false
+	})
+}
+
+// playCategory maps a play-layer conclusion to its category: a detect-stage
+// HTTP status is the kiosk's own answer, so 401/403 are source_blocked and
+// 404/410-class source_missing; everything else is render_failed.
+func playCategory(reason Reason, status int) Category {
+	if reason == ReasonRenderDetect && status >= 400 {
+		return CategoryOf(ReasonHTTPStatus, status)
+	}
+	return CategoryOf(reason, status)
+}

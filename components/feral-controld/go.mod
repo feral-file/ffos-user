@@ -10,6 +10,7 @@ require (
 	github.com/ethereum/go-ethereum v1.17.2
 	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20261027140929-82d5ebae13e4
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
+	github.com/gabriel-vasile/mimetype v1.4.9
 	github.com/go-jose/go-jose/v4 v4.1.3
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/golang/mock v1.6.0
@@ -19,6 +20,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/stretchr/testify v1.11.1
+	go.etcd.io/bbolt v1.5.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/net v0.56.0
 )
