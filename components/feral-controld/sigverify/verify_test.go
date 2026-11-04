@@ -258,9 +258,9 @@ func TestVerify_PlaceholderSignature_Invalid(t *testing.T) {
 	assert.Equal(t, "feed signature invalid: signature invalid", v.Reason)
 }
 
-// TestVerify_UnsupportedAlg_Invalid pins the contract divergence recorded in
-// docs/api-design.md: the v2 profile lists ecdsa-p256, dp1-go v0.6.0 does not
-// implement it, so such an entry reads as invalid rather than being skipped.
+// TestVerify_UnsupportedAlg_Invalid pins the supported-algorithms note in
+// docs/api-design.md: dp1-go v0.7.2 does not implement ecdsa-p256, so such an
+// entry reads as invalid rather than being skipped.
 func TestVerify_UnsupportedAlg_Invalid(t *testing.T) {
 	doc := unsignedDoc()
 	signWith(t, doc, newKey(t), dp1playlist.RoleFeed)
