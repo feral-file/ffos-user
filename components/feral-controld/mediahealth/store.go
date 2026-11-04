@@ -202,9 +202,12 @@ func (s *Store) Count() (int, error) {
 	return n, err
 }
 
-// Due returns up to limit sources whose recheck time is at or before now,
-// earliest first.
-func (s *Store) Due(now time.Time, limit int) ([]string, error) {
+// Due returns up to limit sources whose due time (recheck or transient
+// retry) is at or before now, earliest first, skipping any in exclude. The
+// exclusion is applied INSIDE the scan so a handful of permanently excluded
+// rows at the head of the index (the items on the wall) cannot shadow
+// eligible rows behind them.
+func (s *Store) Due(now time.Time, limit int, exclude map[string]struct{}) ([]string, error) {
 	var out []string
 	err := s.db.View(func(tx *bolt.Tx) error {
 		items := tx.Bucket(bucketItems)
@@ -217,6 +220,9 @@ func (s *Store) Due(now time.Time, limit int) ([]string, error) {
 			}
 			rec, derr := s.decode(items.Get(itemKey))
 			if derr != nil || rec == nil {
+				continue
+			}
+			if _, skip := exclude[rec.Source]; skip {
 				continue
 			}
 			out = append(out, rec.Source)
@@ -240,11 +246,11 @@ func (s *Store) put(tx *bolt.Tx, prev, rec *Record) error {
 	}
 	recheck := tx.Bucket(bucketRecheck)
 	if prev != nil {
-		if err := recheck.Delete(recheckKey(prev.RecheckAfter, key)); err != nil {
+		if err := recheck.Delete(recheckKey(prev.dueAt(), key)); err != nil {
 			return err
 		}
 	}
-	return recheck.Put(recheckKey(rec.RecheckAfter, key), []byte{})
+	return recheck.Put(recheckKey(rec.dueAt(), key), []byte{})
 }
 
 func recheckPrefix(t time.Time) string {
@@ -371,6 +377,7 @@ func (s *Store) ApplyProbe(source string, res ProbeResult) (*Record, error) {
 			rec.RecheckAfter = now.Add(RecheckOK)
 			rec.ConsecutiveBroken = 0
 			rec.LastError, rec.LastErrorAt = "", nil
+			rec.RetryAfter = time.Time{}
 		case VerdictDead:
 			if rec.State == StateBroken && rec.Layer == LayerL0 {
 				rec.ConsecutiveBroken++
@@ -387,12 +394,14 @@ func (s *Store) ApplyProbe(source string, res ProbeResult) (*Record, error) {
 			rec.RecheckAfter = now.Add(brokenRecheck(rec.ConsecutiveBroken))
 			rec.LastError = res.Detail
 			rec.LastErrorAt = new(now)
+			rec.RetryAfter = time.Time{}
 		default:
+			// Transient: hold the next attempt, never the verdict. An
+			// expired broken verdict stays expired (no skip authority) and
+			// the source is left alone for RetryTransient.
 			rec.LastError = transientDetail(res)
 			rec.LastErrorAt = new(now)
-			if rec.State == "" {
-				rec.RecheckAfter = now.Add(RetryTransient)
-			}
+			rec.RetryAfter = now.Add(RetryTransient)
 		}
 		return true
 	})
@@ -416,24 +425,26 @@ func transientDetail(res ProbeResult) string {
 }
 
 // ApplyOutcome folds one player-reported outcome into source's record.
-// online is the device's own connectivity verdict at the time of the poll.
+// count says whether a failing outcome may advance the corroboration
+// counters: the Service passes false while the device's own connectivity
+// verdict is offline or unknown, and for every failing entry after the
+// first of one play (Service.samePlay) — the player reports several stages
+// per attempt and retries in place, and one attempt must not corroborate
+// itself.
 //
 // Rules (the corroboration contract):
 //   - kind ok    → State ok, Layer play, recheck in RecheckOK; consecutive
 //     fail reset. A play success is the strongest positive evidence and
-//     heals a broken verdict — whatever online says: a work that rendered
+//     heals a broken verdict — whatever count says: a work that rendered
 //     (from cache, from a LAN origin) rendered.
 //   - kind skip  → Plays.Skipped only.
 //   - kind fail, device-local (deviceLocal: webgl, or detect/network) or
-//     observed while the device was OFFLINE → Plays.LastFail only; never a
-//     verdict and never a count. An outage says nothing about a source,
-//     and a verdict earned during one would be skipped before the play
-//     layer could ever heal it.
+//     count=false → Plays.LastFail only; never a verdict and never a count.
 //   - kind fail, otherwise → Plays.Fail and ConsecutiveFail advance. The
-//     record becomes broken (Layer play) when ConsecutiveFail reaches 2, or
-//     when an L0 broken verdict is already standing (corroborated either
-//     way). A single failure is recorded, not concluded.
-func (s *Store) ApplyOutcome(o Outcome, online bool) (*Record, error) {
+//     record becomes broken (Layer play) when ConsecutiveFail reaches 2 —
+//     two distinct plays — or when an L0 broken verdict is already standing
+//     (corroborated either way). A single failure is recorded, not concluded.
+func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 	now := s.now()
 	return s.update(o.Source, func(rec *Record, _ bool) bool {
 		switch o.Kind {
@@ -463,7 +474,7 @@ func (s *Store) ApplyOutcome(o Outcome, online bool) (*Record, error) {
 				rec.MediaType = o.MediaType
 			}
 			reason := reasonForStage(o.Stage)
-			if reason == "" || deviceLocal(o) || !online {
+			if reason == "" || deviceLocal(o) || !count {
 				// Recorded for the app and the support bundle; the source
 				// is not the thing that failed (or nothing could be told
 				// about it while the device was offline).

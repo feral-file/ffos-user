@@ -211,12 +211,21 @@ func (p *Probe) retryUnranged(ctx context.Context, result ProbeResult, wireURL, 
 // validate runs the content rules over a 2xx body.
 func (p *Probe) validate(result ProbeResult, resp *fetchOutcome, promised int64) ProbeResult {
 	body := resp.Body
-	if resp.ReadErr != nil && !isConclusiveTruncation(len(body), promised, p.window()) {
-		// A mid-body read failure without conclusive evidence of truncation
-		// is network weather, not a verdict.
-		result.Verdict = VerdictInconclusive
-		result.Err = &FetchError{Kind: FetchErrTransport, Err: resp.ReadErr}
-		return result
+	if resp.ReadErr != nil {
+		// A deadline or cancellation mid-body is the probe's own clock
+		// running out (a slow healthy origin, the phase ceiling), never
+		// evidence about the bytes — judged BEFORE any byte count, because
+		// a timed-out short read looks exactly like a truncated one.
+		kind := fetchErrorKind(resp.ReadErr)
+		if kind == FetchErrTimeout || !isConclusiveTruncation(len(body), promised, p.window()) {
+			// Without independent evidence of premature termination (a
+			// closed connection short of what the response promised) a
+			// mid-body read failure is network weather, not a verdict.
+			result.Verdict = VerdictInconclusive
+			result.Reason = ReasonTransport
+			result.Err = &FetchError{Kind: kind, Err: resp.ReadErr}
+			return result
+		}
 	}
 	if p.Validator == nil {
 		result.Verdict = VerdictAlive

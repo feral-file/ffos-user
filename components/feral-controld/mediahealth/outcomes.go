@@ -98,25 +98,43 @@ func reasonForStage(stage string) Reason {
 
 // Drainer tracks what has already been read from the ring so each outcome
 // is applied once. One per poller; not safe for concurrent use.
+//
+// The player numbers entries for the lifetime of its page, NOT per cast:
+// a cast bumps castSeq but the ring keeps its entries and seq keeps
+// counting, so the cursor must survive a cast — resetting it there would
+// re-apply the entries still in the ring and let an ordinary cast
+// manufacture its own corroboration. The cursor resets only when the
+// numbering provably restarted: a page reload (the player-session
+// generation bump, Reset) or a ring whose highest seq is below the cursor
+// (a restart the daemon did not see).
 type Drainer struct {
 	castSeq int64
 	lastSeq int64
-	primed  bool
+}
+
+// Reset forgets the cursor: the player page was replaced, so its numbering
+// starts over and the entries about to appear are new.
+func (d *Drainer) Reset() {
+	d.lastSeq = 0
 }
 
 // Drain returns the entries of o not yet seen, in Seq order, and advances
-// the cursor. A castSeq change resets the cursor (a new cast restarts seq
-// numbering). A gap between the last seen seq and the oldest returned entry
+// the cursor. A gap between the last seen seq and the oldest returned entry
 // means the ring wrapped between polls; it is reported in gap so the caller
 // can log it.
 func (d *Drainer) Drain(o *Outcomes) (fresh []Outcome, gap int64) {
 	if o == nil {
 		return nil, 0
 	}
-	if !d.primed || o.CastSeq != d.castSeq {
-		d.castSeq = o.CastSeq
+	d.castSeq = o.CastSeq
+	var maxSeq int64
+	for _, e := range o.Entries {
+		maxSeq = max(maxSeq, e.Seq)
+	}
+	if len(o.Entries) > 0 && maxSeq < d.lastSeq {
+		// Sequence rollback: nothing in the ring is at or past the cursor,
+		// so the page restarted its numbering. Everything present is new.
 		d.lastSeq = 0
-		d.primed = true
 	}
 	entries := make([]Outcome, 0, len(o.Entries))
 	for _, e := range o.Entries {

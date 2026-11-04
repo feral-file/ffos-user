@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
@@ -39,7 +40,7 @@ const mediaHealthMinFreeBytes = offlinecache.DefaultMinFreeDiskBytes
 // online is the device's applied internet verdict (the mediator's
 // connectivity edges, see main): play failures observed while it is false
 // are recorded but never counted, so an outage cannot mark the wall broken.
-func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, online func() bool, logger *zap.Logger) (*mediahealth.Service, *mediahealth.Lookahead) {
+func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, online func() bool, replayable func(string) bool, logger *zap.Logger) (*mediahealth.Service, *mediahealth.Lookahead) {
 	if cfg.Disabled {
 		logger.Warn("media health disabled by config; casts are forwarded unprobed and carry no hints")
 		return nil, nil
@@ -74,12 +75,13 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 		lookahead = &mediahealth.Lookahead{Prober: prober, Store: store, Logger: logger, Window: cfg.Lookahead}
 	}
 	svc := mediahealth.New(mediahealth.Config{
-		Store:     store,
-		Prober:    prober,
-		Contract:  &mediahealth.PlayerContract{Path: setupui.DefaultContractPath},
-		Lookahead: lookahead,
-		Online:    online,
-		Logger:    logger,
+		Store:      store,
+		Prober:     prober,
+		Contract:   &mediahealth.PlayerContract{Path: setupui.DefaultContractPath},
+		Lookahead:  lookahead,
+		Online:     online,
+		Replayable: replayable,
+		Logger:     logger,
 	})
 	count, _ := store.Count()
 	logger.Info("media health store opened",
@@ -107,4 +109,11 @@ func installedControldVersion() string {
 		return ""
 	}
 	return cfg.Version
+}
+
+// mediaHealthCursorReconciler forgets the outcome-ring cursor on every
+// player-session generation: a new page restarts the ring's numbering, so
+// nothing in the fresh ring was seen before (see mediahealth.Drainer).
+func mediaHealthCursorReconciler(svc *mediahealth.Service) func(context.Context) {
+	return func(context.Context) { svc.ResetOutcomeCursor() }
 }

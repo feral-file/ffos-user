@@ -151,6 +151,7 @@ func (f *mediaHealthFetcher) Fetch(ctx context.Context, req mediahealth.FetchReq
 // the guard stopped) must stay a guard verdict, and an NXDOMAIN must be
 // told apart from a resolver that merely timed out.
 func classifyFetchError(err error) error {
+	err = redactFetchError(err)
 	switch {
 	case errors.Is(err, ErrUnsafeSource):
 		return &mediahealth.FetchError{Kind: mediahealth.FetchErrGuard, Err: err}
@@ -167,6 +168,18 @@ func classifyFetchError(err error) error {
 		return &mediahealth.FetchError{Kind: mediahealth.FetchErrTimeout, Err: err}
 	}
 	return &mediahealth.FetchError{Kind: mediahealth.FetchErrTransport, Err: err}
+}
+
+// redactFetchError strips credential-bearing URL text from a net/http error
+// before it can reach a log line or a stored lastError. *url.Error renders
+// its URL verbatim — query string included — and on a redirect hop that is
+// a URL the playlist never showed us; the wrapped cause is kept so the
+// error classes (DNS, timeout, guard) still match through errors.Is/As.
+func redactFetchError(err error) error {
+	if urlErr, ok := errors.AsType[*go_url.Error](err); ok {
+		return &go_url.Error{Op: urlErr.Op, URL: redactSourceForLog(urlErr.URL), Err: urlErr.Err}
+	}
+	return err
 }
 
 // redactSourceForLog prepares a source URL for the daemon log: the query

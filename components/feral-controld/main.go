@@ -1258,7 +1258,14 @@ func initializeApp(
 	// mediator's single observer seam.
 	var mediaHealthOnline atomic.Bool
 	internetObservers = append(internetObservers, func(connected bool) { mediaHealthOnline.Store(connected) })
-	mediaHealthSvc, mediaHealthLookahead := wireMediaHealth(config.Get().MediaHealthTuning(logger), uaPolicy, mediaHealthOnline.Load, logger)
+	// A source the offline cache can replay is never hinted (the hint would
+	// hide what replay interception could show); the check is the same one
+	// the cast rescue uses, and only counts when kiosk replay is wired.
+	var mediaHealthReplayable func(string) bool
+	if offlineCache != nil && kioskReplay != nil {
+		mediaHealthReplayable = func(source string) bool { return offlineCache.HasReplayableItem(source) }
+	}
+	mediaHealthSvc, mediaHealthLookahead := wireMediaHealth(config.Get().MediaHealthTuning(logger), uaPolicy, mediaHealthOnline.Load, mediaHealthReplayable, logger)
 	if mediaHealthSvc != nil {
 		defer func() { _ = mediaHealthSvc.Close() }()
 		commandrouter.SetMediaHealth(rawCmdHandler, mediaHealthSvc, logger)
@@ -1536,6 +1543,11 @@ func initializeApp(
 	}
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))
+	}
+	if mediaHealthSvc != nil {
+		// A new player page restarts the outcome ring's numbering; forget
+		// the cursor so nothing in the fresh ring is mistaken for seen.
+		session.RegisterReconciler("media-health-cursor", mediaHealthCursorReconciler(mediaHealthSvc))
 	}
 	session.RegisterReconciler("status-force-refresh", statusForceRefreshReconciler(poller))
 	session.RegisterReconciler("setupui-resync", setupUIResyncReconciler(setupNarrator))

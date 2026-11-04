@@ -166,13 +166,19 @@ func (l *Lookahead) nextAhead(now time.Time) string {
 	if window <= 0 {
 		window = DefaultWindow
 	}
-	candidates := make([]string, 0, window)
+	candidates := make([]string, 0, window+1)
 	for step := 1; step < len(sources) && len(candidates) < window; step++ {
 		src := sources[(index+step)%len(sources)]
 		if src == "" || IsDataURI(src) {
 			continue
 		}
 		candidates = append(candidates, src)
+	}
+	// The current item last: it is already on screen, so nothing ahead
+	// depends on it, but a one-item playlist (or one parked on its current
+	// item) would otherwise never get its scheduled recheck.
+	if cur := sources[index]; cur != "" && !IsDataURI(cur) {
+		candidates = append(candidates, cur)
 	}
 	if len(candidates) == 0 {
 		return ""
@@ -218,12 +224,14 @@ func (l *Lookahead) nextDue(now time.Time) string {
 	}
 	l.mu.Unlock()
 
-	due, err := l.Store.Due(now, 8)
+	// On-wall sources are excluded inside the query, so the rows the
+	// lookahead owns can never shadow the off-wall rows behind them.
+	due, err := l.Store.Due(now, 8, onWall)
 	if err != nil {
 		return ""
 	}
 	for _, src := range due {
-		if _, playing := onWall[src]; playing || IsDataURI(src) {
+		if IsDataURI(src) {
 			continue
 		}
 		l.mu.Lock()

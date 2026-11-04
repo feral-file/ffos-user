@@ -182,3 +182,22 @@ func dataURIParses(uri string) bool {
 	res := (&mediahealth.Probe{}).ProbeOne(context.Background(), uri)
 	return res.Verdict == mediahealth.VerdictInline
 }
+
+// F4 (PR #438 review): a redirect hop's signed URL must not survive into the
+// fetch error that the cast path logs and the store keeps as lastError.
+func TestMediaHealthFetcher_ErrorsCarryNoCredentials(t *testing.T) {
+	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		go_http.Redirect(w, r, "https://gone.example/a.png?X-Amz-Signature=deadbeef", go_http.StatusFound)
+	}))
+	defer origin.Close()
+	nx := sourceGuard{resolver: nxdomainResolver{}, isReserved: loopbackIsPublic}
+	f := newMediaHealthFetcherWith(nx, newGuardedProbeHTTPClientFor(nx, 0))
+	_, err := f.Fetch(context.Background(), mediahealth.FetchRequest{URL: origin.URL + "/a", MaxBodyBytes: 64})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "deadbeef")
+	assert.NotContains(t, err.Error(), "X-Amz")
+	assert.Contains(t, err.Error(), "gone.example")
+	fe, ok := errors.AsType[*mediahealth.FetchError](err)
+	require.True(t, ok)
+	assert.Equal(t, mediahealth.FetchErrDNS, fe.Kind, "the class still classifies through the redaction")
+}

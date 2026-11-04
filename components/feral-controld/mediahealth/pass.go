@@ -119,10 +119,21 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 			results[i] = probeDataURI(source)
 			continue
 		}
-		if rec := stored[source]; rec != nil && fromStoreVerdict(rec, at) != "" {
-			firstIndex[key] = i
-			results[i] = storedResult(rec, at)
-			continue
+		if rec := stored[source]; rec != nil {
+			if fromStoreVerdict(rec, at) != "" {
+				firstIndex[key] = i
+				results[i] = storedResult(rec, at)
+				continue
+			}
+			if !rec.Due(at) {
+				// Under a transient retry hold (a 429 minutes ago): the
+				// cast must not re-dial an origin asking to be left
+				// alone, and nothing conclusive is known — inconclusive,
+				// fail-open, no request.
+				firstIndex[key] = i
+				results[i] = ProbeResult{Source: redactForLog(source), Verdict: VerdictInconclusive, FromStore: true, Err: errRetryHold}
+				continue
+			}
 		}
 		if len(uniqueIndices) == maxAttempts {
 			results[i] = ProbeResult{
@@ -253,3 +264,9 @@ type budgetError struct{}
 func (budgetError) Error() string { return "media health: per-cast probe budget exhausted" }
 
 var errBudgetExhausted error = budgetError{}
+
+type retryHoldError struct{}
+
+func (retryHoldError) Error() string { return "media health: source under a transient retry hold" }
+
+var errRetryHold error = retryHoldError{}

@@ -93,7 +93,9 @@ func TestStore_TransientOnlyRecordSchedulesRetryButHasNoVerdict(t *testing.T) {
 	rec, err := s.ApplyProbe("https://o/a", ProbeResult{Verdict: VerdictInconclusive, Reason: ReasonTransport, Err: errors.New("timeout")})
 	require.NoError(t, err)
 	assert.Empty(t, rec.State)
-	assert.Equal(t, clock.t.Add(RetryTransient), rec.RecheckAfter)
+	assert.Equal(t, clock.t.Add(RetryTransient), rec.RetryAfter)
+	assert.False(t, rec.Due(clock.t))
+	assert.True(t, rec.Due(clock.t.Add(RetryTransient)))
 	health, err := s.ItemHealths([]string{"https://o/a", "https://o/never"})
 	require.NoError(t, err)
 	assert.Equal(t, StateUnknown, health[0].State)
@@ -258,17 +260,17 @@ func TestStore_DueAndRecheckIndex(t *testing.T) {
 	_, _ = s.ApplyProbe("https://o/a", ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
 	_, _ = s.ApplyProbe("https://o/b", ProbeResult{Verdict: VerdictAlive, Status: 200})
 
-	due, err := s.Due(clock.t.Add(RecheckBroken), 10)
+	due, err := s.Due(clock.t.Add(RecheckBroken), 10, nil)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"https://o/a"}, due)
 
 	// Re-probing a moves its index entry; the old one must not linger.
 	clock.Advance(RecheckBroken)
 	_, _ = s.ApplyProbe("https://o/a", ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
-	due, err = s.Due(clock.t, 10)
+	due, err = s.Due(clock.t, 10, nil)
 	require.NoError(t, err)
 	assert.Empty(t, due)
-	due, err = s.Due(clock.t.Add(RecheckOK), 10)
+	due, err = s.Due(clock.t.Add(RecheckOK), 10, nil)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"https://o/a", "https://o/b"}, due)
 

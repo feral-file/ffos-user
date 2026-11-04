@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 )
 
@@ -90,6 +91,9 @@ func fetchErrorKind(err error) FetchErrorKind {
 		return fe.Kind
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return FetchErrTimeout
+	}
+	if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
 		return FetchErrTimeout
 	}
 	return FetchErrTransport

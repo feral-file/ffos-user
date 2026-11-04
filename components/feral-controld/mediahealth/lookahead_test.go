@@ -24,24 +24,28 @@ func TestLookahead_ProbesUpcomingItemsInPlayOrder(t *testing.T) {
 	l := newTestLookahead(t, f, clock)
 	l.Observe([]string{"https://o/0", "https://o/1", "https://o/2", "https://o/3", "https://o/4"}, 3)
 
-	// Window 3 from index 3: items 4, 0, 1 — one request per step.
-	for _, want := range []string{"https://o/4", "https://o/0", "https://o/1"} {
+	// Window 3 from index 3: items 4, 0, 1, then the current item 3 last —
+	// one request per step.
+	for _, want := range []string{"https://o/4", "https://o/0", "https://o/1", "https://o/3"} {
 		assert.True(t, l.step(context.Background(), nil), "a due upcoming item is probed")
 		assert.Equal(t, 1, f.count(want), want)
 	}
 	assert.False(t, l.step(context.Background(), nil), "the window is exhausted; nothing is due in the background")
 	assert.Equal(t, 0, f.count("https://o/2"), "beyond the window nothing is probed")
-	assert.Equal(t, 0, f.count("https://o/3"), "the current item is not probed ahead")
+	assert.Equal(t, 1, f.count("https://o/3"), "the current item is probed after the window, once")
 }
 
 func TestLookahead_SkipsRecordsThatAreNotDue(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	f := newTableFetcher()
+	f.answers["https://o/0"] = ok(200, "image/png", minimalPNG(1, 1), -1)
 	f.answers["https://o/1"] = ok(200, "image/png", minimalPNG(1, 1), -1)
 	l := newTestLookahead(t, f, clock)
 	l.Observe([]string{"https://o/0", "https://o/1"}, 0)
 	assert.True(t, l.step(context.Background(), nil))
 	assert.Equal(t, 1, f.count("https://o/1"))
+	assert.True(t, l.step(context.Background(), nil), "then the current item")
+	assert.Equal(t, 1, f.count("https://o/0"))
 	assert.False(t, l.step(context.Background(), nil), "an ok record inside its window is not re-probed")
 	clock.Advance(RecheckOK + time.Second)
 	assert.True(t, l.step(context.Background(), nil), "past its recheck it is due again")
@@ -72,6 +76,7 @@ func TestLookahead_BackgroundSweepIsTokenBucketed(t *testing.T) {
 func TestLookahead_AdmitGateAndIgnoredInputs(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	f := newTableFetcher()
+	f.answers["https://o/0"] = ok(200, "image/png", minimalPNG(1, 1), -1)
 	f.answers["https://o/1"] = ok(200, "image/png", minimalPNG(1, 1), -1)
 	l := newTestLookahead(t, f, clock)
 	admit := false
@@ -80,6 +85,7 @@ func TestLookahead_AdmitGateAndIgnoredInputs(t *testing.T) {
 	assert.False(t, l.step(context.Background(), nil), "refused by the resource gate")
 	admit = true
 	assert.True(t, l.step(context.Background(), nil))
+	assert.True(t, l.step(context.Background(), nil), "the current item")
 	assert.False(t, l.step(context.Background(), nil), "data: items are never probed ahead")
 
 	big := make([]string, maxObservedItems+1)

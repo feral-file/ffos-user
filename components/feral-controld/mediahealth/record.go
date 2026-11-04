@@ -228,9 +228,14 @@ type Record struct {
 	RecheckAfter time.Time `json:"recheckAfter"`
 
 	// LastError / LastErrorAt describe the most recent transient attempt.
-	// They never change State.
+	// They never change State. RetryAfter is when the next attempt may run
+	// after one — tracked apart from RecheckAfter so a rate-limited origin
+	// is left alone for RetryTransient WITHOUT extending an expired broken
+	// verdict's authority to skip playback (Conclusive reads RecheckAfter
+	// only).
 	LastError   string     `json:"lastError,omitempty"`
 	LastErrorAt *time.Time `json:"lastErrorAt,omitempty"`
+	RetryAfter  time.Time  `json:"retryAfter,omitempty"`
 
 	// ConsecutiveBroken counts L0 re-probes that stayed broken, for the
 	// recheck backoff. Reset by any ok.
@@ -278,9 +283,19 @@ func (r *Record) Conclusive(now time.Time) bool {
 	return r != nil && r.State == StateBroken && now.Before(r.RecheckAfter)
 }
 
-// Due reports whether the record wants another look.
+// Due reports whether the record wants another look: past its recheck
+// time AND past any transient retry hold.
 func (r *Record) Due(now time.Time) bool {
-	return r == nil || !now.Before(r.RecheckAfter)
+	return r == nil || !now.Before(r.dueAt())
+}
+
+// dueAt is the later of the verdict recheck and the transient retry hold;
+// the recheck index is keyed on it.
+func (r *Record) dueAt() time.Time {
+	if r.RetryAfter.After(r.RecheckAfter) {
+		return r.RetryAfter
+	}
+	return r.RecheckAfter
 }
 
 // hostOf extracts the host of a URL for the record, "" when unparsable.

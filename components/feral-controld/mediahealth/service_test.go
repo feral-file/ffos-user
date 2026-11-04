@@ -108,9 +108,11 @@ func TestService_OfflineFailuresAreNotCounted(t *testing.T) {
 	assert.Equal(t, 0, rec.Plays.Fail)
 
 	online = true
+	// Two DISTINCT plays (another source between them) once online.
 	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 2, Entries: []Outcome{
-		{Seq: 1, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad},
-		{Seq: 2, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad},
+		{Seq: 3, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1},
+		{Seq: 4, Source: "https://o/other", Kind: OutcomeOK, Stage: StageReady},
+		{Seq: 5, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1},
 	}})
 	rec, err = s.Store().Get("https://o/a")
 	require.NoError(t, err)
@@ -118,8 +120,9 @@ func TestService_OfflineFailuresAreNotCounted(t *testing.T) {
 
 	unknown := New(Config{Store: p.Store, Prober: p, Contract: &PlayerContract{}, Now: clock.Now})
 	unknown.ObservePlayback(items("https://o/b"), 0, nil, &Outcomes{CastSeq: 1, Entries: []Outcome{
-		{Seq: 1, Source: "https://o/b", Kind: OutcomeFail, Stage: StageLoad},
-		{Seq: 2, Source: "https://o/b", Kind: OutcomeFail, Stage: StageLoad},
+		{Seq: 1, Source: "https://o/b", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1},
+		{Seq: 2, Source: "https://o/x", Kind: OutcomeOK, Stage: StageReady},
+		{Seq: 3, Source: "https://o/b", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1},
 	}})
 	rec, err = p.Store.Get("https://o/b")
 	require.NoError(t, err)

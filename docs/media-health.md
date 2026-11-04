@@ -51,7 +51,7 @@ cache uses (`offlinecache.SourceKey`), pinned equal by a test.
 |---|---|---|
 | broken | after 24 h; after 7 consecutive broken rechecks, after 7 d | the hint keeps skipping until a reprobe or a play success heals it |
 | ok | after 7 d | a play success refreshes it for free |
-| transient only | after 1 h | the stored state is untouched |
+| transient (any state) | next attempt after 1 h (`retryAfter`) | the stored state is untouched; an expired broken verdict is NOT revived — the hold delays the probe, never the skip |
 
 A broken record **past** its recheck window is still shown to the app as
 broken (it is the last thing observed) but no longer hints and no longer
@@ -94,7 +94,10 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
 - Status table: 2xx → content rules; 400/404/410-class → dead; 401, 403, 406,
   407, 408, 416, 429 and every 5xx → transient; a 3xx that survives the
   redirect chain → transient. NXDOMAIN → dead (`dns`); every other transport
-  failure → transient.
+  failure → transient, including a deadline that expires mid-body (judged
+  before any byte count: a timed-out short read is not truncation). Fetch
+  errors carry redacted URLs, so a signed redirect hop never reaches a log
+  line or a stored `lastError`.
 - Content rules, first failing rule wins, anything ambiguous is healthy:
   `zero_length`, `truncated` (judged against what THIS response promised, never
   the Content-Range total), sniff with `mimetype` v1.4.9 (pinned: verdicts are
@@ -127,9 +130,11 @@ by URL.
 ### The lookahead
 
 From the status poller's playback observer, `mediahealth.Lookahead` probes the
-next 8 items after the current index whose record is missing or due, one at a
-time with a 1 s gap, and — when nothing is ahead — one due record not on the
-wall under a budget of 20 per hour, so a fixed source heals without being cast
+next 8 items after the current index (then the current item itself, so a
+one-item playlist still gets its recheck) whose record is missing or due, one
+at a time with a 1 s gap, and — when nothing is ahead — one due record not on
+the wall (excluded inside the index scan, so on-wall rows never shadow them)
+under a budget of 20 per hour, so a fixed source heals without being cast
 again and a 100k-record store never becomes 100k probes a day. New hints ride
 the next push.
 
@@ -147,9 +152,11 @@ or force cast. Any `mediaHealth` a controller puts on a cast is dropped.
 }
 ```
 
-Sparse: conclusively broken items only. The player skips a hinted item in its
-timeline without mounting it, keeps it in `items`, and reports
-`{kind:"skip", stage:"hint"}` in its outcome ring.
+Sparse: conclusively broken items only, minus any source the offline cache
+can replay from a confirmed capture (the hint must not hide what replay
+interception would show — the same reason the cast rescue exists). The player
+skips a hinted item in its timeline without mounting it, keeps it in `items`,
+and reports `{kind:"skip", stage:"hint"}` in its outcome ring.
 
 ## The outcome ring (player → controld): `outcomes` on `checkStatus`
 
@@ -164,9 +171,12 @@ timeline without mounting it, keeps it in `items`, and reports
 }
 ```
 
-The last 64 entries; `castSeq` increments per cast, `seq` per entry, so
-controld tells a new cast from a continuation and logs when the ring wrapped
-between polls. Live-only on the player.
+The last 64 entries; `seq` counts for the lifetime of the player page and
+`castSeq` increments per cast. controld keeps a seq cursor that survives casts
+(a cast must not re-apply the entries still in the ring), resets it on a
+player-session generation bump or when the ring's highest seq falls below it
+(a page restart), and logs when the ring wrapped between polls. Live-only on
+the player.
 
 | stage | kind | code |
 |---|---|---|
@@ -181,7 +191,11 @@ between polls. Live-only on the player.
 
 **Corroboration.** One failure is recorded, not concluded. A record becomes
 `broken` (layer `play`) on a second failure in a distinct play, or on one
-failure when an L0 broken verdict is already standing. A `ready` writes `ok`
+failure when an L0 broken verdict is already standing. A play is a run of
+consecutive failing entries for one source whose attempt counter does not go
+backwards; the run ends on another source, a success, a skip, or an
+`exhausted` entry. The several stages of one attempt (detect, load, retries,
+exhaustion) count once; the last stage stays as the diagnostic. A `ready` writes `ok`
 and heals a broken record: the wall itself is the strongest probe. Entries
 are applied in `seq` order, so a detect failure whose iframe fallback then
 rendered nets out to `ok`. Two classes never count: device-local failures

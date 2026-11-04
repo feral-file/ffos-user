@@ -19,14 +19,24 @@ import (
 //     ItemHealths (the player_status annotation); Report for getMediaHealth.
 //   - devicectl: Reset (factory reset).
 type Service struct {
-	store     *Store
-	prober    *Prober
-	lookahead *Lookahead
-	contract  *PlayerContract
-	drainer   Drainer
-	logger    *zap.Logger
-	now       func() time.Time
-	online    func() bool
+	store      *Store
+	prober     *Prober
+	lookahead  *Lookahead
+	contract   *PlayerContract
+	drainer    Drainer
+	logger     *zap.Logger
+	now        func() time.Time
+	online     func() bool
+	replayable func(source string) bool
+
+	// Play-run tracking for the corroboration rule: consecutive failing
+	// entries for one source with a non-decreasing attempt counter are ONE
+	// play (the player reports several stages per attempt and retries in
+	// place), so they count once. The run ends on another source, a
+	// success, a skip, or an exhausted entry.
+	runSource  string
+	runAttempt int
+	runEnded   bool
 
 	// inferredFailed remembers the last (castSeq-less) renderStatus==3
 	// sighting so the fallback counts one failure per item mount, not one
@@ -48,8 +58,13 @@ type Config struct {
 	// which is treated as OFFLINE: until the daemon has a verdict, a
 	// failure cannot be blamed on the source.
 	Online func() bool
-	Logger *zap.Logger
-	Now    func() time.Time
+	// Replayable, when set, reports whether the offline cache can serve a
+	// source from a confirmed capture. A replayable source is never hinted:
+	// the hint would make the player skip a work that replay interception
+	// could have shown (the same reason the cast rescue exists).
+	Replayable func(source string) bool
+	Logger     *zap.Logger
+	Now        func() time.Time
 }
 
 // New wires a Service. The lookahead's Run must be driven by the caller.
@@ -62,6 +77,7 @@ func New(cfg Config) *Service {
 		logger:        cfg.Logger,
 		now:           cfg.Now,
 		online:        cfg.Online,
+		replayable:    cfg.Replayable,
 		inferredIndex: -1,
 	}
 	if s.logger == nil {
@@ -87,18 +103,36 @@ func (s *Service) PlayerSupportsHints() bool {
 	return s.contract.Supported()
 }
 
-// Hints returns the hint map for sources (conclusive broken only). On a
-// store error it returns nil: a push with no hints is the fail-open shape.
+// Hints returns the hint map for sources (conclusive broken only, minus
+// anything the offline cache can replay). On a store error it returns nil:
+// a push with no hints is the fail-open shape.
 func (s *Service) Hints(sources []string) map[string]Hint {
 	hints, err := s.store.Hints(sources, s.now())
 	if err != nil {
 		s.logger.Warn("media health: hints unavailable for this push", zap.Error(err))
 		return nil
 	}
+	if s.replayable != nil {
+		for src := range hints {
+			if s.replayable(src) {
+				// A dead ORIGIN is not a dead ITEM when replay can serve
+				// it; the hint must not hide what the cache would show.
+				delete(hints, src)
+			}
+		}
+	}
 	if len(hints) == 0 {
 		return nil
 	}
 	return hints
+}
+
+// ResetOutcomeCursor forgets the outcome-ring cursor and the play run: the
+// player page was replaced (a player-session generation bump), so its
+// numbering restarts and nothing in the next ring was seen before.
+func (s *Service) ResetOutcomeCursor() {
+	s.drainer.Reset()
+	s.runSource, s.runAttempt, s.runEnded = "", 0, false
 }
 
 // HintArgument returns the displayPlaylist `mediaHealth` argument for
@@ -163,7 +197,8 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 				zap.Int64("missed", gap))
 		}
 		for _, o := range fresh {
-			if _, err := s.store.ApplyOutcome(o, online); err != nil && !errors.Is(err, ErrLowDisk) {
+			count := online && !s.samePlay(o)
+			if _, err := s.store.ApplyOutcome(o, count); err != nil && !errors.Is(err, ErrLowDisk) {
 				s.logger.Warn("media health: recording play outcome failed", zap.String("stage", o.Stage), zap.Error(err))
 			}
 		}
@@ -185,6 +220,23 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 	if _, err := s.store.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageInferred}, online); err != nil && !errors.Is(err, ErrLowDisk) {
 		s.logger.Warn("media health: recording inferred failure failed", zap.Error(err))
 	}
+}
+
+// samePlay reports whether a failing outcome continues the play run already
+// counted, and advances the run. Rules: a success, a skip, or another
+// source ends the run; an exhausted entry ends it after itself (the next
+// entry for that source is a new mount); a failing entry whose attempt
+// counter did not go backwards continues it. Errs toward "same play", the
+// safe direction — an undercounted failure delays a verdict, an overcounted
+// one hides a work.
+func (s *Service) samePlay(o Outcome) bool {
+	if o.Kind != OutcomeFail {
+		s.runSource, s.runAttempt, s.runEnded = "", 0, false
+		return false
+	}
+	same := o.Source == s.runSource && !s.runEnded && o.Attempt >= s.runAttempt
+	s.runSource, s.runAttempt, s.runEnded = o.Source, o.Attempt, o.Stage == StageExhausted
+	return same
 }
 
 // Reset closes the store and removes its directory (factory reset). The
