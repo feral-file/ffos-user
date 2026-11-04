@@ -286,31 +286,82 @@ func (s *Store) update(source string, fn func(rec *Record, existed bool) bool) (
 	}
 	var out *Record
 	err := s.db.Batch(func(tx *bolt.Tx) error {
-		items := tx.Bucket(bucketItems)
-		prev, derr := s.decode(items.Get([]byte(Key(source))))
-		if errors.Is(derr, ErrNewerRecord) {
-			return derr
-		}
-		var rec Record
-		existed := derr == nil && prev != nil
-		if existed {
-			rec = *prev
-		} else {
-			prev = nil
-			rec = Record{Source: source}
-		}
-		if !fn(&rec, existed) {
-			out = &rec
-			return nil
-		}
-		rec.Build = s.build
-		out = &rec
-		return s.put(tx, prev, &rec)
+		var terr error
+		out, terr = s.applyTx(tx, source, fn)
+		return terr
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// applyTx is one read-modify-write of source's record inside tx.
+func (s *Store) applyTx(tx *bolt.Tx, source string, fn func(rec *Record, existed bool) bool) (*Record, error) {
+	items := tx.Bucket(bucketItems)
+	prev, derr := s.decode(items.Get([]byte(Key(source))))
+	if errors.Is(derr, ErrNewerRecord) {
+		return nil, derr
+	}
+	var rec Record
+	existed := derr == nil && prev != nil
+	if existed {
+		rec = *prev
+	} else {
+		prev = nil
+		rec = Record{Source: source}
+	}
+	if !fn(&rec, existed) {
+		return &rec, nil
+	}
+	rec.Build = s.build
+	if err := s.put(tx, prev, &rec); err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// ProbeWrite pairs a source with the probe result to record for it.
+type ProbeWrite struct {
+	Source string
+	Result ProbeResult
+}
+
+// ApplyProbes records many probe results in ONE write transaction, the
+// last write per source winning. The cast pass uses it for the fan-out of
+// a shared verdict onto wire-identical siblings and for malformed data:
+// URIs: one ApplyProbe per source costs one db.Batch wait each (bbolt
+// coalesces concurrent callers, not a sequential loop), which turned a
+// 2,048-item playlist repeating one source into a 37 s pass against a 10 s
+// ceiling (PR #438 review, round 3, F12). Results that write nothing
+// (inline, from-store, reason-less inconclusive) are skipped.
+func (s *Store) ApplyProbes(writes []ProbeWrite) error {
+	if err := s.checkDisk(); err != nil {
+		return err
+	}
+	bySource := make(map[string]ProbeResult, len(writes))
+	order := make([]string, 0, len(writes))
+	for _, w := range writes {
+		if !probeWritesRecord(w.Result) {
+			continue
+		}
+		if _, dup := bySource[w.Source]; !dup {
+			order = append(order, w.Source)
+		}
+		bySource[w.Source] = w.Result
+	}
+	if len(order) == 0 {
+		return nil
+	}
+	now := s.now()
+	return s.db.Update(func(tx *bolt.Tx) error {
+		for _, src := range order {
+			if _, err := s.applyTx(tx, src, probeMutation(bySource[src], now)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // checkDisk enforces the free-space reserve, logging the first refusal of
@@ -354,14 +405,26 @@ func (s *Store) checkDisk() error {
 //   - inline      → nothing: inline items have no origin to observe.
 //   - FromStore   → nothing: the verdict came from this store already.
 func (s *Store) ApplyProbe(source string, res ProbeResult) (*Record, error) {
+	if !probeWritesRecord(res) {
+		return s.Get(source)
+	}
+	return s.update(source, probeMutation(res, s.now()))
+}
+
+// probeWritesRecord says whether a probe result changes the record at all:
+// inline sources, answers served from the store, and reason-less
+// inconclusives (a guard or length refusal — a policy objection, never a
+// verdict) write nothing.
+func probeWritesRecord(res ProbeResult) bool {
 	if res.FromStore || res.Verdict == VerdictInline {
-		return s.Get(source)
+		return false
 	}
-	if res.Verdict == VerdictInconclusive && res.Reason == "" {
-		return s.Get(source)
-	}
-	now := s.now()
-	return s.update(source, func(rec *Record, _ bool) bool {
+	return res.Verdict != VerdictInconclusive || res.Reason != ""
+}
+
+// probeMutation is the record update one probe result applies.
+func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed bool) bool {
+	return func(rec *Record, _ bool) bool {
 		if res.WireURL != "" {
 			rec.WireURL = res.WireURL
 			rec.Host = hostOf(res.WireURL)
@@ -404,7 +467,7 @@ func (s *Store) ApplyProbe(source string, res ProbeResult) (*Record, error) {
 			rec.RetryAfter = now.Add(RetryTransient)
 		}
 		return true
-	})
+	}
 }
 
 func brokenRecheck(consecutive int) time.Duration {

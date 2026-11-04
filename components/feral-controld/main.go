@@ -36,6 +36,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/netlog"
@@ -132,6 +133,15 @@ type app struct {
 	// Netlog is the WAN-outage flight recorder; nil when disabled by config,
 	// unavailable (ring open failed), or in the test app.
 	Netlog *netlog.Recorder
+	// MediaHealth owns the per-device observation store (bbolt). Nil when
+	// disabled by config, when the store failed to open, or in the test
+	// app. Closed by run() LAST (its defer is registered first): the status
+	// poller, the lookahead worker and the command router all write to it
+	// until they stop. It used to be closed by a defer inside
+	// initializeApp, i.e. before run started — every read and write then
+	// failed with "database not open" and the feature was silently inert
+	// (PR #438 review, round 3, F11).
+	MediaHealth *mediahealth.Service
 
 	// StateLoadKnown records whether run()'s state.Load succeeded (false =
 	// the persisted state was unreadable and quarantined). The provisioning
@@ -296,6 +306,16 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 
 	// Start watchdog
 	app.Watchdog.Start(ctx)
+	// Registered before every other closer so it runs after them: the store
+	// must outlive the status poller, the lookahead worker and the command
+	// router, which write to it until they stop (see app.MediaHealth).
+	if app.MediaHealth != nil {
+		defer func() {
+			if err := app.MediaHealth.Close(); err != nil {
+				app.Logger.Warn("media health: store close failed", zap.Error(err))
+			}
+		}()
+	}
 	defer app.Watchdog.Stop()
 
 	// Initialize DBus client. NON-FATAL: controld is the sole SoftAP/LAN
@@ -1267,7 +1287,6 @@ func initializeApp(
 	}
 	mediaHealthSvc, mediaHealthLookahead := wireMediaHealth(config.Get().MediaHealthTuning(logger), uaPolicy, mediaHealthOnline.Load, mediaHealthReplayable, logger)
 	if mediaHealthSvc != nil {
-		defer func() { _ = mediaHealthSvc.Close() }()
 		commandrouter.SetMediaHealth(rawCmdHandler, mediaHealthSvc, logger)
 		playlistScheduler.SetHintSource(mediaHealthSvc.HintArgument)
 		status.SetItemHealthSource(poller, mediaHealthSvc.ItemHealths)
@@ -1730,6 +1749,7 @@ func initializeApp(
 		Ctx:                      context,
 		Cancel:                   cancelApp,
 		Logger:                   logger,
+		MediaHealth:              mediaHealthSvc,
 		Clock:                    clock,
 		OS:                       os,
 		Signal:                   signal,

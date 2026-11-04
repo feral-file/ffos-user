@@ -106,7 +106,13 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   `mediaHealth.knownBadPageMarkers`), `type_mismatch` (declared image/video/
   audio sniffed as html/plain/json; text-based media types exempt),
   `container_invalid` (PNG, GIF, WebP, JPEG headers).
-- `data:` URIs never dial: well-formed is inline, proven-malformed is dead.
+- `data:` URIs never dial: well-formed is inline (never recorded),
+  proven-malformed is dead and recorded like any other broken source, so it
+  gets a hint; the sweep re-settles such a record without network.
+- Everything the pass settles outside the worker pool (malformed `data:`
+  URIs, a shared verdict fanned out to wire-identical siblings) is written in
+  one store transaction after the request barrier, so a playlist repeating
+  one source thousands of times costs one request and one write.
 
 ### The cast-time pass (replaces the #304 preflight)
 

@@ -6,6 +6,7 @@ package mediahealth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -390,4 +391,112 @@ func TestLookahead_StepsPastRefusedSources(t *testing.T) {
 	assert.Equal(t, 1, f.count("https://o/swept"))
 	assert.False(t, l.step(context.Background(), nil), "held until probeHold passes")
 	assert.Equal(t, 1, f.count("https://o/swept"))
+}
+
+// Regressions from the PR #438 review (feralfile-bot, round 3).
+
+// F12: a playlist repeating one source thousands of times is one request,
+// one record and one write — not one db.Batch wait per copy.
+func TestPreflight_RepeatedSourceIsOneWrite(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := newTableFetcher()
+	f.answers["https://o/a"] = ok(200, "image/png", minimalPNG(1, 1), -1)
+	p := newPassProber(t, f, clock)
+	sources := make([]string, 2048)
+	for i := range sources {
+		sources[i] = "https://o/a"
+	}
+	start := time.Now()
+	results := p.Preflight(context.Background(), sources)
+	assert.Less(t, time.Since(start), 3*time.Second, "the fan-out must not serialize one batch wait per copy")
+	assert.Equal(t, 1, f.count("https://o/a"))
+	for i := range results {
+		require.Equal(t, VerdictAlive, results[i].Verdict, "item %d", i)
+	}
+	rec, err := p.Store.Get("https://o/a")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Equal(t, StateOK, rec.State)
+
+	// Distinct fragment variants of one URL: one request, one write, a
+	// record each.
+	variants := make([]string, 512)
+	for i := range variants {
+		variants[i] = fmt.Sprintf("https://o/b#%d", i)
+	}
+	f.answers["https://o/b#0"] = ok(404, "", nil, -1)
+	start = time.Now()
+	p.Preflight(context.Background(), variants)
+	assert.Less(t, time.Since(start), 3*time.Second)
+	assert.Equal(t, 1, f.count("https://o/b#0"))
+	for _, src := range []string{"https://o/b#1", "https://o/b#511"} {
+		rec, err := p.Store.Get(src)
+		require.NoError(t, err)
+		require.NotNil(t, rec, src)
+		assert.Equal(t, StateBroken, rec.State, src)
+	}
+}
+
+func TestStore_ApplyProbesLastWriteWinsAndSkipsNonWrites(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := openTestStore(t, clock)
+	err := store.ApplyProbes([]ProbeWrite{
+		{Source: "https://o/a", Result: ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus}},
+		{Source: "https://o/a", Result: ProbeResult{Verdict: VerdictAlive, Status: 200}},
+		{Source: "https://o/guard", Result: ProbeResult{Verdict: VerdictInconclusive}},
+		{Source: "data:,x", Result: ProbeResult{Verdict: VerdictInline}},
+		{Source: "https://o/stored", Result: ProbeResult{Verdict: VerdictDead, FromStore: true}},
+	})
+	require.NoError(t, err)
+	rec, err := store.Get("https://o/a")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Equal(t, StateOK, rec.State, "the last write for a source wins")
+	for _, src := range []string{"https://o/guard", "data:,x", "https://o/stored"} {
+		rec, err := store.Get(src)
+		require.NoError(t, err)
+		assert.Nil(t, rec, src)
+	}
+	require.NoError(t, store.ApplyProbes(nil))
+}
+
+// F13: a provably malformed data: URI is conclusive and gets a record and
+// a hint; a well-formed inline source stays unrecorded; the sweep
+// re-settles the record without network.
+func TestPreflight_RecordsMalformedDataURIs(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := newTableFetcher()
+	f.answers["https://o/alive"] = ok(200, "image/png", minimalPNG(1, 1), -1)
+	l := newTestLookahead(t, f, clock)
+	p := l.Prober
+	results := p.Preflight(context.Background(), []string{"data:image/png;base64", "https://o/alive", "data:,fine"})
+	assert.Equal(t, VerdictDead, results[0].Verdict)
+	assert.Equal(t, VerdictAlive, results[1].Verdict)
+	assert.Equal(t, VerdictInline, results[2].Verdict)
+
+	rec, err := p.Store.Get("data:image/png;base64")
+	require.NoError(t, err)
+	require.NotNil(t, rec, "the malformed URI is recorded")
+	assert.Equal(t, StateBroken, rec.State)
+	assert.Equal(t, CategoryUnsupported, rec.Category)
+	assert.Equal(t, ReasonDataURIInvalid, rec.Reason)
+	rec, err = p.Store.Get("data:,fine")
+	require.NoError(t, err)
+	assert.Nil(t, rec, "a well-formed inline source is not recorded")
+
+	hints, err := p.Store.Hints([]string{"data:image/png;base64", "https://o/alive", "data:,fine"}, clock.Now())
+	require.NoError(t, err)
+	assert.Contains(t, hints, "data:image/png;base64")
+	assert.Len(t, hints, 1)
+
+	// Off the wall and due, the sweep re-settles it: no request, the
+	// broken count advances, and it never shadows the rows behind it.
+	l.Observe(nil, 0)
+	clock.Advance(RecheckBroken + time.Second)
+	assert.True(t, l.step(context.Background(), nil))
+	rec, err = p.Store.Get("data:image/png;base64")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Equal(t, 2, rec.ConsecutiveBroken)
+	assert.Equal(t, 1, f.count("https://o/alive"), "no network for a data: recheck")
 }

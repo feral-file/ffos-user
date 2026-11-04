@@ -111,6 +111,10 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 	// 2, F9). Capacity hints are capped at the budget so a playlist
 	// repeating one tiny URL cannot size an allocation.
 	settled := make([]bool, len(sources))
+	// writes collects every record the pass settles outside the worker
+	// pool (malformed data: URIs, fanned-out sibling verdicts) for ONE
+	// store transaction after the barrier; see Store.ApplyProbes.
+	var writes []ProbeWrite
 	firstIndex := make(map[string]int, min(len(sources), maxAttempts))
 	keyOf := make([]string, len(sources))
 	uniqueIndices := make([]int, 0, min(len(sources), maxAttempts))
@@ -118,6 +122,13 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 		if IsDataURI(source) {
 			results[i] = probeDataURI(source)
 			settled[i] = true
+			if results[i].Verdict == VerdictDead {
+				// A provably malformed data: URI is as conclusive as a 404
+				// and can never heal; it needs a record and a hint like
+				// any other broken source (PR #438 review, round 3, F13).
+				// Well-formed inline sources stay unrecorded.
+				writes = append(writes, ProbeWrite{Source: source, Result: results[i]})
+			}
 			continue
 		}
 		if rec := stored[source]; rec != nil {
@@ -213,8 +224,13 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 		}
 		results[i] = results[first]
 		results[i].Source = redactForLog(sources[i])
-		if probed[first] {
-			p.record(sources[i], results[i], logger)
+		if probed[first] && sources[i] != sources[first] {
+			writes = append(writes, ProbeWrite{Source: sources[i], Result: results[i]})
+		}
+	}
+	if len(writes) > 0 && p.Store != nil {
+		if err := p.Store.ApplyProbes(writes); err != nil && !errors.Is(err, ErrLowDisk) {
+			logger.Warn("media health: recording settled verdicts failed", zap.Int("count", len(writes)), zap.Error(err))
 		}
 	}
 	return results

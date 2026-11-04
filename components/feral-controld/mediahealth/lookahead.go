@@ -281,14 +281,15 @@ func (l *Lookahead) nextDue(now time.Time) string {
 	if err != nil {
 		return ""
 	}
-	for _, src := range due {
-		if IsDataURI(src) {
-			continue
-		}
+	// A due data: record (a malformed URI the cast pass recorded) is
+	// re-settled through the same path: ProbeOne answers it synchronously
+	// with no network, and the broken backoff spaces the rechecks out.
+	// Skipping it here would let a handful of them shadow the rows behind.
+	if len(due) > 0 {
 		l.mu.Lock()
 		l.sweepTokens--
 		l.mu.Unlock()
-		return src
+		return due[0]
 	}
 	return ""
 }
