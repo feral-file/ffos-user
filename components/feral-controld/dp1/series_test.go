@@ -30,7 +30,7 @@ import (
 // series at all (feralfile-bot F2, 2026-10-29). The catalog reads the value
 // itself, from its own copy of the same item.
 func seriesItem() dp1playlist.PlaylistItem {
-	seriesID := 387
+	seriesID := dp1playlist.SeriesID("387")
 	return dp1playlist.PlaylistItem{
 		ID:     "item-series",
 		Slug:   "scrampled-auw",
@@ -286,17 +286,10 @@ func TestDP1_SeriesStaysUnexpandedWhenThePlaylistHasNoID(t *testing.T) {
 }
 
 // An edition of a V1–V3 series carries a 256-bit `seriesId` as decimal
-// digits, which is what the catalog returns. The dp1-go this daemon builds
-// against (v0.6.0) types the field `*int`, so decoding that answer fails:
-//
-//	json: cannot unmarshal string into Go struct field
-//	ProvenanceContract.seriesId of type int
-//
-// display-protocol/dp1-go#12 makes the field accept either form. Until that
-// release is pinned here, `full` playback of those series is unreachable —
-// and this test is what says so, rather than the behavior looking like a
-// catalog fault. When #12 lands this test flips to asserting the expansion.
-func TestDP1_A256BitSeriesIDOnAnEditionIsNotYetReadable(t *testing.T) {
+// digits, which is what the catalog returns. dp1-go types the field as
+// `playlist.SeriesID`, which takes an integer or a decimal string and keeps
+// every digit, so the series expands and the edition keeps its exact id.
+func TestDP1_A256BitSeriesIDOnAnEditionExpands(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -316,11 +309,11 @@ func TestDP1_A256BitSeriesIDOnAnEditionIsNotYetReadable(t *testing.T) {
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
 
-	// The decode fails, so the series keeps its representative rather than
-	// the screen losing the work.
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
-	assert.Equal(t, "item-series", result.Items[0].ID)
+	assert.Equal(t, "a", result.Items[0].ID)
+	require.NotNil(t, result.Items[0].Provenance.Contract.SeriesID)
+	assert.Equal(t, dp1playlist.SeriesID(bigSeriesID), *result.Items[0].Provenance.Contract.SeriesID)
 }
 
 // TestDP1_CastCapHoldsAcrossPlainAndExpandedAppends is the regression test
@@ -496,7 +489,7 @@ func TestDP1_EachExpandedEditionOwnsItsCopyOfTheInstanceFields(t *testing.T) {
 // through wholesale, so an edition whose on-chain provenance names its series
 // arrives carrying `seriesId`. editionItem() omits it, so any test built only
 // on that helper cannot see this at all.
-func labeledEditionItem(id string, seriesID int) dp1playlist.PlaylistItem {
+func labeledEditionItem(id string, seriesID dp1playlist.SeriesID) dp1playlist.PlaylistItem {
 	item := editionItem(id)
 	item.Provenance.Contract.SeriesID = &seriesID
 	return item
@@ -520,7 +513,7 @@ func TestDP1_AnEditionsOwnSeriesIDSurvivesExpansion(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	const seriesID = 387
+	const seriesID = dp1playlist.SeriesID("387")
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})

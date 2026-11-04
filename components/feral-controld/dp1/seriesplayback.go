@@ -116,7 +116,7 @@ func clearSeriesMarker(item dp1playlist.PlaylistItem) dp1playlist.PlaylistItem {
 type SeriesGroupKey struct {
 	Chain    string
 	Address  string
-	SeriesID int
+	SeriesID dp1playlist.SeriesID
 }
 
 // seriesGroupKey builds item's group key from its provenance contract. ok is
