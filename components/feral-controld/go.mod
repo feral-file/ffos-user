@@ -6,7 +6,7 @@ require github.com/gorilla/websocket v1.5.3
 
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0
-	github.com/display-protocol/dp1-go v0.7.3-0.20261105073447-6de33024fcf8
+	github.com/display-protocol/dp1-go v0.7.3-0.20261105075827-ed15dea64bfc
 	github.com/ethereum/go-ethereum v1.17.2
 	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20261027140929-82d5ebae13e4
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
@@ -24,7 +24,6 @@ require (
 )
 
 require (
-	github.com/Masterminds/semver/v3 v3.3.0 // indirect
 	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.20.0 // indirect
