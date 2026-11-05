@@ -39,8 +39,7 @@ func (c ClaimQR) ClaimQRPins() ([]string, bool) {
 
 // Enrolled reports whether an active owner exists.
 func (c ClaimQR) Enrolled() bool {
-	st := c.Auth.State()
-	return st == control.StateEnrolled || st == control.StateEnforced
+	return c.Auth.State() == control.StateEnrolled
 }
 
 // ClearInvitation voids the live invitation.

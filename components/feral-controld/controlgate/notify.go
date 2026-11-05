@@ -100,15 +100,31 @@ func notification(data any) (notificationMeta, bool) {
 // channelPlan says, for the current state, whether plaintext still goes out
 // on a channel and whether sealed copies go out on it (§9 table). A locked
 // device cannot seal (no readable grants), so it keeps today's plaintext.
-func channelPlan(st control.State, relayerChannel bool) (plaintext, sealed bool) {
+//
+// On an owned device the LAN WebSocket carries plaintext only while the
+// owner's switch is open, and then only the status types: they tell a LAN
+// peer what the LAN-open set (feral-file#3551) already lets it read with
+// getDeviceStatus and friends. Mint pairing and approval requests stay
+// sealed-only; they are the owner's business.
+func channelPlan(st control.State, relayerChannel, lanOpen bool, typ string) (plaintext, sealed bool) {
 	switch st {
 	case control.StateEnrolled:
-		return relayerChannel, true // relayer keeps plaintext for old apps; LAN WS stops
-	case control.StateEnforced:
-		return false, true
+		if relayerChannel {
+			return true, true // relayer keeps plaintext for old apps
+		}
+		return lanOpen && lanPlaintextTypes[typ], true
 	default: // legacy, locked
 		return true, false
 	}
+}
+
+// lanPlaintextTypes are the notification types an owned device with its LAN
+// switch open still sends in plaintext on the LAN WebSocket.
+var lanPlaintextTypes = map[string]bool{
+	string(relayer.NOTIFICATION_TYPE_DEVICE_STATUS):        true,
+	string(relayer.NOTIFICATION_TYPE_PLAYER_STATUS):        true,
+	string(relayer.NOTIFICATION_TYPE_DDC_STATUS):           true,
+	string(relayer.NOTIFICATION_TYPE_OFFLINE_CACHE_STATUS): true,
 }
 
 // SealingRelayer wraps the relayer handle given to notification producers.
@@ -159,7 +175,7 @@ func (s *SealingRelayer) Send(ctx context.Context, data any) error {
 		}
 		return relayer.ErrNotConnected
 	}
-	plain, sealed := channelPlan(s.auth.State(), true)
+	plain, sealed := channelPlan(s.auth.State(), true, false, n.NotificationType)
 	var firstErr error
 	if plain {
 		firstErr = s.Relayer.Send(ctx, data)
@@ -195,7 +211,7 @@ func (s *SealingWS) SendAll(message any) error {
 	if !ok {
 		return s.WS.SendAll(message)
 	}
-	plain, sealed := channelPlan(s.auth.State(), false)
+	plain, sealed := channelPlan(s.auth.State(), false, s.auth.LANOpen(), n.NotificationType)
 	var firstErr error
 	if plain {
 		firstErr = s.WS.SendAll(message)

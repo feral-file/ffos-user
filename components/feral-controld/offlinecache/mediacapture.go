@@ -22,8 +22,9 @@ import (
 // MediaClass doc for why ClassMedia/ClassUnknown items never need
 // capture.go's headless-Chromium pipeline: the kiosk player renders each
 // of these as a native element (<img>/<video>/<audio>/<object>/a
-// non-scripted iframe) that requests the bare item.Source directly, so
-// there is exactly one "dependency" to cache — the file itself.
+// non-scripted iframe) fed by one request for the bare item.Source (for a
+// still, the player's CORS fetch() of it), so there is exactly one
+// "dependency" to cache — the file itself.
 //
 //go:generate mockgen -source=mediacapture.go -destination=../mocks/offlinecache_mediacapture.go -package=mocks -mock_names=MediaCapturer=MockOfflineCacheMediaCapturer
 type MediaCapturer interface {
@@ -231,8 +232,8 @@ func (c *mediaCapturer) gltfExternalDependencies(res Resource) []string {
 // transparently, so this fetch's response is already the fully-resolved
 // 2xx body. Storing it under sourceURL means replay can fulfill the
 // kiosk's request for the bare item.Source directly with status 200 and
-// the resolved body — the player's <img>/<video>/<audio> element only
-// ever requests that bare source URL (see classify.go's MediaClass doc),
+// the resolved body — the player only ever requests that bare source URL
+// for these items (see classify.go's MediaClass doc),
 // so there is no redirect hop to faithfully replay in the first place,
 // unlike capture.go's software path (where an artwork's own JS can
 // legitimately inspect/depend on an intermediate redirect response).
@@ -241,7 +242,8 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 	if err != nil {
 		return Resource{}, fmt.Errorf("build request: %w", err)
 	}
-	// ff-player's <video crossOrigin="anonymous"> element always sends an
+	// ff-player's <video crossOrigin="anonymous"> element and its CORS
+	// fetch() of a still both always send an
 	// Origin header, and CDN/S3-backed CORS configs commonly only emit
 	// Access-Control-Allow-Origin (and friends) when a request carries
 	// one — a bare Origin-less GET can get a byte-identical response

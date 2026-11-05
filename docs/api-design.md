@@ -39,51 +39,18 @@ and does not depend on public Cloudflare CORS configuration.
 
 ---
 
-## Version posture and API v2 transition
+## Version posture
 
-Unless explicitly marked v2, the registries and wire shapes below document the
-currently deployed v1 interfaces. The proposed target is the
-[FF1 communication API v2](ff1-v2-api-contract.md) and its
-[controller-authentication profile](ff1-v2-controller-authentication.md); its
-compatibility gates and coordinated removal sequence live in the
-[migration plan](ff1-v2-migration.md). V2 remains a design draft, not a
-second production contract.
-
-For v2, `feral-controld` remains the only runtime external-control owner. It
-initiates MQTT 5 connections and owns the LAN HTTPS/WebSocket adapter, while
-focused protocol, state, and authentication packages implement the shared
-contract without hiding command policy in transport code. It owns setup and
-recovery UX, including recovery SoftAP; setup and reset coordination is
-in-process, not the explicitly versioned D-Bus interface the v2 draft
-specified for it — one owner holds external admission, confirmation records,
-broker cleanup, identity rotation, controller-authority bootstrap and
-protocol completion together with physical confirmation and durable local
-reset execution.
-
-> This paragraph previously assigned setup/recovery UX to `feral-setupd`,
-> which was merged into `feral-controld` (see
-> [`architecture.md`](architecture.md), "The setupd merge").
-
-The v1 relayer envelope, Mint handoff, port-1111 Hub, and
-`GetRelayerTopicID` remain unchanged only through the migration compatibility
-gates. They are removed together from each successfully promoted v2 device
-image and are never alternative v2 semantics. A rolled-back, below-minimum, or
-current-v1 device keeps all four paths. The hosted relayer and other v1
-infrastructure remain until the remaining legacy fleet passes its separate
-infrastructure-retirement gate. The v2 `_ff1-control._tcp.local` lifecycle is
-independent of the broker, internet, and `enableHub`: advertise only when a
-LAN-usable interface and the complete TLS backend are ready; withdraw on
-listener unavailability and before any of the three pending-reset lifecycles.
-mDNS is discovery, never proof of identity or authority.
-
-The FF OS deployment binding for v2 public TCP 443 is a system-level
-`ff1-control.socket` plus hardened `systemd-socket-proxyd`, forwarding an
-unmodified raw TCP stream from LAN-usable IPv4 and IPv6 addresses to
-unprivileged `feral-controld` on loopback `127.0.0.1:8443`. `feral-controld`
-owns TLS/mTLS and HTTP/WebSocket, runs neither as root nor with
-`CAP_NET_BIND_SERVICE`, and advertises mDNS only after an end-to-end readiness
-check. This least-privilege front end is deployment customization, not a new
-protocol binding.
+The registries and wire shapes below document the deployed interfaces.
+Controller authorization is [`ff1-control-v1.md`](ff1-control-v1.md)
+(feral-file#3551), the normative contract: an `ff1Envelope` carries a
+controller's signed and encrypted request on the LAN hub, the legacy topic
+relayer and the v2 device-ID relay alike, and the per-state plaintext policy
+(§7.2) decides what each route admits without one. The earlier MQTT/mTLS
+"FF1 communication API v2" drafts are deleted; nothing implemented them.
+`feral-controld` is the only runtime external-control owner and owns setup
+and recovery UX in-process (see [`architecture.md`](architecture.md), "The
+setupd merge"). mDNS is discovery, never proof of identity or authority.
 
 ---
 
@@ -278,22 +245,22 @@ The `mintPairingApprovalDecision` command is a controller-to-controld approval r
 
 ### LAN hub HTTP surface (port 1111)
 
-`feral-controld`'s `hub` package binds `0.0.0.0:1111`. The listener is up unconditionally when `enableHub` is set (default on) — it is the BLE-replacement LAN recovery channel, not an optional feature. Every route is registered through one shared middleware (`hub/middleware.go`) that applies an in-flight storm cap (HTTP `429` over `MAX_INFLIGHT_REQUESTS = 64`) and per-request logging. That middleware is the single chokepoint and the designated insertion point for the future LAN-authorization layer (#3471). Phase 0 of feral-file#3551 gates a few surfaces on a **claimed** device behind the header `X-FF1-Topic` (the current relayer topic, compared in constant time): the `sshAccess` cast and `GET /api/screenshot`. A refusal is `401` with `{"error":{"code":"topic_required"}}`; a claimed device without a topic refuses too. Unclaimed devices, and every other route and command (`connect` included, until phase 1), stay **unauthenticated** (see `docs/architecture.md` "Deliberately-open LAN surface" for the residuals).
+`feral-controld`'s `hub` package binds `0.0.0.0:1111`. The listener is up unconditionally when `enableHub` is set (default on) — it is the BLE-replacement LAN recovery channel, not an optional feature. Every route is registered through one shared middleware (`hub/middleware.go`) that applies an in-flight storm cap (HTTP `429` over `MAX_INFLIGHT_REQUESTS = 64`) and per-request logging. That middleware is the single chokepoint for authorization too. It serves **local sources only** (`hub/localsource.go`): a request from any other source, on every route, gets `403 {"error":{"code":"lan_only"}}` (loopback, RFC 1918, `169.254/16`, `fe80::/10`, `fc00::/7`, CGNAT `100.64/10` for Tailscale, or on-link to an interface prefix read per request; `docs/ff1-control-v1.md` §7.2). With the control protocol on (feral-file#3551), `/api/cast` plaintext is limited to the LAN-open set (the controller tier: what the next command can undo), plus `showPairingQRCode` before an owner exists, and to nothing once the owner closes the LAN switch (`setLanControl`); owner-tier commands need an owner's envelope. Refusals are `403 {"error":{"code":"enrollment_required"}}`. Within the LAN-open set the hub stays **unauthenticated** by design (see `docs/architecture.md` "Deliberately-open LAN surface").
 
 | Route | Method | Purpose |
 |---|---|---|
 | `/api/cast` | POST | Same JSON command envelope as the relayer (`command` + `request`); routed through the same `commandrouter`, including the pre-CDP mint-pairing commands. Non-POST → `405`. A per-command token-bucket gate inside `commandrouter` can additionally return `429`. |
 | `/api/status` | GET | LEGACY device/setup status JSON (below), `contract: "1"`. Kept for transitional tooling; not the pairing surface. Non-GET → `405`. |
 | `/api/v2/status` | GET | The LAN **pairing** surface: identical payload, `contract: "2"`. The versioned route is the firmware gate — old firmware 404s here (and advertises no `api` mDNS TXT key), which is how the app tells LAN-pairable devices from old ones. Non-GET → `405`. |
-| `/api/screenshot` | GET | PNG observation of the sole Chromium page target. Optional `width` and `height` query parameters define an aspect-ratio-preserving bounding box. Browser-originated requests are rejected. On a claimed device, requires `X-FF1-Topic` (else `401 topic_required`): the screen can show the claim QR, which carries the topic. With the control protocol on (feral-file#3551, `docs/ff1-control-v1.md` §7.2): `403 {"error":{"code":"enrollment_required"}}` in every state but `legacy`; in `legacy`, `403 {"error":{"code":"screen_protected"}}` while a first-owner invitation is live, re-checked after the capture (an invitation minted during it discards the image). Non-GET → `405`. |
+| `/api/screenshot` | GET | PNG observation of the sole Chromium page target. Optional `width` and `height` query parameters define an aspect-ratio-preserving bounding box. Browser-originated requests are rejected. With the control protocol on (feral-file#3551, `docs/ff1-control-v1.md` §7.2): `403 {"error":{"code":"enrollment_required"}}` in every state but `legacy`; in `legacy`, `403 {"error":{"code":"screen_protected"}}` while a first-owner invitation is live, re-checked after the capture (an invitation minted during it discards the image). Non-GET → `405`. |
 | `/api/notification` | GET → WS | Upgrades to a WebSocket that streams the same outbound notifications the relayer receives. Non-GET → `405`. |
-| `/metrics` | GET | Prometheus text exposition: playback metrics plus the stage-0 network-observability gauges (`net_link_state`, `net_wifi_signal_percent`, `net_wifi_link_info`, `relayer_connected`, `relayer_last_close_code`, `relayer_disconnects_total`; see [`wan-outage-observability.md`](wan-outage-observability.md)) and the legacy-relayer retirement gauges that Gate B reads ([`ff1-control-v1.md`](ff1-control-v1.md) §15.4): `relay_v2_connected` (1 while the v2 socket is up), `relayer_legacy_retired` (1 while the legacy relayer is latched retired), `control_state{state}` (1 for the current `legacy`/`enrolled`/`enforced`/`locked`), `legacy_topic_present`, `device_claimed`, and `reset_target_version_info{version}` (the image a factory reset would boot, read from `/home/feralfile/.state/reset_target_version`, which ffos `feral-recovery-update.sh` writes; `version="unknown"` while the file is missing, which Gate B counts as below G3). Cache-only — a scrape never triggers probe work. |
+| `/metrics` | GET | Prometheus text exposition: playback metrics plus the stage-0 network-observability gauges (`net_link_state`, `net_wifi_signal_percent`, `net_wifi_link_info`, `relayer_connected`, `relayer_last_close_code`, `relayer_disconnects_total`; see [`wan-outage-observability.md`](wan-outage-observability.md)) and the legacy-relayer retirement gauges that Gate B reads ([`ff1-control-v1.md`](ff1-control-v1.md) §15.4): `relay_v2_connected` (1 while the v2 socket is up), `relayer_legacy_retired` (1 while the legacy relayer is latched retired), `control_state{state}` (1 for the current `legacy`/`enrolled`/`locked`), `legacy_topic_present`, `device_claimed`, and `reset_target_version_info{target_version}` (the image a factory reset would boot, read from `/home/feralfile/.state/reset_target_version`, which ffos `feral-recovery-update.sh` writes; `target_version="unknown"` while the file is missing, which Gate B counts as below G3). Cache-only — a scrape never triggers probe work. No gauge label may be named `job`, `instance`, `version`, `branch`, `cpu_model` or `memory_model`: vmagent stamps those on every pushed sample (`run-vmagent.sh -remoteWrite.label`) and VictoriaMetrics overwrites a same-name scraped label rather than renaming it, so the device's own `/metrics` looks right while the fleet store carries the running version instead (3.0.0 shipped `reset_target_version_info{version}` that way; the label is `target_version` from the next controld package). |
 
 The hub does not carry `messageID == "system"` messages; topic assignment is relayer-only.
 
-For installation diagnosis, `curl --fail http://<device-ip>:1111/api/screenshot -o screenshot.png` saves the current renderer output (on a claimed device add `-H "X-FF1-Topic: <topic>"`). Read `/api/v2/status` alongside it to distinguish LAN connectivity from the relay socket state.
+For installation diagnosis, `curl --fail http://<device-ip>:1111/api/screenshot -o screenshot.png` saves the current renderer output (from a local source, on a device without an owner and no live invitation; an owned device refuses it, `403 enrollment_required`). Read `/api/v2/status` alongside it to distinguish LAN connectivity from the relay socket state.
 
-`GET /api/screenshot` uses an isolated, short-lived CDP connection so PNG encoding cannot block the persistent command/status connection. `width` and `height` are optional positive integers up to 4096; either may be supplied alone. Two-axis boxes must not exceed 8,294,400 pixels (3840×2160, the 4K-UHD pixel budget); a one-axis request is proportionally scaled down when its derived surface would exceed that budget. This preserves aspect ratio without cropping or stretching while keeping every accepted capture deliverable within the 40 MiB PNG and 64 MiB CDP-frame limits. With neither parameter, the route reads viewport metrics first: it preserves native output when the viewport fits both budgets and sends a full-viewport scaled clip before encoding when it does not. Capture plus response delivery is single-flight and has a 10-second capture deadline; the Hub's 30-second write deadline bounds a backpressured client. The PNG is evidence of Chromium renderer output, not proof of compositor, HDMI, or physical-panel output. The route remains inside the Hub's unauthenticated trusted-LAN boundary; rejecting `Origin` and `Sec-Fetch-Site` requests reduces browser/DNS-rebinding exposure but is not a substitute for the planned shared Hub authorization layer.
+`GET /api/screenshot` uses an isolated, short-lived CDP connection so PNG encoding cannot block the persistent command/status connection. `width` and `height` are optional positive integers up to 4096; either may be supplied alone. Two-axis boxes must not exceed 8,294,400 pixels (3840×2160, the 4K-UHD pixel budget); a one-axis request is proportionally scaled down when its derived surface would exceed that budget. This preserves aspect ratio without cropping or stretching while keeping every accepted capture deliverable within the 40 MiB PNG and 64 MiB CDP-frame limits. With neither parameter, the route reads viewport metrics first: it preserves native output when the viewport fits both budgets and sends a full-viewport scaled clip before encoding when it does not. Capture plus response delivery is single-flight and has a 10-second capture deadline; the Hub's 30-second write deadline bounds a backpressured client. The PNG is evidence of Chromium renderer output, not proof of compositor, HDMI, or physical-panel output. On a device without an owner the route is inside the Hub's unauthenticated local-network boundary; rejecting `Origin` and `Sec-Fetch-Site` requests reduces browser/DNS-rebinding exposure but is not authorization.
 
 **`GET /api/status` / `GET /api/v2/status` body** (`hub/status.go`; identical shape, only `contract` differs):
 
@@ -311,17 +278,17 @@ For installation diagnosis, `curl --fail http://<device-ip>:1111/api/screenshot 
   "setup_state": "online",
   "connectivity": "...",
   "topic_id": "...",
-  "control": {"v": 1, "state": "legacy|enrolled|enforced|locked", "profile": {"v": 1, "dev": "...", "gen": "...", "sig": {}, "enc": {}}}
+  "control": {"v": 1, "state": "legacy|enrolled|locked", "profile": {"v": 1, "dev": "...", "gen": "...", "sig": {}, "enc": {}}, "lan": "open|closed"}
 }
 ```
 
-- `control` (feral-file#3551, `docs/ff1-control-v1.md` §11) is present only when the control protocol runs on this device; its presence is the capability signal. A `locked` device omits `profile`. Outside `legacy`, `topic_id` is `""` even before the relayer claim. `getDeviceStatus` and the `device_status` notification carry the same block.
+- `control` (feral-file#3551, `docs/ff1-control-v1.md` §11) is present only when the control protocol runs on this device; its presence is the capability signal. A `locked` device omits `profile`. `lan` (the owner's LAN switch, §7.2) is present only in `enrolled`; absent means closed or unknown. Outside `legacy`, `topic_id` is `""` even before the relayer claim. `getDeviceStatus` and the `device_status` notification carry the same block.
 
 - `contract` is owned by the hub (not the status provider): `"1"` on the legacy route, `"2"` on `/api/v2/status`. The versioned route — not the field — is the firmware gate the pairing app uses: a device that 404s on `/api/v2/status` (or lacks the `api` mDNS TXT key) is old firmware and must be treated as **not LAN-pairable** (no discovery notification, no pairing offer). The field remains the dual-running-window signal for retiring the open `:1111` surface.
 - `setup_state` is a coarse provisioning-state string. When the provisioning machine is wired in (production), it is the live machine state: `starting`, `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joining`. The bare status provider falls back to `claimed` / `unclaimed`.
 - `relayer_connected` reports the cached relayer WebSocket lifecycle state, independently of LAN link and internet reachability. It is not proof that a cloud command will complete. `relayer_last_connected_at` is the UTC RFC3339 timestamp of the most recent successful socket dial in this daemon process; it remains after disconnect and is `null` until the first successful dial (including after restart). Status reads trigger no relayer probe. These two describe the legacy relayer only; `relay_v2_connected` is the v2 device-ID relay socket (additive, feral-file#3551 G3).
 - `claimed` mirrors the mDNS TXT `claimed` value.
-- `topic_id` is served only while the device is unclaimed; once claimed the key stays present with the value `""` (feral-file#3551 phase 0). The released app reads claimed + empty `topic_id` as `alreadyClaimed`. Additional phones join by owner-initiated registration (`docs/ff1-control-v1.md` §5.6): an owner scans the new phone's controller QR; no claim QR is shown on an owned device for them.
+- `topic_id` is served only while the device is unclaimed; once claimed the key stays present with the value `""` (feral-file#3551). The released app reads claimed + empty `topic_id` as `alreadyClaimed`. Additional phones join by owner-initiated registration (`docs/ff1-control-v1.md` §5.6): an owner scans the new phone's controller QR; no claim QR is shown on an owned device for them.
 - `branch` and `version` are read from the same `ff1-config.json` the OTA gate uses, so the LAN payload can never disagree with the claim QR.
 - `internet` is live internet reachability (sys-monitord's cached signal, one local D-Bus round-trip per poll). It is distinct from `connectivity`, which is LAN-link state: a device on a healthy LAN with a dead WAN is `connectivity: "connected"`, `internet: false`.
 
@@ -377,7 +344,7 @@ Machine states: `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joi
 - **App-triggered setup (`startWifiSetup`):** the app can put the frame into this same setup mode over the relayer or LAN cast (command reference in [`controld-inbound-controller-messages.md`](controld-inbound-controller-messages.md)). The reply (`{ok, ssid}` or `{ok:false, code}` with `wired_link_active`/`busy`) is produced before the raise is queued — not synchronized against the transport, which is why the app treats a timed-out send as success: a raise that severs the station link can drop the reply in flight on either transport. Acceptance queues the standard entry sequence and the session runs under the `user-requested` policy row. The relayer `getDeviceStatus` reply carries `contract:"2"` (equal to the hub's v2 contract — one firmware gate, two transports) so the app can identify a v2 frame off-LAN.
 - **Join sequencing (the "AP bounce"):** on credential submit the machine tears the AP down *before* the station-mode join (the single radio cannot host the AP and join at once), then joins via `wifictl` under a **120s deadline** (`Config.JoinTimeout` — the one long blocking call on the loop goroutine; expiry surfaces as the timeout failure, D10). On **any** join failure (including wrong password) the AP is re-raised so the user can retry; the portal `/status` reports `failed` with a reason.
 
-`wifictl` wraps `nmcli` for saved-profile enumeration, scanning (with a pre-AP scan cache, because NM serializes Wi-Fi operations on the single radio and the driver rejects every scan while the setup AP holds it: the portal reads the cache at any age and never scans live (#261); an empty refresh keeps a list younger than 10m), and joining. A hidden-network join passes `hidden yes` and skips the scan-visibility wait; an open network omits the `password` argument entirely; the pre-join stale-profile purge matches the profile's **target SSID** (not its name) and deletes only PSK/open profiles — never 802.1X (D9). Join errors are classified as auth / SSID-not-found / timeout / unknown and mapped to portal messages.
+`wifictl` wraps `nmcli` for saved-profile enumeration, scanning (with a pre-AP scan cache, because NM serializes Wi-Fi operations on the single radio and the driver rejects every scan while the setup AP holds it: the portal reads the cache at any age and never scans live (#261); an empty refresh never replaces the list, at any age, the device's own setup SSID is dropped before that test, and the picker shows the list's age (#404)), and joining. A hidden-network join passes `hidden yes` and skips the scan-visibility wait; an open network omits the `password` argument entirely; the pre-join stale-profile purge matches the profile's **target SSID** (not its name) and deletes only PSK/open profiles — never 802.1X (D9). Join errors are classified as auth / SSID-not-found / timeout / unknown and mapped to portal messages.
 
 ### Setup narration (`setupDisplay`) extension states and send-time downgrades
 
@@ -454,10 +421,7 @@ Use `dbus.NewError(message, []interface{}{})` for all D-Bus method errors. The f
 
 `feral-controld` verifies every `displayPlaylist` document with dp1-go's §7.1 verifier and reports a three-way verdict — `valid|invalid|unsigned` — on the cast reply (`signatureStatus`, `signers[]`, `legacySignature`) and on `player_status` (feral-file/ffos-user#307; wire shapes in [`controld-inbound-controller-messages.md`](controld-inbound-controller-messages.md)). Verification is over the JCS-canonical form, so re-marshaled bytes verify identically to wire bytes; a dropped field does not, which is why the inline path verifies the caller's original `dp1_call` token (retained verbatim by both ingress decoders as `Command.RawArguments`) rather than a re-marshal of the decoded map — `encoding/json` HTML-escapes `&`/`<`/`>`, which can inflate an honest document past the verifier's size bound; its float64 rounding of large integers is absorbed by JCS — or the typed struct, and why the offline cached copy — a typed, hydrated re-marshal — carries no verdict at all rather than a false one (persisting the download-time verdict beside the record is the follow-up). Bounds: every ingress caps the document at 4 MiB before decoding — the hub's request body, the relayer's websocket frame (`relayer.MAX_MESSAGE_BYTES`), and the URL fetch — and the verifier refuses anything larger on its own as well (`sigverify.MaxDocumentBytes`, defense in depth); verification stops at 16 `signatures[]` entries (counted by streaming the array and halting at the 17th, so the cap costs no per-entry allocation), and signer fields (`alg`/`role`/`kid`) past 32/32/256 bytes are blanked and reported as malformed before any cryptography runs (in-bounds siblings are reported as `unverified`) — so the unauthenticated hub cannot buy hours of JCS canonicalization or megabytes of log with one cast. The verdict is cryptographic only: it does not establish that the signer is one the device trusts. Trust anchoring is a later, separate layer; the reported `kid`s are its input.
 
-Two divergences from the v2 contract (`ff1-v2-api-contract.md` §10, §12.3) are recorded here rather than settled in code:
-
-- **Algorithms.** The v2 profile lists `ed25519` and `ecdsa-p256`. dp1-go v0.6.0 implements `ed25519` and `eip191` (did:pkh), and the production feed already carries an `eip191` signature. An `ecdsa-p256` entry therefore verifies as `unsupported alg` → `invalid` today. The profile or the library needs to move; until then the `signatureVerification.disabled` config flag is the remedy if such documents appear first.
-- **Vocabulary.** v2's `signatureStatus` is `verified|verification_pending|failed` and has no value for an unsigned document because v2 rejects those outright. The v1 surfaces use `valid|invalid|unsigned` (mapping valid→verified, invalid→failed); `unsigned` needs a v2 value to be proposed when v2 lands.
+**Supported algorithms.** dp1-go v0.7.2 implements `ed25519` and `eip191` (did:pkh), and the production feed already carries an `eip191` signature. Any other `alg` (for example `ecdsa-p256`) verifies as `unsupported alg` → `invalid`; until the library supports it, the `signatureVerification.disabled` config flag is the remedy if such documents appear.
 
 Signature verification is informational only: no verdict blocks a cast, refresh, or scheduled cutover, and no signature notice is shown. The phone preference, device modes, and setter are retired; persisted mode records are ignored. Release the daemon before or with the phone setting removal. Verification on original bytes, internal verdicts, and generation fencing remain unchanged.
 

@@ -28,6 +28,9 @@
            value server-side, so it cannot collide with a real network. */}}
       <option value="{{.ManualSSIDOption}}" data-manual>Other network…</option>
     </select>
+    {{- if .ScanAge}}
+    <p class="field-hint">Networks found {{.ScanAge}}. Not seeing yours? Use “Network not listed?” below.</p>
+    {{- end}}
 
     <div id="manual-entry">
       <label for="ssid-manual">Or type a network name</label>

@@ -78,7 +78,7 @@ func TestFirstOwnerInvitationFlow(t *testing.T) {
 	}
 
 	// The grant survives a restart.
-	d.reopen(false)
+	d.reopen()
 	if d.a.State() != StateEnrolled {
 		t.Fatal("grant not durable")
 	}
@@ -530,13 +530,13 @@ func TestStateAndStatus(t *testing.T) {
 	if d.a.State() != StateEnrolled {
 		t.Fatal(d.a.State())
 	}
-	d.reopen(true)
 	st := d.a.Status()
-	if st.State != StateEnforced || st.Profile == nil || *st.Profile != d.id.Profile() {
+	if st.Profile == nil || *st.Profile != d.id.Profile() {
 		t.Fatalf("status = %+v", st)
 	}
 	b, _ := json.Marshal(st)
-	if !strings.HasPrefix(string(b), `{"v":1,"state":"enforced","profile":{"v":1,"dev":"FF1-TESTUNIT"`) {
+	if !strings.HasPrefix(string(b), `{"v":1,"state":"enrolled","profile":{"v":1,"dev":"FF1-TESTUNIT"`) ||
+		!strings.HasSuffix(string(b), `,"lan":"open"}`) {
 		t.Fatalf("status json = %s", b)
 	}
 }
@@ -1019,7 +1019,7 @@ func TestPreApprovalEnrollPersistsWindow(t *testing.T) {
 	if err != nil || d.final(adm, rc).Code != CodeNotApproved {
 		t.Fatal("pre-approval enroll")
 	}
-	d.reopen(false)
+	d.reopen()
 	adm, _ = d.a.Open(compact)
 	if d.final(adm, rc).Code != CodeReplay {
 		t.Fatal("pre-approval enroll window not persisted")
@@ -1275,7 +1275,7 @@ func TestReleaseOwnership(t *testing.T) {
 	d.expectCode(guest, d.cmdClaims(guest, "rotate", `{}`), CodeAccessRevoked)
 
 	// A restart reads the same: legacy.
-	d.reopen(false)
+	d.reopen()
 	if d.a.State() != StateLegacy {
 		t.Fatalf("state after restart = %s", d.a.State())
 	}

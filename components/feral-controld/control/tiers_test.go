@@ -84,7 +84,7 @@ func TestEveryCommandHasATier(t *testing.T) {
 
 func TestTierTableHasNoPhantoms(t *testing.T) {
 	known := map[string]bool{CmdApproveController: true, CmdRevokeController: true, CmdListControllers: true,
-		CmdRegisterController: true, CmdReleaseOwnership: true, CmdEnvelope: true}
+		CmdRegisterController: true, CmdReleaseOwnership: true, CmdEnvelope: true, CmdSetLanControl: true}
 	for _, v := range commandConstants(t) {
 		known[v] = true
 	}
@@ -102,6 +102,12 @@ func TestTierOfAndAllows(t *testing.T) {
 	if TierOf("noSuchCommand") != TierOwner || TierOf("sshAccess") != TierOwner ||
 		TierOf("displayPlaylist") != TierController || TierOf("ping") != TierInternal {
 		t.Fatal("TierOf")
+	}
+	// feral-file#3551 LAN-open: shutdown fails the undo test, uploadLogs
+	// changes nothing on the device, and the switch is the owner's.
+	if TierOf("shutdown") != TierOwner || TierOf("uploadLogs") != TierController ||
+		TierOf(CmdSetLanControl) != TierOwner {
+		t.Fatal("TierOf: LAN-open tier moves")
 	}
 	for _, tc := range []struct {
 		tier Tier
