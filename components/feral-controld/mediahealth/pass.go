@@ -368,7 +368,7 @@ func (p *Prober) probeOne(ctx context.Context, source string, logger *zap.Logger
 			zap.Int("status", res.Status),
 			zap.Duration("retry_after", res.RetryAfter))
 	}
-	p.record(source, res, logger)
+	res.Recorded = p.record(source, res, logger)
 	return res, true
 }
 
@@ -420,14 +420,19 @@ func (p *Prober) cooled(source string) bool {
 	return ok
 }
 
-func (p *Prober) record(source string, res ProbeResult, logger *zap.Logger) {
-	if p.Store == nil {
-		return
+// record writes res and reports whether the store actually changed.
+func (p *Prober) record(source string, res ProbeResult, logger *zap.Logger) bool {
+	if p.Store == nil || !probeWritesRecord(res) {
+		return false
 	}
-	if _, err := p.Store.ApplyProbe(source, res); err != nil && !errors.Is(err, ErrLowDisk) {
-		logger.Warn("media health: recording probe result failed",
-			zap.String("source", res.Source), zap.Error(err))
+	if _, err := p.Store.ApplyProbe(source, res); err != nil {
+		if !errors.Is(err, ErrLowDisk) {
+			logger.Warn("media health: recording probe result failed",
+				zap.String("source", res.Source), zap.Error(err))
+		}
+		return false
 	}
+	return true
 }
 
 // fromStoreVerdict says which verdict a stored record answers for the pass

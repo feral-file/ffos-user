@@ -190,8 +190,8 @@ func (l *Lookahead) step(ctx context.Context, logger *zap.Logger) bool {
 	return false
 }
 
-// probe runs one request and holds the source only when the result wrote
-// no record. A recorded answer is governed by its record alone — Due reads
+// probe runs one request and holds the source only when the result did not
+// change the store (ProbeResult.Recorded). A recorded answer is governed by its record alone — Due reads
 // the verdict's recheck and the transient retryAfter, which honors a
 // shorter Retry-After — so an in-memory hour on top of it delayed a
 // recovered source's fresh verdict by up to an hour (PR #438 review, F19).
@@ -205,7 +205,10 @@ func (l *Lookahead) probe(ctx context.Context, src string, at time.Time, kind st
 	res := l.Prober.ProbeAndRecord(ctx, src)
 	var cooled *hostCooldownError
 	switch {
-	case probeWritesRecord(res):
+	case res.Recorded:
+		// Only a write that landed makes the record govern: a refused
+		// write (the low-disk guard) leaves the source due, and releasing
+		// it would re-pick it every step and starve the wall (F21).
 		l.release(src)
 	case errors.As(res.Err, &cooled):
 		l.hold(src, cooled.until)

@@ -194,3 +194,41 @@ func TestLookahead_UnrecordedRefusalIsStillHeld(t *testing.T) {
 	clock.Advance(probeHold)
 	assert.True(t, l.step(context.Background(), nil))
 }
+
+// F21 (PR #438 review): while the store refuses writes (disk below its
+// reserve) a probed source stays due; the lookahead must keep holding it
+// or it re-picks the same source every step and the rest of the wall is
+// never checked.
+func TestLookahead_RefusedWriteKeepsTheHold(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	free := int64(10 << 30)
+	store, err := Open(t.TempDir()+"/mh/store.db", Options{
+		Now:          clock.Now,
+		MinFreeBytes: 5 << 30,
+		FreeBytes:    func(string) (int64, error) { return free, nil },
+	})
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+	f := newTableFetcher()
+	for _, u := range []string{"https://o/0", "https://o/1", "https://o/2"} {
+		f.answers[u] = ok(200, "image/png", minimalPNG(1, 1), -1)
+	}
+	p := &Prober{Probe: &Probe{Fetcher: f, Validator: NewContentValidator(DefaultProbeMaxBytes, nil)}, Store: store, Now: clock.Now}
+	l := &Lookahead{Prober: p, Store: store, Now: clock.Now, Window: 3}
+	free = 1 << 30
+	l.Observe([]string{"https://o/0", "https://o/1", "https://o/2"}, 0)
+
+	require.True(t, l.step(context.Background(), nil))
+	require.True(t, l.step(context.Background(), nil))
+	assert.Equal(t, 1, f.count("https://o/1"), "the refused write does not make it re-picked")
+	assert.Equal(t, 1, f.count("https://o/2"), "the next upcoming source gets its turn")
+	rec, err := store.Get("https://o/1")
+	require.NoError(t, err)
+	assert.Nil(t, rec, "nothing was written")
+
+	res := p.ProbeAndRecord(context.Background(), "https://o/0")
+	assert.False(t, res.Recorded, "a refused write is reported as not recorded")
+	free = 10 << 30
+	res = p.ProbeAndRecord(context.Background(), "https://o/0")
+	assert.True(t, res.Recorded)
+}

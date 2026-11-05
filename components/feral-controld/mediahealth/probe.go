@@ -72,6 +72,12 @@ type ProbeResult struct {
 	// never marks its wall broken.
 	DNSUnresolved   bool
 	ResolverHealthy bool
+	// Recorded is set by the Prober: the result changed the store. False
+	// for results the store never records (guard and length refusals,
+	// skipped hosts) AND for writes the store refused (the low-disk guard,
+	// a failed transaction) — the lookahead holds such a source, because
+	// its record will not make it non-due (PR #438 review, F21).
+	Recorded bool
 }
 
 // Rewriter is the kiosk's gateway policy, as this package needs it: which

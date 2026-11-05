@@ -197,8 +197,9 @@ and a slot on its host is taken like the pass takes one. A probe that wrote a
 record is governed by that record alone, so a 429 with `Retry-After: 30` is due
 again after 30 s. A probe that wrote **no** record is held in memory for 1 h:
 the source guard or the URL-length limit refuses some sources without a
-record (a policy objection is never a verdict), and without the hold such a
-source would stay due and block everything behind it. A source skipped for a
+record (a policy objection is never a verdict), and so does a write the
+store refuses (the low-disk guard). Without the hold such a source would stay
+due and block everything behind it. A source skipped for a
 host cooldown is held only until the cooldown ends. New hints ride the next
 push, or the hint-only push below.
 
