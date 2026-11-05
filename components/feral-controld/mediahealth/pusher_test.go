@@ -96,18 +96,25 @@ func TestHintPusher_AttachedMapIsTheBaselineForTheCast(t *testing.T) {
 	assert.Zero(t, f.count())
 }
 
-func TestHintPusher_UnknownBaselineSendsOnlyWhenSomethingIsHinted(t *testing.T) {
+// F20 (PR #438 review): after a controld restart under a surviving page the
+// belief is unknown, and the page may still hold hints the previous process
+// pushed. If those verdicts healed or expired, only an explicit empty
+// replacement stops the player skipping them.
+func TestHintPusher_UnknownBaselineSendsTheEmptyMap(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	f := &fakeHintSender{}
 	want := map[string]Hint{}
 	p := newTestPusher(clock, f, &want)
-	// A boot replay: the player put a cast up without a controld push.
+	// A fresh process: no Attached, just the poll of the surviving page.
 	p.Observe([]string{"https://o/a"}, 1, true)
 	clock.Advance(16 * time.Second)
-	assert.False(t, p.step(context.Background()), "nothing to hint: no send on an unknown baseline")
+	require.True(t, p.step(context.Background()), "an unknown belief sends even an empty map")
+	require.Equal(t, 1, f.count())
+	assert.Empty(t, f.last().hints)
+	assert.False(t, p.step(context.Background()), "once delivered the belief is known: no chatter")
 	want = map[string]Hint{"https://o/a": brokenHint}
-	assert.True(t, p.step(context.Background()), "the boot cast carried no hints; the push restores them")
-	assert.Equal(t, 1, f.count())
+	assert.True(t, p.step(context.Background()), "a later verdict is still pushed")
+	assert.Equal(t, 2, f.count())
 }
 
 func TestHintPusher_NewCastResetsTheSettleAndTheBaseline(t *testing.T) {

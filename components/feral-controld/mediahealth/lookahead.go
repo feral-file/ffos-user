@@ -2,6 +2,7 @@ package mediahealth
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"time"
@@ -175,33 +176,56 @@ func (l *Lookahead) step(ctx context.Context, logger *zap.Logger) bool {
 	at := now()
 	l.pruneHeld(at)
 	if src := l.nextAhead(at); src != "" {
-		l.hold(src, at)
-		res := l.Prober.ProbeAndRecord(ctx, src)
-		logger.Debug("media health: lookahead probe", zap.String("source", res.Source), zap.String("verdict", string(res.Verdict)))
+		l.probe(ctx, src, at, "lookahead", logger)
 		return true
 	}
 	if src := l.nextUnprobed(); src != "" {
-		l.hold(src, at)
-		res := l.Prober.ProbeAndRecord(ctx, src)
-		logger.Debug("media health: wall probe", zap.String("source", res.Source), zap.String("verdict", string(res.Verdict)))
+		l.probe(ctx, src, at, "wall", logger)
 		return true
 	}
 	if src := l.nextDue(at); src != "" {
-		l.hold(src, at)
-		res := l.Prober.ProbeAndRecord(ctx, src)
-		logger.Debug("media health: sweep probe", zap.String("source", res.Source), zap.String("verdict", string(res.Verdict)))
+		l.probe(ctx, src, at, "sweep", logger)
 		return true
 	}
 	return false
 }
 
-func (l *Lookahead) hold(src string, now time.Time) {
+// probe runs one request and holds the source only when the result wrote
+// no record. A recorded answer is governed by its record alone — Due reads
+// the verdict's recheck and the transient retryAfter, which honors a
+// shorter Retry-After — so an in-memory hour on top of it delayed a
+// recovered source's fresh verdict by up to an hour (PR #438 review, F19).
+// The hold exists for the results the store refuses to record (a guard or
+// URL-length refusal, a cut-short wait for a host slot), which would
+// otherwise stay due forever; a source skipped for a host cooldown is held
+// only until the cooldown ends.
+func (l *Lookahead) probe(ctx context.Context, src string, at time.Time, kind string, logger *zap.Logger) {
+	// Held while the request runs, so nothing else picks it meanwhile.
+	l.hold(src, at.Add(probeHold))
+	res := l.Prober.ProbeAndRecord(ctx, src)
+	var cooled *hostCooldownError
+	switch {
+	case probeWritesRecord(res):
+		l.release(src)
+	case errors.As(res.Err, &cooled):
+		l.hold(src, cooled.until)
+	}
+	logger.Debug("media health: "+kind+" probe", zap.String("source", res.Source), zap.String("verdict", string(res.Verdict)))
+}
+
+func (l *Lookahead) hold(src string, until time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.held == nil {
 		l.held = make(map[string]time.Time)
 	}
-	l.held[src] = now.Add(probeHold)
+	l.held[src] = until
+}
+
+func (l *Lookahead) release(src string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.held, src)
 }
 
 // pruneHeld drops expired holds. The map is bounded by the probe rate

@@ -149,3 +149,48 @@ func TestProber_ResolverHealthEvidence(t *testing.T) {
 	res = p.ProbeAndRecord(context.Background(), "https://gone.example/a")
 	assert.True(t, res.ResolverHealthy, "the online verdict (itself a DNS-dependent check) is evidence too")
 }
+
+// F19 (PR #438 review): a recorded transient answer follows its record's
+// retry time — a 429 with Retry-After: 30 is due again after 30 s, not
+// after the lookahead's one-hour in-memory hold. The hold stays for
+// results that write no record.
+func TestLookahead_RecordedTransientFollowsItsRetryAfter(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := newTableFetcher()
+	l := newTestLookahead(t, f, clock) // Window: 3
+	l.Prober.Hosts = &HostLimiter{Now: clock.Now}
+	src := "https://limited.example/a"
+	f.answers[src] = ok(429, "", nil, -1, "Retry-After", "30")
+	l.Observe([]string{"https://o/cur", src}, 0)
+	f.answers["https://o/cur"] = ok(200, "image/png", minimalPNG(1, 1), -1)
+
+	require.True(t, l.step(context.Background(), nil))
+	require.Equal(t, 1, f.count(src))
+	require.True(t, l.step(context.Background(), nil), "then the current item")
+	assert.False(t, l.step(context.Background(), nil), "inside the origin's 30 s nothing is due")
+
+	f.answers[src] = ok(200, "image/png", minimalPNG(1, 1), -1)
+	clock.Advance(31 * time.Second)
+	require.True(t, l.step(context.Background(), nil), "past Retry-After the source is due again")
+	assert.Equal(t, 2, f.count(src))
+	rec, err := l.Store.Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State, "the recovered source gets its fresh verdict")
+}
+
+func TestLookahead_UnrecordedRefusalIsStillHeld(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := newTableFetcher()
+	l := newTestLookahead(t, f, clock)
+	src := "https://refused.example/a"
+	f.answers[src] = fail(FetchErrGuard)
+	l.Observe([]string{"https://o/cur", src}, 0)
+	f.answers["https://o/cur"] = ok(200, "image/png", minimalPNG(1, 1), -1)
+	require.True(t, l.step(context.Background(), nil))
+	require.True(t, l.step(context.Background(), nil))
+	clock.Advance(31 * time.Second)
+	assert.False(t, l.step(context.Background(), nil), "a refusal writes no record, so the hour hold keeps it from looping")
+	assert.Equal(t, 1, f.count(src))
+	clock.Advance(probeHold)
+	assert.True(t, l.step(context.Background(), nil))
+}

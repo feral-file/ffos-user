@@ -202,20 +202,14 @@ func (p *HintPusher) step(ctx context.Context) bool {
 	if known && hintsEqual(held, want) {
 		return false
 	}
-	if !known && len(want) == 0 {
-		// Nothing to hint and no belief about this cast: the player holds
-		// what the cast's push carried, which can only have been computed
-		// from an older (or equal) store, and an empty map now means every
-		// verdict it could have carried has healed or expired since. Sending
-		// the empty map would be correct but is chatter on every boot
-		// replay and every wall with nothing broken; adopt it as the belief.
-		p.mu.Lock()
-		if p.haveWall && p.castSeq == castSeq {
-			p.held, p.heldCast = nil, castSeq
-		}
-		p.mu.Unlock()
-		return false
-	}
+	// An unknown belief sends whatever the map is, the EMPTY map included.
+	// The belief is unknown after a controld restart under a surviving
+	// player page: the page still holds the hints the previous process
+	// pushed, and if those verdicts have healed or expired since, only an
+	// explicit empty replacement stops the player skipping works the
+	// device no longer judges broken (PR #438 review, F20). The cost is
+	// one send per cast with no belief, which replace semantics make
+	// harmless.
 	skipped, err := p.Send(ctx, castSeq, want)
 	switch {
 	case err == nil:

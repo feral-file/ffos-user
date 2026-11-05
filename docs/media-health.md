@@ -193,11 +193,14 @@ request at a time with a 2 s gap, in this order:
 
 Every request goes through the shared `HostLimiter`: a source on a cooled
 host is stepped over (not held — it is eligible again when the cooldown ends)
-and a slot on its host is taken like the pass takes one. A source the worker
-just probed is left alone for 1 h whatever its record says: a probe the source
-guard or the URL-length limit refuses writes no record (a policy objection is
-never a verdict), so without that hold it would stay due and block everything
-behind it. New hints ride the next push.
+and a slot on its host is taken like the pass takes one. A probe that wrote a
+record is governed by that record alone, so a 429 with `Retry-After: 30` is due
+again after 30 s. A probe that wrote **no** record is held in memory for 1 h:
+the source guard or the URL-length limit refuses some sources without a
+record (a policy objection is never a verdict), and without the hold such a
+source would stay due and block everything behind it. A source skipped for a
+host cooldown is held only until the cooldown ends. New hints ride the next
+push, or the hint-only push below.
 
 ## The hint (controld → player): `mediaHealth` on `displayPlaylist`
 
@@ -247,8 +250,11 @@ replaces only the held hint map:
   the player is believed to hold. Recomputing rather than listening for store
   writes also catches a verdict that **expires** past its recheck window. The
   belief is the map the last push path attached, or the last delivered
-  push, bound to the cast generation. An unknown belief costs at most one
-  redundant send, which replace semantics make harmless. Nothing is sent
+  push, bound to the cast generation. An unknown belief sends the current
+  map, **the empty one included**: after a controld restart under a
+  surviving page, the page may still hold hints that have since healed or
+  expired, and only an explicit empty replacement clears them. That costs
+  one send per cast with no belief, which replace semantics make harmless. Nothing is sent
   in the first 15 s after a new cast, since the cast's push carried the map.
 - **Failure.** `staleCast` waits for the next poll's generation. A transport
   error or a reply that crossed a page generation change retries on the next
