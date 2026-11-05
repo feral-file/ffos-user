@@ -45,11 +45,11 @@ type rig struct {
 	enrolled int
 }
 
-func newRig(t *testing.T, fsys *control.MemFS, enforced bool) *rig {
+func newRig(t *testing.T, fsys *control.MemFS) *rig {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
-	a, err := control.New(control.Config{Dir: "/s/control", DeviceID: testDevice, FS: fsys, Enforced: enforced})
+	a, err := control.New(control.Config{Dir: "/s/control", DeviceID: testDevice, FS: fsys})
 	if err != nil || a.LockErr() != nil {
 		t.Fatal(err, a.LockErr())
 	}
@@ -177,7 +177,7 @@ func expectCode(t *testing.T, r control.ReplyClaims, code string) {
 
 func TestControlProtocolEndToEnd(t *testing.T) {
 	fsys := control.NewMemFS()
-	r := newRig(t, fsys, false)
+	r := newRig(t, fsys)
 
 	// --- legacy: plaintext works on both routes, profile is published ---
 	state, profile, _ := r.profile()
@@ -212,10 +212,30 @@ func TestControlProtocolEndToEnd(t *testing.T) {
 		t.Fatalf("after enroll: state %s topic %q", state, topic)
 	}
 
-	// --- plaintext LAN refused; relayer plaintext is tiered ---
-	code, body := r.post([]byte(`{"command":"displayPlaylist","request":{"dp1_call":{}}}`))
+	// --- LAN plaintext: the undoable set while the switch is open, nothing
+	// once the owner closes it; relayer plaintext is tiered ---
+	if code, body := r.post([]byte(`{"command":"displayPlaylist","request":{"dp1_call":{}}}`)); code != 200 {
+		t.Fatalf("enrolled LAN plaintext, switch open: %d %s", code, body)
+	}
+	if state, _, _ := r.profile(); state != control.StateEnrolled {
+		t.Fatal(state)
+	}
+	if _, b := r.get("/api/v2/status"); !strings.Contains(string(b), `"lan":"open"`) {
+		t.Fatalf("status lan member: %s", b)
+	}
+	code, body := r.post([]byte(`{"command":"factoryReset","request":{}}`))
+	if code != 403 || !strings.Contains(string(body), `"enrollment_required"`) {
+		t.Fatalf("enrolled LAN owner-tier plaintext: %d %s", code, body)
+	}
+	if reply = r.lanEnvelope(owner, owner.build(control.OpCmd, control.CmdSetLanControl, `{"open":false}`, "")); !reply.OK {
+		t.Fatalf("setLanControl: %+v", reply)
+	}
+	code, body = r.post([]byte(`{"command":"displayPlaylist","request":{"dp1_call":{}}}`))
 	if code != 403 || strings.TrimSpace(string(body)) != `{"error":{"code":"enrollment_required","message":"this FF1 needs signed requests: update the Feral File app or ff-cli"}}` {
-		t.Fatalf("enrolled LAN plaintext: %d %s", code, body)
+		t.Fatalf("enrolled LAN plaintext, switch closed: %d %s", code, body)
+	}
+	if _, b := r.get("/api/v2/status"); !strings.Contains(string(b), `"lan":"closed"`) {
+		t.Fatalf("status lan member: %s", b)
 	}
 	if code, body := r.get("/api/screenshot"); code != 403 || !strings.Contains(string(body), "enrollment_required") {
 		t.Fatalf("enrolled screenshot: %d %s", code, body)
@@ -328,21 +348,20 @@ func TestControlProtocolEndToEnd(t *testing.T) {
 		t.Fatalf("relayer bad envelope: %s", msg)
 	}
 
-	// --- enforced (same grants, flag flipped): relayer plaintext is Play-only ---
-	r2 := newRig(t, fsys, true)
-	if st, _, _ := r2.profile(); st != control.StateEnforced {
+	// --- a restart keeps the owner and the closed switch ---
+	r2 := newRig(t, fsys)
+	if st, _, _ := r2.profile(); st != control.StateEnrolled {
 		t.Fatalf("state %s", st)
 	}
-	if msg := r2.relayerCast([]byte(`{"command":"rotate","request":{}}`)); !strings.Contains(string(msg), `"error":"envelope_required"`) {
-		t.Fatalf("enforced relayer rotate: %s", msg)
+	if code, _ := r2.post([]byte(`{"command":"displayPlaylist","request":{"dp1_call":{}}}`)); code != 403 {
+		t.Fatalf("closed switch lost on restart: %d", code)
 	}
-	play := `{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{"dpVersion":"1.0.0","items":[]}}}`
 	// Review F3: the case-variant / duplicate request bypass is refused on
 	// both routes, and the router never sees it.
 	before = r2.rec.count()
 	bypass := `{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{}},"Request":{"intent":{"action":"queue"},"dp1_call":{"evil":1}}}` //nolint:gosec // G101: a test message, not a credential.
 	if msg := r2.relayerCast([]byte(bypass)); !strings.Contains(string(msg), `"error":"invalid_message"`) {
-		t.Fatalf("enforced relayer bypass: %s", msg)
+		t.Fatalf("relayer bypass: %s", msg)
 	}
 	if code, body := r2.post([]byte(bypass)); code != 400 || !strings.Contains(string(body), "invalid_message") {
 		t.Fatalf("LAN bypass: %d %s", code, body)
@@ -350,11 +369,8 @@ func TestControlProtocolEndToEnd(t *testing.T) {
 	if r2.rec.count() != before {
 		t.Fatal("an ambiguous message reached the router")
 	}
-	if msg := r2.relayerCast([]byte(play)); !strings.Contains(string(msg), `"ran":"displayPlaylist"`) {
-		t.Fatalf("enforced relayer Play cast: %s", msg)
-	}
 	ls = owner.build(control.OpCmd, "getDeviceStatus", `{}`, "")
 	if reply = owner.open(ls, r2.relayerCast(ls.cast)); !reply.OK {
-		t.Fatalf("enforced relayer envelope: %+v", reply)
+		t.Fatalf("relayer envelope: %+v", reply)
 	}
 }
