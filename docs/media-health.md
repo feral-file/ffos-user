@@ -264,27 +264,29 @@ would hide real art, the worst outcome here.
   the recheck index on purpose: the L0 lookahead and sweep must not pick L1
   work up.
 - **Render** (`offlinecache.NewMediaHealthRenderer`, the capturer's own
-  browser, dial and source guard): viewport pinned to 1024×1024 (the pHash
-  is only comparable at one geometry, and it matches the indexer's), the
-  same reserved-address guard on every request the page makes, child
-  targets included; navigate, settle (15 s; 30 s for the confirmation of a
-  blank), viewport-bounded `Page.captureScreenshot`; the main document's
-  status is read from the first `Document` response. The URL rendered is the
+  browser and source guard): each render runs in its **own disposable
+  browser context** (`Target.createBrowserContext` on the browser session,
+  a page created in it, attached flat, disposed on every exit path), so
+  storage the page or any of its frames wrote — a frame removed mid-render
+  included — dies with the context and can never reach a later render or an
+  offline capture, which share the browser process but never a context.
+  Viewport pinned to 1024×1024 (the pHash is only comparable at one
+  geometry, and it matches the indexer's), the same reserved-address guard
+  on every request the page makes, child targets included; navigate, settle
+  (15 s; 30 s for the confirmation of a blank), viewport-bounded
+  `Page.captureScreenshot`; the main document's status is the main frame's
+  **latest** `Document` response, so a page that replaces itself onto an
+  error page is judged by that page and a child frame's document never
+  counts. The URL rendered is the
   record's **own source** through the gateway policy, fragment kept — never
   the record's `wireUrl`, which the cast pass copies from a wire-identical
   sibling (`work#one` and `work#two` are two works). The policy then rides on
   the guard, so **every** request of the render — redirects, child frames,
   subresources — is rewritten as the kiosk's interceptor rewrites it, and the
-  guard judges the rewritten destination. Before the browser goes back to the
-  capturer every origin the page touched has its storage cleared, as a capture
-  clears its own, plus the storage key of every frame that was ever alive
-  during the render (taken at `Page.frameNavigated` on every attached child
-  session too, since a frame the page removes before cleanup leaves its
-  partitioned storage behind) and of every frame the final trees still show,
-  and the page is stopped before the session is dropped. A child target the
-  guard could not contain (a worker: no Fetch domain) is left paused, as a
-  capture leaves it — and the render is then **not evidence** (stalled), since
-  the page painted without its worker; such works never get an L1 verdict.
+  guard judges the rewritten destination. A child target the guard could not
+  contain (a worker: no Fetch domain) is left paused, as a capture leaves it
+  — and the render is then **not evidence** (stalled), since the page painted
+  without its worker; such works never get an L1 verdict.
 - **Verdict ladder** (ported from ff-indexer-v2's `probe.Classify` and
   `phash`, same pHash algorithm and bit order, same per-channel variance
   blank signal): a known-bad fingerprint match first (`render_known_bad`,

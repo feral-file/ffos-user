@@ -33,7 +33,6 @@ type renderSession struct {
 	params   map[string]map[string]interface{}
 	handlers map[string][]func(json.RawMessage)
 	navError string
-	clears   []string
 	shot     []byte
 	fail     map[string]error
 	// replies answers a method with a scripted result; a reply keyed by
@@ -67,11 +66,6 @@ func (s *renderSession) Send(_ context.Context, method string, params map[string
 	s.sent = append(s.sent, method)
 	s.calls = append(s.calls, sessionCall{method: method, params: params})
 	s.params[method] = params
-	if method == "Storage.clearDataForOrigin" {
-		if origin, ok := params["origin"].(string); ok {
-			s.clears = append(s.clears, origin)
-		}
-	}
 	navErr, shot, failErr, onNav := s.navError, s.shot, s.fail[method], s.onNavigate
 	if failErr == nil && s.id != "" {
 		failErr = s.failByID[method+"@"+s.id]
@@ -205,12 +199,6 @@ func (s *renderSession) waitCalls(t *testing.T, method string, n int) []map[stri
 	}
 }
 
-func (s *renderSession) clearedOrigins() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.clears...)
-}
-
 func (s *renderSession) methods() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -252,26 +240,26 @@ func TestMediaHealthRenderer_ConversationAndFrame(t *testing.T) {
 	s := newRenderSession()
 	s.shot = pngOf(color.RGBA{R: 10, G: 20, B: 30, A: 255}, 64, 48)
 	s.onNavigate = func(s *renderSession) {
-		// A subresource first (ignored), then the main document, then an
-		// iframe document (ignored: only the first Document counts).
-		s.emit("Network.responseReceived", `{"type":"Script","response":{"status":500}}`)
-		s.emit("Network.responseReceived", `{"type":"Document","response":{"status":203}}`)
-		s.emit("Network.responseReceived", `{"type":"Document","response":{"status":404}}`)
+		// A subresource (ignored), the main frame's document, then an
+		// iframe's document (ignored: another frame).
+		s.emit("Network.responseReceived", `{"type":"Script","frameId":"F","response":{"status":500}}`)
+		s.emit("Network.responseReceived", `{"type":"Document","frameId":"F","response":{"status":203}}`)
+		s.emit("Network.responseReceived", `{"type":"Document","frameId":"I","response":{"status":404}}`)
 	}
 	r := newTestRenderer(t)
 	frame, err := r.renderOnSession(context.Background(), s, "https://art.example/p", time.Millisecond)
 	require.NoError(t, err)
 	require.NotNil(t, frame)
-	assert.Equal(t, 203, frame.MainStatus, "the main document's status, not a subresource's or a child frame's")
+	assert.Equal(t, 203, frame.MainStatus, "the main frame's document status, not a subresource's or a child frame's")
 	assert.Equal(t, image.Rect(0, 0, 64, 48), frame.Image.Bounds())
 	r8, g8, b8, _ := frame.Image.At(1, 1).RGBA()
 	assert.Equal(t, []uint32{10 << 8, 20 << 8, 30 << 8}, []uint32{r8 &^ 0xff, g8 &^ 0xff, b8 &^ 0xff})
 
 	methods := s.methods()
 	// The guard is armed around the navigate exactly as a capture arms it:
-	// reset first (our clears are never paused), Fetch.enable before the
-	// navigate, the child-target auto-attach, then the navigate, then the
-	// viewport-bounded screenshot.
+	// Fetch.enable before the navigate, the child-target auto-attach, then
+	// the navigate, then the viewport-bounded screenshot. No cache or
+	// storage reset: the context is disposable.
 	idx := func(m string) int {
 		for i, got := range methods {
 			if got == m {
@@ -280,10 +268,10 @@ func TestMediaHealthRenderer_ConversationAndFrame(t *testing.T) {
 		}
 		return -1
 	}
-	for _, m := range []string{"Network.enable", "Page.enable", "Emulation.setDeviceMetricsOverride", "Network.clearBrowserCache", "Storage.clearDataForOrigin", "Fetch.enable", "Target.setAutoAttach", "Page.navigate", "Page.captureScreenshot"} {
+	for _, m := range []string{"Network.enable", "Page.enable", "Emulation.setDeviceMetricsOverride", "Fetch.enable", "Target.setAutoAttach", "Page.navigate", "Page.captureScreenshot"} {
 		assert.NotEqual(t, -1, idx(m), m)
 	}
-	assert.Less(t, idx("Storage.clearDataForOrigin"), idx("Fetch.enable"))
+	assert.NotContains(t, methods, "Storage.clearDataForOrigin")
 	assert.Less(t, idx("Fetch.enable"), idx("Page.navigate"))
 	assert.Less(t, idx("Target.setAutoAttach"), idx("Page.navigate"))
 	assert.Less(t, idx("Page.navigate"), idx("Page.captureScreenshot"))
@@ -292,7 +280,6 @@ func TestMediaHealthRenderer_ConversationAndFrame(t *testing.T) {
 	assert.Equal(t, renderViewport, metrics["height"])
 	assert.Equal(t, false, s.params["Page.captureScreenshot"]["captureBeyondViewport"], "a page must not be able to grow the capture")
 	assert.Equal(t, "https://art.example/p", s.params["Page.navigate"]["url"])
-	assert.Equal(t, "https://art.example", s.params["Storage.clearDataForOrigin"]["origin"])
 }
 
 func TestMediaHealthRenderer_FailuresAreErrorsNotFrames(t *testing.T) {
@@ -351,36 +338,6 @@ func TestNewMediaHealthRenderer_NilForForeignCapturer(t *testing.T) {
 	r := NewMediaHealthRenderer(&capturer{}, nil)
 	assert.NotNil(t, r)
 	assert.Implements(t, (*mediahealth.Renderer)(nil), r)
-}
-
-// F20 (PR #443 review): every origin the render touched is cleared before
-// the browser goes back to the capturer, on the success and the failure
-// path alike.
-func TestMediaHealthRenderer_ClearsEveryObservedOrigin(t *testing.T) {
-	s := newRenderSession()
-	s.shot = pngOf(color.White, 8, 8)
-	s.onNavigate = func(s *renderSession) {
-		s.emit("Network.responseReceived", `{"type":"Document","response":{"status":200,"url":"https://art.example/p"}}`)
-		s.emit("Network.responseReceived", `{"type":"Document","response":{"status":200,"url":"https://frames.example/inner"}}`)
-		s.emit("Network.responseReceived", `{"type":"Script","response":{"status":200,"url":"https://cdn.example/lib.js"}}`)
-		s.emit("Network.responseReceived", `{"type":"Image","response":{"status":200,"url":"data:image/png;base64,AAAA"}}`)
-	}
-	r := newTestRenderer(t)
-	_, err := r.renderOnSession(context.Background(), s, "https://art.example/p", time.Millisecond)
-	require.NoError(t, err)
-	cleared := s.clearedOrigins()
-	assert.ElementsMatch(t, []string{"https://art.example", "https://art.example", "https://frames.example", "https://cdn.example"}, cleared,
-		"the pre-navigation reset of the source origin, then every observed http(s) origin after the render")
-
-	// The failure path clears too.
-	s = newRenderSession()
-	s.navError = "net::ERR_FAILED"
-	s.onNavigate = func(s *renderSession) {
-		s.emit("Network.responseReceived", `{"type":"Document","response":{"status":302,"url":"https://redirect.example/x"}}`)
-	}
-	_, err = r.renderOnSession(context.Background(), s, "https://art.example/p", time.Millisecond)
-	require.Error(t, err)
-	assert.Contains(t, s.clearedOrigins(), "https://redirect.example")
 }
 
 // F22 (PR #443 review, round 2): the kiosk's gateway policy applies to
@@ -450,45 +407,6 @@ func TestMediaHealthRenderer_PolicyAppliesToEveryRequest(t *testing.T) {
 	assert.Empty(t, s.callsOf("Fetch.continueRequest"))
 }
 
-// F20 (round 2): every frame's storage key is cleared — partitioned
-// third-party storage that an origin-scoped clear cannot reach — across
-// the root and every attached child session, on success and failure.
-func TestMediaHealthRenderer_ClearsEveryFrameStorageKey(t *testing.T) {
-	s := newRenderSession()
-	s.shot = pngOf(color.White, 8, 8)
-	s.replies["Page.getFrameTree"] = json.RawMessage(`{"frameTree":{"frame":{"id":"root"},"childFrames":[{"frame":{"id":"b"},"childFrames":[{"frame":{"id":"c"}}]}]}}`)
-	s.replies["Storage.getStorageKeyForFrame|root"] = json.RawMessage(`{"storageKey":"https://a.test/"}`)
-	s.replies["Storage.getStorageKeyForFrame|b"] = json.RawMessage(`{"storageKey":"https://b.test/^0https://a.test"}`)
-	s.replies["Storage.getStorageKeyForFrame|c"] = json.RawMessage(`{"storageKey":"https://c.test/^0https://a.test"}`)
-	s.replies["Page.getFrameTree@oopif"] = json.RawMessage(`{"frameTree":{"frame":{"id":"d"}}}`)
-	s.replies["Storage.getStorageKeyForFrame|d"] = json.RawMessage(`{"storageKey":"https://d.test/^0https://a.test"}`)
-	s.onNavigate = func(s *renderSession) {
-		s.emit("Target.attachedToTarget", `{"sessionId":"oopif","targetInfo":{"targetId":"t","type":"iframe"}}`)
-	}
-	r := newTestRenderer(t)
-	_, err := r.renderOnSession(context.Background(), s, "https://a.test/p", time.Millisecond)
-	require.NoError(t, err)
-	var keys []string
-	for _, c := range s.callsOf("Storage.clearDataForStorageKey") {
-		keys = append(keys, c["storageKey"].(string))
-		assert.Equal(t, "all", c["storageTypes"])
-	}
-	assert.ElementsMatch(t, []string{"https://a.test/", "https://b.test/^0https://a.test", "https://c.test/^0https://a.test", "https://d.test/^0https://a.test"}, keys,
-		"the root's frames and the child session's frame, each once")
-	child := s.child("oopif")
-	require.NotNil(t, child)
-	assert.Contains(t, child.methods(), "Network.enable", "a child session is observed for responses too")
-
-	// Failure path: the clear still runs.
-	s = newRenderSession()
-	s.navError = "net::ERR_FAILED"
-	s.replies["Page.getFrameTree"] = json.RawMessage(`{"frameTree":{"frame":{"id":"root"}}}`)
-	s.replies["Storage.getStorageKeyForFrame|root"] = json.RawMessage(`{"storageKey":"https://a.test/"}`)
-	_, err = r.renderOnSession(context.Background(), s, "https://a.test/p", time.Millisecond)
-	require.Error(t, err)
-	assert.Len(t, s.callsOf("Storage.clearDataForStorageKey"), 1)
-}
-
 // agentOnlyRewriter matches a host without rewriting any URL: the policy's
 // User-Agent branch.
 type agentOnlyRewriter struct{ prefix string }
@@ -496,29 +414,6 @@ type agentOnlyRewriter struct{ prefix string }
 func (agentOnlyRewriter) RewriteURL(string) (string, bool) { return "", false }
 func (r agentOnlyRewriter) Matches(raw string) bool        { return strings.HasPrefix(raw, r.prefix) }
 func (agentOnlyRewriter) UserAgent() string                { return "feral-player/2.0" }
-
-// F20 (round 3): a frame removed before cleanup is gone from the final
-// frame tree but not from storage; its key, taken while it was alive, is
-// still cleared.
-func TestMediaHealthRenderer_ClearsKeysOfFramesRemovedBeforeCleanup(t *testing.T) {
-	s := newRenderSession()
-	s.shot = pngOf(color.White, 8, 8)
-	// The final tree holds the root only; frame b lived and was removed.
-	s.replies["Page.getFrameTree"] = json.RawMessage(`{"frameTree":{"frame":{"id":"root"}}}`)
-	s.replies["Storage.getStorageKeyForFrame|root"] = json.RawMessage(`{"storageKey":"https://a.test/"}`)
-	s.replies["Storage.getStorageKeyForFrame|b"] = json.RawMessage(`{"storageKey":"https://b.test/^0https://a.test"}`)
-	s.onNavigate = func(s *renderSession) {
-		s.emit("Page.frameNavigated", `{"frame":{"id":"b","url":"https://b.test/inner"}}`)
-	}
-	r := newTestRenderer(t)
-	_, err := r.renderOnSession(context.Background(), s, "https://a.test/p", 50*time.Millisecond)
-	require.NoError(t, err)
-	var keys []string
-	for _, c := range s.callsOf("Storage.clearDataForStorageKey") {
-		keys = append(keys, c["storageKey"].(string))
-	}
-	assert.ElementsMatch(t, []string{"https://a.test/", "https://b.test/^0https://a.test"}, keys)
-}
 
 // F24 (round 3): a child target the guard could not contain (a worker has
 // no Fetch domain) is left paused by the capturer; the page then paints
@@ -537,7 +432,6 @@ func TestMediaHealthRenderer_ContainedChildIsNotEvidence(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "left contained")
 	assert.NotContains(t, s.methods(), "Page.captureScreenshot", "no frame is taken from a page missing its worker")
-	assert.Contains(t, s.methods(), "Storage.clearDataForOrigin", "cleanup still ran")
 
 	// A child that arms fine is no objection.
 	s = newRenderSession()
@@ -547,5 +441,80 @@ func TestMediaHealthRenderer_ContainedChildIsNotEvidence(t *testing.T) {
 	}
 	_, err = r.renderOnSession(context.Background(), s, "https://a.test/p", 100*time.Millisecond)
 	require.NoError(t, err)
-	assert.Contains(t, s.child("frame-1").methods(), "Page.enable", "a child session is watched for its frames too")
+}
+
+// F20 (round 4): every render runs in its own disposable browser context,
+// so whatever storage the page or any of its frames wrote — including a
+// frame removed mid-render — dies with the context. The browser
+// conversation: create the context, a page in it, attach flat, render on
+// that session, dispose the context on every exit path.
+func TestMediaHealthRenderer_DisposableBrowserContext(t *testing.T) {
+	browser := newRenderSession()
+	browser.replies["Target.createBrowserContext"] = json.RawMessage(`{"browserContextId":"BC1"}`)
+	browser.replies["Target.createTarget"] = json.RawMessage(`{"targetId":"T1"}`)
+	browser.replies["Target.attachToTarget"] = json.RawMessage(`{"sessionId":"S1"}`)
+	browser.shot = pngOf(color.White, 8, 8)
+	r := newTestRenderer(t)
+	frame, err := r.renderInDisposableContext(context.Background(), browser, "https://art.example/p", time.Millisecond)
+	require.NoError(t, err)
+	require.NotNil(t, frame)
+
+	assert.Equal(t, true, browser.params["Target.createBrowserContext"]["disposeOnDetach"])
+	assert.Equal(t, "BC1", browser.params["Target.createTarget"]["browserContextId"])
+	assert.Equal(t, "about:blank", browser.params["Target.createTarget"]["url"])
+	assert.Equal(t, "T1", browser.params["Target.attachToTarget"]["targetId"])
+	assert.Equal(t, true, browser.params["Target.attachToTarget"]["flatten"])
+	assert.Equal(t, "BC1", browser.params["Target.disposeBrowserContext"]["browserContextId"])
+	bm := browser.methods()
+	assert.Equal(t, "Target.disposeBrowserContext", bm[len(bm)-1], "disposed last")
+	page := browser.child("S1")
+	require.NotNil(t, page, "the render ran on the attached page session")
+	assert.Contains(t, page.methods(), "Page.navigate")
+	assert.Contains(t, page.methods(), "Page.captureScreenshot")
+	assert.NotContains(t, browser.methods(), "Page.navigate", "never on the browser session")
+
+	// A failed render still disposes the context.
+	browser = newRenderSession()
+	browser.replies["Target.createBrowserContext"] = json.RawMessage(`{"browserContextId":"BC2"}`)
+	browser.replies["Target.createTarget"] = json.RawMessage(`{"targetId":"T2"}`)
+	browser.replies["Target.attachToTarget"] = json.RawMessage(`{"sessionId":"S2"}`)
+	browser.replies["Page.navigate@S2"] = json.RawMessage(`{"frameId":"F","errorText":"net::ERR_FAILED"}`)
+	_, err = r.renderInDisposableContext(context.Background(), browser, "https://art.example/p", time.Millisecond)
+	require.Error(t, err)
+	assert.Equal(t, "BC2", browser.params["Target.disposeBrowserContext"]["browserContextId"])
+
+	// No context: unavailable, nothing else attempted.
+	browser = newRenderSession()
+	browser.fail["Target.createBrowserContext"] = errors.New("simulated")
+	_, err = r.renderInDisposableContext(context.Background(), browser, "https://art.example/p", time.Millisecond)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, mediahealth.ErrRendererUnavailable)
+	assert.NotContains(t, browser.methods(), "Target.createTarget")
+}
+
+// F26 (round 4): the status is the main frame's LATEST document — a page
+// that replaces itself onto an error page is judged by that page — and a
+// child frame's document never counts.
+func TestMediaHealthRenderer_MainStatusFollowsTheMainFrame(t *testing.T) {
+	s := newRenderSession()
+	s.shot = pngOf(color.Black, 8, 8)
+	s.onNavigate = func(s *renderSession) {
+		s.emit("Network.responseReceived", `{"type":"Document","frameId":"F","response":{"status":200}}`)
+		s.emit("Network.responseReceived", `{"type":"Document","frameId":"I","response":{"status":200}}`)
+		s.emit("Network.responseReceived", `{"type":"Document","frameId":"F","response":{"status":503}}`)
+	}
+	r := newTestRenderer(t)
+	frame, err := r.renderOnSession(context.Background(), s, "https://art.example/p", time.Millisecond)
+	require.NoError(t, err)
+	assert.Equal(t, 503, frame.MainStatus, "the document on screen at capture time")
+
+	// No frameId on the navigate reply: the first document response.
+	s = newRenderSession()
+	s.shot = pngOf(color.Black, 8, 8)
+	s.replies["Page.navigate"] = json.RawMessage(`{}`)
+	s.onNavigate = func(s *renderSession) {}
+	s.replies["Page.navigate"] = json.RawMessage(`{}`)
+	frame, err = r.renderOnSession(context.Background(), s, "https://art.example/p", time.Millisecond)
+	require.NoError(t, err)
+	assert.Equal(t, 0, frame.MainStatus, "unknown when nothing was observed")
 }

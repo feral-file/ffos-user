@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	go_http "net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -17,18 +18,26 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // mediaHealthRenderer is the media-health L1 render probe over the offline
 // cache's headless Chromium (feral-file/ffos-user#392, docs/media-health.md
 // §6). It reuses the capturer wholesale — the same Downloader (one browser,
-// one job at a time, idle teardown), the same page dial, and the SAME
-// source guard: the page is untrusted artwork code, so every request it
-// makes, child targets included, goes through the reserved-address policy
-// exactly as a capture's does. What differs from a capture: nothing is
-// stored, the viewport is pinned to a fixed size so the pHash is
-// comparable across devices and with the indexer, and the only output is
-// the frame plus the main document's status.
+// one job at a time, idle teardown) and the SAME source guard: the page is
+// untrusted artwork code, so every request it makes, child targets
+// included, goes through the reserved-address policy exactly as a
+// capture's does, plus the kiosk's gateway policy on each request.
+//
+// Unlike a capture, each render runs in its OWN DISPOSABLE BROWSER CONTEXT
+// (Target.createBrowserContext, disposed when the render ends): storage a
+// page writes — its own, a child frame's partitioned storage, a frame the
+// page removed mid-render — dies with the context and can never reach a
+// later render or an offline capture, which share the browser process but
+// never a context. That is the whole reason the render dials the BROWSER
+// endpoint rather than the capturer's single page target. Nothing is
+// stored; the viewport is pinned so the pHash is comparable; the only
+// output is the frame plus the main document's status.
 type mediaHealthRenderer struct {
 	c *capturer
 	// policy is the kiosk's gateway policy, applied to EVERY request the
@@ -102,17 +111,15 @@ const (
 	renderNavigateWindow = 30 * time.Second
 	// renderScreenshotWindow bounds the capture call.
 	renderScreenshotWindow = 20 * time.Second
+	// renderTeardownWindow bounds disposing the render's browser context
+	// after the render (on its own context: the render's may be gone).
+	renderTeardownWindow = 10 * time.Second
 	// maxScreenshotBytes caps the PNG the browser hands back; a 1024x1024
 	// capture is far below it.
 	maxScreenshotBytes = 8 << 20
 	// maxDecodedPixels rejects a declared geometry larger than the pinned
 	// viewport could produce before the pixel buffer is allocated.
 	maxDecodedPixels = renderViewport * renderViewport * 2
-	// maxObservedRenderResponses bounds the origins remembered for the
-	// post-render storage clear: a hostile page issuing thousands of
-	// requests must not size an allocation; the clear is best effort and
-	// window-bounded anyway.
-	maxObservedRenderResponses = 4096
 )
 
 // Render implements mediahealth.Renderer.
@@ -124,37 +131,119 @@ func (r *mediaHealthRenderer) Render(ctx context.Context, wireURL string, settle
 	}
 	defer c.downloader.Release()
 
-	session, err := DialPageSession(ctx, endpoint, c.cdpClient, c.dialer, c.json, c.io, c.logger)
+	browser, err := dialBrowserSession(ctx, endpoint, c.cdpClient, c.dialer, c.json, c.io, c.logger)
 	if err != nil {
-		return nil, fmt.Errorf("%w: dial render session: %w", mediahealth.ErrRendererUnavailable, err)
+		return nil, fmt.Errorf("%w: dial browser: %w", mediahealth.ErrRendererUnavailable, err)
 	}
-	// Stop the page BEFORE dropping the session, for the same reason the
-	// capturer does: Release only schedules an idle teardown, and the
-	// untrusted page would otherwise keep running unguarded until then.
-	defer func() {
-		c.stopPageBeforeDetach(session)
-		_ = session.Close()
-	}()
-	return r.renderOnSession(ctx, session, wireURL, settle)
+	defer func() { _ = browser.Close() }()
+	return r.renderInDisposableContext(ctx, browser, wireURL, settle)
 }
 
-// renderOnSession is Render after the browser is acquired and the page
-// dialed: the CDP conversation itself, on an injectable session so it can
-// be pinned without a browser.
+// dialBrowserSession dials the browser target itself (/json/version's
+// webSocketDebuggerUrl), the only session that can create and dispose
+// browser contexts. Same plain loopback client and dialer as the page
+// dial: our own browser is a trusted destination.
+func dialBrowserSession(ctx context.Context, endpoint string, httpClient wrapper.HTTPClient, dialer wrapper.WebSocketDialer, jsonWrapper wrapper.JSON, ioWrapper wrapper.IO, logger *zap.Logger) (CDPSession, error) {
+	ctx, cancel := context.WithTimeout(ctx, defaultDialTimeout)
+	defer cancel()
+	req, err := httpClient.NewRequest(go_http.MethodGet, endpoint+"/json/version", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build version request: %w", err)
+	}
+	resp, err := httpClient.Do(req.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("fetch version: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := ioWrapper.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read version: %w", err)
+	}
+	var version struct {
+		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+	}
+	if err := jsonWrapper.Unmarshal(body, &version); err != nil {
+		return nil, fmt.Errorf("parse version: %w", err)
+	}
+	if version.WebSocketDebuggerURL == "" {
+		return nil, fmt.Errorf("no browser target at %s", endpoint)
+	}
+	conn, _, err := dialer.DialContext(ctx, version.WebSocketDebuggerURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("dial browser target: %w", err)
+	}
+	return NewCDPSession(conn, jsonWrapper, logger), nil
+}
+
+// renderInDisposableContext creates a browser context for this render,
+// a page in it, attaches (flat) and renders on that page session, then
+// disposes the context — which closes the page and deletes every byte of
+// storage the render produced, whichever frame wrote it and whether or not
+// that frame still existed at the end. On an injectable browser session so
+// the conversation can be pinned without a browser.
+func (r *mediaHealthRenderer) renderInDisposableContext(ctx context.Context, browser CDPSession, wireURL string, settle time.Duration) (*mediahealth.Frame, error) {
+	c := r.c
+	raw, err := browser.Send(ctx, "Target.createBrowserContext", map[string]interface{}{"disposeOnDetach": true})
+	if err != nil {
+		return nil, fmt.Errorf("%w: Target.createBrowserContext: %w", mediahealth.ErrRendererUnavailable, err)
+	}
+	var created struct {
+		BrowserContextID string `json:"browserContextId"`
+	}
+	if err := json.Unmarshal(raw, &created); err != nil || created.BrowserContextID == "" {
+		return nil, fmt.Errorf("%w: Target.createBrowserContext: no browserContextId", mediahealth.ErrRendererUnavailable)
+	}
+	// Disposed on every exit path, on its own bounded context: the
+	// render's context may be the thing that expired. disposeOnDetach
+	// above is the backstop for a session that dies before this runs.
+	defer func() {
+		disposeCtx, cancel := context.WithTimeout(context.Background(), renderTeardownWindow)
+		defer cancel()
+		if _, err := browser.Send(disposeCtx, "Target.disposeBrowserContext", map[string]interface{}{"browserContextId": created.BrowserContextID}); err != nil {
+			c.logger.Warn("media health render: could not dispose the render's browser context; it is disposed when the browser connection detaches", zap.Error(err))
+		}
+	}()
+
+	raw, err = browser.Send(ctx, "Target.createTarget", map[string]interface{}{
+		"url": "about:blank", "browserContextId": created.BrowserContextID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: Target.createTarget: %w", mediahealth.ErrRendererUnavailable, err)
+	}
+	var target struct {
+		TargetID string `json:"targetId"`
+	}
+	if err := json.Unmarshal(raw, &target); err != nil || target.TargetID == "" {
+		return nil, fmt.Errorf("%w: Target.createTarget: no targetId", mediahealth.ErrRendererUnavailable)
+	}
+	raw, err = browser.Send(ctx, "Target.attachToTarget", map[string]interface{}{"targetId": target.TargetID, "flatten": true})
+	if err != nil {
+		return nil, fmt.Errorf("%w: Target.attachToTarget: %w", mediahealth.ErrRendererUnavailable, err)
+	}
+	var attached struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(raw, &attached); err != nil || attached.SessionID == "" {
+		return nil, fmt.Errorf("%w: Target.attachToTarget: no sessionId", mediahealth.ErrRendererUnavailable)
+	}
+	page := browser.ForSession(attached.SessionID)
+	defer func() { _ = page.Close() }()
+	return r.renderOnSession(ctx, page, wireURL, settle)
+}
+
+// renderOnSession is the render on an attached page session: the CDP
+// conversation itself, on an injectable session so it can be pinned
+// without a browser.
 func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSession, wireURL string, settle time.Duration) (*mediahealth.Frame, error) {
 	c := r.c
-	// The main document's status: the first Document-type response after
-	// our navigate. Registered before Network.enable so the navigation's
-	// own response cannot be missed.
-	obs := newRenderObserver(ctx, session)
-	// Everything the page touched is cleared before the shared browser
-	// goes back to the capturer: every observed origin (as a capture
-	// clears its own) AND every frame's storage key — third-party frames
-	// keep partitioned storage that an origin-scoped clear does not reach,
-	// and a nested frame's marker surviving into the next offline capture
-	// changes what that capture fetches (PR #443 review, F20). On every
-	// exit path, on its own bounded window.
-	defer obs.cleanup(c)
+	// The main document's status follows the main FRAME through every
+	// navigation it makes — a page that location.replace()s itself onto an
+	// error page is judged by the document that was captured, not by the
+	// first response (PR #443 review, F26). Keyed by frameId: child frames'
+	// documents never count. Registered before Network.enable so the
+	// navigation's own response cannot be missed.
+	docs := &mainDocTracker{status: map[string]int{}}
+	session.On("Network.responseReceived", docs.observe)
 	// Registered BEFORE Fetch.enable so no paused request can arrive
 	// without a handler (an unanswered pause hangs the request). The
 	// policy rides on the guard so it applies to every request, child
@@ -175,11 +264,8 @@ func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSe
 			return nil, fmt.Errorf("media health render: %s: %w", step.method, err)
 		}
 	}
-	if err := c.resetTargetState(ctx, session, wireURL); err != nil {
-		return nil, fmt.Errorf("media health render: reset chromium state: %w", err)
-	}
-	// After the reset (so our own clears are never paused) and before the
-	// navigate (so its first request is covered).
+	// Before the navigate, so its first request is covered. (No cache or
+	// storage reset: the browser context is brand new.)
 	if _, err := session.Send(ctx, "Fetch.enable", fetchEnablePatternAll()); err != nil {
 		return nil, fmt.Errorf("media health render: Fetch.enable: %w", err)
 	}
@@ -194,6 +280,7 @@ func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSe
 		return nil, fmt.Errorf("media health render: Page.navigate: %w", err)
 	}
 	var nav struct {
+		FrameID   string `json:"frameId"`
 		ErrorText string `json:"errorText"`
 	}
 	if json.Unmarshal(raw, &nav) == nil && nav.ErrorText != "" {
@@ -245,10 +332,55 @@ func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSe
 	if err != nil {
 		return nil, fmt.Errorf("media health render: %w", err)
 	}
-	status := obs.mainStatus()
+	status := docs.latest(nav.FrameID)
 	c.logger.Debug("media health render: frame captured",
 		zap.String("url", redactSourceForLog(wireURL)), zap.Int("main_status", status), zap.Duration("settle", settle))
 	return &mediahealth.Frame{Image: img, MainStatus: status}, nil
+}
+
+// mainDocTracker keeps the LATEST Document response per frame, so the
+// status reported is the one of the document actually on screen when the
+// capture is taken, whatever navigations the page made since the first.
+type mainDocTracker struct {
+	mu     sync.Mutex
+	status map[string]int
+	// first is the first Document response seen, for a navigate reply
+	// that carried no frameId (older protocol shapes).
+	first     int
+	firstSeen bool
+}
+
+func (t *mainDocTracker) observe(params json.RawMessage) {
+	var ev struct {
+		Type     string `json:"type"`
+		FrameID  string `json:"frameId"`
+		Response struct {
+			Status int `json:"status"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(params, &ev); err != nil || ev.Type != "Document" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if ev.FrameID != "" {
+		t.status[ev.FrameID] = ev.Response.Status
+	}
+	if !t.firstSeen {
+		t.firstSeen = true
+		t.first = ev.Response.Status
+	}
+}
+
+// latest is the main frame's current document status, 0 when none was
+// observed (the renderer treats 0 as unknown, not as a failure).
+func (t *mainDocTracker) latest(frameID string) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if frameID != "" {
+		return t.status[frameID]
+	}
+	return t.first
 }
 
 // decodeScreenshotPNG decodes a PNG with the header read first, so a
@@ -269,211 +401,4 @@ func decodeScreenshotPNG(data []byte) (image.Image, error) {
 		return nil, fmt.Errorf("screenshot of %dx%d exceeds the %d-pixel cap", cfg.Width, cfg.Height, maxDecodedPixels)
 	}
 	return png.Decode(bytes.NewReader(data))
-}
-
-// renderObserver watches one render across the root session and every
-// child target the browser attaches (flatten mode: all sessions hang off
-// the root, and a child's own attachments are announced on the child): the
-// main document's status, the origins of every response, and the sessions
-// themselves, which cleanup walks for frame storage keys.
-type renderObserver struct {
-	ctx  context.Context
-	root CDPSession
-
-	mu         sync.Mutex
-	status     int
-	statusSeen bool
-	observed   []Resource
-	sessions   []CDPSession
-	// keys are the storage keys of frames seen ALIVE (Page.frameNavigated
-	// on any session), asked for at that moment: a frame the page removes
-	// before cleanup is gone from the final frame tree, but its
-	// partitioned storage is not (PR #443 review, round 3, F20).
-	keys map[string]struct{}
-}
-
-func newRenderObserver(ctx context.Context, root CDPSession) *renderObserver {
-	o := &renderObserver{ctx: ctx, root: root, sessions: []CDPSession{root}, keys: map[string]struct{}{}}
-	o.watch(root, true)
-	return o
-}
-
-// maxRetainedStorageKeys bounds the keys remembered from live frames.
-const maxRetainedStorageKeys = 1024
-
-// noteFrame asks the session for the storage key of a frame that just
-// navigated and retains it, off the dispatch goroutine.
-func (o *renderObserver) noteFrame(session CDPSession, frameID string) {
-	if frameID == "" {
-		return
-	}
-	go func() {
-		raw, err := session.Send(o.ctx, "Storage.getStorageKeyForFrame", map[string]interface{}{"frameId": frameID})
-		if err != nil {
-			return
-		}
-		var reply struct {
-			StorageKey string `json:"storageKey"`
-		}
-		if json.Unmarshal(raw, &reply) != nil || reply.StorageKey == "" {
-			return
-		}
-		o.mu.Lock()
-		if len(o.keys) < maxRetainedStorageKeys {
-			o.keys[reply.StorageKey] = struct{}{}
-		}
-		o.mu.Unlock()
-	}()
-}
-
-// watch registers the observer's handlers on session: responses, and the
-// attach event that announces the session's own child targets. Handlers
-// are appended to the session's list, so the capturer's guard handlers on
-// the same methods keep running.
-func (o *renderObserver) watch(session CDPSession, isRoot bool) {
-	session.On("Network.responseReceived", func(params json.RawMessage) {
-		var ev struct {
-			Type     string `json:"type"`
-			Response struct {
-				Status int    `json:"status"`
-				URL    string `json:"url"`
-			} `json:"response"`
-		}
-		if err := json.Unmarshal(params, &ev); err != nil {
-			return
-		}
-		o.mu.Lock()
-		defer o.mu.Unlock()
-		if ev.Response.URL != "" && len(o.observed) < maxObservedRenderResponses {
-			o.observed = append(o.observed, Resource{URL: ev.Response.URL})
-		}
-		if isRoot && ev.Type == "Document" && !o.statusSeen {
-			o.statusSeen = true
-			o.status = ev.Response.Status
-		}
-	})
-	session.On("Page.frameNavigated", func(params json.RawMessage) {
-		var ev struct {
-			Frame struct {
-				ID string `json:"id"`
-			} `json:"frame"`
-		}
-		if json.Unmarshal(params, &ev) == nil {
-			o.noteFrame(session, ev.Frame.ID)
-		}
-	})
-	session.On("Target.attachedToTarget", func(params json.RawMessage) {
-		var evt targetAttachedEvent
-		if err := json.Unmarshal(params, &evt); err != nil || evt.SessionID == "" {
-			return
-		}
-		child := o.root.ForSession(evt.SessionID)
-		o.mu.Lock()
-		if len(o.sessions) >= maxRenderSessions {
-			o.mu.Unlock()
-			return
-		}
-		o.sessions = append(o.sessions, child)
-		o.mu.Unlock()
-		o.watch(child, false)
-		// Off the dispatch goroutine: a Send from inside a handler would
-		// wait on the very read pump that is delivering this event.
-		// Page is enabled too, for the child's own frameNavigated events.
-		go func() {
-			_, _ = child.Send(o.ctx, "Network.enable", map[string]interface{}{})
-			_, _ = child.Send(o.ctx, "Page.enable", map[string]interface{}{})
-		}()
-	})
-}
-
-func (o *renderObserver) mainStatus() int {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.status
-}
-
-// maxRenderSessions bounds the child targets remembered for cleanup; a
-// page opening more frames than this still has its origins cleared.
-const maxRenderSessions = 64
-
-// renderCleanupWindow bounds the whole post-render clear.
-const renderCleanupWindow = 10 * time.Second
-
-// cleanup clears what the render touched: every observed origin through
-// the capturer's own routine, then the storage key of every frame in every
-// session (the partitioned storage an origin clear cannot reach).
-func (o *renderObserver) cleanup(c *capturer) {
-	o.mu.Lock()
-	resources := append([]Resource(nil), o.observed...)
-	sessions := append([]CDPSession(nil), o.sessions...)
-	keys := make(map[string]struct{}, len(o.keys))
-	for k := range o.keys {
-		keys[k] = struct{}{}
-	}
-	o.mu.Unlock()
-	c.clearObservedOriginsStorage(context.Background(), o.root, resources)
-
-	// The keys retained from live frames, plus whatever the final frame
-	// trees still show (a frame whose key was never asked for in time).
-	ctx, cancel := context.WithTimeout(context.Background(), renderCleanupWindow)
-	defer cancel()
-	for _, session := range sessions {
-		for _, key := range frameStorageKeys(ctx, session) {
-			keys[key] = struct{}{}
-		}
-	}
-	for key := range keys {
-		if ctx.Err() != nil {
-			c.logger.Warn("media health render: storage-key clear window elapsed, skipping remaining keys")
-			return
-		}
-		if _, err := o.root.Send(ctx, "Storage.clearDataForStorageKey", map[string]interface{}{
-			"storageKey": key, "storageTypes": "all",
-		}); err != nil {
-			c.logger.Warn("media health render: Storage.clearDataForStorageKey failed", zap.Error(err))
-		}
-	}
-}
-
-// frameStorageKeys returns the storage key of every frame the session's
-// frame tree shows, best effort (a frame gone by the time it is asked is
-// skipped).
-func frameStorageKeys(ctx context.Context, session CDPSession) []string {
-	raw, err := session.Send(ctx, "Page.getFrameTree", map[string]interface{}{})
-	if err != nil {
-		return nil
-	}
-	var tree struct {
-		FrameTree frameTreeNode `json:"frameTree"`
-	}
-	if err := json.Unmarshal(raw, &tree); err != nil {
-		return nil
-	}
-	var keys []string
-	var walk func(n frameTreeNode)
-	walk = func(n frameTreeNode) {
-		if n.Frame.ID != "" {
-			raw, err := session.Send(ctx, "Storage.getStorageKeyForFrame", map[string]interface{}{"frameId": n.Frame.ID})
-			if err == nil {
-				var reply struct {
-					StorageKey string `json:"storageKey"`
-				}
-				if json.Unmarshal(raw, &reply) == nil && reply.StorageKey != "" {
-					keys = append(keys, reply.StorageKey)
-				}
-			}
-		}
-		for _, child := range n.ChildFrames {
-			walk(child)
-		}
-	}
-	walk(tree.FrameTree)
-	return keys
-}
-
-type frameTreeNode struct {
-	Frame struct {
-		ID string `json:"id"`
-	} `json:"frame"`
-	ChildFrames []frameTreeNode `json:"childFrames"`
 }
