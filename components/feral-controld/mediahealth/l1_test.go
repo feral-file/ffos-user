@@ -572,3 +572,42 @@ func TestL1_PlaySuccessResetsTheBlankRun(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StateSuspect, rec.State)
 }
+
+// F27 (round 6): a suspect record's recheck is a recovery probe and gets
+// the longer settle, so a work that paints between the two windows heals.
+func TestL1_SuspectRecheckUsesTheLongSettle(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+	src := "https://o/slow-paint"
+	seedSoftware(t, store, src)
+	for i := 0; i < 2; i++ {
+		_, err := store.ApplyRender(src, RenderResult{Verdict: RenderBlank, Variance: 0.0001})
+		require.NoError(t, err)
+	}
+	rec, err := store.Get(src)
+	require.NoError(t, err)
+	require.Equal(t, StateSuspect, rec.State)
+
+	// The page paints only under the long window.
+	r := &fakeRenderer{frames: map[string]*Frame{}}
+	r.frames[src] = &Frame{Image: uniform(color.Black), MainStatus: 200}
+	var asleep atomic.Bool
+	asleep.Store(true)
+	l1 := NewL1(L1Config{Store: store, Renderer: r, Asleep: asleep.Load, Now: clock.Now, Settle: time.Millisecond, ConfirmSettle: 7 * time.Millisecond, GateWatch: time.Millisecond})
+	clock.Advance(RecheckL1Suspect + time.Second)
+	r.frames[src] = &Frame{Image: checkerboard(), MainStatus: 200} // what a 7 ms render shows
+	assert.True(t, l1.Step(context.Background()))
+	require.Len(t, r.calls, 1)
+	assert.Equal(t, 7*time.Millisecond, r.calls[0].settle, "a suspect recheck is a recovery probe: the long window")
+	rec, err = store.Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State, "the recovery heals it")
+	assert.Equal(t, 0, rec.L1.ConsecutiveBlank)
+
+	// A known-bad suspect record rechecks the same way.
+	_, err = store.ApplyRender(src, RenderResult{Verdict: RenderKnownBad, Label: "x"})
+	require.NoError(t, err)
+	clock.Advance(RecheckL1Suspect + time.Second)
+	assert.True(t, l1.Step(context.Background()))
+	assert.Equal(t, 7*time.Millisecond, r.calls[1].settle)
+}

@@ -374,11 +374,16 @@ func (l *L1) Step(ctx context.Context) bool {
 
 func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 	settle := l.cfg.Settle
-	// One blank is pending confirmation until a second blank concludes it
-	// or a real frame clears it — whatever happened in between (a stalled
-	// confirmation keeps the count at 1), so the confirmation always gets
-	// the longer settle (PR #443 review, F21).
-	confirm := rec.L1 != nil && rec.L1.ConsecutiveBlank == 1
+	// The longer settle for every render that can conclude or heal a
+	// blank: the confirmation of a pending blank (one blank is pending
+	// until a second concludes it or a real frame clears it, whatever
+	// happened in between — a stalled confirmation keeps the count at 1;
+	// PR #443 review, F21) AND every recheck of a record that is already
+	// suspect (a recovery probe at the short window would miss a work
+	// that paints between the two settles and keep it suspect for as long
+	// as nothing plays it; F27 — the indexer's healing probes use the
+	// confirmation window the same way).
+	confirm := rec.L1 != nil && (rec.L1.ConsecutiveBlank == 1 || rec.State == StateSuspect)
 	if confirm {
 		settle = l.cfg.ConfirmSettle
 	}

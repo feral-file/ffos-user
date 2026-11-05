@@ -302,7 +302,9 @@ would hide real art, the worst outcome here.
 - **Stalled** (navigation failed, main document not 2xx, capture timed out,
   browser unavailable): no evidence, `l1.lastError` only, retried after 24 h.
 - **Rechecks:** ok after 7 d, suspect after 24 h (a fixed page heals on the
-  next night), stalled after 24 h. A real render of a `suspect` record heals
+  next night; the recheck of a suspect record is a recovery probe and uses
+  the longer confirmation settle, as the indexer's healing probes do),
+  stalled after 24 h. A real render of a `suspect` record heals
   it to `ok` (layer `l1`), and so does a play success; an L0 success only
   refreshes the record's L0 metadata and recheck — valid bytes say nothing
   about a frame — while an L0 failure still outranks it. An L1 verdict never
