@@ -208,6 +208,15 @@ func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSe
 		return nil, fmt.Errorf("media health render: settle: %w", ctx.Err())
 	}
 
+	// A child target the guard could not contain was left paused — a
+	// worker (no Fetch domain) most often. The page then painted without
+	// it, and a frame of THAT is not evidence about the work: the
+	// containment stays, the render does not count (stalled; retried
+	// another night, never a verdict).
+	if n := guard.childSetupFailures.Load(); n > 0 {
+		return nil, fmt.Errorf("media health render: %d child target(s) left contained; the frame is not evidence", n)
+	}
+
 	shotCtx, shotCancel := context.WithTimeout(ctx, renderScreenshotWindow)
 	defer shotCancel()
 	// Viewport-bounded: captureBeyondViewport would let a page make the
@@ -276,12 +285,45 @@ type renderObserver struct {
 	statusSeen bool
 	observed   []Resource
 	sessions   []CDPSession
+	// keys are the storage keys of frames seen ALIVE (Page.frameNavigated
+	// on any session), asked for at that moment: a frame the page removes
+	// before cleanup is gone from the final frame tree, but its
+	// partitioned storage is not (PR #443 review, round 3, F20).
+	keys map[string]struct{}
 }
 
 func newRenderObserver(ctx context.Context, root CDPSession) *renderObserver {
-	o := &renderObserver{ctx: ctx, root: root, sessions: []CDPSession{root}}
+	o := &renderObserver{ctx: ctx, root: root, sessions: []CDPSession{root}, keys: map[string]struct{}{}}
 	o.watch(root, true)
 	return o
+}
+
+// maxRetainedStorageKeys bounds the keys remembered from live frames.
+const maxRetainedStorageKeys = 1024
+
+// noteFrame asks the session for the storage key of a frame that just
+// navigated and retains it, off the dispatch goroutine.
+func (o *renderObserver) noteFrame(session CDPSession, frameID string) {
+	if frameID == "" {
+		return
+	}
+	go func() {
+		raw, err := session.Send(o.ctx, "Storage.getStorageKeyForFrame", map[string]interface{}{"frameId": frameID})
+		if err != nil {
+			return
+		}
+		var reply struct {
+			StorageKey string `json:"storageKey"`
+		}
+		if json.Unmarshal(raw, &reply) != nil || reply.StorageKey == "" {
+			return
+		}
+		o.mu.Lock()
+		if len(o.keys) < maxRetainedStorageKeys {
+			o.keys[reply.StorageKey] = struct{}{}
+		}
+		o.mu.Unlock()
+	}()
 }
 
 // watch registers the observer's handlers on session: responses, and the
@@ -310,6 +352,16 @@ func (o *renderObserver) watch(session CDPSession, isRoot bool) {
 			o.status = ev.Response.Status
 		}
 	})
+	session.On("Page.frameNavigated", func(params json.RawMessage) {
+		var ev struct {
+			Frame struct {
+				ID string `json:"id"`
+			} `json:"frame"`
+		}
+		if json.Unmarshal(params, &ev) == nil {
+			o.noteFrame(session, ev.Frame.ID)
+		}
+	})
 	session.On("Target.attachedToTarget", func(params json.RawMessage) {
 		var evt targetAttachedEvent
 		if err := json.Unmarshal(params, &evt); err != nil || evt.SessionID == "" {
@@ -326,8 +378,10 @@ func (o *renderObserver) watch(session CDPSession, isRoot bool) {
 		o.watch(child, false)
 		// Off the dispatch goroutine: a Send from inside a handler would
 		// wait on the very read pump that is delivering this event.
+		// Page is enabled too, for the child's own frameNavigated events.
 		go func() {
 			_, _ = child.Send(o.ctx, "Network.enable", map[string]interface{}{})
+			_, _ = child.Send(o.ctx, "Page.enable", map[string]interface{}{})
 		}()
 	})
 }
@@ -352,12 +406,17 @@ func (o *renderObserver) cleanup(c *capturer) {
 	o.mu.Lock()
 	resources := append([]Resource(nil), o.observed...)
 	sessions := append([]CDPSession(nil), o.sessions...)
+	keys := make(map[string]struct{}, len(o.keys))
+	for k := range o.keys {
+		keys[k] = struct{}{}
+	}
 	o.mu.Unlock()
 	c.clearObservedOriginsStorage(context.Background(), o.root, resources)
 
+	// The keys retained from live frames, plus whatever the final frame
+	// trees still show (a frame whose key was never asked for in time).
 	ctx, cancel := context.WithTimeout(context.Background(), renderCleanupWindow)
 	defer cancel()
-	keys := map[string]struct{}{}
 	for _, session := range sessions {
 		for _, key := range frameStorageKeys(ctx, session) {
 			keys[key] = struct{}{}

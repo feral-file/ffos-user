@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -1332,6 +1333,13 @@ type captureGuard struct {
 	// then checks the destination that will actually be dialed, so a
 	// rewrite can never route around it.
 	rewrite func(rawURL string, headers map[string]string) (newURL string, newHeaders []map[string]string, apply bool)
+	// childSetupFailures counts auto-attached targets left paused because
+	// their containment could not be armed (a worker has no Fetch domain,
+	// an unparseable attach event, a failed auto-attach extension). A
+	// capture only loses those requests; a media-health render must NOT
+	// judge the frame such a page painted without its worker — it reads
+	// this to call the render "no evidence" (PR #443 review, F24).
+	childSetupFailures atomic.Int32
 	// targetSlots bounds CHILD-TARGET SETUP, which is separate work from
 	// deciding a paused request: each attach performs several CDP calls
 	// (Fetch.enable, setAutoAttach, resume), and a hostile page can create
@@ -1544,12 +1552,14 @@ func (c *capturer) sendAutoAttach(ctx context.Context, session CDPSession) error
 func (c *capturer) handleCaptureTargetAttached(ctx context.Context, root CDPSession, guard *captureGuard, params json.RawMessage) {
 	var evt targetAttachedEvent
 	if err := c.json.Unmarshal(params, &evt); err != nil {
+		guard.childSetupFailures.Add(1)
 		c.logger.Warn("offline cache capture: failed to parse Target.attachedToTarget", zap.Error(err))
 		return
 	}
 	if evt.SessionID == "" {
 		// Without a sessionId there is nothing to route commands to, so
 		// the child can be neither guarded nor resumed.
+		guard.childSetupFailures.Add(1)
 		c.logger.Warn("offline cache capture: Target.attachedToTarget without sessionId; child left paused",
 			zap.String("type", evt.TargetInfo.Type))
 		return
@@ -1577,6 +1587,7 @@ func (c *capturer) handleCaptureTargetAttached(ctx context.Context, root CDPSess
 		// exact trade this fail-closed branch refuses.
 		// TestCapturer_RealBrowser_LoopbackRequestsNeverLeaveTheBrowser
 		// pins it against a real browser.
+		guard.childSetupFailures.Add(1)
 		c.logger.Warn("offline cache capture: Fetch.enable on child target failed; leaving it paused",
 			zap.String("session_id", evt.SessionID),
 			zap.String("type", evt.TargetInfo.Type), zap.Error(err))
@@ -1594,6 +1605,7 @@ func (c *capturer) handleCaptureTargetAttached(ctx context.Context, root CDPSess
 	// with the Fetch.enable path immediately above it.
 	c.armAutoAttachHandler(ctx, root, child, guard)
 	if err := c.sendAutoAttach(ctx, child); err != nil {
+		guard.childSetupFailures.Add(1)
 		c.logger.Warn("offline cache capture: could not extend auto-attach into child target; leaving it paused",
 			zap.String("session_id", evt.SessionID),
 			zap.String("type", evt.TargetInfo.Type), zap.Error(err))

@@ -533,3 +533,42 @@ func TestApplyProbe_AliveKeepsSuspect(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StateBroken, rec.State, "an L0 failure still outranks suspect")
 }
+
+// F25 (round 3): a successful play ends an L1 blank run, so a recovered
+// work needs a fresh long confirmation before it can be suspect again.
+func TestL1_PlaySuccessResetsTheBlankRun(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+	src := "https://o/html"
+	seedSoftware(t, store, src)
+	for i := 0; i < 2; i++ {
+		_, err := store.ApplyRender(src, RenderResult{Verdict: RenderBlank, Variance: 0.0001})
+		require.NoError(t, err)
+	}
+	rec, err := store.Get(src)
+	require.NoError(t, err)
+	require.Equal(t, StateSuspect, rec.State)
+
+	rec, err = store.ApplyOutcome(Outcome{Seq: 1, Source: src, Kind: OutcomeOK, Stage: StageReady, At: "t"}, true)
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State)
+	assert.Equal(t, 0, rec.L1.ConsecutiveBlank, "the blank run ended with the play")
+
+	// The next due render: a short blank only schedules a confirmation.
+	clock.Advance(RecheckL1Suspect + time.Second)
+	r := &fakeRenderer{frames: map[string]*Frame{src: {Image: uniform(color.Black), MainStatus: 200}}}
+	var asleep atomic.Bool
+	asleep.Store(true)
+	l1 := newTestL1(t, store, r, clock, &asleep)
+	assert.True(t, l1.Step(context.Background()))
+	assert.Equal(t, time.Millisecond, r.calls[0].settle, "a fresh render, not a confirmation")
+	rec, err = store.Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State, "one short blank cannot reverse the recovery")
+	assert.Equal(t, 1, rec.L1.ConsecutiveBlank)
+	assert.True(t, l1.Step(context.Background()))
+	assert.Equal(t, DefaultConfirmSettle, r.calls[1].settle, "then the long confirmation")
+	rec, err = store.Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, StateSuspect, rec.State)
+}

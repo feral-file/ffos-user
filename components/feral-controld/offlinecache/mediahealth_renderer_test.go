@@ -41,6 +41,9 @@ type renderSession struct {
 	replies  map[string]json.RawMessage
 	children map[string]*renderSession
 	parent   *renderSession
+	// failByID fails a method on one child only ("method@<id>"); shared
+	// with children like replies.
+	failByID map[string]error
 	// id is the child session's id ("" for the root); a reply keyed by
 	// "method@<id>" answers that child only. The replies map is SHARED
 	// with children and must be complete before the render starts.
@@ -56,7 +59,7 @@ type sessionCall struct {
 }
 
 func newRenderSession() *renderSession {
-	return &renderSession{params: map[string]map[string]interface{}{}, handlers: map[string][]func(json.RawMessage){}, fail: map[string]error{}, replies: map[string]json.RawMessage{}, children: map[string]*renderSession{}}
+	return &renderSession{params: map[string]map[string]interface{}{}, handlers: map[string][]func(json.RawMessage){}, fail: map[string]error{}, replies: map[string]json.RawMessage{}, children: map[string]*renderSession{}, failByID: map[string]error{}}
 }
 
 func (s *renderSession) Send(_ context.Context, method string, params map[string]interface{}) (json.RawMessage, error) {
@@ -70,6 +73,9 @@ func (s *renderSession) Send(_ context.Context, method string, params map[string
 		}
 	}
 	navErr, shot, failErr, onNav := s.navError, s.shot, s.fail[method], s.onNavigate
+	if failErr == nil && s.id != "" {
+		failErr = s.failByID[method+"@"+s.id]
+	}
 	reply, hasReply := s.replies[method]
 	if s.id != "" {
 		if r, ok := s.replies[method+"@"+s.id]; ok {
@@ -126,6 +132,7 @@ func (s *renderSession) ForSession(id string) CDPSession {
 	c.parent = s
 	c.id = id
 	c.replies = s.replies
+	c.failByID = s.failByID
 	c.shot = s.shot
 	s.children[id] = c
 	return c
@@ -489,3 +496,56 @@ type agentOnlyRewriter struct{ prefix string }
 func (agentOnlyRewriter) RewriteURL(string) (string, bool) { return "", false }
 func (r agentOnlyRewriter) Matches(raw string) bool        { return strings.HasPrefix(raw, r.prefix) }
 func (agentOnlyRewriter) UserAgent() string                { return "feral-player/2.0" }
+
+// F20 (round 3): a frame removed before cleanup is gone from the final
+// frame tree but not from storage; its key, taken while it was alive, is
+// still cleared.
+func TestMediaHealthRenderer_ClearsKeysOfFramesRemovedBeforeCleanup(t *testing.T) {
+	s := newRenderSession()
+	s.shot = pngOf(color.White, 8, 8)
+	// The final tree holds the root only; frame b lived and was removed.
+	s.replies["Page.getFrameTree"] = json.RawMessage(`{"frameTree":{"frame":{"id":"root"}}}`)
+	s.replies["Storage.getStorageKeyForFrame|root"] = json.RawMessage(`{"storageKey":"https://a.test/"}`)
+	s.replies["Storage.getStorageKeyForFrame|b"] = json.RawMessage(`{"storageKey":"https://b.test/^0https://a.test"}`)
+	s.onNavigate = func(s *renderSession) {
+		s.emit("Page.frameNavigated", `{"frame":{"id":"b","url":"https://b.test/inner"}}`)
+	}
+	r := newTestRenderer(t)
+	_, err := r.renderOnSession(context.Background(), s, "https://a.test/p", 50*time.Millisecond)
+	require.NoError(t, err)
+	var keys []string
+	for _, c := range s.callsOf("Storage.clearDataForStorageKey") {
+		keys = append(keys, c["storageKey"].(string))
+	}
+	assert.ElementsMatch(t, []string{"https://a.test/", "https://b.test/^0https://a.test"}, keys)
+}
+
+// F24 (round 3): a child target the guard could not contain (a worker has
+// no Fetch domain) is left paused by the capturer; the page then paints
+// without it and the frame must not be evidence.
+func TestMediaHealthRenderer_ContainedChildIsNotEvidence(t *testing.T) {
+	s := newRenderSession()
+	s.shot = pngOf(color.Black, 8, 8)
+	s.failByID["Fetch.enable@worker-1"] = errors.New("'Fetch.enable' wasn't found")
+	s.onNavigate = func(s *renderSession) {
+		s.emit("Target.attachedToTarget", `{"sessionId":"worker-1","targetInfo":{"targetId":"w","type":"worker"}}`)
+	}
+	r := newTestRenderer(t)
+	// The capturer's child setup runs on its own goroutine; the settle
+	// outlasts it.
+	_, err := r.renderOnSession(context.Background(), s, "https://a.test/p", 100*time.Millisecond)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "left contained")
+	assert.NotContains(t, s.methods(), "Page.captureScreenshot", "no frame is taken from a page missing its worker")
+	assert.Contains(t, s.methods(), "Storage.clearDataForOrigin", "cleanup still ran")
+
+	// A child that arms fine is no objection.
+	s = newRenderSession()
+	s.shot = pngOf(color.White, 8, 8)
+	s.onNavigate = func(s *renderSession) {
+		s.emit("Target.attachedToTarget", `{"sessionId":"frame-1","targetInfo":{"targetId":"f","type":"iframe"}}`)
+	}
+	_, err = r.renderOnSession(context.Background(), s, "https://a.test/p", 100*time.Millisecond)
+	require.NoError(t, err)
+	assert.Contains(t, s.child("frame-1").methods(), "Page.enable", "a child session is watched for its frames too")
+}

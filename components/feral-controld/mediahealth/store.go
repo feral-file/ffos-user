@@ -622,6 +622,12 @@ func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, exi
 				return true
 			}
 			rec.Plays.ConsecutiveFail = 0
+			if rec.L1 != nil {
+				// A fresh successful play ends an L1 blank run too: a
+				// recovered work must earn a new long confirmation before
+				// it can be suspect again (PR #443 review, F25).
+				rec.L1.ConsecutiveBlank = 0
+			}
 			rec.State = StateOK
 			rec.Layer = LayerPlay
 			rec.Category, rec.Reason = "", ""

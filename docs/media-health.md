@@ -277,18 +277,23 @@ would hide real art, the worst outcome here.
   subresources — is rewritten as the kiosk's interceptor rewrites it, and the
   guard judges the rewritten destination. Before the browser goes back to the
   capturer every origin the page touched has its storage cleared, as a capture
-  clears its own, plus every frame's storage key across every attached child
-  session (partitioned third-party storage that an origin clear does not
-  reach), and the page is stopped before the session is dropped.
+  clears its own, plus the storage key of every frame that was ever alive
+  during the render (taken at `Page.frameNavigated` on every attached child
+  session too, since a frame the page removes before cleanup leaves its
+  partitioned storage behind) and of every frame the final trees still show,
+  and the page is stopped before the session is dropped. A child target the
+  guard could not contain (a worker: no Fetch domain) is left paused, as a
+  capture leaves it — and the render is then **not evidence** (stalled), since
+  the page painted without its worker; such works never get an L1 verdict.
 - **Verdict ladder** (ported from ff-indexer-v2's `probe.Classify` and
   `phash`, same pHash algorithm and bit order, same per-channel variance
   blank signal): a known-bad fingerprint match first (`render_known_bad`,
   suspect at once, label kept), then blank (`render_blank`: variance under
   0.001 across every channel — hue without luma spread is art, not blank),
   else ok. A blank concludes only on a **second consecutive blank**, rendered
-  immediately with the longer settle; a real frame resets the count, and a
-  stalled confirmation keeps the blank pending so the next render is still
-  the long one.
+  immediately with the longer settle; a real frame or a successful play
+  resets the count, and a stalled confirmation keeps the blank pending so
+  the next render is still the long one.
 - **Stalled** (navigation failed, main document not 2xx, capture timed out,
   browser unavailable): no evidence, `l1.lastError` only, retried after 24 h.
 - **Rechecks:** ok after 7 d, suspect after 24 h (a fixed page heals on the
