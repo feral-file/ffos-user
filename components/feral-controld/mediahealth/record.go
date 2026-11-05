@@ -242,7 +242,12 @@ type Record struct {
 	ConsecutiveBroken int `json:"consecutiveBroken,omitempty"`
 
 	Plays PlayStats `json:"plays"`
-	Build Build     `json:"build"`
+	// L1 is the nightly render probe's sub-record (l1.go); nil until it
+	// has rendered this source. Its own due time (Next) is deliberately
+	// NOT part of dueAt: L1 work is found by Store.L1Candidates, never by
+	// the L0 lookahead or sweep.
+	L1    *L1Verdict `json:"l1,omitempty"`
+	Build Build      `json:"build"`
 }
 
 // PlayStats is what the player reported about this source.

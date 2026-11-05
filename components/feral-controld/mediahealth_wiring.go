@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -118,4 +119,53 @@ func installedControldVersion() string {
 // from the ring itself which it was (see mediahealth.Drainer).
 func mediaHealthCursorReconciler(svc *mediahealth.Service) func(context.Context) {
 	return func(context.Context) { svc.ResetOutcomeCursor() }
+}
+
+// wireMediaHealthL1 builds the nightly render runner (docs/media-health.md
+// §6) when mediaHealth.l1.enabled is set and the offline cache's renderer
+// exists; nil otherwise, with one log line saying why, so a device whose
+// operator expected L1 can see from the journal that it is off.
+func wireMediaHealthL1(cfg config.MediaHealthConfig, store *mediahealth.Store, renderer mediahealth.Renderer, rewriter *uarewrite.Policy, asleepSince func() (time.Time, bool), admit func() bool, logger *zap.Logger) *mediahealth.L1 {
+	if cfg.L1 == nil || !cfg.L1.Enabled {
+		logger.Info("media health: L1 render probe off (mediaHealth.l1.enabled is not set)")
+		return nil
+	}
+	if renderer == nil {
+		logger.Warn("media health: L1 render probe enabled but no headless renderer (offline cache disabled); not running")
+		return nil
+	}
+	var known []mediahealth.Fingerprint
+	for _, fp := range cfg.L1.KnownBad {
+		parsed, err := mediahealth.ParseFingerprint(fp.PHash, fp.MaxDistance, fp.Label)
+		if err != nil {
+			logger.Warn("media health: dropping unparsable L1 fingerprint", zap.Error(err))
+			continue
+		}
+		known = append(known, parsed)
+	}
+	l1cfg := mediahealth.L1Config{
+		Store:                  store,
+		Renderer:               renderer,
+		AsleepSince:            asleepSince,
+		Admit:                  admit,
+		Logger:                 logger,
+		MaxPerNight:            cfg.L1.MaxPerNight,
+		MinAsleep:              time.Duration(cfg.L1.MinAsleepSeconds) * time.Second,
+		BlankVarianceThreshold: cfg.L1.BlankVarianceThreshold,
+		KnownBad:               known,
+		Settle:                 time.Duration(cfg.L1.SettleMs) * time.Millisecond,
+		ConfirmSettle:          time.Duration(cfg.L1.ConfirmSettleMs) * time.Millisecond,
+	}
+	// Same typed-nil guard as wireMediaHealth: a nil *Policy must never
+	// land in the interface field.
+	if rewriter != nil {
+		l1cfg.Rewriter = rewriter
+	}
+	l1 := mediahealth.NewL1(l1cfg)
+	logger.Info("media health: L1 render probe on",
+		zap.Int("max_per_night", cfg.L1.MaxPerNight),
+		zap.Int("min_asleep_seconds", cfg.L1.MinAsleepSeconds),
+		zap.Int("known_bad_fingerprints", len(known)),
+		zap.Bool("admission_gate", admit != nil))
+	return l1
 }

@@ -512,6 +512,11 @@ type executor struct {
 	// executor, violate the sleepScheduleFileMu discipline, and put file I/O on
 	// the CDP connect loop. Zero value "" is neither awake nor sleeping.
 	sleepScheduleDesiredCache sleepschedule.State
+	// sleepConfirmedAt is when the last player apply succeeded at
+	// sleeping (applySleepTransition stamps every transition into sleep);
+	// meaningful only while sleepPlayerState == playerSleeping. Read by
+	// PlayerAsleepSince for the media-health L1 gate's grace period.
+	sleepConfirmedAt time.Time
 	// Panel (FFP DDC) leg: sleepPanelState/sleepPanelOK is the last state the async
 	// panel-power worker reached. It lets the loop re-enqueue a best-effort DDC
 	// alignment when a transient ddcutil failure left the panel behind, without
