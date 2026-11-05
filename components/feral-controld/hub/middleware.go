@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	fflogger "github.com/feral-file/ffos-user/components/feral-controld/logger"
 )
@@ -67,12 +68,12 @@ func isLoopbackAddr(remoteAddr string) bool {
 // withMiddleware is the SINGLE wrapper every hub route is registered through.
 //
 // It is deliberately the one chokepoint for cross-cutting concerns on the LAN
-// control surface: today an in-flight concurrency limiter (command-storm
-// protection) and per-request logging. It is also, by design, the future
-// insertion point for LAN authorization (screen-anchored pairing, feral-file
-// #3551). Nothing else may register a hub route directly: any route bypassing
-// this wrapper would also bypass the storm cap and the coming authorization
-// check, so new cross-cutting behavior belongs here, not in individual
+// control surface: an in-flight concurrency limiter (command-storm
+// protection), the local-source check, the browser and Host checks, the
+// control protocol's route-level checks (feral-file#3551), and per-request
+// logging. Nothing else may register a hub route directly: any route
+// bypassing this wrapper would also bypass the storm cap and the
+// authorization checks, so new cross-cutting behavior belongs here, not in individual
 // handlers, and every route MUST go through routes()'s withMiddleware calls.
 func (h *hub) withMiddleware(route string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -97,9 +98,20 @@ func (h *hub) withMiddleware(route string, next http.HandlerFunc) http.HandlerFu
 
 		r.Body = http.MaxBytesReader(w, r.Body, MAX_REQUEST_BODY_BYTES)
 
-		// Web pages may not drive the hub. Until LAN authorization lands
-		// (below), the hub trusts every caller on the network, and a browser
-		// is the one caller that does not belong to the owner: an artwork
+		// Local sources only (see localsource.go): the LAN-open command set
+		// is open to the device's own network, never to the Internet.
+		if !isLocalSource(r.RemoteAddr, interfaceAddrs) {
+			h.logger.Warn("Hub request rejected: non-local source",
+				zap.String("route", route),
+				zap.String("remote_addr", r.RemoteAddr),
+			)
+			writeControlError(w, control.CodeLANOnly)
+			return
+		}
+
+		// Web pages may not drive the hub. The LAN-open command set trusts
+		// every native caller on the network, and a browser is the one
+		// caller that does not belong to anyone there: an artwork
 		// playing on this device or any site open in a browser on the same
 		// Wi-Fi can send a no-cors POST to /api/cast that the JSON decoder
 		// accepts. Browsers always mark cross-site requests with Origin or
@@ -138,15 +150,11 @@ func (h *hub) withMiddleware(route string, next http.HandlerFunc) http.HandlerFu
 			h.contactObserver()
 		}
 
-		// LAN AUTHORIZATION SEAM (feral-file#3551): screen-anchored pairing checks
-		// go here, guarding every route uniformly, before next is invoked.
-		// Phase 0 (containment) puts only route-level topic gates here (see
-		// topicGatedRoutes); its per-command gate on /api/cast needs the
-		// decoded command and lives in handleCast (see topicGatedCommands).
+		// LAN AUTHORIZATION SEAM (feral-file#3551): route-level checks of the
+		// control protocol go here, guarding every route uniformly, before
+		// next is invoked. Per-command authorization on /api/cast needs the
+		// decoded command and lives in handleCast (the §7.2 policy).
 		if route == "screenshot" && h.refuseScreenshotUnlessLegacy(w) {
-			return
-		}
-		if topicGatedRoutes[route] && h.refuseWithoutTopic(w, r, route) {
 			return
 		}
 

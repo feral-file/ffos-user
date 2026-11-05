@@ -125,13 +125,13 @@ func newTestDevice(t testing.TB, grants ...Grant) *testDevice {
 	if err := InitDir(d.fs, d.dir, d.id, grants); err != nil {
 		t.Fatal(err)
 	}
-	d.reopen(false)
+	d.reopen()
 	return d
 }
 
-func (d *testDevice) reopen(enforced bool) {
+func (d *testDevice) reopen() {
 	d.t.Helper()
-	a, err := New(Config{Dir: d.dir, DeviceID: testDeviceID, Enforced: enforced, FS: d.fs,
+	a, err := New(Config{Dir: d.dir, DeviceID: testDeviceID, FS: d.fs,
 		Now:  func() time.Time { return time.Unix(d.now.Load(), 0) },
 		Rand: rand.NewChaCha8([32]byte{1})})
 	if err != nil {

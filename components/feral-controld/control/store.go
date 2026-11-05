@@ -91,6 +91,11 @@ type Store struct {
 	// disables it alone; it never contributes to lockErr.
 	display    []DisplayGrant
 	displayErr error
+	// lanOpen is the owner's LAN switch (lan.go). lanErr records a load
+	// failure (the switch then reads closed); it never contributes to
+	// lockErr.
+	lanOpen bool
+	lanErr  error
 }
 
 // InitDir provisions a fresh control directory holding id and grants. The
@@ -175,6 +180,8 @@ func LoadStore(fsys FS, dir, deviceID string) (*Store, error) {
 	// Loaded last and never fatal: a bad display file disables display
 	// grants only (§5.7), so an older or newer build cannot lock on it.
 	s.display, s.displayErr = loadDisplayGrants(fsys, dir, id.gen)
+	// Same for the LAN switch: a bad file reads closed, never locked.
+	s.lanOpen, s.lanErr = loadLAN(fsys, dir, id.gen)
 	return s, nil
 }
 
