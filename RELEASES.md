@@ -46,7 +46,7 @@ ffos-user, package rail (`components/**`):
   - G3: the device keeps working when the legacy relayer is gone; a
     permanent legacy error latches it retired while v2 and the LAN hub keep
     running (#420). #415 was reverted by #416; neither ships.
-  - LAN-open (feat/3551-lan-open): on the
+  - LAN-open (#444): on the
     device's own network anyone may run the controller tier (what the next
     command can undo), in `legacy` and, while the owner's switch is open
     (`setLanControl`, `.state/control/lan.json`, default open), in
@@ -164,7 +164,7 @@ The LAN-open change (above) ships in this same full-image release. S1 (a
 rebuild, if 3.0.0 was already built on Staging) runs only after steps 1-5
 (spec §7.2, §15.4).
 
-1. The ffos-user LAN-open PR (feat/3551-lan-open) is merged into `develop`.
+1. The ffos-user LAN-open PR (#444) is merged into `develop`.
 2. Play `@feralfile/display` 0.6.0 is published (it pairs both firmware
    generations: a display grant from 3.0.0, a relayer session from 2.0.x),
    and ff3 is deployed on 0.6.0. Both precede the Staging image; they
