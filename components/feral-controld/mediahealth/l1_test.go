@@ -125,8 +125,8 @@ type fakeRenderer struct {
 }
 
 type renderCall struct {
-	url       string
-	settle    time.Duration
+	url      string
+	settle   time.Duration
 	canceled bool
 }
 
