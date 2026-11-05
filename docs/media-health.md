@@ -13,7 +13,7 @@ consulted and nothing leaves the device.
 |---|---|---|---|
 | L0 | before play (the cast-time pass) and ahead of play (the lookahead) | the first 32 KiB of the source: HTTP status, declared vs sniffed type, gateway error pages and directory listings, corrupt containers | `mediahealth` (rules), `offlinecache` (the guarded fetch) |
 | play | every `checkStatus` poll | what the player reported for each item it mounted: ready, or failed at which stage | `mediahealth` (drain), `status` (poll) |
-| L1 | nightly, while the panel sleeps (own PR, flag off by default) | a rendered frame: blank, or a known error-page fingerprint | not shipped yet |
+| L1 | nightly, while the panel sleeps (`mediaHealth.l1.enabled`, off by default) | a rendered frame of a software work: blank, or a known error-page fingerprint | `mediahealth` (classifier, runner), `offlinecache` (the headless render) |
 
 Two rules bind every writer:
 
@@ -239,6 +239,54 @@ Without the contract, controld falls back to inference: a `renderStatus == 3`
 sighting for the item at `index` counts as one failure per mount (stage
 `inferred`).
 
+## L1: the nightly render probe (experiment, off by default)
+
+`mediahealth.L1` renders software-class sources in the offline cache's
+headless Chromium while the panel sleeps and classifies the frame. It is an
+experiment behind `mediaHealth.l1.enabled` (absent = off): its verdicts are
+stored under the record's `l1` sub-record and shown to the app as `suspect`,
+and they are **never** a hint and **never** count toward cast rejection — a
+blank frame is weaker evidence than a byte-level failure, and a false blank
+would hide real art, the worst outcome here.
+
+- **Gate.** Renders only while `devicectl.PlayerAsleep` is true: the sleep
+  schedule wants the panel asleep AND the player confirmed it (any other
+  tracker state reads awake). The offline cache's admission gate, when
+  enabled, is consulted read-only before each render. An in-flight render is
+  cancelled when the gate closes (the panel wakes, a cast interrupts the
+  night); a cancelled render records nothing and the candidate stays due.
+- **Candidates** (`Store.L1Candidates`): records whose L0 sniffed or
+  declared type is HTML, or that the player rendered in an iframe; never
+  images, video, audio or `data:` URIs (L0's container rules cover those,
+  and a browser frame of them proves nothing more), and never a `broken`
+  record (a frame of an error page adds nothing to a 404). Never-rendered
+  sources first, then by the `l1.next` due time. The `l1` due time is not in
+  the recheck index on purpose: the L0 lookahead and sweep must not pick L1
+  work up.
+- **Render** (`offlinecache.NewMediaHealthRenderer`, the capturer's own
+  browser, dial and source guard): viewport pinned to 1024×1024 (the pHash
+  is only comparable at one geometry, and it matches the indexer's), the
+  same reserved-address guard on every request the page makes, child
+  targets included; navigate, settle (15 s; 30 s for the confirmation of a
+  blank), viewport-bounded `Page.captureScreenshot`; the main document's
+  status is read from the first `Document` response. The page is stopped
+  before the session is dropped, as a capture does.
+- **Verdict ladder** (ported from ff-indexer-v2's `probe.Classify` and
+  `phash`, same pHash algorithm and bit order, same per-channel variance
+  blank signal): a known-bad fingerprint match first (`render_known_bad`,
+  suspect at once, label kept), then blank (`render_blank`: variance under
+  0.001 across every channel — hue without luma spread is art, not blank),
+  else ok. A blank concludes only on a **second consecutive blank**, rendered
+  immediately with the longer settle; a real frame resets the count.
+- **Stalled** (navigation failed, main document not 2xx, capture timed out,
+  browser unavailable): no evidence, `l1.lastError` only, retried after 24 h.
+- **Rechecks:** ok after 7 d, suspect after 24 h (a fixed page heals on the
+  next night), stalled after 24 h. A real render of a `suspect` record heals
+  it to `ok` (layer `l1`); an L1 verdict never touches a `broken` record,
+  `recheckAfter` or `retryAfter`.
+- **Cap:** `maxPerNight` renders per local calendar day (default 200), one
+  at a time.
+
 ## Status surfaces
 
 - `player_status` gains a controld-owned `mediaHealth` array, index-aligned
@@ -275,9 +323,24 @@ cycle).
   "disabled": false,
   "knownBadPageMarkers": ["gateway time-out"],
   "probeMaxBytes": 32768,
-  "lookahead": 8
+  "lookahead": 8,
+  "l1": {
+    "enabled": false,
+    "maxPerNight": 200,
+    "blankVarianceThreshold": 0.001,
+    "settleMs": 15000,
+    "confirmSettleMs": 30000,
+    "knownBad": [{"phash": "0x…", "maxDistance": 6, "label": "kubo-500"}]
+  }
 }
 ```
+
+`l1` is absent (off) unless an operator enables it; it also needs the
+offline cache (its headless browser). `knownBad` fingerprints are operator
+data: capture the offending render once, record its pHash (the indexer's
+`render_probe.known_bad_fingerprints` use the same algorithm), keep
+`maxDistance` small (4–8; a loose tolerance hides real art). An entry that
+does not parse is logged and dropped.
 
 `disabled` is the kill switch: no store, no pass (casts forwarded unprobed,
 the pre-#304 behavior), no hints, no lookahead, no per-item status. The
@@ -290,4 +353,5 @@ retired `sourceProbe.disabled` is read as `mediaHealth.disabled`. `lookahead:
   `uarewrite` (pinned by `mediahealth/importlint_test.go`); it never builds an
   HTTP client. `offlinecache` implements its `Fetcher`.
 - The store observes. Playback is gated only by the hint and by the existing
-  all-dead rejection; L1 never gates.
+  all-dead rejection; L1 never gates, and it renders only while the panel is
+  asleep.

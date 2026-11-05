@@ -271,6 +271,27 @@ func InvalidatePlayerSleepState(exec Executor, logger *zap.Logger) {
 	inv.invalidatePlayerSleepState()
 }
 
+// PlayerAsleep reports whether the panel is asleep for the purposes of
+// background work that must not run beside the wall (the media-health L1
+// render, feral-file/ffos-user#392): the schedule's desired state is
+// sleeping AND the last player apply succeeded at sleeping. Any other
+// tracker state (awake, a failed apply, a fresh document not yet re-driven)
+// reads as awake — the conservative side. Reached by interface assertion
+// (see InvalidatePlayerSleepState) so the Executor interface and its mock
+// stay unchanged.
+func (e *executor) PlayerAsleep() bool {
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+	return e.sleepScheduleDesiredCache == sleepschedule.StateSleeping && e.sleepPlayerState == playerSleeping
+}
+
+// PlayerAsleep is the exported seam over an Executor: false when the
+// executor does not implement the tracker (a test double).
+func PlayerAsleep(exec Executor) bool {
+	a, ok := exec.(interface{ PlayerAsleep() bool })
+	return ok && a.PlayerAsleep()
+}
+
 func (e *executor) invalidatePlayerSleepState() {
 	e.sleepApplyMu.Lock()
 	e.sleepPlayerState = playerFreshDocument

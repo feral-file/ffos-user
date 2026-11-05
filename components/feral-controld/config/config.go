@@ -85,9 +85,45 @@ type MediaHealthConfig struct {
 	// (default 8); 0 keeps the default, a negative value disables the
 	// lookahead and the background sweep.
 	Lookahead int `json:"lookahead,omitempty"`
+	// L1 is the nightly render probe (docs/media-health.md §6): an
+	// experiment, absent or enabled=false means it never runs.
+	L1 *MediaHealthL1Config `json:"l1,omitempty"`
 	// Malformed records that the block did not decode; every field then
 	// reads as its default.
 	Malformed bool `json:"-"`
+}
+
+// MediaHealthL1Config tunes the nightly render probe. Its verdicts are
+// reported to the app as `suspect` and never skip or reject anything, so
+// every knob here is about cost and sensitivity, never about playback.
+type MediaHealthL1Config struct {
+	// Enabled turns the probe on. Off by default: it renders untrusted
+	// pages in the headless browser while the panel sleeps.
+	Enabled bool `json:"enabled"`
+	// MaxPerNight caps renders per local calendar day (default 200).
+	MaxPerNight int `json:"maxPerNight,omitempty"`
+	// BlankVarianceThreshold is the per-channel variance below which a
+	// frame is blank (default 0.001, the indexer's); values outside
+	// (0, 0.25) keep the default.
+	BlankVarianceThreshold float64 `json:"blankVarianceThreshold,omitempty"`
+	// SettleMs / ConfirmSettleMs are the wait after navigation before the
+	// capture, for a first render and for the confirmation render of a
+	// blank (defaults 15000 / 30000, the indexer's).
+	SettleMs        int `json:"settleMs,omitempty"`
+	ConfirmSettleMs int `json:"confirmSettleMs,omitempty"`
+	// KnownBad lists fingerprints of renders that paint fine but are not
+	// the artwork (gateway error pages, placeholders): a frame within
+	// maxDistance (Hamming, 0-64; keep it small, 4-8) of one is suspect
+	// immediately. An entry that does not parse is logged and dropped.
+	KnownBad []MediaHealthFingerprint `json:"knownBad,omitempty"`
+}
+
+// MediaHealthFingerprint is one known-bad render: a 64-bit pHash as hex
+// (with or without 0x), a tolerance, and a label for the record.
+type MediaHealthFingerprint struct {
+	PHash       string `json:"phash"`
+	MaxDistance int    `json:"maxDistance"`
+	Label       string `json:"label"`
 }
 
 // MediaHealthTuning decodes the mediaHealth block, folding in the retired

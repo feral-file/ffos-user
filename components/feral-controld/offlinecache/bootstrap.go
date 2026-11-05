@@ -14,6 +14,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
@@ -379,6 +380,12 @@ type Runtime struct {
 	// interface (OnItemStateChanged only), which has no Close method, so
 	// Service cannot own this shutdown step itself.
 	Notifier *Notifier
+	// MediaHealthRenderer is the media-health L1 render probe over this
+	// cache's headless Chromium and source guard (mediahealth_renderer.go);
+	// nil when the capturer is not the package's own. Admission is the
+	// resource gate, read-only, for the same consumer; nil when disabled.
+	MediaHealthRenderer mediahealth.Renderer
+	Admission           AdmissionController
 	// SysMetricsSink, when non-nil (the admission gate is enabled), is
 	// main.go's hook for feeding monitord's raw sysmetrics payloads into
 	// the gate — wired to mediator.SetSysMetricsObserver so the mediator
@@ -488,9 +495,11 @@ func Bootstrap(
 	notifier := NewNotifier(relayerClient, wsHandler, logger)
 	admissionOpts := AdmissionOptions{Clock: clockWrapper}
 	var sysMetricsSink func(raw []byte)
+	var admission AdmissionController
 	if opts.ResourceGate.Enabled {
 		gate := NewAdmissionGate(opts.ResourceGate.Policy, clockWrapper, jsonWrapper, logger)
 		admissionOpts.Controller = gate
+		admission = gate
 		sysMetricsSink = gate.Observe
 	}
 	svc := NewService(store, classifier, capturer, mediaCapturer, jsonWrapper, opts.CaptureWindowMs, opts.MaxDiskBytes, notifier, admissionOpts, logger)
@@ -507,6 +516,7 @@ func Bootstrap(
 		ObservePlayback: observePlayback, SetCacheChanged: func(fn func()) { worker.onCacheChanged = fn },
 		Service: svc, KioskReplay: kioskReplay, ScopeLost: scopeLost,
 		StaticServer: staticServer, Notifier: notifier, SysMetricsSink: sysMetricsSink,
+		MediaHealthRenderer: NewMediaHealthRenderer(capturer), Admission: admission,
 	}
 }
 

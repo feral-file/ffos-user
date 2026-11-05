@@ -1161,6 +1161,8 @@ func initializeApp(
 	var offlineCacheNotifier *offlinecache.Notifier
 	var offlineCacheSysMetricsSink func(raw []byte)
 	var offlineCacheChanged func(func())
+	var offlineCacheRenderer mediahealth.Renderer
+	var offlineCacheAdmission offlinecache.AdmissionController
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
 		ocRuntime := offlinecache.Bootstrap(
@@ -1174,6 +1176,8 @@ func initializeApp(
 		offlineCacheNotifier = ocRuntime.Notifier
 		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
 		offlineCacheChanged = ocRuntime.SetCacheChanged
+		offlineCacheRenderer = ocRuntime.MediaHealthRenderer
+		offlineCacheAdmission = ocRuntime.Admission
 		if ocRuntime.ObservePlayback != nil {
 			playbackObservers = append(playbackObservers, func(st *status.PlayerStatus) {
 				if st == nil || (st.Command != string(commands.CMD_DISPLAY_PLAYLIST) && st.Command != string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST)) || st.Items == nil || st.Index == nil {
@@ -1300,6 +1304,18 @@ func initializeApp(
 		})
 		if mediaHealthLookahead != nil {
 			go mediaHealthLookahead.Run(context)
+		}
+		// L1, the nightly render probe: an experiment behind
+		// mediaHealth.l1.enabled, off by default. It needs the offline
+		// cache's headless browser (its renderer) and runs only while
+		// the panel is asleep by devicectl's own tracker.
+		var admit func() bool
+		if offlineCacheAdmission != nil {
+			admit = func() bool { return offlineCacheAdmission.Admit(offlinecache.ClassSoftware).Allowed }
+		}
+		if l1 := wireMediaHealthL1(config.Get().MediaHealthTuning(logger), mediaHealthSvc.Store(), offlineCacheRenderer,
+			func() bool { return devicectl.PlayerAsleep(executor) }, admit, logger); l1 != nil {
+			go l1.Run(context)
 		}
 	}
 	if len(playbackObservers) > 0 {
