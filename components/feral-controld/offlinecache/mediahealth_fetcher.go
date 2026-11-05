@@ -209,8 +209,15 @@ func classifyFetchError(err error) error {
 	case errors.Is(err, ErrSourceTooLong):
 		return &mediahealth.FetchError{Kind: mediahealth.FetchErrTooLong, Err: err}
 	}
-	if dnsErr, ok := errors.AsType[*net.DNSError](err); ok && dnsErr.IsNotFound {
-		return &mediahealth.FetchError{Kind: mediahealth.FetchErrDNS, Err: err}
+	if dnsErr, ok := errors.AsType[*net.DNSError](err); ok {
+		if dnsErr.IsNotFound {
+			return &mediahealth.FetchError{Kind: mediahealth.FetchErrDNS, Err: err}
+		}
+		// Everything else a resolver can say short of NXDOMAIN — SERVFAIL
+		// ("server misbehaving"), a lookup timeout, a refusal. Checked
+		// before the generic timeout below so a DNS timeout is counted
+		// toward the DNS streak, not lost as plain network weather.
+		return &mediahealth.FetchError{Kind: mediahealth.FetchErrDNSUnresolved, Err: err}
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return &mediahealth.FetchError{Kind: mediahealth.FetchErrTimeout, Err: err}

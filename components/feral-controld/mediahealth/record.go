@@ -193,6 +193,17 @@ const (
 	// RetryTransient: a transient attempt (no verdict) schedules a retry
 	// after this; the stored verdict, if any, is untouched.
 	RetryTransient = time.Hour
+	// DNSDeadAfter / DNSDeadMinFailures: the one transient class that
+	// concludes on its own. A name that fails to resolve on every counted
+	// attempt for a day (at least DNSDeadMinFailures attempts, each while
+	// the device resolved other names) is broken, reason dns: the zone is
+	// gone for this device whatever the resolver's excuse (an expired
+	// domain answers SERVFAIL, not NXDOMAIN, on most resolvers). A single
+	// SERVFAIL never is — it can be the device's own resolver. The verdict
+	// keeps the normal broken recheck, so it heals the day the zone
+	// returns.
+	DNSDeadAfter       = 24 * time.Hour
+	DNSDeadMinFailures = 3
 )
 
 // recordVersion is the record envelope version. Readers refuse a higher
@@ -236,6 +247,14 @@ type Record struct {
 	LastError   string     `json:"lastError,omitempty"`
 	LastErrorAt *time.Time `json:"lastErrorAt,omitempty"`
 	RetryAfter  time.Time  `json:"retryAfter,omitempty"`
+
+	// DNSFailSince / DNSFailures track an unbroken streak of resolution
+	// failures without a definitive answer, counted only while other names
+	// resolved (ProbeResult.ResolverHealthy). Any other probe answer —
+	// alive, dead, any transient that got past DNS — ends the streak. See
+	// DNSDeadAfter for when it concludes.
+	DNSFailSince *time.Time `json:"dnsFailSince,omitempty"`
+	DNSFailures  int        `json:"dnsFailures,omitempty"`
 
 	// ConsecutiveBroken counts L0 re-probes that stayed broken, for the
 	// recheck backoff. Reset by any ok.

@@ -20,6 +20,9 @@ Two rules bind every writer:
 1. **No observation hides a work.** The device skips an item only on its own
    conclusive verdict: a `broken` record inside its recheck window. A transient
    failure (429, 5xx, timeout, guard refusal) is never persisted as a verdict.
+   The one exception is corroborated over time: a name that fails to resolve
+   on every counted attempt for a day, each while the device resolved other
+   names, is broken (see the DNS streak below).
    L1 verdicts are reported as `suspect` and never skip anything. No central
    block list is ever consumed.
 2. **Source URLs stay on the device.** The record holds the source because
@@ -52,6 +55,7 @@ cache uses (`offlinecache.SourceKey`), pinned equal by a test.
 | broken | after 24 h; after 7 consecutive broken rechecks, after 7 d | the hint keeps skipping until a reprobe or a play success heals it |
 | ok | after 7 d | a play success refreshes it for free |
 | transient (any state) | next attempt after 1 h (`retryAfter`) | the stored state is untouched; an expired broken verdict is NOT revived — the hold delays the probe, never the skip |
+| DNS streak (`dnsFailSince`, `dnsFailures`) | with the transient hold | broken (`dns`, `source_missing`, layer `l0`) once at least 3 counted failures span 24 h; any answer that got past DNS ends the streak |
 
 A broken record **past** its recheck window is still shown to the app as
 broken (it is the last thing observed) but no longer hints and no longer
@@ -101,7 +105,17 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   407, 408, 416, 429 and every 5xx → transient; a 3xx that survives the
   redirect chain → transient. NXDOMAIN → dead (`dns`); every other transport
   failure → transient, including a deadline that expires mid-body (judged
-  before any byte count: a timed-out short read is not truncation). Fetch
+  before any byte count: a timed-out short read is not truncation).
+- **DNS streak.** A resolution failure short of NXDOMAIN (SERVFAIL, a
+  resolver timeout, a refusal) is transient per attempt, because it can be
+  the device's own resolver. It counts toward the source's streak only when
+  the device demonstrably resolves other names: controld's internet verdict
+  is online (that check needs DNS itself), or another probe's name resolved
+  within the last hour. A failure while nothing resolves neither counts nor
+  ends the streak. At 3 counted failures spanning 24 h the record is broken
+  (`dns`) with the normal broken recheck, so it heals the day the zone
+  returns. Expired domains answer SERVFAIL, not NXDOMAIN, on most resolvers,
+  which is why NXDOMAIN alone was not enough. Fetch
   errors carry redacted URLs, so a signed redirect hop never reaches a log
   line or a stored `lastError`.
 - Content rules, first failing rule wins, anything ambiguous is healthy:
@@ -293,7 +307,7 @@ player.
 | `webgl` | fail | device-local; recorded, never a verdict |
 | `exhausted` | fail | the retry budget was spent |
 | `hint` | skip | skipped on controld's hint |
-| `ready` | ok | `elapsedMs` = mount → ready |
+| `ready` | ok | `elapsedMs` = mount → ready; a verdict only for `image`, `video`, `audio`, `model` (see below) |
 
 **Corroboration.** One failure is recorded, not concluded. A record becomes
 `broken` (layer `play`) on a second failure in a distinct play, or on one
@@ -301,15 +315,21 @@ failure when an L0 broken verdict is already standing. A play is a run of
 consecutive failing entries for one source whose attempt counter does not go
 backwards; the run ends on another source, a success, a skip, or an
 `exhausted` entry. The several stages of one attempt (detect, load, retries,
-exhaustion) count once; the last stage stays as the diagnostic. A `ready` writes `ok`
-and heals a broken record: the wall itself is the strongest probe. Entries
+exhaustion) count once; the last stage stays as the diagnostic. A `ready` from
+a renderer that reports its own failures (`image`, `video`, `audio`, `model`)
+writes `ok` and heals a broken record: the wall itself is the strongest
+probe. A `ready` from an opaque embed (`iframe`, `object`, `pdf`) or with no
+`mediaType` is counted as a play but writes no verdict, heals nothing and
+leaves the record due: Chromium reports ready for its own error page inside
+an iframe, so that ready proves the mount, not the work, and L0 has to keep
+looking. Entries
 are applied in `seq` order, so a detect failure whose iframe fallback then
 rendered nets out to `ok`. Two classes never count: device-local failures
 (`webgl`, `detect`/`network`) and any failure observed while controld's own
 internet verdict is offline (or not yet known) — an outage says nothing about
 a source, and a verdict earned during one would be skipped before the play
-layer could ever heal it. A `ready` counts whatever the verdict says: a work
-that rendered from cache rendered.
+layer could ever heal it. A real-renderer `ready` counts whatever the verdict
+says: a work that rendered from cache rendered.
 
 Without the contract, controld falls back to inference: a `renderStatus == 3`
 sighting for the item at `index` counts as one failure per mount (stage

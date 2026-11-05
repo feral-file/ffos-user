@@ -84,6 +84,7 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 		Store:       store,
 		Logger:      logger,
 		Hosts:       &mediahealth.HostLimiter{},
+		Online:      online,
 		Items:       cfg.CastItems,
 		Concurrency: cfg.CastConcurrency,
 	}

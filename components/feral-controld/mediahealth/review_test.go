@@ -26,16 +26,16 @@ func TestDrainer_CursorSurvivesCastsAndResetsOnRollback(t *testing.T) {
 	assert.Len(t, fresh, 1)
 	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 2, Entries: ring})
 	assert.Empty(t, fresh, "a cast with the same ring re-applies nothing")
-	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 2, Entries: append(ring, Outcome{Seq: 2, Source: "b", Kind: OutcomeOK, Stage: StageReady})})
+	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 2, Entries: append(ring, Outcome{Seq: 2, Source: "b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"})})
 	assert.Equal(t, []string{"b"}, sourcesOf(fresh))
 
 	// Page restart with the same castSeq: numbering restarts below the cursor.
-	fresh, gap, _ := d.Drain(&Outcomes{CastSeq: 2, Entries: []Outcome{{Seq: 1, Source: "c", Kind: OutcomeOK, Stage: StageReady}}})
+	fresh, gap, _ := d.Drain(&Outcomes{CastSeq: 2, Entries: []Outcome{{Seq: 1, Source: "c", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"}}})
 	assert.Equal(t, []string{"c"}, sourcesOf(fresh), "a rollback means everything present is new")
 	assert.Equal(t, int64(0), gap)
 
 	d.Reset()
-	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 3, Entries: []Outcome{{Seq: 1, Source: "c", Kind: OutcomeOK, Stage: StageReady, At: "new-page"}}})
+	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 3, Entries: []Outcome{{Seq: 1, Source: "c", Kind: OutcomeOK, Stage: StageReady, MediaType: "image", At: "new-page"}}})
 	assert.Equal(t, []string{"c"}, sourcesOf(fresh), "an explicit reset (generation bump) followed by a new page's ring forgets the cursor")
 }
 
@@ -73,7 +73,7 @@ func TestService_OnePlayCountsOnce(t *testing.T) {
 
 	// Another item plays, then a comes round again: a distinct play.
 	s.ObservePlayback(list, 1, nil, &Outcomes{CastSeq: 1, Entries: []Outcome{
-		{Seq: 5, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady},
+		{Seq: 5, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"},
 		{Seq: 6, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Code: "image", Attempt: 1},
 	}})
 	rec, err = s.Store().Get("https://o/a")
@@ -244,7 +244,7 @@ func TestDrainer_ReconnectToSamePageReappliesNothing(t *testing.T) {
 	assert.False(t, restarted, "a ring holding remembered entries is the same page")
 	assert.Equal(t, int64(0), gap)
 
-	more := append(ring, Outcome{Seq: 3, Source: "b", Kind: OutcomeOK, Stage: StageReady, At: "t3"})
+	more := append(ring, Outcome{Seq: 3, Source: "b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image", At: "t3"})
 	fresh, gap, restarted = d.Drain(&Outcomes{CastSeq: 1, Entries: more})
 	assert.Equal(t, []string{"b"}, sourcesOf(fresh), "the cursor moved past the remembered entries")
 	assert.Equal(t, int64(0), gap, "no gap is reported across the reconnect")
@@ -319,7 +319,7 @@ func TestPreflight_FragmentVariantsKeepTheirOwnVerdicts(t *testing.T) {
 	p := newPassProber(t, f, clock)
 	_, err := p.Store.ApplyProbe("https://o/a#one", ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
 	require.NoError(t, err)
-	_, err = p.Store.ApplyOutcome(Outcome{Source: "https://o/a#two", Kind: OutcomeOK, Stage: StageReady}, true)
+	_, err = p.Store.ApplyOutcome(Outcome{Source: "https://o/a#two", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"}, true)
 	require.NoError(t, err)
 
 	results := p.Preflight(context.Background(), []string{"https://o/a#one", "https://o/a#two"})
@@ -522,7 +522,7 @@ func TestStore_ApplyOutcomeIsIdempotentPerRingEntry(t *testing.T) {
 	assert.Equal(t, 1, rec.Plays.Fail, "the same entry counts once")
 	assert.Equal(t, 1, rec.Plays.ConsecutiveFail)
 
-	okEntry := Outcome{Seq: 2, Source: "https://o/a", Kind: OutcomeOK, Stage: StageReady, At: "t2"}
+	okEntry := Outcome{Seq: 2, Source: "https://o/a", Kind: OutcomeOK, Stage: StageReady, MediaType: "image", At: "t2"}
 	_, err = store.ApplyOutcome(okEntry, true)
 	require.NoError(t, err)
 	_, err = store.ApplyOutcome(okEntry, true)
@@ -584,7 +584,7 @@ func TestService_RestartDoesNotCorroborate(t *testing.T) {
 
 	// A genuinely new play after the restart still corroborates.
 	ring = append(ring,
-		Outcome{Seq: 2, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, At: "t2"},
+		Outcome{Seq: 2, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image", At: "t2"},
 		Outcome{Seq: 3, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1, At: "t3"})
 	s.ObservePlayback(items("https://o/a", "https://o/b"), 0, nil, &Outcomes{CastSeq: 1, Entries: ring})
 	rec, err = s.Store().Get("https://o/a")
@@ -625,7 +625,7 @@ func TestStore_StaleOutcomesNeverSupersedeANewerVerdict(t *testing.T) {
 	// The reverse: a 404 at 12:05, then an old `ready` from 11:30.
 	_, err = store.ApplyProbe("https://o/b", ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
 	require.NoError(t, err)
-	_, err = store.ApplyOutcome(Outcome{Seq: 3, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, At: "2026-11-04T11:30:00Z"}, true)
+	_, err = store.ApplyOutcome(Outcome{Seq: 3, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image", At: "2026-11-04T11:30:00Z"}, true)
 	require.NoError(t, err)
 	rec, err = store.Get("https://o/b")
 	require.NoError(t, err)
@@ -634,7 +634,7 @@ func TestStore_StaleOutcomesNeverSupersedeANewerVerdict(t *testing.T) {
 	assert.Equal(t, time.Date(2026, 11, 4, 11, 30, 0, 0, time.UTC), *rec.Plays.LastOKAt)
 
 	// A success dated after the verdict heals it, dated by the player.
-	_, err = store.ApplyOutcome(Outcome{Seq: 4, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, At: "2026-11-04T12:05:00Z"}, true)
+	_, err = store.ApplyOutcome(Outcome{Seq: 4, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image", At: "2026-11-04T12:05:00Z"}, true)
 	require.NoError(t, err)
 	rec, err = store.Get("https://o/b")
 	require.NoError(t, err)

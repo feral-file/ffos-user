@@ -432,6 +432,10 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 			rec.WireURL = res.WireURL
 			rec.Host = hostOf(res.WireURL)
 		}
+		if !res.DNSUnresolved {
+			// Any answer that got past DNS ends a resolution streak.
+			rec.DNSFailSince, rec.DNSFailures = nil, 0
+		}
 		switch res.Verdict {
 		case VerdictAlive:
 			rec.State = StateOK
@@ -445,22 +449,8 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 			rec.LastError, rec.LastErrorAt = "", nil
 			rec.RetryAfter = time.Time{}
 		case VerdictDead:
-			if rec.State == StateBroken && rec.Layer == LayerL0 {
-				rec.ConsecutiveBroken++
-			} else {
-				rec.ConsecutiveBroken = 1
-			}
-			rec.State = StateBroken
-			rec.Layer = LayerL0
-			rec.Reason = res.Reason
-			rec.Category = CategoryOf(res.Reason, res.Status)
-			rec.HTTPStatus = res.Status
+			concludeBrokenL0(rec, res.Reason, res.Status, res.Detail, now)
 			rec.DeclaredType, rec.SniffedType = res.Declared, res.Sniffed
-			rec.CheckedAt = now
-			rec.RecheckAfter = now.Add(brokenRecheck(rec.ConsecutiveBroken))
-			rec.LastError = res.Detail
-			rec.LastErrorAt = new(now)
-			rec.RetryAfter = time.Time{}
 		default:
 			// Transient: hold the next attempt, never the verdict. An
 			// expired broken verdict stays expired (no skip authority) and
@@ -475,9 +465,45 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 			rec.LastError = transientDetail(res)
 			rec.LastErrorAt = new(now)
 			rec.RetryAfter = now.Add(hold)
+			if res.DNSUnresolved && res.ResolverHealthy {
+				if rec.DNSFailSince == nil {
+					rec.DNSFailSince = new(now)
+				}
+				rec.DNSFailures++
+				if rec.DNSFailures >= DNSDeadMinFailures && now.Sub(*rec.DNSFailSince) >= DNSDeadAfter {
+					// The streak is the corroboration: a day of failures,
+					// each while other names resolved. Re-concluded on
+					// every recheck that still fails, which advances the
+					// broken backoff like any repeated broken verdict.
+					concludeBrokenL0(rec, ReasonDNS, 0, rec.LastError, now)
+				}
+			}
+			// A DNS failure while the device could not resolve anything
+			// neither counts nor ends the streak: it says nothing about
+			// this name.
 		}
 		return true
 	}
+}
+
+// concludeBrokenL0 writes an L0 broken verdict: the shared tail of a dead
+// probe and a concluded DNS streak.
+func concludeBrokenL0(rec *Record, reason Reason, status int, detail string, now time.Time) {
+	if rec.State == StateBroken && rec.Layer == LayerL0 {
+		rec.ConsecutiveBroken++
+	} else {
+		rec.ConsecutiveBroken = 1
+	}
+	rec.State = StateBroken
+	rec.Layer = LayerL0
+	rec.Reason = reason
+	rec.Category = CategoryOf(reason, status)
+	rec.HTTPStatus = status
+	rec.CheckedAt = now
+	rec.RecheckAfter = now.Add(brokenRecheck(rec.ConsecutiveBroken))
+	rec.LastError = detail
+	rec.LastErrorAt = new(now)
+	rec.RetryAfter = time.Time{}
 }
 
 func brokenRecheck(consecutive int) time.Duration {
@@ -621,6 +647,17 @@ func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, exi
 				return true
 			}
 			rec.Plays.ConsecutiveFail = 0
+			if !readyIsEvidence(o) {
+				// An iframe/object/PDF reports ready for whatever document
+				// loaded in it — Chromium's own error page included — so its
+				// ready proves the mount, not the work. Counted as a play,
+				// but it neither sets ok, nor heals a broken verdict, nor
+				// pushes the recheck out: the record stays due and L0, the
+				// layer that actually reads the bytes, keeps looking. A
+				// ready that wrote ok here hid an unresolvable fxhash work
+				// for a week (#392, office FF1, 2026-11-05).
+				return true
+			}
 			rec.State = StateOK
 			rec.Layer = LayerPlay
 			rec.Category, rec.Reason = "", ""

@@ -199,7 +199,7 @@ func TestStore_ApplyOutcome_OfflineAndDetectNetworkNeverConclude(t *testing.T) {
 		assert.Equal(t, StageLoad, rec.Plays.LastFail.Stage)
 	}
 	// A success while offline (cache, LAN origin) is still a success.
-	rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeOK, Stage: StageReady}, false)
+	rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "image"}, false)
 	require.NoError(t, err)
 	assert.Equal(t, StateOK, rec.State)
 	// A standing L0 verdict is not corroborated by an offline failure either.
@@ -216,7 +216,7 @@ func TestStore_ApplyOutcome_DetectFailThenReadyInOnePlayIsOK(t *testing.T) {
 	const src = "https://origin.example/a"
 	_, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: "404"}, true)
 	require.NoError(t, err)
-	rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeOK, Stage: StageReady}, true)
+	rec, err := s.ApplyOutcome(Outcome{Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "image"}, true)
 	require.NoError(t, err)
 	assert.Equal(t, StateOK, rec.State, "the iframe fallback rendered: applied in seq order, the ready wins")
 	assert.Equal(t, 0, rec.Plays.ConsecutiveFail)

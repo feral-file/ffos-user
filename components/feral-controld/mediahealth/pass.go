@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -63,7 +64,21 @@ type Prober struct {
 	PhaseCeiling time.Duration
 	// Now is the clock (time.Now when nil).
 	Now func() time.Time
+	// Online reports the device's applied internet verdict (the mediator's
+	// connectivity check, which itself needs DNS). With lastResolved it
+	// decides ProbeResult.ResolverHealthy: a resolution failure counts
+	// toward a source's DNS streak only while the device demonstrably
+	// resolves other names. nil reads as not online.
+	Online func() bool
+
+	// lastResolved is the unix-nano time of the last probe whose name
+	// resolved (any HTTP answer, or a definitive NXDOMAIN).
+	lastResolved atomic.Int64
 }
+
+// resolverWindow is how recent another name's resolution must be for a
+// resolution failure to count against the failing name.
+const resolverWindow = time.Hour
 
 const (
 	// DefaultConcurrency is the pool size. Four is enough to keep a mixed
@@ -340,6 +355,7 @@ func (p *Prober) probeOne(ctx context.Context, source string, logger *zap.Logger
 		defer p.Hosts.Release(host)
 	}
 	res = p.Probe.ProbeOne(ctx, source)
+	p.noteResolution(&res)
 	if p.Hosts != nil && coolsHost(res.Status) && res.Verdict == VerdictInconclusive {
 		// Keyed by the host that actually answered (post-redirect), which
 		// is the one asking for the pause; the pre-dial check above keys
@@ -354,6 +370,31 @@ func (p *Prober) probeOne(ctx context.Context, source string, logger *zap.Logger
 	}
 	p.record(source, res, logger)
 	return res, true
+}
+
+// noteResolution keeps the resolver-health evidence: a probe that got any
+// HTTP answer or a definitive NXDOMAIN proves the resolver answers; a
+// resolution failure is marked ResolverHealthy only when the device is
+// online or another name resolved inside resolverWindow.
+func (p *Prober) noteResolution(res *ProbeResult) {
+	now := time.Now
+	if p.Now != nil {
+		now = p.Now
+	}
+	at := now()
+	if res.Status > 0 || (res.Verdict == VerdictDead && res.Reason == ReasonDNS) {
+		p.lastResolved.Store(at.UnixNano())
+	}
+	if !res.DNSUnresolved {
+		return
+	}
+	if p.Online != nil && p.Online() {
+		res.ResolverHealthy = true
+		return
+	}
+	if last := p.lastResolved.Load(); last != 0 && at.Sub(time.Unix(0, last)) <= resolverWindow {
+		res.ResolverHealthy = true
+	}
 }
 
 // wireHost is the hostname the probe would dial for source, the key the

@@ -64,6 +64,14 @@ type ProbeResult struct {
 	// store bounds the record's transient hold by it and the HostLimiter
 	// cools the host for it.
 	RetryAfter time.Duration
+	// DNSUnresolved marks a transient result whose cause was a resolution
+	// failure without a definitive answer (FetchErrDNSUnresolved).
+	// ResolverHealthy says whether, at that moment, the device could
+	// resolve OTHER names (Prober sets it): only then does the failure
+	// count toward the DNS streak, so a device whose own resolver is down
+	// never marks its wall broken.
+	DNSUnresolved   bool
+	ResolverHealthy bool
 }
 
 // Rewriter is the kiosk's gateway policy, as this package needs it: which
@@ -279,6 +287,9 @@ func (p *Probe) fromFetchError(result ProbeResult, err error) ProbeResult {
 	}
 	result.Verdict = VerdictInconclusive
 	switch fetchErrorKind(err) {
+	case FetchErrDNSUnresolved:
+		result.Reason = ReasonTransport
+		result.DNSUnresolved = true
 	case FetchErrGuard, FetchErrTooLong:
 		// Policy and size objections, not liveness: the display path still
 		// forwards such a source today (whether it should is #3471's

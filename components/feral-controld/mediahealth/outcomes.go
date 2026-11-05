@@ -66,6 +66,19 @@ const (
 // them would let an outage mark every work on the wall broken, and a
 // conclusive broken record is skipped before it is mounted, so the play
 // layer could never heal it once the network returned.
+// readyIsEvidence reports whether a `ready` outcome proves the source
+// rendered. Only renderers that report their own load or decode failures
+// count (image, video, audio, model). Opaque embeds (iframe, object, pdf)
+// report ready for any document, an error page included, and an absent
+// mediaType means detection never settled — neither is evidence.
+func readyIsEvidence(o Outcome) bool {
+	switch o.MediaType {
+	case "image", "video", "audio", "model":
+		return true
+	}
+	return false
+}
+
 func deviceLocal(o Outcome) bool {
 	switch o.Stage {
 	case StageWebGL:
