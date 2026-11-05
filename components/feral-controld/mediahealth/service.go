@@ -23,6 +23,7 @@ type Service struct {
 	store      *Store
 	prober     *Prober
 	lookahead  *Lookahead
+	pusher     *HintPusher
 	contract   *PlayerContract
 	drainer    Drainer
 	logger     *zap.Logger
@@ -59,6 +60,10 @@ type Config struct {
 	Contract *PlayerContract
 	// Lookahead may be nil (no during-play probing).
 	Lookahead *Lookahead
+	// Pusher may be nil (verdicts reach the player only on the next push).
+	// The Service feeds it the wall (ObservePlayback) and every map a push
+	// path attaches (HintArgument); the caller drives its Run.
+	Pusher *HintPusher
 	// Online reports the device's current internet verdict (the mediator's
 	// applied connectivity state). Play failures observed while it is false
 	// are recorded but never counted toward a verdict. nil means "unknown",
@@ -80,6 +85,7 @@ func New(cfg Config) *Service {
 		store:         cfg.Store,
 		prober:        cfg.Prober,
 		lookahead:     cfg.Lookahead,
+		pusher:        cfg.Pusher,
 		contract:      cfg.Contract,
 		logger:        cfg.Logger,
 		now:           cfg.Now,
@@ -159,6 +165,9 @@ func (s *Service) HintArgument(items []dp1playlist.PlaylistItem) interface{} {
 		sources[i] = items[i].Source
 	}
 	hints := s.Hints(sources)
+	// The pusher's belief of what the player holds: exactly what this push
+	// carries, none included (nil-safe).
+	s.pusher.Attached(hints)
 	if len(hints) == 0 {
 		return nil
 	}
@@ -252,6 +261,13 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 	}
 	if s.lookahead != nil {
 		s.lookahead.Observe(sources, index)
+	}
+	// Only a player with the outcome ring has a cast generation to fence a
+	// hint-only push on; without it the pusher has no wall (nil-safe).
+	if outcomes != nil && items != nil {
+		s.pusher.Observe(sources, outcomes.CastSeq, true)
+	} else {
+		s.pusher.Observe(nil, 0, false)
 	}
 	online := s.online != nil && s.online()
 	s.mu.Lock()

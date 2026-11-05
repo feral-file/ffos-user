@@ -55,7 +55,7 @@ var playerCommands = []string{
 	"connect", "disconnect", "checkStatus", "moveToArtwork", "updateIndex", "refreshArtwork",
 	"updateArtFraming", "updateDisplaySettings", "cursorUpdate", "displayPlaylist", "refreshPlaylist",
 	"setSleepMode", "setShuffle", "setLoop", "displayDefaultPlaylist", "updateDefaultDuration",
-	"getRecentlyPlayed", "resolveRecentlyPlayed",
+	"getRecentlyPlayed", "resolveRecentlyPlayed", "setMediaHealth",
 	"ping", "mintPairingDisplay", "setupDisplay", "getContentPolicy", "setContentPolicy",
 }
 

@@ -1858,3 +1858,26 @@ func TestCommandHandler_Process_StagedFactoryReset_ServesReadOnly(t *testing.T) 
 		require.NoError(t, err, "%s must still be served during a staged reset", cmd)
 	}
 }
+
+// setMediaHealth replaces the player's skip map; only the daemon's hint
+// pusher may send it. From a controller it is refused before CDP is touched.
+func TestCommandHandler_Process_SetMediaHealthIsInternal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockCDP := mocks.NewMockCDP(ctrl) // no EXPECT: any Send fails the test
+	handler := commandrouter.New(
+		newRoutableExecutor(ctrl), mockCDP, mocks.NewMockDP1(ctrl), mocks.NewMockStatusPoller(ctrl),
+		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	result, err := handler.Process(context.Background(), commands.Command{
+		Type: commands.CMD_SET_MEDIA_HEALTH,
+		Arguments: map[string]interface{}{
+			"castSeq":     1,
+			"mediaHealth": map[string]interface{}{"https://o/a": map[string]interface{}{"category": "source_missing"}},
+		},
+	})
+	require.NoError(t, err)
+	reply, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, false, reply["ok"])
+	assert.Equal(t, "setMediaHealth is internal", reply["error"])
+}

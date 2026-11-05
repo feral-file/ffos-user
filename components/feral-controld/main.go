@@ -1285,7 +1285,7 @@ func initializeApp(
 	if offlineCache != nil && kioskReplay != nil {
 		mediaHealthReplayable = func(source string) bool { return offlineCache.HasReplayableItem(source) }
 	}
-	mediaHealthSvc, mediaHealthLookahead := wireMediaHealth(config.Get().MediaHealthTuning(logger), uaPolicy, mediaHealthOnline.Load, mediaHealthReplayable, logger)
+	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(config.Get().MediaHealthTuning(logger), uaPolicy, mediaHealthOnline.Load, mediaHealthReplayable, newHintSender(cdp.Send, session.Generation), logger)
 	if mediaHealthSvc != nil {
 		commandrouter.SetMediaHealth(rawCmdHandler, mediaHealthSvc, logger)
 		playlistScheduler.SetHintSource(mediaHealthSvc.HintArgument)
@@ -1300,6 +1300,9 @@ func initializeApp(
 		})
 		if mediaHealthLookahead != nil {
 			go mediaHealthLookahead.Run(context)
+		}
+		if mediaHealthPusher != nil {
+			go mediaHealthPusher.Run(context)
 		}
 	}
 	if len(playbackObservers) > 0 {

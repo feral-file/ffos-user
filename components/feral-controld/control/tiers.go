@@ -144,10 +144,11 @@ var commandTiers = map[string]Tier{
 
 	// --- internal: never from outside ---
 	string(commands.CMD_RESOLVE_RECENTLY_PLAYED): TierInternal,
-	CmdEnvelope:          TierInternal,
-	"ping":               TierInternal, // controld → player liveness probe
-	"mintPairingDisplay": TierInternal, // controld → player mint-pairing paint
-	"setupDisplay":       TierInternal, // controld → player setup narration paint
+	string(commands.CMD_SET_MEDIA_HEALTH):        TierInternal, // controld → player hint-only push
+	CmdEnvelope:                                  TierInternal,
+	"ping":                                       TierInternal, // controld → player liveness probe
+	"mintPairingDisplay":                         TierInternal, // controld → player mint-pairing paint
+	"setupDisplay":                               TierInternal, // controld → player setup narration paint
 }
 
 // TierOf returns cmd's tier. Unknown names are owner-only (§7.1).

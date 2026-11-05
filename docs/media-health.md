@@ -205,6 +205,44 @@ interception would show — the same reason the cast rescue exists). The player
 skips a hinted item in its timeline without mounting it, keeps it in `items`,
 and reports `{kind:"skip", stage:"hint"}` in its outcome ring.
 
+### The hint-only push: `setMediaHealth`
+
+A verdict reached **between** pushes (the lookahead, the sweep, the outcome
+drain) would otherwise reach the player only on the next cast, cutover or
+refresh, and a static inline cast is never re-pushed. Since the cast pass
+probes only its first 24 items, that is where most of a long wall's verdicts
+land. `mediahealth.HintPusher` closes the gap with a player command that
+replaces only the held hint map:
+
+```json
+{"command": "setMediaHealth", "request": {"castSeq": 7, "mediaHealth": {"<item.source>": {"state": "broken", "category": "source_missing", "reason": "http_status"}}}}
+```
+
+- **Player side.** Replace semantics: the map is the full hinted set for the
+  wall, `{}` when nothing is broken any more, so a heal reaches the player as
+  well. Applied only when `castSeq` is the outcome ring's current generation,
+  else `{ok:false, error:"staleCast"}` with the held map untouched. The work on
+  screen is never unmounted; the map is honoured at the next selection under
+  the existing rules. Reply `{ok:true, skippedIndices}`.
+- **Gate.** Sent only when the manifest's `mediaHealth` entry, still version
+  1, lists `"commands": ["setMediaHealth"]`. Controld gates the contract on
+  version 1 exactly, so a version bump would turn hints off on fielded
+  daemons; the command is detected by name instead.
+- **When.** Every 15 s the pusher recomputes the map for the wall with the
+  same `Service.Hints` every push uses and sends it when it differs from what
+  the player is believed to hold. Recomputing rather than listening for store
+  writes also catches a verdict that **expires** past its recheck window. The
+  belief is the map the last push path attached, or the last delivered
+  push, bound to the cast generation. An unknown belief costs at most one
+  redundant send, which replace semantics make harmless. Nothing is sent
+  in the first 15 s after a new cast, since the cast's push carried the map.
+- **Failure.** `staleCast` waits for the next poll's generation. A transport
+  error or a reply that crossed a page generation change retries on the next
+  tick. Any other refusal parks the pusher until the next cast, so it never
+  loops against a player that does not implement the command.
+- **Internal.** `setMediaHealth` is tier `internal` and the command router
+  refuses it from a controller: only the daemon may install a skip map.
+
 ## The outcome ring (player → controld): `outcomes` on `checkStatus`
 
 Beside the ring, the same contract carries the player's own report of what

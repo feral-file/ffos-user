@@ -546,6 +546,15 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			"error":  "resolveRecentlyPlayed is internal",
 		}, nil
 	}
+	if commandType == commands.CMD_SET_MEDIA_HEALTH {
+		// Only the daemon's hint pusher may replace the player's skip map;
+		// forwarded from a controller it would hide works the device never
+		// judged broken.
+		return map[string]interface{}{
+			"ok":    false,
+			"error": "setMediaHealth is internal",
+		}, nil
+	}
 
 	// Replay never accepts a phone-supplied source. It resolves an opaque
 	// device-local record, rebuilds a one-work unsigned DP-1 call, then invokes
