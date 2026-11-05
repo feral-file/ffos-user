@@ -413,7 +413,7 @@ func inheritInstanceFields(item dp1playlist.PlaylistItem, editions []dp1playlist
 // unlabeled), stripping it off (rejected for now — it removes a true
 // provenance field to steer another component's default), and carrying the
 // publisher's `seriesPlayback` across the boundary (impossible today — no
-// dp1-go release has the field, v0.7.2 included). The
+// dp1-go release has the field). The
 // likeliest real fix is in the player's own default for an expanded run.
 // Pinned by TestDP1_AnEditionsOwnSeriesIDSurvivesExpansion.
 func (d *dp1) seriesEditions(ctx context.Context, playlistID string, item dp1playlist.PlaylistItem) ([]dp1playlist.PlaylistItem, error) {

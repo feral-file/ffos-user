@@ -30,7 +30,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/display-protocol/dp1-go/sign"
@@ -119,21 +118,40 @@ const (
 )
 
 // MaxDocumentBytes bounds the document Verify will canonicalize at all.
-// Every ingress already caps its document at 4 MiB (hub body limit, dp1
-// fetch limit, relayer frame limit), so an honest document never trips it;
-// it exists so that this package's own cost bound does not depend on every
-// caller remembering theirs. Over the cap: invalid, no cryptography.
-const MaxDocumentBytes = 4 << 20
+// It MUST stay >= the largest document any ingress admits. There is no
+// "unverifiable" status, so an over-cap document is reported invalid — the
+// same bucket as a tampered one — and a cap below an ingress would brand
+// honest documents as forgeries rather than merely decline to judge them.
+//
+// The ingresses no longer agree on one figure: the inline paths cap at
+// 4 MiB (hub request body, relayer frame, control v1 compact form) while a
+// URL fetch admits dp1.MaxPlaylistBodyBytes, 16 MiB, so that the Feral File
+// series published above 4 MiB can be displayed (feral-file/feral-file#3597).
+// This tracks the LARGEST of them, not the common one.
+//
+// It remains this package's own bound rather than a trusted inherited one,
+// because commandrouter's dp1_call fallback can hand Verify more bytes than
+// any ingress measured: encoding/json HTML-escapes &/</> at six bytes each.
+// Over the cap: invalid, no cryptography.
+const MaxDocumentBytes = 16 << 20
 
 // MaxSignatures bounds how many signatures[] entries Verify will even hand
-// to dp1-go. Every entry costs two JCS canonicalizations of the WHOLE
-// document (payload_hash check + signing digest), and the unauthenticated
-// LAN hub accepts a 4 MiB body with no entry cap — so an unbounded loop is
-// hours of CPU per hostile cast, holding a command-gate slot the whole
-// time. DP-1 defines six roles (curator, feed, agent, institution, licensor,
-// publisher); 16 is comfortably above any honest chain. Past it the
-// document is invalid with ReasonTooManySignatures and NO cryptography
-// runs, so the cost of a hostile document is one envelope decode.
+// to dp1-go. The cost it defends against is no longer document-sized:
+// since the dp1-go version this module pins, one call canonicalizes the
+// document once and each entry then costs a single signature check over the
+// resulting 32 bytes — microseconds, independent of document size. Before
+// that, every entry cost two whole-document canonicalizations (payload_hash
+// check + signing digest), which made an unbounded array hours of CPU per
+// hostile cast on an unauthenticated 4 MiB body. That per-entry cost is
+// what sized this cap, and what sized the 4 MiB ingress figures.
+//
+// The cap stays because what remains is still attacker-chosen: N ECDSA
+// recoveries for eip191, and N alg/kid/role strings copied into the cast
+// reply and the log line. DP-1 defines six roles (curator, feed, agent,
+// institution, licensor, publisher); 16 is comfortably above any honest
+// chain. Past it the document is invalid with ReasonTooManySignatures and
+// NO cryptography runs, so the cost of a hostile document is one envelope
+// decode.
 const MaxSignatures = 16
 
 // signatureEnvelope is the minimal top-level projection Verify needs beyond
@@ -197,11 +215,10 @@ func Verify(raw []byte) Verdict {
 	}
 
 	// Decode the (count-bounded) entries and enforce the field bounds BEFORE
-	// dp1-go sees the document: every dp1-go entry check costs two whole-
-	// document canonicalizations, and the bounds exist precisely so an
-	// oversized entry buys none of that. A decode failure or an empty array
-	// is left for dp1-go below, which classifies both the same way and does
-	// no cryptography on either.
+	// dp1-go sees the document: the bounds exist so an oversized entry buys
+	// no canonicalization of the document at all. A decode failure or an
+	// empty array is left for dp1-go below, which classifies both the same
+	// way and does no cryptography on either.
 	var entries []dp1playlist.Signature
 	if uerr := json.Unmarshal(env.Signatures, &entries); uerr == nil && len(entries) > 0 {
 		if v, refused := refuseOversized(entries, legacy); refused {
@@ -209,7 +226,14 @@ func Verify(raw []byte) Verdict {
 		}
 	}
 
-	ok, _, err := sign.VerifyPlaylistSignatures(raw)
+	// One call, one canonicalization of the document, and every entry's own
+	// error. dp1-go's detailed verifier exists for exactly this caller: the
+	// plain VerifyPlaylistSignatures returns the failed entries WITHOUT their
+	// errors, so labeling which entry failed and why used to mean re-verifying
+	// each one here — another whole-document canonicalization apiece, on the
+	// failure path, which is the path a hostile document chooses
+	// (display-protocol/dp1-go#16).
+	results, err := sign.VerifyMultiSignaturesJSONDetailed(raw)
 	switch {
 	case errors.Is(err, sign.ErrNoSignatures):
 		reason := ReasonUnsigned
@@ -221,40 +245,33 @@ func Verify(raw []byte) Verdict {
 		// signatures is present but not an array of signature objects.
 		return Verdict{Status: StatusInvalid, LegacyPresent: legacy, Reason: ReasonMalformed}
 	}
-	if len(entries) == 0 {
-		// Cannot happen: dp1-go just decoded a non-empty array from the same
-		// bytes. Guarded so a library change surfaces as invalid, never as
-		// a silently valid verdict over entries this function never saw.
+	if len(results) != len(entries) {
+		// Cannot happen: dp1-go decoded the same array from the same bytes
+		// this function just counted and field-bounded. Guarded so a library
+		// change surfaces as invalid, never as a silently valid verdict over
+		// entries the bounds above never saw.
 		return Verdict{Status: StatusInvalid, LegacyPresent: legacy, Reason: ReasonMalformed}
 	}
 
-	signers := make([]Signer, 0, len(entries))
+	// The verdict is read off the per-entry results alone. There is no
+	// document-level ok to agree with any more, so the two can no longer
+	// contradict each other and there is nothing to arbitrate: valid means
+	// every entry reported OK.
+	signers := make([]Signer, 0, len(results))
 	firstFailure := ""
-	for _, e := range entries {
-		s := Signer{Alg: e.Alg, Kid: e.Kid, Role: e.Role, OK: true}
-		if !ok {
-			// Re-run per entry only on the failure path to label WHICH
-			// entries failed and why: VerifyPlaylistSignatures returns the
-			// failed structs but not their errors, and matching those back
-			// by value is more fragile than one extra verify per entry.
-			if verr := sign.VerifyMultiSignature(raw, e); verr != nil {
-				s.OK = false
-				s.Reason = classify(verr)
-				if firstFailure == "" {
-					firstFailure = fmt.Sprintf("%s signature invalid: %s", roleOrUnknown(e.Role), s.Reason)
-				}
+	for _, r := range results {
+		e := r.Signature
+		s := Signer{Alg: e.Alg, Kid: e.Kid, Role: e.Role, OK: r.OK()}
+		if !s.OK {
+			s.Reason = classify(r.Err)
+			if firstFailure == "" {
+				firstFailure = fmt.Sprintf("%s signature invalid: %s", roleOrUnknown(e.Role), s.Reason)
 			}
 		}
 		signers = append(signers, s)
 	}
-	if ok {
-		return Verdict{Status: StatusValid, Signers: signers, LegacyPresent: legacy}
-	}
 	if firstFailure == "" {
-		// dp1-go said not-ok but every per-entry re-check passed: cannot
-		// happen with a deterministic verifier, but never report valid on
-		// the library's word being contradicted.
-		firstFailure = "signature invalid: " + ReasonMalformed
+		return Verdict{Status: StatusValid, Signers: signers, LegacyPresent: legacy}
 	}
 	return Verdict{Status: StatusInvalid, Signers: signers, LegacyPresent: legacy, Reason: firstFailure}
 }
@@ -323,15 +340,17 @@ func tooManySignatures(raw json.RawMessage) bool {
 
 // classify maps a dp1-go per-entry verification error onto the reason
 // vocabulary. Order matters: ErrSigInvalid wraps the base64 and length
-// failures too, and the payload-hash mismatch is a plain (unwrapped) error
-// in dp1-go v0.6.0, hence the string match — pinned by the tamper test.
+// failures too, so it must be tested before the generic fallback. The
+// payload-hash mismatch was an unwrapped error matched by its text until
+// dp1-go exported ErrPayloadHashMismatch for this caller; all three arms are
+// pinned by the tamper tests.
 func classify(err error) string {
 	switch {
 	case errors.Is(err, sign.ErrUnsupportedAlg):
 		return ReasonUnsupportedAlg
 	case errors.Is(err, sign.ErrSigInvalid):
 		return ReasonSignatureInvalid
-	case strings.Contains(err.Error(), "payload_hash"):
+	case errors.Is(err, sign.ErrPayloadHashMismatch):
 		return ReasonPayloadHashMismatch
 	default:
 		return ReasonMalformed

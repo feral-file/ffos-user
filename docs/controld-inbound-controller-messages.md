@@ -588,13 +588,18 @@ at accept time, before dynamic hydration: the URL path verifies the fetched
 bytes and the inline path verifies the caller's own `dp1_call` token exactly
 as it arrived — both ingress decoders retain the `request` object verbatim
 beside the decoded map — never a re-marshal of the map (whose HTML escaping
-of `&`/`<`/`>` can inflate a valid document past the 4 MiB verifier bound)
+of `&`/`<`/`>` can inflate a valid document past the verifier bound)
 and never the typed struct (which drops fields the signer covered). The offline
 cached-copy fallback carries NO verdict — the stored body is a typed,
 hydrated re-marshal, not the signed bytes — so a cast served from it omits
-the fields below. Bounds, all aimed at untrusted ingress: a document larger than 4 MiB is
-refused before decoding on every path (hub body limit, relayer frame limit,
-URL fetch limit, and the verifier's own cap); at most 16 `signatures[]` entries are verified and a document
+the fields below. Bounds, all aimed at untrusted ingress, and no longer one figure: the inline
+paths refuse a document larger than 4 MiB before decoding (hub body limit,
+relayer frame limit, control v1 compact-form limit) while a URL fetch refuses
+one larger than 16 MiB, which is also the verifier's own cap. The URL path is
+allowed the larger document on purpose — the Feral File series published
+between 4.9 and 8.9 MiB compact (up to ~11.9 MiB as served, formatting included) are displayed that way (feral-file/feral-file#3597),
+and a URL fetch runs behind the command gate's heavy budget (at most 4
+concurrent) rather than at the hub's open door (64). At most 16 `signatures[]` entries are verified and a document
 with more is `invalid` (`too many signatures`) without any cryptography
 running; an entry whose `alg`, `role`, or `kid` exceeds 32/32/256 bytes makes the
 document `invalid` before any cryptography runs: that entry is reported as

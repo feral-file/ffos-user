@@ -536,12 +536,14 @@ func (r *relayer) Connect(ctx context.Context) error {
 
 	// Bound every inbound frame BEFORE it is decoded. The relayer is the
 	// second ingress for displayPlaylist (the LAN hub is the first, capped by
-	// hub.MAX_REQUEST_BODY_BYTES; URL fetches by dp1.MaxPlaylistBodyBytes),
-	// and an inline playlist's cost downstream — JSON decode into a map, JCS
-	// canonicalization per signature entry — scales with its size, so an
-	// unbounded frame from a remote controller or a compromised relayer is
-	// an unbounded memory and CPU spend. Same limit as the hub so both paths
-	// admit the same worst-case document. gorilla returns ErrReadLimit on an
+	// hub.MAX_REQUEST_BODY_BYTES), and an inline playlist's cost downstream
+	// — JSON decode into a map, one JCS canonicalization of the document —
+	// scales with its size, so an unbounded frame from a remote controller or
+	// a compromised relayer is an unbounded memory and CPU spend. Same limit
+	// as the hub so both INLINE paths admit the same worst-case document; a
+	// URL fetch admits more (dp1.MaxPlaylistBodyBytes), deliberately, because
+	// it carries only a URL string over this frame and runs behind the
+	// command gate rather than at the hub's open door. gorilla returns ErrReadLimit on an
 	// oversized frame and the read loop reconnects, which is the right
 	// outcome for a peer that sends one.
 	conn.SetReadLimit(MAX_MESSAGE_BYTES)
