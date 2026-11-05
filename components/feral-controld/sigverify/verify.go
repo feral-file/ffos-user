@@ -125,7 +125,7 @@ const (
 //
 // The ingresses no longer agree on one figure: the inline paths cap at
 // 4 MiB (hub request body, relayer frame, control v1 compact form) while a
-// URL fetch admits dp1.MaxPlaylistBodyBytes, 10 MiB, so that the Feral File
+// URL fetch admits dp1.MaxPlaylistBodyBytes, 16 MiB, so that the Feral File
 // series published above 4 MiB can be displayed (feral-file/feral-file#3597).
 // This tracks the LARGEST of them, not the common one.
 //
@@ -133,7 +133,7 @@ const (
 // because commandrouter's dp1_call fallback can hand Verify more bytes than
 // any ingress measured: encoding/json HTML-escapes &/</> at six bytes each.
 // Over the cap: invalid, no cryptography.
-const MaxDocumentBytes = 10 << 20
+const MaxDocumentBytes = 16 << 20
 
 // MaxSignatures bounds how many signatures[] entries Verify will even hand
 // to dp1-go. The cost it defends against is no longer document-sized:

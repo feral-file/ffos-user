@@ -93,11 +93,16 @@ const (
 	// response is reachable by any LAN caller naming a URL, so the bound stays
 	// (feral-file/ffos-user#307).
 	//
-	// 10 MiB over the largest published document (8.9 MiB) is headroom on
-	// purpose: these documents grow as series mint out — one of the five
+	// 16 MiB is headroom over the actual HTTP response, not over the
+	// compact-JSON byte count the issue measured: feralfile.com serves these
+	// documents formatted, and the formatting whitespace alone adds ~33% —
+	// crystalline-work-sdk is 8,904,417 bytes compact but 11,854,155 bytes as
+	// fetched (2026-11-05). A bound sized against the wrong figure admits
+	// nothing; this one is sized against the bytes LimitReader below actually
+	// counts. These documents also grow as series mint out — one of the five
 	// gained 60 KiB during the investigation — and a bound that has to move
 	// with every release is a bound that will be wrong on fielded devices.
-	MaxPlaylistBodyBytes = 10 << 20
+	MaxPlaylistBodyBytes = 16 << 20
 
 	DEFAULT_DURATION             = 300
 	MINIMAL_PLAYLIST_ITEMS_LIMIT = 50

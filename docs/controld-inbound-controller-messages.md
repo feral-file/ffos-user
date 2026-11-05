@@ -584,9 +584,9 @@ hydrated re-marshal, not the signed bytes — so a cast served from it omits
 the fields below. Bounds, all aimed at untrusted ingress, and no longer one figure: the inline
 paths refuse a document larger than 4 MiB before decoding (hub body limit,
 relayer frame limit, control v1 compact-form limit) while a URL fetch refuses
-one larger than 10 MiB, which is also the verifier's own cap. The URL path is
+one larger than 16 MiB, which is also the verifier's own cap. The URL path is
 allowed the larger document on purpose — the Feral File series published
-between 4.9 and 8.9 MiB are displayed that way (feral-file/feral-file#3597),
+between 4.9 and 8.9 MiB compact (up to ~11.9 MiB as served, formatting included) are displayed that way (feral-file/feral-file#3597),
 and a URL fetch runs behind the command gate's heavy budget (at most 4
 concurrent) rather than at the hub's open door (64). At most 16 `signatures[]` entries are verified and a document
 with more is `invalid` (`too many signatures`) without any cryptography
