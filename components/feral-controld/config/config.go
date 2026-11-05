@@ -342,19 +342,16 @@ type ControlConfig struct {
 	// Enabled decides only whether a device WITHOUT control state starts the
 	// protocol (creates its identity and offers invitations).
 	Enabled bool `json:"enabled"`
-	// Enforced is the §7.2 "enforced" switch (phase 2). It can only make a
-	// device stricter than enrolled, never less strict.
-	Enforced bool `json:"enforced"`
 	// Malformed records that the block (or one of its fields) did not
 	// decode; the affected fields read false.
 	Malformed bool `json:"-"`
 }
 
-// ControlTuning decodes the control block field by field, so one bad value
-// does not take the other with it. Absent means disabled and not enforced.
-// A malformed field reads false and sets Malformed: for Enabled that only
-// affects devices without control state, and for Enforced false is still
-// the enrolled policy, so both degrade safely.
+// ControlTuning decodes the control block field by field. Absent means
+// disabled. A malformed field reads false and sets Malformed: for Enabled
+// that only affects devices without control state, so it degrades safely.
+// Unknown keys are ignored: a stale "enforced" in an older controld.json
+// (the state was removed by feral-file#3551) still parses.
 func (c *Config) ControlTuning(logger *zap.Logger) ControlConfig {
 	var t ControlConfig
 	if len(c.Control) == 0 || string(c.Control) == "null" {
@@ -364,7 +361,7 @@ func (c *Config) ControlTuning(logger *zap.Logger) ControlConfig {
 	if err := json.Unmarshal(c.Control, &fields); err != nil {
 		t.Malformed = true
 	}
-	for name, dst := range map[string]*bool{"enabled": &t.Enabled, "enforced": &t.Enforced} {
+	for name, dst := range map[string]*bool{"enabled": &t.Enabled} {
 		raw, ok := fields[name]
 		if !ok {
 			continue
