@@ -464,10 +464,17 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 		default:
 			// Transient: hold the next attempt, never the verdict. An
 			// expired broken verdict stays expired (no skip authority) and
-			// the source is left alone for RetryTransient.
+			// the source is left alone for RetryTransient — or for the
+			// shorter pause the origin itself asked for (Retry-After on a
+			// 429/503): a host saying "30 s" should not cost the source an
+			// hour. RetryTransient stays the ceiling.
+			hold := RetryTransient
+			if res.RetryAfter > 0 && res.RetryAfter < hold {
+				hold = res.RetryAfter
+			}
 			rec.LastError = transientDetail(res)
 			rec.LastErrorAt = new(now)
-			rec.RetryAfter = now.Add(RetryTransient)
+			rec.RetryAfter = now.Add(hold)
 		}
 		return true
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"net"
@@ -69,7 +70,16 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 	if rewriter != nil {
 		probe.Rewriter = rewriter
 	}
-	prober := &mediahealth.Prober{Probe: probe, Store: store, Logger: logger}
+	// One HostLimiter for the pass and the lookahead: per-host pacing and
+	// 429/503 cooldowns only work if both consumers see the same state.
+	prober := &mediahealth.Prober{
+		Probe:       probe,
+		Store:       store,
+		Logger:      logger,
+		Hosts:       &mediahealth.HostLimiter{},
+		Items:       cfg.CastItems,
+		Concurrency: cfg.CastConcurrency,
+	}
 	var lookahead *mediahealth.Lookahead
 	if cfg.Lookahead >= 0 {
 		lookahead = &mediahealth.Lookahead{Prober: prober, Store: store, Logger: logger, Window: cfg.Lookahead}
@@ -88,6 +98,8 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 		zap.String("path", constants.MEDIA_HEALTH_STORE_FILE),
 		zap.Int("records", count),
 		zap.Int("probe_max_bytes", maxBytes),
+		zap.Int("cast_items", cmp.Or(cfg.CastItems, mediahealth.DefaultPassItems)),
+		zap.Int("cast_concurrency", cmp.Or(cfg.CastConcurrency, mediahealth.DefaultConcurrency)),
 		zap.Bool("lookahead", lookahead != nil),
 		zap.Bool("rewriter", rewriter != nil))
 	return svc, lookahead

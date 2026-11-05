@@ -30,8 +30,10 @@ func TestLookahead_ProbesUpcomingItemsInPlayOrder(t *testing.T) {
 		assert.True(t, l.step(context.Background(), nil), "a due upcoming item is probed")
 		assert.Equal(t, 1, f.count(want), want)
 	}
-	assert.False(t, l.step(context.Background(), nil), "the window is exhausted; nothing is due in the background")
-	assert.Equal(t, 0, f.count("https://o/2"), "beyond the window nothing is probed")
+	assert.Equal(t, 0, f.count("https://o/2"), "the window and the current item come before the rest of the wall")
+	assert.True(t, l.step(context.Background(), nil), "then the rest of the wall, for sources never probed")
+	assert.Equal(t, 1, f.count("https://o/2"))
+	assert.False(t, l.step(context.Background(), nil), "the wall is covered; nothing is due in the background")
 	assert.Equal(t, 1, f.count("https://o/3"), "the current item is probed after the window, once")
 }
 

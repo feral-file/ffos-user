@@ -59,6 +59,11 @@ type ProbeResult struct {
 	// FromStore marks a verdict served from a conclusive stored record
 	// without a network request (Prober.Preflight).
 	FromStore bool
+	// RetryAfter is the origin's Retry-After on a 429/503 (0 when none or
+	// on any other answer): how long the host asked to be left alone. The
+	// store bounds the record's transient hold by it and the HostLimiter
+	// cools the host for it.
+	RetryAfter time.Duration
 }
 
 // Rewriter is the kiosk's gateway policy, as this package needs it: which
@@ -164,14 +169,23 @@ func (p *Probe) ProbeOne(ctx context.Context, source string) ProbeResult {
 		// never sends one. Retry once without it.
 		return p.retryUnranged(ctx, result, wireURL, agent, maxBytes)
 	default:
-		result.Verdict = verdictForStatus(resp.Status)
-		result.Reason = ReasonHTTPStatus
-		result.Detail = fmt.Sprintf("HTTP %d", resp.Status)
-		if result.Verdict == VerdictInconclusive {
-			result.Err = fmt.Errorf("media health: transient HTTP %d", resp.Status)
-		}
-		return result
+		return statusResult(result, resp)
 	}
+}
+
+// statusResult judges a non-2xx answer by the status table and, when the
+// origin asked for a pause (429/503), carries its Retry-After along.
+func statusResult(result ProbeResult, resp *fetchOutcome) ProbeResult {
+	result.Verdict = verdictForStatus(resp.Status)
+	result.Reason = ReasonHTTPStatus
+	result.Detail = fmt.Sprintf("HTTP %d", resp.Status)
+	if result.Verdict == VerdictInconclusive {
+		result.Err = fmt.Errorf("media health: transient HTTP %d", resp.Status)
+		if coolsHost(resp.Status) {
+			result.RetryAfter, _ = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		}
+	}
+	return result
 }
 
 // retryUnranged re-issues the probe without a Range header, once. A second
@@ -198,13 +212,7 @@ func (p *Probe) retryUnranged(ctx context.Context, result ProbeResult, wireURL, 
 	case resp.Status >= 200 && resp.Status < 300:
 		return p.validate(result, resp, resp.ContentLength)
 	default:
-		result.Verdict = verdictForStatus(resp.Status)
-		result.Reason = ReasonHTTPStatus
-		result.Detail = fmt.Sprintf("HTTP %d", resp.Status)
-		if result.Verdict == VerdictInconclusive {
-			result.Err = fmt.Errorf("media health: transient HTTP %d", resp.Status)
-		}
-		return result
+		return statusResult(result, resp)
 	}
 }
 

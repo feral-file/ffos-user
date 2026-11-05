@@ -27,15 +27,37 @@ import (
 // latency that early exit saved is bought back by the store: a source with
 // a conclusive record is answered from it without a request, so a playlist
 // seen before costs no network at cast.
+//
+// What the pass does NOT do any more is probe a whole 256-item playlist
+// at cast with 16 workers: that burst looked like a scrape to a CDN and a
+// 429 there was the fleet's own doing. The cast pass now covers the first
+// Items sources in play order with a small pool, paced per host by the
+// shared HostLimiter, and leaves the rest to the lookahead, which walks
+// the whole wall at one request every Gap. Items beyond the pass are
+// unknown at cast (no hint — fail-open) and get their hint on the next
+// push. The all-dead rejection keeps its reach: while every source seen so
+// far is dead the pass continues, batch by batch, up to the budget, so a
+// cast of 200 dead items is still refused and a cast of 24 dead items in
+// front of a live one still plays.
 type Prober struct {
 	Probe  *Probe
 	Store  *Store
 	Logger *zap.Logger
+	// Hosts paces requests per origin and keeps a 429/503 host cool; shared
+	// with the Lookahead through this Prober. nil = no per-host pacing
+	// (tests, the bench).
+	Hosts *HostLimiter
 
 	// Concurrency is the worker-pool size (DefaultConcurrency when 0).
 	Concurrency int
+	// Items is how many sources, in play order, the pass probes before
+	// handing the rest to the lookahead (DefaultPassItems when 0). Only
+	// network work counts: data: URIs and sources answered from the store
+	// are outside it.
+	Items int
 	// MaxAttempts caps distinct dialing wire URLs per pass
-	// (DefaultMaxAttempts when 0). Sources past it are inconclusive.
+	// (DefaultMaxAttempts when 0). Sources past it are inconclusive. The
+	// all-dead extension stops here.
 	MaxAttempts int
 	// PhaseCeiling bounds the whole pass (DefaultPhaseCeiling when 0).
 	PhaseCeiling time.Duration
@@ -44,13 +66,20 @@ type Prober struct {
 }
 
 const (
-	// DefaultConcurrency matches the offline cache's measured sweet spot
-	// against the same uplink (classifyConcurrency: past 16 the uplink is
-	// the limit).
-	DefaultConcurrency = 16
-	// DefaultMaxAttempts comfortably covers real playlists (the dynamic
+	// DefaultConcurrency is the pool size. Four is enough to keep a mixed
+	// playlist's pass inside the ceiling (one slow origin blocks one
+	// worker), and together with the per-host cap it means an origin
+	// serving the whole playlist sees DefaultHostInFlight connections,
+	// not the pool.
+	DefaultConcurrency = 4
+	// DefaultPassItems is how far into the playlist the cast pass looks.
+	// 24 items at 2 per host and ~300 ms each is a few seconds; it covers
+	// the opening of any real wall, and the lookahead reaches the rest
+	// before playback does at one request every DefaultGap.
+	DefaultPassItems = 24
+	// DefaultMaxAttempts bounds the all-dead extension (the dynamic
 	// resolution path caps at 255) while keeping a hostile cast's worst
-	// case a burst, not a stream.
+	// case bounded.
 	DefaultMaxAttempts = 256
 	// DefaultPhaseCeiling bounds the pass's share of the cast request's
 	// time. It does not guarantee the whole command answers inside the
@@ -165,50 +194,46 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 		uniqueIndices = append(uniqueIndices, i)
 	}
 
-	workers := p.Concurrency
-	if workers <= 0 {
-		workers = DefaultConcurrency
-	}
-	if len(uniqueIndices) < workers {
-		workers = len(uniqueIndices)
-	}
-	indices := make(chan int)
-	// probed marks the unique positions whose request actually ran (not
-	// cut off by the ceiling), so a shared verdict is recorded for the
-	// siblings only when it is a real verdict.
+	// The network work runs in batches of Items. The first batch always
+	// runs; a later one runs only while every source seen so far — the
+	// settled ones included — is dead, because that is the only state in
+	// which probing further can change the cast's fate (allSourcesDead
+	// needs every item dead; one alive, inline or inconclusive item admits
+	// the cast, and the lookahead will look at the rest). probed marks the
+	// unique positions whose request actually ran (not cut off by the
+	// ceiling), so a shared verdict is recorded for the siblings only when
+	// it is a real verdict.
 	probed := make([]bool, len(sources))
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Go(func() {
-			for i := range indices {
-				if ctx.Err() != nil {
-					// Ceiling already hit: never probed, so never dead.
-					results[i] = ProbeResult{
-						Source:  redactForLog(sources[i]),
-						Verdict: VerdictInconclusive,
-						Err:     ctx.Err(),
-					}
-					continue
-				}
-				results[i] = p.Probe.ProbeOne(ctx, sources[i])
-				probed[i] = true
-				p.record(sources[i], results[i], logger)
-			}
-		})
+	batch := p.Items
+	if batch <= 0 {
+		batch = DefaultPassItems
 	}
-	for _, i := range uniqueIndices {
-		select {
-		case indices <- i:
-		case <-ctx.Done():
-			results[i] = ProbeResult{
-				Source:  redactForLog(sources[i]),
-				Verdict: VerdictInconclusive,
-				Err:     ctx.Err(),
+	rejectable := true
+	for i := range sources {
+		if settled[i] && results[i].Verdict != VerdictDead {
+			rejectable = false
+			break
+		}
+	}
+	for start := 0; start < len(uniqueIndices); start += batch {
+		end := min(start+batch, len(uniqueIndices))
+		if start > 0 && !rejectable {
+			for _, i := range uniqueIndices[start:] {
+				results[i] = ProbeResult{
+					Source:  redactForLog(sources[i]),
+					Verdict: VerdictInconclusive,
+					Err:     errBeyondPass,
+				}
+			}
+			break
+		}
+		p.runPool(ctx, sources, uniqueIndices[start:end], results, probed, logger)
+		for _, i := range uniqueIndices[start:end] {
+			if results[i].Verdict != VerdictDead {
+				rejectable = false
 			}
 		}
 	}
-	close(indices)
-	wg.Wait()
 
 	// Fan each probed verdict back out to the wire-identical siblings that
 	// had no verdict of their own, after the barrier so every read sees a
@@ -236,16 +261,122 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 	return results
 }
 
+// runPool probes the unique positions in indices with a fixed worker pool
+// and writes each result (and its record) in place.
+func (p *Prober) runPool(ctx context.Context, sources []string, indices []int, results []ProbeResult, probed []bool, logger *zap.Logger) {
+	workers := p.Concurrency
+	if workers <= 0 {
+		workers = DefaultConcurrency
+	}
+	if len(indices) < workers {
+		workers = len(indices)
+	}
+	feed := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Go(func() {
+			for i := range feed {
+				if ctx.Err() != nil {
+					// Ceiling already hit: never probed, so never dead.
+					results[i] = ProbeResult{
+						Source:  redactForLog(sources[i]),
+						Verdict: VerdictInconclusive,
+						Err:     ctx.Err(),
+					}
+					continue
+				}
+				results[i], probed[i] = p.probeOne(ctx, sources[i], logger)
+			}
+		})
+	}
+	for _, i := range indices {
+		select {
+		case feed <- i:
+		case <-ctx.Done():
+			results[i] = ProbeResult{
+				Source:  redactForLog(sources[i]),
+				Verdict: VerdictInconclusive,
+				Err:     ctx.Err(),
+			}
+		}
+	}
+	close(feed)
+	wg.Wait()
+}
+
 // ProbeAndRecord probes one source outside a cast pass (the lookahead and
 // the background sweep) and writes the result.
 func (p *Prober) ProbeAndRecord(ctx context.Context, source string) ProbeResult {
-	res := p.Probe.ProbeOne(ctx, source)
 	logger := p.Logger
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	p.record(source, res, logger)
+	res, _ := p.probeOne(ctx, source, logger)
 	return res
+}
+
+// probeOne is the one network path of both consumers: the host pacing,
+// the probe, the host cooldown, the record. probed is false when no
+// request was made (a cooled host, a cut-short wait for a slot) — such a
+// result is inconclusive without a Reason, so Store.ApplyProbe writes
+// nothing and the source stays unknown rather than held for an hour.
+func (p *Prober) probeOne(ctx context.Context, source string, logger *zap.Logger) (res ProbeResult, probed bool) {
+	host := p.wireHost(source)
+	if p.Hosts != nil {
+		if until, ok := p.Hosts.Cooled(host); ok {
+			return ProbeResult{
+				Source:  redactForLog(source),
+				Verdict: VerdictInconclusive,
+				Err:     &hostCooldownError{until: until},
+			}, false
+		}
+		if err := p.Hosts.Acquire(ctx, host); err != nil {
+			return ProbeResult{
+				Source:  redactForLog(source),
+				Verdict: VerdictInconclusive,
+				Err:     err,
+			}, false
+		}
+		defer p.Hosts.Release(host)
+	}
+	res = p.Probe.ProbeOne(ctx, source)
+	if p.Hosts != nil && coolsHost(res.Status) && res.Verdict == VerdictInconclusive {
+		// Keyed by the host that actually answered (post-redirect), which
+		// is the one asking for the pause; the pre-dial check above keys
+		// by the pre-redirect host, so a 429 at the end of a redirect
+		// chain cools the answering host and not the source's — accepted,
+		// the chain is the uncommon case.
+		p.Hosts.Cooldown(hostOf(res.WireURL), res.RetryAfter)
+		logger.Info("media health: origin asked for a pause; host cooled",
+			zap.String("host", hostOf(res.WireURL)),
+			zap.Int("status", res.Status),
+			zap.Duration("retry_after", res.RetryAfter))
+	}
+	p.record(source, res, logger)
+	return res, true
+}
+
+// wireHost is the hostname the probe would dial for source, the key the
+// HostLimiter paces by.
+func (p *Prober) wireHost(source string) string {
+	if IsDataURI(source) {
+		return ""
+	}
+	if p.Probe == nil {
+		return hostOf(source)
+	}
+	wireURL, _ := p.Probe.wire(source)
+	return hostOf(wireURL)
+}
+
+// cooled reports whether source's host is under a cooldown (the lookahead
+// steps over such sources without holding them).
+func (p *Prober) cooled(source string) bool {
+	if p.Hosts == nil {
+		return false
+	}
+	_, ok := p.Hosts.Cooled(p.wireHost(source))
+	return ok
 }
 
 func (p *Prober) record(source string, res ProbeResult, logger *zap.Logger) {
@@ -303,6 +434,22 @@ type budgetError struct{}
 func (budgetError) Error() string { return "media health: per-cast probe budget exhausted" }
 
 var errBudgetExhausted error = budgetError{}
+
+type beyondPassError struct{}
+
+func (beyondPassError) Error() string {
+	return "media health: beyond the cast pass; left to the lookahead"
+}
+
+var errBeyondPass error = beyondPassError{}
+
+// hostCooldownError marks a source not probed because its host asked for
+// a pause. No Reason rides with it, so no record is written.
+type hostCooldownError struct{ until time.Time }
+
+func (e *hostCooldownError) Error() string {
+	return "media health: host under a cooldown until " + e.until.UTC().Format(time.RFC3339)
+}
 
 type retryHoldError struct{}
 

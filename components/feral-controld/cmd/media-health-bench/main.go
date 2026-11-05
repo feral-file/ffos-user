@@ -78,6 +78,7 @@ func main() {
 			Validator: mediahealth.NewContentValidator(mediahealth.DefaultProbeMaxBytes, nil),
 		},
 		Store: store,
+		Hosts: &mediahealth.HostLimiter{},
 	}
 
 	fmt.Printf("items: %d (unique sources: %d)\n", len(items), uniqueCount(sources))

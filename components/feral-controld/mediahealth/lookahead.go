@@ -21,10 +21,22 @@ import (
 //     Window sources that have no record or are due (Record.Due), one at a
 //     time, with Gap between requests. The hint for a newly broken item
 //     rides the next push (refresher, cutover, re-cast).
-//  2. With nothing ahead to probe, takes one due record not on the wall
-//     from the store's recheck index, under a token bucket of
+//  2. With the window quiet, walks the REST of the wall in play order for
+//     sources that have never been probed: the cast pass covers only its
+//     first items (Prober.Items), so this is how the rest of a long wall
+//     gets its first verdict before playback reaches it, at the same one
+//     request per Gap — a 1,000-item wall is covered in about half an
+//     hour, never in a burst. Due-but-recorded rows out there already show
+//     a verdict and are left to the sweep's budget.
+//  3. With nothing on the wall to probe, takes one due record not on the
+//     wall from the store's recheck index, under a token bucket of
 //     SweepPerHour, so a 100k-record store never becomes 100k probes a
 //     day and a fixed source still heals without being cast again.
+//
+// Every request goes through the Prober's shared HostLimiter: a source on
+// a host under a 429/503 cooldown is stepped over (not held — it becomes
+// eligible again when the cooldown ends), and a slot on its host is taken
+// like the cast pass takes one.
 //
 // Admit, when set, is consulted before each request (the offline cache's
 // resource gate, read-only); a refusal just waits for the next tick.
@@ -67,8 +79,14 @@ type Lookahead struct {
 }
 
 const (
-	DefaultWindow       = 8
-	DefaultGap          = time.Second
+	// DefaultWindow is how far ahead of playback the lookahead keeps
+	// verdicts fresh; 16 items at one request per DefaultGap is half a
+	// minute of work, well ahead of any play duration.
+	DefaultWindow = 16
+	// DefaultGap paces the worker at one request every two seconds, host
+	// agnostic: with the pass no longer bursting, this is the steady rate
+	// an origin sees from one device.
+	DefaultGap          = 2 * time.Second
 	DefaultSweepPerHour = 20
 	// idleTick is how often the worker looks for due work with no wake.
 	idleTick = time.Minute
@@ -162,6 +180,12 @@ func (l *Lookahead) step(ctx context.Context, logger *zap.Logger) bool {
 		logger.Debug("media health: lookahead probe", zap.String("source", res.Source), zap.String("verdict", string(res.Verdict)))
 		return true
 	}
+	if src := l.nextUnprobed(); src != "" {
+		l.hold(src, at)
+		res := l.Prober.ProbeAndRecord(ctx, src)
+		logger.Debug("media health: wall probe", zap.String("source", res.Source), zap.String("verdict", string(res.Verdict)))
+		return true
+	}
 	if src := l.nextDue(at); src != "" {
 		l.hold(src, at)
 		res := l.Prober.ProbeAndRecord(ctx, src)
@@ -235,7 +259,47 @@ func (l *Lookahead) nextAhead(now time.Time) string {
 		return ""
 	}
 	for _, src := range candidates {
-		if records[src].Due(now) && !l.isHeld(src) {
+		if records[src].Due(now) && !l.isHeld(src) && !l.Prober.cooled(src) {
+			return src
+		}
+	}
+	return ""
+}
+
+// nextUnprobed returns the first source beyond the window, in play order,
+// that has no record at all, or "". One read transaction over the rest of
+// the wall per step: bounded by maxObservedItems point reads from the
+// mmap, a few milliseconds every Gap, cheaper than keeping a cursor in
+// step with the cast pass and the sweep writing records underneath it.
+func (l *Lookahead) nextUnprobed() string {
+	l.mu.Lock()
+	sources := l.sources
+	index := l.index
+	l.mu.Unlock()
+	window := l.Window
+	if window <= 0 {
+		window = DefaultWindow
+	}
+	if len(sources) <= window+1 {
+		return ""
+	}
+	candidates := make([]string, 0, len(sources)-window-1)
+	for step := window + 1; step < len(sources); step++ {
+		src := sources[(index+step)%len(sources)]
+		if src == "" || IsDataURI(src) {
+			continue
+		}
+		candidates = append(candidates, src)
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	records, err := l.Store.GetMany(candidates)
+	if err != nil {
+		return ""
+	}
+	for _, src := range candidates {
+		if records[src] == nil && !l.isHeld(src) && !l.Prober.cooled(src) {
 			return src
 		}
 	}

@@ -124,15 +124,34 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
 
 `commandrouter`'s `displayPlaylist` runs `mediahealth.Prober.Preflight` over
 the resolved sources after DP-1 resolution and before the playback lock. Shape
-kept from the preflight: a fixed worker pool (16), wire-identical sources
-probed once (fragment-stripped key — the request is shared, the verdict is
-recorded under every variant's own source, and a variant with its own stored
-verdict keeps it), a per-pass budget of 256 distinct wire URLs, a 5 s per-item deadline covering guard DNS, a 10 s phase ceiling, the
-2048-item skip, and `displayAt` playlists skipped entirely. What changed: no
-early exit on the first alive source — every source inside the budget is
-probed and recorded — and a source with a **conclusive stored verdict**
-(broken or ok inside its window) is answered from the store without a request,
-so a playlist seen before costs no network at cast.
+kept from the preflight: a fixed worker pool, wire-identical sources probed
+once (fragment-stripped key — the request is shared, the verdict is recorded
+under every variant's own source, and a variant with its own stored verdict
+keeps it), a per-pass budget of 256 distinct wire URLs, a 5 s per-item
+deadline covering guard DNS, a 10 s phase ceiling, the 2048-item skip, and
+`displayAt` playlists skipped entirely. What changed: no early exit on the
+first alive source — every source the pass reaches is probed and recorded —
+and a source with a **conclusive stored verdict** (broken or ok inside its
+window) is answered from the store without a request, so a playlist seen
+before costs no network at cast.
+
+The pass is paced, not a burst. It probes the **first 24 sources in play
+order** (`castItems`) that need a request with **4 workers**
+(`castConcurrency`) and at most **2 in flight per host** — a playlist served
+by one CDN runs at 2, whatever the pool — then hands the rest of the wall to
+the lookahead. Items beyond the pass are unknown at cast: no record, no hint,
+fail-open; their hint rides the next push once the lookahead has reached them.
+The all-dead rejection keeps its reach: while **every** source seen so far is
+dead (a stored alive verdict, an inline item or an inconclusive answer ends
+it) the pass continues batch by batch up to the budget, so 200 dead items are
+still refused and 24 dead items in front of a live one still play.
+
+A host that answers **429 or 503** is cooled for its `Retry-After`
+(60 s when it sends none, never more than 1 h) in a `HostLimiter` the pass and
+the lookahead share: sources on a cooled host are stepped over without a
+request and without a record (unknown, not held), and the probed source's own
+transient hold is the origin's `Retry-After` bounded by the usual hour instead
+of a flat hour.
 
 The admission rule is unchanged: the cast is rejected with `sourceUnreachable`
 only when EVERY item is dead (now including a conclusive broken record), and
@@ -142,17 +161,29 @@ by URL.
 
 ### The lookahead
 
-From the status poller's playback observer, `mediahealth.Lookahead` probes the
-next 8 items after the current index (then the current item itself, so a
-one-item playlist still gets its recheck) whose record is missing or due, one
-at a time with a 1 s gap, and — when nothing is ahead — one due record not on
-the wall (excluded inside the index scan, so on-wall rows never shadow them)
-under a budget of 20 per hour, so a fixed source heals without being cast
-again and a 100k-record store never becomes 100k probes a day. A source the
-worker just probed is left alone for 1 h whatever its record says: a probe the
-source guard or the URL-length limit refuses writes no record (a policy
-objection is never a verdict), so without that hold it would stay due and
-block everything behind it. New hints ride the next push.
+From the status poller's playback observer, `mediahealth.Lookahead` works one
+request at a time with a 2 s gap, in this order:
+
+1. the next 16 items after the current index (then the current item itself,
+   so a one-item playlist still gets its recheck) whose record is missing or
+   due;
+2. the rest of the wall, in play order, for sources that have **never been
+   probed** — this is how the items the cast pass left get their first
+   verdict before playback reaches them (a 1,000-item wall is covered in
+   about half an hour, never in a burst); due-but-recorded rows out there
+   already show a verdict and are left to the sweep;
+3. one due record not on the wall (excluded inside the index scan, so on-wall
+   rows never shadow them) under a budget of 20 per hour, so a fixed source
+   heals without being cast again and a 100k-record store never becomes 100k
+   probes a day.
+
+Every request goes through the shared `HostLimiter`: a source on a cooled
+host is stepped over (not held — it is eligible again when the cooldown ends)
+and a slot on its host is taken like the pass takes one. A source the worker
+just probed is left alone for 1 h whatever its record says: a probe the source
+guard or the URL-length limit refuses writes no record (a policy objection is
+never a verdict), so without that hold it would stay due and block everything
+behind it. New hints ride the next push.
 
 ## The hint (controld → player): `mediaHealth` on `displayPlaylist`
 
@@ -297,14 +328,19 @@ cycle).
   "disabled": false,
   "knownBadPageMarkers": ["gateway time-out"],
   "probeMaxBytes": 32768,
-  "lookahead": 8
+  "lookahead": 16,
+  "castItems": 24,
+  "castConcurrency": 4
 }
 ```
 
 `disabled` is the kill switch: no store, no pass (casts forwarded unprobed,
 the pre-#304 behavior), no hints, no lookahead, no per-item status. The
 retired `sourceProbe.disabled` is read as `mediaHealth.disabled`. `lookahead:
--1` disables the lookahead and the background sweep.
+-1` disables the lookahead and the background sweep. `castItems` and
+`castConcurrency` tune the cast-time pass for an origin that still
+rate-limits the defaults; the per-host cap (2 in flight) and the lookahead's
+2 s gap are fixed.
 
 ## Boundaries
 

@@ -82,9 +82,16 @@ type MediaHealthConfig struct {
 	// ProbeMaxBytes is the L0 window (default 32 KiB, the indexer's).
 	ProbeMaxBytes int `json:"probeMaxBytes,omitempty"`
 	// Lookahead is how many upcoming items are probed ahead during play
-	// (default 8); 0 keeps the default, a negative value disables the
+	// (default 16); 0 keeps the default, a negative value disables the
 	// lookahead and the background sweep.
 	Lookahead int `json:"lookahead,omitempty"`
+	// CastItems is how many sources, in play order, the cast-time pass
+	// probes before leaving the rest to the lookahead (default 24); 0
+	// keeps the default. CastConcurrency is that pass's worker pool
+	// (default 4). Both are operator tuning for an origin that still
+	// rate-limits the defaults; the per-host cap (2 in flight) is fixed.
+	CastItems       int `json:"castItems,omitempty"`
+	CastConcurrency int `json:"castConcurrency,omitempty"`
 	// Malformed records that the block did not decode; every field then
 	// reads as its default.
 	Malformed bool `json:"-"`
