@@ -56,6 +56,11 @@ const (
 	// maxDecodedPixels rejects a declared geometry larger than the pinned
 	// viewport could produce before the pixel buffer is allocated.
 	maxDecodedPixels = renderViewport * renderViewport * 2
+	// maxObservedRenderResponses bounds the origins remembered for the
+	// post-render storage clear: a hostile page issuing thousands of
+	// requests must not size an allocation; the clear is best effort and
+	// window-bounded anyway.
+	maxObservedRenderResponses = 4096
 )
 
 // Render implements mediahealth.Renderer.
@@ -93,24 +98,43 @@ func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSe
 		statusMu   sync.Mutex
 		mainStatus int
 		statusSeen bool
+		observed   []Resource
 	)
 	session.On("Network.responseReceived", func(params json.RawMessage) {
 		var ev struct {
 			Type     string `json:"type"`
 			Response struct {
-				Status int `json:"status"`
+				Status int    `json:"status"`
+				URL    string `json:"url"`
 			} `json:"response"`
 		}
-		if err := json.Unmarshal(params, &ev); err != nil || ev.Type != "Document" {
+		if err := json.Unmarshal(params, &ev); err != nil {
 			return
 		}
 		statusMu.Lock()
-		if !statusSeen {
+		defer statusMu.Unlock()
+		if ev.Response.URL != "" && len(observed) < maxObservedRenderResponses {
+			observed = append(observed, Resource{URL: ev.Response.URL})
+		}
+		if ev.Type == "Document" && !statusSeen {
 			statusSeen = true
 			mainStatus = ev.Response.Status
 		}
-		statusMu.Unlock()
 	})
+	// Every origin the page touched — the navigation's, its redirects',
+	// its iframes' and subresources' — has its storage cleared before the
+	// shared browser goes back to the capturer, exactly as a capture
+	// clears its own. The pre-navigation reset can only scope to the
+	// source's origin; a child frame writing storage at another origin
+	// would otherwise survive into the next offline capture and change
+	// what it fetches (PR #443 review, F20). Runs on every exit path, on
+	// its own bounded window, from the capturer's cleanup.
+	defer func() {
+		statusMu.Lock()
+		resources := append([]Resource(nil), observed...)
+		statusMu.Unlock()
+		c.clearObservedOriginsStorage(context.Background(), session, resources)
+	}()
 	// Registered BEFORE Fetch.enable so no paused request can arrive
 	// without a handler (an unanswered pause hangs the request).
 	guard := c.attachSourceGuard(ctx, session)

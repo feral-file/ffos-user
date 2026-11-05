@@ -29,9 +29,9 @@ func TestWireMediaHealthL1_OffByDefaultAndNeedsARenderer(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	asleep := func() bool { return false }
 
-	assert.Nil(t, wireMediaHealthL1(config.MediaHealthConfig{}, store, noopRenderer{}, asleep, nil, zap.NewNop()), "absent block: off")
-	assert.Nil(t, wireMediaHealthL1(config.MediaHealthConfig{L1: &config.MediaHealthL1Config{}}, store, noopRenderer{}, asleep, nil, zap.NewNop()), "present but not enabled: off")
-	assert.Nil(t, wireMediaHealthL1(config.MediaHealthConfig{L1: &config.MediaHealthL1Config{Enabled: true}}, store, nil, asleep, nil, zap.NewNop()), "enabled without a renderer: off")
+	assert.Nil(t, wireMediaHealthL1(config.MediaHealthConfig{}, store, noopRenderer{}, nil, asleep, nil, zap.NewNop()), "absent block: off")
+	assert.Nil(t, wireMediaHealthL1(config.MediaHealthConfig{L1: &config.MediaHealthL1Config{}}, store, noopRenderer{}, nil, asleep, nil, zap.NewNop()), "present but not enabled: off")
+	assert.Nil(t, wireMediaHealthL1(config.MediaHealthConfig{L1: &config.MediaHealthL1Config{Enabled: true}}, store, nil, nil, asleep, nil, zap.NewNop()), "enabled without a renderer: off")
 
 	cfg := config.MediaHealthConfig{L1: &config.MediaHealthL1Config{
 		Enabled: true,
@@ -40,7 +40,7 @@ func TestWireMediaHealthL1_OffByDefaultAndNeedsARenderer(t *testing.T) {
 			{PHash: "not-hex", MaxDistance: 6, Label: "dropped"},
 		},
 	}}
-	l1 := wireMediaHealthL1(cfg, store, noopRenderer{}, asleep, nil, zap.NewNop())
+	l1 := wireMediaHealthL1(cfg, store, noopRenderer{}, nil, asleep, nil, zap.NewNop())
 	require.NotNil(t, l1)
 	assert.False(t, l1.Step(context.Background()), "awake: it renders nothing")
 }

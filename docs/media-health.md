@@ -269,15 +269,22 @@ would hide real art, the worst outcome here.
   same reserved-address guard on every request the page makes, child
   targets included; navigate, settle (15 s; 30 s for the confirmation of a
   blank), viewport-bounded `Page.captureScreenshot`; the main document's
-  status is read from the first `Document` response. The page is stopped
-  before the session is dropped, as a capture does.
+  status is read from the first `Document` response. The URL rendered is the
+  record's **own source** through the gateway policy, fragment kept — never
+  the record's `wireUrl`, which the cast pass copies from a wire-identical
+  sibling (`work#one` and `work#two` are two works). Before the browser goes
+  back to the capturer every origin the page touched has its storage cleared,
+  as a capture clears its own, and the page is stopped before the session is
+  dropped.
 - **Verdict ladder** (ported from ff-indexer-v2's `probe.Classify` and
   `phash`, same pHash algorithm and bit order, same per-channel variance
   blank signal): a known-bad fingerprint match first (`render_known_bad`,
   suspect at once, label kept), then blank (`render_blank`: variance under
   0.001 across every channel — hue without luma spread is art, not blank),
   else ok. A blank concludes only on a **second consecutive blank**, rendered
-  immediately with the longer settle; a real frame resets the count.
+  immediately with the longer settle; a real frame resets the count, and a
+  stalled confirmation keeps the blank pending so the next render is still
+  the long one.
 - **Stalled** (navigation failed, main document not 2xx, capture timed out,
   browser unavailable): no evidence, `l1.lastError` only, retried after 24 h.
 - **Rechecks:** ok after 7 d, suspect after 24 h (a fixed page heals on the

@@ -429,3 +429,73 @@ func TestL1_RunStopsOnContext(t *testing.T) {
 		t.Fatal("Run did not return after cancel")
 	}
 }
+
+// Regressions from the PR #443 review (feralfile-bot, round 1).
+
+// F19: the render navigates the record's OWN source through the gateway
+// policy, fragment kept — never the wire URL the cast pass copied from a
+// sibling.
+func TestRenderURL_OwnSourceThroughThePolicy(t *testing.T) {
+	assert.Equal(t, "https://o/work#two", renderURL("https://o/work#two", nil))
+	rw := fakeRewriter{}
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/a.html#two",
+		renderURL("https://ipfs.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/a.html#two", rw))
+	assert.Equal(t, "https://ipfs.io/ipns/name/x#f", renderURL("https://ipfs.io/ipns/name/x#f", rw), "unmatched: as written")
+
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+	// Two fragment siblings share one L0 request and, with it, one WireURL.
+	for _, src := range []string{"https://o/work#one", "https://o/work#two"} {
+		_, err := store.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200, Declared: "text/html", Sniffed: "text/html", WireURL: "https://o/work#one"})
+		require.NoError(t, err)
+	}
+	r := &fakeRenderer{frames: map[string]*Frame{
+		"https://o/work#one": {Image: checkerboard(), MainStatus: 200},
+		"https://o/work#two": {Image: checkerboard(), MainStatus: 200},
+	}}
+	var asleep atomic.Bool
+	asleep.Store(true)
+	l1 := newTestL1(t, store, r, clock, &asleep)
+	assert.True(t, l1.Step(context.Background()))
+	assert.True(t, l1.Step(context.Background()))
+	assert.Equal(t, 1, r.count("https://o/work#one"))
+	assert.Equal(t, 1, r.count("https://o/work#two"), "each sibling renders as itself")
+}
+
+// F21: a stalled confirmation keeps the blank pending, so the next render
+// is still the long confirmation and a short blank can never conclude.
+func TestL1_StalledConfirmationKeepsTheLongSettle(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+	seedSoftware(t, store, "https://o/slow")
+	r := &fakeRenderer{frames: map[string]*Frame{"https://o/slow": {Image: uniform(color.Black), MainStatus: 200}}}
+	var asleep atomic.Bool
+	asleep.Store(true)
+	l1 := newTestL1(t, store, r, clock, &asleep)
+
+	assert.True(t, l1.Step(context.Background()), "first render: blank, confirmation due")
+	r.mu.Lock()
+	r.errs = map[string]error{"https://o/slow": errors.New("navigation failed")}
+	r.mu.Unlock()
+	assert.True(t, l1.Step(context.Background()), "the confirmation stalls")
+	rec, err := store.Get("https://o/slow")
+	require.NoError(t, err)
+	assert.Equal(t, RenderStalled, rec.L1.Verdict)
+	assert.Equal(t, 1, rec.L1.ConsecutiveBlank, "the blank stays pending")
+	assert.Equal(t, StateOK, rec.State)
+
+	clock.Advance(RecheckL1Stalled + time.Second)
+	r.mu.Lock()
+	r.errs = nil
+	r.mu.Unlock()
+	assert.True(t, l1.Step(context.Background()), "tomorrow's render")
+	settles := []time.Duration{}
+	for _, c := range r.calls {
+		settles = append(settles, c.settle)
+	}
+	assert.Equal(t, []time.Duration{time.Millisecond, DefaultConfirmSettle, DefaultConfirmSettle}, settles,
+		"the render after a stalled confirmation is still the long confirmation")
+	rec, err = store.Get("https://o/slow")
+	require.NoError(t, err)
+	assert.Equal(t, StateSuspect, rec.State, "a long blank after a short blank concludes")
+}

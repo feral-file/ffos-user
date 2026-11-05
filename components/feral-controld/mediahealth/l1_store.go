@@ -103,6 +103,10 @@ func (s *Store) ApplyRender(source string, r RenderResult) (*Record, error) {
 		brokenElsewhere := rec.State == StateBroken && rec.Layer != LayerL1
 		switch r.Verdict {
 		case RenderStalled:
+			// ConsecutiveBlank is left as it was: a stalled confirmation
+			// keeps the blank pending, so the next render is still the
+			// long confirmation (the runner keys on the count, not on
+			// Verdict).
 			l1.Next = now.Add(RecheckL1Stalled)
 		case RenderOK:
 			l1.ConsecutiveBlank = 0

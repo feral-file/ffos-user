@@ -1313,7 +1313,7 @@ func initializeApp(
 		if offlineCacheAdmission != nil {
 			admit = func() bool { return offlineCacheAdmission.Admit(offlinecache.ClassSoftware).Allowed }
 		}
-		if l1 := wireMediaHealthL1(config.Get().MediaHealthTuning(logger), mediaHealthSvc.Store(), offlineCacheRenderer,
+		if l1 := wireMediaHealthL1(config.Get().MediaHealthTuning(logger), mediaHealthSvc.Store(), offlineCacheRenderer, uaPolicy,
 			func() bool { return devicectl.PlayerAsleep(executor) }, admit, logger); l1 != nil {
 			go l1.Run(context)
 		}

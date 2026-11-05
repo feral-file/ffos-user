@@ -30,6 +30,7 @@ type renderSession struct {
 	params   map[string]map[string]interface{}
 	handlers map[string]func(json.RawMessage)
 	navError string
+	clears   []string
 	shot     []byte
 	fail     map[string]error
 	// onNavigate runs when Page.navigate is sent, after the handlers are
@@ -45,6 +46,11 @@ func (s *renderSession) Send(_ context.Context, method string, params map[string
 	s.mu.Lock()
 	s.sent = append(s.sent, method)
 	s.params[method] = params
+	if method == "Storage.clearDataForOrigin" {
+		if origin, ok := params["origin"].(string); ok {
+			s.clears = append(s.clears, origin)
+		}
+	}
 	navErr, shot, failErr, onNav := s.navError, s.shot, s.fail[method], s.onNavigate
 	s.mu.Unlock()
 	if failErr != nil {
@@ -80,6 +86,12 @@ func (s *renderSession) emit(method string, payload string) {
 	if h != nil {
 		h(json.RawMessage(payload))
 	}
+}
+
+func (s *renderSession) clearedOrigins() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.clears...)
 }
 
 func (s *renderSession) methods() []string {
@@ -210,4 +222,34 @@ func TestNewMediaHealthRenderer_NilForForeignCapturer(t *testing.T) {
 	r := NewMediaHealthRenderer(&capturer{})
 	assert.NotNil(t, r)
 	assert.Implements(t, (*mediahealth.Renderer)(nil), r)
+}
+
+// F20 (PR #443 review): every origin the render touched is cleared before
+// the browser goes back to the capturer, on the success and the failure
+// path alike.
+func TestMediaHealthRenderer_ClearsEveryObservedOrigin(t *testing.T) {
+	s := newRenderSession()
+	s.shot = pngOf(color.White, 8, 8)
+	s.onNavigate = func(s *renderSession) {
+		s.emit("Network.responseReceived", `{"type":"Document","response":{"status":200,"url":"https://art.example/p"}}`)
+		s.emit("Network.responseReceived", `{"type":"Document","response":{"status":200,"url":"https://frames.example/inner"}}`)
+		s.emit("Network.responseReceived", `{"type":"Script","response":{"status":200,"url":"https://cdn.example/lib.js"}}`)
+		s.emit("Network.responseReceived", `{"type":"Image","response":{"status":200,"url":"data:image/png;base64,AAAA"}}`)
+	}
+	r := newTestRenderer(t)
+	_, err := r.renderOnSession(context.Background(), s, "https://art.example/p", time.Millisecond)
+	require.NoError(t, err)
+	cleared := s.clearedOrigins()
+	assert.ElementsMatch(t, []string{"https://art.example", "https://art.example", "https://frames.example", "https://cdn.example"}, cleared,
+		"the pre-navigation reset of the source origin, then every observed http(s) origin after the render")
+
+	// The failure path clears too.
+	s = newRenderSession()
+	s.navError = "net::ERR_FAILED"
+	s.onNavigate = func(s *renderSession) {
+		s.emit("Network.responseReceived", `{"type":"Document","response":{"status":302,"url":"https://redirect.example/x"}}`)
+	}
+	_, err = r.renderOnSession(context.Background(), s, "https://art.example/p", time.Millisecond)
+	require.Error(t, err)
+	assert.Contains(t, s.clearedOrigins(), "https://redirect.example")
 }

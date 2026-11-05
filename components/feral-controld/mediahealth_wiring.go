@@ -125,7 +125,7 @@ func mediaHealthCursorReconciler(svc *mediahealth.Service) func(context.Context)
 // §6) when mediaHealth.l1.enabled is set and the offline cache's renderer
 // exists; nil otherwise, with one log line saying why, so a device whose
 // operator expected L1 can see from the journal that it is off.
-func wireMediaHealthL1(cfg config.MediaHealthConfig, store *mediahealth.Store, renderer mediahealth.Renderer, asleep, admit func() bool, logger *zap.Logger) *mediahealth.L1 {
+func wireMediaHealthL1(cfg config.MediaHealthConfig, store *mediahealth.Store, renderer mediahealth.Renderer, rewriter *uarewrite.Policy, asleep, admit func() bool, logger *zap.Logger) *mediahealth.L1 {
 	if cfg.L1 == nil || !cfg.L1.Enabled {
 		logger.Info("media health: L1 render probe off (mediaHealth.l1.enabled is not set)")
 		return nil
@@ -143,7 +143,7 @@ func wireMediaHealthL1(cfg config.MediaHealthConfig, store *mediahealth.Store, r
 		}
 		known = append(known, parsed)
 	}
-	l1 := mediahealth.NewL1(mediahealth.L1Config{
+	l1cfg := mediahealth.L1Config{
 		Store:                  store,
 		Renderer:               renderer,
 		Asleep:                 asleep,
@@ -154,7 +154,13 @@ func wireMediaHealthL1(cfg config.MediaHealthConfig, store *mediahealth.Store, r
 		KnownBad:               known,
 		Settle:                 time.Duration(cfg.L1.SettleMs) * time.Millisecond,
 		ConfirmSettle:          time.Duration(cfg.L1.ConfirmSettleMs) * time.Millisecond,
-	})
+	}
+	// Same typed-nil guard as wireMediaHealth: a nil *Policy must never
+	// land in the interface field.
+	if rewriter != nil {
+		l1cfg.Rewriter = rewriter
+	}
+	l1 := mediahealth.NewL1(l1cfg)
 	logger.Info("media health: L1 render probe on",
 		zap.Int("max_per_night", cfg.L1.MaxPerNight),
 		zap.Int("known_bad_fingerprints", len(known)),
