@@ -73,14 +73,31 @@ var ErrPlaylistInvalid = errors.New("playlistInvalid")
 var ErrUnsupportedItemSchema = errors.New("dynamicQuery: unsupported itemSchema")
 
 const (
-	// MaxPlaylistBodyBytes bounds a playlist document fetched by URL, matching
-	// hub.MAX_REQUEST_BODY_BYTES for inline casts so both ingress paths admit
-	// the same worst-case document. It is read before decoding or signature
-	// verification: every signatures[] entry costs two JCS canonicalizations
-	// of the whole body, so an unbounded remote response — reachable by any
-	// LAN caller naming a URL — would otherwise buy CPU and memory the inline
-	// cap deliberately denies (feral-file/ffos-user#307).
-	MaxPlaylistBodyBytes = 4 << 20
+	// MaxPlaylistBodyBytes bounds a playlist document fetched by URL. It is
+	// deliberately LARGER than hub.MAX_REQUEST_BODY_BYTES, which still caps
+	// an inline cast at 4 MiB: the five Feral File series published between
+	// 4.9 and 8.9 MiB are to be displayable by URL and not inline
+	// (feral-file/feral-file#3597), and the two paths do not carry the same
+	// worst case. The hub admits hub.MAX_INFLIGHT_REQUESTS (64) bodies at the
+	// door, before any gate; a URL fetch runs inside the displayPlaylist
+	// handler, behind the command gate's `heavy` policy (Weight 4 of a 16
+	// budget), so at most 4 are ever in flight. Raising the inline cap would
+	// multiply by 64 what raising this one multiplies by 4.
+	//
+	// It is read before decoding or signature verification, because both
+	// scale with the body: the JSON decode into a map costs ~2.6x the body in
+	// heap (measured on the 8.49 MiB document), and verification costs one
+	// JCS canonicalization of the whole document — once per call, not two per
+	// signatures[] entry as it did before the dp1-go version this module pins
+	// (see sigverify.MaxSignatures for what that changed). An unbounded remote
+	// response is reachable by any LAN caller naming a URL, so the bound stays
+	// (feral-file/ffos-user#307).
+	//
+	// 10 MiB over the largest published document (8.9 MiB) is headroom on
+	// purpose: these documents grow as series mint out — one of the five
+	// gained 60 KiB during the investigation — and a bound that has to move
+	// with every release is a bound that will be wrong on fielded devices.
+	MaxPlaylistBodyBytes = 10 << 20
 
 	DEFAULT_DURATION             = 300
 	MINIMAL_PLAYLIST_ITEMS_LIMIT = 50
