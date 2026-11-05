@@ -150,6 +150,7 @@ func wireMediaHealthL1(cfg config.MediaHealthConfig, store *mediahealth.Store, r
 		Admit:                  admit,
 		Logger:                 logger,
 		MaxPerNight:            cfg.L1.MaxPerNight,
+		MinAsleep:              time.Duration(cfg.L1.MinAsleepSeconds) * time.Second,
 		BlankVarianceThreshold: cfg.L1.BlankVarianceThreshold,
 		KnownBad:               known,
 		Settle:                 time.Duration(cfg.L1.SettleMs) * time.Millisecond,
@@ -163,6 +164,7 @@ func wireMediaHealthL1(cfg config.MediaHealthConfig, store *mediahealth.Store, r
 	l1 := mediahealth.NewL1(l1cfg)
 	logger.Info("media health: L1 render probe on",
 		zap.Int("max_per_night", cfg.L1.MaxPerNight),
+		zap.Int("min_asleep_seconds", cfg.L1.MinAsleepSeconds),
 		zap.Int("known_bad_fingerprints", len(known)),
 		zap.Bool("admission_gate", admit != nil))
 	return l1

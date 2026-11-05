@@ -301,6 +301,7 @@ func newTestL1(t *testing.T, store *Store, r Renderer, clock *testClock, asleep 
 		Now:       clock.Now,
 		Settle:    time.Millisecond,
 		GateWatch: time.Millisecond,
+		MinAsleep: -1, // no grace: it has its own test
 	})
 }
 
@@ -343,7 +344,7 @@ func TestL1_GateCapAndVerdicts(t *testing.T) {
 	assert.Equal(t, RenderOK, rec.L1.Verdict)
 
 	// The nightly cap, reset by the calendar day.
-	capped := NewL1(L1Config{Store: store, Renderer: r, Asleep: asleep.Load, Now: clock.Now, MaxPerNight: 1, Settle: time.Millisecond, GateWatch: time.Millisecond})
+	capped := NewL1(L1Config{Store: store, Renderer: r, Asleep: asleep.Load, Now: clock.Now, MaxPerNight: 1, Settle: time.Millisecond, GateWatch: time.Millisecond, MinAsleep: -1})
 	clock.Advance(RecheckL1OK + time.Second)
 	assert.True(t, capped.Step(context.Background()))
 	assert.False(t, capped.Step(context.Background()), "one per night")
@@ -351,7 +352,7 @@ func TestL1_GateCapAndVerdicts(t *testing.T) {
 	assert.True(t, capped.Step(context.Background()), "a new day, a new budget")
 
 	// Admission refusal waits.
-	refused := NewL1(L1Config{Store: store, Renderer: r, Asleep: asleep.Load, Admit: func() bool { return false }, Now: clock.Now, Settle: time.Millisecond})
+	refused := NewL1(L1Config{Store: store, Renderer: r, Asleep: asleep.Load, Admit: func() bool { return false }, Now: clock.Now, Settle: time.Millisecond, MinAsleep: -1})
 	clock.Advance(RecheckL1OK + time.Second)
 	assert.False(t, refused.Step(context.Background()))
 }
@@ -418,7 +419,7 @@ func TestL1_RunStopsOnContext(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	store := newL1Store(t, clock)
 	var asleep atomic.Bool
-	l1 := NewL1(L1Config{Store: store, Renderer: &fakeRenderer{}, Asleep: asleep.Load, Now: clock.Now, Tick: time.Millisecond})
+	l1 := NewL1(L1Config{Store: store, Renderer: &fakeRenderer{}, Asleep: asleep.Load, Now: clock.Now, Tick: time.Millisecond, MinAsleep: -1})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { l1.Run(ctx); close(done) }()
@@ -593,7 +594,7 @@ func TestL1_SuspectRecheckUsesTheLongSettle(t *testing.T) {
 	r.frames[src] = &Frame{Image: uniform(color.Black), MainStatus: 200}
 	var asleep atomic.Bool
 	asleep.Store(true)
-	l1 := NewL1(L1Config{Store: store, Renderer: r, Asleep: asleep.Load, Now: clock.Now, Settle: time.Millisecond, ConfirmSettle: 7 * time.Millisecond, GateWatch: time.Millisecond})
+	l1 := NewL1(L1Config{Store: store, Renderer: r, Asleep: asleep.Load, Now: clock.Now, Settle: time.Millisecond, ConfirmSettle: 7 * time.Millisecond, GateWatch: time.Millisecond, MinAsleep: -1})
 	clock.Advance(RecheckL1Suspect + time.Second)
 	r.frames[src] = &Frame{Image: checkerboard(), MainStatus: 200} // what a 7 ms render shows
 	assert.True(t, l1.Step(context.Background()))
@@ -610,4 +611,37 @@ func TestL1_SuspectRecheckUsesTheLongSettle(t *testing.T) {
 	clock.Advance(RecheckL1Suspect + time.Second)
 	assert.True(t, l1.Step(context.Background()))
 	assert.Equal(t, 7*time.Millisecond, r.calls[1].settle)
+}
+
+// The grace period: the panel must have been confirmed asleep for
+// MinAsleep before the first render, counted from the first asleep
+// sighting; any wake restarts it, so a short manual nap never starts the
+// headless browser.
+func TestL1_GracePeriodAfterSleep(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+	seedSoftware(t, store, "https://o/html")
+	r := &fakeRenderer{frames: map[string]*Frame{"https://o/html": {Image: checkerboard(), MainStatus: 200}}}
+	var asleep atomic.Bool
+	l1 := NewL1(L1Config{Store: store, Renderer: r, Asleep: asleep.Load, Now: clock.Now, Settle: time.Millisecond, GateWatch: time.Millisecond, MinAsleep: 2 * time.Minute})
+
+	asleep.Store(true)
+	assert.False(t, l1.Step(context.Background()), "just asleep: inside the grace period")
+	clock.Advance(90 * time.Second)
+	assert.False(t, l1.Step(context.Background()), "still inside it")
+	assert.Empty(t, r.calls, "no headless render was started")
+
+	// A nap that ends inside the grace: the clock restarts on the next sleep.
+	asleep.Store(false)
+	assert.False(t, l1.Step(context.Background()))
+	asleep.Store(true)
+	assert.False(t, l1.Step(context.Background()), "the new sleep's first sighting starts a new grace")
+	clock.Advance(90 * time.Second)
+	assert.False(t, l1.Step(context.Background()), "the grace restarted with the new sleep")
+	clock.Advance(31 * time.Second)
+	assert.True(t, l1.Step(context.Background()), "past the grace: the render runs")
+	assert.Len(t, r.calls, 1)
+
+	// The default applies when unset.
+	assert.Equal(t, DefaultMinAsleep, NewL1(L1Config{}).cfg.MinAsleep)
 }

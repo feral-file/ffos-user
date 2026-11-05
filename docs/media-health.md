@@ -250,10 +250,14 @@ blank frame is weaker evidence than a byte-level failure, and a false blank
 would hide real art, the worst outcome here.
 
 - **Gate.** Renders only while `devicectl.PlayerAsleep` is true: the sleep
-  schedule wants the panel asleep AND the player confirmed it (any other
-  tracker state reads awake). The offline cache's admission gate, when
-  enabled, is consulted read-only before each render. An in-flight render is
-  cancelled when the gate closes (the panel wakes, a cast interrupts the
+  schedule (or a manual sleep from the controller — the same override
+  path) wants the panel asleep AND the player confirmed it (any other
+  tracker state reads awake) — and has been for at least `minAsleepSeconds`
+  (default 120; negative disables the grace), counted from the first asleep sighting; any wake restarts
+  that grace, so a short manual nap never starts the headless browser. The
+  offline cache's admission gate, when enabled, is consulted read-only
+  before each render. An in-flight render is cancelled within a couple of
+  seconds when the gate closes (the panel wakes, a cast interrupts the
   night); a cancelled render records nothing and the candidate stays due.
 - **Candidates** (`Store.L1Candidates`): records whose L0 sniffed or
   declared type is HTML, or that the player rendered in an iframe; never
@@ -352,6 +356,7 @@ cycle).
   "l1": {
     "enabled": false,
     "maxPerNight": 200,
+    "minAsleepSeconds": 120,
     "blankVarianceThreshold": 0.001,
     "settleMs": 15000,
     "confirmSettleMs": 30000,

@@ -877,9 +877,9 @@ func TestMediaHealthTuning(t *testing.T) {
 		if got := (&config.Config{}).MediaHealthTuning(nil); got.L1 != nil {
 			t.Fatalf("l1 must be absent (off) by default: %+v", got.L1)
 		}
-		c := &config.Config{MediaHealth: []byte(`{"l1":{"enabled":true,"maxPerNight":50,"blankVarianceThreshold":0.002,"settleMs":5000,"confirmSettleMs":9000,"knownBad":[{"phash":"0xabc","maxDistance":6,"label":"kubo-500"}]}}`)}
+		c := &config.Config{MediaHealth: []byte(`{"l1":{"enabled":true,"maxPerNight":50,"minAsleepSeconds":300,"blankVarianceThreshold":0.002,"settleMs":5000,"confirmSettleMs":9000,"knownBad":[{"phash":"0xabc","maxDistance":6,"label":"kubo-500"}]}}`)}
 		got := c.MediaHealthTuning(nil)
-		if got.L1 == nil || !got.L1.Enabled || got.L1.MaxPerNight != 50 || got.L1.BlankVarianceThreshold != 0.002 ||
+		if got.L1 == nil || !got.L1.Enabled || got.L1.MaxPerNight != 50 || got.L1.MinAsleepSeconds != 300 || got.L1.BlankVarianceThreshold != 0.002 ||
 			got.L1.SettleMs != 5000 || got.L1.ConfirmSettleMs != 9000 || len(got.L1.KnownBad) != 1 ||
 			got.L1.KnownBad[0].PHash != "0xabc" || got.L1.KnownBad[0].MaxDistance != 6 || got.L1.KnownBad[0].Label != "kubo-500" {
 			t.Fatalf("unexpected l1 decode: %+v", got.L1)

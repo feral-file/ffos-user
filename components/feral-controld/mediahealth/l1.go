@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -118,6 +119,11 @@ const (
 	DefaultMaxPerNight = 200
 	// DefaultL1Tick is how often the runner re-checks its gate.
 	DefaultL1Tick = time.Minute
+	// DefaultMinAsleep is how long the panel must have been confirmed
+	// asleep before the first render: a short manual nap (sleep, then a
+	// wake seconds later) should never cost a headless Chromium start,
+	// and a wake resets the clock.
+	DefaultMinAsleep = 2 * time.Minute
 	// defaultGateWatch is how often an in-flight render re-checks the gate
 	// so a wake (or a cast) cancels it rather than letting it finish.
 	defaultGateWatch = 2 * time.Second
@@ -251,6 +257,10 @@ type L1Config struct {
 	// Admit, when set, is the device resource gate (the offline cache's,
 	// read-only); a refusal just waits for the next tick.
 	Admit func() bool
+	// MinAsleep is the grace period after Asleep first reports true before
+	// the gate opens (DefaultMinAsleep when 0; negative = none); any wake
+	// restarts it.
+	MinAsleep time.Duration
 	// Rewriter is the kiosk's gateway policy (the L0 probe's), applied to
 	// the record's OWN source to derive the URL to render; nil renders the
 	// source as written.
@@ -278,6 +288,12 @@ type L1 struct {
 
 	nightDay   string
 	nightCount int
+
+	// asleepSince is when Asleep first reported true in the current sleep
+	// (zero while awake); the gate opens MinAsleep after it. Guarded by
+	// gateMu: the render's gate watcher polls while Step is in flight.
+	gateMu      sync.Mutex
+	asleepSince time.Time
 }
 
 // NewL1 builds the runner. Store, Renderer and Asleep are required.
@@ -299,6 +315,12 @@ func NewL1(cfg L1Config) *L1 {
 	}
 	if cfg.GateWatch <= 0 {
 		cfg.GateWatch = defaultGateWatch
+	}
+	switch {
+	case cfg.MinAsleep == 0:
+		cfg.MinAsleep = DefaultMinAsleep
+	case cfg.MinAsleep < 0:
+		cfg.MinAsleep = 0 // no grace: render on the first asleep sighting
 	}
 	l := &L1{cfg: cfg, logger: cfg.Logger, now: cfg.Now}
 	if l.logger == nil {
@@ -331,8 +353,22 @@ func (l *L1) Run(ctx context.Context) {
 	}
 }
 
+// gate says whether a render may run now: the panel confirmed asleep
+// for at least MinAsleep, and the resource gate admits. The grace period
+// is counted from the first asleep sighting of the current sleep; a wake
+// (any false sighting) clears it, so the next sleep earns it again.
 func (l *L1) gate() bool {
+	l.gateMu.Lock()
+	defer l.gateMu.Unlock()
 	if l.cfg.Asleep == nil || !l.cfg.Asleep() {
+		l.asleepSince = time.Time{}
+		return false
+	}
+	now := l.now()
+	if l.asleepSince.IsZero() {
+		l.asleepSince = now
+	}
+	if l.cfg.MinAsleep > 0 && now.Sub(l.asleepSince) < l.cfg.MinAsleep {
 		return false
 	}
 	if l.cfg.Admit != nil && !l.cfg.Admit() {

@@ -102,6 +102,11 @@ type MediaHealthL1Config struct {
 	Enabled bool `json:"enabled"`
 	// MaxPerNight caps renders per local calendar day (default 200).
 	MaxPerNight int `json:"maxPerNight,omitempty"`
+	// MinAsleepSeconds is how long the panel must have been confirmed
+	// asleep before the first render (default 120; negative = none); a
+	// wake restarts it, so a short manual nap never starts the headless
+	// browser.
+	MinAsleepSeconds int `json:"minAsleepSeconds,omitempty"`
 	// BlankVarianceThreshold is the per-channel variance below which a
 	// frame is blank (default 0.001, the indexer's); values outside
 	// (0, 0.25) keep the default.
