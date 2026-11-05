@@ -1301,10 +1301,18 @@ const (
 // likewise uncovered. Both are recorded in
 // docs/offline-artwork-capture.md §9.
 func (c *capturer) attachSourceGuard(ctx context.Context, session CDPSession) *captureGuard {
+	return c.attachSourceGuardWithRewrite(ctx, session, nil)
+}
+
+// attachSourceGuardWithRewrite is attachSourceGuard with the per-request
+// rewrite installed BEFORE the handler is armed, so no paused request can
+// ever be judged without it.
+func (c *capturer) attachSourceGuardWithRewrite(ctx context.Context, session CDPSession, rewrite func(string, map[string]string) (string, []map[string]string, bool)) *captureGuard {
 	g := &captureGuard{
 		c:           c,
 		slots:       make(chan struct{}, captureGuardConcurrency),
 		targetSlots: make(chan struct{}, captureTargetSetupConcurrency),
+		rewrite:     rewrite,
 	}
 	g.arm(ctx, session)
 	return g
@@ -1316,6 +1324,14 @@ func (c *capturer) attachSourceGuard(ctx context.Context, session CDPSession) *c
 type captureGuard struct {
 	c     *capturer
 	slots chan struct{}
+	// rewrite, when set (the media-health L1 render only; nil for every
+	// capture), is the kiosk's gateway policy applied to each paused
+	// request BEFORE the guard judges it: the URL to continue with (or
+	// "" to keep it) and the header set to continue with (or nil), as
+	// the kiosk's own uarewrite interceptor does per request. The guard
+	// then checks the destination that will actually be dialed, so a
+	// rewrite can never route around it.
+	rewrite func(rawURL string, headers map[string]string) (newURL string, newHeaders []map[string]string, apply bool)
 	// targetSlots bounds CHILD-TARGET SETUP, which is separate work from
 	// deciding a paused request: each attach performs several CDP calls
 	// (Fetch.enable, setAutoAttach, resume), and a hostile page can create
@@ -1338,7 +1354,8 @@ func (g *captureGuard) arm(ctx context.Context, session CDPSession) {
 		var evt struct {
 			RequestID string `json:"requestId"`
 			Request   struct {
-				URL string `json:"url"`
+				URL     string            `json:"url"`
+				Headers map[string]string `json:"headers"`
 			} `json:"request"`
 		}
 		if err := c.json.Unmarshal(params, &evt); err != nil {
@@ -1351,7 +1368,7 @@ func (g *captureGuard) arm(ctx context.Context, session CDPSession) {
 		case slots <- struct{}{}:
 			go func() {
 				defer func() { <-slots }()
-				c.decidePausedRequest(ctx, session, evt.RequestID, evt.Request.URL)
+				g.decide(ctx, session, evt.RequestID, evt.Request.URL, evt.Request.Headers)
 			}()
 		default:
 			saturatedOnce.Do(func() {
@@ -1364,12 +1381,33 @@ func (g *captureGuard) arm(ctx context.Context, session CDPSession) {
 
 // decidePausedRequest allows or blocks one paused request.
 func (c *capturer) decidePausedRequest(ctx context.Context, session CDPSession, requestID, rawURL string) {
+	(&captureGuard{c: c}).decide(ctx, session, requestID, rawURL, nil)
+}
+
+// decide judges one paused request: the guard's rewrite (if any) first, so
+// the URL checked is the one that will be dialed, then the reserved-address
+// policy, then continue (with the rewritten URL/headers) or fail.
+func (g *captureGuard) decide(ctx context.Context, session CDPSession, requestID, rawURL string, headers map[string]string) {
+	c := g.c
 	decideCtx, cancel := context.WithTimeout(ctx, captureGuardDecisionTimeout)
 	defer cancel()
 
-	if err := c.pausedRequestAllowed(decideCtx, rawURL); err != nil {
+	args := map[string]interface{}{"requestId": requestID}
+	target := rawURL
+	if g.rewrite != nil {
+		if newURL, newHeaders, ok := g.rewrite(rawURL, headers); ok {
+			if newURL != "" && newURL != rawURL {
+				args["url"] = newURL
+				target = newURL
+			}
+			if newHeaders != nil {
+				args["headers"] = newHeaders
+			}
+		}
+	}
+	if err := c.pausedRequestAllowed(decideCtx, target); err != nil {
 		c.logger.Warn("offline cache capture: blocked page request",
-			zap.String("url", truncateSourceForLog(rawURL)), zap.Error(err))
+			zap.String("url", truncateSourceForLog(target)), zap.Error(err))
 		// Answered on its OWN context, not decideCtx. The dominant reason
 		// the check above fails is decideCtx expiring inside addrsFor (a
 		// hanging resolver — the case its 5s bound exists for), and
@@ -1387,9 +1425,7 @@ func (c *capturer) decidePausedRequest(ctx context.Context, session CDPSession, 
 		}
 		return
 	}
-	if _, err := session.Send(decideCtx, "Fetch.continueRequest", map[string]interface{}{
-		"requestId": requestID,
-	}); err != nil {
+	if _, err := session.Send(decideCtx, "Fetch.continueRequest", args); err != nil {
 		c.logger.Warn("offline cache capture: Fetch.continueRequest failed",
 			zap.String("request_id", requestID), zap.Error(err))
 	}

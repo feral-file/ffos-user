@@ -499,3 +499,37 @@ func TestL1_StalledConfirmationKeepsTheLongSettle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StateSuspect, rec.State, "a long blank after a short blank concludes")
 }
+
+// F23 (round 2): an L0 success refreshes a suspect record's L0 metadata but
+// never its state; a play success or an L1 render heals it, an L0 failure
+// still outranks it.
+func TestApplyProbe_AliveKeepsSuspect(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+	src := "https://o/html"
+	seedSoftware(t, store, src)
+	_, err := store.ApplyRender(src, RenderResult{Verdict: RenderKnownBad, PHash: 3, Variance: 0.1, Label: "kubo-500"})
+	require.NoError(t, err)
+	clock.Advance(RecheckOK + time.Second)
+
+	rec, err := store.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200, Declared: "text/html", Sniffed: "text/html"})
+	require.NoError(t, err)
+	assert.Equal(t, StateSuspect, rec.State, "valid bytes do not heal a render verdict")
+	assert.Equal(t, LayerL1, rec.Layer)
+	assert.Equal(t, ReasonRenderKnownBad, rec.Reason)
+	assert.Equal(t, 200, rec.HTTPStatus, "but the L0 metadata is refreshed")
+	assert.WithinDuration(t, clock.Now().Add(RecheckOK), rec.RecheckAfter, time.Second, "and so is the L0 recheck")
+	assert.Equal(t, RenderKnownBad, rec.L1.Verdict)
+
+	rec, err = store.ApplyOutcome(Outcome{Seq: 1, Source: src, Kind: OutcomeOK, Stage: StageReady, At: "t"}, true)
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State, "a real play heals it")
+
+	_, err = store.ApplyRender(src, RenderResult{Verdict: RenderBlank})
+	require.NoError(t, err)
+	_, err = store.ApplyRender(src, RenderResult{Verdict: RenderBlank})
+	require.NoError(t, err)
+	rec, err = store.ApplyProbe(src, ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
+	require.NoError(t, err)
+	assert.Equal(t, StateBroken, rec.State, "an L0 failure still outranks suspect")
+}

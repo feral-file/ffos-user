@@ -434,16 +434,24 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 		}
 		switch res.Verdict {
 		case VerdictAlive:
-			rec.State = StateOK
-			rec.Layer = LayerL0
-			rec.Category, rec.Reason = "", ""
 			rec.HTTPStatus = res.Status
 			rec.DeclaredType, rec.SniffedType = res.Declared, res.Sniffed
-			rec.CheckedAt = now
 			rec.RecheckAfter = now.Add(RecheckOK)
 			rec.ConsecutiveBroken = 0
 			rec.LastError, rec.LastErrorAt = "", nil
 			rec.RetryAfter = time.Time{}
+			if rec.State == StateSuspect {
+				// Valid bytes say nothing about a frame that rendered
+				// blank or as an error page: the L0 metadata and recheck
+				// are refreshed, the L1 verdict stands until a play
+				// success or a real L1 render heals it (PR #443 review,
+				// F23).
+				return true
+			}
+			rec.State = StateOK
+			rec.Layer = LayerL0
+			rec.Category, rec.Reason = "", ""
+			rec.CheckedAt = now
 		case VerdictDead:
 			if rec.State == StateBroken && rec.Layer == LayerL0 {
 				rec.ConsecutiveBroken++

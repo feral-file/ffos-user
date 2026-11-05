@@ -380,12 +380,15 @@ type Runtime struct {
 	// interface (OnItemStateChanged only), which has no Close method, so
 	// Service cannot own this shutdown step itself.
 	Notifier *Notifier
-	// MediaHealthRenderer is the media-health L1 render probe over this
-	// cache's headless Chromium and source guard (mediahealth_renderer.go);
-	// nil when the capturer is not the package's own. Admission is the
-	// resource gate, read-only, for the same consumer; nil when disabled.
-	MediaHealthRenderer mediahealth.Renderer
-	Admission           AdmissionController
+	// NewMediaHealthRenderer builds the media-health L1 render probe over
+	// this cache's headless Chromium and source guard
+	// (mediahealth_renderer.go) under the kiosk's gateway policy, which
+	// main builds after this bootstrap — hence a factory, not a value. It
+	// answers nil when the capturer is not the package's own. Admission is
+	// the resource gate, read-only, for the same consumer; nil when
+	// disabled.
+	NewMediaHealthRenderer func(policy mediahealth.Rewriter) mediahealth.Renderer
+	Admission              AdmissionController
 	// SysMetricsSink, when non-nil (the admission gate is enabled), is
 	// main.go's hook for feeding monitord's raw sysmetrics payloads into
 	// the gate — wired to mediator.SetSysMetricsObserver so the mediator
@@ -516,7 +519,10 @@ func Bootstrap(
 		ObservePlayback: observePlayback, SetCacheChanged: func(fn func()) { worker.onCacheChanged = fn },
 		Service: svc, KioskReplay: kioskReplay, ScopeLost: scopeLost,
 		StaticServer: staticServer, Notifier: notifier, SysMetricsSink: sysMetricsSink,
-		MediaHealthRenderer: NewMediaHealthRenderer(capturer), Admission: admission,
+		NewMediaHealthRenderer: func(policy mediahealth.Rewriter) mediahealth.Renderer {
+			return NewMediaHealthRenderer(capturer, policy)
+		},
+		Admission: admission,
 	}
 }
 

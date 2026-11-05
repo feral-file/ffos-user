@@ -1161,7 +1161,7 @@ func initializeApp(
 	var offlineCacheNotifier *offlinecache.Notifier
 	var offlineCacheSysMetricsSink func(raw []byte)
 	var offlineCacheChanged func(func())
-	var offlineCacheRenderer mediahealth.Renderer
+	var offlineCacheRendererFactory func(mediahealth.Rewriter) mediahealth.Renderer
 	var offlineCacheAdmission offlinecache.AdmissionController
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
@@ -1176,7 +1176,7 @@ func initializeApp(
 		offlineCacheNotifier = ocRuntime.Notifier
 		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
 		offlineCacheChanged = ocRuntime.SetCacheChanged
-		offlineCacheRenderer = ocRuntime.MediaHealthRenderer
+		offlineCacheRendererFactory = ocRuntime.NewMediaHealthRenderer
 		offlineCacheAdmission = ocRuntime.Admission
 		if ocRuntime.ObservePlayback != nil {
 			playbackObservers = append(playbackObservers, func(st *status.PlayerStatus) {
@@ -1313,7 +1313,18 @@ func initializeApp(
 		if offlineCacheAdmission != nil {
 			admit = func() bool { return offlineCacheAdmission.Admit(offlinecache.ClassSoftware).Allowed }
 		}
-		if l1 := wireMediaHealthL1(config.Get().MediaHealthTuning(logger), mediaHealthSvc.Store(), offlineCacheRenderer, uaPolicy,
+		// The renderer takes the policy the L0 probe uses, so the page L1
+		// judges is fetched exactly as the kiosk fetches it. Same typed-nil
+		// guard as wireMediaHealth.
+		var renderer mediahealth.Renderer
+		if offlineCacheRendererFactory != nil {
+			var policy mediahealth.Rewriter
+			if uaPolicy != nil {
+				policy = uaPolicy
+			}
+			renderer = offlineCacheRendererFactory(policy)
+		}
+		if l1 := wireMediaHealthL1(config.Get().MediaHealthTuning(logger), mediaHealthSvc.Store(), renderer, uaPolicy,
 			func() bool { return devicectl.PlayerAsleep(executor) }, admit, logger); l1 != nil {
 			go l1.Run(context)
 		}

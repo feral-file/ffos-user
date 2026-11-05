@@ -272,10 +272,14 @@ would hide real art, the worst outcome here.
   status is read from the first `Document` response. The URL rendered is the
   record's **own source** through the gateway policy, fragment kept — never
   the record's `wireUrl`, which the cast pass copies from a wire-identical
-  sibling (`work#one` and `work#two` are two works). Before the browser goes
-  back to the capturer every origin the page touched has its storage cleared,
-  as a capture clears its own, and the page is stopped before the session is
-  dropped.
+  sibling (`work#one` and `work#two` are two works). The policy then rides on
+  the guard, so **every** request of the render — redirects, child frames,
+  subresources — is rewritten as the kiosk's interceptor rewrites it, and the
+  guard judges the rewritten destination. Before the browser goes back to the
+  capturer every origin the page touched has its storage cleared, as a capture
+  clears its own, plus every frame's storage key across every attached child
+  session (partitioned third-party storage that an origin clear does not
+  reach), and the page is stopped before the session is dropped.
 - **Verdict ladder** (ported from ff-indexer-v2's `probe.Classify` and
   `phash`, same pHash algorithm and bit order, same per-channel variance
   blank signal): a known-bad fingerprint match first (`render_known_bad`,
@@ -289,8 +293,10 @@ would hide real art, the worst outcome here.
   browser unavailable): no evidence, `l1.lastError` only, retried after 24 h.
 - **Rechecks:** ok after 7 d, suspect after 24 h (a fixed page heals on the
   next night), stalled after 24 h. A real render of a `suspect` record heals
-  it to `ok` (layer `l1`); an L1 verdict never touches a `broken` record,
-  `recheckAfter` or `retryAfter`.
+  it to `ok` (layer `l1`), and so does a play success; an L0 success only
+  refreshes the record's L0 metadata and recheck — valid bytes say nothing
+  about a frame — while an L0 failure still outranks it. An L1 verdict never
+  touches a `broken` record, `recheckAfter` or `retryAfter`.
 - **Cap:** `maxPerNight` renders per local calendar day (default 200), one
   at a time.
 

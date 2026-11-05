@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,17 +31,67 @@ import (
 // the frame plus the main document's status.
 type mediaHealthRenderer struct {
 	c *capturer
+	// policy is the kiosk's gateway policy, applied to EVERY request the
+	// page makes (the navigation, its redirects, child frames and
+	// subresources) through the guard's rewrite hook, as the kiosk's own
+	// uarewrite interceptor does: a content-addressed path on a hostile
+	// gateway goes to the replacement gateway, any other request to those
+	// hosts gets the policy agent. Without it L1 would fetch a different
+	// destination from the kiosk and judge a page the wall never shows.
+	policy mediahealth.Rewriter
 }
 
-// NewMediaHealthRenderer adapts the capturer into mediahealth.Renderer. nil
-// when the capturer is not the package's own implementation (a test
-// double), so the L1 runner is simply not wired.
-func NewMediaHealthRenderer(cap Capturer) mediahealth.Renderer {
+// NewMediaHealthRenderer adapts the capturer into mediahealth.Renderer
+// under the kiosk's gateway policy (nil = render as written). nil when the
+// capturer is not the package's own implementation (a test double), so the
+// L1 runner is simply not wired.
+func NewMediaHealthRenderer(cap Capturer, policy mediahealth.Rewriter) mediahealth.Renderer {
 	c, ok := cap.(*capturer)
 	if !ok || c == nil {
 		return nil
 	}
-	return &mediaHealthRenderer{c: c}
+	return &mediaHealthRenderer{c: c, policy: policy}
+}
+
+// renderRewrite is the guard's per-request rewrite for policy: the kiosk
+// interceptor's decision, verbatim — a matching host is either redirected
+// (a content-addressed path) or continued with the policy agent.
+func renderRewrite(policy mediahealth.Rewriter) func(string, map[string]string) (string, []map[string]string, bool) {
+	if policy == nil {
+		return nil
+	}
+	return func(rawURL string, headers map[string]string) (string, []map[string]string, bool) {
+		if !policy.Matches(rawURL) {
+			return "", nil, false
+		}
+		if target, ok := policy.RewriteURL(rawURL); ok {
+			return target, nil, true
+		}
+		return "", userAgentHeaders(headers, policy.UserAgent()), true
+	}
+}
+
+// userAgentHeaders mirrors uarewrite.Policy.RewriteHeaders: the request's
+// headers with User-Agent replaced (or added), sorted by name.
+func userAgentHeaders(headers map[string]string, agent string) []map[string]string {
+	out := make([]map[string]string, 0, len(headers)+1)
+	replaced := false
+	for name, value := range headers {
+		if strings.EqualFold(name, "user-agent") {
+			if replaced {
+				continue
+			}
+			out = append(out, map[string]string{"name": name, "value": agent})
+			replaced = true
+			continue
+		}
+		out = append(out, map[string]string{"name": name, "value": value})
+	}
+	if !replaced {
+		out = append(out, map[string]string{"name": "User-Agent", "value": agent})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i]["name"] < out[j]["name"] })
+	return out
 }
 
 const (
@@ -94,50 +146,20 @@ func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSe
 	// The main document's status: the first Document-type response after
 	// our navigate. Registered before Network.enable so the navigation's
 	// own response cannot be missed.
-	var (
-		statusMu   sync.Mutex
-		mainStatus int
-		statusSeen bool
-		observed   []Resource
-	)
-	session.On("Network.responseReceived", func(params json.RawMessage) {
-		var ev struct {
-			Type     string `json:"type"`
-			Response struct {
-				Status int    `json:"status"`
-				URL    string `json:"url"`
-			} `json:"response"`
-		}
-		if err := json.Unmarshal(params, &ev); err != nil {
-			return
-		}
-		statusMu.Lock()
-		defer statusMu.Unlock()
-		if ev.Response.URL != "" && len(observed) < maxObservedRenderResponses {
-			observed = append(observed, Resource{URL: ev.Response.URL})
-		}
-		if ev.Type == "Document" && !statusSeen {
-			statusSeen = true
-			mainStatus = ev.Response.Status
-		}
-	})
-	// Every origin the page touched — the navigation's, its redirects',
-	// its iframes' and subresources' — has its storage cleared before the
-	// shared browser goes back to the capturer, exactly as a capture
-	// clears its own. The pre-navigation reset can only scope to the
-	// source's origin; a child frame writing storage at another origin
-	// would otherwise survive into the next offline capture and change
-	// what it fetches (PR #443 review, F20). Runs on every exit path, on
-	// its own bounded window, from the capturer's cleanup.
-	defer func() {
-		statusMu.Lock()
-		resources := append([]Resource(nil), observed...)
-		statusMu.Unlock()
-		c.clearObservedOriginsStorage(context.Background(), session, resources)
-	}()
+	obs := newRenderObserver(ctx, session)
+	// Everything the page touched is cleared before the shared browser
+	// goes back to the capturer: every observed origin (as a capture
+	// clears its own) AND every frame's storage key — third-party frames
+	// keep partitioned storage that an origin-scoped clear does not reach,
+	// and a nested frame's marker surviving into the next offline capture
+	// changes what that capture fetches (PR #443 review, F20). On every
+	// exit path, on its own bounded window.
+	defer obs.cleanup(c)
 	// Registered BEFORE Fetch.enable so no paused request can arrive
-	// without a handler (an unanswered pause hangs the request).
-	guard := c.attachSourceGuard(ctx, session)
+	// without a handler (an unanswered pause hangs the request). The
+	// policy rides on the guard so it applies to every request, child
+	// targets included (the capturer arms the same guard on each child).
+	guard := c.attachSourceGuardWithRewrite(ctx, session, renderRewrite(r.policy))
 
 	for _, step := range []struct {
 		method string
@@ -214,9 +236,7 @@ func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSe
 	if err != nil {
 		return nil, fmt.Errorf("media health render: %w", err)
 	}
-	statusMu.Lock()
-	status := mainStatus
-	statusMu.Unlock()
+	status := obs.mainStatus()
 	c.logger.Debug("media health render: frame captured",
 		zap.String("url", redactSourceForLog(wireURL)), zap.Int("main_status", status), zap.Duration("settle", settle))
 	return &mediahealth.Frame{Image: img, MainStatus: status}, nil
@@ -240,4 +260,161 @@ func decodeScreenshotPNG(data []byte) (image.Image, error) {
 		return nil, fmt.Errorf("screenshot of %dx%d exceeds the %d-pixel cap", cfg.Width, cfg.Height, maxDecodedPixels)
 	}
 	return png.Decode(bytes.NewReader(data))
+}
+
+// renderObserver watches one render across the root session and every
+// child target the browser attaches (flatten mode: all sessions hang off
+// the root, and a child's own attachments are announced on the child): the
+// main document's status, the origins of every response, and the sessions
+// themselves, which cleanup walks for frame storage keys.
+type renderObserver struct {
+	ctx  context.Context
+	root CDPSession
+
+	mu         sync.Mutex
+	status     int
+	statusSeen bool
+	observed   []Resource
+	sessions   []CDPSession
+}
+
+func newRenderObserver(ctx context.Context, root CDPSession) *renderObserver {
+	o := &renderObserver{ctx: ctx, root: root, sessions: []CDPSession{root}}
+	o.watch(root, true)
+	return o
+}
+
+// watch registers the observer's handlers on session: responses, and the
+// attach event that announces the session's own child targets. Handlers
+// are appended to the session's list, so the capturer's guard handlers on
+// the same methods keep running.
+func (o *renderObserver) watch(session CDPSession, isRoot bool) {
+	session.On("Network.responseReceived", func(params json.RawMessage) {
+		var ev struct {
+			Type     string `json:"type"`
+			Response struct {
+				Status int    `json:"status"`
+				URL    string `json:"url"`
+			} `json:"response"`
+		}
+		if err := json.Unmarshal(params, &ev); err != nil {
+			return
+		}
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		if ev.Response.URL != "" && len(o.observed) < maxObservedRenderResponses {
+			o.observed = append(o.observed, Resource{URL: ev.Response.URL})
+		}
+		if isRoot && ev.Type == "Document" && !o.statusSeen {
+			o.statusSeen = true
+			o.status = ev.Response.Status
+		}
+	})
+	session.On("Target.attachedToTarget", func(params json.RawMessage) {
+		var evt targetAttachedEvent
+		if err := json.Unmarshal(params, &evt); err != nil || evt.SessionID == "" {
+			return
+		}
+		child := o.root.ForSession(evt.SessionID)
+		o.mu.Lock()
+		if len(o.sessions) >= maxRenderSessions {
+			o.mu.Unlock()
+			return
+		}
+		o.sessions = append(o.sessions, child)
+		o.mu.Unlock()
+		o.watch(child, false)
+		// Off the dispatch goroutine: a Send from inside a handler would
+		// wait on the very read pump that is delivering this event.
+		go func() {
+			_, _ = child.Send(o.ctx, "Network.enable", map[string]interface{}{})
+		}()
+	})
+}
+
+func (o *renderObserver) mainStatus() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.status
+}
+
+// maxRenderSessions bounds the child targets remembered for cleanup; a
+// page opening more frames than this still has its origins cleared.
+const maxRenderSessions = 64
+
+// renderCleanupWindow bounds the whole post-render clear.
+const renderCleanupWindow = 10 * time.Second
+
+// cleanup clears what the render touched: every observed origin through
+// the capturer's own routine, then the storage key of every frame in every
+// session (the partitioned storage an origin clear cannot reach).
+func (o *renderObserver) cleanup(c *capturer) {
+	o.mu.Lock()
+	resources := append([]Resource(nil), o.observed...)
+	sessions := append([]CDPSession(nil), o.sessions...)
+	o.mu.Unlock()
+	c.clearObservedOriginsStorage(context.Background(), o.root, resources)
+
+	ctx, cancel := context.WithTimeout(context.Background(), renderCleanupWindow)
+	defer cancel()
+	keys := map[string]struct{}{}
+	for _, session := range sessions {
+		for _, key := range frameStorageKeys(ctx, session) {
+			keys[key] = struct{}{}
+		}
+	}
+	for key := range keys {
+		if ctx.Err() != nil {
+			c.logger.Warn("media health render: storage-key clear window elapsed, skipping remaining keys")
+			return
+		}
+		if _, err := o.root.Send(ctx, "Storage.clearDataForStorageKey", map[string]interface{}{
+			"storageKey": key, "storageTypes": "all",
+		}); err != nil {
+			c.logger.Warn("media health render: Storage.clearDataForStorageKey failed", zap.Error(err))
+		}
+	}
+}
+
+// frameStorageKeys returns the storage key of every frame the session's
+// frame tree shows, best effort (a frame gone by the time it is asked is
+// skipped).
+func frameStorageKeys(ctx context.Context, session CDPSession) []string {
+	raw, err := session.Send(ctx, "Page.getFrameTree", map[string]interface{}{})
+	if err != nil {
+		return nil
+	}
+	var tree struct {
+		FrameTree frameTreeNode `json:"frameTree"`
+	}
+	if err := json.Unmarshal(raw, &tree); err != nil {
+		return nil
+	}
+	var keys []string
+	var walk func(n frameTreeNode)
+	walk = func(n frameTreeNode) {
+		if n.Frame.ID != "" {
+			raw, err := session.Send(ctx, "Storage.getStorageKeyForFrame", map[string]interface{}{"frameId": n.Frame.ID})
+			if err == nil {
+				var reply struct {
+					StorageKey string `json:"storageKey"`
+				}
+				if json.Unmarshal(raw, &reply) == nil && reply.StorageKey != "" {
+					keys = append(keys, reply.StorageKey)
+				}
+			}
+		}
+		for _, child := range n.ChildFrames {
+			walk(child)
+		}
+	}
+	walk(tree.FrameTree)
+	return keys
+}
+
+type frameTreeNode struct {
+	Frame struct {
+		ID string `json:"id"`
+	} `json:"frame"`
+	ChildFrames []frameTreeNode `json:"childFrames"`
 }
