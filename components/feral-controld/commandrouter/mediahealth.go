@@ -26,8 +26,9 @@ type MediaHealth interface {
 	// when there are none or the installed player does not declare the
 	// contract.
 	HintArgument(items []dp1playlist.PlaylistItem) interface{}
-	// Report builds the getMediaHealth rows for the items on screen.
-	Report(items []dp1playlist.PlaylistItem) ([]mediahealth.ReportItem, error)
+	// Report builds the getMediaHealth rows for the items on screen, with
+	// the player's own report of the indices it is skipping.
+	Report(items []dp1playlist.PlaylistItem, skipped []int) ([]mediahealth.ReportItem, error)
 }
 
 // SetMediaHealth injects the media-health service onto h, if h supports it
@@ -96,7 +97,7 @@ func (h *handler) handleGetMediaHealth(ctx context.Context, command commands.Com
 		items = items[:maxMediaHealthReportItems]
 		truncated = true
 	}
-	rows, err := h.mediaHealth.Report(items)
+	rows, err := h.mediaHealth.Report(items, playerStatus.SkippedIndices)
 	if err != nil {
 		return nil, err
 	}
@@ -113,8 +114,13 @@ func (h *handler) handleGetMediaHealth(ctx context.Context, command commands.Com
 	return reply, nil
 }
 
-// replyKeyOutcomes is the player's raw outcome ring on a checkStatus reply.
-const replyKeyOutcomes = "outcomes"
+// replyKeyOutcomes is the player's raw outcome ring on a checkStatus reply;
+// replyKeySkipped its raw report of hint-skipped indices. Both are inputs
+// to the media observation store, never a controller surface.
+const (
+	replyKeyOutcomes = "outcomes"
+	replyKeySkipped  = "skippedIndices"
+)
 
 // stripOutcomesReply removes the raw outcome ring from a direct checkStatus
 // reply, in both shapes the player answers (bare, and enveloped under
@@ -129,7 +135,9 @@ func stripOutcomesReply(result interface{}) {
 		return
 	}
 	delete(m, replyKeyOutcomes)
+	delete(m, replyKeySkipped)
 	if msg, ok := m["message"].(map[string]interface{}); ok {
 		delete(msg, replyKeyOutcomes)
+		delete(msg, replyKeySkipped)
 	}
 }

@@ -42,7 +42,7 @@ func (f *fakeMediaHealth) HintArgument(items []dp1playlist.PlaylistItem) interfa
 	return f.hints
 }
 
-func (f *fakeMediaHealth) Report([]dp1playlist.PlaylistItem) ([]mediahealth.ReportItem, error) {
+func (f *fakeMediaHealth) Report([]dp1playlist.PlaylistItem, []int) ([]mediahealth.ReportItem, error) {
 	return nil, nil
 }
 

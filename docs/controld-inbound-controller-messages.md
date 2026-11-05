@@ -3313,12 +3313,25 @@ rejects one.
   "items": [
     { "index": 0, "id": "a", "title": "Genome #12", "state": "broken",
       "category": "source_missing", "reason": "http_status", "layer": "l0",
+      "skipped": true,
       "checkedAt": "2026-11-04T10:00:00Z", "plays": { "ok": 0, "fail": 2 } },
-    { "index": 1, "id": "b", "title": "Study", "state": "ok",
-      "checkedAt": "2026-11-04T09:00:00Z", "plays": { "ok": 12, "fail": 0 } }
+    { "index": 1, "id": "b", "title": "Study", "state": "ok", "skipped": false,
+      "checkedAt": "2026-11-04T09:00:00Z", "plays": { "ok": 12, "fail": 0 } },
+    { "index": 2, "id": "c", "title": "Drift", "state": "broken",
+      "category": "source_missing", "reason": "http_status", "layer": "l0",
+      "skipped": false, "unskipped": "expired",
+      "checkedAt": "2026-11-01T10:00:00Z" }
   ]
 }
 ```
+
+`skipped` is whether the player is resolving past the row right now, from
+the player's own report of the hint map it holds — the only input for a
+"Skip" label; `state` is the last observation and the two differ (an
+expired verdict, a replayable source, a player without the contract, a push
+not yet received). `unskipped` (`expired` | `replayable` | `player` |
+`pending`) says which, and is present only when `state` is `broken` and
+`skipped` is false.
 
 `state` is `ok`, `broken`, `suspect` (an L1 render verdict, reported but never
 acted on) or `unknown` (never observed). `category` is the closed app-facing

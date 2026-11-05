@@ -37,6 +37,7 @@ func TestPollPlayerStatus_MediaHealthAnnotationAndOutcomeStripping(t *testing.T)
 						map[string]interface{}{"seq": 1, "source": "https://o/a", "kind": "fail", "stage": "load", "code": "image"},
 					},
 				},
+				"skippedIndices": []interface{}{1},
 				// A spoofed annotation from the page: must be discarded.
 				"mediaHealth": []interface{}{map[string]interface{}{"state": "ok"}, map[string]interface{}{"state": "ok"}},
 			},
@@ -60,11 +61,12 @@ func TestPollPlayerStatus_MediaHealthAnnotationAndOutcomeStripping(t *testing.T)
 		}
 	}
 	var asked []dp1playlist.PlaylistItem
-	p.itemHealthSource = func(items []dp1playlist.PlaylistItem) []mediahealth.ItemHealth {
-		asked = items
+	var askedSkipped []int
+	p.itemHealthSource = func(items []dp1playlist.PlaylistItem, skipped []int) []mediahealth.ItemHealth {
+		asked, askedSkipped = items, skipped
 		return []mediahealth.ItemHealth{
 			{State: mediahealth.StateBroken, Category: mediahealth.CategoryRenderFailed, Reason: mediahealth.ReasonRenderLoad, Layer: mediahealth.LayerPlay},
-			{State: mediahealth.StateUnknown},
+			{State: mediahealth.StateUnknown, Skipped: true},
 		}
 	}
 
@@ -77,11 +79,14 @@ func TestPollPlayerStatus_MediaHealthAnnotationAndOutcomeStripping(t *testing.T)
 
 	require.Len(t, asked, 2)
 	assert.Equal(t, "https://o/b", asked[1].Source, "the source asks with the reply's own item list, sources intact")
+	assert.Equal(t, []int{1}, askedSkipped, "and with the player's own skipped indices")
 
 	payload := mockWS.lastPayload.(map[string]interface{})
 	message := payload["message"].(*PlayerStatus)
 	assert.Nil(t, message.Outcomes, "the ring carries sources and is not a controller surface")
+	assert.Nil(t, message.SkippedIndices, "the raw report is an input; controllers get MediaHealth[i].skipped")
 	require.Len(t, message.MediaHealth, 2)
+	assert.True(t, message.MediaHealth[1].Skipped)
 	assert.Equal(t, mediahealth.StateBroken, message.MediaHealth[0].State)
 	assert.Equal(t, mediahealth.CategoryRenderFailed, message.MediaHealth[0].Category)
 	assert.Equal(t, mediahealth.StateUnknown, message.MediaHealth[1].State)
@@ -98,7 +103,7 @@ func TestAnnotateMediaHealth_DropsMisalignedAndUnwired(t *testing.T) {
 	p.annotateMediaHealth(st)
 	assert.Nil(t, st.MediaHealth, "unwired: whatever the reply carried is dropped")
 
-	p.itemHealthSource = func([]dp1playlist.PlaylistItem) []mediahealth.ItemHealth {
+	p.itemHealthSource = func([]dp1playlist.PlaylistItem, []int) []mediahealth.ItemHealth {
 		return []mediahealth.ItemHealth{{State: mediahealth.StateOK}}
 	}
 	st = &PlayerStatus{Items: &items, MediaHealth: spoofed}

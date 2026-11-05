@@ -176,6 +176,13 @@ and reports `{kind:"skip", stage:"hint"}` in its outcome ring.
 
 ## The outcome ring (player → controld): `outcomes` on `checkStatus`
 
+Beside the ring, the same contract carries the player's own report of what
+it is skipping: `"skippedIndices": [1, 4]` — the indices into `items` the
+timeline is currently resolving past because of a hint (empty or absent when
+none; absent on a player without the contract). It is the one fact only the
+player knows, which hint map it holds, and it feeds `mediaHealth[i].skipped`
+(Status surfaces). Indices only, never sources. Live-only, like the ring.
+
 ```json
 "outcomes": {
   "castSeq": 3,
@@ -242,16 +249,31 @@ sighting for the item at `index` counts as one failure per mount (stage
 ## Status surfaces
 
 - `player_status` gains a controld-owned `mediaHealth` array, index-aligned
-  with `items`: `{"state":"ok"}`, `{"state":"unknown"}`,
-  `{"state":"broken","category":"…","reason":"…","layer":"l0"}` or
-  `{"state":"suspect","category":"render_blank","layer":"l1"}`. Nothing else is
-  pushed. The raw `outcomes` ring is stripped from the notification and from
-  direct `checkStatus` replies (hub and relayer): it carries item sources and
-  play history, and is consumed on the device only.
+  with `items`: `{"state":"ok","skipped":false}`, `{"state":"unknown",…}`,
+  `{"state":"broken","category":"…","reason":"…","layer":"l0","skipped":true}`
+  or `{"state":"suspect","category":"render_blank","layer":"l1",…}`. Two facts
+  per item, kept apart on purpose: `state` (with its category, reason and
+  layer) is **the last observation** this device made; `skipped` is whether
+  **the player is resolving past the item right now**, from the player's own
+  report of the hint map it holds (`skippedIndices` below). They differ in
+  four cases, and the app's "Skip" badge must come from `skipped` only:
+  an expired verdict (past `recheckAfter`: still reported `broken`, no longer
+  hinted), a source the offline cache can replay (hint dropped), a player
+  without the contract (nothing hinted), and push lag in either direction
+  (a verdict concluded mid-playlist reaches the player on the next push; a
+  record healed to `ok` is still skipped until then). When `state` is
+  `broken` and `skipped` is false, `unskipped` says which:
+  `expired` | `replayable` | `player` | `pending` (hinted now, push not yet
+  received — or the player chose to play it: repeat-one, an all-broken map).
+  Nothing else is pushed; freshness (`checkedAt`) stays on `getMediaHealth`.
+  The raw `outcomes` ring and `skippedIndices` are stripped from the
+  notification and from direct `checkStatus` replies (hub and relayer): they
+  are inputs, consumed on the device only.
 - `getMediaHealth` (controller tier, query class, no arguments) returns the
   whole playlist on screen: `{ok, status, items:[{index, id, title, state,
-  category, reason, layer, checkedAt, plays:{ok,fail}}], total, truncated,
-  castSeq}`. Bounded at 2048 rows. No source URLs.
+  category, reason, layer, skipped, unskipped, checkedAt, plays:{ok,fail}}],
+  total, truncated, castSeq}`, `skipped`/`unskipped` by the same rule as the
+  push. Bounded at 2048 rows. No source URLs.
 
 ## Store
 

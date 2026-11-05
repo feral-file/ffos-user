@@ -188,7 +188,11 @@ func TestLookahead_SweepSkipsOnWallRowsInsideTheQuery(t *testing.T) {
 	clock := &testClock{t: time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)}
 	f := newTableFetcher()
 	l := newTestLookahead(t, f, clock)
-	l.Window = 1
+	// The whole wall is inside the window the walk owns (current + 9), so
+	// every on-wall row is excluded from the sweep's query; on-wall rows
+	// BEYOND the window are not (the #392 follow-up lets the sweep refresh
+	// them, by due time, like any other row).
+	l.Window = 9
 	wall := make([]string, 0, 10)
 	for i := 0; i < 10; i++ {
 		src := "https://o/wall" + string(rune('a'+i))
@@ -207,12 +211,12 @@ func TestLookahead_SweepSkipsOnWallRowsInsideTheQuery(t *testing.T) {
 		f.answers[src] = ok(http.StatusNotFound, "", nil, -1)
 	}
 	l.Observe(wall, 0)
-	// Drain the lookahead window (1 upcoming item + the current one), then
+	// Drain the lookahead window (9 upcoming items + the current one), then
 	// the sweep must reach the off-wall record.
-	for i := 0; i < 3 && f.count(off) == 0; i++ {
+	for i := 0; i < 12 && f.count(off) == 0; i++ {
 		require.True(t, l.step(context.Background(), nil))
 	}
-	assert.Equal(t, 1, f.count(off), "the off-wall row is reached despite ten due on-wall rows ahead of it")
+	assert.Equal(t, 1, f.count(off), "the off-wall row is reached despite ten due window rows ahead of it")
 }
 
 func writeManifest(path string) error {
@@ -656,4 +660,124 @@ func TestOutcomeTime(t *testing.T) {
 	assert.Equal(t, now, outcomeTime(Outcome{At: "t1"}, now), "unparseable: the drain time")
 	assert.Equal(t, now, outcomeTime(Outcome{At: "2026-11-04T13:00:00Z"}, now), "a player clock ahead of the device is clamped")
 	assert.Equal(t, time.Date(2026, 11, 4, 11, 59, 59, 500000000, time.UTC), outcomeTime(Outcome{At: "2026-11-04T11:59:59.500Z"}, now))
+}
+
+// #392 follow-up: `state: broken` is the last observation, `skipped` is
+// what the player reports it is resolving past, and `unskipped` says why a
+// broken item is not skipped — one case each.
+func TestService_ItemHealths_SkippedAndUnskipped(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	replayable := map[string]bool{}
+	store := openTestStore(t, clock)
+	// The contract check caches its answer for a while, so the no-contract
+	// and with-contract cases get a service each over the same store.
+	noContract := New(Config{Store: store, Contract: &PlayerContract{Path: filepath.Join(t.TempDir(), "none")}, Now: clock.Now, Online: func() bool { return true },
+		Replayable: func(src string) bool { return replayable[src] }})
+	manifest := filepath.Join(t.TempDir(), "ffos-player-contract.json")
+	require.NoError(t, os.WriteFile(manifest, []byte(manifestWithContract), 0o600))
+	svc := New(Config{Store: store, Contract: &PlayerContract{Path: manifest}, Now: clock.Now, Online: func() bool { return true },
+		Replayable: func(src string) bool { return replayable[src] }})
+	defer func() { _ = svc.Close() }()
+	list := items("https://o/broken", "https://o/replay", "https://o/expired", "https://o/ok")
+	for _, src := range []string{"https://o/broken", "https://o/replay", "https://o/expired"} {
+		_, err := store.ApplyProbe(src, ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
+		require.NoError(t, err)
+	}
+	_, err := store.ApplyProbe("https://o/ok", ProbeResult{Verdict: VerdictAlive, Status: 200})
+	require.NoError(t, err)
+
+	// Case 3: no contract declared — nothing is hinted, every broken row
+	// says so, and nothing is skipped whatever the state.
+	h := noContract.ItemHealths(list, nil)
+	require.Len(t, h, 4)
+	for i := 0; i < 3; i++ {
+		assert.Equal(t, StateBroken, h[i].State)
+		assert.False(t, h[i].Skipped)
+		assert.Equal(t, UnskippedPlayer, h[i].Unskipped, i)
+	}
+	assert.False(t, h[3].Skipped)
+	assert.Empty(t, h[3].Unskipped, "an ok row never carries a reason")
+
+	// With the contract: the player reports what it skips.
+	replayable["https://o/replay"] = true
+	// Expire the third verdict only: it was written at the same time as the
+	// others, so re-write it with a recheck in the past.
+	rec, err := store.Get("https://o/expired")
+	require.NoError(t, err)
+	require.True(t, rec.Conclusive(clock.Now()))
+	clock.Advance(RecheckBroken + time.Second)
+	for _, src := range []string{"https://o/broken", "https://o/replay"} {
+		_, err := store.ApplyProbe(src, ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus}) // fresh again
+		require.NoError(t, err)
+	}
+	h = svc.ItemHealths(list, []int{0})
+	assert.True(t, h[0].Skipped, "the player says it skips index 0")
+	assert.Empty(t, h[0].Unskipped)
+	assert.False(t, h[1].Skipped)
+	assert.Equal(t, UnskippedReplayable, h[1].Unskipped, "case 2: the cache can serve it, so the hint left it out")
+	assert.False(t, h[2].Skipped)
+	assert.Equal(t, StateBroken, h[2].State, "still the last observation")
+	assert.Equal(t, UnskippedExpired, h[2].Unskipped, "case 1: past its window, not conclusive, not hinted")
+
+	// Case 4, both ways: a conclusive broken item the player is not yet
+	// skipping is pending; an ok item the player still skips is skipped.
+	h = svc.ItemHealths(list, []int{3})
+	assert.False(t, h[0].Skipped)
+	assert.Equal(t, UnskippedPending, h[0].Unskipped, "hinted now, the push has not reached the player")
+	assert.True(t, h[3].Skipped, "healed to ok, but the player keeps the old hint until the next push")
+	assert.Equal(t, StateOK, h[3].State)
+
+	// Out-of-range or negative indices are ignored.
+	h = svc.ItemHealths(list, []int{-1, 9})
+	for _, row := range h {
+		assert.False(t, row.Skipped)
+	}
+
+	// getMediaHealth carries the same two fields.
+	rows, err := svc.Report(list, []int{0})
+	require.NoError(t, err)
+	assert.True(t, rows[0].Skipped)
+	assert.Equal(t, UnskippedReplayable, rows[1].Unskipped)
+	assert.Equal(t, UnskippedExpired, rows[2].Unskipped)
+}
+
+// #392 follow-up: a due record on the wall beyond the lookahead window is
+// swept, so an expired verdict there is refreshed instead of waiting for
+// playback to reach it.
+func TestLookahead_SweepsDueOnWallRecordsBeyondTheWindow(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := newTableFetcher()
+	l := newTestLookahead(t, f, clock) // Window: 3
+	wall := make([]string, 12)
+	for i := range wall {
+		wall[i] = fmt.Sprintf("https://o/%d", i)
+		f.answers[wall[i]] = ok(200, "image/png", minimalPNG(1, 1), -1)
+		_, err := l.Store.ApplyProbe(wall[i], ProbeResult{Verdict: VerdictAlive, Status: 200})
+		require.NoError(t, err)
+	}
+	// Position 9 is broken and its verdict expires; nothing in the window
+	// (0..3) is due.
+	_, err := l.Store.ApplyProbe(wall[9], ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
+	require.NoError(t, err)
+	clock.Advance(RecheckBroken + time.Second)
+	for _, src := range wall[:4] {
+		_, err := l.Store.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200})
+		require.NoError(t, err)
+	}
+	l.Observe(wall, 0)
+	// The window items 4..8 and 10, 11 are due too (ok, 7 d old) but the
+	// sweep answers the earliest due first; what matters is that the
+	// on-wall record at 9 is reachable at all.
+	seen := map[string]bool{}
+	for i := 0; i < 12 && !seen[wall[9]]; i++ {
+		if !l.step(context.Background(), nil) {
+			break
+		}
+		for _, src := range wall {
+			if f.count(src) > 0 {
+				seen[src] = true
+			}
+		}
+	}
+	assert.True(t, seen[wall[9]], "a due on-wall record beyond the window is swept")
 }

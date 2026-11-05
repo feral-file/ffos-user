@@ -469,7 +469,7 @@ type deadSourcesProber struct {
 
 func (p *deadSourcesProber) HintArgument([]dp1playlist.PlaylistItem) interface{} { return nil }
 
-func (p *deadSourcesProber) Report([]dp1playlist.PlaylistItem) ([]mediahealth.ReportItem, error) {
+func (p *deadSourcesProber) Report([]dp1playlist.PlaylistItem, []int) ([]mediahealth.ReportItem, error) {
 	return nil, nil
 }
 

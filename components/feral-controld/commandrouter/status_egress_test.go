@@ -330,9 +330,9 @@ func TestCheckStatusOutcomesEgress(t *testing.T) {
 			t.Run(transport+map[bool]string{true: "/wrapped", false: "/bare"}[wrapped], func(t *testing.T) {
 				ctrl := gomock.NewController(t)
 				ctx := context.Background()
-				reply := map[string]any{"ok": true, "index": 0, "renderStatus": 2, "outcomes": ring, "futureStatus": "preserved"}
+				reply := map[string]any{"ok": true, "index": 0, "renderStatus": 2, "outcomes": ring, "skippedIndices": []any{1}, "futureStatus": "preserved"}
 				if wrapped {
-					reply = map[string]any{"messageID": "player-request", "message": reply, "outcomes": ring}
+					reply = map[string]any{"messageID": "player-request", "message": reply, "outcomes": ring, "skippedIndices": []any{1}}
 				}
 				player := mocks.NewMockCDP(ctrl)
 				player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(reply, nil)
@@ -368,6 +368,7 @@ func TestCheckStatusOutcomesEgress(t *testing.T) {
 				}
 				require.NotContains(t, string(encoded), "private-token")
 				require.NotContains(t, string(encoded), `"outcomes"`)
+				require.NotContains(t, string(encoded), `"skippedIndices"`)
 				var decoded map[string]any
 				require.NoError(t, json.Unmarshal(encoded, &decoded))
 				if wrapped {

@@ -43,7 +43,37 @@ type ItemHealth struct {
 	Category Category `json:"category,omitempty"`
 	Reason   Reason   `json:"reason,omitempty"`
 	Layer    Layer    `json:"layer,omitempty"`
+	// Skipped is whether the PLAYER is resolving past this item right now,
+	// from its own report (PlayerStatus.SkippedIndices) — the hint it
+	// actually holds, not a recomputation at poll time. State is the last
+	// observation; the two differ (an expired verdict, a replayable
+	// source, a player without the contract, a push not yet received),
+	// so the app's "Skip" badge must come from here, never from State.
+	// Always serialized.
+	Skipped bool `json:"skipped"`
+	// Unskipped says why a broken item is NOT being skipped; present only
+	// when State is broken and Skipped is false.
+	Unskipped Unskipped `json:"unskipped,omitempty"`
 }
+
+// Unskipped is the reason a broken item is not skipped by the player.
+type Unskipped string
+
+const (
+	// UnskippedExpired: the verdict is past its recheck window, so it is
+	// not conclusive and was not hinted.
+	UnskippedExpired Unskipped = "expired"
+	// UnskippedReplayable: the offline cache can serve the source, so the
+	// hint deliberately left it out.
+	UnskippedReplayable Unskipped = "replayable"
+	// UnskippedPlayer: the installed player does not declare the hint
+	// contract; nothing is hinted.
+	UnskippedPlayer Unskipped = "player"
+	// UnskippedPending: hinted now, but the player is not skipping it —
+	// the push carrying the hint has not happened yet, or the player
+	// chose to play it (repeat-one, or an all-broken map).
+	UnskippedPending Unskipped = "pending"
+)
 
 // ItemHealths returns one ItemHealth per source, in order. A source with no
 // record, or a record without a verdict, is "unknown". A broken record is
@@ -75,14 +105,16 @@ func itemHealthOf(rec *Record) ItemHealth {
 // screen, one verdict per item, with the detail the app can show on a
 // work's page. Never a source URL.
 type ReportItem struct {
-	Index     int      `json:"index"`
-	ID        string   `json:"id,omitempty"`
-	Title     string   `json:"title,omitempty"`
-	State     State    `json:"state"`
-	Category  Category `json:"category,omitempty"`
-	Reason    Reason   `json:"reason,omitempty"`
-	Layer     Layer    `json:"layer,omitempty"`
-	CheckedAt string   `json:"checkedAt,omitempty"`
+	Index     int       `json:"index"`
+	ID        string    `json:"id,omitempty"`
+	Title     string    `json:"title,omitempty"`
+	State     State     `json:"state"`
+	Category  Category  `json:"category,omitempty"`
+	Reason    Reason    `json:"reason,omitempty"`
+	Layer     Layer     `json:"layer,omitempty"`
+	Skipped   bool      `json:"skipped"`
+	Unskipped Unskipped `json:"unskipped,omitempty"`
+	CheckedAt string    `json:"checkedAt,omitempty"`
 	Plays     *struct {
 		OK   int `json:"ok"`
 		Fail int `json:"fail"`

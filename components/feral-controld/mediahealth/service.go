@@ -166,26 +166,79 @@ func (s *Service) HintArgument(items []dp1playlist.PlaylistItem) interface{} {
 }
 
 // ItemHealths annotates the player's item list; nil on error.
-func (s *Service) ItemHealths(items []dp1playlist.PlaylistItem) []ItemHealth {
+func (s *Service) ItemHealths(items []dp1playlist.PlaylistItem, skipped []int) []ItemHealth {
 	sources := make([]string, len(items))
 	for i := range items {
 		sources[i] = items[i].Source
 	}
-	out, err := s.store.ItemHealths(sources)
+	records, err := s.store.GetMany(sources)
 	if err != nil {
 		s.logger.Warn("media health: item health unavailable for this status round", zap.Error(err))
 		return nil
 	}
+	skippedAt := skippedSet(skipped)
+	now := s.now()
+	out := make([]ItemHealth, len(sources))
+	for i, src := range sources {
+		rec := records[src]
+		h := itemHealthOf(rec)
+		h.Skipped = skippedAt[i]
+		if h.State == StateBroken && !h.Skipped {
+			h.Unskipped = s.unskippedReason(src, rec, now)
+		}
+		out[i] = h
+	}
 	return out
 }
 
+// unskippedReason says why a broken record is not being skipped by the
+// player, in the order the hint pipeline refuses it: no contract declared
+// (nothing is ever hinted), the cache can replay it (the hint drops it),
+// the verdict expired (not conclusive, so not hinted), else it IS hinted
+// now and the player simply does not hold that hint yet — or chose to
+// play it (repeat-one, an all-broken map).
+func (s *Service) unskippedReason(source string, rec *Record, now time.Time) Unskipped {
+	switch {
+	case !s.PlayerSupportsHints():
+		return UnskippedPlayer
+	case s.replayable != nil && s.replayable(source):
+		return UnskippedReplayable
+	case rec == nil || !rec.Conclusive(now):
+		return UnskippedExpired
+	default:
+		return UnskippedPending
+	}
+}
+
+func skippedSet(skipped []int) map[int]bool {
+	set := make(map[int]bool, len(skipped))
+	for _, i := range skipped {
+		if i >= 0 {
+			set[i] = true
+		}
+	}
+	return set
+}
+
 // Report builds the getMediaHealth rows for the items on screen.
-func (s *Service) Report(items []dp1playlist.PlaylistItem) ([]ReportItem, error) {
+func (s *Service) Report(items []dp1playlist.PlaylistItem, skipped []int) ([]ReportItem, error) {
 	in := make([]ReportInput, len(items))
 	for i := range items {
 		in[i] = ReportInput{ID: items[i].ID, Title: items[i].Title, Source: items[i].Source}
 	}
-	return s.store.Report(in)
+	rows, err := s.store.Report(in)
+	if err != nil {
+		return nil, err
+	}
+	// The same overlay as ItemHealths, so the two surfaces never disagree.
+	health := s.ItemHealths(items, skipped)
+	for i := range rows {
+		if i < len(health) {
+			rows[i].Skipped = health[i].Skipped
+			rows[i].Unskipped = health[i].Unskipped
+		}
+	}
+	return rows, nil
 }
 
 // ObservePlayback is the status poller's hook: it drains the player's

@@ -115,6 +115,13 @@ type PlayerStatus struct {
 	// digested per-item verdicts (MediaHealth below) are what controllers
 	// get.
 	Outcomes *mediahealth.Outcomes `json:"outcomes,omitempty"`
+	// SkippedIndices is the player's own report, under the same contract,
+	// of the item indices it is currently resolving past because of a
+	// hint — the one fact only the player knows (which hint map it
+	// holds). Absent on a player without the contract. Stripped from the
+	// notification like Outcomes; it reaches controllers digested, as
+	// MediaHealth[i].skipped.
+	SkippedIndices []int `json:"skippedIndices,omitempty"`
 	// MediaHealth is controld-owned, same contract as SignatureStatus and
 	// Overlay (the player never sends it; whatever arrived is dropped): one
 	// entry per element of Items, in the same order, with this device's
@@ -332,7 +339,7 @@ type poller struct {
 	// per-item media verdicts for the player's item list
 	// (PlayerStatus.MediaHealth). Same single-writer contract as the
 	// fields above; nil omits the field.
-	itemHealthSource func(items []dp1playlist.PlaylistItem) []mediahealth.ItemHealth
+	itemHealthSource func(items []dp1playlist.PlaylistItem, skipped []int) []mediahealth.ItemHealth
 }
 
 func NewPoller(
@@ -460,8 +467,9 @@ func SetPlaybackObserver(p Poller, fn func(*PlayerStatus)) {
 // (PlayerStatus.MediaHealth) before Start. Package-level and type-asserted,
 // like SetPlaybackObserver, so the Poller interface and its mocks stay
 // untouched. The callback runs on the poller with the reply's item list and
-// returns one entry per item or nil (omit the field).
-func SetItemHealthSource(p Poller, fn func(items []dp1playlist.PlaylistItem) []mediahealth.ItemHealth) {
+// the player's own skipped indices, and returns one entry per item or nil
+// (omit the field).
+func SetItemHealthSource(p Poller, fn func(items []dp1playlist.PlaylistItem, skipped []int) []mediahealth.ItemHealth) {
 	if concrete, ok := p.(*poller); ok {
 		concrete.itemHealthSource = fn
 	}
@@ -637,7 +645,7 @@ func (s *poller) annotateMediaHealth(playerStatus *PlayerStatus) {
 	if s.itemHealthSource == nil || playerStatus.Items == nil || len(*playerStatus.Items) == 0 {
 		return
 	}
-	health := s.itemHealthSource(*playerStatus.Items)
+	health := s.itemHealthSource(*playerStatus.Items, playerStatus.SkippedIndices)
 	if len(health) != len(*playerStatus.Items) {
 		return
 	}
@@ -814,6 +822,7 @@ func (s *poller) lightweightPlayerStatus(playerStatus *PlayerStatus) *PlayerStat
 	// observation store, not a controller surface: MediaHealth (set by
 	// annotateMediaHealth) is the digested, source-free form that ships.
 	playerStatus.Outcomes = nil
+	playerStatus.SkippedIndices = nil
 	return playerStatus
 }
 

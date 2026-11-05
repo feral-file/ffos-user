@@ -251,6 +251,10 @@ func (l *Lookahead) nextDue(now time.Time) string {
 	if perHour < 0 {
 		return ""
 	}
+	window := l.Window
+	if window <= 0 {
+		window = DefaultWindow
+	}
 	l.mu.Lock()
 	if l.sweepLast.IsZero() {
 		l.sweepTokens = float64(perHour)
@@ -265,8 +269,14 @@ func (l *Lookahead) nextDue(now time.Time) string {
 		l.mu.Unlock()
 		return ""
 	}
-	exclude := make(map[string]struct{}, len(l.sources)+len(l.held))
-	for _, s := range l.sources {
+	// Excluded inside the query: the window the walk above owns (the
+	// current item and the next Window), and held sources. NOT the rest
+	// of the wall: a due record further ahead on the wall is reached by
+	// nothing else until playback approaches it, so an expired verdict
+	// there would read `broken` to the app for hours without a hint
+	// behind it (#392 follow-up); the sweep rechecks it under its budget.
+	exclude := make(map[string]struct{}, len(l.held)+window+1)
+	for _, s := range l.windowSources(window) {
 		exclude[s] = struct{}{}
 	}
 	for s := range l.held {
@@ -274,9 +284,6 @@ func (l *Lookahead) nextDue(now time.Time) string {
 	}
 	l.mu.Unlock()
 
-	// On-wall and held sources are excluded inside the query, so the rows
-	// the lookahead owns, or just probed without a verdict, can never
-	// shadow the off-wall rows behind them.
 	due, err := l.Store.Due(now, 8, exclude)
 	if err != nil {
 		return ""
@@ -292,4 +299,18 @@ func (l *Lookahead) nextDue(now time.Time) string {
 		return due[0]
 	}
 	return ""
+}
+
+// windowSources is the current item and the next window items, the
+// sources nextAhead owns. Caller holds l.mu.
+func (l *Lookahead) windowSources(window int) []string {
+	if len(l.sources) == 0 {
+		return nil
+	}
+	out := make([]string, 0, window+1)
+	out = append(out, l.sources[l.index])
+	for step := 1; step < len(l.sources) && step <= window; step++ {
+		out = append(out, l.sources[(l.index+step)%len(l.sources)])
+	}
+	return out
 }

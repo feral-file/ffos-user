@@ -191,7 +191,7 @@ type reportingMediaHealth struct {
 	asked []dp1playlist.PlaylistItem
 }
 
-func (r *reportingMediaHealth) Report(items []dp1playlist.PlaylistItem) ([]mediahealth.ReportItem, error) {
+func (r *reportingMediaHealth) Report(items []dp1playlist.PlaylistItem, _ []int) ([]mediahealth.ReportItem, error) {
 	r.asked = items
 	rows := make([]mediahealth.ReportItem, len(items))
 	for i, it := range items {

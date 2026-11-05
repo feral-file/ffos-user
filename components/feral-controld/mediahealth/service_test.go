@@ -47,7 +47,7 @@ func TestService_OutcomesDrainIntoTheStore(t *testing.T) {
 		{Seq: 2, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady},
 		{Seq: 3, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Code: "image"},
 	}})
-	health := s.ItemHealths(list)
+	health := s.ItemHealths(list, nil)
 	require.Len(t, health, 2)
 	assert.Equal(t, StateBroken, health[0].State)
 	assert.Equal(t, CategoryRenderFailed, health[0].Category)
@@ -58,7 +58,7 @@ func TestService_OutcomesDrainIntoTheStore(t *testing.T) {
 	assert.Contains(t, hints, "https://o/a")
 	assert.True(t, s.PlayerSupportsHints())
 
-	rows, err := s.Report(list)
+	rows, err := s.Report(list, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 2, rows[0].Plays.Fail)
 	assert.Equal(t, "thttps://o/a", rows[0].Title)
