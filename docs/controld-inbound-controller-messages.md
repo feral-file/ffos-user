@@ -192,7 +192,9 @@ router, storm gate and handlers as a plaintext one.
 
 `approveController {ctl, role, expiresAt?}`, `revokeController {ctl}`,
 `registerController {sig, enc, label, platform, role, expiresAt?}`,
-`releaseOwnership {}` and `listControllers {}` are owner-tier envelope commands answered by the
+`releaseOwnership {}`, `listControllers {}` and `setLanControl {open}`
+(→ `{"open":bool}`, the owner's LAN switch, stored in
+`/home/feralfile/.state/control/lan.json`) are owner-tier envelope commands answered by the
 authority itself; they never reach the router (see the spec §5.5 and §5.6.4
 for results and `command_failed` reasons). `revokeController` of the
 signer's own `ctl` is also accepted from a controller grant (self-revoke).
@@ -200,14 +202,24 @@ signer's own `ctl` is also accepted from a controller grant (self-revoke).
 ### Plaintext policy (state-dependent, spec §7.2)
 
 `/api/v2/status` (and `getDeviceStatus`) carry
-`"control":{"v":1,"state":"legacy|enrolled|enforced|locked","profile":…}`.
+`"control":{"v":1,"state":"legacy|enrolled|locked","profile":…,"lan":"open|closed"}`
+(`lan` only in `enrolled`).
+
+The LAN-open set is the controller tier (spec §7.1): what the next command
+can undo. Every hub route refuses a non-local source first with
+`403 {"error":{"code":"lan_only"}}` (spec §7.2 defines local).
 
 | State | LAN plaintext `/api/cast` | Relayer plaintext |
 |---|---|---|
-| `legacy` | allowed (phase-0 topic gate still applies) | allowed |
-| `enrolled` | `403 {"error":{"code":"enrollment_required"}}` | controller-tier commands only |
-| `enforced` | `403 enrollment_required` | only the exact Play `displayPlaylist` shape |
+| `legacy` | the LAN-open set and `showPairingQRCode`; anything else `403 {"error":{"code":"enrollment_required"}}` | allowed |
+| `enrolled` | switch open (`lan:"open"`, the default): the LAN-open set; anything else, and everything with the switch closed, `403 enrollment_required` | controller-tier commands only |
 | `locked` | `401 {"error":{"code":"locked"}}` | controller-tier commands only |
+
+Owner-tier plaintext (`sshAccess`, `factoryReset`, `startWifiSetup`,
+`shutdown`, input injection, …) is refused on the LAN in every state (a
+retired device's `factoryReset` is the one exception, spec §8). The
+relayer column applies only to an image that still configures a legacy
+relayer (none from the 3.0.0 LAN-open build on, spec §15.4).
 
 A refused relayer plaintext command gets the RPC `message`
 `{"ok":false,"error":"envelope_required"|"locked","command":"<name>","message":"<text>"}`:
@@ -290,12 +302,11 @@ Current error cases:
 
 Current relayer error response: none standardized; command failure is logged.
 
-LAN hub (`POST :1111/api/cast`): `connect` needs no `X-FF1-Topic` header,
-claimed or not. It is a feral-file#3551 phase-0 residual: the released ff-app
-sends it LAN-first before every cast without the header, so it stays open; under
-the phase-1 control protocol only an owner claims or rebinds with it
-(`ff1-control-v1.md` §7.1). An open `connect` only
-rewrites the claim record and confers no authority.
+LAN hub (`POST :1111/api/cast`): `connect` is in the LAN-open set (controller
+tier): the released ff-app sends it LAN-first before every cast. Under the
+control protocol only an owner claims or rebinds with it; a non-owner
+`connect` to a claimed device is answered `ok` and changes nothing
+(`ff1-control-v1.md` §7.1).
 
 ### showPairingQRCode
 
@@ -577,13 +588,18 @@ at accept time, before dynamic hydration: the URL path verifies the fetched
 bytes and the inline path verifies the caller's own `dp1_call` token exactly
 as it arrived — both ingress decoders retain the `request` object verbatim
 beside the decoded map — never a re-marshal of the map (whose HTML escaping
-of `&`/`<`/`>` can inflate a valid document past the 4 MiB verifier bound)
+of `&`/`<`/`>` can inflate a valid document past the verifier bound)
 and never the typed struct (which drops fields the signer covered). The offline
 cached-copy fallback carries NO verdict — the stored body is a typed,
 hydrated re-marshal, not the signed bytes — so a cast served from it omits
-the fields below. Bounds, all aimed at untrusted ingress: a document larger than 4 MiB is
-refused before decoding on every path (hub body limit, relayer frame limit,
-URL fetch limit, and the verifier's own cap); at most 16 `signatures[]` entries are verified and a document
+the fields below. Bounds, all aimed at untrusted ingress, and no longer one figure: the inline
+paths refuse a document larger than 4 MiB before decoding (hub body limit,
+relayer frame limit, control v1 compact-form limit) while a URL fetch refuses
+one larger than 16 MiB, which is also the verifier's own cap. The URL path is
+allowed the larger document on purpose — the Feral File series published
+between 4.9 and 8.9 MiB compact (up to ~11.9 MiB as served, formatting included) are displayed that way (feral-file/feral-file#3597),
+and a URL fetch runs behind the command gate's heavy budget (at most 4
+concurrent) rather than at the hub's open door (64). At most 16 `signatures[]` entries are verified and a document
 with more is `invalid` (`too many signatures`) without any cryptography
 running; an entry whose `alg`, `role`, or `kid` exceeds 32/32/256 bytes makes the
 document `invalid` before any cryptography runs: that entry is reported as
@@ -1234,15 +1250,11 @@ Current error cases:
 
 Current relayer error response: none standardized; command failure is logged.
 
-LAN hub (`POST :1111/api/cast`) requirement (feral-file#3551 phase 0): on a
-**claimed** device, `sshAccess` (enable and disable alike) must carry the header
-`X-FF1-Topic` equal to the device's current relayer topic. A missing or wrong
-header, or a claimed device that holds no topic yet, is refused with HTTP `401`
-and the body `{"error":{"code":"topic_required"}}` before the executor runs.
-The topic is compared in constant time and never logged. An unclaimed device
-accepts `sshAccess` without the header. Relayer-delivered `sshAccess` is
-unaffected. A client that gets `topic_required` should tell the user to re-pair
-it (ff1-cli reads the topic from its keyring).
+LAN hub (`POST :1111/api/cast`): `sshAccess` is owner tier. With the control
+protocol on, plaintext `sshAccess` is refused with
+`403 {"error":{"code":"enrollment_required"}}` in `legacy` and `enrolled`
+(before an owner exists too; `locked` refuses it as `locked`); an owner sends
+it sealed (`ff1-control-v1.md` §7.2).
 
 ### updateToLatestVersion
 
@@ -3390,10 +3402,10 @@ Rules:
 - Device-control commands with destructive side effects (`shutdown`, `reboot`,
   `factoryReset`, `updateToLatestVersion`, `sshAccess`) should remain explicit
   command names with narrow request bodies.
-- LAN hub authorization is phase 0 of feral-file#3551 (containment): on a
-  claimed device, only `sshAccess` (plus `GET /api/screenshot`) requires the
-  `X-FF1-Topic` header; see that section. Every other command, including
-  `connect`, `factoryReset`, `startWifiSetup`, `showPairingQRCode`, and the
-  keyboard/mouse/gesture input commands, stays open to any LAN caller while
-  the device is in the control protocol's `legacy` state (or the protocol is
-  off). With an owner enrolled, see "Control Protocol Envelope" above.
+- The LAN hub serves local sources only (`lan_only` otherwise). With the
+  control protocol on, plaintext on it is limited to the LAN-open set
+  (controller tier) in every state, plus `showPairingQRCode` before an
+  owner exists, and to nothing once the owner closes the switch; see
+  "Plaintext policy" above. With the protocol off (no control state and
+  `control.enabled` false) the hub admits every command from a local
+  source, as before the protocol.

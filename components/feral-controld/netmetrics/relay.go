@@ -69,7 +69,7 @@ type DeviceStateSources struct {
 	LegacyRetired      func() bool
 	LegacyTopicPresent func() bool
 	Claimed            func() bool
-	// ControlState is "legacy", "enrolled", "enforced", "locked", or "off"
+	// ControlState is "legacy", "enrolled", "locked", or "off"
 	// when the control protocol is not running.
 	ControlState func() string
 	// ResetTargetVersion is the version a factory reset would boot, or

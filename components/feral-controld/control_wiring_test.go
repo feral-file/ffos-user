@@ -50,7 +50,7 @@ func wiringFor(t *testing.T, cfg config.ControlConfig, fsys control.FS) *control
 func TestControlWiring_NoStateDisabledIsOff(t *testing.T) {
 	// No control state + disabled (or malformed): the protocol stays off and
 	// every transport is wired exactly as before.
-	for _, cfg := range []config.ControlConfig{{}, {Malformed: true}, {Enforced: true}} {
+	for _, cfg := range []config.ControlConfig{{}, {Malformed: true}} {
 		fsys := control.NewMemFS()
 		if w := wiringFor(t, cfg, fsys); w != nil {
 			t.Fatalf("%+v: protocol started without state or enabled", cfg)
@@ -75,8 +75,8 @@ func TestControlWiring_StateOnDiskForcesProtocolOn(t *testing.T) {
 		if st := w.auth.State(); st != control.StateEnrolled {
 			t.Fatalf("%s: state %s", name, st)
 		}
-		if d := w.auth.Policy(control.RouteLAN, "displayPlaylist", nil); d.Allow || d.Code != control.CodeEnrollmentRequired {
-			t.Fatalf("%s: LAN plaintext %+v", name, d)
+		if d := w.auth.Policy(control.RouteLAN, "sshAccess", nil); d.Allow || d.Code != control.CodeEnrollmentRequired {
+			t.Fatalf("%s: LAN owner-tier plaintext %+v", name, d)
 		}
 		if d := w.auth.Policy(control.RouteRelayer, "sshAccess", nil); d.Allow {
 			t.Fatalf("%s: relayer owner-tier plaintext allowed", name)
@@ -84,14 +84,6 @@ func TestControlWiring_StateOnDiskForcesProtocolOn(t *testing.T) {
 		if _, err := w.auth.IssueInvitation(); err == nil {
 			t.Fatalf("%s: invitation offered on an owned device", name)
 		}
-	}
-	// enforced only tightens: with an owner and enforced it is enforced;
-	// a malformed enforced (read false) is still enrolled.
-	if w := wiringFor(t, config.ControlConfig{Enforced: true}, ownedState(t)); w.auth.State() != control.StateEnforced {
-		t.Fatal("enforced not applied")
-	}
-	if w := wiringFor(t, config.ControlConfig{Enabled: true, Malformed: true}, ownedState(t)); w.auth.State() != control.StateEnrolled {
-		t.Fatal("malformed enforced fell below enrolled")
 	}
 }
 

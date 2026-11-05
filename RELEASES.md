@@ -46,6 +46,15 @@ ffos-user, package rail (`components/**`):
   - G3: the device keeps working when the legacy relayer is gone; a
     permanent legacy error latches it retired while v2 and the LAN hub keep
     running (#420). #415 was reverted by #416; neither ships.
+  - LAN-open (#444): on the
+    device's own network anyone may run the controller tier (what the next
+    command can undo), in `legacy` and, while the owner's switch is open
+    (`setLanControl`, `.state/control/lan.json`, default open), in
+    `enrolled`; owner-tier plaintext is refused on the LAN in every state.
+    `shutdown` moved to the owner tier, `uploadLogs` to the controller
+    tier. The hub serves local sources only (`403 lan_only`). The phase-0
+    topic gate (`X-FF1-Topic`) and the `enforced` state with its boot purge
+    are deleted. Spec §7.2, §8, §9, §11, §13, §15.4.
 - **Hub and player.**
   - Browser-originated requests refused on every hub route (#376).
   - Relayer connectivity in the LAN status (#397).
@@ -79,6 +88,8 @@ ffos-user, image rail (`users/**`):
 
 ### Before dispatch
 
+- **The LAN-open steps below come first**; where they name a later app,
+  ff-cli or Play release than the bullets here, theirs wins.
 - **App first** (spec §15.1). Publish the G3 app (ff-app 1.8.44 or later:
   #1166, #1193, #1194) to App Store and Google Play production and finish
   the rollout before S1: it lists display rows (since ff-app #1151, 1.8.34),
@@ -104,15 +115,13 @@ ffos-user, image rail (`users/**`):
   `features.browser_pairing.display_grants_min_ffos_version` gates both the
   display rows on Paired sites and the approval copy that promises a site
   direct access (ff-app `ff1_paired_sites_provider`,
-  `mint_pairing_approval_dialog`). Decide once: set it to `"3.0.0"` and
-  accept that copy shown to sites still on Play 0.4, or leave it unset
-  until Play 0.5 publishes. remote-config#22 sets it; drop it there for the
-  second choice.
-- **Image secrets** (`FERAL_CONTROLD_CONFIG_JSON`, Staging and Production),
-  confirmed by the release operator: `relayV2.endpoint` =
-  `wss://relayer.feralfile.io`; `control.enabled` = JSON `true` (no
-  `control.enforced`); the `relayer` block kept with the live legacy
-  endpoint (pre-G3 controld dereferences it without a nil check).
+  `mint_pairing_approval_dialog`). Decided with the LAN-open steps: set it
+  to `"3.0.0"` (remote-config#22) once Play 0.6.0 is published.
+- **Image secrets** (`FERAL_CONTROLD_CONFIG_JSON`, Development, Staging and
+  Production), confirmed by the release operator: `relayV2.endpoint` =
+  `wss://relayer.feralfile.io`; `control.enabled` = JSON `true`; **no
+  `relayer` block** (LAN-open step 5 below; until that step the block was
+  kept for pre-G3 controld).
 - **Build log of each run:** "keeping .control as configured", no
   "forcing del(.control)", and no "`.relayV2.endpoint` is empty" error
   (the check prints nothing when it passes; it fails the build otherwise).
@@ -148,6 +157,61 @@ ffos-user, image rail (`users/**`):
 - **Merge order.** This entry merges into `develop` before the
   `develop -> staging` promotion PR, or `check-release-rail.sh` fails on
   that PR.
+
+### LAN-open steps (human, in this order)
+
+The LAN-open change (above) ships in this same full-image release. S1 (a
+rebuild, if 3.0.0 was already built on Staging) runs only after steps 1-5
+(spec §7.2, §15.4).
+
+1. The ffos-user LAN-open PR (#444) is merged into `develop`.
+2. Play `@feralfile/display` 0.6.0 is published (it pairs both firmware
+   generations: a display grant from 3.0.0, a relayer session from 2.0.x),
+   and ff3 is deployed on 0.6.0. Both precede the Staging image; they
+   change nothing for 2.0.x devices.
+3. The ff-app LAN-open release is published, the force-update floor
+   (`app_update.ios.required_version`, `app_update.android.required_version`)
+   is raised to it, and remote config
+   `features.browser_pairing.display_grants_min_ffos_version` = `"3.0.0"`.
+4. The ff1-cli LAN-open release is published.
+5. The release operator deletes the `relayer` block from
+   `FERAL_CONTROLD_CONFIG_JSON` in Development, Staging and Production
+   (Development too, so `develop` benches match the release), keeping
+   `control.enabled=true` and `relayV2.endpoint`. 3.0.0 controld reads a
+   missing block as "no legacy relayer"; a topic a device holds is inert
+   after its OTA. **Rule from this step on: never build an image from an
+   ffos-user ref older than the LAN-open merge.** A pre-3.0 controld
+   dereferences the missing block and crash-loops.
+6. The Staging rebuild of 3.0.0 (S1, inputs below) and its bench, the
+   Staging bench above plus:
+   - from a laptop on the same Wi-Fi, without credentials, against an
+     owned device: plaintext `displayPlaylist` plays and `getDeviceStatus`
+     answers; `/api/status` has no `topic_id`; `sshAccess`, `factoryReset`,
+     `startWifiSetup` and `shutdown` are refused;
+   - after `setLanControl {open:false}`: `displayPlaylist` refused, status
+     `control.lan:"closed"`; that survives a reboot and an OTA and is gone
+     after a factory reset;
+   - from a non-local source (a VPS through a port forward, or an injected
+     source): every hub route refused `lan_only`;
+   - a phone without a grant joins on the LAN, displays and gets LAN status
+     pushes; off the LAN it sees the controller prompt; after show-code it
+     works off the LAN;
+   - a `legacy` device after the OTA from 2.0.11: plaintext playback on the
+     LAN, owner rows hidden, Secure works, a topic-holding phone has no
+     remote route;
+   - the ff3 button against a 2.0.11 FF1 (session) and a 3.0.0 FF1 (grant)
+     from one browser; after the 2.0.11 FF1 OTAs, its stored session gives
+     "Pair again?" and re-pairing yields a grant;
+   - an unclaimed 2.0.x with the legacy host blocked (nft): the app's update
+     action starts an OTA.
+7. Then S2, P1 and P2 as below, unchanged: `recovery_version` and
+   `min_runtime_version` move in P2, after the fleet watch. A factory reset
+   onto 2.0.1 meanwhile is fine while the legacy worker exists: that image
+   keeps its own `relayer` block, gets a topic, and its pre-claim gate
+   updates it to 3.0.0. P2 lands before Gate B and the worker deletion
+   (spec §15.4). Shelf stock is reflashed as below. The legacy worker
+   deletion stays on the spec §15.4 gates; before the Cloudflare account is
+   deleted, confirm the version API (`ffos.feralfile.io`) is not in it.
 
 ### Release action (human)
 
@@ -222,18 +286,18 @@ Staging one only after explicit in-session confirmation
 
 - P2 (above) before Gate B.
 - Reflash shelf stock with 3.0.0.
-- Play 0.5 stays unpublished until 3.0.0 is broadly deployed (§15.1: FF OS
-  with §5.7 and `relayV2.endpoint`). Until then, on 3.0.0 devices the
-  approval copy that promises a site direct access shows to sites still on
-  Play 0.4 (remote config `display_grants_min_ffos_version`).
+- Play integrators move to `@feralfile/display` 0.6.0 (published in
+  LAN-open step 2). A site still on Play 0.4 stops working against 3.0.0
+  devices (no legacy relayer there); on 2.0.x it keeps its session.
 - Watch `control_state`, `relay_v2_connected`, `relayer_legacy_retired`,
   OTA success and controld restarts on the fleet gauges.
 - Legacy shutdown is a later, separate step (spec §15.4): Gate A and
   Gate B, then delete `tv-cast-coordination` (disable its `deploy.yml`
   first: ff-relayer docs, ff-relayer#32), then set
-  `features.ff1.legacy_relayer_retired` to JSON `true`, then the
-  empty-endpoint release as `recovery_version`, before the Cloudflare
-  account is deleted.
+  `features.ff1.legacy_relayer_retired` to JSON `true`. The images
+  without a `relayer` block (LAN-open step 5, P2 as `recovery_version`)
+  replace the empty-endpoint release; they reach the fleet before the
+  Cloudflare account is deleted.
 - Also before that account is deleted: ff-player's built-in default
   playlist (`src/constants.ts`, in this release's `da3662b4`) and ff-cli's
   default feed (`src/config.ts`) still name

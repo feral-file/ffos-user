@@ -69,10 +69,10 @@ func (h *hub) serveEnvelope(w http.ResponseWriter, r *http.Request, payload comm
 // owner (or is locked): a screenshot has no envelope form — it is a raw PNG
 // GET — so the route answers 403 enrollment_required in every state but
 // legacy. In legacy it answers 403 screen_protected while an invitation is
-// live: the claim QR then carries it, and an unclaimed device has no topic
-// gate, so any LAN host could read the invitation off a screenshot and
-// become the sole owner (review F1). Otherwise the phase-0 topic gate still
-// guards the route.
+// live: the claim QR then carries it, so any LAN host could read the
+// invitation off a screenshot and become the sole owner (review F1).
+// Otherwise a legacy device serves it to any LAN host, like the rest of the
+// LAN-open set.
 // screenshotGeneration returns the invitation generation to compare after a
 // capture (review N1); 0 when control is off.
 func (h *hub) screenshotGeneration() uint64 {

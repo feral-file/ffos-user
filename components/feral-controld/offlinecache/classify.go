@@ -22,9 +22,11 @@ import (
 //   - ClassMedia and ClassUnknown are both routed to the browser-free
 //     direct-download path (mediacapture.go): the kiosk player renders
 //     every one of these as a native element (<img>/<video>/<audio>/
-//     <object>/iframe-without-scripting) that requests the bare source
-//     URL directly, so the "dependency graph" is exactly one file — no
-//     browser is needed to discover dependencies that do not exist.
+//     <object>/iframe-without-scripting) fed by one request for the bare
+//     source URL (a still's is the player's CORS fetch() of that URL,
+//     handed to the <img> as a blob), so the "dependency graph" is
+//     exactly one file — no browser is needed to discover dependencies
+//     that do not exist.
 //     ClassUnknown (an empty or unrecognized Content-Type) is treated
 //     the same as ClassMedia rather than rejected: the goal is offline
 //     caching for every single-file artwork, and a best-effort direct

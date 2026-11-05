@@ -1095,8 +1095,9 @@ func (r *replayer) processRequestPaused(sessionID string, session CDPSession, pa
 		}
 	}
 	// ff-player's content-type probe (see headProbeQueryParams' doc)
-	// issues a HEAD to the item's source before ever issuing the GET a
-	// native <img>/<video>/<audio> element actually renders from — a
+	// issues a HEAD to the item's source before ever issuing the GET its
+	// <img>/<video>/<audio> renders from (a still's GET is the player's
+	// own CORS fetch()) — a
 	// HEAD-keyed resource is never captured (capture.go/mediacapture.go
 	// only ever store a GET), so this is not a rare edge case but an
 	// UNCONDITIONAL miss on the two lookups above for every offline
