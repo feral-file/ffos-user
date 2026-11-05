@@ -277,7 +277,10 @@ would hide real art, the worst outcome here.
   `Page.captureScreenshot`; the main document's status is the main frame's
   **latest** `Document` response, so a page that replaces itself onto an
   error page is judged by that page and a child frame's document never
-  counts. The URL rendered is the
+  counts; a main-document navigation that fails after the first (a
+  `loadingFailed`, a committed `chrome-error://` page) makes the render
+  **stalled**, since Chromium's own error page is on screen. The URL
+  rendered is the
   record's **own source** through the gateway policy, fragment kept — never
   the record's `wireUrl`, which the cast pass copies from a wire-identical
   sibling (`work#one` and `work#two` are two works). The policy then rides on

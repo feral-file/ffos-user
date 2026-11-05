@@ -242,8 +242,11 @@ func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSe
 	// first response (PR #443 review, F26). Keyed by frameId: child frames'
 	// documents never count. Registered before Network.enable so the
 	// navigation's own response cannot be missed.
-	docs := &mainDocTracker{status: map[string]int{}}
+	docs := newMainDocTracker()
+	session.On("Network.requestWillBeSent", docs.observeRequest)
 	session.On("Network.responseReceived", docs.observe)
+	session.On("Network.loadingFailed", docs.observeFailure)
+	session.On("Page.frameNavigated", docs.observeNavigation)
 	// Registered BEFORE Fetch.enable so no paused request can arrive
 	// without a handler (an unanswered pause hangs the request). The
 	// policy rides on the guard so it applies to every request, child
@@ -303,6 +306,13 @@ func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSe
 	if n := guard.childSetupFailures.Load(); n > 0 {
 		return nil, fmt.Errorf("media health render: %d child target(s) left contained; the frame is not evidence", n)
 	}
+	// A main-document navigation that failed AFTER the first (a
+	// location.replace onto a closed connection, a committed
+	// chrome-error:// page) leaves Chromium's own error page on screen; a
+	// frame of that is not evidence either (PR #443 review, round 5, F26).
+	if reason := docs.failure(nav.FrameID); reason != "" {
+		return nil, fmt.Errorf("media health render: main document navigation failed: %s", reason)
+	}
 
 	shotCtx, shotCancel := context.WithTimeout(ctx, renderScreenshotWindow)
 	defer shotCancel()
@@ -338,16 +348,50 @@ func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSe
 	return &mediahealth.Frame{Image: img, MainStatus: status}, nil
 }
 
-// mainDocTracker keeps the LATEST Document response per frame, so the
-// status reported is the one of the document actually on screen when the
-// capture is taken, whatever navigations the page made since the first.
+// mainDocTracker keeps, per frame, the LATEST Document response and the
+// latest navigation failure, so what is reported is the state of the
+// document actually on screen when the capture is taken, whatever
+// navigations the page made since the first. Document requests are
+// correlated to their frame through Network.requestWillBeSent, because
+// Network.loadingFailed carries no frameId.
 type mainDocTracker struct {
 	mu     sync.Mutex
 	status map[string]int
+	// failed holds the failure reason of the frame's latest document
+	// navigation (a loadingFailed, or a committed chrome-error:// page);
+	// cleared by a later Document response or a normal navigation.
+	failed map[string]string
+	// docRequests maps an in-flight Document request to its frame.
+	docRequests map[string]string
 	// first is the first Document response seen, for a navigate reply
 	// that carried no frameId (older protocol shapes).
-	first     int
-	firstSeen bool
+	first       int
+	firstSeen   bool
+	firstFailed string
+}
+
+// maxTrackedDocRequests bounds the request→frame map a hostile page could
+// grow by navigating frames in a loop.
+const maxTrackedDocRequests = 1024
+
+func newMainDocTracker() *mainDocTracker {
+	return &mainDocTracker{status: map[string]int{}, failed: map[string]string{}, docRequests: map[string]string{}}
+}
+
+func (t *mainDocTracker) observeRequest(params json.RawMessage) {
+	var ev struct {
+		RequestID string `json:"requestId"`
+		FrameID   string `json:"frameId"`
+		Type      string `json:"type"`
+	}
+	if err := json.Unmarshal(params, &ev); err != nil || ev.Type != "Document" || ev.RequestID == "" || ev.FrameID == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.docRequests) < maxTrackedDocRequests {
+		t.docRequests[ev.RequestID] = ev.FrameID
+	}
 }
 
 func (t *mainDocTracker) observe(params json.RawMessage) {
@@ -365,11 +409,62 @@ func (t *mainDocTracker) observe(params json.RawMessage) {
 	defer t.mu.Unlock()
 	if ev.FrameID != "" {
 		t.status[ev.FrameID] = ev.Response.Status
+		delete(t.failed, ev.FrameID)
 	}
 	if !t.firstSeen {
 		t.firstSeen = true
 		t.first = ev.Response.Status
 	}
+	t.firstFailed = ""
+}
+
+// observeFailure records a Document request that failed (net::ERR_*). A
+// canceled one is a navigation superseded by another, not a failure.
+func (t *mainDocTracker) observeFailure(params json.RawMessage) {
+	var ev struct {
+		RequestID string `json:"requestId"`
+		Type      string `json:"type"`
+		ErrorText string `json:"errorText"`
+		Canceled  bool   `json:"canceled"`
+	}
+	if err := json.Unmarshal(params, &ev); err != nil || ev.Type != "Document" || ev.Canceled {
+		return
+	}
+	reason := ev.ErrorText
+	if reason == "" {
+		reason = "loading failed"
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if frameID, ok := t.docRequests[ev.RequestID]; ok {
+		t.failed[frameID] = reason
+		delete(t.docRequests, ev.RequestID)
+		return
+	}
+	t.firstFailed = reason
+}
+
+// observeNavigation records a frame that committed Chromium's own error
+// document (chrome-error://, or an unreachableUrl), and clears a recorded
+// failure when the frame commits a normal document.
+func (t *mainDocTracker) observeNavigation(params json.RawMessage) {
+	var ev struct {
+		Frame struct {
+			ID             string `json:"id"`
+			URL            string `json:"url"`
+			UnreachableURL string `json:"unreachableUrl"`
+		} `json:"frame"`
+	}
+	if err := json.Unmarshal(params, &ev); err != nil || ev.Frame.ID == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if ev.Frame.UnreachableURL != "" || strings.HasPrefix(ev.Frame.URL, "chrome-error://") {
+		t.failed[ev.Frame.ID] = "error document committed"
+		return
+	}
+	delete(t.failed, ev.Frame.ID)
 }
 
 // latest is the main frame's current document status, 0 when none was
@@ -381,6 +476,17 @@ func (t *mainDocTracker) latest(frameID string) int {
 		return t.status[frameID]
 	}
 	return t.first
+}
+
+// failure is the reason the main frame's latest document navigation
+// failed, "" when it did not.
+func (t *mainDocTracker) failure(frameID string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if frameID != "" {
+		return t.failed[frameID]
+	}
+	return t.firstFailed
 }
 
 // decodeScreenshotPNG decodes a PNG with the header read first, so a

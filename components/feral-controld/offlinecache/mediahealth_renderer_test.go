@@ -518,3 +518,56 @@ func TestMediaHealthRenderer_MainStatusFollowsTheMainFrame(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, frame.MainStatus, "unknown when nothing was observed")
 }
+
+// F26 (round 5): a main-document navigation that fails after the first —
+// a replace onto a closed connection, Chromium's committed error page —
+// leaves the browser's own error page on screen, and that frame is never
+// evidence.
+func TestMediaHealthRenderer_FailedReplacementNavigationIsStalled(t *testing.T) {
+	r := newTestRenderer(t)
+
+	// loadingFailed for the main frame's second document request.
+	s := newRenderSession()
+	s.shot = pngOf(color.Black, 8, 8)
+	s.onNavigate = func(s *renderSession) {
+		s.emit("Network.requestWillBeSent", `{"requestId":"r1","frameId":"F","type":"Document"}`)
+		s.emit("Network.responseReceived", `{"type":"Document","frameId":"F","response":{"status":200}}`)
+		s.emit("Network.requestWillBeSent", `{"requestId":"r2","frameId":"F","type":"Document"}`)
+		s.emit("Network.loadingFailed", `{"requestId":"r2","type":"Document","errorText":"net::ERR_EMPTY_RESPONSE","canceled":false}`)
+	}
+	_, err := r.renderOnSession(context.Background(), s, "https://art.example/p", time.Millisecond)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ERR_EMPTY_RESPONSE")
+	assert.NotContains(t, s.methods(), "Page.captureScreenshot")
+
+	// A committed chrome-error:// document, with no loadingFailed at all.
+	s = newRenderSession()
+	s.shot = pngOf(color.Black, 8, 8)
+	s.onNavigate = func(s *renderSession) {
+		s.emit("Network.responseReceived", `{"type":"Document","frameId":"F","response":{"status":200}}`)
+		s.emit("Page.frameNavigated", `{"frame":{"id":"F","url":"chrome-error://chromewebdata/","unreachableUrl":"https://art.example/reset"}}`)
+	}
+	_, err = r.renderOnSession(context.Background(), s, "https://art.example/p", time.Millisecond)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "error document committed")
+
+	// A canceled Document request is a superseded navigation, not a
+	// failure; a child frame's failure is not the main frame's; and a
+	// failure followed by a successful document is healed.
+	s = newRenderSession()
+	s.shot = pngOf(color.Black, 8, 8)
+	s.onNavigate = func(s *renderSession) {
+		s.emit("Network.requestWillBeSent", `{"requestId":"r1","frameId":"F","type":"Document"}`)
+		s.emit("Network.loadingFailed", `{"requestId":"r1","type":"Document","errorText":"net::ERR_ABORTED","canceled":true}`)
+		s.emit("Network.requestWillBeSent", `{"requestId":"i1","frameId":"I","type":"Document"}`)
+		s.emit("Network.loadingFailed", `{"requestId":"i1","type":"Document","errorText":"net::ERR_FAILED","canceled":false}`)
+		s.emit("Network.requestWillBeSent", `{"requestId":"r2","frameId":"F","type":"Document"}`)
+		s.emit("Network.loadingFailed", `{"requestId":"r2","type":"Document","errorText":"net::ERR_FAILED","canceled":false}`)
+		s.emit("Network.requestWillBeSent", `{"requestId":"r3","frameId":"F","type":"Document"}`)
+		s.emit("Network.responseReceived", `{"type":"Document","frameId":"F","response":{"status":200}}`)
+		s.emit("Page.frameNavigated", `{"frame":{"id":"F","url":"https://art.example/retry"}}`)
+	}
+	frame, err := r.renderOnSession(context.Background(), s, "https://art.example/p", time.Millisecond)
+	require.NoError(t, err)
+	assert.Equal(t, 200, frame.MainStatus)
+}
