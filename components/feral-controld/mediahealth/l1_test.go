@@ -6,7 +6,6 @@ import (
 	"image"
 	"image/color"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -292,16 +291,43 @@ func TestApplyRender_Transitions(t *testing.T) {
 	assert.Equal(t, StateBroken, rec.State, "a frame cannot heal a 404")
 }
 
-func newTestL1(t *testing.T, store *Store, r Renderer, clock *testClock, asleep *atomic.Bool) *L1 {
+// fakeSleep is the AsleepSince source for tests: Store(true) stamps a new
+// sleep at the clock's time (as devicectl stamps each transition into
+// sleep), Store(false) wakes.
+type fakeSleep struct {
+	mu     sync.Mutex
+	clock  *testClock
+	asleep bool
+	since  time.Time
+}
+
+func newFakeSleep(clock *testClock) *fakeSleep { return &fakeSleep{clock: clock} }
+
+func (f *fakeSleep) Store(asleep bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if asleep && !f.asleep {
+		f.since = f.clock.Now()
+	}
+	f.asleep = asleep
+}
+
+func (f *fakeSleep) Since() (time.Time, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.since, f.asleep
+}
+
+func newTestL1(t *testing.T, store *Store, r Renderer, clock *testClock, asleep *fakeSleep) *L1 {
 	t.Helper()
 	return NewL1(L1Config{
-		Store:     store,
-		Renderer:  r,
-		Asleep:    asleep.Load,
-		Now:       clock.Now,
-		Settle:    time.Millisecond,
-		GateWatch: time.Millisecond,
-		MinAsleep: -1, // no grace: it has its own test
+		Store:       store,
+		Renderer:    r,
+		AsleepSince: asleep.Since,
+		Now:         clock.Now,
+		Settle:      time.Millisecond,
+		GateWatch:   time.Millisecond,
+		MinAsleep:   -1, // no grace: it has its own test
 	})
 }
 
@@ -314,8 +340,8 @@ func TestL1_GateCapAndVerdicts(t *testing.T) {
 		"https://o/blank": {Image: uniform(color.Black), MainStatus: 200},
 		"https://o/fine":  {Image: checkerboard(), MainStatus: 200},
 	}}
-	var asleep atomic.Bool
-	l1 := newTestL1(t, store, r, clock, &asleep)
+	asleep := newFakeSleep(clock)
+	l1 := newTestL1(t, store, r, clock, asleep)
 
 	assert.False(t, l1.Step(context.Background()), "awake: nothing is rendered")
 	assert.Empty(t, r.calls)
@@ -344,7 +370,7 @@ func TestL1_GateCapAndVerdicts(t *testing.T) {
 	assert.Equal(t, RenderOK, rec.L1.Verdict)
 
 	// The nightly cap, reset by the calendar day.
-	capped := NewL1(L1Config{Store: store, Renderer: r, Asleep: asleep.Load, Now: clock.Now, MaxPerNight: 1, Settle: time.Millisecond, GateWatch: time.Millisecond, MinAsleep: -1})
+	capped := NewL1(L1Config{Store: store, Renderer: r, AsleepSince: asleep.Since, Now: clock.Now, MaxPerNight: 1, Settle: time.Millisecond, GateWatch: time.Millisecond, MinAsleep: -1})
 	clock.Advance(RecheckL1OK + time.Second)
 	assert.True(t, capped.Step(context.Background()))
 	assert.False(t, capped.Step(context.Background()), "one per night")
@@ -352,7 +378,7 @@ func TestL1_GateCapAndVerdicts(t *testing.T) {
 	assert.True(t, capped.Step(context.Background()), "a new day, a new budget")
 
 	// Admission refusal waits.
-	refused := NewL1(L1Config{Store: store, Renderer: r, Asleep: asleep.Load, Admit: func() bool { return false }, Now: clock.Now, Settle: time.Millisecond, MinAsleep: -1})
+	refused := NewL1(L1Config{Store: store, Renderer: r, AsleepSince: asleep.Since, Admit: func() bool { return false }, Now: clock.Now, Settle: time.Millisecond, MinAsleep: -1})
 	clock.Advance(RecheckL1OK + time.Second)
 	assert.False(t, refused.Step(context.Background()))
 }
@@ -370,9 +396,9 @@ func TestL1_StalledAndUnavailableAreNotEvidence(t *testing.T) {
 			"https://o/nav":  errors.New("navigation failed: net::ERR_NAME_NOT_RESOLVED"),
 		},
 	}
-	var asleep atomic.Bool
+	asleep := newFakeSleep(clock)
 	asleep.Store(true)
-	l1 := newTestL1(t, store, r, clock, &asleep)
+	l1 := newTestL1(t, store, r, clock, asleep)
 	for i := 0; i < 3; i++ {
 		assert.True(t, l1.Step(context.Background()))
 	}
@@ -392,9 +418,9 @@ func TestL1_WakeCancelsTheRenderAndKeepsItDue(t *testing.T) {
 	store := newL1Store(t, clock)
 	seedSoftware(t, store, "https://o/slow")
 	r := &fakeRenderer{block: true}
-	var asleep atomic.Bool
+	asleep := newFakeSleep(clock)
 	asleep.Store(true)
-	l1 := newTestL1(t, store, r, clock, &asleep)
+	l1 := newTestL1(t, store, r, clock, asleep)
 
 	done := make(chan bool)
 	go func() { done <- l1.Step(context.Background()) }()
@@ -418,8 +444,8 @@ func TestL1_WakeCancelsTheRenderAndKeepsItDue(t *testing.T) {
 func TestL1_RunStopsOnContext(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	store := newL1Store(t, clock)
-	var asleep atomic.Bool
-	l1 := NewL1(L1Config{Store: store, Renderer: &fakeRenderer{}, Asleep: asleep.Load, Now: clock.Now, Tick: time.Millisecond, MinAsleep: -1})
+	asleep := newFakeSleep(clock)
+	l1 := NewL1(L1Config{Store: store, Renderer: &fakeRenderer{}, AsleepSince: asleep.Since, Now: clock.Now, Tick: time.Millisecond, MinAsleep: -1})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { l1.Run(ctx); close(done) }()
@@ -454,9 +480,9 @@ func TestRenderURL_OwnSourceThroughThePolicy(t *testing.T) {
 		"https://o/work#one": {Image: checkerboard(), MainStatus: 200},
 		"https://o/work#two": {Image: checkerboard(), MainStatus: 200},
 	}}
-	var asleep atomic.Bool
+	asleep := newFakeSleep(clock)
 	asleep.Store(true)
-	l1 := newTestL1(t, store, r, clock, &asleep)
+	l1 := newTestL1(t, store, r, clock, asleep)
 	assert.True(t, l1.Step(context.Background()))
 	assert.True(t, l1.Step(context.Background()))
 	assert.Equal(t, 1, r.count("https://o/work#one"))
@@ -470,9 +496,9 @@ func TestL1_StalledConfirmationKeepsTheLongSettle(t *testing.T) {
 	store := newL1Store(t, clock)
 	seedSoftware(t, store, "https://o/slow")
 	r := &fakeRenderer{frames: map[string]*Frame{"https://o/slow": {Image: uniform(color.Black), MainStatus: 200}}}
-	var asleep atomic.Bool
+	asleep := newFakeSleep(clock)
 	asleep.Store(true)
-	l1 := newTestL1(t, store, r, clock, &asleep)
+	l1 := newTestL1(t, store, r, clock, asleep)
 
 	assert.True(t, l1.Step(context.Background()), "first render: blank, confirmation due")
 	r.mu.Lock()
@@ -558,9 +584,9 @@ func TestL1_PlaySuccessResetsTheBlankRun(t *testing.T) {
 	// The next due render: a short blank only schedules a confirmation.
 	clock.Advance(RecheckL1Suspect + time.Second)
 	r := &fakeRenderer{frames: map[string]*Frame{src: {Image: uniform(color.Black), MainStatus: 200}}}
-	var asleep atomic.Bool
+	asleep := newFakeSleep(clock)
 	asleep.Store(true)
-	l1 := newTestL1(t, store, r, clock, &asleep)
+	l1 := newTestL1(t, store, r, clock, asleep)
 	assert.True(t, l1.Step(context.Background()))
 	assert.Equal(t, time.Millisecond, r.calls[0].settle, "a fresh render, not a confirmation")
 	rec, err = store.Get(src)
@@ -592,9 +618,9 @@ func TestL1_SuspectRecheckUsesTheLongSettle(t *testing.T) {
 	// The page paints only under the long window.
 	r := &fakeRenderer{frames: map[string]*Frame{}}
 	r.frames[src] = &Frame{Image: uniform(color.Black), MainStatus: 200}
-	var asleep atomic.Bool
+	asleep := newFakeSleep(clock)
 	asleep.Store(true)
-	l1 := NewL1(L1Config{Store: store, Renderer: r, Asleep: asleep.Load, Now: clock.Now, Settle: time.Millisecond, ConfirmSettle: 7 * time.Millisecond, GateWatch: time.Millisecond, MinAsleep: -1})
+	l1 := NewL1(L1Config{Store: store, Renderer: r, AsleepSince: asleep.Since, Now: clock.Now, Settle: time.Millisecond, ConfirmSettle: 7 * time.Millisecond, GateWatch: time.Millisecond, MinAsleep: -1})
 	clock.Advance(RecheckL1Suspect + time.Second)
 	r.frames[src] = &Frame{Image: checkerboard(), MainStatus: 200} // what a 7 ms render shows
 	assert.True(t, l1.Step(context.Background()))
@@ -622,8 +648,8 @@ func TestL1_GracePeriodAfterSleep(t *testing.T) {
 	store := newL1Store(t, clock)
 	seedSoftware(t, store, "https://o/html")
 	r := &fakeRenderer{frames: map[string]*Frame{"https://o/html": {Image: checkerboard(), MainStatus: 200}}}
-	var asleep atomic.Bool
-	l1 := NewL1(L1Config{Store: store, Renderer: r, Asleep: asleep.Load, Now: clock.Now, Settle: time.Millisecond, GateWatch: time.Millisecond, MinAsleep: 2 * time.Minute})
+	asleep := newFakeSleep(clock)
+	l1 := NewL1(L1Config{Store: store, Renderer: r, AsleepSince: asleep.Since, Now: clock.Now, Settle: time.Millisecond, GateWatch: time.Millisecond, MinAsleep: 2 * time.Minute})
 
 	asleep.Store(true)
 	assert.False(t, l1.Step(context.Background()), "just asleep: inside the grace period")
@@ -641,6 +667,16 @@ func TestL1_GracePeriodAfterSleep(t *testing.T) {
 	clock.Advance(31 * time.Second)
 	assert.True(t, l1.Step(context.Background()), "past the grace: the render runs")
 	assert.Len(t, r.calls, 1)
+
+	// F28: a wake and a new sleep BETWEEN two gate checks is a new sleep —
+	// the source's stamp moved — so the grace restarts although the runner
+	// never saw the panel awake.
+	asleep.Store(false)
+	asleep.Store(true)
+	assert.False(t, l1.Step(context.Background()), "a sleep that began since the last check has not earned the grace")
+	clock.Advance(2*time.Minute + time.Second)
+	clock.Advance(RecheckL1OK) // make the record due again
+	assert.True(t, l1.Step(context.Background()))
 
 	// The default applies when unset.
 	assert.Equal(t, DefaultMinAsleep, NewL1(L1Config{}).cfg.MinAsleep)

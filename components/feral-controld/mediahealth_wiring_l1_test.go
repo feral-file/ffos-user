@@ -27,7 +27,7 @@ func TestWireMediaHealthL1_OffByDefaultAndNeedsARenderer(t *testing.T) {
 	store, err := mediahealth.Open(filepath.Join(t.TempDir(), "store.db"), mediahealth.Options{})
 	require.NoError(t, err)
 	defer func() { _ = store.Close() }()
-	asleep := func() bool { return false }
+	asleep := func() (time.Time, bool) { return time.Time{}, false }
 
 	assert.Nil(t, wireMediaHealthL1(config.MediaHealthConfig{}, store, noopRenderer{}, nil, asleep, nil, zap.NewNop()), "absent block: off")
 	assert.Nil(t, wireMediaHealthL1(config.MediaHealthConfig{L1: &config.MediaHealthL1Config{}}, store, noopRenderer{}, nil, asleep, nil, zap.NewNop()), "present but not enabled: off")

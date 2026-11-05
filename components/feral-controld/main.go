@@ -1325,7 +1325,7 @@ func initializeApp(
 			renderer = offlineCacheRendererFactory(policy)
 		}
 		if l1 := wireMediaHealthL1(config.Get().MediaHealthTuning(logger), mediaHealthSvc.Store(), renderer, uaPolicy,
-			func() bool { return devicectl.PlayerAsleep(executor) }, admit, logger); l1 != nil {
+			func() (time.Time, bool) { return devicectl.PlayerAsleepSince(executor) }, admit, logger); l1 != nil {
 			go l1.Run(context)
 		}
 	}

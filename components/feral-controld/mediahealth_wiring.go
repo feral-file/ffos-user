@@ -125,7 +125,7 @@ func mediaHealthCursorReconciler(svc *mediahealth.Service) func(context.Context)
 // §6) when mediaHealth.l1.enabled is set and the offline cache's renderer
 // exists; nil otherwise, with one log line saying why, so a device whose
 // operator expected L1 can see from the journal that it is off.
-func wireMediaHealthL1(cfg config.MediaHealthConfig, store *mediahealth.Store, renderer mediahealth.Renderer, rewriter *uarewrite.Policy, asleep, admit func() bool, logger *zap.Logger) *mediahealth.L1 {
+func wireMediaHealthL1(cfg config.MediaHealthConfig, store *mediahealth.Store, renderer mediahealth.Renderer, rewriter *uarewrite.Policy, asleepSince func() (time.Time, bool), admit func() bool, logger *zap.Logger) *mediahealth.L1 {
 	if cfg.L1 == nil || !cfg.L1.Enabled {
 		logger.Info("media health: L1 render probe off (mediaHealth.l1.enabled is not set)")
 		return nil
@@ -146,7 +146,7 @@ func wireMediaHealthL1(cfg config.MediaHealthConfig, store *mediahealth.Store, r
 	l1cfg := mediahealth.L1Config{
 		Store:                  store,
 		Renderer:               renderer,
-		Asleep:                 asleep,
+		AsleepSince:            asleepSince,
 		Admit:                  admit,
 		Logger:                 logger,
 		MaxPerNight:            cfg.L1.MaxPerNight,

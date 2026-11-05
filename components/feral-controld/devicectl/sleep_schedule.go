@@ -280,16 +280,40 @@ func InvalidatePlayerSleepState(exec Executor, logger *zap.Logger) {
 // (see InvalidatePlayerSleepState) so the Executor interface and its mock
 // stay unchanged.
 func (e *executor) PlayerAsleep() bool {
+	_, asleep := e.PlayerAsleepSince()
+	return asleep
+}
+
+// PlayerAsleepSince is PlayerAsleep with the time the player confirmed
+// the CURRENT sleep (the stamp applySleepTransition takes on each
+// transition into sleep): a consumer that polls can tell a sleep that
+// started after its last poll from one that has been going on, which a
+// bare bool cannot. (zero, false) while awake.
+func (e *executor) PlayerAsleepSince() (time.Time, bool) {
 	e.sleepApplyMu.Lock()
 	defer e.sleepApplyMu.Unlock()
-	return e.sleepScheduleDesiredCache == sleepschedule.StateSleeping && e.sleepPlayerState == playerSleeping
+	if e.sleepScheduleDesiredCache == sleepschedule.StateSleeping && e.sleepPlayerState == playerSleeping {
+		return e.sleepConfirmedAt, true
+	}
+	return time.Time{}, false
 }
 
 // PlayerAsleep is the exported seam over an Executor: false when the
 // executor does not implement the tracker (a test double).
 func PlayerAsleep(exec Executor) bool {
-	a, ok := exec.(interface{ PlayerAsleep() bool })
-	return ok && a.PlayerAsleep()
+	_, asleep := PlayerAsleepSince(exec)
+	return asleep
+}
+
+// PlayerAsleepSince is the exported seam over an Executor for
+// PlayerAsleepSince: (zero, false) when the executor does not implement
+// the tracker.
+func PlayerAsleepSince(exec Executor) (time.Time, bool) {
+	a, ok := exec.(interface{ PlayerAsleepSince() (time.Time, bool) })
+	if !ok {
+		return time.Time{}, false
+	}
+	return a.PlayerAsleepSince()
 }
 
 func (e *executor) invalidatePlayerSleepState() {
@@ -589,6 +613,18 @@ func (e *executor) applySleepTransitionLocked(ctx context.Context, state sleepsc
 
 	e.sleepPlayerState = playerSleepStateFor(state)
 	e.sleepLastGood = state
+	if state == sleepschedule.StateSleeping {
+		// Stamped on EVERY transition into sleep (an aligned re-apply is
+		// skipped by the caller, so a continuing sleep keeps its stamp):
+		// PlayerAsleepSince consumers measure the current sleep from here,
+		// and a wake followed by a new sleep between two of their polls
+		// must read as a new sleep, not a continuation. Wall clock when the
+		// executor has no clock (bare executors in tests).
+		e.sleepConfirmedAt = time.Now()
+		if e.clock != nil {
+			e.sleepConfirmedAt = e.clock.Now()
+		}
+	}
 	return nil
 }
 

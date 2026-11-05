@@ -28,7 +28,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -250,15 +249,21 @@ type RenderResult struct {
 type L1Config struct {
 	Store    *Store
 	Renderer Renderer
-	// Asleep reports whether the panel is asleep (the schedule wants it
-	// and the player confirmed). The runner renders only while it is true
-	// and cancels an in-flight render when it turns false.
-	Asleep func() bool
+	// AsleepSince reports whether the panel is asleep (the schedule wants
+	// it and the player confirmed) and when the player confirmed THIS
+	// sleep. The runner renders only while it holds, MinAsleep after that
+	// time, and cancels an in-flight render when it stops holding. The
+	// time comes from the source (devicectl stamps each transition into
+	// sleep), not from the runner's own first sighting: a wake and a new
+	// sleep between two polls would otherwise read as one long sleep and
+	// skip the grace (PR #443 review, F28).
+	AsleepSince func() (since time.Time, asleep bool)
 	// Admit, when set, is the device resource gate (the offline cache's,
 	// read-only); a refusal just waits for the next tick.
 	Admit func() bool
-	// MinAsleep is the grace period after Asleep first reports true before
-	// the gate opens (DefaultMinAsleep when 0; negative = none); any wake
+	// MinAsleep is the grace period after the player confirmed the current
+	// sleep before the gate opens (DefaultMinAsleep when 0; negative =
+	// none); a new sleep carries a new confirmation time, so any wake
 	// restarts it.
 	MinAsleep time.Duration
 	// Rewriter is the kiosk's gateway policy (the L0 probe's), applied to
@@ -288,15 +293,9 @@ type L1 struct {
 
 	nightDay   string
 	nightCount int
-
-	// asleepSince is when Asleep first reported true in the current sleep
-	// (zero while awake); the gate opens MinAsleep after it. Guarded by
-	// gateMu: the render's gate watcher polls while Step is in flight.
-	gateMu      sync.Mutex
-	asleepSince time.Time
 }
 
-// NewL1 builds the runner. Store, Renderer and Asleep are required.
+// NewL1 builds the runner. Store, Renderer and AsleepSince are required.
 func NewL1(cfg L1Config) *L1 {
 	if cfg.MaxPerNight <= 0 {
 		cfg.MaxPerNight = DefaultMaxPerNight
@@ -353,22 +352,19 @@ func (l *L1) Run(ctx context.Context) {
 	}
 }
 
-// gate says whether a render may run now: the panel confirmed asleep
-// for at least MinAsleep, and the resource gate admits. The grace period
-// is counted from the first asleep sighting of the current sleep; a wake
-// (any false sighting) clears it, so the next sleep earns it again.
+// gate says whether a render may run now: the player confirmed the
+// current sleep at least MinAsleep ago, and the resource gate admits. The
+// grace is measured from the source's own confirmation time of THIS
+// sleep, so a wake and a new sleep between two checks start a new grace.
 func (l *L1) gate() bool {
-	l.gateMu.Lock()
-	defer l.gateMu.Unlock()
-	if l.cfg.Asleep == nil || !l.cfg.Asleep() {
-		l.asleepSince = time.Time{}
+	if l.cfg.AsleepSince == nil {
 		return false
 	}
-	now := l.now()
-	if l.asleepSince.IsZero() {
-		l.asleepSince = now
+	since, asleep := l.cfg.AsleepSince()
+	if !asleep {
+		return false
 	}
-	if l.cfg.MinAsleep > 0 && now.Sub(l.asleepSince) < l.cfg.MinAsleep {
+	if l.cfg.MinAsleep > 0 && l.now().Sub(since) < l.cfg.MinAsleep {
 		return false
 	}
 	if l.cfg.Admit != nil && !l.cfg.Admit() {

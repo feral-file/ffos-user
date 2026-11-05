@@ -2,6 +2,7 @@ package devicectl
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -36,4 +37,32 @@ func TestPlayerAsleep_RequiresDesiredAndConfirmed(t *testing.T) {
 		return e
 	}()))
 	assert.False(t, PlayerAsleep(nil), "an executor without the tracker reads awake")
+}
+
+// PlayerAsleepSince carries the stamp of the CURRENT sleep: a wake and a new
+// sleep between two polls reads as a new sleep.
+func TestPlayerAsleepSince_StampsEachTransitionIntoSleep(t *testing.T) {
+	e := &executor{sleepScheduleDesiredCache: sleepschedule.StateSleeping}
+	_, asleep := e.PlayerAsleepSince()
+	assert.False(t, asleep)
+
+	first := time.Date(2026, 11, 5, 1, 0, 0, 0, time.UTC)
+	e.sleepPlayerState = playerSleeping
+	e.sleepConfirmedAt = first
+	since, asleep := e.PlayerAsleepSince()
+	assert.True(t, asleep)
+	assert.Equal(t, first, since)
+
+	// Wake, then a new sleep: the stamp moves.
+	e.sleepPlayerState = playerAwake
+	_, asleep = e.PlayerAsleepSince()
+	assert.False(t, asleep)
+	e.sleepPlayerState = playerSleeping
+	e.sleepConfirmedAt = first.Add(time.Minute)
+	since, asleep = e.PlayerAsleepSince()
+	assert.True(t, asleep)
+	assert.Equal(t, first.Add(time.Minute), since)
+
+	_, asleep = PlayerAsleepSince(nil)
+	assert.False(t, asleep, "an executor without the tracker reads awake")
 }
