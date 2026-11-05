@@ -978,9 +978,10 @@ Directory: `/home/feralfile/.state/control/`, mode 0700. Files are mode 0600.
 - `lan.json` (§7.2, optional): `{"v":1,"gen","open"}`, exactly those
   members, `open` a boolean. The owner's LAN switch, written only by
   `setLanControl` (§5.5), atomically like the other files. A missing file,
-  or one whose `gen` is not the identity's, reads **open** (the default; the
-  next write overwrites it). Any other read or parse failure reads
-  **closed**, logged once at start: a damaged switch must not reopen a LAN
+  or one whose `gen` is a string that is not the identity's, reads **open**
+  (the default; the next write overwrites it). Any other read or parse
+  failure, a `gen` that is not a string included, reads **closed**, logged
+  once at start: a damaged switch must not reopen a LAN
   the owner closed, and the owner rewrites it with `setLanControl`. It never
   locks the device and is never part of `grants.json` (whose strict parse
   would lock on an unknown member, and a rollback to a controld that does

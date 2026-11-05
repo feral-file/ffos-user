@@ -49,6 +49,13 @@ func TestLANSwitchFileFailureDirection(t *testing.T) {
 		{"corrupt reads closed", `not json`, false, true},
 		{"unknown member reads closed", `{"v":1,"gen":"GEN","open":true,"x":1}`, false, true},
 		{"other version reads closed", `{"v":2,"gen":"GEN","open":true}`, false, true},
+		// A malformed gen is a corrupt file, not another identity's file:
+		// it must not reopen a closed switch (review F1 on #444).
+		{"null gen reads closed", `{"v":1,"gen":null,"open":false}`, false, true},
+		{"bool gen reads closed", `{"v":1,"gen":true,"open":false}`, false, true},
+		{"number gen reads closed", `{"v":1,"gen":1,"open":false}`, false, true},
+		{"array gen reads closed", `{"v":1,"gen":[],"open":false}`, false, true},
+		{"object gen reads closed", `{"v":1,"gen":{},"open":false}`, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, owner, _ := ownerDevice(t)

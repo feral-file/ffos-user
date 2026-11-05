@@ -65,8 +65,16 @@ func parseLAN(raw []byte, gen string) (bool, error) {
 	if v, err := uintMember(m, "v"); err != nil || v != 1 {
 		return false, errors.New("lan.json: unsupported version")
 	}
-	if err := expectString(m, "gen", gen); err != nil {
-		return false, fmt.Errorf("%w: %w", errLANGenMismatch, err)
+	// Only a well-formed gen of another identity is a dead file (reads
+	// open). A gen that is not a string at all is a corrupt file and must
+	// read closed like any other parse failure: a malformed switch must not
+	// reopen the LAN the owner closed.
+	got, err := stringMember(m, "gen")
+	if err != nil {
+		return false, fmt.Errorf("lan.json: %w", err)
+	}
+	if got != gen {
+		return false, fmt.Errorf("%w: gen %q", errLANGenMismatch, got)
 	}
 	open, err := boolMember(m, "open")
 	if err != nil {
