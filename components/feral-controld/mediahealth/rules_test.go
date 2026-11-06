@@ -348,7 +348,9 @@ func TestRules_BackgroundProbesWaitLongerThanTheCast(t *testing.T) {
 
 	cast := p.Preflight(context.Background(), []string{"https://arweave.example/tx"})
 	assert.Equal(t, VerdictInconclusive, cast[0].Verdict, "at cast the slow answer is a timeout")
-	assert.Equal(t, UnreachableNoAnswer, cast[0].Unreachable)
+	rec, err := p.Store.Get("https://arweave.example/tx")
+	require.NoError(t, err)
+	assert.Nil(t, rec, "the cast's short deadline is not the source's failure: nothing recorded, no hold, no issue")
 
 	bg := p.ProbeAndRecord(context.Background(), "https://arweave.example/tx")
 	assert.Equal(t, 404, bg.Status, "in the background the gateway's real answer arrives")

@@ -54,6 +54,11 @@ type ItemHealth struct {
 	// Unskipped says why a broken item is NOT being skipped; present only
 	// when State is broken and Skipped is false.
 	Unskipped Unskipped `json:"unskipped,omitempty"`
+	// Issue is the latest real attempt's problem (see Issue), present only
+	// while State is NOT broken: a broken item shows its Category instead.
+	// It complements State — an `ok` item with `rate_limited` plays fine
+	// while the host throttles the device's checks.
+	Issue Issue `json:"issue,omitempty"`
 }
 
 // Unskipped is the reason a broken item is not skipped by the player.
@@ -92,13 +97,18 @@ func (s *Store) ItemHealths(sources []string) ([]ItemHealth, error) {
 }
 
 func itemHealthOf(rec *Record) ItemHealth {
-	if rec == nil || rec.State == "" {
+	if rec == nil {
 		return ItemHealth{State: StateUnknown}
 	}
-	if rec.State == StateOK {
-		return ItemHealth{State: StateOK}
+	switch rec.State {
+	case "":
+		return ItemHealth{State: StateUnknown, Issue: rec.Issue}
+	case StateOK:
+		return ItemHealth{State: StateOK, Issue: rec.Issue}
+	case StateBroken:
+		return ItemHealth{State: rec.State, Category: rec.Category, Reason: rec.Reason, Layer: rec.Layer}
 	}
-	return ItemHealth{State: rec.State, Category: rec.Category, Reason: rec.Reason, Layer: rec.Layer}
+	return ItemHealth{State: rec.State, Category: rec.Category, Reason: rec.Reason, Layer: rec.Layer, Issue: rec.Issue}
 }
 
 // ReportItem is one row of the getMediaHealth reply: the whole playlist on
@@ -115,7 +125,17 @@ type ReportItem struct {
 	Skipped   bool      `json:"skipped"`
 	Unskipped Unskipped `json:"unskipped,omitempty"`
 	CheckedAt string    `json:"checkedAt,omitempty"`
-	Plays     *struct {
+	// Issue / IssueSince: see ItemHealth.Issue; IssueSince is when the
+	// current run of trouble began (RFC 3339).
+	Issue      Issue  `json:"issue,omitempty"`
+	IssueSince string `json:"issueSince,omitempty"`
+	// NextCheckAt is when the device looks at this source again — the
+	// verdict's recheck or a transient hold, whichever is later (RFC 3339).
+	NextCheckAt string `json:"nextCheckAt,omitempty"`
+	// FailedPlays counts failed plays since the last real success; the
+	// source concludes broken at 2. Omitted at 0.
+	FailedPlays int `json:"failedPlays,omitempty"`
+	Plays       *struct {
 		OK   int `json:"ok"`
 		Fail int `json:"fail"`
 	} `json:"plays,omitempty"`
@@ -150,11 +170,19 @@ func (s *Store) Report(items []ReportInput) ([]ReportItem, error) {
 			Category: health.Category,
 			Reason:   health.Reason,
 			Layer:    health.Layer,
+			Issue:    health.Issue,
 		}
 		if rec != nil {
 			if !rec.CheckedAt.IsZero() {
 				row.CheckedAt = rec.CheckedAt.UTC().Format(time.RFC3339)
 			}
+			if health.Issue != "" && rec.IssueSince != nil {
+				row.IssueSince = rec.IssueSince.UTC().Format(time.RFC3339)
+			}
+			if due := rec.dueAt(); !due.IsZero() {
+				row.NextCheckAt = due.UTC().Format(time.RFC3339)
+			}
+			row.FailedPlays = rec.Plays.ConsecutiveFail
 			if rec.Plays.OK > 0 || rec.Plays.Fail > 0 {
 				row.Plays = &struct {
 					OK   int `json:"ok"`

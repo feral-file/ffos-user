@@ -442,6 +442,7 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 		}
 		switch res.Verdict {
 		case VerdictAlive:
+			rec.clearIssue()
 			rec.State = StateOK
 			rec.Layer = LayerL0
 			rec.Category, rec.Reason = "", ""
@@ -469,6 +470,10 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 			rec.LastError = transientDetail(res)
 			rec.LastErrorAt = new(now)
 			rec.RetryAfter = now.Add(hold)
+			// The honest report of this attempt (Issue). An attempt that
+			// says nothing about the source (an outage, a 406) leaves the
+			// previous issue standing: it neither confirms nor clears it.
+			rec.setIssue(issueForProbe(res), now)
 			if res.Unreachable != "" && res.NetworkHealthy {
 				if rec.UnreachableSince == nil {
 					rec.UnreachableSince = new(now)
@@ -502,6 +507,8 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 // concludeBrokenL0 writes an L0 broken verdict: the shared tail of a dead
 // probe and a concluded DNS streak.
 func concludeBrokenL0(rec *Record, reason Reason, status int, detail string, now time.Time) {
+	// A verdict replaces any issue: the app shows the category instead.
+	rec.clearIssue()
 	if rec.State == StateBroken && rec.Layer == LayerL0 {
 		rec.ConsecutiveBroken++
 	} else {
@@ -669,6 +676,7 @@ func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, exi
 			}
 			rec.Plays.ConsecutiveFail = 0
 			if !readyIsEvidence(o) {
+				// Counted as a play, but proves nothing: any issue stands.
 				// An iframe/object/PDF reports ready for whatever document
 				// loaded in it — Chromium's own error page included — so its
 				// ready proves the mount, not the work. Counted as a play,
@@ -679,6 +687,7 @@ func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, exi
 				// for a week (#392, office FF1, 2026-11-05).
 				return true
 			}
+			rec.clearIssue()
 			rec.State = StateOK
 			rec.Layer = LayerPlay
 			rec.Category, rec.Reason = "", ""
@@ -715,8 +724,10 @@ func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, exi
 			corroborated := rec.Plays.ConsecutiveFail >= 2 ||
 				(rec.State == StateBroken && rec.Layer == LayerL0 && at.Before(rec.RecheckAfter))
 			if !corroborated {
+				rec.setIssue(IssuePlayFailed, at)
 				return true
 			}
+			rec.clearIssue()
 			// Backoff, as for L0: a work the player has re-concluded broken
 			// on BrokenBackoffAfter consecutive rechecks is retried weekly,
 			// not daily — each daily retry of a dead iframe costs the wall
@@ -782,4 +793,37 @@ func playCategory(reason Reason, status int) Category {
 		return CategoryOf(ReasonHTTPStatus, status)
 	}
 	return CategoryOf(reason, status)
+}
+
+// ApplyKioskAnswer folds a 2xx DOCUMENT the kiosk itself loaded for source
+// (the navigation observer): the origin served the kiosk, so a probe-side
+// issue (no answer, DNS, 5xx, rate limit, access denied) is no longer the
+// truth and the unreachable streak ends. It never writes ok — a 200 proves
+// the document arrived, not that the work rendered — and a play_failed
+// issue stands: that one is about rendering. Writes only when something
+// changes; a source with no record is left alone (nothing to correct).
+func (s *Store) ApplyKioskAnswer(source string) error {
+	rec, err := s.Get(source)
+	if err != nil || rec == nil {
+		return err
+	}
+	if !rec.Issue.probeSide() && rec.UnreachableSince == nil {
+		return nil
+	}
+	_, err = s.update(source, func(rec *Record, existed bool) bool {
+		if !existed {
+			return false
+		}
+		changed := false
+		if rec.Issue.probeSide() {
+			rec.clearIssue()
+			changed = true
+		}
+		if rec.UnreachableSince != nil {
+			rec.UnreachableSince, rec.UnreachableFailures = nil, 0
+			changed = true
+		}
+		return changed
+	})
+	return err
 }

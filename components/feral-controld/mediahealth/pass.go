@@ -375,6 +375,16 @@ func (p *Prober) probeOne(ctx context.Context, source string, timeout time.Durat
 		defer p.Hosts.Release(host)
 	}
 	res = p.Probe.ProbeOneWithin(ctx, source, timeout)
+	if timeout == 0 && res.Verdict == VerdictInconclusive && fetchErrorKind(res.Err) == FetchErrTimeout {
+		// The cast pass's SHORT item deadline (Probe.ItemTimeout, 5 s)
+		// expired: it bounds the cast's latency, not the source. Recording
+		// it held a slow-but-healthy origin for an hour, counted toward
+		// its unreachable streak and showed the app `no_answer` while a
+		// 30 s background probe would have answered in seconds. Unrecorded,
+		// the item stays due and the lookahead's background probe
+		// (BackgroundItemTimeout) is the real attempt.
+		return ProbeResult{Source: redactForLog(source), Verdict: VerdictInconclusive, Err: res.Err}, false
+	}
 	if ctx.Err() != nil && res.Verdict == VerdictInconclusive {
 		// The CALLER's context ended — the cast pass's phase ceiling, or
 		// shutdown — not this source's own ItemTimeout. Running out of our

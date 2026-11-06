@@ -1,6 +1,7 @@
 package mediahealth
 
 import (
+	"errors"
 	"net/url"
 	"strconv"
 
@@ -43,16 +44,17 @@ type Navigation struct {
 var playerQueryParams = map[string]bool{"display_mode": true}
 
 // ObserveNavigation folds one observed frame navigation into the record
-// of the wall source it belongs to. A 2xx–3xx is ignored: it proves the
-// mount, not the work (the player's own `ready`/decode entries judge the
-// content). A definite status ≥ 400 is a `detect` failure with that
+// of the wall source it belongs to. A 2xx proves the mount, not the work
+// (the player's own `ready`/decode entries judge the content), so it is
+// never a success — but it does clear a probe-side Issue (ApplyKioskAnswer).
+// A 3xx is a hop, ignored. A definite status ≥ 400 is a `detect` failure with that
 // status — the same shape as the player's own content-type check, so the
 // existing table applies (404/410 → source_missing, 401/403/429 →
 // source_blocked, 5xx → render_failed) — and a network error is a `load`
 // failure carrying Chromium's reason. Navigations for URLs not on the
 // wall (the player's own page, overlays) are ignored.
 func (s *Service) ObserveNavigation(nav Navigation) {
-	if nav.Canceled || (nav.Status == 0 && nav.Error == "") || (nav.Status > 0 && nav.Status < 400) {
+	if nav.Canceled || (nav.Status == 0 && nav.Error == "") || (nav.Status >= 300 && nav.Status < 400) {
 		return
 	}
 	online := s.online != nil && s.online()
@@ -60,6 +62,16 @@ func (s *Service) ObserveNavigation(nav Navigation) {
 	defer s.mu.Unlock()
 	src, ok := s.matchWallSource(nav.URL)
 	if !ok {
+		return
+	}
+	if nav.Status >= 200 && nav.Status < 300 {
+		// The kiosk's own evidence wins over the probe's: the origin served
+		// this document to the kiosk, so a probe-side issue is no longer
+		// the truth. Not a success (the work may still fail to render),
+		// so no outcome is applied and the play run is left alone.
+		if err := s.store.ApplyKioskAnswer(src); err != nil && !errors.Is(err, ErrLowDisk) {
+			s.logger.Warn("media health: recording a kiosk-served document failed", zap.Error(err))
+		}
 		return
 	}
 	o := Outcome{Source: src, Kind: OutcomeFail}

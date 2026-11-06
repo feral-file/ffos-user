@@ -262,6 +262,12 @@ type Record struct {
 	// UnreachableDeadAfter for when it concludes.
 	UnreachableSince    *time.Time `json:"unreachableSince,omitempty"`
 	UnreachableFailures int        `json:"unreachableFailures,omitempty"`
+	// Issue / IssueSince are the latest real attempt's problem and when
+	// the current run of trouble began (see Issue). Cleared by a real
+	// answer and by any verdict; shown to the app only while State is not
+	// broken.
+	Issue      Issue      `json:"issue,omitempty"`
+	IssueSince *time.Time `json:"issueSince,omitempty"`
 	// legacyDNS* are the DNS-only streak fields an earlier build of this
 	// branch wrote; Store.decode folds them into the unreachable streak
 	// and they are never written again.

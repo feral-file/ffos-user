@@ -412,15 +412,47 @@ sighting for the item at `index` counts as one failure per mount (stage
   `broken` and `skipped` is false, `unskipped` says which:
   `expired` | `replayable` | `player` | `pending` (hinted now, push not yet
   received — or the player chose to play it: repeat-one, an all-broken map).
+  `issue` (below) rides beside `state` when there is one.
   Nothing else is pushed; freshness (`checkedAt`) stays on `getMediaHealth`.
   The raw `outcomes` ring and `skippedIndices` are stripped from the
   notification and from direct `checkStatus` replies (hub and relayer): they
   are inputs, consumed on the device only.
 - `getMediaHealth` (controller tier, query class, no arguments) returns the
   whole playlist on screen: `{ok, status, items:[{index, id, title, state,
-  category, reason, layer, skipped, unskipped, checkedAt, plays:{ok,fail}}],
-  total, truncated, castSeq}`, `skipped`/`unskipped` by the same rule as the
-  push. Bounded at 2048 rows. No source URLs.
+  category, reason, layer, skipped, unskipped, checkedAt, issue, issueSince,
+  nextCheckAt, failedPlays, plays:{ok,fail}}], total, truncated, castSeq}`,
+  `skipped`/`unskipped` by the same rule as the push. Bounded at 2048 rows. No
+  source URLs.
+
+### Honest reporting of temporary failures: `issue`
+
+A temporary failure has no verdict, so it reads `state: unknown` — before this
+field, exactly like a source never checked. `issue` is the latest REAL
+attempt's problem, beside `state`, never instead of it. It is omitted while
+`state` is `broken` (the category says it) and when there is none.
+
+| `issue` | Set by | Cleared by |
+|---|---|---|
+| `no_answer` | a background probe (30 s) got no response: timeout, refused, reset, TLS | any answer, from a probe or the kiosk |
+| `dns` | the name did not resolve, short of NXDOMAIN (which is `broken` at once) | any answer |
+| `server_error` | a 5xx without `Retry-After` | any answer |
+| `rate_limited` | 429, or 503 with `Retry-After` | the next probe answering, or a kiosk 2xx |
+| `access_denied` | 401/403/407 to the probe (may be the probe's identity) | the next probe answering, or a kiosk 2xx |
+| `play_failed` | one counted failed play (player ring or kiosk observer) | a real success, or the verdict at 2 |
+
+Rules: only real attempts write an issue — the cast pass's 5 s deadline
+expiring writes nothing at all (no record, no hold, no streak count; the
+lookahead's 30 s probe is the real attempt), and neither does an unreachable
+result while the device reached no other origin, nor a play while offline. A
+2xx document the kiosk observer sees clears a probe-side issue and ends the
+unreachable streak, but never writes `ok` (a 200 does not prove the work
+rendered) and never clears `play_failed`. An attempt that says nothing about
+the source (an outage, a 406) leaves the standing issue as it is. `issueSince`
+is when the current run of trouble began, kept across a change of kind and
+reset when the issue clears. `nextCheckAt` is the later of the verdict's
+recheck and a transient hold. `failedPlays` counts failed plays since the last
+real success (a verdict at 2). The raw `lastError` text never leaves the
+device: it carries the host and path.
 
 ## Store
 

@@ -3323,7 +3323,12 @@ rejects one.
       "skipped": true,
       "checkedAt": "2026-11-04T10:00:00Z", "plays": { "ok": 0, "fail": 2 } },
     { "index": 1, "id": "b", "title": "Study", "state": "ok", "skipped": false,
-      "checkedAt": "2026-11-04T09:00:00Z", "plays": { "ok": 12, "fail": 0 } },
+      "checkedAt": "2026-11-04T09:00:00Z", "nextCheckAt": "2026-11-11T09:00:00Z",
+      "plays": { "ok": 12, "fail": 0 } },
+    { "index": 3, "id": "d", "title": "Interface Token", "state": "unknown",
+      "skipped": false, "issue": "no_answer",
+      "issueSince": "2026-11-06T06:58:51Z", "nextCheckAt": "2026-11-06T07:58:51Z",
+      "failedPlays": 1, "plays": { "ok": 0, "fail": 1 } },
     { "index": 2, "id": "c", "title": "Drift", "state": "broken",
       "category": "source_missing", "reason": "http_status", "layer": "l0",
       "skipped": false, "unskipped": "expired",
@@ -3346,7 +3351,18 @@ set — `source_missing`, `source_blocked`, `not_media`, `corrupt_file`,
 `unsupported`, `render_failed`, `render_blank`, `device_limit` — and `reason`
 the detail code beneath it; `layer` says which probe set the state (`l0`,
 `play`, `l1`). `castSeq` echoes the player's outcome-ring cast sequence when
-the player declares the `mediaHealth` contract. Rows are capped at 2048
+the player declares the `mediaHealth` contract.
+
+`issue` is the latest real attempt's problem when there is no verdict to say
+so — `no_answer`, `dns`, `server_error`, `rate_limited`, `access_denied`,
+`play_failed` — a closed set the app renders labels for, present only while
+`state` is not `broken`. It complements `state`: an `ok` row with
+`rate_limited` plays fine while the host throttles the device's checks.
+`issueSince` is when the current run of trouble began, `nextCheckAt` when the
+device looks again (any state), `failedPlays` the failed plays since the last
+real success (a verdict at 2, omitted at 0). An outage writes no issue: the
+device only reports a source's problem while it can reach other hosts. See
+`docs/media-health.md` for what sets and clears each value. Rows are capped at 2048
 (`truncated: true` past that); `total` is the full item count. No source URL
 ever appears in a row.
 
@@ -3355,7 +3371,8 @@ on screen. `{ "ok": false, "status": "error", "error": "mediaHealthUnavailable" 
 when the feature is disabled by config or its store could not be opened.
 
 The same verdicts ride every `player_status` notification as the index-aligned
-`mediaHealth` array (state, category, reason, layer only), and every
+`mediaHealth` array (state, category, reason, layer, skipped, unskipped and
+`issue` — the time fields stay here), and every
 `displayPlaylist` push carries a controld-owned `mediaHealth` request field
 naming the conclusively broken items for the player to skip — a controller
 cannot set that field; any value sent is dropped.
