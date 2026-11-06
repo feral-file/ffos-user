@@ -918,3 +918,5 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCach
 }
 
 func strPtr(s string) *string { return &s }
+
+func (*trackingScheduler) SetHintSource(playlistschedule.HintSource) {}

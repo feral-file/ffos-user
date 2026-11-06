@@ -31,7 +31,9 @@
 // RewriteURL). The DP-1 item source stays byte-for-byte what the app cast:
 // `Fetch.continueRequest`'s `url` override is invisible to the page, so
 // ff-player, the offline-cache identity (`sha256(item.source)`), and every
-// log still see the original URL. Anything on a matching host that is NOT a
+// log still see the original URL. A doubled `/ipfs/ipfs/<cid>` prefix (a
+// common tokenURI mistake no gateway can serve) is collapsed first, so it
+// is rewritten too (collapseDoubledIPFS). Anything on a matching host that is NOT a
 // CID path keeps the User-Agent rule above.
 //
 // This package is intentionally pure: it holds no CDP connection, performs
@@ -314,18 +316,47 @@ func (p *Policy) RewriteURL(rawURL string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if !isCIDPath(u.EscapedPath()) {
+	escaped := collapseDoubledIPFS(u.EscapedPath())
+	if !isCIDPath(escaped) {
+		return "", false
+	}
+	path, err := url.PathUnescape(escaped)
+	if err != nil {
 		return "", false
 	}
 	out := url.URL{
 		Scheme:     p.replacement.Scheme,
 		Host:       p.replacement.Host,
-		Path:       u.Path,
-		RawPath:    u.RawPath,
+		Path:       path,
 		RawQuery:   u.RawQuery,
 		ForceQuery: u.ForceQuery,
 	}
+	if escaped != (&url.URL{Path: path}).EscapedPath() {
+		// Keep the source's own percent-encoding byte-for-byte.
+		out.RawPath = escaped
+	}
 	return out.String(), true
+}
+
+// collapseDoubledIPFS turns `/ipfs/ipfs/<cid>...` (any number of repeated
+// `ipfs` segments) into `/ipfs/<cid>...` when what follows is a CID. The
+// doubled prefix is a common tokenURI mistake: no gateway can serve it (it
+// names the CID "ipfs"), and because it is not a CID path it escaped this
+// rewrite entirely — the kiosk kept dialing the retired gateway, which
+// answered 429 on every play, while the same CID loads on the replacement
+// ("Rebirth of the D U A T #1", office FF1). Only collapsed when a real CID
+// follows, so a path that merely contains "ipfs" is left alone.
+func collapseDoubledIPFS(escapedPath string) string {
+	const prefix = "/ipfs/"
+	out := escapedPath
+	for strings.HasPrefix(out, prefix+"ipfs/") {
+		candidate := out[len(prefix)-1:]
+		if !isCIDPath(candidate) && !strings.HasPrefix(candidate, prefix+"ipfs/") {
+			return escapedPath
+		}
+		out = candidate
+	}
+	return out
 }
 
 // isCIDPath reports whether an escaped URL path is `/ipfs/<cid>` optionally

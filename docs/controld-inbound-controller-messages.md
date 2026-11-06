@@ -83,6 +83,8 @@ for relayer topic assignment:
   `feral-controld` as commandrouter pre-CDP special cases, owned by the
   `offlinecache` package (see "Offline Artwork Caching Inbound Messages"
   below).
+- `getMediaHealth` is likewise a commandrouter pre-CDP special case, owned by
+  the `mediahealth` package (see "getMediaHealth" below).
 - `refreshArtwork` clears Chromium cache, then forwards to Chromium through
   CDP.
 - Any other non-device command is forwarded to Chromium through CDP.
@@ -3301,6 +3303,103 @@ their claim.
 Error cases: `invalidRequest`, `seriesPlaybackUnavailable` (the durable write
 failed, or its directory entry could not be confirmed durable even on retry —
 `ok:true` means saved, the same contract `setContentPolicy` holds).
+
+### getMediaHealth
+
+Purpose: read this device's media verdict for every item of the playlist on
+screen (feral-file/ffos-user#392, `docs/media-health.md`), so a controller can
+show which works play and why one does not. The rows are built from the
+player's own item list, so they line up with what the app already displays.
+
+Request: `{}` for the original form (the first 2048 rows, `truncated` past
+that), or a **paged** request with any of:
+
+| Field | Type | Rule |
+|---|---|---|
+| `offset` | integer ≥ 0 | first row to return, among the rows the filter admits |
+| `limit` | integer 1–1000 | default 500 |
+| `filter` | `"all"` \| `"attention"` | `attention` = `state` broken or suspect, or any `issue`, or `skipped` |
+
+Any other key, type or value is **rejected** with
+`{ "ok": false, "status": "error", "error": "invalid request" }` rather than
+ignored — the storm gate dedupes query-class commands on type + arguments, so
+the argument space must stay bounded (valid pages are bounded by the
+playlist's size, the same reason `getContentPolicy` rejects arguments). A
+paged reply carries `offset`, `limit`, `matched` (rows the filter admits
+across the whole wall) and `nextOffset` (omitted on the last page) beside
+`total`; every row keeps its absolute playlist `index`; `castSeq` is the
+consistency token — if it changes between pages the wall changed, start
+over. Typical use is one request: `{"filter":"attention"}`.
+
+```json
+{
+  "ok": true,
+  "status": "ok",
+  "castSeq": 3,
+  "total": 2,
+  "truncated": false,
+  "items": [
+    { "index": 0, "id": "a", "title": "Genome #12", "state": "broken",
+      "category": "source_missing", "reason": "http_status", "layer": "l0",
+      "skipped": true,
+      "checkedAt": "2026-11-04T10:00:00Z", "plays": { "ok": 0, "fail": 2 } },
+    { "index": 1, "id": "b", "title": "Study", "state": "ok", "skipped": false,
+      "checkedAt": "2026-11-04T09:00:00Z", "nextCheckAt": "2026-11-11T09:00:00Z",
+      "plays": { "ok": 12, "fail": 0 } },
+    { "index": 3, "id": "d", "title": "Interface Token", "state": "unknown",
+      "skipped": false, "issue": "no_answer",
+      "issueSince": "2026-11-06T06:58:51Z", "nextCheckAt": "2026-11-06T07:58:51Z",
+      "failedPlays": 1, "plays": { "ok": 0, "fail": 1 } },
+    { "index": 2, "id": "c", "title": "Drift", "state": "broken",
+      "category": "source_missing", "reason": "http_status", "layer": "l0",
+      "skipped": false, "unskipped": "expired",
+      "checkedAt": "2026-11-01T10:00:00Z" }
+  ]
+}
+```
+
+`skipped` is whether the player is resolving past the row right now, from
+the player's own report of the hint map it holds — the only input for a
+"Skip" label; `state` is the last observation and the two differ (an
+expired verdict, a replayable source, a player without the contract, a push
+not yet received). `unskipped` (`expired` | `replayable` | `player` |
+`pending`) says which, and is present only when `state` is `broken` and
+`skipped` is false.
+
+`state` is `ok`, `broken`, `suspect` (an L1 render verdict, reported but never
+acted on) or `unknown` (never observed). `category` is the closed app-facing
+set — `source_missing`, `source_blocked`, `not_media`, `corrupt_file`,
+`unsupported`, `render_failed`, `render_blank`, `device_limit` — and `reason`
+the detail code beneath it; `layer` says which probe set the state (`l0`,
+`play`, `l1`). `castSeq` echoes the player's outcome-ring cast sequence when
+the player declares the `mediaHealth` contract.
+
+`issue` is the latest real attempt's problem when there is no verdict to say
+so — `no_answer`, `dns`, `server_error`, `rate_limited`, `access_denied`,
+`play_failed` — a closed set the app renders labels for, present only while
+`state` is not `broken`. It complements `state`: an `ok` row with
+`rate_limited` plays fine while the host throttles the device's checks.
+`issueSince` is when the current run of trouble began, `nextCheckAt` when the
+device looks again (any state), `failedPlays` the failed plays since the last
+real success (a verdict at 2, omitted at 0). `servedBy` is the **host** of the fallback
+gateway the device loads the work through when the source's own gateway
+could not serve it (e.g. `"gateway.pinata.cloud"`), never a URL; absent when the
+source's own gateway serves it. An outage writes no issue: the
+device only reports a source's problem while it can reach other hosts. See
+`docs/media-health.md` for what sets and clears each value. Rows are capped at 2048
+(`truncated: true` past that); `total` is the full item count. No source URL
+ever appears in a row.
+
+`{ "ok": true, "status": "empty", "items": [], "total": 0 }` when nothing is
+on screen. `{ "ok": false, "status": "error", "error": "mediaHealthUnavailable" }`
+when the feature is disabled by config or its store could not be opened.
+
+The same verdicts ride every `player_status` notification as the index-aligned
+`mediaHealth` array (state, category, reason, layer, skipped, unskipped and
+`issue` — the time fields stay here), and every
+`displayPlaylist` push carries a controld-owned `mediaHealth` request field
+naming the conclusively broken items for the player to skip — a controller
+cannot set that field; any value sent is dropped.
 
 ### Content policy effect on playlists
 

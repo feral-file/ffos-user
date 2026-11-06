@@ -603,3 +603,7 @@ func TestRefreshLeavesAnUnknownRatingAloneWhenTheSourceIsUnresolvable(t *testing
 		t.Fatalf("an unknown rating must be treated as unrated and left alone; sent=%s", *sent)
 	}
 }
+
+func (*authoritySpyScheduler) SetHintSource(playlistschedule.HintSource) {}
+
+func (*legacySourceScheduler) SetHintSource(playlistschedule.HintSource) {}

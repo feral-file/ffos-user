@@ -112,6 +112,7 @@ var commandTiers = map[string]Tier{
 	string(commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE): TierController,
 	string(commands.CMD_CLEAR_PLAYLIST_CACHE):      TierController,
 	string(commands.CMD_GET_OFFLINE_CACHE_STATUS):  TierController,
+	string(commands.CMD_GET_MEDIA_HEALTH):          TierController,
 	string(commands.CMD_DEVICE_STATUS):             TierController,
 	string(commands.CMD_SYS_METRICS):               TierController, // == CMD_PROFILE
 	string(commands.CMD_SCREEN_ROTATION):           TierController,
@@ -143,10 +144,11 @@ var commandTiers = map[string]Tier{
 
 	// --- internal: never from outside ---
 	string(commands.CMD_RESOLVE_RECENTLY_PLAYED): TierInternal,
-	CmdEnvelope:          TierInternal,
-	"ping":               TierInternal, // controld → player liveness probe
-	"mintPairingDisplay": TierInternal, // controld → player mint-pairing paint
-	"setupDisplay":       TierInternal, // controld → player setup narration paint
+	string(commands.CMD_SET_MEDIA_HEALTH):        TierInternal, // controld → player hint-only push
+	CmdEnvelope:                                  TierInternal,
+	"ping":                                       TierInternal, // controld → player liveness probe
+	"mintPairingDisplay":                         TierInternal, // controld → player mint-pairing paint
+	"setupDisplay":                               TierInternal, // controld → player setup narration paint
 }
 
 // TierOf returns cmd's tier. Unknown names are owner-only (§7.1).

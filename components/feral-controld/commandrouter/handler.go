@@ -18,6 +18,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
@@ -58,14 +59,16 @@ type handler struct {
 	// (a build wired without the sleep tracker).
 	asleep func() bool
 
-	// sourceProber, when set (SetSourceProber), is the cast-time source
-	// preflight (#304). Independent of offlineCache above on purpose: the
-	// probe must run whether or not offline caching is enabled — it only
+	// mediaHealth, when set (SetMediaHealth), is the cast-time L0 media
+	// probe pass (#304, #392): the admission verdict (every item dead ⇒
+	// sourceUnreachable), the observation store, and the per-item hint
+	// field. Independent of offlineCache above on purpose: the pass must
+	// run whether or not offline caching is enabled — its fetcher only
 	// LIVES in that package because that is where dialing untrusted
-	// playlist URLs is made safe. nil (tests, a build wired before the
-	// seam) skips the preflight entirely, degrading to the old
+	// playlist URLs is made safe. nil (tests, a build with the feature
+	// disabled) skips the pass entirely, degrading to the old
 	// accept-anything behavior — fail-open, documented at the call site.
-	sourceProber offlinecache.SourceProber
+	mediaHealth MediaHealth
 
 	// sessionGeneration, when set (SetSessionGeneration), is
 	// playersession.Session.Generation narrowed to a func() uint64 seam
@@ -337,26 +340,6 @@ func (h *handler) setOverlaySource(fn func() *status.Overlay) {
 	h.overlaySource = fn
 }
 
-// SetSourceProber injects the cast-time source preflight onto h, if h
-// supports it (the concrete *handler built by New — NOT the
-// storm-protection gate wrapper, so callers must wire it against the raw
-// handler before NewGate wraps it, mirroring SetSessionGeneration's
-// contract).
-func SetSourceProber(h Handler, prober offlinecache.SourceProber, logger *zap.Logger) {
-	setter, ok := h.(interface {
-		setSourceProber(offlinecache.SourceProber)
-	})
-	if !ok {
-		logger.Warn("Command handler does not support source preflight wiring")
-		return
-	}
-	setter.setSourceProber(prober)
-}
-
-func (h *handler) setSourceProber(prober offlinecache.SourceProber) {
-	h.sourceProber = prober
-}
-
 // SignatureVerificationOptions wires internal verdict reporting.
 // Verification never interrupts playback or requires a viewer decision.
 type SignatureVerificationOptions struct {
@@ -370,7 +353,7 @@ type SignatureVerificationOptions struct {
 // displayPlaylist cast (feral-file/ffos-user#307) on h, if h supports it —
 // the concrete *handler built by New, NOT the storm-protection gate wrapper,
 // so callers must wire it against the raw handler before NewGate wraps it
-// (SetSourceProber's contract). Not called ⇒ verification off: playlists
+// (SetMediaHealth's contract). Not called ⇒ verification off: playlists
 // carry no verdict and replies carry no signatureStatus, which is exactly
 // the shape old firmware has.
 func SetSignatureVerification(h Handler, opts SignatureVerificationOptions, logger *zap.Logger) {
@@ -437,6 +420,7 @@ var servedDuringFactoryReset = map[commands.Type]bool{
 	commands.CMD_DDC_PANEL_STATUS:    true,
 	commands.CMD_GET_CONTENT_POLICY:  true,
 	commands.CMD_GET_SERIES_PLAYBACK: true,
+	commands.CMD_GET_MEDIA_HEALTH:    true, // reads the store and the player's item list; writes nothing
 }
 
 // Process processes the command and returns the result
@@ -552,11 +536,23 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		}
 		return boundedRecentlyPlayedReply(recentPlayerReply(result)), nil
 	}
+	if commandType == commands.CMD_GET_MEDIA_HEALTH {
+		return h.handleGetMediaHealth(ctx, command)
+	}
 	if commandType == commands.CMD_RESOLVE_RECENTLY_PLAYED {
 		return map[string]interface{}{
 			"ok":     false,
 			"status": "error",
 			"error":  "resolveRecentlyPlayed is internal",
+		}, nil
+	}
+	if commandType == commands.CMD_SET_MEDIA_HEALTH {
+		// Only the daemon's hint pusher may replace the player's skip map;
+		// forwarded from a controller it would hide works the device never
+		// judged broken.
+		return map[string]interface{}{
+			"ok":    false,
+			"error": "setMediaHealth is internal",
 		}, nil
 	}
 
@@ -726,7 +722,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// review). rescueProbeResults carries the probe evidence for that
 		// late rejection; scopeSyncErr is the closure's outcome seam.
 		var rescuedByCache bool
-		var rescueProbeResults []offlinecache.SourceProbeResult
+		var rescueProbeResults []mediahealth.ProbeResult
 		var scopeSyncErr error
 		// scopeSyncEnabled is SyncPlaylist's enabled-count for the same one
 		// consumer: a rescue with an errorless sync that armed ZERO cached
@@ -738,7 +734,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// probeVerdicts retains the preflight's per-source answers so the final
 		// projection can be re-checked against them without re-probing. See the
 		// re-check below the reprojection.
-		var probeVerdicts map[string]offlinecache.SourceProbeResult
+		var probeVerdicts map[string]mediahealth.ProbeResult
 		// seriesCastPlan is set only by the static dp1_call branch below
 		// (the one call site with the raw bytes a per-item seriesPlayback
 		// read needs -- see ResolveSeriesCastPlan's doc). Its zero value
@@ -747,6 +743,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var seriesCastPlan dp1.CastPlan
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			delete(command.Arguments, "retireBlockedCurrent") // internal refresh-only signal
+			delete(command.Arguments, "mediaHealth")          // controld-owned hint field (#392), set before each send
 			// The content-policy lock is taken further down, immediately before
 			// the filter, NOT here: URL and dynamic resolution between here and
 			// there are network-bound (the shared 30s HTTP timeout on a
@@ -1003,20 +1000,23 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			command.Arguments["contentContext"] = string(contentContext)
 			schedulerSource.ContentContext = string(contentContext)
 
-			// Cast-time source preflight (#304). Without it, a cast whose
-			// every source 400s is forwarded, self-reported ok by the
+			// Cast-time L0 media probe pass (#304, #392). Without it, a cast
+			// whose every source 400s is forwarded, self-reported ok by the
 			// player (an iframe cannot see HTTP status), and shown as
 			// "playing" — so neither the casting end nor the device ever
-			// learns the links are dead. The probe rejects the cast ONLY
-			// when every item earned a definitive dead verdict (an actual
-			// HTTP >= 400 answer — or a malformed data: URI, the one
-			// non-HTTP verdict that is equally definitive because it is a
-			// parse, not a network guess): network errors, timeouts, guard
-			// refusals, and well-formed data: items all count in the cast's favor, so
-			// an offline device casting a fully-cached playlist (the
-			// cached-copy fallback above) still plays. A partially-dead
-			// playlist also still plays — rejecting it would punish nine
-			// good artworks for one dead link — with the dead items logged.
+			// learns the links are dead. The pass rejects the cast ONLY
+			// when every item earned a definitive dead verdict — an
+			// identity-independent HTTP error, a failed L0 content rule
+			// (error page, directory listing, corrupt container), an
+			// unresolvable host, a malformed data: URI, or a conclusive
+			// broken record already in the store: network errors,
+			// timeouts, guard refusals, and well-formed data: items all
+			// count in the cast's favor, so an offline device casting a
+			// fully-cached playlist (the cached-copy fallback above) still
+			// plays. A partially-dead playlist also still plays — rejecting
+			// it would punish nine good artworks for one dead link — with
+			// the dead items logged, recorded, and HINTED to the player so
+			// it skips them without mounting (attachMediaHealthHints).
 			//
 			// Placed deliberately with the slow network-bound work: after
 			// DP-1 resolution (so dynamic items are probed as resolved) and
@@ -1024,8 +1024,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// (see that comment). err must be assigned, not just returned,
 			// so the deferred playback-failure accounting above records the
 			// rejection.
-			if h.sourceProber != nil && playlist != nil && len(playlist.Items) > 0 &&
-				len(playlist.Items) <= maxPreflightItems {
+			if h.mediaHealth != nil && playlist != nil && len(playlist.Items) > 0 {
 				sources := make([]string, 0, len(playlist.Items))
 				// scheduledPlaylist: any item carrying displayAt makes this
 				// a scheduler-filtered playlist, and the probe would see
@@ -1061,7 +1060,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						zap.Int("items", len(sources)))
 				} else {
 					probeStarted := time.Now()
-					probeResults := h.sourceProber.ProbeSources(ctx, sources)
+					probeResults := h.mediaHealth.Preflight(ctx, sources)
 					h.logger.Info("displayPlaylist: source preflight completed",
 						zap.Int("items", len(sources)),
 						zap.Duration("duration", time.Since(probeStarted)))
@@ -1071,9 +1070,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// SourceProbeResult's doc), so keying on it would miss
 					// every signed URL — and a miss makes the re-check below
 					// fail open and forward a cast already proven dead.
-					// ProbeSources returns one result per source in input
+					// Preflight returns one result per source in input
 					// order, which is what makes the index safe.
-					probeVerdicts = make(map[string]offlinecache.SourceProbeResult, len(probeResults))
+					probeVerdicts = make(map[string]mediahealth.ProbeResult, len(probeResults))
 					for i, r := range probeResults {
 						if i < len(sources) {
 							probeVerdicts[sources[i]] = r
@@ -1091,16 +1090,18 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					dead, inconclusive := 0, 0
 					for i, r := range probeResults {
 						switch r.Verdict {
-						case offlinecache.ProbeDead:
+						case mediahealth.VerdictDead:
 							dead++
 							if dead <= maxProbeLogDetailItems {
 								h.logger.Warn("displayPlaylist: item source is unreachable",
 									zap.Int("item", i),
 									zap.String("source", r.Source),
 									zap.Int("status", r.Status),
+									zap.String("reason", string(r.Reason)),
+									zap.Bool("from_store", r.FromStore),
 									zap.Error(r.Err))
 							}
-						case offlinecache.ProbeInconclusive:
+						case mediahealth.VerdictInconclusive:
 							inconclusive++
 						}
 					}
@@ -1112,7 +1113,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						h.logger.Debug("displayPlaylist: item source probes inconclusive",
 							zap.Int("count", inconclusive))
 					}
-					if dead == len(probeResults) {
+					// Every source must carry a dead verdict: a pass that
+					// answered fewer results than sources (impossible for
+					// the real Prober, cheap to guard) must fail OPEN, never
+					// read as "nothing alive".
+					if len(probeResults) == len(sources) && dead == len(probeResults) {
 						switch {
 						case h.offlineCache != nil && h.kioskReplay != nil && h.offlineCache.HasReplayableItem(sources...):
 							// A definitively dead ORIGIN is not a dead CAST
@@ -1138,14 +1143,6 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						}
 					}
 				}
-			}
-
-			if h.sourceProber != nil && playlist != nil && len(playlist.Items) > maxPreflightItems {
-				// Over the preflight item budget: skip before building any
-				// per-item state (fail open) — see maxPreflightItems.
-				h.logger.Warn("displayPlaylist: playlist exceeds the preflight item budget; source preflight skipped",
-					zap.Int("items", len(playlist.Items)),
-					zap.Int("budget", maxPreflightItems))
 			}
 
 			// Preflight is done, so reacquire the policy lock and hold it
@@ -1433,6 +1430,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return
 				}
 				command.Arguments["dp1_call"] = playlist
+				h.attachMediaHealthHints(command.Arguments, playlist)
 				invalidateVerdictBeforeSend()
 				result, err = h.sendCDPRequest(command)
 				if err != nil || !playerresponse.OK(result) {
@@ -1462,6 +1460,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, err
 				}
 				command.Arguments["dp1_call"] = playlist
+				h.attachMediaHealthHints(command.Arguments, playlist)
 			}
 			if commandType == commands.CMD_DISPLAY_PLAYLIST || commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
 				invalidateVerdictBeforeSend()
@@ -1687,14 +1686,14 @@ func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
 // single item with no verdict (never probed, or the preflight was skipped)
 // makes it false: this must only ever reject a cast the preflight itself would
 // have rejected, never one it never judged.
-func allSourcesDead(playlist *dp1.Playlist, verdicts map[string]offlinecache.SourceProbeResult) ([]offlinecache.SourceProbeResult, bool) {
+func allSourcesDead(playlist *dp1.Playlist, verdicts map[string]mediahealth.ProbeResult) ([]mediahealth.ProbeResult, bool) {
 	if playlist == nil || len(playlist.Items) == 0 || len(verdicts) == 0 {
 		return nil, false
 	}
-	results := make([]offlinecache.SourceProbeResult, 0, len(playlist.Items))
+	results := make([]mediahealth.ProbeResult, 0, len(playlist.Items))
 	for _, item := range playlist.Items {
 		r, probed := verdicts[item.Source]
-		if !probed || r.Verdict != offlinecache.ProbeDead {
+		if !probed || r.Verdict != mediahealth.VerdictDead {
 			return nil, false
 		}
 		results = append(results, r)
@@ -2150,6 +2149,7 @@ func (h *handler) sendCDPRequest(command commands.Command) (interface{}, error) 
 	if command.Type == "checkStatus" {
 		playerresponse.SanitizeShowingKey(result)
 		annotateOverlayReply(result, h.overlaySource)
+		stripOutcomesReply(result)
 		annotateSeriesPlaybackReply(result, h.currentSeriesPlaybackMode)
 	}
 

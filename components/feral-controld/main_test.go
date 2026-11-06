@@ -16,6 +16,7 @@ import (
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -68,6 +69,7 @@ func orderIndex(list []string, s string) int {
 }
 
 type testSetup struct {
+	t                *testing.T
 	ctrl             *gomock.Controller
 	ctx              context.Context
 	cancel           context.CancelFunc
@@ -109,6 +111,7 @@ func setup(t *testing.T) *testSetup {
 
 	// Create all mocks
 	ts := &testSetup{
+		t:                t,
 		ctrl:             ctrl,
 		ctx:              ctx,
 		cancel:           cancel,
@@ -195,74 +198,27 @@ func TestApp_Run_Success(t *testing.T) {
 	tests := []struct {
 		name      string
 		setupFunc func(*testSetup)
+		verify    func(*testing.T, *testSetup)
 	}{
 		{
-			name: "successful startup without relayer connection",
+			name:      "successful startup without relayer connection",
+			setupFunc: expectSuccessfulRunWithoutRelayer,
+		},
+		{
+			// PR #438 review, round 3, F11: the media-health store used to
+			// be closed by a defer inside initializeApp, before run ever
+			// started, so every read and write failed with "database not
+			// open". The app owns it and run closes it after shutdown.
+			name: "media-health store stays open until run returns",
 			setupFunc: func(ts *testSetup) {
-				// Mock successful state loading
-				ts.mockStateManager.EXPECT().
-					Load(ts.logger).
-					Return(&state.State{
-						Relayer: &state.RelayerState{TopicID: ""},
-					}, nil)
-				ts.mockStateManager.EXPECT().
-					ClaimSnapshot().
-					Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
-					AnyTimes()
-
-				// CDP now connects in the background and never gates startup: run() calls
-				// Start (fire-and-forget) and Close on shutdown.
-				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-				ts.mockCDP.EXPECT().Close()
-
-				// Mock Watchdog start and stop
-				ts.mockWatchdog.EXPECT().Start(gomock.Any())
-				ts.mockWatchdog.EXPECT().Stop()
-
-				// Mock DBus start and stop
-				ts.mockDBus.EXPECT().Start().Return(nil)
-				ts.mockDBus.EXPECT().Stop().Return(nil)
-
-				// Mock Mediator start and stop
-				ts.mockMediator.EXPECT().Start()
-				ts.mockMediator.EXPECT().Stop()
-
-				// Mock StatusPoller start and stop
-				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
-				ts.mockStatusPoller.EXPECT().Stop()
-
-				// Mock Refresher start and stop
-				ts.mockRefresher.EXPECT().Start()
-				ts.mockRefresher.EXPECT().Stop()
-
-				// Mock Hub start and stop
-				ts.mockHub.EXPECT().Start()
-				ts.mockHub.EXPECT().Stop().Return(nil)
-
-				// Mock OS ReadFile for mDNS device info. The device-name
-				// record is read alongside the hostname: an unnamed unit is
-				// the ordinary case, and a missing file must leave the
-				// advertised name as the serial.
-				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
-				ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
-				ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
-
-				// Mock Mediator InitializeMDNS
-				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
-
-				// Mock Daemon notify
-				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
-
-				// Mock OOM recoverer
-				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
-
-				// Mock DBus call
-				ts.mockDBus.EXPECT().
-					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
-					Return([]interface{}{false}, nil)
-				// Relayer Close is unconditional at shutdown (a later reconcile
-				// may have connected); it is a no-op on a nil conn.
-				ts.mockRelayer.EXPECT().Close()
+				expectSuccessfulRunWithoutRelayer(ts)
+				store, err := mediahealth.Open(filepath.Join(ts.t.TempDir(), "store.db"), mediahealth.Options{})
+				require.NoError(ts.t, err)
+				ts.app.MediaHealth = mediahealth.New(mediahealth.Config{Store: store})
+			},
+			verify: func(t *testing.T, ts *testSetup) {
+				_, err := ts.app.MediaHealth.Store().Get("https://o/a")
+				assert.Error(t, err, "closed once run returned")
 			},
 		},
 		{
@@ -645,8 +601,78 @@ func TestApp_Run_Success(t *testing.T) {
 
 			err := ts.app.run(testCtx, ts.config)
 			assert.NoError(t, err)
+			if tt.verify != nil {
+				tt.verify(t, ts)
+			}
 		})
 	}
+}
+
+func expectSuccessfulRunWithoutRelayer(ts *testSetup) {
+	// Mock successful state loading
+	ts.mockStateManager.EXPECT().
+		Load(ts.logger).
+		Return(&state.State{
+			Relayer: &state.RelayerState{TopicID: ""},
+		}, nil)
+	ts.mockStateManager.EXPECT().
+		ClaimSnapshot().
+		Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
+		AnyTimes()
+
+	// CDP now connects in the background and never gates startup: run() calls
+	// Start (fire-and-forget) and Close on shutdown.
+	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
+	ts.mockCDP.EXPECT().Close()
+
+	// Mock Watchdog start and stop
+	ts.mockWatchdog.EXPECT().Start(gomock.Any())
+	ts.mockWatchdog.EXPECT().Stop()
+
+	// Mock DBus start and stop
+	ts.mockDBus.EXPECT().Start().Return(nil)
+	ts.mockDBus.EXPECT().Stop().Return(nil)
+
+	// Mock Mediator start and stop
+	ts.mockMediator.EXPECT().Start()
+	ts.mockMediator.EXPECT().Stop()
+
+	// Mock StatusPoller start and stop
+	ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+	ts.mockStatusPoller.EXPECT().Stop()
+
+	// Mock Refresher start and stop
+	ts.mockRefresher.EXPECT().Start()
+	ts.mockRefresher.EXPECT().Stop()
+
+	// Mock Hub start and stop
+	ts.mockHub.EXPECT().Start()
+	ts.mockHub.EXPECT().Stop().Return(nil)
+
+	// Mock OS ReadFile for mDNS device info. The device-name
+	// record is read alongside the hostname: an unnamed unit is
+	// the ordinary case, and a missing file must leave the
+	// advertised name as the serial.
+	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+	ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
+	ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
+
+	// Mock Mediator InitializeMDNS
+	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+
+	// Mock Daemon notify
+	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+
+	// Mock OOM recoverer
+	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+
+	// Mock DBus call
+	ts.mockDBus.EXPECT().
+		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+		Return([]interface{}{false}, nil)
+	// Relayer Close is unconditional at shutdown (a later reconcile
+	// may have connected); it is a no-op on a nil conn.
+	ts.mockRelayer.EXPECT().Close()
 }
 
 func TestApp_Run_StartsAndStopsOfflineCacheWhenEnabled(t *testing.T) {

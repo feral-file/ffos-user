@@ -135,6 +135,8 @@ type Scheduler interface {
 	// SetProjector installs the content-policy projection applied to every
 	// scheduler-owned push. Optional; nil leaves pushes unprojected.
 	SetProjector(Projector)
+	// SetHintSource installs the media-health hint source for cutover pushes.
+	SetHintSource(fn HintSource)
 	// Stop latches shutdown and is not reversible: afterwards no recompute pass
 	// writes to the player and no new transition timer or push retry is armed.
 	// It returns without waiting for a CDP send that is already in flight; see
@@ -233,7 +235,8 @@ type scheduler struct {
 
 	// projector re-applies the current content policy to every scheduler-owned
 	// push. Read under mu, called outside it (see Projector).
-	projector Projector
+	projector  Projector
+	hintSource HintSource
 
 	// stopped latches at Stop and gates player writes during shutdown.
 	// Canceling the timer contexts is not enough on its own: a timer or retry
@@ -302,6 +305,20 @@ func (s *scheduler) SetProjector(p Projector) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.projector = p
+}
+
+// HintSource returns the displayPlaylist `mediaHealth` argument for the
+// items about to be pushed (feral-file/ffos-user#392), or nil for none. The
+// scheduler's cutover pushes build their own command, so they carry the
+// hint the same way commandrouter's casts do; the value is opaque here.
+type HintSource func(items []dp1playlist.PlaylistItem) interface{}
+
+// SetHintSource installs the media-health hint source. Set once at wiring
+// time; nil sends no hints.
+func (s *scheduler) SetHintSource(fn HintSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hintSource = fn
 }
 
 func (s *scheduler) RestoredPending() bool {
@@ -864,6 +881,14 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	}
 	if source.PlaylistURL != "" {
 		command.Arguments["playlistUrl"] = source.PlaylistURL
+	}
+	s.mu.Lock()
+	hintSource := s.hintSource
+	s.mu.Unlock()
+	if hintSource != nil && playlist != nil {
+		if hints := hintSource(playlist.Items); hints != nil {
+			command.Arguments["mediaHealth"] = hints
+		}
 	}
 	payload, err := command.JSON()
 	if err != nil {
