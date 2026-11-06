@@ -287,3 +287,36 @@ func TestRules_PlayVerdictBacksOffAfterAWeekOfReconclusions(t *testing.T) {
 	}
 	assert.WithinDuration(t, rec.CheckedAt.Add(RecheckBrokenBackoff), rec.RecheckAfter, time.Second, "a week of failures: retried weekly")
 }
+
+// F22 (PR #438 review): a failure must never vouch for its own network.
+// Evidence is read before the current answer is added, never comes from
+// the failing host, and a 5xx is not end-to-end evidence at all.
+func TestRules_UnreachableNeedsIndependentNetworkEvidence(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := newTableFetcher()
+	f.answers["https://bad.example/a"] = ok(502, "", nil, -1)
+	f.answers["https://proxy-b.example/a"] = ok(502, "", nil, -1)
+	f.answers["https://good.example/a"] = ok(200, "image/png", minimalPNG(1, 1), -1)
+	p := newPassProber(t, f, clock)
+
+	for i := 0; i < 3; i++ {
+		res := p.ProbeAndRecord(context.Background(), "https://bad.example/a")
+		assert.Equal(t, UnreachableServer, res.Unreachable)
+		assert.False(t, res.NetworkHealthy, "attempt %d: a 502 cannot vouch for itself", i)
+		clock.Advance(13 * time.Hour)
+	}
+	rec, err := p.Store.Get("https://bad.example/a")
+	require.NoError(t, err)
+	assert.NotEqual(t, StateBroken, rec.State, "26 h of self-corroborated 502s never conclude")
+
+	res := p.ProbeAndRecord(context.Background(), "https://proxy-b.example/a")
+	assert.False(t, res.NetworkHealthy, "another host's 502 is not evidence either: an intermediary answers 502 for every host")
+
+	p.ProbeAndRecord(context.Background(), "https://good.example/a")
+	res = p.ProbeAndRecord(context.Background(), "https://bad.example/a")
+	assert.True(t, res.NetworkHealthy, "an end-to-end answer from a different host is")
+
+	f.answers["https://good.example/b"] = ok(504, "", nil, -1)
+	res = p.ProbeAndRecord(context.Background(), "https://good.example/b")
+	assert.False(t, res.NetworkHealthy, "the failing host's own earlier answer does not count for it")
+}

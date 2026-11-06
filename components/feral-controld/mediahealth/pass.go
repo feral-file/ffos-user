@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/url"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -71,9 +70,11 @@ type Prober struct {
 	// demonstrably reaches other origins. nil reads as not online.
 	Online func() bool
 
-	// lastAnswered is the unix-nano time of the last probe that got any
-	// HTTP response, or a definitive NXDOMAIN (the resolver answered).
-	lastAnswered atomic.Int64
+	// answeredMu guards the network evidence: when and from which host the
+	// last END-TO-END answer came (see noteNetwork).
+	answeredMu   sync.Mutex
+	answeredAt   time.Time
+	answeredHost string
 }
 
 // networkWindow is how recent another origin's answer must be for an
@@ -383,28 +384,39 @@ func (p *Prober) probeOne(ctx context.Context, source string, logger *zap.Logger
 	return res, true
 }
 
-// noteNetwork keeps the network-health evidence: a probe that got any
-// HTTP response or a definitive NXDOMAIN proves the device reaches the
-// world; an unreachable result is marked NetworkHealthy only when the
-// device is online or another origin answered inside networkWindow.
+// noteNetwork keeps the network-health evidence and marks an unreachable
+// result NetworkHealthy when the device demonstrably reaches OTHER origins:
+// controld's internet verdict is online, or a DIFFERENT host gave an
+// end-to-end answer inside networkWindow.
+//
+// Three rules keep a failure from vouching for itself (PR #438 review,
+// F22): the verdict is read from the evidence BEFORE this result is added
+// to it; evidence from the failing host itself never counts (repeated
+// failures from one origin cannot corroborate each other); and only an
+// end-to-end answer is evidence — a 2xx–4xx, or a definitive NXDOMAIN from
+// the resolver. A 5xx is not: a captive portal or a broken proxy answers
+// 502 for every host, and counting those would let every work on the wall
+// corroborate every other one into broken.
 func (p *Prober) noteNetwork(res *ProbeResult) {
 	now := time.Now
 	if p.Now != nil {
 		now = p.Now
 	}
 	at := now()
-	if res.Status > 0 || (res.Verdict == VerdictDead && res.Reason == ReasonDNS) {
-		p.lastAnswered.Store(at.UnixNano())
+	host := hostOf(res.WireURL)
+	p.answeredMu.Lock()
+	defer p.answeredMu.Unlock()
+	if res.Unreachable != "" {
+		switch {
+		case p.Online != nil && p.Online():
+			res.NetworkHealthy = true
+		case !p.answeredAt.IsZero() && at.Sub(p.answeredAt) <= networkWindow && p.answeredHost != host:
+			res.NetworkHealthy = true
+		}
 	}
-	if res.Unreachable == "" {
-		return
-	}
-	if p.Online != nil && p.Online() {
-		res.NetworkHealthy = true
-		return
-	}
-	if last := p.lastAnswered.Load(); last != 0 && at.Sub(time.Unix(0, last)) <= networkWindow {
-		res.NetworkHealthy = true
+	endToEnd := (res.Status >= 200 && res.Status < 500) || (res.Verdict == VerdictDead && res.Reason == ReasonDNS)
+	if endToEnd {
+		p.answeredAt, p.answeredHost = at, host
 	}
 }
 

@@ -117,8 +117,11 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   streak, including a 401/403/429, a 503 that names a `Retry-After`, and a
   deadline that expires mid-body, so a slow but alive origin never
   concludes. An attempt counts only when the device demonstrably reaches
-  other origins: controld's internet verdict is online, or another probe got
-  an HTTP answer within the last hour. At 3 counted attempts spanning 24 h
+  other origins: controld's internet verdict is online, or a DIFFERENT host
+  gave an end-to-end answer (a 2xx–4xx, or a definitive NXDOMAIN) within the
+  last hour. The evidence is read before the attempt's own answer is added,
+  the failing host never vouches for itself, and a 5xx is never evidence: a
+  captive portal or broken proxy answers 502 for every host. At 3 counted attempts spanning 24 h
   the record is broken (`unreachable`, or `dns` when the last attempt was a
   DNS failure) with the normal broken recheck, so it heals on the first
   answer. A probe cut short by the cast pass's own 10 s ceiling, rather
