@@ -77,6 +77,16 @@ func ResolveSeriesPlaybackMode(document, device *SeriesPlaybackMode) SeriesPlayb
 // random is still stored and returned as its own value everywhere else —
 // only this narrowing step collapses it.
 //
+// full is itself gated by artworkModel.hasDistinctEditions(): the full/first
+// config only has a real choice to make for a `multi_unique` series, whose
+// editions are genuinely different artworks. A `single` (1/1) series has
+// only ever the one artwork, and a `multi` series' editions are identical
+// copies of one artwork, so both narrow to the representative regardless of
+// mode — casting N identical copies under `full` shows nothing a viewer
+// could tell apart from casting one (owner decision, 2026-11-06). An empty
+// or unrecognized artworkModel (the catalog did not state it) is NOT
+// narrowed this way — see hasDistinctEditions' doc.
+//
 // The representative itself still carries the document's series marker
 // (contract.seriesId, no tokenId) — it IS the series item, unmodified — so
 // emitting it as-is would still satisfy isSeriesItem. clearSeriesMarker
@@ -84,8 +94,8 @@ func ResolveSeriesPlaybackMode(document, device *SeriesPlaybackMode) SeriesPlayb
 // itself, so a later re-entry into Process built from this output (a
 // setSeriesPlayback re-cast, a recently-played replay) is never re-read as
 // an unresolved series (feralfile-bot F4, 2026-10-30).
-func NarrowEditions(mode SeriesPlaybackMode, representative dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
-	if mode == SeriesPlaybackFull {
+func NarrowEditions(mode SeriesPlaybackMode, artworkModel SeriesArtworkModel, representative dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
+	if mode == SeriesPlaybackFull && artworkModel.hasDistinctEditions() {
 		return editions
 	}
 	return []dp1playlist.PlaylistItem{clearSeriesMarker(representative)}
@@ -201,6 +211,11 @@ type ResolvedSeriesGroup struct {
 	Representative dp1playlist.PlaylistItem
 	Editions       []dp1playlist.PlaylistItem
 	Resolved       bool
+	// ArtworkModel is the catalog's own `series.artworkModel` for this
+	// group — empty for unresolvedSeriesGroup, which has no catalog answer
+	// to read it from. NarrowEditions treats empty the same as an
+	// unrecognized value: see SeriesArtworkModel.hasDistinctEditions.
+	ArtworkModel SeriesArtworkModel
 }
 
 // CastSegment is one position in a playlist as resolveSeriesCastPlan walked
@@ -269,7 +284,7 @@ func (p CastPlan) Narrow(device *SeriesPlaybackMode) []dp1playlist.PlaylistItem 
 			items = append(items, *seg.Item)
 		} else {
 			mode := ResolveSeriesPlaybackMode(seg.Group.DocumentMode, device)
-			items = append(items, NarrowEditions(mode, seg.Group.Representative, seg.Group.Editions)...)
+			items = append(items, NarrowEditions(mode, seg.Group.ArtworkModel, seg.Group.Representative, seg.Group.Editions)...)
 		}
 		if p.maxItems > 0 && len(items) >= p.maxItems {
 			return items[:p.maxItems]
@@ -392,7 +407,7 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 
 		default:
 			attempts++
-			editions, err := d.seriesEditions(ctx, playlist.ID, item)
+			editions, artworkModel, err := d.seriesEditions(ctx, playlist.ID, item)
 			if err != nil || len(editions) == 0 {
 				if err != nil {
 					d.logger.Warn("series item kept unexpanded; its representative still plays",
@@ -408,7 +423,7 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 				break
 			}
 			inherited := inheritInstanceFields(item, editions)
-			group := &ResolvedSeriesGroup{Representative: item, Editions: inherited, Resolved: true}
+			group := &ResolvedSeriesGroup{Representative: item, Editions: inherited, Resolved: true, ArtworkModel: artworkModel}
 			if key, ok := seriesGroupKey(item); ok {
 				group.Key = key
 			}
