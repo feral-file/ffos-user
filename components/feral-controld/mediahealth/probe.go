@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -125,6 +127,10 @@ type Probe struct {
 	// ItemTimeout bounds one source's WHOLE probe, guard DNS included
 	// (DefaultItemTimeout when 0).
 	ItemTimeout time.Duration
+	// ArweaveConfirmGateway is the second arweave gateway a 404/410 on an
+	// arweave transaction path is re-checked on before it may count as
+	// broken (DefaultArweaveConfirmGateway when ""; see confirmAbsence).
+	ArweaveConfirmGateway string
 }
 
 const (
@@ -158,17 +164,30 @@ func (p *Probe) ProbeOneWithin(ctx context.Context, source string, timeout time.
 	if IsDataURI(source) {
 		return probeDataURI(source)
 	}
-	wireURL, agent := p.wire(source)
-	result := ProbeResult{WireURL: wireURL}
-
 	if timeout <= 0 {
 		timeout = p.ItemTimeout
 	}
 	if timeout <= 0 {
 		timeout = DefaultItemTimeout
 	}
+	// One deadline for the probe AND any confirmation it needs, so a
+	// confirmed absence never costs more than the caller's item budget.
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	res := p.probeOnce(ctx, source)
+	if res.Verdict == VerdictDead && res.Reason == ReasonHTTPStatus &&
+		(res.Status == http.StatusNotFound || res.Status == http.StatusGone) {
+		if alt, ok := arweaveConfirmURL(source, p.ArweaveConfirmGateway); ok {
+			return p.confirmAbsence(ctx, res, alt)
+		}
+	}
+	return res
+}
+
+// probeOnce is one source's probe under the caller's deadline.
+func (p *Probe) probeOnce(ctx context.Context, source string) ProbeResult {
+	wireURL, agent := p.wire(source)
+	result := ProbeResult{WireURL: wireURL}
 
 	maxBytes := p.MaxBytes
 	if maxBytes <= 0 {
@@ -521,4 +540,90 @@ func redactForLog(rawURL string) string {
 		return rawURL[:maxLabel] + "…"
 	}
 	return rawURL
+}
+
+// DefaultArweaveConfirmGateway is where an arweave transaction a gateway
+// answered 404/410 for is re-checked (an ar.io gateway, independent of
+// arweave.net's own retrieval).
+const DefaultArweaveConfirmGateway = "https://ar-io.dev"
+
+// arweaveGatewayHosts are the gateways whose paths are arweave
+// transaction ids. A gateway's 404 on one is "this gateway could not
+// retrieve it", not "it does not exist": on the office FF1, 7 of 60
+// healthy works in a labeled fixture read 404 from arweave.net while 5 of
+// them served video/mp4 from ar-io.dev at the same moment, and every one
+// was hinted and skipped (#392).
+var arweaveGatewayHosts = map[string]bool{"arweave.net": true, "ar-io.dev": true, "ar-io.net": true}
+
+// arweaveTxID matches an arweave transaction id: 32 bytes, base64url, no
+// padding (43 characters).
+var arweaveTxID = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
+// arweaveConfirmURL returns the same transaction path (and query) on a
+// second gateway when source is a transaction path on an arweave gateway:
+// confirmGateway (DefaultArweaveConfirmGateway when ""), or arweave.net
+// when the source already is on confirmGateway's host.
+func arweaveConfirmURL(source, confirmGateway string) (string, bool) {
+	u, err := url.Parse(source)
+	if err != nil || !arweaveGatewayHosts[strings.ToLower(u.Hostname())] {
+		return "", false
+	}
+	first, _, _ := strings.Cut(strings.TrimPrefix(u.EscapedPath(), "/"), "/")
+	if !arweaveTxID.MatchString(first) {
+		return "", false
+	}
+	if confirmGateway == "" {
+		confirmGateway = DefaultArweaveConfirmGateway
+	}
+	g, err := url.Parse(confirmGateway)
+	if err != nil || g.Scheme != "https" || g.Hostname() == "" {
+		g, _ = url.Parse(DefaultArweaveConfirmGateway)
+	}
+	if strings.EqualFold(g.Hostname(), u.Hostname()) {
+		g, _ = url.Parse("https://arweave.net")
+	}
+	alt := url.URL{Scheme: g.Scheme, Host: g.Host, Path: u.Path, RawPath: u.RawPath, RawQuery: u.RawQuery}
+	return alt.String(), true
+}
+
+// confirmAbsence re-checks a gateway's 404/410 on the second gateway.
+// Only a 404/410 from both is a verdict. When the second gateway serves
+// the transaction, the work exists and the first gateway failed to
+// retrieve it: a transient server-side failure (issue server_error,
+// feeding the unreachable streak) — never a broken verdict, so nothing is
+// hinted away. If the kiosk itself cannot load it through its own gateway,
+// the play layer judges that (the observer sees the frame's 404). When the
+// second gateway cannot answer either, nothing is confirmed, and the
+// result is transient the same way; a deadline that ran out carries the
+// timeout error, so the cast pass's short deadline records nothing.
+func (p *Probe) confirmAbsence(ctx context.Context, res ProbeResult, altURL string) ProbeResult {
+	maxBytes := p.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = DefaultProbeMaxBytes
+	}
+	altHost := hostOf(altURL)
+	resp, err := p.fetch(ctx, altURL, "", maxBytes, true)
+	if err == nil && (resp.Status == http.StatusNotFound || resp.Status == http.StatusGone) {
+		res.Detail = fmt.Sprintf("%s; %s also answered HTTP %d", res.Detail, altHost, resp.Status)
+		return res
+	}
+	firstStatus := res.Status
+	res.Verdict = VerdictInconclusive
+	res.Unreachable = UnreachableServer
+	switch {
+	case err == nil && resp.Status >= 200 && resp.Status < 300:
+		res.Detail = fmt.Sprintf("HTTP %d from the gateway; %s serves the transaction (HTTP %d)", firstStatus, altHost, resp.Status)
+		res.Err = fmt.Errorf("media health: gateway answered %d for a transaction %s serves", firstStatus, altHost)
+	case err != nil:
+		res.Detail = fmt.Sprintf("HTTP %d from the gateway; %s could not confirm it", firstStatus, altHost)
+		if fetchErrorKind(err) == FetchErrTimeout {
+			res.Err = err
+		} else {
+			res.Err = fmt.Errorf("media health: gateway answered %d, unconfirmed: %w", firstStatus, err)
+		}
+	default:
+		res.Detail = fmt.Sprintf("HTTP %d from the gateway; %s answered HTTP %d", firstStatus, altHost, resp.Status)
+		res.Err = fmt.Errorf("media health: gateway answered %d, unconfirmed (%s answered %d)", firstStatus, altHost, resp.Status)
+	}
+	return res
 }

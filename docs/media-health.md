@@ -107,6 +107,20 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   redirect chain → transient. NXDOMAIN → dead (`dns`); every other transport
   failure → transient, including a deadline that expires mid-body (judged
   before any byte count: a timed-out short read is not truncation).
+- **Arweave 404s are confirmed on a second gateway.** On an arweave
+  transaction path (`arweave.net`, `ar-io.dev`, `ar-io.net`, first path
+  segment a 43-character transaction id), a 404 or 410 means "this gateway
+  could not retrieve it", not "it does not exist": on the office FF1, 7 of 60
+  healthy works in a labeled fixture read 404 from arweave.net while 5 of
+  them served `video/mp4` from ar-io.dev at the same moment. So the same path
+  is re-checked once on `mediaHealth.arweaveConfirmGateway` (default
+  `https://ar-io.dev`; arweave.net when the source is already there), inside
+  the same item deadline. Both 404/410 is broken. The second gateway serving
+  it, or failing to answer, is a transient server-side failure — issue
+  `server_error`, feeding the unreachable streak — never a broken verdict and
+  never a hint. If the kiosk cannot load it through its own gateway, the play
+  layer judges that from the frame's real status. A deadline that runs out
+  during the confirmation at cast records nothing, like any cast timeout.
 - **Unreachable streak.** An attempt in which the origin gives no usable
   answer is transient on its own, because it can be the device's network.
   Three classes count: DNS short of NXDOMAIN (SERVFAIL, a resolver timeout —
@@ -487,7 +501,8 @@ cycle).
   "probeMaxBytes": 32768,
   "lookahead": 16,
   "castItems": 24,
-  "castConcurrency": 4
+  "castConcurrency": 4,
+  "arweaveConfirmGateway": "https://ar-io.dev"
 }
 ```
 

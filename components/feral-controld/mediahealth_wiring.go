@@ -70,9 +70,10 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 		maxBytes = mediahealth.DefaultProbeMaxBytes
 	}
 	probe := &mediahealth.Probe{
-		Fetcher:   offlinecache.NewMediaHealthFetcher(net.DefaultResolver),
-		Validator: mediahealth.NewContentValidator(maxBytes, cfg.KnownBadPageMarkers),
-		MaxBytes:  maxBytes,
+		Fetcher:               offlinecache.NewMediaHealthFetcher(net.DefaultResolver),
+		Validator:             mediahealth.NewContentValidator(maxBytes, cfg.KnownBadPageMarkers),
+		MaxBytes:              maxBytes,
+		ArweaveConfirmGateway: cfg.ArweaveConfirmGateway,
 	}
 	if rewriter != nil {
 		probe.Rewriter = rewriter

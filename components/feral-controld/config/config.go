@@ -98,6 +98,11 @@ type MediaHealthConfig struct {
 	// frame's HTTP status to the store). The kill switch for the one
 	// media-health piece that holds a socket to the kiosk.
 	KioskObserverDisabled bool `json:"kioskObserverDisabled,omitempty"`
+	// ArweaveConfirmGateway is the second arweave gateway a 404/410 on an
+	// arweave transaction is re-checked on before it counts as broken
+	// (default https://ar-io.dev). An operator can switch it when an ar.io
+	// gateway changes, without a release.
+	ArweaveConfirmGateway string `json:"arweaveConfirmGateway,omitempty"`
 	// Malformed records that the block did not decode; every field then
 	// reads as its default.
 	Malformed bool `json:"-"`
