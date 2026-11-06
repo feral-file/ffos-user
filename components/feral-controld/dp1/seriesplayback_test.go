@@ -94,11 +94,46 @@ func TestNarrowEditions_FirstKeepsOnlyTheRepresentative(t *testing.T) {
 	assert.Equal(t, "representative", got[0].ID)
 }
 
-// FF1 has no re-roll-per-loop behavior (AC4 of feral-file/ffos-user#425):
-// random has nothing to randomize at cast time and narrows to the same
-// single representative first would.
-func TestNarrowEditions_RandomResolvesToFirstAtCastTime(t *testing.T) {
-	editions := []dp1playlist.PlaylistItem{editionItem("a"), editionItem("b")}
+// Owner decision, 2026-11-06 (supersedes AC4 of feral-file/ffos-user#425):
+// a genuine random PICK at cast time is both possible and wanted for a
+// multi_unique series, even though FF1 still has no re-roll-per-loop
+// behavior. Run enough trials that more than one distinct edition showing
+// up is a near-certainty under real randomness and a near-impossibility by
+// bad luck alone — with 5 editions, 200 trials all landing on the same one
+// has probability 5*(1/5)^199, indistinguishable from zero.
+func TestNarrowEditions_RandomPicksAGenuinelyRandomEditionForMultiUnique(t *testing.T) {
+	editions := []dp1playlist.PlaylistItem{
+		editionItem("a"), editionItem("b"), editionItem("c"), editionItem("d"), editionItem("e"),
+	}
+
+	seen := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		got := dp1.NarrowEditions(dp1.SeriesPlaybackRandom, dp1.SeriesArtworkModelMultiUnique, editionItem("representative"), editions)
+		require.Len(t, got, 1)
+		seen[got[0].ID] = true
+	}
+
+	assert.Greater(t, len(seen), 1, "200 random picks over 5 editions must not all land on the same one")
+	for id := range seen {
+		assert.NotEqual(t, "representative", id, "random must pick from editions, not fall back to representative, when editions genuinely differ")
+	}
+}
+
+// A single/multi series' editions are not distinguishable to begin with
+// (hasDistinctEditions is false), so random has nothing to randomize and
+// must narrow to the representative exactly like first does.
+func TestNarrowEditions_RandomNarrowsToRepresentativeWhenArtworkModelHasNoDistinctEditions(t *testing.T) {
+	editions := []dp1playlist.PlaylistItem{editionItem("a"), editionItem("b"), editionItem("c")}
+	got := dp1.NarrowEditions(dp1.SeriesPlaybackRandom, dp1.SeriesArtworkModelMulti, editionItem("representative"), editions)
+	require.Len(t, got, 1)
+	assert.Equal(t, "representative", got[0].ID)
+}
+
+// The unresolved-group fallback (unresolvedSeriesGroup) hands NarrowEditions
+// a single-element editions slice holding only the representative itself —
+// random must not panic or misbehave on that, and must still return it.
+func TestNarrowEditions_RandomWithOneEditionReturnsIt(t *testing.T) {
+	editions := []dp1playlist.PlaylistItem{editionItem("representative")}
 	got := dp1.NarrowEditions(dp1.SeriesPlaybackRandom, dp1.SeriesArtworkModelMultiUnique, editionItem("representative"), editions)
 	require.Len(t, got, 1)
 	assert.Equal(t, "representative", got[0].ID)
