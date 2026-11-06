@@ -280,13 +280,51 @@ func TestGateways_OverrideIsScopedToTheSourcesGateway(t *testing.T) {
 	require.True(t, ok, "and b's files follow it")
 	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA+"/frames/2.png", target)
 
-	// Variants on one gateway share the route: the pass fans one result
-	// out to every fragment variant, so they carry the same override, and
-	// that gateway serving any of them again clears it for all.
-	_, err = s.ApplyProbe(b+"#v2", ProbeResult{Verdict: VerdictAlive, Status: 200, ServedBy: "https://ipfs.filebase.io"})
+}
+
+// F25, round 2: two files under one CID on the SAME gateway are probed
+// independently; the route stays while either still needs it.
+func TestGateways_RouteStaysWhileAnySourceNeedsIt(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	s := openTestStore(t, clock)
+	missing := "https://ipfs.pixura.io/ipfs/" + cidA + "/missing.html"
+	present := "https://ipfs.pixura.io/ipfs/" + cidA + "/present.html"
+	for _, src := range []string{missing, present} {
+		_, err := s.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200, ServedBy: "https://ipfs.filebase.io"})
+		require.NoError(t, err)
+	}
+	_, err := s.ApplyProbe(present, ProbeResult{Verdict: VerdictAlive, Status: 200})
 	require.NoError(t, err)
-	_, err = s.ApplyProbe(b+"#v2", ProbeResult{Verdict: VerdictAlive, Status: 200})
+	target, ok := s.GatewayOverride(missing)
+	require.True(t, ok, "missing.html still needs the fallback")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA+"/missing.html", target)
+	_, ok = s.GatewayOverride("https://ipfs.pixura.io/ipfs/" + cidA + "/assets/app.js")
+	assert.True(t, ok, "the work's own files under the CID still follow the route")
+
+	_, err = s.ApplyProbe(missing, ProbeResult{Verdict: VerdictAlive, Status: 200})
 	require.NoError(t, err)
-	_, ok = s.GatewayOverride(b)
-	assert.False(t, ok, "the same gateway serving a variant serves them all")
+	_, ok = s.GatewayOverride(missing)
+	assert.False(t, ok, "the route clears once no source on it needs it")
+}
+
+// The per-source index survives a restart too, including the last-source rule.
+func TestGateways_RouteSourcesSurviveReopen(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	path := filepath.Join(t.TempDir(), "mh", "store.db")
+	st, err := Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	require.NoError(t, err)
+	a := "https://ipfs.pixura.io/ipfs/" + cidA + "/a.html"
+	b := "https://ipfs.pixura.io/ipfs/" + cidA + "/b.html"
+	for _, src := range []string{a, b} {
+		_, err = st.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200, ServedBy: "https://ipfs.filebase.io"})
+		require.NoError(t, err)
+	}
+	require.NoError(t, st.Close())
+	st, err = Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	require.NoError(t, err)
+	defer func() { _ = st.Close() }()
+	_, err = st.ApplyProbe(a, ProbeResult{Verdict: VerdictAlive, Status: 200})
+	require.NoError(t, err)
+	_, ok := st.GatewayOverride(b)
+	assert.True(t, ok, "b's entry was reloaded and still holds the route")
 }

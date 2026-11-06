@@ -133,10 +133,12 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   original URL, and a work's own files under the same CID or transaction
   follow. The override targets only a configured gateway origin plus the
   request's own path and query, never a URL from playlist content. It is
-  indexed by route — the content id plus the gateway the source names — in
-  the store's `servedBy` bucket (mirrored in memory for the per-request
-  lookup), so two sources naming one CID through different gateways keep
-  independent overrides, and it survives a restart. Every probe still
+  indexed by route — the content id plus the gateway the source names — with
+  one entry per source that needs it, in the store's `servedBy` bucket
+  (mirrored in memory for the per-request lookup). A route stays while any
+  source on it still needs the fallback, so one source recovering never
+  drops another's — another file under the same CID, or the same CID named
+  through another gateway — and it survives a restart. Every probe still
   tries the source's own gateway first, so when it serves again `servedBy`
   clears and the kiosk goes back to it. Without the interceptor
   (`gatewayUserAgent.enabled: false`) a fallback gateway serving a work is
