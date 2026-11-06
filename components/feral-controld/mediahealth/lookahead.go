@@ -3,6 +3,7 @@ package mediahealth
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -325,29 +326,32 @@ func (l *Lookahead) nextDue(now time.Time) string {
 		l.mu.Unlock()
 		return ""
 	}
-	// The whole wall is excluded inside the query — the walk above owns
-	// it — so on-wall rows never shadow off-wall ones. Held sources are
-	// filtered after: the wall set is a shared snapshot, never copied per
-	// call.
+	// Excluded INSIDE the query, before its limit, so neither can fill the
+	// result and shadow an eligible off-wall row (PR #438 review, F8): the
+	// whole wall (the walk above owns it) and the sources the worker holds.
+	// The wall set is a shared read-only snapshot, never copied per call;
+	// the held map is small (bounded by the probe rate times probeHold), so
+	// it is cloned.
 	wall := l.wallSet
+	held := maps.Clone(l.held)
 	l.mu.Unlock()
+	skip := func(src string) bool {
+		if _, onWall := wall[src]; onWall {
+			return true
+		}
+		_, isHeld := held[src]
+		return isHeld
+	}
 
-	due, err := l.Store.Due(now, 8, wall)
-	if err != nil {
+	due, err := l.Store.Due(now, 1, skip)
+	if err != nil || len(due) == 0 {
 		return ""
 	}
 	// A due data: record (a malformed URI the cast pass recorded) is
 	// re-settled through the same path: ProbeOne answers it synchronously
 	// with no network, and the broken backoff spaces the rechecks out.
-	// Skipping it here would let a handful of them shadow the rows behind.
-	for _, src := range due {
-		if l.isHeld(src) {
-			continue
-		}
-		l.mu.Lock()
-		l.sweepTokens--
-		l.mu.Unlock()
-		return src
-	}
-	return ""
+	l.mu.Lock()
+	l.sweepTokens--
+	l.mu.Unlock()
+	return due[0]
 }

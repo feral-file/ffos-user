@@ -206,11 +206,14 @@ func (s *Store) Count() (int, error) {
 }
 
 // Due returns up to limit sources whose due time (recheck or transient
-// retry) is at or before now, earliest first, skipping any in exclude. The
-// exclusion is applied INSIDE the scan so a handful of permanently excluded
-// rows at the head of the index (the items on the wall) cannot shadow
-// eligible rows behind them.
-func (s *Store) Due(now time.Time, limit int, exclude map[string]struct{}) ([]string, error) {
+// retry) is at or before now, earliest first, skipping any for which skip
+// returns true (nil skips nothing). The exclusion is applied INSIDE the
+// scan, before the limit, so excluded rows at the head of the index — the
+// items on the wall, sources the caller holds — cannot fill the result and
+// shadow eligible rows behind them (PR #438 review, F8). skip runs inside
+// the store's read transaction: it must be cheap and must not touch the
+// store.
+func (s *Store) Due(now time.Time, limit int, skip func(source string) bool) ([]string, error) {
 	var out []string
 	err := s.db.View(func(tx *bolt.Tx) error {
 		items := tx.Bucket(bucketItems)
@@ -225,7 +228,7 @@ func (s *Store) Due(now time.Time, limit int, exclude map[string]struct{}) ([]st
 			if derr != nil || rec == nil {
 				continue
 			}
-			if _, skip := exclude[rec.Source]; skip {
+			if skip != nil && skip(rec.Source) {
 				continue
 			}
 			out = append(out, rec.Source)

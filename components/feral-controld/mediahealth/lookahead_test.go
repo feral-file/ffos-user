@@ -115,3 +115,32 @@ func TestLookahead_RunStopsOnContext(t *testing.T) {
 		t.Fatal("Run did not return after cancel")
 	}
 }
+
+// F8 (PR #438 review, round on the single walk): held sources are
+// excluded INSIDE the due query, before its limit, so a run of them at the
+// head of the index cannot shadow an eligible off-wall record behind them.
+func TestLookahead_HeldSourcesNeverShadowTheSweep(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := newTableFetcher()
+	l := newTestLookahead(t, f, clock)
+	held := make([]string, 8)
+	for i := range held {
+		held[i] = "https://o/held" + strconv.Itoa(i)
+		_, err := l.Store.ApplyProbe(held[i], ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
+		require.NoError(t, err)
+		clock.Advance(time.Second)
+	}
+	const ninth = "https://o/ninth"
+	f.answers[ninth] = ok(200, "image/png", minimalPNG(1, 1), -1)
+	_, err := l.Store.ApplyProbe(ninth, ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
+	require.NoError(t, err)
+	clock.Advance(RecheckBroken + time.Minute)
+	for _, src := range held {
+		l.hold(src, clock.t.Add(probeHold))
+	}
+	require.True(t, l.step(context.Background(), nil), "the ninth, unheld record is swept")
+	assert.Equal(t, 1, f.count(ninth))
+	for _, src := range held {
+		assert.Zero(t, f.count(src), "a held source is not re-dialed")
+	}
+}
