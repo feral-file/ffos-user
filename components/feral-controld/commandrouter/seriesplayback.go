@@ -27,6 +27,26 @@ func SetSeriesPlayback(h Handler, store *seriesplayback.Store, logger *zap.Logge
 
 func (h *handler) setSeriesPlayback(store *seriesplayback.Store) { h.seriesPlayback = store }
 
+// SeriesPlaybackSource exposes h's own device-level series-playback getter
+// (currentSeriesPlaybackMode) to callers outside this package — namely
+// main.go, which wires status.Poller.SetSeriesPlaybackSource against the
+// same handler it builds here, so the poller's pushed player_status and
+// this package's own direct checkStatus reply (annotateSeriesPlaybackReply,
+// called from sendCDPRequest) read the identical device-level store and can
+// never disagree. ok is false (fn nil) when h is not a *handler built by
+// New — same concrete-handler-only, pre-NewGate contract as
+// SetOverlaySource/SetSeriesPlayback; the method itself is nil-safe even
+// without a store wired (it returns nil, meaning "follow the document"),
+// so ok says nothing about whether a store was wired, only whether this
+// handler type supports the seam at all.
+func SeriesPlaybackSource(h Handler) (fn func() *dp1.SeriesPlaybackMode, ok bool) {
+	target, ok := h.(*handler)
+	if !ok {
+		return nil, false
+	}
+	return target.currentSeriesPlaybackMode, true
+}
+
 // ResetSeriesPlayback returns the device-level series-playback override to
 // "follow the document" and removes it from disk. Used by factory reset: the
 // owner's override must not outlive their claim, same as content policy and

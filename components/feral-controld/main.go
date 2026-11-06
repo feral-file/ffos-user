@@ -1226,6 +1226,17 @@ func initializeApp(
 		seriesPlaybackStore = seriesplayback.Fallback(constants.SERIES_PLAYBACK_FILE)
 	}
 	commandrouter.SetSeriesPlayback(rawCmdHandler, seriesPlaybackStore, logger)
+	// player_status also carries the device's current series-playback
+	// override (ffos-user#425 follow-up), passively — not only via an
+	// explicit getSeriesPlayback query. One getter, read from rawCmdHandler's
+	// own store and reused for both status surfaces exactly like
+	// buildOverlaySource below, so the poller's push loop and this package's
+	// own direct checkStatus reply can never disagree.
+	if seriesPlaybackSource, ok := commandrouter.SeriesPlaybackSource(rawCmdHandler); ok {
+		poller.SetSeriesPlaybackSource(seriesPlaybackSource)
+	} else {
+		logger.Warn("Command handler does not support series playback status wiring")
+	}
 	// Cast-time source preflight (#304): a displayPlaylist whose every item
 	// source definitively answers an HTTP error is rejected at accept time
 	// instead of being forwarded and self-reported as playing. Wired against
