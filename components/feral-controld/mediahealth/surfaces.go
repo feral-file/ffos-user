@@ -141,6 +141,14 @@ type ReportItem struct {
 	} `json:"plays,omitempty"`
 }
 
+// NeedsAttention reports whether a row is worth showing on its own: a
+// verdict (broken or suspect), an issue, or a player skip. The
+// `attention` filter of getMediaHealth; rows the lookahead has not reached
+// yet read `unknown` with no issue and are not.
+func (r ReportItem) NeedsAttention() bool {
+	return r.State == StateBroken || r.State == StateSuspect || r.Issue != "" || r.Skipped
+}
+
 // ReportInput is what the caller knows about each item on screen.
 type ReportInput struct {
 	ID     string

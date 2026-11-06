@@ -159,7 +159,7 @@ func TestRules_PassCeilingIsNotTheSourcesFailure(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, rec, "no record, no one-hour hold: the lookahead's walk will reach it")
 
-	l := &Lookahead{Prober: p, Store: p.Store, Now: clock.Now, Window: 1}
+	l := &Lookahead{Prober: p, Store: p.Store, Now: clock.Now}
 	f.block = nil
 	l.Observe([]string{"https://o/cur", "https://o/next", "https://slow.example/a"}, 0)
 	f.answers["https://o/cur"] = ok(200, "image/png", minimalPNG(1, 1), -1)

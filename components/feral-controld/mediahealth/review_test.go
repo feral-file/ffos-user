@@ -188,11 +188,8 @@ func TestLookahead_SweepSkipsOnWallRowsInsideTheQuery(t *testing.T) {
 	clock := &testClock{t: time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)}
 	f := newTableFetcher()
 	l := newTestLookahead(t, f, clock)
-	// The whole wall is inside the window the walk owns (current + 9), so
-	// every on-wall row is excluded from the sweep's query; on-wall rows
-	// BEYOND the window are not (the #392 follow-up lets the sweep refresh
-	// them, by due time, like any other row).
-	l.Window = 9
+	// The walk owns the whole wall, so every on-wall row is excluded from
+	// the sweep's query and the off-wall row behind them is reached.
 	wall := make([]string, 0, 10)
 	for i := 0; i < 10; i++ {
 		src := "https://o/wall" + string(rune('a'+i))
@@ -741,13 +738,13 @@ func TestService_ItemHealths_SkippedAndUnskipped(t *testing.T) {
 	assert.Equal(t, UnskippedExpired, rows[2].Unskipped)
 }
 
-// #392 follow-up: a due record on the wall beyond the lookahead window is
-// swept, so an expired verdict there is refreshed instead of waiting for
+// #392 follow-up: a due record anywhere on the wall is reached by the
+// walk, so an expired verdict there is refreshed instead of waiting for
 // playback to reach it.
-func TestLookahead_SweepsDueOnWallRecordsBeyondTheWindow(t *testing.T) {
+func TestLookahead_WalkReachesDueRecordsAnywhereOnTheWall(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	f := newTableFetcher()
-	l := newTestLookahead(t, f, clock) // Window: 3
+	l := newTestLookahead(t, f, clock)
 	wall := make([]string, 12)
 	for i := range wall {
 		wall[i] = fmt.Sprintf("https://o/%d", i)

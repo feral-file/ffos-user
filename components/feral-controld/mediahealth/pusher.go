@@ -129,7 +129,7 @@ func (p *HintPusher) Observe(sources []string, castSeq int64, ok bool) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !ok || len(sources) == 0 || len(sources) > maxObservedItems {
+	if !ok || len(sources) == 0 {
 		p.haveWall = false
 		p.sources = nil
 		return

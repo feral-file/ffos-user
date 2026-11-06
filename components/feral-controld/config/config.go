@@ -81,9 +81,10 @@ type MediaHealthConfig struct {
 	KnownBadPageMarkers []string `json:"knownBadPageMarkers,omitempty"`
 	// ProbeMaxBytes is the L0 window (default 32 KiB, the indexer's).
 	ProbeMaxBytes int `json:"probeMaxBytes,omitempty"`
-	// Lookahead is how many upcoming items are probed ahead during play
-	// (default 16); 0 keeps the default, a negative value disables the
-	// lookahead and the background sweep.
+	// Lookahead: a negative value disables the during-play lookahead and
+	// the background sweep. (It once sized the lookahead's window; the
+	// lookahead now walks the whole wall, so a positive value is accepted
+	// and ignored.)
 	Lookahead int `json:"lookahead,omitempty"`
 	// CastItems is how many sources, in play order, the cast-time pass
 	// probes before leaving the rest to the lookahead (default 24); 0

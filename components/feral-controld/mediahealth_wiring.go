@@ -90,7 +90,7 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 	}
 	var lookahead *mediahealth.Lookahead
 	if cfg.Lookahead >= 0 {
-		lookahead = &mediahealth.Lookahead{Prober: prober, Store: store, Logger: logger, Window: cfg.Lookahead}
+		lookahead = &mediahealth.Lookahead{Prober: prober, Store: store, Logger: logger}
 	}
 	contract := &mediahealth.PlayerContract{Path: setupui.DefaultContractPath}
 	var pusher *mediahealth.HintPusher

@@ -1024,8 +1024,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// (see that comment). err must be assigned, not just returned,
 			// so the deferred playback-failure accounting above records the
 			// rejection.
-			if h.mediaHealth != nil && playlist != nil && len(playlist.Items) > 0 &&
-				len(playlist.Items) <= maxPreflightItems {
+			if h.mediaHealth != nil && playlist != nil && len(playlist.Items) > 0 {
 				sources := make([]string, 0, len(playlist.Items))
 				// scheduledPlaylist: any item carrying displayAt makes this
 				// a scheduler-filtered playlist, and the probe would see
@@ -1114,7 +1113,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						h.logger.Debug("displayPlaylist: item source probes inconclusive",
 							zap.Int("count", inconclusive))
 					}
-					if dead == len(probeResults) {
+					// Every source must carry a dead verdict: a pass that
+					// answered fewer results than sources (impossible for
+					// the real Prober, cheap to guard) must fail OPEN, never
+					// read as "nothing alive".
+					if len(probeResults) == len(sources) && dead == len(probeResults) {
 						switch {
 						case h.offlineCache != nil && h.kioskReplay != nil && h.offlineCache.HasReplayableItem(sources...):
 							// A definitively dead ORIGIN is not a dead CAST
@@ -1140,14 +1143,6 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						}
 					}
 				}
-			}
-
-			if h.mediaHealth != nil && playlist != nil && len(playlist.Items) > maxPreflightItems {
-				// Over the preflight item budget: skip before building any
-				// per-item state (fail open) — see maxPreflightItems.
-				h.logger.Warn("displayPlaylist: playlist exceeds the preflight item budget; source preflight skipped",
-					zap.Int("items", len(playlist.Items)),
-					zap.Int("budget", maxPreflightItems))
 			}
 
 			// Preflight is done, so reacquire the policy lock and hold it

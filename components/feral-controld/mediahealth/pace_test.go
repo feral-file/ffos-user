@@ -304,13 +304,13 @@ func TestHostLimiter_CooldownBoundsAndKeepsTheLater(t *testing.T) {
 	assert.False(t, ok, "expired entries are dropped")
 }
 
-// The rest of the wall beyond the window is walked in play order for
-// sources never probed, so the items the cast pass left get their first
-// verdict before playback reaches them; a cooled host is stepped over.
+// The whole wall is walked in play order, so the items the cast pass left
+// get their first verdict before playback reaches them; a cooled host is
+// stepped over, not held.
 func TestLookahead_WalksTheWholeWallForUnprobedSources(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	f := newTableFetcher()
-	l := newTestLookahead(t, f, clock) // Window: 3
+	l := newTestLookahead(t, f, clock)
 	l.Prober.Hosts = &HostLimiter{Now: clock.Now}
 	wall := make([]string, 10)
 	for i := range wall {
@@ -339,10 +339,10 @@ func TestLookahead_WalksTheWholeWallForUnprobedSources(t *testing.T) {
 	assert.False(t, l.step(context.Background(), nil))
 }
 
-func TestLookahead_WindowSkipsACooledHostWithoutHolding(t *testing.T) {
+func TestLookahead_WalkSkipsACooledHostWithoutHolding(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	f := newTableFetcher()
-	l := newTestLookahead(t, f, clock) // Window: 3
+	l := newTestLookahead(t, f, clock)
 	l.Prober.Hosts = &HostLimiter{Now: clock.Now}
 	f.answers["https://cool.example/1"] = ok(200, "image/png", minimalPNG(1, 1), -1)
 	f.answers["https://o/2"] = ok(200, "image/png", minimalPNG(1, 1), -1)

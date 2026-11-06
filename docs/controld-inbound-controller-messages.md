@@ -3306,9 +3306,25 @@ screen (feral-file/ffos-user#392, `docs/media-health.md`), so a controller can
 show which works play and why one does not. The rows are built from the
 player's own item list, so they line up with what the app already displays.
 
-Request: `{}` — no fields, and a **non-empty request is rejected** with an
-error reply rather than ignored, the same storm-gate reason `getContentPolicy`
-rejects one.
+Request: `{}` for the original form (the first 2048 rows, `truncated` past
+that), or a **paged** request with any of:
+
+| Field | Type | Rule |
+|---|---|---|
+| `offset` | integer ≥ 0 | first row to return, among the rows the filter admits |
+| `limit` | integer 1–1000 | default 500 |
+| `filter` | `"all"` \| `"attention"` | `attention` = `state` broken or suspect, or any `issue`, or `skipped` |
+
+Any other key, type or value is **rejected** with
+`{ "ok": false, "status": "error", "error": "invalid request" }` rather than
+ignored — the storm gate dedupes query-class commands on type + arguments, so
+the argument space must stay bounded (valid pages are bounded by the
+playlist's size, the same reason `getContentPolicy` rejects arguments). A
+paged reply carries `offset`, `limit`, `matched` (rows the filter admits
+across the whole wall) and `nextOffset` (omitted on the last page) beside
+`total`; every row keeps its absolute playlist `index`; `castSeq` is the
+consistency token — if it changes between pages the wall changed, start
+over. Typical use is one request: `{"filter":"attention"}`.
 
 ```json
 {

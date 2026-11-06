@@ -2,6 +2,7 @@ package mediahealth
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 func newTestLookahead(t *testing.T, f Fetcher, clock *testClock) *Lookahead {
 	t.Helper()
 	p := newPassProber(t, f, clock)
-	return &Lookahead{Prober: p, Store: p.Store, Now: clock.Now, Window: 3}
+	return &Lookahead{Prober: p, Store: p.Store, Now: clock.Now}
 }
 
 func TestLookahead_ProbesUpcomingItemsInPlayOrder(t *testing.T) {
@@ -24,17 +25,16 @@ func TestLookahead_ProbesUpcomingItemsInPlayOrder(t *testing.T) {
 	l := newTestLookahead(t, f, clock)
 	l.Observe([]string{"https://o/0", "https://o/1", "https://o/2", "https://o/3", "https://o/4"}, 3)
 
-	// Window 3 from index 3: items 4, 0, 1, then the current item 3 last —
-	// one request per step.
-	for _, want := range []string{"https://o/4", "https://o/0", "https://o/1", "https://o/3"} {
-		assert.True(t, l.step(context.Background(), nil), "a due upcoming item is probed")
+	// One walk from index 3: the items after it in play order, wrapping,
+	// then the current item last — one request per step.
+	for _, want := range []string{"https://o/4", "https://o/0", "https://o/1", "https://o/2", "https://o/3"} {
+		assert.True(t, l.step(context.Background(), nil), want)
 		assert.Equal(t, 1, f.count(want), want)
 	}
-	assert.Equal(t, 0, f.count("https://o/2"), "the window and the current item come before the rest of the wall")
-	assert.True(t, l.step(context.Background(), nil), "then the rest of the wall, for sources never probed")
-	assert.Equal(t, 1, f.count("https://o/2"))
 	assert.False(t, l.step(context.Background(), nil), "the wall is covered; nothing is due in the background")
-	assert.Equal(t, 1, f.count("https://o/3"), "the current item is probed after the window, once")
+	for _, u := range []string{"https://o/0", "https://o/1", "https://o/2", "https://o/3", "https://o/4"} {
+		assert.Equal(t, 1, f.count(u), "each item once: %s", u)
+	}
 }
 
 func TestLookahead_SkipsRecordsThatAreNotDue(t *testing.T) {
@@ -90,10 +90,14 @@ func TestLookahead_AdmitGateAndIgnoredInputs(t *testing.T) {
 	assert.True(t, l.step(context.Background(), nil), "the current item")
 	assert.False(t, l.step(context.Background(), nil), "data: items are never probed ahead")
 
-	big := make([]string, maxObservedItems+1)
+	// No size cap: a wall holds whatever the playlist resolved to.
+	big := make([]string, 5000)
+	for i := range big {
+		big[i] = "https://big.example/" + strconv.Itoa(i)
+	}
 	l.Observe(big, 0)
 	l.mu.Lock()
-	assert.Nil(t, l.sources, "an oversized snapshot is dropped, not retained")
+	assert.Len(t, l.sources, 5000, "a large snapshot is retained")
 	l.mu.Unlock()
 }
 

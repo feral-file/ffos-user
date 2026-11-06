@@ -157,7 +157,7 @@ func TestProber_NetworkHealthEvidence(t *testing.T) {
 func TestLookahead_RecordedTransientFollowsItsRetryAfter(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	f := newTableFetcher()
-	l := newTestLookahead(t, f, clock) // Window: 3
+	l := newTestLookahead(t, f, clock)
 	l.Prober.Hosts = &HostLimiter{Now: clock.Now}
 	src := "https://limited.example/a"
 	f.answers[src] = ok(429, "", nil, -1, "Retry-After", "30")
@@ -214,7 +214,7 @@ func TestLookahead_RefusedWriteKeepsTheHold(t *testing.T) {
 		f.answers[u] = ok(200, "image/png", minimalPNG(1, 1), -1)
 	}
 	p := &Prober{Probe: &Probe{Fetcher: f, Validator: NewContentValidator(DefaultProbeMaxBytes, nil)}, Store: store, Now: clock.Now}
-	l := &Lookahead{Prober: p, Store: store, Now: clock.Now, Window: 3}
+	l := &Lookahead{Prober: p, Store: store, Now: clock.Now}
 	free = 1 << 30
 	l.Observe([]string{"https://o/0", "https://o/1", "https://o/2"}, 0)
 

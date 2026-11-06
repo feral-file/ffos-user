@@ -101,7 +101,7 @@ const (
 	// DefaultPassItems is how far into the playlist the cast pass looks.
 	// 24 items at 2 per host and ~300 ms each is a few seconds; it covers
 	// the opening of any real wall, and the lookahead reaches the rest
-	// before playback does at one request every DefaultGap.
+	// before playback does, one request after another.
 	DefaultPassItems = 24
 	// DefaultMaxAttempts bounds the all-dead extension (the dynamic
 	// resolution path caps at 255) while keeping a hostile cast's worst

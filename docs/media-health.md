@@ -154,8 +154,11 @@ kept from the preflight: a fixed worker pool, wire-identical sources probed
 once (fragment-stripped key — the request is shared, the verdict is recorded
 under every variant's own source, and a variant with its own stored verdict
 keeps it), a per-pass budget of 256 distinct wire URLs, a 5 s per-item
-deadline covering guard DNS, a 10 s phase ceiling, the 2048-item skip, and
-`displayAt` playlists skipped entirely. What changed: no early exit on the
+deadline covering guard DNS, a 10 s phase ceiling, and `displayAt` playlists
+skipped entirely. There is no item cap in front of the pass: the refresher
+re-resolves a playlist with no item limit, so the wall holds everything the
+query returns and is judged whole; the pass bounds its own work by probing
+only its first 24 items. What changed: no early exit on the
 first alive source — every source the pass reaches is probed and recorded —
 and a source with a **conclusive stored verdict** (broken or ok inside its
 window) is answered from the store without a request, so a playlist seen
@@ -187,36 +190,33 @@ by URL.
 
 ### The lookahead
 
-From the status poller's playback observer, `mediahealth.Lookahead` works one
-request at a time with a 2 s gap. Each background request may take up to 30 s
+From the status poller's playback observer, `mediahealth.Lookahead` runs one
+rule: starting after the current item, walk the wall in play order and probe
+the first source that is **due** — no record, an expired verdict, or a passed
+retry hold. The next items come first because they are first in the walk; the
+rest of the wall follows, and the current item comes last (already on screen,
+but a one-item playlist would otherwise never get its recheck). A cursor
+remembers where the walk stopped, so each step reads one chunk of records,
+not the whole wall, and resets when the playlist or the index changes. There
+is no cap on the wall. With nothing due on the wall, the background sweep
+takes one due record **not** on the wall, under a budget of 20 per hour, so a
+fixed source heals without being cast again and a 100k-record store never
+becomes 100k probes a day.
+
+Pace: the next probe starts as soon as the previous one finishes — no gap.
+Politeness is the shared `HostLimiter` alone: at most 2 in flight per host
+(the walk itself is one request at a time), and a host answering 429/503 is
+paused for its `Retry-After`; a source on a paused host is stepped over, not
+held. Each background request may take up to 30 s
 (`Prober.BackgroundItemTimeout`), not the cast pass's 5 s: nothing waits on
 it, and a short deadline only turned slow answers into timeouts (arweave.net
-serves some 404 pages after 7–27 s). The order is:
-
-1. the next 16 items after the current index (then the current item itself,
-   so a one-item playlist still gets its recheck) whose record is missing or
-   due;
-2. the rest of the wall, in play order, for sources that have **never been
-   probed** — this is how the items the cast pass left get their first
-   verdict before playback reaches them (a 1,000-item wall is covered in
-   about half an hour, never in a burst); due-but-recorded rows out there
-   already show a verdict and are left to the sweep;
-3. one due record not on the wall (excluded inside the index scan, so on-wall
-   rows never shadow them) under a budget of 20 per hour, so a fixed source
-   heals without being cast again and a 100k-record store never becomes 100k
-   probes a day.
-
-Every request goes through the shared `HostLimiter`: a source on a cooled
-host is stepped over (not held — it is eligible again when the cooldown ends)
-and a slot on its host is taken like the pass takes one. A probe that wrote a
-record is governed by that record alone, so a 429 with `Retry-After: 30` is due
-again after 30 s. A probe that wrote **no** record is held in memory for 1 h:
-the source guard or the URL-length limit refuses some sources without a
-record (a policy objection is never a verdict), and so does a write the
-store refuses (the low-disk guard). Without the hold such a source would stay
-due and block everything behind it. A source skipped for a
-host cooldown is held only until the cooldown ends. New hints ride the next
-push, or the hint-only push below.
+serves some 404 pages after 7–27 s). A probe that wrote a record is governed
+by that record alone, so a 429 with `Retry-After: 30` is due again after 30 s.
+A probe that wrote **no** record is held in memory for 1 h: the source guard
+or the URL-length limit refuses some sources without a record (a policy
+objection is never a verdict), and so does a write the store refuses. Without
+the hold such a source would stay due and block everything behind it. New
+hints ride the next push, or the hint-only push below.
 
 ## The hint (controld → player): `mediaHealth` on `displayPlaylist`
 
@@ -421,8 +421,15 @@ sighting for the item at `index` counts as one failure per mount (stage
   whole playlist on screen: `{ok, status, items:[{index, id, title, state,
   category, reason, layer, skipped, unskipped, checkedAt, issue, issueSince,
   nextCheckAt, failedPlays, plays:{ok,fail}}], total, truncated, castSeq}`,
-  `skipped`/`unskipped` by the same rule as the push. Bounded at 2048 rows. No
-  source URLs.
+  `skipped`/`unskipped` by the same rule as the push. The empty request
+  returns the first 2048 rows (`truncated`); a request with `offset` (≥ 0),
+  `limit` (1–1000, default 500) or `filter` (`all` | `attention`: broken,
+  suspect, any `issue`, or skipped) is paged — `matched` counts the rows the
+  filter admits across the wall, `nextOffset` is present while more remain,
+  every row keeps its absolute `index`, and `castSeq` is the consistency
+  token (a change between pages means the wall changed). Anything else is
+  rejected: the storm gate dedupes on type + arguments, so the argument space
+  stays bounded by the playlist's page count. No source URLs.
 
 ### Honest reporting of temporary failures: `issue`
 
@@ -491,8 +498,8 @@ observer (the one media-health piece that holds a socket to the kiosk). The
 retired `sourceProbe.disabled` is read as `mediaHealth.disabled`. `lookahead:
 -1` disables the lookahead and the background sweep. `castItems` and
 `castConcurrency` tune the cast-time pass for an origin that still
-rate-limits the defaults; the per-host cap (2 in flight) and the lookahead's
-2 s gap are fixed.
+rate-limits the defaults; the per-host cap (2 in flight) is fixed, and the
+lookahead has no gap — it is paced by the per-host rules alone.
 
 ## Boundaries
 
