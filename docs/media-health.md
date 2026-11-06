@@ -116,9 +116,10 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   is re-checked once on `mediaHealth.arweaveConfirmGateway` (default
   `https://ar-io.dev`; arweave.net when the source is already there), inside
   the same item deadline. Both 404/410 is broken. The second gateway serving
-  it, or failing to answer, is a transient server-side failure — issue
-  `server_error`, feeding the unreachable streak — never a broken verdict and
-  never a hint. If the kiosk cannot load it through its own gateway, the play
+  it is proof the work exists: reported as issue `server_error`, but an
+  answer, so it ends the unreachable streak and can never become a verdict or
+  a hint. The second gateway failing to answer confirms nothing: a transient
+  `server_error` feeding the streak like any other server failure. If the kiosk cannot load it through its own gateway, the play
   layer judges that from the frame's real status. A deadline that runs out
   during the confirmation at cast records nothing, like any cast timeout.
 - **Unreachable streak.** An attempt in which the origin gives no usable

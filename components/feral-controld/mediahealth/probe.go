@@ -78,6 +78,12 @@ type ProbeResult struct {
 	// UnreachableDeadAfter).
 	Unreachable    Unreachable
 	NetworkHealthy bool
+	// GatewayFailed marks a gateway's 404 on an arweave transaction that a
+	// second gateway SERVED (confirmAbsence): the work exists and one
+	// gateway failed to retrieve it. Reported as issue server_error, but it
+	// is an answer — the transaction is there — so it never advances, and
+	// in fact ends, the unreachable streak (PR #438 review, F24).
+	GatewayFailed bool
 	// Recorded is set by the Prober: the result changed the store. False
 	// for results the store never records (guard and length refusals,
 	// skipped hosts) AND for writes the store refused (the low-disk guard,
@@ -589,9 +595,9 @@ func arweaveConfirmURL(source, confirmGateway string) (string, bool) {
 // confirmAbsence re-checks a gateway's 404/410 on the second gateway.
 // Only a 404/410 from both is a verdict. When the second gateway serves
 // the transaction, the work exists and the first gateway failed to
-// retrieve it: a transient server-side failure (issue server_error,
-// feeding the unreachable streak) — never a broken verdict, so nothing is
-// hinted away. If the kiosk itself cannot load it through its own gateway,
+// retrieve it: reported as issue server_error, but an ANSWER — it ends the
+// unreachable streak rather than advancing it (GatewayFailed) — so it can
+// never become a broken verdict or a hint. If the kiosk itself cannot load it through its own gateway,
 // the play layer judges that (the observer sees the frame's 404). When the
 // second gateway cannot answer either, nothing is confirmed, and the
 // result is transient the same way; a deadline that ran out carries the
@@ -612,6 +618,12 @@ func (p *Probe) confirmAbsence(ctx context.Context, res ProbeResult, altURL stri
 	res.Unreachable = UnreachableServer
 	switch {
 	case err == nil && resp.Status >= 200 && resp.Status < 300:
+		// Proof the transaction exists: not an unreachable attempt, so it
+		// cannot count toward a broken verdict however long the first
+		// gateway keeps failing. The play layer still judges whether the
+		// kiosk, which loads through the first gateway, can show it.
+		res.Unreachable = ""
+		res.GatewayFailed = true
 		res.Detail = fmt.Sprintf("HTTP %d from the gateway; %s serves the transaction (HTTP %d)", firstStatus, altHost, resp.Status)
 		res.Err = fmt.Errorf("media health: gateway answered %d for a transaction %s serves", firstStatus, altHost)
 	case err != nil:

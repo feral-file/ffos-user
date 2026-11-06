@@ -52,13 +52,14 @@ func TestArweave_SecondGatewayServesIt(t *testing.T) {
 
 	res := p.ProbeAndRecord(context.Background(), src)
 	assert.Equal(t, VerdictInconclusive, res.Verdict, "a gateway's 404 that a second gateway disproves is never broken")
-	assert.Equal(t, UnreachableServer, res.Unreachable)
+	assert.Empty(t, res.Unreachable, "the transaction exists: an answer, not an unreachable attempt")
+	assert.True(t, res.GatewayFailed)
 	assert.Equal(t, 404, res.Status)
 	rec, err := p.Store.Get(src)
 	require.NoError(t, err)
 	assert.NotEqual(t, StateBroken, rec.State)
 	assert.Equal(t, IssueServerError, rec.Issue, "honest: the gateway failed to serve")
-	assert.Equal(t, 1, rec.UnreachableFailures, "and it feeds the unreachable streak")
+	assert.Zero(t, rec.UnreachableFailures, "and it does not feed the unreachable streak")
 	hints, err := p.Store.Hints([]string{src}, time.Now())
 	require.NoError(t, err)
 	assert.Empty(t, hints, "nothing is hinted away")
@@ -115,4 +116,32 @@ func TestArweave_OtherHostsKeepTheirSingleRequest(t *testing.T) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	assert.Len(t, f.calls, 1, "no confirmation request outside arweave transaction paths")
+}
+
+// F24 (PR #438 review): the first gateway answering 404 for days while the
+// second serves the transaction must never conclude broken, and it ends a
+// streak that earlier no-answer attempts had started.
+func TestArweave_ServedTransactionNeverConcludesBroken(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := newTableFetcher()
+	src := "https://arweave.net/" + txA
+	f.answers[src] = ok(404, "text/html", nil, -1)
+	f.answers["https://ar-io.dev/"+txA] = ok(206, "video/mp4", []byte("\x00\x00\x00\x18ftypmp42"), -1, "Content-Range", "bytes 0-23/1000")
+	p := newPassProber(t, f, clock)
+	p.Online = func() bool { return true }
+
+	_, err := p.Store.ApplyProbe(src, ProbeResult{Verdict: VerdictInconclusive, Reason: ReasonTransport, Err: context.DeadlineExceeded, Unreachable: UnreachableNoAnswer, NetworkHealthy: true})
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		clock.Advance(13 * time.Hour)
+		p.ProbeAndRecord(context.Background(), src)
+	}
+	rec, err := p.Store.Get(src)
+	require.NoError(t, err)
+	assert.NotEqual(t, StateBroken, rec.State, "three served confirmations over 26 h never conclude")
+	assert.Nil(t, rec.UnreachableSince, "each served confirmation ends the streak")
+	assert.Equal(t, IssueServerError, rec.Issue)
+	hints, err := p.Store.Hints([]string{src}, clock.t)
+	require.NoError(t, err)
+	assert.Empty(t, hints)
 }

@@ -56,6 +56,10 @@ func (i Issue) probeSide() bool {
 // the transient statuses that are about the probe's request rather than
 // the source (406, 408, 416).
 func issueForProbe(res ProbeResult) Issue {
+	if res.GatewayFailed {
+		// One gateway failed to serve a transaction another serves.
+		return IssueServerError
+	}
 	switch res.Unreachable {
 	case UnreachableDNS:
 		if res.NetworkHealthy {
