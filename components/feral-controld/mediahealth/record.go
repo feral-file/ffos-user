@@ -128,6 +128,10 @@ const (
 	ReasonUnsupportedScheme Reason = "unsupported_scheme"
 	ReasonTransport         Reason = "transport"
 	ReasonDataURIInvalid    Reason = "data_uri_invalid"
+	// ReasonUnreachable: the origin gave no usable answer on every counted
+	// attempt for a day (UnreachableDeadAfter) — no response or a server
+	// error. A DNS-only streak concludes ReasonDNS instead.
+	ReasonUnreachable Reason = "unreachable"
 
 	// Play-layer reasons, one per outcome stage that can conclude.
 	ReasonRenderDetect    Reason = "render_detect"
@@ -153,12 +157,14 @@ func CategoryOf(reason Reason, httpStatus int) Category {
 	switch reason {
 	case ReasonHTTPStatus:
 		switch httpStatus {
-		case 401, 403, 407:
+		case 401, 403, 407, 429:
+			// 429 only reaches a verdict from the PLAY layer (L0 keeps it
+			// transient): the kiosk itself refused, play after play.
 			return CategorySourceBlocked
 		default:
 			return CategorySourceMissing
 		}
-	case ReasonDNS:
+	case ReasonDNS, ReasonUnreachable:
 		return CategorySourceMissing
 	case ReasonTypeMismatch, ReasonDirectoryListing, ReasonKnownErrorPage:
 		return CategoryNotMedia
@@ -193,8 +199,8 @@ const (
 	// RetryTransient: a transient attempt (no verdict) schedules a retry
 	// after this; the stored verdict, if any, is untouched.
 	RetryTransient = time.Hour
-	// DNSDeadAfter / DNSDeadMinFailures: the one transient class that
-	// concludes on its own. A name that fails to resolve on every counted
+	// UnreachableDeadAfter / UnreachableDeadMinFailures: the one transient
+	// class that concludes on its own (ProbeResult.Unreachable). A name that fails to resolve on every counted
 	// attempt for a day (at least DNSDeadMinFailures attempts, each while
 	// the device resolved other names) is broken, reason dns: the zone is
 	// gone for this device whatever the resolver's excuse (an expired
@@ -202,8 +208,8 @@ const (
 	// SERVFAIL never is — it can be the device's own resolver. The verdict
 	// keeps the normal broken recheck, so it heals the day the zone
 	// returns.
-	DNSDeadAfter       = 24 * time.Hour
-	DNSDeadMinFailures = 3
+	UnreachableDeadAfter       = 24 * time.Hour
+	UnreachableDeadMinFailures = 3
 )
 
 // recordVersion is the record envelope version. Readers refuse a higher
@@ -248,13 +254,19 @@ type Record struct {
 	LastErrorAt *time.Time `json:"lastErrorAt,omitempty"`
 	RetryAfter  time.Time  `json:"retryAfter,omitempty"`
 
-	// DNSFailSince / DNSFailures track an unbroken streak of resolution
-	// failures without a definitive answer, counted only while other names
-	// resolved (ProbeResult.ResolverHealthy). Any other probe answer —
-	// alive, dead, any transient that got past DNS — ends the streak. See
-	// DNSDeadAfter for when it concludes.
-	DNSFailSince *time.Time `json:"dnsFailSince,omitempty"`
-	DNSFailures  int        `json:"dnsFailures,omitempty"`
+	// UnreachableSince / UnreachableFailures track an unbroken streak of
+	// attempts in which the origin gave no usable answer (DNS without
+	// NXDOMAIN, no response, a server error), counted only while the
+	// device reached other origins (ProbeResult.NetworkHealthy). Any
+	// answer — alive, dead, a 401/403/429 — ends the streak. See
+	// UnreachableDeadAfter for when it concludes.
+	UnreachableSince    *time.Time `json:"unreachableSince,omitempty"`
+	UnreachableFailures int        `json:"unreachableFailures,omitempty"`
+	// legacyDNS* are the DNS-only streak fields an earlier build of this
+	// branch wrote; Store.decode folds them into the unreachable streak
+	// and they are never written again.
+	LegacyDNSFailSince *time.Time `json:"dnsFailSince,omitempty"`
+	LegacyDNSFailures  int        `json:"dnsFailures,omitempty"`
 
 	// ConsecutiveBroken counts L0 re-probes that stayed broken, for the
 	// recheck backoff. Reset by any ok.

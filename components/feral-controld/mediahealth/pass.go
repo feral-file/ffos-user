@@ -65,20 +65,20 @@ type Prober struct {
 	// Now is the clock (time.Now when nil).
 	Now func() time.Time
 	// Online reports the device's applied internet verdict (the mediator's
-	// connectivity check, which itself needs DNS). With lastResolved it
-	// decides ProbeResult.ResolverHealthy: a resolution failure counts
-	// toward a source's DNS streak only while the device demonstrably
-	// resolves other names. nil reads as not online.
+	// connectivity check, which itself needs DNS and an HTTP answer). With
+	// lastAnswered it decides ProbeResult.NetworkHealthy: an unreachable
+	// result counts toward a source's streak only while the device
+	// demonstrably reaches other origins. nil reads as not online.
 	Online func() bool
 
-	// lastResolved is the unix-nano time of the last probe whose name
-	// resolved (any HTTP answer, or a definitive NXDOMAIN).
-	lastResolved atomic.Int64
+	// lastAnswered is the unix-nano time of the last probe that got any
+	// HTTP response, or a definitive NXDOMAIN (the resolver answered).
+	lastAnswered atomic.Int64
 }
 
-// resolverWindow is how recent another name's resolution must be for a
-// resolution failure to count against the failing name.
-const resolverWindow = time.Hour
+// networkWindow is how recent another origin's answer must be for an
+// unreachable result to count against the failing source.
+const networkWindow = time.Hour
 
 const (
 	// DefaultConcurrency is the pool size. Four is enough to keep a mixed
@@ -355,7 +355,18 @@ func (p *Prober) probeOne(ctx context.Context, source string, logger *zap.Logger
 		defer p.Hosts.Release(host)
 	}
 	res = p.Probe.ProbeOne(ctx, source)
-	p.noteResolution(&res)
+	if ctx.Err() != nil && res.Verdict == VerdictInconclusive {
+		// The CALLER's context ended — the cast pass's phase ceiling, or
+		// shutdown — not this source's own ItemTimeout. Running out of our
+		// own budget says nothing about the source: recording it as a
+		// transient failure put a one-hour hold on every item still in
+		// flight when the pass ended (four items on the office FF1), and
+		// because they then had a record the lookahead's walk for
+		// never-probed sources skipped them too. Unrecorded, the item
+		// stays unknown and the lookahead reaches it within seconds.
+		return ProbeResult{Source: redactForLog(source), Verdict: VerdictInconclusive, Err: ctx.Err()}, false
+	}
+	p.noteNetwork(&res)
 	if p.Hosts != nil && coolsHost(res.Status) && res.Verdict == VerdictInconclusive {
 		// Keyed by the host that actually answered (post-redirect), which
 		// is the one asking for the pause; the pre-dial check above keys
@@ -372,28 +383,28 @@ func (p *Prober) probeOne(ctx context.Context, source string, logger *zap.Logger
 	return res, true
 }
 
-// noteResolution keeps the resolver-health evidence: a probe that got any
-// HTTP answer or a definitive NXDOMAIN proves the resolver answers; a
-// resolution failure is marked ResolverHealthy only when the device is
-// online or another name resolved inside resolverWindow.
-func (p *Prober) noteResolution(res *ProbeResult) {
+// noteNetwork keeps the network-health evidence: a probe that got any
+// HTTP response or a definitive NXDOMAIN proves the device reaches the
+// world; an unreachable result is marked NetworkHealthy only when the
+// device is online or another origin answered inside networkWindow.
+func (p *Prober) noteNetwork(res *ProbeResult) {
 	now := time.Now
 	if p.Now != nil {
 		now = p.Now
 	}
 	at := now()
 	if res.Status > 0 || (res.Verdict == VerdictDead && res.Reason == ReasonDNS) {
-		p.lastResolved.Store(at.UnixNano())
+		p.lastAnswered.Store(at.UnixNano())
 	}
-	if !res.DNSUnresolved {
+	if res.Unreachable == "" {
 		return
 	}
 	if p.Online != nil && p.Online() {
-		res.ResolverHealthy = true
+		res.NetworkHealthy = true
 		return
 	}
-	if last := p.lastResolved.Load(); last != 0 && at.Sub(time.Unix(0, last)) <= resolverWindow {
-		res.ResolverHealthy = true
+	if last := p.lastAnswered.Load(); last != 0 && at.Sub(time.Unix(0, last)) <= networkWindow {
+		res.NetworkHealthy = true
 	}
 }
 

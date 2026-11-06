@@ -64,14 +64,18 @@ type ProbeResult struct {
 	// store bounds the record's transient hold by it and the HostLimiter
 	// cools the host for it.
 	RetryAfter time.Duration
-	// DNSUnresolved marks a transient result whose cause was a resolution
-	// failure without a definitive answer (FetchErrDNSUnresolved).
-	// ResolverHealthy says whether, at that moment, the device could
-	// resolve OTHER names (Prober sets it): only then does the failure
-	// count toward the DNS streak, so a device whose own resolver is down
-	// never marks its wall broken.
-	DNSUnresolved   bool
-	ResolverHealthy bool
+	// Unreachable classifies a transient result in which the origin gave
+	// no usable answer at all — DNS without a definitive answer, no
+	// response (timeout, refused or reset connection, TLS failure), or a
+	// server error — as opposed to an answer that is merely identity- or
+	// load-dependent (401/403/429, 503 with Retry-After), which is an
+	// answer. NetworkHealthy says whether, at that moment, the device
+	// demonstrably reached OTHER origins (Prober sets it): only then does
+	// the failure count toward the record's unreachable streak, so a device
+	// with no network never marks its wall broken (Store.ApplyProbe,
+	// UnreachableDeadAfter).
+	Unreachable    Unreachable
+	NetworkHealthy bool
 	// Recorded is set by the Prober: the result changed the store. False
 	// for results the store never records (guard and length refusals,
 	// skipped hosts) AND for writes the store refused (the low-disk guard,
@@ -79,6 +83,20 @@ type ProbeResult struct {
 	// its record will not make it non-due (PR #438 review, F21).
 	Recorded bool
 }
+
+// Unreachable names how an origin failed to answer (ProbeResult.Unreachable).
+type Unreachable string
+
+const (
+	// UnreachableDNS: resolution failed without NXDOMAIN (SERVFAIL, a
+	// resolver timeout, a refusal).
+	UnreachableDNS Unreachable = "dns"
+	// UnreachableNoAnswer: no HTTP response — the item deadline expired
+	// before one, or the connection was refused, reset or failed TLS.
+	UnreachableNoAnswer Unreachable = "no_answer"
+	// UnreachableServer: a 5xx without Retry-After.
+	UnreachableServer Unreachable = "server_error"
+)
 
 // Rewriter is the kiosk's gateway policy, as this package needs it: which
 // wire URL and User-Agent the kiosk would actually use for a source. The
@@ -198,6 +216,12 @@ func statusResult(result ProbeResult, resp *fetchOutcome) ProbeResult {
 		if coolsHost(resp.Status) {
 			result.RetryAfter, _ = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		}
+		if resp.Status >= 500 && result.RetryAfter == 0 {
+			// A server error is the origin failing to serve. A 503 that
+			// names a Retry-After is the origin asking for a pause — alive,
+			// like a 429 — and stays out of the streak.
+			result.Unreachable = UnreachableServer
+		}
 	}
 	return result
 }
@@ -295,16 +319,19 @@ func (p *Probe) fromFetchError(result ProbeResult, err error) ProbeResult {
 	switch fetchErrorKind(err) {
 	case FetchErrDNSUnresolved:
 		result.Reason = ReasonTransport
-		result.DNSUnresolved = true
+		result.Unreachable = UnreachableDNS
 	case FetchErrGuard, FetchErrTooLong:
 		// Policy and size objections, not liveness: the display path still
 		// forwards such a source today (whether it should is #3471's
 		// territory), so they must not become dead here.
 		result.Reason = ""
-	case FetchErrTimeout:
-		result.Reason = ReasonTransport
 	default:
+		// A timeout before any response, a refused or reset connection, a
+		// TLS failure: the origin gave nothing back. (A deadline that
+		// expires MID-BODY never reaches here — it has a status, it is an
+		// answer, see validate.)
 		result.Reason = ReasonTransport
+		result.Unreachable = UnreachableNoAnswer
 	}
 	result.Err = err
 	return result

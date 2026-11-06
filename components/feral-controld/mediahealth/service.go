@@ -45,6 +45,10 @@ type Service struct {
 	runSource  string
 	runAttempt int
 	runEnded   bool
+	// runRefused is set when the current run's content-type check got a
+	// definite refusal (definiteRefusal): a `ready` that follows for the
+	// same source is the error page, not the work.
+	runRefused bool
 
 	// inferredFailed remembers the last (castSeq-less) renderStatus==3
 	// sighting so the fallback counts one failure per item mount, not one
@@ -276,14 +280,32 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 		fresh, gap, restarted := s.drainer.Drain(outcomes)
 		if restarted {
 			// A new page: a failing run cannot continue across it.
-			s.runSource, s.runAttempt, s.runEnded = "", 0, false
+			s.runSource, s.runAttempt, s.runEnded, s.runRefused = "", 0, false, false
 		}
 		if gap > 0 {
 			s.logger.Warn("media health: player outcome ring wrapped between polls; outcomes were lost",
 				zap.Int64("missed", gap))
 		}
 		for _, o := range fresh {
-			count := online && !s.samePlay(o)
+			var count bool
+			switch {
+			case o.Kind == OutcomeFail && !countableFailure(o):
+				// History only, and it must not touch the run: an
+				// uncountable entry that OPENED the run made every failure
+				// after it in that play "the same play", so a work that
+				// failed its content-type check on the network and then
+				// timed out three times counted nothing, play after play
+				// (ipfs.infura.io on the office FF1, 6 plays, 0 counted).
+			case o.Kind == OutcomeFail:
+				count = online && !s.samePlay(o)
+				if definiteRefusal(o) {
+					s.runRefused = true
+				}
+			default:
+				o.errorPage = o.Kind == OutcomeOK && s.runRefused &&
+					o.Source == s.runSource && !readyIsEvidence(o)
+				s.samePlay(o)
+			}
 			if _, err := s.store.ApplyOutcome(o, count); err != nil && !errors.Is(err, ErrLowDisk) {
 				s.logger.Warn("media health: recording play outcome failed", zap.String("stage", o.Stage), zap.Error(err))
 			}
@@ -317,10 +339,13 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 // one hides a work.
 func (s *Service) samePlay(o Outcome) bool {
 	if o.Kind != OutcomeFail {
-		s.runSource, s.runAttempt, s.runEnded = "", 0, false
+		s.runSource, s.runAttempt, s.runEnded, s.runRefused = "", 0, false, false
 		return false
 	}
 	same := o.Source == s.runSource && !s.runEnded && o.Attempt >= s.runAttempt
+	if !same {
+		s.runRefused = false
+	}
 	s.runSource, s.runAttempt, s.runEnded = o.Source, o.Attempt, o.Stage == StageExhausted
 	return same
 }

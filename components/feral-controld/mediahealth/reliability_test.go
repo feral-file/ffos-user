@@ -52,7 +52,7 @@ func TestStore_OpaqueReadyNeverHealsABrokenVerdict(t *testing.T) {
 }
 
 func dnsUnresolved(healthy bool) ProbeResult {
-	return ProbeResult{Verdict: VerdictInconclusive, Reason: ReasonTransport, Err: errors.New("lookup: server misbehaving"), DNSUnresolved: true, ResolverHealthy: healthy}
+	return ProbeResult{Verdict: VerdictInconclusive, Reason: ReasonTransport, Err: errors.New("lookup: server misbehaving"), Unreachable: UnreachableDNS, NetworkHealthy: healthy}
 }
 
 // A name that fails to resolve on every counted attempt for a day, while
@@ -65,7 +65,7 @@ func TestStore_DNSStreakConcludesAfterADay(t *testing.T) {
 	rec, err := s.ApplyProbe(src, dnsUnresolved(true))
 	require.NoError(t, err)
 	assert.Equal(t, State(""), rec.State, "one SERVFAIL is weather")
-	assert.Equal(t, 1, rec.DNSFailures)
+	assert.Equal(t, 1, rec.UnreachableFailures)
 	start := clock.t
 
 	clock.Advance(12 * time.Hour)
@@ -76,10 +76,10 @@ func TestStore_DNSStreakConcludesAfterADay(t *testing.T) {
 	clock.Advance(13 * time.Hour)
 	rec, err = s.ApplyProbe(src, dnsUnresolved(false))
 	require.NoError(t, err)
-	assert.Equal(t, 2, rec.DNSFailures, "a failure while nothing resolved does not count")
+	assert.Equal(t, 2, rec.UnreachableFailures, "a failure while nothing resolved does not count")
 	assert.Equal(t, State(""), rec.State)
-	require.NotNil(t, rec.DNSFailSince)
-	assert.Equal(t, start.UTC(), rec.DNSFailSince.UTC(), "nor does it end the streak")
+	require.NotNil(t, rec.UnreachableSince)
+	assert.Equal(t, start.UTC(), rec.UnreachableSince.UTC(), "nor does it end the streak")
 
 	clock.Advance(time.Hour)
 	rec, err = s.ApplyProbe(src, dnsUnresolved(true))
@@ -99,8 +99,8 @@ func TestStore_DNSStreakConcludesAfterADay(t *testing.T) {
 	rec, err = s.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200})
 	require.NoError(t, err)
 	assert.Equal(t, StateOK, rec.State, "the zone came back: healed")
-	assert.Nil(t, rec.DNSFailSince)
-	assert.Zero(t, rec.DNSFailures)
+	assert.Nil(t, rec.UnreachableSince)
+	assert.Zero(t, rec.UnreachableFailures)
 }
 
 func TestStore_DNSStreakNeedsEnoughAttemptsAndEndsOnAnyAnswer(t *testing.T) {
@@ -114,14 +114,14 @@ func TestStore_DNSStreakNeedsEnoughAttemptsAndEndsOnAnyAnswer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, State(""), rec.State, "two attempts are not enough, however far apart")
 
-	// A timeout that got past DNS (the name resolved) ends the streak.
-	rec, err = s.ApplyProbe(src, ProbeResult{Verdict: VerdictInconclusive, Reason: ReasonTransport, Err: errors.New("i/o timeout")})
+	// Any answer — here a 403 — ends the streak.
+	rec, err = s.ApplyProbe(src, ProbeResult{Verdict: VerdictInconclusive, Status: 403, Reason: ReasonHTTPStatus, Err: errors.New("HTTP 403")})
 	require.NoError(t, err)
-	assert.Nil(t, rec.DNSFailSince)
-	assert.Zero(t, rec.DNSFailures)
+	assert.Nil(t, rec.UnreachableSince)
+	assert.Zero(t, rec.UnreachableFailures)
 }
 
-func TestProber_ResolverHealthEvidence(t *testing.T) {
+func TestProber_NetworkHealthEvidence(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	f := newTableFetcher()
 	f.answers["https://up.example/a"] = ok(200, "image/png", minimalPNG(1, 1), -1)
@@ -129,25 +129,25 @@ func TestProber_ResolverHealthEvidence(t *testing.T) {
 	p := newPassProber(t, f, clock)
 
 	res := p.ProbeAndRecord(context.Background(), "https://gone.example/a")
-	assert.True(t, res.DNSUnresolved)
-	assert.False(t, res.ResolverHealthy, "offline and nothing resolved yet: does not count")
+	assert.Equal(t, UnreachableDNS, res.Unreachable)
+	assert.False(t, res.NetworkHealthy, "offline and nothing resolved yet: does not count")
 	rec, err := p.Store.Get("https://gone.example/a")
 	require.NoError(t, err)
-	assert.Zero(t, rec.DNSFailures)
+	assert.Zero(t, rec.UnreachableFailures)
 
 	p.ProbeAndRecord(context.Background(), "https://up.example/a")
 	clock.Advance(2 * time.Hour)
 	res = p.ProbeAndRecord(context.Background(), "https://gone.example/a")
-	assert.False(t, res.ResolverHealthy, "another name resolved, but too long ago")
+	assert.False(t, res.NetworkHealthy, "another name resolved, but too long ago")
 
 	p.ProbeAndRecord(context.Background(), "https://up.example/a")
 	res = p.ProbeAndRecord(context.Background(), "https://gone.example/a")
-	assert.True(t, res.ResolverHealthy, "another name resolved within the hour")
+	assert.True(t, res.NetworkHealthy, "another name resolved within the hour")
 
 	clock.Advance(2 * time.Hour)
 	p.Online = func() bool { return true }
 	res = p.ProbeAndRecord(context.Background(), "https://gone.example/a")
-	assert.True(t, res.ResolverHealthy, "the online verdict (itself a DNS-dependent check) is evidence too")
+	assert.True(t, res.NetworkHealthy, "the online verdict (itself a DNS-dependent check) is evidence too")
 }
 
 // F19 (PR #438 review): a recorded transient answer follows its record's

@@ -277,6 +277,10 @@ func (s *Store) decode(raw []byte) (*Record, error) {
 	if rec.V > recordVersion {
 		return nil, ErrNewerRecord
 	}
+	if rec.LegacyDNSFailSince != nil && rec.UnreachableSince == nil {
+		rec.UnreachableSince, rec.UnreachableFailures = rec.LegacyDNSFailSince, rec.LegacyDNSFailures
+	}
+	rec.LegacyDNSFailSince, rec.LegacyDNSFailures = nil, 0
 	return &rec, nil
 }
 
@@ -432,9 +436,9 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 			rec.WireURL = res.WireURL
 			rec.Host = hostOf(res.WireURL)
 		}
-		if !res.DNSUnresolved {
-			// Any answer that got past DNS ends a resolution streak.
-			rec.DNSFailSince, rec.DNSFailures = nil, 0
+		if res.Unreachable == "" {
+			// Any answer ends an unreachable streak.
+			rec.UnreachableSince, rec.UnreachableFailures = nil, 0
 		}
 		switch res.Verdict {
 		case VerdictAlive:
@@ -465,22 +469,31 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 			rec.LastError = transientDetail(res)
 			rec.LastErrorAt = new(now)
 			rec.RetryAfter = now.Add(hold)
-			if res.DNSUnresolved && res.ResolverHealthy {
-				if rec.DNSFailSince == nil {
-					rec.DNSFailSince = new(now)
+			if res.Unreachable != "" && res.NetworkHealthy {
+				if rec.UnreachableSince == nil {
+					rec.UnreachableSince = new(now)
 				}
-				rec.DNSFailures++
-				if rec.DNSFailures >= DNSDeadMinFailures && now.Sub(*rec.DNSFailSince) >= DNSDeadAfter {
-					// The streak is the corroboration: a day of failures,
-					// each while other names resolved. Re-concluded on
-					// every recheck that still fails, which advances the
+				rec.UnreachableFailures++
+				if rec.UnreachableFailures >= UnreachableDeadMinFailures && now.Sub(*rec.UnreachableSince) >= UnreachableDeadAfter {
+					// The streak is the corroboration: a day of attempts
+					// with no usable answer, each while other origins
+					// answered. A slow-but-alive origin never gets here —
+					// one answer in the day ends the streak. Re-concluded
+					// on every recheck that still fails, which advances the
 					// broken backoff like any repeated broken verdict.
-					concludeBrokenL0(rec, ReasonDNS, 0, rec.LastError, now)
+					reason, status := ReasonUnreachable, 0
+					switch res.Unreachable {
+					case UnreachableDNS:
+						reason = ReasonDNS
+					case UnreachableServer:
+						status = res.Status
+					}
+					concludeBrokenL0(rec, reason, status, rec.LastError, now)
 				}
 			}
-			// A DNS failure while the device could not resolve anything
+			// An unreachable result while the device reached nothing else
 			// neither counts nor ends the streak: it says nothing about
-			// this name.
+			// this source.
 		}
 		return true
 	}
@@ -638,6 +651,14 @@ func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, exi
 		stale := !rec.CheckedAt.IsZero() && at.Before(rec.CheckedAt)
 		switch o.Kind {
 		case OutcomeOK:
+			if o.errorPage {
+				// The embed showed the error page the content-type check
+				// already reported: not a success, and it must not erase the
+				// failure run before it. Without this, a work refused with
+				// 429 on every play (12 plays on the office FF1) reset its
+				// own run each time and was never marked broken.
+				return true
+			}
 			rec.Plays.OK++
 			rec.Plays.LastOKAt = laterOf(rec.Plays.LastOKAt, at)
 			if o.MediaType != "" {
@@ -696,6 +717,20 @@ func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, exi
 			if !corroborated {
 				return true
 			}
+			// Backoff, as for L0: a work the player has re-concluded broken
+			// on BrokenBackoffAfter consecutive rechecks is retried weekly,
+			// not daily — each daily retry of a dead iframe costs the wall
+			// three 45 s attempts. Only a re-conclusion AFTER the previous
+			// verdict expired advances it (repeat-one can replay a broken
+			// work inside its window; those plays must not burn the week).
+			switch {
+			case rec.State == StateBroken && rec.Layer == LayerPlay && !at.Before(rec.RecheckAfter):
+				rec.ConsecutiveBroken++
+			case rec.State == StateBroken && rec.Layer == LayerPlay:
+				// Still inside the window: keep the count.
+			default:
+				rec.ConsecutiveBroken = 1
+			}
 			rec.State = StateBroken
 			rec.Layer = LayerPlay
 			rec.Reason = reason
@@ -706,7 +741,7 @@ func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, exi
 			rec.Category = playCategory(reason, status)
 			rec.HTTPStatus = status
 			rec.CheckedAt = at
-			rec.RecheckAfter = at.Add(RecheckBroken)
+			rec.RecheckAfter = at.Add(brokenRecheck(rec.ConsecutiveBroken))
 			rec.LastError = fmt.Sprintf("player: %s %s", o.Stage, o.Code)
 			rec.LastErrorAt = new(at)
 			return true
