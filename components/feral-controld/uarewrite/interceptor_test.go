@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -759,34 +760,40 @@ func TestProcessPausedAppliesTheGatewayOverride(t *testing.T) {
 		DoAndReturn(func(_ interface{}, _ string, args map[string]interface{}) (json.RawMessage, error) {
 			got = append(got, args)
 			return nil, nil
-		}).Times(3)
+		}).Times(4)
 
 	i := testInterceptor(t, []string{"ipfs.io"})
-	i.SetGatewayOverride(func(raw string) (string, bool) {
-		if raw == "https://arweave.net/"+tx+"/index.html" {
-			return "https://ar-io.dev/" + tx + "/index.html", true
+	var referrers []string
+	i.SetGatewayOverride(func(raw, referrer string) (string, bool) {
+		referrers = append(referrers, referrer)
+		if raw == "https://arweave.net/"+tx+"/index.html" || referrer == "https://arweave.net/"+tx+"/index.html" {
+			return "https://ar-io.dev/" + tx + strings.TrimPrefix(raw, "https://arweave.net/"+tx), true
 		}
 		return "", false
 	}, OverrideFetchPatterns([]string{"arweave.net"}))
 
 	i.processPaused(session, pausedEvent(t, "req-1", "https://arweave.net/"+tx+"/index.html",
 		map[string]string{"User-Agent": "Mozilla/5.0 Chrome/150"}, nil))
-	i.processPaused(session, pausedEvent(t, "req-2", "https://arweave.net/"+tx+"/other.js", nil, nil))
-	i.processPaused(session, pausedEvent(t, "req-3", "https://ipfs.io/ipfs/QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A", nil, nil))
+	i.processPaused(session, pausedEvent(t, "req-2", "https://arweave.net/"+tx+"/other.js",
+		map[string]string{"referer": "https://arweave.net/" + tx + "/index.html"}, nil))
+	i.processPaused(session, pausedEvent(t, "req-3", "https://arweave.net/"+tx+"/alone.js", nil, nil))
+	i.processPaused(session, pausedEvent(t, "req-4", "https://ipfs.io/ipfs/QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A", nil, nil))
 
-	require.Len(t, got, 3)
+	require.Len(t, got, 4)
 	assert.Equal(t, "https://ar-io.dev/"+tx+"/index.html", got[0]["url"], "the override is applied")
 	assert.NotContains(t, got[0], "headers", "with Chromium's own headers")
-	assert.NotContains(t, got[1], "url", "no override and no policy match: continued untouched")
-	assert.NotContains(t, got[1], "headers")
-	assert.Equal(t, "https://ipfs.filebase.io/ipfs/QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A", got[2]["url"], "the static policy still applies when the override has no answer")
+	assert.Equal(t, "https://ar-io.dev/"+tx+"/other.js", got[1]["url"], "a subresource follows its document: the Referer reaches the lookup (header name as the renderer sent it)")
+	assert.NotContains(t, got[2], "url", "no override and no policy match: continued untouched")
+	assert.NotContains(t, got[2], "headers")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A", got[3]["url"], "the static policy still applies when the override has no answer")
+	assert.Equal(t, []string{"", "https://arweave.net/" + tx + "/index.html", "", ""}, referrers)
 }
 
 func TestFetchPatternsIncludeTheOverride(t *testing.T) {
 	t.Parallel()
 	i := testInterceptor(t, []string{"ipfs.io"})
 	base := len(i.fetchPatterns())
-	i.SetGatewayOverride(func(string) (string, bool) { return "", false }, OverrideFetchPatterns([]string{"arweave.net", "ar-io.dev"}))
+	i.SetGatewayOverride(func(string, string) (string, bool) { return "", false }, OverrideFetchPatterns([]string{"arweave.net", "ar-io.dev"}))
 	patterns := i.fetchPatterns()
 	assert.Len(t, patterns, base+4)
 	var urls []string

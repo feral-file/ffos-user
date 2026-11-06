@@ -249,6 +249,19 @@ func (p *Probe) probeOnce(ctx context.Context, source string) ProbeResult {
 	}
 }
 
+// probeWhole is one source's probe as the kiosk would request it: no Range
+// header, the body read capped at the probe window. Used to confirm a
+// fallback gateway (confirmAbsence); the primary probe stays ranged so a
+// 200 KB artwork does not cost 200 KB per lookahead step.
+func (p *Probe) probeWhole(ctx context.Context, source string) ProbeResult {
+	wireURL, agent := p.wire(source)
+	maxBytes := p.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = DefaultProbeMaxBytes
+	}
+	return p.retryUnranged(ctx, ProbeResult{WireURL: wireURL}, wireURL, agent, maxBytes)
+}
+
 // statusResult judges a non-2xx answer by the status table and, when the
 // origin asked for a pause (429/503), carries its Retry-After along.
 func statusResult(result ProbeResult, resp *fetchOutcome) ProbeResult {
@@ -582,9 +595,20 @@ var defaultGateways = NewGateways(nil, nil)
 //   - A gateway's content rule fails (a type mismatch, an error page): that
 //     is a verdict about the content itself, and it stands.
 //   - Every gateway says 404/410: broken, confirmed.
-//   - Nothing else answers: a transient server_error feeding the streak;
-//     a deadline that ran out carries the timeout error, so the cast
-//     pass's short deadline records nothing at all.
+//   - Nothing else answers — a 5xx, a timeout, OR any other status (402,
+//     403, 429: the gateway's policy, never the content's) — and likewise
+//     when no other gateway is configured for the network: a transient
+//     server_error feeding the streak, because one gateway's 404 is not
+//     evidence the content is gone; a deadline that ran out carries the
+//     timeout error, so the cast pass's short deadline records nothing.
+//
+// The confirmation is a WHOLE-FILE request (no Range header, the body
+// read capped at the probe window), the request shape the kiosk makes:
+// ar-io.dev served a 32 KiB range of a 195 MB video and answered the
+// whole-file load with 402, and the probe's "served" verdict put every
+// item on the wall through a gateway that would not play it (office FF1,
+// 2026-11-06). A gateway "serves it" only when it answers the request the
+// player sends.
 func (p *Probe) confirmAbsence(ctx context.Context, res ProbeResult, ref ContentRef) ProbeResult {
 	firstStatus := res.Status
 	confirmed := 0
@@ -592,7 +616,7 @@ func (p *Probe) confirmAbsence(ctx context.Context, res ProbeResult, ref Content
 	var lastNote string
 	candidates := p.gateways().candidates(ref, hostOf(res.WireURL))
 	for _, origin := range candidates {
-		alt := p.probeOnce(ctx, ref.URLOn(origin))
+		alt := p.probeWhole(ctx, ref.URLOn(origin))
 		altHost := hostOf(origin)
 		switch {
 		case alt.Verdict == VerdictAlive:
@@ -610,9 +634,11 @@ func (p *Probe) confirmAbsence(ctx context.Context, res ProbeResult, ref Content
 		case alt.Verdict == VerdictDead && alt.Reason == ReasonHTTPStatus && (alt.Status == http.StatusNotFound || alt.Status == http.StatusGone):
 			confirmed++
 			lastNote = fmt.Sprintf("%s also answered HTTP %d", altHost, alt.Status)
-		case alt.Verdict == VerdictDead:
-			// A content rule (or another identity-independent status) on the
-			// bytes another gateway served: a verdict about the content.
+		case alt.Verdict == VerdictDead && alt.Reason != ReasonHTTPStatus:
+			// A content rule on the bytes another gateway served: a verdict
+			// about the content. Any other status it answers (402, 400, a
+			// 206 to the unranged request) is that gateway's own behavior
+			// and falls through to "could not confirm".
 			alt.Detail = fmt.Sprintf("%s (served by %s after HTTP %d from the gateway)", alt.Detail, altHost, firstStatus)
 			return alt
 		default:
@@ -629,10 +655,12 @@ func (p *Probe) confirmAbsence(ctx context.Context, res ProbeResult, ref Content
 	res.Detail = fmt.Sprintf("HTTP %d from the gateway; %s", firstStatus, lastNote)
 	switch {
 	case len(candidates) == 0:
-		// No other gateway configured for this network: keep the verdict.
-		res.Verdict = VerdictDead
-		res.Unreachable = ""
-		res.Detail = fmt.Sprintf("HTTP %d", firstStatus)
+		// No other gateway configured for this network: the 404 stays
+		// unconfirmed. It is reported as the gateway's problem
+		// (server_error) and, repeated across a day, concludes through
+		// the unreachable streak — never on one gateway's word.
+		res.Detail = fmt.Sprintf("HTTP %d from the gateway; no other gateway configured to confirm it", firstStatus)
+		res.Err = fmt.Errorf("media health: gateway answered %d, unconfirmed (no other gateway configured)", firstStatus)
 		return res
 	case lastErr != nil && fetchErrorKind(lastErr) == FetchErrTimeout:
 		res.Err = lastErr

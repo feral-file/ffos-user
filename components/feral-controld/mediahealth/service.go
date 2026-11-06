@@ -115,8 +115,8 @@ func New(cfg Config) *Service {
 // GatewayOverride is the kiosk interceptor's per-request lookup: the same
 // path on the fallback gateway the probe found serving this content, when
 // there is one (Store.GatewayOverride).
-func (s *Service) GatewayOverride(rawURL string) (string, bool) {
-	return s.store.GatewayOverride(rawURL)
+func (s *Service) GatewayOverride(rawURL, referrer string) (string, bool) {
+	return s.store.GatewayOverride(rawURL, referrer)
 }
 
 // Store exposes the store for the surfaces that read it directly.

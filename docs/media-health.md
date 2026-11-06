@@ -121,9 +121,23 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   - **its content rule fails:** that is a verdict about the content, and it
     stands;
   - **every gateway says 404/410:** `broken`;
-  - **nothing else answers:** a transient `server_error` feeding the
-    unreachable streak. A deadline that runs out during the fallback at cast
-    records nothing, like any cast timeout.
+  - **nothing else answers** — a 5xx, a timeout, or any other status (402,
+    403, 429: the gateway's policy, never the content's) — **or no other
+    gateway is configured for the network:** a transient `server_error`
+    feeding the unreachable streak; one gateway's 404 is never a verdict on
+    its own. A deadline that runs out during the fallback at cast records
+    nothing, like any cast timeout.
+
+  The confirmation is the request the kiosk makes — **no `Range` header**,
+  the body read capped at the probe window — not the probe's ranged read.
+  ar-io.dev served a 32 KiB range of a 195 MB video and answered the
+  whole-file load with `402 Payment Required` (an x402 offer for "data
+  egress"); on the ranged read it looked like a serving gateway, and every
+  item routed through it failed to play (office FF1, 2026-11-06). The
+  shipped Arweave list is therefore `arweave.net` alone — a fallback for
+  sources on any other Arweave gateway, none for sources on arweave.net
+  itself — and ar-io.dev was dropped. Add a fallback only after a whole-file
+  load of a large work has been seen to succeed from the device.
 
   **The kiosk applies it.** The kiosk's request interceptor (`uarewrite`)
   asks the store for every `/ipfs/` request on any host and every request on
@@ -138,9 +152,19 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   (mirrored in memory for the per-request lookup). A route stays while any
   source on it still needs the fallback, so one source recovering never
   drops another's — another file under the same CID, or the same CID named
-  through another gateway — and it survives a restart. Every probe still
+  through another gateway — and it survives a restart. The choice is per
+  source, not per route: two files under one CID can need different
+  fallbacks (the first gateway serves `a.html` but answers 404 for
+  `b.html`, which the second serves), so a request that is a recorded
+  source loads through the gateway that served that source, a work's own
+  files follow the document that embeds them (the request's `Referer`,
+  which a same-origin subresource carries in full), and only a request
+  nothing ties to a source takes the route's stable best-effort choice. Every probe still
   tries the source's own gateway first, so when it serves again `servedBy`
-  clears and the kiosk goes back to it. Without the interceptor
+  clears and the kiosk goes back to it. A `broken` conclusion from ANY
+  layer clears it too: a play-layer verdict over a work "served by" a
+  fallback must not leave the kiosk loading the gateway the verdict has just
+  proven does not play it. Without the interceptor
   (`gatewayUserAgent.enabled: false`) a fallback gateway serving a work is
   reported as a gateway failure (`server_error`, an answer that ends the
   streak) instead of `ok`: the verdict never claims what the wall cannot do.
@@ -528,7 +552,7 @@ cycle).
   "castItems": 24,
   "castConcurrency": 4,
   "ipfsGateways": ["https://ipfs.filebase.io", "https://gateway.pinata.cloud"],
-  "arweaveGateways": ["https://arweave.net", "https://ar-io.dev"]
+  "arweaveGateways": ["https://arweave.net"]
 }
 ```
 

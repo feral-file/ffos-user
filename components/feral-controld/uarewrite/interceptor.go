@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -122,10 +123,12 @@ type Interceptor struct {
 	// media-health store's choice of a fallback gateway for a
 	// content-addressed source (mediahealth.Store.GatewayOverride), so the
 	// kiosk loads a work through the same gateway the verdict was taken
-	// on. overridePatterns widen the Fetch patterns to the requests it can
+	// on. It gets the request's Referer too, so a work's own files follow
+	// the gateway recorded for the document that embeds them.
+	// overridePatterns widen the Fetch patterns to the requests it can
 	// apply to. Both are written once, before AttachOnReconnect, and read
 	// only after; no lock.
-	override         func(rawURL string) (string, bool)
+	override         func(rawURL, referrer string) (string, bool)
 	overridePatterns []map[string]interface{}
 
 	// superviseOnce starts the supervisor exactly once, on the FIRST
@@ -376,7 +379,7 @@ func (i *Interceptor) processPaused(session offlinecache.CDPSession, params json
 		// the policy's replacement) answered 404 for this content while
 		// this one served it. The target is a configured gateway origin
 		// plus this request's own path and query — never playlist content.
-		if target, ok := i.override(paused.Request.URL); ok {
+		if target, ok := i.override(paused.Request.URL, referrerOf(paused.Request.Headers)); ok {
 			args["url"] = target
 			redirected = target
 		}
@@ -605,7 +608,7 @@ func (i *Interceptor) releaseAttach() {
 // the extra Fetch patterns it needs (see Interceptor.override). Call
 // before the first AttachOnReconnect; later calls are ignored by sessions
 // already armed until they re-arm.
-func (i *Interceptor) SetGatewayOverride(override func(rawURL string) (string, bool), patterns []map[string]interface{}) {
+func (i *Interceptor) SetGatewayOverride(override func(rawURL, referrer string) (string, bool), patterns []map[string]interface{}) {
 	i.override = override
 	i.overridePatterns = patterns
 }
@@ -631,4 +634,15 @@ func OverrideFetchPatterns(arweaveHosts []string) []map[string]interface{} {
 		patterns = append(patterns, map[string]interface{}{"urlPattern": "https://" + h + "/*", "requestStage": "Request"})
 	}
 	return patterns
+}
+
+// referrerOf is the request's Referer header; CDP reports header names as
+// the renderer sent them, so the match is case-insensitive.
+func referrerOf(headers map[string]string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, "Referer") {
+			return v
+		}
+	}
+	return ""
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+	bolterrors "go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 )
 
@@ -158,18 +159,7 @@ func Open(path string, opts Options) (*Store, error) {
 		return meta.Put(metaSchemaKey, []byte(strconv.Itoa(schemaVersion)))
 	})
 	if err == nil {
-		err = db.View(func(tx *bolt.Tx) error {
-			return tx.Bucket(bucketServedBy).ForEach(func(k, v []byte) error {
-				// Only "route\x00source" keys: entries earlier builds keyed
-				// by content or route alone are skipped here and dropped by
-				// the next write for their source.
-				route, source, ok := strings.Cut(string(k), servedBySep)
-				if ok {
-					s.addServedBy(route, source, string(v))
-				}
-				return nil
-			})
-		})
+		err = s.loadServedBy()
 	}
 	if err != nil {
 		_ = db.Close()
@@ -304,6 +294,66 @@ func (s *Store) put(tx *bolt.Tx, prev, rec *Record) error {
 // bucketServedBy key.
 const servedBySep = "\x00"
 
+// servedByIndexVersion is the bucketServedBy key layout, stored under
+// metaServedByIndexKey. An index in any other layout is REBUILT from the
+// records at Open, never read or skipped: skipping entries an older
+// layout wrote left the records saying "served by ar-io.dev" while the
+// kiosk's lookup was empty, so after a deploy the wall went back to the
+// failing gateway with nothing in the verdict to show it (office FF1,
+// 2026-11-06). The records are the source of truth; the index is a cache.
+const servedByIndexVersion = "2"
+
+var metaServedByIndexKey = []byte("servedByIndex")
+
+// loadServedBy mirrors bucketServedBy into memory, first rebuilding the
+// bucket from the records when its layout is not servedByIndexVersion.
+func (s *Store) loadServedBy() error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		meta := tx.Bucket(bucketMeta)
+		if string(meta.Get(metaServedByIndexKey)) == servedByIndexVersion {
+			return nil
+		}
+		if err := tx.DeleteBucket(bucketServedBy); err != nil && !errors.Is(err, bolterrors.ErrBucketNotFound) {
+			return err
+		}
+		b, err := tx.CreateBucket(bucketServedBy)
+		if err != nil {
+			return err
+		}
+		rebuilt := 0
+		err = tx.Bucket(bucketItems).ForEach(func(k, v []byte) error {
+			rec, derr := s.decode(v)
+			if derr != nil || rec == nil || rec.ServedBy == "" {
+				return nil
+			}
+			ref, ok := s.gateways.Ref(rec.Source)
+			if !ok {
+				return nil
+			}
+			rebuilt++
+			return b.Put([]byte(ref.RouteKey()+servedBySep+string(k)), []byte(rec.ServedBy))
+		})
+		if err != nil {
+			return err
+		}
+		if rebuilt > 0 {
+			s.logger.Info("media health: gateway-override index rebuilt from records", zap.Int("entries", rebuilt))
+		}
+		return meta.Put(metaServedByIndexKey, []byte(servedByIndexVersion))
+	})
+	if err != nil {
+		return err
+	}
+	return s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketServedBy).ForEach(func(k, v []byte) error {
+			if route, source, ok := strings.Cut(string(k), servedBySep); ok {
+				s.addServedBy(route, source, string(v))
+			}
+			return nil
+		})
+	})
+}
+
 // indexServedBy keeps bucketServedBy and its in-memory mirror in step with
 // a record's ServedBy. One entry per (route, source): a route stays routed
 // while ANY source on it still needs the fallback, and a source recovering
@@ -326,12 +376,6 @@ func (s *Store) indexServedBy(tx *bolt.Tx, prev, rec *Record) error {
 	b := tx.Bucket(bucketServedBy)
 	route, source := ref.RouteKey(), Key(rec.Source)
 	key := []byte(route + servedBySep + source)
-	// Drop entries earlier builds keyed by content or by route alone.
-	for _, legacy := range []string{ref.Key(), route} {
-		if err := b.Delete([]byte(legacy)); err != nil {
-			return err
-		}
-	}
 	s.servedByMu.Lock()
 	defer s.servedByMu.Unlock()
 	if rec.ServedBy == "" {
@@ -369,26 +413,58 @@ func (s *Store) addServedByLocked(route, source, origin string) {
 // origin comes from the operator's gateway list via the probe, and only
 // the request's own path and query are carried over. A request already on
 // the recorded gateway is left alone.
-func (s *Store) GatewayOverride(rawURL string) (string, bool) {
+//
+// referrer is the request's Referer header ("" when absent): a work's own
+// files are requested by the work's document, so they follow the gateway
+// recorded for THAT source (routeOrigin).
+func (s *Store) GatewayOverride(rawURL, referrer string) (string, bool) {
 	ref, ok := s.gateways.Ref(rawURL)
 	if !ok {
 		return "", false
 	}
 	s.servedByMu.RLock()
-	origin := ""
-	for _, o := range s.servedBy[ref.RouteKey()] {
-		// Sources on one route are normally served by the same gateway
-		// (the first in the list that has the content); when they differ,
-		// the lexically smallest origin keeps the choice stable.
-		if origin == "" || o < origin {
-			origin = o
-		}
-	}
+	origin := s.routeOriginLocked(ref.RouteKey(), rawURL, referrer)
 	s.servedByMu.RUnlock()
 	if origin == "" || strings.EqualFold(hostOf(origin), ref.Host) {
 		return "", false
 	}
 	return ref.URLOn(origin), true
+}
+
+// routeOriginLocked picks the gateway for one request on a route. Two
+// sources under one CID can need DIFFERENT fallbacks — the first gateway
+// serves a.html but answers 404 for b.html, which the second serves — so
+// the choice is per source, not per route (PR #438 review, F25 round 3):
+//
+//  1. the request IS a recorded source (as written, or with the player's
+//     own query parameters stripped — navigationKey): that source's gateway;
+//  2. its Referer is a recorded source: the gateway recorded for the
+//     document that embeds it (a same-origin subresource carries the full
+//     document URL under Chromium's default referrer policy);
+//  3. otherwise the lexically smallest origin on the route, a stable
+//     best-effort for a request nothing ties to a source.
+//
+// Caller holds servedByMu.
+func (s *Store) routeOriginLocked(route, rawURL, referrer string) string {
+	sources := s.servedBy[route]
+	if len(sources) == 0 {
+		return ""
+	}
+	for _, u := range []string{rawURL, navigationKey(rawURL), referrer, navigationKey(referrer)} {
+		if u == "" {
+			continue
+		}
+		if o, ok := sources[Key(u)]; ok {
+			return o
+		}
+	}
+	origin := ""
+	for _, o := range sources {
+		if origin == "" || o < origin {
+			origin = o
+		}
+	}
+	return origin
 }
 
 func recheckPrefix(t time.Time) string {
@@ -593,7 +669,6 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 			rec.LastError, rec.LastErrorAt = "", nil
 			rec.RetryAfter = time.Time{}
 		case VerdictDead:
-			rec.ServedBy = ""
 			concludeBrokenL0(rec, res.Reason, res.Status, res.Detail, now)
 			rec.DeclaredType, rec.SniffedType = res.Declared, res.Sniffed
 		default:
@@ -656,6 +731,7 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 func concludeBrokenL0(rec *Record, reason Reason, status int, detail string, now time.Time) {
 	// A verdict replaces any issue: the app shows the category instead.
 	rec.clearIssue()
+	rec.dropRoute()
 	if rec.State == StateBroken && rec.Layer == LayerL0 {
 		rec.ConsecutiveBroken++
 	} else {
@@ -891,6 +967,7 @@ func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, exi
 			}
 			rec.State = StateBroken
 			rec.Layer = LayerPlay
+			rec.dropRoute()
 			rec.Reason = reason
 			status := 0
 			if o.Stage == StageDetect {

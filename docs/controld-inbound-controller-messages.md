@@ -3383,7 +3383,7 @@ so — `no_answer`, `dns`, `server_error`, `rate_limited`, `access_denied`,
 device looks again (any state), `failedPlays` the failed plays since the last
 real success (a verdict at 2, omitted at 0). `servedBy` is the **host** of the fallback
 gateway the device loads the work through when the source's own gateway
-could not serve it (e.g. `"ar-io.dev"`), never a URL; absent when the
+could not serve it (e.g. `"gateway.pinata.cloud"`), never a URL; absent when the
 source's own gateway serves it. An outage writes no issue: the
 device only reports a source's problem while it can reach other hosts. See
 `docs/media-health.md` for what sets and clears each value. Rows are capped at 2048

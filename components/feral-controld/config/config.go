@@ -101,9 +101,11 @@ type MediaHealthConfig struct {
 	// IPFSGateways / ArweaveGateways are the ordered fallback gateways for
 	// content-addressed sources (defaults mediahealth.DefaultIPFSGateways /
 	// DefaultArweaveGateways): after the source's own gateway answers
-	// 404/410, they are tried one by one, at most two, and the first that
-	// serves is the one the kiosk loads the work through. https origins
-	// only; an operator switches them without a release.
+	// 404/410, they are tried one by one, at most two, with the kiosk's
+	// own request shape (no Range), and the first that serves is the one
+	// the kiosk loads the work through. https origins only; an operator
+	// switches them without a release — but only to a gateway seen to
+	// serve a WHOLE large file from a device (ar-io.dev meters them).
 	IPFSGateways    []string `json:"ipfsGateways,omitempty"`
 	ArweaveGateways []string `json:"arweaveGateways,omitempty"`
 	// Malformed records that the block did not decode; every field then

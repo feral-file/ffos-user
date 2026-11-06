@@ -23,9 +23,18 @@ const (
 // request, 4everland timed out on 2 of 3, cloudflare-ipfs.com is gone, and
 // ipfs.feralfile.com serves only what Feral File pinned. See the locked
 // design on #392 (issuecomment-6683248733).
+//
+// Arweave ships with arweave.net ALONE: a fallback for sources on any
+// other Arweave gateway, none for sources on arweave.net itself (a
+// gateway never confirms its own 404). ar-io.dev was dropped on
+// 2026-11-06: it serves a 32 KiB range of a 195 MB video but answers the
+// kiosk's whole-file request with 402 Payment Required (an x402 offer
+// for "data egress"), so every item routed through it failed to play.
+// Add a fallback here only after a WHOLE-FILE load of a large work has
+// been seen to succeed from the device.
 var (
 	DefaultIPFSGateways    = []string{"https://ipfs.filebase.io", "https://gateway.pinata.cloud"}
-	DefaultArweaveGateways = []string{"https://arweave.net", "https://ar-io.dev"}
+	DefaultArweaveGateways = []string{"https://arweave.net"}
 )
 
 // maxConfirmGateways bounds the extra requests one probe may spend on a
