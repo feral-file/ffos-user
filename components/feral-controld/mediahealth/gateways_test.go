@@ -254,3 +254,39 @@ func TestGateways_ReportShowsTheServingHost(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ar-io.dev", rows[0].ServedBy, "a host, never a URL")
 }
+
+// F25 (PR #438 review): two sources naming one CID through different
+// gateways keep independent overrides — one recovering leaves the other
+// on its fallback.
+func TestGateways_OverrideIsScopedToTheSourcesGateway(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	s := openTestStore(t, clock)
+	a := "https://ipfs.pixura.io/ipfs/" + cidA
+	b := "https://ipfs.example.org/ipfs/" + cidA
+	for _, src := range []string{a, b} {
+		_, err := s.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200, ServedBy: "https://ipfs.filebase.io"})
+		require.NoError(t, err)
+	}
+	// a's own gateway serves again.
+	_, err := s.ApplyProbe(a, ProbeResult{Verdict: VerdictAlive, Status: 200})
+	require.NoError(t, err)
+
+	_, ok := s.GatewayOverride(a)
+	assert.False(t, ok, "a is back on its own gateway")
+	target, ok := s.GatewayOverride(b)
+	require.True(t, ok, "b still needs its fallback")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA, target)
+	target, ok = s.GatewayOverride(b + "/frames/2.png")
+	require.True(t, ok, "and b's files follow it")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA+"/frames/2.png", target)
+
+	// Variants on one gateway share the route: the pass fans one result
+	// out to every fragment variant, so they carry the same override, and
+	// that gateway serving any of them again clears it for all.
+	_, err = s.ApplyProbe(b+"#v2", ProbeResult{Verdict: VerdictAlive, Status: 200, ServedBy: "https://ipfs.filebase.io"})
+	require.NoError(t, err)
+	_, err = s.ApplyProbe(b+"#v2", ProbeResult{Verdict: VerdictAlive, Status: 200})
+	require.NoError(t, err)
+	_, ok = s.GatewayOverride(b)
+	assert.False(t, ok, "the same gateway serving a variant serves them all")
+}

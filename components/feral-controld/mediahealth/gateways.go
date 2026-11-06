@@ -103,6 +103,15 @@ type ContentRef struct {
 // "ipfs:<cid>").
 func (r ContentRef) Key() string { return string(r.Network) + ":" + r.ID }
 
+// RouteKey scopes a fallback-gateway choice to the content AND the gateway
+// it was requested through ("ipfs:<cid>@ipfs.pixura.io"). Two sources can
+// name one CID through different gateways, and one of them recovering says
+// nothing about the other: keyed by content alone, healing one removed the
+// other's override and put an error page on the wall while media health
+// reported it ok (PR #438 review, F25). Variants on the same gateway (a
+// fragment, a query) share a route: that gateway serving one serves all.
+func (r ContentRef) RouteKey() string { return r.Key() + "@" + r.Host }
+
 // Ref parses a URL as content-addressed: `/ipfs/<cid>…` on any host, or
 // `/<tx>…` on an Arweave gateway host. ok is false for anything else.
 func (g *Gateways) Ref(rawURL string) (ContentRef, bool) {

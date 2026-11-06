@@ -159,7 +159,12 @@ func Open(path string, opts Options) (*Store, error) {
 	if err == nil {
 		err = db.View(func(tx *bolt.Tx) error {
 			return tx.Bucket(bucketServedBy).ForEach(func(k, v []byte) error {
-				s.servedBy[string(k)] = string(v)
+				// Only route keys (content@host): an entry an earlier build
+				// keyed by content alone can no longer be matched, and is
+				// dropped by the next write for its source.
+				if strings.Contains(string(k), "@") {
+					s.servedBy[string(k)] = string(v)
+				}
 				return nil
 			})
 		})
@@ -294,11 +299,12 @@ func (s *Store) put(tx *bolt.Tx, prev, rec *Record) error {
 }
 
 // indexServedBy keeps bucketServedBy and its in-memory mirror in step with
-// a record's ServedBy. Keyed by content id, so fragment and query variants
-// of one source share an entry: the last writer wins, and a clear from any
-// variant (its own gateway served it again, or the content is confirmed
-// missing) clears it for all — the source's own gateway then serves the
-// content, which is the healthy default. The mirror is updated inside the
+// a record's ServedBy. Keyed by route (ContentRef.RouteKey: the content
+// and the gateway it was requested through), so a source on another
+// gateway naming the same CID keeps its own override; fragment and query
+// variants on one gateway share an entry, and a clear from any of them
+// (that gateway served it again, or the content is confirmed missing)
+// clears it for all of them — correctly, since it is the same gateway. The mirror is updated inside the
 // write transaction: a rolled-back write leaves it ahead of the file until
 // the next write for that source, which only affects which gateway the
 // kiosk tries, never a verdict.
@@ -317,12 +323,17 @@ func (s *Store) indexServedBy(tx *bolt.Tx, prev, rec *Record) error {
 	b := tx.Bucket(bucketServedBy)
 	s.servedByMu.Lock()
 	defer s.servedByMu.Unlock()
-	if rec.ServedBy == "" {
-		delete(s.servedBy, ref.Key())
-		return b.Delete([]byte(ref.Key()))
+	key := ref.RouteKey()
+	// Drop an entry an earlier build keyed by content alone.
+	if err := b.Delete([]byte(ref.Key())); err != nil {
+		return err
 	}
-	s.servedBy[ref.Key()] = rec.ServedBy
-	return b.Put([]byte(ref.Key()), []byte(rec.ServedBy))
+	if rec.ServedBy == "" {
+		delete(s.servedBy, key)
+		return b.Delete([]byte(key))
+	}
+	s.servedBy[key] = rec.ServedBy
+	return b.Put([]byte(key), []byte(rec.ServedBy))
 }
 
 // GatewayOverride answers the kiosk interceptor: for a request URL whose
@@ -338,7 +349,7 @@ func (s *Store) GatewayOverride(rawURL string) (string, bool) {
 		return "", false
 	}
 	s.servedByMu.RLock()
-	origin, found := s.servedBy[ref.Key()]
+	origin, found := s.servedBy[ref.RouteKey()]
 	s.servedByMu.RUnlock()
 	if !found || strings.EqualFold(hostOf(origin), ref.Host) {
 		return "", false
