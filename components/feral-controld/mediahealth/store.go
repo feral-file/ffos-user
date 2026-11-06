@@ -470,10 +470,17 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 			rec.LastError = transientDetail(res)
 			rec.LastErrorAt = new(now)
 			rec.RetryAfter = now.Add(hold)
-			// The honest report of this attempt (Issue). An attempt that
-			// says nothing about the source (an outage, a 406) leaves the
-			// previous issue standing: it neither confirms nor clears it.
-			rec.setIssue(issueForProbe(res), now)
+			// The honest report of this attempt (Issue). An answer the
+			// vocabulary does not name (a 406, 408, 416) still disproves a
+			// probe-side issue — the source responded — so it clears one
+			// (PR #438 review, F23); a play_failed stands until a real
+			// playback success. An attempt with no answer that says nothing
+			// about the source (an outage) leaves the issue as it is.
+			if issue := issueForProbe(res); issue != "" {
+				rec.setIssue(issue, now)
+			} else if res.Status > 0 && res.Unreachable == "" && rec.Issue.probeSide() {
+				rec.clearIssue()
+			}
 			if res.Unreachable != "" && res.NetworkHealthy {
 				if rec.UnreachableSince == nil {
 					rec.UnreachableSince = new(now)

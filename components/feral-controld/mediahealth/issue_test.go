@@ -221,3 +221,33 @@ func TestIssue_FailedPlaysOnTheReport(t *testing.T) {
 	assert.Equal(t, 1, rows[0].FailedPlays)
 	assert.Equal(t, IssuePlayFailed, rows[0].Issue)
 }
+
+// F23 (PR #438 review): an answer outside the vocabulary still disproves a
+// probe-side issue; it never clears play_failed; an outage clears nothing.
+func TestIssue_UnnamedAnswerClearsAProbeSideIssue(t *testing.T) {
+	for _, status := range []int{406, 408, 416} {
+		clock := &testClock{t: time.Now()}
+		s := openTestStore(t, clock)
+		_, err := s.ApplyProbe("https://o/a", transient(0, UnreachableNoAnswer, true))
+		require.NoError(t, err)
+		rec, err := s.ApplyProbe("https://o/a", transient(status, "", false))
+		require.NoError(t, err)
+		assert.Empty(t, rec.Issue, "status %d: the source answered", status)
+		assert.Nil(t, rec.IssueSince)
+	}
+
+	clock := &testClock{t: time.Now()}
+	s := openTestStore(t, clock)
+	_, err := s.ApplyProbe("https://o/b", transient(0, UnreachableNoAnswer, true))
+	require.NoError(t, err)
+	rec, err := s.ApplyProbe("https://o/b", transient(0, UnreachableNoAnswer, false))
+	require.NoError(t, err)
+	assert.Equal(t, IssueNoAnswer, rec.Issue, "an outage neither confirms nor clears")
+
+	f := newPlayFeed(t, true)
+	f.emit(infuraPlay()...)
+	require.Equal(t, IssuePlayFailed, f.record().Issue)
+	_, err = f.s.Store().ApplyProbe(f.src, transient(406, "", false))
+	require.NoError(t, err)
+	assert.Equal(t, IssuePlayFailed, f.record().Issue, "a probe answer says nothing about rendering")
+}

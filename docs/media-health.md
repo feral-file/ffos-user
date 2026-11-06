@@ -446,8 +446,10 @@ lookahead's 30 s probe is the real attempt), and neither does an unreachable
 result while the device reached no other origin, nor a play while offline. A
 2xx document the kiosk observer sees clears a probe-side issue and ends the
 unreachable streak, but never writes `ok` (a 200 does not prove the work
-rendered) and never clears `play_failed`. An attempt that says nothing about
-the source (an outage, a 406) leaves the standing issue as it is. `issueSince`
+rendered) and never clears `play_failed`. A probe answer the vocabulary does
+not name (a 406, 408, 416) still clears a probe-side issue — the source
+responded — while an attempt with no answer during an outage leaves the
+standing issue as it is. `issueSince`
 is when the current run of trouble began, kept across a change of kind and
 reset when the issue clears. `nextCheckAt` is the later of the verdict's
 recheck and a transient hold. `failedPlays` counts failed plays since the last
