@@ -363,6 +363,32 @@ a source, and a verdict earned during one would be skipped before the play
 layer could ever heal it. A real-renderer `ready` counts whatever the verdict
 says: a work that rendered from cache rendered.
 
+### The kiosk navigation observer (controld sees the iframe's real status)
+
+A page may not learn anything about a cross-origin iframe's document, so the
+player reports `ready` for Chromium's own 404 page. DevTools is not bound by
+that rule. `offlinecache.KioskNavigationObserver` holds one passive CDP
+session to the kiosk — `Network.enable` only, no interception, nothing that
+can pause a frame — and reports the DOCUMENT load of every artwork frame to
+`Service.ObserveNavigation`: the final HTTP status, or Chromium's error text
+(`net::ERR_NAME_NOT_RESOLVED`, ...). The kiosk's root target reports the
+document request of every cross-origin iframe the player mounts, so one
+session is enough (verified on the office FF1). It is re-dialed on every
+primary-CDP reconnect, like the User-Agent rewrite, and closed with it.
+
+An observation is matched to a wall source by URL once the fragment and the
+player's own query params (`display_mode`) are stripped, from the current
+index forward. Then it is folded through the SAME play-run and corroboration
+rules as a ring entry: a status ≥ 400 is a `detect` failure with that status
+(404/410 → `source_missing`, 401/403/429 → `source_blocked`, 5xx →
+`render_failed`), a network error is a `load` failure with Chromium's reason,
+a canceled load (the player replacing or giving up on a frame) and a 2xx/3xx
+are ignored — a 2xx proves the mount, not the work. An observation never
+concludes on its own: two failed plays, or one over a standing L0 verdict,
+and only while the device is online. The observed 404 also marks the play
+refused, so the error page's `ready` that follows is neither a success nor a
+reset. `mediaHealth.kioskObserverDisabled: true` turns the observer off.
+
 Without the contract, controld falls back to inference: a `renderStatus == 3`
 sighting for the item at `index` counts as one failure per mount (stage
 `inferred`).
@@ -425,7 +451,9 @@ cycle).
 ```
 
 `disabled` is the kill switch: no store, no pass (casts forwarded unprobed,
-the pre-#304 behavior), no hints, no lookahead, no per-item status. The
+the pre-#304 behavior), no hints, no lookahead, no per-item status, no kiosk
+observer. `kioskObserverDisabled: true` turns off only the kiosk navigation
+observer (the one media-health piece that holds a socket to the kiosk). The
 retired `sourceProbe.disabled` is read as `mediaHealth.disabled`. `lookahead:
 -1` disables the lookahead and the background sweep. `castItems` and
 `castConcurrency` tune the cast-time pass for an origin that still

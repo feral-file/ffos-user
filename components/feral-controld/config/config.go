@@ -92,6 +92,11 @@ type MediaHealthConfig struct {
 	// rate-limits the defaults; the per-host cap (2 in flight) is fixed.
 	CastItems       int `json:"castItems,omitempty"`
 	CastConcurrency int `json:"castConcurrency,omitempty"`
+	// KioskObserverDisabled turns off the passive kiosk navigation
+	// observer (the daemon's own CDP session reporting each artwork
+	// frame's HTTP status to the store). The kill switch for the one
+	// media-health piece that holds a socket to the kiosk.
+	KioskObserverDisabled bool `json:"kioskObserverDisabled,omitempty"`
 	// Malformed records that the block did not decode; every field then
 	// reads as its default.
 	Malformed bool `json:"-"`

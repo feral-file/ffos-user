@@ -127,9 +127,15 @@ type app struct {
 	// bug it fixes has nothing to do with caching, so it must run on a
 	// device with offlineCache off. Nil only when explicitly disabled via
 	// gatewayUserAgent.enabled=false, or when its policy failed to build.
-	UARewrite   *uarewrite.Interceptor
-	Hub         hub.Hub
-	LinkChecker *status.LinkChecker
+	UARewrite *uarewrite.Interceptor
+	// MediaHealthObserver reports the kiosk's artwork-frame navigations
+	// (their HTTP status) to the media-health store over its own passive
+	// CDP session (#392). Nil when media health or the observer is
+	// disabled. Re-attached on every kiosk reconnect like UARewrite, and
+	// closed with it.
+	MediaHealthObserver *offlinecache.KioskNavigationObserver
+	Hub                 hub.Hub
+	LinkChecker         *status.LinkChecker
 	// Netlog is the WAN-outage flight recorder; nil when disabled by config,
 	// unavailable (ring open failed), or in the test app.
 	Netlog *netlog.Recorder
@@ -668,6 +674,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 				app.Logger.Warn("Failed to arm kiosk User-Agent rewrite", zap.Error(err))
 			}
 		}
+
+		// The media-health navigation observer owns a kiosk session too,
+		// and loses it on the same restarts. Passive (Network events only),
+		// so a failure here costs observations, never playback.
+		if app.MediaHealthObserver != nil {
+			if err := app.MediaHealthObserver.AttachOnReconnect(ctx); err != nil {
+				app.Logger.Warn("Failed to attach the media-health navigation observer to the kiosk", zap.Error(err))
+			}
+		}
 	})
 	defer app.CDP.Close()
 
@@ -687,6 +702,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		}
 		if err := app.UARewrite.Close(); err != nil {
 			app.Logger.Warn("Failed to close kiosk User-Agent rewrite session", zap.Error(err))
+		}
+	}()
+	// Same ownership rule for the navigation observer's session.
+	defer func() {
+		if app.MediaHealthObserver == nil {
+			return
+		}
+		if err := app.MediaHealthObserver.Close(); err != nil {
+			app.Logger.Warn("Failed to close the media-health navigation observer session", zap.Error(err))
 		}
 	}()
 
@@ -1285,7 +1309,12 @@ func initializeApp(
 	if offlineCache != nil && kioskReplay != nil {
 		mediaHealthReplayable = func(source string) bool { return offlineCache.HasReplayableItem(source) }
 	}
-	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(config.Get().MediaHealthTuning(logger), uaPolicy, mediaHealthOnline.Load, mediaHealthReplayable, newHintSender(cdp.Send, session.Generation), logger)
+	mediaHealthCfg := config.Get().MediaHealthTuning(logger)
+	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, mediaHealthOnline.Load, mediaHealthReplayable, newHintSender(cdp.Send, session.Generation), logger)
+	var mediaHealthObserver *offlinecache.KioskNavigationObserver
+	if mediaHealthSvc != nil && !mediaHealthCfg.KioskObserverDisabled {
+		mediaHealthObserver = offlinecache.NewKioskNavigationObserver(cdpEndpoint, httpClient, webSocketDialer, json, io, mediaHealthSvc, logger)
+	}
 	if mediaHealthSvc != nil {
 		commandrouter.SetMediaHealth(rawCmdHandler, mediaHealthSvc, logger)
 		playlistScheduler.SetHintSource(mediaHealthSvc.HintArgument)
@@ -1753,6 +1782,7 @@ func initializeApp(
 		Cancel:                   cancelApp,
 		Logger:                   logger,
 		MediaHealth:              mediaHealthSvc,
+		MediaHealthObserver:      mediaHealthObserver,
 		Clock:                    clock,
 		OS:                       os,
 		Signal:                   signal,

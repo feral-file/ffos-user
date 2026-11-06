@@ -55,6 +55,12 @@ type Service struct {
 	// per poll.
 	inferredIndex  int
 	inferredSource string
+
+	// wall / wallIndex are the player's item sources and index as last
+	// polled (ObservePlayback), for matching an observed kiosk navigation
+	// to its source (ObserveNavigation). Guarded by mu.
+	wall      []string
+	wallIndex int
 }
 
 // Config builds a Service.
@@ -276,6 +282,11 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 	online := s.online != nil && s.online()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if items != nil {
+		s.wall, s.wallIndex = sources, index
+	} else {
+		s.wall, s.wallIndex = nil, 0
+	}
 	if outcomes != nil {
 		fresh, gap, restarted := s.drainer.Drain(outcomes)
 		if restarted {
@@ -287,28 +298,7 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 				zap.Int64("missed", gap))
 		}
 		for _, o := range fresh {
-			var count bool
-			switch {
-			case o.Kind == OutcomeFail && !countableFailure(o):
-				// History only, and it must not touch the run: an
-				// uncountable entry that OPENED the run made every failure
-				// after it in that play "the same play", so a work that
-				// failed its content-type check on the network and then
-				// timed out three times counted nothing, play after play
-				// (ipfs.infura.io on the office FF1, 6 plays, 0 counted).
-			case o.Kind == OutcomeFail:
-				count = online && !s.samePlay(o)
-				if definiteRefusal(o) {
-					s.runRefused = true
-				}
-			default:
-				o.errorPage = o.Kind == OutcomeOK && s.runRefused &&
-					o.Source == s.runSource && !readyIsEvidence(o)
-				s.samePlay(o)
-			}
-			if _, err := s.store.ApplyOutcome(o, count); err != nil && !errors.Is(err, ErrLowDisk) {
-				s.logger.Warn("media health: recording play outcome failed", zap.String("stage", o.Stage), zap.Error(err))
-			}
+			s.applyEntry(o, online)
 		}
 		return
 	}
@@ -330,6 +320,36 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 	}
 }
 
+// applyEntry folds one entry — a ring entry from the player or a
+// navigation the daemon observed on the kiosk — through the play-run
+// rules and into the store, and reports whether it counted toward a
+// verdict. Caller holds s.mu.
+func (s *Service) applyEntry(o Outcome, online bool) bool {
+	var count bool
+	switch {
+	case o.Kind == OutcomeFail && !countableFailure(o):
+		// History only, and it must not touch the run: an uncountable
+		// entry that OPENED the run made every failure after it in that
+		// play "the same play", so a work that failed its content-type
+		// check on the network and then timed out three times counted
+		// nothing, play after play (ipfs.infura.io on the office FF1, 6
+		// plays, 0 counted).
+	case o.Kind == OutcomeFail:
+		count = online && !s.samePlay(o)
+		if definiteRefusal(o) {
+			s.runRefused = true
+		}
+	default:
+		o.errorPage = o.Kind == OutcomeOK && s.runRefused &&
+			o.Source == s.runSource && !readyIsEvidence(o)
+		s.samePlay(o)
+	}
+	if _, err := s.store.ApplyOutcome(o, count); err != nil && !errors.Is(err, ErrLowDisk) {
+		s.logger.Warn("media health: recording play outcome failed", zap.String("stage", o.Stage), zap.Error(err))
+	}
+	return count
+}
+
 // samePlay reports whether a failing outcome continues the play run already
 // counted, and advances the run. Rules: a success, a skip, or another
 // source ends the run; an exhausted entry ends it after itself (the next
@@ -342,11 +362,20 @@ func (s *Service) samePlay(o Outcome) bool {
 		s.runSource, s.runAttempt, s.runEnded, s.runRefused = "", 0, false, false
 		return false
 	}
-	same := o.Source == s.runSource && !s.runEnded && o.Attempt >= s.runAttempt
+	// An observed navigation (Attempt 0) carries no attempt counter: it
+	// belongs to whatever play of that source is open, and when it opens
+	// one, the player's own entries for that play (attempt >= 1) continue
+	// it — the frame request happens after the player's content-type
+	// check, but the ring is drained only every poll, so the two can
+	// arrive in either order.
+	same := o.Source == s.runSource && !s.runEnded && (o.Attempt == 0 || o.Attempt >= s.runAttempt)
 	if !same {
 		s.runRefused = false
 	}
-	s.runSource, s.runAttempt, s.runEnded = o.Source, o.Attempt, o.Stage == StageExhausted
+	s.runSource, s.runEnded = o.Source, o.Stage == StageExhausted
+	if !same || o.Attempt > 0 {
+		s.runAttempt = o.Attempt
+	}
 	return same
 }
 
