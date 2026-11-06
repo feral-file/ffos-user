@@ -188,7 +188,10 @@ by URL.
 ### The lookahead
 
 From the status poller's playback observer, `mediahealth.Lookahead` works one
-request at a time with a 2 s gap, in this order:
+request at a time with a 2 s gap. Each background request may take up to 30 s
+(`Prober.BackgroundItemTimeout`), not the cast pass's 5 s: nothing waits on
+it, and a short deadline only turned slow answers into timeouts (arweave.net
+serves some 404 pages after 7–27 s). The order is:
 
 1. the next 16 items after the current index (then the current item itself,
    so a one-item playlist still gets its recheck) whose record is missing or

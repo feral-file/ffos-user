@@ -143,16 +143,27 @@ const (
 	DefaultItemTimeout = 5 * time.Second
 )
 
-// ProbeOne probes one source. It never returns an error: everything that
-// prevents a conclusive answer is that source's inconclusive result.
+// ProbeOne probes one source within ItemTimeout. It never returns an
+// error: everything that prevents a conclusive answer is that source's
+// inconclusive result.
 func (p *Probe) ProbeOne(ctx context.Context, source string) ProbeResult {
+	return p.ProbeOneWithin(ctx, source, 0)
+}
+
+// ProbeOneWithin is ProbeOne with the item deadline given by the caller
+// (ItemTimeout when timeout <= 0). The cast pass keeps the short default:
+// it sits on the cast request's latency. Background probes pass a longer
+// one (Prober.BackgroundItemTimeout).
+func (p *Probe) ProbeOneWithin(ctx context.Context, source string, timeout time.Duration) ProbeResult {
 	if IsDataURI(source) {
 		return probeDataURI(source)
 	}
 	wireURL, agent := p.wire(source)
 	result := ProbeResult{WireURL: wireURL}
 
-	timeout := p.ItemTimeout
+	if timeout <= 0 {
+		timeout = p.ItemTimeout
+	}
 	if timeout <= 0 {
 		timeout = DefaultItemTimeout
 	}

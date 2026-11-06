@@ -61,6 +61,16 @@ type Prober struct {
 	MaxAttempts int
 	// PhaseCeiling bounds the whole pass (DefaultPhaseCeiling when 0).
 	PhaseCeiling time.Duration
+	// BackgroundItemTimeout is the per-item deadline for probes outside a
+	// cast (the lookahead, the wall walk, the sweep), via ProbeAndRecord
+	// (DefaultBackgroundItemTimeout when 0). The cast pass keeps the
+	// Probe's short ItemTimeout because it sits on the cast's latency;
+	// background probes sit on nothing, and a short deadline there only
+	// turned slow answers into timeouts: arweave.net answers some
+	// transactions with its 404 page after 7–27 s, so a 5 s probe recorded
+	// "no answer" and never saw the status (office FF1, "Infinite
+	// Descent").
+	BackgroundItemTimeout time.Duration
 	// Now is the clock (time.Now when nil).
 	Now func() time.Time
 	// Online reports the device's applied internet verdict (the mediator's
@@ -103,6 +113,11 @@ const (
 	// anything here); it guarantees a black-holing origin cannot hang the
 	// command.
 	DefaultPhaseCeiling = 10 * time.Second
+	// DefaultBackgroundItemTimeout: long enough for a slow gateway to
+	// answer, short enough that one black hole holds the one-at-a-time
+	// lookahead for seconds, not minutes. The guarded transport's own
+	// 10 s TLS-handshake bound still applies inside it.
+	DefaultBackgroundItemTimeout = 30 * time.Second
 )
 
 // Preflight probes sources and returns one result per source, in input
@@ -301,7 +316,7 @@ func (p *Prober) runPool(ctx context.Context, sources []string, indices []int, r
 					}
 					continue
 				}
-				results[i], probed[i] = p.probeOne(ctx, sources[i], logger)
+				results[i], probed[i] = p.probeOne(ctx, sources[i], 0, logger)
 			}
 		})
 	}
@@ -327,7 +342,11 @@ func (p *Prober) ProbeAndRecord(ctx context.Context, source string) ProbeResult 
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	res, _ := p.probeOne(ctx, source, logger)
+	timeout := p.BackgroundItemTimeout
+	if timeout <= 0 {
+		timeout = DefaultBackgroundItemTimeout
+	}
+	res, _ := p.probeOne(ctx, source, timeout, logger)
 	return res
 }
 
@@ -336,7 +355,7 @@ func (p *Prober) ProbeAndRecord(ctx context.Context, source string) ProbeResult 
 // request was made (a cooled host, a cut-short wait for a slot) — such a
 // result is inconclusive without a Reason, so Store.ApplyProbe writes
 // nothing and the source stays unknown rather than held for an hour.
-func (p *Prober) probeOne(ctx context.Context, source string, logger *zap.Logger) (res ProbeResult, probed bool) {
+func (p *Prober) probeOne(ctx context.Context, source string, timeout time.Duration, logger *zap.Logger) (res ProbeResult, probed bool) {
 	host := p.wireHost(source)
 	if p.Hosts != nil {
 		if until, ok := p.Hosts.Cooled(host); ok {
@@ -355,7 +374,7 @@ func (p *Prober) probeOne(ctx context.Context, source string, logger *zap.Logger
 		}
 		defer p.Hosts.Release(host)
 	}
-	res = p.Probe.ProbeOne(ctx, source)
+	res = p.Probe.ProbeOneWithin(ctx, source, timeout)
 	if ctx.Err() != nil && res.Verdict == VerdictInconclusive {
 		// The CALLER's context ended — the cast pass's phase ceiling, or
 		// shutdown — not this source's own ItemTimeout. Running out of our

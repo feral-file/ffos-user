@@ -320,3 +320,42 @@ func TestRules_UnreachableNeedsIndependentNetworkEvidence(t *testing.T) {
 	res = p.ProbeAndRecord(context.Background(), "https://good.example/b")
 	assert.False(t, res.NetworkHealthy, "the failing host's own earlier answer does not count for it")
 }
+
+// slowFetcher answers after delay, or gives up when the context ends.
+type slowFetcher struct {
+	delay time.Duration
+	ans   scriptedAnswer
+}
+
+func (f slowFetcher) Fetch(ctx context.Context, _ FetchRequest) (*FetchResponse, error) {
+	select {
+	case <-time.After(f.delay):
+		return f.ans.resp, f.ans.err
+	case <-ctx.Done():
+		return nil, &FetchError{Kind: FetchErrTimeout, Err: ctx.Err()}
+	}
+}
+
+// Background probes get BackgroundItemTimeout; the cast pass keeps the
+// Probe's short ItemTimeout. A gateway that answers its 404 slowly is
+// only a timeout at cast, but a real answer in the background.
+func TestRules_BackgroundProbesWaitLongerThanTheCast(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := slowFetcher{delay: 200 * time.Millisecond, ans: ok(404, "text/html", []byte("404 - Page cannot be found"), -1)}
+	p := newPassProber(t, f, clock)
+	p.Probe.ItemTimeout = 50 * time.Millisecond
+	p.BackgroundItemTimeout = 2 * time.Second
+
+	cast := p.Preflight(context.Background(), []string{"https://arweave.example/tx"})
+	assert.Equal(t, VerdictInconclusive, cast[0].Verdict, "at cast the slow answer is a timeout")
+	assert.Equal(t, UnreachableNoAnswer, cast[0].Unreachable)
+
+	bg := p.ProbeAndRecord(context.Background(), "https://arweave.example/tx")
+	assert.Equal(t, 404, bg.Status, "in the background the gateway's real answer arrives")
+	assert.Equal(t, VerdictDead, bg.Verdict)
+}
+
+func TestRules_BackgroundTimeoutDefaults(t *testing.T) {
+	assert.Equal(t, 30*time.Second, DefaultBackgroundItemTimeout)
+	assert.Equal(t, 5*time.Second, DefaultItemTimeout, "the cast keeps its short deadline")
+}
