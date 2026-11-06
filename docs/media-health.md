@@ -156,10 +156,20 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   source, not per route: two files under one CID can need different
   fallbacks (the first gateway serves `a.html` but answers 404 for
   `b.html`, which the second serves), so a request that is a recorded
-  source loads through the gateway that served that source, a work's own
-  files follow the document that embeds them (the request's `Referer`,
-  which a same-origin subresource carries in full), and only a request
-  nothing ties to a source takes the route's stable best-effort choice. Every probe still
+  source loads through the gateway that served that source — its own
+  gateway included: every ok content-addressed source is indexed, with `""`
+  for "its own gateway", so a source that recovered while another file
+  under the CID still needs a fallback is never mistaken for an untied
+  request — a work's own files follow the document that embeds them (the
+  request's `Referer`, which a same-origin subresource carries in full), and
+  only a request nothing ties to a source takes the route's stable
+  best-effort fallback. Only routes with a fallback are held in memory;
+  the rest stay in the bucket, so memory is bounded by the sources that
+  need a fallback. The override only ever targets a gateway still on the
+  operator's lists: at startup a recorded fallback that is no longer
+  configured is dropped and its source made due, so removing a gateway
+  from the config (as ar-io.dev was) takes effect on the next restart, not
+  when the 7-day ok verdict expires. Every probe still
   tries the source's own gateway first, so when it serves again `servedBy`
   clears and the kiosk goes back to it. A `broken` conclusion from ANY
   layer clears it too: a play-layer verdict over a work "served by" a

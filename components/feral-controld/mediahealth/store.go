@@ -61,10 +61,13 @@ type Store struct {
 
 	// gateways parses sources into content ids for the servedBy index.
 	gateways *Gateways
-	// servedByMu guards servedBy, the in-memory mirror of bucketServedBy:
-	// route (ContentRef.RouteKey) → the sources that need it (Key(source))
-	// → the gateway origin each was served by. Read per kiosk request
-	// (GatewayOverride), written when a record's ServedBy changes.
+	// servedByMu guards servedBy, the in-memory mirror of the routes in
+	// bucketServedBy that have at least one source on a fallback gateway:
+	// route (ContentRef.RouteKey) → every ok source on it (Key(source)) →
+	// the gateway origin it was served by ("" = its own gateway). Read per
+	// kiosk request (GatewayOverride), written as records change. Routes
+	// with no fallback stay on disk only, so memory is bounded by the
+	// sources that need a fallback, not by every content-addressed source.
 	servedByMu sync.RWMutex
 	servedBy   map[string]map[string]string
 }
@@ -91,10 +94,11 @@ var (
 	bucketItems   = []byte("items")
 	bucketRecheck = []byte("recheck")
 	bucketMeta    = []byte("meta")
-	// bucketServedBy indexes content id ("ar:<tx>", "ipfs:<cid>") to the
-	// gateway origin the kiosk loads it through (Record.ServedBy), so the
-	// interceptor's per-request lookup never scans records. Mirrored in
-	// memory (Store.servedBy) at Open.
+	// bucketServedBy indexes every ok content-addressed source, keyed
+	// route + servedBySep + Key(source), to the gateway origin the kiosk
+	// loads it through (Record.ServedBy; "" = its own gateway), so the
+	// interceptor's per-request lookup never scans records. The routes
+	// with a fallback are mirrored in memory (Store.servedBy).
 	bucketServedBy = []byte("servedBy")
 	metaSchemaKey  = []byte("schema")
 )
@@ -160,6 +164,9 @@ func Open(path string, opts Options) (*Store, error) {
 	})
 	if err == nil {
 		err = s.loadServedBy()
+	}
+	if err == nil {
+		err = s.retireUnconfiguredFallbacks()
 	}
 	if err != nil {
 		_ = db.Close()
@@ -301,7 +308,7 @@ const servedBySep = "\x00"
 // kiosk's lookup was empty, so after a deploy the wall went back to the
 // failing gateway with nothing in the verdict to show it (office FF1,
 // 2026-11-06). The records are the source of truth; the index is a cache.
-const servedByIndexVersion = "2"
+const servedByIndexVersion = "3"
 
 var metaServedByIndexKey = []byte("servedByIndex")
 
@@ -323,7 +330,11 @@ func (s *Store) loadServedBy() error {
 		rebuilt := 0
 		err = tx.Bucket(bucketItems).ForEach(func(k, v []byte) error {
 			rec, derr := s.decode(v)
-			if derr != nil || rec == nil || rec.ServedBy == "" {
+			if derr != nil {
+				return nil
+			}
+			origin, indexed := servedByEntry(rec)
+			if !indexed {
 				return nil
 			}
 			ref, ok := s.gateways.Ref(rec.Source)
@@ -331,7 +342,7 @@ func (s *Store) loadServedBy() error {
 				return nil
 			}
 			rebuilt++
-			return b.Put([]byte(ref.RouteKey()+servedBySep+string(k)), []byte(rec.ServedBy))
+			return b.Put([]byte(ref.RouteKey()+servedBySep+string(k)), []byte(origin))
 		})
 		if err != nil {
 			return err
@@ -344,29 +355,114 @@ func (s *Store) loadServedBy() error {
 	if err != nil {
 		return err
 	}
-	return s.db.View(func(tx *bolt.Tx) error {
+	all := map[string]map[string]string{}
+	err = s.db.View(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketServedBy).ForEach(func(k, v []byte) error {
 			if route, source, ok := strings.Cut(string(k), servedBySep); ok {
-				s.addServedBy(route, source, string(v))
+				if all[route] == nil {
+					all[route] = map[string]string{}
+				}
+				all[route][source] = string(v)
 			}
 			return nil
 		})
 	})
+	if err != nil {
+		return err
+	}
+	s.servedByMu.Lock()
+	defer s.servedByMu.Unlock()
+	for route, sources := range all {
+		if routeHasFallback(sources) {
+			s.servedBy[route] = sources
+		}
+	}
+	return nil
+}
+
+// retireUnconfiguredFallbacks drops, at Open, every recorded fallback that
+// is no longer on the operator's gateway lists, and makes its source due
+// now so the next probe finds its current gateway. The override must only
+// ever target a configured origin: ar-io.dev was removed from the
+// defaults after it answered whole-file loads with 402, and records still
+// "served by" it would otherwise keep routing the kiosk there for the 7 d
+// an ok verdict lasts. Bounded by the index (sources with a fallback), not
+// the store.
+func (s *Store) retireUnconfiguredFallbacks() error {
+	s.servedByMu.RLock()
+	var stale []string
+	for _, sources := range s.servedBy {
+		for source, origin := range sources {
+			if origin != "" && !s.gateways.Configured(origin) {
+				stale = append(stale, source)
+			}
+		}
+	}
+	s.servedByMu.RUnlock()
+	if len(stale) == 0 {
+		return nil
+	}
+	now := s.now()
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		items := tx.Bucket(bucketItems)
+		for _, key := range stale {
+			prev, derr := s.decode(items.Get([]byte(key)))
+			if derr != nil || prev == nil {
+				continue
+			}
+			rec := *prev
+			rec.ServedBy = ""
+			rec.RecheckAfter = now
+			rec.RetryAfter = time.Time{}
+			if err := s.put(tx, prev, &rec); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err == nil {
+		s.logger.Info("media health: fallback gateways no longer configured were retired", zap.Int("sources", len(stale)))
+	}
+	return err
+}
+
+// servedByEntry is what the index holds for a record: every ok
+// content-addressed source is indexed, with the fallback origin that
+// serves it or "" for its own gateway. Anything else (no record, no
+// verdict, broken) is absent, so the kiosk lookup can tell a source KNOWN
+// to load from its own gateway from a request nothing ties to a source
+// (PR #438 review, F25 round 4).
+func servedByEntry(rec *Record) (origin string, indexed bool) {
+	if rec == nil || rec.State != StateOK {
+		return "", false
+	}
+	return rec.ServedBy, true
+}
+
+func routeHasFallback(sources map[string]string) bool {
+	for _, o := range sources {
+		if o != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // indexServedBy keeps bucketServedBy and its in-memory mirror in step with
-// a record's ServedBy. One entry per (route, source): a route stays routed
-// while ANY source on it still needs the fallback, and a source recovering
-// removes only its own entry (PR #438 review, F25). The mirror is updated
-// inside the write transaction: a rolled-back write leaves it ahead of the
-// file until the next write for that source, which only affects which
-// gateway the kiosk tries, never a verdict.
+// a record (servedByEntry). One entry per (route, source): a route stays
+// routed while ANY source on it still needs the fallback, a source
+// recovering keeps its own entry ("" — known to load from its own gateway)
+// so it is never mistaken for an untied request, and a route is held in
+// memory only while a source on it needs a fallback — the moment one does,
+// the route's own-gateway sources are read in from the bucket (PR #438
+// review, F25). The mirror is updated inside the write transaction: a
+// rolled-back write leaves it ahead of the file until the next write for
+// that source, which only affects which gateway the kiosk tries, never a
+// verdict.
 func (s *Store) indexServedBy(tx *bolt.Tx, prev, rec *Record) error {
-	prevBy := ""
-	if prev != nil {
-		prevBy = prev.ServedBy
-	}
-	if prevBy == rec.ServedBy {
+	prevOrigin, prevIndexed := servedByEntry(prev)
+	origin, indexed := servedByEntry(rec)
+	if prevIndexed == indexed && prevOrigin == origin {
 		return nil
 	}
 	ref, ok := s.gateways.Ref(rec.Source)
@@ -375,35 +471,40 @@ func (s *Store) indexServedBy(tx *bolt.Tx, prev, rec *Record) error {
 	}
 	b := tx.Bucket(bucketServedBy)
 	route, source := ref.RouteKey(), Key(rec.Source)
-	key := []byte(route + servedBySep + source)
-	s.servedByMu.Lock()
-	defer s.servedByMu.Unlock()
-	if rec.ServedBy == "" {
-		if sources := s.servedBy[route]; sources != nil {
-			delete(sources, source)
-			if len(sources) == 0 {
-				delete(s.servedBy, route)
-			}
+	prefix := []byte(route + servedBySep)
+	key := append(append([]byte(nil), prefix...), source...)
+	if indexed {
+		if err := b.Put(key, []byte(origin)); err != nil {
+			return err
 		}
-		return b.Delete(key)
+	} else if err := b.Delete(key); err != nil {
+		return err
 	}
-	s.addServedByLocked(route, source, rec.ServedBy)
-	return b.Put(key, []byte(rec.ServedBy))
-}
-
-func (s *Store) addServedBy(route, source, origin string) {
 	s.servedByMu.Lock()
 	defer s.servedByMu.Unlock()
-	s.addServedByLocked(route, source, origin)
-}
-
-func (s *Store) addServedByLocked(route, source, origin string) {
-	sources := s.servedBy[route]
-	if sources == nil {
+	sources, inMemory := s.servedBy[route]
+	switch {
+	case !inMemory && origin == "":
+		// A route with no fallback stays on disk only.
+		return nil
+	case !inMemory:
+		// The route's first fallback: bring its own-gateway sources along
+		// (the cursor sees this transaction's Put).
 		sources = map[string]string{}
+		c := b.Cursor()
+		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+			sources[string(k[len(prefix):])] = string(v)
+		}
 		s.servedBy[route] = sources
+	case !indexed:
+		delete(sources, source)
+	default:
+		sources[source] = origin
 	}
-	sources[source] = origin
+	if !routeHasFallback(sources) {
+		delete(s.servedBy, route)
+	}
+	return nil
 }
 
 // GatewayOverride answers the kiosk interceptor: for a request URL whose
@@ -431,17 +532,20 @@ func (s *Store) GatewayOverride(rawURL, referrer string) (string, bool) {
 	return ref.URLOn(origin), true
 }
 
-// routeOriginLocked picks the gateway for one request on a route. Two
-// sources under one CID can need DIFFERENT fallbacks — the first gateway
-// serves a.html but answers 404 for b.html, which the second serves — so
-// the choice is per source, not per route (PR #438 review, F25 round 3):
+// routeOriginLocked picks the gateway for one request on a route ("" =
+// the request's own gateway). Two sources under one CID can need
+// DIFFERENT fallbacks — the first gateway serves a.html but answers 404
+// for b.html, which the second serves — and one can need none while the
+// other does, so the choice is per source, not per route (PR #438 review,
+// F25 rounds 3–4):
 //
-//  1. the request IS a recorded source (as written, or with the player's
-//     own query parameters stripped — navigationKey): that source's gateway;
-//  2. its Referer is a recorded source: the gateway recorded for the
-//     document that embeds it (a same-origin subresource carries the full
-//     document URL under Chromium's default referrer policy);
-//  3. otherwise the lexically smallest origin on the route, a stable
+//  1. the request IS an ok source (as written, or with the player's own
+//     query parameters stripped — navigationKey): that source's gateway,
+//     its own included;
+//  2. its Referer is an ok source: the gateway recorded for the document
+//     that embeds it (a same-origin subresource carries the full document
+//     URL under Chromium's default referrer policy);
+//  3. otherwise the lexically smallest fallback on the route, a stable
 //     best-effort for a request nothing ties to a source.
 //
 // Caller holds servedByMu.
@@ -460,7 +564,7 @@ func (s *Store) routeOriginLocked(route, rawURL, referrer string) string {
 	}
 	origin := ""
 	for _, o := range sources {
-		if origin == "" || o < origin {
+		if o != "" && (origin == "" || o < origin) {
 			origin = o
 		}
 	}

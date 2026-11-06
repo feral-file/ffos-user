@@ -169,6 +169,19 @@ func (r ContentRef) URLOn(origin string) string {
 	return out
 }
 
+// Configured reports whether origin is on one of the operator's lists.
+// A recorded fallback that is no longer configured is never routed to.
+func (g *Gateways) Configured(origin string) bool {
+	for _, list := range g.lists {
+		for _, o := range list {
+			if strings.EqualFold(o, origin) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // candidates are the gateways to try after the source's own, in order,
 // skipping the host already tried, at most maxConfirmGateways.
 func (g *Gateways) candidates(ref ContentRef, triedHost string) []string {

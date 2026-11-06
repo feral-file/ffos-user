@@ -67,11 +67,16 @@ func TestGateways_ListsAndCandidates(t *testing.T) {
 
 // newGatewayProber configures an Arweave fallback (ar-io.dev) so the
 // Arweave path is exercised; the shipped default is arweave.net alone.
+// withArIO configures ar-io.dev as an Arweave fallback for tests that
+// exercise the Arweave route (the shipped default is arweave.net alone,
+// and an unconfigured fallback is retired at Open).
+var withArIO = NewGateways(nil, []string{"https://arweave.net", "https://ar-io.dev"})
+
 func newGatewayProber(t *testing.T, f Fetcher, override bool) *Prober {
 	t.Helper()
 	p := newPassProber(t, f, &testClock{t: time.Now()})
 	p.Probe.OverrideActive = override
-	p.Probe.Gateways = NewGateways(nil, []string{"https://arweave.net", "https://ar-io.dev"})
+	p.Probe.Gateways = withArIO
 	p.Online = func() bool { return true }
 	return p
 }
@@ -217,13 +222,13 @@ func TestGateways_OtherHostsKeepTheirSingleRequest(t *testing.T) {
 func TestGateways_OverrideIndexSurvivesReopen(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	path := filepath.Join(t.TempDir(), "mh", "store.db")
-	s, err := Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	s, err := Open(path, Options{Now: clock.Now, Logger: zap.NewNop(), Gateways: withArIO})
 	require.NoError(t, err)
 	src := "https://arweave.net/" + txA
 	_, err = s.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 206, ServedBy: "https://ar-io.dev"})
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
-	s, err = Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	s, err = Open(path, Options{Now: clock.Now, Logger: zap.NewNop(), Gateways: withArIO})
 	require.NoError(t, err)
 	defer func() { _ = s.Close() }()
 	target, ok := s.GatewayOverride(src, "")
@@ -305,6 +310,10 @@ func TestGateways_RouteStaysWhileAnySourceNeedsIt(t *testing.T) {
 	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA+"/missing.html", target)
 	_, ok = s.GatewayOverride("https://ipfs.pixura.io/ipfs/"+cidA+"/assets/app.js", "")
 	assert.True(t, ok, "the work's own files under the CID still follow the route")
+	_, ok = s.GatewayOverride(present, "")
+	assert.False(t, ok, "F25 round 4: the recovered source loads from its own gateway, not the other's fallback")
+	_, ok = s.GatewayOverride("https://ipfs.pixura.io/ipfs/"+cidA+"/assets/app.js", present+"?display_mode=crop")
+	assert.False(t, ok, "and so do its own files")
 
 	_, err = s.ApplyProbe(missing, ProbeResult{Verdict: VerdictAlive, Status: 200})
 	require.NoError(t, err)
@@ -340,7 +349,7 @@ func TestGateways_RouteSourcesSurviveReopen(t *testing.T) {
 func TestGateways_IndexIsRebuiltFromRecordsAcrossLayouts(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	path := filepath.Join(t.TempDir(), "mh", "store.db")
-	st, err := Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	st, err := Open(path, Options{Now: clock.Now, Logger: zap.NewNop(), Gateways: withArIO})
 	require.NoError(t, err)
 	src := "https://arweave.net/" + txA
 	_, err = st.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200, ServedBy: "https://ar-io.dev"})
@@ -356,7 +365,7 @@ func TestGateways_IndexIsRebuiltFromRecordsAcrossLayouts(t *testing.T) {
 	}))
 	require.NoError(t, st.Close())
 
-	st, err = Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	st, err = Open(path, Options{Now: clock.Now, Logger: zap.NewNop(), Gateways: withArIO})
 	require.NoError(t, err)
 	defer func() { _ = st.Close() }()
 	target, ok := st.GatewayOverride(src, "")
@@ -520,4 +529,89 @@ func TestGateways_EachSourceLoadsThroughTheGatewayThatServedIt(t *testing.T) {
 	target, ok = s.GatewayOverride(asset, "")
 	require.True(t, ok)
 	assert.Equal(t, "https://gateway.pinata.cloud/ipfs/"+cidA+"/assets/app.js", target, "nothing ties it to a source: the stable best-effort choice")
+}
+
+// F25, round 4: a source ok on its OWN gateway is indexed too ("" — known
+// to need no fallback), so when another file under the CID later needs
+// one, the first keeps its own gateway, including after a restart. Routes
+// without a fallback stay on disk only: memory is bounded by the sources
+// that need a fallback.
+func TestGateways_RecoveredSourceStaysOnItsOwnGateway(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	path := filepath.Join(t.TempDir(), "mh", "store.db")
+	st, err := Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	require.NoError(t, err)
+	a := "https://ipfs.pixura.io/ipfs/" + cidA + "/a.html"
+	b := "https://ipfs.pixura.io/ipfs/" + cidA + "/b.html"
+	asset := "https://ipfs.pixura.io/ipfs/" + cidA + "/assets/app.js"
+	_, err = st.ApplyProbe(a, ProbeResult{Verdict: VerdictAlive, Status: 200})
+	require.NoError(t, err)
+	st.servedByMu.RLock()
+	assert.Empty(t, st.servedBy, "a route with no fallback is not held in memory")
+	st.servedByMu.RUnlock()
+
+	_, err = st.ApplyProbe(b, ProbeResult{Verdict: VerdictAlive, Status: 200, ServedBy: "https://gateway.pinata.cloud"})
+	require.NoError(t, err)
+	check := func(st *Store, when string) {
+		t.Helper()
+		_, ok := st.GatewayOverride(a, "")
+		assert.False(t, ok, "%s: a stays on its own gateway", when)
+		_, ok = st.GatewayOverride(asset, a)
+		assert.False(t, ok, "%s: a's files follow a", when)
+		target, ok := st.GatewayOverride(b, "")
+		require.True(t, ok, "%s: b needs its fallback", when)
+		assert.Equal(t, "https://gateway.pinata.cloud/ipfs/"+cidA+"/b.html", target)
+		target, ok = st.GatewayOverride(asset, b)
+		require.True(t, ok, "%s: b's files follow b", when)
+		assert.Equal(t, "https://gateway.pinata.cloud/ipfs/"+cidA+"/assets/app.js", target)
+		_, ok = st.GatewayOverride(asset, "")
+		assert.True(t, ok, "%s: an untied request takes the route's fallback", when)
+	}
+	check(st, "live")
+	require.NoError(t, st.Close())
+	st, err = Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	require.NoError(t, err)
+	defer func() { _ = st.Close() }()
+	check(st, "reopened")
+
+	// b recovers: nothing on the route needs a fallback, the route leaves
+	// memory, and a is still known to load from its own gateway.
+	_, err = st.ApplyProbe(b, ProbeResult{Verdict: VerdictAlive, Status: 200})
+	require.NoError(t, err)
+	st.servedByMu.RLock()
+	assert.Empty(t, st.servedBy)
+	st.servedByMu.RUnlock()
+	_, ok := st.GatewayOverride(asset, "")
+	assert.False(t, ok)
+}
+
+// A fallback the operator no longer lists is never routed to: at Open its
+// sources drop the route and are due now, so the next probe finds the
+// current gateway (ar-io.dev, removed after its 402s, office FF1).
+func TestGateways_UnconfiguredFallbackIsRetiredAtOpen(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	path := filepath.Join(t.TempDir(), "mh", "store.db")
+	old := NewGateways(nil, []string{"https://arweave.net", "https://ar-io.dev"})
+	st, err := Open(path, Options{Now: clock.Now, Logger: zap.NewNop(), Gateways: old})
+	require.NoError(t, err)
+	src := "https://arweave.net/" + txA
+	keep := "https://ipfs.pixura.io/ipfs/" + cidA
+	_, err = st.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 206, WireURL: src, ServedBy: "https://ar-io.dev"})
+	require.NoError(t, err)
+	_, err = st.ApplyProbe(keep, ProbeResult{Verdict: VerdictAlive, Status: 200, WireURL: keep, ServedBy: "https://ipfs.filebase.io"})
+	require.NoError(t, err)
+	require.NoError(t, st.Close())
+
+	clock.Advance(time.Minute)
+	st, err = Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	require.NoError(t, err)
+	defer func() { _ = st.Close() }()
+	_, ok := st.GatewayOverride(src, "")
+	assert.False(t, ok, "the kiosk is never routed to a gateway no longer configured")
+	rec, err := st.Get(src)
+	require.NoError(t, err)
+	assert.Empty(t, rec.ServedBy)
+	assert.True(t, rec.Due(clock.Now()), "and the source is probed again now")
+	_, ok = st.GatewayOverride(keep, "")
+	assert.True(t, ok, "a configured fallback is untouched")
 }
