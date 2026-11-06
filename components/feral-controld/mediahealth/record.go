@@ -268,6 +268,13 @@ type Record struct {
 	// broken.
 	Issue      Issue      `json:"issue,omitempty"`
 	IssueSince *time.Time `json:"issueSince,omitempty"`
+	// ServedBy is the gateway origin the kiosk loads this content-addressed
+	// source through because the source's own gateway answered 404/410
+	// while this one served it (Probe.confirmAbsence). Set on an alive
+	// probe through a fallback gateway, cleared when the source's own
+	// gateway serves again or the content is confirmed missing. Indexed by
+	// content id in bucketServedBy for the kiosk's per-request lookup.
+	ServedBy string `json:"servedBy,omitempty"`
 	// legacyDNS* are the DNS-only streak fields an earlier build of this
 	// branch wrote; Store.decode folds them into the unreachable streak
 	// and they are never written again.

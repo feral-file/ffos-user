@@ -1321,10 +1321,18 @@ func initializeApp(
 		mediaHealthReplayable = func(source string) bool { return offlineCache.HasReplayableItem(source) }
 	}
 	mediaHealthCfg := config.Get().MediaHealthTuning(logger)
-	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, mediaHealthOnline.Load, mediaHealthReplayable, newHintSender(cdp.Send, session.Generation), logger)
+	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, uaRewrite != nil, mediaHealthOnline.Load, mediaHealthReplayable, newHintSender(cdp.Send, session.Generation), logger)
 	var mediaHealthObserver *offlinecache.KioskNavigationObserver
 	if mediaHealthSvc != nil && !mediaHealthCfg.KioskObserverDisabled {
 		mediaHealthObserver = offlinecache.NewKioskNavigationObserver(cdpEndpoint, httpClient, webSocketDialer, json, io, mediaHealthSvc, logger)
+	}
+	if mediaHealthSvc != nil && uaRewrite != nil {
+		// The kiosk loads a content-addressed work through the gateway the
+		// probe found serving it, so the verdict and the wall agree (#392,
+		// gateway fallback). Installed before the interceptor's first
+		// attach (run()'s onConnect hook).
+		gateways := mediahealth.NewGateways(mediaHealthCfg.IPFSGateways, mediaHealthCfg.ArweaveGateways)
+		uaRewrite.SetGatewayOverride(mediaHealthSvc.GatewayOverride, uarewrite.OverrideFetchPatterns(gateways.ArweaveHosts()))
 	}
 	if mediaHealthSvc != nil {
 		commandrouter.SetMediaHealth(rawCmdHandler, mediaHealthSvc, logger)

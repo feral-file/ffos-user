@@ -107,21 +107,41 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   redirect chain → transient. NXDOMAIN → dead (`dns`); every other transport
   failure → transient, including a deadline that expires mid-body (judged
   before any byte count: a timed-out short read is not truncation).
-- **Arweave 404s are confirmed on a second gateway.** On an arweave
-  transaction path (`arweave.net`, `ar-io.dev`, `ar-io.net`, first path
-  segment a 43-character transaction id), a 404 or 410 means "this gateway
-  could not retrieve it", not "it does not exist": on the office FF1, 7 of 60
-  healthy works in a labeled fixture read 404 from arweave.net while 5 of
-  them served `video/mp4` from ar-io.dev at the same moment. So the same path
-  is re-checked once on `mediaHealth.arweaveConfirmGateway` (default
-  `https://ar-io.dev`; arweave.net when the source is already there), inside
-  the same item deadline. Both 404/410 is broken. The second gateway serving
-  it is proof the work exists: reported as issue `server_error`, but an
-  answer, so it ends the unreachable streak and can never become a verdict or
-  a hint. The second gateway failing to answer confirms nothing: a transient
-  `server_error` feeding the streak like any other server failure. If the kiosk cannot load it through its own gateway, the play
-  layer judges that from the frame's real status. A deadline that runs out
-  during the confirmation at cast records nothing, like any cast timeout.
+- **Gateway fallback for IPFS and Arweave.** On a content-addressed path —
+  `/ipfs/<cid>` on any host, or `/<43-character transaction id>` on an
+  Arweave gateway — a 404 or 410 means "this gateway could not retrieve it",
+  not "it does not exist": on the office FF1, 7 of 60 healthy works in a
+  labeled fixture read 404 from arweave.net while ar-io.dev served them. So
+  the probe tries the network's other configured gateways
+  (`mediaHealth.ipfsGateways`, `mediaHealth.arweaveGateways`), in order, at
+  most two, inside the same item deadline, stopping at the first that serves:
+  - **one serves it:** its bytes are judged by the normal content rules.
+    Valid media is `ok` with `servedBy` = that gateway, and the kiosk loads
+    the work through it (below), so the verdict and the wall agree;
+  - **its content rule fails:** that is a verdict about the content, and it
+    stands;
+  - **every gateway says 404/410:** `broken`;
+  - **nothing else answers:** a transient `server_error` feeding the
+    unreachable streak. A deadline that runs out during the fallback at cast
+    records nothing, like any cast timeout.
+
+  **The kiosk applies it.** The kiosk's request interceptor (`uarewrite`)
+  asks the store for every `/ipfs/` request on any host and every request on
+  an Arweave gateway: when the content's id has a `servedBy` record, the
+  request goes to the same path and query on that gateway, invisibly to the
+  page — the source, the offline-cache identity and every log keep the
+  original URL, and a work's own files under the same CID or transaction
+  follow. The override targets only a configured gateway origin plus the
+  request's own path and query, never a URL from playlist content. It is
+  indexed by content id in the store's `servedBy` bucket (mirrored in memory
+  for the per-request lookup) and survives a restart. Every probe still
+  tries the source's own gateway first, so when it serves again `servedBy`
+  clears and the kiosk goes back to it. Without the interceptor
+  (`gatewayUserAgent.enabled: false`) a fallback gateway serving a work is
+  reported as a gateway failure (`server_error`, an answer that ends the
+  streak) instead of `ok`: the verdict never claims what the wall cannot do.
+  The kiosk observer matches a request loaded through a fallback gateway to
+  its wall source by content id.
 - **Unreachable streak.** An attempt in which the origin gives no usable
   answer is transient on its own, because it can be the device's network.
   Three classes count: DNS short of NXDOMAIN (SERVFAIL, a resolver timeout —
@@ -503,7 +523,8 @@ cycle).
   "lookahead": 16,
   "castItems": 24,
   "castConcurrency": 4,
-  "arweaveConfirmGateway": "https://ar-io.dev"
+  "ipfsGateways": ["https://ipfs.filebase.io", "https://gateway.pinata.cloud"],
+  "arweaveGateways": ["https://arweave.net", "https://ar-io.dev"]
 }
 ```
 

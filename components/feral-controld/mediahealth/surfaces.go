@@ -135,7 +135,11 @@ type ReportItem struct {
 	// FailedPlays counts failed plays since the last real success; the
 	// source concludes broken at 2. Omitted at 0.
 	FailedPlays int `json:"failedPlays,omitempty"`
-	Plays       *struct {
+	// ServedBy is the HOST of the fallback gateway the device loads this
+	// work through, when the source's own gateway could not serve it. A
+	// host, never a URL. Omitted when the source's own gateway serves it.
+	ServedBy string `json:"servedBy,omitempty"`
+	Plays    *struct {
 		OK   int `json:"ok"`
 		Fail int `json:"fail"`
 	} `json:"plays,omitempty"`
@@ -191,6 +195,9 @@ func (s *Store) Report(items []ReportInput) ([]ReportItem, error) {
 				row.NextCheckAt = due.UTC().Format(time.RFC3339)
 			}
 			row.FailedPlays = rec.Plays.ConsecutiveFail
+			if rec.ServedBy != "" {
+				row.ServedBy = hostOf(rec.ServedBy)
+			}
 			if rec.Plays.OK > 0 || rec.Plays.Fail > 0 {
 				row.Plays = &struct {
 					OK   int `json:"ok"`

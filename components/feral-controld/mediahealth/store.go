@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -55,12 +57,23 @@ type Store struct {
 	minFreeBytes int64
 	freeBytes    func(path string) (int64, error)
 	lowDiskWarn  bool
+
+	// gateways parses sources into content ids for the servedBy index.
+	gateways *Gateways
+	// servedByMu guards servedBy, the in-memory mirror of bucketServedBy:
+	// read per kiosk request (GatewayOverride), written after a record's
+	// ServedBy changes.
+	servedByMu sync.RWMutex
+	servedBy   map[string]string
 }
 
 // Options tunes Open.
 type Options struct {
 	// Now is the clock (time.Now when nil).
 	Now func() time.Time
+	// Gateways parses sources into content ids for the servedBy index
+	// (NewGateways defaults when nil). Must be the same set the Probe uses.
+	Gateways *Gateways
 	// Build is stamped on every verdict this process writes.
 	Build Build
 	// MinFreeBytes refuses writes when the filesystem has less free space.
@@ -76,7 +89,12 @@ var (
 	bucketItems   = []byte("items")
 	bucketRecheck = []byte("recheck")
 	bucketMeta    = []byte("meta")
-	metaSchemaKey = []byte("schema")
+	// bucketServedBy indexes content id ("ar:<tx>", "ipfs:<cid>") to the
+	// gateway origin the kiosk loads it through (Record.ServedBy), so the
+	// interceptor's per-request lookup never scans records. Mirrored in
+	// memory (Store.servedBy) at Open.
+	bucketServedBy = []byte("servedBy")
+	metaSchemaKey  = []byte("schema")
 )
 
 // schemaVersion is the bucket layout version, distinct from recordVersion.
@@ -107,6 +125,11 @@ func Open(path string, opts Options) (*Store, error) {
 		logger:       opts.Logger,
 		minFreeBytes: opts.MinFreeBytes,
 		freeBytes:    opts.FreeBytes,
+		gateways:     opts.Gateways,
+		servedBy:     map[string]string{},
+	}
+	if s.gateways == nil {
+		s.gateways = defaultGateways
 	}
 	if s.now == nil {
 		s.now = time.Now
@@ -118,7 +141,7 @@ func Open(path string, opts Options) (*Store, error) {
 		s.freeBytes = statfsFree
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketItems, bucketRecheck, bucketMeta} {
+		for _, b := range [][]byte{bucketItems, bucketRecheck, bucketMeta, bucketServedBy} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -133,6 +156,14 @@ func Open(path string, opts Options) (*Store, error) {
 		}
 		return meta.Put(metaSchemaKey, []byte(strconv.Itoa(schemaVersion)))
 	})
+	if err == nil {
+		err = db.View(func(tx *bolt.Tx) error {
+			return tx.Bucket(bucketServedBy).ForEach(func(k, v []byte) error {
+				s.servedBy[string(k)] = string(v)
+				return nil
+			})
+		})
+	}
 	if err != nil {
 		_ = db.Close()
 		return nil, err
@@ -256,7 +287,63 @@ func (s *Store) put(tx *bolt.Tx, prev, rec *Record) error {
 			return err
 		}
 	}
-	return recheck.Put(recheckKey(rec.dueAt(), key), []byte{})
+	if err := recheck.Put(recheckKey(rec.dueAt(), key), []byte{}); err != nil {
+		return err
+	}
+	return s.indexServedBy(tx, prev, rec)
+}
+
+// indexServedBy keeps bucketServedBy and its in-memory mirror in step with
+// a record's ServedBy. Keyed by content id, so fragment and query variants
+// of one source share an entry: the last writer wins, and a clear from any
+// variant (its own gateway served it again, or the content is confirmed
+// missing) clears it for all — the source's own gateway then serves the
+// content, which is the healthy default. The mirror is updated inside the
+// write transaction: a rolled-back write leaves it ahead of the file until
+// the next write for that source, which only affects which gateway the
+// kiosk tries, never a verdict.
+func (s *Store) indexServedBy(tx *bolt.Tx, prev, rec *Record) error {
+	prevBy := ""
+	if prev != nil {
+		prevBy = prev.ServedBy
+	}
+	if prevBy == rec.ServedBy {
+		return nil
+	}
+	ref, ok := s.gateways.Ref(rec.Source)
+	if !ok {
+		return nil
+	}
+	b := tx.Bucket(bucketServedBy)
+	s.servedByMu.Lock()
+	defer s.servedByMu.Unlock()
+	if rec.ServedBy == "" {
+		delete(s.servedBy, ref.Key())
+		return b.Delete([]byte(ref.Key()))
+	}
+	s.servedBy[ref.Key()] = rec.ServedBy
+	return b.Put([]byte(ref.Key()), []byte(rec.ServedBy))
+}
+
+// GatewayOverride answers the kiosk interceptor: for a request URL whose
+// content (an IPFS CID or an Arweave transaction, under any gateway, any
+// path below it) is recorded as served by a fallback gateway, the same
+// path and query on that gateway. Never a URL from playlist content: the
+// origin comes from the operator's gateway list via the probe, and only
+// the request's own path and query are carried over. A request already on
+// the recorded gateway is left alone.
+func (s *Store) GatewayOverride(rawURL string) (string, bool) {
+	ref, ok := s.gateways.Ref(rawURL)
+	if !ok {
+		return "", false
+	}
+	s.servedByMu.RLock()
+	origin, found := s.servedBy[ref.Key()]
+	s.servedByMu.RUnlock()
+	if !found || strings.EqualFold(hostOf(origin), ref.Host) {
+		return "", false
+	}
+	return ref.URLOn(origin), true
 }
 
 func recheckPrefix(t time.Time) string {
@@ -445,6 +532,10 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 		}
 		switch res.Verdict {
 		case VerdictAlive:
+			// The source's own gateway served it (ServedBy "") or a fallback
+			// did (ServedBy set): either way the record says which one the
+			// kiosk should load.
+			rec.ServedBy = res.ServedBy
 			rec.clearIssue()
 			rec.State = StateOK
 			rec.Layer = LayerL0
@@ -457,6 +548,7 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 			rec.LastError, rec.LastErrorAt = "", nil
 			rec.RetryAfter = time.Time{}
 		case VerdictDead:
+			rec.ServedBy = ""
 			concludeBrokenL0(rec, res.Reason, res.Status, res.Detail, now)
 			rec.DeclaredType, rec.SniffedType = res.Declared, res.Sniffed
 		default:

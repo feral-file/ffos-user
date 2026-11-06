@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -84,6 +82,11 @@ type ProbeResult struct {
 	// is an answer — the transaction is there — so it never advances, and
 	// in fact ends, the unreachable streak (PR #438 review, F24).
 	GatewayFailed bool
+	// ServedBy is the gateway origin that served a content-addressed source
+	// after the source's own gateway answered 404/410 (confirmAbsence, only
+	// when the kiosk override is active). The store records it and the
+	// kiosk interceptor loads the source through it.
+	ServedBy string
 	// Recorded is set by the Prober: the result changed the store. False
 	// for results the store never records (guard and length refusals,
 	// skipped hosts) AND for writes the store refused (the low-disk guard,
@@ -133,10 +136,15 @@ type Probe struct {
 	// ItemTimeout bounds one source's WHOLE probe, guard DNS included
 	// (DefaultItemTimeout when 0).
 	ItemTimeout time.Duration
-	// ArweaveConfirmGateway is the second arweave gateway a 404/410 on an
-	// arweave transaction path is re-checked on before it may count as
-	// broken (DefaultArweaveConfirmGateway when ""; see confirmAbsence).
-	ArweaveConfirmGateway string
+	// Gateways are the ordered fallback gateways per content-addressed
+	// network (NewGateways defaults when nil); see confirmAbsence.
+	Gateways *Gateways
+	// OverrideActive says the kiosk interceptor will load a work through
+	// the gateway the probe found serving it (Record.ServedBy). Only then
+	// is such a work `ok`: without the override the wall would still load
+	// the failing gateway, and the verdict must not claim what the wall
+	// cannot do — it is reported as a gateway failure instead.
+	OverrideActive bool
 }
 
 const (
@@ -183,8 +191,8 @@ func (p *Probe) ProbeOneWithin(ctx context.Context, source string, timeout time.
 	res := p.probeOnce(ctx, source)
 	if res.Verdict == VerdictDead && res.Reason == ReasonHTTPStatus &&
 		(res.Status == http.StatusNotFound || res.Status == http.StatusGone) {
-		if alt, ok := arweaveConfirmURL(source, p.ArweaveConfirmGateway); ok {
-			return p.confirmAbsence(ctx, res, alt)
+		if ref, ok := p.gateways().Ref(source); ok {
+			return p.confirmAbsence(ctx, res, ref)
 		}
 	}
 	return res
@@ -548,94 +556,88 @@ func redactForLog(rawURL string) string {
 	return rawURL
 }
 
-// DefaultArweaveConfirmGateway is where an arweave transaction a gateway
-// answered 404/410 for is re-checked (an ar.io gateway, independent of
-// arweave.net's own retrieval).
-const DefaultArweaveConfirmGateway = "https://ar-io.dev"
-
-// arweaveGatewayHosts are the gateways whose paths are arweave
-// transaction ids. A gateway's 404 on one is "this gateway could not
-// retrieve it", not "it does not exist": on the office FF1, 7 of 60
-// healthy works in a labeled fixture read 404 from arweave.net while 5 of
-// them served video/mp4 from ar-io.dev at the same moment, and every one
-// was hinted and skipped (#392).
-var arweaveGatewayHosts = map[string]bool{"arweave.net": true, "ar-io.dev": true, "ar-io.net": true}
-
-// arweaveTxID matches an arweave transaction id: 32 bytes, base64url, no
-// padding (43 characters).
-var arweaveTxID = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
-
-// arweaveConfirmURL returns the same transaction path (and query) on a
-// second gateway when source is a transaction path on an arweave gateway:
-// confirmGateway (DefaultArweaveConfirmGateway when ""), or arweave.net
-// when the source already is on confirmGateway's host.
-func arweaveConfirmURL(source, confirmGateway string) (string, bool) {
-	u, err := url.Parse(source)
-	if err != nil || !arweaveGatewayHosts[strings.ToLower(u.Hostname())] {
-		return "", false
+// gateways returns the configured fallback gateways (defaults when unset).
+func (p *Probe) gateways() *Gateways {
+	if p.Gateways != nil {
+		return p.Gateways
 	}
-	first, _, _ := strings.Cut(strings.TrimPrefix(u.EscapedPath(), "/"), "/")
-	if !arweaveTxID.MatchString(first) {
-		return "", false
-	}
-	if confirmGateway == "" {
-		confirmGateway = DefaultArweaveConfirmGateway
-	}
-	g, err := url.Parse(confirmGateway)
-	if err != nil || g.Scheme != "https" || g.Hostname() == "" {
-		g, _ = url.Parse(DefaultArweaveConfirmGateway)
-	}
-	if strings.EqualFold(g.Hostname(), u.Hostname()) {
-		g, _ = url.Parse("https://arweave.net")
-	}
-	alt := url.URL{Scheme: g.Scheme, Host: g.Host, Path: u.Path, RawPath: u.RawPath, RawQuery: u.RawQuery}
-	return alt.String(), true
+	return defaultGateways
 }
 
-// confirmAbsence re-checks a gateway's 404/410 on the second gateway.
-// Only a 404/410 from both is a verdict. When the second gateway serves
-// the transaction, the work exists and the first gateway failed to
-// retrieve it: reported as issue server_error, but an ANSWER — it ends the
-// unreachable streak rather than advancing it (GatewayFailed) — so it can
-// never become a broken verdict or a hint. If the kiosk itself cannot load it through its own gateway,
-// the play layer judges that (the observer sees the frame's 404). When the
-// second gateway cannot answer either, nothing is confirmed, and the
-// result is transient the same way; a deadline that ran out carries the
-// timeout error, so the cast pass's short deadline records nothing.
-func (p *Probe) confirmAbsence(ctx context.Context, res ProbeResult, altURL string) ProbeResult {
-	maxBytes := p.MaxBytes
-	if maxBytes <= 0 {
-		maxBytes = DefaultProbeMaxBytes
+var defaultGateways = NewGateways(nil, nil)
+
+// confirmAbsence re-checks a gateway's 404/410 on a content-addressed path
+// against the network's other gateways, in order, at most
+// maxConfirmGateways, inside the caller's deadline. A gateway's 404 there
+// means "this gateway could not retrieve it", not "it does not exist": on
+// the office FF1, 7 of 60 healthy works in a labeled fixture read 404 from
+// arweave.net while ar-io.dev served them (#392).
+//
+//   - A gateway serves it: its bytes are judged by the normal content rules.
+//     Valid media is `ok` with ServedBy = that gateway's origin, which the
+//     kiosk interceptor then loads it through (Record.ServedBy) — so the
+//     verdict and the wall agree. Without the interceptor (OverrideActive
+//     false) it is a gateway failure instead: issue server_error, an
+//     answer that ends the unreachable streak, never a verdict or a hint.
+//   - A gateway's content rule fails (a type mismatch, an error page): that
+//     is a verdict about the content itself, and it stands.
+//   - Every gateway says 404/410: broken, confirmed.
+//   - Nothing else answers: a transient server_error feeding the streak;
+//     a deadline that ran out carries the timeout error, so the cast
+//     pass's short deadline records nothing at all.
+func (p *Probe) confirmAbsence(ctx context.Context, res ProbeResult, ref ContentRef) ProbeResult {
+	firstStatus := res.Status
+	confirmed := 0
+	var lastErr error
+	var lastNote string
+	candidates := p.gateways().candidates(ref, hostOf(res.WireURL))
+	for _, origin := range candidates {
+		alt := p.probeOnce(ctx, ref.URLOn(origin))
+		altHost := hostOf(origin)
+		switch {
+		case alt.Verdict == VerdictAlive:
+			if !p.OverrideActive {
+				res.Verdict = VerdictInconclusive
+				res.Unreachable = ""
+				res.GatewayFailed = true
+				res.Detail = fmt.Sprintf("HTTP %d from the gateway; %s serves it", firstStatus, altHost)
+				res.Err = fmt.Errorf("media health: gateway answered %d for content %s serves", firstStatus, altHost)
+				return res
+			}
+			alt.ServedBy = origin
+			alt.Detail = fmt.Sprintf("HTTP %d from %s; served by %s", firstStatus, hostOf(res.WireURL), altHost)
+			return alt
+		case alt.Verdict == VerdictDead && alt.Reason == ReasonHTTPStatus && (alt.Status == http.StatusNotFound || alt.Status == http.StatusGone):
+			confirmed++
+			lastNote = fmt.Sprintf("%s also answered HTTP %d", altHost, alt.Status)
+		case alt.Verdict == VerdictDead:
+			// A content rule (or another identity-independent status) on the
+			// bytes another gateway served: a verdict about the content.
+			alt.Detail = fmt.Sprintf("%s (served by %s after HTTP %d from the gateway)", alt.Detail, altHost, firstStatus)
+			return alt
+		default:
+			lastErr = alt.Err
+			lastNote = fmt.Sprintf("%s could not confirm it", altHost)
+		}
 	}
-	altHost := hostOf(altURL)
-	resp, err := p.fetch(ctx, altURL, "", maxBytes, true)
-	if err == nil && (resp.Status == http.StatusNotFound || resp.Status == http.StatusGone) {
-		res.Detail = fmt.Sprintf("%s; %s also answered HTTP %d", res.Detail, altHost, resp.Status)
+	if len(candidates) > 0 && confirmed == len(candidates) {
+		res.Detail = fmt.Sprintf("%s; %s", res.Detail, lastNote)
 		return res
 	}
-	firstStatus := res.Status
 	res.Verdict = VerdictInconclusive
 	res.Unreachable = UnreachableServer
+	res.Detail = fmt.Sprintf("HTTP %d from the gateway; %s", firstStatus, lastNote)
 	switch {
-	case err == nil && resp.Status >= 200 && resp.Status < 300:
-		// Proof the transaction exists: not an unreachable attempt, so it
-		// cannot count toward a broken verdict however long the first
-		// gateway keeps failing. The play layer still judges whether the
-		// kiosk, which loads through the first gateway, can show it.
+	case len(candidates) == 0:
+		// No other gateway configured for this network: keep the verdict.
+		res.Verdict = VerdictDead
 		res.Unreachable = ""
-		res.GatewayFailed = true
-		res.Detail = fmt.Sprintf("HTTP %d from the gateway; %s serves the transaction (HTTP %d)", firstStatus, altHost, resp.Status)
-		res.Err = fmt.Errorf("media health: gateway answered %d for a transaction %s serves", firstStatus, altHost)
-	case err != nil:
-		res.Detail = fmt.Sprintf("HTTP %d from the gateway; %s could not confirm it", firstStatus, altHost)
-		if fetchErrorKind(err) == FetchErrTimeout {
-			res.Err = err
-		} else {
-			res.Err = fmt.Errorf("media health: gateway answered %d, unconfirmed: %w", firstStatus, err)
-		}
+		res.Detail = fmt.Sprintf("HTTP %d", firstStatus)
+		return res
+	case lastErr != nil && fetchErrorKind(lastErr) == FetchErrTimeout:
+		res.Err = lastErr
 	default:
-		res.Detail = fmt.Sprintf("HTTP %d from the gateway; %s answered HTTP %d", firstStatus, altHost, resp.Status)
-		res.Err = fmt.Errorf("media health: gateway answered %d, unconfirmed (%s answered %d)", firstStatus, altHost, resp.Status)
+		res.Err = fmt.Errorf("media health: gateway answered %d, unconfirmed (%s)", firstStatus, lastNote)
 	}
 	return res
 }

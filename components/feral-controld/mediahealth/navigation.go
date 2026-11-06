@@ -121,6 +121,17 @@ func (s *Service) matchWallSource(rawURL string) (string, bool) {
 			return src, true
 		}
 	}
+	// A request the kiosk loaded through a fallback gateway reports that
+	// gateway's URL: match it by content id, the identity every gateway
+	// shares.
+	if ref, ok := s.store.gateways.Ref(rawURL); ok {
+		for step := 0; step < n; step++ {
+			src := s.wall[(start+step)%n]
+			if other, ok := s.store.gateways.Ref(src); ok && other.Key() == ref.Key() && other.Rest == ref.Rest {
+				return src, true
+			}
+		}
+	}
 	return "", false
 }
 

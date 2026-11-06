@@ -48,13 +48,18 @@ const mediaHealthMinFreeBytes = offlinecache.DefaultMinFreeDiskBytes
 //
 // pushHints, when non-nil, delivers the hint-only push (newHintSender); the
 // returned pusher's Run must be driven by the caller, like the lookahead's.
-func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, online func() bool, replayable func(string) bool, pushHints mediahealth.HintSender, logger *zap.Logger) (*mediahealth.Service, *mediahealth.Lookahead, *mediahealth.HintPusher) {
+//
+// overrideActive says the kiosk interceptor runs and will load a work
+// through the fallback gateway the probe found serving it.
+func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, overrideActive bool, online func() bool, replayable func(string) bool, pushHints mediahealth.HintSender, logger *zap.Logger) (*mediahealth.Service, *mediahealth.Lookahead, *mediahealth.HintPusher) {
+	gateways := mediahealth.NewGateways(cfg.IPFSGateways, cfg.ArweaveGateways)
 	if cfg.Disabled {
 		logger.Warn("media health disabled by config; casts are forwarded unprobed and carry no hints")
 		return nil, nil, nil
 	}
 	store, err := mediahealth.Open(constants.MEDIA_HEALTH_STORE_FILE, mediahealth.Options{
 		Build:        mediahealth.Build{Controld: installedControldVersion()},
+		Gateways:     gateways,
 		MinFreeBytes: mediaHealthMinFreeBytes,
 		Logger:       logger,
 	})
@@ -70,10 +75,11 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 		maxBytes = mediahealth.DefaultProbeMaxBytes
 	}
 	probe := &mediahealth.Probe{
-		Fetcher:               offlinecache.NewMediaHealthFetcher(net.DefaultResolver),
-		Validator:             mediahealth.NewContentValidator(maxBytes, cfg.KnownBadPageMarkers),
-		MaxBytes:              maxBytes,
-		ArweaveConfirmGateway: cfg.ArweaveConfirmGateway,
+		Fetcher:        offlinecache.NewMediaHealthFetcher(net.DefaultResolver),
+		Validator:      mediahealth.NewContentValidator(maxBytes, cfg.KnownBadPageMarkers),
+		MaxBytes:       maxBytes,
+		Gateways:       gateways,
+		OverrideActive: overrideActive,
 	}
 	if rewriter != nil {
 		probe.Rewriter = rewriter

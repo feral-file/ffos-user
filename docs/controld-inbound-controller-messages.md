@@ -3381,7 +3381,10 @@ so — `no_answer`, `dns`, `server_error`, `rate_limited`, `access_denied`,
 `rate_limited` plays fine while the host throttles the device's checks.
 `issueSince` is when the current run of trouble began, `nextCheckAt` when the
 device looks again (any state), `failedPlays` the failed plays since the last
-real success (a verdict at 2, omitted at 0). An outage writes no issue: the
+real success (a verdict at 2, omitted at 0). `servedBy` is the **host** of the fallback
+gateway the device loads the work through when the source's own gateway
+could not serve it (e.g. `"ar-io.dev"`), never a URL; absent when the
+source's own gateway serves it. An outage writes no issue: the
 device only reports a source's problem while it can reach other hosts. See
 `docs/media-health.md` for what sets and clears each value. Rows are capped at 2048
 (`truncated: true` past that); `total` is the full item count. No source URL

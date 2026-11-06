@@ -117,6 +117,17 @@ type Interceptor struct {
 	// without a live kiosk. Production never overrides it.
 	dial dialFunc
 
+	// override, when set (SetGatewayOverride before the first attach), is
+	// consulted for every paused request before the static policy: the
+	// media-health store's choice of a fallback gateway for a
+	// content-addressed source (mediahealth.Store.GatewayOverride), so the
+	// kiosk loads a work through the same gateway the verdict was taken
+	// on. overridePatterns widen the Fetch patterns to the requests it can
+	// apply to. Both are written once, before AttachOnReconnect, and read
+	// only after; no lock.
+	override         func(rawURL string) (string, bool)
+	overridePatterns []map[string]interface{}
+
 	// superviseOnce starts the supervisor exactly once, on the FIRST
 	// AttachOnReconnect call — success or failure. Starting it on failure
 	// too is the point: an initial attach against a kiosk that is still
@@ -213,7 +224,7 @@ func (i *Interceptor) AttachOnReconnect(ctx context.Context) error {
 	})
 
 	if _, err := session.Send(ctx, "Fetch.enable", map[string]interface{}{
-		"patterns": i.policy.FetchPatterns(),
+		"patterns": i.fetchPatterns(),
 	}); err != nil {
 		// Arming failed, so this session intercepts nothing. Close it
 		// rather than leaving a live connection that looks attached but
@@ -359,7 +370,18 @@ func (i *Interceptor) processPaused(session offlinecache.CDPSession, params json
 	// Policy.RewriteURL for why they are not combined.
 	rewritten := false
 	redirected := ""
-	if paused.ResponseStatusCode == nil && i.policy.Matches(paused.Request.URL) {
+	if paused.ResponseStatusCode == nil && i.override != nil {
+		// The media-health store's fallback gateway wins over the static
+		// policy: it was chosen because the source's own gateway (possibly
+		// the policy's replacement) answered 404 for this content while
+		// this one served it. The target is a configured gateway origin
+		// plus this request's own path and query — never playlist content.
+		if target, ok := i.override(paused.Request.URL); ok {
+			args["url"] = target
+			redirected = target
+		}
+	}
+	if redirected == "" && paused.ResponseStatusCode == nil && i.policy.Matches(paused.Request.URL) {
 		if target, ok := i.policy.RewriteURL(paused.Request.URL); ok {
 			// `url` is applied by Chromium "in a way that's not observable
 			// by page": ff-player, offline-cache identity, and the
@@ -500,7 +522,7 @@ func (i *Interceptor) ensureArmed() {
 	defer cancel()
 
 	if _, err := session.Send(ctx, "Fetch.enable", map[string]interface{}{
-		"patterns": i.policy.FetchPatterns(),
+		"patterns": i.fetchPatterns(),
 	}); err != nil {
 		if !recoverableSendFailure(err) {
 			// The socket answered and refused. Re-dialing would loop the
@@ -577,4 +599,36 @@ func (i *Interceptor) releaseAttach() {
 	i.redialMu.Lock()
 	i.attaching = false
 	i.redialMu.Unlock()
+}
+
+// SetGatewayOverride installs the per-request fallback-gateway lookup and
+// the extra Fetch patterns it needs (see Interceptor.override). Call
+// before the first AttachOnReconnect; later calls are ignored by sessions
+// already armed until they re-arm.
+func (i *Interceptor) SetGatewayOverride(override func(rawURL string) (string, bool), patterns []map[string]interface{}) {
+	i.override = override
+	i.overridePatterns = patterns
+}
+
+// fetchPatterns is the policy's own patterns plus the override's. Every
+// paused request is answered: a request neither rule applies to continues
+// untouched (processPaused), so a wider pattern set costs one CDP round
+// trip per matching request, never a changed request.
+func (i *Interceptor) fetchPatterns() []map[string]interface{} {
+	patterns := i.policy.FetchPatterns()
+	return append(patterns, i.overridePatterns...)
+}
+
+// OverrideFetchPatterns are the Fetch patterns the gateway override needs:
+// every `/ipfs/` path on any host (an IPFS source can sit on any gateway),
+// and every path on each Arweave gateway host.
+func OverrideFetchPatterns(arweaveHosts []string) []map[string]interface{} {
+	patterns := []map[string]interface{}{
+		{"urlPattern": "http://*/ipfs/*", "requestStage": "Request"},
+		{"urlPattern": "https://*/ipfs/*", "requestStage": "Request"},
+	}
+	for _, h := range arweaveHosts {
+		patterns = append(patterns, map[string]interface{}{"urlPattern": "https://" + h + "/*", "requestStage": "Request"})
+	}
+	return patterns
 }
