@@ -1282,6 +1282,17 @@ func initializeApp(
 		seriesPlaybackStore = seriesplayback.Fallback(constants.SERIES_PLAYBACK_FILE)
 	}
 	commandrouter.SetSeriesPlayback(rawCmdHandler, seriesPlaybackStore, logger)
+	// player_status also carries the device's current series-playback
+	// override (ffos-user#425 follow-up), passively — not only via an
+	// explicit getSeriesPlayback query. One getter, read from rawCmdHandler's
+	// own store and reused for both status surfaces exactly like
+	// buildOverlaySource below, so the poller's push loop and this package's
+	// own direct checkStatus reply can never disagree.
+	if seriesPlaybackSource, ok := commandrouter.SeriesPlaybackSource(rawCmdHandler); ok {
+		poller.SetSeriesPlaybackSource(seriesPlaybackSource)
+	} else {
+		logger.Warn("Command handler does not support series playback status wiring")
+	}
 	// Media health (#304, #392, docs/media-health.md): the cast-time L0 pass
 	// replaces the former source preflight — a displayPlaylist whose every
 	// item source definitively answers dead is still rejected at accept time
@@ -1344,7 +1355,7 @@ func initializeApp(
 	// Signature verification wiring: the same Active slot feeds the raw
 	// handler (writes on cast), the refresher (writes on re-push, below)
 	// and the status poller (reads on every poll). Wired against the raw
-	// handler for the same reason as SetSourceProber above.
+	// handler for the same reason as SetMediaHealth above.
 	activeVerdict := &sigverify.Active{}
 	if sigVerifyEnabled {
 		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict}, logger)

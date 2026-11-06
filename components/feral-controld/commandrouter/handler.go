@@ -2142,13 +2142,15 @@ func (h *handler) sendCDPRequest(command commands.Command) (interface{}, error) 
 	}
 	// Direct status requests bypass the lightweight notification mapper. Apply
 	// the same showing-key privacy boundary, and the same controld-owned
-	// overlay annotation (issue #381), before either hub or relayer egress —
-	// pollPlayerStatus's annotateOverlay only runs for the poller's own push
-	// loop, never for a direct checkStatus reply.
+	// overlay/series-playback annotations (issue #381; ffos-user#425 follow-up),
+	// before either hub or relayer egress — pollPlayerStatus's annotateOverlay/
+	// annotateSeriesPlayback only run for the poller's own push loop, never for
+	// a direct checkStatus reply.
 	if command.Type == "checkStatus" {
 		playerresponse.SanitizeShowingKey(result)
 		annotateOverlayReply(result, h.overlaySource)
 		stripOutcomesReply(result)
+		annotateSeriesPlaybackReply(result, h.currentSeriesPlaybackMode)
 	}
 
 	return result, nil
