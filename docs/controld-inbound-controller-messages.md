@@ -143,6 +143,105 @@ source preflight notes for the conditions that are deliberately never
 rejected (scheduled playlists, cached captures, and every non-definitive
 probe outcome).
 
+## Control Protocol Envelope (`ff1Envelope`, feral-file#3551)
+
+Active when `controld.json` sets `"control":{"enabled":true}`, and always on
+a device that already has control state (`.state/control/` or the
+factory-reset tombstone), whatever the config says: the config is replaced by
+every full-image OTA and must never reopen an owned device. With the
+protocol off, `ff1Envelope` is an unknown command like any other (forwarded
+to the player, which rejects it) and nothing below applies. The normative
+contract is `docs/ff1-control-v1.md`; this section is the message-level
+summary.
+
+### Request
+
+Same JSON on both routes (LAN `POST /api/cast`, relayer topic cast):
+
+```json
+{"command":"ff1Envelope","request":{"v":1,"jwe":"<compact JWE>"}}
+```
+
+`request` has exactly the members `v` (=1) and `jwe`. The JWE is the §3
+request: an ECDH-ES/A256GCM JWE to the device's `devEnc`, wrapping an ES256
+JWS by the controller over claims carrying `op` (`cmd`, `enroll`,
+`requestAccess`), `cmd`, and `req` — the inner command name and its usual
+`request` object, unchanged. The admitted command runs through the same
+router, storm gate and handlers as a plaintext one.
+
+### Reply
+
+- Authenticated outcomes (success, `command_failed`, and every encrypted
+  error: `invalid_request`, `expired`, `replay`, `permission_denied`,
+  `access_revoked`, `invitation_invalid`, `pending`, `not_approved`,
+  `rate_limited`, `locked`, `internal_error`): LAN `200` /
+  relayer RPC `message`, body `{"v":1,"jwe":"<compact>"}`, readable only with
+  the request's reply key and verified against the pinned device key.
+  A handler's own reply (including bodies with `ok:false` that the handler
+  returns rather than raises) is `ok:true` with that body as `res`; a handler
+  error is `command_failed` with `res` =
+  `{"ok":false,"error":"rate_limited|sourceUnreachable|contentBlocked|playlistInvalid|failed","command","message"}`.
+- Public errors, when no reply key can be trusted: body
+  `{"error":{"code":"bad_envelope|unknown_controller|bad_signature|locked|busy"}}`,
+  LAN status 401 (`busy`: 503, retry), relayer RPC `message`. The plaintext
+  refusals `enrollment_required`, `envelope_required`, `screen_protected`
+  (403) and `invalid_message` (400) are listed under the plaintext policy
+  below; the full table is the spec §4.4.
+
+### Owner commands handled by the authority
+
+`approveController {ctl, role, expiresAt?}`, `revokeController {ctl}`,
+`registerController {sig, enc, label, platform, role, expiresAt?}`,
+`releaseOwnership {}`, `listControllers {}` and `setLanControl {open}`
+(→ `{"open":bool}`, the owner's LAN switch, stored in
+`/home/feralfile/.state/control/lan.json`) are owner-tier envelope commands answered by the
+authority itself; they never reach the router (see the spec §5.5 and §5.6.4
+for results and `command_failed` reasons). `revokeController` of the
+signer's own `ctl` is also accepted from a controller grant (self-revoke).
+
+### Plaintext policy (state-dependent, spec §7.2)
+
+`/api/v2/status` (and `getDeviceStatus`) carry
+`"control":{"v":1,"state":"legacy|enrolled|locked","profile":…,"lan":"open|closed"}`
+(`lan` only in `enrolled`).
+
+The LAN-open set is the controller tier (spec §7.1): what the next command
+can undo. Every hub route refuses a non-local source first with
+`403 {"error":{"code":"lan_only"}}` (spec §7.2 defines local).
+
+| State | LAN plaintext `/api/cast` | Relayer plaintext |
+|---|---|---|
+| `legacy` | the LAN-open set and `showPairingQRCode`; anything else `403 {"error":{"code":"enrollment_required"}}` | allowed |
+| `enrolled` | switch open (`lan:"open"`, the default): the LAN-open set; anything else, and everything with the switch closed, `403 enrollment_required` | controller-tier commands only |
+| `locked` | `401 {"error":{"code":"locked"}}` | controller-tier commands only |
+
+Owner-tier plaintext (`sshAccess`, `factoryReset`, `startWifiSetup`,
+`shutdown`, input injection, …) is refused on the LAN in every state (a
+retired device's `factoryReset` is the one exception, spec §8). The
+relayer column applies only to an image that still configures a legacy
+relayer (none from the 3.0.0 LAN-open build on, spec §15.4).
+
+A refused relayer plaintext command gets the RPC `message`
+`{"ok":false,"error":"envelope_required"|"locked","command":"<name>","message":"<text>"}`:
+`ok:false` and a flat string `error`, the shape every released client
+(ff-app, ff1-cli, Play) reports as a failure without crashing. Outside
+`legacy`, `GET /api/screenshot` answers `403 enrollment_required` and status
+serves `topic_id:""`.
+
+Two more refusals apply whenever the protocol is on:
+- A plaintext message whose top level repeats a member name, exactly or in
+  another case (`"request"` and `"Request"`), is refused in every state:
+  LAN `400 {"error":{"code":"invalid_message"}}`, relayer
+  `{"ok":false,"error":"invalid_message",…}`. Accepted plaintext runs with
+  its `request` decoded from the exact bytes the policy judged. Behaviour change
+  when the protocol is wired: a message whose ONLY request member is a
+  case variant (`"Request"`, no `"request"`) used to reach the handler
+  through encoding/json's case-insensitive decode; it now runs with no
+  arguments, because only the exact `request` token is judged and used.
+- In `legacy`, `GET /api/screenshot` answers
+  `403 {"error":{"code":"screen_protected"}}` while the first-owner
+  invitation is live (the claim QR carries it).
+
 ## Shared Success Responses
 
 Most side-effect commands return:
@@ -202,6 +301,12 @@ Current error cases:
 - `primaryAddress` is accepted but not currently used by the executor.
 
 Current relayer error response: none standardized; command failure is logged.
+
+LAN hub (`POST :1111/api/cast`): `connect` is in the LAN-open set (controller
+tier): the released ff-app sends it LAN-first before every cast. Under the
+control protocol only an owner claims or rebinds with it; a non-owner
+`connect` to a claimed device is answered `ok` and changes nothing
+(`ff1-control-v1.md` §7.1).
 
 ### showPairingQRCode
 
@@ -483,13 +588,18 @@ at accept time, before dynamic hydration: the URL path verifies the fetched
 bytes and the inline path verifies the caller's own `dp1_call` token exactly
 as it arrived — both ingress decoders retain the `request` object verbatim
 beside the decoded map — never a re-marshal of the map (whose HTML escaping
-of `&`/`<`/`>` can inflate a valid document past the 4 MiB verifier bound)
+of `&`/`<`/`>` can inflate a valid document past the verifier bound)
 and never the typed struct (which drops fields the signer covered). The offline
 cached-copy fallback carries NO verdict — the stored body is a typed,
 hydrated re-marshal, not the signed bytes — so a cast served from it omits
-the fields below. Bounds, all aimed at untrusted ingress: a document larger than 4 MiB is
-refused before decoding on every path (hub body limit, relayer frame limit,
-URL fetch limit, and the verifier's own cap); at most 16 `signatures[]` entries are verified and a document
+the fields below. Bounds, all aimed at untrusted ingress, and no longer one figure: the inline
+paths refuse a document larger than 4 MiB before decoding (hub body limit,
+relayer frame limit, control v1 compact-form limit) while a URL fetch refuses
+one larger than 16 MiB, which is also the verifier's own cap. The URL path is
+allowed the larger document on purpose — the Feral File series published
+between 4.9 and 8.9 MiB compact (up to ~11.9 MiB as served, formatting included) are displayed that way (feral-file/feral-file#3597),
+and a URL fetch runs behind the command gate's heavy budget (at most 4
+concurrent) rather than at the hub's open door (64). At most 16 `signatures[]` entries are verified and a document
 with more is `invalid` (`too many signatures`) without any cryptography
 running; an entry whose `alg`, `role`, or `kid` exceeds 32/32/256 bytes makes the
 document `invalid` before any cryptography runs: that entry is reported as
@@ -575,6 +685,46 @@ Dynamic DP1 example:
 }
 ```
 
+Raster wallet-walk example (what ff-app casts for an address playlist with
+no hidden works; the address is inlined in the query, the page cursor is the
+only variable, and no API key travels in the document — the device adds its
+own `x-api-key` from config `raster.apiKey`; contract in
+[`api-design.md`](api-design.md), "DP-1 `dynamicQuery` resolution"):
+
+```json
+{
+  "messageID": "msg-display-4",
+  "message": {
+    "command": "displayPlaylist",
+    "request": {
+      "dp1_call": {
+        "id": "7c1b1f7e-5b2a-4d2e-9d7a-1a2b3c4d5e6f",
+        "items": [],
+        "dynamicQuery": {
+          "profile": "graphql-v1",
+          "endpoint": "https://api.raster.art/graphql",
+          "method": "POST",
+          "headers": { "Content-Type": "application/json" },
+          "query": "query WalletWalk($after: String) { address(address: \"0xabc…\") { tokensOwned(first: 250, after: $after) { pageInfo { hasNextPage endCursor } nodes { quantity lastAcquiredAt token { id chainId contractAddress tokenId tokenStandard name media { previewHash previewType contentUrl normalizedContentUrl contentType } artworks { id slug title isSeries platform { name } artists { id name slug addresses } } artists { id name slug addresses } } } } } }",
+          "pagination": {
+            "variable": "after",
+            "cursorPath": "data.address.tokensOwned.pageInfo.endCursor",
+            "hasNextPath": "data.address.tokensOwned.pageInfo.hasNextPage"
+          },
+          "responseMapping": {
+            "itemsPath": "data.address.tokensOwned.nodes",
+            "itemSchema": "raster/tokensOwned/1.0"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+A wallet with hidden works is cast as a static snapshot (items, no
+`dynamicQuery`) and takes the inline path above unchanged.
+
 Current success response: Chromium/player response from
 `window.handleCDPRequest(...)`, with the signature verdict merged in as
 additive keys beside `ok` (the displayAt-deferred acceptance
@@ -636,7 +786,15 @@ Current error cases:
   cleared).
 - `dp1_call` is not an object.
 - Inline DP1 cannot be marshaled/unmarshaled.
-- Dynamic query resolution fails.
+- Dynamic query resolution fails. For a `dynamicQuery` whose
+  `responseMapping.itemSchema` names a vendor shape this firmware has no
+  mapper for, the error names the schema (`dynamicQuery: unsupported
+  itemSchema "<schema>"`) and no request is made. For a Raster wallet walk,
+  a missing `pagination` block, a non-Raster or non-https endpoint, a
+  GraphQL `errors` array, a non-2xx page, a page whose `cursorPath`/
+  `hasNextPath` cannot be read, or a walk past 200 pages fails the whole
+  cast with no partial playlist (`raster dynamicQuery: …`); an individual
+  node the wall cannot play is skipped, not fatal.
 - CDP send to Chromium fails.
 - Player response is not `{"message":{"ok":true}}`; this records playback
   failure metrics but the raw player response is still returned if CDP
@@ -1091,6 +1249,12 @@ Current error cases:
   authorized keys.
 
 Current relayer error response: none standardized; command failure is logged.
+
+LAN hub (`POST :1111/api/cast`): `sshAccess` is owner tier. With the control
+protocol on, plaintext `sshAccess` is refused with
+`403 {"error":{"code":"enrollment_required"}}` in `legacy` and `enrolled`
+(before an owner exists too; `locked` refuses it as `locked`); an owner sends
+it sealed (`ff1-control-v1.md` §7.2).
 
 ### updateToLatestVersion
 
@@ -1677,7 +1841,11 @@ Error cases:
 - `disabled`: `mintPairing.enabled` is false.
 - `invalid_config`: broker base URL is missing, or mint pairing is enabled
   without a valid player contract manifest.
-- `topic_not_ready`: device has no current relayer topic ID.
+- `topic_not_ready`: device has no current relayer topic ID and cannot
+  issue display grants (§5.7 of `ff1-control-v1.md`). A device that issues
+  display grants pairs without a topic; its approval request and decision
+  then carry `topicID: ""`, and a Play 0.4 session request (no display
+  keys) on it is refused on the channel before the owner is asked.
 - `broker_unavailable`: broker channel creation failed before a pairing code
   was available.
 - `broker_response_invalid`: broker did not return a pairing code.
@@ -1806,7 +1974,11 @@ Error cases (`ok: false`):
 - `disabled`: `mintPairing.enabled` is false.
 - `invalid_request`: missing, extra, or malformed arguments.
 - `invalid_config`: the broker base URL is not configured.
-- `topic_not_ready`: device has no current relayer topic ID.
+- `topic_not_ready`: device has no current relayer topic ID and cannot
+  issue display grants (§5.7 of `ff1-control-v1.md`). A device that issues
+  display grants pairs without a topic; its approval request and decision
+  then carry `topicID: ""`, and a Play 0.4 session request (no display
+  keys) on it is refused on the channel before the owner is asked.
 - `topic_changed`: the claim changed while the device was joining.
 - `replace_in_progress` (retryable): the pairing being replaced was still
   delivering its approved session when the join's request ended.
@@ -2509,7 +2681,24 @@ Example (specific items):
 ```
 
 Omitting `sources` (or passing an empty array) reports on every item this
-process currently knows about, on disk and in flight.
+process currently knows about, on disk and in flight, except automatic
+playback captures (below). That whole-store listing carries no
+`not_cached` entries: it lists what the device holds or is working on.
+
+**Automatic playback captures are not reported.** Media the FF1 captured
+on its own while playing (see
+[automatic playback cache](automatic-playback-cache.md)) is kept for its
+own playback and offline replay, not because anyone asked, so the app's
+Downloads lists only the works someone downloaded. A whole-store request
+leaves these captures out of `items` and `totals`; a request that names
+one in `sources` gets `state: "not_cached"` for it, with no
+`coverageComplete`, `bytes` or `reason`, so the app offers Download.
+`downloadPlaylistItem`/`downloadPlaylist` for such a source is reported
+like any other download: `queued`/`downloading` while it runs, then the
+finished capture's state, because the download makes it an explicit one.
+`diskUsed` still counts their bytes, since it measures the whole store
+(see below) and they occupy it until evicted. `offline_cache_status`
+never announces them either (see that notification).
 
 Request fields, all optional:
 
@@ -2735,6 +2924,14 @@ Clears are pushed even though the clearing client already got an `ok: true`
 response, because *other* connected controllers (and local hub WebSocket
 clients) would otherwise keep rendering a stale `queued`/`ready` entry
 until they next poll.
+
+Automatic playback captures are not announced: an automatic attempt
+pushes no `queued`, `downloading`, failure or finished state (see
+`getOfflineCacheStatus`). The only push that names one is the
+`not_cached` sent when eviction or a clear removes it, which is the same
+answer a `getOfflineCacheStatus` request naming it gets. When an explicit
+download joins an automatic attempt already in flight, that attempt's
+finished state is pushed like any download's.
 
 Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`, and mirrored
 to local hub WebSocket clients.
@@ -3043,6 +3240,68 @@ factory reset's deletion is made durable the same way.
 
 Error cases: `invalidRequest`, `unsupported`, `contentPolicyUnavailable`.
 
+### getSeriesPlayback
+
+Purpose: read the device-level series-playback override (feral-file/ffos-user#425) — the
+one setting that forces every series on this device into a single playback
+mode, regardless of what each document asks for.
+
+Request: `{}` — no fields, and a **non-empty request is rejected** with
+`invalidRequest` rather than ignored, the same storm-gate reason
+`getContentPolicy` rejects one.
+
+```json
+{ "ok": true, "seriesPlayback": null, "active": true }
+```
+
+```json
+{ "ok": true, "seriesPlayback": "first", "active": true }
+```
+
+`seriesPlayback` is `null` when no override is set — "follow each document's
+own `seriesPlayback`" — or one of `"first"`, `"full"`, `"random"` when an
+owner has configured one. `null` is distinguishable from an explicit `"first"`:
+the two mean different things (one series item's own intent followed per item,
+versus every series on the device forced to its representative).
+
+Unlike `getContentPolicy`, there is no player acknowledgement to check: the
+player has no notion of a series to configure, so `active:true` reports only
+whether the durable store is readable.
+
+Error cases: `invalidRequest`, `seriesPlaybackUnavailable` (the store could not
+be read).
+
+### setSeriesPlayback
+
+Purpose: set or clear the device-level series-playback override.
+
+Request: exactly `{"seriesPlayback": "first" | "full" | "random" | null}`. Any
+other argument count, an unrecognized string, or any other JSON type, is
+`invalidRequest`.
+
+Unlike `setContentPolicy`, there is no CDP round trip: the player never sees
+this setting, so a write either commits durably or it does not — there is no
+second, player-held state to reconcile against it.
+
+An accepted change re-casts the currently displayed playlist **only if** it
+currently holds a series controld resolved this way (a static `dp1_call`
+cast with at least one `seriesRegistry` item). The full edition set for every
+such series is kept from the cast that resolved it, so the re-cast narrows
+under the new setting without a second catalog call. If nothing currently
+displayed went through that resolution this boot — a freshly started process,
+or the screen simply shows non-series content — the setting is saved with no
+re-cast: once a series is narrowed and cast, the playlist the player holds
+carries no marker telling controld a series was ever there, so there is
+nothing to re-narrow.
+
+A factory reset clears the series-playback override along with content policy,
+the claim, and the device name — the owner's preference must not outlive
+their claim.
+
+Error cases: `invalidRequest`, `seriesPlaybackUnavailable` (the durable write
+failed, or its directory entry could not be confirmed durable even on retry —
+`ok:true` means saved, the same contract `setContentPolicy` holds).
+
 ### Content policy effect on playlists
 
 `displayPlaylist` takes an optional `contentContext`, whose only valid present
@@ -3143,3 +3402,10 @@ Rules:
 - Device-control commands with destructive side effects (`shutdown`, `reboot`,
   `factoryReset`, `updateToLatestVersion`, `sshAccess`) should remain explicit
   command names with narrow request bodies.
+- The LAN hub serves local sources only (`lan_only` otherwise). With the
+  control protocol on, plaintext on it is limited to the LAN-open set
+  (controller tier) in every state, plus `showPairingQRCode` before an
+  owner exists, and to nothing once the owner closes the switch; see
+  "Plaintext policy" above. With the protocol off (no control state and
+  `control.enabled` false) the hub admits every command from a local
+  source, as before the protocol.

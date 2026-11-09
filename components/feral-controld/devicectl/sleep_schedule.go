@@ -885,6 +885,34 @@ func PlayerSleepGate(exec Executor) func() bool {
 	return g.playerSleepGateBlocked
 }
 
+// PlayerCastWakeGate returns the predicate commandrouter consults before a
+// controller's cast: does the player need waking first? It is deliberately
+// wider than PlayerSleepGate. The navigation gate asks whether navigating
+// would route a sleeping wall out of /sleep, so a FAILED wake (tracker
+// playerUnknownFailed, attempted awake, desired awake) reads as not
+// blocked. For a cast that answer is wrong: the player was last confirmed
+// sleeping and its page is still parked on /sleep, so the cast must retry
+// the wake rather than forward into it. The predicate therefore takes the
+// onAwake edge's own view of "was sleeping" (onAwakeWasSleepingLocked,
+// which keeps a failed wake eligible through sleepLastGood) OR the
+// schedule's desired state, so a page reloaded inside the sleep window is
+// woken by override before the loop can sleep it again. Executors without
+// the tracker (test doubles) yield an always-false predicate.
+func PlayerCastWakeGate(exec Executor) func() bool {
+	g, ok := exec.(interface{ playerNeedsWakeForCast() bool })
+	if !ok {
+		return func() bool { return false }
+	}
+	return g.playerNeedsWakeForCast
+}
+
+// playerNeedsWakeForCast implements PlayerCastWakeGate's predicate.
+func (e *executor) playerNeedsWakeForCast() bool {
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+	return e.sleepScheduleDesiredCache == sleepschedule.StateSleeping || e.onAwakeWasSleepingLocked()
+}
+
 // playerSleepGateBlocked implements PlayerSleepGate's predicate.
 // Design doc §3.1 step 2 gates on the schedule's DESIRED state, not just the
 // last APPLIED one — so this also blocks when sleepScheduleDesiredCache

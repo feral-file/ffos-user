@@ -493,7 +493,20 @@ type Service interface {
 	// against a JCS-canonicalized form (dp1-go's sign package), not raw
 	// bytes, so this does not affect signature validity — see
 	// docs/offline-artwork-capture.md.
-	DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (queued, total int, err error)
+	//
+	// maxQueued bounds the WORK this call does — how many of the
+	// playlist's items it classifies (one network-bound probe each) and
+	// enqueues — without bounding what it RECORDS. 0 means unbounded.
+	// The two have to be separable: the record this writes is the
+	// playlist's membership list, and ClearPlaylist enumerates the member
+	// sources to clear from it, so a record short of the real membership
+	// leaves items cached that a playlist-scoped clear then cannot reach
+	// (feralfile-bot F6 on ffos-user#421 — a bulk download overwriting a
+	// complete record saved earlier by a single-item download, after
+	// which the clear reported success and left the tail on disk).
+	// Callers that need the bound pass it here rather than truncating
+	// playlistRaw.
+	DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string, maxQueued int) (queued, total int, err error)
 	// ClearItem removes the item with this source URL from the cache: its
 	// record, any blob it was the last referent of, and any
 	// not-yet-started download queued for it. Because cached records are
@@ -515,6 +528,9 @@ type Service interface {
 	// about (on-disk + in-flight) when req.Sources is empty. The result
 	// is one bounded page (see MaxStatusItems and StatusSnapshot's doc);
 	// the zero StatusRequest asks for the first page of everything.
+	// Automatic playback captures are the FF1's own cache and are not
+	// reported (#423): a scoped ask answers not_cached for one, and the
+	// whole-store listing and its totals leave it out (see itemStatus).
 	Status(req StatusRequest) (StatusSnapshot, error)
 	// CachedPlaylistForURL returns the raw playlist body last downloaded
 	// via DownloadPlaylist(ctx, raw, sourceURL) OR indexed via
@@ -1888,7 +1904,7 @@ type queuedItem struct {
 	class MediaClass
 }
 
-func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (int, int, error) {
+func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string, maxQueued int) (int, int, error) {
 	if !s.started.Load() {
 		return 0, 0, ErrServiceNotStarted
 	}
@@ -1913,11 +1929,24 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 	// never leave already-accepted capture jobs running in the
 	// background for a call this method is about to report as failed.
 	total := len(playlist.Items)
+	// maxQueued bounds the items this call WORKS on, and nothing else:
+	// `considered` is what gets classified and enqueued, while playlistRaw
+	// — persisted below as the playlist's membership record — and the
+	// `total` reported back both stay whole. Bounding the record instead is
+	// the defect this parameter exists to prevent; see the interface doc.
+	considered := playlist.Items
+	if maxQueued > 0 && len(considered) > maxQueued {
+		s.logger.Warn("offline cache: bounding the items queued for download to the ceiling; the playlist record stays complete",
+			zap.String("playlist_id", playlist.ID),
+			zap.Int("items", len(considered)),
+			zap.Int("limit", maxQueued))
+		considered = considered[:maxQueued]
+	}
 	// Pair each queued item with the clear-epoch sampled just before its
 	// classify, so a ClearItem/ClearPlaylist landing during this (per
 	// item, network-bound) loop or the SavePlaylist below is detected at
 	// enqueue and cannot be silently undone — see downloadEpoch's doc.
-	toQueue, classifyFailed := s.classifyPlaylistItems(ctx, playlist.Items)
+	toQueue, classifyFailed := s.classifyPlaylistItems(ctx, considered)
 	if len(toQueue) == 0 && classifyFailed > 0 {
 		// Distinguish "classification itself is broken" from "this
 		// playlist genuinely has no cacheable items" — the latter is a
@@ -1934,7 +1963,7 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 		// not because it genuinely has none.
 		return 0, total, fmt.Errorf(
 			"offline cache: classify playlist %s items: %d of %d item(s) failed classification, none queued",
-			playlist.ID, classifyFailed, total)
+			playlist.ID, classifyFailed, len(considered))
 	}
 
 	// savePlaylistAndURLIndex re-checks plEpoch under playlistRecordMu and
@@ -2411,9 +2440,16 @@ func (s *service) process(ctx context.Context, j captureJob) {
 		return
 	}
 
-	if j.automatic != nil {
+	switch {
+	case automatic:
+		// A speculative success is the FF1's own playback cache, so it is
+		// not announced either: offline_cache_status stays as quiet about
+		// it as Status is (see itemStatus, #423). A Download that joined
+		// the capture cleared automatic above and is announced below like
+		// any download. Eviction still runs; the bytes are on disk.
+	case j.automatic != nil:
 		s.notifyObserver(j.item.Source, terminal, rec.Coverage)
-	} else {
+	default:
 		s.notify(j.item.Source, terminal, rec.Coverage)
 	}
 	s.enforceDiskLimit(j.sourceKey, j.item.Source)
@@ -3090,7 +3126,9 @@ func (s *service) HasReplayableItem(sources ...string) bool {
 			return false
 		}
 		seen[key] = struct{}{}
-		item, ok := s.itemStatus(key, source, false)
+		// hideAutomatic=false: a fresh automatic capture is replayable, and
+		// the rescue is the FF1's own use of it (see itemStatus).
+		item, ok := s.itemStatus(key, source, false, false)
 		if !ok {
 			continue
 		}
@@ -3109,7 +3147,8 @@ func (s *service) Status(req StatusRequest) (StatusSnapshot, error) {
 	// whole-store case it stays nil: every known key recovers its source
 	// from the record on disk or from sourceByKey (in-flight items).
 	keys, requestedSource := sortedUniqueSourceKeys(req.Sources)
-	if len(keys) == 0 {
+	wholeStore := len(keys) == 0
+	if wholeStore {
 		var err error
 		keys, err = s.allKnownItemKeys()
 		if err != nil {
@@ -3139,6 +3178,23 @@ func (s *service) Status(req StatusRequest) (StatusSnapshot, error) {
 		snapshot.Items = make([]ItemStatus, 0, min(limit, len(keys)))
 	}
 	var totals StatusTotals
+
+	// reported is itemStatus as a controller sees it (#423): automatic
+	// playback captures read as not_cached (see itemStatus), and a
+	// whole-store walk leaves not_cached entries out of the page and the
+	// totals. The walk lists what the FF1 holds or is working on for
+	// someone; its not_cached entries are those automatic captures and keys
+	// tracked as not_cached with no record, and neither is a work anyone
+	// asked the FF1 to keep. An evicted record leaves the listing the same
+	// way (see notifyEvicted). A scoped ask still gets its not_cached
+	// answer, as for any source it names.
+	reported := func(key string, withBytes bool) (ItemStatus, bool) {
+		item, ok := s.itemStatus(key, requestedSource[key], withBytes, true)
+		if ok && wholeStore && item.State == StateNotCached {
+			return ItemStatus{}, false
+		}
+		return item, ok
+	}
 
 	countTotals := func(item ItemStatus) {
 		totals.Total++
@@ -3177,18 +3233,19 @@ func (s *service) Status(req StatusRequest) (StatusSnapshot, error) {
 			}
 			// Cheap read: this key is only here to be counted, so skip
 			// the per-blob stats recordBytes would do.
-			if item, ok := s.itemStatus(key, requestedSource[key], false); ok {
+			if item, ok := reported(key, false); ok {
 				countTotals(item)
 			}
 			continue
 		}
 
-		item, ok := s.itemStatus(key, requestedSource[key], true)
+		item, ok := reported(key, true)
 		if !ok {
 			// No source recoverable for this key (see itemStatus): the
 			// entry would be unmatchable by any client, so it is
 			// dropped from the page rather than reported with an empty
-			// identity.
+			// identity. A whole-store not_cached entry is dropped here
+			// too (see reported).
 			continue
 		}
 		snapshot.Items = append(snapshot.Items, item)
@@ -3304,7 +3361,11 @@ func (s *service) allKnownItemKeys() ([]string, error) {
 // need the item's state for totals pass false, and must not put the
 // result on the wire: its Bytes would read as 0 rather than as "not
 // measured".
-func (s *service) itemStatus(key, sourceHint string, withBytes bool) (ItemStatus, bool) {
+//
+// hideAutomatic selects what a controller is told about automatic
+// playback captures (#423): Status passes true, HasReplayableItem false.
+// See the automatic-record branch below.
+func (s *service) itemStatus(key, sourceHint string, withBytes, hideAutomatic bool) (ItemStatus, bool) {
 	s.mu.RLock()
 	trackedState, tracked := s.state[key]
 	speculative := s.automaticKey == key && s.automaticIntent != nil && s.automaticIntent.Load()
@@ -3348,16 +3409,34 @@ func (s *service) itemStatus(key, sourceHint string, withBytes bool) (ItemStatus
 		return ItemStatus{Source: sourceHint, State: StateNotCached}, true
 	}
 
+	// An automatic playback capture (ItemRecord.Automatic) is the FF1's own
+	// cache, kept for its playback rather than because anyone asked, so a
+	// controller is told nothing about it: with hideAutomatic (Status) every
+	// one reads as not_cached, the answer for a source the device holds
+	// nothing for, and the app's Downloads lists only the works someone
+	// asked the FF1 to keep (#423). An expired one reads that way for every
+	// caller, because replay passes it through to the network.
+	// HasReplayableItem passes hideAutomatic=false: a fresh automatic
+	// capture is exactly what its offline rescue can replay, and hiding it
+	// there would reject casts the cache can serve. An explicit job in
+	// flight still shows as queued/downloading (speculative work was masked
+	// above), because someone has now asked. Its success leaves an explicit
+	// record (a fresh capture, or process clearing the flag on a capture
+	// it joined), which then reports below like any download. The entry is
+	// bare: the automatic record's coverage and bytes describe the FF1's
+	// cache, not this answer.
+	if rec.Automatic && (hideAutomatic || !rec.freshForPlayback(s.clock.Now())) {
+		state := StateNotCached
+		if trackedState == StateQueued || trackedState == StateDownloading {
+			state = trackedState
+		}
+		return ItemStatus{Source: rec.Item.Source, State: state, Percent: percentForState(state)}, true
+	}
+
 	// A record on disk always wins over in-memory state: e.g. a failed
 	// re-download attempt over an existing ready/partial capture should
 	// still report that earlier successful capture, not "failed".
 	state := stateFromCoverage(rec.Coverage)
-	if rec.Automatic && !rec.freshForPlayback(s.clock.Now()) {
-		state = StateNotCached
-		if trackedState == StateQueued || trackedState == StateDownloading {
-			state = trackedState
-		}
-	}
 	status := ItemStatus{
 		Source:           rec.Item.Source,
 		State:            state,

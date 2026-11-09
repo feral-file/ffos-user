@@ -8,6 +8,7 @@ on:
       - 'scripts/test-serve-feral-player.sh'
       - 'scripts/test-headless-startup-contract.sh'
       - 'scripts/test-enable-wake-on-lan.sh'
+      - 'scripts/test-wifi-reading.sh'
       - 'scripts/agent-iso-build-guard.sh'
       - 'scripts/test-agent-iso-build-guard.sh'
       - 'scripts/agent-branch-flow-guard.sh'
@@ -34,6 +35,7 @@ on:
       - 'scripts/test-serve-feral-player.sh'
       - 'scripts/test-headless-startup-contract.sh'
       - 'scripts/test-enable-wake-on-lan.sh'
+      - 'scripts/test-wifi-reading.sh'
       - 'scripts/agent-iso-build-guard.sh'
       - 'scripts/test-agent-iso-build-guard.sh'
       - 'scripts/agent-branch-flow-guard.sh'
@@ -86,6 +88,11 @@ jobs:
           # version-dependent, so keep it out of pipefail's reach.
           (/tmp/darkhttpd/darkhttpd 2>&1 || true) | head -1
           echo /tmp/darkhttpd >> "$GITHUB_PATH"
+
+      # wifi-reading.sh is written for the image's gawk (asort, delete of an
+      # array); the runner's default awk is mawk.
+      - name: Install gawk
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gawk
 
       - name: Run local verification target
         run: make verify-scripts

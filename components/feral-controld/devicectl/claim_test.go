@@ -61,6 +61,19 @@ func (s *narratorSpy) RefreshClaimQRName(resolve func() string) {
 	s.calls = append(s.calls, "refresh_claim_name")
 	s.lastName = resolve()
 }
+
+// RefreshClaimQRURL mirrors setupui.Service: build runs only while the
+// spy's current intent is the claim QR.
+func (s *narratorSpy) RefreshClaimQRURL(build func() string) {
+	if len(s.calls) == 0 || s.calls[len(s.calls)-1] != "claim" {
+		return
+	}
+	s.calls = append(s.calls, "refresh_claim_url")
+	s.lastURL = build()
+}
+func (s *narratorSpy) ClaimQRShowing() bool {
+	return len(s.calls) > 0 && (s.calls[len(s.calls)-1] == "claim" || s.calls[len(s.calls)-1] == "refresh_claim_url")
+}
 func (s *narratorSpy) ShowReady()        { s.calls = append(s.calls, "ready") }
 func (s *narratorSpy) ShowFactoryReset() { s.calls = append(s.calls, "factory_reset") }
 func (s *narratorSpy) ShowJoinFailed(reason string) {
@@ -1122,13 +1135,13 @@ func TestConnectClaimTransitionHidesOverlay(t *testing.T) {
 
 	args := []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`)
 
-	res, err := e.connect(args)
+	res, err := e.connect(context.Background(), args)
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 	assert.Equal(t, []string{"hide"}, spy.calls, "the claim transition must clear the claim QR")
 
 	// Re-connect on the now-claimed device (connect mutated st in place).
-	res, err = e.connect(args)
+	res, err = e.connect(context.Background(), args)
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 	assert.Equal(t, []string{"hide"}, spy.calls, "a re-connect must not hide again")
@@ -1154,7 +1167,7 @@ func TestConnectClaimTransitionPlayerDownDoesNotFailClaim(t *testing.T) {
 	spy := &narratorSpy{}
 	e := &executor{logger: zap.NewNop(), setupNarrator: spy, json: wrapper.NewJSON(), cdp: mockCDP}
 
-	res, err := e.connect([]byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
+	res, err := e.connect(context.Background(), []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 	assert.Equal(t, []string{"hide"}, spy.calls)
@@ -1244,7 +1257,7 @@ func TestConnectClaimTransitionDefaultPlaybackDoesNotClearDisplayAtCache(t *test
 
 	doneConnect := make(chan struct{})
 	go func() {
-		res, err := e.connect([]byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
+		res, err := e.connect(context.Background(), []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
 		require.NoError(t, err)
 		assert.Equal(t, CmdOK, res)
 		close(doneConnect)
@@ -1892,4 +1905,124 @@ func TestStartWifiSetupCommand(t *testing.T) {
 		assert.Equal(t, false, m["ok"])
 		assert.Equal(t, "unavailable", m["code"])
 	})
+}
+
+// TestMaybeShowClaimQROnOnline_RelayV2Route pins the G3 claim rule
+// (docs/setup-flow.md, "Claim QR → ready"): the remote-route wait ends on a legacy topic
+// OR a live v2 socket; on expiry a v2-carrying device that is confirmed online
+// still paints (first-owner enrollment is LAN-only), and every other expiry
+// keeps today's narration. A device without v2 wiring is unchanged.
+func TestMaybeShowClaimQROnOnline_RelayV2Route(t *testing.T) {
+	online := func(context.Context) (bool, error) { return true, nil }
+	offline := func(context.Context) (bool, error) { return false, nil }
+	unknown := func(context.Context) (bool, error) { return false, errors.New("monitord unavailable") }
+	yes := func() bool { return true }
+	no := func() bool { return false }
+
+	for _, tc := range []struct {
+		name        string
+		v2Wired     func() bool
+		v2Connected func() bool
+		probe       func(context.Context) (bool, error)
+		wantGate    bool
+		wantLast    string // last narration when the gate does not run
+	}{
+		{name: "v2 connected, no topic", v2Wired: yes, v2Connected: yes, probe: online, wantGate: true},
+		{name: "v2 wired but not connected, online", v2Wired: yes, v2Connected: no, probe: online, wantGate: true},
+		{name: "v2 wired, offline narrates", v2Wired: yes, v2Connected: no, probe: offline, wantLast: "connecting"},
+		{name: "v2 wired, probe error hides", v2Wired: yes, v2Connected: no, probe: unknown, wantLast: "hide"},
+		{name: "no v2 wiring keeps the legacy withhold", probe: online, wantLast: "hide"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			sm := mocks.NewMockStateManager(ctrl)
+			state.InjectStateManagerForTesting(sm)
+			sm.EXPECT().GetState().Return(&state.State{}).AnyTimes()
+			sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
+			mockOS := mocks.NewMockOS(ctrl)
+			mockOS.EXPECT().ReadFile(gomock.Any()).Return(nil, errors.New("no local config")).AnyTimes()
+
+			core, observed := observer.New(zap.InfoLevel)
+			spy := &narratorSpy{}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			clk := &autoClaimClock{}
+			// Let the remote-route wait run its full window, then stop the
+			// gate's retry backoff.
+			clk.onSleep = func() {
+				if clk.Now().Sub(time.Time{}) > autoClaimTopicWait+time.Second {
+					cancel()
+				}
+			}
+			e := &executor{logger: zap.New(core), setupNarrator: spy, clock: clk, os: mockOS}
+			e.SetInternetProbe(tc.probe)
+			if tc.v2Wired != nil {
+				e.SetRelayV2Route(tc.v2Wired, tc.v2Connected)
+			}
+
+			e.MaybeShowClaimQROnOnline(ctx)
+
+			gateRan := false
+			for _, entry := range observed.All() {
+				if entry.Message == "Auto claim flow: device online and unclaimed; running pre-claim gate" {
+					gateRan = true
+				}
+			}
+			assert.Equal(t, tc.wantGate, gateRan)
+			if !tc.wantGate {
+				require.NotEmpty(t, spy.calls)
+				assert.Equal(t, tc.wantLast, spy.calls[len(spy.calls)-1])
+			}
+		})
+	}
+}
+
+// TestRefreshOrRunClaimQR_KeepsOnScreenQR: a topic that lands while the claim
+// QR is up rebuilds the URL in place (same invitation), never repainting
+// "finalizing" over it.
+func TestRefreshOrRunClaimQR_KeepsOnScreenQR(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().Return(&state.State{Relayer: &state.RelayerState{TopicID: "topic-late"}}).AnyTimes()
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-late", TopicReady: true}).AnyTimes()
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(gomock.Any()).Return(nil, errors.New("no local config")).AnyTimes()
+
+	spy := &narratorSpy{calls: []string{"claim"}}
+	fc := &fakeControl{fields: []string{"inv-1", "pinsig", "pinenc", "gen"}, ok: true}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}, os: mockOS}
+	e.SetControl(fc)
+
+	e.RefreshOrRunClaimQR(context.Background())
+
+	assert.Equal(t, []string{"claim", "refresh_claim_url"}, spy.calls)
+	assert.Contains(t, spy.lastURL, "topic-late")
+	assert.Contains(t, spy.lastURL, "|inv-1|pinsig|pinenc|gen", "the refreshed QR carries the invitation")
+	assert.Zero(t, fc.cleared.Load(), "a refresh in place must not void the invitation a phone may have scanned")
+}
+
+// TestRefreshIfTopicLanded: a topic that landed while the flow was painting
+// is folded into the on-screen QR; an unchanged topic leaves the QR alone.
+func TestRefreshIfTopicLanded(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().Return(&state.State{Relayer: &state.RelayerState{TopicID: "topic-mid"}}).AnyTimes()
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "topic-mid", TopicReady: true}).AnyTimes()
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(gomock.Any()).Return(nil, errors.New("no local config")).AnyTimes()
+
+	spy := &narratorSpy{calls: []string{"claim"}}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}, os: mockOS}
+
+	e.refreshIfTopicLanded("topic-mid")
+	assert.Equal(t, []string{"claim"}, spy.calls, "same topic: no repaint")
+
+	e.refreshIfTopicLanded("")
+	assert.Equal(t, []string{"claim", "refresh_claim_url"}, spy.calls)
+	assert.Contains(t, spy.lastURL, "topic-mid")
 }

@@ -120,6 +120,18 @@ type autoClaimFlow interface {
 	MaybeShowClaimQROnOnline(ctx context.Context)
 }
 
+// relayV2RouteSink receives the v2 relay seams the claim flow's remote-route
+// wait consults (devicectl executor.SetRelayV2Route).
+type relayV2RouteSink interface {
+	SetRelayV2Route(wired, connected func() bool)
+}
+
+// claimQRRefresher is the topic observer's entry point when the executor has
+// one: refresh an on-screen claim QR in place, else run the claim flow.
+type claimQRRefresher interface {
+	RefreshOrRunClaimQR(ctx context.Context)
+}
+
 // startupOTAGateFlow is the narrow slice of the executor the online startup
 // update trigger needs (the claimed-device counterpart of autoClaimFlow).
 // Asserted at wiring time so test doubles without the method simply leave the
@@ -499,15 +511,22 @@ func wireInternetProbe(ex any, dc dbus.DBus, logger *zap.Logger) {
 }
 
 // externalLinkDetailProbe is externalLinkProbe's detail flavor: the same
-// hotspot-excluding probe, plus the ethernet-only verdict from the same nmcli
-// read, so the machine's §4.7 health snapshot learns the link TYPE at zero
-// extra probe cost. Same nil and failure semantics.
-func externalLinkDetailProbe(lc *status.LinkChecker) func(context.Context) (bool, bool, error) {
+// hotspot-excluding probe, plus the ethernet-only and address-pending verdicts
+// from the same nmcli read, so the machine's §4.7 health snapshot learns the
+// link TYPE, and its sustained raise learns the no-lease shape (#404), at
+// zero extra probe cost. Same nil and failure semantics.
+func externalLinkDetailProbe(lc *status.LinkChecker) func(context.Context) (provisioning.LinkDetail, error) {
 	if lc == nil {
 		return nil
 	}
-	return func(ctx context.Context) (bool, bool, error) {
-		return lc.ExternalLinkDetail(ctx, softap.ProfileName)
+	return func(ctx context.Context) (provisioning.LinkDetail, error) {
+		r, err := lc.ExternalLinkReading(ctx, softap.ProfileName)
+		return provisioning.LinkDetail{
+			Link:            r.Link,
+			Wired:           r.Wired,
+			AddrPending:     r.AddrPending,
+			AddrPendingConn: r.AddrPendingConn,
+		}, err
 	}
 }
 

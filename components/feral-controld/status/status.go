@@ -5,6 +5,7 @@ import (
 	//nolint:gosec
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -624,7 +625,14 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 	if relayerConnected {
 		if forceSend || s.shouldSendByHash(s.lastRelayerStatusHashes, notificationType, currentHash) {
 			if err := s.relayer.Send(ctx, data); err != nil {
-				s.logger.Error("Failed to send notification via relayer",
+				// The handle reports connected while only the v2 relay is
+				// up; the legacy send then just finds no socket, every
+				// round, and is retried once it reconnects.
+				logSendFailure := s.logger.Error
+				if errors.Is(err, relayer.ErrNotConnected) {
+					logSendFailure = s.logger.Debug
+				}
+				logSendFailure("Failed to send notification via relayer",
 					zap.String("notification_type", string(notificationType)),
 					zap.Error(err),
 				)

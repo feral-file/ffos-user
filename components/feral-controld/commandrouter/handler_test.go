@@ -463,6 +463,8 @@ func (f *fakeMintPairingService) Painter() overlay.Painter { return nil }
 
 func (f *fakeMintPairingService) SetSession(mintpairing.NavigationSession) {}
 
+func (f *fakeMintPairingService) SetDisplayGrants(mintpairing.DisplayGrantIssuer, string) {}
+
 func (f *fakeMintPairingService) RevokeTopicSessions(context.Context, string) (int, error) {
 	return 0, nil
 }
@@ -849,6 +851,16 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 		}).
 		Times(1)
 
+	// Static dp1_call: no dynamic content, so Process resolves series items
+	// by hand (see handler.go's CMD_DISPLAY_PLAYLIST branch) rather than
+	// through ProcessDynamicPlaylistForCast. mockPlaylist has none, so the
+	// resolution is a no-op; returning plain segments unchanged is what the
+	// real resolveSeriesCastPlan would do too.
+	ts.mockDP1.EXPECT().
+		ResolveSeriesCastPlan(ts.ctx, *mockPlaylist, gomock.Any(), gomock.Any(), dp1.CAST_PLAYLIST_ITEMS_LIMIT).
+		DoAndReturn(passthroughCastPlan).
+		Times(1)
+
 	ts.mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
 		Return(cdpResult, nil).
@@ -899,8 +911,17 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesInlineManifest(t *testi
 	ctx := context.Background()
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	// Static dp1_call again (see WithPlaylistObject above); echo the
+	// playlist straight back as plain segments since what this test pins is
+	// the inlineManifest round-trip through the real JSON wrapper, not
+	// series resolution.
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(ctx, gomock.Any(), gomock.Any(), gomock.Any(), dp1.CAST_PLAYLIST_ITEMS_LIMIT).
+		DoAndReturn(passthroughCastPlan).
+		Times(1)
 	handler := commandrouter.New(
-		newRoutableExecutor(ctrl), mockCDP, mocks.NewMockDP1(ctrl), mockStatusPoller,
+		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,
 		nil, nil, nil, nil, wrapper.NewJSON(), logger)
 
 	var playlistMap map[string]interface{}
@@ -959,8 +980,16 @@ func TestCommandHandler_Process_PlayRecentlyPlayed_ReentersDisplayPlaylist(t *te
 	ctx := context.Background()
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	// Re-entering displayPlaylist with the retained item goes through the
+	// static dp1_call branch, which resolves series items by hand; this
+	// playlist has none, so echo it back as plain segments.
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
+		AnyTimes()
 	handler := commandrouter.New(
-		newRoutableExecutor(ctrl), mockCDP, mocks.NewMockDP1(ctrl), mockStatusPoller,
+		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,
 		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
 	var displayExpression string

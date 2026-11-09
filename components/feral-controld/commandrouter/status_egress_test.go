@@ -62,7 +62,7 @@ func TestCheckStatusShowingKeyEgress(t *testing.T) {
 						server := wrapper.NewHTTPServer(&http.Server{Handler: mux, ReadHeaderTimeout: time.Second})
 						hub.New(ctx, mocks.NewMockWS(ctrl), router, nil, nil, server, codec, logger)
 						response := httptest.NewRecorder()
-						mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/cast", strings.NewReader(`{"command":"checkStatus","request":{}}`)))
+						mux.ServeHTTP(response, lanCheckStatusRequest())
 						require.Equal(t, http.StatusOK, response.Code)
 						encoded = response.Body.Bytes()
 					} else {
@@ -194,7 +194,7 @@ func TestCheckStatusOverlayEgress(t *testing.T) {
 						server := wrapper.NewHTTPServer(&http.Server{Handler: mux, ReadHeaderTimeout: time.Second})
 						hub.New(ctx, mocks.NewMockWS(ctrl), router, nil, nil, server, codec, logger)
 						response := httptest.NewRecorder()
-						mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/cast", strings.NewReader(`{"command":"checkStatus","request":{}}`)))
+						mux.ServeHTTP(response, lanCheckStatusRequest())
 						require.Equal(t, http.StatusOK, response.Code)
 						encoded = response.Body.Bytes()
 					} else {
@@ -277,7 +277,7 @@ func TestCheckStatusOverlayEgress_SetupOwner(t *testing.T) {
 						server := wrapper.NewHTTPServer(&http.Server{Handler: mux, ReadHeaderTimeout: time.Second})
 						hub.New(ctx, mocks.NewMockWS(ctrl), router, nil, nil, server, codec, logger)
 						response := httptest.NewRecorder()
-						mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/cast", strings.NewReader(`{"command":"checkStatus","request":{}}`)))
+						mux.ServeHTTP(response, lanCheckStatusRequest())
 						require.Equal(t, http.StatusOK, response.Code)
 						encoded = response.Body.Bytes()
 					} else {
@@ -313,4 +313,13 @@ func TestCheckStatusOverlayEgress_SetupOwner(t *testing.T) {
 			}
 		}
 	}
+}
+
+// lanCheckStatusRequest is a hub cast from a LAN peer: the hub serves local
+// sources only (feral-file#3551), and httptest's default source (192.0.2.1)
+// is a public address.
+func lanCheckStatusRequest() *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/cast", strings.NewReader(`{"command":"checkStatus","request":{}}`))
+	req.RemoteAddr = "192.168.1.20:40000"
+	return req
 }

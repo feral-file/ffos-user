@@ -16,6 +16,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	fflogger "github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
@@ -71,6 +72,10 @@ type hub struct {
 	// executor's probes); invoked on request goroutines, so the observer must
 	// be internally synchronized and non-blocking.
 	contactObserver func()
+
+	// control is the feral-file#3551 control gate (see control.go); nil when
+	// control.enabled is false.
+	control ControlGate
 }
 
 // SetContactObserver wires the control-plane contact signal (see
@@ -175,7 +180,7 @@ func NewWithLogDelivery(
 // routes registers every hub endpoint through the shared middleware. Each route
 // MUST be wrapped by withMiddleware — it is the single chokepoint for the
 // in-flight storm cap, request logging, and the future LAN authorization check
-// (issue #3471). Do not register a bare handler here.
+// (feral-file#3551). Do not register a bare handler here.
 func (h *hub) routes() {
 	handler := h.server.Handler()
 	mux, ok := handler.(*http.ServeMux)
@@ -293,7 +298,26 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.cmdHandler.Process(h.ctx, payload)
+	// Control protocol (feral-file#3551, docs/ff1-control-v1.md): envelopes
+	// go to the authority; plaintext goes through the §7.2 policy
+	// (RouteLAN — every hub caller, which the middleware already limited to
+	// local sources).
+	if h.control != nil {
+		if payload.Type == control.CmdEnvelope {
+			h.serveEnvelope(w, r, payload)
+			return
+		}
+		d, normalized := h.control.Plaintext(control.RouteLAN, payload)
+		if !d.Allow {
+			h.logger.Warn("Hub plaintext cast refused by control policy",
+				zap.String("command", string(payload.Type)), zap.String("code", d.Code))
+			writeControlError(w, d.Code)
+			return
+		}
+		payload = normalized
+	}
+
+	result, err := h.cmdHandler.Process(commands.FromController(h.ctx), payload)
 	if err != nil {
 		if commandrouter.IsRateLimited(err) {
 			h.logger.Warn("Cast request rejected by storm protection", zap.Error(err))
@@ -377,7 +401,13 @@ func (h *hub) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), screenshot.CaptureTimeout)
 	defer cancel()
 
+	invGen := h.screenshotGeneration()
 	image, err := h.capturer.Capture(ctx, bounds)
+	if err == nil && h.screenshotRaced(invGen) {
+		h.logger.Warn("Screenshot discarded: an invitation appeared during the capture")
+		writeControlError(w, control.CodeScreenProtected)
+		return
+	}
 	if err != nil {
 		statusCode := screenshotErrorStatus(err)
 		h.logger.Warn("Failed to capture screenshot", zap.Int("status", statusCode), zap.Error(err))

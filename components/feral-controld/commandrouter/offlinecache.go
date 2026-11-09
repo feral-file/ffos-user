@@ -79,6 +79,13 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// that window visible: see Service.ClearBarrier.
 	barrier := h.offlineCache.ClearBarrier()
 
+	// The resolve carries no item ceiling, for either command: this one
+	// enqueues exactly ONE item, selected by an exact-match scan whose cost
+	// does not grow with the list, and the bulk sibling bounds its own
+	// queueing at the service instead (see resolveOfflineCachePlaylist). The
+	// resolve also decides what the save below persists, and ClearPlaylist
+	// enumerates the member sources to clear FROM that record, so a truncated
+	// resolve here would orphan every item past the cut.
 	playlist, err := h.resolveOfflineCachePlaylist(ctx, args)
 	if err != nil {
 		return errorResponse("resolve_failed", err.Error(), true), nil
@@ -248,7 +255,12 @@ func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]an
 	// existed.
 	sourceURL, _ := stringArg(args["playlistUrl"])
 
-	queued, total, err := h.offlineCache.DownloadPlaylist(ctx, raw, sourceURL)
+	// The item ceiling is passed as the QUEUEING bound, not applied to raw
+	// above: raw is the membership record ClearPlaylist later enumerates, and
+	// truncating it is exactly what orphaned cached items past the cut — see
+	// resolveOfflineCachePlaylist's doc and Service.DownloadPlaylist's
+	// maxQueued.
+	queued, total, err := h.offlineCache.DownloadPlaylist(ctx, raw, sourceURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT)
 	if err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
@@ -384,8 +396,13 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 		return
 	}
 
-	sources := make([]string, 0, len(playlist.Items))
-	for _, item := range playlist.Items {
+	// This resync never sends the player a playlist — it only re-points
+	// interception at what is already on screen — so the scope comes from the
+	// items the player reported, not from the resolve above. See
+	// playlistForReplayScope.
+	scoped := playlistForReplayScope(playerStatus, playlist)
+	sources := make([]string, 0, len(scoped.Items))
+	for _, item := range scoped.Items {
 		sources = append(sources, item.Source)
 	}
 	// Serialize this scope resync against any concurrent displayPlaylist
@@ -408,6 +425,36 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 	if _, syncErr := h.kioskReplay.SyncPlaylist(ctx, sources); syncErr != nil {
 		h.logger.Warn("offline cache: failed to sync kiosk replay scope after clear", zap.Error(syncErr))
 	}
+}
+
+// playlistForReplayScope returns the playlist whose items offline-replay
+// scope must be derived from, for a pass that sends the player NOTHING.
+//
+// Interception is keyed on the URLs the kiosk actually fetches, so the scope
+// has to describe what the PLAYER holds — not what the daemon would resolve
+// the same status to now. Whenever player status carries a concrete item list
+// (a static inline playlist: the filtered active set the player was cast),
+// that list IS what it holds, and re-resolving it can only diverge from the
+// screen: a seriesRegistry item cast while the catalog was unreachable keeps
+// its representative, so a later pass whose expansion succeeds would scope
+// replay to editions that were never displayed and never cached. SyncPlaylist
+// then finds nothing cached and disables replay outright (see
+// offlinecache.applyScope), while the cached representative is still on the
+// wall (feralfile-bot #421 F7).
+//
+// A URL status carries no item list at all, and a dynamic one carries queries
+// rather than resolved items, so there the resolved playlist is the only
+// answer available — and it is also the one the player was given.
+//
+// Independent copy of playlist-refresher's own, for the same reason
+// resolveDisplayedPlaylist is duplicated here rather than shared: the two
+// packages deliberately do not depend on each other (see AGENTS.md's
+// service-boundary guidance). Keep the two in sync.
+func playlistForReplayScope(playerStatus *status.PlayerStatus, resolved *dp1.Playlist) *dp1.Playlist {
+	if playerStatus != nil && playerStatus.Playlist != nil && !playerStatus.Playlist.HasDynamicContent() {
+		return playerStatus.Playlist
+	}
+	return resolved
 }
 
 // resolveDisplayedPlaylist mirrors playlist-refresher's own
@@ -438,7 +485,16 @@ func (h *handler) resolveDisplayedPlaylist(ctx context.Context, playerStatus *st
 		return playlist, nil
 	case playerStatus.Playlist != nil:
 		if !playerStatus.Playlist.HasDynamicContent() {
-			return playerStatus.Playlist, nil
+			// Defensive, not load-bearing: every CMD_DISPLAY_PLAYLIST path
+			// now expands a series before it reaches the player, so
+			// playerStatus.Playlist should already carry editions — but
+			// this is a no-op (hasSeriesItems short-circuits) whenever
+			// that holds, and correct if it ever doesn't. Short-deadlined
+			// for that reason — see dp1.DefensiveSeriesExpansionTimeout.
+			expandCtx, cancel := context.WithTimeout(ctx, dp1.DefensiveSeriesExpansionTimeout)
+			defer cancel()
+			expanded := h.dp1.ExpandSeriesItems(expandCtx, *playerStatus.Playlist, 0)
+			return &expanded, nil
 		}
 		return h.dp1.ProcessDynamicPlaylist(ctx, *playerStatus.Playlist, false)
 	default:
@@ -585,6 +641,35 @@ func parseStatusRequest(args map[string]any) (offlinecache.StatusRequest, map[st
 // items), not the minimal first batch a live display uses. Kept as its own
 // helper (rather than sharing displayPlaylist's inline switch) so the
 // display-integration todo can evolve that path independently.
+//
+// The ceiling in that first sentence bounds the download WORK, and it is
+// applied where that work is scheduled — Service.DownloadPlaylist's maxQueued
+// — not here on the resolved playlist. Series expansion resolves each
+// seriesRegistry item into up to dp1.MAX_PLAYLIST_ITEMS_LIMIT editions, and
+// every resolver below is given an uncapped result size, so a conforming
+// request naming a handful of large series can resolve into tens of thousands
+// of items; CMD_DOWNLOAD_PLAYLIST is reachable from the LAN with no pairing
+// under the shipped control.enabled=false default, which is what makes the
+// ceiling worth enforcing rather than documenting (run-reviewer round 3, F1).
+//
+// Truncating HERE was the wrong place for it, and both download commands show
+// why: what this helper returns is also the playlist record that gets
+// persisted, and ClearPlaylist enumerates the member sources to clear FROM
+// that record. A truncated resolve therefore wrote a short membership list —
+// so a bulk download of an oversized playlist overwrote a complete record
+// saved earlier by a single-item download, and the clear that followed
+// reported success while leaving every item past the cut cached and invisible
+// to it (feralfile-bot F6, 2026-10-29). The same shape is why
+// handleDownloadPlaylistItem was already moved off the capped wrapper in round
+// 4: a source genuinely present past the ceiling answered a permanent
+// not_found. One uncapped resolve now serves both, and the bound sits on the
+// queueing instead.
+//
+// The ceiling is likewise NOT inside expandSeriesItems: that function is
+// shared with the display paths, where a blanket clamp would newly truncate
+// the tail of a publisher's own signed item list on any oversized playlist
+// that merely happens to also name a series — silent data loss neither
+// origin/develop nor this branch does anywhere else.
 func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[string]any) (*dp1.Playlist, error) {
 	switch {
 	case args["playlistUrl"] != nil:
@@ -613,7 +698,11 @@ func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[stri
 		if playlist.HasDynamicContent() {
 			return h.dp1.ProcessDynamicPlaylist(ctx, *playlist, false)
 		}
-		return playlist, nil
+		// Static dp1_call: mirror the uncapped expansion
+		// ProcessPlaylistURL above already applies, so a download of an
+		// inline series plays — and caches — its editions too.
+		expanded := h.dp1.ExpandSeriesItems(ctx, *playlist, 0)
+		return &expanded, nil
 
 	default:
 		return nil, fmt.Errorf("request must include playlistUrl or dp1_call")

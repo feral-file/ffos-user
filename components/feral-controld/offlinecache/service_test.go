@@ -239,7 +239,7 @@ func TestService_DownloadPlaylist_DuplicateSourcesCollapseToOneJob(t *testing.T)
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
 	require.NoError(t, err)
 	assert.Equal(t, 1, queued, "a duplicated source must be queued exactly once")
 	assert.Equal(t, 2, total, "total still reports the playlist's raw item count")
@@ -310,7 +310,7 @@ func TestService_DownloadPlaylist_ConcurrentRequestsForOneSourceCaptureOnce(t *t
 	for _, playlistID := range []string{"playlist-a", "playlist-b"} {
 		go func(raw json.RawMessage) {
 			start.Wait() // release both goroutines together
-			q, tot, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+			q, tot, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
 			results <- result{q, tot, err}
 		}(rawFor(playlistID))
 	}
@@ -460,7 +460,7 @@ func TestService_DownloadPlaylist_BeforeStartReturnsNotStarted(t *testing.T) {
 	defer ts.ctrl.Finish()
 
 	raw := json.RawMessage(`{"id":"playlist-1","items":[]}`)
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
 	assert.ErrorIs(t, err, offlinecache.ErrServiceNotStarted)
 	assert.Zero(t, queued)
 	assert.Zero(t, total)
@@ -683,7 +683,7 @@ func TestService_DownloadPlaylist_QueuesEveryClassButStreamingAndStoresVerbatim(
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
 	require.NoError(t, err)
 	assert.Equal(t, 2, queued, "software and media items must both be queued; only the streaming item is excluded")
 	assert.Equal(t, 3, total)
@@ -734,7 +734,7 @@ func TestService_DownloadPlaylist_DoesNotDoubleCountAlreadyInFlightItems(t *test
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued1, total1, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	queued1, total1, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
 	require.NoError(t, err)
 	assert.Equal(t, 1, queued1, "the first call must report the item as newly queued")
 	assert.Equal(t, 1, total1)
@@ -744,7 +744,7 @@ func TestService_DownloadPlaylist_DoesNotDoubleCountAlreadyInFlightItems(t *test
 		return err == nil && len(snap.Items) == 1 && snap.Items[0].State == offlinecache.StateDownloading
 	}, 2*time.Second, 10*time.Millisecond, "worker should have dequeued into downloading before the retry lands")
 
-	queued2, total2, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	queued2, total2, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
 	require.NoError(t, err)
 	assert.Zero(t, queued2, "a retry while the only item is still downloading must report queuedCount 0, not double-count it")
 	assert.Equal(t, 1, total2)
@@ -792,7 +792,7 @@ func TestService_DownloadPlaylist_AllItemsFailClassificationReturnsError(t *test
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, sourceURL)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, sourceURL, 0)
 	require.Error(t, err, "a classifier outage must not be reported as a successful download of zero software items")
 	assert.Zero(t, queued)
 	assert.Equal(t, 2, total)
@@ -848,7 +848,7 @@ func TestService_DownloadPlaylist_SavePlaylistFailureStartsNoWork(t *testing.T) 
 	// SavePlaylist failure must short-circuit before either the URL
 	// index write or any item's capture job ever starts.
 
-	queued, total, downloadErr := svc.DownloadPlaylist(context.Background(), raw, "https://feed.example.com/playlists/playlist-1")
+	queued, total, downloadErr := svc.DownloadPlaylist(context.Background(), raw, "https://feed.example.com/playlists/playlist-1", 0)
 	require.Error(t, downloadErr)
 	assert.Zero(t, queued, "no item may be reported as queued when the playlist itself failed to persist")
 	assert.Equal(t, 1, total)
@@ -887,7 +887,7 @@ func TestService_DownloadPlaylist_PartialClassificationFailureStillQueuesSuccess
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
 	require.NoError(t, err)
 	assert.Equal(t, 1, queued)
 	assert.Equal(t, 2, total)
@@ -922,7 +922,7 @@ func TestService_DownloadPlaylist_IndexesBySourceURLForOfflineDisplayFallback(t 
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, sourceURL)
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, sourceURL, 0)
 	require.NoError(t, err)
 
 	cached, err := ts.service.CachedPlaylistForURL(sourceURL)
@@ -948,7 +948,7 @@ func TestService_DownloadPlaylist_EmptySourceURLIsNotIndexed(t *testing.T) {
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "")
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
 	require.NoError(t, err)
 
 	_, err = ts.service.CachedPlaylistForURL("https://feed.example.com/playlists/playlist-1")
@@ -1102,7 +1102,7 @@ func TestService_DownloadPlaylist_InvalidJSON(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
-	_, _, err := ts.service.DownloadPlaylist(context.Background(), json.RawMessage(`not json`), "")
+	_, _, err := ts.service.DownloadPlaylist(context.Background(), json.RawMessage(`not json`), "", 0)
 	assert.Error(t, err)
 }
 
@@ -1113,7 +1113,7 @@ func TestService_DownloadPlaylist_MissingID(t *testing.T) {
 	raw, err := json.Marshal(map[string]interface{}{"dpVersion": "1.0.0", "items": []interface{}{}})
 	require.NoError(t, err)
 
-	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "")
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
 	assert.Error(t, err)
 }
 
@@ -1647,7 +1647,7 @@ func TestService_ClearPlaylist_DuringBlockedClassificationDoesNotResurrect(t *te
 
 	dlDone := make(chan error, 1)
 	go func() {
-		queued, _, dlErr := ts.service.DownloadPlaylist(context.Background(), raw, "https://feed.example.com/p1")
+		queued, _, dlErr := ts.service.DownloadPlaylist(context.Background(), raw, "https://feed.example.com/p1", 0)
 		assert.Zero(t, queued, "no item may be queued once the playlist is cleared mid-classification")
 		dlDone <- dlErr
 	}()
@@ -3327,7 +3327,7 @@ func TestService_DownloadPlaylist_ClassificationIsBoundedAndConcurrent(t *testin
 	defer ts.service.Stop()
 
 	start := time.Now()
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
 	elapsed := time.Since(start)
 
 	// Nothing could be classified, so this is the documented
@@ -3410,7 +3410,7 @@ func TestService_DownloadPlaylist_ClassifyDeadlineIsPerItemNotPerPhase(t *testin
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
 	require.NoError(t, err)
 	assert.Equal(t, itemCount, queued, "no item may be dropped for being late in the queue")
 	assert.Equal(t, itemCount, total)
@@ -3479,7 +3479,7 @@ func TestService_DownloadPlaylist_InlineDataURIsAreSkippedNotFailed(t *testing.T
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
 	require.NoError(t, err, "an inline item must not fail the command")
 	assert.Equal(t, 1, queued, "only the fetchable item is queued")
 	assert.Equal(t, 2, total)
@@ -3561,7 +3561,7 @@ func TestService_DownloadPlaylist_SkipsOversizedSources(t *testing.T) {
 		Return(&offlinecache.ItemRecord{}, nil).AnyTimes()
 
 	raw := []byte(`{"id":"pl-1","items":[{"id":"a","source":"` + good + `"},{"id":"b","source":"` + oversized + `"}]}`)
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
 	require.NoError(t, err, "one oversized item must not fail the whole playlist")
 	require.Equal(t, 2, total)
 	require.Equal(t, 1, queued, "only the in-bounds source is queued")
@@ -3821,4 +3821,78 @@ func TestService_ClearPlaylist_UncachedStillAdvancesTheGeneration(t *testing.T) 
 		"there is no record to delete, so the call still reports failure")
 	require.Greater(t, ts.service.CurrentPlaylistClearGeneration("pl-never-cached"), before,
 		"the generation must advance anyway, so an in-flight download for this id loses to the clear")
+}
+
+// maxQueued bounds the download WORK; it must not bound the membership
+// record. The record is the only list ClearPlaylist enumerates, so a record
+// short of the playlist's real membership leaves cached items that a
+// playlist-scoped clear reports success for and never touches.
+//
+// This is the shape feralfile-bot F6 reproduced on ffos-user#421: a tail item
+// cached earlier by a single-item download (which resolves uncapped), then a
+// bulk download of the same playlist, whose capped resolve overwrote the
+// complete record with a truncated one — after which ClearPlaylist left the
+// tail on disk. The bound is now on the queueing instead, so both halves hold
+// at once: three items classified, six recorded, every one of them clearable.
+func TestService_DownloadPlaylist_BoundedQueueKeepsTheWholeMembershipRecord(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	const itemCount = 6
+	const maxQueued = 3
+
+	items := make([]map[string]interface{}, itemCount)
+	sources := make([]string, itemCount)
+	for i := range items {
+		sources[i] = fmt.Sprintf("https://example.com/%02d.html", i)
+		items[i] = map[string]interface{}{"id": fmt.Sprintf("item-%02d", i), "source": sources[i]}
+	}
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1", "title": "t", "items": items,
+	})
+	require.NoError(t, err)
+
+	tail := sources[itemCount-1]
+
+	// Only the bounded prefix may be probed: classification is the
+	// per-item network cost the ceiling exists to bound, and gomock fails
+	// the test if a source past the bound is classified at all.
+	for _, source := range sources[:maxQueued] {
+		ts.mockClassifier.EXPECT().Classify(gomock.Any(), source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	}
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, item dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(maxQueued)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	// The tail item is already cached — the earlier single-item download
+	// that the capped bulk resolve used to make unreachable.
+	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
+		Item:     dp1playlist.PlaylistItem{ID: fmt.Sprintf("item-%02d", itemCount-1), Source: tail},
+		Coverage: offlinecache.Coverage{Complete: true},
+	}))
+
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", maxQueued)
+	require.NoError(t, err)
+	assert.Equal(t, maxQueued, queued, "the bound limits what is queued")
+	assert.Equal(t, itemCount, total, "total still reports the playlist's real item count, not the bound")
+
+	for _, source := range sources[:maxQueued] {
+		waitForState(t, ts.service, source, offlinecache.StateReady)
+	}
+
+	require.NoError(t, ts.service.ClearPlaylist("playlist-1"))
+
+	// Every member, including the tail past the bound: the clear reads the
+	// record this download wrote, and that record is the whole playlist.
+	for _, source := range sources {
+		_, err := ts.store.LoadItem(offlinecache.SourceKey(source))
+		assert.ErrorIs(t, err, offlinecache.ErrItemNotFound,
+			"clearing the playlist must reach %s", source)
+	}
 }

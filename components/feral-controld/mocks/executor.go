@@ -188,6 +188,32 @@ func (mr *MocksetupNarratorMockRecorder) RefreshClaimQRName(resolve interface{})
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RefreshClaimQRName", reflect.TypeOf((*MocksetupNarrator)(nil).RefreshClaimQRName), resolve)
 }
 
+// ClaimQRShowing mocks base method.
+func (m *MocksetupNarrator) ClaimQRShowing() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClaimQRShowing")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// ClaimQRShowing indicates an expected call of ClaimQRShowing.
+func (mr *MocksetupNarratorMockRecorder) ClaimQRShowing() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClaimQRShowing", reflect.TypeOf((*MocksetupNarrator)(nil).ClaimQRShowing))
+}
+
+// RefreshClaimQRURL mocks base method.
+func (m *MocksetupNarrator) RefreshClaimQRURL(build func() string) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "RefreshClaimQRURL", build)
+}
+
+// RefreshClaimQRURL indicates an expected call of RefreshClaimQRURL.
+func (mr *MocksetupNarratorMockRecorder) RefreshClaimQRURL(build interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RefreshClaimQRURL", reflect.TypeOf((*MocksetupNarrator)(nil).RefreshClaimQRURL), build)
+}
+
 // ShowClaimQRAutomatic mocks base method.
 func (m *MocksetupNarrator) ShowClaimQRAutomatic(url, deviceName string) {
 	m.ctrl.T.Helper()

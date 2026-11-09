@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/golang/mock/gomock"
@@ -128,6 +129,40 @@ func TestDP1_ProcessPlaylistURL_BodyOverCap_Rejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "body exceeds")
 }
 
+// TestDP1_ProcessPlaylistURLForCast_FormattedSizeNearRealResponse_Admitted pins
+// the bound against the bytes a real fetch actually sees, not the
+// compact-JSON byte count the issue measured: feralfile.com serves these
+// documents formatted, and crystalline-work-sdk is 11,854,155 bytes as
+// fetched (2026-11-05) against 8,904,417 bytes compact — a ~33% gap from
+// whitespace alone. A bound sized against the smaller figure (as
+// MaxPlaylistBodyBytes was before this test) would still refuse the issue's
+// own required document.
+func TestDP1_ProcessPlaylistURLForCast_FormattedSizeNearRealResponse_Admitted(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	const crystallineWorkSDKFetchedBytes = 11854155
+	require.Less(t, crystallineWorkSDKFetchedBytes, dp1.MaxPlaylistBodyBytes,
+		"MaxPlaylistBodyBytes must stay sized against the real HTTP response, not the compact-JSON figure")
+
+	url := "https://feed.example/crystalline-work-sdk.json"
+	// contentrating.ValidatePlaylistFragment runs on the raw bytes ahead of
+	// the (mocked) decode, so the body must still be valid JSON — padded
+	// inside the title string to reach the real fetched size without
+	// touching the schema it validates.
+	const prefix = `{"dpVersion":"1.1.0","title":"`
+	const suffix = `","items":[]}`
+	padding := strings.Repeat("x", crystallineWorkSDKFetchedBytes-len(prefix)-len(suffix))
+	body := []byte(prefix + padding + suffix)
+	require.Len(t, body, crystallineWorkSDKFetchedBytes)
+	expectFetch(ts, url, body, func(p *dp1.Playlist) { p.ID = "crystalline-work-sdk" })
+
+	result, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url)
+
+	require.NoError(t, err)
+	assert.Equal(t, "crystalline-work-sdk", result.ID)
+}
+
 // TestDP1_ProcessPlaylistURL_VerificationDisabled_NoVerdict: the config kill
 // switch leaves the playlist verdict-less, which every reporter treats as
 // "not verified" and omits.
@@ -138,7 +173,7 @@ func TestDP1_ProcessPlaylistURL_VerificationDisabled_NoVerdict(t *testing.T) {
 	mockHTTP := mocks.NewMockHTTPClient(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	client := dp1.New(mocks.NewMockFFIndexer(ctrl), mockHTTP, mockJSON, mockIO, logger, false, false)
+	client := dp1.New(mocks.NewMockFFIndexer(ctrl), mockHTTP, mockHTTP, mockJSON, mockIO, logger, false, false, "")
 
 	url := "https://feed.example/p.json"
 	body := signedFixture(t)

@@ -5,81 +5,29 @@ Agents should treat these rules as stable constraints when adding, refactoring, 
 
 ---
 
-## Version posture and API v2 transition
+## Version posture
 
-Unless a section is explicitly marked v2, this document describes the
-currently deployed v1 architecture. The proposed v2 target is defined by the
-[FF1 communication API v2](ff1-v2-api-contract.md), its
-[controller-authentication profile](ff1-v2-controller-authentication.md), and
-the separate [migration plan](ff1-v2-migration.md). It remains a design draft
-until the gates in those documents pass.
+This document describes the deployed architecture. Controller authorization
+is [`ff1-control-v1.md`](ff1-control-v1.md) (feral-file#3551): normative,
+implemented in `components/feral-controld/control`, and carried with the
+same envelopes on every transport — the LAN hub, the legacy topic relayer
+and the v2 device-ID relay (ff-relayer#26). A transport never confers or
+changes authority. The earlier MQTT/mTLS "FF1 communication API v2" drafts
+(API contract, controller-authentication profile and migration plan) are
+deleted: nothing implemented them, and the control protocol with relay v2
+replaced them. The legacy relayer is retired under that contract's §15.4,
+not by a new wire protocol.
 
-The v2 target preserves these service boundaries:
+These boundaries hold across that work:
 
-- `feral-controld` remains the sole owner of runtime external control. It owns
-  the outbound MQTT 5 connection and the LAN HTTPS/WebSocket adapter, then
-  routes the common command model to existing executors. Protocol encoding,
-  retained state, authentication, and authorization belong in focused boundary
-  packages; command policy must not be hidden in transport handlers.
+- `feral-controld` is the sole owner of runtime external control. Protocol
+  encoding, authentication and authorization live in focused boundary
+  packages (`control`, `controlgate`, `relaywire`); command policy must not
+  be hidden in transport handlers.
 - `feral-controld` also owns setup and recovery UX, including the recovery
-  SoftAP: reset preparation, physical confirmation, local erasure, and
-  setup-state transitions no longer cross a service boundary at all, so the
-  versioned D-Bus contract the v2 draft specified for them is moot — the
-  coordination is in-process (see "The setupd merge" below).
-- For reset, `feral-controld` owns external command admission, protocol-visible
-  confirmation state, the broker authorization barrier, runtime-identity
-  rotation, controller-authority bootstrap, and final protocol status — plus
-  the on-device confirmation UX and local reset execution the draft had split
-  out to `feral-setupd`. The ordering constraint survives the merge and is
-  what actually matters: reset cannot report completion before the
-  broker-barrier, identity-registry, and authority-registration ACKs plus
-  durable local authority activation and cleanup finish.
-
-> The setup/recovery bullet above previously assigned that ownership to
-> `feral-setupd`, copied from the v2 draft written before that daemon was
-> merged into `feral-controld` (see "The setupd merge" below).
-
-The current relayer, Mint pairing handoff, optional port-1111 Hub, and
-`GetRelayerTopicID` exist only behind migration compatibility gates. They are
-removed together from each successfully promoted v2 device image; v2 must not
-retain permanent dual command, pairing, discovery, or authorization semantics.
-A device that rolls back, is below the minimum upgrade version, or otherwise
-remains on current v1 keeps all four v1 paths. The hosted relayer and other v1
-infrastructure remain available until the remaining legacy fleet passes its
-separate infrastructure-retirement gate.
-
-The v2 `_ff1-control._tcp.local` advertisement is independent of broker
-connectivity, internet connectivity, and legacy `enableHub`. `feral-controld`
-advertises it only while a LAN-usable interface exists and the complete v2 TLS
-backend is ready. It withdraws the record whenever the listener path is
-unavailable and before entering `pending_broker_cleanup` or
-`pending_identity_rotation` or `pending_authority_bootstrap`. Discovery is an
-endpoint hint, never authentication or authorization.
-
-### V2 TCP 443 deployment boundary
-
-The FF OS least-privilege target reserves public TCP 443 with a system-level
-`ff1-control.socket` and a hardened `ff1-control-proxy.service` running
-`systemd-socket-proxyd`. The socket listens on LAN-usable IPv4 and IPv6
-addresses. The proxy forwards the unmodified raw TCP stream to
-`feral-controld`'s loopback-only TLS listener at `127.0.0.1:8443`; it parses no
-TLS, HTTP, WebSocket, or application data. TLS 1.3, mTLS, HTTPS, WebSocket, and
-all protocol authorization remain owned by unprivileged `feral-controld`.
-`feral-controld` is not run as root and receives no `CAP_NET_BIND_SERVICE`.
-The system manager performs the privileged bind; the proxy runs under a
-dedicated unprivileged identity with `NoNewPrivileges` and no ambient or
-bounding capabilities, and may connect only to the loopback backend.
-
-An active socket unit is not readiness. The mDNS record is published only
-after the public 443 -> raw proxy -> loopback TLS path and the active identity
-are ready. Reset withdrawal happens before the TLS backend is quiesced; while
-any pending-reset lifecycle is active, the front end fails closed and no
-advertisement is present. Advertisement resumes only after identity rotation,
-authority activation, local cleanup, and a successful end-to-end readiness
-check, using the active identity's SPKI fingerprint.
-
-This front end is an FF OS deployment customization. It does not change the v2
-wire protocol or expose a second application endpoint.
+  SoftAP: reset preparation, physical confirmation, local erasure and
+  setup-state transitions are in-process, not a D-Bus contract (see "The
+  setupd merge" below).
 
 ---
 
@@ -120,13 +68,18 @@ Process-level crash recovery remains systemd's job; the in-process supervisor on
 
 ## Deliberately-open LAN surface (release-scoped, pending security sign-off)
 
-This release ships three LAN-facing surfaces **without** authentication. They are accepted, release-scoped decisions, not oversights. Each is named here for security sign-off, and each has a single declared end state: **v2 screen-anchored LAN pairing** (issue [#3471](https://github.com/feral-file/ffos-user/issues/3471)), where a short code shown on the device's display anchors trust, the device stores authorized controller keys, the owner reviews/revokes them on-device, and factory reset clears them.
+This release ships three LAN-facing surfaces that are open, wholly or in part, **without** authentication. They are accepted, release-scoped decisions, not oversights, each named here for security sign-off. The command API's end state is the feral-file#3551 control protocol with its LAN-open rule (item 1, normative in `docs/ff1-control-v1.md`), which replaced the earlier v2 screen-anchored LAN pairing plan (issue [#3471](https://github.com/feral-file/ffos-user/issues/3471)).
 
-1. **Unauthenticated command API on `:1111`.** `POST /api/cast` on the LAN hub accepts the same command envelope as the relayer and routes it through the same `commandrouter`. Any host on the local network can drive the device. The hub's single shared middleware (`hub/middleware.go`) is the **designated insertion point** for the v2 authorization layer — it is the one chokepoint every hub route passes through.
+1. **Command API on `:1111`, open to the device's own network for what can be undone.** `POST /api/cast` on the LAN hub accepts the same command envelope as the relayer and routes it through the same `commandrouter`. The hub's single shared middleware (`hub/middleware.go`) is the one chokepoint every hub route passes through, and its first authorization check is the **local-source rule** (`hub/localsource.go`, feral-file#3551): a request from a source that is not loopback, private or link-local (RFC 1918, `169.254/16`, `fe80::/10`, `fc00::/7`), CGNAT (`100.64/10`, Tailscale, which ffos's `feral_owner` filter limits to the owner's tailnet address) or on-link to one of the device's interface prefixes (read per request) is refused `403 lan_only` on every route, envelopes and the notification WebSocket included. Remote control is relay v2's job.
+   - **The control protocol (feral-file#3551, `docs/ff1-control-v1.md`), started by `control.enabled` in `controld.json` (default off; off on a device without control state, the hub admits every command from a local source, as before the protocol). It fails closed: a device that has control state on disk (`.state/control/` or the factory-reset tombstone `.state/control.retired`) runs the protocol whatever the config says, because `controld.json` is replaced by every full-image OTA.** When on, FF1 is the only authority on every route. Each controller holds its own P-256 keys and an owner- or controller-tier grant in `.state/control/`; an authorized request is an `ff1Envelope` cast carrying a signed (ES256) and encrypted (ECDH-ES/A256GCM) JWE, admitted by `control.Authority.Open` with a durable per-controller replay window, and answered with a reply signed by the device key and encrypted to the request's reply key. The hub (`hub/control.go`) and the relayer path (`mediator.handleRelayerMessage`) both hand envelopes to `controlgate.Gate`, which runs the admitted command through the same storm-gated router with the `control.Principal` on the context; `commandrouter.Process` re-checks the tier before any handler or the CDP fallthrough, and the storm gate's dedupe key includes the controller.
+   - **The LAN-open rule (§7.2).** On the device's own network anyone may run what the next command can undo: the controller tier (`control/tiers.go`), which is therefore also the LAN-open set (playback, offline cache, status reads, volume, DDC, sleep and wake, `reboot`, `uploadLogs`, `connect`, which a non-owner cannot use to claim). What cannot be undone (`sshAccess`, `factoryReset`, `startWifiSetup`, `updateToLatestVersion`, `shutdown`, owner settings, input injection) is owner tier and needs an owner's envelope on every route, before an owner exists too; before an owner exists the LAN also admits `showPairingQRCode`, the first-owner path. Once an owner exists the LAN-open set stays open while the owner's switch is open (`setLanControl`, persisted in `.state/control/lan.json`, default open, fail-closed on a damaged file, never a lock); closed, the LAN refuses all plaintext (`403 enrollment_required`). In either case an owned device closes `/api/screenshot` (it has no envelope form) and status withholds the topic. Notifications are sealed per active grant; with the switch open the LAN WebSocket also carries the four status types in plaintext, never mint pairing or approval requests. Images from the 3.0.0 LAN-open build carry no legacy `relayer` block, so the legacy relayer's plaintext rules (`legacy`: everything; owned: controller tier) apply only to older images.
+   - **Pairing.** The first owner enrolls with a single-use invitation carried in the claim QR (physical presence) from a phone on the device's network. Later controllers are added by owner-initiated registration (§5.6): the controller shows its keys as a QR, an owner registers them with `registerController`, and the controller then enrolls; neither the device's screen nor the same Wi-Fi is needed. A controller grant is what a phone needs to control the device from off its network. An owned device no longer paints a claim QR for a second phone, and the app has no button that asks it to (feral-file#3551, feral-file/ff-app#1216). The older `requestAccess` flow, where an owner approves against a 6-digit code bound to the device key, remains only as a LAN-only fallback that current clients no longer offer. A sole-phone owner who lost that phone recovers by factory reset.
+   - **Reset and corruption.** A factory reset first writes the tombstone `.state/control.retired` (which keeps the device locked if the reset rolls back), then deletes `.state/control/`, and fails if either step fails. A corrupt control directory is `locked` (envelopes refused, LAN plaintext refused), never silently unowned.
+   - **Residuals.** By design, anyone on the device's network can run the LAN-open set on an owned device while the switch is open; an owner on a shared network (office, hotel, museum) closes it. A DDC power off (VCP D6) cannot be undone over DDC on some panels. No LAN-served payload of a claimed device carries the topic: the `getDeviceStatus` reply and the `/api/notification` WebSocket payloads (`device_status`, `player_status`; the overlay field reports only owner/state, never the claim-QR URL), `/metrics`, mDNS TXT (`id`/`name`/`claimed`/`api`), and `/api/logs` (a loopback-only ingest route that serves nothing back) were audited for it. The setup access point's captive portal keeps its own residual (`docs/ff1-control-v1.md` §13).
 2. **Prometheus `/metrics` on the LAN.** The hub serves playback metrics in Prometheus text format at `:1111/metrics`, unauthenticated, on the same surface.
 3. **System-wide unprivileged-port floor.** `feral-controld` runs as a `systemd --user` service (uid 1000) where `CAP_NET_BIND_SERVICE` is inert, so the captive portal binds `:80` by lowering the system-wide unprivileged-port floor: `net.ipv4.ip_unprivileged_port_start=80`. This sysctl is set in the base image (`ffos` repo, `archiso-ff1/airootfs/etc/sysctl.d/10-unprivileged-port-start.conf`), not in this repository, and it applies to **every** process on the device, not just the portal.
 
-Until v2 lands, deployments must treat the LAN as a trust boundary: enable these surfaces only on networks where local clients are trusted. The `contract` field on `GET /api/status` (value `"1"`) exists for the dual-running window that retiring the open surface requires — see `docs/api-design.md`.
+Deployments treat the LAN as a trust boundary for what is still open on it: the LAN-open command set (until the owner closes it), `/metrics`, and an ownerless device. The `contract` field on `GET /api/status` (value `"1"`) exists for the dual-running window that retiring the open surface requires — see `docs/api-design.md`.
 
 ---
 
@@ -169,6 +122,8 @@ The former controld→setupd signals (`show_pairing_qr_code`, `factory_reset`, `
 ### External transport: WebSocket relayer
 
 `feral-controld` maintains a persistent WebSocket connection to the remote relayer endpoint. Remote commands from the mobile app arrive over this connection. `feral-controld` routes them locally to either the device executor (device-control commands) or Chromium via CDP (web/playback commands). No other service connects to the relayer.
+
+There are two relayer sockets, independent of each other: the legacy topic relayer (`relayer.endpoint`) and the v2 device-ID relay (`relayV2.endpoint`, `docs/ff1-control-v1.md` §10). The legacy one is optional (feral-file#3551 G3). In G3 a missing `relayer` block or an empty endpoint means no legacy relayer, and images from the 3.0.0 LAN-open build on ship **no `relayer` block** (the release operator deleted it from every environment's `FERAL_CONTROLD_CONFIG_JSON`; a pre-G3 controld would crash-loop on such a config, so no image is built from an older ffos-user ref, `docs/ff1-control-v1.md` §15.4). A legacy topic a device stored before that OTA is inert. On an image that still configures one, any permanent legacy dial error (404/410 handshake, NXDOMAIN, bad URL) latches it retired (`ErrLegacyRetired`) instead of exiting the daemon: every permanent class survives a restart, so exiting fixed nothing. While latched it dials only on an escalating probe (1 min doubling to 1 h; a successful dial clears the latch) and once per offline→online edge (`AllowRetiredProbe`, from the mediator), because a captive portal or filtering resolver also returns a non-temporary DNS failure and a legacy-claimed device must heal when the network does. A probe that meets a transient error runs the ordinary retry loop; only a permanent error re-latches. v2 is dialed only with a control authority, which a device without control state gets only from `control.enabled`, so a G3 image ships `control.enabled=true` with `relayV2.endpoint` (`docs/ff1-control-v1.md` §7.2, §15.4). The netlog probe host follows the v2 endpoint first, then the legacy one, then the support-logs host. Pre-G3 firmware exits instead and redials on every heartbeat, which is why the legacy host's shutdown waits for the fleet (`docs/ff1-control-v1.md` §15.4).
 
 ### UI control: Chrome DevTools Protocol (CDP)
 
@@ -294,9 +249,9 @@ Component versions follow semantic versioning. The `ffos` build repo pins the `f
 
 ## Current-v1 invariants agents must not break
 
-These invariants apply while the v1 compatibility gates remain active. Their
-coordinated v2 replacements are defined in the transition section above; no
-individual v1 transport may be removed or repurposed in isolation.
+These invariants apply while the v1 compatibility gates remain active. Retiring
+a v1 transport follows `ff1-control-v1.md` §15; no individual v1 transport may
+be removed or repurposed in isolation.
 
 1. `feral-sys-monitord` emits signals; it never takes recovery actions or calls other services.
 2. `feral-watchdog` consumes signals; it never emits its own D-Bus health signals.
@@ -308,5 +263,5 @@ individual v1 transport may be removed or repurposed in isolation.
 8. The LAN hub listener (port 1111) binds unconditionally when `enableHub` is on (its default); it is the LAN recovery channel and must not be re-gated on internet or relayer state. mDNS discoverability, by contrast, is link-keyed.
 9. `feral-controld`'s startup brings the hub, mDNS, and provisioning up before the relayer/CDP init, and the relayer connect is never fatal. Do not reorder so that a relayer or CDP failure can abort setup.
 10. `feral-sys-monitord` exposes D-Bus RPC (`GetConnectivityStatus`, `GetSysMetrics`), relied on by `feral-controld`. Do not remove without a coordinated update to all callers.
-11. The unauthenticated `:1111` command API, `:1111/metrics`, and the system-wide `ip_unprivileged_port_start=80` sysctl are accepted, release-scoped surfaces whose end state is v2 screen-anchored pairing (#3471). Add LAN authorization at the hub's shared middleware chokepoint, not by diverging individual routes.
+11. The `:1111` command API's open LAN-open set (feral-file#3551: the controller tier, local sources only, while the owner's switch is open), `:1111/metrics`, and the system-wide `ip_unprivileged_port_start=80` sysctl are accepted, release-scoped surfaces ("Deliberately-open LAN surface" above). A command joins the controller tier, and so the LAN-open set, only if the next command can undo it. Add LAN authorization at the hub's shared middleware chokepoint (the local-source check lives there) or in the §7.2 policy, not by diverging individual routes.
 12. `feral-controld` may REPORT a health condition to `feral-watchdog` over D-Bus (today: `cdp_stuck`, ffos-user#356), but must never itself call `systemctl restart`/`reboot` on Chromium's behalf or decide to. `feral-watchdog`'s `ChromiumMonitor` remains the sole owner of that decision, folding any such report into its existing restart/fallback-hold/reboot-cap ladder and suppression gates rather than acting on it directly.

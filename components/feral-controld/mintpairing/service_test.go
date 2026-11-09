@@ -552,6 +552,24 @@ func TestRelayerSessionCreator_ListEphemeralSessionIDsReportsAFailedList(t *test
 	require.Error(t, err, "an unreadable list must never look like an empty one")
 }
 
+// A retired legacy relayer (410 on its session routes) holds no usable
+// sessions, so a factory reset's sweep is done, not failed.
+func TestRevokeTopicSessions_RetiredRelayerIsNothingToRevoke(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusGone)
+	}))
+	defer server.Close()
+
+	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+	_, err := creator.ListEphemeralSessionIDs(context.Background(), "topic-1")
+	require.ErrorIs(t, err, errRelayerSessionsRetired)
+
+	s := newService(Options{}, nil, creator, nil, nil, wrapper.NewJSON(), zap.NewNop()).(*service)
+	revoked, err := s.RevokeTopicSessions(context.Background(), "topic-1")
+	require.NoError(t, err)
+	assert.Zero(t, revoked)
+}
+
 func TestRelayerSessionCreator_RevokeTreatsAMissingSessionAsRevoked(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -4007,6 +4025,7 @@ type fakeBrokerChannel struct {
 	// rejectionRetryable records each rejection's retryable flag, in order.
 	rejectionRetryable []bool
 	deliveredSessions  []minter.MintResult
+	deliveredGrants    []minter.DisplayGrantResult
 	successErr         error
 	// pollErr is returned together with the pending request — the minter's
 	// attestation-mismatch shape (the refused request rides along).
@@ -4019,6 +4038,17 @@ type fakeBrokerChannel struct {
 	pollAfterRequestErr error
 	// requestHandedOut records that the request was returned by a poll.
 	requestHandedOut bool
+	// joinedRequest is the request the site announced at create, when set.
+	joinedRequest *minter.MintRequest
+}
+
+func (f *fakeBrokerChannel) JoinedMintRequest() (minter.MintRequest, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.joinedRequest == nil {
+		return minter.MintRequest{}, false
+	}
+	return *f.joinedRequest, true
 }
 
 // SetPollAfterRequestErr makes later polls fail with err, as the broker does
@@ -4125,6 +4155,34 @@ func (f *fakeBrokerChannel) SendMintSuccess(_ context.Context, _ minter.MintRequ
 		}
 	}
 	return &minter.SendMessageResult{ChannelID: f.resolvedChannelID(), Seq: 1, ExpiresAt: time.Now().Add(time.Minute)}, nil
+}
+
+// SendMintDisplayGrant records a delivered display grant; it shares the
+// session delivery's count, hooks and failure injection.
+func (f *fakeBrokerChannel) SendMintDisplayGrant(_ context.Context, _ minter.MintRequest, grant minter.DisplayGrantResult) (*minter.SendMessageResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.successCount++
+	f.deliveredGrants = append(f.deliveredGrants, grant)
+	if f.onSend != nil {
+		f.onSend()
+	}
+	if f.successErr != nil {
+		return nil, f.successErr
+	}
+	if f.successSent != nil {
+		select {
+		case f.successSent <- struct{}{}:
+		default:
+		}
+	}
+	return &minter.SendMessageResult{ChannelID: f.resolvedChannelID(), Seq: 1, ExpiresAt: time.Now().Add(time.Minute)}, nil
+}
+
+func (f *fakeBrokerChannel) DeliveredGrants() []minter.DisplayGrantResult {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]minter.DisplayGrantResult(nil), f.deliveredGrants...)
 }
 
 func (f *fakeBrokerChannel) SendMintRejection(ctx context.Context, _ minter.MintRequest, rejection minter.MintRejection) (*minter.SendMessageResult, error) {

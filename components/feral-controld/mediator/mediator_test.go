@@ -2,6 +2,7 @@ package mediator_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -18,6 +19,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
+	"github.com/feral-file/ffos-user/components/feral-controld/controlgate"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
@@ -1277,7 +1280,7 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 
 				// Expect the command handler to process
 				ts.mockCommandHandler.EXPECT().
-					Process(gomock.Any(), commands.Command{
+					Process(fromControllerCtx{}, commands.Command{
 						Type:      commands.Type(cmd),
 						Arguments: args,
 					}).
@@ -1320,7 +1323,7 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 
 				// Expect the command handler to process and return error
 				ts.mockCommandHandler.EXPECT().
-					Process(gomock.Any(), commands.Command{
+					Process(fromControllerCtx{}, commands.Command{
 						Type:      commands.Type(cmd),
 						Arguments: args,
 					}).
@@ -1351,7 +1354,7 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 
 				// Expect the command handler to process and return nil result
 				ts.mockCommandHandler.EXPECT().
-					Process(gomock.Any(), commands.Command{
+					Process(fromControllerCtx{}, commands.Command{
 						Type:      commands.Type(cmd),
 						Arguments: args,
 					}).
@@ -1421,7 +1424,7 @@ func TestMediator_HandleRelayerMessage_RateLimited(t *testing.T) {
 	ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte("{}"), nil).AnyTimes()
 
 	ts.mockCommandHandler.EXPECT().
-		Process(gomock.Any(), commands.Command{Type: commands.Type(cmd), Arguments: args}).
+		Process(fromControllerCtx{}, commands.Command{Type: commands.Type(cmd), Arguments: args}).
 		Return(nil, &commandrouter.RateLimitedError{Command: commands.Type(cmd), Reason: "rate limit exceeded"}).
 		Times(1)
 
@@ -1478,7 +1481,7 @@ func TestMediator_HandleRelayerMessage_SourceUnreachable(t *testing.T) {
 	ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte("{}"), nil).AnyTimes()
 
 	ts.mockCommandHandler.EXPECT().
-		Process(gomock.Any(), commands.Command{Type: commands.Type(cmd), Arguments: args}).
+		Process(fromControllerCtx{}, commands.Command{Type: commands.Type(cmd), Arguments: args}).
 		Return(nil, &commandrouter.SourceUnreachableError{
 			Results: []offlinecache.SourceProbeResult{
 				{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
@@ -1525,3 +1528,77 @@ func TestMediator_HandleRelayerMessage_SourceUnreachable(t *testing.T) {
 		assert.NotContains(t, message, "origin.example")
 	}
 }
+
+// denyingGate is a ControlGate that refuses every plaintext command with
+// code, standing in for an enrolled (envelope_required) or locked device.
+type denyingGate struct {
+	code  string
+	calls int
+}
+
+func (g *denyingGate) HandleEnvelope(context.Context, json.RawMessage, control.Origin) (*controlgate.Wire, *control.PublicError) {
+	g.calls++
+	return nil, nil
+}
+
+func (g *denyingGate) Plaintext(control.Route, commands.Command) (control.Decision, commands.Command) {
+	g.calls++
+	return control.Decision{Code: g.code}, commands.Command{}
+}
+
+// TestMediator_ControlNeverAnswersFramesWithoutCommandOrMessageID pins the
+// loop breaker (feral-file#3551 round 2, B-1): the deployed relayer's own
+// error frames carry no command and no messageID; answering one with a
+// denial draws the same error back forever. A command without a messageID
+// has no caller to reply to either.
+func TestMediator_ControlNeverAnswersFramesWithoutCommandOrMessageID(t *testing.T) {
+	display := string(commands.CMD_DISPLAY_PLAYLIST)
+	envelope := string(control.CmdEnvelope)
+	frames := map[string]relayer.Payload{
+		"invalid messageID error frame": {},
+		"command without messageID":     {Message: relayer.Message{Command: &display}},
+		"command-less with messageID":   {MessageID: "m1"},
+		// Round 3 L-3: not opened, so no window is spent and nothing runs.
+		"envelope without messageID": {Message: relayer.Message{Command: &envelope}},
+	}
+	for _, code := range []string{control.CodeEnvelopeRequired, control.CodeLocked} {
+		for name, payload := range frames {
+			t.Run(code+"/"+name, func(t *testing.T) {
+				ts := setup(t)
+				defer ts.teardown()
+
+				ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte("{}"), nil).AnyTimes()
+				ts.mockCommandHandler.EXPECT().Process(gomock.Any(), gomock.Any()).Times(0)
+				ts.mockRelayer.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
+
+				gate := &denyingGate{code: code}
+				ts.mediator.(interface{ SetControl(mediator.ControlGate) }).SetControl(gate)
+
+				var capturedHandler relayer.Handler
+				ts.mockDbus.EXPECT().OnBusSignal(gomock.Any()).Times(1)
+				ts.mockRelayer.EXPECT().
+					OnRelayerMessage(gomock.Any()).
+					DoAndReturn(func(handler relayer.Handler) { capturedHandler = handler }).
+					Times(1)
+
+				ts.mediator.Start()
+				assert.NoError(t, capturedHandler(ts.ctx, payload))
+				if name != "command without messageID" {
+					assert.Zero(t, gate.calls, "frame reached the control gate")
+				}
+			})
+		}
+	}
+}
+
+// fromControllerCtx matches a context the mediator marked with
+// commands.FromController: every command that arrives over the relayer is a
+// controller's, and the router wakes a sleeping player only for those.
+type fromControllerCtx struct{}
+
+func (fromControllerCtx) Matches(x interface{}) bool {
+	ctx, ok := x.(context.Context)
+	return ok && commands.IsFromController(ctx)
+}
+
+func (fromControllerCtx) String() string { return "a context marked commands.FromController" }

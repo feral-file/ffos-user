@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type testSetup struct {
@@ -137,6 +138,28 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 	assert.NotNil(t, result.MACInfo)
 	assert.Equal(t, "aa:bb:cc:dd:ee:ff", result.MACInfo["enp1s0"])
 	assert.Equal(t, "11:22:33:44:55:66", result.MACInfo["wlp2s0"])
+}
+
+// A config without a "relayer" block loads as an empty one ("no legacy
+// relayer"); main.go reads RelayerConfig.Endpoint unconditionally.
+func TestConfigManager_Load_NoRelayerBlockYieldsEmptyConfig(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	configData := `{"relayV2":{"endpoint":"wss://relayer.feralfile.io"}}`
+	ts.mockOS.EXPECT().ReadFile(constants.CONFIG_FILE).Return([]byte(configData), nil).Times(1)
+	ts.mockOS.EXPECT().IsNotExist(nil).Return(false).Times(1)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(configData), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error { return json.Unmarshal(data, v) }).
+		Times(1)
+	ts.setupMACExpectations()
+
+	result, err := ts.cm.Load(ts.logger)
+	require.NoError(t, err)
+	require.NotNil(t, result.RelayerConfig)
+	assert.Empty(t, result.RelayerConfig.Endpoint)
+	assert.Empty(t, result.RelayerConfig.APIKey)
 }
 
 func TestLogStreamingConfigIsPermissiveAndFailsClosed(t *testing.T) {
@@ -763,5 +786,62 @@ func TestContentPolicyTuningPermissiveDecode(t *testing.T) {
 		err := json.Unmarshal([]byte(`{"contentPolicy": {"blockUnratedCurated": "true"}, "enableHub": true}`), &c)
 		require.NoError(t, err, "a wrong-typed contentPolicy block must not fail the parse")
 		assert.Equal(t, config.ContentPolicyConfig{}, c.ContentPolicyTuning(zap.NewNop()))
+	})
+}
+
+func TestControlTuning(t *testing.T) {
+	assert.Equal(t, config.ControlConfig{}, (&config.Config{}).ControlTuning(zap.NewNop()))
+	c := &config.Config{Control: []byte(`{"enabled":true}`)}
+	assert.Equal(t, config.ControlConfig{Enabled: true}, c.ControlTuning(zap.NewNop()))
+	// A stale "enforced" key (removed, feral-file#3551) is ignored, whatever
+	// its value.
+	c = &config.Config{Control: []byte(`{"enabled":true,"enforced":true}`)}
+	assert.Equal(t, config.ControlConfig{Enabled: true}, c.ControlTuning(zap.NewNop()))
+	c = &config.Config{Control: []byte(`{"enabled":true,"enforced":"yes"}`)}
+	assert.Equal(t, config.ControlConfig{Enabled: true}, c.ControlTuning(zap.NewNop()))
+	c = &config.Config{Control: []byte(`{"enabled":"yes"}`)}
+	assert.Equal(t, config.ControlConfig{Malformed: true}, c.ControlTuning(zap.NewNop()))
+	c = &config.Config{Control: []byte(`[true]`)}
+	assert.Equal(t, config.ControlConfig{Malformed: true}, c.ControlTuning(zap.NewNop()))
+}
+
+// TestRasterTuningPermissiveDecode pins the same §3 config hazard rule for the
+// raster block: a malformed credential block costs the wallet walk its key,
+// never the daemon its boot. The warning must not echo the block, which holds
+// the key.
+func TestRasterTuningPermissiveDecode(t *testing.T) {
+	t.Run("absent block yields no key", func(t *testing.T) {
+		c := &config.Config{}
+		assert.Equal(t, config.RasterConfig{}, c.RasterTuning(zap.NewNop()))
+	})
+
+	t.Run("well-formed block decodes", func(t *testing.T) {
+		c := &config.Config{Raster: []byte(`{"apiKey":"rk_live_abc"}`)}
+		assert.Equal(t, "rk_live_abc", c.RasterTuning(zap.NewNop()).APIKey)
+	})
+
+	t.Run("wrong-typed value yields no key without failing", func(t *testing.T) {
+		c := &config.Config{Raster: []byte(`{"apiKey":123}`)}
+		assert.Equal(t, config.RasterConfig{}, c.RasterTuning(zap.NewNop()))
+	})
+
+	t.Run("wrong-typed block survives the whole-config parse", func(t *testing.T) {
+		var c config.Config
+		err := json.Unmarshal([]byte(`{"raster": {"apiKey": ["x"]}, "enableHub": true}`), &c)
+		require.NoError(t, err, "a wrong-typed raster block must not fail the parse")
+		assert.Equal(t, config.RasterConfig{}, c.RasterTuning(zap.NewNop()))
+	})
+
+	t.Run("malformed block is not echoed into the log", func(t *testing.T) {
+		core, logs := observer.New(zap.WarnLevel)
+		c := &config.Config{Raster: []byte(`{"apiKey":123}`)}
+		c.RasterTuning(zap.New(core))
+		require.Equal(t, 1, logs.Len())
+		for _, entry := range logs.All() {
+			assert.NotContains(t, entry.Message, "123")
+			for _, field := range entry.Context {
+				assert.NotContains(t, field.String, "123")
+			}
+		}
 	})
 }

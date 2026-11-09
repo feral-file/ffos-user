@@ -1,6 +1,10 @@
 package helper
 
-import "encoding/json"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+)
 
 // TruncateBytes truncates the given bytes to the given max length
 func TruncateBytes(data []byte, maxLength int) []byte {
@@ -20,4 +24,16 @@ func TruncateMap(data map[string]interface{}, maxLength int) ([]byte, error) {
 
 	// Truncate JSON data
 	return TruncateBytes(jsonData, maxLength), nil
+}
+
+// TopicFingerprint is a short, non-reversible tag for a relayer topic ID, for
+// logs. The topic is a bearer credential on the legacy relayer and logs are
+// uploaded, so the raw value is never logged; the first 8 hex digits of its
+// SHA-256 are enough to tell topics apart. Empty stays empty.
+func TopicFingerprint(topic string) string {
+	if topic == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(topic))
+	return hex.EncodeToString(sum[:4])
 }
