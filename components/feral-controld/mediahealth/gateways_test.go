@@ -395,7 +395,7 @@ func TestGateways_NormalizedRedirectKeepsItsOwnGateway(t *testing.T) {
 	db, err := bolt.Open(path, 0o600, nil)
 	require.NoError(t, err)
 	require.NoError(t, db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketMeta).Put(metaServedByIndexKey, []byte("3"))
+		return tx.Bucket(bucketMeta).Put(metaServedByIndexKey, []byte("4"))
 	}))
 	require.NoError(t, db.Close())
 	st, err = Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
@@ -409,6 +409,70 @@ func TestGateways_NormalizedRedirectKeepsItsOwnGateway(t *testing.T) {
 	target, ok := st.GatewayOverride("https://ipfs.raribleuserdata.com/ipfs/"+cidA+"/?fxhash=abc", "")
 	require.True(t, ok, "no longer an ok source: the request falls to the route's best effort")
 	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA+"/?fxhash=abc", target)
+}
+
+// F25 round 7: the bare `/ipfs/<cid>?q` and the already-slashed
+// `/ipfs/<cid>/?q` share an identity (the bare one's redirect target is the
+// slashed one). One going broken must not delete the other's entry.
+func TestGateways_SharedIdentityKeepsEachOwner(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	path := filepath.Join(t.TempDir(), "mh", "store.db")
+	st, err := Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	require.NoError(t, err)
+	bare := "https://ipfs.raribleuserdata.com/ipfs/" + cidA + "?q=x"
+	slashed := "https://ipfs.raribleuserdata.com/ipfs/" + cidA + "/?q=x"
+	other := "https://ipfs.raribleuserdata.com/ipfs/" + cidA + "/other.html"
+	for _, src := range []string{bare, slashed} {
+		_, err = st.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 206})
+		require.NoError(t, err)
+	}
+	_, err = st.ApplyProbe(other, ProbeResult{Verdict: VerdictAlive, Status: 200, ServedBy: "https://ipfs.filebase.io"})
+	require.NoError(t, err)
+
+	_, err = st.ApplyProbe(bare, ProbeResult{Verdict: VerdictDead, Reason: ReasonHTTPStatus, Status: 404})
+	require.NoError(t, err)
+	_, ok := st.GatewayOverride(slashed, "")
+	assert.False(t, ok, "the healthy slashed source keeps its own entry")
+	_, ok = st.GatewayOverride(slashed+"&display_mode=crop", "")
+	assert.False(t, ok, "with the player's params too")
+
+	// And after a reopen, from the bucket.
+	require.NoError(t, st.Close())
+	st, err = Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	require.NoError(t, err)
+	defer func() { _ = st.Close() }()
+	_, ok = st.GatewayOverride(slashed, "")
+	assert.False(t, ok, "after a reopen")
+
+	// The reverse: the slashed one going broken leaves the bare one's alias.
+	_, err = st.ApplyProbe(bare, ProbeResult{Verdict: VerdictAlive, Status: 206})
+	require.NoError(t, err)
+	_, err = st.ApplyProbe(slashed, ProbeResult{Verdict: VerdictDead, Reason: ReasonHTTPStatus, Status: 404})
+	require.NoError(t, err)
+	_, ok = st.GatewayOverride(slashed, "")
+	assert.False(t, ok, "the bare source's redirect still finds its own gateway")
+}
+
+// Between owners of one identity: the source that IS the URL decides; else
+// any owner served by its own gateway; else the smallest origin.
+func TestOriginForIdentity(t *testing.T) {
+	e := map[string]string{
+		servedByEntryKey("id1", "a"):   "https://b.example",
+		servedByEntryKey("id1", "b"):   "",
+		servedByEntryKey("id2", "c"):   "https://z.example",
+		servedByEntryKey("id2", "d"):   "https://y.example",
+		servedByEntryKey("id3", "id3"): "https://x.example",
+		servedByEntryKey("id3", "e"):   "",
+	}
+	o, ok := originForIdentity(e, "id1")
+	assert.True(t, ok)
+	assert.Equal(t, "", o, "an owner served by its own gateway wins over a fallback")
+	o, _ = originForIdentity(e, "id2")
+	assert.Equal(t, "https://y.example", o, "else the smallest origin")
+	o, _ = originForIdentity(e, "id3")
+	assert.Equal(t, "https://x.example", o, "the source that IS the URL decides")
+	_, ok = originForIdentity(e, "missing")
+	assert.False(t, ok)
 }
 
 // The per-source index survives a restart too, including the last-source rule.

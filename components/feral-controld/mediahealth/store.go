@@ -65,8 +65,9 @@ type Store struct {
 	gateways *Gateways
 	// servedByMu guards servedBy, the in-memory mirror of the routes in
 	// bucketServedBy that have at least one source on a fallback gateway:
-	// route (ContentRef.RouteKey) → every ok source on it (Key(source)) →
-	// the gateway origin it was served by ("" = its own gateway). Read per
+	// route (ContentRef.RouteKey) → entry (identity + servedBySep + owner,
+	// see servedByEntryKey) → the gateway origin the owner was served by
+	// ("" = its own gateway). Read per
 	// kiosk request (GatewayOverride), written as records change. Routes
 	// with no fallback stay on disk only, so memory is bounded by the
 	// sources that need a fallback, not by every content-addressed source.
@@ -311,8 +312,10 @@ const servedBySep = "\x00"
 // kiosk's lookup was empty, so after a deploy the wall went back to the
 // failing gateway with nothing in the verdict to show it (office FF1,
 // 2026-11-06). The records are the source of truth; the index is a cache.
-// Version 4 adds each source's request aliases (servedByIdentities).
-const servedByIndexVersion = "4"
+// Version 5 keys each entry by route, identity AND owning source
+// (servedByEntryKey), so an identity two sources share is never deleted
+// by one of them on the other's behalf.
+const servedByIndexVersion = "5"
 
 var metaServedByIndexKey = []byte("servedByIndex")
 
@@ -347,7 +350,7 @@ func (s *Store) loadServedBy() error {
 			}
 			rebuilt++
 			for _, id := range servedByIdentities(rec.Source) {
-				if err := b.Put([]byte(ref.RouteKey()+servedBySep+id), []byte(origin)); err != nil {
+				if err := b.Put([]byte(ref.RouteKey()+servedBySep+servedByEntryKey(id, string(k))), []byte(origin)); err != nil {
 					return err
 				}
 			}
@@ -367,11 +370,11 @@ func (s *Store) loadServedBy() error {
 	all := map[string]map[string]string{}
 	err = s.db.View(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketServedBy).ForEach(func(k, v []byte) error {
-			if route, source, ok := strings.Cut(string(k), servedBySep); ok {
+			if route, entry, ok := strings.Cut(string(k), servedBySep); ok {
 				if all[route] == nil {
 					all[route] = map[string]string{}
 				}
-				all[route][source] = string(v)
+				all[route][entry] = string(v)
 			}
 			return nil
 		})
@@ -401,9 +404,11 @@ func (s *Store) retireUnconfiguredFallbacks() error {
 	s.servedByMu.RLock()
 	var stale []string
 	for _, sources := range s.servedBy {
-		for source, origin := range sources {
+		for entry, origin := range sources {
 			if origin != "" && !s.gateways.Configured(origin) {
-				stale = append(stale, source)
+				if id, owner := splitServedByEntry(entry); id == owner && !slices.Contains(stale, owner) {
+					stale = append(stale, owner)
+				}
 			}
 		}
 	}
@@ -417,8 +422,6 @@ func (s *Store) retireUnconfiguredFallbacks() error {
 		for _, key := range stale {
 			prev, derr := s.decode(items.Get([]byte(key)))
 			if derr != nil || prev == nil {
-				// An alias entry (servedByIdentities) has no record of its
-				// own; retiring its source rewrites it.
 				continue
 			}
 			rec := *prev
@@ -481,10 +484,14 @@ func (s *Store) indexServedBy(tx *bolt.Tx, prev, rec *Record) error {
 		return nil
 	}
 	b := tx.Bucket(bucketServedBy)
-	route, ids := ref.RouteKey(), servedByIdentities(rec.Source)
+	route, owner := ref.RouteKey(), Key(rec.Source)
+	var entries []string
+	for _, id := range servedByIdentities(rec.Source) {
+		entries = append(entries, servedByEntryKey(id, owner))
+	}
 	prefix := []byte(route + servedBySep)
-	for _, id := range ids {
-		key := append(append([]byte(nil), prefix...), id...)
+	for _, entry := range entries {
+		key := append(append([]byte(nil), prefix...), entry...)
 		if indexed {
 			if err := b.Put(key, []byte(origin)); err != nil {
 				return err
@@ -510,12 +517,12 @@ func (s *Store) indexServedBy(tx *bolt.Tx, prev, rec *Record) error {
 		}
 		s.servedBy[route] = sources
 	case !indexed:
-		for _, id := range ids {
-			delete(sources, id)
+		for _, entry := range entries {
+			delete(sources, entry)
 		}
 	default:
-		for _, id := range ids {
-			sources[id] = origin
+		for _, entry := range entries {
+			sources[entry] = origin
 		}
 	}
 	if !routeHasFallback(sources) {
@@ -577,7 +584,7 @@ func (s *Store) routeOriginLocked(route, rawURL, referrer string) string {
 		if u == "" {
 			continue
 		}
-		if o, ok := sources[Key(u)]; ok {
+		if o, ok := originForIdentity(sources, Key(u)); ok {
 			return o
 		}
 	}
@@ -601,10 +608,12 @@ func (s *Store) routeOriginLocked(route, rawURL, referrer string) string {
 // reconstruction cannot recover the original spelling, so the lookup fell
 // through to another file's fallback (PR #438 review, F25 rounds 5–6).
 //
-// Hazard: two spellings of one source on one gateway (`/ipfs/<cid>?q` and
-// `/ipfs//<cid>?q`) share an alias; the later write owns it, and removing
-// either removes it. Both name the same document, so the lookup then falls
-// to the route's best effort for that pair only.
+// Several sources can share an identity — `/ipfs/<cid>?q`, `/ipfs//<cid>?q`
+// and the already-slashed `/ipfs/<cid>/?q` all request the same URL — so
+// every entry is owned (servedByEntryKey): a source writes and deletes
+// only its own, and a shared identity survives while any owner is ok
+// (PR #438 review, F25 round 7). originForIdentity resolves between
+// owners.
 func servedByIdentities(source string) []string {
 	ids := []string{Key(source)}
 	slashed, ok := contentpath.SlashBeforeQuery(source)
@@ -620,6 +629,49 @@ func servedByIdentities(source string) []string {
 		}
 	}
 	return ids
+}
+
+// servedByEntryKey is one index entry within a route: the identity a
+// request is matched by, and the source (Key) that owns the entry.
+func servedByEntryKey(identity, owner string) string {
+	return identity + servedBySep + owner
+}
+
+func splitServedByEntry(entry string) (identity, owner string) {
+	identity, owner, _ = strings.Cut(entry, servedBySep)
+	return identity, owner
+}
+
+// originForIdentity picks the gateway for a request matched by identity
+// among the route's entries (a route holds the few sources under one
+// content id on one gateway, so the scan is short). Between owners: the
+// source that IS this URL first (its own verdict is about exactly this
+// request); otherwise the own gateway if any owner was served there (the
+// gateway answered this very URL for it); otherwise the smallest origin,
+// for a stable choice.
+func originForIdentity(entries map[string]string, identity string) (string, bool) {
+	found, own := false, false
+	best := ""
+	for entry, origin := range entries {
+		id, owner := splitServedByEntry(entry)
+		if id != identity {
+			continue
+		}
+		if owner == identity {
+			return origin, true
+		}
+		switch {
+		case origin == "":
+			own = true
+		case !found || (best != "" && origin < best):
+			best = origin
+		}
+		found = true
+	}
+	if own {
+		return "", true
+	}
+	return best, found
 }
 
 func recheckPrefix(t time.Time) string {
