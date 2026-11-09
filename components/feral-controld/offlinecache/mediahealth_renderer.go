@@ -17,6 +17,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -39,45 +40,106 @@ import (
 // stored; the viewport is pinned so the pHash is comparable; the only
 // output is the frame plus the main document's status.
 type mediaHealthRenderer struct {
-	c *capturer
-	// policy is the kiosk's gateway policy, applied to EVERY request the
-	// page makes (the navigation, its redirects, child frames and
-	// subresources) through the guard's rewrite hook, as the kiosk's own
-	// uarewrite interceptor does: a content-addressed path on a hostile
-	// gateway goes to the replacement gateway, any other request to those
-	// hosts gets the policy agent. Without it L1 would fetch a different
-	// destination from the kiosk and judge a page the wall never shows.
-	policy mediahealth.Rewriter
+	c       *capturer
+	routing MediaHealthRouting
+}
+
+// MediaHealthRouting is how the kiosk routes a work's requests, which L1
+// must reproduce or it judges a page the wall never shows (PR #443 review,
+// F22, F29). The zero value renders every request as written.
+type MediaHealthRouting struct {
+	// Policy is the kiosk's static gateway policy (uarewrite.Policy):
+	// a content-addressed path on a hostile gateway goes to the
+	// replacement gateway, any other request to those hosts gets the
+	// policy agent.
+	Policy mediahealth.Rewriter
+	// Override is the media-health store's recorded fallback gateway
+	// (mediahealth.Service.GatewayOverride), consulted per request with
+	// its Referer BEFORE the static policy, exactly as the kiosk's
+	// interceptor does: a work whose own gateway 404s plays through the
+	// fallback the L0 probe found serving it, its own files following by
+	// Referer. nil when the kiosk interceptor is off (the wall then does
+	// not use it either).
+	Override func(rawURL, referrer string) (string, bool)
+	// SlashBareCID applies the kiosk's bare-CID rule
+	// (contentpath.SlashBeforeQuery): the navigation goes to the
+	// directory form the kiosk's synthetic redirect leaves the document
+	// at, and a subresource of the shape is sent there. Without it the
+	// gateway's own 301 drops an fxhash query and L1 renders the blank,
+	// hash-less page the wall never shows. Set with the kiosk interceptor.
+	SlashBareCID bool
 }
 
 // NewMediaHealthRenderer adapts the capturer into mediahealth.Renderer
-// under the kiosk's gateway policy (nil = render as written). nil when the
-// capturer is not the package's own implementation (a test double), so the
-// L1 runner is simply not wired.
-func NewMediaHealthRenderer(cap Capturer, policy mediahealth.Rewriter) mediahealth.Renderer {
+// under the kiosk's routing. nil when the capturer is not the package's
+// own implementation (a test double), so the L1 runner is simply not
+// wired.
+func NewMediaHealthRenderer(cap Capturer, routing MediaHealthRouting) mediahealth.Renderer {
 	c, ok := cap.(*capturer)
 	if !ok || c == nil {
 		return nil
 	}
-	return &mediaHealthRenderer{c: c, policy: policy}
+	return &mediaHealthRenderer{c: c, routing: routing}
 }
 
-// renderRewrite is the guard's per-request rewrite for policy: the kiosk
-// interceptor's decision, verbatim — a matching host is either redirected
-// (a content-addressed path) or continued with the policy agent.
-func renderRewrite(policy mediahealth.Rewriter) func(string, map[string]string) (string, []map[string]string, bool) {
-	if policy == nil {
+// navigationURL is the URL the render navigates for a record's source: the
+// directory form of a bare CID with a query when the kiosk redirects it
+// (its synthetic 301 leaves the document there: location.search keeps the
+// query, relative assets resolve under the CID), the source otherwise —
+// fragment kept either way.
+func (rt MediaHealthRouting) navigationURL(source string) string {
+	if rt.SlashBareCID {
+		if slashed, ok := contentpath.SlashBeforeQuery(source); ok {
+			return slashed
+		}
+	}
+	return source
+}
+
+// renderRewrite is the guard's per-request rewrite: the kiosk
+// interceptor's decision, in its order — the bare-CID slash, then the
+// store's recorded fallback (by the request, then its Referer), then the
+// static policy (a redirect for a content-addressed path, else the policy
+// agent). nil when there is nothing to apply. The guard judges whatever
+// destination this returns.
+func renderRewrite(rt MediaHealthRouting) func(string, map[string]string) (string, []map[string]string, bool) {
+	if rt.Policy == nil && rt.Override == nil && !rt.SlashBareCID {
 		return nil
 	}
 	return func(rawURL string, headers map[string]string) (string, []map[string]string, bool) {
-		if !policy.Matches(rawURL) {
-			return "", nil, false
+		reqURL := rawURL
+		if rt.SlashBareCID {
+			if slashed, ok := contentpath.SlashBeforeQuery(rawURL); ok {
+				reqURL = slashed
+			}
 		}
-		if target, ok := policy.RewriteURL(rawURL); ok {
-			return target, nil, true
+		if rt.Override != nil {
+			if target, ok := rt.Override(reqURL, referrerHeader(headers)); ok {
+				return target, nil, true
+			}
 		}
-		return "", userAgentHeaders(headers, policy.UserAgent()), true
+		if rt.Policy != nil && rt.Policy.Matches(reqURL) {
+			if target, ok := rt.Policy.RewriteURL(reqURL); ok {
+				return target, nil, true
+			}
+			return reqURL, userAgentHeaders(headers, rt.Policy.UserAgent()), true
+		}
+		if reqURL != rawURL {
+			return reqURL, nil, true
+		}
+		return "", nil, false
 	}
+}
+
+// referrerHeader is the paused request's Referer; CDP reports header names
+// as the renderer sent them, so the match is case-insensitive.
+func referrerHeader(headers map[string]string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, "Referer") {
+			return v
+		}
+	}
+	return ""
 }
 
 // userAgentHeaders mirrors uarewrite.Policy.RewriteHeaders: the request's
@@ -251,7 +313,7 @@ func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSe
 	// without a handler (an unanswered pause hangs the request). The
 	// policy rides on the guard so it applies to every request, child
 	// targets included (the capturer arms the same guard on each child).
-	guard := c.attachSourceGuardWithRewrite(ctx, session, renderRewrite(r.policy))
+	guard := c.attachSourceGuardWithRewrite(ctx, session, renderRewrite(r.routing))
 
 	for _, step := range []struct {
 		method string
@@ -278,7 +340,7 @@ func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSe
 
 	navCtx, navCancel := context.WithTimeout(ctx, renderNavigateWindow)
 	defer navCancel()
-	raw, err := session.Send(navCtx, "Page.navigate", map[string]interface{}{"url": wireURL})
+	raw, err := session.Send(navCtx, "Page.navigate", map[string]interface{}{"url": r.routing.navigationURL(wireURL)})
 	if err != nil {
 		return nil, fmt.Errorf("media health render: Page.navigate: %w", err)
 	}

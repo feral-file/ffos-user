@@ -550,12 +550,21 @@ would hide real art, the worst outcome here.
   `loadingFailed`, a committed `chrome-error://` page) makes the render
   **stalled**, since Chromium's own error page is on screen. The URL
   rendered is the
-  record's **own source** through the gateway policy, fragment kept — never
-  the record's `wireUrl`, which the cast pass copies from a wire-identical
-  sibling (`work#one` and `work#two` are two works). The policy then rides on
-  the guard, so **every** request of the render — redirects, child frames,
-  subresources — is rewritten as the kiosk's interceptor rewrites it, and the
-  guard judges the rewritten destination. A child target the guard could not
+  record's **own source**, fragment kept — never the record's `wireUrl`,
+  which the cast pass copies from a wire-identical sibling (`work#one` and
+  `work#two` are two works) — routed exactly as the kiosk's interceptor
+  routes it (`offlinecache.MediaHealthRouting`), on the guard so **every**
+  request of the render — the navigation, redirects, child frames,
+  subresources — goes through it and the guard judges the destination it
+  picks. In the interceptor's order: a bare CID with a query is navigated in
+  its directory form (where the kiosk's synthetic redirect leaves the
+  document; without it the gateway's own 301 drops an fxhash query and L1
+  would judge the blank, hash-less page) and a bare subresource is sent
+  there; then the store's recorded fallback gateway (`GatewayOverride`, by
+  the request and then its Referer), so a work the wall plays through a
+  fallback is rendered through it, its own files included; then the static
+  gateway policy. The fallback and the bare-CID rule apply only when the
+  kiosk interceptor is installed, as on the wall (PR #443 review, F29). A child target the guard could not
   contain (a worker: no Fetch domain) is left paused, as a capture leaves it
   — and the render is then **not evidence** (stalled), since the page painted
   without its worker; such works never get an L1 verdict.

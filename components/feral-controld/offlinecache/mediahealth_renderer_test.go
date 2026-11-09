@@ -233,7 +233,7 @@ func newTestRendererWithPolicy(t *testing.T, policy mediahealth.Rewriter) *media
 		json:   wrapper.NewJSON(),
 		guard:  sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}},
 	}
-	return &mediaHealthRenderer{c: c, policy: policy}
+	return &mediaHealthRenderer{c: c, routing: MediaHealthRouting{Policy: policy}}
 }
 
 func TestMediaHealthRenderer_ConversationAndFrame(t *testing.T) {
@@ -333,9 +333,9 @@ func TestDecodeScreenshotPNG_Caps(t *testing.T) {
 }
 
 func TestNewMediaHealthRenderer_NilForForeignCapturer(t *testing.T) {
-	assert.Nil(t, NewMediaHealthRenderer(nil, nil))
-	assert.NotNil(t, NewMediaHealthRenderer(&capturer{}, nil))
-	r := NewMediaHealthRenderer(&capturer{}, nil)
+	assert.Nil(t, NewMediaHealthRenderer(nil, MediaHealthRouting{}))
+	assert.NotNil(t, NewMediaHealthRenderer(&capturer{}, MediaHealthRouting{}))
+	r := NewMediaHealthRenderer(&capturer{}, MediaHealthRouting{})
 	assert.NotNil(t, r)
 	assert.Implements(t, (*mediahealth.Renderer)(nil), r)
 }
@@ -405,6 +405,77 @@ func TestMediaHealthRenderer_PolicyAppliesToEveryRequest(t *testing.T) {
 	failed := s.waitCalls(t, "Fetch.failRequest", 1)
 	assert.Equal(t, "bad", failed[0]["requestId"], "the guard judges the rewritten destination")
 	assert.Empty(t, s.callsOf("Fetch.continueRequest"))
+}
+
+// F29 (PR #443 review): L1 routes like the kiosk. The store's recorded
+// fallback wins over the static policy, for the navigation and for a work's
+// own files by Referer; a bare CID with a query is navigated in its
+// directory form and a bare subresource is sent there; zero routing renders
+// as written.
+func TestMediaHealthRenderer_RoutesLikeTheKiosk(t *testing.T) {
+	const cid = "QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A"
+	own := "https://ipfs.pixura.io/ipfs/" + cid
+	// The guard decides paused requests on their own goroutines.
+	var mu sync.Mutex
+	var lookups [][2]string
+	override := func(raw, referrer string) (string, bool) {
+		mu.Lock()
+		lookups = append(lookups, [2]string{raw, referrer})
+		mu.Unlock()
+		if strings.HasPrefix(raw, own) {
+			return "https://ipfs.filebase.io/ipfs/" + cid + strings.TrimPrefix(raw, own), true
+		}
+		if strings.HasPrefix(referrer, own) {
+			return "https://ipfs.filebase.io/ipfs/" + cid + "/" + raw[strings.LastIndex(raw, "/")+1:], true
+		}
+		return "", false
+	}
+	r := newTestRenderer(t)
+	r.routing = MediaHealthRouting{
+		Policy:       hopRewriter{retired: "https://ipfs.pixura.io", replacement: "https://replacement.example"},
+		Override:     override,
+		SlashBareCID: true,
+	}
+	s := newRenderSession()
+	s.shot = pngOf(color.White, 8, 8)
+	s.onNavigate = func(s *renderSession) {
+		s.emit("Fetch.requestPaused", `{"requestId":"doc","request":{"url":"`+own+`/?fxhash=abc","headers":{}}}`)
+		s.emit("Fetch.requestPaused", `{"requestId":"js","request":{"url":"https://cdn.example/lib.js","headers":{"Referer":"`+own+`/?fxhash=abc"}}}`)
+		s.emit("Fetch.requestPaused", `{"requestId":"bare","request":{"url":"https://other.example/ipfs/`+cid+`?v=2","headers":{}}}`)
+		s.emit("Fetch.requestPaused", `{"requestId":"plain","request":{"url":"https://elsewhere.example/x.png","headers":{}}}`)
+	}
+	_, err := r.renderOnSession(context.Background(), s, own+"?fxhash=abc", time.Millisecond)
+	require.NoError(t, err)
+
+	nav := s.callsOf("Page.navigate")
+	require.Len(t, nav, 1)
+	assert.Equal(t, own+"/?fxhash=abc", nav[0]["url"], "a bare CID with a query is navigated in its directory form, as the kiosk's redirect leaves it")
+	cont := s.waitCalls(t, "Fetch.continueRequest", 4)
+	byID := map[string]map[string]interface{}{}
+	for _, c := range cont {
+		byID[c["requestId"].(string)] = c
+	}
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cid+"/?fxhash=abc", byID["doc"]["url"], "the recorded fallback wins over the static policy")
+	assert.Nil(t, byID["doc"]["headers"], "with Chromium's own headers, as the kiosk")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cid+"/lib.js", byID["js"]["url"], "a work's own file follows it by Referer")
+	assert.Equal(t, "https://other.example/ipfs/"+cid+"/?v=2", byID["bare"]["url"], "a bare subresource is sent to its directory form")
+	assert.Nil(t, byID["plain"]["url"], "anything else continues as is")
+	mu.Lock()
+	assert.Contains(t, lookups, [2]string{"https://other.example/ipfs/" + cid + "/?v=2", ""}, "the override is consulted with the slashed URL")
+	mu.Unlock()
+
+	// Zero routing: the source as written, no rewrite at all.
+	r = newTestRenderer(t)
+	s = newRenderSession()
+	s.shot = pngOf(color.White, 8, 8)
+	s.onNavigate = func(s *renderSession) {
+		s.emit("Fetch.requestPaused", `{"requestId":"bare","request":{"url":"https://other.example/ipfs/`+cid+`?v=2","headers":{}}}`)
+	}
+	_, err = r.renderOnSession(context.Background(), s, own+"?fxhash=abc", time.Millisecond)
+	require.NoError(t, err)
+	assert.Equal(t, own+"?fxhash=abc", s.callsOf("Page.navigate")[0]["url"])
+	cont = s.waitCalls(t, "Fetch.continueRequest", 1)
+	assert.Nil(t, cont[0]["url"])
 }
 
 // agentOnlyRewriter matches a host without rewriting any URL: the policy's

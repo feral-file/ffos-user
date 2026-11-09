@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"image"
 	"math/bits"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -266,12 +265,8 @@ type L1Config struct {
 	// none); a new sleep carries a new confirmation time, so any wake
 	// restarts it.
 	MinAsleep time.Duration
-	// Rewriter is the kiosk's gateway policy (the L0 probe's), applied to
-	// the record's OWN source to derive the URL to render; nil renders the
-	// source as written.
-	Rewriter Rewriter
-	Logger   *zap.Logger
-	Now      func() time.Time
+	Logger    *zap.Logger
+	Now       func() time.Time
 
 	MaxPerNight            int
 	BlankVarianceThreshold float64
@@ -419,7 +414,15 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 	if confirm {
 		settle = l.cfg.ConfirmSettle
 	}
-	wire := renderURL(rec.Source, l.cfg.Rewriter)
+	// The record's OWN source, fragment kept — never Record.WireURL: the
+	// cast pass shares one request between wire-identical siblings and
+	// copies that probe's URL into every sibling's record, so a `work#two`
+	// record carries `work#one`'s wire URL, and a fragment is the whole
+	// identity of such a work (PR #443 review, F19). The renderer routes
+	// it as the kiosk does (gateway policy, recorded fallback, bare-CID
+	// rule; F22, F29), per request, from the source as written — the
+	// recorded fallback is keyed by that source's own gateway.
+	wire := rec.Source
 
 	// Cancel on wake: the gate is re-checked while the render runs, so a
 	// panel that wakes (or a cast that interrupts the night) stops the
@@ -504,31 +507,4 @@ func isSoftwareRecord(rec *Record) bool {
 		return true
 	}
 	return rec.MediaType == "iframe"
-}
-
-// renderURL is the URL L1 navigates for a record: the record's OWN source
-// through the kiosk's gateway policy, with its fragment kept. Never
-// Record.WireURL — the cast pass shares one request between wire-identical
-// siblings and copies that probe's URL into every sibling's record, so a
-// `work#two` record carries `work#one`'s wire URL, and a fragment is the
-// whole identity of such a work (PR #443 review, F19).
-func renderURL(source string, rw Rewriter) string {
-	if rw == nil {
-		return source
-	}
-	rewritten, ok := rw.RewriteURL(source)
-	if !ok {
-		return source
-	}
-	src, err := url.Parse(source)
-	if err != nil || src.Fragment == "" {
-		return rewritten
-	}
-	out, err := url.Parse(rewritten)
-	if err != nil {
-		return rewritten
-	}
-	out.Fragment = src.Fragment
-	out.RawFragment = src.RawFragment
-	return out.String()
 }

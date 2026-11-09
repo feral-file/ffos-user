@@ -382,12 +382,13 @@ type Runtime struct {
 	Notifier *Notifier
 	// NewMediaHealthRenderer builds the media-health L1 render probe over
 	// this cache's headless Chromium and source guard
-	// (mediahealth_renderer.go) under the kiosk's gateway policy, which
-	// main builds after this bootstrap — hence a factory, not a value. It
+	// (mediahealth_renderer.go) under the kiosk's routing (gateway policy,
+	// recorded fallback override, bare-CID rule), which main builds after
+	// this bootstrap — hence a factory, not a value. It
 	// answers nil when the capturer is not the package's own. Admission is
 	// the resource gate, read-only, for the same consumer; nil when
 	// disabled.
-	NewMediaHealthRenderer func(policy mediahealth.Rewriter) mediahealth.Renderer
+	NewMediaHealthRenderer func(routing MediaHealthRouting) mediahealth.Renderer
 	Admission              AdmissionController
 	// SysMetricsSink, when non-nil (the admission gate is enabled), is
 	// main.go's hook for feeding monitord's raw sysmetrics payloads into
@@ -519,8 +520,8 @@ func Bootstrap(
 		ObservePlayback: observePlayback, SetCacheChanged: func(fn func()) { worker.onCacheChanged = fn },
 		Service: svc, KioskReplay: kioskReplay, ScopeLost: scopeLost,
 		StaticServer: staticServer, Notifier: notifier, SysMetricsSink: sysMetricsSink,
-		NewMediaHealthRenderer: func(policy mediahealth.Rewriter) mediahealth.Renderer {
-			return NewMediaHealthRenderer(capturer, policy)
+		NewMediaHealthRenderer: func(routing MediaHealthRouting) mediahealth.Renderer {
+			return NewMediaHealthRenderer(capturer, routing)
 		},
 		Admission: admission,
 	}

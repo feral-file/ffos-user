@@ -459,16 +459,11 @@ func TestL1_RunStopsOnContext(t *testing.T) {
 
 // Regressions from the PR #443 review (feralfile-bot, round 1).
 
-// F19: the render navigates the record's OWN source through the gateway
-// policy, fragment kept — never the wire URL the cast pass copied from a
-// sibling.
-func TestRenderURL_OwnSourceThroughThePolicy(t *testing.T) {
-	assert.Equal(t, "https://o/work#two", renderURL("https://o/work#two", nil))
-	rw := fakeRewriter{}
-	assert.Equal(t, "https://ipfs.filebase.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/a.html#two",
-		renderURL("https://ipfs.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/a.html#two", rw))
-	assert.Equal(t, "https://ipfs.io/ipns/name/x#f", renderURL("https://ipfs.io/ipns/name/x#f", rw), "unmatched: as written")
-
+// F19: the render asks for the record's OWN source, fragment kept — never
+// the wire URL the cast pass copied from a sibling. Routing it like the
+// kiosk (policy, recorded fallback, bare-CID rule) is the renderer's job,
+// per request (offlinecache TestMediaHealthRenderer_RoutesLikeTheKiosk).
+func TestL1_RendersTheRecordsOwnSource(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	store := newL1Store(t, clock)
 	// Two fragment siblings share one L0 request and, with it, one WireURL.

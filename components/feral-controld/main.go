@@ -1185,7 +1185,7 @@ func initializeApp(
 	var offlineCacheNotifier *offlinecache.Notifier
 	var offlineCacheSysMetricsSink func(raw []byte)
 	var offlineCacheChanged func(func())
-	var offlineCacheRendererFactory func(mediahealth.Rewriter) mediahealth.Renderer
+	var offlineCacheRendererFactory func(offlinecache.MediaHealthRouting) mediahealth.Renderer
 	var offlineCacheAdmission offlinecache.AdmissionController
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
@@ -1361,18 +1361,20 @@ func initializeApp(
 		if offlineCacheAdmission != nil {
 			admit = func() bool { return offlineCacheAdmission.Admit(offlinecache.ClassSoftware).Allowed }
 		}
-		// The renderer takes the policy the L0 probe uses, so the page L1
-		// judges is fetched exactly as the kiosk fetches it. Same typed-nil
-		// guard as wireMediaHealth.
+		// The renderer routes every request exactly as the kiosk's
+		// interceptor does (gateway policy, the store's recorded fallback,
+		// the bare-CID rule), so the page L1 judges is the one the wall
+		// shows; all of it only when that interceptor is installed. Same
+		// typed-nil guard as wireMediaHealth.
 		var renderer mediahealth.Renderer
 		if offlineCacheRendererFactory != nil {
-			var policy mediahealth.Rewriter
-			if uaPolicy != nil {
-				policy = uaPolicy
+			var routing offlinecache.MediaHealthRouting
+			if uaRewrite != nil && uaPolicy != nil {
+				routing = offlinecache.MediaHealthRouting{Policy: uaPolicy, Override: mediaHealthSvc.GatewayOverride, SlashBareCID: true}
 			}
-			renderer = offlineCacheRendererFactory(policy)
+			renderer = offlineCacheRendererFactory(routing)
 		}
-		if l1 := wireMediaHealthL1(config.Get().MediaHealthTuning(logger), mediaHealthSvc.Store(), renderer, uaPolicy,
+		if l1 := wireMediaHealthL1(config.Get().MediaHealthTuning(logger), mediaHealthSvc.Store(), renderer,
 			func() (time.Time, bool) { return devicectl.PlayerAsleepSince(executor) }, admit, logger); l1 != nil {
 			go l1.Run(context)
 		}
