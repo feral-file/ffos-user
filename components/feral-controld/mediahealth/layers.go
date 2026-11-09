@@ -100,3 +100,53 @@ func definiteAbsence(code string) bool {
 	}
 	return false
 }
+
+// l1NightGap separates two L1 negatives that corroborate each other: a blank
+// and its same-night confirmation (seconds apart, identical conditions) are
+// one observation; two conclusions this far apart are different nights.
+// Robust across midnight, unlike a calendar date.
+const l1NightGap = 12 * time.Hour
+
+// l1Negative reports a standing L1 negative on the record (suspect or broken
+// from a blank or known-bad render): independent of the wall's frame, so the
+// two corroborate each other.
+func (r *Record) l1Negative() bool {
+	return r.Layer == LayerL1 && (r.State == StateSuspect || r.State == StateBroken) && renderLayerReason(r.Reason)
+}
+
+// concludeRender writes a render negative (blank or known-bad, from L1 or
+// the wall). broken requires both render verdicts being conclusive and the
+// negative corroborated (the caller decides); otherwise it is suspect —
+// advisory, never a hint. A broken render verdict gets the ordinary broken
+// window (and its backoff), so it is hinted and counted toward rejecting
+// an all-broken cast like any other. The gateway route is kept: a render
+// verdict says nothing about which gateway serves the bytes, and the work
+// is retried at the window's end.
+func (r *Record) concludeRender(reason Reason, layer Layer, at time.Time, broken bool) {
+	r.clearIssue()
+	if !broken {
+		r.State = StateSuspect
+		r.Layer = layer
+		r.Reason = reason
+		r.Category = CategoryOf(reason, 0)
+		r.CheckedAt = at
+		return
+	}
+	switch {
+	case r.State == StateBroken && r.Layer == layer && !at.Before(r.RecheckAfter):
+		r.ConsecutiveBroken++
+	case r.State == StateBroken && r.Layer == layer:
+		// Inside the window: keep the count.
+	default:
+		r.ConsecutiveBroken = 1
+	}
+	r.State = StateBroken
+	r.Layer = layer
+	r.Reason = reason
+	r.Category = CategoryOf(reason, 0)
+	r.HTTPStatus = 0
+	r.CheckedAt = at
+	r.RecheckAfter = at.Add(brokenRecheck(r.ConsecutiveBroken))
+	r.LastError = "render: " + string(reason)
+	r.LastErrorAt = &at
+}

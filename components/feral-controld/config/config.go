@@ -116,6 +116,14 @@ type MediaHealthConfig struct {
 	// screenshots the live kiosk, so absent or enabled=false means it never
 	// runs. It classifies with the l1 block's fingerprints and threshold.
 	WallCapture *MediaHealthWallCaptureConfig `json:"wallCapture,omitempty"`
+	// RenderConclusive lets a corroborated render negative — a blank or
+	// known-bad frame from the nightly render or the wall, agreed by an
+	// earlier night, another play or the other source — conclude broken:
+	// skipped, and counted toward rejecting an all-broken cast. Off (the
+	// default) keeps every render negative suspect, advisory. Turn it on
+	// only once the office fixture shows no false blanks among its healthy
+	// works: a false blank hides real art.
+	RenderConclusive bool `json:"renderConclusive,omitempty"`
 	// Malformed records that the block did not decode; every field then
 	// reads as its default.
 	Malformed bool `json:"-"`

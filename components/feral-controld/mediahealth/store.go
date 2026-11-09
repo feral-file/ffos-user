@@ -63,6 +63,10 @@ type Store struct {
 
 	// gateways parses sources into content ids for the servedBy index.
 	gateways *Gateways
+	// renderConclusive lets a corroborated render negative (a blank or
+	// known-bad frame, from L1 or the wall) conclude broken; false keeps it
+	// suspect (advisory). Options.RenderConclusive.
+	renderConclusive bool
 	// servedByMu guards servedBy, the in-memory mirror of the routes in
 	// bucketServedBy that have at least one source on a fallback gateway:
 	// route (ContentRef.RouteKey) → entry (identity + servedBySep + owner,
@@ -84,6 +88,11 @@ type Options struct {
 	Gateways *Gateways
 	// Build is stamped on every verdict this process writes.
 	Build Build
+	// RenderConclusive (mediaHealth.renderConclusive, default false): a
+	// corroborated render negative concludes broken (skipped, counted
+	// toward rejecting an all-broken cast) instead of suspect. Off until
+	// the office fixture shows no false blanks among its healthy works.
+	RenderConclusive bool
 	// MinFreeBytes refuses writes when the filesystem has less free space.
 	// 0 disables the guard (tests).
 	MinFreeBytes int64
@@ -128,15 +137,16 @@ func Open(path string, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("media health: open store: %w", err)
 	}
 	s := &Store{
-		db:           db,
-		path:         path,
-		now:          opts.Now,
-		build:        opts.Build,
-		logger:       opts.Logger,
-		minFreeBytes: opts.MinFreeBytes,
-		freeBytes:    opts.FreeBytes,
-		gateways:     opts.Gateways,
-		servedBy:     map[string]map[string]string{},
+		db:               db,
+		path:             path,
+		now:              opts.Now,
+		build:            opts.Build,
+		logger:           opts.Logger,
+		minFreeBytes:     opts.MinFreeBytes,
+		freeBytes:        opts.FreeBytes,
+		gateways:         opts.Gateways,
+		renderConclusive: opts.RenderConclusive,
+		servedBy:         map[string]map[string]string{},
 	}
 	if s.gateways == nil {
 		s.gateways = defaultGateways
@@ -314,8 +324,9 @@ const servedBySep = "\x00"
 // 2026-11-06). The records are the source of truth; the index is a cache.
 // Version 5 keys each entry by route, identity AND owning source
 // (servedByEntryKey), so an identity two sources share is never deleted
-// by one of them on the other's behalf.
-const servedByIndexVersion = "5"
+// by one of them on the other's behalf. Version 6 also indexes a
+// render-layer broken record (servedByEntry).
+const servedByIndexVersion = "6"
 
 var metaServedByIndexKey = []byte("servedByIndex")
 
@@ -449,8 +460,13 @@ func (s *Store) retireUnconfiguredFallbacks() error {
 // ok one: L1 is advisory and never gates playback, and its verdict says
 // nothing about which gateway serves the bytes — dropping the route when a
 // work turns suspect would send the wall back to the gateway that 404s.
+//
+// A render-layer broken record is indexed too: a render verdict (the work
+// did not paint) says nothing about which gateway serves its bytes, and the
+// work is retried at the end of its window — through the gateway that
+// served it, not the one that 404s.
 func servedByEntry(rec *Record) (origin string, indexed bool) {
-	if rec == nil || (rec.State != StateOK && rec.State != StateSuspect) {
+	if rec == nil || (rec.State != StateOK && rec.State != StateSuspect && !rec.renderLayerBroken()) {
 		return "", false
 	}
 	return rec.ServedBy, true
@@ -1051,7 +1067,7 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 				return nil
 			}
 		}
-		rec, err := s.applyTx(tx, o.Source, outcomeMutation(o, count, s.contentAddressed(o.Source), now))
+		rec, err := s.applyTx(tx, o.Source, outcomeMutation(o, count, s.contentAddressed(o.Source), s.renderConclusive, now))
 		if err != nil {
 			return err
 		}
@@ -1111,7 +1127,7 @@ func (s *Store) contentAddressed(source string) bool {
 	return ok
 }
 
-func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) func(rec *Record, existed bool) bool {
+func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, now time.Time) func(rec *Record, existed bool) bool {
 	return func(rec *Record, _ bool) bool {
 		at := outcomeTime(o, now)
 		stale := !rec.CheckedAt.IsZero() && at.Before(rec.CheckedAt)
@@ -1199,6 +1215,15 @@ func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) fun
 			rec.Plays.Skipped++
 			return true
 		case OutcomeFail:
+			if o.Stage == StageFrame && rec.fetchRunOpen() {
+				// The play on screen is the one whose content-type check
+				// failed (a clean play's ready would have ended that run),
+				// so this frame is of its error page: the same play, not a
+				// second failure — and the fetch reason stands (both layers
+				// failing report the fetch one). Recorded under `wall`
+				// above; the run and LastFail are left as they are.
+				return true
+			}
 			if rec.Plays.LastFailAt == nil || !at.Before(*rec.Plays.LastFailAt) {
 				rec.Plays.LastFail = &PlayFailure{Stage: o.Stage, Code: o.Code, MediaType: o.MediaType, Attempt: o.Attempt, At: at}
 				rec.Plays.LastFailAt = new(at)
@@ -1221,7 +1246,8 @@ func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) fun
 			}
 			rec.Plays.ConsecutiveFail++
 			corroborated := rec.Plays.ConsecutiveFail >= 2 ||
-				(rec.State == StateBroken && rec.Layer == LayerL0 && at.Before(rec.RecheckAfter))
+				(rec.State == StateBroken && rec.Layer == LayerL0 && at.Before(rec.RecheckAfter)) ||
+				(o.Stage == StageFrame && rec.l1Negative())
 			if !corroborated {
 				rec.setIssue(IssuePlayFailed, at)
 				return true
@@ -1229,13 +1255,10 @@ func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) fun
 			rec.clearIssue()
 			if o.Stage == StageFrame {
 				// Two plays whose frame on the wall read blank (or known
-				// bad): a render verdict, advisory like L1's — suspect,
-				// never a hint or a rejection.
-				rec.State = StateSuspect
-				rec.Layer = LayerPlay
-				rec.Reason = reason
-				rec.Category = CategoryOf(reason, 0)
-				rec.CheckedAt = at
+				// bad), or one over a standing L1 negative: a render
+				// verdict — broken when render verdicts are conclusive,
+				// suspect (advisory) otherwise.
+				rec.concludeRender(reason, LayerPlay, at, renderConclusive)
 				return true
 			}
 			// Backoff, as for L0: a work the player has re-concluded broken

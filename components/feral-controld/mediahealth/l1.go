@@ -92,6 +92,10 @@ type L1Verdict struct {
 	// MainStatus is the main document's HTTP status on the last render.
 	MainStatus int    `json:"mainStatus,omitempty"`
 	LastError  string `json:"lastError,omitempty"`
+	// NegativeAt is when L1 last concluded a negative (blank or known-bad);
+	// cleared by a frame that rendered. A second conclusion at least
+	// l1NightGap later is a different night: corroboration (step 2).
+	NegativeAt time.Time `json:"negativeAt,omitempty"`
 }
 
 // L1 recheck policy (own constants: an L1 verdict is weaker than L0's).

@@ -3,6 +3,7 @@ package mediahealth
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -74,19 +75,26 @@ func sortCands(c []l1Cand) {
 	sort.SliceStable(c, func(i, j int) bool { return c[i].next.Before(c[j].next) })
 }
 
-// ApplyRender records one L1 render on source. It never touches the L0
-// recheck fields (RecheckAfter, RetryAfter) nor a broken verdict set by L0
-// or play: an L1 verdict only ever moves a record between ok and suspect.
+// ApplyRender records one L1 render on source. It never touches a broken
+// verdict set by L0 or by the fetch layer of a play, nor the L0 recheck
+// fields of an ok or suspect record.
 //
-//   - ok: l1 = ok, next render after RecheckL1OK; a suspect record heals to
-//     ok (layer l1).
+//   - ok: a rendered frame (renderedFrame, layers.go): ok with layer l1 over
+//     unknown, ok, suspect or a render-layer broken, never over an L0 or
+//     fetch-layer broken; changes nothing while the open fetch run's last
+//     failure is a 400/404/410. Next render after RecheckL1OK.
 //   - blank: the first blank schedules an immediate confirmation render
 //     (next = now, the runner uses the longer settle); the second
-//     consecutive blank concludes suspect/render_blank for RecheckL1Suspect.
-//   - known_bad: suspect/render_known_bad immediately, for RecheckL1Suspect.
+//     consecutive blank concludes a render negative.
+//   - known_bad: concludes a render negative immediately.
+//   - a render negative (step 2) is suspect, or broken — with the ordinary
+//     broken window, so RecheckAfter is set — when mediaHealth.render-
+//     Conclusive is on and an earlier-night L1 negative or an open play
+//     failure run corroborates it; next render after RecheckL1Suspect.
 //   - stalled: no evidence; lastError only, next after RecheckL1Stalled.
 func (s *Store) ApplyRender(source string, r RenderResult) (*Record, error) {
 	now := s.now()
+	contentAddressed := s.contentAddressed(source)
 	return s.update(source, func(rec *Record, _ bool) bool {
 		l1 := rec.L1
 		if l1 == nil {
@@ -102,6 +110,30 @@ func (s *Store) ApplyRender(source string, r RenderResult) (*Record, error) {
 			l1.Variance = r.Variance
 		}
 		brokenElsewhere := rec.State == StateBroken && rec.Layer != LayerL1
+		// negative concludes a blank or known-bad render (step 2): suspect,
+		// or broken when render verdicts are conclusive AND something
+		// independent agrees — an L1 negative on an earlier night, or an
+		// open play failure run. A same-night confirmation is not
+		// independent. When that run is a fetch one (the content-type
+		// check refused the document), both layers failed and the fetch
+		// reason is the verdict.
+		negative := func(reason Reason) {
+			corroborated := (!l1.NegativeAt.IsZero() && now.Sub(l1.NegativeAt) >= l1NightGap) ||
+				rec.Plays.ConsecutiveFail > 0
+			l1.NegativeAt = now
+			if brokenElsewhere {
+				return
+			}
+			conclude := s.renderConclusive && corroborated
+			if conclude && rec.fetchRunOpen() {
+				status, _ := strconv.Atoi(rec.Plays.LastFail.Code)
+				rec.concludeRender(ReasonRenderDetect, LayerPlay, now, true)
+				rec.Category = playCategory(ReasonRenderDetect, status, contentAddressed)
+				rec.HTTPStatus = status
+				return
+			}
+			rec.concludeRender(reason, LayerL1, now, conclude)
+		}
 		switch r.Verdict {
 		case RenderStalled:
 			// ConsecutiveBlank is left as it was: a stalled confirmation
@@ -115,6 +147,7 @@ func (s *Store) ApplyRender(source string, r RenderResult) (*Record, error) {
 			// A frame of the work rendered: the play layer's evidence for
 			// an HTML work, which an iframe's `ready` is not
 			// (renderedFrame, layers.go).
+			l1.NegativeAt = time.Time{}
 			rec.renderedFrame(now, LayerL1)
 		case RenderBlank:
 			l1.ConsecutiveBlank++
@@ -123,24 +156,12 @@ func (s *Store) ApplyRender(source string, r RenderResult) (*Record, error) {
 				break
 			}
 			l1.Next = now.Add(RecheckL1Suspect)
-			if !brokenElsewhere {
-				rec.State = StateSuspect
-				rec.Layer = LayerL1
-				rec.Reason = ReasonRenderBlank
-				rec.Category = CategoryOf(ReasonRenderBlank, 0)
-				rec.CheckedAt = now
-			}
+			negative(ReasonRenderBlank)
 		case RenderKnownBad:
 			l1.ConsecutiveBlank = 0
 			l1.Label = r.Label
 			l1.Next = now.Add(RecheckL1Suspect)
-			if !brokenElsewhere {
-				rec.State = StateSuspect
-				rec.Layer = LayerL1
-				rec.Reason = ReasonRenderKnownBad
-				rec.Category = CategoryOf(ReasonRenderKnownBad, 0)
-				rec.CheckedAt = now
-			}
+			negative(ReasonRenderKnownBad)
 		default:
 			return false
 		}

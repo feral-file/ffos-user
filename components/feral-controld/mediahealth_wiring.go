@@ -60,10 +60,11 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 		return nil, nil, nil
 	}
 	store, err := mediahealth.Open(constants.MEDIA_HEALTH_STORE_FILE, mediahealth.Options{
-		Build:        mediahealth.Build{Controld: installedControldVersion()},
-		Gateways:     gateways,
-		MinFreeBytes: mediaHealthMinFreeBytes,
-		Logger:       logger,
+		Build:            mediahealth.Build{Controld: installedControldVersion()},
+		Gateways:         gateways,
+		MinFreeBytes:     mediaHealthMinFreeBytes,
+		RenderConclusive: cfg.RenderConclusive,
+		Logger:           logger,
 	})
 	if err != nil {
 		// Not fatal: this daemon owns every recovery surface on the device,

@@ -69,11 +69,11 @@ counts toward rejecting a cast.
 | `source_missing` | `http_status` 404/410/400-class, `dns` | broken |
 | `source_unreachable` | `unreachable` (a day of attempts with no usable answer, each while other origins answered — including a gateway's unconfirmed 404 for a content-addressed source), and a play-layer `render_detect` 404/410-class answer for a content-addressed source (one gateway's answer; the play layer has no second gateway to confirm absence) | broken |
 | `source_blocked` | the player's own HEAD saw 401/403 (`render_detect` with that code). L0 treats those as transient because its request identity is not the kiosk's | broken, corroborated |
-| `not_media` | `type_mismatch`, `directory_listing`, `known_error_page` | broken |
+| `not_media` | `type_mismatch`, `directory_listing`, `known_error_page`; `render_known_bad` (a frame — L1 or the wall — matching a known-bad fingerprint: a gateway's error page served with a 200, the same fact) | broken; `render_known_bad` is suspect, or broken when corroborated and `renderConclusive` |
 | `corrupt_file` | `zero_length`, `truncated`, `container_invalid` | broken |
 | `unsupported` | `unsupported_scheme`, `data_uri_invalid`, `unsupported_mime_type` (a `data:` URI declaring a type the kiosk cannot display), `transport` (reserved) | broken |
 | `render_failed` | `render_detect`, `render_load`, `render_decode`, `render_watchdog`, `render_exhausted` | broken, corroborated |
-| `render_blank` | `render_blank`, `render_known_bad` (L1) | suspect |
+| `render_blank` | `render_blank` (a frame — L1 or the wall — with no content) | suspect, or broken when corroborated and `renderConclusive` |
 | `device_limit` | `webgl_lost` | recorded on `plays.lastFail` only; never a verdict |
 
 ## L0: the probe
@@ -579,12 +579,26 @@ would hide real art, the worst outcome here.
 - **Verdict ladder** (ported from ff-indexer-v2's `probe.Classify` and
   `phash`, same pHash algorithm and bit order, same per-channel variance
   blank signal): a known-bad fingerprint match first (`render_known_bad`,
-  suspect at once, label kept), then blank (`render_blank`: variance under
+  a render negative at once, label kept), then blank (`render_blank`: variance under
   0.001 across every channel — hue without luma spread is art, not blank),
   else ok. A blank concludes only on a **second consecutive blank**, rendered
   immediately with the longer settle; a real frame or a successful play
   resets the count, and a stalled confirmation keeps the blank pending so
   the next render is still the long one.
+- **Render negatives and corroboration (step 2).** A concluded blank or
+  known-bad render is `suspect`, advisory — unless `mediaHealth.render-
+  Conclusive` is on AND something independent agrees: an L1 negative on an
+  **earlier night** (at least 12 h before: a same-night confirmation is the
+  same observation), an open play failure run, or the wall's own failing
+  frame. Then it is `broken`, layer `l1`, with the ordinary broken window
+  and backoff: skipped, and counted toward rejecting an all-broken cast.
+  When the open run is a fetch one (the content-type check refused the
+  document), both layers failed and the verdict carries the fetch reason
+  (`render_detect`, `source_missing`/`source_unreachable`). Off by default
+  until the office fixture shows no false blanks among its healthy works: a
+  false blank hides real art. A render-layer `broken` keeps its gateway
+  route (`servedBy` indexes it): the work is retried at the window's end
+  through the gateway that serves its bytes.
 - **Stalled** (navigation failed, main document not 2xx, capture timed out,
   browser unavailable): no evidence, `l1.lastError` only, retried after 24 h.
 - **Rechecks:** ok after 7 d, suspect after 24 h (a fixed page heals on the
@@ -660,8 +674,12 @@ into the play run as a `frame` outcome. Off unless
   its own (`plays.ok` is the player's). A blank or known-bad frame is a
   counted play failure (`frame`/`blank`, `frame`/`known_bad`), one per play;
   an opaque embed's `ready` does not end a frame run (it reports a blank
-  frame as ready too). Two plays conclude **`suspect`** (`render_blank` /
-  `render_known_bad`, layer `play`): advisory, never a skip.
+  frame as ready too). A failing frame while the play's content-type check
+  has an open refusal is the frame of that error page — the same play,
+  recorded under `wall` but not counted again. Two plays — or one over a
+  standing L1 negative — conclude a render negative (`render_blank` /
+  `render_known_bad`, layer `play`): `suspect`, or `broken` under
+  `renderConclusive` (see L1, step 2).
 - The record keeps the last frame's verdict, variance and hash under `wall`;
   the frame itself never leaves the device.
 
@@ -775,7 +793,8 @@ cycle).
     "enabled": false,
     "settleMs": 15000,
     "maxEdge": 1024
-  }
+  },
+  "renderConclusive": false
 }
 ```
 

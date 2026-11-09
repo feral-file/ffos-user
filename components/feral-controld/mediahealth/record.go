@@ -191,8 +191,14 @@ func CategoryOf(reason Reason, httpStatus int) Category {
 		return CategoryRenderFailed
 	case ReasonWebGLLost:
 		return CategoryDeviceLimit
-	case ReasonRenderBlank, ReasonRenderKnownBad:
+	case ReasonRenderBlank:
 		return CategoryRenderBlank
+	case ReasonRenderKnownBad:
+		// A frame matching a known-bad fingerprint is a gateway's error
+		// page (or placeholder) served with a 200: the same fact as L0's
+		// known_error_page, so the same category. Still render evidence
+		// (its layer is read from the reason, layers.go).
+		return CategoryNotMedia
 	}
 	return ""
 }
