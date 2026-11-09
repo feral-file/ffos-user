@@ -462,8 +462,9 @@ func TestStore_ApplyProbesLastWriteWinsAndSkipsNonWrites(t *testing.T) {
 }
 
 // F13: a provably malformed data: URI is conclusive and gets a record and
-// a hint; a well-formed inline source stays unrecorded; the sweep
-// re-settles the record without network.
+// a hint; a well-formed inline source whose payload checks out is recorded
+// ok (it used to stay unrecorded, and read `unknown` forever) and never
+// hinted; the sweep re-settles the broken record without network.
 func TestPreflight_RecordsMalformedDataURIs(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	f := newTableFetcher()
@@ -483,7 +484,10 @@ func TestPreflight_RecordsMalformedDataURIs(t *testing.T) {
 	assert.Equal(t, ReasonDataURIInvalid, rec.Reason)
 	rec, err = p.Store.Get("data:,fine")
 	require.NoError(t, err)
-	assert.Nil(t, rec, "a well-formed inline source is not recorded")
+	require.NotNil(t, rec, "a checked inline payload is recorded")
+	assert.Equal(t, StateOK, rec.State)
+	assert.Equal(t, LayerL0, rec.Layer)
+	assert.Empty(t, rec.WireURL, "nothing was dialed")
 
 	hints, err := p.Store.Hints([]string{"data:image/png;base64", "https://o/alive", "data:,fine"}, clock.Now())
 	require.NoError(t, err)

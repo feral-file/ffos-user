@@ -55,6 +55,29 @@ func minimalJPEG() []byte {
 	return buf
 }
 
+// jpegWithStrayBytes has the shape of the two fixture works that L0 wrongly
+// marked corrupt_file (office FF1, 2026-11-06): APP0, an Exif APP1, then 38
+// bytes of an orphaned Photoshop "8BIM" block whose own marker was stripped,
+// then the frame header. Chromium's decoder skips the stray bytes and draws
+// the image.
+func jpegWithStrayBytes() []byte {
+	buf := []byte{0xFF, 0xD8}
+	buf = append(buf, 0xFF, 0xE0, 0x00, 0x10)
+	buf = append(buf, []byte("JFIF\x00")...)
+	buf = append(buf, make([]byte, 16-2-5)...)
+	buf = append(buf, 0xFF, 0xE1, 0x00, 0x10)
+	buf = append(buf, []byte("Exif\x00\x00")...)
+	buf = append(buf, make([]byte, 16-2-6)...)
+	stray := []byte("\x00\x00\x008BIM\x04%\x00\x00\x00\x00\x00\x10")
+	stray = append(stray, make([]byte, 38-len(stray))...)
+	buf = append(buf, stray...)
+	buf = append(buf, 0xFF, 0xC0, 0x00, 0x11)
+	buf = append(buf, make([]byte, 0x11-2)...)
+	buf = append(buf, 0xFF, 0xDA, 0x00, 0x0C)
+	buf = append(buf, make([]byte, 10)...)
+	return buf
+}
+
 func kuboDirectoryListing() []byte {
 	return []byte(`<!DOCTYPE html><html><head><title>/ipfs/QmFoo</title></head>
 <body><h1>Index of /ipfs/QmFoo</h1>
@@ -111,7 +134,9 @@ func TestContentValidator_Validate(t *testing.T) {
 		{name: "PNG signature with corrupt IHDR", declared: "image/png", body: append([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, bytes.Repeat([]byte{0xAB}, 32)...), totalLength: -1, wantOK: false, wantReason: ReasonContainerInvalid, wantSniffed: "image/png"},
 		{name: "PNG with zero dimensions", declared: "image/png", body: minimalPNG(0, 100), totalLength: -1, wantOK: false, wantReason: ReasonContainerInvalid},
 		{name: "GIF with zero dimensions", declared: "image/gif", body: minimalGIF(0, 0), totalLength: -1, wantOK: false, wantReason: ReasonContainerInvalid},
-		{name: "JPEG with corrupted segment structure", declared: "image/jpeg", body: []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00}, totalLength: -1, wantOK: false, wantReason: ReasonContainerInvalid, wantSniffed: "image/jpeg"},
+		{name: "JPEG with an invalid segment length", declared: "image/jpeg", body: []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x01, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00}, totalLength: -1, wantOK: false, wantReason: ReasonContainerInvalid, wantSniffed: "image/jpeg"},
+		{name: "JPEG with stray bytes before the next marker decodes", declared: "image/jpeg", body: jpegWithStrayBytes(), totalLength: -1, wantOK: true, wantSniffed: "image/jpeg"},
+		{name: "JPEG whose stray bytes run past the window is inconclusive", declared: "image/jpeg", body: []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00}, totalLength: -1, wantOK: true, wantSniffed: "image/jpeg"},
 
 		{name: "PNG prefix too short to judge", declared: "image/png", body: []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00}, totalLength: -1, wantOK: true},
 		{name: "unknown binary type is not judged", declared: "application/octet-stream", body: bytes.Repeat([]byte{0x42}, 64), totalLength: -1, wantOK: true},
@@ -174,7 +199,7 @@ func TestCategoryOf_CoversEveryReason(t *testing.T) {
 		ReasonHTTPStatus, ReasonDNS, ReasonTypeMismatch, ReasonContainerInvalid,
 		ReasonDirectoryListing, ReasonKnownErrorPage, ReasonZeroLength, ReasonTruncated,
 		ReasonInvalidURL, ReasonUnsupportedScheme, ReasonTransport, ReasonDataURIInvalid,
-		ReasonUnreachable, ReasonRenderDetect, ReasonRenderLoad, ReasonRenderDecode, ReasonRenderWatchdog,
+		ReasonUnreachable, ReasonUnsupportedMimeType, ReasonRenderDetect, ReasonRenderLoad, ReasonRenderDecode, ReasonRenderWatchdog,
 		ReasonRenderExhausted, ReasonWebGLLost, ReasonRenderBlank, ReasonRenderKnownBad,
 	}
 	for _, r := range reasons {

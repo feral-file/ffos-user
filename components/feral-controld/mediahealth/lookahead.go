@@ -271,8 +271,11 @@ func (l *Lookahead) nextOnWall(now time.Time) string {
 		positions := make([]int, 0, chunk)
 		for i := 0; i < chunk; i++ {
 			pos := (from + i) % n
+			// data: items are walked too: a due one is settled
+			// synchronously with no network (ProbeOne decodes it), and its
+			// record then keeps it off the walk until its recheck.
 			src := walkSource(sources, index, pos)
-			if src == "" || IsDataURI(src) {
+			if src == "" {
 				continue
 			}
 			candidates = append(candidates, src)

@@ -468,7 +468,27 @@ func probeDataURI(source string) ProbeResult {
 		}
 		return result
 	}
-	result.Verdict = VerdictInline
+	declared, _, _ := dataURIMediaType(source)
+	reason, detail, sniffed, decoded := checkDataURIPayload(source, declared)
+	result.Declared, result.Sniffed = normalizeContentType(declared), sniffed
+	switch {
+	case !decoded:
+		// Well-formed metadata over a payload that does not decode: no
+		// verdict, but a reasoned inconclusive, so the record holds the
+		// source for RetryTransient instead of the walk re-picking it.
+		result.Verdict = VerdictInconclusive
+		result.Reason = ReasonDataURIInvalid
+		result.Detail = "data: payload does not decode"
+		result.Err = fmt.Errorf("media health: %s", result.Detail)
+	case reason != "":
+		// The payload is all there is: like a malformed URI, this can never
+		// heal, and the wall shows exactly this.
+		result.Verdict = VerdictDead
+		result.Reason = reason
+		result.Detail = detail
+	default:
+		result.Verdict = VerdictInline
+	}
 	return result
 }
 

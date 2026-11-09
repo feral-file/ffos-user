@@ -137,6 +137,10 @@ const (
 	ReasonUnsupportedScheme Reason = "unsupported_scheme"
 	ReasonTransport         Reason = "transport"
 	ReasonDataURIInvalid    Reason = "data_uri_invalid"
+	// ReasonUnsupportedMimeType: a data: URI declaring a type the kiosk
+	// cannot display at all (data:application/html downloads, so the frame
+	// stays blank). Same string as ff-indexer-v2's.
+	ReasonUnsupportedMimeType Reason = "unsupported_mime_type"
 	// ReasonUnreachable: the origin gave no usable answer on every counted
 	// attempt for a day (UnreachableDeadAfter) — no response or a server
 	// error. A DNS-only streak concludes ReasonDNS instead.
@@ -181,7 +185,7 @@ func CategoryOf(reason Reason, httpStatus int) Category {
 		return CategoryNotMedia
 	case ReasonZeroLength, ReasonTruncated, ReasonContainerInvalid:
 		return CategoryCorruptFile
-	case ReasonInvalidURL, ReasonUnsupportedScheme, ReasonDataURIInvalid, ReasonTransport:
+	case ReasonInvalidURL, ReasonUnsupportedScheme, ReasonDataURIInvalid, ReasonUnsupportedMimeType, ReasonTransport:
 		return CategoryUnsupported
 	case ReasonRenderDetect, ReasonRenderLoad, ReasonRenderDecode, ReasonRenderWatchdog, ReasonRenderExhausted:
 		return CategoryRenderFailed

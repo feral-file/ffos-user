@@ -179,9 +179,12 @@ func TestMediaHealth_KeyAndDataURIParityWithOfflineCache(t *testing.T) {
 	}
 }
 
+// dataURIParses reports whether mediahealth read the URI's metadata: the
+// declared type is set exactly then. The verdict itself is not the parse —
+// a parsed URI whose payload is not what it declares is dead too.
 func dataURIParses(uri string) bool {
 	res := (&mediahealth.Probe{}).ProbeOne(context.Background(), uri)
-	return res.Verdict == mediahealth.VerdictInline
+	return res.Declared != ""
 }
 
 // F4 (PR #438 review): a redirect hop's signed URL must not survive into the

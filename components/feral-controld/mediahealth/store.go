@@ -724,7 +724,8 @@ func (s *Store) checkDisk() error {
 //     → LastError only, recheck in RetryTransient when the record has no
 //     verdict, otherwise untouched. A guard/too-long refusal (no Reason)
 //     writes nothing at all: it is policy, not an observation.
-//   - inline      → nothing: inline items have no origin to observe.
+//   - inline      → as alive once the payload was checked (Sniffed set): the
+//     bytes are the work, and a checked payload is what L0 vouches for.
 //   - FromStore   → nothing: the verdict came from this store already.
 func (s *Store) ApplyProbe(source string, res ProbeResult) (*Record, error) {
 	if !probeWritesRecord(res) {
@@ -734,11 +735,13 @@ func (s *Store) ApplyProbe(source string, res ProbeResult) (*Record, error) {
 }
 
 // probeWritesRecord says whether a probe result changes the record at all:
-// inline sources, answers served from the store, and reason-less
-// inconclusives (a guard or length refusal — a policy objection, never a
-// verdict) write nothing.
+// answers served from the store, an inline source whose payload was not
+// checked, and reason-less inconclusives (a guard or length refusal — a
+// policy objection, never a verdict) write nothing. A checked inline
+// payload is recorded ok: before it, a well-formed data: work never had a
+// state and read `unknown` forever, however often it played.
 func probeWritesRecord(res ProbeResult) bool {
-	if res.FromStore || res.Verdict == VerdictInline {
+	if res.FromStore || (res.Verdict == VerdictInline && res.Sniffed == "") {
 		return false
 	}
 	return res.Verdict != VerdictInconclusive || res.Reason != ""
@@ -756,7 +759,7 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 			rec.UnreachableSince, rec.UnreachableFailures = nil, 0
 		}
 		switch res.Verdict {
-		case VerdictAlive:
+		case VerdictAlive, VerdictInline:
 			// The source's own gateway served it (ServedBy "") or a fallback
 			// did (ServedBy set): either way the record says which one the
 			// kiosk should load.

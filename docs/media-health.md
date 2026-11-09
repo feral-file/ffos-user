@@ -71,7 +71,7 @@ counts toward rejecting a cast.
 | `source_blocked` | the player's own HEAD saw 401/403 (`render_detect` with that code). L0 treats those as transient because its request identity is not the kiosk's | broken, corroborated |
 | `not_media` | `type_mismatch`, `directory_listing`, `known_error_page` | broken |
 | `corrupt_file` | `zero_length`, `truncated`, `container_invalid` | broken |
-| `unsupported` | `unsupported_scheme`, `data_uri_invalid`, `transport` (reserved) | broken |
+| `unsupported` | `unsupported_scheme`, `data_uri_invalid`, `unsupported_mime_type` (a `data:` URI declaring a type the kiosk cannot display), `transport` (reserved) | broken |
 | `render_failed` | `render_detect`, `render_load`, `render_decode`, `render_watchdog`, `render_exhausted` | broken, corroborated |
 | `render_blank` | `render_blank`, `render_known_bad` (L1) | suspect |
 | `device_limit` | `webgl_lost` | recorded on `plays.lastFail` only; never a verdict |
@@ -211,12 +211,32 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   lone substring), `known_error_page` (operator markers,
   `mediaHealth.knownBadPageMarkers`), `type_mismatch` (declared image/video/
   audio sniffed as html/plain/json; text-based media types exempt),
-  `container_invalid` (PNG, GIF, WebP, JPEG headers).
-- `data:` URIs never dial: well-formed is inline (never recorded),
-  proven-malformed is dead and recorded like any other broken source, so it
-  gets a hint; the sweep re-settles such a record without network.
-- Everything the pass settles outside the worker pool (malformed `data:`
-  URIs, a shared verdict fanned out to wire-identical siblings) is written in
+  `container_invalid` (PNG, GIF, WebP, JPEG headers). The JPEG walk reads
+  segments the way Chromium's decoder does: stray bytes between segments
+  are skipped to the next marker (libjpeg warns and decodes on), and only a
+  segment length below 2 is corrupt. Rejecting stray bytes outright marked
+  two complete images `corrupt_file` and skipped them (38 bytes of an
+  orphaned Photoshop block after the Exif segment, office FF1, 2026-11-06).
+- `data:` URIs never dial. Proven-malformed metadata is dead. A well-formed
+  one has its payload judged in place, by ff-indexer-v2's `data:` rule with
+  Chromium's decoding (percent-decoding, then forgiving base64; only the
+  first probe window of a large payload is decoded): a declared type the
+  kiosk cannot display (anything but image/video/audio/text/model,
+  `application/json`, `application/pdf`) is `unsupported_mime_type`, an
+  empty payload `zero_length`, a payload whose sniffed type does not match
+  the declared one `type_mismatch`. The kiosk renders a `data:` URI by its
+  declared type, so a mismatch is what the wall shows: an SVG declared
+  `application/json` shows the JSON viewer, a poem declared `text/markdown`
+  a blank frame, and the player reports both as `ready`. Two allowances
+  for what Chromium draws anyway: an image/video/audio type matches any
+  sniffed type in the same family (those elements sniff), and `text/html`
+  matches any text, XML or JSON body. A payload that passes is recorded
+  `ok` (layer `l0`); one that does not decode is a reasoned inconclusive (a
+  hold, no verdict). Every verdict is recorded and hinted like any other;
+  the cast pass writes a passing one only when its record is due, and the
+  lookahead walk and the sweep settle due `data:` records without
+  network.
+- Everything the pass settles outside the worker pool (`data:` URIs, a shared verdict fanned out to wire-identical siblings) is written in
   one store transaction after the request barrier, so a playlist repeating
   one source thousands of times costs one request and one write.
 

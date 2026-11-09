@@ -88,7 +88,12 @@ func TestLookahead_AdmitGateAndIgnoredInputs(t *testing.T) {
 	admit = true
 	assert.True(t, l.step(context.Background(), nil))
 	assert.True(t, l.step(context.Background(), nil), "the current item")
-	assert.False(t, l.step(context.Background(), nil), "data: items are never probed ahead")
+	assert.True(t, l.step(context.Background(), nil), "a data: item is settled once, with no network")
+	rec, err := l.Store.Get("data:,x")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Equal(t, StateOK, rec.State)
+	assert.False(t, l.step(context.Background(), nil), "its record keeps it off the walk")
 
 	// No size cap: a wall holds whatever the playlist resolved to.
 	big := make([]string, 5000)

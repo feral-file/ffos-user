@@ -182,11 +182,17 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 		if IsDataURI(source) {
 			results[i] = probeDataURI(source)
 			settled[i] = true
-			if results[i].Verdict == VerdictDead {
-				// A provably malformed data: URI is as conclusive as a 404
-				// and can never heal; it needs a record and a hint like
-				// any other broken source (PR #438 review, round 3, F13).
-				// Well-formed inline sources stay unrecorded.
+			switch {
+			case results[i].Verdict == VerdictDead:
+				// A provably malformed data: URI, or a payload that is not
+				// what it declares, is as conclusive as a 404 and can never
+				// heal; it needs a record and a hint like any other broken
+				// source (PR #438 review, round 3, F13).
+				writes = append(writes, ProbeWrite{Source: source, Result: results[i]})
+			case probeWritesRecord(results[i]) && stored[source].Due(at):
+				// A checked payload (ok) or one that would not decode (a
+				// hold): recorded when due, not on every cast — the bytes
+				// cannot change under the same URI.
 				writes = append(writes, ProbeWrite{Source: source, Result: results[i]})
 			}
 			continue
