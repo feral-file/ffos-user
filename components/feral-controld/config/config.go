@@ -136,7 +136,8 @@ type MediaHealthL1Config struct {
 	BlankVarianceThreshold float64 `json:"blankVarianceThreshold,omitempty"`
 	// SettleMs / ConfirmSettleMs are the wait after navigation before the
 	// capture, for a first render and for the confirmation render of a
-	// blank (defaults 15000 / 30000, the indexer's).
+	// blank (defaults 30000 / 45000: the headless browser paints on the
+	// CPU, so it gets longer than the indexer's GPU-backed 15000 / 30000).
 	SettleMs        int `json:"settleMs,omitempty"`
 	ConfirmSettleMs int `json:"confirmSettleMs,omitempty"`
 	// KnownBad lists fingerprints of renders that paint fine but are not

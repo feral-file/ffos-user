@@ -542,7 +542,10 @@ would hide real art, the worst outcome here.
   Viewport pinned to 1024×1024 (the pHash is only comparable at one
   geometry, and it matches the indexer's), the same reserved-address guard
   on every request the page makes, child targets included; navigate, settle
-  (15 s; 30 s for the confirmation of a blank), viewport-bounded
+  (30 s; 45 s for the confirmation of a blank — the headless browser paints
+  with software GL on the CPU, so it waits longer than the indexer's
+  GPU-backed 15 s / 30 s, and longer than the wall capture's 15 s on the
+  kiosk's GPU), viewport-bounded
   `Page.captureScreenshot`; the main document's status is the main frame's
   **latest** `Document` response, so a page that replaces itself onto an
   error page is judged by that page and a child frame's document never
@@ -700,8 +703,8 @@ cycle).
     "maxPerNight": 200,
     "minAsleepSeconds": 120,
     "blankVarianceThreshold": 0.001,
-    "settleMs": 15000,
-    "confirmSettleMs": 30000,
+    "settleMs": 30000,
+    "confirmSettleMs": 45000,
     "knownBad": [{"phash": "0x…", "maxDistance": 6, "label": "kubo-500"}]
   }
 }

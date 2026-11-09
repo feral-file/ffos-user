@@ -109,10 +109,16 @@ const (
 	// MaxVariance bounds Variance (half the samples at 0, half at 1); a
 	// threshold at or above it classifies every frame blank.
 	MaxVariance = 0.25
-	// DefaultSettle / DefaultConfirmSettle mirror the indexer's
-	// render_probe.settle_ms / confirm_settle_ms.
-	DefaultSettle        = 15 * time.Second
-	DefaultConfirmSettle = 30 * time.Second
+	// DefaultSettle / DefaultConfirmSettle are the nightly render's wait
+	// before the capture, for a first render and for the confirmation of a
+	// blank. Longer than the indexer's render_probe.settle_ms /
+	// confirm_settle_ms (15 s / 30 s): the indexer renders on a GPU host, the
+	// FF1's headless browser paints with software GL on the CPU, so a work
+	// that is on screen within 15 s on the wall can still be painting at
+	// 15 s here — and a frame captured mid-paint reads blank. A capture of
+	// the wall itself, on the kiosk's GPU, needs only the shorter wait.
+	DefaultSettle        = 30 * time.Second
+	DefaultConfirmSettle = 45 * time.Second
 	// DefaultMaxPerNight bounds renders per local calendar day.
 	DefaultMaxPerNight = 200
 	// DefaultL1Tick is how often the runner re-checks its gate.
