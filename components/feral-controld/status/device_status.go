@@ -79,6 +79,22 @@ func NewDeviceStatus(
 	}
 }
 
+// ReadScreenRotation reads the configured orientation, defaulting to landscape.
+func ReadScreenRotation(os wrapper.OS) string {
+	data, err := os.ReadFile(constants.SCREEN_ORIENTATION_FILE)
+	if err == nil {
+		switch strings.TrimSpace(string(data)) {
+		case "90":
+			return "portrait"
+		case "180":
+			return "landscapeReverse"
+		case "270":
+			return "portraitReverse"
+		}
+	}
+	return "landscape"
+}
+
 // DeviceStatusContract is the API contract version this firmware speaks,
 // reported on every getDeviceStatus reply (relayer and LAN cast alike) so the
 // app can identify a v2 frame when mDNS is unavailable — multicast-filtering
@@ -236,28 +252,8 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		return nil
 	})
 
-	// Get screen rotation
 	g.Go(func() error {
-		// Default to landscape
-		screenRotation = "landscape"
-
-		configData, err := d.os.ReadFile(constants.SCREEN_ORIENTATION_FILE)
-		if err != nil {
-			return nil // Don't fail if config file doesn't exist
-		}
-
-		if len(configData) > 0 {
-			savedRotation := strings.TrimSpace(string(configData))
-			orientationMap := map[string]string{
-				"normal": "landscape",
-				"90":     "portrait",
-				"180":    "landscapeReverse",
-				"270":    "portraitReverse",
-			}
-			if orientation, ok := orientationMap[savedRotation]; ok {
-				screenRotation = orientation
-			}
-		}
+		screenRotation = ReadScreenRotation(d.os)
 		return nil
 	})
 

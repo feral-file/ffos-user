@@ -755,10 +755,11 @@ first owner can enroll between the decision and the issuance.
 **Authorization.** A display `ctl` is looked up after `grants.json` (§3.4
 step 2) and is admitted in every state but `locked` (§7.2), `legacy`
 included, with its own replay window persisted in `display_grants.json`
-before execution (§6). It may send exactly two things:
+before execution (§6). It may send:
 `op:"cmd"`, `cmd:"displayPlaylist"` whose `req` is **the exact Play shape**
 (`isPlayCastShape`), executed as the principal
-`{controllerId, role:"display"}`; and its own self-revoke
+`{controllerId, role:"display"}`; `getDeviceStatus` with `req:{}` over
+relay v2, returning only `res.screenRotation`; and its own self-revoke
 (`revokeController{ctl:<own>}`, the site's unpair). Every other command,
 every other `req` shape, and every non-`cmd` op (`enroll`,
 `requestAccess`) is `permission_denied` with the `ctr` spent. A revoked or
@@ -770,8 +771,8 @@ Play shape is the request
 exactly `{"action":"now_display"}`, and `dp1_call` is an object; anything
 wider is not a display grant's to send. The command
 router re-checks
-the same rule (`control.Permits`) before any handler runs. No status read,
-no `connect`, no notifications: `GrantActive`, `Seal`, `SealAll`, the v2
+the same rule (`control.Permits`) before any handler runs. Rotation changes, `connect`, and notifications are
+outside the grant: `GrantActive`, `Seal`, `SealAll`, the v2
 binding layer and the owner count never see display records.
 
 **Site rules** are in §14 (browser). A site that moves to 0.5 re-pairs
@@ -821,7 +822,7 @@ Unknown commands fail closed: they are owner-only.
 | owner | everything not listed below; specifically `sshAccess`, `factoryReset`, `startWifiSetup`, `updateToLatestVersion`, `setDeviceName`, `showPairingQRCode`, `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, `mintPairingApprovalDecision`, `setContentPolicy`, `setSeriesPlayback`, `analyticsToggle`, `betaFeaturesToggle`, `shutdown`, `sendKeyboardEvent`, `tapGesture`, `doubleTapGesture`, `longPressGesture`, `dragGesture`, `clickAndDragGesture`, `zoomGesture`, `cursorUpdate`, `disconnect`, `approveController`, `revokeController` (a controller may name only its own `ctl`, §5.5), `listControllers`, `registerController`, `releaseOwnership`, `setLanControl` |
 | controller | playback: `displayPlaylist`, `displayDefaultPlaylist`, `refreshArtwork`, `refreshPlaylist`, `checkStatus`, `moveToArtwork`, `updateIndex`, `setShuffle`, `setLoop`, `updateArtFraming`, `updateDisplaySettings`, `updateDefaultDuration`, `getRecentlyPlayed`, `playRecentlyPlayed`; offline cache: `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`, `clearPlaylistCache`, `getOfflineCacheStatus`; claim: `connect` (see below); device: `getDeviceStatus`, `deviceMetrics`, `rotate`, `setVolume`, `toggleMute`, `ddcPanelControl`, `ddcPanelStatus`, `setSleepSchedule`, `setSleepMode`, `sleepNow`, `wakeNow`, `reboot`, `runNetworkDiagnostics`, `getContentPolicy`, `getSeriesPlayback`, `uploadLogs` |
 | internal | never accepted from any external principal, owner included (`permission_denied`): `resolveRecentlyPlayed` (router-internal), `ping`, `mintPairingDisplay`, `setupDisplay` (controld → player paint/probe commands that would otherwise fall through to the player over CDP), and `ff1Envelope` (an envelope inside an envelope) |
-| display (§5.7) | not a tier but a role outside the table: `displayPlaylist` in the exact Play shape (§5.7), and the self-revoke; everything else `permission_denied`. `control.Permits(principal, cmd, req)` decides it, in the authority and in the router's re-check |
+| display (§5.7) | not a tier but a role outside the table: `displayPlaylist` in the exact Play shape (§5.7), the relay v2 orientation query (`getDeviceStatus` with `{}`), and the self-revoke; everything else `permission_denied`. `control.Permits(principal, cmd, req)` decides it, in the authority and in the router's re-check |
 
 **The controller tier is also the LAN-open set** (§7.2): what anyone on the
 device's own network may send in plaintext. A command belongs in it only if
@@ -1413,7 +1414,7 @@ reply rather than `bad_envelope`.
     signature, unknown `kid`, revoked controller, `exp - iat > 120`,
     `ctl ≠ kid`, owner-tier command from a controller, `registerController`
     from a controller, `revokeController` of another `ctl` from a controller;
-    display grants (§5.7): `getDeviceStatus`, `connect`, a non-Play-shape
+    display grants (§5.7): `getDeviceStatus` on LAN, `connect`, a non-Play-shape
     `displayPlaylist`, `registerController` and `op:"enroll"` from the
     display `ctl` (`permission_denied`), an expired display grant
     (`access_revoked`), and `approveController{role:"display"}` from the

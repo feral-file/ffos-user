@@ -622,7 +622,7 @@ func (a *Authority) OpenFrom(compact string, origin Origin) (*Admission, error) 
 	} else if dg, ok := a.store.DisplayGrant(pre.adm.ctl); ok {
 		// grants.json first, then the display store (§5.7); a ctl is never
 		// in both.
-		return a.admitDisplay(pre, dg, now)
+		return a.admitDisplay(pre, dg, now, origin.Route)
 	}
 	c := pre.claims
 	a.prunePending(now)

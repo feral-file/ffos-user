@@ -52,6 +52,12 @@ relayer and the v2 device-ID relay alike, and the per-state plaintext policy
 and recovery UX in-process (see [`architecture.md`](architecture.md), "The
 setupd merge"). mDNS is discovery, never proof of identity or authority.
 
+A paired website using a display grant can send sealed `getDeviceStatus` with
+`req: {}` in the signed claims over relay v2. Its sealed reply contains only
+`res: {"screenRotation":"portrait"}` (one of `landscape`, `portrait`,
+`landscapeReverse`, or `portraitReverse`). See the
+[display-grant authorization rules](ff1-control-v1.md#57-display-grants).
+
 ---
 
 ## D-Bus Naming and Versioning Conventions
