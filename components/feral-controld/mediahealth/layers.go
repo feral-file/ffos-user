@@ -44,7 +44,7 @@ func (r *Record) renderLayerBroken() bool {
 // would never conclude (the PENDING #37 pattern).
 func (r *Record) fetchRunOpen() bool {
 	f := r.Plays.LastFail
-	return r.Plays.ConsecutiveFail > 0 && f != nil && f.Stage == StageDetect && f.Code != CodeNetwork
+	return r.Plays.ConsecutiveFail > 0 && f != nil && f.Stage == StageDetect && f.Code != CodeNetwork && !f.Superseded
 }
 
 // renderedFrame applies a frame of the work that rendered — the nightly L1
@@ -149,4 +149,46 @@ func (r *Record) concludeRender(reason Reason, layer Layer, at time.Time, broken
 	r.RecheckAfter = at.Add(brokenRecheck(r.ConsecutiveBroken))
 	r.LastError = "render: " + string(reason)
 	r.LastErrorAt = &at
+}
+
+// headGetWindow bounds one play's content-type check (the player's HEAD)
+// and the kiosk's own GET of the same document: the iframe fallback loads
+// right after the check, and the embedded load watchdog is 45 s.
+const headGetWindow = 60 * time.Second
+
+// revertHeadRefusal undoes a counted content-type check refusal that the
+// kiosk's own GET of the same document overruled: the observer saw it
+// served (2xx) within headGetWindow of the HEAD (player entries carry an
+// attempt; an observed failure, attempt 0, is the GET itself and never
+// reverted). The HEAD is the weakest fetch evidence — a different method,
+// sometimes a different answer (405, a 404 on HEAD and a 200 on GET) — so
+// the real GET outranks it. The count is reverted, the issue ends with the
+// run, and a verdict this very failure concluded is withdrawn: its
+// evidence was the HEAD alone. Reports whether anything changed.
+func (r *Record) revertHeadRefusal(now time.Time) bool {
+	f := r.Plays.LastFail
+	if !r.fetchRunOpen() || f.Attempt == 0 || now.Before(f.At) || now.Sub(f.At) > headGetWindow {
+		return false
+	}
+	if r.State == StateBroken && r.Layer == LayerPlay && r.Reason == ReasonRenderDetect && r.CheckedAt.Equal(f.At) {
+		r.State, r.Layer = "", ""
+		r.Category, r.Reason = "", ""
+		r.HTTPStatus = 0
+		r.RecheckAfter = now
+		r.LastError, r.LastErrorAt = "", nil
+	}
+	r.Plays.ConsecutiveFail--
+	if r.Plays.Fail > 0 {
+		r.Plays.Fail--
+	}
+	f.Superseded = true
+	switch {
+	case r.Plays.ConsecutiveFail == 0 && r.Issue == IssuePlayFailed:
+		r.clearIssue()
+	case r.Plays.ConsecutiveFail > 0 && r.State == "":
+		// A withdrawn verdict leaves the run's earlier counted failure:
+		// back to one failure short of a verdict, reported as such.
+		r.setIssue(IssuePlayFailed, now)
+	}
+	return true
 }

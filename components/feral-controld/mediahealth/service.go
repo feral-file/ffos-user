@@ -33,6 +33,12 @@ type Service struct {
 	// wallCapture judges the wall's own frame (wall_capture.go); nil when
 	// off. Set once at wiring, before the poller starts (SetWallCapture).
 	wallCapture *WallCapture
+	// kioskServed remembers, per wall source, when the kiosk observer last
+	// saw its document served (2xx): a content-type check refusal drained
+	// later from the ring, timed at or before that GET, is overruled by it
+	// (kioskServedAfter). Entries older than headGetWindow are dropped.
+	// Guarded by mu.
+	kioskServed map[string]time.Time
 
 	// mu serializes the per-page outcome state below (drainer, the play
 	// run, the inferred-failure memory): ObservePlayback runs on the status
@@ -356,6 +362,11 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 func (s *Service) applyEntry(o Outcome, online bool) bool {
 	var count bool
 	switch {
+	case o.Kind == OutcomeFail && s.kioskServedAfter(o):
+		// The kiosk's own GET of this document was served at or after this
+		// content-type check, in the same play: the HEAD's refusal is not
+		// the document's (the GET outranks it) — history only, and it must
+		// not mark the play's ready as an error page.
 	case o.Kind == OutcomeFail && !countableFailure(o):
 		// History only, and it must not touch the run: an uncountable
 		// entry that OPENED the run made every failure after it in that
@@ -383,6 +394,21 @@ func (s *Service) applyEntry(o Outcome, online bool) bool {
 		s.logger.Warn("media health: recording play outcome failed", zap.String("stage", o.Stage), zap.Error(err))
 	}
 	return count
+}
+
+// kioskServedAfter reports a content-type check refusal (the player's HEAD,
+// with an attempt) that the kiosk's own GET of the same document overruled:
+// served 2xx at or after it, within headGetWindow. Caller holds s.mu.
+func (s *Service) kioskServedAfter(o Outcome) bool {
+	if o.Stage != StageDetect || o.Attempt == 0 || o.Code == CodeNetwork {
+		return false
+	}
+	served, ok := s.kioskServed[o.Source]
+	if !ok {
+		return false
+	}
+	at := outcomeTime(o, s.now())
+	return !served.Before(at) && served.Sub(at) <= headGetWindow
 }
 
 // samePlay reports whether a failing outcome continues the play run already

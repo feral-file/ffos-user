@@ -743,7 +743,16 @@ lookahead's 30 s probe is the real attempt), and neither does an unreachable
 result while the device reached no other origin, nor a play while offline. A
 2xx document the kiosk observer sees clears a probe-side issue and ends the
 unreachable streak, but never writes `ok` (a 200 does not prove the work
-rendered) and never clears `play_failed`. A probe answer the vocabulary does
+rendered) and never clears `play_failed`. It does overrule the player's
+content-type check in the same play: the kiosk's GET is the real fetch and
+the HEAD the weakest fetch evidence (another method, sometimes another
+answer — a 405, or a 404 on HEAD and a 200 on GET). A HEAD refusal drained
+after a 2xx GET of the same document within 60 s is history only (it
+neither counts nor makes the play's `ready` an error page); one already
+counted is reverted when the 2xx arrives — its count, its `play_failed`,
+and a verdict that very refusal concluded, which goes back to unknown. A
+refusal is reverted once (`superseded`); an observed GET failure is never
+reverted. A probe answer the vocabulary does
 not name (a 406, 408, 416) still clears a probe-side issue — the source
 responded — while an attempt with no answer during an outage leaves the
 standing issue as it is. `issueSince`

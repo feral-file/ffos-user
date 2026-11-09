@@ -350,6 +350,10 @@ type PlayFailure struct {
 	MediaType string    `json:"mediaType,omitempty"`
 	Attempt   int       `json:"attempt,omitempty"`
 	At        time.Time `json:"at"`
+	// Superseded marks a content-type check refusal the kiosk's own GET of
+	// the same document overruled (served 2xx in the same play): its count
+	// was reverted (revertHeadRefusal) and it takes part in nothing.
+	Superseded bool `json:"superseded,omitempty"`
 }
 
 // Build records which software produced the current verdict.

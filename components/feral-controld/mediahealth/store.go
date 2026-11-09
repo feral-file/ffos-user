@@ -1348,19 +1348,28 @@ func playCategory(reason Reason, status int, contentAddressed bool) Category {
 // the document arrived, not that the work rendered — and a play_failed
 // issue stands: that one is about rendering. Writes only when something
 // changes; a source with no record is left alone (nothing to correct).
+//
+// It also lets the kiosk's real GET outrank the player's HEAD: a content-type
+// check refusal counted in the same play is reverted (revertHeadRefusal).
 func (s *Store) ApplyKioskAnswer(source string) error {
 	rec, err := s.Get(source)
 	if err != nil || rec == nil {
 		return err
 	}
-	if !rec.Issue.probeSide() && rec.UnreachableSince == nil {
+	now := s.now()
+	probe := *rec
+	if lf := rec.Plays.LastFail; lf != nil {
+		copied := *lf
+		probe.Plays.LastFail = &copied
+	}
+	if !rec.Issue.probeSide() && rec.UnreachableSince == nil && !probe.revertHeadRefusal(now) {
 		return nil
 	}
 	_, err = s.update(source, func(rec *Record, existed bool) bool {
 		if !existed {
 			return false
 		}
-		changed := false
+		changed := rec.revertHeadRefusal(now)
 		if rec.Issue.probeSide() {
 			rec.clearIssue()
 			changed = true

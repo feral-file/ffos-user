@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/url"
 	"strconv"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -65,6 +66,21 @@ func (s *Service) ObserveNavigation(nav Navigation) {
 		return
 	}
 	if nav.Status >= 200 && nav.Status < 300 {
+		now := s.now()
+		if s.kioskServed == nil {
+			s.kioskServed = map[string]time.Time{}
+		}
+		for k, t := range s.kioskServed {
+			if now.Sub(t) > headGetWindow {
+				delete(s.kioskServed, k)
+			}
+		}
+		s.kioskServed[src] = now
+		if s.runSource == src {
+			// A refusal earlier in this play was the HEAD's, not the
+			// document's: the ready that follows is not an error page.
+			s.runRefused = false
+		}
 		// The kiosk's own evidence wins over the probe's: the origin served
 		// this document to the kiosk, so a probe-side issue is no longer
 		// the truth. Not a success (the work may still fail to render),
