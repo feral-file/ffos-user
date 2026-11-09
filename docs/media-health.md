@@ -527,8 +527,10 @@ would hide real art, the worst outcome here.
 - **Candidates** (`Store.L1Candidates`): records whose L0 sniffed or
   declared type is HTML, or that the player rendered in an iframe; never
   images, video, audio or `data:` URIs (L0's container rules cover those,
-  and a browser frame of them proves nothing more), and never a `broken`
-  record (a frame of an error page adds nothing to a 404). Never-rendered
+  and a browser frame of them proves nothing more), and never an L0 or
+  fetch-layer `broken` record (a frame of an error page adds nothing to a
+  404). A record broken by a render-layer verdict (a play or a frame said
+  it did not paint) IS rendered: a frame that paints heals it. Never-rendered
   sources first, then by the `l1.next` due time. The `l1` due time is not in
   the recheck index on purpose: the L0 lookahead and sweep must not pick L1
   work up.
@@ -588,8 +590,16 @@ would hide real art, the worst outcome here.
 - **Rechecks:** ok after 7 d, suspect after 24 h (a fixed page heals on the
   next night; the recheck of a suspect record is a recovery probe and uses
   the longer confirmation settle, as the indexer's healing probes do),
-  stalled after 24 h. A real render of a `suspect` record heals
-  it to `ok` (layer `l1`), and so does a play success that proves a render
+  stalled after 24 h. **A rendered frame is the play layer's evidence
+  for an HTML work** (an iframe's `ready` is not): it records `ok` with
+  layer `l1` over unknown, an L0 `ok`, a `suspect` or a render-layer
+  `broken`, ending the failure run — but never over an L0 or fetch-layer
+  `broken` (the two layers, `layers.go`: a success in one never heals a
+  failure in the other), and it does not end a run opened by the
+  content-type check (a 401/403/429/4xx refusal is a fetch question; the
+  work still concludes on the next refusal). An L0 success on an `ok`
+  record keeps layer `l1`: valid bytes say less than a frame. A `suspect`
+  record is also healed to `ok` by a play success that proves a render
   (an image, video, audio or model `ready`; an iframe's `ready` fires for a
   blank frame too, so for an HTML work only the next L1 render heals it,
   and the blank run is kept); an L0 success only refreshes the record's L0

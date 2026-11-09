@@ -886,8 +886,13 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 				// F23).
 				return true
 			}
+			if rec.State != StateOK || rec.Layer != LayerL1 {
+				// Valid bytes say less than a rendered frame: an ok record
+				// L1 saw render keeps layer l1 (the app's "verified on this
+				// device"); its L0 metadata above is refreshed all the same.
+				rec.Layer = LayerL0
+			}
 			rec.State = StateOK
-			rec.Layer = LayerL0
 			rec.Category, rec.Reason = "", ""
 			rec.CheckedAt = now
 		case VerdictDead:

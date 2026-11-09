@@ -33,11 +33,12 @@ func (s *Store) L1Candidates(now time.Time, limit int) ([]string, error) {
 			if derr != nil || rec == nil || !isSoftwareRecord(rec) {
 				return nil
 			}
-			// A broken record is never rendered, inside or past its L0
-			// window: L0's own recheck decides when a 404 gets another
-			// look, and a frame of an error page proves nothing a byte
-			// verdict did not.
-			if rec.State == StateBroken {
+			// A broken record is rendered only when a frame could heal it:
+			// a render-layer verdict (a play or a frame said it did not
+			// paint). An L0 or fetch-layer broken is never rendered: L0's
+			// own recheck decides when a 404 gets another look, and a frame
+			// of an error page proves nothing a byte verdict did not.
+			if rec.State == StateBroken && !rec.renderLayerBroken() {
 				return nil
 			}
 			var next time.Time
@@ -111,11 +112,26 @@ func (s *Store) ApplyRender(source string, r RenderResult) (*Record, error) {
 		case RenderOK:
 			l1.ConsecutiveBlank = 0
 			l1.Next = now.Add(RecheckL1OK)
-			if rec.State == StateSuspect {
-				rec.State = StateOK
-				rec.Layer = LayerL1
-				rec.Category, rec.Reason = "", ""
-				rec.CheckedAt = now
+			// A frame of the work rendered: the play layer's evidence for
+			// an HTML work, which an iframe's `ready` is not. It answers
+			// the render question only (layers.go): it heals a suspect or
+			// a render-layer broken and records ok (layer l1), but never
+			// an L0 or fetch-layer broken (a frame can be the gateway's
+			// error page), and it ends a failure run only when that run
+			// is a render one.
+			if rec.State == StateBroken && !rec.renderLayerBroken() {
+				break
+			}
+			rec.State = StateOK
+			rec.Layer = LayerL1
+			rec.Category, rec.Reason = "", ""
+			rec.CheckedAt = now
+			rec.ConsecutiveBroken = 0
+			if !rec.fetchRunOpen() {
+				rec.Plays.ConsecutiveFail = 0
+				if rec.Issue == IssuePlayFailed {
+					rec.clearIssue()
+				}
 			}
 		case RenderBlank:
 			l1.ConsecutiveBlank++

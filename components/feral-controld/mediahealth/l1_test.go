@@ -744,3 +744,96 @@ func TestClassifyMasked_IgnoresTheMaskedRegion(t *testing.T) {
 	assert.InDelta(t, 0.125, UnmaskedFraction(sliver, []image.Rectangle{rest}), 0.01)
 	assert.InDelta(t, 1.0, UnmaskedFraction(sliver, nil), 0.001)
 }
+
+// Step 1 (#392, L1 as play evidence): a rendered frame is the play layer's
+// evidence for an HTML work. It records ok (layer l1), and a later L0
+// success keeps l1 — valid bytes say less than a frame.
+func TestL1_RenderedFrameIsPlayEvidence(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+	src := "https://o/html"
+	seedSoftware(t, store, src)
+
+	rec, err := store.ApplyRender(src, RenderResult{Verdict: RenderOK, Variance: 0.05})
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State)
+	assert.Equal(t, LayerL1, rec.Layer, "ok because a frame rendered, not because the bytes passed")
+
+	clock.Advance(time.Hour)
+	rec, err = store.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200, Declared: "text/html", Sniffed: "text/html"})
+	require.NoError(t, err)
+	assert.Equal(t, LayerL1, rec.Layer, "an L0 success keeps the render evidence")
+	assert.Equal(t, 200, rec.HTTPStatus, "and still refreshes the L0 metadata")
+}
+
+// A frame heals a render-layer broken (the work did not paint on plays),
+// ending the failure run; it never heals an L0 or fetch-layer broken, and
+// those are never rendered at all.
+func TestL1_RenderedFrameHealsOnlyTheRenderLayer(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+
+	renderBroken := "https://o/watchdog"
+	seedSoftware(t, store, renderBroken)
+	for i := 1; i <= 2; i++ {
+		_, err := store.ApplyOutcome(Outcome{Seq: int64(i), Source: renderBroken, Kind: OutcomeFail, Stage: StageWatchdog, Code: "45s", At: "t"}, true)
+		require.NoError(t, err)
+	}
+	fetchBroken := "https://o/gone"
+	seedSoftware(t, store, fetchBroken)
+	for i := 3; i <= 4; i++ {
+		_, err := store.ApplyOutcome(Outcome{Seq: int64(i), Source: fetchBroken, Kind: OutcomeFail, Stage: StageDetect, Code: "404", At: "t"}, true)
+		require.NoError(t, err)
+	}
+	l0Broken := "https://o/l0-404"
+	seedSoftware(t, store, l0Broken)
+	clock.Advance(RecheckOK + time.Second)
+	_, err := store.ApplyProbe(l0Broken, ProbeResult{Verdict: VerdictDead, Reason: ReasonHTTPStatus, Status: 404})
+	require.NoError(t, err)
+
+	for src, want := range map[string]State{renderBroken: StateBroken, fetchBroken: StateBroken, l0Broken: StateBroken} {
+		rec, err := store.Get(src)
+		require.NoError(t, err)
+		require.Equal(t, want, rec.State, src)
+	}
+	cands, err := store.L1Candidates(clock.Now(), 10)
+	require.NoError(t, err)
+	assert.Contains(t, cands, renderBroken, "a render-layer broken is rendered: a frame can heal it")
+	assert.NotContains(t, cands, fetchBroken, "a fetch-layer broken is not: a frame can be the gateway's error page")
+	assert.NotContains(t, cands, l0Broken)
+
+	rec, err := store.ApplyRender(renderBroken, RenderResult{Verdict: RenderOK, Variance: 0.05})
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State, "the frame heals the render-layer verdict")
+	assert.Equal(t, LayerL1, rec.Layer)
+	assert.Equal(t, 0, rec.Plays.ConsecutiveFail, "and ends the failure run")
+
+	rec, err = store.ApplyRender(fetchBroken, RenderResult{Verdict: RenderOK, Variance: 0.05})
+	require.NoError(t, err)
+	assert.Equal(t, StateBroken, rec.State, "a frame never overrules a 404")
+	assert.Equal(t, ReasonRenderDetect, rec.Reason)
+}
+
+// A failure run opened by the content-type check (HEAD 429 here) is a fetch
+// question: a frame that rendered answers the render question only — it
+// keeps the run and its play_failed issue, so the work still concludes
+// source_blocked/unreachable on the next refusal.
+func TestL1_RenderedFrameKeepsAFetchRun(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+	src := "https://o/rate-limited"
+	seedSoftware(t, store, src)
+	_, err := store.ApplyOutcome(Outcome{Seq: 1, Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: "429", At: "t"}, true)
+	require.NoError(t, err)
+
+	rec, err := store.ApplyRender(src, RenderResult{Verdict: RenderOK, Variance: 0.05})
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State)
+	assert.Equal(t, LayerL1, rec.Layer)
+	assert.Equal(t, 1, rec.Plays.ConsecutiveFail, "the fetch run stays open")
+	assert.Equal(t, IssuePlayFailed, rec.Issue, "and so does its issue")
+
+	rec, err = store.ApplyOutcome(Outcome{Seq: 2, Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: "429", At: "t"}, true)
+	require.NoError(t, err)
+	assert.Equal(t, StateBroken, rec.State, "the second refusal concludes")
+}
