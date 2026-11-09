@@ -559,8 +559,11 @@ would hide real art, the worst outcome here.
   picks. In the interceptor's order: a bare CID with a query is navigated in
   its directory form (where the kiosk's synthetic redirect leaves the
   document; without it the gateway's own 301 drops an fxhash query and L1
-  would judge the blank, hash-less page) and a bare subresource is sent
-  there; then the store's recorded fallback gateway (`GatewayOverride`, by
+  would judge the blank, hash-less page), a LATER document navigation of
+  that shape (the work navigating itself, a frame it opens) gets the same
+  synthetic 301 as on the kiosk — never an invisible override, which would
+  keep the document's URL bare and send its relative assets to `/ipfs/`
+  (F30) — and a bare subresource is sent there by plain override; then the store's recorded fallback gateway (`GatewayOverride`, by
   the request and then its Referer), so a work the wall plays through a
   fallback is rendered through it, its own files included; then the static
   gateway policy. The fallback and the bare-CID rule apply only when the

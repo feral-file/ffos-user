@@ -439,7 +439,10 @@ func TestMediaHealthRenderer_RoutesLikeTheKiosk(t *testing.T) {
 	s := newRenderSession()
 	s.shot = pngOf(color.White, 8, 8)
 	s.onNavigate = func(s *renderSession) {
-		s.emit("Fetch.requestPaused", `{"requestId":"doc","request":{"url":"`+own+`/?fxhash=abc","headers":{}}}`)
+		// A later document navigation of the bare shape gets the kiosk's
+		// synthetic redirect (F30), not an invisible override.
+		s.emit("Fetch.requestPaused", `{"requestId":"nav2","resourceType":"Document","request":{"url":"https://other.example/ipfs/`+cid+`?fxhash=def","headers":{}}}`)
+		s.emit("Fetch.requestPaused", `{"requestId":"doc","resourceType":"Document","request":{"url":"`+own+`/?fxhash=abc","headers":{}}}`)
 		s.emit("Fetch.requestPaused", `{"requestId":"js","request":{"url":"https://cdn.example/lib.js","headers":{"Referer":"`+own+`/?fxhash=abc"}}}`)
 		s.emit("Fetch.requestPaused", `{"requestId":"bare","request":{"url":"https://other.example/ipfs/`+cid+`?v=2","headers":{}}}`)
 		s.emit("Fetch.requestPaused", `{"requestId":"plain","request":{"url":"https://elsewhere.example/x.png","headers":{}}}`)
@@ -463,6 +466,14 @@ func TestMediaHealthRenderer_RoutesLikeTheKiosk(t *testing.T) {
 	mu.Lock()
 	assert.Contains(t, lookups, [2]string{"https://other.example/ipfs/" + cid + "/?v=2", ""}, "the override is consulted with the slashed URL")
 	mu.Unlock()
+	fulfilled := s.waitCalls(t, "Fetch.fulfillRequest", 1)
+	assert.Equal(t, "nav2", fulfilled[0]["requestId"])
+	assert.Equal(t, 301, fulfilled[0]["responseCode"])
+	assert.Equal(t, []map[string]string{
+		{"name": "Location", "value": "https://other.example/ipfs/" + cid + "/?fxhash=def"},
+		{"name": "Content-Length", "value": "0"},
+	}, fulfilled[0]["responseHeaders"], "a later bare-CID document is redirected to its directory form, as the kiosk does")
+	assert.Nil(t, byID["nav2"], "and not continued")
 
 	// Zero routing: the source as written, no rewrite at all.
 	r = newTestRenderer(t)
@@ -470,12 +481,16 @@ func TestMediaHealthRenderer_RoutesLikeTheKiosk(t *testing.T) {
 	s.shot = pngOf(color.White, 8, 8)
 	s.onNavigate = func(s *renderSession) {
 		s.emit("Fetch.requestPaused", `{"requestId":"bare","request":{"url":"https://other.example/ipfs/`+cid+`?v=2","headers":{}}}`)
+		s.emit("Fetch.requestPaused", `{"requestId":"bdoc","resourceType":"Document","request":{"url":"https://other.example/ipfs/`+cid+`?v=2","headers":{}}}`)
 	}
 	_, err = r.renderOnSession(context.Background(), s, own+"?fxhash=abc", time.Millisecond)
 	require.NoError(t, err)
 	assert.Equal(t, own+"?fxhash=abc", s.callsOf("Page.navigate")[0]["url"])
-	cont = s.waitCalls(t, "Fetch.continueRequest", 1)
-	assert.Nil(t, cont[0]["url"])
+	cont = s.waitCalls(t, "Fetch.continueRequest", 2)
+	for _, c := range cont {
+		assert.Nil(t, c["url"])
+	}
+	assert.Empty(t, s.callsOf("Fetch.fulfillRequest"), "no redirect without the kiosk rule")
 }
 
 // agentOnlyRewriter matches a host without rewriting any URL: the policy's

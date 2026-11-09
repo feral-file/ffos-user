@@ -1302,18 +1302,19 @@ const (
 // likewise uncovered. Both are recorded in
 // docs/offline-artwork-capture.md §9.
 func (c *capturer) attachSourceGuard(ctx context.Context, session CDPSession) *captureGuard {
-	return c.attachSourceGuardWithRewrite(ctx, session, nil)
+	return c.attachSourceGuardWithRewrite(ctx, session, nil, nil)
 }
 
 // attachSourceGuardWithRewrite is attachSourceGuard with the per-request
-// rewrite installed BEFORE the handler is armed, so no paused request can
-// ever be judged without it.
-func (c *capturer) attachSourceGuardWithRewrite(ctx context.Context, session CDPSession, rewrite func(string, map[string]string) (string, []map[string]string, bool)) *captureGuard {
+// rewrite and document redirect installed BEFORE the handler is armed, so
+// no paused request can ever be judged without them.
+func (c *capturer) attachSourceGuardWithRewrite(ctx context.Context, session CDPSession, rewrite func(string, map[string]string) (string, []map[string]string, bool), redirectDocument func(string) (string, bool)) *captureGuard {
 	g := &captureGuard{
-		c:           c,
-		slots:       make(chan struct{}, captureGuardConcurrency),
-		targetSlots: make(chan struct{}, captureTargetSetupConcurrency),
-		rewrite:     rewrite,
+		c:                c,
+		slots:            make(chan struct{}, captureGuardConcurrency),
+		targetSlots:      make(chan struct{}, captureTargetSetupConcurrency),
+		rewrite:          rewrite,
+		redirectDocument: redirectDocument,
 	}
 	g.arm(ctx, session)
 	return g
@@ -1333,6 +1334,15 @@ type captureGuard struct {
 	// then checks the destination that will actually be dialed, so a
 	// rewrite can never route around it.
 	rewrite func(rawURL string, headers map[string]string) (newURL string, newHeaders []map[string]string, apply bool)
+	// redirectDocument, when set (the media-health L1 render only), answers
+	// a DOCUMENT request it claims with a synthetic 301 to the returned
+	// Location instead of continuing it — the kiosk's answer to a bare CID
+	// with a query (uarewrite.Interceptor.redirectDocument). A `url`
+	// override would keep the document's own URL bare, so its relative
+	// assets resolve under `/ipfs/` and fail (PR #443 review, F30). Nothing
+	// is dialed for the 301; the redirected request is paused again and
+	// goes through rewrite and the guard like any other.
+	redirectDocument func(rawURL string) (location string, ok bool)
 	// childSetupFailures counts auto-attached targets left paused because
 	// their containment could not be armed (a worker has no Fetch domain,
 	// an unparseable attach event, a failed auto-attach extension). A
@@ -1360,8 +1370,9 @@ func (g *captureGuard) arm(ctx context.Context, session CDPSession) {
 
 	session.On("Fetch.requestPaused", func(params json.RawMessage) {
 		var evt struct {
-			RequestID string `json:"requestId"`
-			Request   struct {
+			RequestID    string `json:"requestId"`
+			ResourceType string `json:"resourceType"`
+			Request      struct {
 				URL     string            `json:"url"`
 				Headers map[string]string `json:"headers"`
 			} `json:"request"`
@@ -1376,7 +1387,7 @@ func (g *captureGuard) arm(ctx context.Context, session CDPSession) {
 		case slots <- struct{}{}:
 			go func() {
 				defer func() { <-slots }()
-				g.decide(ctx, session, evt.RequestID, evt.Request.URL, evt.Request.Headers)
+				g.decide(ctx, session, evt.RequestID, evt.Request.URL, evt.ResourceType, evt.Request.Headers)
 			}()
 		default:
 			saturatedOnce.Do(func() {
@@ -1389,16 +1400,33 @@ func (g *captureGuard) arm(ctx context.Context, session CDPSession) {
 
 // decidePausedRequest allows or blocks one paused request.
 func (c *capturer) decidePausedRequest(ctx context.Context, session CDPSession, requestID, rawURL string) {
-	(&captureGuard{c: c}).decide(ctx, session, requestID, rawURL, nil)
+	(&captureGuard{c: c}).decide(ctx, session, requestID, rawURL, "", nil)
 }
 
 // decide judges one paused request: the guard's rewrite (if any) first, so
 // the URL checked is the one that will be dialed, then the reserved-address
 // policy, then continue (with the rewritten URL/headers) or fail.
-func (g *captureGuard) decide(ctx context.Context, session CDPSession, requestID, rawURL string, headers map[string]string) {
+func (g *captureGuard) decide(ctx context.Context, session CDPSession, requestID, rawURL, resourceType string, headers map[string]string) {
 	c := g.c
 	decideCtx, cancel := context.WithTimeout(ctx, captureGuardDecisionTimeout)
 	defer cancel()
+
+	if g.redirectDocument != nil && resourceType == "Document" {
+		if location, ok := g.redirectDocument(rawURL); ok {
+			if _, err := session.Send(decideCtx, "Fetch.fulfillRequest", map[string]interface{}{
+				"requestId":    requestID,
+				"responseCode": 301,
+				"responseHeaders": []map[string]string{
+					{"name": "Location", "value": location},
+					{"name": "Content-Length", "value": "0"},
+				},
+			}); err != nil {
+				c.logger.Warn("offline cache capture: Fetch.fulfillRequest (document redirect) failed",
+					zap.String("url", redactSourceForLog(rawURL)), zap.Error(err))
+			}
+			return
+		}
+	}
 
 	args := map[string]interface{}{"requestId": requestID}
 	target := rawURL

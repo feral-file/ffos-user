@@ -82,6 +82,20 @@ func NewMediaHealthRenderer(cap Capturer, routing MediaHealthRouting) mediahealt
 	return &mediaHealthRenderer{c: c, routing: routing}
 }
 
+// documentRedirect is the guard's synthetic-redirect hook for a later
+// DOCUMENT navigation of the bare-CID shape (a work that navigates itself,
+// or a frame it opens): the kiosk answers those with a 301 to the
+// directory form, so the document's own URL ends in `/` and its relative
+// assets resolve under the CID — a `url` override would keep it bare (PR
+// #443 review, F30). nil when the bare-CID rule is off. Subresources keep
+// the plain override in renderRewrite.
+func (rt MediaHealthRouting) documentRedirect() func(string) (string, bool) {
+	if !rt.SlashBareCID {
+		return nil
+	}
+	return contentpath.SlashBeforeQuery
+}
+
 // navigationURL is the URL the render navigates for a record's source: the
 // directory form of a bare CID with a query when the kiosk redirects it
 // (its synthetic 301 leaves the document there: location.search keeps the
@@ -313,7 +327,7 @@ func (r *mediaHealthRenderer) renderOnSession(ctx context.Context, session CDPSe
 	// without a handler (an unanswered pause hangs the request). The
 	// policy rides on the guard so it applies to every request, child
 	// targets included (the capturer arms the same guard on each child).
-	guard := c.attachSourceGuardWithRewrite(ctx, session, renderRewrite(r.routing))
+	guard := c.attachSourceGuardWithRewrite(ctx, session, renderRewrite(r.routing), r.routing.documentRedirect())
 
 	for _, step := range []struct {
 		method string
