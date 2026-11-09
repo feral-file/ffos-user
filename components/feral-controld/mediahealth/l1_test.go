@@ -5,6 +5,7 @@ import (
 	"errors"
 	"image"
 	"image/color"
+	"image/draw"
 	"sync"
 	"testing"
 	"time"
@@ -686,4 +687,60 @@ func TestL1_GracePeriodAfterSleep(t *testing.T) {
 
 	// The default applies when unset.
 	assert.Equal(t, DefaultMinAsleep, NewL1(L1Config{}).cfg.MinAsleep)
+}
+
+// The wall capture masks the player's own UI over the artwork (the title
+// label, the cursor). A blank artwork with a label on it is still blank;
+// a real artwork stays ok; the label's pixels move neither the variance
+// nor the hash.
+func TestClassifyMasked_IgnoresTheMaskedRegion(t *testing.T) {
+	label := image.Rect(0, 48, 24, 64) // bottom-left, like the tombstone
+	withLabel := func(base image.Image) image.Image {
+		out := image.NewRGBA(base.Bounds())
+		draw.Draw(out, out.Bounds(), base, base.Bounds().Min, draw.Src)
+		draw.Draw(out, label, &image.Uniform{C: color.White}, image.Point{}, draw.Src)
+		return out
+	}
+	blankWithLabel := withLabel(uniform(color.Black))
+
+	unmasked, err := Classify(blankWithLabel, nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	assert.Equal(t, RenderOK, unmasked.Verdict, "unmasked, the label alone makes a blank work look rendered")
+
+	c, err := ClassifyMasked(blankWithLabel, []image.Rectangle{label}, nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	assert.Equal(t, RenderBlank, c.Verdict, "masked, the blank work reads blank")
+
+	// The hash moves toward the label-free art once masked, but a masked
+	// region still costs the DCT information: a wall frame's pHash is
+	// approximate where the label sits, which the fingerprint rules allow
+	// for (fingerprints learned from wall frames carry the same mask).
+	art := checkerboard()
+	plain, err := Classify(art, nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	un, err := Classify(withLabel(art), nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	m, err := ClassifyMasked(withLabel(art), []image.Rectangle{label}, nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	assert.Equal(t, RenderOK, m.Verdict)
+	assert.Less(t, HashDistance(plain.PHash, m.PHash), HashDistance(plain.PHash, un.PHash), "masking moves the hash toward the art without the label")
+
+	// A masked pixel is skipped, not filled: a mostly-masked flat frame
+	// with a strongly varying sliver keeps the sliver's variance. (Stripes
+	// 8 px high, so the 4-px sampling grid sees both colors.)
+	sliver := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	for y := 0; y < 64; y++ {
+		for x := 0; x < 64; x++ {
+			if x < 8 && y%8 < 4 {
+				sliver.Set(x, y, color.White)
+			} else {
+				sliver.Set(x, y, color.Black)
+			}
+		}
+	}
+	rest := image.Rect(8, 0, 64, 64)
+	assert.Greater(t, maskedVariance(sliver, []image.Rectangle{rest}), maskedVariance(sliver, nil),
+		"only the unmasked sliver counts, undiluted by the masked area")
+	assert.InDelta(t, 0.125, UnmaskedFraction(sliver, []image.Rectangle{rest}), 0.01)
+	assert.InDelta(t, 1.0, UnmaskedFraction(sliver, nil), 0.001)
 }

@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"math/bits"
 	"strconv"
 	"strings"
@@ -179,6 +180,14 @@ func HashDistance(a, b uint64) int { return bits.OnesCount64(a ^ b) }
 // brightness is not blank, and a frame is blank only when every channel is
 // flat. Samples every 4th pixel in each dimension.
 func Variance(img image.Image) float64 {
+	return maskedVariance(img, nil)
+}
+
+// maskedVariance is Variance over the pixels outside masks. Masked pixels
+// are SKIPPED, never filled: a filled pixel adds no deviation but still
+// counts as a sample, which lowers the variance — the false-blank
+// direction, the one that hides art.
+func maskedVariance(img image.Image, masks []image.Rectangle) float64 {
 	bounds := img.Bounds()
 	if bounds.Empty() {
 		return 0
@@ -188,6 +197,9 @@ func Variance(img image.Image) float64 {
 	var n int
 	for y := bounds.Min.Y; y < bounds.Max.Y; y += stride {
 		for x := bounds.Min.X; x < bounds.Max.X; x += stride {
+			if masked(masks, x, y) {
+				continue
+			}
 			r, g, b, _ := img.At(x, y).RGBA()
 			channels := [3]float64{float64(r) / 65535.0, float64(g) / 65535.0, float64(b) / 65535.0}
 			for i, v := range channels {
@@ -210,6 +222,90 @@ func Variance(img image.Image) float64 {
 	return maxVar
 }
 
+func masked(masks []image.Rectangle, x, y int) bool {
+	p := image.Point{X: x, Y: y}
+	for _, m := range masks {
+		if p.In(m) {
+			return true
+		}
+	}
+	return false
+}
+
+// UnmaskedFraction is the share of img's area outside masks (overlaps
+// counted once), sampled on the Variance grid. A caller refuses to judge a
+// frame whose unmasked share is too small to say anything.
+func UnmaskedFraction(img image.Image, masks []image.Rectangle) float64 {
+	bounds := img.Bounds()
+	if bounds.Empty() {
+		return 0
+	}
+	const stride = 4
+	var kept, total int
+	for y := bounds.Min.Y; y < bounds.Max.Y; y += stride {
+		for x := bounds.Min.X; x < bounds.Max.X; x += stride {
+			total++
+			if !masked(masks, x, y) {
+				kept++
+			}
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(kept) / float64(total)
+}
+
+// meanFilled is img with every masked pixel replaced by the mean color of
+// the unmasked ones: what the pHash sees, since its DCT needs a full grid.
+// A flat patch at the mean is the least informative fill — it moves no
+// coefficient toward any particular pattern.
+type meanFilled struct {
+	image.Image
+	masks []image.Rectangle
+	fill  color.Color
+}
+
+func (m meanFilled) At(x, y int) color.Color {
+	if masked(m.masks, x, y) {
+		return m.fill
+	}
+	return m.Image.At(x, y)
+}
+
+// channel16 narrows a mean of 16-bit channel values (RGBA() returns each in
+// [0, 0xffff], so the mean is too); clamped all the same.
+func channel16(v uint64) uint16 {
+	if v > 0xffff {
+		return 0xffff
+	}
+	return uint16(v)
+}
+
+func fillMasked(img image.Image, masks []image.Rectangle) image.Image {
+	if len(masks) == 0 {
+		return img
+	}
+	bounds := img.Bounds()
+	var sum [3]uint64
+	var n uint64
+	for y := bounds.Min.Y; y < bounds.Max.Y; y += 4 {
+		for x := bounds.Min.X; x < bounds.Max.X; x += 4 {
+			if masked(masks, x, y) {
+				continue
+			}
+			r, g, b, _ := img.At(x, y).RGBA()
+			sum[0], sum[1], sum[2] = sum[0]+uint64(r), sum[1]+uint64(g), sum[2]+uint64(b)
+			n++
+		}
+	}
+	fill := color.RGBA64{A: 0xffff}
+	if n > 0 {
+		fill = color.RGBA64{R: channel16(sum[0] / n), G: channel16(sum[1] / n), B: channel16(sum[2] / n), A: 0xffff}
+	}
+	return meanFilled{Image: img, masks: masks, fill: fill}
+}
+
 // Classification is the pure verdict over one frame.
 type Classification struct {
 	Verdict  RenderVerdict
@@ -222,11 +318,19 @@ type Classification struct {
 // page is usually not blank, and the specific label is the better answer),
 // then blank, else ok.
 func Classify(img image.Image, fingerprints []Fingerprint, blankVarianceThreshold float64) (Classification, error) {
-	hash, err := PHash(img)
+	return ClassifyMasked(img, nil, fingerprints, blankVarianceThreshold)
+}
+
+// ClassifyMasked is Classify with regions left out of the judgement: the
+// player's own UI drawn over the artwork on the wall (the title label, the
+// cursor). The variance skips them; the pHash sees them filled with the
+// mean color of the rest. masks are in img's coordinates.
+func ClassifyMasked(img image.Image, masks []image.Rectangle, fingerprints []Fingerprint, blankVarianceThreshold float64) (Classification, error) {
+	hash, err := PHash(fillMasked(img, masks))
 	if err != nil {
 		return Classification{}, err
 	}
-	c := Classification{Verdict: RenderOK, PHash: hash, Variance: Variance(img)}
+	c := Classification{Verdict: RenderOK, PHash: hash, Variance: maskedVariance(img, masks)}
 	for _, fp := range fingerprints {
 		if HashDistance(hash, fp.Hash) <= fp.MaxDistance {
 			c.Verdict = RenderKnownBad
