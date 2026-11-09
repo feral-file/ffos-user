@@ -55,7 +55,7 @@ cache uses (`offlinecache.SourceKey`), pinned equal by a test.
 | broken | after 24 h; after 7 consecutive broken rechecks, after 7 d | the hint keeps skipping until a reprobe or a play success heals it |
 | ok | after 7 d | a play success refreshes it for free |
 | transient (any state) | next attempt after 1 h (`retryAfter`) | the stored state is untouched; an expired broken verdict is NOT revived — the hold delays the probe, never the skip |
-| unreachable streak (`unreachableSince`, `unreachableFailures`) | with the transient hold | broken (`unreachable`, or `dns` for a DNS-only failure; `source_missing`, layer `l0`) once at least 3 counted failures span 24 h; any answer ends the streak |
+| unreachable streak (`unreachableSince`, `unreachableFailures`) | with the transient hold | broken (`unreachable` → `source_unreachable`, or `dns` → `source_missing` for a DNS-only failure; layer `l0`) once at least 3 counted failures span 24 h; any answer ends the streak |
 | broken, from the play layer | after 24 h; after 7 consecutive re-conclusions, after 7 d | the same backoff as L0, so a work that stays dead costs one failed play a week, not a day |
 
 A broken record **past** its recheck window is still shown to the app as
@@ -67,6 +67,7 @@ counts toward rejecting a cast.
 | category | reasons | state |
 |---|---|---|
 | `source_missing` | `http_status` 404/410/400-class, `dns` | broken |
+| `source_unreachable` | `unreachable` (a day of attempts with no usable answer, each while other origins answered — including a gateway's unconfirmed 404 for a content-addressed source), and a play-layer `render_detect` 404/410-class answer for a content-addressed source (one gateway's answer; the play layer has no second gateway to confirm absence) | broken |
 | `source_blocked` | the player's own HEAD saw 401/403 (`render_detect` with that code). L0 treats those as transient because its request identity is not the kiosk's | broken, corroborated |
 | `not_media` | `type_mismatch`, `directory_listing`, `known_error_page` | broken |
 | `corrupt_file` | `zero_length`, `truncated`, `container_invalid` | broken |
@@ -453,7 +454,8 @@ An observation is matched to a wall source by URL once the fragment and the
 player's own query params (`display_mode`) are stripped, from the current
 index forward. Then it is folded through the SAME play-run and corroboration
 rules as a ring entry: a status ≥ 400 is a `detect` failure with that status
-(404/410 → `source_missing`, 401/403/429 → `source_blocked`, 5xx →
+(404/410 → `source_missing`, or `source_unreachable` for a content-addressed
+source; 401/403/429 → `source_blocked`, 5xx →
 `render_failed`), a network error is a `load` failure with Chromium's reason,
 a canceled load (the player replacing or giving up on a frame) and a 2xx/3xx
 are ignored — a 2xx proves the mount, not the work. An observation never
@@ -518,7 +520,7 @@ attempt's problem, beside `state`, never instead of it. It is omitted while
 | `server_error` | a 5xx without `Retry-After` | any answer |
 | `rate_limited` | 429, or 503 with `Retry-After` | the next probe answering, or a kiosk 2xx |
 | `access_denied` | 401/403/407 to the probe (may be the probe's identity) | the next probe answering, or a kiosk 2xx |
-| `play_failed` | one counted failed play (player ring or kiosk observer) | a real success, or the verdict at 2 |
+| `play_failed` | one counted failed play (player ring or kiosk observer) | any `ready` that ends the failure run (an opaque embed's included — not the error page shown after a refused content-type check), or the verdict at 2 |
 
 Rules: only real attempts write an issue — the cast pass's 5 s deadline
 expiring writes nothing at all (no record, no hold, no streak count; the
@@ -532,8 +534,8 @@ responded — while an attempt with no answer during an outage leaves the
 standing issue as it is. `issueSince`
 is when the current run of trouble began, kept across a change of kind and
 reset when the issue clears. `nextCheckAt` is the later of the verdict's
-recheck and a transient hold. `failedPlays` counts failed plays since the last
-real success (a verdict at 2). The raw `lastError` text never leaves the
+recheck and a transient hold. `failedPlays` counts the failed plays in the
+current failure run (a verdict at 2); any `ready` but the error page ends it. The raw `lastError` text never leaves the
 device: it carries the host and path.
 
 ## Store

@@ -927,7 +927,7 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 				return nil
 			}
 		}
-		rec, err := s.applyTx(tx, o.Source, outcomeMutation(o, count, now))
+		rec, err := s.applyTx(tx, o.Source, outcomeMutation(o, count, s.contentAddressed(o.Source), now))
 		if err != nil {
 			return err
 		}
@@ -979,7 +979,15 @@ func outcomeDigest(o Outcome) string {
 // in the play history the app shows, but it never changes the state,
 // never advances the corroboration run, and never refreshes a verdict —
 // older evidence does not supersede newer (PR #438 review, round 5, F17).
-func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, existed bool) bool {
+// contentAddressed reports whether source names an IPFS/Arweave content id
+// (whatever gateway it was published on): a gateway's 404 for one says the
+// gateway could not serve it, not that the content is gone.
+func (s *Store) contentAddressed(source string) bool {
+	_, ok := s.gateways.Ref(source)
+	return ok
+}
+
+func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) func(rec *Record, existed bool) bool {
 	return func(rec *Record, _ bool) bool {
 		at := outcomeTime(o, now)
 		stale := !rec.CheckedAt.IsZero() && at.Before(rec.CheckedAt)
@@ -1002,8 +1010,21 @@ func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, exi
 				return true
 			}
 			rec.Plays.ConsecutiveFail = 0
+			if rec.Issue == IssuePlayFailed {
+				// play_failed reports a failure run short of the verdict;
+				// the run just ended, so the issue goes with it. This holds
+				// for an iframe ready too: it cannot heal a verdict, but it
+				// does reset the run (the next failure counts from one), and
+				// an issue kept past that never cleared at all — no probe
+				// answer or kiosk 200 clears a play issue, and the verdict
+				// at two can no longer come. PENDING #37 showed play_failed
+				// through ten good plays (office FF1, 2026-11-09). An error
+				// page's ready returned above and keeps the run and issue.
+				rec.clearIssue()
+			}
 			if !readyIsEvidence(o) {
-				// Counted as a play, but proves nothing: any issue stands.
+				// Counted as a play, but proves nothing about the work: no
+				// ok, no heal, no recheck push (a probe-side issue stands).
 				// An iframe/object/PDF reports ready for whatever document
 				// loaded in it — Chromium's own error page included — so its
 				// ready proves the mount, not the work. Counted as a play,
@@ -1077,7 +1098,7 @@ func outcomeMutation(o Outcome, count bool, now time.Time) func(rec *Record, exi
 			if o.Stage == StageDetect {
 				status, _ = strconv.Atoi(o.Code)
 			}
-			rec.Category = playCategory(reason, status)
+			rec.Category = playCategory(reason, status, contentAddressed)
 			rec.HTTPStatus = status
 			rec.CheckedAt = at
 			rec.RecheckAfter = at.Add(brokenRecheck(rec.ConsecutiveBroken))
@@ -1116,9 +1137,21 @@ func laterOf(have *time.Time, t time.Time) *time.Time {
 // 404/410-class source_missing; a 5xx means the origin is up but failing,
 // which (corroborated across plays) is render_failed, like every other
 // stage.
-func playCategory(reason Reason, status int) Category {
+//
+// The exception is a 404/410-class answer for a content-addressed source:
+// that is one gateway's answer, and the play layer has no second gateway
+// to confirm it (L0's confirmAbsence does, and an L0 verdict that confirmed
+// absence is source_missing). The verdict stands — the work does not play
+// here — but it reads source_unreachable, the same as L0's unconfirmed
+// gateway 404 (arweave.net 404ing an on-chain transaction to the player,
+// office FF1, 2026-11-09).
+func playCategory(reason Reason, status int, contentAddressed bool) Category {
 	if reason == ReasonRenderDetect && status >= 400 && status < 500 {
-		return CategoryOf(ReasonHTTPStatus, status)
+		category := CategoryOf(ReasonHTTPStatus, status)
+		if category == CategorySourceMissing && contentAddressed {
+			return CategorySourceUnreachable
+		}
+		return category
 	}
 	return CategoryOf(reason, status)
 }

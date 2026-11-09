@@ -174,7 +174,7 @@ func TestCategoryOf_CoversEveryReason(t *testing.T) {
 		ReasonHTTPStatus, ReasonDNS, ReasonTypeMismatch, ReasonContainerInvalid,
 		ReasonDirectoryListing, ReasonKnownErrorPage, ReasonZeroLength, ReasonTruncated,
 		ReasonInvalidURL, ReasonUnsupportedScheme, ReasonTransport, ReasonDataURIInvalid,
-		ReasonRenderDetect, ReasonRenderLoad, ReasonRenderDecode, ReasonRenderWatchdog,
+		ReasonUnreachable, ReasonRenderDetect, ReasonRenderLoad, ReasonRenderDecode, ReasonRenderWatchdog,
 		ReasonRenderExhausted, ReasonWebGLLost, ReasonRenderBlank, ReasonRenderKnownBad,
 	}
 	for _, r := range reasons {
@@ -183,6 +183,8 @@ func TestCategoryOf_CoversEveryReason(t *testing.T) {
 	assert.Equal(t, CategorySourceMissing, CategoryOf(ReasonHTTPStatus, 404))
 	assert.Equal(t, CategorySourceMissing, CategoryOf(ReasonHTTPStatus, 410))
 	assert.Equal(t, CategorySourceBlocked, CategoryOf(ReasonHTTPStatus, 403))
+	assert.Equal(t, CategorySourceMissing, CategoryOf(ReasonDNS, 0))
+	assert.Equal(t, CategorySourceUnreachable, CategoryOf(ReasonUnreachable, 0), "a day without an answer is not proof the work is gone")
 	assert.Equal(t, CategoryDeviceLimit, CategoryOf(ReasonWebGLLost, 0))
 	assert.Equal(t, CategoryRenderBlank, CategoryOf(ReasonRenderBlank, 0))
 	assert.Empty(t, CategoryOf(Reason("made_up"), 0))

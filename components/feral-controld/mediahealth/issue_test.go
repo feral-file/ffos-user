@@ -114,10 +114,24 @@ func TestIssue_PlayFailedThenVerdictOrHeal(t *testing.T) {
 	g.emit(Outcome{Kind: OutcomeOK, Stage: StageReady, MediaType: "image", Attempt: 1})
 	assert.Empty(t, g.record().Issue, "a real success clears it")
 
+	// An iframe ready on a later play cannot heal a verdict, but it ends the
+	// failure run, and play_failed goes with the run: kept, it never cleared
+	// (PENDING #37 on the office FF1 showed it through ten good plays).
 	h := newPlayFeed(t, true)
 	h.emit(infuraPlay()...)
 	h.emit(iframeReady)
-	assert.Equal(t, IssuePlayFailed, h.record().Issue, "an iframe ready proves nothing: the issue stands")
+	rec = h.record()
+	assert.Empty(t, rec.Issue, "the run ended: the issue goes with it")
+	assert.Equal(t, 0, rec.Plays.ConsecutiveFail)
+	assert.Empty(t, rec.State, "an iframe ready still never writes ok")
+
+	// The error page the iframe fallback shows after a refused content-type
+	// check is not a play that went through: run and issue both stand.
+	e := newPlayFeed(t, true)
+	e.emit(Outcome{Kind: OutcomeFail, Stage: StageDetect, Code: "404", Attempt: 1}, iframeReady)
+	rec = e.record()
+	assert.Equal(t, IssuePlayFailed, rec.Issue, "an error page's ready is not a success")
+	assert.Equal(t, 1, rec.Plays.ConsecutiveFail)
 }
 
 func TestIssue_OfflinePlaysWriteNoIssue(t *testing.T) {

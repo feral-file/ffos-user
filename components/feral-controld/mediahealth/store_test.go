@@ -160,6 +160,31 @@ func TestStore_ApplyOutcome_DetectStatusCategories(t *testing.T) {
 	}
 }
 
+// A gateway's 404 to the player for a content-addressed source is that
+// gateway's answer, not proof the content is gone: the play verdict stands
+// (the work does not play here) but reads source_unreachable. A 403 is the
+// kiosk refused either way.
+func TestStore_ApplyOutcome_GatewayDetect404IsUnreachable(t *testing.T) {
+	clock := &testClock{t: time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)}
+	s := openTestStore(t, clock)
+	for _, tc := range []struct {
+		src, code string
+		want      Category
+	}{
+		{"https://arweave.net/vhHpN5FzIu8b5svpQaYxlTtoKPFSw2nGfuKdA-4qyTY", "404", CategorySourceUnreachable},
+		{"https://ipfs.io/ipfs/QmQHxZCdW5Gq9YCrcGbvrvYx5LZ6reL9Aev5td8GNAuatC/17.png", "410", CategorySourceUnreachable},
+		{"https://ipfs.io/ipfs/QmQHxZCdW5Gq9YCrcGbvrvYx5LZ6reL9Aev5td8GNAuatC/18.png", "403", CategorySourceBlocked},
+		{"https://origin.example/plain", "404", CategorySourceMissing},
+	} {
+		_, _ = s.ApplyOutcome(Outcome{Source: tc.src, Kind: OutcomeFail, Stage: StageDetect, Code: tc.code}, true)
+		rec, err := s.ApplyOutcome(Outcome{Source: tc.src, Kind: OutcomeFail, Stage: StageDetect, Code: tc.code}, true)
+		require.NoError(t, err)
+		assert.Equal(t, StateBroken, rec.State, tc.src)
+		assert.Equal(t, ReasonRenderDetect, rec.Reason, tc.src)
+		assert.Equal(t, tc.want, rec.Category, tc.src)
+	}
+}
+
 func TestStore_ApplyOutcome_DeviceLocalAndSkipNeverConclude(t *testing.T) {
 	clock := &testClock{t: time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)}
 	s := openTestStore(t, clock)

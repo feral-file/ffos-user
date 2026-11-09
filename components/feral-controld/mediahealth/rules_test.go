@@ -177,14 +177,15 @@ func unreachableResult(kind Unreachable, status int) ProbeResult {
 
 func TestRules_UnreachableStreakConcludes(t *testing.T) {
 	cases := []struct {
-		name       string
-		kind       Unreachable
-		status     int
-		wantReason Reason
+		name         string
+		kind         Unreachable
+		status       int
+		wantReason   Reason
+		wantCategory Category
 	}{
-		{"no answer (ipfs.infura.io)", UnreachableNoAnswer, 0, ReasonUnreachable},
-		{"server error", UnreachableServer, 502, ReasonUnreachable},
-		{"dns", UnreachableDNS, 0, ReasonDNS},
+		{"no answer (ipfs.infura.io)", UnreachableNoAnswer, 0, ReasonUnreachable, CategorySourceUnreachable},
+		{"server error", UnreachableServer, 502, ReasonUnreachable, CategorySourceUnreachable},
+		{"dns", UnreachableDNS, 0, ReasonDNS, CategorySourceMissing},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -201,7 +202,7 @@ func TestRules_UnreachableStreakConcludes(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, StateBroken, rec.State, "3 counted attempts over 24 h")
 			assert.Equal(t, tc.wantReason, rec.Reason)
-			assert.Equal(t, CategorySourceMissing, rec.Category)
+			assert.Equal(t, tc.wantCategory, rec.Category)
 			assert.Equal(t, tc.status, rec.HTTPStatus)
 		})
 	}

@@ -3368,7 +3368,7 @@ not yet received). `unskipped` (`expired` | `replayable` | `player` |
 
 `state` is `ok`, `broken`, `suspect` (an L1 render verdict, reported but never
 acted on) or `unknown` (never observed). `category` is the closed app-facing
-set — `source_missing`, `source_blocked`, `not_media`, `corrupt_file`,
+set — `source_missing`, `source_unreachable`, `source_blocked`, `not_media`, `corrupt_file`,
 `unsupported`, `render_failed`, `render_blank`, `device_limit` — and `reason`
 the detail code beneath it; `layer` says which probe set the state (`l0`,
 `play`, `l1`). `castSeq` echoes the player's outcome-ring cast sequence when

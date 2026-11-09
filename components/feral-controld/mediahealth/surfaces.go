@@ -132,8 +132,9 @@ type ReportItem struct {
 	// NextCheckAt is when the device looks at this source again — the
 	// verdict's recheck or a transient hold, whichever is later (RFC 3339).
 	NextCheckAt string `json:"nextCheckAt,omitempty"`
-	// FailedPlays counts failed plays since the last real success; the
-	// source concludes broken at 2. Omitted at 0.
+	// FailedPlays counts the failed plays in the current failure run (any
+	// ready but an error page ends it); the source concludes broken at 2.
+	// Omitted at 0.
 	FailedPlays int `json:"failedPlays,omitempty"`
 	// ServedBy is the HOST of the fallback gateway the device loads this
 	// work through, when the source's own gateway could not serve it. A

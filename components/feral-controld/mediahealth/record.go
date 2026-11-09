@@ -84,6 +84,15 @@ const (
 	// CategorySourceMissing: the origin said the resource is not there for
 	// anyone (404/410-class), or the host does not resolve.
 	CategorySourceMissing Category = "source_missing"
+	// CategorySourceUnreachable: the work exists as far as the device can
+	// tell, but nothing it tried would serve it — an origin that gave no
+	// usable answer for a day (the unreachable streak), or a gateway that
+	// answered 404 for a content-addressed source no other gateway
+	// confirmed missing. Still broken (skipped, rechecked daily), but not
+	// source_missing: arweave.net timing out on a transaction that is on
+	// chain read "missing" to the app for nine works on the office FF1
+	// (2026-11-09), which the owner reads as "this work is gone".
+	CategorySourceUnreachable Category = "source_unreachable"
 	// CategorySourceBlocked: the kiosk itself was refused (401/403 seen by
 	// the player's own HEAD). L0 treats those statuses as transient because
 	// its request identity is not the kiosk's; only the play layer can
@@ -164,8 +173,10 @@ func CategoryOf(reason Reason, httpStatus int) Category {
 		default:
 			return CategorySourceMissing
 		}
-	case ReasonDNS, ReasonUnreachable:
+	case ReasonDNS:
 		return CategorySourceMissing
+	case ReasonUnreachable:
+		return CategorySourceUnreachable
 	case ReasonTypeMismatch, ReasonDirectoryListing, ReasonKnownErrorPage:
 		return CategoryNotMedia
 	case ReasonZeroLength, ReasonTruncated, ReasonContainerInvalid:

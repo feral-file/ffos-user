@@ -100,7 +100,6 @@ func (r *Record) setIssue(issue Issue, now time.Time) {
 	r.Issue = issue
 }
 
-// clearIssue drops any issue (a real answer, a verdict).
 // dropRoute forgets the fallback gateway a broken work was routed
 // through. Every broken conclusion calls it, whichever layer concluded:
 // a play-layer verdict over a work "served by" a fallback left the route
@@ -110,6 +109,8 @@ func (r *Record) setIssue(issue Issue, now time.Time) {
 // finds a gateway that serves it.
 func (r *Record) dropRoute() { r.ServedBy = "" }
 
+// clearIssue drops any issue (a real answer, a verdict, the end of a
+// failure run).
 func (r *Record) clearIssue() {
 	r.Issue, r.IssueSince = "", nil
 }
