@@ -82,6 +82,20 @@ type Capturer interface {
 	Capture(ctx context.Context, bounds Bounds) (*Image, error)
 }
 
+// ArtworkCapturer captures only the artwork on the wall, with the player's
+// UI over it reported as masks (artwork.go). A separate interface so the hub,
+// which serves whole screenshots, does not depend on it.
+type ArtworkCapturer interface {
+	CaptureArtwork(ctx context.Context, maxEdge int) (*ArtworkFrame, error)
+}
+
+// Kiosk is both captures over one Chromium endpoint, sharing one single
+// flight: a hub screenshot and a wall capture never run at once.
+type Kiosk interface {
+	Capturer
+	ArtworkCapturer
+}
+
 type capturer struct {
 	endpoint    string
 	httpClient  wrapper.HTTPClient
@@ -91,6 +105,12 @@ type capturer struct {
 
 // New creates a single-flight screenshot capturer for one Chromium endpoint.
 func New(endpoint string, httpClient wrapper.HTTPClient, dialer wrapper.WebSocketDialer) Capturer {
+	return NewKiosk(endpoint, httpClient, dialer)
+}
+
+// NewKiosk is New with the artwork capture too, for a caller that needs both
+// over the same single flight.
+func NewKiosk(endpoint string, httpClient wrapper.HTTPClient, dialer wrapper.WebSocketDialer) Kiosk {
 	return &capturer{
 		endpoint:    strings.TrimRight(endpoint, "/"),
 		httpClient:  httpClient,
