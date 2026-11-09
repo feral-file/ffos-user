@@ -845,3 +845,33 @@ func TestRasterTuningPermissiveDecode(t *testing.T) {
 		}
 	})
 }
+
+func TestMediaHealthTuning(t *testing.T) {
+	t.Run("absent block is enabled with defaults", func(t *testing.T) {
+		c := &config.Config{}
+		got := c.MediaHealthTuning(nil)
+		if got.Disabled || got.Malformed || got.ProbeMaxBytes != 0 || got.Lookahead != 0 || len(got.KnownBadPageMarkers) != 0 {
+			t.Fatalf("unexpected defaults: %+v", got)
+		}
+	})
+	t.Run("decodes every field", func(t *testing.T) {
+		c := &config.Config{MediaHealth: []byte(`{"disabled":true,"knownBadPageMarkers":["gateway time-out"],"probeMaxBytes":4096,"lookahead":-1}`)}
+		got := c.MediaHealthTuning(nil)
+		if !got.Disabled || got.ProbeMaxBytes != 4096 || got.Lookahead != -1 || len(got.KnownBadPageMarkers) != 1 {
+			t.Fatalf("unexpected decode: %+v", got)
+		}
+	})
+	t.Run("malformed block reads as defaults, never fatal", func(t *testing.T) {
+		c := &config.Config{MediaHealth: []byte(`{"disabled":"yes"}`)}
+		got := c.MediaHealthTuning(nil)
+		if got.Disabled || !got.Malformed {
+			t.Fatalf("expected defaults with Malformed set: %+v", got)
+		}
+	})
+	t.Run("retired sourceProbe.disabled still disables", func(t *testing.T) {
+		c := &config.Config{SourceProbe: &config.SourceProbeConfig{Disabled: true}}
+		if !c.MediaHealthTuning(nil).Disabled {
+			t.Fatal("sourceProbe.disabled must keep its meaning")
+		}
+	})
+}

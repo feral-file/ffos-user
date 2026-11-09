@@ -7,6 +7,7 @@ package mocks
 import (
 	context "context"
 	reflect "reflect"
+	time "time"
 
 	commands "github.com/feral-file/ffos-user/components/feral-controld/commands"
 	setupui "github.com/feral-file/ffos-user/components/feral-controld/setupui"
@@ -113,6 +114,18 @@ func (mr *MockExecutorMockRecorder) SetDeviceNameObserver(observer interface{}) 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetDeviceNameObserver", reflect.TypeOf((*MockExecutor)(nil).SetDeviceNameObserver), observer)
 }
 
+// SetMediaHealthResetter mocks base method.
+func (m *MockExecutor) SetMediaHealthResetter(reset func() error) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetMediaHealthResetter", reset)
+}
+
+// SetMediaHealthResetter indicates an expected call of SetMediaHealthResetter.
+func (mr *MockExecutorMockRecorder) SetMediaHealthResetter(reset interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetMediaHealthResetter", reflect.TypeOf((*MockExecutor)(nil).SetMediaHealthResetter), reset)
+}
+
 // SetSetupUI mocks base method.
 func (m *MockExecutor) SetSetupUI(ui *setupui.Service) {
 	m.ctrl.T.Helper()
@@ -123,6 +136,115 @@ func (m *MockExecutor) SetSetupUI(ui *setupui.Service) {
 func (mr *MockExecutorMockRecorder) SetSetupUI(ui interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSetupUI", reflect.TypeOf((*MockExecutor)(nil).SetSetupUI), ui)
+}
+
+// MockControlClaim is a mock of ControlClaim interface.
+type MockControlClaim struct {
+	ctrl     *gomock.Controller
+	recorder *MockControlClaimMockRecorder
+}
+
+// MockControlClaimMockRecorder is the mock recorder for MockControlClaim.
+type MockControlClaimMockRecorder struct {
+	mock *MockControlClaim
+}
+
+// NewMockControlClaim creates a new mock instance.
+func NewMockControlClaim(ctrl *gomock.Controller) *MockControlClaim {
+	mock := &MockControlClaim{ctrl: ctrl}
+	mock.recorder = &MockControlClaimMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockControlClaim) EXPECT() *MockControlClaimMockRecorder {
+	return m.recorder
+}
+
+// ClaimQRFields mocks base method.
+func (m *MockControlClaim) ClaimQRFields() ([]string, time.Time, bool) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClaimQRFields")
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(time.Time)
+	ret2, _ := ret[2].(bool)
+	return ret0, ret1, ret2
+}
+
+// ClaimQRFields indicates an expected call of ClaimQRFields.
+func (mr *MockControlClaimMockRecorder) ClaimQRFields() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClaimQRFields", reflect.TypeOf((*MockControlClaim)(nil).ClaimQRFields))
+}
+
+// ClaimQRPins mocks base method.
+func (m *MockControlClaim) ClaimQRPins() ([]string, bool) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClaimQRPins")
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(bool)
+	return ret0, ret1
+}
+
+// ClaimQRPins indicates an expected call of ClaimQRPins.
+func (mr *MockControlClaimMockRecorder) ClaimQRPins() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClaimQRPins", reflect.TypeOf((*MockControlClaim)(nil).ClaimQRPins))
+}
+
+// ClearInvitation mocks base method.
+func (m *MockControlClaim) ClearInvitation() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ClearInvitation")
+}
+
+// ClearInvitation indicates an expected call of ClearInvitation.
+func (mr *MockControlClaimMockRecorder) ClearInvitation() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearInvitation", reflect.TypeOf((*MockControlClaim)(nil).ClearInvitation))
+}
+
+// ConnectAuthority mocks base method.
+func (m *MockControlClaim) ConnectAuthority(ctx context.Context) (bool, bool) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ConnectAuthority", ctx)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(bool)
+	return ret0, ret1
+}
+
+// ConnectAuthority indicates an expected call of ConnectAuthority.
+func (mr *MockControlClaimMockRecorder) ConnectAuthority(ctx interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ConnectAuthority", reflect.TypeOf((*MockControlClaim)(nil).ConnectAuthority), ctx)
+}
+
+// Enrolled mocks base method.
+func (m *MockControlClaim) Enrolled() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Enrolled")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// Enrolled indicates an expected call of Enrolled.
+func (mr *MockControlClaimMockRecorder) Enrolled() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Enrolled", reflect.TypeOf((*MockControlClaim)(nil).Enrolled))
+}
+
+// Retire mocks base method.
+func (m *MockControlClaim) Retire() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Retire")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Retire indicates an expected call of Retire.
+func (mr *MockControlClaimMockRecorder) Retire() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Retire", reflect.TypeOf((*MockControlClaim)(nil).Retire))
 }
 
 // MocksetupNarrator is a mock of setupNarrator interface.
@@ -146,6 +268,20 @@ func NewMocksetupNarrator(ctrl *gomock.Controller) *MocksetupNarrator {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MocksetupNarrator) EXPECT() *MocksetupNarratorMockRecorder {
 	return m.recorder
+}
+
+// ClaimQRShowing mocks base method.
+func (m *MocksetupNarrator) ClaimQRShowing() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClaimQRShowing")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// ClaimQRShowing indicates an expected call of ClaimQRShowing.
+func (mr *MocksetupNarratorMockRecorder) ClaimQRShowing() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClaimQRShowing", reflect.TypeOf((*MocksetupNarrator)(nil).ClaimQRShowing))
 }
 
 // Hide mocks base method.
@@ -188,20 +324,6 @@ func (mr *MocksetupNarratorMockRecorder) RefreshClaimQRName(resolve interface{})
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RefreshClaimQRName", reflect.TypeOf((*MocksetupNarrator)(nil).RefreshClaimQRName), resolve)
 }
 
-// ClaimQRShowing mocks base method.
-func (m *MocksetupNarrator) ClaimQRShowing() bool {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ClaimQRShowing")
-	ret0, _ := ret[0].(bool)
-	return ret0
-}
-
-// ClaimQRShowing indicates an expected call of ClaimQRShowing.
-func (mr *MocksetupNarratorMockRecorder) ClaimQRShowing() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClaimQRShowing", reflect.TypeOf((*MocksetupNarrator)(nil).ClaimQRShowing))
-}
-
 // RefreshClaimQRURL mocks base method.
 func (m *MocksetupNarrator) RefreshClaimQRURL(build func() string) {
 	m.ctrl.T.Helper()
@@ -214,18 +336,6 @@ func (mr *MocksetupNarratorMockRecorder) RefreshClaimQRURL(build interface{}) *g
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RefreshClaimQRURL", reflect.TypeOf((*MocksetupNarrator)(nil).RefreshClaimQRURL), build)
 }
 
-// ShowClaimQRAutomatic mocks base method.
-func (m *MocksetupNarrator) ShowClaimQRAutomatic(url, deviceName string) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "ShowClaimQRAutomatic", url, deviceName)
-}
-
-// ShowClaimQRAutomatic indicates an expected call of ShowClaimQRAutomatic.
-func (mr *MocksetupNarratorMockRecorder) ShowClaimQRAutomatic(url, deviceName interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowClaimQRAutomatic", reflect.TypeOf((*MocksetupNarrator)(nil).ShowClaimQRAutomatic), url, deviceName)
-}
-
 // ShowClaimQR mocks base method.
 func (m *MocksetupNarrator) ShowClaimQR(url, deviceName string) {
 	m.ctrl.T.Helper()
@@ -236,6 +346,18 @@ func (m *MocksetupNarrator) ShowClaimQR(url, deviceName string) {
 func (mr *MocksetupNarratorMockRecorder) ShowClaimQR(url, deviceName interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowClaimQR", reflect.TypeOf((*MocksetupNarrator)(nil).ShowClaimQR), url, deviceName)
+}
+
+// ShowClaimQRAutomatic mocks base method.
+func (m *MocksetupNarrator) ShowClaimQRAutomatic(url, deviceName string) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ShowClaimQRAutomatic", url, deviceName)
+}
+
+// ShowClaimQRAutomatic indicates an expected call of ShowClaimQRAutomatic.
+func (mr *MocksetupNarratorMockRecorder) ShowClaimQRAutomatic(url, deviceName interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowClaimQRAutomatic", reflect.TypeOf((*MocksetupNarrator)(nil).ShowClaimQRAutomatic), url, deviceName)
 }
 
 // ShowConnectingIfShowing mocks base method.

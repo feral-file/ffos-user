@@ -19,8 +19,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
-	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/seriesplayback"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -315,7 +315,7 @@ func TestCommandHandler_SetSeriesPlayback_ConcurrentRequestsCoalesceWithoutLosin
 		Times(3) // initial cast + the "first" recast + the "full" recast
 	mockStatusPoller.EXPECT().ForceRefresh().Times(3)
 
-	// probeCalls counts every ProbeSources invocation: 1 = the initial cast's
+	// probeCalls counts every Preflight invocation: 1 = the initial cast's
 	// own preflight, 2 = setSeriesPlayback("first")'s own recast preflight
 	// (the window this test targets), 3 = the coalesced follow-up recast's
 	// preflight, run by the SAME goroutine once call 2 returns. Only call 2
@@ -323,7 +323,7 @@ func TestCommandHandler_SetSeriesPlayback_ConcurrentRequestsCoalesceWithoutLosin
 	probeCalls := 0
 	var secondResult interface{}
 	secondDone := make(chan struct{})
-	commandrouter.SetSourceProber(handler, &stallingProber{during: func() {
+	commandrouter.SetMediaHealth(handler, &stallingProber{during: func() {
 		probeCalls++
 		if probeCalls != 2 {
 			return
@@ -458,7 +458,7 @@ func TestCommandHandler_SetSeriesPlayback_DefaultPlaybackInvalidatesTheSeriesCac
 	assert.Equal(t, true, result.(map[string]interface{})["ok"], "the setting itself must still persist")
 }
 
-// deadSourcesProber answers ProbeDead (HTTP 404) for every source in dead
+// deadSourcesProber answers VerdictDead (HTTP 404) for every source in dead
 // and ProbeAlive for everything else. during, if set, runs inside the first
 // probe only — i.e. while the first cast's preflight is still pending.
 type deadSourcesProber struct {
@@ -467,16 +467,22 @@ type deadSourcesProber struct {
 	probes int
 }
 
-func (p *deadSourcesProber) ProbeSources(_ context.Context, sources []string) []offlinecache.SourceProbeResult {
+func (p *deadSourcesProber) HintArgument([]dp1playlist.PlaylistItem) interface{} { return nil }
+
+func (p *deadSourcesProber) Report([]dp1playlist.PlaylistItem, []int) ([]mediahealth.ReportItem, error) {
+	return nil, nil
+}
+
+func (p *deadSourcesProber) Preflight(_ context.Context, sources []string) []mediahealth.ProbeResult {
 	p.probes++
 	if p.probes == 1 && p.during != nil {
 		p.during()
 	}
-	results := make([]offlinecache.SourceProbeResult, len(sources))
+	results := make([]mediahealth.ProbeResult, len(sources))
 	for i, source := range sources {
-		results[i] = offlinecache.SourceProbeResult{Source: source, Verdict: offlinecache.ProbeAlive, Status: 200}
+		results[i] = mediahealth.ProbeResult{Source: source, Verdict: mediahealth.VerdictAlive, Status: 200}
 		if p.dead[source] {
-			results[i] = offlinecache.SourceProbeResult{Source: source, Verdict: offlinecache.ProbeDead, Status: 404}
+			results[i] = mediahealth.ProbeResult{Source: source, Verdict: mediahealth.VerdictDead, Status: 404}
 		}
 	}
 	return results
@@ -506,7 +512,7 @@ func TestCommandHandler_SetSeriesPlayback_RejectedCastIsNotRecast(t *testing.T) 
 	for _, edition := range editions {
 		dead[edition.Source] = true
 	}
-	commandrouter.SetSourceProber(handler, &deadSourcesProber{dead: dead}, logger)
+	commandrouter.SetMediaHealth(handler, &deadSourcesProber{dead: dead}, logger)
 
 	group := &dp1.ResolvedSeriesGroup{
 		Representative: seriesEditionItem("item-series"),
@@ -666,7 +672,7 @@ func TestCommandHandler_SetSeriesPlayback_OverlappingSettingChangeDoesNotRecastA
 		require.NoError(t, err)
 		assert.Equal(t, true, result.(map[string]interface{})["ok"], "the setting itself must still persist")
 	}
-	commandrouter.SetSourceProber(handler, &deadSourcesProber{dead: dead, during: func() { setMode("full") }}, logger)
+	commandrouter.SetMediaHealth(handler, &deadSourcesProber{dead: dead, during: func() { setMode("full") }}, logger)
 
 	group := &dp1.ResolvedSeriesGroup{
 		Representative: seriesEditionItem("item-series"),

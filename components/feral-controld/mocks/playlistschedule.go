@@ -192,6 +192,18 @@ func (mr *MockPlaylistSchedulerMockRecorder) ResumePersisted(ctx interface{}) *g
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResumePersisted", reflect.TypeOf((*MockPlaylistScheduler)(nil).ResumePersisted), ctx)
 }
 
+// SetHintSource mocks base method.
+func (m *MockPlaylistScheduler) SetHintSource(fn playlistschedule.HintSource) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetHintSource", fn)
+}
+
+// SetHintSource indicates an expected call of SetHintSource.
+func (mr *MockPlaylistSchedulerMockRecorder) SetHintSource(fn interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetHintSource", reflect.TypeOf((*MockPlaylistScheduler)(nil).SetHintSource), fn)
+}
+
 // SetInlineDynamicSource mocks base method.
 func (m *MockPlaylistScheduler) SetInlineDynamicSource(playlist *dp1.Playlist) {
 	m.ctrl.T.Helper()
@@ -202,6 +214,18 @@ func (m *MockPlaylistScheduler) SetInlineDynamicSource(playlist *dp1.Playlist) {
 func (mr *MockPlaylistSchedulerMockRecorder) SetInlineDynamicSource(playlist interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetInlineDynamicSource", reflect.TypeOf((*MockPlaylistScheduler)(nil).SetInlineDynamicSource), playlist)
+}
+
+// SetProjector mocks base method.
+func (m *MockPlaylistScheduler) SetProjector(arg0 playlistschedule.Projector) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetProjector", arg0)
+}
+
+// SetProjector indicates an expected call of SetProjector.
+func (mr *MockPlaylistSchedulerMockRecorder) SetProjector(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetProjector", reflect.TypeOf((*MockPlaylistScheduler)(nil).SetProjector), arg0)
 }
 
 // SetPushObserver mocks base method.

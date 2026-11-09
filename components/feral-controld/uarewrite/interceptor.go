@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -117,6 +119,19 @@ type Interceptor struct {
 	// without a live kiosk. Production never overrides it.
 	dial dialFunc
 
+	// override, when set (SetGatewayOverride before the first attach), is
+	// consulted for every paused request before the static policy: the
+	// media-health store's choice of a fallback gateway for a
+	// content-addressed source (mediahealth.Store.GatewayOverride), so the
+	// kiosk loads a work through the same gateway the verdict was taken
+	// on. It gets the request's Referer too, so a work's own files follow
+	// the gateway recorded for the document that embeds them.
+	// overridePatterns widen the Fetch patterns to the requests it can
+	// apply to. Both are written once, before AttachOnReconnect, and read
+	// only after; no lock.
+	override         func(rawURL, referrer string) (string, bool)
+	overridePatterns []map[string]interface{}
+
 	// superviseOnce starts the supervisor exactly once, on the FIRST
 	// AttachOnReconnect call — success or failure. Starting it on failure
 	// too is the point: an initial attach against a kiosk that is still
@@ -213,7 +228,7 @@ func (i *Interceptor) AttachOnReconnect(ctx context.Context) error {
 	})
 
 	if _, err := session.Send(ctx, "Fetch.enable", map[string]interface{}{
-		"patterns": i.policy.FetchPatterns(),
+		"patterns": i.fetchPatterns(),
 	}); err != nil {
 		// Arming failed, so this session intercepts nothing. Close it
 		// rather than leaving a live connection that looks attached but
@@ -303,7 +318,10 @@ func (i *Interceptor) onRequestPaused(session offlinecache.CDPSession, params js
 // fetchRequestPaused is the subset of Fetch.requestPaused this needs.
 type fetchRequestPaused struct {
 	RequestID string `json:"requestId"`
-	Request   struct {
+	// ResourceType tells a navigation ("Document") from a subresource: the
+	// bare-CID-with-query rule answers the two differently (processPaused).
+	ResourceType string `json:"resourceType"`
+	Request      struct {
 		URL     string            `json:"url"`
 		Headers map[string]string `json:"headers"`
 	} `json:"request"`
@@ -344,6 +362,27 @@ func (i *Interceptor) processPaused(session offlinecache.CDPSession, params json
 	defer cancel()
 
 	args := map[string]interface{}{"requestId": paused.RequestID}
+	reqURL := paused.Request.URL
+
+	// A bare CID with a query (`/ipfs/<cid>?fxhash=…`) is healed FIRST, on
+	// any host: gateways 301 that shape to `/<cid>/` and drop the query, so
+	// the sketch reads a null hash (contentpath.SlashBeforeQuery). A
+	// navigation gets a synthetic redirect (redirectDocument) — not a `url`
+	// override, which would keep the document URL bare so `./bundle.js`
+	// resolves to `/ipfs/bundle.js` and 400s (measured on the FF1,
+	// spaceplant #135). A subresource of that shape (rare) takes the plain
+	// override, and the rules below then see the slashed URL, so a retired
+	// host's replacement or the store's fallback gateway still applies.
+	if paused.ResponseStatusCode == nil {
+		if target, ok := contentpath.SlashBeforeQuery(reqURL); ok {
+			if paused.ResourceType == "Document" {
+				i.redirectDocument(ctx, session, paused.RequestID, reqURL, target)
+				return
+			}
+			reqURL = target
+			args["url"] = target
+		}
+	}
 
 	// Re-check the URL even though Fetch was armed with the policy's own
 	// patterns. The check is cheap and it is what keeps this correct if the
@@ -358,9 +397,22 @@ func (i *Interceptor) processPaused(session offlinecache.CDPSession, params json
 	// headers, everything else on the host gets the User-Agent swap. See
 	// Policy.RewriteURL for why they are not combined.
 	rewritten := false
-	redirected := ""
-	if paused.ResponseStatusCode == nil && i.policy.Matches(paused.Request.URL) {
-		if target, ok := i.policy.RewriteURL(paused.Request.URL); ok {
+	redirected, _ := args["url"].(string)
+	overridden := false
+	if paused.ResponseStatusCode == nil && i.override != nil {
+		// The media-health store's fallback gateway wins over the static
+		// policy: it was chosen because the source's own gateway (possibly
+		// the policy's replacement) answered 404 for this content while
+		// this one served it. The target is a configured gateway origin
+		// plus this request's own path and query — never playlist content.
+		if target, ok := i.override(reqURL, referrerOf(paused.Request.Headers)); ok {
+			args["url"] = target
+			redirected = target
+			overridden = true
+		}
+	}
+	if !overridden && paused.ResponseStatusCode == nil && i.policy.Matches(reqURL) {
+		if target, ok := i.policy.RewriteURL(reqURL); ok {
 			// `url` is applied by Chromium "in a way that's not observable
 			// by page": ff-player, offline-cache identity, and the
 			// artwork itself keep seeing the original source.
@@ -374,9 +426,9 @@ func (i *Interceptor) processPaused(session offlinecache.CDPSession, params json
 
 	if _, err := session.Send(ctx, "Fetch.continueRequest", args); err != nil {
 		i.logger.Warn("uarewrite: Fetch.continueRequest failed",
-			zap.String("url", paused.Request.URL),
+			zap.String("url", offlinecache.RedactSourceForLog(paused.Request.URL)),
 			zap.Bool("rewritten", rewritten),
-			zap.String("redirected_to", redirected),
+			zap.String("redirected_to", offlinecache.RedactSourceForLog(redirected)),
 			zap.Error(err))
 		i.recoverFrom(session, err)
 		return
@@ -385,11 +437,11 @@ func (i *Interceptor) processPaused(session offlinecache.CDPSession, params json
 	switch {
 	case redirected != "":
 		i.logger.Debug("uarewrite: redirected retired-gateway request",
-			zap.String("url", paused.Request.URL),
-			zap.String("to", redirected))
+			zap.String("url", offlinecache.RedactSourceForLog(paused.Request.URL)),
+			zap.String("to", offlinecache.RedactSourceForLog(redirected)))
 	case rewritten:
 		i.logger.Debug("uarewrite: rewrote User-Agent",
-			zap.String("url", paused.Request.URL))
+			zap.String("url", offlinecache.RedactSourceForLog(paused.Request.URL)))
 	}
 }
 
@@ -500,7 +552,7 @@ func (i *Interceptor) ensureArmed() {
 	defer cancel()
 
 	if _, err := session.Send(ctx, "Fetch.enable", map[string]interface{}{
-		"patterns": i.policy.FetchPatterns(),
+		"patterns": i.fetchPatterns(),
 	}); err != nil {
 		if !recoverableSendFailure(err) {
 			// The socket answered and refused. Re-dialing would loop the
@@ -577,4 +629,102 @@ func (i *Interceptor) releaseAttach() {
 	i.redialMu.Lock()
 	i.attaching = false
 	i.redialMu.Unlock()
+}
+
+// SetGatewayOverride installs the per-request fallback-gateway lookup and
+// the extra Fetch patterns it needs (see Interceptor.override). Call
+// before the first AttachOnReconnect; later calls are ignored by sessions
+// already armed until they re-arm.
+func (i *Interceptor) SetGatewayOverride(override func(rawURL, referrer string) (string, bool), patterns []map[string]interface{}) {
+	i.override = override
+	i.overridePatterns = patterns
+}
+
+// fetchPatterns is the policy's own patterns, every `/ipfs/` path on any
+// host (contentPathPatterns), plus the override's, deduplicated. Every
+// paused request is answered: a request no rule applies to continues
+// untouched (processPaused), so a wider pattern set costs one CDP round
+// trip per matching request, never a changed request.
+func (i *Interceptor) fetchPatterns() []map[string]interface{} {
+	patterns := append(i.policy.FetchPatterns(), contentPathPatterns()...)
+	for _, p := range i.overridePatterns {
+		if !hasPattern(patterns, p) {
+			patterns = append(patterns, p)
+		}
+	}
+	return patterns
+}
+
+// contentPathPatterns arm every `/ipfs/` path on any host, so the
+// bare-CID-with-query redirect (processPaused) applies wherever a source
+// sits — the gateways that need it (raribleuserdata) are not retired hosts
+// — whether or not a gateway override is installed.
+func contentPathPatterns() []map[string]interface{} {
+	return []map[string]interface{}{
+		{"urlPattern": "http://*/ipfs/*", "requestStage": "Request"},
+		{"urlPattern": "https://*/ipfs/*", "requestStage": "Request"},
+	}
+}
+
+func hasPattern(patterns []map[string]interface{}, p map[string]interface{}) bool {
+	for _, q := range patterns {
+		if q["urlPattern"] == p["urlPattern"] && q["requestStage"] == p["requestStage"] {
+			return true
+		}
+	}
+	return false
+}
+
+// redirectDocument answers a navigation to a bare `/ipfs/<cid>?query` with
+// a synthetic 301 to its directory form: Chromium then navigates to the
+// slashed URL, `location.search` keeps the query, relative assets resolve
+// under `/<cid>/`, and the DP-1 source stays byte-for-byte what the app
+// cast. The redirected navigation is paused again and goes through the
+// ordinary rules. A failed fulfill is handled like a failed continue: the
+// request is lost either way, and a dead session must be retired.
+func (i *Interceptor) redirectDocument(ctx context.Context, session offlinecache.CDPSession, requestID, from, to string) {
+	args := map[string]interface{}{
+		"requestId":    requestID,
+		"responseCode": 301,
+		"responseHeaders": []map[string]string{
+			{"name": "Location", "value": to},
+			{"name": "Content-Length", "value": "0"},
+		},
+	}
+	if _, err := session.Send(ctx, "Fetch.fulfillRequest", args); err != nil {
+		i.logger.Warn("uarewrite: Fetch.fulfillRequest failed",
+			zap.String("url", offlinecache.RedactSourceForLog(from)),
+			zap.String("location", offlinecache.RedactSourceForLog(to)),
+			zap.Error(err))
+		i.recoverFrom(session, err)
+		return
+	}
+	i.logger.Debug("uarewrite: redirected bare CID navigation to its directory form",
+		zap.String("url", offlinecache.RedactSourceForLog(from)),
+		zap.String("to", offlinecache.RedactSourceForLog(to)))
+}
+
+// OverrideFetchPatterns are the Fetch patterns the gateway override needs:
+// every `/ipfs/` path on any host (an IPFS source can sit on any gateway),
+// and every path on each Arweave gateway host.
+func OverrideFetchPatterns(arweaveHosts []string) []map[string]interface{} {
+	patterns := []map[string]interface{}{
+		{"urlPattern": "http://*/ipfs/*", "requestStage": "Request"},
+		{"urlPattern": "https://*/ipfs/*", "requestStage": "Request"},
+	}
+	for _, h := range arweaveHosts {
+		patterns = append(patterns, map[string]interface{}{"urlPattern": "https://" + h + "/*", "requestStage": "Request"})
+	}
+	return patterns
+}
+
+// referrerOf is the request's Referer header; CDP reports header names as
+// the renderer sent them, so the match is case-insensitive.
+func referrerOf(headers map[string]string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, "Referer") {
+			return v
+		}
+	}
+	return ""
 }

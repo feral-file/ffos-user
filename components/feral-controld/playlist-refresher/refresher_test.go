@@ -3284,3 +3284,5 @@ func TestRefresher_ResyncScopeToCurrentDisplayKeepsDisplayedReplayScope(t *testi
 	time.Sleep(100 * time.Millisecond)
 	r.Stop()
 }
+
+func (*fakePlaylistScheduler) SetHintSource(playlistschedule.HintSource) {}

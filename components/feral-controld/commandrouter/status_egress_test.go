@@ -323,3 +323,69 @@ func lanCheckStatusRequest() *http.Request {
 	req.RemoteAddr = "192.168.1.20:40000"
 	return req
 }
+
+// TestCheckStatusOutcomesEgress (PR #438 review, round 4, F16): the player's
+// raw `outcomes` ring carries item sources — presigned CDN URLs included —
+// and play history across casts. The poller's notification mapper drops it;
+// the direct checkStatus reply (LAN /api/cast or relayer) bypasses that
+// mapper, so sendCDPRequest must strip it too, on BOTH reply shapes, a
+// spoofed top-level copy beside a real "message" sub-map included.
+func TestCheckStatusOutcomesEgress(t *testing.T) {
+	ring := map[string]any{"castSeq": 3, "entries": []any{map[string]any{
+		"seq": 1, "source": "https://cdn.example/a.png?X-Amz-Signature=private-token", "kind": "fail", "stage": "load",
+	}}}
+	for _, transport := range []string{"hub", "relayer"} {
+		for _, wrapped := range []bool{false, true} {
+			t.Run(transport+map[bool]string{true: "/wrapped", false: "/bare"}[wrapped], func(t *testing.T) {
+				ctrl := gomock.NewController(t)
+				ctx := context.Background()
+				reply := map[string]any{"ok": true, "index": 0, "renderStatus": 2, "outcomes": ring, "skippedIndices": []any{1}, "futureStatus": "preserved"}
+				if wrapped {
+					reply = map[string]any{"messageID": "player-request", "message": reply, "outcomes": ring, "skippedIndices": []any{1}}
+				}
+				player := mocks.NewMockCDP(ctrl)
+				player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(reply, nil)
+				executor := newRoutableExecutor(ctrl)
+				codec := wrapper.NewJSON()
+				logger := zap.NewNop()
+				router := commandrouter.New(executor, player, nil, nil, nil, nil, nil, nil, codec, logger)
+				var encoded []byte
+				if transport == "hub" {
+					mux := http.NewServeMux()
+					server := wrapper.NewHTTPServer(&http.Server{Handler: mux, ReadHeaderTimeout: time.Second})
+					hub.New(ctx, mocks.NewMockWS(ctrl), router, nil, nil, server, codec, logger)
+					response := httptest.NewRecorder()
+					mux.ServeHTTP(response, lanCheckStatusRequest())
+					require.Equal(t, http.StatusOK, response.Code)
+					encoded = response.Body.Bytes()
+				} else {
+					remote := mocks.NewMockRelayer(ctrl)
+					bus := mocks.NewMockDBus(ctrl)
+					bus.EXPECT().OnBusSignal(gomock.Any())
+					var receive relayer.Handler
+					remote.EXPECT().OnRelayerMessage(gomock.Any()).Do(func(h relayer.Handler) { receive = h })
+					remote.EXPECT().Send(ctx, gomock.Any()).DoAndReturn(func(_ context.Context, response interface{}) error {
+						payload := response.(relayer.Response)
+						var err error
+						encoded, err = json.Marshal(payload.Message)
+						return err
+					})
+					med := mediator.New(ctx, remote, bus, player, router, executor, nil, codec, logger)
+					med.Start()
+					command := "checkStatus"
+					require.NoError(t, receive(ctx, relayer.Payload{MessageID: "controller-request", Message: relayer.Message{Command: &command}}))
+				}
+				require.NotContains(t, string(encoded), "private-token")
+				require.NotContains(t, string(encoded), `"outcomes"`)
+				require.NotContains(t, string(encoded), `"skippedIndices"`)
+				var decoded map[string]any
+				require.NoError(t, json.Unmarshal(encoded, &decoded))
+				if wrapped {
+					decoded = decoded["message"].(map[string]any)
+				}
+				require.Equal(t, "preserved", decoded["futureStatus"])
+				require.Equal(t, float64(2), decoded["renderStatus"])
+			})
+		}
+	}
+}
