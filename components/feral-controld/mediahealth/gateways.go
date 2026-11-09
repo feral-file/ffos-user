@@ -129,6 +129,13 @@ func (g *Gateways) Ref(rawURL string) (ContentRef, bool) {
 	// URLOn then emits clean (the default IPFS fallback only redirects the
 	// doubled-slash form).
 	if cid, rest, ok := contentpath.IPFS(path); ok {
+		if rest == "" && u.RawQuery != "" {
+			// A bare CID with a query is dialed as `/<cid>/?query` on every
+			// gateway (contentpath.SlashBeforeQuery): the bare shape 301s
+			// to `/<cid>/` without the query, so a fallback that served it
+			// would serve the wrong page.
+			rest = "/"
+		}
 		return ContentRef{Network: NetworkIPFS, ID: cid, Rest: rest, Query: u.RawQuery, Host: host}, true
 	}
 	if g != nil && g.arweaveHosts[host] {

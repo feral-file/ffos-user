@@ -8,6 +8,8 @@
 // (office FF1, fixture item 36). Stdlib only, so both can import it.
 package contentpath
 
+import "net/url"
+
 // IPFS parses an escaped URL path as `/ipfs/<cid>` with an optional
 // remainder. Slash runs and repeated `ipfs` segments before the id are
 // collapsed: `/ipfs//<cid>/x.png` and `/ipfs/ipfs/<cid>` are common tokenURI
@@ -34,6 +36,39 @@ func IPFS(escapedPath string) (cid, rest string, ok bool) {
 			return "", "", false
 		}
 	}
+}
+
+// SlashBeforeQuery turns a bare CID with a query — `…/ipfs/<cid>?fxhash=…`,
+// the shape fxhash gentk v1/v2 metadata carries — into the directory form
+// `…/ipfs/<cid>/?fxhash=…`, on the same host, query and fragment kept. ok is
+// false for any other shape (no query, a remainder after the CID, not an
+// IPFS path), including the slashed form itself, so applying it twice is a
+// no-op.
+//
+// Why: every gateway measured (raribleuserdata, filebase) answers the bare
+// shape with a 301 to `/<cid>/` that DROPS the query, so the work's snippet
+// reads a null hash and the sketch never runs, while the iframe still
+// reports ready (PR #438 review, 2026-11-08, three works on a shared
+// playlist). New playlists come out slashed (ff-indexer-v2#178); every
+// playlist already shared carries the bare shape, so the device heals it:
+// the kiosk with a synthetic redirect (uarewrite), the probe by dialing the
+// slashed wire (mediahealth). A file CID with a trailing slash and a query
+// is still served by the gateways we route to (checked on filebase), so
+// the slash is safe for non-directory sources too. The path comes out
+// normalized (slash runs and repeated `ipfs` segments collapsed), since the
+// URL is rebuilt from the parsed CID.
+func SlashBeforeQuery(rawURL string) (string, bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" || (u.RawQuery == "" && !u.ForceQuery) {
+		return "", false
+	}
+	cid, rest, ok := IPFS(u.EscapedPath())
+	if !ok || rest != "" {
+		return "", false
+	}
+	u.Path = "/ipfs/" + cid + "/"
+	u.RawPath = ""
+	return u.String(), true
 }
 
 // Arweave parses an escaped URL path as `/<tx>` with an optional remainder,

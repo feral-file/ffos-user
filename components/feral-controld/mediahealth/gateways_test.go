@@ -36,6 +36,7 @@ func TestGateways_Ref(t *testing.T) {
 		{"https://ipfs.io/ipfs//" + cidA + "/17.png", true, "ipfs:" + cidA, "/17.png"},
 		{"https://ipfs.io/ipfs/ipfs/" + cidB, true, "ipfs:" + cidB, ""},
 		{"https://arweave.net//" + txA + "/index.html", true, "ar:" + txA, "/index.html"},
+		{"https://ipfs.raribleuserdata.com/ipfs/" + cidA + "?fxhash=abc", true, "ipfs:" + cidA, "/"},
 		{"https://arweave.net/not-a-tx", false, "", ""},
 		{"https://example.com/" + txA, false, "", ""},
 		{"https://ipfs.io/ipns/example.com/x.png", false, "", ""},
@@ -56,6 +57,10 @@ func TestGateways_Ref(t *testing.T) {
 	// dials the form every gateway serves directly.
 	ref, _ = g.Ref("https://ipfs.io/ipfs//" + cidA + "/17.png")
 	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA+"/17.png", ref.URLOn("https://ipfs.filebase.io"))
+	// A bare CID with a query is dialed in its directory form, query kept:
+	// the bare shape 301s to a page without the query.
+	ref, _ = g.Ref("https://ipfs.raribleuserdata.com/ipfs/" + cidA + "?fxhash=abc")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA+"/?fxhash=abc", ref.URLOn("https://ipfs.filebase.io"))
 	ref, _ = g.Ref("https://arweave.net/" + txA + "/index.html")
 	assert.Equal(t, "https://ar-io.dev/"+txA+"/index.html", ref.URLOn("https://ar-io.dev"))
 }

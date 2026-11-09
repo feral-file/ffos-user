@@ -335,3 +335,22 @@ func TestProbeOne_RedirectHookIsTheWirePolicy(t *testing.T) {
 	require.Len(t, f.calls, 1)
 	assert.Nil(t, f.calls[0].Redirect, "no policy, no hook")
 }
+
+// The probe dials a bare CID with a query in its directory form, as the
+// kiosk's synthetic redirect makes the wall load it (PR #438 review): the
+// bare shape 301s to `/<cid>/` without the query, and a verdict on that
+// page would be about a document the work never runs on.
+func TestWire_BareCIDWithQueryIsDialedSlashed(t *testing.T) {
+	t.Parallel()
+	p := &Probe{}
+	got, _ := p.wire("https://ipfs.raribleuserdata.com/ipfs/" + cidA + "?fxhash=abc")
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cidA+"/?fxhash=abc", got)
+	got, _ = p.wire("https://ipfs.raribleuserdata.com/ipfs/" + cidA + "/?fxhash=abc")
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cidA+"/?fxhash=abc", got, "the directory form is left alone")
+	got, _ = p.wire("https://ipfs.raribleuserdata.com/ipfs/" + cidA)
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cidA, got, "no query, no slash")
+	p.Rewriter = fakeRewriter{}
+	got, agent := p.wire("https://ipfs.io/ipfs/" + cidA + "?fxhash=abc")
+	assert.Equal(t, "", agent)
+	assert.True(t, strings.HasSuffix(got, "/ipfs/"+cidA+"/?fxhash=abc"), "the retired-gateway rewrite is slashed too: %s", got)
+}

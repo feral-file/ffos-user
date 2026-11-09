@@ -98,7 +98,17 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   kiosk interceptor does — on the initial URL and on **every redirect hop**
   (the interceptor evaluates its policy per request), each re-pointed before
   the guard and the dial, so a source that redirects onto a retired gateway
-  is judged at the replacement, not at the retired gateway's 404.
+  is judged at the replacement, not at the retired gateway's 404. A **bare
+  CID with a query** (`/ipfs/<cid>?fxhash=…`, the shape fxhash gentk v1/v2
+  metadata carries) is dialed as `/ipfs/<cid>/?fxhash=…` on any host, the
+  way the kiosk loads it: every gateway measured 301s the bare shape to
+  `/<cid>/` and drops the query, the sketch reads a null hash, and the
+  iframe still reports ready (PR #438 review). The kiosk interceptor heals
+  the same shape with a **synthetic 301** to the slashed URL on a navigation
+  (a `url` override would keep the document URL bare and send `./bundle.js`
+  to `/ipfs/bundle.js`); a subresource of the shape takes the plain
+  override. The gateway fallback (below) dials the slashed form too. One
+  parser decides the shape for all three: `contentpath.SlashBeforeQuery`.
 - A 206 is trusted only with a `Content-Range` starting at byte 0; otherwise,
   and on 416, and when a valid prefix is shorter than 512 bytes and shorter
   than the resource, the probe retries once without `Range`. A 206 to an

@@ -1,6 +1,8 @@
 package mediahealth
 
 import (
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
+
 	"context"
 	"errors"
 	"fmt"
@@ -438,8 +440,20 @@ const LabelHeader = "X-Ffos-Media-Health-Label"
 // wire computes the URL and User-Agent the kiosk would use for source:
 // a content-addressed path on a hostile gateway is redirected (and keeps the
 // default agent, as the kiosk interceptor does); any other request on such
-// a host gets the policy agent; everything else is dialed as written.
+// a host gets the policy agent; everything else is dialed as written. A
+// bare CID with a query is dialed in its directory form on either path,
+// as the kiosk's synthetic redirect makes the wall load it
+// (contentpath.SlashBeforeQuery): the bare shape 301s to a page without
+// the query, and a verdict on that page would be about the wrong document.
 func (p *Probe) wire(source string) (string, string) {
+	wireURL, agent := p.policyWire(source)
+	if slashed, ok := contentpath.SlashBeforeQuery(wireURL); ok {
+		wireURL = slashed
+	}
+	return wireURL, agent
+}
+
+func (p *Probe) policyWire(source string) (string, string) {
 	if p.Rewriter == nil {
 		return source, ""
 	}

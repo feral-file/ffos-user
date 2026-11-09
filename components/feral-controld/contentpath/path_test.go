@@ -68,3 +68,34 @@ func TestArweave(t *testing.T) {
 		})
 	}
 }
+
+func TestSlashBeforeQuery(t *testing.T) {
+	t.Parallel()
+	host := "https://ipfs.raribleuserdata.com"
+	tests := []struct {
+		name, in, want string
+		ok             bool
+	}{
+		{name: "bare cid with query", in: host + "/ipfs/" + cidV0 + "?fxhash=abc", want: host + "/ipfs/" + cidV0 + "/?fxhash=abc", ok: true},
+		{name: "query and fragment kept", in: host + "/ipfs/" + cidV1B32 + "?a=1&b=2#frag", want: host + "/ipfs/" + cidV1B32 + "/?a=1&b=2#frag", ok: true},
+		{name: "slash run before the cid is normalized", in: host + "/ipfs//" + cidV0 + "?x=1", want: host + "/ipfs/" + cidV0 + "/?x=1", ok: true},
+		{name: "any host", in: "http://localhost:8080/ipfs/" + cidV0 + "?x=1", want: "http://localhost:8080/ipfs/" + cidV0 + "/?x=1", ok: true},
+		{name: "empty query with a question mark", in: host + "/ipfs/" + cidV0 + "?", want: host + "/ipfs/" + cidV0 + "/?", ok: true},
+		{name: "already slashed is a no-op", in: host + "/ipfs/" + cidV0 + "/?fxhash=abc"},
+		{name: "no query", in: host + "/ipfs/" + cidV0},
+		{name: "a file under the cid", in: host + "/ipfs/" + cidV0 + "/index.html?x=1"},
+		{name: "not a cid", in: host + "/ipfs/notacid?x=1"},
+		{name: "ipns", in: host + "/ipns/example.com?x=1"},
+		{name: "arweave is not touched", in: "https://arweave.net/" + txA + "?x=1"},
+		{name: "no host", in: "data:text/plain,hi?x=1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := SlashBeforeQuery(tt.in)
+			if ok != tt.ok || got != tt.want {
+				t.Fatalf("SlashBeforeQuery(%q) = (%q, %v), want (%q, %v)", tt.in, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
