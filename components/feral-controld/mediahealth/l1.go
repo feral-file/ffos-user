@@ -26,6 +26,7 @@ import (
 	"image"
 	"image/color"
 	"math/bits"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -588,7 +589,7 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 		res.MainStatus = frame.MainStatus
 		res.Err = fmt.Sprintf("main document HTTP %d", frame.MainStatus)
 	default:
-		c, cerr := Classify(frame.Image, l.cfg.KnownBad, l.cfg.BlankVarianceThreshold)
+		c, cerr := Classify(frame.Image, append(slices.Clone(l.cfg.KnownBad), l.cfg.Store.LearnedFingerprints()...), l.cfg.BlankVarianceThreshold)
 		if cerr != nil {
 			res.Verdict = RenderStalled
 			res.Err = cerr.Error()

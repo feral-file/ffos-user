@@ -77,6 +77,11 @@ type Store struct {
 	// sources that need a fallback, not by every content-addressed source.
 	servedByMu sync.RWMutex
 	servedBy   map[string]map[string]string
+
+	// learnedMu guards learned: the promoted known-bad fingerprints
+	// (fingerprints.go), mirrored from bucketFingerprints.
+	learnedMu sync.RWMutex
+	learned   []Fingerprint
 }
 
 // Options tunes Open.
@@ -161,7 +166,7 @@ func Open(path string, opts Options) (*Store, error) {
 		s.freeBytes = statfsFree
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketItems, bucketRecheck, bucketMeta, bucketServedBy} {
+		for _, b := range [][]byte{bucketItems, bucketRecheck, bucketMeta, bucketServedBy, bucketFingerprints} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -178,6 +183,9 @@ func Open(path string, opts Options) (*Store, error) {
 	})
 	if err == nil {
 		err = s.loadServedBy()
+	}
+	if err == nil {
+		err = s.loadLearned()
 	}
 	if err == nil {
 		err = s.retireUnconfiguredFallbacks()
@@ -1049,7 +1057,12 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 		digest = outcomeDigest(o)
 	}
 	var out *Record
+	// learn: a wall frame rendered over an open definite absence — the
+	// gateway's error page (learnErrorPage). Set inside the batch (reset
+	// on a retry), acted on after it commits.
+	var learn bool
 	err := s.db.Batch(func(tx *bolt.Tx) error {
+		learn = false
 		meta := tx.Bucket(bucketMeta)
 		var consumed []string
 		if digest != "" {
@@ -1067,7 +1080,13 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 				return nil
 			}
 		}
-		rec, err := s.applyTx(tx, o.Source, outcomeMutation(o, count, s.contentAddressed(o.Source), s.renderConclusive, now))
+		mutate := outcomeMutation(o, count, s.contentAddressed(o.Source), s.renderConclusive, now)
+		rec, err := s.applyTx(tx, o.Source, func(rec *Record, existed bool) bool {
+			if o.frame != nil && o.Kind == OutcomeOK && rec.headWins() {
+				learn = true
+			}
+			return mutate(rec, existed)
+		})
 		if err != nil {
 			return err
 		}
@@ -1087,6 +1106,9 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	if learn {
+		s.learnErrorPage(o.Source, o.frame.PHash)
 	}
 	return out, nil
 }

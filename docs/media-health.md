@@ -585,6 +585,18 @@ would hide real art, the worst outcome here.
   immediately with the longer settle; a real frame or a successful play
   resets the count, and a stalled confirmation keeps the blank pending so
   the next render is still the long one.
+- **Learned fingerprints.** The known-bad list fills itself from the one
+  conflict that proves a frame is not art: a frame that renders (nightly or
+  on the wall) while the same play's content-type check said the document
+  is not there (400/404/410 — the HEAD wins, the record keeps its state) is
+  the gateway's error page, since a rendered artwork can never produce a
+  404. Its pHash is a candidate (`fingerprints` bucket); candidates within
+  6 bits are one cluster, and a cluster seen on **3 different works** is a
+  learned known-bad fingerprint (label `learned`, tolerance 6), used by both
+  classifiers beside `mediaHealth.l1.knownBad` — so the same error page
+  served with a 200 (an Arweave gateway's) is recognized on any work. Real
+  art cannot become a candidate. Bounded (256 clusters, the least recently
+  seen unpromoted one evicted; 16 works each); cleared with the store.
 - **Render negatives and corroboration (step 2).** A concluded blank or
   known-bad render is `suspect`, advisory — unless `mediaHealth.render-
   Conclusive` is on AND something independent agrees: an L1 negative on an

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"image"
+	"slices"
 	"sync"
 	"time"
 
@@ -202,7 +203,8 @@ func (w *WallCapture) Step(ctx context.Context) bool {
 		w.cfg.Logger.Debug("media health: wall frame mostly covered by the player's UI; not judged", zap.String("source", redactForLog(m.source)))
 		return false
 	}
-	c, err := ClassifyMasked(frame.Image, frame.Masks, w.cfg.KnownBad, w.cfg.BlankVarianceThreshold)
+	known := append(slices.Clone(w.cfg.KnownBad), w.cfg.Store.LearnedFingerprints()...)
+	c, err := ClassifyMasked(frame.Image, frame.Masks, known, w.cfg.BlankVarianceThreshold)
 	if err != nil {
 		w.cfg.Logger.Warn("media health: classifying a wall frame failed", zap.Error(err))
 		return false
