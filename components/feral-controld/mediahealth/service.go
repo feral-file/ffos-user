@@ -30,6 +30,9 @@ type Service struct {
 	now        func() time.Time
 	online     func() bool
 	replayable func(source string) bool
+	// wallCapture judges the wall's own frame (wall_capture.go); nil when
+	// off. Set once at wiring, before the poller starts (SetWallCapture).
+	wallCapture *WallCapture
 
 	// mu serializes the per-page outcome state below (drainer, the play
 	// run, the inferred-failure memory): ObservePlayback runs on the status
@@ -110,6 +113,20 @@ func New(cfg Config) *Service {
 		s.now = time.Now
 	}
 	return s
+}
+
+// SetWallCapture attaches the wall-capture runner; call before the status
+// poller starts.
+func (s *Service) SetWallCapture(w *WallCapture) { s.wallCapture = w }
+
+// ObserveWallFrame folds a classified capture of the wall into the play run
+// as a StageFrame outcome, under the same rules as the player's own entries
+// (one counted failure per play).
+func (s *Service) ObserveWallFrame(o Outcome) {
+	online := s.online != nil && s.online()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applyEntry(o, online)
 }
 
 // GatewayOverride is the kiosk interceptor's per-request lookup: the same
@@ -279,6 +296,11 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 	if s.lookahead != nil {
 		s.lookahead.Observe(sources, index)
 	}
+	if items != nil {
+		s.wallCapture.Observe(sources, index, renderStatus)
+	} else {
+		s.wallCapture.Observe(nil, -1, nil)
+	}
 	// Only a player with the outcome ring has a cast generation to fence a
 	// hint-only push on; without it the pusher has no wall (nil-safe).
 	if outcomes != nil && items != nil {
@@ -346,6 +368,12 @@ func (s *Service) applyEntry(o Outcome, online bool) bool {
 		if definiteRefusal(o) {
 			s.runRefused = true
 		}
+	case o.Stage == StageFrame:
+		// A rendered frame belongs to the play already on screen: it
+		// neither ends nor restarts the run the player's entries
+		// describe. Whether it may count as a success against that
+		// play's content-type check is the store's call
+		// (renderedFrame: a definite absence wins).
 	default:
 		o.errorPage = o.Kind == OutcomeOK && s.runRefused &&
 			o.Source == s.runSource && !readyIsEvidence(o)

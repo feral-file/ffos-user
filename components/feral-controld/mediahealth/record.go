@@ -305,8 +305,22 @@ type Record struct {
 	// has rendered this source. Its own due time (Next) is deliberately
 	// NOT part of dueAt: L1 work is found by Store.L1Candidates, never by
 	// the L0 lookahead or sweep.
-	L1    *L1Verdict `json:"l1,omitempty"`
-	Build Build      `json:"build"`
+	L1 *L1Verdict `json:"l1,omitempty"`
+	// Wall is the last classified capture of the wall (wall.go).
+	Wall  *WallObservation `json:"wall,omitempty"`
+	Build Build            `json:"build"`
+}
+
+// WallObservation is the last classified capture of the wall for a source
+// (wall.go): render evidence from the kiosk's own GPU, beside the nightly
+// headless render's L1Verdict.
+type WallObservation struct {
+	Verdict  RenderVerdict `json:"verdict"`
+	PHash    string        `json:"phash,omitempty"`
+	Variance float64       `json:"variance,omitempty"`
+	Label    string        `json:"label,omitempty"`
+	Clipped  bool          `json:"clipped,omitempty"`
+	At       time.Time     `json:"at"`
 }
 
 // PlayStats is what the player reported about this source.

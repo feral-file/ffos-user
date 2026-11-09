@@ -113,26 +113,9 @@ func (s *Store) ApplyRender(source string, r RenderResult) (*Record, error) {
 			l1.ConsecutiveBlank = 0
 			l1.Next = now.Add(RecheckL1OK)
 			// A frame of the work rendered: the play layer's evidence for
-			// an HTML work, which an iframe's `ready` is not. It answers
-			// the render question only (layers.go): it heals a suspect or
-			// a render-layer broken and records ok (layer l1), but never
-			// an L0 or fetch-layer broken (a frame can be the gateway's
-			// error page), and it ends a failure run only when that run
-			// is a render one.
-			if rec.State == StateBroken && !rec.renderLayerBroken() {
-				break
-			}
-			rec.State = StateOK
-			rec.Layer = LayerL1
-			rec.Category, rec.Reason = "", ""
-			rec.CheckedAt = now
-			rec.ConsecutiveBroken = 0
-			if !rec.fetchRunOpen() {
-				rec.Plays.ConsecutiveFail = 0
-				if rec.Issue == IssuePlayFailed {
-					rec.clearIssue()
-				}
-			}
+			// an HTML work, which an iframe's `ready` is not
+			// (renderedFrame, layers.go).
+			rec.renderedFrame(now, LayerL1)
 		case RenderBlank:
 			l1.ConsecutiveBlank++
 			if l1.ConsecutiveBlank < 2 {

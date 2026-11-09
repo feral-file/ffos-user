@@ -1,5 +1,7 @@
 package mediahealth
 
+import "time"
+
 // Two layers of evidence, each answering its own question (feral-file/
 // ffos-user#392, "L1 as play evidence"):
 //
@@ -43,4 +45,58 @@ func (r *Record) renderLayerBroken() bool {
 func (r *Record) fetchRunOpen() bool {
 	f := r.Plays.LastFail
 	return r.Plays.ConsecutiveFail > 0 && f != nil && f.Stage == StageDetect && f.Code != CodeNetwork
+}
+
+// renderedFrame applies a frame of the work that rendered — the nightly L1
+// render or a capture of the wall — and reports whether the record took it.
+// It answers the render question only: it records ok (layer is l1 for the
+// nightly render, play for the wall) over unknown, an ok, a suspect or a
+// render-layer broken, never over an L0 or fetch-layer broken (a frame can
+// be the gateway's error page); and it ends the failure run only when that
+// run is a render one (fetchRunOpen).
+//
+// When the open fetch run's last failure is a definite absence (the
+// content-type check got 400/404/410), the frame changes nothing: a
+// rendered artwork can never produce a 404, an error page can look like a
+// rendered frame — the HEAD wins.
+func (r *Record) renderedFrame(at time.Time, layer Layer) bool {
+	if r.State == StateBroken && !r.renderLayerBroken() {
+		return false
+	}
+	if r.fetchRunOpen() && definiteAbsence(r.Plays.LastFail.Code) {
+		return false
+	}
+	r.State = StateOK
+	r.Layer = layer
+	r.Category, r.Reason = "", ""
+	r.CheckedAt = at
+	r.ConsecutiveBroken = 0
+	if !r.fetchRunOpen() {
+		r.Plays.ConsecutiveFail = 0
+		if r.Issue == IssuePlayFailed {
+			r.clearIssue()
+		}
+	}
+	return true
+}
+
+// frameRunOpen reports an open failure run whose last counted failure is a
+// frame of the wall (blank or known-bad). An opaque embed's `ready` reports
+// a blank frame as ready too, so it must not end such a run — otherwise
+// every play's `ready` would reset the run before that play's blank frame
+// arrived, and a blank work could never conclude.
+func (r *Record) frameRunOpen() bool {
+	f := r.Plays.LastFail
+	return r.Plays.ConsecutiveFail > 0 && f != nil && f.Stage == StageFrame
+}
+
+// definiteAbsence reports a content-type check status that says the
+// document is not there for anyone: 400, 404, 410 — L0's dead statuses.
+// 401/403/429 are about the asker's identity or rate, not the document.
+func definiteAbsence(code string) bool {
+	switch code {
+	case "400", "404", "410":
+		return true
+	}
+	return false
 }

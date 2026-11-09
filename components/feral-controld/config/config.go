@@ -111,6 +111,11 @@ type MediaHealthConfig struct {
 	// L1 is the nightly render probe (docs/media-health.md §6): an
 	// experiment, absent or enabled=false means it never runs.
 	L1 *MediaHealthL1Config `json:"l1,omitempty"`
+	// WallCapture judges the wall's own frame as play evidence for an HTML
+	// work (docs/media-health.md, "Wall capture"): an experiment that
+	// screenshots the live kiosk, so absent or enabled=false means it never
+	// runs. It classifies with the l1 block's fingerprints and threshold.
+	WallCapture *MediaHealthWallCaptureConfig `json:"wallCapture,omitempty"`
 	// Malformed records that the block did not decode; every field then
 	// reads as its default.
 	Malformed bool `json:"-"`
@@ -145,6 +150,19 @@ type MediaHealthL1Config struct {
 	// maxDistance (Hamming, 0-64; keep it small, 4-8) of one is suspect
 	// immediately. An entry that does not parse is logged and dropped.
 	KnownBad []MediaHealthFingerprint `json:"knownBad,omitempty"`
+}
+
+// MediaHealthWallCaptureConfig tunes the capture of the wall.
+type MediaHealthWallCaptureConfig struct {
+	// Enabled turns it on. Off by default: it screenshots the live kiosk.
+	Enabled bool `json:"enabled"`
+	// SettleMs is how long a work has been on screen before the capture
+	// (default 15000; the kiosk renders on its GPU, so it needs less than
+	// the nightly headless render's 30000).
+	SettleMs int `json:"settleMs,omitempty"`
+	// MaxEdge bounds the captured frame's longer edge in pixels (default
+	// 1024, the nightly render's viewport).
+	MaxEdge int `json:"maxEdge,omitempty"`
 }
 
 // MediaHealthFingerprint is one known-bad render: a 64-bit pHash as hex

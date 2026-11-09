@@ -886,10 +886,11 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 				// F23).
 				return true
 			}
-			if rec.State != StateOK || rec.Layer != LayerL1 {
-				// Valid bytes say less than a rendered frame: an ok record
-				// L1 saw render keeps layer l1 (the app's "verified on this
-				// device"); its L0 metadata above is refreshed all the same.
+			if rec.State != StateOK || (rec.Layer != LayerL1 && rec.Layer != LayerPlay) {
+				// Valid bytes say less than render evidence: an ok record a
+				// frame or a play proved keeps its layer (l1, play — the
+				// app's "verified on this device"); its L0 metadata above
+				// is refreshed all the same.
 				rec.Layer = LayerL0
 			}
 			rec.State = StateOK
@@ -1114,8 +1115,21 @@ func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) fun
 	return func(rec *Record, _ bool) bool {
 		at := outcomeTime(o, now)
 		stale := !rec.CheckedAt.IsZero() && at.Before(rec.CheckedAt)
+		if o.frame != nil {
+			// A capture of the wall: record what it saw. A frame is not a
+			// play of its own — the player's `ready` for the same mount
+			// already counted that.
+			rec.Wall = &WallObservation{
+				Verdict: RenderVerdict(o.Code), PHash: fmt.Sprintf("%016x", o.frame.PHash),
+				Variance: o.frame.Variance, Label: o.frame.Label, Clipped: o.frame.Clipped, At: at,
+			}
+		}
 		switch o.Kind {
 		case OutcomeOK:
+			if o.Stage == StageFrame {
+				rec.renderedFrame(at, LayerPlay)
+				return true
+			}
 			if o.errorPage {
 				// The embed showed the error page the content-type check
 				// already reported: not a success, and it must not erase the
@@ -1130,6 +1144,11 @@ func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) fun
 				rec.MediaType = o.MediaType
 			}
 			if stale {
+				return true
+			}
+			if !readyIsEvidence(o) && rec.frameRunOpen() {
+				// An opaque embed's ready says nothing about a blank frame:
+				// the frame run (and its play_failed) stands (frameRunOpen).
 				return true
 			}
 			rec.Plays.ConsecutiveFail = 0
@@ -1187,7 +1206,7 @@ func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) fun
 			if o.MediaType != "" {
 				rec.MediaType = o.MediaType
 			}
-			reason := reasonForStage(o.Stage)
+			reason := outcomeReason(o)
 			if reason == "" || deviceLocal(o) || !count {
 				// Recorded for the app and the support bundle; the source
 				// is not the thing that failed (or nothing could be told
@@ -1208,6 +1227,17 @@ func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) fun
 				return true
 			}
 			rec.clearIssue()
+			if o.Stage == StageFrame {
+				// Two plays whose frame on the wall read blank (or known
+				// bad): a render verdict, advisory like L1's — suspect,
+				// never a hint or a rejection.
+				rec.State = StateSuspect
+				rec.Layer = LayerPlay
+				rec.Reason = reason
+				rec.Category = CategoryOf(reason, 0)
+				rec.CheckedAt = at
+				return true
+			}
 			// Backoff, as for L0: a work the player has re-concluded broken
 			// on BrokenBackoffAfter consecutive rechecks is retried weekly,
 			// not daily — each daily retry of a dead iframe costs the wall

@@ -34,6 +34,9 @@ type Outcome struct {
 	// At is the player's own ISO timestamp, kept as reported.
 	At string `json:"at,omitempty"`
 
+	// frame is set by the Service for a StageFrame entry: what the capture
+	// of the wall classified (wall.go). Never on the wire.
+	frame *FrameEvidence
 	// errorPage is set by the Service, never by the player: this `ready`
 	// is an opaque embed that loaded AFTER the same play's content-type
 	// check got a definite refusal (definiteRefusal), so what reached
@@ -88,6 +91,10 @@ const (
 	StageHint      = "hint"
 	StageReady     = "ready"
 	StageInferred  = "inferred"
+	// StageFrame is controld's own too: a capture of the wall, classified
+	// (wall.go). Kind ok with code ok, or kind fail with code blank or
+	// known_bad. Render-layer evidence for an HTML work.
+	StageFrame = "frame"
 
 	// CodeNetwork is the detect-stage code the player reports when its
 	// content-type HEAD failed at the transport layer (no HTTP answer at
@@ -143,8 +150,31 @@ func reasonForStage(stage string) Reason {
 		return ReasonRenderExhausted
 	case StageWebGL:
 		return ReasonWebGLLost
+	case StageFrame:
+		return ReasonRenderBlank
 	}
 	return ""
+}
+
+// outcomeReason is reasonForStage refined by the code where the stage alone
+// does not say: a frame matching a known-bad fingerprint is
+// render_known_bad, any other failing frame render_blank.
+func outcomeReason(o Outcome) Reason {
+	if o.Stage == StageFrame && o.Code == string(RenderKnownBad) {
+		return ReasonRenderKnownBad
+	}
+	return reasonForStage(o.Stage)
+}
+
+// FrameEvidence is what a capture of the wall contributes besides its
+// verdict: the classifier's measurements, for the record and for learning
+// fingerprints.
+type FrameEvidence struct {
+	PHash    uint64
+	Variance float64
+	Label    string
+	// Clipped is false when the capture fell back to the whole screen.
+	Clipped bool
 }
 
 // Drainer tracks what has already been read from the ring so each outcome

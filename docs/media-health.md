@@ -611,6 +611,60 @@ would hide real art, the worst outcome here.
 - **Cap:** `maxPerNight` renders per local calendar day (default 200), one
   at a time.
 
+## Wall capture: the wall's own frame (experiment, off by default)
+
+`mediahealth.WallCapture` judges what the wall actually shows: a fixed time
+after an HTML work is on screen it captures the artwork from the kiosk — the
+kiosk's own GPU, size and timing, which the nightly headless render only
+approximates — classifies it with the L1 classifier, and feeds the verdict
+into the play run as a `frame` outcome. Off unless
+`mediaHealth.wallCapture.enabled`: it screenshots the live kiosk.
+
+- **When.** Driven by the status poll: a *mount* is the item at the player's
+  index while `renderStatus` is 2 (committed and on screen); a different
+  source or index, or leaving 2, is a new mount. Once a mount has been ready
+  for `settleMs` (default 15 s — the kiosk renders on its GPU, so it needs
+  less than the nightly render's 30 s) it is captured, once, only while the
+  panel is awake (a dark panel reads blank). Only HTML works (the L1
+  candidate rule): an image, video, audio or model proves itself through its
+  own `ready`. A source whose last frame rendered is left alone for 24 h; a
+  source with a failing frame is captured every play, which is how a second
+  play corroborates the first.
+- **Capture** (`screenshot.CaptureArtwork`, the hub screenshot's own
+  observation-only CDP connection and single flight — a hub screenshot and a
+  wall capture never run at once): one `Runtime.evaluate` locates the
+  artwork (the largest `img`/`video`/`iframe`/`object`/`model-viewer` with no
+  ancestor at inline opacity below 1 — ff-player double-buffers two slots
+  and fades the hidden one to 0, and marks neither; not found → the whole
+  viewport), refuses a **covered** artwork (the element at its center is not
+  the artwork: the loading overlay, the error modal, a setup or pairing
+  overlay), and reports the **title label** while visible as a mask. The
+  label is pinned to the viewport's bottom-left over the artwork for 30 s
+  (or the whole item, by the owner's tombstone setting) and is masked, never
+  hidden: that setting is the owner's. Then a clipped, downscaled
+  (`maxEdge`, default 1024) `Page.captureScreenshot`. The DOM coupling is to
+  ff-player's main at d748416; it degrades (whole viewport, no mask) rather
+  than failing when that DOM changes.
+- **Classify** (`ClassifyMasked`): the variance **skips** masked pixels
+  (filling them would push a real frame toward blank); the pHash sees them
+  filled with the mean color of the rest, so a wall frame's hash is
+  approximate where the label sits. A frame less than half unmasked, a frame
+  taken while the wall moved on, a busy capturer and a covered artwork are
+  not evidence.
+- **Into the play run** (`Service.ObserveWallFrame`, the same `applyEntry`
+  as the player's own entries): a rendered frame is the play's evidence for
+  an HTML work — `ok` with layer `play`, under the same rendered-frame rule
+  as L1 (it heals a render-layer `broken`, never an L0 or fetch-layer one,
+  changes nothing while the open fetch run's last failure is a 400/404/410 —
+  the HEAD wins — and does not end a 401/403/429 run); it is not a play of
+  its own (`plays.ok` is the player's). A blank or known-bad frame is a
+  counted play failure (`frame`/`blank`, `frame`/`known_bad`), one per play;
+  an opaque embed's `ready` does not end a frame run (it reports a blank
+  frame as ready too). Two plays conclude **`suspect`** (`render_blank` /
+  `render_known_bad`, layer `play`): advisory, never a skip.
+- The record keeps the last frame's verdict, variance and hash under `wall`;
+  the frame itself never leaves the device.
+
 ## Status surfaces
 
 - `player_status` gains a controld-owned `mediaHealth` array, index-aligned
@@ -716,6 +770,11 @@ cycle).
     "settleMs": 30000,
     "confirmSettleMs": 45000,
     "knownBad": [{"phash": "0x…", "maxDistance": 6, "label": "kubo-500"}]
+  },
+  "wallCapture": {
+    "enabled": false,
+    "settleMs": 15000,
+    "maxEdge": 1024
   }
 }
 ```
