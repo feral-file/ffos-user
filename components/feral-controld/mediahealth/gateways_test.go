@@ -359,6 +359,58 @@ func TestGateways_RedirectedBareSourceKeepsItsOwnGateway(t *testing.T) {
 	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA+"/other.html", target)
 }
 
+// F25 round 6: the redirect also normalizes the path, so a source spelled
+// `/ipfs//<cid>?q` arrives as `/ipfs/<cid>/?q`. It must still find its own
+// entry — for the navigation, with the player's params, and for its files
+// by Referer — including after the index is rebuilt at Open.
+func TestGateways_NormalizedRedirectKeepsItsOwnGateway(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	path := filepath.Join(t.TempDir(), "mh", "store.db")
+	st, err := Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	require.NoError(t, err)
+	src := "https://ipfs.raribleuserdata.com/ipfs//" + cidA + "?fxhash=abc"
+	other := "https://ipfs.raribleuserdata.com/ipfs/" + cidA + "/other.html"
+	_, err = st.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 206})
+	require.NoError(t, err)
+	_, err = st.ApplyProbe(other, ProbeResult{Verdict: VerdictAlive, Status: 200, ServedBy: "https://ipfs.filebase.io"})
+	require.NoError(t, err)
+
+	check := func(s *Store, when string) {
+		t.Helper()
+		slashed := "https://ipfs.raribleuserdata.com/ipfs/" + cidA + "/?fxhash=abc"
+		_, ok := s.GatewayOverride(slashed, "")
+		assert.False(t, ok, "%s: the redirected navigation stays on its own gateway", when)
+		_, ok = s.GatewayOverride(slashed+"&display_mode=crop", "")
+		assert.False(t, ok, "%s: with the player's own params too", when)
+		_, ok = s.GatewayOverride("https://ipfs.raribleuserdata.com/ipfs/"+cidA+"/bundle.js", slashed+"&display_mode=crop")
+		assert.False(t, ok, "%s: and its files, by their referrer", when)
+		target, ok := s.GatewayOverride(other, "")
+		require.True(t, ok, "%s: the other file keeps its fallback", when)
+		assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA+"/other.html", target)
+	}
+	check(st, "live")
+	require.NoError(t, st.Close())
+
+	// A store written under the previous layout rebuilds with the aliases.
+	db, err := bolt.Open(path, 0o600, nil)
+	require.NoError(t, err)
+	require.NoError(t, db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketMeta).Put(metaServedByIndexKey, []byte("3"))
+	}))
+	require.NoError(t, db.Close())
+	st, err = Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	require.NoError(t, err)
+	defer func() { _ = st.Close() }()
+	check(st, "after rebuild")
+
+	// The source going broken drops its aliases with it.
+	_, err = st.ApplyProbe(src, ProbeResult{Verdict: VerdictDead, Reason: ReasonHTTPStatus, Status: 404})
+	require.NoError(t, err)
+	target, ok := st.GatewayOverride("https://ipfs.raribleuserdata.com/ipfs/"+cidA+"/?fxhash=abc", "")
+	require.True(t, ok, "no longer an ok source: the request falls to the route's best effort")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA+"/?fxhash=abc", target)
+}
+
 // The per-source index survives a restart too, including the last-source rule.
 func TestGateways_RouteSourcesSurviveReopen(t *testing.T) {
 	clock := &testClock{t: time.Now()}

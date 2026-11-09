@@ -97,7 +97,8 @@ var (
 	bucketRecheck = []byte("recheck")
 	bucketMeta    = []byte("meta")
 	// bucketServedBy indexes every ok content-addressed source, keyed
-	// route + servedBySep + Key(source), to the gateway origin the kiosk
+	// route + servedBySep + Key(source) (plus the source's request aliases,
+	// servedByIdentities), to the gateway origin the kiosk
 	// loads it through (Record.ServedBy; "" = its own gateway), so the
 	// interceptor's per-request lookup never scans records. The routes
 	// with a fallback are mirrored in memory (Store.servedBy).
@@ -310,7 +311,8 @@ const servedBySep = "\x00"
 // kiosk's lookup was empty, so after a deploy the wall went back to the
 // failing gateway with nothing in the verdict to show it (office FF1,
 // 2026-11-06). The records are the source of truth; the index is a cache.
-const servedByIndexVersion = "3"
+// Version 4 adds each source's request aliases (servedByIdentities).
+const servedByIndexVersion = "4"
 
 var metaServedByIndexKey = []byte("servedByIndex")
 
@@ -344,7 +346,12 @@ func (s *Store) loadServedBy() error {
 				return nil
 			}
 			rebuilt++
-			return b.Put([]byte(ref.RouteKey()+servedBySep+string(k)), []byte(origin))
+			for _, id := range servedByIdentities(rec.Source) {
+				if err := b.Put([]byte(ref.RouteKey()+servedBySep+id), []byte(origin)); err != nil {
+					return err
+				}
+			}
+			return nil
 		})
 		if err != nil {
 			return err
@@ -410,6 +417,8 @@ func (s *Store) retireUnconfiguredFallbacks() error {
 		for _, key := range stale {
 			prev, derr := s.decode(items.Get([]byte(key)))
 			if derr != nil || prev == nil {
+				// An alias entry (servedByIdentities) has no record of its
+				// own; retiring its source rewrites it.
 				continue
 			}
 			rec := *prev
@@ -472,15 +481,17 @@ func (s *Store) indexServedBy(tx *bolt.Tx, prev, rec *Record) error {
 		return nil
 	}
 	b := tx.Bucket(bucketServedBy)
-	route, source := ref.RouteKey(), Key(rec.Source)
+	route, ids := ref.RouteKey(), servedByIdentities(rec.Source)
 	prefix := []byte(route + servedBySep)
-	key := append(append([]byte(nil), prefix...), source...)
-	if indexed {
-		if err := b.Put(key, []byte(origin)); err != nil {
+	for _, id := range ids {
+		key := append(append([]byte(nil), prefix...), id...)
+		if indexed {
+			if err := b.Put(key, []byte(origin)); err != nil {
+				return err
+			}
+		} else if err := b.Delete(key); err != nil {
 			return err
 		}
-	} else if err := b.Delete(key); err != nil {
-		return err
 	}
 	s.servedByMu.Lock()
 	defer s.servedByMu.Unlock()
@@ -499,9 +510,13 @@ func (s *Store) indexServedBy(tx *bolt.Tx, prev, rec *Record) error {
 		}
 		s.servedBy[route] = sources
 	case !indexed:
-		delete(sources, source)
+		for _, id := range ids {
+			delete(sources, id)
+		}
 	default:
-		sources[source] = origin
+		for _, id := range ids {
+			sources[id] = origin
+		}
 	}
 	if !routeHasFallback(sources) {
 		delete(s.servedBy, route)
@@ -542,10 +557,10 @@ func (s *Store) GatewayOverride(rawURL, referrer string) (string, bool) {
 // F25 rounds 3–4):
 //
 //  1. the request IS an ok source (as written, or with the player's own
-//     query parameters stripped — navigationKey — or in the bare form the
-//     playlist names when the kiosk redirected a bare CID with a query to
-//     its directory form — contentpath.UnslashBeforeQuery, F25 round 5):
-//     that source's gateway, its own included;
+//     query parameters stripped — navigationKey — including the URL the
+//     kiosk redirects a bare CID with a query to, which the index holds
+//     as an alias of the source: servedByIdentities): that source's
+//     gateway, its own included;
 //  2. its Referer is an ok source: the gateway recorded for the document
 //     that embeds it (a same-origin subresource carries the full document
 //     URL under Chromium's default referrer policy);
@@ -558,7 +573,10 @@ func (s *Store) routeOriginLocked(route, rawURL, referrer string) string {
 	if len(sources) == 0 {
 		return ""
 	}
-	for _, u := range sourceCandidates(rawURL, referrer) {
+	for _, u := range []string{rawURL, navigationKey(rawURL), referrer, navigationKey(referrer)} {
+		if u == "" {
+			continue
+		}
 		if o, ok := sources[Key(u)]; ok {
 			return o
 		}
@@ -572,28 +590,36 @@ func (s *Store) routeOriginLocked(route, rawURL, referrer string) string {
 	return origin
 }
 
-// sourceCandidates are the spellings a kiosk request and its referrer may
-// carry of the source the playlist names, the request's own first: as
-// written, without the player's query params (navigationKey), and — since
-// the kiosk answers a navigation to a bare CID with a query by redirecting
-// it to `/<cid>/?query` (uarewrite, contentpath.SlashBeforeQuery) — the
-// bare form of each. Without the bare form a work recovered on its own
-// gateway would no longer find its own route entry after the redirect and
-// could be sent to another source's fallback (PR #438 review, F25 round 5).
-func sourceCandidates(rawURL, referrer string) []string {
-	var out []string
-	for _, u := range []string{rawURL, referrer} {
-		for _, v := range []string{u, navigationKey(u)} {
-			if v == "" {
-				continue
-			}
-			out = append(out, v)
-			if bare, ok := contentpath.UnslashBeforeQuery(v); ok {
-				out = append(out, bare)
-			}
+// servedByIdentities are the bucketServedBy keys one source is indexed
+// under: Key(source), and — when the kiosk redirects it (a bare CID with a
+// query, contentpath.SlashBeforeQuery) — the key of the URL it actually
+// requests instead, as written and without the player's query params
+// (navigationKey), so the redirected navigation and the files it loads
+// (by Referer) find this source's own entry. The alias is computed from
+// the source forward, never reconstructed from the request: the redirect
+// also normalizes the path (`/ipfs//<cid>?q` → `/ipfs/<cid>/?q`), and a
+// reconstruction cannot recover the original spelling, so the lookup fell
+// through to another file's fallback (PR #438 review, F25 rounds 5–6).
+//
+// Hazard: two spellings of one source on one gateway (`/ipfs/<cid>?q` and
+// `/ipfs//<cid>?q`) share an alias; the later write owns it, and removing
+// either removes it. Both name the same document, so the lookup then falls
+// to the route's best effort for that pair only.
+func servedByIdentities(source string) []string {
+	ids := []string{Key(source)}
+	slashed, ok := contentpath.SlashBeforeQuery(source)
+	if !ok {
+		return ids
+	}
+	for _, u := range []string{slashed, navigationKey(slashed)} {
+		if u == "" {
+			continue
+		}
+		if k := Key(u); !slices.Contains(ids, k) {
+			ids = append(ids, k)
 		}
 	}
-	return out
+	return ids
 }
 
 func recheckPrefix(t time.Time) string {
