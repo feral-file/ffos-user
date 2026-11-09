@@ -99,3 +99,47 @@ func TestSlashBeforeQuery(t *testing.T) {
 		})
 	}
 }
+
+func TestUnslashBeforeQuery(t *testing.T) {
+	t.Parallel()
+	host := "https://ipfs.raribleuserdata.com"
+	tests := []struct {
+		name, in, want string
+		ok             bool
+	}{
+		{name: "directory form with query", in: host + "/ipfs/" + cidV0 + "/?fxhash=abc", want: host + "/ipfs/" + cidV0 + "?fxhash=abc", ok: true},
+		{name: "fragment kept", in: host + "/ipfs/" + cidV1B32 + "/?a=1#f", want: host + "/ipfs/" + cidV1B32 + "?a=1#f", ok: true},
+		{name: "no query", in: host + "/ipfs/" + cidV0 + "/"},
+		{name: "a file under the cid", in: host + "/ipfs/" + cidV0 + "/index.html?x=1"},
+		{name: "already bare", in: host + "/ipfs/" + cidV0 + "?x=1"},
+		{name: "not ipfs", in: "https://arweave.net/" + txA + "/?x=1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := UnslashBeforeQuery(tt.in)
+			if ok != tt.ok || got != tt.want {
+				t.Fatalf("UnslashBeforeQuery(%q) = (%q, %v), want (%q, %v)", tt.in, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+// The two are inverses on the shape the kiosk redirects: a bare source
+// comes back byte for byte after the round trip.
+func TestSlashRoundTrip(t *testing.T) {
+	t.Parallel()
+	for _, src := range []string{
+		"https://ipfs.raribleuserdata.com/ipfs/" + cidV0 + "?fxhash=ooCaGyZkD8Yy",
+		"https://ipfs.filebase.io/ipfs/" + cidV1B32 + "?fxhash=a%20b&fxiteration=94",
+	} {
+		slashed, ok := SlashBeforeQuery(src)
+		if !ok {
+			t.Fatalf("SlashBeforeQuery(%q) refused", src)
+		}
+		back, ok := UnslashBeforeQuery(slashed)
+		if !ok || back != src {
+			t.Fatalf("round trip of %q gave (%q, %v)", src, back, ok)
+		}
+	}
+}

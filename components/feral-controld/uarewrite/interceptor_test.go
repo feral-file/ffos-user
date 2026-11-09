@@ -13,7 +13,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
@@ -180,6 +182,50 @@ func TestProcessPausedSlashesBareCIDSubresource(t *testing.T) {
 	assert.NotContains(t, got[0], "headers")
 	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidV0+"/?v=2", got[1]["url"], "retired host: the replacement gateway, slashed")
 	assert.NotContains(t, got[1], "headers")
+}
+
+// F26 (PR #438 review): a signed URL's credentials never reach the log.
+// Both redirect outcomes (a failed and a successful fulfill) and the
+// override path log the URLs redacted: scheme, host and path, the query
+// replaced by "?…".
+func TestInterceptorLogsRedactQueryValues(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	policy, err := New([]string{"ipfs.io"}, "feral-player/test", "")
+	require.NoError(t, err)
+	i := NewInterceptor(policy, "http://127.0.0.1:9222", nil, nil, wrapper.NewJSON(), nil, wrapper.NewClock(), zap.New(core))
+	t.Cleanup(func() { _ = i.Close() })
+
+	const secret = "X-Amz-Signature=deadbeefcafe" //nolint:gosec // G101: a fake signature the test asserts never reaches the log
+	session := mocks.NewMockCDPSession(ctrl)
+	gomock.InOrder(
+		session.EXPECT().Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).
+			Return(nil, errors.New("Fetch.fulfillRequest: invalid requestId")),
+		session.EXPECT().Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).Return(nil, nil),
+		session.EXPECT().Send(gomock.Any(), "Fetch.continueRequest", gomock.Any()).Return(nil, nil),
+	)
+	bare := "https://cdn.example.com/ipfs/" + cidV0 + "?" + secret
+	i.processPaused(session, pausedEventTyped(t, "req-1", bare, "Document"))
+	i.processPaused(session, pausedEventTyped(t, "req-2", bare, "Document"))
+	i.processPaused(session, pausedEventTyped(t, "req-3", "https://ipfs.io/ipfs/"+cidV0+"/a.png?"+secret, "Image"))
+
+	entries := logs.All()
+	require.NotEmpty(t, entries)
+	sawRedacted := false
+	for _, e := range entries {
+		for k, v := range e.ContextMap() {
+			str, _ := v.(string)
+			assert.NotContains(t, str, "deadbeefcafe", "%s field %q leaks the signature", e.Message, k)
+			if strings.HasSuffix(str, "?…") {
+				sawRedacted = true
+			}
+		}
+	}
+	assert.True(t, sawRedacted, "the URLs are still logged, redacted")
 }
 
 // headerValue pulls one header out of the continueRequest args the

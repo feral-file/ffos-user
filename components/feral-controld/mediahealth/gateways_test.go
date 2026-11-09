@@ -333,6 +333,32 @@ func TestGateways_RouteStaysWhileAnySourceNeedsIt(t *testing.T) {
 	assert.False(t, ok, "the route clears once no source on it needs it")
 }
 
+// F25 round 5: the kiosk redirects a bare CID with a query to its directory
+// form, so the navigation and its files arrive slashed. A source recovered
+// on its own gateway must still find its own entry, not the fallback of
+// another file under the same CID.
+func TestGateways_RedirectedBareSourceKeepsItsOwnGateway(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	s := openTestStore(t, clock)
+	bare := "https://ipfs.raribleuserdata.com/ipfs/" + cidA + "?fxhash=abc"
+	other := "https://ipfs.raribleuserdata.com/ipfs/" + cidA + "/other.html"
+	_, err := s.ApplyProbe(bare, ProbeResult{Verdict: VerdictAlive, Status: 206})
+	require.NoError(t, err)
+	_, err = s.ApplyProbe(other, ProbeResult{Verdict: VerdictAlive, Status: 200, ServedBy: "https://ipfs.filebase.io"})
+	require.NoError(t, err)
+
+	slashed := "https://ipfs.raribleuserdata.com/ipfs/" + cidA + "/?fxhash=abc"
+	_, ok := s.GatewayOverride(slashed, "")
+	assert.False(t, ok, "the redirected navigation stays on its own gateway")
+	_, ok = s.GatewayOverride(slashed+"&display_mode=crop", "")
+	assert.False(t, ok, "with the player's own params too")
+	_, ok = s.GatewayOverride("https://ipfs.raribleuserdata.com/ipfs/"+cidA+"/bundle.js", slashed+"&display_mode=crop")
+	assert.False(t, ok, "and its files, by their referrer")
+	target, ok := s.GatewayOverride(other, "")
+	require.True(t, ok, "the other file keeps its fallback")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA+"/other.html", target)
+}
+
 // The per-source index survives a restart too, including the last-source rule.
 func TestGateways_RouteSourcesSurviveReopen(t *testing.T) {
 	clock := &testClock{t: time.Now()}

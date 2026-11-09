@@ -426,9 +426,9 @@ func (i *Interceptor) processPaused(session offlinecache.CDPSession, params json
 
 	if _, err := session.Send(ctx, "Fetch.continueRequest", args); err != nil {
 		i.logger.Warn("uarewrite: Fetch.continueRequest failed",
-			zap.String("url", paused.Request.URL),
+			zap.String("url", offlinecache.RedactSourceForLog(paused.Request.URL)),
 			zap.Bool("rewritten", rewritten),
-			zap.String("redirected_to", redirected),
+			zap.String("redirected_to", offlinecache.RedactSourceForLog(redirected)),
 			zap.Error(err))
 		i.recoverFrom(session, err)
 		return
@@ -437,11 +437,11 @@ func (i *Interceptor) processPaused(session offlinecache.CDPSession, params json
 	switch {
 	case redirected != "":
 		i.logger.Debug("uarewrite: redirected retired-gateway request",
-			zap.String("url", paused.Request.URL),
-			zap.String("to", redirected))
+			zap.String("url", offlinecache.RedactSourceForLog(paused.Request.URL)),
+			zap.String("to", offlinecache.RedactSourceForLog(redirected)))
 	case rewritten:
 		i.logger.Debug("uarewrite: rewrote User-Agent",
-			zap.String("url", paused.Request.URL))
+			zap.String("url", offlinecache.RedactSourceForLog(paused.Request.URL)))
 	}
 }
 
@@ -693,15 +693,15 @@ func (i *Interceptor) redirectDocument(ctx context.Context, session offlinecache
 	}
 	if _, err := session.Send(ctx, "Fetch.fulfillRequest", args); err != nil {
 		i.logger.Warn("uarewrite: Fetch.fulfillRequest failed",
-			zap.String("url", from),
-			zap.String("location", to),
+			zap.String("url", offlinecache.RedactSourceForLog(from)),
+			zap.String("location", offlinecache.RedactSourceForLog(to)),
 			zap.Error(err))
 		i.recoverFrom(session, err)
 		return
 	}
 	i.logger.Debug("uarewrite: redirected bare CID navigation to its directory form",
-		zap.String("url", from),
-		zap.String("to", to))
+		zap.String("url", offlinecache.RedactSourceForLog(from)),
+		zap.String("to", offlinecache.RedactSourceForLog(to)))
 }
 
 // OverrideFetchPatterns are the Fetch patterns the gateway override needs:

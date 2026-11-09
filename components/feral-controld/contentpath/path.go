@@ -71,6 +71,28 @@ func SlashBeforeQuery(rawURL string) (string, bool) {
 	return u.String(), true
 }
 
+// UnslashBeforeQuery is SlashBeforeQuery's inverse, for identity only: the
+// bare form `…/ipfs/<cid>?query` of a directory-form URL with a query, so a
+// request the kiosk redirected can be matched back to the source the
+// playlist names (mediahealth's per-source gateway routes key on that
+// string). ok is false for any other shape. It undoes exactly what
+// SlashBeforeQuery adds; a source whose path SlashBeforeQuery also
+// normalized (`/ipfs//<cid>?q`) does not round-trip, and such a lookup
+// falls back to whatever the caller does for an unmatched request.
+func UnslashBeforeQuery(rawURL string) (string, bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" || (u.RawQuery == "" && !u.ForceQuery) {
+		return "", false
+	}
+	cid, rest, ok := IPFS(u.EscapedPath())
+	if !ok || rest != "/" {
+		return "", false
+	}
+	u.Path = "/ipfs/" + cid
+	u.RawPath = ""
+	return u.String(), true
+}
+
 // Arweave parses an escaped URL path as `/<tx>` with an optional remainder,
 // collapsing a leading slash run. The caller decides whether the host is an
 // Arweave gateway: a 43-character base64url segment at the root of any

@@ -251,6 +251,11 @@ func redactFetchError(err error) error {
 // is cut at the first '?' rather than trusted to be credential-free. data:
 // URIs pass straight to truncation — their bounded prefix is content, not a
 // credential carrier, matching how the rest of this package logs them.
+// RedactSourceForLog is redactSourceForLog for other packages that log a
+// kiosk or playlist URL (uarewrite): one redaction rule for every log line
+// that can leave the device.
+func RedactSourceForLog(source string) string { return redactSourceForLog(source) }
+
 func redactSourceForLog(source string) string {
 	if isDataURI(source) {
 		return truncateSourceForLog(source)

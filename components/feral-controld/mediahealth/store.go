@@ -1,6 +1,8 @@
 package mediahealth
 
 import (
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
+
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -540,8 +542,10 @@ func (s *Store) GatewayOverride(rawURL, referrer string) (string, bool) {
 // F25 rounds 3–4):
 //
 //  1. the request IS an ok source (as written, or with the player's own
-//     query parameters stripped — navigationKey): that source's gateway,
-//     its own included;
+//     query parameters stripped — navigationKey — or in the bare form the
+//     playlist names when the kiosk redirected a bare CID with a query to
+//     its directory form — contentpath.UnslashBeforeQuery, F25 round 5):
+//     that source's gateway, its own included;
 //  2. its Referer is an ok source: the gateway recorded for the document
 //     that embeds it (a same-origin subresource carries the full document
 //     URL under Chromium's default referrer policy);
@@ -554,10 +558,7 @@ func (s *Store) routeOriginLocked(route, rawURL, referrer string) string {
 	if len(sources) == 0 {
 		return ""
 	}
-	for _, u := range []string{rawURL, navigationKey(rawURL), referrer, navigationKey(referrer)} {
-		if u == "" {
-			continue
-		}
+	for _, u := range sourceCandidates(rawURL, referrer) {
 		if o, ok := sources[Key(u)]; ok {
 			return o
 		}
@@ -569,6 +570,30 @@ func (s *Store) routeOriginLocked(route, rawURL, referrer string) string {
 		}
 	}
 	return origin
+}
+
+// sourceCandidates are the spellings a kiosk request and its referrer may
+// carry of the source the playlist names, the request's own first: as
+// written, without the player's query params (navigationKey), and — since
+// the kiosk answers a navigation to a bare CID with a query by redirecting
+// it to `/<cid>/?query` (uarewrite, contentpath.SlashBeforeQuery) — the
+// bare form of each. Without the bare form a work recovered on its own
+// gateway would no longer find its own route entry after the redirect and
+// could be sent to another source's fallback (PR #438 review, F25 round 5).
+func sourceCandidates(rawURL, referrer string) []string {
+	var out []string
+	for _, u := range []string{rawURL, referrer} {
+		for _, v := range []string{u, navigationKey(u)} {
+			if v == "" {
+				continue
+			}
+			out = append(out, v)
+			if bare, ok := contentpath.UnslashBeforeQuery(v); ok {
+				out = append(out, bare)
+			}
+		}
+	}
+	return out
 }
 
 func recheckPrefix(t time.Time) string {
