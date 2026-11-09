@@ -33,6 +33,9 @@ func TestGateways_Ref(t *testing.T) {
 		{"https://ipfs.filebase.io/ipfs/" + cidA, true, "ipfs:" + cidA, ""},
 		{"https://ipfs.pixura.io/ipfs/" + cidB + "/frames/1.png", true, "ipfs:" + cidB, "/frames/1.png"},
 		{"https://ipfs.io/ipfs/" + cidA + "/", true, "ipfs:" + cidA, "/"},
+		{"https://ipfs.io/ipfs//" + cidA + "/17.png", true, "ipfs:" + cidA, "/17.png"},
+		{"https://ipfs.io/ipfs/ipfs/" + cidB, true, "ipfs:" + cidB, ""},
+		{"https://arweave.net//" + txA + "/index.html", true, "ar:" + txA, "/index.html"},
 		{"https://arweave.net/not-a-tx", false, "", ""},
 		{"https://example.com/" + txA, false, "", ""},
 		{"https://ipfs.io/ipns/example.com/x.png", false, "", ""},
@@ -49,6 +52,10 @@ func TestGateways_Ref(t *testing.T) {
 	}
 	ref, _ := g.Ref("https://ipfs.pixura.io/ipfs/" + cidB + "/frames/1.png?v=2")
 	assert.Equal(t, "https://gateway.pinata.cloud/ipfs/"+cidB+"/frames/1.png?v=2", ref.URLOn("https://gateway.pinata.cloud"))
+	// A doubled slash before the CID is dropped on the way out: the fallback
+	// dials the form every gateway serves directly.
+	ref, _ = g.Ref("https://ipfs.io/ipfs//" + cidA + "/17.png")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA+"/17.png", ref.URLOn("https://ipfs.filebase.io"))
 	ref, _ = g.Ref("https://arweave.net/" + txA + "/index.html")
 	assert.Equal(t, "https://ar-io.dev/"+txA+"/index.html", ref.URLOn("https://ar-io.dev"))
 }

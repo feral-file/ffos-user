@@ -1,4 +1,4 @@
-package uarewrite
+package contentpath
 
 import (
 	"encoding/base32"
@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// isCID reports whether s is a syntactically valid IPFS CID: a bare CIDv0
+// IsCID reports whether s is a syntactically valid IPFS CID: a bare CIDv0
 // (base58btc, 46 chars starting "Qm") or a multibase-prefixed CIDv1 whose
 // decoded bytes carry version 1, a codec varint, and a multihash whose
 // declared digest length matches the bytes present.
@@ -31,7 +31,7 @@ import (
 // alphabet-valid segment is refused here rather than multiplied through.
 const maxCIDLength = 256
 
-func isCID(s string) bool {
+func IsCID(s string) bool {
 	if len(s) < 2 || len(s) > maxCIDLength {
 		return false
 	}

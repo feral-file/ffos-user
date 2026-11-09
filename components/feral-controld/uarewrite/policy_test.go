@@ -720,6 +720,12 @@ func TestRewriteURL(t *testing.T) {
 		{name: "tripled ipfs prefix with remainder", in: "https://ipfs.io/ipfs/ipfs/ipfs/" + cidV1 + "/a%20b.png",
 			want: "https://ipfs.filebase.io/ipfs/" + cidV1 + "/a%20b.png", ok: true},
 		{name: "doubled prefix without a cid is left alone", in: "https://ipfs.io/ipfs/ipfs/notacid"},
+		{name: "double slash before the cid is collapsed", in: "https://ipfs.io/ipfs//" + cidV0 + "/17.png",
+			want: "https://ipfs.filebase.io/ipfs/" + cidV0 + "/17.png", ok: true},
+		{name: "slash runs and doubled prefix together", in: "https://ipfs.io//ipfs/ipfs//" + cidV1 + "/a%20b.png",
+			want: "https://ipfs.filebase.io/ipfs/" + cidV1 + "/a%20b.png", ok: true},
+		{name: "slash run inside the remainder is kept", in: "https://ipfs.io/ipfs/" + cidV0 + "//x.png",
+			want: "https://ipfs.filebase.io/ipfs/" + cidV0 + "//x.png", ok: true},
 		{name: "no host", in: "data:image/gif;base64,R0lGOD"},
 	}
 

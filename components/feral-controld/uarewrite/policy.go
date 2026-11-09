@@ -31,10 +31,12 @@
 // RewriteURL). The DP-1 item source stays byte-for-byte what the app cast:
 // `Fetch.continueRequest`'s `url` override is invisible to the page, so
 // ff-player, the offline-cache identity (`sha256(item.source)`), and every
-// log still see the original URL. A doubled `/ipfs/ipfs/<cid>` prefix (a
-// common tokenURI mistake no gateway can serve) is collapsed first, so it
-// is rewritten too (collapseDoubledIPFS). Anything on a matching host that is NOT a
-// CID path keeps the User-Agent rule above.
+// log still see the original URL. Slash runs and repeated `ipfs` segments
+// before the CID (`/ipfs//<cid>`, `/ipfs/ipfs/<cid>`: common tokenURI
+// mistakes the gateways redirect or refuse) are collapsed first, so those
+// are rewritten too (contentpath.IPFS, the parser the media-health probe
+// shares). Anything on a matching host that is NOT a CID path keeps the
+// User-Agent rule above.
 //
 // This package is intentionally pure: it holds no CDP connection, performs
 // no I/O, and knows nothing about how interception is armed. That keeps the
@@ -50,6 +52,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 )
 
 // DefaultUserAgent is the token sent in place of Chromium's own.
@@ -316,10 +320,11 @@ func (p *Policy) RewriteURL(rawURL string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	escaped := collapseDoubledIPFS(u.EscapedPath())
-	if !isCIDPath(escaped) {
+	cid, rest, ok := contentpath.IPFS(u.EscapedPath())
+	if !ok {
 		return "", false
 	}
+	escaped := "/ipfs/" + cid + rest
 	path, err := url.PathUnescape(escaped)
 	if err != nil {
 		return "", false
@@ -336,43 +341,6 @@ func (p *Policy) RewriteURL(rawURL string) (string, bool) {
 		out.RawPath = escaped
 	}
 	return out.String(), true
-}
-
-// collapseDoubledIPFS turns `/ipfs/ipfs/<cid>...` (any number of repeated
-// `ipfs` segments) into `/ipfs/<cid>...` when what follows is a CID. The
-// doubled prefix is a common tokenURI mistake: no gateway can serve it (it
-// names the CID "ipfs"), and because it is not a CID path it escaped this
-// rewrite entirely — the kiosk kept dialing the retired gateway, which
-// answered 429 on every play, while the same CID loads on the replacement
-// ("Rebirth of the D U A T #1", office FF1). Only collapsed when a real CID
-// follows, so a path that merely contains "ipfs" is left alone.
-func collapseDoubledIPFS(escapedPath string) string {
-	const prefix = "/ipfs/"
-	out := escapedPath
-	for strings.HasPrefix(out, prefix+"ipfs/") {
-		candidate := out[len(prefix)-1:]
-		if !isCIDPath(candidate) && !strings.HasPrefix(candidate, prefix+"ipfs/") {
-			return escapedPath
-		}
-		out = candidate
-	}
-	return out
-}
-
-// isCIDPath reports whether an escaped URL path is `/ipfs/<cid>` optionally
-// followed by `/...`, where <cid> parses as a CID (see isCID). A `%` in the
-// segment means percent-encoding, which no CID alphabet contains.
-func isCIDPath(escapedPath string) bool {
-	const prefix = "/ipfs/"
-	if !strings.HasPrefix(escapedPath, prefix) {
-		return false
-	}
-	rest := escapedPath[len(prefix):]
-	cid := rest
-	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		cid = rest[:i]
-	}
-	return isCID(cid)
 }
 
 // normalizeReplacementGateway reduces an operator-written gateway to scheme

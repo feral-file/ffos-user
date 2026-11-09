@@ -2,8 +2,9 @@ package mediahealth
 
 import (
 	"net/url"
-	"regexp"
 	"strings"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 )
 
 // Network is a content-addressed network whose paths name content, not a
@@ -85,16 +86,6 @@ func origins(list, fallback []string) []string {
 	return out
 }
 
-// arweaveTxID matches an Arweave transaction id: 32 bytes, base64url,
-// no padding (43 characters).
-var arweaveTxID = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
-
-// ipfsCID matches a CID as it appears in a gateway path: CIDv0 (base58,
-// "Qm…", 46 characters) or a CIDv1 in its common lowercase multibase
-// forms. Loose on purpose: a false positive costs one extra gateway
-// request, a false negative only skips the fallback.
-var ipfsCID = regexp.MustCompile(`^(Qm[1-9A-HJ-NP-Za-km-z]{44}|b[a-z2-7]{50,}|z[1-9A-HJ-NP-Za-km-z]{40,}|f[0-9a-f]{40,})$`)
-
 // ContentRef is a content-addressed URL taken apart: which network, the
 // content id, and the path and query after it (kept verbatim, so a work's
 // own files under its CID or transaction follow the same gateway).
@@ -123,7 +114,8 @@ func (r ContentRef) Key() string { return string(r.Network) + ":" + r.ID }
 func (r ContentRef) RouteKey() string { return r.Key() + "@" + r.Host }
 
 // Ref parses a URL as content-addressed: `/ipfs/<cid>…` on any host, or
-// `/<tx>…` on an Arweave gateway host. ok is false for anything else.
+// `/<tx>…` on an Arweave gateway host, with the slash runs and repeated
+// `ipfs` segments contentpath tolerates. ok is false for anything else.
 func (g *Gateways) Ref(rawURL string) (ContentRef, bool) {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Hostname() == "" {
@@ -131,23 +123,17 @@ func (g *Gateways) Ref(rawURL string) (ContentRef, bool) {
 	}
 	host := strings.ToLower(u.Hostname())
 	path := u.EscapedPath()
-	if rest, found := strings.CutPrefix(path, "/ipfs/"); found {
-		id, tail, _ := strings.Cut(rest, "/")
-		if ipfsCID.MatchString(id) {
-			if tail != "" || strings.HasSuffix(rest, "/") {
-				tail = "/" + tail
-			}
-			return ContentRef{Network: NetworkIPFS, ID: id, Rest: tail, Query: u.RawQuery, Host: host}, true
-		}
-		return ContentRef{}, false
+	// contentpath is the parser the kiosk rewrite uses too, so the probe
+	// and the wall agree on what is content-addressed — including the
+	// `/ipfs//<cid>` and `/ipfs/ipfs/<cid>` mistakes it normalizes, which
+	// URLOn then emits clean (the default IPFS fallback only redirects the
+	// doubled-slash form).
+	if cid, rest, ok := contentpath.IPFS(path); ok {
+		return ContentRef{Network: NetworkIPFS, ID: cid, Rest: rest, Query: u.RawQuery, Host: host}, true
 	}
 	if g != nil && g.arweaveHosts[host] {
-		id, tail, hasTail := strings.Cut(strings.TrimPrefix(path, "/"), "/")
-		if arweaveTxID.MatchString(id) {
-			if hasTail {
-				tail = "/" + tail
-			}
-			return ContentRef{Network: NetworkArweave, ID: id, Rest: tail, Query: u.RawQuery, Host: host}, true
+		if tx, rest, ok := contentpath.Arweave(path); ok {
+			return ContentRef{Network: NetworkArweave, ID: tx, Rest: rest, Query: u.RawQuery, Host: host}, true
 		}
 	}
 	return ContentRef{}, false

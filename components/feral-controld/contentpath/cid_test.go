@@ -1,4 +1,4 @@
-package uarewrite
+package contentpath
 
 import (
 	"strings"
@@ -32,8 +32,8 @@ func TestIsCID(t *testing.T) {
 		"bafybeigbz7fx2ce65lpky3idh4cae3umix2vgh4jofinzzyss33zhq4gha", // objkt GIF
 	}
 	for _, s := range valid {
-		if !isCID(s) {
-			t.Errorf("isCID(%q) = false, want true", s)
+		if !IsCID(s) {
+			t.Errorf("IsCID(%q) = false, want true", s)
 		}
 	}
 	invalid := []string{"", "b", "api", "v0", "QmAbc", "readme.md", "index.html",
@@ -46,8 +46,8 @@ func TestIsCID(t *testing.T) {
 		"k" + strings.Repeat("z", 100000),         // oversized; must be refused before decoding
 	}
 	for _, s := range invalid {
-		if isCID(s) {
-			t.Errorf("isCID(%q) = true, want false", s)
+		if IsCID(s) {
+			t.Errorf("IsCID(%q) = true, want false", s)
 		}
 	}
 }

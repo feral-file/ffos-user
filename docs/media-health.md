@@ -110,7 +110,10 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   before any byte count: a timed-out short read is not truncation).
 - **Gateway fallback for IPFS and Arweave.** On a content-addressed path —
   `/ipfs/<cid>` on any host, or `/<43-character transaction id>` on an
-  Arweave gateway — a 404 or 410 means "this gateway could not retrieve it",
+  Arweave gateway, as the `contentpath` package parses them: slash runs and
+  repeated `ipfs` segments before the id are collapsed (`/ipfs//<cid>`,
+  `/ipfs/ipfs/<cid>`), the same parser the kiosk rewrite uses, so the probe
+  and the wall agree on which sources are content-addressed — a 404 or 410 means "this gateway could not retrieve it",
   not "it does not exist": on the office FF1, 7 of 60 healthy works in a
   labeled fixture read 404 from arweave.net while ar-io.dev served them. So
   the probe tries the network's other configured gateways
