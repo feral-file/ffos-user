@@ -33,6 +33,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/uarewrite"
 )
 
 func main() {
@@ -72,10 +73,20 @@ func main() {
 	}
 	defer func() { _ = store.Close() }()
 
+	// The default kiosk gateway policy, so the bench dials the wire the wall
+	// would (a retired gateway's CID path goes to the replacement gateway),
+	// as the daemon's prober does; without it a work the wall renders can
+	// read inconclusive here on the retired gateway's 429.
+	rewriter, err := uarewrite.New(nil, "", "")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gateway policy:", err)
+		os.Exit(1)
+	}
 	prober := &mediahealth.Prober{
 		Probe: &mediahealth.Probe{
 			Fetcher:   offlinecache.NewMediaHealthFetcher(net.DefaultResolver),
 			Validator: mediahealth.NewContentValidator(mediahealth.DefaultProbeMaxBytes, nil),
+			Rewriter:  rewriter,
 		},
 		Store: store,
 		Hosts: &mediahealth.HostLimiter{},
