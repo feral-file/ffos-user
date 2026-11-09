@@ -580,7 +580,11 @@ would hide real art, the worst outcome here.
   `phash`, same pHash algorithm and bit order, same per-channel variance
   blank signal): a known-bad fingerprint match first (`render_known_bad`,
   a render negative at once, label kept), then blank (`render_blank`: variance under
-  0.001 across every channel — hue without luma spread is art, not blank),
+  0.0001 across every channel — hue without luma spread is art, not blank;
+  a decade under the indexer's 0.001, measured on the wall's own frames:
+  real blanks 0 to 0.000053, a dark-by-design work with a little text
+  0.0004, the dimmest real art 0.025 — the device is the truth, not the
+  indexer's GPU renders),
   else ok. A blank concludes only on a **second consecutive blank**, rendered
   immediately with the longer settle; a real frame or a successful play
   resets the count, and a stalled confirmation keeps the blank pending so
@@ -805,7 +809,7 @@ cycle).
     "enabled": false,
     "maxPerNight": 200,
     "minAsleepSeconds": 120,
-    "blankVarianceThreshold": 0.001,
+    "blankVarianceThreshold": 0.0001,
     "settleMs": 30000,
     "confirmSettleMs": 45000,
     "knownBad": [{"phash": "0x…", "maxDistance": 6, "label": "kubo-500"}]

@@ -109,9 +109,17 @@ const (
 	// RecheckL1Stalled: no evidence; try again the next night.
 	RecheckL1Stalled = 24 * time.Hour
 
-	// DefaultBlankVarianceThreshold is the indexer's
-	// render_probe.blank_variance_threshold default.
-	DefaultBlankVarianceThreshold = 0.001
+	// DefaultBlankVarianceThreshold is the per-channel variance below which
+	// a frame is blank. A decade under the indexer's render_probe default
+	// (0.001), from the wall's own frames (office FF1, 2026-11-09, 20
+	// fixture works): every real blank measured 0 to 0.000053, a dark-by-
+	// design work with a small line of text 0.0004 (the indexer's value
+	// called it blank), the dimmest real art 0.025. Trust the device's
+	// measurements, not the indexer's GPU renders. The error this trades in
+	// is the safe one: a near-blank frame between 0.0001 and 0.001 now
+	// reads ok (a work kept on the wall), where it read blank (a work
+	// hidden); a near-blank error page is the learned fingerprints' job.
+	DefaultBlankVarianceThreshold = 0.0001
 	// MaxVariance bounds Variance (half the samples at 0, half at 1); a
 	// threshold at or above it classifies every frame blank.
 	MaxVariance = 0.25

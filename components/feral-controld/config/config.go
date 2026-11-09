@@ -144,8 +144,9 @@ type MediaHealthL1Config struct {
 	// browser.
 	MinAsleepSeconds int `json:"minAsleepSeconds,omitempty"`
 	// BlankVarianceThreshold is the per-channel variance below which a
-	// frame is blank (default 0.001, the indexer's); values outside
-	// (0, 0.25) keep the default.
+	// frame is blank (default 0.0001, measured on the wall's own frames —
+	// a decade under the indexer's 0.001, which called dark art blank);
+	// values outside (0, 0.25) keep the default.
 	BlankVarianceThreshold float64 `json:"blankVarianceThreshold,omitempty"`
 	// SettleMs / ConfirmSettleMs are the wait after navigation before the
 	// capture, for a first render and for the confirmation render of a

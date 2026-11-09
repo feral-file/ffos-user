@@ -837,3 +837,37 @@ func TestL1_RenderedFrameKeepsAFetchRun(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StateBroken, rec.State, "the second refusal concludes")
 }
+
+// sparseFrame is a 1024x1024 black frame with lit white pixels on the
+// Variance sampling grid (every 4th pixel each way: 65536 samples), so its
+// variance is lit/65536 * (1 - lit/65536) on every channel.
+func sparseFrame(lit int) image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, 1024, 1024))
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: color.Black}, image.Point{}, draw.Src)
+	for i := 0; i < lit; i++ {
+		img.Set((i*37%256)*4, (i*101%256)*4, color.White)
+	}
+	return img
+}
+
+// The blank threshold is the device's, measured on the wall's own frames
+// (office FF1, 2026-11-09): real blanks 0 to 0.000053; MUTATION #570, dark
+// by design with a small line of pink text, 0.0004 — which the indexer's
+// 0.001 called blank, hiding a work that renders.
+func TestBlankThreshold_MeasuredOnTheWall(t *testing.T) {
+	darkArt := sparseFrame(26)  // ≈ 0.0004, like MUTATION #570
+	nearBlank := sparseFrame(3) // ≈ 0.000046, the highest real blank measured
+	assert.InDelta(t, 0.0004, Variance(darkArt), 0.00002)
+	assert.InDelta(t, 0.000046, Variance(nearBlank), 0.000005)
+
+	c, err := Classify(darkArt, nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	assert.Equal(t, RenderOK, c.Verdict, "dark art with a little content is not blank")
+	c, err = Classify(nearBlank, nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	assert.Equal(t, RenderBlank, c.Verdict, "every real blank on the wall still reads blank")
+
+	c, err = Classify(darkArt, nil, 0.001)
+	require.NoError(t, err)
+	assert.Equal(t, RenderBlank, c.Verdict, "the indexer's threshold is the false blank this replaces")
+}
