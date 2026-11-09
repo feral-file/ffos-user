@@ -238,18 +238,22 @@ func wireWallCapture(cfg config.MediaHealthConfig, svc *mediahealth.Service, kio
 		threshold = cfg.L1.BlankVarianceThreshold
 	}
 	known := knownBadFingerprints(cfg, logger)
+	settle := time.Duration(cfg.WallCapture.SettleMs) * time.Millisecond
+	if settle <= 0 {
+		settle = mediahealth.DefaultWallSettle
+	}
 	w := mediahealth.NewWallCapture(mediahealth.WallCaptureConfig{
 		Store:                  svc.Store(),
 		Capturer:               kioskWall{kiosk: kiosk, maxEdge: maxEdge},
 		Deliver:                svc.ObserveWallFrame,
 		Awake:                  func() bool { return asleep == nil || !asleep() },
-		Settle:                 time.Duration(cfg.WallCapture.SettleMs) * time.Millisecond,
+		Settle:                 settle,
 		KnownBad:               known,
 		BlankVarianceThreshold: threshold,
 		Logger:                 logger,
 	})
 	logger.Info("media health: wall capture on",
-		zap.Int("settle_ms", cfg.WallCapture.SettleMs), zap.Int("max_edge", maxEdge),
+		zap.Duration("settle", settle), zap.Int("max_edge", maxEdge),
 		zap.Int("known_bad_fingerprints", len(known)))
 	return w
 }
