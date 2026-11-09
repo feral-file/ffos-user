@@ -1,6 +1,8 @@
 package mediahealth
 
 import (
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
+
 	"context"
 	"errors"
 	"fmt"
@@ -59,7 +61,55 @@ type ProbeResult struct {
 	// FromStore marks a verdict served from a conclusive stored record
 	// without a network request (Prober.Preflight).
 	FromStore bool
+	// RetryAfter is the origin's Retry-After on a 429/503 (0 when none or
+	// on any other answer): how long the host asked to be left alone. The
+	// store bounds the record's transient hold by it and the HostLimiter
+	// cools the host for it.
+	RetryAfter time.Duration
+	// Unreachable classifies a transient result in which the origin gave
+	// no usable answer at all — DNS without a definitive answer, no
+	// response (timeout, refused or reset connection, TLS failure), or a
+	// server error — as opposed to an answer that is merely identity- or
+	// load-dependent (401/403/429, 503 with Retry-After), which is an
+	// answer. NetworkHealthy says whether, at that moment, the device
+	// demonstrably reached OTHER origins (Prober sets it): only then does
+	// the failure count toward the record's unreachable streak, so a device
+	// with no network never marks its wall broken (Store.ApplyProbe,
+	// UnreachableDeadAfter).
+	Unreachable    Unreachable
+	NetworkHealthy bool
+	// GatewayFailed marks a gateway's 404 on an arweave transaction that a
+	// second gateway SERVED (confirmAbsence): the work exists and one
+	// gateway failed to retrieve it. Reported as issue server_error, but it
+	// is an answer — the transaction is there — so it never advances, and
+	// in fact ends, the unreachable streak (PR #438 review, F24).
+	GatewayFailed bool
+	// ServedBy is the gateway origin that served a content-addressed source
+	// after the source's own gateway answered 404/410 (confirmAbsence, only
+	// when the kiosk override is active). The store records it and the
+	// kiosk interceptor loads the source through it.
+	ServedBy string
+	// Recorded is set by the Prober: the result changed the store. False
+	// for results the store never records (guard and length refusals,
+	// skipped hosts) AND for writes the store refused (the low-disk guard,
+	// a failed transaction) — the lookahead holds such a source, because
+	// its record will not make it non-due (PR #438 review, F21).
+	Recorded bool
 }
+
+// Unreachable names how an origin failed to answer (ProbeResult.Unreachable).
+type Unreachable string
+
+const (
+	// UnreachableDNS: resolution failed without NXDOMAIN (SERVFAIL, a
+	// resolver timeout, a refusal).
+	UnreachableDNS Unreachable = "dns"
+	// UnreachableNoAnswer: no HTTP response — the item deadline expired
+	// before one, or the connection was refused, reset or failed TLS.
+	UnreachableNoAnswer Unreachable = "no_answer"
+	// UnreachableServer: a 5xx without Retry-After.
+	UnreachableServer Unreachable = "server_error"
+)
 
 // Rewriter is the kiosk's gateway policy, as this package needs it: which
 // wire URL and User-Agent the kiosk would actually use for a source. The
@@ -88,6 +138,15 @@ type Probe struct {
 	// ItemTimeout bounds one source's WHOLE probe, guard DNS included
 	// (DefaultItemTimeout when 0).
 	ItemTimeout time.Duration
+	// Gateways are the ordered fallback gateways per content-addressed
+	// network (NewGateways defaults when nil); see confirmAbsence.
+	Gateways *Gateways
+	// OverrideActive says the kiosk interceptor will load a work through
+	// the gateway the probe found serving it (Record.ServedBy). Only then
+	// is such a work `ok`: without the override the wall would still load
+	// the failing gateway, and the verdict must not claim what the wall
+	// cannot do — it is reported as a gateway failure instead.
+	OverrideActive bool
 }
 
 const (
@@ -106,21 +165,45 @@ const (
 	DefaultItemTimeout = 5 * time.Second
 )
 
-// ProbeOne probes one source. It never returns an error: everything that
-// prevents a conclusive answer is that source's inconclusive result.
+// ProbeOne probes one source within ItemTimeout. It never returns an
+// error: everything that prevents a conclusive answer is that source's
+// inconclusive result.
 func (p *Probe) ProbeOne(ctx context.Context, source string) ProbeResult {
+	return p.ProbeOneWithin(ctx, source, 0)
+}
+
+// ProbeOneWithin is ProbeOne with the item deadline given by the caller
+// (ItemTimeout when timeout <= 0). The cast pass keeps the short default:
+// it sits on the cast request's latency. Background probes pass a longer
+// one (Prober.BackgroundItemTimeout).
+func (p *Probe) ProbeOneWithin(ctx context.Context, source string, timeout time.Duration) ProbeResult {
 	if IsDataURI(source) {
 		return probeDataURI(source)
 	}
-	wireURL, agent := p.wire(source)
-	result := ProbeResult{WireURL: wireURL}
-
-	timeout := p.ItemTimeout
+	if timeout <= 0 {
+		timeout = p.ItemTimeout
+	}
 	if timeout <= 0 {
 		timeout = DefaultItemTimeout
 	}
+	// One deadline for the probe AND any confirmation it needs, so a
+	// confirmed absence never costs more than the caller's item budget.
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	res := p.probeOnce(ctx, source)
+	if res.Verdict == VerdictDead && res.Reason == ReasonHTTPStatus &&
+		(res.Status == http.StatusNotFound || res.Status == http.StatusGone) {
+		if ref, ok := p.gateways().Ref(source); ok {
+			return p.confirmAbsence(ctx, res, ref)
+		}
+	}
+	return res
+}
+
+// probeOnce is one source's probe under the caller's deadline.
+func (p *Probe) probeOnce(ctx context.Context, source string) ProbeResult {
+	wireURL, agent := p.wire(source)
+	result := ProbeResult{WireURL: wireURL}
 
 	maxBytes := p.MaxBytes
 	if maxBytes <= 0 {
@@ -164,14 +247,42 @@ func (p *Probe) ProbeOne(ctx context.Context, source string) ProbeResult {
 		// never sends one. Retry once without it.
 		return p.retryUnranged(ctx, result, wireURL, agent, maxBytes)
 	default:
-		result.Verdict = verdictForStatus(resp.Status)
-		result.Reason = ReasonHTTPStatus
-		result.Detail = fmt.Sprintf("HTTP %d", resp.Status)
-		if result.Verdict == VerdictInconclusive {
-			result.Err = fmt.Errorf("media health: transient HTTP %d", resp.Status)
-		}
-		return result
+		return statusResult(result, resp)
 	}
+}
+
+// probeWhole is one source's probe as the kiosk would request it: no Range
+// header, the body read capped at the probe window. Used to confirm a
+// fallback gateway (confirmAbsence); the primary probe stays ranged so a
+// 200 KB artwork does not cost 200 KB per lookahead step.
+func (p *Probe) probeWhole(ctx context.Context, source string) ProbeResult {
+	wireURL, agent := p.wire(source)
+	maxBytes := p.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = DefaultProbeMaxBytes
+	}
+	return p.retryUnranged(ctx, ProbeResult{WireURL: wireURL}, wireURL, agent, maxBytes)
+}
+
+// statusResult judges a non-2xx answer by the status table and, when the
+// origin asked for a pause (429/503), carries its Retry-After along.
+func statusResult(result ProbeResult, resp *fetchOutcome) ProbeResult {
+	result.Verdict = verdictForStatus(resp.Status)
+	result.Reason = ReasonHTTPStatus
+	result.Detail = fmt.Sprintf("HTTP %d", resp.Status)
+	if result.Verdict == VerdictInconclusive {
+		result.Err = fmt.Errorf("media health: transient HTTP %d", resp.Status)
+		if coolsHost(resp.Status) {
+			result.RetryAfter, _ = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		}
+		if resp.Status >= 500 && result.RetryAfter == 0 {
+			// A server error is the origin failing to serve. A 503 that
+			// names a Retry-After is the origin asking for a pause — alive,
+			// like a 429 — and stays out of the streak.
+			result.Unreachable = UnreachableServer
+		}
+	}
+	return result
 }
 
 // retryUnranged re-issues the probe without a Range header, once. A second
@@ -198,13 +309,7 @@ func (p *Probe) retryUnranged(ctx context.Context, result ProbeResult, wireURL, 
 	case resp.Status >= 200 && resp.Status < 300:
 		return p.validate(result, resp, resp.ContentLength)
 	default:
-		result.Verdict = verdictForStatus(resp.Status)
-		result.Reason = ReasonHTTPStatus
-		result.Detail = fmt.Sprintf("HTTP %d", resp.Status)
-		if result.Verdict == VerdictInconclusive {
-			result.Err = fmt.Errorf("media health: transient HTTP %d", resp.Status)
-		}
-		return result
+		return statusResult(result, resp)
 	}
 }
 
@@ -271,15 +376,21 @@ func (p *Probe) fromFetchError(result ProbeResult, err error) ProbeResult {
 	}
 	result.Verdict = VerdictInconclusive
 	switch fetchErrorKind(err) {
+	case FetchErrDNSUnresolved:
+		result.Reason = ReasonTransport
+		result.Unreachable = UnreachableDNS
 	case FetchErrGuard, FetchErrTooLong:
 		// Policy and size objections, not liveness: the display path still
 		// forwards such a source today (whether it should is #3471's
 		// territory), so they must not become dead here.
 		result.Reason = ""
-	case FetchErrTimeout:
-		result.Reason = ReasonTransport
 	default:
+		// A timeout before any response, a refused or reset connection, a
+		// TLS failure: the origin gave nothing back. (A deadline that
+		// expires MID-BODY never reaches here — it has a status, it is an
+		// answer, see validate.)
 		result.Reason = ReasonTransport
+		result.Unreachable = UnreachableNoAnswer
 	}
 	result.Err = err
 	return result
@@ -329,8 +440,20 @@ const LabelHeader = "X-Ffos-Media-Health-Label"
 // wire computes the URL and User-Agent the kiosk would use for source:
 // a content-addressed path on a hostile gateway is redirected (and keeps the
 // default agent, as the kiosk interceptor does); any other request on such
-// a host gets the policy agent; everything else is dialed as written.
+// a host gets the policy agent; everything else is dialed as written. A
+// bare CID with a query is dialed in its directory form on either path,
+// as the kiosk's synthetic redirect makes the wall load it
+// (contentpath.SlashBeforeQuery): the bare shape 301s to a page without
+// the query, and a verdict on that page would be about the wrong document.
 func (p *Probe) wire(source string) (string, string) {
+	wireURL, agent := p.policyWire(source)
+	if slashed, ok := contentpath.SlashBeforeQuery(wireURL); ok {
+		wireURL = slashed
+	}
+	return wireURL, agent
+}
+
+func (p *Probe) policyWire(source string) (string, string) {
 	if p.Rewriter == nil {
 		return source, ""
 	}
@@ -359,7 +482,27 @@ func probeDataURI(source string) ProbeResult {
 		}
 		return result
 	}
-	result.Verdict = VerdictInline
+	declared, _, _ := dataURIMediaType(source)
+	reason, detail, sniffed, decoded := checkDataURIPayload(source, declared)
+	result.Declared, result.Sniffed = normalizeContentType(declared), sniffed
+	switch {
+	case !decoded:
+		// Well-formed metadata over a payload that does not decode: no
+		// verdict, but a reasoned inconclusive, so the record holds the
+		// source for RetryTransient instead of the walk re-picking it.
+		result.Verdict = VerdictInconclusive
+		result.Reason = ReasonDataURIInvalid
+		result.Detail = "data: payload does not decode"
+		result.Err = fmt.Errorf("media health: %s", result.Detail)
+	case reason != "":
+		// The payload is all there is: like a malformed URI, this can never
+		// heal, and the wall shows exactly this.
+		result.Verdict = VerdictDead
+		result.Reason = reason
+		result.Detail = detail
+	default:
+		result.Verdict = VerdictInline
+	}
 	return result
 }
 
@@ -458,4 +601,105 @@ func redactForLog(rawURL string) string {
 		return rawURL[:maxLabel] + "…"
 	}
 	return rawURL
+}
+
+// gateways returns the configured fallback gateways (defaults when unset).
+func (p *Probe) gateways() *Gateways {
+	if p.Gateways != nil {
+		return p.Gateways
+	}
+	return defaultGateways
+}
+
+var defaultGateways = NewGateways(nil, nil)
+
+// confirmAbsence re-checks a gateway's 404/410 on a content-addressed path
+// against the network's other gateways, in order, at most
+// maxConfirmGateways, inside the caller's deadline. A gateway's 404 there
+// means "this gateway could not retrieve it", not "it does not exist": on
+// the office FF1, 7 of 60 healthy works in a labeled fixture read 404 from
+// arweave.net while ar-io.dev served them (#392).
+//
+//   - A gateway serves it: its bytes are judged by the normal content rules.
+//     Valid media is `ok` with ServedBy = that gateway's origin, which the
+//     kiosk interceptor then loads it through (Record.ServedBy) — so the
+//     verdict and the wall agree. Without the interceptor (OverrideActive
+//     false) it is a gateway failure instead: issue server_error, an
+//     answer that ends the unreachable streak, never a verdict or a hint.
+//   - A gateway's content rule fails (a type mismatch, an error page): that
+//     is a verdict about the content itself, and it stands.
+//   - Every gateway says 404/410: broken, confirmed.
+//   - Nothing else answers — a 5xx, a timeout, OR any other status (402,
+//     403, 429: the gateway's policy, never the content's) — and likewise
+//     when no other gateway is configured for the network: a transient
+//     server_error feeding the streak, because one gateway's 404 is not
+//     evidence the content is gone; a deadline that ran out carries the
+//     timeout error, so the cast pass's short deadline records nothing.
+//
+// The confirmation is a WHOLE-FILE request (no Range header, the body
+// read capped at the probe window), the request shape the kiosk makes:
+// ar-io.dev served a 32 KiB range of a 195 MB video and answered the
+// whole-file load with 402, and the probe's "served" verdict put every
+// item on the wall through a gateway that would not play it (office FF1,
+// 2026-11-06). A gateway "serves it" only when it answers the request the
+// player sends.
+func (p *Probe) confirmAbsence(ctx context.Context, res ProbeResult, ref ContentRef) ProbeResult {
+	firstStatus := res.Status
+	confirmed := 0
+	var lastErr error
+	var lastNote string
+	candidates := p.gateways().candidates(ref, hostOf(res.WireURL))
+	for _, origin := range candidates {
+		alt := p.probeWhole(ctx, ref.URLOn(origin))
+		altHost := hostOf(origin)
+		switch {
+		case alt.Verdict == VerdictAlive:
+			if !p.OverrideActive {
+				res.Verdict = VerdictInconclusive
+				res.Unreachable = ""
+				res.GatewayFailed = true
+				res.Detail = fmt.Sprintf("HTTP %d from the gateway; %s serves it", firstStatus, altHost)
+				res.Err = fmt.Errorf("media health: gateway answered %d for content %s serves", firstStatus, altHost)
+				return res
+			}
+			alt.ServedBy = origin
+			alt.Detail = fmt.Sprintf("HTTP %d from %s; served by %s", firstStatus, hostOf(res.WireURL), altHost)
+			return alt
+		case alt.Verdict == VerdictDead && alt.Reason == ReasonHTTPStatus && (alt.Status == http.StatusNotFound || alt.Status == http.StatusGone):
+			confirmed++
+			lastNote = fmt.Sprintf("%s also answered HTTP %d", altHost, alt.Status)
+		case alt.Verdict == VerdictDead && alt.Reason != ReasonHTTPStatus:
+			// A content rule on the bytes another gateway served: a verdict
+			// about the content. Any other status it answers (402, 400, a
+			// 206 to the unranged request) is that gateway's own behavior
+			// and falls through to "could not confirm".
+			alt.Detail = fmt.Sprintf("%s (served by %s after HTTP %d from the gateway)", alt.Detail, altHost, firstStatus)
+			return alt
+		default:
+			lastErr = alt.Err
+			lastNote = fmt.Sprintf("%s could not confirm it", altHost)
+		}
+	}
+	if len(candidates) > 0 && confirmed == len(candidates) {
+		res.Detail = fmt.Sprintf("%s; %s", res.Detail, lastNote)
+		return res
+	}
+	res.Verdict = VerdictInconclusive
+	res.Unreachable = UnreachableServer
+	res.Detail = fmt.Sprintf("HTTP %d from the gateway; %s", firstStatus, lastNote)
+	switch {
+	case len(candidates) == 0:
+		// No other gateway configured for this network: the 404 stays
+		// unconfirmed. It is reported as the gateway's problem
+		// (server_error) and, repeated across a day, concludes through
+		// the unreachable streak — never on one gateway's word.
+		res.Detail = fmt.Sprintf("HTTP %d from the gateway; no other gateway configured to confirm it", firstStatus)
+		res.Err = fmt.Errorf("media health: gateway answered %d, unconfirmed (no other gateway configured)", firstStatus)
+		return res
+	case lastErr != nil && fetchErrorKind(lastErr) == FetchErrTimeout:
+		res.Err = lastErr
+	default:
+		res.Err = fmt.Errorf("media health: gateway answered %d, unconfirmed (%s)", firstStatus, lastNote)
+	}
+	return res
 }

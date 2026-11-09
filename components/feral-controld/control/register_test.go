@@ -245,9 +245,9 @@ func TestRevokeReportsRevokedCtl(t *testing.T) {
 	}
 }
 
-// §5.1: the first owner never enrolls over the device-ID relay; the LAN and
-// the legacy relayer keep the screen-QR path, and the refusal spends nothing
-// of the invitation.
+// §5.1: the first owner never enrolls over the device-ID relay (clients use
+// the LAN only, §14 rule 11; the legacy relayer is the §13 residual), and the
+// refusal spends nothing of the invitation.
 func TestFirstOwnerEnrollRefusedOnRelayV2(t *testing.T) {
 	d := newTestDevice(t)
 	inv, err := d.a.IssueInvitation()

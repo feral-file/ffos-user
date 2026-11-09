@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,7 +13,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
@@ -74,6 +77,155 @@ func pausedEvent(t *testing.T, requestID, url string, headers map[string]string,
 	raw, err := json.Marshal(payload)
 	require.NoError(t, err)
 	return raw
+}
+
+// pausedEventTyped is pausedEvent with a resourceType, as Chromium reports
+// it ("Document" for a navigation, "Script", "Image", ... otherwise).
+func pausedEventTyped(t *testing.T, requestID, url, resourceType string) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(map[string]interface{}{
+		"requestId":    requestID,
+		"resourceType": resourceType,
+		"request":      map[string]interface{}{"url": url, "headers": map[string]string{"User-Agent": "Mozilla/5.0 Chrome/150"}},
+	})
+	require.NoError(t, err)
+	return raw
+}
+
+// A navigation to a bare CID with a query is answered with a synthetic 301
+// to the directory form (PR #438 review): a `url` override would keep the
+// document URL bare and break the work's relative assets instead.
+func TestProcessPausedRedirectsBareCIDNavigation(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	session := mocks.NewMockCDPSession(ctrl)
+	var got map[string]interface{}
+	session.EXPECT().
+		Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).
+		DoAndReturn(func(_ interface{}, _ string, args map[string]interface{}) (json.RawMessage, error) {
+			got = args
+			return nil, nil
+		})
+
+	i := testInterceptor(t, []string{"ipfs.io"})
+	i.processPaused(session, pausedEventTyped(t, "req-1",
+		"https://ipfs.raribleuserdata.com/ipfs/"+cidV0+"?fxhash=abc", "Document"))
+
+	assert.Equal(t, "req-1", got["requestId"])
+	assert.Equal(t, 301, got["responseCode"])
+	headers, _ := got["responseHeaders"].([]map[string]string)
+	var location string
+	for _, h := range headers {
+		if h["name"] == "Location" {
+			location = h["value"]
+		}
+	}
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cidV0+"/?fxhash=abc", location,
+		"same host, slash before the query, query kept")
+}
+
+// The directory form itself, and a bare CID without a query, are not the
+// shape: a navigation to either continues untouched on an unlisted host.
+func TestProcessPausedLeavesSlashedAndQuerylessNavigationsAlone(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	session := mocks.NewMockCDPSession(ctrl)
+	var got []map[string]interface{}
+	session.EXPECT().
+		Send(gomock.Any(), "Fetch.continueRequest", gomock.Any()).
+		DoAndReturn(func(_ interface{}, _ string, args map[string]interface{}) (json.RawMessage, error) {
+			got = append(got, args)
+			return nil, nil
+		}).Times(2)
+
+	i := testInterceptor(t, []string{"ipfs.io"})
+	i.processPaused(session, pausedEventTyped(t, "req-1", "https://ipfs.raribleuserdata.com/ipfs/"+cidV0+"/?fxhash=abc", "Document"))
+	i.processPaused(session, pausedEventTyped(t, "req-2", "https://ipfs.raribleuserdata.com/ipfs/"+cidV0, "Document"))
+
+	require.Len(t, got, 2)
+	for _, args := range got {
+		assert.NotContains(t, args, "url")
+		assert.NotContains(t, args, "headers")
+	}
+}
+
+// A subresource of the bare shape takes the plain `url` override, and the
+// later rules see the slashed URL: on a retired host it still lands on the
+// replacement gateway, slashed.
+func TestProcessPausedSlashesBareCIDSubresource(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	session := mocks.NewMockCDPSession(ctrl)
+	var got []map[string]interface{}
+	session.EXPECT().
+		Send(gomock.Any(), "Fetch.continueRequest", gomock.Any()).
+		DoAndReturn(func(_ interface{}, _ string, args map[string]interface{}) (json.RawMessage, error) {
+			got = append(got, args)
+			return nil, nil
+		}).Times(2)
+
+	i := testInterceptor(t, []string{"ipfs.io"})
+	i.processPaused(session, pausedEventTyped(t, "req-1", "https://ipfs.raribleuserdata.com/ipfs/"+cidV0+"?v=2", "Script"))
+	i.processPaused(session, pausedEventTyped(t, "req-2", "https://ipfs.io/ipfs/"+cidV0+"?v=2", "Script"))
+
+	require.Len(t, got, 2)
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cidV0+"/?v=2", got[0]["url"], "unlisted host: same host, slashed")
+	assert.NotContains(t, got[0], "headers")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidV0+"/?v=2", got[1]["url"], "retired host: the replacement gateway, slashed")
+	assert.NotContains(t, got[1], "headers")
+}
+
+// F26 (PR #438 review): a signed URL's credentials never reach the log.
+// Both redirect outcomes (a failed and a successful fulfill) and the
+// override path log the URLs redacted: scheme, host and path, the query
+// replaced by "?…".
+func TestInterceptorLogsRedactQueryValues(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	policy, err := New([]string{"ipfs.io"}, "feral-player/test", "")
+	require.NoError(t, err)
+	i := NewInterceptor(policy, "http://127.0.0.1:9222", nil, nil, wrapper.NewJSON(), nil, wrapper.NewClock(), zap.New(core))
+	t.Cleanup(func() { _ = i.Close() })
+
+	const secret = "X-Amz-Signature=deadbeefcafe" //nolint:gosec // G101: a fake signature the test asserts never reaches the log
+	session := mocks.NewMockCDPSession(ctrl)
+	gomock.InOrder(
+		session.EXPECT().Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).
+			Return(nil, errors.New("Fetch.fulfillRequest: invalid requestId")),
+		session.EXPECT().Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).Return(nil, nil),
+		session.EXPECT().Send(gomock.Any(), "Fetch.continueRequest", gomock.Any()).Return(nil, nil),
+	)
+	bare := "https://cdn.example.com/ipfs/" + cidV0 + "?" + secret
+	i.processPaused(session, pausedEventTyped(t, "req-1", bare, "Document"))
+	i.processPaused(session, pausedEventTyped(t, "req-2", bare, "Document"))
+	i.processPaused(session, pausedEventTyped(t, "req-3", "https://ipfs.io/ipfs/"+cidV0+"/a.png?"+secret, "Image"))
+
+	entries := logs.All()
+	require.NotEmpty(t, entries)
+	sawRedacted := false
+	for _, e := range entries {
+		for k, v := range e.ContextMap() {
+			str, _ := v.(string)
+			assert.NotContains(t, str, "deadbeefcafe", "%s field %q leaks the signature", e.Message, k)
+			if strings.HasSuffix(str, "?…") {
+				sawRedacted = true
+			}
+		}
+	}
+	assert.True(t, sawRedacted, "the URLs are still logged, redacted")
 }
 
 // headerValue pulls one header out of the continueRequest args the
@@ -741,4 +893,68 @@ func TestProcessPausedKeepsUserAgentRuleForNonCIDPaths(t *testing.T) {
 	ua, ok := headerValue(got, "User-Agent")
 	require.True(t, ok)
 	assert.Equal(t, "feral-player/test", ua)
+}
+
+// The media-health store's fallback gateway wins over the static policy,
+// and a request it has no answer for falls through to the policy.
+func TestProcessPausedAppliesTheGatewayOverride(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	const tx = "EwKI3znILCW86MZiIwji_kxrFG9Rdp-2arLMpxjyojs"
+	session := mocks.NewMockCDPSession(ctrl)
+	var got []map[string]interface{}
+	session.EXPECT().
+		Send(gomock.Any(), "Fetch.continueRequest", gomock.Any()).
+		DoAndReturn(func(_ interface{}, _ string, args map[string]interface{}) (json.RawMessage, error) {
+			got = append(got, args)
+			return nil, nil
+		}).Times(4)
+
+	i := testInterceptor(t, []string{"ipfs.io"})
+	var referrers []string
+	i.SetGatewayOverride(func(raw, referrer string) (string, bool) {
+		referrers = append(referrers, referrer)
+		if raw == "https://arweave.net/"+tx+"/index.html" || referrer == "https://arweave.net/"+tx+"/index.html" {
+			return "https://ar-io.dev/" + tx + strings.TrimPrefix(raw, "https://arweave.net/"+tx), true
+		}
+		return "", false
+	}, OverrideFetchPatterns([]string{"arweave.net"}))
+
+	i.processPaused(session, pausedEvent(t, "req-1", "https://arweave.net/"+tx+"/index.html",
+		map[string]string{"User-Agent": "Mozilla/5.0 Chrome/150"}, nil))
+	i.processPaused(session, pausedEvent(t, "req-2", "https://arweave.net/"+tx+"/other.js",
+		map[string]string{"referer": "https://arweave.net/" + tx + "/index.html"}, nil))
+	i.processPaused(session, pausedEvent(t, "req-3", "https://arweave.net/"+tx+"/alone.js", nil, nil))
+	i.processPaused(session, pausedEvent(t, "req-4", "https://ipfs.io/ipfs/QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A", nil, nil))
+
+	require.Len(t, got, 4)
+	assert.Equal(t, "https://ar-io.dev/"+tx+"/index.html", got[0]["url"], "the override is applied")
+	assert.NotContains(t, got[0], "headers", "with Chromium's own headers")
+	assert.Equal(t, "https://ar-io.dev/"+tx+"/other.js", got[1]["url"], "a subresource follows its document: the Referer reaches the lookup (header name as the renderer sent it)")
+	assert.NotContains(t, got[2], "url", "no override and no policy match: continued untouched")
+	assert.NotContains(t, got[2], "headers")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A", got[3]["url"], "the static policy still applies when the override has no answer")
+	assert.Equal(t, []string{"", "https://arweave.net/" + tx + "/index.html", "", ""}, referrers)
+}
+
+func TestFetchPatternsIncludeTheOverride(t *testing.T) {
+	t.Parallel()
+	i := testInterceptor(t, []string{"ipfs.io"})
+	urlsOf := func(patterns []map[string]interface{}) []string {
+		var urls []string
+		for _, p := range patterns {
+			urls = append(urls, p["urlPattern"].(string))
+		}
+		return urls
+	}
+	base := i.fetchPatterns()
+	assert.Subset(t, urlsOf(base), []string{"http://*/ipfs/*", "https://*/ipfs/*"},
+		"every /ipfs/ path is armed without an override: the bare-CID redirect applies on any host")
+	i.SetGatewayOverride(func(string, string) (string, bool) { return "", false }, OverrideFetchPatterns([]string{"arweave.net", "ar-io.dev"}))
+	patterns := i.fetchPatterns()
+	assert.Len(t, patterns, len(base)+2, "the override's /ipfs/ patterns are already armed and not repeated")
+	assert.ElementsMatch(t, []string{"https://arweave.net/*", "https://ar-io.dev/*"}, urlsOf(patterns[len(base):]))
 }

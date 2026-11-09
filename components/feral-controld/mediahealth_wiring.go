@@ -1,14 +1,19 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
@@ -41,13 +46,21 @@ const mediaHealthMinFreeBytes = offlinecache.DefaultMinFreeDiskBytes
 // online is the device's applied internet verdict (the mediator's
 // connectivity edges, see main): play failures observed while it is false
 // are recorded but never counted, so an outage cannot mark the wall broken.
-func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, online func() bool, replayable func(string) bool, logger *zap.Logger) (*mediahealth.Service, *mediahealth.Lookahead) {
+//
+// pushHints, when non-nil, delivers the hint-only push (newHintSender); the
+// returned pusher's Run must be driven by the caller, like the lookahead's.
+//
+// overrideActive says the kiosk interceptor runs and will load a work
+// through the fallback gateway the probe found serving it.
+func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, overrideActive bool, online func() bool, replayable func(string) bool, pushHints mediahealth.HintSender, logger *zap.Logger) (*mediahealth.Service, *mediahealth.Lookahead, *mediahealth.HintPusher) {
+	gateways := mediahealth.NewGateways(cfg.IPFSGateways, cfg.ArweaveGateways)
 	if cfg.Disabled {
 		logger.Warn("media health disabled by config; casts are forwarded unprobed and carry no hints")
-		return nil, nil
+		return nil, nil, nil
 	}
 	store, err := mediahealth.Open(constants.MEDIA_HEALTH_STORE_FILE, mediahealth.Options{
 		Build:        mediahealth.Build{Controld: installedControldVersion()},
+		Gateways:     gateways,
 		MinFreeBytes: mediaHealthMinFreeBytes,
 		Logger:       logger,
 	})
@@ -56,30 +69,48 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 		// and a store that will not open must cost observations, never the
 		// wall. Restart=always retries on the next start.
 		logger.Error("media health store unavailable; running without media observations", zap.Error(err))
-		return nil, nil
+		return nil, nil, nil
 	}
 	maxBytes := cfg.ProbeMaxBytes
 	if maxBytes <= 0 {
 		maxBytes = mediahealth.DefaultProbeMaxBytes
 	}
 	probe := &mediahealth.Probe{
-		Fetcher:   offlinecache.NewMediaHealthFetcher(net.DefaultResolver),
-		Validator: mediahealth.NewContentValidator(maxBytes, cfg.KnownBadPageMarkers),
-		MaxBytes:  maxBytes,
+		Fetcher:        offlinecache.NewMediaHealthFetcher(net.DefaultResolver),
+		Validator:      mediahealth.NewContentValidator(maxBytes, cfg.KnownBadPageMarkers),
+		MaxBytes:       maxBytes,
+		Gateways:       gateways,
+		OverrideActive: overrideActive,
 	}
 	if rewriter != nil {
 		probe.Rewriter = rewriter
 	}
-	prober := &mediahealth.Prober{Probe: probe, Store: store, Logger: logger}
+	// One HostLimiter for the pass and the lookahead: per-host pacing and
+	// 429/503 cooldowns only work if both consumers see the same state.
+	prober := &mediahealth.Prober{
+		Probe:       probe,
+		Store:       store,
+		Logger:      logger,
+		Hosts:       &mediahealth.HostLimiter{},
+		Online:      online,
+		Items:       cfg.CastItems,
+		Concurrency: cfg.CastConcurrency,
+	}
 	var lookahead *mediahealth.Lookahead
 	if cfg.Lookahead >= 0 {
-		lookahead = &mediahealth.Lookahead{Prober: prober, Store: store, Logger: logger, Window: cfg.Lookahead}
+		lookahead = &mediahealth.Lookahead{Prober: prober, Store: store, Logger: logger}
+	}
+	contract := &mediahealth.PlayerContract{Path: setupui.DefaultContractPath}
+	var pusher *mediahealth.HintPusher
+	if pushHints != nil {
+		pusher = &mediahealth.HintPusher{Send: pushHints, Supported: contract.SupportsHintPush, Logger: logger}
 	}
 	svc := mediahealth.New(mediahealth.Config{
 		Store:      store,
 		Prober:     prober,
-		Contract:   &mediahealth.PlayerContract{Path: setupui.DefaultContractPath},
+		Contract:   contract,
 		Lookahead:  lookahead,
+		Pusher:     pusher,
 		Online:     online,
 		Replayable: replayable,
 		Logger:     logger,
@@ -89,9 +120,15 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 		zap.String("path", constants.MEDIA_HEALTH_STORE_FILE),
 		zap.Int("records", count),
 		zap.Int("probe_max_bytes", maxBytes),
+		zap.Int("cast_items", cmp.Or(cfg.CastItems, mediahealth.DefaultPassItems)),
+		zap.Int("cast_concurrency", cmp.Or(cfg.CastConcurrency, mediahealth.DefaultConcurrency)),
 		zap.Bool("lookahead", lookahead != nil),
 		zap.Bool("rewriter", rewriter != nil))
-	return svc, lookahead
+	if pusher != nil {
+		// The Service computes the map exactly as every push does.
+		pusher.Hints = svc.Hints
+	}
+	return svc, lookahead, pusher
 }
 
 // installedControldVersion reads the installed version from the FF1 config
@@ -168,4 +205,80 @@ func wireMediaHealthL1(cfg config.MediaHealthConfig, store *mediahealth.Store, r
 		zap.Int("known_bad_fingerprints", len(known)),
 		zap.Bool("admission_gate", admit != nil))
 	return l1
+}
+
+// cdpSend is the kiosk CDP client's Send, the one method the hint pusher's
+// sender needs.
+type cdpSend func(method string, params map[string]interface{}) (interface{}, error)
+
+// newHintSender builds the hint pusher's delivery: `setMediaHealth` over
+// the kiosk CDP client through `window.handleCDPRequest`, the same
+// evaluate the content-policy commands use, fenced on the player-session
+// generation the same way — a reply that crossed a generation change came
+// from a page that is gone, and the new page's boot cast carries its own
+// hints. The map holds source URLs: it travels over loopback CDP only, as
+// every displayPlaylist push already does.
+func newHintSender(send cdpSend, generation func() uint64) mediahealth.HintSender {
+	return func(_ context.Context, castSeq int64, hints map[string]mediahealth.Hint) ([]int, error) {
+		cmd := commands.Command{Type: commands.CMD_SET_MEDIA_HEALTH, Arguments: map[string]any{
+			"castSeq": castSeq,
+			// Replace semantics: the full map for the wall, {} when nothing
+			// is broken any more (a heal must reach the player too).
+			"mediaHealth": hintMapArgument(hints),
+		}}
+		b, err := cmd.JSON()
+		if err != nil {
+			return nil, err
+		}
+		before := generation()
+		result, err := send(cdp.METHOD_EVALUATE, map[string]interface{}{
+			"expression":    fmt.Sprintf("window.handleCDPRequest(%s)", b),
+			"awaitPromise":  true,
+			"returnByValue": true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if generation() != before {
+			return nil, errors.New("media health: hint push raced a player generation change")
+		}
+		return decodeHintPushReply(result)
+	}
+}
+
+func hintMapArgument(hints map[string]mediahealth.Hint) map[string]mediahealth.Hint {
+	if hints == nil {
+		return map[string]mediahealth.Hint{}
+	}
+	return hints
+}
+
+// decodeHintPushReply reads the player's `setMediaHealth` reply, bare or
+// wrapped in the envelope's `message`: {ok:true, skippedIndices} is
+// delivered; {ok:false, error:"staleCast"} is a cast race; any other
+// answer is a refusal — a player whose manifest lists the command but
+// does not implement it answers unknown-command, and must not be retried
+// into for the rest of the cast.
+func decodeHintPushReply(result interface{}) ([]int, error) {
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("%w: unexpected reply %T", mediahealth.ErrHintPushRefused, result)
+	}
+	if msg, ok := m["message"].(map[string]interface{}); ok {
+		m = msg
+	}
+	if okValue, _ := m["ok"].(bool); !okValue {
+		if code, _ := m["error"].(string); code == "staleCast" {
+			return nil, mediahealth.ErrStaleCast
+		}
+		return nil, fmt.Errorf("%w: %v", mediahealth.ErrHintPushRefused, m["error"])
+	}
+	raw, _ := m["skippedIndices"].([]interface{})
+	skipped := make([]int, 0, len(raw))
+	for _, v := range raw {
+		if f, ok := v.(float64); ok && f >= 0 {
+			skipped = append(skipped, int(f))
+		}
+	}
+	return skipped, nil
 }

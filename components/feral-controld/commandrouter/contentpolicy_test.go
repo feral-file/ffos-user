@@ -499,7 +499,7 @@ type stallingProber struct {
 
 func (p *stallingProber) HintArgument([]dp1playlist.PlaylistItem) interface{} { return nil }
 
-func (p *stallingProber) Report([]dp1playlist.PlaylistItem) ([]mediahealth.ReportItem, error) {
+func (p *stallingProber) Report([]dp1playlist.PlaylistItem, []int) ([]mediahealth.ReportItem, error) {
 	return nil, nil
 }
 
@@ -772,7 +772,7 @@ type verdictProber struct {
 
 func (p *verdictProber) HintArgument([]dp1playlist.PlaylistItem) interface{} { return nil }
 
-func (p *verdictProber) Report([]dp1playlist.PlaylistItem) ([]mediahealth.ReportItem, error) {
+func (p *verdictProber) Report([]dp1playlist.PlaylistItem, []int) ([]mediahealth.ReportItem, error) {
 	return nil, nil
 }
 

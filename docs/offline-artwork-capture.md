@@ -41,8 +41,11 @@ anything else that resolves to a single-file `source` (including an
 empty/unrecognized `Content-Type`, treated as best-effort downloadable
 rather than rejected) — is the opposite case: the kiosk player renders it
 as a native element (`<img>`/`<video>`/`<audio>`/`<object>`/a
-non-scripted `<iframe>`) that requests the bare `source` URL directly, so
-there is exactly ONE dependency to cache: the file itself. Running a
+non-scripted `<iframe>`) fed by a single request for the bare `source`
+URL — the element's own request, or for a still the player's CORS
+`fetch()` of that same URL whose bytes it hands to the `<img>` as a blob
+(ff-player#327) — so there is exactly ONE dependency to cache: the file
+itself. Running a
 whole headless browser just to observe that one request would cost a
 second Chromium process and gigabyte-scale memory pressure for zero
 benefit, so `feral-controld` downloads these directly over HTTP instead
@@ -656,15 +659,17 @@ answer the second time around.
   though the underlying `*http.Response` may reflect a fully-resolved
   redirect chain. This is safe (unlike capture.go's software path, which
   must preserve each redirect hop as its own `Resource` — §4.1) because
-  the kiosk's native `<img>`/`<video>`/`<audio>` element only ever
-  requests the bare `item.Source`; there is no redirect hop for replay to
+  the kiosk only ever requests the bare `item.Source` for these items
+  (its `<video>`/`<audio>` element directly, a still through a CORS
+  `fetch()` of the same URL); there is no redirect hop for replay to
   faithfully reproduce, so storing the final resolved bytes directly
   under the request URL the kiosk will actually make is both correct and
   simpler.
 - **CORS headers are captured the same allowlisted way** as `capture.go`
   (`filterReplayableHeaders`, §4.6/§5's `Resource.Headers` bullet):
   `ff-player`'s `<video crossOrigin="anonymous">` element CORS-checks its
-  response exactly like a cross-origin `fetch()`/XHR would, so an offline
+  response exactly like a cross-origin `fetch()`/XHR would, and stills are
+  read by exactly such a CORS `fetch()`, so an offline
   replay missing those headers would still fail Chromium's own CORS
   enforcement even with byte-correct status/body. Getting those headers
   onto the wire in the first place requires sending an `Origin` header on

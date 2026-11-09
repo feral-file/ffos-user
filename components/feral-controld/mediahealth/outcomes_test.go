@@ -9,7 +9,7 @@ import (
 func TestDrainer_SeqCursorCastResetAndGap(t *testing.T) {
 	var d Drainer
 	fresh, gap, _ := d.Drain(&Outcomes{CastSeq: 1, Entries: []Outcome{
-		{Seq: 2, Source: "b", Kind: OutcomeOK, Stage: StageReady},
+		{Seq: 2, Source: "b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"},
 		{Seq: 1, Source: "a", Kind: OutcomeFail, Stage: StageLoad},
 	}})
 	assert.Equal(t, int64(0), gap)

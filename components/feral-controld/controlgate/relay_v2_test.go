@@ -22,7 +22,7 @@ import (
 // Exercise the actual binary carrier -> existing authority -> targeted reply.
 // Enrollment and crypto use the existing endpoint fixtures, not a new policy.
 func TestV2BindsOnlyAfterVerifiedReplayAdmission(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	recorder := &recorder{}
 	g := controlgate.New(a, recorder, zap.NewNop())
 	owner := enrollOwner(t, g, a)

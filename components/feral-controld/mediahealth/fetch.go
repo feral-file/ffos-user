@@ -79,6 +79,12 @@ const (
 	// FetchErrDNS: the host does not resolve (NXDOMAIN). Conclusive
 	// (source_missing) — the indexer treats it the same.
 	FetchErrDNS FetchErrorKind = "dns"
+	// FetchErrDNSUnresolved: resolution failed WITHOUT a definitive answer
+	// (SERVFAIL, a resolver timeout, a refused query). Transient per
+	// attempt — it can be the device's own resolver — but a streak of them
+	// while other names resolve concludes broken (Store.ApplyProbe,
+	// DNSDeadAfter).
+	FetchErrDNSUnresolved FetchErrorKind = "dns_unresolved"
 	// FetchErrTimeout: the item deadline or the phase ceiling expired.
 	// Transient.
 	FetchErrTimeout FetchErrorKind = "timeout"

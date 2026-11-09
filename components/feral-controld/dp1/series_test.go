@@ -95,14 +95,28 @@ func serveEditions(ts *testSetup, playlistID, itemID string, body string) {
 
 // editionsBody is the shape the catalog actually returns, as measured:
 // {revisionId, playlistId, itemId, series, total, limit, offset, items}.
-// Only `total` and `items` are read here; the rest is carried so a change
-// to the envelope that drops them is caught.
+// `series` deliberately carries no `artworkModel` here — see
+// editionsBodyWithModel for that — so this fixture exercises the "catalog
+// did not state it" case that SeriesArtworkModel.hasDistinctEditions
+// defaults to true for. `total` and `items` are read here; the rest is
+// carried so a change to the envelope that drops them is caught.
 func editionsBody(total int, items ...dp1playlist.PlaylistItem) string {
+	return editionsBodyWithModel(total, "", items...)
+}
+
+// editionsBodyWithModel is editionsBody with the catalog's own
+// `series.artworkModel` set explicitly, for NarrowEditions'
+// full/first-eligibility tests.
+func editionsBodyWithModel(total int, artworkModel dp1.SeriesArtworkModel, items ...dp1playlist.PlaylistItem) string {
+	series := map[string]any{"chain": "evm", "seriesId": "387"}
+	if artworkModel != "" {
+		series["artworkModel"] = artworkModel
+	}
 	envelope := map[string]any{
 		"revisionId": "editions_e4c3a49b8bf7f92c7b2697b58234f03c47c51868199d359e1bb7fd94ca8a0ba8",
 		"playlistId": "playlist-1",
 		"itemId":     "item-series",
-		"series":     map[string]any{"chain": "evm", "seriesId": "387"},
+		"series":     series,
 		"total":      total,
 		"limit":      255,
 		"offset":     0,

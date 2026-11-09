@@ -40,14 +40,14 @@ func TestService_OutcomesDrainIntoTheStore(t *testing.T) {
 	list := items("https://o/a", "https://o/b")
 	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 1, Entries: []Outcome{
 		{Seq: 1, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Code: "image"},
-		{Seq: 2, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady},
+		{Seq: 2, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"},
 	}})
 	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 1, Entries: []Outcome{
 		{Seq: 1, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Code: "image"},
-		{Seq: 2, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady},
+		{Seq: 2, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"},
 		{Seq: 3, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Code: "image"},
 	}})
-	health := s.ItemHealths(list)
+	health := s.ItemHealths(list, nil)
 	require.Len(t, health, 2)
 	assert.Equal(t, StateBroken, health[0].State)
 	assert.Equal(t, CategoryRenderFailed, health[0].Category)
@@ -58,7 +58,7 @@ func TestService_OutcomesDrainIntoTheStore(t *testing.T) {
 	assert.Contains(t, hints, "https://o/a")
 	assert.True(t, s.PlayerSupportsHints())
 
-	rows, err := s.Report(list)
+	rows, err := s.Report(list, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 2, rows[0].Plays.Fail)
 	assert.Equal(t, "thttps://o/a", rows[0].Title)
@@ -111,7 +111,7 @@ func TestService_OfflineFailuresAreNotCounted(t *testing.T) {
 	// Two DISTINCT plays (another source between them) once online.
 	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 2, Entries: []Outcome{
 		{Seq: 3, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1},
-		{Seq: 4, Source: "https://o/other", Kind: OutcomeOK, Stage: StageReady},
+		{Seq: 4, Source: "https://o/other", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"},
 		{Seq: 5, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1},
 	}})
 	rec, err = s.Store().Get("https://o/a")
@@ -121,7 +121,7 @@ func TestService_OfflineFailuresAreNotCounted(t *testing.T) {
 	unknown := New(Config{Store: p.Store, Prober: p, Contract: &PlayerContract{}, Now: clock.Now})
 	unknown.ObservePlayback(items("https://o/b"), 0, nil, &Outcomes{CastSeq: 1, Entries: []Outcome{
 		{Seq: 1, Source: "https://o/b", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1},
-		{Seq: 2, Source: "https://o/x", Kind: OutcomeOK, Stage: StageReady},
+		{Seq: 2, Source: "https://o/x", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"},
 		{Seq: 3, Source: "https://o/b", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1},
 	}})
 	rec, err = p.Store.Get("https://o/b")

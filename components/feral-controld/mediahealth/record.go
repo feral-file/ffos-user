@@ -84,6 +84,15 @@ const (
 	// CategorySourceMissing: the origin said the resource is not there for
 	// anyone (404/410-class), or the host does not resolve.
 	CategorySourceMissing Category = "source_missing"
+	// CategorySourceUnreachable: the work exists as far as the device can
+	// tell, but nothing it tried would serve it — an origin that gave no
+	// usable answer for a day (the unreachable streak), or a gateway that
+	// answered 404 for a content-addressed source no other gateway
+	// confirmed missing. Still broken (skipped, rechecked daily), but not
+	// source_missing: arweave.net timing out on a transaction that is on
+	// chain read "missing" to the app for nine works on the office FF1
+	// (2026-11-09), which the owner reads as "this work is gone".
+	CategorySourceUnreachable Category = "source_unreachable"
 	// CategorySourceBlocked: the kiosk itself was refused (401/403 seen by
 	// the player's own HEAD). L0 treats those statuses as transient because
 	// its request identity is not the kiosk's; only the play layer can
@@ -128,6 +137,14 @@ const (
 	ReasonUnsupportedScheme Reason = "unsupported_scheme"
 	ReasonTransport         Reason = "transport"
 	ReasonDataURIInvalid    Reason = "data_uri_invalid"
+	// ReasonUnsupportedMimeType: a data: URI declaring a type the kiosk
+	// cannot display at all (data:application/html downloads, so the frame
+	// stays blank). Same string as ff-indexer-v2's.
+	ReasonUnsupportedMimeType Reason = "unsupported_mime_type"
+	// ReasonUnreachable: the origin gave no usable answer on every counted
+	// attempt for a day (UnreachableDeadAfter) — no response or a server
+	// error. A DNS-only streak concludes ReasonDNS instead.
+	ReasonUnreachable Reason = "unreachable"
 
 	// Play-layer reasons, one per outcome stage that can conclude.
 	ReasonRenderDetect    Reason = "render_detect"
@@ -153,18 +170,22 @@ func CategoryOf(reason Reason, httpStatus int) Category {
 	switch reason {
 	case ReasonHTTPStatus:
 		switch httpStatus {
-		case 401, 403, 407:
+		case 401, 403, 407, 429:
+			// 429 only reaches a verdict from the PLAY layer (L0 keeps it
+			// transient): the kiosk itself refused, play after play.
 			return CategorySourceBlocked
 		default:
 			return CategorySourceMissing
 		}
 	case ReasonDNS:
 		return CategorySourceMissing
+	case ReasonUnreachable:
+		return CategorySourceUnreachable
 	case ReasonTypeMismatch, ReasonDirectoryListing, ReasonKnownErrorPage:
 		return CategoryNotMedia
 	case ReasonZeroLength, ReasonTruncated, ReasonContainerInvalid:
 		return CategoryCorruptFile
-	case ReasonInvalidURL, ReasonUnsupportedScheme, ReasonDataURIInvalid, ReasonTransport:
+	case ReasonInvalidURL, ReasonUnsupportedScheme, ReasonDataURIInvalid, ReasonUnsupportedMimeType, ReasonTransport:
 		return CategoryUnsupported
 	case ReasonRenderDetect, ReasonRenderLoad, ReasonRenderDecode, ReasonRenderWatchdog, ReasonRenderExhausted:
 		return CategoryRenderFailed
@@ -193,6 +214,17 @@ const (
 	// RetryTransient: a transient attempt (no verdict) schedules a retry
 	// after this; the stored verdict, if any, is untouched.
 	RetryTransient = time.Hour
+	// UnreachableDeadAfter / UnreachableDeadMinFailures: the one transient
+	// class that concludes on its own (ProbeResult.Unreachable). A name that fails to resolve on every counted
+	// attempt for a day (at least DNSDeadMinFailures attempts, each while
+	// the device resolved other names) is broken, reason dns: the zone is
+	// gone for this device whatever the resolver's excuse (an expired
+	// domain answers SERVFAIL, not NXDOMAIN, on most resolvers). A single
+	// SERVFAIL never is — it can be the device's own resolver. The verdict
+	// keeps the normal broken recheck, so it heals the day the zone
+	// returns.
+	UnreachableDeadAfter       = 24 * time.Hour
+	UnreachableDeadMinFailures = 3
 )
 
 // recordVersion is the record envelope version. Readers refuse a higher
@@ -236,6 +268,33 @@ type Record struct {
 	LastError   string     `json:"lastError,omitempty"`
 	LastErrorAt *time.Time `json:"lastErrorAt,omitempty"`
 	RetryAfter  time.Time  `json:"retryAfter,omitempty"`
+
+	// UnreachableSince / UnreachableFailures track an unbroken streak of
+	// attempts in which the origin gave no usable answer (DNS without
+	// NXDOMAIN, no response, a server error), counted only while the
+	// device reached other origins (ProbeResult.NetworkHealthy). Any
+	// answer — alive, dead, a 401/403/429 — ends the streak. See
+	// UnreachableDeadAfter for when it concludes.
+	UnreachableSince    *time.Time `json:"unreachableSince,omitempty"`
+	UnreachableFailures int        `json:"unreachableFailures,omitempty"`
+	// Issue / IssueSince are the latest real attempt's problem and when
+	// the current run of trouble began (see Issue). Cleared by a real
+	// answer and by any verdict; shown to the app only while State is not
+	// broken.
+	Issue      Issue      `json:"issue,omitempty"`
+	IssueSince *time.Time `json:"issueSince,omitempty"`
+	// ServedBy is the gateway origin the kiosk loads this content-addressed
+	// source through because the source's own gateway answered 404/410
+	// while this one served it (Probe.confirmAbsence). Set on an alive
+	// probe through a fallback gateway, cleared when the source's own
+	// gateway serves again or the content is confirmed missing. Indexed by
+	// content id in bucketServedBy for the kiosk's per-request lookup.
+	ServedBy string `json:"servedBy,omitempty"`
+	// legacyDNS* are the DNS-only streak fields an earlier build of this
+	// branch wrote; Store.decode folds them into the unreachable streak
+	// and they are never written again.
+	LegacyDNSFailSince *time.Time `json:"dnsFailSince,omitempty"`
+	LegacyDNSFailures  int        `json:"dnsFailures,omitempty"`
 
 	// ConsecutiveBroken counts L0 re-probes that stayed broken, for the
 	// recheck backoff. Reset by any ok.

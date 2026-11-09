@@ -271,14 +271,28 @@ func validWebPHeader(body []byte) (bool, string) {
 }
 
 // validJPEGStructure walks JPEG marker segments from SOI as far as the probe
-// window allows. A byte where a marker must start that is not 0xFF means
-// the stream is corrupt; running out of window while the structure is still
-// consistent is inconclusive (OK).
+// window allows, the way the decoder Chromium uses (libjpeg-turbo) reads
+// them. Bytes where a marker should start are skipped up to the next real
+// marker — libjpeg warns "N extraneous bytes before marker" and decodes on —
+// so only what the decoder itself rejects is corrupt: a segment length
+// below 2. Running out of window while the structure is still consistent,
+// or while skipping stray bytes, is inconclusive (OK).
+//
+// Rejecting stray bytes outright marked two complete 2048x2048 JPEGs
+// corrupt_file and skipped them for a day: each carries 38 bytes of an
+// orphaned Photoshop metadata block after its Exif segment, which Chromium
+// steps over (office FF1, 2026-11-06). ff-indexer-v2's walk has the same
+// false positive.
 func validJPEGStructure(body []byte) (bool, string) {
 	i := 2
 	for i+4 <= len(body) {
 		if body[i] != 0xFF {
-			return false, fmt.Sprintf("JPEG segment marker expected at offset %d", i)
+			next := nextJPEGMarker(body, i)
+			if next < 0 {
+				return true, ""
+			}
+			i = next
+			continue
 		}
 		marker := body[i+1]
 		if marker == 0xFF {
@@ -299,4 +313,16 @@ func validJPEGStructure(body []byte) (bool, string) {
 		i += 2 + segLen
 	}
 	return true, ""
+}
+
+// nextJPEGMarker returns the offset of the next marker at or after from: a
+// 0xFF followed by a byte that is neither a fill byte (0xFF) nor a stuffed
+// zero. -1 when the held bytes end first.
+func nextJPEGMarker(body []byte, from int) int {
+	for j := from; j+1 < len(body); j++ {
+		if body[j] == 0xFF && body[j+1] != 0x00 && body[j+1] != 0xFF {
+			return j
+		}
+	}
+	return -1
 }

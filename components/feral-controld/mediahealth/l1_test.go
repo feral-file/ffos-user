@@ -548,7 +548,9 @@ func TestApplyProbe_AliveKeepsSuspect(t *testing.T) {
 	assert.WithinDuration(t, clock.Now().Add(RecheckOK), rec.RecheckAfter, time.Second, "and so is the L0 recheck")
 	assert.Equal(t, RenderKnownBad, rec.L1.Verdict)
 
-	rec, err = store.ApplyOutcome(Outcome{Seq: 1, Source: src, Kind: OutcomeOK, Stage: StageReady, At: "t"}, true)
+	// A play that proves a render (readyIsEvidence); an iframe's ready would
+	// not (TestL1_PlaySuccessResetsTheBlankRun).
+	rec, err = store.ApplyOutcome(Outcome{Seq: 1, Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "model", At: "t"}, true)
 	require.NoError(t, err)
 	assert.Equal(t, StateOK, rec.State, "a real play heals it")
 
@@ -563,6 +565,10 @@ func TestApplyProbe_AliveKeepsSuspect(t *testing.T) {
 
 // F25 (round 3): a successful play ends an L1 blank run, so a recovered
 // work needs a fresh long confirmation before it can be suspect again.
+// "Successful" is a play that proves a render (readyIsEvidence): an
+// iframe's ready fires for a blank frame too, so it neither heals the
+// suspect verdict nor ends the run — for an HTML work only the next L1
+// render can.
 func TestL1_PlaySuccessResetsTheBlankRun(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	store := newL1Store(t, clock)
@@ -576,9 +582,14 @@ func TestL1_PlaySuccessResetsTheBlankRun(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StateSuspect, rec.State)
 
-	rec, err = store.ApplyOutcome(Outcome{Seq: 1, Source: src, Kind: OutcomeOK, Stage: StageReady, At: "t"}, true)
+	rec, err = store.ApplyOutcome(Outcome{Seq: 1, Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "iframe", At: "t"}, true)
 	require.NoError(t, err)
-	assert.Equal(t, StateOK, rec.State)
+	assert.Equal(t, StateSuspect, rec.State, "an iframe ready proves the mount, not the render")
+	assert.Equal(t, 2, rec.L1.ConsecutiveBlank, "and does not end the blank run")
+
+	rec, err = store.ApplyOutcome(Outcome{Seq: 2, Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "model", At: "t"}, true)
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State, "a play that proves a render heals")
 	assert.Equal(t, 0, rec.L1.ConsecutiveBlank, "the blank run ended with the play")
 
 	// The next due render: a short blank only schedules a confirmation.

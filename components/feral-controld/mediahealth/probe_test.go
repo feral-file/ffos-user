@@ -2,9 +2,11 @@ package mediahealth
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -215,6 +217,49 @@ func TestProbeOne_DataURIs(t *testing.T) {
 	assert.Equal(t, VerdictInconclusive, res.Verdict, "a comma merely beyond the scan bound proves nothing")
 }
 
+// The payload of a well-formed data: URI is judged by the indexer's data:
+// rule (zero_length, type_mismatch) with Chromium's decoding, and the
+// device-side allowances for what Chromium renders anyway.
+func TestProbeOne_DataURIPayloads(t *testing.T) {
+	b64 := func(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+	png := minimalPNG(1, 1)
+	svg := []byte(`<?xml version="1.0" encoding="utf-8"?><svg viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>`)
+	poem := []byte("the garden \nwanted to be a garden\n\nbut they were searching \nfor gold\n")
+	big := append(append([]byte{}, png...), make([]byte, 4*dataURIPayloadBytes)...)
+	for _, tc := range []struct {
+		name, uri   string
+		want        Verdict
+		wantReason  Reason
+		wantSniffed string
+	}{
+		// The two fixture works the office FF1 showed blank (2026-11-09).
+		{"SVG declared application/json (Texture and Hues #124)", "data:application/json;base64," + b64(svg), VerdictDead, ReasonTypeMismatch, "image/svg+xml"},
+		{"text declared text/markdown (the garden)", "data:text/markdown;base64," + b64(poem), VerdictDead, ReasonTypeMismatch, "text/plain"},
+		{"empty payload", "data:image/png;base64,", VerdictDead, ReasonZeroLength, ""},
+		{"bytes that are not the declared image", "data:image/png;base64,AAAA", VerdictDead, ReasonTypeMismatch, "application/octet-stream"},
+		{"PNG", "data:image/png;base64," + b64(png), VerdictInline, "", "image/png"},
+		{"percent-encoded SVG", "data:image/svg+xml;utf8," + url.PathEscape(string(svg)), VerdictInline, "", "image/svg+xml"},
+		{"plain text", "data:text/plain,hello%20world", VerdictInline, "", "text/plain"},
+		{"default type", "data:,hello", VerdictInline, "", "text/plain"},
+		{"SVG declared text/html", "data:text/html;base64," + b64(svg), VerdictInline, "", "image/svg+xml"},
+		{"PNG declared image/jpg: the img element sniffs", "data:image/jpg;base64," + b64(png), VerdictInline, "", "image/png"},
+		{"forgiving base64: whitespace, no padding, percent-escaped", "data:image/png;base64,iVBO Rw0K%0AGgo", VerdictInline, "", "image/png"},
+		{"only the head of a large payload is decoded", "data:image/png;base64," + b64(big), VerdictInline, "", "image/png"},
+		{"a type the kiosk cannot display", "data:application/html;base64," + b64([]byte("<html><body>hi</body></html>")), VerdictDead, ReasonUnsupportedMimeType, ""},
+		{"audio and model types are displayable", "data:audio/mpeg;base64,SUQzBAAAAAAAAA==", VerdictInline, "", "audio/mpeg"},
+		{"undecodable base64 is no verdict", "data:image/png;base64,!!!!", VerdictInconclusive, ReasonDataURIInvalid, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := newProbe(&scriptedFetcher{}).ProbeOne(context.Background(), tc.uri)
+			assert.Equal(t, tc.want, res.Verdict)
+			assert.Equal(t, tc.wantReason, res.Reason)
+			assert.Equal(t, tc.wantSniffed, res.Sniffed)
+		})
+	}
+	assert.Equal(t, CategoryNotMedia, CategoryOf(ReasonTypeMismatch, 0), "a mismatch reads not_media")
+	assert.Equal(t, CategoryUnsupported, CategoryOf(ReasonUnsupportedMimeType, 0))
+}
+
 // fakeRewriter is a Rewriter double: one host is hostile, one CID path
 // redirects to a replacement gateway.
 type fakeRewriter struct{}
@@ -289,4 +334,23 @@ func TestProbeOne_RedirectHookIsTheWirePolicy(t *testing.T) {
 	newProbe(f).ProbeOne(context.Background(), "https://cdn.example/art")
 	require.Len(t, f.calls, 1)
 	assert.Nil(t, f.calls[0].Redirect, "no policy, no hook")
+}
+
+// The probe dials a bare CID with a query in its directory form, as the
+// kiosk's synthetic redirect makes the wall load it (PR #438 review): the
+// bare shape 301s to `/<cid>/` without the query, and a verdict on that
+// page would be about a document the work never runs on.
+func TestWire_BareCIDWithQueryIsDialedSlashed(t *testing.T) {
+	t.Parallel()
+	p := &Probe{}
+	got, _ := p.wire("https://ipfs.raribleuserdata.com/ipfs/" + cidA + "?fxhash=abc")
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cidA+"/?fxhash=abc", got)
+	got, _ = p.wire("https://ipfs.raribleuserdata.com/ipfs/" + cidA + "/?fxhash=abc")
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cidA+"/?fxhash=abc", got, "the directory form is left alone")
+	got, _ = p.wire("https://ipfs.raribleuserdata.com/ipfs/" + cidA)
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cidA, got, "no query, no slash")
+	p.Rewriter = fakeRewriter{}
+	got, agent := p.wire("https://ipfs.io/ipfs/" + cidA + "?fxhash=abc")
+	assert.Equal(t, "", agent)
+	assert.True(t, strings.HasSuffix(got, "/ipfs/"+cidA+"/?fxhash=abc"), "the retired-gateway rewrite is slashed too: %s", got)
 }

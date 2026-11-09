@@ -3,6 +3,7 @@ package dp1
 import (
 	"context"
 	"encoding/json"
+	"math/rand/v2"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
@@ -20,9 +21,10 @@ const (
 	SeriesPlaybackFirst SeriesPlaybackMode = "first"
 	// SeriesPlaybackFull casts every edition the catalog returned.
 	SeriesPlaybackFull SeriesPlaybackMode = "full"
-	// SeriesPlaybackRandom is accepted and stored like any other mode, but
-	// FF1 has no re-roll-per-loop behavior and narrowEditions resolves it to
-	// SeriesPlaybackFirst at cast time — see that function's doc.
+	// SeriesPlaybackRandom picks one genuinely random edition at cast time
+	// for a multi_unique series (NarrowEditions); FF1 still has no
+	// re-roll-per-loop behavior, so the pick is made once per cast, not once
+	// per loop iteration — see NarrowEditions' doc.
 	SeriesPlaybackRandom SeriesPlaybackMode = "random"
 )
 
@@ -65,17 +67,35 @@ func ResolveSeriesPlaybackMode(document, device *SeriesPlaybackMode) SeriesPlayb
 }
 
 // NarrowEditions returns the editions a cast in mode actually carries.
-// full casts every catalog edition; first and random both narrow to
-// representative — the series item's OWN declared edition (dp1/series.go:
-// "its own `source` is one representative edition"), not editions[0]. The
-// catalog's ordering has no guarantee of matching what the document itself
-// named as representative (feralfile-bot F1, 2026-10-30), so first/random
-// must use representative directly rather than slicing the catalog's
-// answer. FF1 has no re-roll-per-loop behavior, so random has nothing to
-// randomize AT CAST TIME and resolves to the same single edition first
-// would (owner decision, 2026-10-30; AC4 of feral-file/ffos-user#425).
-// random is still stored and returned as its own value everywhere else —
-// only this narrowing step collapses it.
+// full casts every catalog edition; first always narrows to representative
+// — the series item's OWN declared edition (dp1/series.go: "its own `source`
+// is one representative edition"), not editions[0]. The catalog's ordering
+// has no guarantee of matching what the document itself named as
+// representative (feralfile-bot F1, 2026-10-30), so first must use
+// representative directly rather than slicing the catalog's answer.
+//
+// random narrows to ONE genuinely randomly-picked edition out of the full
+// editions slice (randomEdition) when artworkModel.hasDistinctEditions() —
+// there is an actual choice to make — and otherwise falls back to
+// representative exactly like first, since a single/multi series' editions
+// are not distinguishable to begin with. This supersedes AC4 of
+// feral-file/ffos-user#425 ("random has nothing to randomize AT CAST TIME,"
+// because FF1 had no re-roll-per-loop behavior): a re-roll on every loop
+// iteration is still out of reach without player-side changes, but a
+// genuinely random PICK made once, at cast/narrow time, is both possible and
+// now wanted (owner decision, 2026-11-06). random is still stored and
+// returned as its own value everywhere else — only this narrowing step acts
+// on it.
+//
+// full is itself gated by artworkModel.hasDistinctEditions(): the full/first
+// config only has a real choice to make for a `multi_unique` series, whose
+// editions are genuinely different artworks. A `single` (1/1) series has
+// only ever the one artwork, and a `multi` series' editions are identical
+// copies of one artwork, so both narrow to the representative regardless of
+// mode — casting N identical copies under `full` shows nothing a viewer
+// could tell apart from casting one (owner decision, 2026-11-06). An empty
+// or unrecognized artworkModel (the catalog did not state it) is NOT
+// narrowed this way — see hasDistinctEditions' doc.
 //
 // The representative itself still carries the document's series marker
 // (contract.seriesId, no tokenId) — it IS the series item, unmodified — so
@@ -84,11 +104,30 @@ func ResolveSeriesPlaybackMode(document, device *SeriesPlaybackMode) SeriesPlayb
 // itself, so a later re-entry into Process built from this output (a
 // setSeriesPlayback re-cast, a recently-played replay) is never re-read as
 // an unresolved series (feralfile-bot F4, 2026-10-30).
-func NarrowEditions(mode SeriesPlaybackMode, representative dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
-	if mode == SeriesPlaybackFull {
+func NarrowEditions(mode SeriesPlaybackMode, artworkModel SeriesArtworkModel, representative dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
+	switch {
+	case mode == SeriesPlaybackFull && artworkModel.hasDistinctEditions():
 		return editions
+	case mode == SeriesPlaybackRandom && artworkModel.hasDistinctEditions() && len(editions) > 0:
+		return []dp1playlist.PlaylistItem{clearSeriesMarker(randomEdition(editions))}
+	default:
+		return []dp1playlist.PlaylistItem{clearSeriesMarker(representative)}
 	}
-	return []dp1playlist.PlaylistItem{clearSeriesMarker(representative)}
+}
+
+// randomEdition picks one edition out of editions uniformly at random.
+// editions is never empty at this call site (NarrowEditions guards len(editions)
+// > 0 before calling it).
+//
+// Randomness source: math/rand/v2's top-level N functions (rand.IntN here),
+// which since Go 1.22 are backed by a process-global ChaCha8 source that
+// self-seeds from the OS CSPRNG on first use — no explicit seeding needed,
+// and safe for concurrent callers. This is a cast-time pick, not a
+// cryptographic one, but there is no reason to prefer a weaker, manually
+// seeded source over the runtime's own default.
+func randomEdition(editions []dp1playlist.PlaylistItem) dp1playlist.PlaylistItem {
+	//nolint:gosec // G404: this picks which artwork edition to display, not a security decision; math/rand/v2's self-seeded source is sufficient.
+	return editions[rand.IntN(len(editions))]
 }
 
 // clearSeriesMarker returns a copy of item with its seriesRegistry series
@@ -201,6 +240,11 @@ type ResolvedSeriesGroup struct {
 	Representative dp1playlist.PlaylistItem
 	Editions       []dp1playlist.PlaylistItem
 	Resolved       bool
+	// ArtworkModel is the catalog's own `series.artworkModel` for this
+	// group — empty for unresolvedSeriesGroup, which has no catalog answer
+	// to read it from. NarrowEditions treats empty the same as an
+	// unrecognized value: see SeriesArtworkModel.hasDistinctEditions.
+	ArtworkModel SeriesArtworkModel
 }
 
 // CastSegment is one position in a playlist as resolveSeriesCastPlan walked
@@ -269,7 +313,7 @@ func (p CastPlan) Narrow(device *SeriesPlaybackMode) []dp1playlist.PlaylistItem 
 			items = append(items, *seg.Item)
 		} else {
 			mode := ResolveSeriesPlaybackMode(seg.Group.DocumentMode, device)
-			items = append(items, NarrowEditions(mode, seg.Group.Representative, seg.Group.Editions)...)
+			items = append(items, NarrowEditions(mode, seg.Group.ArtworkModel, seg.Group.Representative, seg.Group.Editions)...)
 		}
 		if p.maxItems > 0 && len(items) >= p.maxItems {
 			return items[:p.maxItems]
@@ -392,7 +436,7 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 
 		default:
 			attempts++
-			editions, err := d.seriesEditions(ctx, playlist.ID, item)
+			editions, artworkModel, err := d.seriesEditions(ctx, playlist.ID, item)
 			if err != nil || len(editions) == 0 {
 				if err != nil {
 					d.logger.Warn("series item kept unexpanded; its representative still plays",
@@ -408,7 +452,7 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 				break
 			}
 			inherited := inheritInstanceFields(item, editions)
-			group := &ResolvedSeriesGroup{Representative: item, Editions: inherited, Resolved: true}
+			group := &ResolvedSeriesGroup{Representative: item, Editions: inherited, Resolved: true, ArtworkModel: artworkModel}
 			if key, ok := seriesGroupKey(item); ok {
 				group.Key = key
 			}

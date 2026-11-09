@@ -23,6 +23,7 @@ type Service struct {
 	store      *Store
 	prober     *Prober
 	lookahead  *Lookahead
+	pusher     *HintPusher
 	contract   *PlayerContract
 	drainer    Drainer
 	logger     *zap.Logger
@@ -44,12 +45,22 @@ type Service struct {
 	runSource  string
 	runAttempt int
 	runEnded   bool
+	// runRefused is set when the current run's content-type check got a
+	// definite refusal (definiteRefusal): a `ready` that follows for the
+	// same source is the error page, not the work.
+	runRefused bool
 
 	// inferredFailed remembers the last (castSeq-less) renderStatus==3
 	// sighting so the fallback counts one failure per item mount, not one
 	// per poll.
 	inferredIndex  int
 	inferredSource string
+
+	// wall / wallIndex are the player's item sources and index as last
+	// polled (ObservePlayback), for matching an observed kiosk navigation
+	// to its source (ObserveNavigation). Guarded by mu.
+	wall      []string
+	wallIndex int
 }
 
 // Config builds a Service.
@@ -59,6 +70,10 @@ type Config struct {
 	Contract *PlayerContract
 	// Lookahead may be nil (no during-play probing).
 	Lookahead *Lookahead
+	// Pusher may be nil (verdicts reach the player only on the next push).
+	// The Service feeds it the wall (ObservePlayback) and every map a push
+	// path attaches (HintArgument); the caller drives its Run.
+	Pusher *HintPusher
 	// Online reports the device's current internet verdict (the mediator's
 	// applied connectivity state). Play failures observed while it is false
 	// are recorded but never counted toward a verdict. nil means "unknown",
@@ -80,6 +95,7 @@ func New(cfg Config) *Service {
 		store:         cfg.Store,
 		prober:        cfg.Prober,
 		lookahead:     cfg.Lookahead,
+		pusher:        cfg.Pusher,
 		contract:      cfg.Contract,
 		logger:        cfg.Logger,
 		now:           cfg.Now,
@@ -94,6 +110,13 @@ func New(cfg Config) *Service {
 		s.now = time.Now
 	}
 	return s
+}
+
+// GatewayOverride is the kiosk interceptor's per-request lookup: the same
+// path on the fallback gateway the probe found serving this content, when
+// there is one (Store.GatewayOverride).
+func (s *Service) GatewayOverride(rawURL, referrer string) (string, bool) {
+	return s.store.GatewayOverride(rawURL, referrer)
 }
 
 // Store exposes the store for the surfaces that read it directly.
@@ -159,6 +182,9 @@ func (s *Service) HintArgument(items []dp1playlist.PlaylistItem) interface{} {
 		sources[i] = items[i].Source
 	}
 	hints := s.Hints(sources)
+	// The pusher's belief of what the player holds: exactly what this push
+	// carries, none included (nil-safe).
+	s.pusher.Attached(hints)
 	if len(hints) == 0 {
 		return nil
 	}
@@ -166,26 +192,79 @@ func (s *Service) HintArgument(items []dp1playlist.PlaylistItem) interface{} {
 }
 
 // ItemHealths annotates the player's item list; nil on error.
-func (s *Service) ItemHealths(items []dp1playlist.PlaylistItem) []ItemHealth {
+func (s *Service) ItemHealths(items []dp1playlist.PlaylistItem, skipped []int) []ItemHealth {
 	sources := make([]string, len(items))
 	for i := range items {
 		sources[i] = items[i].Source
 	}
-	out, err := s.store.ItemHealths(sources)
+	records, err := s.store.GetMany(sources)
 	if err != nil {
 		s.logger.Warn("media health: item health unavailable for this status round", zap.Error(err))
 		return nil
 	}
+	skippedAt := skippedSet(skipped)
+	now := s.now()
+	out := make([]ItemHealth, len(sources))
+	for i, src := range sources {
+		rec := records[src]
+		h := itemHealthOf(rec)
+		h.Skipped = skippedAt[i]
+		if h.State == StateBroken && !h.Skipped {
+			h.Unskipped = s.unskippedReason(src, rec, now)
+		}
+		out[i] = h
+	}
 	return out
 }
 
+// unskippedReason says why a broken record is not being skipped by the
+// player, in the order the hint pipeline refuses it: no contract declared
+// (nothing is ever hinted), the cache can replay it (the hint drops it),
+// the verdict expired (not conclusive, so not hinted), else it IS hinted
+// now and the player simply does not hold that hint yet — or chose to
+// play it (repeat-one, an all-broken map).
+func (s *Service) unskippedReason(source string, rec *Record, now time.Time) Unskipped {
+	switch {
+	case !s.PlayerSupportsHints():
+		return UnskippedPlayer
+	case s.replayable != nil && s.replayable(source):
+		return UnskippedReplayable
+	case rec == nil || !rec.Conclusive(now):
+		return UnskippedExpired
+	default:
+		return UnskippedPending
+	}
+}
+
+func skippedSet(skipped []int) map[int]bool {
+	set := make(map[int]bool, len(skipped))
+	for _, i := range skipped {
+		if i >= 0 {
+			set[i] = true
+		}
+	}
+	return set
+}
+
 // Report builds the getMediaHealth rows for the items on screen.
-func (s *Service) Report(items []dp1playlist.PlaylistItem) ([]ReportItem, error) {
+func (s *Service) Report(items []dp1playlist.PlaylistItem, skipped []int) ([]ReportItem, error) {
 	in := make([]ReportInput, len(items))
 	for i := range items {
 		in[i] = ReportInput{ID: items[i].ID, Title: items[i].Title, Source: items[i].Source}
 	}
-	return s.store.Report(in)
+	rows, err := s.store.Report(in)
+	if err != nil {
+		return nil, err
+	}
+	// The same overlay as ItemHealths, so the two surfaces never disagree.
+	health := s.ItemHealths(items, skipped)
+	for i := range rows {
+		if i < len(health) {
+			rows[i].Skipped = health[i].Skipped
+			rows[i].Unskipped = health[i].Unskipped
+		}
+	}
+	return rows, nil
 }
 
 // ObservePlayback is the status poller's hook: it drains the player's
@@ -200,24 +279,33 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 	if s.lookahead != nil {
 		s.lookahead.Observe(sources, index)
 	}
+	// Only a player with the outcome ring has a cast generation to fence a
+	// hint-only push on; without it the pusher has no wall (nil-safe).
+	if outcomes != nil && items != nil {
+		s.pusher.Observe(sources, outcomes.CastSeq, true)
+	} else {
+		s.pusher.Observe(nil, 0, false)
+	}
 	online := s.online != nil && s.online()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if items != nil {
+		s.wall, s.wallIndex = sources, index
+	} else {
+		s.wall, s.wallIndex = nil, 0
+	}
 	if outcomes != nil {
 		fresh, gap, restarted := s.drainer.Drain(outcomes)
 		if restarted {
 			// A new page: a failing run cannot continue across it.
-			s.runSource, s.runAttempt, s.runEnded = "", 0, false
+			s.runSource, s.runAttempt, s.runEnded, s.runRefused = "", 0, false, false
 		}
 		if gap > 0 {
 			s.logger.Warn("media health: player outcome ring wrapped between polls; outcomes were lost",
 				zap.Int64("missed", gap))
 		}
 		for _, o := range fresh {
-			count := online && !s.samePlay(o)
-			if _, err := s.store.ApplyOutcome(o, count); err != nil && !errors.Is(err, ErrLowDisk) {
-				s.logger.Warn("media health: recording play outcome failed", zap.String("stage", o.Stage), zap.Error(err))
-			}
+			s.applyEntry(o, online)
 		}
 		return
 	}
@@ -239,6 +327,36 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 	}
 }
 
+// applyEntry folds one entry — a ring entry from the player or a
+// navigation the daemon observed on the kiosk — through the play-run
+// rules and into the store, and reports whether it counted toward a
+// verdict. Caller holds s.mu.
+func (s *Service) applyEntry(o Outcome, online bool) bool {
+	var count bool
+	switch {
+	case o.Kind == OutcomeFail && !countableFailure(o):
+		// History only, and it must not touch the run: an uncountable
+		// entry that OPENED the run made every failure after it in that
+		// play "the same play", so a work that failed its content-type
+		// check on the network and then timed out three times counted
+		// nothing, play after play (ipfs.infura.io on the office FF1, 6
+		// plays, 0 counted).
+	case o.Kind == OutcomeFail:
+		count = online && !s.samePlay(o)
+		if definiteRefusal(o) {
+			s.runRefused = true
+		}
+	default:
+		o.errorPage = o.Kind == OutcomeOK && s.runRefused &&
+			o.Source == s.runSource && !readyIsEvidence(o)
+		s.samePlay(o)
+	}
+	if _, err := s.store.ApplyOutcome(o, count); err != nil && !errors.Is(err, ErrLowDisk) {
+		s.logger.Warn("media health: recording play outcome failed", zap.String("stage", o.Stage), zap.Error(err))
+	}
+	return count
+}
+
 // samePlay reports whether a failing outcome continues the play run already
 // counted, and advances the run. Rules: a success, a skip, or another
 // source ends the run; an exhausted entry ends it after itself (the next
@@ -248,11 +366,23 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 // one hides a work.
 func (s *Service) samePlay(o Outcome) bool {
 	if o.Kind != OutcomeFail {
-		s.runSource, s.runAttempt, s.runEnded = "", 0, false
+		s.runSource, s.runAttempt, s.runEnded, s.runRefused = "", 0, false, false
 		return false
 	}
-	same := o.Source == s.runSource && !s.runEnded && o.Attempt >= s.runAttempt
-	s.runSource, s.runAttempt, s.runEnded = o.Source, o.Attempt, o.Stage == StageExhausted
+	// An observed navigation (Attempt 0) carries no attempt counter: it
+	// belongs to whatever play of that source is open, and when it opens
+	// one, the player's own entries for that play (attempt >= 1) continue
+	// it — the frame request happens after the player's content-type
+	// check, but the ring is drained only every poll, so the two can
+	// arrive in either order.
+	same := o.Source == s.runSource && !s.runEnded && (o.Attempt == 0 || o.Attempt >= s.runAttempt)
+	if !same {
+		s.runRefused = false
+	}
+	s.runSource, s.runEnded = o.Source, o.Stage == StageExhausted
+	if !same || o.Attempt > 0 {
+		s.runAttempt = o.Attempt
+	}
 	return same
 }
 

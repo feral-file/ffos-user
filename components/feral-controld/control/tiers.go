@@ -62,10 +62,12 @@ var commandTiers = map[string]Tier{
 	// setSeriesPlayback is the same category of owner-level device setting
 	// as setContentPolicy (feral-file/ffos-user#425): it changes what plays
 	// on the device, not merely what a controller is shown.
-	string(commands.CMD_SET_SERIES_PLAYBACK):        TierOwner,
-	string(commands.CMD_ANALYTICS_TOGGLE):           TierOwner,
-	string(commands.CMD_BETA_FEATURES_TOGGLE):       TierOwner,
-	string(commands.CMD_UPLOAD_LOGS):                TierOwner,
+	string(commands.CMD_SET_SERIES_PLAYBACK):  TierOwner,
+	string(commands.CMD_ANALYTICS_TOGGLE):     TierOwner,
+	string(commands.CMD_BETA_FEATURES_TOGGLE): TierOwner,
+	// shutdown is the one power command nobody on the LAN can undo: the
+	// device stays off until a person presses its button (feral-file#3551).
+	string(commands.CMD_SHUTDOWN):                   TierOwner,
 	string(commands.CMD_KEYBOARD_EVENT):             TierOwner,
 	string(commands.CMD_MOUSE_TAP_EVENT):            TierOwner,
 	string(commands.CMD_MOUSE_DOUBLE_TAP_EVENT):     TierOwner,
@@ -80,6 +82,7 @@ var commandTiers = map[string]Tier{
 	CmdListControllers:    TierOwner,
 	CmdRegisterController: TierOwner,
 	CmdReleaseOwnership:   TierOwner,
+	CmdSetLanControl:      TierOwner,
 	// Player CastCommand names that reach the player over the CDP
 	// fallthrough. cursorUpdate is pointer injection like the gestures;
 	// disconnect tears down the player's cast session.
@@ -87,6 +90,14 @@ var commandTiers = map[string]Tier{
 	"disconnect":   TierOwner,
 
 	// --- controller: playback, display, power, read-only status ---
+	//
+	// The controller tier is ALSO the LAN-open set (§7.2): on the device's
+	// own network, with the owner's switch open, anyone may run it in
+	// plaintext. The rule that admits a command here is the undo test: the
+	// next command (or a wait) can undo whatever it did. Before adding a
+	// command to this section, check it against that test; one that fails
+	// it (wipes, opens a shell, changes Wi-Fi, powers the device off for
+	// good) is owner tier.
 	// connect starts every ff-app cast. Only an owner claims or rebinds: the
 	// executor answers a non-owner connect to a claimed device ok without
 	// changing anything, and refuses one to an unclaimed device (§7.1).
@@ -114,10 +125,12 @@ var commandTiers = map[string]Tier{
 	string(commands.CMD_SLEEP_NOW):                 TierController,
 	string(commands.CMD_WAKE_NOW):                  TierController,
 	string(commands.CMD_REBOOT):                    TierController,
-	string(commands.CMD_SHUTDOWN):                  TierController,
 	string(commands.CMD_RUN_NETWORK_DIAGNOSTICS):   TierController,
 	string(commands.CMD_GET_CONTENT_POLICY):        TierController,
 	string(commands.CMD_GET_SERIES_PLAYBACK):       TierController,
+	// uploadLogs changes nothing on the device; "Send log" must work for a
+	// phone without a grant and for a device nobody owns yet.
+	string(commands.CMD_UPLOAD_LOGS): TierController,
 	// Player CastCommand names forwarded over CDP.
 	"checkStatus":           TierController,
 	"moveToArtwork":         TierController,
@@ -131,10 +144,11 @@ var commandTiers = map[string]Tier{
 
 	// --- internal: never from outside ---
 	string(commands.CMD_RESOLVE_RECENTLY_PLAYED): TierInternal,
-	CmdEnvelope:          TierInternal,
-	"ping":               TierInternal, // controld → player liveness probe
-	"mintPairingDisplay": TierInternal, // controld → player mint-pairing paint
-	"setupDisplay":       TierInternal, // controld → player setup narration paint
+	string(commands.CMD_SET_MEDIA_HEALTH):        TierInternal, // controld → player hint-only push
+	CmdEnvelope:                                  TierInternal,
+	"ping":                                       TierInternal, // controld → player liveness probe
+	"mintPairingDisplay":                         TierInternal, // controld → player mint-pairing paint
+	"setupDisplay":                               TierInternal, // controld → player setup narration paint
 }
 
 // TierOf returns cmd's tier. Unknown names are owner-only (§7.1).

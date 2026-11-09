@@ -42,7 +42,7 @@ func (f *fakeMediaHealth) HintArgument(items []dp1playlist.PlaylistItem) interfa
 	return f.hints
 }
 
-func (f *fakeMediaHealth) Report([]dp1playlist.PlaylistItem) ([]mediahealth.ReportItem, error) {
+func (f *fakeMediaHealth) Report([]dp1playlist.PlaylistItem, []int) ([]mediahealth.ReportItem, error) {
 	return nil, nil
 }
 
@@ -343,24 +343,25 @@ func TestCommandHandler_Process_DisplayPlaylist_Scheduled_SkipsPreflightEntirely
 		"a scheduled playlist must not be probed at all — the verdict could never affect it, only delay it")
 }
 
-// TestCommandHandler_Process_DisplayPlaylist_OverItemBudget_SkipsPreflight
-// pins the #308-round-4 bound: past maxPreflightItems the preflight is
-// skipped before ANY per-item bookkeeping is built (fail open) — the
-// request and lookup caps already bounded network and disk work, and this
-// bounds the memory/CPU bookkeeping in front of them.
-func TestCommandHandler_Process_DisplayPlaylist_OverItemBudget_SkipsPreflight(t *testing.T) {
+// TestCommandHandler_Process_DisplayPlaylist_LargePlaylistIsProbed pins the
+// removal of the item cap (#392, large walls): the refresher re-resolves a
+// playlist with no item limit, so a large wall must be judged like any
+// other — the pass itself bounds the work (its first items only).
+func TestCommandHandler_Process_DisplayPlaylist_LargePlaylistIsProbed(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	items := make([]dp1playlist.PlaylistItem, commandrouter.MaxPreflightItemsForTest+1)
+	items := make([]dp1playlist.PlaylistItem, 2049)
 	for i := range items {
-		items[i] = dp1playlist.PlaylistItem{ID: fmt.Sprintf("i%d", i), Source: "https://origin.example/dead"}
+		items[i] = dp1playlist.PlaylistItem{ID: fmt.Sprintf("i%d", i), Source: fmt.Sprintf("https://origin.example/%d", i)}
 	}
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: items}}
 
 	playlistURL := "https://example.com/playlist.json"
 	expectDisplayPlaylistSuccess(ts, playlistURL, playlist)
 
+	// A pass answering NO results (impossible for the real Prober) must
+	// fail open, never read as "every item dead".
 	prober := &fakeMediaHealth{results: nil}
 	commandrouter.SetMediaHealth(ts.handler, prober, ts.logger)
 
@@ -368,8 +369,8 @@ func TestCommandHandler_Process_DisplayPlaylist_OverItemBudget_SkipsPreflight(t 
 
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
-	assert.Empty(t, prober.probed,
-		"an over-budget playlist must not be probed at all — fail open before any per-item state")
+	require.Len(t, prober.probed, 1, "the pass ran once")
+	assert.Len(t, prober.probed[0], 2049, "no item cap in front of the pass")
 }
 
 // TestCommandHandler_Process_DisplayPlaylist_RejectionSkipsReplayResync pins

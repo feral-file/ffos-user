@@ -2,6 +2,8 @@ package mediahealth
 
 import (
 	"context"
+	"errors"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -9,22 +11,38 @@ import (
 	"go.uber.org/zap"
 )
 
-// Lookahead probes the items coming up on the wall and, when the wall is
-// quiet, sweeps records that are due for another look.
+// Lookahead keeps the wall judged: it walks the playlist from the player's
+// position and probes whatever is due, then, with the wall quiet, sweeps
+// records that are not on the wall.
 //
 // Fed by the status poller's playback observer (the same seam the
 // automatic playback cache uses): every poll hands it the player's item
 // list and index. It performs no I/O on the poller goroutine — it only
-// retains the snapshot and wakes its worker. The worker:
+// retains the snapshot and wakes its worker. The worker runs ONE rule:
 //
-//  1. Walks the playlist from index+1 (wrapping) and probes the first
-//     Window sources that have no record or are due (Record.Due), one at a
-//     time, with Gap between requests. The hint for a newly broken item
-//     rides the next push (refresher, cutover, re-cast).
-//  2. With nothing ahead to probe, takes one due record not on the wall
+//   - Starting after the current item, walk the wall in play order and
+//     probe the first source that is due (Record.Due: no record, an
+//     expired verdict, or a passed retry hold). The next items come first
+//     because they are first in the walk; the rest of the wall follows,
+//     and the current item comes last — it is already on screen, but a
+//     one-item playlist would otherwise never get its recheck. A cursor
+//     remembers where the walk stopped, so each step reads one chunk of
+//     records, not the whole wall, and resets when the playlist or the
+//     index changes so the next items always come first again. There is
+//     no cap on the wall: the refresher re-resolves a playlist with no
+//     item limit, so the wall holds everything the query returns, and a
+//     wall the lookahead refused to see played on unjudged (#392).
+//   - With nothing due on the wall, take one due record NOT on the wall
 //     from the store's recheck index, under a token bucket of
 //     SweepPerHour, so a 100k-record store never becomes 100k probes a
 //     day and a fixed source still heals without being cast again.
+//
+// Pace: the next probe starts as soon as the previous one finishes — no
+// gap. Politeness is the Prober's shared HostLimiter alone: at most two
+// requests in flight per host (this worker is one at a time), and a host
+// answering 429/503 is paused for its Retry-After; a source on a paused
+// host is stepped over, not held. Against one CDN this is a few requests
+// a second at typical answer times, and the cooldown is the backstop.
 //
 // Admit, when set, is consulted before each request (the offline cache's
 // resource gate, read-only); a refusal just waits for the next tick.
@@ -32,11 +50,6 @@ type Lookahead struct {
 	Prober *Prober
 	Store  *Store
 	Logger *zap.Logger
-	// Window is how many upcoming items are probed ahead (DefaultWindow
-	// when 0).
-	Window int
-	// Gap is the pause between requests (DefaultGap when 0).
-	Gap time.Duration
 	// SweepPerHour bounds background re-probes of records not on the wall
 	// (DefaultSweepPerHour when 0; negative disables the sweep).
 	SweepPerHour int
@@ -48,18 +61,23 @@ type Lookahead struct {
 	mu      sync.Mutex
 	sources []string
 	index   int
-	wake    chan struct{}
-	once    sync.Once
+	// wallSet is the sources on the wall, for the sweep's exclusion;
+	// rebuilt (never mutated) when the snapshot changes, so a reader may
+	// hold the map outside mu.
+	wallSet map[string]struct{}
+	// cursor is the walk position (0 = right after the current item) the
+	// next step resumes from.
+	cursor int
+	wake   chan struct{}
+	once   sync.Once
 
 	// held parks sources the worker just probed until the time recorded,
-	// whatever the store says. A probe that writes no record (a source
-	// guard or URL-length refusal: a policy objection, deliberately never
-	// a verdict) leaves the record due forever; without this hold the
-	// worker would re-probe that one source every tick and nothing behind
-	// it — later window items, the current item's recheck, the sweep —
-	// would ever run (PR #438 review, round 2, F10). probeHold matches the
-	// store's shortest recheck, so a recorded source is never held longer
-	// than its own record already holds it. Pruned on use.
+	// but only when the probe wrote no record (ProbeResult.Recorded false:
+	// a source guard or URL-length refusal, a write the store refused).
+	// Such a source stays due forever, and without this hold the worker
+	// would re-pick it every step and nothing behind it would ever run
+	// (PR #438 review, F10/F21). A recorded answer is governed by its
+	// record alone (F19). Pruned on use.
 	held map[string]time.Time
 
 	sweepTokens float64
@@ -67,23 +85,21 @@ type Lookahead struct {
 }
 
 const (
-	DefaultWindow       = 8
-	DefaultGap          = time.Second
 	DefaultSweepPerHour = 20
 	// idleTick is how often the worker looks for due work with no wake.
 	idleTick = time.Minute
-	// probeHold is how long a just-probed source is left alone by the
-	// worker regardless of its record (see Lookahead.held).
+	// probeHold is how long an unrecorded probe keeps its source out of
+	// the walk (see Lookahead.held).
 	probeHold = RetryTransient
-	// maxObservedItems bounds the retained snapshot: a hostile 4 MiB cast
-	// could otherwise park a huge slice here on every poll.
-	maxObservedItems = 4096
+	// walkChunk is how many wall positions one store read covers while
+	// the walk looks for the next due source.
+	walkChunk = 64
 )
 
 // Observe retains the current playlist snapshot. items may be nil when the
 // player is not displaying a playlist (the lookahead then only sweeps).
 func (l *Lookahead) Observe(sources []string, index int) {
-	if len(sources) > maxObservedItems || index < 0 || index >= len(sources) {
+	if index < 0 || index >= len(sources) {
 		sources, index = nil, 0
 	}
 	l.mu.Lock()
@@ -91,6 +107,14 @@ func (l *Lookahead) Observe(sources []string, index int) {
 	if changed {
 		l.sources = slices.Clone(sources)
 		l.index = index
+		l.cursor = 0
+		set := make(map[string]struct{}, len(sources))
+		for _, s := range sources {
+			if s != "" {
+				set[s] = struct{}{}
+			}
+		}
+		l.wallSet = set
 	}
 	l.mu.Unlock()
 	if changed {
@@ -117,24 +141,21 @@ func (l *Lookahead) Run(ctx context.Context) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	gap := l.Gap
-	if gap <= 0 {
-		gap = DefaultGap
-	}
 	ticker := time.NewTicker(idleTick)
 	defer ticker.Stop()
 	for {
-		worked := l.step(ctx, logger)
-		var wait <-chan time.Time
-		if worked {
-			wait = time.After(gap)
+		if ctx.Err() != nil {
+			return
+		}
+		if l.step(ctx, logger) {
+			// A request was made; look for the next one right away.
+			continue
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-l.wake:
 		case <-ticker.C:
-		case <-wait:
 		}
 	}
 }
@@ -156,32 +177,51 @@ func (l *Lookahead) step(ctx context.Context, logger *zap.Logger) bool {
 	}
 	at := now()
 	l.pruneHeld(at)
-	if src := l.nextAhead(at); src != "" {
-		l.hold(src, at)
-		res := l.Prober.ProbeAndRecord(ctx, src)
-		logger.Debug("media health: lookahead probe", zap.String("source", res.Source), zap.String("verdict", string(res.Verdict)))
+	if src := l.nextOnWall(at); src != "" {
+		l.probe(ctx, src, at, "wall", logger)
 		return true
 	}
 	if src := l.nextDue(at); src != "" {
-		l.hold(src, at)
-		res := l.Prober.ProbeAndRecord(ctx, src)
-		logger.Debug("media health: sweep probe", zap.String("source", res.Source), zap.String("verdict", string(res.Verdict)))
+		l.probe(ctx, src, at, "sweep", logger)
 		return true
 	}
 	return false
 }
 
-func (l *Lookahead) hold(src string, now time.Time) {
+// probe runs one request and holds the source only when the result did not
+// change the store (ProbeResult.Recorded); a source skipped for a host
+// cooldown is held only until the cooldown ends.
+func (l *Lookahead) probe(ctx context.Context, src string, at time.Time, kind string, logger *zap.Logger) {
+	// Held while the request runs, so nothing else picks it meanwhile.
+	l.hold(src, at.Add(probeHold))
+	res := l.Prober.ProbeAndRecord(ctx, src)
+	var cooled *hostCooldownError
+	switch {
+	case res.Recorded:
+		l.release(src)
+	case errors.As(res.Err, &cooled):
+		l.hold(src, cooled.until)
+	}
+	logger.Debug("media health: "+kind+" probe", zap.String("source", res.Source), zap.String("verdict", string(res.Verdict)))
+}
+
+func (l *Lookahead) hold(src string, until time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.held == nil {
 		l.held = make(map[string]time.Time)
 	}
-	l.held[src] = now.Add(probeHold)
+	l.held[src] = until
+}
+
+func (l *Lookahead) release(src string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.held, src)
 }
 
 // pruneHeld drops expired holds. The map is bounded by the probe rate
-// (one per Gap) times probeHold, so pruning on every step keeps it small.
+// times probeHold, so pruning on every step keeps it small.
 func (l *Lookahead) pruneHeld(now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -200,45 +240,69 @@ func (l *Lookahead) isHeld(src string) bool {
 	return ok
 }
 
-// nextAhead returns the first upcoming source that wants a look, or "".
-func (l *Lookahead) nextAhead(now time.Time) string {
+// walkSource is the wall source at walk position pos: the items after the
+// current one in play order, wrapping, with the current item last.
+func walkSource(sources []string, index, pos int) string {
+	return sources[(index+1+pos)%len(sources)]
+}
+
+// nextOnWall returns the next due source on the wall from the cursor,
+// scanning the whole wall at most once (wrapping), or "" when nothing on
+// the wall is due. The cursor is left just past the source returned, so
+// the following step continues from there; it is reset to the start when
+// a full scan found nothing.
+func (l *Lookahead) nextOnWall(now time.Time) string {
 	l.mu.Lock()
 	sources := l.sources
 	index := l.index
+	start := l.cursor
 	l.mu.Unlock()
-	if len(sources) == 0 {
+	n := len(sources)
+	if n == 0 {
 		return ""
 	}
-	window := l.Window
-	if window <= 0 {
-		window = DefaultWindow
+	if start < 0 || start >= n {
+		start = 0
 	}
-	candidates := make([]string, 0, window+1)
-	for step := 1; step < len(sources) && len(candidates) < window; step++ {
-		src := sources[(index+step)%len(sources)]
-		if src == "" || IsDataURI(src) {
+	for scanned := 0; scanned < n; {
+		from := (start + scanned) % n
+		chunk := min(walkChunk, n-scanned)
+		candidates := make([]string, 0, chunk)
+		positions := make([]int, 0, chunk)
+		for i := 0; i < chunk; i++ {
+			pos := (from + i) % n
+			// data: items are walked too: a due one is settled
+			// synchronously with no network (ProbeOne decodes it), and its
+			// record then keeps it off the walk until its recheck.
+			src := walkSource(sources, index, pos)
+			if src == "" {
+				continue
+			}
+			candidates = append(candidates, src)
+			positions = append(positions, pos)
+		}
+		scanned += chunk
+		if len(candidates) == 0 {
 			continue
 		}
-		candidates = append(candidates, src)
-	}
-	// The current item last: it is already on screen, so nothing ahead
-	// depends on it, but a one-item playlist (or one parked on its current
-	// item) would otherwise never get its scheduled recheck.
-	if cur := sources[index]; cur != "" && !IsDataURI(cur) {
-		candidates = append(candidates, cur)
-	}
-	if len(candidates) == 0 {
-		return ""
-	}
-	records, err := l.Store.GetMany(candidates)
-	if err != nil {
-		return ""
-	}
-	for _, src := range candidates {
-		if records[src].Due(now) && !l.isHeld(src) {
-			return src
+		records, err := l.Store.GetMany(candidates)
+		if err != nil {
+			return ""
+		}
+		for i, src := range candidates {
+			if records[src].Due(now) && !l.isHeld(src) && !l.Prober.cooled(src) {
+				l.mu.Lock()
+				if len(l.sources) == n {
+					l.cursor = (positions[i] + 1) % n
+				}
+				l.mu.Unlock()
+				return src
+			}
 		}
 	}
+	l.mu.Lock()
+	l.cursor = 0
+	l.mu.Unlock()
 	return ""
 }
 
@@ -265,31 +329,32 @@ func (l *Lookahead) nextDue(now time.Time) string {
 		l.mu.Unlock()
 		return ""
 	}
-	exclude := make(map[string]struct{}, len(l.sources)+len(l.held))
-	for _, s := range l.sources {
-		exclude[s] = struct{}{}
-	}
-	for s := range l.held {
-		exclude[s] = struct{}{}
-	}
+	// Excluded INSIDE the query, before its limit, so neither can fill the
+	// result and shadow an eligible off-wall row (PR #438 review, F8): the
+	// whole wall (the walk above owns it) and the sources the worker holds.
+	// The wall set is a shared read-only snapshot, never copied per call;
+	// the held map is small (bounded by the probe rate times probeHold), so
+	// it is cloned.
+	wall := l.wallSet
+	held := maps.Clone(l.held)
 	l.mu.Unlock()
+	skip := func(src string) bool {
+		if _, onWall := wall[src]; onWall {
+			return true
+		}
+		_, isHeld := held[src]
+		return isHeld
+	}
 
-	// On-wall and held sources are excluded inside the query, so the rows
-	// the lookahead owns, or just probed without a verdict, can never
-	// shadow the off-wall rows behind them.
-	due, err := l.Store.Due(now, 8, exclude)
-	if err != nil {
+	due, err := l.Store.Due(now, 1, skip)
+	if err != nil || len(due) == 0 {
 		return ""
 	}
 	// A due data: record (a malformed URI the cast pass recorded) is
 	// re-settled through the same path: ProbeOne answers it synchronously
 	// with no network, and the broken backoff spaces the rechecks out.
-	// Skipping it here would let a handful of them shadow the rows behind.
-	if len(due) > 0 {
-		l.mu.Lock()
-		l.sweepTokens--
-		l.mu.Unlock()
-		return due[0]
-	}
-	return ""
+	l.mu.Lock()
+	l.sweepTokens--
+	l.mu.Unlock()
+	return due[0]
 }

@@ -116,15 +116,68 @@ func TestSourceUnreachableError_RendersReasonCodesNeverURLs(t *testing.T) {
 }
 
 func TestGetMediaHealth(t *testing.T) {
-	t.Run("rejects arguments", func(t *testing.T) {
+	t.Run("rejects anything but a well-formed paging request", func(t *testing.T) {
 		ts := setup(t)
 		defer ts.teardown()
 		commandrouter.SetMediaHealth(ts.handler, &fakeMediaHealth{}, ts.logger)
-		result, err := ts.handler.Process(ts.ctx, commands.Command{Type: commands.CMD_GET_MEDIA_HEALTH, Arguments: map[string]interface{}{"x": 1}})
-		require.NoError(t, err)
-		reply := result.(map[string]interface{})
-		assert.Equal(t, false, reply["ok"])
-		assert.Contains(t, reply["error"], "no arguments")
+		for _, args := range []map[string]interface{}{
+			{"x": 1}, {"limit": float64(0)}, {"limit": float64(1001)}, {"offset": float64(-1)},
+			{"offset": 1.5}, {"offset": "1"}, {"filter": "broken"}, {"filter": 1}, {"offset": float64(0), "x": true},
+		} {
+			result, err := ts.handler.Process(ts.ctx, commands.Command{Type: commands.CMD_GET_MEDIA_HEALTH, Arguments: args})
+			require.NoError(t, err)
+			reply := result.(map[string]interface{})
+			assert.Equal(t, false, reply["ok"], "%v", args)
+			assert.Equal(t, "invalid request", reply["error"], "%v", args)
+		}
+	})
+
+	t.Run("pages and filters", func(t *testing.T) {
+		page := func(t *testing.T, args map[string]interface{}) map[string]interface{} {
+			ts := setup(t)
+			defer ts.teardown()
+			commandrouter.SetMediaHealth(ts.handler, &reportingMediaHealth{}, ts.logger)
+			items := []dp1playlist.PlaylistItem{
+				{ID: "a", Title: "A", Source: "https://origin.example/a"},
+				{ID: "b", Title: "B", Source: "https://origin.example/b"},
+			}
+			ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{Items: &items, Outcomes: &mediahealth.Outcomes{CastSeq: 7}}, nil).Times(1)
+			result, err := ts.handler.Process(ts.ctx, commands.Command{Type: commands.CMD_GET_MEDIA_HEALTH, Arguments: args})
+			require.NoError(t, err)
+			return result.(map[string]interface{})
+		}
+
+		reply := page(t, map[string]interface{}{"filter": "attention"})
+		assert.Equal(t, true, reply["ok"])
+		assert.Equal(t, 2, reply["total"])
+		assert.Equal(t, 1, reply["matched"], "only the broken row needs attention")
+		assert.Equal(t, 0, reply["offset"])
+		assert.Equal(t, 500, reply["limit"], "the default page")
+		assert.NotContains(t, reply, "nextOffset")
+		assert.NotContains(t, reply, "truncated", "the paged form has no truncated flag")
+		assert.Equal(t, int64(7), reply["castSeq"])
+		rows := reply["items"].([]mediahealth.ReportItem)
+		require.Len(t, rows, 1)
+		assert.Equal(t, "a", rows[0].ID)
+		assert.Equal(t, 0, rows[0].Index, "the absolute playlist index")
+
+		reply = page(t, map[string]interface{}{"limit": float64(1)})
+		assert.Equal(t, 2, reply["matched"])
+		assert.Equal(t, 1, reply["nextOffset"])
+		rows = reply["items"].([]mediahealth.ReportItem)
+		require.Len(t, rows, 1)
+		assert.Equal(t, "a", rows[0].ID)
+
+		reply = page(t, map[string]interface{}{"offset": float64(1), "limit": float64(1)})
+		assert.NotContains(t, reply, "nextOffset", "the last page")
+		rows = reply["items"].([]mediahealth.ReportItem)
+		require.Len(t, rows, 1)
+		assert.Equal(t, "b", rows[0].ID)
+		assert.Equal(t, 1, rows[0].Index)
+
+		reply = page(t, map[string]interface{}{"offset": float64(50)})
+		assert.Equal(t, 2, reply["matched"])
+		assert.Empty(t, reply["items"].([]mediahealth.ReportItem), "past the end: an empty page, not an error")
 	})
 
 	t.Run("unavailable when not wired", func(t *testing.T) {
@@ -191,7 +244,7 @@ type reportingMediaHealth struct {
 	asked []dp1playlist.PlaylistItem
 }
 
-func (r *reportingMediaHealth) Report(items []dp1playlist.PlaylistItem) ([]mediahealth.ReportItem, error) {
+func (r *reportingMediaHealth) Report(items []dp1playlist.PlaylistItem, _ []int) ([]mediahealth.ReportItem, error) {
 	r.asked = items
 	rows := make([]mediahealth.ReportItem, len(items))
 	for i, it := range items {

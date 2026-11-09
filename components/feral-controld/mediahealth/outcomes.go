@@ -2,6 +2,7 @@ package mediahealth
 
 import (
 	"sort"
+	"strconv"
 )
 
 // Outcomes is the `outcomes` field of the player's checkStatus reply under
@@ -32,6 +33,43 @@ type Outcome struct {
 	ElapsedMs int64  `json:"elapsedMs,omitempty"`
 	// At is the player's own ISO timestamp, kept as reported.
 	At string `json:"at,omitempty"`
+
+	// errorPage is set by the Service, never by the player: this `ready`
+	// is an opaque embed that loaded AFTER the same play's content-type
+	// check got a definite refusal (definiteRefusal), so what reached
+	// ready is the origin's or Chromium's error page. The store neither
+	// counts it as a success nor lets it reset the failure run.
+	errorPage bool
+}
+
+// countableFailure reports whether a failing entry can ever advance the
+// corroboration count: it has a reason, and its stage is not device-local
+// (webgl, a content-type check that failed on the network). Only such
+// entries take part in play runs (Service.samePlay); the rest are history.
+func countableFailure(o Outcome) bool {
+	return o.Kind == OutcomeFail && reasonForStage(o.Stage) != "" && !deviceLocal(o)
+}
+
+// definiteRefusal reports whether a content-type check's HTTP status is an
+// answer the iframe fallback cannot override: the origin refused or does
+// not have the resource, so the embed that loads next shows the error page.
+// 4xx only, minus the statuses that are about the check rather than the
+// resource — 405 (some servers refuse HEAD and serve GET), 408 (the
+// request timed out) and 416 (a range artifact). 5xx stays out: server
+// trouble is routinely transient and the fallback GET may well succeed.
+func definiteRefusal(o Outcome) bool {
+	if o.Kind != OutcomeFail || o.Stage != StageDetect {
+		return false
+	}
+	status, err := strconv.Atoi(o.Code)
+	if err != nil || status < 400 || status >= 500 {
+		return false
+	}
+	switch status {
+	case 405, 408, 416:
+		return false
+	}
+	return true
 }
 
 const (
@@ -66,6 +104,19 @@ const (
 // them would let an outage mark every work on the wall broken, and a
 // conclusive broken record is skipped before it is mounted, so the play
 // layer could never heal it once the network returned.
+// readyIsEvidence reports whether a `ready` outcome proves the source
+// rendered. Only renderers that report their own load or decode failures
+// count (image, video, audio, model). Opaque embeds (iframe, object, pdf)
+// report ready for any document, an error page included, and an absent
+// mediaType means detection never settled — neither is evidence.
+func readyIsEvidence(o Outcome) bool {
+	switch o.MediaType {
+	case "image", "video", "audio", "model":
+		return true
+	}
+	return false
+}
+
 func deviceLocal(o Outcome) bool {
 	switch o.Stage {
 	case StageWebGL:

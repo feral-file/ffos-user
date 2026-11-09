@@ -2,6 +2,7 @@ package mediahealth
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 func newTestLookahead(t *testing.T, f Fetcher, clock *testClock) *Lookahead {
 	t.Helper()
 	p := newPassProber(t, f, clock)
-	return &Lookahead{Prober: p, Store: p.Store, Now: clock.Now, Window: 3}
+	return &Lookahead{Prober: p, Store: p.Store, Now: clock.Now}
 }
 
 func TestLookahead_ProbesUpcomingItemsInPlayOrder(t *testing.T) {
@@ -24,15 +25,16 @@ func TestLookahead_ProbesUpcomingItemsInPlayOrder(t *testing.T) {
 	l := newTestLookahead(t, f, clock)
 	l.Observe([]string{"https://o/0", "https://o/1", "https://o/2", "https://o/3", "https://o/4"}, 3)
 
-	// Window 3 from index 3: items 4, 0, 1, then the current item 3 last —
-	// one request per step.
-	for _, want := range []string{"https://o/4", "https://o/0", "https://o/1", "https://o/3"} {
-		assert.True(t, l.step(context.Background(), nil), "a due upcoming item is probed")
+	// One walk from index 3: the items after it in play order, wrapping,
+	// then the current item last — one request per step.
+	for _, want := range []string{"https://o/4", "https://o/0", "https://o/1", "https://o/2", "https://o/3"} {
+		assert.True(t, l.step(context.Background(), nil), want)
 		assert.Equal(t, 1, f.count(want), want)
 	}
-	assert.False(t, l.step(context.Background(), nil), "the window is exhausted; nothing is due in the background")
-	assert.Equal(t, 0, f.count("https://o/2"), "beyond the window nothing is probed")
-	assert.Equal(t, 1, f.count("https://o/3"), "the current item is probed after the window, once")
+	assert.False(t, l.step(context.Background(), nil), "the wall is covered; nothing is due in the background")
+	for _, u := range []string{"https://o/0", "https://o/1", "https://o/2", "https://o/3", "https://o/4"} {
+		assert.Equal(t, 1, f.count(u), "each item once: %s", u)
+	}
 }
 
 func TestLookahead_SkipsRecordsThatAreNotDue(t *testing.T) {
@@ -86,12 +88,21 @@ func TestLookahead_AdmitGateAndIgnoredInputs(t *testing.T) {
 	admit = true
 	assert.True(t, l.step(context.Background(), nil))
 	assert.True(t, l.step(context.Background(), nil), "the current item")
-	assert.False(t, l.step(context.Background(), nil), "data: items are never probed ahead")
+	assert.True(t, l.step(context.Background(), nil), "a data: item is settled once, with no network")
+	rec, err := l.Store.Get("data:,x")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Equal(t, StateOK, rec.State)
+	assert.False(t, l.step(context.Background(), nil), "its record keeps it off the walk")
 
-	big := make([]string, maxObservedItems+1)
+	// No size cap: a wall holds whatever the playlist resolved to.
+	big := make([]string, 5000)
+	for i := range big {
+		big[i] = "https://big.example/" + strconv.Itoa(i)
+	}
 	l.Observe(big, 0)
 	l.mu.Lock()
-	assert.Nil(t, l.sources, "an oversized snapshot is dropped, not retained")
+	assert.Len(t, l.sources, 5000, "a large snapshot is retained")
 	l.mu.Unlock()
 }
 
@@ -107,5 +118,34 @@ func TestLookahead_RunStopsOnContext(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+// F8 (PR #438 review, round on the single walk): held sources are
+// excluded INSIDE the due query, before its limit, so a run of them at the
+// head of the index cannot shadow an eligible off-wall record behind them.
+func TestLookahead_HeldSourcesNeverShadowTheSweep(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := newTableFetcher()
+	l := newTestLookahead(t, f, clock)
+	held := make([]string, 8)
+	for i := range held {
+		held[i] = "https://o/held" + strconv.Itoa(i)
+		_, err := l.Store.ApplyProbe(held[i], ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
+		require.NoError(t, err)
+		clock.Advance(time.Second)
+	}
+	const ninth = "https://o/ninth"
+	f.answers[ninth] = ok(200, "image/png", minimalPNG(1, 1), -1)
+	_, err := l.Store.ApplyProbe(ninth, ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
+	require.NoError(t, err)
+	clock.Advance(RecheckBroken + time.Minute)
+	for _, src := range held {
+		l.hold(src, clock.t.Add(probeHold))
+	}
+	require.True(t, l.step(context.Background(), nil), "the ninth, unheld record is swept")
+	assert.Equal(t, 1, f.count(ninth))
+	for _, src := range held {
+		assert.Zero(t, f.count(src), "a held source is not re-dialed")
 	}
 }

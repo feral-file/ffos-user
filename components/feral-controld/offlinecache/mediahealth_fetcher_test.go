@@ -179,9 +179,12 @@ func TestMediaHealth_KeyAndDataURIParityWithOfflineCache(t *testing.T) {
 	}
 }
 
+// dataURIParses reports whether mediahealth read the URI's metadata: the
+// declared type is set exactly then. The verdict itself is not the parse —
+// a parsed URI whose payload is not what it declares is dead too.
 func dataURIParses(uri string) bool {
 	res := (&mediahealth.Probe{}).ProbeOne(context.Background(), uri)
-	return res.Verdict == mediahealth.VerdictInline
+	return res.Declared != ""
 }
 
 // F4 (PR #438 review): a redirect hop's signed URL must not survive into the
@@ -393,4 +396,28 @@ func TestMediaHealthFetcher_RedirectToHTTPSPaysTheTLSWeight(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, go_http.StatusOK, resp.Status)
 	assert.True(t, one.TryAcquire(1))
+}
+
+// Resolution failures short of NXDOMAIN are their own class, so the store
+// can count a streak of them; NXDOMAIN stays definitive and a non-DNS
+// timeout stays plain network weather.
+func TestClassifyFetchError_DNSClasses(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want mediahealth.FetchErrorKind
+	}{
+		{"nxdomain", &net.DNSError{Err: "no such host", Name: "a.example", IsNotFound: true}, mediahealth.FetchErrDNS},
+		{"servfail", &net.DNSError{Err: "server misbehaving", Name: "a.example", IsTemporary: true}, mediahealth.FetchErrDNSUnresolved},
+		{"lookup timeout", &net.DNSError{Err: "i/o timeout", Name: "a.example", IsTimeout: true}, mediahealth.FetchErrDNSUnresolved},
+		{"wrapped servfail", &net.OpError{Op: "dial", Err: &net.DNSError{Err: "server misbehaving", Name: "a.example"}}, mediahealth.FetchErrDNSUnresolved},
+		{"deadline", context.DeadlineExceeded, mediahealth.FetchErrTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fe, ok := errors.AsType[*mediahealth.FetchError](classifyFetchError(tc.err))
+			require.True(t, ok)
+			assert.Equal(t, tc.want, fe.Kind)
+		})
+	}
 }

@@ -20,6 +20,9 @@ Two rules bind every writer:
 1. **No observation hides a work.** The device skips an item only on its own
    conclusive verdict: a `broken` record inside its recheck window. A transient
    failure (429, 5xx, timeout, guard refusal) is never persisted as a verdict.
+   The one exception is corroborated over time: an origin that gives no
+   usable answer on every counted attempt for a day, each while the device
+   reached other origins, is broken (see the unreachable streak below).
    L1 verdicts are reported as `suspect` and never skip anything. No central
    block list is ever consumed.
 2. **Source URLs stay on the device.** The record holds the source because
@@ -52,6 +55,8 @@ cache uses (`offlinecache.SourceKey`), pinned equal by a test.
 | broken | after 24 h; after 7 consecutive broken rechecks, after 7 d | the hint keeps skipping until a reprobe or a play success heals it |
 | ok | after 7 d | a play success refreshes it for free |
 | transient (any state) | next attempt after 1 h (`retryAfter`) | the stored state is untouched; an expired broken verdict is NOT revived — the hold delays the probe, never the skip |
+| unreachable streak (`unreachableSince`, `unreachableFailures`) | with the transient hold | broken (`unreachable` → `source_unreachable`, or `dns` → `source_missing` for a DNS-only failure; layer `l0`) once at least 3 counted failures span 24 h; any answer ends the streak |
+| broken, from the play layer | after 24 h; after 7 consecutive re-conclusions, after 7 d | the same backoff as L0, so a work that stays dead costs one failed play a week, not a day |
 
 A broken record **past** its recheck window is still shown to the app as
 broken (it is the last thing observed) but no longer hints and no longer
@@ -62,10 +67,11 @@ counts toward rejecting a cast.
 | category | reasons | state |
 |---|---|---|
 | `source_missing` | `http_status` 404/410/400-class, `dns` | broken |
+| `source_unreachable` | `unreachable` (a day of attempts with no usable answer, each while other origins answered — including a gateway's unconfirmed 404 for a content-addressed source), and a play-layer `render_detect` 404/410-class answer for a content-addressed source (one gateway's answer; the play layer has no second gateway to confirm absence) | broken |
 | `source_blocked` | the player's own HEAD saw 401/403 (`render_detect` with that code). L0 treats those as transient because its request identity is not the kiosk's | broken, corroborated |
 | `not_media` | `type_mismatch`, `directory_listing`, `known_error_page` | broken |
 | `corrupt_file` | `zero_length`, `truncated`, `container_invalid` | broken |
-| `unsupported` | `unsupported_scheme`, `data_uri_invalid`, `transport` (reserved) | broken |
+| `unsupported` | `unsupported_scheme`, `data_uri_invalid`, `unsupported_mime_type` (a `data:` URI declaring a type the kiosk cannot display), `transport` (reserved) | broken |
 | `render_failed` | `render_detect`, `render_load`, `render_decode`, `render_watchdog`, `render_exhausted` | broken, corroborated |
 | `render_blank` | `render_blank`, `render_known_bad` (L1) | suspect |
 | `device_limit` | `webgl_lost` | recorded on `plays.lastFail` only; never a verdict |
@@ -92,7 +98,17 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   kiosk interceptor does — on the initial URL and on **every redirect hop**
   (the interceptor evaluates its policy per request), each re-pointed before
   the guard and the dial, so a source that redirects onto a retired gateway
-  is judged at the replacement, not at the retired gateway's 404.
+  is judged at the replacement, not at the retired gateway's 404. A **bare
+  CID with a query** (`/ipfs/<cid>?fxhash=…`, the shape fxhash gentk v1/v2
+  metadata carries) is dialed as `/ipfs/<cid>/?fxhash=…` on any host, the
+  way the kiosk loads it: every gateway measured 301s the bare shape to
+  `/<cid>/` and drops the query, the sketch reads a null hash, and the
+  iframe still reports ready (PR #438 review). The kiosk interceptor heals
+  the same shape with a **synthetic 301** to the slashed URL on a navigation
+  (a `url` override would keep the document URL bare and send `./bundle.js`
+  to `/ipfs/bundle.js`); a subresource of the shape takes the plain
+  override. The gateway fallback (below) dials the slashed form too. One
+  parser decides the shape for all three: `contentpath.SlashBeforeQuery`.
 - A 206 is trusted only with a `Content-Range` starting at byte 0; otherwise,
   and on 416, and when a valid prefix is shorter than 512 bytes and shorter
   than the resource, the probe retries once without `Range`. A 206 to an
@@ -101,7 +117,104 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   407, 408, 416, 429 and every 5xx → transient; a 3xx that survives the
   redirect chain → transient. NXDOMAIN → dead (`dns`); every other transport
   failure → transient, including a deadline that expires mid-body (judged
-  before any byte count: a timed-out short read is not truncation). Fetch
+  before any byte count: a timed-out short read is not truncation).
+- **Gateway fallback for IPFS and Arweave.** On a content-addressed path —
+  `/ipfs/<cid>` on any host, or `/<43-character transaction id>` on an
+  Arweave gateway, as the `contentpath` package parses them: slash runs and
+  repeated `ipfs` segments before the id are collapsed (`/ipfs//<cid>`,
+  `/ipfs/ipfs/<cid>`), the same parser the kiosk rewrite uses, so the probe
+  and the wall agree on which sources are content-addressed — a 404 or 410 means "this gateway could not retrieve it",
+  not "it does not exist": on the office FF1, 7 of 60 healthy works in a
+  labeled fixture read 404 from arweave.net while ar-io.dev served them. So
+  the probe tries the network's other configured gateways
+  (`mediaHealth.ipfsGateways`, `mediaHealth.arweaveGateways`), in order, at
+  most two, inside the same item deadline, stopping at the first that serves:
+  - **one serves it:** its bytes are judged by the normal content rules.
+    Valid media is `ok` with `servedBy` = that gateway, and the kiosk loads
+    the work through it (below), so the verdict and the wall agree;
+  - **its content rule fails:** that is a verdict about the content, and it
+    stands;
+  - **every gateway says 404/410:** `broken`;
+  - **nothing else answers** — a 5xx, a timeout, or any other status (402,
+    403, 429: the gateway's policy, never the content's) — **or no other
+    gateway is configured for the network:** a transient `server_error`
+    feeding the unreachable streak; one gateway's 404 is never a verdict on
+    its own. A deadline that runs out during the fallback at cast records
+    nothing, like any cast timeout.
+
+  The confirmation is the request the kiosk makes — **no `Range` header**,
+  the body read capped at the probe window — not the probe's ranged read.
+  ar-io.dev served a 32 KiB range of a 195 MB video and answered the
+  whole-file load with `402 Payment Required` (an x402 offer for "data
+  egress"); on the ranged read it looked like a serving gateway, and every
+  item routed through it failed to play (office FF1, 2026-11-06). The
+  shipped Arweave list is therefore `arweave.net` alone — a fallback for
+  sources on any other Arweave gateway, none for sources on arweave.net
+  itself — and ar-io.dev was dropped. Add a fallback only after a whole-file
+  load of a large work has been seen to succeed from the device.
+
+  **The kiosk applies it.** The kiosk's request interceptor (`uarewrite`)
+  asks the store for every `/ipfs/` request on any host and every request on
+  an Arweave gateway: when the content's id has a `servedBy` record, the
+  request goes to the same path and query on that gateway, invisibly to the
+  page — the source, the offline-cache identity and every log keep the
+  original URL, and a work's own files under the same CID or transaction
+  follow. The override targets only a configured gateway origin plus the
+  request's own path and query, never a URL from playlist content. It is
+  indexed by route — the content id plus the gateway the source names — with
+  one entry per source that needs it, in the store's `servedBy` bucket
+  (mirrored in memory for the per-request lookup). A route stays while any
+  source on it still needs the fallback, so one source recovering never
+  drops another's — another file under the same CID, or the same CID named
+  through another gateway — and it survives a restart. The choice is per
+  source, not per route: two files under one CID can need different
+  fallbacks (the first gateway serves `a.html` but answers 404 for
+  `b.html`, which the second serves), so a request that is a recorded
+  source loads through the gateway that served that source — its own
+  gateway included: every ok content-addressed source is indexed, with `""`
+  for "its own gateway", so a source that recovered while another file
+  under the CID still needs a fallback is never mistaken for an untied
+  request — a work's own files follow the document that embeds them (the
+  request's `Referer`, which a same-origin subresource carries in full), and
+  only a request nothing ties to a source takes the route's stable
+  best-effort fallback. Only routes with a fallback are held in memory;
+  the rest stay in the bucket, so memory is bounded by the sources that
+  need a fallback. The override only ever targets a gateway still on the
+  operator's lists: at startup a recorded fallback that is no longer
+  configured is dropped and its source made due, so removing a gateway
+  from the config (as ar-io.dev was) takes effect on the next restart, not
+  when the 7-day ok verdict expires. Every probe still
+  tries the source's own gateway first, so when it serves again `servedBy`
+  clears and the kiosk goes back to it. A `broken` conclusion from ANY
+  layer clears it too: a play-layer verdict over a work "served by" a
+  fallback must not leave the kiosk loading the gateway the verdict has just
+  proven does not play it. Without the interceptor
+  (`gatewayUserAgent.enabled: false`) a fallback gateway serving a work is
+  reported as a gateway failure (`server_error`, an answer that ends the
+  streak) instead of `ok`: the verdict never claims what the wall cannot do.
+  The kiosk observer matches a request loaded through a fallback gateway to
+  its wall source by content id.
+- **Unreachable streak.** An attempt in which the origin gives no usable
+  answer is transient on its own, because it can be the device's network.
+  Three classes count: DNS short of NXDOMAIN (SERVFAIL, a resolver timeout —
+  expired domains answer SERVFAIL on most resolvers), no response at all (a
+  timeout before any header, a refused or reset connection, a TLS failure —
+  a retired gateway whose DNS still points at servers that drop
+  connections), and a 5xx without `Retry-After`. Any answer ends the
+  streak, including a 401/403/429, a 503 that names a `Retry-After`, and a
+  deadline that expires mid-body, so a slow but alive origin never
+  concludes. An attempt counts only when the device demonstrably reaches
+  other origins: controld's internet verdict is online, or a DIFFERENT host
+  gave an end-to-end answer (a 2xx–4xx, or a definitive NXDOMAIN) within the
+  last hour. The evidence is read before the attempt's own answer is added,
+  the failing host never vouches for itself, and a 5xx is never evidence: a
+  captive portal or broken proxy answers 502 for every host. At 3 counted attempts spanning 24 h
+  the record is broken (`unreachable`, or `dns` when the last attempt was a
+  DNS failure) with the normal broken recheck, so it heals on the first
+  answer. A probe cut short by the cast pass's own 10 s ceiling, rather
+  than its 5 s item deadline, records nothing at all: running out of our
+  own budget says nothing about the source, and an unrecorded item is
+  reached by the lookahead within seconds. Fetch
   errors carry redacted URLs, so a signed redirect hop never reaches a log
   line or a stored `lastError`.
 - Content rules, first failing rule wins, anything ambiguous is healthy:
@@ -111,12 +224,32 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   lone substring), `known_error_page` (operator markers,
   `mediaHealth.knownBadPageMarkers`), `type_mismatch` (declared image/video/
   audio sniffed as html/plain/json; text-based media types exempt),
-  `container_invalid` (PNG, GIF, WebP, JPEG headers).
-- `data:` URIs never dial: well-formed is inline (never recorded),
-  proven-malformed is dead and recorded like any other broken source, so it
-  gets a hint; the sweep re-settles such a record without network.
-- Everything the pass settles outside the worker pool (malformed `data:`
-  URIs, a shared verdict fanned out to wire-identical siblings) is written in
+  `container_invalid` (PNG, GIF, WebP, JPEG headers). The JPEG walk reads
+  segments the way Chromium's decoder does: stray bytes between segments
+  are skipped to the next marker (libjpeg warns and decodes on), and only a
+  segment length below 2 is corrupt. Rejecting stray bytes outright marked
+  two complete images `corrupt_file` and skipped them (38 bytes of an
+  orphaned Photoshop block after the Exif segment, office FF1, 2026-11-06).
+- `data:` URIs never dial. Proven-malformed metadata is dead. A well-formed
+  one has its payload judged in place, by ff-indexer-v2's `data:` rule with
+  Chromium's decoding (percent-decoding, then forgiving base64; only the
+  first probe window of a large payload is decoded): a declared type the
+  kiosk cannot display (anything but image/video/audio/text/model,
+  `application/json`, `application/pdf`) is `unsupported_mime_type`, an
+  empty payload `zero_length`, a payload whose sniffed type does not match
+  the declared one `type_mismatch`. The kiosk renders a `data:` URI by its
+  declared type, so a mismatch is what the wall shows: an SVG declared
+  `application/json` shows the JSON viewer, a poem declared `text/markdown`
+  a blank frame, and the player reports both as `ready`. Two allowances
+  for what Chromium draws anyway: an image/video/audio type matches any
+  sniffed type in the same family (those elements sniff), and `text/html`
+  matches any text, XML or JSON body. A payload that passes is recorded
+  `ok` (layer `l0`); one that does not decode is a reasoned inconclusive (a
+  hold, no verdict). Every verdict is recorded and hinted like any other;
+  the cast pass writes a passing one only when its record is due, and the
+  lookahead walk and the sweep settle due `data:` records without
+  network.
+- Everything the pass settles outside the worker pool (`data:` URIs, a shared verdict fanned out to wire-identical siblings) is written in
   one store transaction after the request barrier, so a playlist repeating
   one source thousands of times costs one request and one write.
 
@@ -124,15 +257,37 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
 
 `commandrouter`'s `displayPlaylist` runs `mediahealth.Prober.Preflight` over
 the resolved sources after DP-1 resolution and before the playback lock. Shape
-kept from the preflight: a fixed worker pool (16), wire-identical sources
-probed once (fragment-stripped key — the request is shared, the verdict is
-recorded under every variant's own source, and a variant with its own stored
-verdict keeps it), a per-pass budget of 256 distinct wire URLs, a 5 s per-item deadline covering guard DNS, a 10 s phase ceiling, the
-2048-item skip, and `displayAt` playlists skipped entirely. What changed: no
-early exit on the first alive source — every source inside the budget is
-probed and recorded — and a source with a **conclusive stored verdict**
-(broken or ok inside its window) is answered from the store without a request,
-so a playlist seen before costs no network at cast.
+kept from the preflight: a fixed worker pool, wire-identical sources probed
+once (fragment-stripped key — the request is shared, the verdict is recorded
+under every variant's own source, and a variant with its own stored verdict
+keeps it), a per-pass budget of 256 distinct wire URLs, a 5 s per-item
+deadline covering guard DNS, a 10 s phase ceiling, and `displayAt` playlists
+skipped entirely. There is no item cap in front of the pass: the refresher
+re-resolves a playlist with no item limit, so the wall holds everything the
+query returns and is judged whole; the pass bounds its own work by probing
+only its first 24 items. What changed: no early exit on the
+first alive source — every source the pass reaches is probed and recorded —
+and a source with a **conclusive stored verdict** (broken or ok inside its
+window) is answered from the store without a request, so a playlist seen
+before costs no network at cast.
+
+The pass is paced, not a burst. It probes the **first 24 sources in play
+order** (`castItems`) that need a request with **4 workers**
+(`castConcurrency`) and at most **2 in flight per host** — a playlist served
+by one CDN runs at 2, whatever the pool — then hands the rest of the wall to
+the lookahead. Items beyond the pass are unknown at cast: no record, no hint,
+fail-open; their hint rides the next push once the lookahead has reached them.
+The all-dead rejection keeps its reach: while **every** source seen so far is
+dead (a stored alive verdict, an inline item or an inconclusive answer ends
+it) the pass continues batch by batch up to the budget, so 200 dead items are
+still refused and 24 dead items in front of a live one still play.
+
+A host that answers **429 or 503** is cooled for its `Retry-After`
+(60 s when it sends none, never more than 1 h) in a `HostLimiter` the pass and
+the lookahead share: sources on a cooled host are stepped over without a
+request and without a record (unknown, not held), and the probed source's own
+transient hold is the origin's `Retry-After` bounded by the usual hour instead
+of a flat hour.
 
 The admission rule is unchanged: the cast is rejected with `sourceUnreachable`
 only when EVERY item is dead (now including a conclusive broken record), and
@@ -142,17 +297,33 @@ by URL.
 
 ### The lookahead
 
-From the status poller's playback observer, `mediahealth.Lookahead` probes the
-next 8 items after the current index (then the current item itself, so a
-one-item playlist still gets its recheck) whose record is missing or due, one
-at a time with a 1 s gap, and — when nothing is ahead — one due record not on
-the wall (excluded inside the index scan, so on-wall rows never shadow them)
-under a budget of 20 per hour, so a fixed source heals without being cast
-again and a 100k-record store never becomes 100k probes a day. A source the
-worker just probed is left alone for 1 h whatever its record says: a probe the
-source guard or the URL-length limit refuses writes no record (a policy
-objection is never a verdict), so without that hold it would stay due and
-block everything behind it. New hints ride the next push.
+From the status poller's playback observer, `mediahealth.Lookahead` runs one
+rule: starting after the current item, walk the wall in play order and probe
+the first source that is **due** — no record, an expired verdict, or a passed
+retry hold. The next items come first because they are first in the walk; the
+rest of the wall follows, and the current item comes last (already on screen,
+but a one-item playlist would otherwise never get its recheck). A cursor
+remembers where the walk stopped, so each step reads one chunk of records,
+not the whole wall, and resets when the playlist or the index changes. There
+is no cap on the wall. With nothing due on the wall, the background sweep
+takes one due record **not** on the wall, under a budget of 20 per hour, so a
+fixed source heals without being cast again and a 100k-record store never
+becomes 100k probes a day.
+
+Pace: the next probe starts as soon as the previous one finishes — no gap.
+Politeness is the shared `HostLimiter` alone: at most 2 in flight per host
+(the walk itself is one request at a time), and a host answering 429/503 is
+paused for its `Retry-After`; a source on a paused host is stepped over, not
+held. Each background request may take up to 30 s
+(`Prober.BackgroundItemTimeout`), not the cast pass's 5 s: nothing waits on
+it, and a short deadline only turned slow answers into timeouts (arweave.net
+serves some 404 pages after 7–27 s). A probe that wrote a record is governed
+by that record alone, so a 429 with `Retry-After: 30` is due again after 30 s.
+A probe that wrote **no** record is held in memory for 1 h: the source guard
+or the URL-length limit refuses some sources without a record (a policy
+objection is never a verdict), and so does a write the store refuses. Without
+the hold such a source would stay due and block everything behind it. New
+hints ride the next push, or the hint-only push below.
 
 ## The hint (controld → player): `mediaHealth` on `displayPlaylist`
 
@@ -174,7 +345,55 @@ interception would show — the same reason the cast rescue exists). The player
 skips a hinted item in its timeline without mounting it, keeps it in `items`,
 and reports `{kind:"skip", stage:"hint"}` in its outcome ring.
 
+### The hint-only push: `setMediaHealth`
+
+A verdict reached **between** pushes (the lookahead, the sweep, the outcome
+drain) would otherwise reach the player only on the next cast, cutover or
+refresh, and a static inline cast is never re-pushed. Since the cast pass
+probes only its first 24 items, that is where most of a long wall's verdicts
+land. `mediahealth.HintPusher` closes the gap with a player command that
+replaces only the held hint map:
+
+```json
+{"command": "setMediaHealth", "request": {"castSeq": 7, "mediaHealth": {"<item.source>": {"state": "broken", "category": "source_missing", "reason": "http_status"}}}}
+```
+
+- **Player side.** Replace semantics: the map is the full hinted set for the
+  wall, `{}` when nothing is broken any more, so a heal reaches the player as
+  well. Applied only when `castSeq` is the outcome ring's current generation,
+  else `{ok:false, error:"staleCast"}` with the held map untouched. The work on
+  screen is never unmounted; the map is honoured at the next selection under
+  the existing rules. Reply `{ok:true, skippedIndices}`.
+- **Gate.** Sent only when the manifest's `mediaHealth` entry, still version
+  1, lists `"commands": ["setMediaHealth"]`. Controld gates the contract on
+  version 1 exactly, so a version bump would turn hints off on fielded
+  daemons; the command is detected by name instead.
+- **When.** Every 15 s the pusher recomputes the map for the wall with the
+  same `Service.Hints` every push uses and sends it when it differs from what
+  the player is believed to hold. Recomputing rather than listening for store
+  writes also catches a verdict that **expires** past its recheck window. The
+  belief is the map the last push path attached, or the last delivered
+  push, bound to the cast generation. An unknown belief sends the current
+  map, **the empty one included**: after a controld restart under a
+  surviving page, the page may still hold hints that have since healed or
+  expired, and only an explicit empty replacement clears them. That costs
+  one send per cast with no belief, which replace semantics make harmless. Nothing is sent
+  in the first 15 s after a new cast, since the cast's push carried the map.
+- **Failure.** `staleCast` waits for the next poll's generation. A transport
+  error or a reply that crossed a page generation change retries on the next
+  tick. Any other refusal parks the pusher until the next cast, so it never
+  loops against a player that does not implement the command.
+- **Internal.** `setMediaHealth` is tier `internal` and the command router
+  refuses it from a controller: only the daemon may install a skip map.
+
 ## The outcome ring (player → controld): `outcomes` on `checkStatus`
+
+Beside the ring, the same contract carries the player's own report of what
+it is skipping: `"skippedIndices": [1, 4]` — the indices into `items` the
+timeline is currently resolving past because of a hint (empty or absent when
+none; absent on a player without the contract). It is the one fact only the
+player knows, which hint map it holds, and it feeds `mediaHealth[i].skipped`
+(Status surfaces). Indices only, never sources. Live-only, like the ring.
 
 ```json
 "outcomes": {
@@ -217,7 +436,7 @@ player.
 | `webgl` | fail | device-local; recorded, never a verdict |
 | `exhausted` | fail | the retry budget was spent |
 | `hint` | skip | skipped on controld's hint |
-| `ready` | ok | `elapsedMs` = mount → ready |
+| `ready` | ok | `elapsedMs` = mount → ready; a verdict only for `image`, `video`, `audio`, `model` (see below) |
 
 **Corroboration.** One failure is recorded, not concluded. A record becomes
 `broken` (layer `play`) on a second failure in a distinct play, or on one
@@ -225,15 +444,58 @@ failure when an L0 broken verdict is already standing. A play is a run of
 consecutive failing entries for one source whose attempt counter does not go
 backwards; the run ends on another source, a success, a skip, or an
 `exhausted` entry. The several stages of one attempt (detect, load, retries,
-exhaustion) count once; the last stage stays as the diagnostic. A `ready` writes `ok`
-and heals a broken record: the wall itself is the strongest probe. Entries
-are applied in `seq` order, so a detect failure whose iframe fallback then
-rendered nets out to `ok`. Two classes never count: device-local failures
+exhaustion) count once; the last stage stays as the diagnostic. Only an
+entry that can count takes part in a run: a device-local entry
+(`detect`/`network`, `webgl`) is history only and never opens, continues or
+ends one. Otherwise the uncountable `network` entry a play often starts with
+opened the run and made every load timeout after it "the same play", so a
+work that never rendered counted nothing. A `ready` from
+a renderer that reports its own failures (`image`, `video`, `audio`, `model`)
+writes `ok` and heals a broken record: the wall itself is the strongest
+probe. A `ready` from an opaque embed (`iframe`, `object`, `pdf`) or with no
+`mediaType` is counted as a play but writes no verdict, heals nothing and
+leaves the record due: Chromium reports ready for its own error page inside
+an iframe, so that ready proves the mount, not the work, and L0 has to keep
+looking. A `ready` from an opaque embed that follows, in the same play, a
+content-type check refused with a definite 4xx (any 4xx but 405, 408 and
+416, which are about the check, not the resource) is the error page: it is
+neither a success nor a reset, so a work refused on every play (429, 403,
+404) concludes `broken` on its second play. A 401/403/407/429 seen by the
+kiosk itself is `source_blocked`. After any other content-type failure (a
+network failure, a 5xx, a 405) the fallback may well show the work, and its
+`ready` ends the run as before. Two classes never count: device-local failures
 (`webgl`, `detect`/`network`) and any failure observed while controld's own
 internet verdict is offline (or not yet known) — an outage says nothing about
 a source, and a verdict earned during one would be skipped before the play
-layer could ever heal it. A `ready` counts whatever the verdict says: a work
-that rendered from cache rendered.
+layer could ever heal it. A real-renderer `ready` counts whatever the verdict
+says: a work that rendered from cache rendered.
+
+### The kiosk navigation observer (controld sees the iframe's real status)
+
+A page may not learn anything about a cross-origin iframe's document, so the
+player reports `ready` for Chromium's own 404 page. DevTools is not bound by
+that rule. `offlinecache.KioskNavigationObserver` holds one passive CDP
+session to the kiosk — `Network.enable` only, no interception, nothing that
+can pause a frame — and reports the DOCUMENT load of every artwork frame to
+`Service.ObserveNavigation`: the final HTTP status, or Chromium's error text
+(`net::ERR_NAME_NOT_RESOLVED`, ...). The kiosk's root target reports the
+document request of every cross-origin iframe the player mounts, so one
+session is enough (verified on the office FF1). It is re-dialed on every
+primary-CDP reconnect, like the User-Agent rewrite, and closed with it.
+
+An observation is matched to a wall source by URL once the fragment and the
+player's own query params (`display_mode`) are stripped, from the current
+index forward. Then it is folded through the SAME play-run and corroboration
+rules as a ring entry: a status ≥ 400 is a `detect` failure with that status
+(404/410 → `source_missing`, or `source_unreachable` for a content-addressed
+source; 401/403/429 → `source_blocked`, 5xx →
+`render_failed`), a network error is a `load` failure with Chromium's reason,
+a canceled load (the player replacing or giving up on a frame) and a 2xx/3xx
+are ignored — a 2xx proves the mount, not the work. An observation never
+concludes on its own: two failed plays, or one over a standing L0 verdict,
+and only while the device is online. The observed 404 also marks the play
+refused, so the error page's `ready` that follows is neither a success nor a
+reset. `mediaHealth.kioskObserverDisabled: true` turns the observer off.
 
 Without the contract, controld falls back to inference: a `renderStatus == 3`
 sighting for the item at `index` counts as one failure per mount (stage
@@ -312,26 +574,87 @@ would hide real art, the worst outcome here.
   next night; the recheck of a suspect record is a recovery probe and uses
   the longer confirmation settle, as the indexer's healing probes do),
   stalled after 24 h. A real render of a `suspect` record heals
-  it to `ok` (layer `l1`), and so does a play success; an L0 success only
-  refreshes the record's L0 metadata and recheck — valid bytes say nothing
-  about a frame — while an L0 failure still outranks it. An L1 verdict never
-  touches a `broken` record, `recheckAfter` or `retryAfter`.
+  it to `ok` (layer `l1`), and so does a play success that proves a render
+  (an image, video, audio or model `ready`; an iframe's `ready` fires for a
+  blank frame too, so for an HTML work only the next L1 render heals it,
+  and the blank run is kept); an L0 success only refreshes the record's L0
+  metadata and recheck — valid bytes say nothing about a frame — while an
+  L0 failure still outranks it. An L1 verdict never touches a `broken`
+  record, `recheckAfter` or `retryAfter`, nor the gateway route: a
+  `suspect` record stays in the override index like an `ok` one, so a work
+  served by a fallback gateway keeps loading through it.
 - **Cap:** `maxPerNight` renders per local calendar day (default 200), one
   at a time.
 
 ## Status surfaces
 
 - `player_status` gains a controld-owned `mediaHealth` array, index-aligned
-  with `items`: `{"state":"ok"}`, `{"state":"unknown"}`,
-  `{"state":"broken","category":"…","reason":"…","layer":"l0"}` or
-  `{"state":"suspect","category":"render_blank","layer":"l1"}`. Nothing else is
-  pushed. The raw `outcomes` ring is stripped from the notification and from
-  direct `checkStatus` replies (hub and relayer): it carries item sources and
-  play history, and is consumed on the device only.
+  with `items`: `{"state":"ok","skipped":false}`, `{"state":"unknown",…}`,
+  `{"state":"broken","category":"…","reason":"…","layer":"l0","skipped":true}`
+  or `{"state":"suspect","category":"render_blank","layer":"l1",…}`. Two facts
+  per item, kept apart on purpose: `state` (with its category, reason and
+  layer) is **the last observation** this device made; `skipped` is whether
+  **the player is resolving past the item right now**, from the player's own
+  report of the hint map it holds (`skippedIndices` below). They differ in
+  four cases, and the app's "Skip" badge must come from `skipped` only:
+  an expired verdict (past `recheckAfter`: still reported `broken`, no longer
+  hinted), a source the offline cache can replay (hint dropped), a player
+  without the contract (nothing hinted), and push lag in either direction
+  (a verdict concluded mid-playlist reaches the player on the next push; a
+  record healed to `ok` is still skipped until then). When `state` is
+  `broken` and `skipped` is false, `unskipped` says which:
+  `expired` | `replayable` | `player` | `pending` (hinted now, push not yet
+  received — or the player chose to play it: repeat-one, an all-broken map).
+  `issue` (below) rides beside `state` when there is one.
+  Nothing else is pushed; freshness (`checkedAt`) stays on `getMediaHealth`.
+  The raw `outcomes` ring and `skippedIndices` are stripped from the
+  notification and from direct `checkStatus` replies (hub and relayer): they
+  are inputs, consumed on the device only.
 - `getMediaHealth` (controller tier, query class, no arguments) returns the
   whole playlist on screen: `{ok, status, items:[{index, id, title, state,
-  category, reason, layer, checkedAt, plays:{ok,fail}}], total, truncated,
-  castSeq}`. Bounded at 2048 rows. No source URLs.
+  category, reason, layer, skipped, unskipped, checkedAt, issue, issueSince,
+  nextCheckAt, failedPlays, plays:{ok,fail}}], total, truncated, castSeq}`,
+  `skipped`/`unskipped` by the same rule as the push. The empty request
+  returns the first 2048 rows (`truncated`); a request with `offset` (≥ 0),
+  `limit` (1–1000, default 500) or `filter` (`all` | `attention`: broken,
+  suspect, any `issue`, or skipped) is paged — `matched` counts the rows the
+  filter admits across the wall, `nextOffset` is present while more remain,
+  every row keeps its absolute `index`, and `castSeq` is the consistency
+  token (a change between pages means the wall changed). Anything else is
+  rejected: the storm gate dedupes on type + arguments, so the argument space
+  stays bounded by the playlist's page count. No source URLs.
+
+### Honest reporting of temporary failures: `issue`
+
+A temporary failure has no verdict, so it reads `state: unknown` — before this
+field, exactly like a source never checked. `issue` is the latest REAL
+attempt's problem, beside `state`, never instead of it. It is omitted while
+`state` is `broken` (the category says it) and when there is none.
+
+| `issue` | Set by | Cleared by |
+|---|---|---|
+| `no_answer` | a background probe (30 s) got no response: timeout, refused, reset, TLS | any answer, from a probe or the kiosk |
+| `dns` | the name did not resolve, short of NXDOMAIN (which is `broken` at once) | any answer |
+| `server_error` | a 5xx without `Retry-After` | any answer |
+| `rate_limited` | 429, or 503 with `Retry-After` | the next probe answering, or a kiosk 2xx |
+| `access_denied` | 401/403/407 to the probe (may be the probe's identity) | the next probe answering, or a kiosk 2xx |
+| `play_failed` | one counted failed play (player ring or kiosk observer) | any `ready` that ends the failure run (an opaque embed's included — not the error page shown after a refused content-type check), or the verdict at 2 |
+
+Rules: only real attempts write an issue — the cast pass's 5 s deadline
+expiring writes nothing at all (no record, no hold, no streak count; the
+lookahead's 30 s probe is the real attempt), and neither does an unreachable
+result while the device reached no other origin, nor a play while offline. A
+2xx document the kiosk observer sees clears a probe-side issue and ends the
+unreachable streak, but never writes `ok` (a 200 does not prove the work
+rendered) and never clears `play_failed`. A probe answer the vocabulary does
+not name (a 406, 408, 416) still clears a probe-side issue — the source
+responded — while an attempt with no answer during an outage leaves the
+standing issue as it is. `issueSince`
+is when the current run of trouble began, kept across a change of kind and
+reset when the issue clears. `nextCheckAt` is the later of the verdict's
+recheck and a transient hold. `failedPlays` counts the failed plays in the
+current failure run (a verdict at 2); any `ready` but the error page ends it. The raw `lastError` text never leaves the
+device: it carries the host and path.
 
 ## Store
 
@@ -355,7 +678,11 @@ cycle).
   "disabled": false,
   "knownBadPageMarkers": ["gateway time-out"],
   "probeMaxBytes": 32768,
-  "lookahead": 8,
+  "lookahead": 16,
+  "castItems": 24,
+  "castConcurrency": 4,
+  "ipfsGateways": ["https://ipfs.filebase.io", "https://gateway.pinata.cloud"],
+  "arweaveGateways": ["https://arweave.net"],
   "l1": {
     "enabled": false,
     "maxPerNight": 200,
@@ -376,9 +703,14 @@ data: capture the offending render once, record its pHash (the indexer's
 does not parse is logged and dropped.
 
 `disabled` is the kill switch: no store, no pass (casts forwarded unprobed,
-the pre-#304 behavior), no hints, no lookahead, no per-item status. The
+the pre-#304 behavior), no hints, no lookahead, no per-item status, no kiosk
+observer. `kioskObserverDisabled: true` turns off only the kiosk navigation
+observer (the one media-health piece that holds a socket to the kiosk). The
 retired `sourceProbe.disabled` is read as `mediaHealth.disabled`. `lookahead:
--1` disables the lookahead and the background sweep.
+-1` disables the lookahead and the background sweep. `castItems` and
+`castConcurrency` tune the cast-time pass for an origin that still
+rate-limits the defaults; the per-host cap (2 in flight) is fixed, and the
+lookahead has no gap — it is paced by the per-host rules alone.
 
 ## Boundaries
 

@@ -81,10 +81,33 @@ type MediaHealthConfig struct {
 	KnownBadPageMarkers []string `json:"knownBadPageMarkers,omitempty"`
 	// ProbeMaxBytes is the L0 window (default 32 KiB, the indexer's).
 	ProbeMaxBytes int `json:"probeMaxBytes,omitempty"`
-	// Lookahead is how many upcoming items are probed ahead during play
-	// (default 8); 0 keeps the default, a negative value disables the
-	// lookahead and the background sweep.
+	// Lookahead: a negative value disables the during-play lookahead and
+	// the background sweep. (It once sized the lookahead's window; the
+	// lookahead now walks the whole wall, so a positive value is accepted
+	// and ignored.)
 	Lookahead int `json:"lookahead,omitempty"`
+	// CastItems is how many sources, in play order, the cast-time pass
+	// probes before leaving the rest to the lookahead (default 24); 0
+	// keeps the default. CastConcurrency is that pass's worker pool
+	// (default 4). Both are operator tuning for an origin that still
+	// rate-limits the defaults; the per-host cap (2 in flight) is fixed.
+	CastItems       int `json:"castItems,omitempty"`
+	CastConcurrency int `json:"castConcurrency,omitempty"`
+	// KioskObserverDisabled turns off the passive kiosk navigation
+	// observer (the daemon's own CDP session reporting each artwork
+	// frame's HTTP status to the store). The kill switch for the one
+	// media-health piece that holds a socket to the kiosk.
+	KioskObserverDisabled bool `json:"kioskObserverDisabled,omitempty"`
+	// IPFSGateways / ArweaveGateways are the ordered fallback gateways for
+	// content-addressed sources (defaults mediahealth.DefaultIPFSGateways /
+	// DefaultArweaveGateways): after the source's own gateway answers
+	// 404/410, they are tried one by one, at most two, with the kiosk's
+	// own request shape (no Range), and the first that serves is the one
+	// the kiosk loads the work through. https origins only; an operator
+	// switches them without a release — but only to a gateway seen to
+	// serve a WHOLE large file from a device (ar-io.dev meters them).
+	IPFSGateways    []string `json:"ipfsGateways,omitempty"`
+	ArweaveGateways []string `json:"arweaveGateways,omitempty"`
 	// L1 is the nightly render probe (docs/media-health.md §6): an
 	// experiment, absent or enabled=false means it never runs.
 	L1 *MediaHealthL1Config `json:"l1,omitempty"`
@@ -425,19 +448,16 @@ type ControlConfig struct {
 	// Enabled decides only whether a device WITHOUT control state starts the
 	// protocol (creates its identity and offers invitations).
 	Enabled bool `json:"enabled"`
-	// Enforced is the §7.2 "enforced" switch (phase 2). It can only make a
-	// device stricter than enrolled, never less strict.
-	Enforced bool `json:"enforced"`
 	// Malformed records that the block (or one of its fields) did not
 	// decode; the affected fields read false.
 	Malformed bool `json:"-"`
 }
 
-// ControlTuning decodes the control block field by field, so one bad value
-// does not take the other with it. Absent means disabled and not enforced.
-// A malformed field reads false and sets Malformed: for Enabled that only
-// affects devices without control state, and for Enforced false is still
-// the enrolled policy, so both degrade safely.
+// ControlTuning decodes the control block field by field. Absent means
+// disabled. A malformed field reads false and sets Malformed: for Enabled
+// that only affects devices without control state, so it degrades safely.
+// Unknown keys are ignored: a stale "enforced" in an older controld.json
+// (the state was removed by feral-file#3551) still parses.
 func (c *Config) ControlTuning(logger *zap.Logger) ControlConfig {
 	var t ControlConfig
 	if len(c.Control) == 0 || string(c.Control) == "null" {
@@ -447,7 +467,7 @@ func (c *Config) ControlTuning(logger *zap.Logger) ControlConfig {
 	if err := json.Unmarshal(c.Control, &fields); err != nil {
 		t.Malformed = true
 	}
-	for name, dst := range map[string]*bool{"enabled": &t.Enabled, "enforced": &t.Enforced} {
+	for name, dst := range map[string]*bool{"enabled": &t.Enabled} {
 		raw, ok := fields[name]
 		if !ok {
 			continue

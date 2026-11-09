@@ -48,33 +48,9 @@ type PlayerStatus struct {
 	Items          *[]dp1playlist.PlaylistItem `json:"items,omitempty"`
 	Ok             bool                        `json:"ok,omitempty"`
 	Error          *string                     `json:"error,omitempty"`
-	DeviceSettings *struct {
-		// Composition is the player's committed showing after DP-1 merging
-		// and ephemeral Control Center writes, not persisted machine defaults.
-		// Keep margin's DP-1 number (pixels) or string (CSS) representation.
-		// ShowingKey is a random player-generated UUID, never a source URL.
-		ShowingKey          *string         `json:"showingKey,omitempty"`
-		CompositionRevision *uint64         `json:"compositionRevision,omitempty"`
-		Margin              json.RawMessage `json:"margin,omitempty"`
-		Background          *string         `json:"background,omitempty"`
-		Scaling             *string         `json:"scaling,omitempty"`
-		// Framing is the saved device preference (artwork, fit, fill), separate
-		// from effective Scaling. Absence keeps unsupported players identifiable.
-		Framing     *string `json:"framing,omitempty"`
-		Orientation *string `json:"orientation,omitempty"`
-		// Device-level default playlist item duration in seconds, set via the
-		// updateDefaultDuration cast command. Absent means "auto" (no
-		// override). Must round-trip here or this typed re-marshal drops it
-		// from player_status notifications before controllers can read it.
-		DefaultDuration *float64 `json:"defaultDuration,omitempty"`
-		// Device-level tombstone (museum label) state: "on", "off", or
-		// "timed". Absent means the player never had one set and falls back
-		// to "timed". Same round-trip requirement as DefaultDuration — ff-app
-		// reads it to show the tombstone control's current selection.
-		Tombstone *string `json:"tombstone,omitempty"`
-	} `json:"deviceSettings,omitempty"`
-	LoopMode *LoopMode `json:"loopMode,omitempty"`
-	Shuffle  *bool     `json:"shuffle,omitempty"`
+	DeviceSettings *PlayerDeviceSettings       `json:"deviceSettings,omitempty"`
+	LoopMode       *LoopMode                   `json:"loopMode,omitempty"`
+	Shuffle        *bool                       `json:"shuffle,omitempty"`
 	// SignatureStatus is controld-owned (the player never sends it): the DP-1
 	// signature verdict of the playlist currently on screen, "valid",
 	// "invalid", or "unsigned" (feral-file/ffos-user#307). Attached by
@@ -115,6 +91,13 @@ type PlayerStatus struct {
 	// digested per-item verdicts (MediaHealth below) are what controllers
 	// get.
 	Outcomes *mediahealth.Outcomes `json:"outcomes,omitempty"`
+	// SkippedIndices is the player's own report, under the same contract,
+	// of the item indices it is currently resolving past because of a
+	// hint — the one fact only the player knows (which hint map it
+	// holds). Absent on a player without the contract. Stripped from the
+	// notification like Outcomes; it reaches controllers digested, as
+	// MediaHealth[i].skipped.
+	SkippedIndices []int `json:"skippedIndices,omitempty"`
 	// MediaHealth is controld-owned, same contract as SignatureStatus and
 	// Overlay (the player never sends it; whatever arrived is dropped): one
 	// entry per element of Items, in the same order, with this device's
@@ -122,6 +105,47 @@ type PlayerStatus struct {
 	// `suspect`, or `unknown`). Set only from the item-health source wired by
 	// main; omitted when none is wired or the lookup fails.
 	MediaHealth []mediahealth.ItemHealth `json:"mediaHealth,omitempty"`
+}
+
+// PlayerDeviceSettings is PlayerStatus.DeviceSettings' shape: a mix of
+// player-reported display/composition state and controld-owned device-level
+// overrides. Named (rather than left as the inline anonymous struct it used
+// to be) so annotateSeriesPlayback below can allocate a fresh one when a
+// reply carries none of these fields at all, without duplicating the field
+// list.
+type PlayerDeviceSettings struct {
+	// Composition is the player's committed showing after DP-1 merging
+	// and ephemeral Control Center writes, not persisted machine defaults.
+	// Keep margin's DP-1 number (pixels) or string (CSS) representation.
+	// ShowingKey is a random player-generated UUID, never a source URL.
+	ShowingKey          *string         `json:"showingKey,omitempty"`
+	CompositionRevision *uint64         `json:"compositionRevision,omitempty"`
+	Margin              json.RawMessage `json:"margin,omitempty"`
+	Background          *string         `json:"background,omitempty"`
+	Scaling             *string         `json:"scaling,omitempty"`
+	// Framing is the saved device preference (artwork, fit, fill), separate
+	// from effective Scaling. Absence keeps unsupported players identifiable.
+	Framing     *string `json:"framing,omitempty"`
+	Orientation *string `json:"orientation,omitempty"`
+	// Device-level default playlist item duration in seconds, set via the
+	// updateDefaultDuration cast command. Absent means "auto" (no
+	// override). Must round-trip here or this typed re-marshal drops it
+	// from player_status notifications before controllers can read it.
+	DefaultDuration *float64 `json:"defaultDuration,omitempty"`
+	// Device-level tombstone (museum label) state: "on", "off", or
+	// "timed". Absent means the player never had one set and falls back
+	// to "timed". Same round-trip requirement as DefaultDuration — ff-app
+	// reads it to show the tombstone control's current selection.
+	Tombstone *string `json:"tombstone,omitempty"`
+	// SeriesPlayback is controld-owned, same drop-then-set contract as
+	// Overlay/SignatureStatus below: the player never sends this (it has no
+	// concept of a series-level device override), so a reply that carries
+	// one is dropped and the field is set only from annotateSeriesPlayback
+	// from the commandrouter-owned seriesplayback.Store. nil means no device
+	// override is set (the series' own document/catalog default applies) —
+	// ff-app reads this the same way it reads Tombstone/DefaultDuration, to
+	// show the series-playback control's current selection.
+	SeriesPlayback *dp1.SeriesPlaybackMode `json:"seriesPlayback,omitempty"`
 }
 
 // OverlayOwner identifies which subsystem's overlay.Painter currently owns
@@ -267,6 +291,13 @@ type Poller interface {
 	// exactly: set once at wiring time before Start, single writer,
 	// nil-safe (no-op, which is what an unwired build leaves it as).
 	SetOverlaySource(fn func() *Overlay)
+	// SetSeriesPlaybackSource registers the function pollPlayerStatus asks
+	// for the current device-level series-playback override (see
+	// PlayerDeviceSettings.SeriesPlayback). Called on every successful
+	// checkStatus round-trip, mirroring SetOverlaySource's contract exactly:
+	// set once at wiring time before Start, single writer, nil-safe (no-op,
+	// which is what an unwired build leaves it as).
+	SetSeriesPlaybackSource(fn func() *dp1.SeriesPlaybackMode)
 }
 
 // poller handles periodic polling of both player status via CDP and device status
@@ -332,7 +363,11 @@ type poller struct {
 	// per-item media verdicts for the player's item list
 	// (PlayerStatus.MediaHealth). Same single-writer contract as the
 	// fields above; nil omits the field.
-	itemHealthSource func(items []dp1playlist.PlaylistItem) []mediahealth.ItemHealth
+	itemHealthSource func(items []dp1playlist.PlaylistItem, skipped []int) []mediahealth.ItemHealth
+	// seriesPlaybackSource, when set (SetSeriesPlaybackSource), resolves the
+	// current device-level series-playback override. Same single-writer
+	// contract as overlaySource.
+	seriesPlaybackSource func() *dp1.SeriesPlaybackMode
 }
 
 func NewPoller(
@@ -460,8 +495,9 @@ func SetPlaybackObserver(p Poller, fn func(*PlayerStatus)) {
 // (PlayerStatus.MediaHealth) before Start. Package-level and type-asserted,
 // like SetPlaybackObserver, so the Poller interface and its mocks stay
 // untouched. The callback runs on the poller with the reply's item list and
-// returns one entry per item or nil (omit the field).
-func SetItemHealthSource(p Poller, fn func(items []dp1playlist.PlaylistItem) []mediahealth.ItemHealth) {
+// the player's own skipped indices, and returns one entry per item or nil
+// (omit the field).
+func SetItemHealthSource(p Poller, fn func(items []dp1playlist.PlaylistItem, skipped []int) []mediahealth.ItemHealth) {
 	if concrete, ok := p.(*poller); ok {
 		concrete.itemHealthSource = fn
 	}
@@ -473,6 +509,10 @@ func (s *poller) SetVerificationLookup(fn func(id, url string) (string, bool)) {
 
 func (s *poller) SetOverlaySource(fn func() *Overlay) {
 	s.overlaySource = fn
+}
+
+func (s *poller) SetSeriesPlaybackSource(fn func() *dp1.SeriesPlaybackMode) {
+	s.seriesPlaybackSource = fn
 }
 
 func (s *poller) SuppressPlayerNotifications(suppress bool) {
@@ -579,6 +619,7 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	s.annotateSignatureStatus(playerStatus)
 	s.annotateOverlay(playerStatus)
 	s.annotateMediaHealth(playerStatus)
+	s.annotateSeriesPlayback(playerStatus)
 
 	lightweightPlayerStatus := s.lightweightPlayerStatus(playerStatus)
 
@@ -637,11 +678,39 @@ func (s *poller) annotateMediaHealth(playerStatus *PlayerStatus) {
 	if s.itemHealthSource == nil || playerStatus.Items == nil || len(*playerStatus.Items) == 0 {
 		return
 	}
-	health := s.itemHealthSource(*playerStatus.Items)
+	health := s.itemHealthSource(*playerStatus.Items, playerStatus.SkippedIndices)
 	if len(health) != len(*playerStatus.Items) {
 		return
 	}
 	playerStatus.MediaHealth = health
+}
+
+// annotateSeriesPlayback fills PlayerStatus.DeviceSettings.SeriesPlayback
+// from the series-playback source, or leaves it nil (omitted) when nothing
+// is wired or no device override is set. Same drop-then-set contract as
+// annotateOverlay: the reply was decoded straight into PlayerStatus, so a
+// player (or a spoofed reply) could have supplied this field too, even
+// though the player has no actual concept of it — it is controld-owned.
+//
+// DeviceSettings itself may be nil if the reply carried none of its other
+// fields either; a non-nil override must not be dropped just because this
+// round's reply happened to omit everything else under deviceSettings, so a
+// PlayerDeviceSettings is allocated here rather than skipped.
+func (s *poller) annotateSeriesPlayback(playerStatus *PlayerStatus) {
+	if playerStatus.DeviceSettings != nil {
+		playerStatus.DeviceSettings.SeriesPlayback = nil
+	}
+	if s.seriesPlaybackSource == nil {
+		return
+	}
+	mode := s.seriesPlaybackSource()
+	if mode == nil {
+		return
+	}
+	if playerStatus.DeviceSettings == nil {
+		playerStatus.DeviceSettings = &PlayerDeviceSettings{}
+	}
+	playerStatus.DeviceSettings.SeriesPlayback = mode
 }
 
 func isPlayerPageURL(url string) bool {
@@ -814,6 +883,7 @@ func (s *poller) lightweightPlayerStatus(playerStatus *PlayerStatus) *PlayerStat
 	// observation store, not a controller surface: MediaHealth (set by
 	// annotateMediaHealth) is the digested, source-free form that ships.
 	playerStatus.Outcomes = nil
+	playerStatus.SkippedIndices = nil
 	return playerStatus
 }
 

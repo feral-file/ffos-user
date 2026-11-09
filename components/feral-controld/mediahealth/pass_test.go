@@ -79,7 +79,7 @@ func TestPreflight_ProbesEverythingAndRecords(t *testing.T) {
 	p := newPassProber(t, f, clock)
 
 	results := p.Preflight(context.Background(), []string{
-		"https://o/alive", "https://o/dead", "https://o/flaky", "data:image/png;base64,AAAA", "https://o/dead#dup",
+		"https://o/alive", "https://o/dead", "https://o/flaky", "data:image/png;base64,iVBORw0KGgo=", "https://o/dead#dup",
 	})
 	require.Len(t, results, 5)
 	assert.Equal(t, VerdictAlive, results[0].Verdict)

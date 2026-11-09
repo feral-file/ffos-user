@@ -26,16 +26,16 @@ func TestDrainer_CursorSurvivesCastsAndResetsOnRollback(t *testing.T) {
 	assert.Len(t, fresh, 1)
 	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 2, Entries: ring})
 	assert.Empty(t, fresh, "a cast with the same ring re-applies nothing")
-	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 2, Entries: append(ring, Outcome{Seq: 2, Source: "b", Kind: OutcomeOK, Stage: StageReady})})
+	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 2, Entries: append(ring, Outcome{Seq: 2, Source: "b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"})})
 	assert.Equal(t, []string{"b"}, sourcesOf(fresh))
 
 	// Page restart with the same castSeq: numbering restarts below the cursor.
-	fresh, gap, _ := d.Drain(&Outcomes{CastSeq: 2, Entries: []Outcome{{Seq: 1, Source: "c", Kind: OutcomeOK, Stage: StageReady}}})
+	fresh, gap, _ := d.Drain(&Outcomes{CastSeq: 2, Entries: []Outcome{{Seq: 1, Source: "c", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"}}})
 	assert.Equal(t, []string{"c"}, sourcesOf(fresh), "a rollback means everything present is new")
 	assert.Equal(t, int64(0), gap)
 
 	d.Reset()
-	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 3, Entries: []Outcome{{Seq: 1, Source: "c", Kind: OutcomeOK, Stage: StageReady, At: "new-page"}}})
+	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 3, Entries: []Outcome{{Seq: 1, Source: "c", Kind: OutcomeOK, Stage: StageReady, MediaType: "image", At: "new-page"}}})
 	assert.Equal(t, []string{"c"}, sourcesOf(fresh), "an explicit reset (generation bump) followed by a new page's ring forgets the cursor")
 }
 
@@ -73,7 +73,7 @@ func TestService_OnePlayCountsOnce(t *testing.T) {
 
 	// Another item plays, then a comes round again: a distinct play.
 	s.ObservePlayback(list, 1, nil, &Outcomes{CastSeq: 1, Entries: []Outcome{
-		{Seq: 5, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady},
+		{Seq: 5, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"},
 		{Seq: 6, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Code: "image", Attempt: 1},
 	}})
 	rec, err = s.Store().Get("https://o/a")
@@ -188,7 +188,8 @@ func TestLookahead_SweepSkipsOnWallRowsInsideTheQuery(t *testing.T) {
 	clock := &testClock{t: time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)}
 	f := newTableFetcher()
 	l := newTestLookahead(t, f, clock)
-	l.Window = 1
+	// The walk owns the whole wall, so every on-wall row is excluded from
+	// the sweep's query and the off-wall row behind them is reached.
 	wall := make([]string, 0, 10)
 	for i := 0; i < 10; i++ {
 		src := "https://o/wall" + string(rune('a'+i))
@@ -207,12 +208,12 @@ func TestLookahead_SweepSkipsOnWallRowsInsideTheQuery(t *testing.T) {
 		f.answers[src] = ok(http.StatusNotFound, "", nil, -1)
 	}
 	l.Observe(wall, 0)
-	// Drain the lookahead window (1 upcoming item + the current one), then
+	// Drain the lookahead window (9 upcoming items + the current one), then
 	// the sweep must reach the off-wall record.
-	for i := 0; i < 3 && f.count(off) == 0; i++ {
+	for i := 0; i < 12 && f.count(off) == 0; i++ {
 		require.True(t, l.step(context.Background(), nil))
 	}
-	assert.Equal(t, 1, f.count(off), "the off-wall row is reached despite ten due on-wall rows ahead of it")
+	assert.Equal(t, 1, f.count(off), "the off-wall row is reached despite ten due window rows ahead of it")
 }
 
 func writeManifest(path string) error {
@@ -240,7 +241,7 @@ func TestDrainer_ReconnectToSamePageReappliesNothing(t *testing.T) {
 	assert.False(t, restarted, "a ring holding remembered entries is the same page")
 	assert.Equal(t, int64(0), gap)
 
-	more := append(ring, Outcome{Seq: 3, Source: "b", Kind: OutcomeOK, Stage: StageReady, At: "t3"})
+	more := append(ring, Outcome{Seq: 3, Source: "b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image", At: "t3"})
 	fresh, gap, restarted = d.Drain(&Outcomes{CastSeq: 1, Entries: more})
 	assert.Equal(t, []string{"b"}, sourcesOf(fresh), "the cursor moved past the remembered entries")
 	assert.Equal(t, int64(0), gap, "no gap is reported across the reconnect")
@@ -315,7 +316,7 @@ func TestPreflight_FragmentVariantsKeepTheirOwnVerdicts(t *testing.T) {
 	p := newPassProber(t, f, clock)
 	_, err := p.Store.ApplyProbe("https://o/a#one", ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
 	require.NoError(t, err)
-	_, err = p.Store.ApplyOutcome(Outcome{Source: "https://o/a#two", Kind: OutcomeOK, Stage: StageReady}, true)
+	_, err = p.Store.ApplyOutcome(Outcome{Source: "https://o/a#two", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"}, true)
 	require.NoError(t, err)
 
 	results := p.Preflight(context.Background(), []string{"https://o/a#one", "https://o/a#two"})
@@ -461,8 +462,9 @@ func TestStore_ApplyProbesLastWriteWinsAndSkipsNonWrites(t *testing.T) {
 }
 
 // F13: a provably malformed data: URI is conclusive and gets a record and
-// a hint; a well-formed inline source stays unrecorded; the sweep
-// re-settles the record without network.
+// a hint; a well-formed inline source whose payload checks out is recorded
+// ok (it used to stay unrecorded, and read `unknown` forever) and never
+// hinted; the sweep re-settles the broken record without network.
 func TestPreflight_RecordsMalformedDataURIs(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	f := newTableFetcher()
@@ -482,7 +484,10 @@ func TestPreflight_RecordsMalformedDataURIs(t *testing.T) {
 	assert.Equal(t, ReasonDataURIInvalid, rec.Reason)
 	rec, err = p.Store.Get("data:,fine")
 	require.NoError(t, err)
-	assert.Nil(t, rec, "a well-formed inline source is not recorded")
+	require.NotNil(t, rec, "a checked inline payload is recorded")
+	assert.Equal(t, StateOK, rec.State)
+	assert.Equal(t, LayerL0, rec.Layer)
+	assert.Empty(t, rec.WireURL, "nothing was dialed")
 
 	hints, err := p.Store.Hints([]string{"data:image/png;base64", "https://o/alive", "data:,fine"}, clock.Now())
 	require.NoError(t, err)
@@ -518,7 +523,7 @@ func TestStore_ApplyOutcomeIsIdempotentPerRingEntry(t *testing.T) {
 	assert.Equal(t, 1, rec.Plays.Fail, "the same entry counts once")
 	assert.Equal(t, 1, rec.Plays.ConsecutiveFail)
 
-	okEntry := Outcome{Seq: 2, Source: "https://o/a", Kind: OutcomeOK, Stage: StageReady, At: "t2"}
+	okEntry := Outcome{Seq: 2, Source: "https://o/a", Kind: OutcomeOK, Stage: StageReady, MediaType: "image", At: "t2"}
 	_, err = store.ApplyOutcome(okEntry, true)
 	require.NoError(t, err)
 	_, err = store.ApplyOutcome(okEntry, true)
@@ -580,7 +585,7 @@ func TestService_RestartDoesNotCorroborate(t *testing.T) {
 
 	// A genuinely new play after the restart still corroborates.
 	ring = append(ring,
-		Outcome{Seq: 2, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, At: "t2"},
+		Outcome{Seq: 2, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image", At: "t2"},
 		Outcome{Seq: 3, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Attempt: 1, At: "t3"})
 	s.ObservePlayback(items("https://o/a", "https://o/b"), 0, nil, &Outcomes{CastSeq: 1, Entries: ring})
 	rec, err = s.Store().Get("https://o/a")
@@ -621,7 +626,7 @@ func TestStore_StaleOutcomesNeverSupersedeANewerVerdict(t *testing.T) {
 	// The reverse: a 404 at 12:05, then an old `ready` from 11:30.
 	_, err = store.ApplyProbe("https://o/b", ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
 	require.NoError(t, err)
-	_, err = store.ApplyOutcome(Outcome{Seq: 3, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, At: "2026-11-04T11:30:00Z"}, true)
+	_, err = store.ApplyOutcome(Outcome{Seq: 3, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image", At: "2026-11-04T11:30:00Z"}, true)
 	require.NoError(t, err)
 	rec, err = store.Get("https://o/b")
 	require.NoError(t, err)
@@ -630,7 +635,7 @@ func TestStore_StaleOutcomesNeverSupersedeANewerVerdict(t *testing.T) {
 	assert.Equal(t, time.Date(2026, 11, 4, 11, 30, 0, 0, time.UTC), *rec.Plays.LastOKAt)
 
 	// A success dated after the verdict heals it, dated by the player.
-	_, err = store.ApplyOutcome(Outcome{Seq: 4, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, At: "2026-11-04T12:05:00Z"}, true)
+	_, err = store.ApplyOutcome(Outcome{Seq: 4, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image", At: "2026-11-04T12:05:00Z"}, true)
 	require.NoError(t, err)
 	rec, err = store.Get("https://o/b")
 	require.NoError(t, err)
@@ -656,4 +661,124 @@ func TestOutcomeTime(t *testing.T) {
 	assert.Equal(t, now, outcomeTime(Outcome{At: "t1"}, now), "unparseable: the drain time")
 	assert.Equal(t, now, outcomeTime(Outcome{At: "2026-11-04T13:00:00Z"}, now), "a player clock ahead of the device is clamped")
 	assert.Equal(t, time.Date(2026, 11, 4, 11, 59, 59, 500000000, time.UTC), outcomeTime(Outcome{At: "2026-11-04T11:59:59.500Z"}, now))
+}
+
+// #392 follow-up: `state: broken` is the last observation, `skipped` is
+// what the player reports it is resolving past, and `unskipped` says why a
+// broken item is not skipped — one case each.
+func TestService_ItemHealths_SkippedAndUnskipped(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	replayable := map[string]bool{}
+	store := openTestStore(t, clock)
+	// The contract check caches its answer for a while, so the no-contract
+	// and with-contract cases get a service each over the same store.
+	noContract := New(Config{Store: store, Contract: &PlayerContract{Path: filepath.Join(t.TempDir(), "none")}, Now: clock.Now, Online: func() bool { return true },
+		Replayable: func(src string) bool { return replayable[src] }})
+	manifest := filepath.Join(t.TempDir(), "ffos-player-contract.json")
+	require.NoError(t, os.WriteFile(manifest, []byte(manifestWithContract), 0o600))
+	svc := New(Config{Store: store, Contract: &PlayerContract{Path: manifest}, Now: clock.Now, Online: func() bool { return true },
+		Replayable: func(src string) bool { return replayable[src] }})
+	defer func() { _ = svc.Close() }()
+	list := items("https://o/broken", "https://o/replay", "https://o/expired", "https://o/ok")
+	for _, src := range []string{"https://o/broken", "https://o/replay", "https://o/expired"} {
+		_, err := store.ApplyProbe(src, ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
+		require.NoError(t, err)
+	}
+	_, err := store.ApplyProbe("https://o/ok", ProbeResult{Verdict: VerdictAlive, Status: 200})
+	require.NoError(t, err)
+
+	// Case 3: no contract declared — nothing is hinted, every broken row
+	// says so, and nothing is skipped whatever the state.
+	h := noContract.ItemHealths(list, nil)
+	require.Len(t, h, 4)
+	for i := 0; i < 3; i++ {
+		assert.Equal(t, StateBroken, h[i].State)
+		assert.False(t, h[i].Skipped)
+		assert.Equal(t, UnskippedPlayer, h[i].Unskipped, i)
+	}
+	assert.False(t, h[3].Skipped)
+	assert.Empty(t, h[3].Unskipped, "an ok row never carries a reason")
+
+	// With the contract: the player reports what it skips.
+	replayable["https://o/replay"] = true
+	// Expire the third verdict only: it was written at the same time as the
+	// others, so re-write it with a recheck in the past.
+	rec, err := store.Get("https://o/expired")
+	require.NoError(t, err)
+	require.True(t, rec.Conclusive(clock.Now()))
+	clock.Advance(RecheckBroken + time.Second)
+	for _, src := range []string{"https://o/broken", "https://o/replay"} {
+		_, err := store.ApplyProbe(src, ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus}) // fresh again
+		require.NoError(t, err)
+	}
+	h = svc.ItemHealths(list, []int{0})
+	assert.True(t, h[0].Skipped, "the player says it skips index 0")
+	assert.Empty(t, h[0].Unskipped)
+	assert.False(t, h[1].Skipped)
+	assert.Equal(t, UnskippedReplayable, h[1].Unskipped, "case 2: the cache can serve it, so the hint left it out")
+	assert.False(t, h[2].Skipped)
+	assert.Equal(t, StateBroken, h[2].State, "still the last observation")
+	assert.Equal(t, UnskippedExpired, h[2].Unskipped, "case 1: past its window, not conclusive, not hinted")
+
+	// Case 4, both ways: a conclusive broken item the player is not yet
+	// skipping is pending; an ok item the player still skips is skipped.
+	h = svc.ItemHealths(list, []int{3})
+	assert.False(t, h[0].Skipped)
+	assert.Equal(t, UnskippedPending, h[0].Unskipped, "hinted now, the push has not reached the player")
+	assert.True(t, h[3].Skipped, "healed to ok, but the player keeps the old hint until the next push")
+	assert.Equal(t, StateOK, h[3].State)
+
+	// Out-of-range or negative indices are ignored.
+	h = svc.ItemHealths(list, []int{-1, 9})
+	for _, row := range h {
+		assert.False(t, row.Skipped)
+	}
+
+	// getMediaHealth carries the same two fields.
+	rows, err := svc.Report(list, []int{0})
+	require.NoError(t, err)
+	assert.True(t, rows[0].Skipped)
+	assert.Equal(t, UnskippedReplayable, rows[1].Unskipped)
+	assert.Equal(t, UnskippedExpired, rows[2].Unskipped)
+}
+
+// #392 follow-up: a due record anywhere on the wall is reached by the
+// walk, so an expired verdict there is refreshed instead of waiting for
+// playback to reach it.
+func TestLookahead_WalkReachesDueRecordsAnywhereOnTheWall(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := newTableFetcher()
+	l := newTestLookahead(t, f, clock)
+	wall := make([]string, 12)
+	for i := range wall {
+		wall[i] = fmt.Sprintf("https://o/%d", i)
+		f.answers[wall[i]] = ok(200, "image/png", minimalPNG(1, 1), -1)
+		_, err := l.Store.ApplyProbe(wall[i], ProbeResult{Verdict: VerdictAlive, Status: 200})
+		require.NoError(t, err)
+	}
+	// Position 9 is broken and its verdict expires; nothing in the window
+	// (0..3) is due.
+	_, err := l.Store.ApplyProbe(wall[9], ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus})
+	require.NoError(t, err)
+	clock.Advance(RecheckBroken + time.Second)
+	for _, src := range wall[:4] {
+		_, err := l.Store.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200})
+		require.NoError(t, err)
+	}
+	l.Observe(wall, 0)
+	// The window items 4..8 and 10, 11 are due too (ok, 7 d old) but the
+	// sweep answers the earliest due first; what matters is that the
+	// on-wall record at 9 is reachable at all.
+	seen := map[string]bool{}
+	for i := 0; i < 12 && !seen[wall[9]]; i++ {
+		if !l.step(context.Background(), nil) {
+			break
+		}
+		for _, src := range wall {
+			if f.count(src) > 0 {
+				seen[src] = true
+			}
+		}
+	}
+	assert.True(t, seen[wall[9]], "a due on-wall record beyond the window is swept")
 }

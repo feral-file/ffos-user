@@ -35,6 +35,10 @@ const (
 	CodeScreenProtected = "screen_protected"
 	// CodeBusy: too many envelopes are being opened at once; retry.
 	CodeBusy = "busy"
+	// CodeLANOnly refuses any hub request from a source that is not on the
+	// device's own network (§7.2, hub localsource.go). Remote control is
+	// relay v2's job.
+	CodeLANOnly = "lan_only"
 )
 
 // Encrypted reply codes (§4.3).
@@ -77,7 +81,6 @@ type State string
 const (
 	StateLegacy   State = "legacy"
 	StateEnrolled State = "enrolled"
-	StateEnforced State = "enforced"
 	StateLocked   State = "locked"
 )
 
@@ -118,7 +121,7 @@ func PublicErrorBody(code string) []byte {
 // PublicErrorStatus maps a public code to its LAN HTTP status.
 func PublicErrorStatus(code string) int {
 	switch code {
-	case CodeEnvelopeRequired, CodeEnrollmentRequired, CodeScreenProtected:
+	case CodeEnvelopeRequired, CodeEnrollmentRequired, CodeScreenProtected, CodeLANOnly:
 		return http.StatusForbidden
 	case CodeInvalidMessage:
 		return http.StatusBadRequest
@@ -256,8 +259,6 @@ type Config struct {
 	Dir string
 	// DeviceID is the hostname (FF1-XXXXXXXX). Required.
 	DeviceID string
-	// Enforced is control.enforced from controld.json (§7.2).
-	Enforced bool
 	// FS defaults to an OSFS.
 	FS FS
 	// Now defaults to time.Now.
@@ -275,7 +276,6 @@ type Authority struct {
 	mu       sync.Mutex
 	store    *Store
 	deviceID string
-	enforced bool
 	now      func() time.Time
 
 	transports atomic.Pointer[[]string]
@@ -353,7 +353,6 @@ func New(cfg Config) (*Authority, error) {
 	}
 	a := &Authority{
 		deviceID: cfg.DeviceID,
-		enforced: cfg.Enforced,
 		now:      cfg.Now,
 		rand:     cfg.Rand,
 		pending:  map[string]*pendingRequest{},
@@ -407,9 +406,6 @@ func (a *Authority) stateLocked(now int64) State {
 	}
 	for _, g := range a.store.Grants() {
 		if g.Role == RoleOwner && g.Active(now) {
-			if a.enforced {
-				return StateEnforced
-			}
 			return StateEnrolled
 		}
 	}
@@ -423,6 +419,10 @@ type Status struct {
 	Profile *Profile `json:"profile,omitempty"`
 	// Transports are the routes this daemon carries envelopes on (§11).
 	Transports []string `json:"transports,omitempty"`
+	// LAN is the owner's switch, LANOpen or LANClosed, present only while
+	// the device has an owner (§11). Absent means closed or unknown to a
+	// client.
+	LAN string `json:"lan,omitempty"`
 }
 
 // Transport names in Status.Transports (§11).
@@ -449,6 +449,12 @@ func (a *Authority) Status() Status {
 	if id := a.store.Identity(); id != nil && st.State != StateLocked {
 		p := id.Profile()
 		st.Profile = &p
+	}
+	if st.State == StateEnrolled {
+		st.LAN = LANClosed
+		if a.LANOpen() {
+			st.LAN = LANOpen
+		}
 	}
 	return st
 }
@@ -857,6 +863,8 @@ func (a *Authority) admitCmd(adm *Admission, c RequestClaims, g Grant, now int64
 	switch c.Cmd {
 	case CmdApproveController, CmdRevokeController, CmdListControllers, CmdRegisterController, CmdReleaseOwnership:
 		return a.controlCommand(adm, c, window, now)
+	case CmdSetLanControl:
+		return a.setLanControl(adm, c, window)
 	}
 	// Step 6: durable before the caller executes anything.
 	if err := a.store.Update(setWindow(g.Ctl, window)); err != nil {
@@ -1483,9 +1491,10 @@ func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Gran
 	if a.stateLocked(now) != StateLegacy || origin.Route == RouteRelayV2 {
 		// The device-ID relay is open to anyone who knows the public ID
 		// and has no plaintext profile read, so a first owner never
-		// enrolls over it; the LAN and the legacy relayer keep the
-		// screen-QR migration path (§5.1). Refused before the invitation
-		// is compared, so v2 is no oracle for it.
+		// enrolls over it. The legacy relayer is still admitted here, but
+		// only as the accepted §13 residual: clients enroll a first owner
+		// on the LAN only (§14 rule 11). Refused before the invitation is
+		// compared, so v2 is no oracle for it.
 		return invalid()
 	}
 	if a.inv == nil || now >= a.inv.expiresAt {
