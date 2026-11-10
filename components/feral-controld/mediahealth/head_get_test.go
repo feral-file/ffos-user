@@ -175,7 +175,9 @@ func TestHeadGet_ARevertedHeadRestoresTheFailureBeforeIt(t *testing.T) {
 	require.NoError(t, err)
 	rec, err = store.Get(src)
 	require.NoError(t, err)
-	assert.Equal(t, State(""), rec.State, "the HEAD's verdict is withdrawn")
+	assert.Equal(t, StateOK, rec.State, "the HEAD's verdict is withdrawn: back to L0's ok")
+	assert.Equal(t, LayerL0, rec.Layer)
+	assert.Equal(t, IssuePlayFailed, rec.Issue, "one failure short of a verdict")
 	assert.Equal(t, 1, rec.Plays.ConsecutiveFail)
 	require.NotNil(t, rec.Plays.RunFail)
 	assert.Equal(t, StageFrame, rec.Plays.RunFail.Stage, "the blank frame classifies the run again")
@@ -206,7 +208,7 @@ func TestHeadGet_AServedGetUndoesTheCountedRefusalPastItsRetries(t *testing.T) {
 	assert.Equal(t, State(""), rec.State, "the verdict's evidence was the HEAD alone: withdrawn")
 	assert.Equal(t, 1, rec.Plays.ConsecutiveFail, "play 1's refusal still counts")
 	require.NotNil(t, rec.Plays.RunFail)
-	assert.True(t, rec.Plays.RunFail.Reinstated)
+	assert.True(t, rec.Plays.RunFail.Settled)
 
 	f.s.ObserveNavigation(Navigation{URL: f.src, Status: 200})
 	assert.Equal(t, 1, f.record().Plays.ConsecutiveFail, "the reinstated refusal is never reverted")
@@ -302,9 +304,78 @@ func TestHeadGet_AWithdrawnVerdictRestoresItsRoute(t *testing.T) {
 	f.s.ObserveNavigation(Navigation{URL: "https://ipfs.filebase.io/ipfs/" + cidA, Status: 200}) // served through the fallback
 	f.s.ObserveNavigation(Navigation{URL: f.src, Status: 200})
 	rec = f.record()
-	assert.Equal(t, State(""), rec.State, "withdrawn")
+	assert.Equal(t, StateOK, rec.State, "withdrawn: back to L0's ok through the fallback")
 	assert.Equal(t, "https://ipfs.filebase.io", rec.ServedBy, "the route comes back")
 	target, ok := f.s.Store().GatewayOverride(f.src, "")
 	require.True(t, ok, "and the kiosk loads through it again")
 	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA, target)
+}
+
+// A refusal its own play's GET confirmed (the kiosk got a 404 too) is
+// settled: a later 2xx of the same document reverts nothing, whichever
+// order the HEAD and the GET arrived in (PR #450 review, F16).
+func TestHeadGet_AGetThatFailedTooSettlesTheRefusal(t *testing.T) {
+	for _, headFirst := range []bool{true, false} {
+		t.Run(map[bool]string{true: "HEAD drained first", false: "GET observed first"}[headFirst], func(t *testing.T) {
+			f := newPlayFeed(t, true)
+			for play := 0; play < 2; play++ {
+				if headFirst {
+					f.emit(failed(StageDetect, "404", 1))
+					f.s.ObserveNavigation(Navigation{URL: f.src, Status: 404})
+				} else {
+					f.s.ObserveNavigation(Navigation{URL: f.src, Status: 404})
+					f.emit(failed(StageDetect, "404", 1))
+				}
+				f.emit(iframeReady)
+			}
+			rec := f.record()
+			require.Equal(t, StateBroken, rec.State)
+			require.Equal(t, 2, rec.Plays.ConsecutiveFail, "one count per play")
+
+			f.clock.Advance(2 * time.Second)
+			f.s.ObserveNavigation(Navigation{URL: f.src, Status: 200}) // a reload served
+			rec = f.record()
+			assert.Equal(t, StateBroken, rec.State, "the real fetch failed: nothing to revert")
+			assert.Equal(t, 2, rec.Plays.ConsecutiveFail)
+		})
+	}
+}
+
+// Withdrawing a HEAD's verdict restores the verdict it replaced — a
+// render-layer broken with its window and backoff — not unknown (PR #450
+// review, F17).
+func TestHeadGet_AWithdrawnVerdictRestoresTheRenderVerdict(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	cap := &fakeWall{frames: []*WallFrame{blankFrame(), blankFrame()}}
+	svc, w := newConclusiveWallRig(t, clock, cap)
+	src := "https://o/blank"
+	seedSoftware(t, svc.Store(), src)
+	playOnce(t, svc, w, clock, src, 1)
+	clock.Advance(time.Minute)
+	playOnce(t, svc, w, clock, src, 2)
+	broken, err := svc.Store().Get(src)
+	require.NoError(t, err)
+	require.Equal(t, ReasonRenderBlank, broken.Reason)
+
+	// Repeat-one: the next mount's HEAD 404s and concludes over the blank
+	// verdict, then its GET is served a second later.
+	clock.Advance(time.Minute)
+	svc.ObservePlayback(items(src), 0, pending(), &Outcomes{CastSeq: 1})
+	svc.ObservePlayback(items(src), 0, nil, &Outcomes{CastSeq: 1, Entries: []Outcome{headAt(src, 30, "404", clock.Now())}})
+	rec, err := svc.Store().Get(src)
+	require.NoError(t, err)
+	require.Equal(t, ReasonRenderDetect, rec.Reason, "the HEAD's verdict replaced the blank one")
+	clock.Advance(time.Second)
+	svc.ObserveNavigation(Navigation{URL: src, Status: 200})
+	rec, err = svc.Store().Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, StateBroken, rec.State, "the blank verdict is back")
+	assert.Equal(t, ReasonRenderBlank, rec.Reason)
+	assert.Equal(t, CategoryRenderBlank, rec.Category)
+	assert.Equal(t, broken.RecheckAfter, rec.RecheckAfter, "with its window")
+	assert.Equal(t, broken.ConsecutiveBroken, rec.ConsecutiveBroken, "and its backoff")
+	assert.Empty(t, rec.Issue)
+	hints, err := svc.Store().Hints([]string{src}, clock.Now())
+	require.NoError(t, err)
+	assert.Contains(t, hints, src, "still skipped")
 }

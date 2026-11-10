@@ -181,24 +181,27 @@ const headGetWindow = 60 * time.Second
 // way: the counted refusal is still RunFail and is undone (F9). The
 // reverted refusal stays visible as superseded on LastFail when it is the
 // newest failure, and the run classifies by the counted failure before it
-// (RunFail.Prev) again — marked Reinstated, so this play's GET never
-// reverts it in its turn.
+// (RunFail.Prev) again — marked Settled, so this play's GET never reverts
+// it in its turn. A refusal its own play's GET confirmed is Settled too
+// (F16). A verdict this refusal concluded is withdrawn back to the verdict
+// it replaced (PlayFailure.Replaced, F17), unknown only when there was
+// none.
 func (r *Record) revertHeadRefusal(now time.Time) bool {
 	f := r.Plays.RunFail
-	if !r.fetchRunOpen() || f.Attempt == 0 || f.Reinstated || now.Before(f.At) || now.Sub(f.At) > headGetWindow {
+	if !r.fetchRunOpen() || f.Attempt == 0 || f.Settled || now.Before(f.At) || now.Sub(f.At) > headGetWindow {
 		return false
 	}
 	if r.State == StateBroken && r.Layer == LayerPlay && r.Reason == ReasonRenderDetect && r.CheckedAt.Equal(f.At) {
-		// The conclusion dropped the fallback route (dropRoute); the GET
-		// just served the document — through that route, when there was
-		// one — so it comes back with the withdrawal (PR #450 review,
-		// F15). RunFail.ServedBy is the route as the refusal found it.
-		r.ServedBy = f.ServedBy
-		r.State, r.Layer = "", ""
-		r.Category, r.Reason = "", ""
-		r.HTTPStatus = 0
-		r.RecheckAfter = now
-		r.LastError, r.LastErrorAt = "", nil
+		if f.Replaced != nil {
+			r.restoreVerdict(f.Replaced)
+		} else {
+			r.State, r.Layer = "", ""
+			r.Category, r.Reason = "", ""
+			r.HTTPStatus = 0
+			r.RecheckAfter = now
+			r.LastError, r.LastErrorAt = "", nil
+			r.ServedBy = f.ServedBy
+		}
 	}
 	r.Plays.ConsecutiveFail--
 	if r.Plays.Fail > 0 {
@@ -210,15 +213,16 @@ func (r *Record) revertHeadRefusal(now time.Time) bool {
 	}
 	if r.Plays.ConsecutiveFail > 0 && f.Prev != nil {
 		prev := *f.Prev
-		prev.Reinstated = true
+		prev.Settled = true
 		r.Plays.RunFail = &prev
 	}
 	switch {
 	case r.Plays.ConsecutiveFail == 0 && r.Issue == IssuePlayFailed:
 		r.clearIssue()
-	case r.Plays.ConsecutiveFail > 0 && r.State == "":
+	case r.Plays.ConsecutiveFail > 0 && r.State != StateBroken:
 		// A withdrawn verdict leaves the run's earlier counted failure:
-		// back to one failure short of a verdict, reported as such.
+		// back to one failure short of a verdict, reported as such (on the
+		// restored ok or unknown; a restored broken carries no issue).
 		r.setIssue(IssuePlayFailed, now)
 	}
 	return true

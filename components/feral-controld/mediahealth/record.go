@@ -373,11 +373,48 @@ type PlayFailure struct {
 	// (one level; its own Prev is dropped), restored when this one is
 	// reverted so the run keeps classifying by what still counts.
 	Prev *PlayFailure `json:"prev,omitempty"`
-	// Reinstated marks a counted failure handed the run back after the
-	// refusal counted on top of it was overruled (revertHeadRefusal): it
-	// belongs to an earlier play, so a GET of the current play never
-	// reverts it.
-	Reinstated bool `json:"reinstated,omitempty"`
+	// Settled marks a counted failure no GET may revert: one handed the
+	// run back after the refusal counted on top of it was overruled (an
+	// earlier play's; F9), or a content-type check refusal its own play's
+	// GET confirmed by failing too (F16) — the real fetch agreed, whatever
+	// order the two arrived in.
+	Settled bool `json:"settled,omitempty"`
+	// Replaced is, on a content-type check refusal that concluded a play
+	// verdict, the verdict it replaced: withdrawing the HEAD's verdict
+	// restores it — state, reason, window, backoff and route — instead of
+	// erasing an independently established one (PR #450 review, F17), and
+	// brings back the fallback route the conclusion dropped (F15).
+	Replaced *VerdictSnapshot `json:"replaced,omitempty"`
+}
+
+// VerdictSnapshot is a record's verdict as it stood before a content-type
+// check refusal replaced it (PlayFailure.Replaced).
+type VerdictSnapshot struct {
+	State             State      `json:"state,omitempty"`
+	Layer             Layer      `json:"layer,omitempty"`
+	Category          Category   `json:"category,omitempty"`
+	Reason            Reason     `json:"reason,omitempty"`
+	HTTPStatus        int        `json:"httpStatus,omitempty"`
+	CheckedAt         time.Time  `json:"checkedAt"`
+	RecheckAfter      time.Time  `json:"recheckAfter"`
+	ConsecutiveBroken int        `json:"consecutiveBroken,omitempty"`
+	LastError         string     `json:"lastError,omitempty"`
+	LastErrorAt       *time.Time `json:"lastErrorAt,omitempty"`
+	ServedBy          string     `json:"servedBy,omitempty"`
+}
+
+func (r *Record) snapshotVerdict() *VerdictSnapshot {
+	return &VerdictSnapshot{
+		State: r.State, Layer: r.Layer, Category: r.Category, Reason: r.Reason, HTTPStatus: r.HTTPStatus,
+		CheckedAt: r.CheckedAt, RecheckAfter: r.RecheckAfter, ConsecutiveBroken: r.ConsecutiveBroken,
+		LastError: r.LastError, LastErrorAt: r.LastErrorAt, ServedBy: r.ServedBy,
+	}
+}
+
+func (r *Record) restoreVerdict(v *VerdictSnapshot) {
+	r.State, r.Layer, r.Category, r.Reason, r.HTTPStatus = v.State, v.Layer, v.Category, v.Reason, v.HTTPStatus
+	r.CheckedAt, r.RecheckAfter, r.ConsecutiveBroken = v.CheckedAt, v.RecheckAfter, v.ConsecutiveBroken
+	r.LastError, r.LastErrorAt, r.ServedBy = v.LastError, v.LastErrorAt, v.ServedBy
 }
 
 // Build records which software produced the current verdict.

@@ -799,7 +799,12 @@ so an uncounted HEAD — the same play, already overruled, offline — never
 reclassifies the run nor is reverted in place of the blank frame before
 it, while the play's uncounted retries never shield its counted refusal;
 a reverted refusal hands the run back to the counted failure before it,
-marked `reinstated` so that GET never reverts it in its turn. A record
+marked `settled` so that GET never reverts it in its turn; a refusal the
+kiosk's own GET confirmed by failing too is settled as well, in either
+arrival order. Withdrawing a verdict the refusal concluded restores the
+verdict it replaced (`runFail.replaced`: state, reason, window, backoff,
+route — a blank verdict from the wall, L0's `ok`), and goes to unknown
+only when nothing preceded it. A record
 from before `runFail` keeps its open run, classified by its `lastFail`. A
 wall frame stays with its play: an observed navigation after it (the
 iframe reloading in the same mount) is the same play, while the player's

@@ -474,13 +474,7 @@ func (s *Store) retireUnconfiguredFallbacks() error {
 // work is retried at the end of its window — through the gateway that
 // served it, not the one that 404s.
 func servedByEntry(rec *Record) (origin string, indexed bool) {
-	// An unknown record with a route is a HEAD-only verdict withdrawn by
-	// the kiosk's served GET (revertHeadRefusal restores the route the
-	// conclusion dropped, PR #450 review F15): the GET came through it, so
-	// it routes. An unknown record without one is not indexed — nothing
-	// says its own gateway serves it.
-	if rec == nil || (rec.State != StateOK && rec.State != StateSuspect && !rec.renderLayerBroken() &&
-		(rec.State != "" || rec.ServedBy == "")) {
+	if rec == nil || (rec.State != StateOK && rec.State != StateSuspect && !rec.renderLayerBroken()) {
 		return "", false
 	}
 	return rec.ServedBy, true
@@ -1286,6 +1280,15 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 			if o.MediaType != "" {
 				rec.MediaType = o.MediaType
 			}
+			if rf := rec.Plays.RunFail; rec.Plays.ConsecutiveFail > 0 && rf != nil && !rf.Superseded &&
+				rf.Stage == StageDetect && rf.Attempt > 0 && o.Stage == StageDetect && o.Attempt == 0 &&
+				!at.Before(rf.At) && at.Sub(rf.At) <= headGetWindow {
+				// The kiosk's own GET failed too, in the refusal's play: the
+				// real fetch confirms the HEAD, so a later 2xx of the same
+				// document (a reload, a retry) must not revert it — the
+				// play keeps its one count either way (PR #450 review, F16).
+				rf.Settled = true
+			}
 			reason := outcomeReason(o)
 			if reason == "" || deviceLocal(o) || !count {
 				// Recorded for the app and the support bundle; the source
@@ -1305,7 +1308,7 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 			run := failure
 			if prev := rec.Plays.RunFail; prev != nil && rec.Plays.ConsecutiveFail > 1 {
 				p := *prev
-				p.Prev = nil
+				p.Prev, p.Replaced = nil, nil
 				run.Prev = &p
 			}
 			rec.Plays.RunFail = &run
@@ -1335,6 +1338,7 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 				rec.concludeRender(reason, LayerPlay, at, renderConclusive)
 				return true
 			}
+			before := rec.snapshotVerdict()
 			// Backoff, as for L0: a work the player has re-concluded broken
 			// on BrokenBackoffAfter consecutive rechecks is retried weekly,
 			// not daily — each daily retry of a dead iframe costs the wall
@@ -1348,6 +1352,11 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 				// Still inside the window: keep the count.
 			default:
 				rec.ConsecutiveBroken = 1
+			}
+			if o.Stage == StageDetect && o.Attempt > 0 {
+				// A content-type check refusal concludes: keep what it
+				// replaces, for revertHeadRefusal (PlayFailure.Replaced).
+				rec.Plays.RunFail.Replaced = before
 			}
 			rec.State = StateBroken
 			rec.Layer = LayerPlay
