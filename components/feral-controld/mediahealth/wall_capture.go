@@ -51,6 +51,12 @@ type wallMount struct {
 	// #450 review, F18). Bounds which navigations belong to this mount
 	// (FrameEvidence.MountedAt).
 	startedAt time.Time
+	// pending marks a placeholder: polls that showed nothing ready since
+	// the previous mount. It keeps startedAt through them — even a zero
+	// one, on a fresh daemon with no poll before the first (PR #450
+	// review, F18 second round): a zero start bounds nothing, which is
+	// right, since every navigation seen so far is this mount's.
+	pending bool
 }
 
 // WallFrame is one capture of the artwork on the wall, with the player's own
@@ -155,16 +161,16 @@ func (w *WallCapture) Observe(sources []string, index int, renderStatus *int) {
 		// previous one: the first pending poll fixes startedAt, later
 		// pending polls keep it.
 		startedAt := prevPoll
-		if w.mount.readyAt.IsZero() && !w.mount.startedAt.IsZero() {
+		if w.mount.pending {
 			startedAt = w.mount.startedAt
 		}
-		w.mount = wallMount{seq: w.mount.seq + 1, startedAt: startedAt}
+		w.mount = wallMount{seq: w.mount.seq + 1, startedAt: startedAt, pending: true}
 		return
 	}
 	src := sources[index]
 	if w.mount.readyAt.IsZero() || w.mount.source != src || w.mount.index != index {
 		startedAt := prevPoll
-		if w.mount.readyAt.IsZero() && !w.mount.startedAt.IsZero() {
+		if w.mount.pending {
 			startedAt = w.mount.startedAt // seen pending first: the mount began before those polls
 		}
 		w.mount = wallMount{seq: w.mount.seq + 1, source: src, index: index, readyAt: now, startedAt: startedAt}

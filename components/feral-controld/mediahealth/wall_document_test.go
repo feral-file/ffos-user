@@ -208,3 +208,29 @@ func TestWallDocument_TheFirstItemOfACastIsObserved(t *testing.T) {
 	assert.Equal(t, 504, rec.Wall.MainStatus)
 	assert.Equal(t, LayerL0, rec.Layer, "not healed")
 }
+
+// On a fresh daemon there is no poll before the first pending one: a 504
+// observed before any poll is still this mount's, however many pending
+// polls follow (PR #450 review, F18 second round).
+func TestWallDocument_AFailureBeforeTheFirstPollIsThisMounts(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	cap := &fakeWall{frames: []*WallFrame{{Image: errorPage(), Clipped: true}}}
+	svc, w := newWallRig(t, clock, cap)
+	src := "https://o/first-after-start"
+	seedSoftware(t, svc.Store(), src)
+	svc.Hints([]string{src})
+	svc.ObserveNavigation(Navigation{URL: src, Status: 504}) // before any poll
+	for i := 0; i < 2; i++ {
+		clock.Advance(5 * time.Second)
+		svc.ObservePlayback(items(src), 0, pending(), &Outcomes{CastSeq: 1})
+	}
+	clock.Advance(5 * time.Second)
+	svc.ObservePlayback(items(src), 0, ready(), readyOutcomes(1, src))
+	clock.Advance(DefaultWallSettle)
+	require.True(t, w.Step(context.Background()))
+	rec, err := svc.Store().Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, RenderStalled, rec.Wall.Verdict)
+	assert.Equal(t, 504, rec.Wall.MainStatus)
+	assert.Equal(t, LayerL0, rec.Layer, "not healed")
+}
