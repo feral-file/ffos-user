@@ -2,6 +2,7 @@ package mediahealth
 
 import (
 	"context"
+	"encoding/json"
 	"image/color"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
 )
 
@@ -319,4 +321,61 @@ func TestRenderEvidence_ARenderedFrameResetsL1History(t *testing.T) {
 	rec, err = store.ApplyRender(src, RenderResult{Verdict: RenderBlank, Variance: 0.00001})
 	require.NoError(t, err)
 	assert.Equal(t, StateSuspect, rec.State, "a fresh negative, uncorroborated: advisory only")
+}
+
+// A player success that proves a render clears L1's earlier negative too: a
+// later night's blank must not be corroborated by it (PR #450 review, F11).
+func TestRenderEvidence_APlaySuccessResetsL1History(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := openConclusiveStore(t, clock)
+	src := "https://o/recovered"
+	seedSoftware(t, store, src)
+	for i := 0; i < 2; i++ {
+		_, err := store.ApplyRender(src, RenderResult{Verdict: RenderBlank, Variance: 0.00001})
+		require.NoError(t, err)
+	}
+	rec, err := store.ApplyOutcome(Outcome{Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "image"}, true)
+	require.NoError(t, err)
+	require.Equal(t, StateOK, rec.State)
+	assert.Zero(t, rec.L1.ConsecutiveBlank)
+	assert.True(t, rec.L1.NegativeAt.IsZero())
+
+	clock.Advance(l1NightGap + time.Hour)
+	for i := 0; i < 2; i++ {
+		rec, err = store.ApplyRender(src, RenderResult{Verdict: RenderBlank, Variance: 0.00001})
+		require.NoError(t, err)
+	}
+	assert.Equal(t, StateSuspect, rec.State, "a fresh negative, uncorroborated: advisory only")
+}
+
+// A record from before RunFail keeps its open run: its LastFail classified
+// the run, so a rendered frame still cannot heal a fetch refusal (PR #450
+// review, F12).
+func TestRenderEvidence_ALegacyRunKeepsItsFetchFailure(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := openTestStore(t, clock)
+	src := "https://o/legacy"
+	seedSoftware(t, store, src)
+	rec, err := store.Get(src)
+	require.NoError(t, err)
+	at := clock.Now().Add(-time.Hour)
+	rec.Plays.Fail, rec.Plays.ConsecutiveFail = 1, 1
+	rec.Plays.LastFail = &PlayFailure{Stage: StageDetect, Code: "404", Attempt: 1, At: at}
+	rec.Plays.LastFailAt = &at
+	raw, err := json.Marshal(rec)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "runFail")
+	require.NoError(t, store.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketItems).Put([]byte(Key(src)), raw)
+	}))
+
+	rec, err = store.Get(src)
+	require.NoError(t, err)
+	require.NotNil(t, rec.Plays.RunFail, "migrated from LastFail")
+	assert.True(t, rec.fetchRunOpen())
+
+	rec, err = store.ApplyRender(src, RenderResult{Verdict: RenderOK, Variance: 0.05})
+	require.NoError(t, err)
+	assert.NotEqual(t, LayerL1, rec.Layer, "the HEAD still wins")
+	assert.Equal(t, 1, rec.Plays.ConsecutiveFail, "the run is not cleared, nor a count invented")
 }

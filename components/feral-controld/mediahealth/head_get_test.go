@@ -186,3 +186,56 @@ func TestHeadGet_ARevertedHeadRestoresTheFailureBeforeIt(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, rec.Plays.ConsecutiveFail, "a second 2xx reverts nothing more")
 }
+
+// The play's uncounted HEAD retries do not shield its counted refusal: a
+// served GET still withdraws the verdict that refusal concluded, and the
+// earlier play's refusal it reinstates is never reverted in its turn (PR
+// #450 review, F9).
+func TestHeadGet_AServedGetUndoesTheCountedRefusalPastItsRetries(t *testing.T) {
+	f := newPlayFeed(t, true)
+	f.emit(failed(StageDetect, "404", 1), iframeReady) // play 1
+	f.emit(failed(StageDetect, "404", 1))              // play 2: concludes
+	require.Equal(t, StateBroken, f.record().State)
+	f.emit(failed(StageDetect, "404", 2)) // play 2's retry: the same play, uncounted
+
+	f.clock.Advance(2 * time.Second)
+	f.s.ObserveNavigation(Navigation{URL: f.src, Status: 200}) // play 2's GET was served
+	rec := f.record()
+	assert.Equal(t, State(""), rec.State, "the verdict's evidence was the HEAD alone: withdrawn")
+	assert.Equal(t, 1, rec.Plays.ConsecutiveFail, "play 1's refusal still counts")
+	require.NotNil(t, rec.Plays.RunFail)
+	assert.True(t, rec.Plays.RunFail.Reinstated)
+
+	f.s.ObserveNavigation(Navigation{URL: f.src, Status: 200})
+	assert.Equal(t, 1, f.record().Plays.ConsecutiveFail, "the reinstated refusal is never reverted")
+}
+
+// A wall frame ends its play: the next mount's content-type check and GET
+// failing 404 count as that play's own failure and conclude on the fetch
+// reason (PR #450 review, F10).
+func TestHeadGet_TheNextPlaysFetchFailureCountsAfterAFrame(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	cap := &fakeWall{frames: []*WallFrame{blankFrame(), blankFrame(), blankFrame(), blankFrame()}}
+	svc, w := newWallRig(t, clock, cap)
+	src := "https://o/gone-html"
+	seedSoftware(t, svc.Store(), src)
+	for play := int64(1); play <= 4; play++ {
+		svc.ObservePlayback(items(src), 0, pending(), &Outcomes{CastSeq: 1})
+		entries := []Outcome{}
+		if play > 1 {
+			svc.ObserveNavigation(Navigation{URL: src, Status: 404}) // the GET, observed at once
+			entries = append(entries, headAt(src, play*10, "404", clock.Now()))
+		}
+		entries = append(entries, Outcome{Seq: play*10 + 1, Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "iframe", At: clock.Now().UTC().Format(time.RFC3339Nano)})
+		svc.ObservePlayback(items(src), 0, ready(), &Outcomes{CastSeq: 1, Entries: entries})
+		clock.Advance(DefaultWallSettle)
+		require.True(t, w.Step(context.Background()))
+		clock.Advance(2 * time.Minute)
+	}
+	rec, err := svc.Store().Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, StateBroken, rec.State, "a 404 every play is a fetch verdict, not an advisory blank")
+	assert.Equal(t, LayerPlay, rec.Layer)
+	assert.Equal(t, ReasonRenderDetect, rec.Reason)
+	assert.Equal(t, 404, rec.HTTPStatus)
+}

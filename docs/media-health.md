@@ -594,7 +594,8 @@ would hide real art, the worst outcome here.
   indexer's GPU renders),
   else ok. A blank concludes only on a **second consecutive blank**, rendered
   immediately with the longer settle; a real frame or a successful play
-  resets the count, and a stalled confirmation keeps the blank pending so
+  resets the count and clears the earlier negative (so a later blank is
+  not corroborated by it), and a stalled confirmation keeps the blank pending so
   the next render is still the long one.
 - **Learned fingerprints.** The known-bad list fills itself from the one
   conflict that proves a frame is not art: a wall frame that renders while
@@ -796,8 +797,13 @@ its last counted failure (`plays.runFail`), kept apart from `plays.lastFail`
 (the most recent failure, a play's terminal stage included, for the app),
 so an uncounted HEAD — the same play, already overruled, offline — never
 reclassifies the run nor is reverted in place of the blank frame before
-it; a reverted refusal hands the run back to the counted failure before
-it. A probe answer the vocabulary does
+it, while the play's uncounted retries never shield its counted refusal;
+a reverted refusal hands the run back to the counted failure before it,
+marked `reinstated` so that GET never reverts it in its turn. A record
+from before `runFail` keeps its open run, classified by its `lastFail`. A
+wall frame ends its play's grouping (like an exhausted entry), so the
+next mount's content-type check and GET count as that play's own
+failure. A probe answer the vocabulary does
 not name (a 406, 408, 416) still clears a probe-side issue — the source
 responded — while an attempt with no answer during an outage leaves the
 standing issue as it is. `issueSince`

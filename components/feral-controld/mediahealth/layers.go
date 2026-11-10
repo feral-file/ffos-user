@@ -175,16 +175,17 @@ const headGetWindow = 60 * time.Second
 // evidence was the HEAD alone. Reports whether anything changed.
 //
 // Only a refusal that COUNTED is undone: it is the run's last counted
-// failure (RunFail), never an uncounted HEAD of the same play — whose
-// revert would erase the failure before it, a blank frame say (PR #450
-// review, F8) — and it is the newest failure the record knows (LastFailAt),
-// so the earlier failure restored below is never reverted in its turn.
-// The reverted refusal stays visible as superseded on LastFail; the run
-// classifies by the counted failure before it (RunFail.Prev) again.
+// failure (RunFail), never an uncounted HEAD — whose revert would erase
+// the failure before it, a blank frame say (PR #450 review, F8). The
+// play's uncounted retries after it (attempt 2, 3) do not stand in the
+// way: the counted refusal is still RunFail and is undone (F9). The
+// reverted refusal stays visible as superseded on LastFail when it is the
+// newest failure, and the run classifies by the counted failure before it
+// (RunFail.Prev) again — marked Reinstated, so this play's GET never
+// reverts it in its turn.
 func (r *Record) revertHeadRefusal(now time.Time) bool {
 	f := r.Plays.RunFail
-	if !r.fetchRunOpen() || f.Attempt == 0 || now.Before(f.At) || now.Sub(f.At) > headGetWindow ||
-		r.Plays.LastFailAt == nil || !r.Plays.LastFailAt.Equal(f.At) {
+	if !r.fetchRunOpen() || f.Attempt == 0 || f.Reinstated || now.Before(f.At) || now.Sub(f.At) > headGetWindow {
 		return false
 	}
 	if r.State == StateBroken && r.Layer == LayerPlay && r.Reason == ReasonRenderDetect && r.CheckedAt.Equal(f.At) {
@@ -203,7 +204,9 @@ func (r *Record) revertHeadRefusal(now time.Time) bool {
 		lf.Superseded = true
 	}
 	if r.Plays.ConsecutiveFail > 0 && f.Prev != nil {
-		r.Plays.RunFail = f.Prev
+		prev := *f.Prev
+		prev.Reinstated = true
+		r.Plays.RunFail = &prev
 	}
 	switch {
 	case r.Plays.ConsecutiveFail == 0 && r.Issue == IssuePlayFailed:

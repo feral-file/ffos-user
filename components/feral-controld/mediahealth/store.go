@@ -726,6 +726,14 @@ func (s *Store) decode(raw []byte) (*Record, error) {
 		rec.UnreachableSince, rec.UnreachableFailures = rec.LegacyDNSFailSince, rec.LegacyDNSFailures
 	}
 	rec.LegacyDNSFailSince, rec.LegacyDNSFailures = nil, 0
+	if rec.Plays.ConsecutiveFail > 0 && rec.Plays.RunFail == nil && rec.Plays.LastFail != nil {
+		// A record from before RunFail (PR #450): its open run was
+		// classified by LastFail, so that is what it keeps — the
+		// fetch/render boundary holds across the upgrade and no count is
+		// invented (PR #450 review, F12).
+		rf := *rec.Plays.LastFail
+		rec.Plays.RunFail = &rf
+	}
 	return &rec, nil
 }
 
@@ -1234,8 +1242,12 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 				// A fresh successful play ends an L1 blank run too: a
 				// recovered work must earn a new long confirmation before
 				// it can be suspect again (PR #443 review, F25). Only a play
-				// that proves a render counts (readyIsEvidence, above).
+				// that proves a render counts (readyIsEvidence, above). Its
+				// earlier negative goes too: a later blank must not be
+				// corroborated by one this success overruled (PR #450
+				// review, F11).
 				rec.L1.ConsecutiveBlank = 0
+				rec.L1.NegativeAt = time.Time{}
 			}
 			rec.clearIssue()
 			rec.State = StateOK

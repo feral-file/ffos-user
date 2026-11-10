@@ -373,6 +373,11 @@ type PlayFailure struct {
 	// (one level; its own Prev is dropped), restored when this one is
 	// reverted so the run keeps classifying by what still counts.
 	Prev *PlayFailure `json:"prev,omitempty"`
+	// Reinstated marks a counted failure handed the run back after the
+	// refusal counted on top of it was overruled (revertHeadRefusal): it
+	// belongs to an earlier play, so a GET of the current play never
+	// reverts it.
+	Reinstated bool `json:"reinstated,omitempty"`
 }
 
 // Build records which software produced the current verdict.

@@ -434,7 +434,12 @@ func (s *Service) samePlay(o Outcome) bool {
 	if !same {
 		s.runRefused = false
 	}
-	s.runSource, s.runEnded = o.Source, o.Stage == StageExhausted
+	// An exhausted entry ends the play after itself, and so does a frame
+	// of the wall: it is taken after the play's `ready`, so whatever
+	// follows for that source is the NEXT mount — whose content-type
+	// check must count as its own failure, not ride the frame's run (PR
+	// #450 review, F10: a 404 every play stayed an advisory blank).
+	s.runSource, s.runEnded = o.Source, o.Stage == StageExhausted || o.Stage == StageFrame
 	if !same || o.Attempt > 0 {
 		s.runAttempt = o.Attempt
 	}
