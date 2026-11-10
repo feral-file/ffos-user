@@ -760,8 +760,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// change (run-reviewer F1 on PR #454 round 4, 2026-11-10; owner
 			// confirmed accepting this over the larger fetch/narrow-split
 			// refactor a real fix would need, 2026-11-10). The static
-			// dp1_call branch below does no network call at all between
-			// this read and its own narrow, so it is unaffected.
+			// dp1_call branch below carries the SAME window, not less of
+			// one: ResolveSeriesCastPlan itself issues a synchronous
+			// catalog HTTP GET per unresolved series item
+			// (dp1.seriesEditions), which sits between this read and that
+			// branch's own Narrow call just as much as playlistUrl/
+			// dynamic's fetch does (run-reviewer F1 on PR #454 round 5,
+			// 2026-11-10, correcting this comment's prior claim that the
+			// static branch was unaffected).
 			deviceSeriesMode := h.currentSeriesPlaybackMode()
 			delete(command.Arguments, "retireBlockedCurrent") // internal refresh-only signal
 			delete(command.Arguments, "mediaHealth")          // controld-owned hint field (#392), set before each send
