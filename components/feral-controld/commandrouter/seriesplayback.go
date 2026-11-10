@@ -367,6 +367,20 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	// rebuild is controld's own, same as CMD_RECENTLY_PLAYED_REPLAY's.
 	rebuilt.Signatures = nil
 	rebuilt.Signature = ""
+	// shell is the exact *Playlist a dynamic-origin cast's
+	// ProcessPlaylistURLForCast/ProcessDynamicPlaylistForCast returned, so
+	// it still carries the ORIGINAL DynamicQuery/DynamicQueries — rebuilt
+	// here holds the already-resolved, already-narrowed Items instead.
+	// Left alone, MarshalJSON would still emit dynamicQuery(.pagination),
+	// so re-entering Process below would see HasDynamicContent() true and
+	// re-run the whole dynamic resolution (a fresh network round trip) on
+	// every setSeriesPlayback call, instead of the free, local re-narrow
+	// this cache exists to provide (run-reviewer F1 on #454, 2026-11-10).
+	// A static-origin cast's shell never has these set, so this is a no-op
+	// for it.
+	rebuilt.DynamicQuery = nil
+	rebuilt.DynamicQueries = nil
+	rebuilt.DynamicQueryPagination = nil
 
 	b, err := h.json.Marshal(rebuilt)
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -247,6 +248,93 @@ func TestCommandHandler_SetSeriesPlayback_RecastsTheCurrentlyDisplayedSeries(t *
 	narrowed := castedItems(t, expressions[1])
 	require.Len(t, narrowed, 1, "the new device override (first) must narrow the re-cast to the representative")
 	assert.Equal(t, "item-series", narrowed[0]["id"], "first must cast the document's own representative, not the catalog's first-returned edition")
+}
+
+// TestCommandHandler_SetSeriesPlayback_RecastOfAPlaylistURLCastDoesNotReResolveTheDynamicQuery
+// is run-reviewer's F1 on PR #454 (feral-file/ffos-user#452): before this
+// fix, a cast whose ORIGIN was dynamic (playlistUrl or a dp1_call carrying a
+// dynamicQuery) stored a shell that still carried the original DynamicQuery,
+// so recastForMode's rebuilt document still had it too, and re-entering
+// Process saw HasDynamicContent() true and called ProcessDynamicPlaylistForCast
+// again instead of the documented network-free re-narrow. Pinned by NOT
+// mocking ProcessDynamicPlaylistForCast at all: a regression calls it and
+// gomock fails the test immediately with "unexpected call", rather than this
+// test having to assert a call count.
+func TestCommandHandler_SetSeriesPlayback_RecastOfAPlaylistURLCastDoesNotReResolveTheDynamicQuery(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	logger := zaptest.NewLogger(t)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
+	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
+
+	const url = "https://feed.example/exhibition.json"
+
+	group := &dp1.ResolvedSeriesGroup{
+		Representative: seriesEditionItem("item-series"),
+		Editions:       []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b")},
+		Resolved:       true,
+	}
+	initialPlan := dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}
+	dynamicOriginPlaylist := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			ID:    "playlist-1",
+			Items: []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b")},
+			DynamicQuery: &playlists.DynamicQuery{
+				Profile:  dp1playlist.ProfileGraphQLV1,
+				Endpoint: "https://example.com/graphql",
+				Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id source } }`,
+				ResponseMapping: playlists.ResponseMapping{
+					ItemsPath:  "data.items",
+					ItemSchema: "dp1/1.0",
+				},
+			},
+		},
+	}
+	// The one and only call this cast's origin ever gets. Deliberately no
+	// EXPECT() for ProcessDynamicPlaylistForCast at all — see the test doc.
+	mockDP1.EXPECT().
+		ProcessPlaylistURLForCast(gomock.Any(), url, gomock.Any()).
+		Return(dynamicOriginPlaylist, initialPlan, nil).
+		Times(1)
+	// The re-cast's rebuilt document, once DynamicQuery is cleared, decodes
+	// as an ordinary static dp1_call carrying concrete editions (no
+	// seriesRegistry item left to resolve) — this is that branch's call.
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ interface{}, playlist dp1.Playlist, _ json.RawMessage, _ *dp1.SeriesPlaybackMode, _ int) dp1.CastPlan {
+			segments := make([]dp1.CastSegment, len(playlist.Items))
+			for i := range playlist.Items {
+				item := playlist.Items[i]
+				segments[i] = dp1.CastSegment{Item: &item}
+			}
+			return dp1.CastPlan{Segments: segments}
+		}).
+		AnyTimes()
+
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(playerOkResponse(), nil).
+		Times(2)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(2)
+
+	_, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": url},
+	})
+	require.NoError(t, err)
+
+	result, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_SET_SERIES_PLAYBACK,
+		Arguments: map[string]interface{}{"seriesPlayback": "first"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, true, result.(map[string]interface{})["ok"],
+		"the re-cast must succeed locally, never reaching ProcessDynamicPlaylistForCast")
 }
 
 // feralfile-bot F7, 2026-11-02 (plus the F1 finding from this fix's own

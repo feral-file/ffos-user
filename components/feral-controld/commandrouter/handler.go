@@ -970,14 +970,16 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if contextErr != nil {
 				return nil, contextErr
 			}
-			// Remembered for every CMD_DISPLAY_PLAYLIST cast, not only a
-			// static dp1_call: seriesCastPlan is the zero value (no
-			// segments) for the playlistUrl and dynamic branches above, so
-			// this call CLEARS any series this device was previously
-			// tracking whenever the screen moves to content this pass did
-			// not resolve series groups for — a stale entry must not
-			// outlive what is actually being cast. See rememberSeriesCast's
-			// doc for why this runs eagerly rather than after the CDP send.
+			// Remembered for every CMD_DISPLAY_PLAYLIST cast: every branch
+			// above (playlistUrl, dp1_call static, dp1_call dynamic) now
+			// resolves any seriesRegistry item against deviceSeriesMode and
+			// sets seriesCastPlan accordingly (feral-file/ffos-user#452) —
+			// it is the zero value (no segments) only when this cast
+			// resolved none, which correctly CLEARS any series this device
+			// was previously tracking whenever the screen moves to content
+			// with no series groups — a stale entry must not outlive what
+			// is actually being cast. See rememberSeriesCast's doc for why
+			// this runs eagerly rather than after the CDP send.
 			//
 			// Settled once the outcome is known: marked accepted only for an
 			// accepted cast, retracted otherwise. Judged from result, not
