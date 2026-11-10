@@ -1185,6 +1185,8 @@ func initializeApp(
 	var offlineCacheNotifier *offlinecache.Notifier
 	var offlineCacheSysMetricsSink func(raw []byte)
 	var offlineCacheChanged func(func())
+	var offlineCacheRendererFactory func(offlinecache.MediaHealthRouting) mediahealth.Renderer
+	var offlineCacheAdmission offlinecache.AdmissionController
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
 		ocRuntime := offlinecache.Bootstrap(
@@ -1198,6 +1200,8 @@ func initializeApp(
 		offlineCacheNotifier = ocRuntime.Notifier
 		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
 		offlineCacheChanged = ocRuntime.SetCacheChanged
+		offlineCacheRendererFactory = ocRuntime.NewMediaHealthRenderer
+		offlineCacheAdmission = ocRuntime.Admission
 		if ocRuntime.ObservePlayback != nil {
 			playbackObservers = append(playbackObservers, func(st *status.PlayerStatus) {
 				if st == nil || (st.Command != string(commands.CMD_DISPLAY_PLAYLIST) && st.Command != string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST)) || st.Items == nil || st.Index == nil {
@@ -1348,6 +1352,31 @@ func initializeApp(
 		})
 		if mediaHealthLookahead != nil {
 			go mediaHealthLookahead.Run(context)
+		}
+		// L1, the nightly render probe: an experiment behind
+		// mediaHealth.l1.enabled, off by default. It needs the offline
+		// cache's headless browser (its renderer) and runs only while
+		// the panel is asleep by devicectl's own tracker.
+		var admit func() bool
+		if offlineCacheAdmission != nil {
+			admit = func() bool { return offlineCacheAdmission.Admit(offlinecache.ClassSoftware).Allowed }
+		}
+		// The renderer routes every request exactly as the kiosk's
+		// interceptor does (gateway policy, the store's recorded fallback,
+		// the bare-CID rule), so the page L1 judges is the one the wall
+		// shows; all of it only when that interceptor is installed. Same
+		// typed-nil guard as wireMediaHealth.
+		var renderer mediahealth.Renderer
+		if offlineCacheRendererFactory != nil {
+			var routing offlinecache.MediaHealthRouting
+			if uaRewrite != nil && uaPolicy != nil {
+				routing = offlinecache.MediaHealthRouting{Policy: uaPolicy, Override: mediaHealthSvc.GatewayOverride, SlashBareCID: true}
+			}
+			renderer = offlineCacheRendererFactory(routing)
+		}
+		if l1 := wireMediaHealthL1(config.Get().MediaHealthTuning(logger), mediaHealthSvc.Store(), renderer,
+			func() (time.Time, bool) { return devicectl.PlayerAsleepSince(executor) }, admit, logger); l1 != nil {
+			go l1.Run(context)
 		}
 		if mediaHealthPusher != nil {
 			go mediaHealthPusher.Run(context)

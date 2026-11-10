@@ -475,6 +475,36 @@ func TestOriginForIdentity(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// An L1 suspect verdict is advisory: a work the kiosk loads through a
+// fallback gateway keeps that route when L1 marks it suspect, and an L0
+// answer on the suspect record keeps it too.
+func TestGateways_SuspectKeepsItsRoute(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	s := openTestStore(t, clock)
+	src := "https://ipfs.pixura.io/ipfs/" + cidA + "/index.html"
+	_, err := s.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200, ServedBy: "https://ipfs.filebase.io"})
+	require.NoError(t, err)
+	for range 2 {
+		rec, err := s.ApplyRender(src, RenderResult{Verdict: RenderBlank})
+		require.NoError(t, err)
+		_ = rec
+	}
+	rec, err := s.Get(src)
+	require.NoError(t, err)
+	require.Equal(t, StateSuspect, rec.State, "two blank renders conclude suspect")
+	target, ok := s.GatewayOverride(src, "")
+	require.True(t, ok, "the suspect work still loads through its fallback")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA+"/index.html", target)
+
+	_, err = s.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200, ServedBy: "https://ipfs.filebase.io"})
+	require.NoError(t, err)
+	rec, err = s.Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, StateSuspect, rec.State, "an L0 answer leaves the L1 verdict")
+	_, ok = s.GatewayOverride(src, "")
+	assert.True(t, ok, "and the route")
+}
+
 // The per-source index survives a restart too, including the last-source rule.
 func TestGateways_RouteSourcesSurviveReopen(t *testing.T) {
 	clock := &testClock{t: time.Now()}

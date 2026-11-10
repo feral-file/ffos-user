@@ -445,9 +445,12 @@ func (s *Store) retireUnconfiguredFallbacks() error {
 // serves it or "" for its own gateway. Anything else (no record, no
 // verdict, broken) is absent, so the kiosk lookup can tell a source KNOWN
 // to load from its own gateway from a request nothing ties to a source
-// (PR #438 review, F25 round 4).
+// (PR #438 review, F25 round 4). A suspect (L1) record is indexed like an
+// ok one: L1 is advisory and never gates playback, and its verdict says
+// nothing about which gateway serves the bytes — dropping the route when a
+// work turns suspect would send the wall back to the gateway that 404s.
 func servedByEntry(rec *Record) (origin string, indexed bool) {
-	if rec == nil || rec.State != StateOK {
+	if rec == nil || (rec.State != StateOK && rec.State != StateSuspect) {
 		return "", false
 	}
 	return rec.ServedBy, true
@@ -865,19 +868,28 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 		case VerdictAlive, VerdictInline:
 			// The source's own gateway served it (ServedBy "") or a fallback
 			// did (ServedBy set): either way the record says which one the
-			// kiosk should load.
+			// kiosk should load — for a suspect record too, whose verdict
+			// below is left to L1.
 			rec.ServedBy = res.ServedBy
 			rec.clearIssue()
-			rec.State = StateOK
-			rec.Layer = LayerL0
-			rec.Category, rec.Reason = "", ""
 			rec.HTTPStatus = res.Status
 			rec.DeclaredType, rec.SniffedType = res.Declared, res.Sniffed
-			rec.CheckedAt = now
 			rec.RecheckAfter = now.Add(RecheckOK)
 			rec.ConsecutiveBroken = 0
 			rec.LastError, rec.LastErrorAt = "", nil
 			rec.RetryAfter = time.Time{}
+			if rec.State == StateSuspect {
+				// Valid bytes say nothing about a frame that rendered
+				// blank or as an error page: the L0 metadata and recheck
+				// are refreshed, the L1 verdict stands until a play
+				// success or a real L1 render heals it (PR #443 review,
+				// F23).
+				return true
+			}
+			rec.State = StateOK
+			rec.Layer = LayerL0
+			rec.Category, rec.Reason = "", ""
+			rec.CheckedAt = now
 		case VerdictDead:
 			concludeBrokenL0(rec, res.Reason, res.Status, res.Detail, now)
 			rec.DeclaredType, rec.SniffedType = res.Declared, res.Sniffed
@@ -1138,8 +1150,17 @@ func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) fun
 				// pushes the recheck out: the record stays due and L0, the
 				// layer that actually reads the bytes, keeps looking. A
 				// ready that wrote ok here hid an unresolvable fxhash work
-				// for a week (#392, office FF1, 2026-11-05).
+				// for a week (#392, office FF1, 2026-11-05). For the same
+				// reason it neither heals an L1 suspect nor resets the L1
+				// blank run below: a blank frame reports ready too.
 				return true
+			}
+			if rec.L1 != nil {
+				// A fresh successful play ends an L1 blank run too: a
+				// recovered work must earn a new long confirmation before
+				// it can be suspect again (PR #443 review, F25). Only a play
+				// that proves a render counts (readyIsEvidence, above).
+				rec.L1.ConsecutiveBlank = 0
 			}
 			rec.clearIssue()
 			rec.State = StateOK
