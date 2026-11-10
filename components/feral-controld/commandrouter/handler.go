@@ -771,6 +771,17 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			deviceSeriesMode := h.currentSeriesPlaybackMode()
 			delete(command.Arguments, "retireBlockedCurrent") // internal refresh-only signal
 			delete(command.Arguments, "mediaHealth")          // controld-owned hint field (#392), set before each send
+			// recastForMode's internal-only re-cast signal (feralfile-bot F1
+			// on PR #454, 2026-11-10): the ORIGINAL cast's scheduler source,
+			// carried through its rebuilt-as-static dp1_call so the branch
+			// taken below (which never itself knows a source) does not
+			// overwrite the scheduler's durable playlistUrl/inline-dynamic
+			// source with its own zero value. The type assertion is the
+			// security boundary — a wire-decoded command can never produce
+			// this Go struct type for this key, only recastForMode's direct
+			// in-process call can.
+			recastSource, isRecast := command.Arguments[recastSchedulerSourceHint].(playlistschedule.Source)
+			delete(command.Arguments, recastSchedulerSourceHint)
 			// The content-policy lock is taken further down, immediately before
 			// the filter, NOT here: URL and dynamic resolution between here and
 			// there are network-bound (the shared 30s HTTP timeout on a
@@ -980,6 +991,19 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				return nil, fmt.Errorf("unknown payload type")
 			}
 
+			// Restore the original cast's scheduler source for a
+			// recastForMode re-cast: the switch above always takes the
+			// static dp1_call branch for one of these (DynamicQuery is
+			// cleared before re-entry, see recastForMode's doc) and so
+			// never itself sets schedulerSource. Applied AFTER the switch,
+			// BEFORE schedulerSource.ContentContext is set below, so the
+			// re-cast's current contentContext still lands on top of the
+			// restored source rather than the stale one it was captured
+			// with (feralfile-bot F1 on PR #454, 2026-11-10).
+			if isRecast {
+				schedulerSource = recastSource
+			}
+
 			// Signature verdict (#307). Logged once here, reported on the
 			// reply and player_status below. nil when verification is off or
 			// the document could not be verified (the offline cached copy).
@@ -1015,7 +1039,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// player send, and the send's own reply otherwise). A
 			// displayAt-deferred acceptance reports ok:true and counts as
 			// accepted, same as the scheduler keeps the cast.
-			seriesCastSeq := h.rememberSeriesCast(*playlist, seriesCastPlan, contentContext)
+			seriesCastSeq := h.rememberSeriesCast(*playlist, seriesCastPlan, contentContext, schedulerSource)
 			defer func() {
 				h.settleSeriesCast(seriesCastSeq, err == nil && playerresponse.OK(result))
 			}()

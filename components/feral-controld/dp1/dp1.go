@@ -421,7 +421,24 @@ func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playli
 	narrowed := *resolved
 	narrowed.Items = plan.Narrow(deviceMode)
 
-	if hasDisplayAtItems(narrowed.Items) || len(narrowed.Items) <= MINIMAL_PLAYLIST_ITEMS_LIMIT {
+	// A scheduled result (some item carries displayAt) is left untrimmed and
+	// its plan uncapped: the scheduler needs every cohort's items to arm its
+	// own timers, and the 50-item cap below exists for an unscheduled SHORT
+	// initial cast, not a scheduled one of any length.
+	if hasDisplayAtItems(narrowed.Items) {
+		return &narrowed, plan, nil
+	}
+	if len(narrowed.Items) <= MINIMAL_PLAYLIST_ITEMS_LIMIT {
+		// Already at or under the cap, so narrowed.Items needs no trim — but
+		// plan's own maxItems is still CAST_PLAYLIST_ITEMS_LIMIT (255) from
+		// the resolveSeriesCastPlan call above. A cached plan returned as-is
+		// would let a later setSeriesPlayback re-narrow (CastPlan.Narrow)
+		// reconstruct up to 255 items for a mode this initial cast never
+		// showed, making playback depend on which mode started the cast
+		// (feralfile-bot F2 on PR #454, 2026-11-10). Capping plan.maxItems
+		// here, same as the trim path below, keeps every later re-narrow
+		// bounded the same way regardless of which mode started the cast.
+		plan.maxItems = MINIMAL_PLAYLIST_ITEMS_LIMIT
 		return &narrowed, plan, nil
 	}
 	narrowed.Items = narrowed.Items[:MINIMAL_PLAYLIST_ITEMS_LIMIT]

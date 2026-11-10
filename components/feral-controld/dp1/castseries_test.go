@@ -194,6 +194,64 @@ func TestDP1_ProcessDynamicPlaylistForCast_CachedPlanStaysBoundedAfterMinimalTri
 		"a later re-narrow of the CACHED plan must stay bounded to what the initial cast actually showed, not reconstruct up to CAST_PLAYLIST_ITEMS_LIMIT")
 }
 
+// TestDP1_ProcessDynamicPlaylistForCast_CachedPlanStaysBoundedWhenAlreadyShort
+// is feralfile-bot's F2 on PR #454: the early return for an UNSCHEDULED
+// result already at or under MINIMAL_PLAYLIST_ITEMS_LIMIT (no trim needed)
+// skipped the same plan.maxItems cap round 2's fix applied to the trimmed
+// path — so a `multi_unique` series narrowed to one representative under
+// `first` cached a plan still bounded to CAST_PLAYLIST_ITEMS_LIMIT (255).
+// Re-narrowing that cached plan to `full` must stay bounded to what a direct
+// `full` cast of the same source would show (MINIMAL_PLAYLIST_ITEMS_LIMIT),
+// not reconstruct every catalog edition just because the FIRST cast started
+// short.
+func TestDP1_ProcessDynamicPlaylistForCast_CachedPlanStaysBoundedWhenAlreadyShort(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	const editionCount = 80 // > MINIMAL_PLAYLIST_ITEMS_LIMIT (50): a full re-narrow would exceed it if uncapped.
+
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		DoAndReturn(func(req *http.Request) (*http.Response, error) {
+			assertGraphQLHydration(t, req, "255", "0")
+			body := `{"data":{"items":[` +
+				`{"id":"fdb2a98f-9ca0-4a76-ae1f-cd8e2f8d4caf","source":"https://cdn.artworks.feralfile.io/0.mp4","provenance":{"type":"seriesRegistry","contract":{"chain":"evm","seriesId":387}}}` +
+				`]}}`
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}).
+		Times(1)
+	serveEditions(ts, "playlist-dyn-2", "fdb2a98f-9ca0-4a76-ae1f-cd8e2f8d4caf", manyEditionsBody("playlist-dyn-2", editionCount, "multi_unique"))
+	allowRawItemModeDecode(ts)
+
+	playlist := dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			ID: "playlist-dyn-2",
+			DynamicQuery: &playlists.DynamicQuery{
+				Profile:  dp1playlist.ProfileGraphQLV1,
+				Endpoint: "https://example.com/graphql",
+				Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id source provenance } }`,
+				ResponseMapping: playlists.ResponseMapping{
+					ItemsPath:  "data.items",
+					ItemSchema: "dp1/1.0",
+				},
+			},
+		},
+	}
+
+	first := dp1.SeriesPlaybackFirst
+	result, plan, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist, &first)
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1, "device mode first must narrow to the single representative")
+
+	renarrowed := plan.Narrow(dp1Mode(dp1.SeriesPlaybackFull))
+	assert.LessOrEqual(t, len(renarrowed), dp1.MINIMAL_PLAYLIST_ITEMS_LIMIT,
+		"a later re-narrow to full of a plan cached from an already-short initial cast must stay bounded, matching a direct full cast, not reconstruct every edition")
+}
+
+// dp1Mode is a one-line helper so the full-mode re-narrow above can take a
+// literal without a throwaway local variable.
+func dp1Mode(m dp1.SeriesPlaybackMode) *dp1.SeriesPlaybackMode { return &m }
+
 // TestDP1_ProcessPlaylistURLForCast_FullMultiUniquePlaysEveryEdition pins the
 // other side of the same mode: a multi_unique series with no seriesPlayback
 // and no device override still casts every catalog edition under the

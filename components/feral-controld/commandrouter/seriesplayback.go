@@ -10,8 +10,22 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/seriesplayback"
 )
+
+// recastSchedulerSourceHint is the internal-only command.Arguments key
+// recastForMode attaches to its re-entrant CMD_DISPLAY_PLAYLIST call, the
+// same pattern as "retireBlockedCurrent"/"mediaHealth" (handler.go): a Go
+// playlistschedule.Source value a decoded wire command could never produce
+// (JSON decoding never yields this struct type), so the type assertion
+// reading it IS the boundary against a caller injecting one. It carries the
+// ORIGINAL cast's scheduler source (the playlistUrl or inline dynamic
+// playlist that started it) across the rebuilt-as-static-dp1_call re-cast,
+// so handler.go can restore it instead of letting the static branch's own
+// zero-value schedulerSource overwrite the scheduler's durable source
+// (feralfile-bot F1 on PR #454, 2026-11-10).
+const recastSchedulerSourceHint = "recastSchedulerSource"
 
 // SetSeriesPlayback wires the device-level series-playback override store, if
 // h supports it (the concrete *handler built by New, not the gate wrapper) —
@@ -111,6 +125,13 @@ type displayedSeriesCast struct {
 	shell          dp1.Playlist
 	plan           dp1.CastPlan
 	contentContext contentpolicy.Context
+	// source is the ORIGINAL cast's scheduler source (playlistUrl or inline
+	// dynamic playlist) — kept so recastForMode can carry it through its
+	// rebuilt-as-static-dp1_call re-cast via recastSchedulerSourceHint,
+	// rather than letting the static branch's own zero-value schedulerSource
+	// silently reset the scheduler's durable source (feralfile-bot F1 on PR
+	// #454, 2026-11-10).
+	source playlistschedule.Source
 }
 
 // rememberSeriesCast records what Process just resolved for a
@@ -129,7 +150,7 @@ type displayedSeriesCast struct {
 // series whose editions all 404 but whose representative is reachable is
 // rejected in full yet accepted narrowed to "first", replacing whatever is
 // actually on screen (PR #429 review F2).
-func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, contentContext contentpolicy.Context) uint64 {
+func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, contentContext contentpolicy.Context, source playlistschedule.Source) uint64 {
 	h.lastSeriesCast.mu.Lock()
 	defer h.lastSeriesCast.mu.Unlock()
 	h.lastSeriesCast.seq++
@@ -139,6 +160,7 @@ func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, c
 		h.lastSeriesCast.shell = dp1.Playlist{}
 		h.lastSeriesCast.plan = dp1.CastPlan{}
 		h.lastSeriesCast.contentContext = ""
+		h.lastSeriesCast.source = playlistschedule.Source{}
 		return h.lastSeriesCast.seq
 	}
 	shell := playlist
@@ -147,6 +169,7 @@ func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, c
 	h.lastSeriesCast.shell = shell
 	h.lastSeriesCast.plan = plan
 	h.lastSeriesCast.contentContext = contentContext
+	h.lastSeriesCast.source = source
 	return h.lastSeriesCast.seq
 }
 
@@ -176,6 +199,7 @@ func (h *handler) settleSeriesCast(seq uint64, accepted bool) {
 	h.lastSeriesCast.shell = dp1.Playlist{}
 	h.lastSeriesCast.plan = dp1.CastPlan{}
 	h.lastSeriesCast.contentContext = ""
+	h.lastSeriesCast.source = playlistschedule.Source{}
 }
 
 // clearSeriesCast invalidates the displayed-series cache without recording a
@@ -201,6 +225,7 @@ func (h *handler) clearSeriesCast() {
 	h.lastSeriesCast.shell = dp1.Playlist{}
 	h.lastSeriesCast.plan = dp1.CastPlan{}
 	h.lastSeriesCast.contentContext = ""
+	h.lastSeriesCast.source = playlistschedule.Source{}
 }
 
 // handleSeriesPlayback serves getSeriesPlayback/setSeriesPlayback. Both are
@@ -359,6 +384,7 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	shell := h.lastSeriesCast.shell
 	plan := h.lastSeriesCast.plan
 	contentContext := h.lastSeriesCast.contentContext
+	source := h.lastSeriesCast.source
 	seqBefore := h.lastSeriesCast.seq
 	h.lastSeriesCast.mu.Unlock()
 
@@ -398,6 +424,17 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	if contentContext != "" {
 		recastArgs["contentContext"] = string(contentContext)
 	}
+	// Carries the ORIGINAL cast's scheduler source through this rebuilt
+	// dp1_call, which Process below classifies as static (no dynamic
+	// fields survive, see above) and would otherwise prepare with a
+	// zero-value Source — silently resetting the scheduler's durable
+	// playlistUrl/inline-dynamic source on every setSeriesPlayback call
+	// (feralfile-bot F1 on PR #454, 2026-11-10). See
+	// recastSchedulerSourceHint's doc for why this cannot be forged by an
+	// external caller.
+	if !source.IsZero() {
+		recastArgs[recastSchedulerSourceHint] = source
+	}
 	_, procErr := h.Process(ctx, commands.Command{Type: commands.CMD_DISPLAY_PLAYLIST, Arguments: recastArgs})
 
 	// The re-entrant Process call's own dp1_call branch just ran
@@ -418,6 +455,7 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 		h.lastSeriesCast.shell = shell
 		h.lastSeriesCast.plan = plan
 		h.lastSeriesCast.contentContext = contentContext
+		h.lastSeriesCast.source = source
 	}
 	h.lastSeriesCast.mu.Unlock()
 
