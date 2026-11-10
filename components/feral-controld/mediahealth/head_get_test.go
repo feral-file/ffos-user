@@ -119,3 +119,70 @@ func TestHeadGet_AnOverruledHeadKeepsTheFrameRun(t *testing.T) {
 	require.NotNil(t, rec.Plays.LastFail)
 	assert.Equal(t, StageFrame, rec.Plays.LastFail.Stage, "the overruled HEAD never became the last failure")
 }
+
+// A HEAD refusal drained BEFORE its GET is observed, in a play following a
+// blank one: whether or not it was counted, the served GET may undo only
+// what the HEAD itself contributed — never the earlier blank frame's
+// failure (PR #450 review, F8).
+func TestHeadGet_AServedGetNeverErasesAFrameFailure(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	cap := &fakeWall{frames: []*WallFrame{blankFrame(), blankFrame(), blankFrame()}}
+	svc, w := newWallRig(t, clock, cap)
+	src := "https://o/blank-html"
+	seedSoftware(t, svc.Store(), src)
+	for play := int64(1); play <= 3; play++ {
+		svc.ObservePlayback(items(src), 0, pending(), &Outcomes{CastSeq: 1})
+		entries := []Outcome{}
+		if play > 1 {
+			entries = append(entries, headAt(src, play*10, "404", clock.Now()))
+		}
+		entries = append(entries, Outcome{Seq: play*10 + 1, Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "iframe", At: clock.Now().UTC().Format(time.RFC3339Nano)})
+		svc.ObservePlayback(items(src), 0, ready(), &Outcomes{CastSeq: 1, Entries: entries})
+		if play > 1 {
+			clock.Advance(2 * time.Second)
+			svc.ObserveNavigation(Navigation{URL: src, Status: 200}) // the GET, served after the HEAD drained
+		}
+		clock.Advance(DefaultWallSettle)
+		require.True(t, w.Step(context.Background()))
+		clock.Advance(2 * time.Minute)
+	}
+	rec, err := svc.Store().Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, StateSuspect, rec.State, "blank on every play: a render negative")
+	assert.Equal(t, ReasonRenderBlank, rec.Reason)
+	assert.Equal(t, StageFrame, rec.Plays.LastFail.Stage)
+}
+
+// A counted HEAD the GET overrules hands the run back to the counted
+// failure before it: here a blank frame, so the run is a frame run again
+// and the next play's `ready` cannot end it. A second served GET reverts
+// nothing more (PR #450 review, F8).
+func TestHeadGet_ARevertedHeadRestoresTheFailureBeforeIt(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := openTestStore(t, clock)
+	src := "https://o/blank-html"
+	seedSoftware(t, store, src)
+	_, err := store.ApplyOutcome(wallBlank(src), true)
+	require.NoError(t, err)
+	clock.Advance(time.Minute)
+	rec, err := store.ApplyOutcome(headAt(src, 2, "404", clock.Now()), true)
+	require.NoError(t, err)
+	require.Equal(t, StateBroken, rec.State, "two counted failures conclude on the HEAD")
+	require.Equal(t, ReasonRenderDetect, rec.Reason)
+
+	clock.Advance(2 * time.Second)
+	require.NoError(t, store.ApplyKioskAnswer(src))
+	rec, err = store.Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, State(""), rec.State, "the HEAD's verdict is withdrawn")
+	assert.Equal(t, 1, rec.Plays.ConsecutiveFail)
+	require.NotNil(t, rec.Plays.RunFail)
+	assert.Equal(t, StageFrame, rec.Plays.RunFail.Stage, "the blank frame classifies the run again")
+	assert.True(t, rec.frameRunOpen())
+	assert.True(t, rec.Plays.LastFail.Superseded, "the overruled HEAD stays visible to the app")
+
+	require.NoError(t, store.ApplyKioskAnswer(src))
+	rec, err = store.Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, 1, rec.Plays.ConsecutiveFail, "a second 2xx reverts nothing more")
+}

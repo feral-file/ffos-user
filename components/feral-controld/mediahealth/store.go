@@ -1259,13 +1259,10 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 				// above; the run and LastFail are left as they are.
 				return true
 			}
-			if o.overruled {
-				// History only (Outcome.overruled): neither counted nor the
-				// run's last failure.
-				return true
-			}
+			failure := PlayFailure{Stage: o.Stage, Code: o.Code, MediaType: o.MediaType, Attempt: o.Attempt, At: at, ServedBy: rec.ServedBy}
 			if rec.Plays.LastFailAt == nil || !at.Before(*rec.Plays.LastFailAt) {
-				rec.Plays.LastFail = &PlayFailure{Stage: o.Stage, Code: o.Code, MediaType: o.MediaType, Attempt: o.Attempt, At: at, ServedBy: rec.ServedBy}
+				last := failure
+				rec.Plays.LastFail = &last
 				rec.Plays.LastFailAt = new(at)
 			}
 			if o.MediaType != "" {
@@ -1285,6 +1282,15 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 				return true
 			}
 			rec.Plays.ConsecutiveFail++
+			// The run's last counted failure (PlayStats.RunFail); the one
+			// before it is kept one level deep for revertHeadRefusal.
+			run := failure
+			if prev := rec.Plays.RunFail; prev != nil && rec.Plays.ConsecutiveFail > 1 {
+				p := *prev
+				p.Prev = nil
+				run.Prev = &p
+			}
+			rec.Plays.RunFail = &run
 			corroborated := rec.Plays.ConsecutiveFail >= 2 ||
 				(rec.State == StateBroken && rec.Layer == LayerL0 && at.Before(rec.RecheckAfter)) ||
 				(o.Stage == StageFrame && rec.l1Negative())
@@ -1411,6 +1417,10 @@ func (s *Store) ApplyKioskAnswer(source string) error {
 	if lf := rec.Plays.LastFail; lf != nil {
 		copied := *lf
 		probe.Plays.LastFail = &copied
+	}
+	if rf := rec.Plays.RunFail; rf != nil {
+		copied := *rf
+		probe.Plays.RunFail = &copied
 	}
 	if !rec.Issue.probeSide() && rec.UnreachableSince == nil && !probe.revertHeadRefusal(now) {
 		return nil

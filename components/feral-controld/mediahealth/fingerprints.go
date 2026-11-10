@@ -192,9 +192,9 @@ const learnConflictWindow = 5 * time.Minute
 // — that frame is the document, not an error page (PR #450 review, F1: a
 // healthy frame through a fallback gateway was learned as known-bad).
 func (r *Record) learnableErrorPage(at time.Time) bool {
-	if !r.fetchRunOpen() || !definiteAbsence(r.Plays.LastFail.Code) {
+	if !r.fetchRunOpen() || !definiteAbsence(r.Plays.RunFail.Code) {
 		return false
 	}
-	f := r.Plays.LastFail
+	f := r.Plays.RunFail
 	return f.ServedBy == r.ServedBy && !at.Before(f.At) && at.Sub(f.At) <= learnConflictWindow
 }

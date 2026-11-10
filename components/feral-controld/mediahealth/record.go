@@ -340,6 +340,15 @@ type PlayStats struct {
 	LastOKAt        *time.Time   `json:"lastOkAt,omitempty"`
 	LastFailAt      *time.Time   `json:"lastFailAt,omitempty"`
 	LastFail        *PlayFailure `json:"lastFail,omitempty"`
+	// RunFail is the open run's last COUNTED failure (the one that advanced
+	// ConsecutiveFail), meaningful only while ConsecutiveFail > 0. It
+	// classifies the run — fetchRunOpen, frameRunOpen — and is what
+	// revertHeadRefusal may undo. Kept apart from LastFail, which is the
+	// most recent failure for the app and takes a play's uncounted stages
+	// too (its terminal stage is the diagnostic): an uncounted entry — the
+	// same play, an overruled HEAD, offline — must never reclassify the run
+	// or be reverted as if it had counted (PR #450 review, F5, F8).
+	RunFail *PlayFailure `json:"runFail,omitempty"`
 }
 
 // PlayFailure is the most recent failing outcome, kept whole so the app and
@@ -360,6 +369,10 @@ type PlayFailure struct {
 	// names the gateway that refused: a frame through another gateway is
 	// not that conflict (learnableErrorPage, PR #450 review F1).
 	ServedBy string `json:"servedBy,omitempty"`
+	// Prev is, on RunFail only, the run's counted failure before this one
+	// (one level; its own Prev is dropped), restored when this one is
+	// reverted so the run keeps classifying by what still counts.
+	Prev *PlayFailure `json:"prev,omitempty"`
 }
 
 // Build records which software produced the current verdict.

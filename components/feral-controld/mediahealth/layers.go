@@ -43,7 +43,7 @@ func (r *Record) renderLayerBroken() bool {
 // play_failed issue, or a work refused on every play but rendering nightly
 // would never conclude (the PENDING #37 pattern).
 func (r *Record) fetchRunOpen() bool {
-	f := r.Plays.LastFail
+	f := r.Plays.RunFail
 	return r.Plays.ConsecutiveFail > 0 && f != nil && f.Stage == StageDetect && f.Code != CodeNetwork && !f.Superseded
 }
 
@@ -63,7 +63,7 @@ func (r *Record) renderedFrame(at time.Time, layer Layer) bool {
 	if r.State == StateBroken && !r.renderLayerBroken() {
 		return false
 	}
-	if r.fetchRunOpen() && definiteAbsence(r.Plays.LastFail.Code) {
+	if r.fetchRunOpen() && definiteAbsence(r.Plays.RunFail.Code) {
 		return false
 	}
 	r.State = StateOK
@@ -94,7 +94,7 @@ func (r *Record) renderedFrame(at time.Time, layer Layer) bool {
 // every play's `ready` would reset the run before that play's blank frame
 // arrived, and a blank work could never conclude.
 func (r *Record) frameRunOpen() bool {
-	f := r.Plays.LastFail
+	f := r.Plays.RunFail
 	return r.Plays.ConsecutiveFail > 0 && f != nil && f.Stage == StageFrame
 }
 
@@ -173,9 +173,18 @@ const headGetWindow = 60 * time.Second
 // the real GET outranks it. The count is reverted, the issue ends with the
 // run, and a verdict this very failure concluded is withdrawn: its
 // evidence was the HEAD alone. Reports whether anything changed.
+//
+// Only a refusal that COUNTED is undone: it is the run's last counted
+// failure (RunFail), never an uncounted HEAD of the same play — whose
+// revert would erase the failure before it, a blank frame say (PR #450
+// review, F8) — and it is the newest failure the record knows (LastFailAt),
+// so the earlier failure restored below is never reverted in its turn.
+// The reverted refusal stays visible as superseded on LastFail; the run
+// classifies by the counted failure before it (RunFail.Prev) again.
 func (r *Record) revertHeadRefusal(now time.Time) bool {
-	f := r.Plays.LastFail
-	if !r.fetchRunOpen() || f.Attempt == 0 || now.Before(f.At) || now.Sub(f.At) > headGetWindow {
+	f := r.Plays.RunFail
+	if !r.fetchRunOpen() || f.Attempt == 0 || now.Before(f.At) || now.Sub(f.At) > headGetWindow ||
+		r.Plays.LastFailAt == nil || !r.Plays.LastFailAt.Equal(f.At) {
 		return false
 	}
 	if r.State == StateBroken && r.Layer == LayerPlay && r.Reason == ReasonRenderDetect && r.CheckedAt.Equal(f.At) {
@@ -190,6 +199,12 @@ func (r *Record) revertHeadRefusal(now time.Time) bool {
 		r.Plays.Fail--
 	}
 	f.Superseded = true
+	if lf := r.Plays.LastFail; lf != nil && lf.At.Equal(f.At) && lf.Stage == f.Stage {
+		lf.Superseded = true
+	}
+	if r.Plays.ConsecutiveFail > 0 && f.Prev != nil {
+		r.Plays.RunFail = f.Prev
+	}
 	switch {
 	case r.Plays.ConsecutiveFail == 0 && r.Issue == IssuePlayFailed:
 		r.clearIssue()

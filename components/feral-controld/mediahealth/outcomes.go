@@ -43,14 +43,6 @@ type Outcome struct {
 	// ready is the origin's or Chromium's error page. The store neither
 	// counts it as a success nor lets it reset the failure run.
 	errorPage bool
-	// overruled is set by the Service, never by the player: a content-type
-	// check refusal the kiosk's own GET of the same document already
-	// overruled (kioskServedAfter). History only: it must not replace
-	// Plays.LastFail, which classifies the open run (frameRunOpen,
-	// fetchRunOpen) — a refused-then-served HEAD would otherwise make the
-	// play's blank frame "the same play" as a fetch refusal and let the
-	// `ready` reset a blank run (PR #450 review, F5).
-	overruled bool
 }
 
 // countableFailure reports whether a failing entry can ever advance the

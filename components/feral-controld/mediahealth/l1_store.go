@@ -129,7 +129,7 @@ func (s *Store) ApplyRender(source string, r RenderResult) (*Record, error) {
 			}
 			conclude := s.renderConclusive && corroborated
 			if conclude && rec.fetchRunOpen() {
-				status, _ := strconv.Atoi(rec.Plays.LastFail.Code)
+				status, _ := strconv.Atoi(rec.Plays.RunFail.Code)
 				rec.concludeRender(ReasonRenderDetect, LayerPlay, now, true)
 				rec.Category = playCategory(ReasonRenderDetect, status, contentAddressed)
 				rec.HTTPStatus = status

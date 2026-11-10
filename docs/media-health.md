@@ -791,7 +791,13 @@ neither counts nor makes the play's `ready` an error page); one already
 counted is reverted when the 2xx arrives — its count, its `play_failed`,
 and a verdict that very refusal concluded, which goes back to unknown. A
 refusal is reverted once (`superseded`); an observed GET failure is never
-reverted. A probe answer the vocabulary does
+reverted. Only a refusal that counted is undone: the run is classified by
+its last counted failure (`plays.runFail`), kept apart from `plays.lastFail`
+(the most recent failure, a play's terminal stage included, for the app),
+so an uncounted HEAD — the same play, already overruled, offline — never
+reclassifies the run nor is reverted in place of the blank frame before
+it; a reverted refusal hands the run back to the counted failure before
+it. A probe answer the vocabulary does
 not name (a 406, 408, 416) still clears a probe-side issue — the source
 responded — while an attempt with no answer during an outage leaves the
 standing issue as it is. `issueSince`
