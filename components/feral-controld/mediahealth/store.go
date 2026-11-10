@@ -299,6 +299,7 @@ func (s *Store) Due(now time.Time, limit int, skip func(source string) bool) ([]
 // record previously stored (nil when none) so the old index entry is removed.
 func (s *Store) put(tx *bolt.Tx, prev, rec *Record) error {
 	rec.V = recordVersion
+	rec.ObservedTracked = true // Record.ObservedTracked
 	raw, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -734,6 +735,14 @@ func (s *Store) decode(raw []byte) (*Record, error) {
 		rf := *rec.Plays.LastFail
 		rec.Plays.RunFail = &rf
 	}
+	if !rec.ObservedTracked {
+		// A record from before ObservedAt (PR #451): seed it once from the
+		// times that stood in for it, so the report keeps its freshness
+		// and an older outcome drained after the upgrade cannot move it
+		// back. put marks it tracked on the next write.
+		rec.observe(rec.legacyObservedAt())
+		rec.ObservedTracked = true
+	}
 	return &rec, nil
 }
 
@@ -888,6 +897,13 @@ func probeWritesRecord(res ProbeResult) bool {
 // probeMutation is the record update one probe result applies.
 func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed bool) bool {
 	return func(rec *Record, _ bool) bool {
+		if res.Unreachable == "" || res.NetworkHealthy {
+			// A probe that got an answer, or none while other origins
+			// answered, looked at the source. One that got none during
+			// an outage says nothing about it (Record.ObservedAt). Answers
+			// served from the store never get here (probeWritesRecord).
+			rec.observe(now)
+		}
 		if res.WireURL != "" {
 			rec.WireURL = res.WireURL
 			rec.Host = hostOf(res.WireURL)
@@ -1107,7 +1123,12 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 			if o.frame != nil && o.Kind == OutcomeOK && (o.errorPage || rec.learnableErrorPage(outcomeTime(o, now))) {
 				learn = true
 			}
-			return mutate(rec, existed)
+			wrote := mutate(rec, existed)
+			if outcomeObserves(o, count) {
+				rec.observe(outcomeTime(o, now))
+				wrote = true
+			}
+			return wrote
 		})
 		if err != nil {
 			return err
@@ -1400,6 +1421,24 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 	}
 }
 
+// outcomeObserves reports whether an outcome is a real look at the source
+// (Record.ObservedAt): a play that reached ready (an error page's included:
+// the player played it), a frame of the wall, or a counted failure. Not a
+// skip on a hint, nor a device-local failure (WebGL), nor a failure
+// counted for nothing because the device was offline or it continued the
+// play already counted (that play's first entry observed it).
+func outcomeObserves(o Outcome, count bool) bool {
+	switch {
+	case o.frame != nil:
+		return true
+	case o.Kind == OutcomeOK:
+		return true
+	case o.Kind == OutcomeFail:
+		return count && !deviceLocal(o)
+	}
+	return false
+}
+
 // outcomeTime is when the player observed the outcome: its own RFC 3339
 // timestamp when present, parseable and not after now (a player clock
 // ahead of the device must not date a verdict into the future, which
@@ -1451,37 +1490,54 @@ func playCategory(reason Reason, status int, contentAddressed bool) Category {
 // issue (no answer, DNS, 5xx, rate limit, access denied) is no longer the
 // truth and the unreachable streak ends. It never writes ok — a 200 proves
 // the document arrived, not that the work rendered — and a play_failed
-// issue stands: that one is about rendering. Writes only when something
-// changes; a source with no record is left alone (nothing to correct).
+// issue stands: that one is about rendering. It is a look at the source
+// (ObservedAt), so a source with no record gets one holding just that look.
 //
 // It also lets the kiosk's real GET outrank the player's HEAD: a content-type
 // check refusal counted in the same play is reverted (revertHeadRefusal),
 // and the result says so — the Service frees that play's count (F13).
 func (s *Store) ApplyKioskAnswer(source string) (bool, error) {
 	rec, err := s.Get(source)
-	if err != nil || rec == nil {
+	if err != nil {
 		return false, err
 	}
 	now := s.now()
-	probe := *rec
-	if lf := rec.Plays.LastFail; lf != nil {
-		copied := *lf
-		probe.Plays.LastFail = &copied
-	}
-	if rf := rec.Plays.RunFail; rf != nil {
-		copied := *rf
-		probe.Plays.RunFail = &copied
-	}
-	if !rec.Issue.probeSide() && rec.UnreachableSince == nil && !probe.revertHeadRefusal(now) {
-		return false, nil
+	// The kiosk loading the document is a look at the source (Record.
+	// ObservedAt) — the only one a player without the outcome ring reports
+	// for a success (PR #451 review, F4). It writes at most once per
+	// kioskObserveGap unless something else changes: a work's frame can
+	// reload often, and freshness at second resolution is not worth a
+	// write per reload.
+	observe := rec == nil || now.Sub(rec.ObservedAt) >= kioskObserveGap
+	if rec != nil {
+		probe := *rec
+		if lf := rec.Plays.LastFail; lf != nil {
+			copied := *lf
+			probe.Plays.LastFail = &copied
+		}
+		if rf := rec.Plays.RunFail; rf != nil {
+			copied := *rf
+			probe.Plays.RunFail = &copied
+		}
+		if !observe && !rec.Issue.probeSide() && rec.UnreachableSince == nil && !probe.revertHeadRefusal(now) {
+			return false, nil
+		}
 	}
 	var reverted bool
 	_, err = s.update(source, func(rec *Record, existed bool) bool {
+		changed := false
+		if observe || !existed {
+			// An observation only: never a verdict (a 200 proves the
+			// document arrived, not that the work rendered), and for a
+			// source with no record, a record holding just this look.
+			rec.observe(now)
+			changed = true
+		}
 		if !existed {
-			return false
+			return changed
 		}
 		reverted = rec.revertHeadRefusal(now)
-		changed := reverted
+		changed = changed || reverted
 		if rec.Issue.probeSide() {
 			rec.clearIssue()
 			changed = true
@@ -1494,3 +1550,7 @@ func (s *Store) ApplyKioskAnswer(source string) (bool, error) {
 	})
 	return reverted && err == nil, err
 }
+
+// kioskObserveGap is the least time between two writes of a kiosk document
+// load as an observation alone (ApplyKioskAnswer).
+const kioskObserveGap = time.Minute

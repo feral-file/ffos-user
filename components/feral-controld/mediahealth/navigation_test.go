@@ -80,7 +80,15 @@ func TestNavigation_IgnoredObservations(t *testing.T) {
 	f.s.ObserveNavigation(Navigation{URL: "http://127.0.0.1:8080/", Status: 404})
 	f.s.ObserveNavigation(Navigation{URL: f.src})
 	rec := f.record()
-	assert.Nil(t, rec, "nothing was recorded: a cancel, a success, a redirect, a stranger, an empty observation")
+	// A success is a look at the source (PR #451, F4): it records that and
+	// nothing else. The cancel, the redirect, the strangers and the empty
+	// observation record nothing at all.
+	require.NotNil(t, rec, "the success is a look")
+	assert.Equal(t, State(""), rec.State, "never a verdict")
+	assert.False(t, rec.ObservedAt.IsZero())
+	assert.Zero(t, rec.Plays.Fail+rec.Plays.OK+rec.Plays.ConsecutiveFail, "no play counted")
+	assert.Nil(t, rec.Plays.LastFail)
+	assert.Empty(t, rec.Issue)
 }
 
 func TestNavigation_RetriesWithinOnePlayCountOnce(t *testing.T) {
