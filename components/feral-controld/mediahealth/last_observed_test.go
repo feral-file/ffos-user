@@ -217,3 +217,45 @@ func TestReport_NotALook(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, rec.lastObservedAt().Equal(verdictAt), "got %v", rec.lastObservedAt())
 }
+
+// A kiosk document load served 2xx is a look: it advances lastObservedAt
+// (for a player without the outcome ring, the only success it reports),
+// leaves the verdict and counters alone, and gives an unrecorded source a
+// record holding just that look. Repeated loads within a minute write
+// nothing more (PR #451 review, F4).
+func TestStore_AKioskDocumentLoadIsALook(t *testing.T) {
+	clock := &testClock{t: time.Date(2026, 11, 10, 2, 0, 0, 0, time.UTC)}
+	st := openTestStore(t, clock)
+	src := "https://o/work"
+	_, err := st.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200, Declared: "text/html", Sniffed: "text/html"})
+	require.NoError(t, err)
+	verdictAt := clock.Now()
+
+	clock.Advance(time.Hour)
+	_, err = st.ApplyKioskAnswer(src)
+	require.NoError(t, err)
+	rec, err := st.Get(src)
+	require.NoError(t, err)
+	assert.True(t, rec.lastObservedAt().Equal(clock.Now()), "got %v", rec.lastObservedAt())
+	assert.True(t, rec.CheckedAt.Equal(verdictAt), "the verdict's age is unchanged")
+	assert.Equal(t, StateOK, rec.State)
+	assert.Equal(t, LayerL0, rec.Layer, "a fetched document is not render evidence")
+	assert.Zero(t, rec.Plays.OK)
+
+	loadedAt := clock.Now()
+	clock.Advance(30 * time.Second)
+	_, err = st.ApplyKioskAnswer(src) // the frame reloads
+	require.NoError(t, err)
+	rec, err = st.Get(src)
+	require.NoError(t, err)
+	assert.True(t, rec.ObservedAt.Equal(loadedAt), "within a minute: no write")
+
+	fresh := "https://o/unrecorded"
+	_, err = st.ApplyKioskAnswer(fresh)
+	require.NoError(t, err)
+	rec, err = st.Get(fresh)
+	require.NoError(t, err)
+	require.NotNil(t, rec, "a record holding just the look")
+	assert.Equal(t, State(""), rec.State)
+	assert.True(t, rec.lastObservedAt().Equal(clock.Now()))
+}

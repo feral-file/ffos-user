@@ -44,7 +44,7 @@ cache uses (`offlinecache.SourceKey`), pinned equal by a test.
 | `wireUrl`, `host` | what L0 actually dialed, after the kiosk gateway rewrite and redirects |
 | `httpStatus`, `declaredType`, `sniffedType`, `mediaType` | evidence |
 | `checkedAt`, `recheckAfter` | when the state was set and when it is due for another look |
-| `observedAt` | when the device last really looked at the source, whether or not the look changed the verdict: a probe that got an answer (or none while other origins answered), a play outcome, a wall frame, a nightly render. Never an answer served from the store, a player skip on a hint, a device-local failure, or an attempt with no answer during an outage. The report's `lastObservedAt`, with `checkedAt`; absent while nothing was a look. `observedTracked` marks a record written since the field exists: an older record is seeded once, when read, from its play, probe, wall and render times, and keeps the maximum from then on |
+| `observedAt` | when the device last really looked at the source, whether or not the look changed the verdict: a probe that got an answer (or none while other origins answered), a play outcome, a wall frame, a nightly render, a document the kiosk loaded 2xx (at most one write a minute for that alone; a source with no record gets one holding just the look). Never an answer served from the store, a player skip on a hint, a device-local failure, or an attempt with no answer during an outage. The report's `lastObservedAt`, with `checkedAt`; absent while nothing was a look. `observedTracked` marks a record written since the field exists: an older record is seeded once, when read, from its play, probe, wall and render times, and keeps the maximum from then on |
 | `lastError`, `lastErrorAt` | the most recent transient attempt; never changes state |
 | `plays` | ok / fail / skipped counts, consecutive failures, the last failure (stage, code, media type, attempt) |
 | `build` | the controld version that wrote the verdict |
@@ -800,8 +800,9 @@ expiring writes nothing at all (no record, no hold, no streak count; the
 lookahead's 30 s probe is the real attempt), and neither does an unreachable
 result while the device reached no other origin, nor a play while offline. A
 2xx document the kiosk observer sees clears a probe-side issue and ends the
-unreachable streak, but never writes `ok` (a 200 does not prove the work
-rendered) and never clears `play_failed`. It does overrule the player's
+unreachable streak, and is a look at the source (`observedAt`), but never
+writes `ok` (a 200 does not prove the work rendered) and never clears
+`play_failed`. It does overrule the player's
 content-type check in the same play: the kiosk's GET is the real fetch and
 the HEAD the weakest fetch evidence (another method, sometimes another
 answer — a 405, or a 404 on HEAD and a 200 on GET). A HEAD refusal drained

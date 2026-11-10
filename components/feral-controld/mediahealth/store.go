@@ -1490,37 +1490,54 @@ func playCategory(reason Reason, status int, contentAddressed bool) Category {
 // issue (no answer, DNS, 5xx, rate limit, access denied) is no longer the
 // truth and the unreachable streak ends. It never writes ok — a 200 proves
 // the document arrived, not that the work rendered — and a play_failed
-// issue stands: that one is about rendering. Writes only when something
-// changes; a source with no record is left alone (nothing to correct).
+// issue stands: that one is about rendering. It is a look at the source
+// (ObservedAt), so a source with no record gets one holding just that look.
 //
 // It also lets the kiosk's real GET outrank the player's HEAD: a content-type
 // check refusal counted in the same play is reverted (revertHeadRefusal),
 // and the result says so — the Service frees that play's count (F13).
 func (s *Store) ApplyKioskAnswer(source string) (bool, error) {
 	rec, err := s.Get(source)
-	if err != nil || rec == nil {
+	if err != nil {
 		return false, err
 	}
 	now := s.now()
-	probe := *rec
-	if lf := rec.Plays.LastFail; lf != nil {
-		copied := *lf
-		probe.Plays.LastFail = &copied
-	}
-	if rf := rec.Plays.RunFail; rf != nil {
-		copied := *rf
-		probe.Plays.RunFail = &copied
-	}
-	if !rec.Issue.probeSide() && rec.UnreachableSince == nil && !probe.revertHeadRefusal(now) {
-		return false, nil
+	// The kiosk loading the document is a look at the source (Record.
+	// ObservedAt) — the only one a player without the outcome ring reports
+	// for a success (PR #451 review, F4). It writes at most once per
+	// kioskObserveGap unless something else changes: a work's frame can
+	// reload often, and freshness at second resolution is not worth a
+	// write per reload.
+	observe := rec == nil || now.Sub(rec.ObservedAt) >= kioskObserveGap
+	if rec != nil {
+		probe := *rec
+		if lf := rec.Plays.LastFail; lf != nil {
+			copied := *lf
+			probe.Plays.LastFail = &copied
+		}
+		if rf := rec.Plays.RunFail; rf != nil {
+			copied := *rf
+			probe.Plays.RunFail = &copied
+		}
+		if !observe && !rec.Issue.probeSide() && rec.UnreachableSince == nil && !probe.revertHeadRefusal(now) {
+			return false, nil
+		}
 	}
 	var reverted bool
 	_, err = s.update(source, func(rec *Record, existed bool) bool {
+		changed := false
+		if observe || !existed {
+			// An observation only: never a verdict (a 200 proves the
+			// document arrived, not that the work rendered), and for a
+			// source with no record, a record holding just this look.
+			rec.observe(now)
+			changed = true
+		}
 		if !existed {
-			return false
+			return changed
 		}
 		reverted = rec.revertHeadRefusal(now)
-		changed := reverted
+		changed = changed || reverted
 		if rec.Issue.probeSide() {
 			rec.clearIssue()
 			changed = true
@@ -1533,3 +1550,7 @@ func (s *Store) ApplyKioskAnswer(source string) (bool, error) {
 	})
 	return reverted && err == nil, err
 }
+
+// kioskObserveGap is the least time between two writes of a kiosk document
+// load as an observation alone (ApplyKioskAnswer).
+const kioskObserveGap = time.Minute
