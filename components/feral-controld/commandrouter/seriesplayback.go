@@ -63,12 +63,13 @@ func ResetSeriesPlayback(h Handler) error {
 }
 
 // currentSeriesPlaybackMode reads the device-level override without taking
-// the store's lock, mirroring contentpolicy.Store.Snapshot: the cast path
-// this feeds (the static dp1_call branch) already runs ahead of the content-
-// policy lock and the kiosk playback lock, and must not add a third lock to
-// that ordering for a value this cheap to read lock-free. nil means "follow
-// the document" — either because no override is set, or because no store was
-// wired (a build before this seam, or a test).
+// the store's lock, mirroring contentpolicy.Store.Snapshot: the cast paths
+// this feeds (all three CMD_DISPLAY_PLAYLIST branches — playlistUrl, dp1_call
+// static, dp1_call dynamic, feral-file/ffos-user#452) already run ahead of
+// the content-policy lock and the kiosk playback lock, and must not add a
+// fourth lock to that ordering for a value this cheap to read lock-free. nil
+// means "follow the document" — either because no override is set, or
+// because no store was wired (a build before this seam, or a test).
 func (h *handler) currentSeriesPlaybackMode() *dp1.SeriesPlaybackMode {
 	if h.seriesPlayback == nil {
 		return nil

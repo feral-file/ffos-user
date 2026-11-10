@@ -750,7 +750,18 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			// deviceSeriesMode is read once per cast attempt and shared by
 			// every branch below, so a device override applies identically
-			// no matter which payload shape the command carried.
+			// no matter which payload shape the command carried. Accepted
+			// risk: for playlistUrl/dp1_call-dynamic, the network-bound
+			// fetch/resolution these branches do happens AFTER this read,
+			// inside ProcessPlaylistURLForCast/ProcessDynamicPlaylistForCast
+			// (deviceMode is passed in as an argument, before any network
+			// call) — a setSeriesPlayback landing mid-fetch is invisible to
+			// THIS cast and only takes effect on the next cast or setting
+			// change (run-reviewer F1 on PR #454 round 4, 2026-11-10; owner
+			// confirmed accepting this over the larger fetch/narrow-split
+			// refactor a real fix would need, 2026-11-10). The static
+			// dp1_call branch below does no network call at all between
+			// this read and its own narrow, so it is unaffected.
 			deviceSeriesMode := h.currentSeriesPlaybackMode()
 			delete(command.Arguments, "retireBlockedCurrent") // internal refresh-only signal
 			delete(command.Arguments, "mediaHealth")          // controld-owned hint field (#392), set before each send
