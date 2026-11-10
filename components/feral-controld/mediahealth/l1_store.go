@@ -173,3 +173,21 @@ func (s *Store) ApplyRender(source string, r RenderResult) (*Record, error) {
 	})
 	return rec, err
 }
+
+// DeferL1 moves an existing record's next L1 render to next without a
+// verdict: the render was canceled by the resource gate (RecheckL1Deferred).
+// The record's state and any earlier L1 verdict stand.
+func (s *Store) DeferL1(source string, next time.Time, reason string) error {
+	_, err := s.update(source, func(rec *Record, existed bool) bool {
+		if !existed {
+			return false
+		}
+		if rec.L1 == nil {
+			rec.L1 = &L1Verdict{}
+		}
+		rec.L1.Next = next
+		rec.L1.LastError = reason
+		return true
+	})
+	return err
+}

@@ -108,6 +108,14 @@ const (
 	RecheckL1Suspect = 24 * time.Hour
 	// RecheckL1Stalled: no evidence; try again the next night.
 	RecheckL1Stalled = 24 * time.Hour
+	// RecheckL1Deferred: a render the resource gate canceled mid-way (the
+	// panel still asleep) goes behind every other due candidate for this
+	// long. Not a verdict. Without it the canceled work stays "never
+	// rendered", heads the queue again the moment the gate reopens, and
+	// a heavy software work trips the CPU-temperature block every time —
+	// on the office FF1 one work was retried each minute, the rest of the
+	// night's queue never ran, and the CPU cycled 40 → 84 °C.
+	RecheckL1Deferred = time.Hour
 
 	// DefaultBlankVarianceThreshold is the per-channel variance below which
 	// a frame is blank. A decade under the indexer's render_probe default
@@ -475,6 +483,16 @@ func (l *L1) Run(ctx context.Context) {
 // grace is measured from the source's own confirmation time of THIS
 // sleep, so a wake and a new sleep between two checks start a new grace.
 func (l *L1) gate() bool {
+	return l.asleepPastGrace() && l.admitted()
+}
+
+// admitted asks the device resource gate (none configured admits).
+func (l *L1) admitted() bool {
+	return l.cfg.Admit == nil || l.cfg.Admit()
+}
+
+// asleepPastGrace is the panel half of gate.
+func (l *L1) asleepPastGrace() bool {
 	if l.cfg.AsleepSince == nil {
 		return false
 	}
@@ -482,13 +500,7 @@ func (l *L1) gate() bool {
 	if !asleep {
 		return false
 	}
-	if l.cfg.MinAsleep > 0 && l.now().Sub(since) < l.cfg.MinAsleep {
-		return false
-	}
-	if l.cfg.Admit != nil && !l.cfg.Admit() {
-		return false
-	}
-	return true
+	return l.cfg.MinAsleep <= 0 || l.now().Sub(since) >= l.cfg.MinAsleep
 }
 
 // Step renders one due candidate if the gate holds and the nightly cap is
@@ -532,8 +544,11 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 	// suspect (a recovery probe at the short window would miss a work
 	// that paints between the two settles and keep it suspect for as long
 	// as nothing plays it; F27 — the indexer's healing probes use the
-	// confirmation window the same way).
-	confirm := rec.L1 != nil && (rec.L1.ConsecutiveBlank == 1 || rec.State == StateSuspect)
+	// confirmation window the same way), and of a record concluded broken
+	// in the render layer — the same recovery probe, for a verdict that
+	// skips the work (PR #450 review, F6).
+	confirm := rec.L1 != nil && (rec.L1.ConsecutiveBlank == 1 || rec.State == StateSuspect) ||
+		rec.renderLayerBroken()
 	if confirm {
 		settle = l.cfg.ConfirmSettle
 	}
@@ -553,7 +568,7 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 	renderCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	watchDone := make(chan struct{})
-	var gateClosed atomic.Bool
+	var gateClosed, pressured atomic.Bool
 	go func() {
 		defer close(watchDone)
 		t := time.NewTicker(l.cfg.GateWatch)
@@ -563,8 +578,14 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 			case <-renderCtx.Done():
 				return
 			case <-t.C:
-				if !l.gate() {
+				if !l.asleepPastGrace() {
 					gateClosed.Store(true)
+					cancel()
+					return
+				}
+				if !l.admitted() {
+					gateClosed.Store(true)
+					pressured.Store(true)
 					cancel()
 					return
 				}
@@ -578,8 +599,19 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 	res := RenderResult{}
 	switch {
 	case err != nil:
+		if pressured.Load() && ctx.Err() == nil {
+			// The resource gate closed while the panel slept on: likely
+			// this render's own load. Not evidence; the candidate goes to
+			// the back of the queue (RecheckL1Deferred).
+			if err := l.cfg.Store.DeferL1(rec.Source, l.now().Add(RecheckL1Deferred), "render deferred: device under resource pressure"); err != nil && !errors.Is(err, ErrLowDisk) {
+				l.logger.Warn("media health: deferring an l1 candidate failed", zap.Error(err))
+			}
+			l.logger.Info("media health: l1 render deferred (resource gate closed mid-render)", zap.String("source", redactForLog(rec.Source)),
+				zap.Duration("retry_in", RecheckL1Deferred))
+			return
+		}
 		if gateClosed.Load() || ctx.Err() != nil {
-			// Canceled by the gate (or shutdown): not evidence and not a
+			// Canceled by a wake (or shutdown): not evidence and not a
 			// stalled verdict either; the candidate stays due.
 			l.logger.Info("media health: l1 render canceled (panel woke or gate closed)", zap.String("source", redactForLog(rec.Source)))
 			return

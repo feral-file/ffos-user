@@ -6,12 +6,15 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 // Frames: a uniform frame is blank; a checkerboard is a real render; a
@@ -870,4 +873,92 @@ func TestBlankThreshold_MeasuredOnTheWall(t *testing.T) {
 	c, err = Classify(darkArt, nil, 0.001)
 	require.NoError(t, err)
 	assert.Equal(t, RenderBlank, c.Verdict, "the indexer's threshold is the false blank this replaces")
+}
+
+// A render the resource gate cancels while the panel sleeps on goes to the
+// back of the queue (RecheckL1Deferred) instead of heading it again: on
+// the office FF1 one heavy work tripped the CPU-temperature block every
+// minute and the rest of the night's queue never ran.
+func TestL1_ResourceGateDefersTheRender(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+	seedSoftware(t, store, "https://o/a")
+	seedSoftware(t, store, "https://o/b")
+	r := &fakeRenderer{block: true, frames: map[string]*Frame{
+		"https://o/a": {Image: checkerboard(), MainStatus: 200},
+		"https://o/b": {Image: checkerboard(), MainStatus: 200},
+	}}
+	asleep := newFakeSleep(clock)
+	asleep.Store(true)
+	var admit atomic.Bool
+	admit.Store(true)
+	l1 := NewL1(L1Config{Store: store, Renderer: r, AsleepSince: asleep.Since, Admit: admit.Load, Now: clock.Now, Settle: time.Millisecond, GateWatch: time.Millisecond, MinAsleep: -1})
+
+	done := make(chan bool)
+	go func() { done <- l1.Step(context.Background()) }()
+	time.Sleep(20 * time.Millisecond)
+	admit.Store(false) // the render heats the CPU past the block
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the resource gate did not cancel the render")
+	}
+	require.Len(t, r.calls, 1)
+	heavy := r.calls[0].url
+	rec, err := store.Get(heavy)
+	require.NoError(t, err)
+	require.NotNil(t, rec.L1)
+	assert.Equal(t, RenderVerdict(""), rec.L1.Verdict, "not a verdict")
+	assert.True(t, rec.L1.Next.Equal(clock.Now().Add(RecheckL1Deferred)), "behind the queue for RecheckL1Deferred")
+	assert.NotEmpty(t, rec.L1.LastError)
+	assert.Equal(t, StateOK, rec.State)
+
+	// The gate reopens: the other work renders, not the deferred one.
+	r.block = false
+	admit.Store(true)
+	assert.True(t, l1.Step(context.Background()))
+	require.Len(t, r.calls, 2)
+	assert.NotEqual(t, heavy, r.calls[1].url)
+	assert.False(t, l1.Step(context.Background()), "the deferred work waits its hour")
+	clock.Advance(RecheckL1Deferred)
+	assert.True(t, l1.Step(context.Background()))
+	assert.Equal(t, heavy, r.calls[2].url)
+}
+
+// A record concluded broken in the render layer is rechecked with the long
+// settle, like a suspect one: a repaired work that paints between the two
+// settles must be able to heal (PR #450 review, F6).
+func TestL1_RenderBrokenRecheckUsesTheLongSettle(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store, err := Open(filepath.Join(t.TempDir(), "mh", "store.db"), Options{Now: clock.Now, Logger: zap.NewNop(), RenderConclusive: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	src := "https://o/slow-paint"
+	seedSoftware(t, store, src)
+	// Night 1: a blank and its confirmation (suspect). Night 2: the recheck
+	// is blank again, corroborated by night 1 — broken.
+	for _, n := range []int{2, 1} {
+		for i := 0; i < n; i++ {
+			_, err := store.ApplyRender(src, RenderResult{Verdict: RenderBlank, Variance: 0.00001})
+			require.NoError(t, err)
+		}
+		clock.Advance(l1NightGap + time.Hour)
+	}
+	rec, err := store.Get(src)
+	require.NoError(t, err)
+	require.Equal(t, StateBroken, rec.State)
+	require.Equal(t, LayerL1, rec.Layer)
+	require.GreaterOrEqual(t, rec.L1.ConsecutiveBlank, 2)
+
+	r := &fakeRenderer{frames: map[string]*Frame{src: {Image: checkerboard(), MainStatus: 200}}}
+	asleep := newFakeSleep(clock)
+	asleep.Store(true)
+	l1 := NewL1(L1Config{Store: store, Renderer: r, AsleepSince: asleep.Since, Now: clock.Now, Settle: time.Millisecond, ConfirmSettle: 7 * time.Millisecond, GateWatch: time.Millisecond, MinAsleep: -1})
+	clock.Advance(RecheckL1Suspect)
+	assert.True(t, l1.Step(context.Background()))
+	require.Len(t, r.calls, 1)
+	assert.Equal(t, 7*time.Millisecond, r.calls[0].settle, "a recovery probe: the long window")
+	rec, err = store.Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State, "the recovery heals it")
 }

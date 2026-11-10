@@ -90,8 +90,12 @@ func (s *Store) loadLearned() error {
 func (s *Store) learnErrorPage(source string, hash uint64) {
 	key := Key(source)
 	now := s.now()
-	var promoted *learnCluster
+	var (
+		promoted *learnCluster
+		full     bool
+	)
 	err := s.db.Update(func(tx *bolt.Tx) error {
+		full = false
 		b := tx.Bucket(bucketFingerprints)
 		var (
 			matchKey []byte
@@ -116,12 +120,20 @@ func (s *Store) learnErrorPage(source string, hash uint64) {
 		}); err != nil {
 			return err
 		}
-		if matchKey == nil {
-			if count >= maxLearnClusters && oldestK != nil {
-				if err := b.Delete(oldestK); err != nil {
-					return err
-				}
+		if matchKey == nil && count >= maxLearnClusters {
+			if oldestK == nil {
+				// Every cluster is promoted: a learned fingerprint is never
+				// evicted (the classifiers and the memory mirror rely on
+				// it), so the new hash is dropped and the bound holds (PR
+				// #450 review, F7).
+				full = true
+				return nil
 			}
+			if err := b.Delete(oldestK); err != nil {
+				return err
+			}
+		}
+		if matchKey == nil {
 			match = learnCluster{Hash: fmt.Sprintf("%016x", hash), First: now}
 			matchKey = []byte(match.Hash)
 		}
@@ -141,6 +153,10 @@ func (s *Store) learnErrorPage(source string, hash uint64) {
 	})
 	if err != nil {
 		s.logger.Warn("media health: recording an error-page candidate failed", zap.Error(err))
+		return
+	}
+	if full {
+		s.logger.Debug("media health: error-page candidate dropped: every learned cluster is promoted", zap.Int("clusters", maxLearnClusters))
 		return
 	}
 	if promoted == nil {

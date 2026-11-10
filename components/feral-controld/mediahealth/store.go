@@ -1259,6 +1259,11 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 				// above; the run and LastFail are left as they are.
 				return true
 			}
+			if o.overruled {
+				// History only (Outcome.overruled): neither counted nor the
+				// run's last failure.
+				return true
+			}
 			if rec.Plays.LastFailAt == nil || !at.Before(*rec.Plays.LastFailAt) {
 				rec.Plays.LastFail = &PlayFailure{Stage: o.Stage, Code: o.Code, MediaType: o.MediaType, Attempt: o.Attempt, At: at, ServedBy: rec.ServedBy}
 				rec.Plays.LastFailAt = new(at)

@@ -2,6 +2,8 @@ package mediahealth
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"path/filepath"
@@ -184,4 +186,42 @@ func TestLearned_ClustersAreBounded(t *testing.T) {
 	var n int
 	require.NoError(t, store.db.View(func(tx *bolt.Tx) error { n = tx.Bucket(bucketFingerprints).Stats().KeyN; return nil }))
 	assert.LessOrEqual(t, n, maxLearnClusters)
+}
+
+// The cluster cap holds when every cluster is promoted: a learned
+// fingerprint is never evicted, so a new hash is dropped (PR #450 review,
+// F7).
+func TestLearned_TheCapHoldsWhenEveryClusterIsPromoted(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	path := filepath.Join(t.TempDir(), "mh", "store.db")
+	st, err := Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	require.NoError(t, err)
+	require.NoError(t, st.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketFingerprints)
+		for i := 0; i < maxLearnClusters; i++ {
+			c := learnCluster{Hash: fmt.Sprintf("%016x", uint64(i)<<40), Promoted: true, Sources: []string{"a", "b", "c"}, First: clock.Now(), Last: clock.Now()}
+			raw, err := json.Marshal(c)
+			if err != nil {
+				return err
+			}
+			if err := b.Put([]byte(c.Hash), raw); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	require.NoError(t, st.Close())
+	st, err = Open(path, Options{Now: clock.Now, Logger: zap.NewNop()})
+	require.NoError(t, err)
+	defer func() { _ = st.Close() }()
+	require.Len(t, st.LearnedFingerprints(), maxLearnClusters)
+
+	fresh := ^uint64(0) // far from every seeded hash
+	for _, src := range []string{"https://o/x", "https://o/y", "https://o/z"} {
+		st.learnErrorPage(src, fresh)
+	}
+	var n int
+	require.NoError(t, st.db.View(func(tx *bolt.Tx) error { n = tx.Bucket(bucketFingerprints).Stats().KeyN; return nil }))
+	assert.Equal(t, maxLearnClusters, n)
+	assert.Len(t, st.LearnedFingerprints(), maxLearnClusters)
 }

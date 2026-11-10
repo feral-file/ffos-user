@@ -366,7 +366,9 @@ func (s *Service) applyEntry(o Outcome, online bool) bool {
 		// The kiosk's own GET of this document was served at or after this
 		// content-type check, in the same play: the HEAD's refusal is not
 		// the document's (the GET outranks it) — history only, and it must
-		// not mark the play's ready as an error page.
+		// not mark the play's ready as an error page nor become the run's
+		// last failure.
+		o.overruled = true
 	case o.Kind == OutcomeFail && !countableFailure(o):
 		// History only, and it must not touch the run: an uncountable
 		// entry that OPENED the run made every failure after it in that

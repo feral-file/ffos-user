@@ -1,10 +1,12 @@
 package mediahealth
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The kiosk's own GET of a document outranks the player's content-type
@@ -83,4 +85,37 @@ func TestHeadGet_OutsideThePlayWindowNothingIsReverted(t *testing.T) {
 	f.clock.Advance(headGetWindow + time.Second)
 	f.s.ObserveNavigation(Navigation{URL: f.src, Status: 200})
 	assert.Equal(t, 1, f.record().Plays.ConsecutiveFail, "a GET minutes later is another play")
+}
+
+// A HEAD refusal the kiosk's GET already overruled is history only: it
+// must not become the run's last failure, or the play's `ready` resets a
+// blank-frame run and a repeatedly blank work never concludes (PR #450
+// review, F5).
+func TestHeadGet_AnOverruledHeadKeepsTheFrameRun(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	cap := &fakeWall{frames: []*WallFrame{blankFrame(), blankFrame(), blankFrame()}}
+	svc, w := newWallRig(t, clock, cap)
+	src := "https://o/blank-html"
+	seedSoftware(t, svc.Store(), src)
+	for play := int64(1); play <= 3; play++ {
+		svc.ObservePlayback(items(src), 0, pending(), &Outcomes{CastSeq: 1})
+		head := clock.Now()
+		clock.Advance(500 * time.Millisecond)
+		svc.ObserveNavigation(Navigation{URL: src, Status: 200}) // the GET, served
+		clock.Advance(4 * time.Second)                           // the next poll drains the HEAD
+		svc.ObservePlayback(items(src), 0, ready(), &Outcomes{CastSeq: 1, Entries: []Outcome{
+			headAt(src, play*10, "404", head),
+			{Seq: play*10 + 1, Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "iframe", At: clock.Now().UTC().Format(time.RFC3339Nano)},
+		}})
+		clock.Advance(DefaultWallSettle)
+		require.True(t, w.Step(context.Background()))
+		clock.Advance(2 * time.Minute)
+	}
+	rec, err := svc.Store().Get(src)
+	require.NoError(t, err)
+	assert.Zero(t, rec.Plays.Fail-rec.Plays.ConsecutiveFail, "every counted failure is a frame of this run")
+	assert.Equal(t, StateSuspect, rec.State, "blank on every play: a render negative")
+	assert.Equal(t, ReasonRenderBlank, rec.Reason)
+	require.NotNil(t, rec.Plays.LastFail)
+	assert.Equal(t, StageFrame, rec.Plays.LastFail.Stage, "the overruled HEAD never became the last failure")
 }

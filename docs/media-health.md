@@ -522,8 +522,15 @@ would hide real art, the worst outcome here.
   starts the headless browser. The
   offline cache's admission gate, when enabled, is consulted read-only
   before each render. An in-flight render is cancelled within a couple of
-  seconds when the gate closes (the panel wakes, a cast interrupts the
-  night); a cancelled render records nothing and the candidate stays due.
+  seconds when the gate closes. A wake (or a cast interrupting the night)
+  records nothing and the candidate stays due. The admission gate closing
+  while the panel sleeps on — most likely the render's own load: SwiftShader
+  takes an x86 FF1 from 40 °C past the 75 °C software block within seconds
+  — **defers** the candidate behind every other due one for an hour
+  (`RecheckL1Deferred`, `l1.next`, `l1.lastError`; no verdict). Without it
+  a heavy work headed the queue again each time the CPU cooled: on the
+  office FF1 it was retried every minute and the rest of the night's queue
+  never ran.
 - **Candidates** (`Store.L1Candidates`): records whose L0 sniffed or
   declared type is HTML, or that the player rendered in an iframe; never
   images, video, audio or `data:` URIs (L0's container rules cover those,
@@ -605,7 +612,8 @@ would hide real art, the worst outcome here.
   learned known-bad fingerprint (label `learned`, tolerance 6), used by both
   classifiers beside `mediaHealth.l1.knownBad` — so the same error page
   served with a 200 (an Arweave gateway's) is recognized on any work. Real
-  art cannot become a candidate. Bounded (256 clusters, the least recently
+  art cannot become a candidate. Bounded (256 clusters — a promoted one is
+  never evicted, so when all 256 are promoted a new hash is dropped — the least recently
   seen unpromoted one evicted; 16 works each); cleared with the store.
 - **Render negatives and corroboration (step 2).** A concluded blank or
   known-bad render is `suspect`, advisory — unless `mediaHealth.render-
@@ -624,8 +632,9 @@ would hide real art, the worst outcome here.
 - **Stalled** (navigation failed, main document not 2xx, capture timed out,
   browser unavailable): no evidence, `l1.lastError` only, retried after 24 h.
 - **Rechecks:** ok after 7 d, suspect after 24 h (a fixed page heals on the
-  next night; the recheck of a suspect record is a recovery probe and uses
-  the longer confirmation settle, as the indexer's healing probes do),
+  next night; the recheck of a suspect record — or of one concluded broken
+  in the render layer — is a recovery probe and uses the longer
+  confirmation settle, as the indexer's healing probes do),
   stalled after 24 h. **A rendered frame is the play layer's evidence
   for an HTML work** (an iframe's `ready` is not): it records `ok` with
   layer `l1` over unknown, an L0 `ok`, a `suspect` or a render-layer
