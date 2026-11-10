@@ -2,12 +2,19 @@ package dp1_test
 
 import (
 	encjson "encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/display-protocol/dp1-go/extension/playlists"
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 )
 
 // servePlaylistFromBody wires the HTTP/IO/JSON mocks to hand back body,
@@ -117,6 +124,74 @@ func TestDP1_ProcessPlaylistURLForCast_HonorsDocumentSeriesPlaybackFromFetchedBy
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1,
 		"the document's own seriesPlayback: first must be read from the FETCHED bytes, the same way a static dp1_call's verbatim bytes already were")
+}
+
+// manyEditionsBody builds a catalog `/editions` answer with n editions under
+// the given artworkModel — large enough (n > MINIMAL_PLAYLIST_ITEMS_LIMIT)
+// to exercise ProcessDynamicPlaylistForCast's post-narrow minimal trim.
+func manyEditionsBody(playlistID string, n int, artworkModel string) string {
+	items := make([]string, n)
+	for i := range items {
+		items[i] = fmt.Sprintf(
+			`{"id":"e%d","source":"https://example.com/%d.mp4","provenance":{"type":"onChain","contract":{"chain":"evm","address":"0x28b51BA8B990c48CB22cB6EF0ad5415fdBA5210C","tokenId":"%d"}}}`,
+			i, i, i)
+	}
+	return fmt.Sprintf(
+		`{"items":[%s],"limit":255,"offset":0,"playlistId":"%s","series":{"chain":"evm","seriesId":"387","artworkModel":"%s"},"total":%d}`,
+		strings.Join(items, ","), playlistID, artworkModel, n)
+}
+
+// TestDP1_ProcessDynamicPlaylistForCast_CachedPlanStaysBoundedAfterMinimalTrim
+// is run-reviewer's F1 on PR #454 round 2: ProcessDynamicPlaylistForCast
+// trims narrowed.Items down to MINIMAL_PLAYLIST_ITEMS_LIMIT when no item
+// states displayAt, but used to return the UNTRIMMED plan (its own maxItems
+// still CAST_PLAYLIST_ITEMS_LIMIT) — so a later setSeriesPlayback re-narrow
+// (CastPlan.Narrow, fed this same plan via commandrouter's rememberSeriesCast)
+// could reconstruct up to 255 items, silently exceeding what the initial
+// cast ever showed. The returned CastPlan itself must stay bounded to what
+// was actually displayed.
+func TestDP1_ProcessDynamicPlaylistForCast_CachedPlanStaysBoundedAfterMinimalTrim(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	const editionCount = 80 // > MINIMAL_PLAYLIST_ITEMS_LIMIT (50), triggers the trim.
+
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		DoAndReturn(func(req *http.Request) (*http.Response, error) {
+			assertGraphQLHydration(t, req, "255", "0")
+			body := `{"data":{"items":[` +
+				`{"id":"fdb2a98f-9ca0-4a76-ae1f-cd8e2f8d4caf","source":"https://cdn.artworks.feralfile.io/0.mp4","provenance":{"type":"seriesRegistry","contract":{"chain":"evm","seriesId":387}}}` +
+				`]}}`
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}).
+		Times(1)
+	serveEditions(ts, "playlist-dyn-1", "fdb2a98f-9ca0-4a76-ae1f-cd8e2f8d4caf", manyEditionsBody("playlist-dyn-1", editionCount, "multi_unique"))
+	allowRawItemModeDecode(ts)
+
+	playlist := dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			ID: "playlist-dyn-1",
+			DynamicQuery: &playlists.DynamicQuery{
+				Profile:  dp1playlist.ProfileGraphQLV1,
+				Endpoint: "https://example.com/graphql",
+				Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id source provenance } }`,
+				ResponseMapping: playlists.ResponseMapping{
+					ItemsPath:  "data.items",
+					ItemSchema: "dp1/1.0",
+				},
+			},
+		},
+	}
+
+	result, plan, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Items, dp1.MINIMAL_PLAYLIST_ITEMS_LIMIT,
+		"the initial cast must trim to the legacy minimal size, unchanged from before this round")
+
+	renarrowed := plan.Narrow(nil)
+	assert.LessOrEqual(t, len(renarrowed), dp1.MINIMAL_PLAYLIST_ITEMS_LIMIT,
+		"a later re-narrow of the CACHED plan must stay bounded to what the initial cast actually showed, not reconstruct up to CAST_PLAYLIST_ITEMS_LIMIT")
 }
 
 // TestDP1_ProcessPlaylistURLForCast_FullMultiUniquePlaysEveryEdition pins the

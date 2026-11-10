@@ -425,6 +425,15 @@ func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playli
 		return &narrowed, plan, nil
 	}
 	narrowed.Items = narrowed.Items[:MINIMAL_PLAYLIST_ITEMS_LIMIT]
+	// plan's own maxItems is still CAST_PLAYLIST_ITEMS_LIMIT (255) from the
+	// resolveSeriesCastPlan call above, but narrowed.Items was just capped
+	// further, to MINIMAL_PLAYLIST_ITEMS_LIMIT (50): a cached plan returned
+	// as-is would let a later setSeriesPlayback re-narrow (CastPlan.Narrow)
+	// reconstruct up to 255 items, silently re-growing the playlist past
+	// what this cast ever actually showed (run-reviewer F1 on PR #454,
+	// round 2, 2026-11-10). Capping plan.maxItems to match keeps a later
+	// re-narrow bounded the same way this initial cast was.
+	plan.maxItems = MINIMAL_PLAYLIST_ITEMS_LIMIT
 	return &narrowed, plan, nil
 }
 

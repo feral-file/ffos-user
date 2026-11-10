@@ -847,11 +847,20 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					h.logger.Warn("offline cache: displayPlaylist falling back to cached copy after live DP-1 resolution failure",
 						zap.String("playlist_url", url), zap.Error(err))
 					playlist = cachedPlaylist
-					// The cached copy is a hydrated re-marshal of a PAST
-					// cast's already-resolved items, not a fresh catalog
-					// answer — there is nothing here for a later
-					// setSeriesPlayback to re-narrow, so this leaves
-					// seriesCastPlan at whatever ProcessPlaylistURLForCast's
+					// The cached copy is handleDownloadPlaylist's own
+					// unconditional, mode-ignorant full expansion
+					// (ProcessPlaylistURL/ExpandSeriesItems — #446's own
+					// scope), not a mode-resolved past CAST — any series
+					// marker is already flattened to plain editions by the
+					// time it reaches this cache, so there is nothing left
+					// for a later setSeriesPlayback to re-narrow. This
+					// fallback plays every edition, unnarrowed, same as it
+					// did before #452; fixing it needs the download/cache
+					// pipeline to retain series-group identity, which is a
+					// separate, tracked gap (run-reviewer F1 on PR #454
+					// round 2, 2026-11-10; feral-file/ffos-user#455) rather
+					// than something this leaves seriesCastPlan able to fix
+					// — it stays at whatever ProcessPlaylistURLForCast's
 					// failed attempt returned (its zero value).
 					seriesCastPlan = dp1.CastPlan{}
 					err = nil
