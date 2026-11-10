@@ -1204,6 +1204,16 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 				rec.renderedFrame(at, LayerPlay)
 				return true
 			}
+			if o.MediaType != "" {
+				// What the player mounted the item as — a fact about the
+				// item whatever the play's outcome, and what makes an
+				// untyped record (L0 refused or transient) an HTML work the
+				// wall capture and L1 may judge. Recorded for an error
+				// page's ready too: without it a work whose first play
+				// showed an error page was never captured, so the frame
+				// could not be learned (office FF1 learn test, 2026-11-10).
+				rec.MediaType = o.MediaType
+			}
 			if o.errorPage {
 				// The embed showed the error page the content-type check
 				// already reported: not a success, and it must not erase the
@@ -1214,9 +1224,6 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 			}
 			rec.Plays.OK++
 			rec.Plays.LastOKAt = laterOf(rec.Plays.LastOKAt, at)
-			if o.MediaType != "" {
-				rec.MediaType = o.MediaType
-			}
 			if stale {
 				return true
 			}

@@ -3,6 +3,7 @@ package mediahealth
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -93,6 +94,13 @@ type Service struct {
 	// to its source (ObserveNavigation). Guarded by mu.
 	wall      []string
 	wallIndex int
+	// pushed is the last playlist a push asked hints for (Hints): the
+	// sources about to be on the wall. The kiosk loads a cast's first item
+	// before the next status poll reports the new wall, so its document
+	// navigation is matched against these (matchWallSource) — otherwise
+	// the first item of every cast was unobserved, and a frame of its
+	// error page healed it (office FF1 learn test, 2026-11-10).
+	pushed []string
 }
 
 // Config builds a Service.
@@ -183,6 +191,9 @@ func (s *Service) PlayerSupportsHints() bool {
 // anything the offline cache can replay). On a store error it returns nil:
 // a push with no hints is the fail-open shape.
 func (s *Service) Hints(sources []string) map[string]Hint {
+	s.mu.Lock()
+	s.pushed = slices.Clone(sources)
+	s.mu.Unlock()
 	hints, err := s.store.Hints(sources, s.now())
 	if err != nil {
 		s.logger.Warn("media health: hints unavailable for this push", zap.Error(err))

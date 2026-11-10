@@ -158,3 +158,53 @@ func TestWallDocument_AFailureBeforeTheLastPendingPollIsThisMounts(t *testing.T)
 	assert.Equal(t, 504, rec.Wall.MainStatus)
 	assert.Equal(t, LayerL0, rec.Layer, "not healed")
 }
+
+// A record with no L0 type (the guard refused, or L0 was transient) whose
+// first play shows an error page is still an HTML work: the error page's
+// ready records the player's media type — nothing else in that play
+// carries it when the content-type check's 5xx went straight to the
+// iframe — so the capture judges the frame and its hash can be learned.
+func TestWallDocument_AnUntypedRecordIsJudgedOnItsErrorPagePlay(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	cap := &fakeWall{frames: []*WallFrame{{Image: errorPage(), Clipped: true}}}
+	svc, w := newWallRig(t, clock, cap)
+	src := "https://o/untyped"
+	svc.ObservePlayback(items(src), 0, pending(), &Outcomes{CastSeq: 1}) // no record yet
+	clock.Advance(2 * time.Second)
+	svc.ObserveNavigation(Navigation{URL: src, Status: 504}) // the kiosk's GET: the record's first entry
+	clock.Advance(2 * time.Second)
+	svc.ObservePlayback(items(src), 0, ready(), readyOutcomes(1, src)) // the iframe's ready on the error page
+	clock.Advance(DefaultWallSettle)
+	require.True(t, w.Step(context.Background()), "captured: the error page's ready typed the record")
+	rec, err := svc.Store().Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, "iframe", rec.MediaType)
+	require.NotNil(t, rec.Wall)
+	assert.Equal(t, RenderStalled, rec.Wall.Verdict)
+	assert.Equal(t, 504, rec.Wall.MainStatus)
+	assert.Equal(t, 1, rec.Plays.ConsecutiveFail)
+	assert.Zero(t, rec.Plays.OK, "the error page's ready is not a success")
+}
+
+// A cast's first item loads before the next poll reports the new wall: its
+// document navigation is matched against the playlist last pushed (Hints),
+// so a 504 there is observed and its error-page frame is no evidence.
+func TestWallDocument_TheFirstItemOfACastIsObserved(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	cap := &fakeWall{frames: []*WallFrame{{Image: errorPage(), Clipped: true}}}
+	svc, w := newWallRig(t, clock, cap)
+	src := "https://o/first-of-cast"
+	seedSoftware(t, svc.Store(), src)
+	svc.Hints([]string{src, "https://o/second"})                                    // the push
+	svc.ObserveNavigation(Navigation{URL: src + "?display_mode=crop", Status: 504}) // the kiosk loads it at once
+	clock.Advance(3 * time.Second)
+	svc.ObservePlayback(items(src, "https://o/second"), 0, ready(), readyOutcomes(1, src)) // the first poll sees it on screen
+	clock.Advance(DefaultWallSettle)
+	require.True(t, w.Step(context.Background()))
+	rec, err := svc.Store().Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, 1, rec.Plays.ConsecutiveFail, "the GET 504 was observed and counted")
+	assert.Equal(t, RenderStalled, rec.Wall.Verdict)
+	assert.Equal(t, 504, rec.Wall.MainStatus)
+	assert.Equal(t, LayerL0, rec.Layer, "not healed")
+}

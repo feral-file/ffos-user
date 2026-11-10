@@ -142,16 +142,32 @@ func (s *Service) ObserveNavigation(nav Navigation) {
 // to show wins. Caller holds s.mu.
 func (s *Service) matchWallSource(rawURL string) (string, bool) {
 	want := navigationKey(rawURL)
-	if want == "" || len(s.wall) == 0 {
+	if want == "" {
 		return "", false
 	}
-	n := len(s.wall)
-	start := s.wallIndex
+	// The wall first, from the item on screen; then the playlist last
+	// pushed (Service.pushed): a cast's first item loads before the next
+	// poll reports the new wall.
+	if src, ok := matchSource(s.wall, s.wallIndex, want, rawURL, s.store.gateways); ok {
+		return src, true
+	}
+	return matchSource(s.pushed, 0, want, rawURL, s.store.gateways)
+}
+
+// matchSource finds the source in list that rawURL is a navigation of,
+// scanning from start: by navigation key first, then — a request the kiosk
+// loaded through a fallback gateway reports that gateway's URL — by the
+// content id every gateway shares.
+func matchSource(list []string, start int, want, rawURL string, gateways *Gateways) (string, bool) {
+	n := len(list)
+	if n == 0 {
+		return "", false
+	}
 	if start < 0 || start >= n {
 		start = 0
 	}
 	for step := 0; step < n; step++ {
-		src := s.wall[(start+step)%n]
+		src := list[(start+step)%n]
 		if src == "" || IsDataURI(src) {
 			continue
 		}
@@ -159,13 +175,10 @@ func (s *Service) matchWallSource(rawURL string) (string, bool) {
 			return src, true
 		}
 	}
-	// A request the kiosk loaded through a fallback gateway reports that
-	// gateway's URL: match it by content id, the identity every gateway
-	// shares.
-	if ref, ok := s.store.gateways.Ref(rawURL); ok {
+	if ref, ok := gateways.Ref(rawURL); ok {
 		for step := 0; step < n; step++ {
-			src := s.wall[(start+step)%n]
-			if other, ok := s.store.gateways.Ref(src); ok && other.Key() == ref.Key() && other.Rest == ref.Rest {
+			src := list[(start+step)%n]
+			if other, ok := gateways.Ref(src); ok && other.Key() == ref.Key() && other.Rest == ref.Rest {
 				return src, true
 			}
 		}
