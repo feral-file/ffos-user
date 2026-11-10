@@ -898,6 +898,19 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 			rec.clearIssue()
 			rec.HTTPStatus = res.Status
 			rec.DeclaredType, rec.SniffedType = res.Declared, res.Sniffed
+			if rec.renderLayerBroken() {
+				// Valid bytes answer the fetch question; the work was
+				// concluded broken on what it painted (a blank or
+				// known-bad frame, a decode or watchdog failure). The
+				// verdict, its window and its backoff count stand, and
+				// only a frame that renders heals it (PR #450 review,
+				// F3). The next byte look waits RecheckOK through
+				// RetryAfter, which — unlike RecheckAfter — never extends
+				// the verdict's authority to skip the work: once that
+				// window ends the work plays and its frame decides.
+				rec.RetryAfter = now.Add(RecheckOK)
+				return true
+			}
 			rec.RecheckAfter = now.Add(RecheckOK)
 			rec.ConsecutiveBroken = 0
 			rec.LastError, rec.LastErrorAt = "", nil
@@ -1082,7 +1095,7 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 		}
 		mutate := outcomeMutation(o, count, s.contentAddressed(o.Source), s.renderConclusive, now)
 		rec, err := s.applyTx(tx, o.Source, func(rec *Record, existed bool) bool {
-			if o.frame != nil && o.Kind == OutcomeOK && rec.headWins() {
+			if o.frame != nil && o.Kind == OutcomeOK && rec.learnableErrorPage(outcomeTime(o, now)) {
 				learn = true
 			}
 			return mutate(rec, existed)
@@ -1247,7 +1260,7 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 				return true
 			}
 			if rec.Plays.LastFailAt == nil || !at.Before(*rec.Plays.LastFailAt) {
-				rec.Plays.LastFail = &PlayFailure{Stage: o.Stage, Code: o.Code, MediaType: o.MediaType, Attempt: o.Attempt, At: at}
+				rec.Plays.LastFail = &PlayFailure{Stage: o.Stage, Code: o.Code, MediaType: o.MediaType, Attempt: o.Attempt, At: at, ServedBy: rec.ServedBy}
 				rec.Plays.LastFailAt = new(at)
 			}
 			if o.MediaType != "" {
@@ -1276,6 +1289,16 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 			}
 			rec.clearIssue()
 			if o.Stage == StageFrame {
+				if rec.State == StateBroken && !rec.renderLayerBroken() {
+					// A fetch-layer verdict (L0's, or the content-type
+					// check's) stands, current or expired: both layers
+					// failing report the fetch reason, and a frame is
+					// never grounds to withdraw it — a suspect would drop
+					// the hint and put a dead work back on the wall (PR
+					// #450 review, F2). The frame is recorded under
+					// `wall` and counted in the run.
+					return true
+				}
 				// Two plays whose frame on the wall read blank (or known
 				// bad), or one over a standing L1 negative: a render
 				// verdict — broken when render verdicts are conclusive,

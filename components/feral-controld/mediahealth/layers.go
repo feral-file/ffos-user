@@ -71,6 +71,14 @@ func (r *Record) renderedFrame(at time.Time, layer Layer) bool {
 	r.Category, r.Reason = "", ""
 	r.CheckedAt = at
 	r.ConsecutiveBroken = 0
+	if r.L1 != nil {
+		// The work rendered: an L1 blank pending confirmation, or a
+		// negative from before, is history. A later headless blank earns
+		// a fresh sequence instead of being corroborated by a negative
+		// this frame overruled (PR #450 review, F4).
+		r.L1.ConsecutiveBlank = 0
+		r.L1.NegativeAt = time.Time{}
+	}
 	if !r.fetchRunOpen() {
 		r.Plays.ConsecutiveFail = 0
 		if r.Issue == IssuePlayFailed {

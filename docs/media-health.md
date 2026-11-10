@@ -590,11 +590,17 @@ would hide real art, the worst outcome here.
   resets the count, and a stalled confirmation keeps the blank pending so
   the next render is still the long one.
 - **Learned fingerprints.** The known-bad list fills itself from the one
-  conflict that proves a frame is not art: a frame that renders (nightly or
-  on the wall) while the same play's content-type check said the document
-  is not there (400/404/410 — the HEAD wins, the record keeps its state) is
-  the gateway's error page, since a rendered artwork can never produce a
-  404. Its pHash is a candidate (`fingerprints` bucket); candidates within
+  conflict that proves a frame is not art: a wall frame that renders while
+  the same play's content-type check said the document is not there
+  (400/404/410 — the HEAD wins, the record keeps its state) is the
+  gateway's error page, since a rendered artwork can never produce a 404.
+  "The same play" is checked, not assumed: the refusal was not overruled
+  by the kiosk's own GET, it was taken on the gateway the record routes
+  through now (a frame through a fallback gateway L0 found since is the
+  work, not the refusal), and it is at most 5 minutes old
+  (`learnableErrorPage`). The nightly L1 render never learns: it counts a
+  frame only when its own GET of the document was served 2xx, and a served
+  GET outranks the HEAD. Its pHash is a candidate (`fingerprints` bucket); candidates within
   6 bits are one cluster, and a cluster seen on **3 different works** is a
   learned known-bad fingerprint (label `learned`, tolerance 6), used by both
   classifiers beside `mediaHealth.l1.knownBad` — so the same error page
@@ -625,7 +631,9 @@ would hide real art, the worst outcome here.
   layer `l1` over unknown, an L0 `ok`, a `suspect` or a render-layer
   `broken`, ending the failure run — but never over an L0 or fetch-layer
   `broken` (the two layers, `layers.go`: a success in one never heals a
-  failure in the other), and it does not end a run opened by the
+  failure in the other), and it resets L1's blank count and earlier
+  negative, so a later headless blank starts a fresh sequence. It does not
+  end a run opened by the
   content-type check (a 401/403/429/4xx refusal is a fetch question; the
   work still concludes on the next refusal). An L0 success on an `ok`
   record keeps layer `l1`: valid bytes say less than a frame. A `suspect`
@@ -634,7 +642,13 @@ would hide real art, the worst outcome here.
   blank frame too, so for an HTML work only the next L1 render heals it,
   and the blank run is kept); an L0 success only refreshes the record's L0
   metadata and recheck — valid bytes say nothing about a frame — while an
-  L0 failure still outranks it. An L1 verdict never touches a `broken`
+  L0 failure still outranks it. An L0 success never heals a render-layer
+  `broken` either (a blank or known-bad frame, a load, decode or watchdog
+  failure): the verdict, its window and its backoff count stand, and the
+  next byte look is held through `retryAfter`, which never re-arms the
+  skip — when the window ends the work plays and its frame decides. A
+  failing wall frame never replaces an L0 or fetch-layer `broken` (both
+  layers failing report the fetch reason; the hint stays). An L1 verdict never touches a `broken`
   record, `recheckAfter` or `retryAfter`, nor the gateway route: a
   `suspect` record stays in the override index like an `ok` one, so a work
   served by a fallback gateway keeps loading through it.

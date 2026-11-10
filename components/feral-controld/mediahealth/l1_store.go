@@ -95,12 +95,10 @@ func sortCands(c []l1Cand) {
 func (s *Store) ApplyRender(source string, r RenderResult) (*Record, error) {
 	now := s.now()
 	contentAddressed := s.contentAddressed(source)
-	// learn: the frame rendered over an open definite absence — the
-	// gateway's error page (learnErrorPage), recorded once the update
-	// commits.
-	var learn bool
+	// An L1 frame is never learned as an error page: it is counted only
+	// when its own GET of the document was served 2xx, which outranks the
+	// content-type check's refusal (learnableErrorPage).
 	rec, err := s.update(source, func(rec *Record, _ bool) bool {
-		learn = r.Verdict == RenderOK && rec.headWins()
 		l1 := rec.L1
 		if l1 == nil {
 			l1 = &L1Verdict{}
@@ -173,8 +171,5 @@ func (s *Store) ApplyRender(source string, r RenderResult) (*Record, error) {
 		rec.L1 = l1
 		return true
 	})
-	if err == nil && learn {
-		s.learnErrorPage(source, r.PHash)
-	}
 	return rec, err
 }

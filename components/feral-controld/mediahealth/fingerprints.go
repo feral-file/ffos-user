@@ -11,9 +11,10 @@ import (
 )
 
 // Learned fingerprints (feral-file/ffos-user#392): the known-bad list fills
-// itself from the one conflict that proves a frame is not art. When a frame
-// of a work renders but the same play's content-type check said the
-// document is not there (a 400/404/410 — the HEAD wins, renderedFrame), the
+// itself from the one conflict that proves a frame is not art. When the
+// wall's frame of a work renders but the same play's content-type check
+// said the document is not there (a 400/404/410 — the HEAD wins,
+// renderedFrame; "the same play" is checked by learnableErrorPage), the
 // frame is the gateway's error page: a rendered artwork can never produce a
 // 404. Its pHash is a candidate. Candidates within learnClusterDistance of
 // each other are one cluster; a cluster seen on learnPromoteSources
@@ -156,9 +157,28 @@ func (s *Store) learnErrorPage(source string, hash uint64) {
 		zap.String("phash", promoted.Hash), zap.Int("works", len(promoted.Sources)))
 }
 
-// headWins reports a frame that rendered over an open definite absence:
-// the frame is the error page, and the record keeps its state
-// (renderedFrame refuses it) — the moment to learn its hash.
-func (r *Record) headWins() bool {
-	return r.fetchRunOpen() && definiteAbsence(r.Plays.LastFail.Code)
+// learnConflictWindow bounds a refusal and the wall frame of the same play:
+// the player's retries (3, 3 s apart) and the embedded load watchdog
+// (45 s), then the wall settle (15 s), fit well inside it. A frame later
+// than this is another play, and the document may since have come back.
+const learnConflictWindow = 5 * time.Minute
+
+// learnableErrorPage reports a wall frame (taken at `at`) that rendered
+// over the content-type check's definite absence in the SAME play: the
+// refusal was not overruled by the kiosk's own GET (fetchRunOpen ignores a
+// superseded one), was taken on the gateway the record routes through now,
+// and is at most learnConflictWindow old. Only then is the frame the
+// gateway's error page — renderedFrame refuses it (the HEAD wins) and its
+// hash becomes a candidate.
+//
+// The nightly L1 render never qualifies: it counts a frame only when its
+// own GET of the document returned 2xx, and a served GET outranks the HEAD
+// — that frame is the document, not an error page (PR #450 review, F1: a
+// healthy frame through a fallback gateway was learned as known-bad).
+func (r *Record) learnableErrorPage(at time.Time) bool {
+	if !r.fetchRunOpen() || !definiteAbsence(r.Plays.LastFail.Code) {
+		return false
+	}
+	f := r.Plays.LastFail
+	return f.ServedBy == r.ServedBy && !at.Before(f.At) && at.Sub(f.At) <= learnConflictWindow
 }

@@ -96,21 +96,78 @@ func TestLearned_SurvivesAReopen(t *testing.T) {
 	assert.Len(t, st.LearnedFingerprints(), 1)
 }
 
-// The nightly render learns too: a frame that renders over an open 404 run.
-func TestLearned_TheNightlyRenderLearns(t *testing.T) {
+// The nightly render never learns: it counts a frame only when its own GET
+// of the document was served 2xx, and a served GET outranks the HEAD — the
+// frame is the document, not an error page (PR #450 review, F1).
+func TestLearned_TheNightlyRenderNeverLearns(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	store := openTestStore(t, clock)
 	h, err := PHash(errorPage())
 	require.NoError(t, err)
-	for _, src := range []string{"https://o/a", "https://o/b", "https://o/c"} {
+	for i, src := range []string{"https://o/a", "https://o/b", "https://o/c"} {
 		seedSoftware(t, store, src)
-		_, err := store.ApplyOutcome(Outcome{Seq: int64(len(src)), Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: "404", Attempt: 1, At: "t"}, true)
+		_, err := store.ApplyOutcome(Outcome{Seq: int64(i + 1), Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: "404", Attempt: 1}, true)
 		require.NoError(t, err)
 		rec, err := store.ApplyRender(src, RenderResult{Verdict: RenderOK, PHash: h, Variance: 0.05})
 		require.NoError(t, err)
-		assert.NotEqual(t, LayerL1, rec.Layer, "the HEAD wins: no ok over the 404")
+		assert.NotEqual(t, LayerL1, rec.Layer, "the HEAD still wins the record: no ok over the 404")
 	}
-	assert.Len(t, store.LearnedFingerprints(), 1)
+	assert.Empty(t, store.LearnedFingerprints())
+}
+
+// wallFrameOK is the wall capture's delivery of a frame that rendered.
+func wallFrameOK(src string, h uint64) Outcome {
+	return Outcome{Source: src, Kind: OutcomeOK, Stage: StageFrame, Code: string(RenderOK), frame: &FrameEvidence{PHash: h, Variance: 0.05, Clipped: true}}
+}
+
+// A refusal is learnable only against a frame of the same play through the
+// same gateway (PR #450 review, F1): the HEAD 404'd on the source's own
+// gateway, L0 then found the work served by a fallback, and the wall now
+// shows the work through that fallback — the healthy frame must not become
+// a known-bad fingerprint. A frame from a later play is not the conflict
+// either. The control (same play, same gateway) still learns, so the guard
+// is what stops the other two.
+func TestLearned_OnlyTheSamePlayOnTheSameGateway(t *testing.T) {
+	h, err := PHash(errorPage())
+	require.NoError(t, err)
+	refuse := func(t *testing.T, store *Store, seq int64, src string) {
+		t.Helper()
+		seedSoftware(t, store, src)
+		_, err := store.ApplyOutcome(Outcome{Seq: seq, Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: "404", Attempt: 1}, true)
+		require.NoError(t, err)
+	}
+	srcs := []string{"https://gw.example/ipfs/a", "https://gw.example/ipfs/b", "https://gw.example/ipfs/c"}
+	cases := []struct {
+		name    string
+		between func(t *testing.T, store *Store, clock *testClock, src string)
+		learns  bool
+	}{
+		{"same play, same gateway", func(*testing.T, *Store, *testClock, string) {}, true},
+		{"served by a fallback since", func(t *testing.T, store *Store, _ *testClock, src string) {
+			_, err := store.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200, Declared: "text/html", Sniffed: "text/html", ServedBy: "https://ipfs.filebase.io"})
+			require.NoError(t, err)
+		}, false},
+		{"a later play", func(_ *testing.T, _ *Store, clock *testClock, _ string) {
+			clock.Advance(learnConflictWindow + time.Second)
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := &testClock{t: time.Now()}
+			store := openTestStore(t, clock)
+			for i, src := range srcs {
+				refuse(t, store, int64(i+1), src)
+				tc.between(t, store, clock, src)
+				_, err := store.ApplyOutcome(wallFrameOK(src, h), true)
+				require.NoError(t, err)
+			}
+			if tc.learns {
+				assert.Len(t, store.LearnedFingerprints(), 1)
+			} else {
+				assert.Empty(t, store.LearnedFingerprints())
+			}
+		})
+	}
 }
 
 // The bucket is bounded: the least recently seen unpromoted cluster goes.

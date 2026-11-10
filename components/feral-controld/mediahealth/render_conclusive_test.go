@@ -214,3 +214,109 @@ func TestRenderConclusive_L1NegativesMustBeANightApart(t *testing.T) {
 	assert.Equal(t, StateBroken, rec.State, "a night later agrees")
 	assert.Equal(t, CategoryNotMedia, rec.Category)
 }
+
+// wallBlank is the wall capture's delivery of a blank frame.
+func wallBlank(src string) Outcome {
+	return Outcome{Source: src, Kind: OutcomeFail, Stage: StageFrame, Code: string(RenderBlank), frame: &FrameEvidence{Clipped: true}}
+}
+
+// A fetch-layer broken verdict stands over a blank wall frame, whatever
+// renderConclusive says: both layers failing report the fetch reason, and
+// the hint must not be dropped (PR #450 review, F2).
+func TestRenderEvidence_FetchBrokenStandsOverAWallBlank(t *testing.T) {
+	for _, conclusive := range []bool{false, true} {
+		t.Run(map[bool]string{false: "advisory", true: "conclusive"}[conclusive], func(t *testing.T) {
+			clock := &testClock{t: time.Now()}
+			store, err := Open(filepath.Join(t.TempDir(), "mh", "store.db"), Options{Now: clock.Now, Logger: zap.NewNop(), RenderConclusive: conclusive})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = store.Close() })
+			src := "https://o/dead"
+			seedSoftware(t, store, src)
+			_, err = store.ApplyProbe(src, ProbeResult{Verdict: VerdictDead, Status: 404, Reason: ReasonHTTPStatus, Declared: "text/html"})
+			require.NoError(t, err)
+			for i := 0; i < 2; i++ {
+				_, err = store.ApplyOutcome(wallBlank(src), true)
+				require.NoError(t, err)
+				clock.Advance(time.Minute)
+			}
+			rec, err := store.Get(src)
+			require.NoError(t, err)
+			assert.Equal(t, StateBroken, rec.State)
+			assert.Equal(t, LayerL0, rec.Layer)
+			assert.Equal(t, ReasonHTTPStatus, rec.Reason)
+			assert.Equal(t, 404, rec.HTTPStatus)
+			require.NotNil(t, rec.Wall, "the frame is still recorded")
+			hints, err := store.Hints([]string{src}, clock.Now())
+			require.NoError(t, err)
+			assert.Contains(t, hints, src, "the dead work stays skipped")
+		})
+	}
+}
+
+// Valid bytes never heal a render-layer broken verdict (PR #450 review,
+// F3): the verdict, its window and its backoff stand — inside the window
+// and after it — and the next byte look is held off without re-arming the
+// skip.
+func TestRenderEvidence_ValidBytesKeepARenderVerdict(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := openConclusiveStore(t, clock)
+	src := "https://o/blank"
+	seedSoftware(t, store, src)
+	for i := 0; i < 2; i++ {
+		_, err := store.ApplyOutcome(wallBlank(src), true)
+		require.NoError(t, err)
+		clock.Advance(time.Minute)
+	}
+	broken, err := store.Get(src)
+	require.NoError(t, err)
+	require.Equal(t, StateBroken, broken.State)
+	require.Equal(t, ReasonRenderBlank, broken.Reason)
+
+	alive := ProbeResult{Verdict: VerdictAlive, Status: 200, Declared: "text/html", Sniffed: "text/html", WireURL: src}
+	rec, err := store.ApplyProbe(src, alive)
+	require.NoError(t, err)
+	assert.Equal(t, StateBroken, rec.State, "inside the window")
+	assert.Equal(t, ReasonRenderBlank, rec.Reason)
+	assert.Equal(t, broken.RecheckAfter, rec.RecheckAfter, "the window is neither extended nor cut")
+	assert.True(t, rec.Conclusive(clock.Now()))
+
+	clock.t = broken.RecheckAfter.Add(time.Hour)
+	rec, err = store.ApplyProbe(src, alive)
+	require.NoError(t, err)
+	assert.Equal(t, StateBroken, rec.State, "after the window: still what the wall last showed")
+	assert.Equal(t, LayerPlay, rec.Layer)
+	assert.Equal(t, broken.ConsecutiveBroken, rec.ConsecutiveBroken, "the backoff count stands")
+	assert.False(t, rec.Conclusive(clock.Now()), "no skip authority re-armed: the work plays and its frame decides")
+	assert.False(t, rec.Due(clock.Now()), "the next byte look waits")
+	assert.True(t, rec.Due(clock.Now().Add(RecheckOK)))
+}
+
+// A frame that renders resets L1's negative history (PR #450 review, F4):
+// a later night's first headless blank starts a fresh sequence instead of
+// concluding on a negative the frame overruled.
+func TestRenderEvidence_ARenderedFrameResetsL1History(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := openConclusiveStore(t, clock)
+	src := "https://o/flaky"
+	seedSoftware(t, store, src)
+	for i := 0; i < 2; i++ { // a blank and its confirmation: suspect
+		_, err := store.ApplyRender(src, RenderResult{Verdict: RenderBlank, Variance: 0.00001})
+		require.NoError(t, err)
+	}
+	h, err := PHash(errorPage())
+	require.NoError(t, err)
+	rec, err := store.ApplyOutcome(Outcome{Source: src, Kind: OutcomeOK, Stage: StageFrame, Code: string(RenderOK), frame: &FrameEvidence{PHash: h, Variance: 0.05, Clipped: true}}, true)
+	require.NoError(t, err)
+	require.Equal(t, StateOK, rec.State)
+	require.Equal(t, LayerPlay, rec.Layer)
+	assert.Zero(t, rec.L1.ConsecutiveBlank)
+	assert.True(t, rec.L1.NegativeAt.IsZero())
+
+	clock.Advance(l1NightGap + time.Hour)
+	rec, err = store.ApplyRender(src, RenderResult{Verdict: RenderBlank, Variance: 0.00001})
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State, "one blank: a confirmation is pending, nothing concluded")
+	rec, err = store.ApplyRender(src, RenderResult{Verdict: RenderBlank, Variance: 0.00001})
+	require.NoError(t, err)
+	assert.Equal(t, StateSuspect, rec.State, "a fresh negative, uncorroborated: advisory only")
+}

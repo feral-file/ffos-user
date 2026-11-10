@@ -354,6 +354,12 @@ type PlayFailure struct {
 	// the same document overruled (served 2xx in the same play): its count
 	// was reverted (revertHeadRefusal) and it takes part in nothing.
 	Superseded bool `json:"superseded,omitempty"`
+	// ServedBy is the record's gateway route when the failure was counted
+	// ("" for the source's own gateway). The kiosk routes every request
+	// through that route, the player's content-type check included, so it
+	// names the gateway that refused: a frame through another gateway is
+	// not that conflict (learnableErrorPage, PR #450 review F1).
+	ServedBy string `json:"servedBy,omitempty"`
 }
 
 // Build records which software produced the current verdict.
