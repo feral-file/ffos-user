@@ -1023,6 +1023,10 @@ func initializeApp(
 	// Components
 	// CDP
 	cdp := cdp.New(cdpEndpoint, webSocketDialer, io, json, httpClient, logger)
+	// One kiosk screenshot capturer: the hub's /api/screenshot and the media
+	// health wall capture share its single flight, so they never capture at
+	// once.
+	kioskCapturer := screenshot.NewKiosk(cdpEndpoint, httpClient, webSocketDialer)
 
 	// Relayer
 	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, os, json, logger)
@@ -1377,6 +1381,13 @@ func initializeApp(
 		if l1 := wireMediaHealthL1(config.Get().MediaHealthTuning(logger), mediaHealthSvc.Store(), renderer,
 			func() (time.Time, bool) { return devicectl.PlayerAsleepSince(executor) }, admit, logger); l1 != nil {
 			go l1.Run(context)
+		}
+		// The wall capture: the wall's own frame as play evidence for an
+		// HTML work. Attached before the poller's first observation.
+		if wc := wireWallCapture(config.Get().MediaHealthTuning(logger), mediaHealthSvc, kioskCapturer,
+			func() bool { _, asleep := devicectl.PlayerAsleepSince(executor); return asleep }, logger); wc != nil {
+			mediaHealthSvc.SetWallCapture(wc)
+			go wc.Run(context)
 		}
 		if mediaHealthPusher != nil {
 			go mediaHealthPusher.Run(context)
@@ -1805,7 +1816,7 @@ func initializeApp(
 		internet: internetProbeFrom(dbusClient, logger),
 		snapshot: provMachine.Snapshot,
 	}
-	screenshotCapturer := screenshot.New(cdpEndpoint, httpClient, webSocketDialer)
+	screenshotCapturer := kioskCapturer
 	hub := hub.NewWithLogDelivery(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger, logStreamEndpoint, logStreamAPIKey, logStreamEnvironment, playerLogSampleRate)
 	// Control-plane hub contact defers the escape policy's episode raise
 	// (§4.1): a phone with the app open must not have its link yanked. The

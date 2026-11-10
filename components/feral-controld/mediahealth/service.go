@@ -3,6 +3,7 @@ package mediahealth
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -30,6 +31,23 @@ type Service struct {
 	now        func() time.Time
 	online     func() bool
 	replayable func(source string) bool
+	// wallCapture judges the wall's own frame (wall_capture.go); nil when
+	// off. Set once at wiring, before the poller starts (SetWallCapture).
+	wallCapture *WallCapture
+	// kioskServed remembers, per wall source, when the kiosk observer last
+	// saw its document served (2xx): a content-type check refusal drained
+	// later from the ring, timed at or before that GET, is overruled by it
+	// (kioskServedAfter). Entries older than headGetWindow are dropped.
+	// Guarded by mu.
+	kioskServed map[string]time.Time
+	// kioskFailed remembers, per wall source, when the kiosk observer last
+	// saw the DOCUMENT navigation fail (a status of 400 or above, or a
+	// network error); a later 2xx of the same document clears it — the
+	// latest answer is what the frame shows. A wall frame taken in a
+	// mount whose latest document answer failed is a picture of that
+	// error page (kioskDocFailedInMount): the office FF1 healed a work to
+	// ok on a frame of nftstorage.link's 504 page (2026-11-10).
+	kioskFailed map[string]kioskFailure
 
 	// mu serializes the per-page outcome state below (drainer, the play
 	// run, the inferred-failure memory): ObservePlayback runs on the status
@@ -49,6 +67,21 @@ type Service struct {
 	// definite refusal (definiteRefusal): a `ready` that follows for the
 	// same source is the error page, not the work.
 	runRefused bool
+	// runFramed is set by a wall frame and held through the same mount's
+	// navigations: the frame is taken after the play's `ready`, so an
+	// observed navigation after it (attempt 0: the iframe reloading) is
+	// still that play, while the player's next entry with an attempt can
+	// only come from the next mount — a new play. A frame must not end the
+	// play outright (PR #450 review, F14: a same-mount reload 404 became a
+	// second play and concluded) nor hold it open across mounts (F10: the
+	// next mount's 404 rode the frame's run, uncounted).
+	runFramed bool
+	// runWithdrawn is set when the kiosk's GET overruled the content-type
+	// check refusal that counted this play (ApplyKioskAnswer reverted it):
+	// the play is still open, but its one count is free again, so its next
+	// genuine failure counts — whichever order the GET and the drain came
+	// in (F13).
+	runWithdrawn bool
 
 	// inferredFailed remembers the last (castSeq-less) renderStatus==3
 	// sighting so the fallback counts one failure per item mount, not one
@@ -61,6 +94,13 @@ type Service struct {
 	// to its source (ObserveNavigation). Guarded by mu.
 	wall      []string
 	wallIndex int
+	// pushed is the last playlist a push asked hints for (Hints): the
+	// sources about to be on the wall. The kiosk loads a cast's first item
+	// before the next status poll reports the new wall, so its document
+	// navigation is matched against these (matchWallSource) — otherwise
+	// the first item of every cast was unobserved, and a frame of its
+	// error page healed it (office FF1 learn test, 2026-11-10).
+	pushed []string
 }
 
 // Config builds a Service.
@@ -112,6 +152,20 @@ func New(cfg Config) *Service {
 	return s
 }
 
+// SetWallCapture attaches the wall-capture runner; call before the status
+// poller starts.
+func (s *Service) SetWallCapture(w *WallCapture) { s.wallCapture = w }
+
+// ObserveWallFrame folds a classified capture of the wall into the play run
+// as a StageFrame outcome, under the same rules as the player's own entries
+// (one counted failure per play).
+func (s *Service) ObserveWallFrame(o Outcome) {
+	online := s.online != nil && s.online()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applyEntry(o, online)
+}
+
 // GatewayOverride is the kiosk interceptor's per-request lookup: the same
 // path on the fallback gateway the probe found serving this content, when
 // there is one (Store.GatewayOverride).
@@ -137,6 +191,9 @@ func (s *Service) PlayerSupportsHints() bool {
 // anything the offline cache can replay). On a store error it returns nil:
 // a push with no hints is the fail-open shape.
 func (s *Service) Hints(sources []string) map[string]Hint {
+	s.mu.Lock()
+	s.pushed = slices.Clone(sources)
+	s.mu.Unlock()
 	hints, err := s.store.Hints(sources, s.now())
 	if err != nil {
 		s.logger.Warn("media health: hints unavailable for this push", zap.Error(err))
@@ -279,6 +336,11 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 	if s.lookahead != nil {
 		s.lookahead.Observe(sources, index)
 	}
+	if items != nil {
+		s.wallCapture.Observe(sources, index, renderStatus)
+	} else {
+		s.wallCapture.Observe(nil, -1, nil)
+	}
 	// Only a player with the outcome ring has a cast generation to fence a
 	// hint-only push on; without it the pusher has no wall (nil-safe).
 	if outcomes != nil && items != nil {
@@ -334,6 +396,12 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 func (s *Service) applyEntry(o Outcome, online bool) bool {
 	var count bool
 	switch {
+	case o.Kind == OutcomeFail && s.kioskServedAfter(o):
+		// The kiosk's own GET of this document was served at or after this
+		// content-type check, in the same play: the HEAD's refusal is not
+		// the document's (the GET outranks it) — history only, and it must
+		// not mark the play's ready as an error page; uncounted, it never
+		// becomes an open run's last failure either (the store's rule).
 	case o.Kind == OutcomeFail && !countableFailure(o):
 		// History only, and it must not touch the run: an uncountable
 		// entry that OPENED the run made every failure after it in that
@@ -342,9 +410,32 @@ func (s *Service) applyEntry(o Outcome, online bool) bool {
 		// nothing, play after play (ipfs.infura.io on the office FF1, 6
 		// plays, 0 counted).
 	case o.Kind == OutcomeFail:
-		count = online && !s.samePlay(o)
+		// Offline, the entry neither counts nor touches the play run: an
+		// offline failure must not open a run that swallows the first
+		// failure once back online (samePlay is not even consulted).
+		if online {
+			same := s.samePlay(o)
+			if same && s.runWithdrawn {
+				// The play's counted refusal was overruled (runWithdrawn):
+				// this failure is the play's first real one.
+				same, s.runWithdrawn = false, false
+			}
+			count = !same
+		}
 		if definiteRefusal(o) {
 			s.runRefused = true
+		}
+	case o.Stage == StageFrame:
+		// A rendered frame belongs to the play already on screen: it
+		// neither ends nor restarts the run the player's entries
+		// describe. Whether it may count as a success against that
+		// play's content-type check is the store's call
+		// (renderedFrame: a definite absence wins) — unless the kiosk's
+		// own document answer of this mount failed: then the frame is
+		// that error page, and the store neither heals nor counts on it.
+		if status, failed := s.kioskDocFailedInMount(o); failed {
+			o.errorPage = true
+			o.frame.MainStatus = status
 		}
 	default:
 		o.errorPage = o.Kind == OutcomeOK && s.runRefused &&
@@ -357,6 +448,42 @@ func (s *Service) applyEntry(o Outcome, online bool) bool {
 	return count
 }
 
+// kioskFailure is one failed document navigation the kiosk observer saw.
+type kioskFailure struct {
+	at     time.Time
+	status int
+}
+
+// kioskDocFailedInMount reports a wall frame whose mount's latest document
+// navigation failed (kioskFailed, not since cleared by a 2xx) at or after
+// the mount began: the frame is the error page. It returns the status.
+// Caller holds s.mu.
+func (s *Service) kioskDocFailedInMount(o Outcome) (int, bool) {
+	if o.Stage != StageFrame || o.frame == nil {
+		return 0, false
+	}
+	f, ok := s.kioskFailed[o.Source]
+	if !ok || f.at.Before(o.frame.MountedAt) {
+		return 0, false
+	}
+	return f.status, true
+}
+
+// kioskServedAfter reports a content-type check refusal (the player's HEAD,
+// with an attempt) that the kiosk's own GET of the same document overruled:
+// served 2xx at or after it, within headGetWindow. Caller holds s.mu.
+func (s *Service) kioskServedAfter(o Outcome) bool {
+	if o.Stage != StageDetect || o.Attempt == 0 || o.Code == CodeNetwork {
+		return false
+	}
+	served, ok := s.kioskServed[o.Source]
+	if !ok {
+		return false
+	}
+	at := outcomeTime(o, s.now())
+	return !served.Before(at) && served.Sub(at) <= headGetWindow
+}
+
 // samePlay reports whether a failing outcome continues the play run already
 // counted, and advances the run. Rules: a success, a skip, or another
 // source ends the run; an exhausted entry ends it after itself (the next
@@ -367,6 +494,7 @@ func (s *Service) applyEntry(o Outcome, online bool) bool {
 func (s *Service) samePlay(o Outcome) bool {
 	if o.Kind != OutcomeFail {
 		s.runSource, s.runAttempt, s.runEnded, s.runRefused = "", 0, false, false
+		s.runFramed, s.runWithdrawn = false, false
 		return false
 	}
 	// An observed navigation (Attempt 0) carries no attempt counter: it
@@ -375,10 +503,12 @@ func (s *Service) samePlay(o Outcome) bool {
 	// it — the frame request happens after the player's content-type
 	// check, but the ring is drained only every poll, so the two can
 	// arrive in either order.
-	same := o.Source == s.runSource && !s.runEnded && (o.Attempt == 0 || o.Attempt >= s.runAttempt)
+	same := o.Source == s.runSource && !s.runEnded && (o.Attempt == 0 || o.Attempt >= s.runAttempt) &&
+		(!s.runFramed || o.Attempt == 0) // after a frame, the player's entry is the next mount (runFramed)
 	if !same {
-		s.runRefused = false
+		s.runRefused, s.runWithdrawn = false, false
 	}
+	s.runFramed = o.Stage == StageFrame || (same && s.runFramed)
 	s.runSource, s.runEnded = o.Source, o.Stage == StageExhausted
 	if !same || o.Attempt > 0 {
 		s.runAttempt = o.Attempt

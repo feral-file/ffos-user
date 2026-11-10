@@ -111,6 +111,19 @@ type MediaHealthConfig struct {
 	// L1 is the nightly render probe (docs/media-health.md §6): an
 	// experiment, absent or enabled=false means it never runs.
 	L1 *MediaHealthL1Config `json:"l1,omitempty"`
+	// WallCapture judges the wall's own frame as play evidence for an HTML
+	// work (docs/media-health.md, "Wall capture"): an experiment that
+	// screenshots the live kiosk, so absent or enabled=false means it never
+	// runs. It classifies with the l1 block's fingerprints and threshold.
+	WallCapture *MediaHealthWallCaptureConfig `json:"wallCapture,omitempty"`
+	// RenderConclusive lets a corroborated render negative — a blank or
+	// known-bad frame from the nightly render or the wall, agreed by an
+	// earlier night, another play or the other source — conclude broken:
+	// skipped, and counted toward rejecting an all-broken cast. Off (the
+	// default) keeps every render negative suspect, advisory. Turn it on
+	// only once the office fixture shows no false blanks among its healthy
+	// works: a false blank hides real art.
+	RenderConclusive bool `json:"renderConclusive,omitempty"`
 	// Malformed records that the block did not decode; every field then
 	// reads as its default.
 	Malformed bool `json:"-"`
@@ -131,12 +144,14 @@ type MediaHealthL1Config struct {
 	// browser.
 	MinAsleepSeconds int `json:"minAsleepSeconds,omitempty"`
 	// BlankVarianceThreshold is the per-channel variance below which a
-	// frame is blank (default 0.001, the indexer's); values outside
-	// (0, 0.25) keep the default.
+	// frame is blank (default 0.0001, measured on the wall's own frames —
+	// a decade under the indexer's 0.001, which called dark art blank);
+	// values outside (0, 0.25) keep the default.
 	BlankVarianceThreshold float64 `json:"blankVarianceThreshold,omitempty"`
 	// SettleMs / ConfirmSettleMs are the wait after navigation before the
 	// capture, for a first render and for the confirmation render of a
-	// blank (defaults 15000 / 30000, the indexer's).
+	// blank (defaults 30000 / 45000: the headless browser paints on the
+	// CPU, so it gets longer than the indexer's GPU-backed 15000 / 30000).
 	SettleMs        int `json:"settleMs,omitempty"`
 	ConfirmSettleMs int `json:"confirmSettleMs,omitempty"`
 	// KnownBad lists fingerprints of renders that paint fine but are not
@@ -144,6 +159,19 @@ type MediaHealthL1Config struct {
 	// maxDistance (Hamming, 0-64; keep it small, 4-8) of one is suspect
 	// immediately. An entry that does not parse is logged and dropped.
 	KnownBad []MediaHealthFingerprint `json:"knownBad,omitempty"`
+}
+
+// MediaHealthWallCaptureConfig tunes the capture of the wall.
+type MediaHealthWallCaptureConfig struct {
+	// Enabled turns it on. Off by default: it screenshots the live kiosk.
+	Enabled bool `json:"enabled"`
+	// SettleMs is how long a work has been on screen before the capture
+	// (default 15000; the kiosk renders on its GPU, so it needs less than
+	// the nightly headless render's 30000).
+	SettleMs int `json:"settleMs,omitempty"`
+	// MaxEdge bounds the captured frame's longer edge in pixels (default
+	// 1024, the nightly render's viewport).
+	MaxEdge int `json:"maxEdge,omitempty"`
 }
 
 // MediaHealthFingerprint is one known-bad render: a 64-bit pHash as hex

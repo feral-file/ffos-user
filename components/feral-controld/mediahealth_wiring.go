@@ -18,6 +18,7 @@ import (
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/uarewrite"
 )
@@ -59,10 +60,11 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 		return nil, nil, nil
 	}
 	store, err := mediahealth.Open(constants.MEDIA_HEALTH_STORE_FILE, mediahealth.Options{
-		Build:        mediahealth.Build{Controld: installedControldVersion()},
-		Gateways:     gateways,
-		MinFreeBytes: mediaHealthMinFreeBytes,
-		Logger:       logger,
+		Build:            mediahealth.Build{Controld: installedControldVersion()},
+		Gateways:         gateways,
+		MinFreeBytes:     mediaHealthMinFreeBytes,
+		RenderConclusive: cfg.RenderConclusive,
+		Logger:           logger,
 	})
 	if err != nil {
 		// Not fatal: this daemon owns every recovery surface on the device,
@@ -171,15 +173,7 @@ func wireMediaHealthL1(cfg config.MediaHealthConfig, store *mediahealth.Store, r
 		logger.Warn("media health: L1 render probe enabled but no headless renderer (offline cache disabled); not running")
 		return nil
 	}
-	var known []mediahealth.Fingerprint
-	for _, fp := range cfg.L1.KnownBad {
-		parsed, err := mediahealth.ParseFingerprint(fp.PHash, fp.MaxDistance, fp.Label)
-		if err != nil {
-			logger.Warn("media health: dropping unparsable L1 fingerprint", zap.Error(err))
-			continue
-		}
-		known = append(known, parsed)
-	}
+	known := knownBadFingerprints(cfg, logger)
 	l1cfg := mediahealth.L1Config{
 		Store:                  store,
 		Renderer:               renderer,
@@ -200,6 +194,84 @@ func wireMediaHealthL1(cfg config.MediaHealthConfig, store *mediahealth.Store, r
 		zap.Int("known_bad_fingerprints", len(known)),
 		zap.Bool("admission_gate", admit != nil))
 	return l1
+}
+
+// knownBadFingerprints parses the l1 block's fingerprints, dropping (and
+// logging) any that do not parse. Shared by the nightly render and the wall
+// capture so both classify alike.
+func knownBadFingerprints(cfg config.MediaHealthConfig, logger *zap.Logger) []mediahealth.Fingerprint {
+	if cfg.L1 == nil {
+		return nil
+	}
+	var known []mediahealth.Fingerprint
+	for _, fp := range cfg.L1.KnownBad {
+		parsed, err := mediahealth.ParseFingerprint(fp.PHash, fp.MaxDistance, fp.Label)
+		if err != nil {
+			logger.Warn("media health: dropping unparsable known-bad fingerprint", zap.Error(err))
+			continue
+		}
+		known = append(known, parsed)
+	}
+	return known
+}
+
+// defaultWallMaxEdge is the wall capture's longer edge: the nightly
+// render's viewport, so the two classify comparable frames.
+const defaultWallMaxEdge = 1024
+
+// wireWallCapture builds the wall-capture runner when
+// mediaHealth.wallCapture.enabled is set; nil otherwise, with one log line.
+func wireWallCapture(cfg config.MediaHealthConfig, svc *mediahealth.Service, kiosk screenshot.ArtworkCapturer, asleep func() bool, logger *zap.Logger) *mediahealth.WallCapture {
+	if cfg.WallCapture == nil || !cfg.WallCapture.Enabled {
+		logger.Info("media health: wall capture off (mediaHealth.wallCapture.enabled is not set)")
+		return nil
+	}
+	if svc == nil || kiosk == nil {
+		return nil
+	}
+	maxEdge := cfg.WallCapture.MaxEdge
+	if maxEdge <= 0 || maxEdge > screenshot.MaxDimension {
+		maxEdge = defaultWallMaxEdge
+	}
+	var threshold float64
+	if cfg.L1 != nil {
+		threshold = cfg.L1.BlankVarianceThreshold
+	}
+	known := knownBadFingerprints(cfg, logger)
+	settle := time.Duration(cfg.WallCapture.SettleMs) * time.Millisecond
+	if settle <= 0 {
+		settle = mediahealth.DefaultWallSettle
+	}
+	w := mediahealth.NewWallCapture(mediahealth.WallCaptureConfig{
+		Store:                  svc.Store(),
+		Capturer:               kioskWall{kiosk: kiosk, maxEdge: maxEdge},
+		Deliver:                svc.ObserveWallFrame,
+		Awake:                  func() bool { return asleep == nil || !asleep() },
+		Settle:                 settle,
+		KnownBad:               known,
+		BlankVarianceThreshold: threshold,
+		Logger:                 logger,
+	})
+	logger.Info("media health: wall capture on",
+		zap.Duration("settle", settle), zap.Int("max_edge", maxEdge),
+		zap.Int("known_bad_fingerprints", len(known)))
+	return w
+}
+
+// kioskWall adapts the screenshot package's artwork capture to the media
+// health runner. A busy capturer (the hub's screenshot is running), a
+// covered artwork and an unreachable kiosk are not evidence.
+type kioskWall struct {
+	kiosk   screenshot.ArtworkCapturer
+	maxEdge int
+}
+
+func (k kioskWall) CaptureWall(ctx context.Context) (*mediahealth.WallFrame, error) {
+	frame, err := k.kiosk.CaptureArtwork(ctx, k.maxEdge)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", mediahealth.ErrFrameUnavailable, err)
+	}
+	return &mediahealth.WallFrame{Image: frame.Image, Masks: frame.Masks, Clipped: frame.Clipped}, nil
 }
 
 // cdpSend is the kiosk CDP client's Send, the one method the hint pusher's

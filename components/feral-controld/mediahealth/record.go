@@ -191,8 +191,14 @@ func CategoryOf(reason Reason, httpStatus int) Category {
 		return CategoryRenderFailed
 	case ReasonWebGLLost:
 		return CategoryDeviceLimit
-	case ReasonRenderBlank, ReasonRenderKnownBad:
+	case ReasonRenderBlank:
 		return CategoryRenderBlank
+	case ReasonRenderKnownBad:
+		// A frame matching a known-bad fingerprint is a gateway's error
+		// page (or placeholder) served with a 200: the same fact as L0's
+		// known_error_page, so the same category. Still render evidence
+		// (its layer is read from the reason, layers.go).
+		return CategoryNotMedia
 	}
 	return ""
 }
@@ -305,8 +311,25 @@ type Record struct {
 	// has rendered this source. Its own due time (Next) is deliberately
 	// NOT part of dueAt: L1 work is found by Store.L1Candidates, never by
 	// the L0 lookahead or sweep.
-	L1    *L1Verdict `json:"l1,omitempty"`
-	Build Build      `json:"build"`
+	L1 *L1Verdict `json:"l1,omitempty"`
+	// Wall is the last classified capture of the wall (wall.go).
+	Wall  *WallObservation `json:"wall,omitempty"`
+	Build Build            `json:"build"`
+}
+
+// WallObservation is the last classified capture of the wall for a source
+// (wall.go): render evidence from the kiosk's own GPU, beside the nightly
+// headless render's L1Verdict.
+type WallObservation struct {
+	Verdict  RenderVerdict `json:"verdict"`
+	PHash    string        `json:"phash,omitempty"`
+	Variance float64       `json:"variance,omitempty"`
+	Label    string        `json:"label,omitempty"`
+	Clipped  bool          `json:"clipped,omitempty"`
+	// MainStatus is the kiosk's own document response when it failed in
+	// this mount (the frame is then the error page: Verdict stalled).
+	MainStatus int       `json:"mainStatus,omitempty"`
+	At         time.Time `json:"at"`
 }
 
 // PlayStats is what the player reported about this source.
@@ -320,6 +343,15 @@ type PlayStats struct {
 	LastOKAt        *time.Time   `json:"lastOkAt,omitempty"`
 	LastFailAt      *time.Time   `json:"lastFailAt,omitempty"`
 	LastFail        *PlayFailure `json:"lastFail,omitempty"`
+	// RunFail is the open run's last COUNTED failure (the one that advanced
+	// ConsecutiveFail), meaningful only while ConsecutiveFail > 0. It
+	// classifies the run — fetchRunOpen, frameRunOpen — and is what
+	// revertHeadRefusal may undo. Kept apart from LastFail, which is the
+	// most recent failure for the app and takes a play's uncounted stages
+	// too (its terminal stage is the diagnostic): an uncounted entry — the
+	// same play, an overruled HEAD, offline — must never reclassify the run
+	// or be reverted as if it had counted (PR #450 review, F5, F8).
+	RunFail *PlayFailure `json:"runFail,omitempty"`
 }
 
 // PlayFailure is the most recent failing outcome, kept whole so the app and
@@ -330,6 +362,62 @@ type PlayFailure struct {
 	MediaType string    `json:"mediaType,omitempty"`
 	Attempt   int       `json:"attempt,omitempty"`
 	At        time.Time `json:"at"`
+	// Superseded marks a content-type check refusal the kiosk's own GET of
+	// the same document overruled (served 2xx in the same play): its count
+	// was reverted (revertHeadRefusal) and it takes part in nothing.
+	Superseded bool `json:"superseded,omitempty"`
+	// ServedBy is the record's gateway route when the failure was counted
+	// ("" for the source's own gateway). The kiosk routes every request
+	// through that route, the player's content-type check included, so it
+	// names the gateway that refused: a frame through another gateway is
+	// not that conflict (learnableErrorPage, PR #450 review F1).
+	ServedBy string `json:"servedBy,omitempty"`
+	// Prev is, on RunFail only, the run's counted failure before this one
+	// (one level; its own Prev is dropped), restored when this one is
+	// reverted so the run keeps classifying by what still counts.
+	Prev *PlayFailure `json:"prev,omitempty"`
+	// Settled marks a counted failure no GET may revert: one handed the
+	// run back after the refusal counted on top of it was overruled (an
+	// earlier play's; F9), or a content-type check refusal its own play's
+	// GET confirmed by failing too (F16) — the real fetch agreed, whatever
+	// order the two arrived in.
+	Settled bool `json:"settled,omitempty"`
+	// Replaced is, on a content-type check refusal that concluded a play
+	// verdict, the verdict it replaced: withdrawing the HEAD's verdict
+	// restores it — state, reason, window, backoff and route — instead of
+	// erasing an independently established one (PR #450 review, F17), and
+	// brings back the fallback route the conclusion dropped (F15).
+	Replaced *VerdictSnapshot `json:"replaced,omitempty"`
+}
+
+// VerdictSnapshot is a record's verdict as it stood before a content-type
+// check refusal replaced it (PlayFailure.Replaced).
+type VerdictSnapshot struct {
+	State             State      `json:"state,omitempty"`
+	Layer             Layer      `json:"layer,omitempty"`
+	Category          Category   `json:"category,omitempty"`
+	Reason            Reason     `json:"reason,omitempty"`
+	HTTPStatus        int        `json:"httpStatus,omitempty"`
+	CheckedAt         time.Time  `json:"checkedAt"`
+	RecheckAfter      time.Time  `json:"recheckAfter"`
+	ConsecutiveBroken int        `json:"consecutiveBroken,omitempty"`
+	LastError         string     `json:"lastError,omitempty"`
+	LastErrorAt       *time.Time `json:"lastErrorAt,omitempty"`
+	ServedBy          string     `json:"servedBy,omitempty"`
+}
+
+func (r *Record) snapshotVerdict() *VerdictSnapshot {
+	return &VerdictSnapshot{
+		State: r.State, Layer: r.Layer, Category: r.Category, Reason: r.Reason, HTTPStatus: r.HTTPStatus,
+		CheckedAt: r.CheckedAt, RecheckAfter: r.RecheckAfter, ConsecutiveBroken: r.ConsecutiveBroken,
+		LastError: r.LastError, LastErrorAt: r.LastErrorAt, ServedBy: r.ServedBy,
+	}
+}
+
+func (r *Record) restoreVerdict(v *VerdictSnapshot) {
+	r.State, r.Layer, r.Category, r.Reason, r.HTTPStatus = v.State, v.Layer, v.Category, v.Reason, v.HTTPStatus
+	r.CheckedAt, r.RecheckAfter, r.ConsecutiveBroken = v.CheckedAt, v.RecheckAfter, v.ConsecutiveBroken
+	r.LastError, r.LastErrorAt, r.ServedBy = v.LastError, v.LastErrorAt, v.ServedBy
 }
 
 // Build records which software produced the current verdict.

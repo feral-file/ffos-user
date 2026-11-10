@@ -63,6 +63,10 @@ type Store struct {
 
 	// gateways parses sources into content ids for the servedBy index.
 	gateways *Gateways
+	// renderConclusive lets a corroborated render negative (a blank or
+	// known-bad frame, from L1 or the wall) conclude broken; false keeps it
+	// suspect (advisory). Options.RenderConclusive.
+	renderConclusive bool
 	// servedByMu guards servedBy, the in-memory mirror of the routes in
 	// bucketServedBy that have at least one source on a fallback gateway:
 	// route (ContentRef.RouteKey) → entry (identity + servedBySep + owner,
@@ -73,6 +77,11 @@ type Store struct {
 	// sources that need a fallback, not by every content-addressed source.
 	servedByMu sync.RWMutex
 	servedBy   map[string]map[string]string
+
+	// learnedMu guards learned: the promoted known-bad fingerprints
+	// (fingerprints.go), mirrored from bucketFingerprints.
+	learnedMu sync.RWMutex
+	learned   []Fingerprint
 }
 
 // Options tunes Open.
@@ -84,6 +93,11 @@ type Options struct {
 	Gateways *Gateways
 	// Build is stamped on every verdict this process writes.
 	Build Build
+	// RenderConclusive (mediaHealth.renderConclusive, default false): a
+	// corroborated render negative concludes broken (skipped, counted
+	// toward rejecting an all-broken cast) instead of suspect. Off until
+	// the office fixture shows no false blanks among its healthy works.
+	RenderConclusive bool
 	// MinFreeBytes refuses writes when the filesystem has less free space.
 	// 0 disables the guard (tests).
 	MinFreeBytes int64
@@ -128,15 +142,16 @@ func Open(path string, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("media health: open store: %w", err)
 	}
 	s := &Store{
-		db:           db,
-		path:         path,
-		now:          opts.Now,
-		build:        opts.Build,
-		logger:       opts.Logger,
-		minFreeBytes: opts.MinFreeBytes,
-		freeBytes:    opts.FreeBytes,
-		gateways:     opts.Gateways,
-		servedBy:     map[string]map[string]string{},
+		db:               db,
+		path:             path,
+		now:              opts.Now,
+		build:            opts.Build,
+		logger:           opts.Logger,
+		minFreeBytes:     opts.MinFreeBytes,
+		freeBytes:        opts.FreeBytes,
+		gateways:         opts.Gateways,
+		renderConclusive: opts.RenderConclusive,
+		servedBy:         map[string]map[string]string{},
 	}
 	if s.gateways == nil {
 		s.gateways = defaultGateways
@@ -151,7 +166,7 @@ func Open(path string, opts Options) (*Store, error) {
 		s.freeBytes = statfsFree
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketItems, bucketRecheck, bucketMeta, bucketServedBy} {
+		for _, b := range [][]byte{bucketItems, bucketRecheck, bucketMeta, bucketServedBy, bucketFingerprints} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -168,6 +183,9 @@ func Open(path string, opts Options) (*Store, error) {
 	})
 	if err == nil {
 		err = s.loadServedBy()
+	}
+	if err == nil {
+		err = s.loadLearned()
 	}
 	if err == nil {
 		err = s.retireUnconfiguredFallbacks()
@@ -314,8 +332,9 @@ const servedBySep = "\x00"
 // 2026-11-06). The records are the source of truth; the index is a cache.
 // Version 5 keys each entry by route, identity AND owning source
 // (servedByEntryKey), so an identity two sources share is never deleted
-// by one of them on the other's behalf.
-const servedByIndexVersion = "5"
+// by one of them on the other's behalf. Version 6 also indexes a
+// render-layer broken record (servedByEntry).
+const servedByIndexVersion = "6"
 
 var metaServedByIndexKey = []byte("servedByIndex")
 
@@ -449,8 +468,13 @@ func (s *Store) retireUnconfiguredFallbacks() error {
 // ok one: L1 is advisory and never gates playback, and its verdict says
 // nothing about which gateway serves the bytes — dropping the route when a
 // work turns suspect would send the wall back to the gateway that 404s.
+//
+// A render-layer broken record is indexed too: a render verdict (the work
+// did not paint) says nothing about which gateway serves its bytes, and the
+// work is retried at the end of its window — through the gateway that
+// served it, not the one that 404s.
 func servedByEntry(rec *Record) (origin string, indexed bool) {
-	if rec == nil || (rec.State != StateOK && rec.State != StateSuspect) {
+	if rec == nil || (rec.State != StateOK && rec.State != StateSuspect && !rec.renderLayerBroken()) {
 		return "", false
 	}
 	return rec.ServedBy, true
@@ -702,6 +726,14 @@ func (s *Store) decode(raw []byte) (*Record, error) {
 		rec.UnreachableSince, rec.UnreachableFailures = rec.LegacyDNSFailSince, rec.LegacyDNSFailures
 	}
 	rec.LegacyDNSFailSince, rec.LegacyDNSFailures = nil, 0
+	if rec.Plays.ConsecutiveFail > 0 && rec.Plays.RunFail == nil && rec.Plays.LastFail != nil {
+		// A record from before RunFail (PR #450): its open run was
+		// classified by LastFail, so that is what it keeps — the
+		// fetch/render boundary holds across the upgrade and no count is
+		// invented (PR #450 review, F12).
+		rf := *rec.Plays.LastFail
+		rec.Plays.RunFail = &rf
+	}
 	return &rec, nil
 }
 
@@ -874,6 +906,19 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 			rec.clearIssue()
 			rec.HTTPStatus = res.Status
 			rec.DeclaredType, rec.SniffedType = res.Declared, res.Sniffed
+			if rec.renderLayerBroken() {
+				// Valid bytes answer the fetch question; the work was
+				// concluded broken on what it painted (a blank or
+				// known-bad frame, a decode or watchdog failure). The
+				// verdict, its window and its backoff count stand, and
+				// only a frame that renders heals it (PR #450 review,
+				// F3). The next byte look waits RecheckOK through
+				// RetryAfter, which — unlike RecheckAfter — never extends
+				// the verdict's authority to skip the work: once that
+				// window ends the work plays and its frame decides.
+				rec.RetryAfter = now.Add(RecheckOK)
+				return true
+			}
 			rec.RecheckAfter = now.Add(RecheckOK)
 			rec.ConsecutiveBroken = 0
 			rec.LastError, rec.LastErrorAt = "", nil
@@ -886,8 +931,14 @@ func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed boo
 				// F23).
 				return true
 			}
+			if rec.State != StateOK || (rec.Layer != LayerL1 && rec.Layer != LayerPlay) {
+				// Valid bytes say less than render evidence: an ok record a
+				// frame or a play proved keeps its layer (l1, play — the
+				// app's "verified on this device"); its L0 metadata above
+				// is refreshed all the same.
+				rec.Layer = LayerL0
+			}
 			rec.State = StateOK
-			rec.Layer = LayerL0
 			rec.Category, rec.Reason = "", ""
 			rec.CheckedAt = now
 		case VerdictDead:
@@ -1027,7 +1078,13 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 		digest = outcomeDigest(o)
 	}
 	var out *Record
+	// learn: a wall frame rendered over an open definite absence, or over
+	// the kiosk's own failed document answer (errorPage) — the gateway's
+	// error page (learnErrorPage). Set inside the batch (reset on a
+	// retry), acted on after it commits.
+	var learn bool
 	err := s.db.Batch(func(tx *bolt.Tx) error {
+		learn = false
 		meta := tx.Bucket(bucketMeta)
 		var consumed []string
 		if digest != "" {
@@ -1045,7 +1102,13 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 				return nil
 			}
 		}
-		rec, err := s.applyTx(tx, o.Source, outcomeMutation(o, count, s.contentAddressed(o.Source), now))
+		mutate := outcomeMutation(o, count, s.contentAddressed(o.Source), s.renderConclusive, now)
+		rec, err := s.applyTx(tx, o.Source, func(rec *Record, existed bool) bool {
+			if o.frame != nil && o.Kind == OutcomeOK && (o.errorPage || rec.learnableErrorPage(outcomeTime(o, now))) {
+				learn = true
+			}
+			return mutate(rec, existed)
+		})
 		if err != nil {
 			return err
 		}
@@ -1065,6 +1128,9 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	if learn {
+		s.learnErrorPage(o.Source, o.frame.PHash)
 	}
 	return out, nil
 }
@@ -1105,12 +1171,49 @@ func (s *Store) contentAddressed(source string) bool {
 	return ok
 }
 
-func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) func(rec *Record, existed bool) bool {
+func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, now time.Time) func(rec *Record, existed bool) bool {
 	return func(rec *Record, _ bool) bool {
 		at := outcomeTime(o, now)
 		stale := !rec.CheckedAt.IsZero() && at.Before(rec.CheckedAt)
+		if o.frame != nil {
+			// A capture of the wall: record what it saw. A frame is not a
+			// play of its own — the player's `ready` for the same mount
+			// already counted that.
+			rec.Wall = &WallObservation{
+				Verdict: RenderVerdict(o.Code), PHash: fmt.Sprintf("%016x", o.frame.PHash),
+				Variance: o.frame.Variance, Label: o.frame.Label, Clipped: o.frame.Clipped, At: at,
+			}
+			if o.errorPage {
+				// The kiosk's own document answer of this mount failed
+				// (frame.MainStatus): the frame is that error page, not
+				// the work — no evidence, as an L1 render whose main
+				// document was not 2xx. Recorded as stalled (so the next
+				// play is captured again; an ok would rest the source for
+				// WallRecheckOK), it neither heals the record nor counts:
+				// the play's failure — the GET itself, or the stage before
+				// it — is already counted (office FF1, 2026-11-10: a frame
+				// of nftstorage.link's 504 page healed a work to ok).
+				rec.Wall.Verdict = RenderStalled
+				rec.Wall.MainStatus = o.frame.MainStatus
+				return true
+			}
+		}
 		switch o.Kind {
 		case OutcomeOK:
+			if o.Stage == StageFrame {
+				rec.renderedFrame(at, LayerPlay)
+				return true
+			}
+			if o.MediaType != "" {
+				// What the player mounted the item as — a fact about the
+				// item whatever the play's outcome, and what makes an
+				// untyped record (L0 refused or transient) an HTML work the
+				// wall capture and L1 may judge. Recorded for an error
+				// page's ready too: without it a work whose first play
+				// showed an error page was never captured, so the frame
+				// could not be learned (office FF1 learn test, 2026-11-10).
+				rec.MediaType = o.MediaType
+			}
 			if o.errorPage {
 				// The embed showed the error page the content-type check
 				// already reported: not a success, and it must not erase the
@@ -1121,10 +1224,12 @@ func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) fun
 			}
 			rec.Plays.OK++
 			rec.Plays.LastOKAt = laterOf(rec.Plays.LastOKAt, at)
-			if o.MediaType != "" {
-				rec.MediaType = o.MediaType
-			}
 			if stale {
+				return true
+			}
+			if !readyIsEvidence(o) && rec.frameRunOpen() {
+				// An opaque embed's ready says nothing about a blank frame:
+				// the frame run (and its play_failed) stands (frameRunOpen).
 				return true
 			}
 			rec.Plays.ConsecutiveFail = 0
@@ -1159,8 +1264,12 @@ func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) fun
 				// A fresh successful play ends an L1 blank run too: a
 				// recovered work must earn a new long confirmation before
 				// it can be suspect again (PR #443 review, F25). Only a play
-				// that proves a render counts (readyIsEvidence, above).
+				// that proves a render counts (readyIsEvidence, above). Its
+				// earlier negative goes too: a later blank must not be
+				// corroborated by one this success overruled (PR #450
+				// review, F11).
 				rec.L1.ConsecutiveBlank = 0
+				rec.L1.NegativeAt = time.Time{}
 			}
 			rec.clearIssue()
 			rec.State = StateOK
@@ -1175,14 +1284,34 @@ func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) fun
 			rec.Plays.Skipped++
 			return true
 		case OutcomeFail:
+			if o.Stage == StageFrame && rec.fetchRunOpen() {
+				// The play on screen is the one whose content-type check
+				// failed (a clean play's ready would have ended that run),
+				// so this frame is of its error page: the same play, not a
+				// second failure — and the fetch reason stands (both layers
+				// failing report the fetch one). Recorded under `wall`
+				// above; the run and LastFail are left as they are.
+				return true
+			}
+			failure := PlayFailure{Stage: o.Stage, Code: o.Code, MediaType: o.MediaType, Attempt: o.Attempt, At: at, ServedBy: rec.ServedBy}
 			if rec.Plays.LastFailAt == nil || !at.Before(*rec.Plays.LastFailAt) {
-				rec.Plays.LastFail = &PlayFailure{Stage: o.Stage, Code: o.Code, MediaType: o.MediaType, Attempt: o.Attempt, At: at}
+				last := failure
+				rec.Plays.LastFail = &last
 				rec.Plays.LastFailAt = new(at)
 			}
 			if o.MediaType != "" {
 				rec.MediaType = o.MediaType
 			}
-			reason := reasonForStage(o.Stage)
+			if rf := rec.Plays.RunFail; rec.Plays.ConsecutiveFail > 0 && rf != nil && !rf.Superseded &&
+				rf.Stage == StageDetect && rf.Attempt > 0 && o.Stage == StageDetect && o.Attempt == 0 &&
+				!at.Before(rf.At) && at.Sub(rf.At) <= headGetWindow {
+				// The kiosk's own GET failed too, in the refusal's play: the
+				// real fetch confirms the HEAD, so a later 2xx of the same
+				// document (a reload, a retry) must not revert it — the
+				// play keeps its one count either way (PR #450 review, F16).
+				rf.Settled = true
+			}
+			reason := outcomeReason(o)
 			if reason == "" || deviceLocal(o) || !count {
 				// Recorded for the app and the support bundle; the source
 				// is not the thing that failed (or nothing could be told
@@ -1196,13 +1325,42 @@ func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) fun
 				return true
 			}
 			rec.Plays.ConsecutiveFail++
+			// The run's last counted failure (PlayStats.RunFail); the one
+			// before it is kept one level deep for revertHeadRefusal.
+			run := failure
+			if prev := rec.Plays.RunFail; prev != nil && rec.Plays.ConsecutiveFail > 1 {
+				p := *prev
+				p.Prev, p.Replaced = nil, nil
+				run.Prev = &p
+			}
+			rec.Plays.RunFail = &run
 			corroborated := rec.Plays.ConsecutiveFail >= 2 ||
-				(rec.State == StateBroken && rec.Layer == LayerL0 && at.Before(rec.RecheckAfter))
+				(rec.State == StateBroken && rec.Layer == LayerL0 && at.Before(rec.RecheckAfter)) ||
+				(o.Stage == StageFrame && rec.l1Negative())
 			if !corroborated {
 				rec.setIssue(IssuePlayFailed, at)
 				return true
 			}
 			rec.clearIssue()
+			if o.Stage == StageFrame {
+				if rec.State == StateBroken && !rec.renderLayerBroken() {
+					// A fetch-layer verdict (L0's, or the content-type
+					// check's) stands, current or expired: both layers
+					// failing report the fetch reason, and a frame is
+					// never grounds to withdraw it — a suspect would drop
+					// the hint and put a dead work back on the wall (PR
+					// #450 review, F2). The frame is recorded under
+					// `wall` and counted in the run.
+					return true
+				}
+				// Two plays whose frame on the wall read blank (or known
+				// bad), or one over a standing L1 negative: a render
+				// verdict — broken when render verdicts are conclusive,
+				// suspect (advisory) otherwise.
+				rec.concludeRender(reason, LayerPlay, at, renderConclusive)
+				return true
+			}
+			before := rec.snapshotVerdict()
 			// Backoff, as for L0: a work the player has re-concluded broken
 			// on BrokenBackoffAfter consecutive rechecks is retried weekly,
 			// not daily — each daily retry of a dead iframe costs the wall
@@ -1216,6 +1374,11 @@ func outcomeMutation(o Outcome, count, contentAddressed bool, now time.Time) fun
 				// Still inside the window: keep the count.
 			default:
 				rec.ConsecutiveBroken = 1
+			}
+			if o.Stage == StageDetect && o.Attempt > 0 {
+				// A content-type check refusal concludes: keep what it
+				// replaces, for revertHeadRefusal (PlayFailure.Replaced).
+				rec.Plays.RunFail.Replaced = before
 			}
 			rec.State = StateBroken
 			rec.Layer = LayerPlay
@@ -1290,19 +1453,35 @@ func playCategory(reason Reason, status int, contentAddressed bool) Category {
 // the document arrived, not that the work rendered — and a play_failed
 // issue stands: that one is about rendering. Writes only when something
 // changes; a source with no record is left alone (nothing to correct).
-func (s *Store) ApplyKioskAnswer(source string) error {
+//
+// It also lets the kiosk's real GET outrank the player's HEAD: a content-type
+// check refusal counted in the same play is reverted (revertHeadRefusal),
+// and the result says so — the Service frees that play's count (F13).
+func (s *Store) ApplyKioskAnswer(source string) (bool, error) {
 	rec, err := s.Get(source)
 	if err != nil || rec == nil {
-		return err
+		return false, err
 	}
-	if !rec.Issue.probeSide() && rec.UnreachableSince == nil {
-		return nil
+	now := s.now()
+	probe := *rec
+	if lf := rec.Plays.LastFail; lf != nil {
+		copied := *lf
+		probe.Plays.LastFail = &copied
 	}
+	if rf := rec.Plays.RunFail; rf != nil {
+		copied := *rf
+		probe.Plays.RunFail = &copied
+	}
+	if !rec.Issue.probeSide() && rec.UnreachableSince == nil && !probe.revertHeadRefusal(now) {
+		return false, nil
+	}
+	var reverted bool
 	_, err = s.update(source, func(rec *Record, existed bool) bool {
 		if !existed {
 			return false
 		}
-		changed := false
+		reverted = rec.revertHeadRefusal(now)
+		changed := reverted
 		if rec.Issue.probeSide() {
 			rec.clearIssue()
 			changed = true
@@ -1313,5 +1492,5 @@ func (s *Store) ApplyKioskAnswer(source string) error {
 		}
 		return changed
 	})
-	return err
+	return reverted && err == nil, err
 }

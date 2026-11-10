@@ -5,12 +5,16 @@ import (
 	"errors"
 	"image"
 	"image/color"
+	"image/draw"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 // Frames: a uniform frame is blank; a checkerboard is a real render; a
@@ -686,4 +690,275 @@ func TestL1_GracePeriodAfterSleep(t *testing.T) {
 
 	// The default applies when unset.
 	assert.Equal(t, DefaultMinAsleep, NewL1(L1Config{}).cfg.MinAsleep)
+}
+
+// The wall capture masks the player's own UI over the artwork (the title
+// label, the cursor). A blank artwork with a label on it is still blank;
+// a real artwork stays ok; the label's pixels move neither the variance
+// nor the hash.
+func TestClassifyMasked_IgnoresTheMaskedRegion(t *testing.T) {
+	label := image.Rect(0, 48, 24, 64) // bottom-left, like the tombstone
+	withLabel := func(base image.Image) image.Image {
+		out := image.NewRGBA(base.Bounds())
+		draw.Draw(out, out.Bounds(), base, base.Bounds().Min, draw.Src)
+		draw.Draw(out, label, &image.Uniform{C: color.White}, image.Point{}, draw.Src)
+		return out
+	}
+	blankWithLabel := withLabel(uniform(color.Black))
+
+	unmasked, err := Classify(blankWithLabel, nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	assert.Equal(t, RenderOK, unmasked.Verdict, "unmasked, the label alone makes a blank work look rendered")
+
+	c, err := ClassifyMasked(blankWithLabel, []image.Rectangle{label}, nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	assert.Equal(t, RenderBlank, c.Verdict, "masked, the blank work reads blank")
+
+	// The hash moves toward the label-free art once masked, but a masked
+	// region still costs the DCT information: a wall frame's pHash is
+	// approximate where the label sits, which the fingerprint rules allow
+	// for (fingerprints learned from wall frames carry the same mask).
+	art := checkerboard()
+	plain, err := Classify(art, nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	un, err := Classify(withLabel(art), nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	m, err := ClassifyMasked(withLabel(art), []image.Rectangle{label}, nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	assert.Equal(t, RenderOK, m.Verdict)
+	assert.Less(t, HashDistance(plain.PHash, m.PHash), HashDistance(plain.PHash, un.PHash), "masking moves the hash toward the art without the label")
+
+	// A masked pixel is skipped, not filled: a mostly-masked flat frame
+	// with a strongly varying sliver keeps the sliver's variance. (Stripes
+	// 8 px high, so the 4-px sampling grid sees both colors.)
+	sliver := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	for y := 0; y < 64; y++ {
+		for x := 0; x < 64; x++ {
+			if x < 8 && y%8 < 4 {
+				sliver.Set(x, y, color.White)
+			} else {
+				sliver.Set(x, y, color.Black)
+			}
+		}
+	}
+	rest := image.Rect(8, 0, 64, 64)
+	assert.Greater(t, maskedVariance(sliver, []image.Rectangle{rest}), maskedVariance(sliver, nil),
+		"only the unmasked sliver counts, undiluted by the masked area")
+	assert.InDelta(t, 0.125, UnmaskedFraction(sliver, []image.Rectangle{rest}), 0.01)
+	assert.InDelta(t, 1.0, UnmaskedFraction(sliver, nil), 0.001)
+}
+
+// Step 1 (#392, L1 as play evidence): a rendered frame is the play layer's
+// evidence for an HTML work. It records ok (layer l1), and a later L0
+// success keeps l1 — valid bytes say less than a frame.
+func TestL1_RenderedFrameIsPlayEvidence(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+	src := "https://o/html"
+	seedSoftware(t, store, src)
+
+	rec, err := store.ApplyRender(src, RenderResult{Verdict: RenderOK, Variance: 0.05})
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State)
+	assert.Equal(t, LayerL1, rec.Layer, "ok because a frame rendered, not because the bytes passed")
+
+	clock.Advance(time.Hour)
+	rec, err = store.ApplyProbe(src, ProbeResult{Verdict: VerdictAlive, Status: 200, Declared: "text/html", Sniffed: "text/html"})
+	require.NoError(t, err)
+	assert.Equal(t, LayerL1, rec.Layer, "an L0 success keeps the render evidence")
+	assert.Equal(t, 200, rec.HTTPStatus, "and still refreshes the L0 metadata")
+}
+
+// A frame heals a render-layer broken (the work did not paint on plays),
+// ending the failure run; it never heals an L0 or fetch-layer broken, and
+// those are never rendered at all.
+func TestL1_RenderedFrameHealsOnlyTheRenderLayer(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+
+	renderBroken := "https://o/watchdog"
+	seedSoftware(t, store, renderBroken)
+	for i := 1; i <= 2; i++ {
+		_, err := store.ApplyOutcome(Outcome{Seq: int64(i), Source: renderBroken, Kind: OutcomeFail, Stage: StageWatchdog, Code: "45s", At: "t"}, true)
+		require.NoError(t, err)
+	}
+	fetchBroken := "https://o/gone"
+	seedSoftware(t, store, fetchBroken)
+	for i := 3; i <= 4; i++ {
+		_, err := store.ApplyOutcome(Outcome{Seq: int64(i), Source: fetchBroken, Kind: OutcomeFail, Stage: StageDetect, Code: "404", At: "t"}, true)
+		require.NoError(t, err)
+	}
+	l0Broken := "https://o/l0-404"
+	seedSoftware(t, store, l0Broken)
+	clock.Advance(RecheckOK + time.Second)
+	_, err := store.ApplyProbe(l0Broken, ProbeResult{Verdict: VerdictDead, Reason: ReasonHTTPStatus, Status: 404})
+	require.NoError(t, err)
+
+	for src, want := range map[string]State{renderBroken: StateBroken, fetchBroken: StateBroken, l0Broken: StateBroken} {
+		rec, err := store.Get(src)
+		require.NoError(t, err)
+		require.Equal(t, want, rec.State, src)
+	}
+	cands, err := store.L1Candidates(clock.Now(), 10)
+	require.NoError(t, err)
+	assert.Contains(t, cands, renderBroken, "a render-layer broken is rendered: a frame can heal it")
+	assert.NotContains(t, cands, fetchBroken, "a fetch-layer broken is not: a frame can be the gateway's error page")
+	assert.NotContains(t, cands, l0Broken)
+
+	rec, err := store.ApplyRender(renderBroken, RenderResult{Verdict: RenderOK, Variance: 0.05})
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State, "the frame heals the render-layer verdict")
+	assert.Equal(t, LayerL1, rec.Layer)
+	assert.Equal(t, 0, rec.Plays.ConsecutiveFail, "and ends the failure run")
+
+	rec, err = store.ApplyRender(fetchBroken, RenderResult{Verdict: RenderOK, Variance: 0.05})
+	require.NoError(t, err)
+	assert.Equal(t, StateBroken, rec.State, "a frame never overrules a 404")
+	assert.Equal(t, ReasonRenderDetect, rec.Reason)
+}
+
+// A failure run opened by the content-type check (HEAD 429 here) is a fetch
+// question: a frame that rendered answers the render question only — it
+// keeps the run and its play_failed issue, so the work still concludes
+// source_blocked/unreachable on the next refusal.
+func TestL1_RenderedFrameKeepsAFetchRun(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+	src := "https://o/rate-limited"
+	seedSoftware(t, store, src)
+	_, err := store.ApplyOutcome(Outcome{Seq: 1, Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: "429", At: "t"}, true)
+	require.NoError(t, err)
+
+	rec, err := store.ApplyRender(src, RenderResult{Verdict: RenderOK, Variance: 0.05})
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State)
+	assert.Equal(t, LayerL1, rec.Layer)
+	assert.Equal(t, 1, rec.Plays.ConsecutiveFail, "the fetch run stays open")
+	assert.Equal(t, IssuePlayFailed, rec.Issue, "and so does its issue")
+
+	rec, err = store.ApplyOutcome(Outcome{Seq: 2, Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: "429", At: "t"}, true)
+	require.NoError(t, err)
+	assert.Equal(t, StateBroken, rec.State, "the second refusal concludes")
+}
+
+// sparseFrame is a 1024x1024 black frame with lit white pixels on the
+// Variance sampling grid (every 4th pixel each way: 65536 samples), so its
+// variance is lit/65536 * (1 - lit/65536) on every channel.
+func sparseFrame(lit int) image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, 1024, 1024))
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: color.Black}, image.Point{}, draw.Src)
+	for i := 0; i < lit; i++ {
+		img.Set((i*37%256)*4, (i*101%256)*4, color.White)
+	}
+	return img
+}
+
+// The blank threshold is the device's, measured on the wall's own frames
+// (office FF1, 2026-11-09): real blanks 0 to 0.000053; MUTATION #570, dark
+// by design with a small line of pink text, 0.0004 — which the indexer's
+// 0.001 called blank, hiding a work that renders.
+func TestBlankThreshold_MeasuredOnTheWall(t *testing.T) {
+	darkArt := sparseFrame(26)  // ≈ 0.0004, like MUTATION #570
+	nearBlank := sparseFrame(3) // ≈ 0.000046, the highest real blank measured
+	assert.InDelta(t, 0.0004, Variance(darkArt), 0.00002)
+	assert.InDelta(t, 0.000046, Variance(nearBlank), 0.000005)
+
+	c, err := Classify(darkArt, nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	assert.Equal(t, RenderOK, c.Verdict, "dark art with a little content is not blank")
+	c, err = Classify(nearBlank, nil, DefaultBlankVarianceThreshold)
+	require.NoError(t, err)
+	assert.Equal(t, RenderBlank, c.Verdict, "every real blank on the wall still reads blank")
+
+	c, err = Classify(darkArt, nil, 0.001)
+	require.NoError(t, err)
+	assert.Equal(t, RenderBlank, c.Verdict, "the indexer's threshold is the false blank this replaces")
+}
+
+// A render the resource gate cancels while the panel sleeps on goes to the
+// back of the queue (RecheckL1Deferred) instead of heading it again: on
+// the office FF1 one heavy work tripped the CPU-temperature block every
+// minute and the rest of the night's queue never ran.
+func TestL1_ResourceGateDefersTheRender(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store := newL1Store(t, clock)
+	seedSoftware(t, store, "https://o/a")
+	seedSoftware(t, store, "https://o/b")
+	r := &fakeRenderer{block: true, frames: map[string]*Frame{
+		"https://o/a": {Image: checkerboard(), MainStatus: 200},
+		"https://o/b": {Image: checkerboard(), MainStatus: 200},
+	}}
+	asleep := newFakeSleep(clock)
+	asleep.Store(true)
+	var admit atomic.Bool
+	admit.Store(true)
+	l1 := NewL1(L1Config{Store: store, Renderer: r, AsleepSince: asleep.Since, Admit: admit.Load, Now: clock.Now, Settle: time.Millisecond, GateWatch: time.Millisecond, MinAsleep: -1})
+
+	done := make(chan bool)
+	go func() { done <- l1.Step(context.Background()) }()
+	time.Sleep(20 * time.Millisecond)
+	admit.Store(false) // the render heats the CPU past the block
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the resource gate did not cancel the render")
+	}
+	require.Len(t, r.calls, 1)
+	heavy := r.calls[0].url
+	rec, err := store.Get(heavy)
+	require.NoError(t, err)
+	require.NotNil(t, rec.L1)
+	assert.Equal(t, RenderVerdict(""), rec.L1.Verdict, "not a verdict")
+	assert.True(t, rec.L1.Next.Equal(clock.Now().Add(RecheckL1Deferred)), "behind the queue for RecheckL1Deferred")
+	assert.NotEmpty(t, rec.L1.LastError)
+	assert.Equal(t, StateOK, rec.State)
+
+	// The gate reopens: the other work renders, not the deferred one.
+	r.block = false
+	admit.Store(true)
+	assert.True(t, l1.Step(context.Background()))
+	require.Len(t, r.calls, 2)
+	assert.NotEqual(t, heavy, r.calls[1].url)
+	assert.False(t, l1.Step(context.Background()), "the deferred work waits its hour")
+	clock.Advance(RecheckL1Deferred)
+	assert.True(t, l1.Step(context.Background()))
+	assert.Equal(t, heavy, r.calls[2].url)
+}
+
+// A record concluded broken in the render layer is rechecked with the long
+// settle, like a suspect one: a repaired work that paints between the two
+// settles must be able to heal (PR #450 review, F6).
+func TestL1_RenderBrokenRecheckUsesTheLongSettle(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	store, err := Open(filepath.Join(t.TempDir(), "mh", "store.db"), Options{Now: clock.Now, Logger: zap.NewNop(), RenderConclusive: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	src := "https://o/slow-paint"
+	seedSoftware(t, store, src)
+	// Night 1: a blank and its confirmation (suspect). Night 2: the recheck
+	// is blank again, corroborated by night 1 — broken.
+	for _, n := range []int{2, 1} {
+		for i := 0; i < n; i++ {
+			_, err := store.ApplyRender(src, RenderResult{Verdict: RenderBlank, Variance: 0.00001})
+			require.NoError(t, err)
+		}
+		clock.Advance(l1NightGap + time.Hour)
+	}
+	rec, err := store.Get(src)
+	require.NoError(t, err)
+	require.Equal(t, StateBroken, rec.State)
+	require.Equal(t, LayerL1, rec.Layer)
+	require.GreaterOrEqual(t, rec.L1.ConsecutiveBlank, 2)
+
+	r := &fakeRenderer{frames: map[string]*Frame{src: {Image: checkerboard(), MainStatus: 200}}}
+	asleep := newFakeSleep(clock)
+	asleep.Store(true)
+	l1 := NewL1(L1Config{Store: store, Renderer: r, AsleepSince: asleep.Since, Now: clock.Now, Settle: time.Millisecond, ConfirmSettle: 7 * time.Millisecond, GateWatch: time.Millisecond, MinAsleep: -1})
+	clock.Advance(RecheckL1Suspect)
+	assert.True(t, l1.Step(context.Background()))
+	require.Len(t, r.calls, 1)
+	assert.Equal(t, 7*time.Millisecond, r.calls[0].settle, "a recovery probe: the long window")
+	rec, err = store.Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, StateOK, rec.State, "the recovery heals it")
 }

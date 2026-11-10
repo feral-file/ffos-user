@@ -3,6 +3,7 @@ package mediahealth
 import (
 	"sort"
 	"strconv"
+	"time"
 )
 
 // Outcomes is the `outcomes` field of the player's checkStatus reply under
@@ -34,11 +35,18 @@ type Outcome struct {
 	// At is the player's own ISO timestamp, kept as reported.
 	At string `json:"at,omitempty"`
 
+	// frame is set by the Service for a StageFrame entry: what the capture
+	// of the wall classified (wall.go). Never on the wire.
+	frame *FrameEvidence
 	// errorPage is set by the Service, never by the player: this `ready`
 	// is an opaque embed that loaded AFTER the same play's content-type
 	// check got a definite refusal (definiteRefusal), so what reached
 	// ready is the origin's or Chromium's error page. The store neither
-	// counts it as a success nor lets it reset the failure run.
+	// counts it as a success nor lets it reset the failure run. On a frame
+	// outcome it is the kiosk's own document response of this mount that
+	// failed (frame.MainStatus): the frame shows that error page, never
+	// the work — it heals nothing and is stored as stalled, like an L1
+	// render whose main document was not 2xx.
 	errorPage bool
 }
 
@@ -88,6 +96,10 @@ const (
 	StageHint      = "hint"
 	StageReady     = "ready"
 	StageInferred  = "inferred"
+	// StageFrame is controld's own too: a capture of the wall, classified
+	// (wall.go). Kind ok with code ok, or kind fail with code blank or
+	// known_bad. Render-layer evidence for an HTML work.
+	StageFrame = "frame"
 
 	// CodeNetwork is the detect-stage code the player reports when its
 	// content-type HEAD failed at the transport layer (no HTTP answer at
@@ -143,8 +155,40 @@ func reasonForStage(stage string) Reason {
 		return ReasonRenderExhausted
 	case StageWebGL:
 		return ReasonWebGLLost
+	case StageFrame:
+		return ReasonRenderBlank
 	}
 	return ""
+}
+
+// outcomeReason is reasonForStage refined by the code where the stage alone
+// does not say: a frame matching a known-bad fingerprint is
+// render_known_bad, any other failing frame render_blank.
+func outcomeReason(o Outcome) Reason {
+	if o.Stage == StageFrame && o.Code == string(RenderKnownBad) {
+		return ReasonRenderKnownBad
+	}
+	return reasonForStage(o.Stage)
+}
+
+// FrameEvidence is what a capture of the wall contributes besides its
+// verdict: the classifier's measurements, for the record and for learning
+// fingerprints.
+type FrameEvidence struct {
+	PHash    uint64
+	Variance float64
+	Label    string
+	// Clipped is false when the capture fell back to the whole screen.
+	Clipped bool
+	// MountedAt bounds the mount the frame was taken in: the status poll
+	// before the item was first seen on screen. A document navigation the
+	// kiosk observer saw after it belongs to this mount (Service.
+	// kioskDocFailedInMount).
+	MountedAt time.Time
+	// MainStatus is set by the Service when the kiosk's latest document
+	// navigation of this mount failed: the frame is a picture of that
+	// response (an error page), and errorPage is set with it.
+	MainStatus int
 }
 
 // Drainer tracks what has already been read from the ring so each outcome

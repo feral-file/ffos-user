@@ -24,7 +24,9 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"math/bits"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -91,6 +93,10 @@ type L1Verdict struct {
 	// MainStatus is the main document's HTTP status on the last render.
 	MainStatus int    `json:"mainStatus,omitempty"`
 	LastError  string `json:"lastError,omitempty"`
+	// NegativeAt is when L1 last concluded a negative (blank or known-bad);
+	// cleared by a frame that rendered. A second conclusion at least
+	// l1NightGap later is a different night: corroboration (step 2).
+	NegativeAt time.Time `json:"negativeAt,omitempty"`
 }
 
 // L1 recheck policy (own constants: an L1 verdict is weaker than L0's).
@@ -102,17 +108,39 @@ const (
 	RecheckL1Suspect = 24 * time.Hour
 	// RecheckL1Stalled: no evidence; try again the next night.
 	RecheckL1Stalled = 24 * time.Hour
+	// RecheckL1Deferred: a render the resource gate canceled mid-way (the
+	// panel still asleep) goes behind every other due candidate for this
+	// long. Not a verdict. Without it the canceled work stays "never
+	// rendered", heads the queue again the moment the gate reopens, and
+	// a heavy software work trips the CPU-temperature block every time —
+	// on the office FF1 one work was retried each minute, the rest of the
+	// night's queue never ran, and the CPU cycled 40 → 84 °C.
+	RecheckL1Deferred = time.Hour
 
-	// DefaultBlankVarianceThreshold is the indexer's
-	// render_probe.blank_variance_threshold default.
-	DefaultBlankVarianceThreshold = 0.001
+	// DefaultBlankVarianceThreshold is the per-channel variance below which
+	// a frame is blank. A decade under the indexer's render_probe default
+	// (0.001), from the wall's own frames (office FF1, 2026-11-09, 20
+	// fixture works): every real blank measured 0 to 0.000053, a dark-by-
+	// design work with a small line of text 0.0004 (the indexer's value
+	// called it blank), the dimmest real art 0.025. Trust the device's
+	// measurements, not the indexer's GPU renders. The error this trades in
+	// is the safe one: a near-blank frame between 0.0001 and 0.001 now
+	// reads ok (a work kept on the wall), where it read blank (a work
+	// hidden); a near-blank error page is the learned fingerprints' job.
+	DefaultBlankVarianceThreshold = 0.0001
 	// MaxVariance bounds Variance (half the samples at 0, half at 1); a
 	// threshold at or above it classifies every frame blank.
 	MaxVariance = 0.25
-	// DefaultSettle / DefaultConfirmSettle mirror the indexer's
-	// render_probe.settle_ms / confirm_settle_ms.
-	DefaultSettle        = 15 * time.Second
-	DefaultConfirmSettle = 30 * time.Second
+	// DefaultSettle / DefaultConfirmSettle are the nightly render's wait
+	// before the capture, for a first render and for the confirmation of a
+	// blank. Longer than the indexer's render_probe.settle_ms /
+	// confirm_settle_ms (15 s / 30 s): the indexer renders on a GPU host, the
+	// FF1's headless browser paints with software GL on the CPU, so a work
+	// that is on screen within 15 s on the wall can still be painting at
+	// 15 s here — and a frame captured mid-paint reads blank. A capture of
+	// the wall itself, on the kiosk's GPU, needs only the shorter wait.
+	DefaultSettle        = 30 * time.Second
+	DefaultConfirmSettle = 45 * time.Second
 	// DefaultMaxPerNight bounds renders per local calendar day.
 	DefaultMaxPerNight = 200
 	// DefaultL1Tick is how often the runner re-checks its gate.
@@ -173,6 +201,14 @@ func HashDistance(a, b uint64) int { return bits.OnesCount64(a ^ b) }
 // brightness is not blank, and a frame is blank only when every channel is
 // flat. Samples every 4th pixel in each dimension.
 func Variance(img image.Image) float64 {
+	return maskedVariance(img, nil)
+}
+
+// maskedVariance is Variance over the pixels outside masks. Masked pixels
+// are SKIPPED, never filled: a filled pixel adds no deviation but still
+// counts as a sample, which lowers the variance — the false-blank
+// direction, the one that hides art.
+func maskedVariance(img image.Image, masks []image.Rectangle) float64 {
 	bounds := img.Bounds()
 	if bounds.Empty() {
 		return 0
@@ -182,6 +218,9 @@ func Variance(img image.Image) float64 {
 	var n int
 	for y := bounds.Min.Y; y < bounds.Max.Y; y += stride {
 		for x := bounds.Min.X; x < bounds.Max.X; x += stride {
+			if masked(masks, x, y) {
+				continue
+			}
 			r, g, b, _ := img.At(x, y).RGBA()
 			channels := [3]float64{float64(r) / 65535.0, float64(g) / 65535.0, float64(b) / 65535.0}
 			for i, v := range channels {
@@ -204,6 +243,90 @@ func Variance(img image.Image) float64 {
 	return maxVar
 }
 
+func masked(masks []image.Rectangle, x, y int) bool {
+	p := image.Point{X: x, Y: y}
+	for _, m := range masks {
+		if p.In(m) {
+			return true
+		}
+	}
+	return false
+}
+
+// UnmaskedFraction is the share of img's area outside masks (overlaps
+// counted once), sampled on the Variance grid. A caller refuses to judge a
+// frame whose unmasked share is too small to say anything.
+func UnmaskedFraction(img image.Image, masks []image.Rectangle) float64 {
+	bounds := img.Bounds()
+	if bounds.Empty() {
+		return 0
+	}
+	const stride = 4
+	var kept, total int
+	for y := bounds.Min.Y; y < bounds.Max.Y; y += stride {
+		for x := bounds.Min.X; x < bounds.Max.X; x += stride {
+			total++
+			if !masked(masks, x, y) {
+				kept++
+			}
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(kept) / float64(total)
+}
+
+// meanFilled is img with every masked pixel replaced by the mean color of
+// the unmasked ones: what the pHash sees, since its DCT needs a full grid.
+// A flat patch at the mean is the least informative fill — it moves no
+// coefficient toward any particular pattern.
+type meanFilled struct {
+	image.Image
+	masks []image.Rectangle
+	fill  color.Color
+}
+
+func (m meanFilled) At(x, y int) color.Color {
+	if masked(m.masks, x, y) {
+		return m.fill
+	}
+	return m.Image.At(x, y)
+}
+
+// channel16 narrows a mean of 16-bit channel values (RGBA() returns each in
+// [0, 0xffff], so the mean is too); clamped all the same.
+func channel16(v uint64) uint16 {
+	if v > 0xffff {
+		return 0xffff
+	}
+	return uint16(v)
+}
+
+func fillMasked(img image.Image, masks []image.Rectangle) image.Image {
+	if len(masks) == 0 {
+		return img
+	}
+	bounds := img.Bounds()
+	var sum [3]uint64
+	var n uint64
+	for y := bounds.Min.Y; y < bounds.Max.Y; y += 4 {
+		for x := bounds.Min.X; x < bounds.Max.X; x += 4 {
+			if masked(masks, x, y) {
+				continue
+			}
+			r, g, b, _ := img.At(x, y).RGBA()
+			sum[0], sum[1], sum[2] = sum[0]+uint64(r), sum[1]+uint64(g), sum[2]+uint64(b)
+			n++
+		}
+	}
+	fill := color.RGBA64{A: 0xffff}
+	if n > 0 {
+		fill = color.RGBA64{R: channel16(sum[0] / n), G: channel16(sum[1] / n), B: channel16(sum[2] / n), A: 0xffff}
+	}
+	return meanFilled{Image: img, masks: masks, fill: fill}
+}
+
 // Classification is the pure verdict over one frame.
 type Classification struct {
 	Verdict  RenderVerdict
@@ -216,11 +339,19 @@ type Classification struct {
 // page is usually not blank, and the specific label is the better answer),
 // then blank, else ok.
 func Classify(img image.Image, fingerprints []Fingerprint, blankVarianceThreshold float64) (Classification, error) {
-	hash, err := PHash(img)
+	return ClassifyMasked(img, nil, fingerprints, blankVarianceThreshold)
+}
+
+// ClassifyMasked is Classify with regions left out of the judgement: the
+// player's own UI drawn over the artwork on the wall (the title label, the
+// cursor). The variance skips them; the pHash sees them filled with the
+// mean color of the rest. masks are in img's coordinates.
+func ClassifyMasked(img image.Image, masks []image.Rectangle, fingerprints []Fingerprint, blankVarianceThreshold float64) (Classification, error) {
+	hash, err := PHash(fillMasked(img, masks))
 	if err != nil {
 		return Classification{}, err
 	}
-	c := Classification{Verdict: RenderOK, PHash: hash, Variance: Variance(img)}
+	c := Classification{Verdict: RenderOK, PHash: hash, Variance: maskedVariance(img, masks)}
 	for _, fp := range fingerprints {
 		if HashDistance(hash, fp.Hash) <= fp.MaxDistance {
 			c.Verdict = RenderKnownBad
@@ -352,6 +483,16 @@ func (l *L1) Run(ctx context.Context) {
 // grace is measured from the source's own confirmation time of THIS
 // sleep, so a wake and a new sleep between two checks start a new grace.
 func (l *L1) gate() bool {
+	return l.asleepPastGrace() && l.admitted()
+}
+
+// admitted asks the device resource gate (none configured admits).
+func (l *L1) admitted() bool {
+	return l.cfg.Admit == nil || l.cfg.Admit()
+}
+
+// asleepPastGrace is the panel half of gate.
+func (l *L1) asleepPastGrace() bool {
 	if l.cfg.AsleepSince == nil {
 		return false
 	}
@@ -359,13 +500,7 @@ func (l *L1) gate() bool {
 	if !asleep {
 		return false
 	}
-	if l.cfg.MinAsleep > 0 && l.now().Sub(since) < l.cfg.MinAsleep {
-		return false
-	}
-	if l.cfg.Admit != nil && !l.cfg.Admit() {
-		return false
-	}
-	return true
+	return l.cfg.MinAsleep <= 0 || l.now().Sub(since) >= l.cfg.MinAsleep
 }
 
 // Step renders one due candidate if the gate holds and the nightly cap is
@@ -409,8 +544,11 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 	// suspect (a recovery probe at the short window would miss a work
 	// that paints between the two settles and keep it suspect for as long
 	// as nothing plays it; F27 — the indexer's healing probes use the
-	// confirmation window the same way).
-	confirm := rec.L1 != nil && (rec.L1.ConsecutiveBlank == 1 || rec.State == StateSuspect)
+	// confirmation window the same way), and of a record concluded broken
+	// in the render layer — the same recovery probe, for a verdict that
+	// skips the work (PR #450 review, F6).
+	confirm := rec.L1 != nil && (rec.L1.ConsecutiveBlank == 1 || rec.State == StateSuspect) ||
+		rec.renderLayerBroken()
 	if confirm {
 		settle = l.cfg.ConfirmSettle
 	}
@@ -430,7 +568,7 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 	renderCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	watchDone := make(chan struct{})
-	var gateClosed atomic.Bool
+	var gateClosed, pressured atomic.Bool
 	go func() {
 		defer close(watchDone)
 		t := time.NewTicker(l.cfg.GateWatch)
@@ -440,8 +578,14 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 			case <-renderCtx.Done():
 				return
 			case <-t.C:
-				if !l.gate() {
+				if !l.asleepPastGrace() {
 					gateClosed.Store(true)
+					cancel()
+					return
+				}
+				if !l.admitted() {
+					gateClosed.Store(true)
+					pressured.Store(true)
 					cancel()
 					return
 				}
@@ -455,8 +599,19 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 	res := RenderResult{}
 	switch {
 	case err != nil:
+		if pressured.Load() && ctx.Err() == nil {
+			// The resource gate closed while the panel slept on: likely
+			// this render's own load. Not evidence; the candidate goes to
+			// the back of the queue (RecheckL1Deferred).
+			if err := l.cfg.Store.DeferL1(rec.Source, l.now().Add(RecheckL1Deferred), "render deferred: device under resource pressure"); err != nil && !errors.Is(err, ErrLowDisk) {
+				l.logger.Warn("media health: deferring an l1 candidate failed", zap.Error(err))
+			}
+			l.logger.Info("media health: l1 render deferred (resource gate closed mid-render)", zap.String("source", redactForLog(rec.Source)),
+				zap.Duration("retry_in", RecheckL1Deferred))
+			return
+		}
 		if gateClosed.Load() || ctx.Err() != nil {
-			// Canceled by the gate (or shutdown): not evidence and not a
+			// Canceled by a wake (or shutdown): not evidence and not a
 			// stalled verdict either; the candidate stays due.
 			l.logger.Info("media health: l1 render canceled (panel woke or gate closed)", zap.String("source", redactForLog(rec.Source)))
 			return
@@ -474,7 +629,7 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 		res.MainStatus = frame.MainStatus
 		res.Err = fmt.Sprintf("main document HTTP %d", frame.MainStatus)
 	default:
-		c, cerr := Classify(frame.Image, l.cfg.KnownBad, l.cfg.BlankVarianceThreshold)
+		c, cerr := Classify(frame.Image, append(slices.Clone(l.cfg.KnownBad), l.cfg.Store.LearnedFingerprints()...), l.cfg.BlankVarianceThreshold)
 		if cerr != nil {
 			res.Verdict = RenderStalled
 			res.Err = cerr.Error()

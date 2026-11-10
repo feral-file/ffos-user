@@ -69,11 +69,11 @@ counts toward rejecting a cast.
 | `source_missing` | `http_status` 404/410/400-class, `dns` | broken |
 | `source_unreachable` | `unreachable` (a day of attempts with no usable answer, each while other origins answered — including a gateway's unconfirmed 404 for a content-addressed source), and a play-layer `render_detect` 404/410-class answer for a content-addressed source (one gateway's answer; the play layer has no second gateway to confirm absence) | broken |
 | `source_blocked` | the player's own HEAD saw 401/403 (`render_detect` with that code). L0 treats those as transient because its request identity is not the kiosk's | broken, corroborated |
-| `not_media` | `type_mismatch`, `directory_listing`, `known_error_page` | broken |
+| `not_media` | `type_mismatch`, `directory_listing`, `known_error_page`; `render_known_bad` (a frame — L1 or the wall — matching a known-bad fingerprint: a gateway's error page served with a 200, the same fact) | broken; `render_known_bad` is suspect, or broken when corroborated and `renderConclusive` |
 | `corrupt_file` | `zero_length`, `truncated`, `container_invalid` | broken |
 | `unsupported` | `unsupported_scheme`, `data_uri_invalid`, `unsupported_mime_type` (a `data:` URI declaring a type the kiosk cannot display), `transport` (reserved) | broken |
 | `render_failed` | `render_detect`, `render_load`, `render_decode`, `render_watchdog`, `render_exhausted` | broken, corroborated |
-| `render_blank` | `render_blank`, `render_known_bad` (L1) | suspect |
+| `render_blank` | `render_blank` (a frame — L1 or the wall — with no content) | suspect, or broken when corroborated and `renderConclusive` |
 | `device_limit` | `webgl_lost` | recorded on `plays.lastFail` only; never a verdict |
 
 ## L0: the probe
@@ -522,13 +522,22 @@ would hide real art, the worst outcome here.
   starts the headless browser. The
   offline cache's admission gate, when enabled, is consulted read-only
   before each render. An in-flight render is cancelled within a couple of
-  seconds when the gate closes (the panel wakes, a cast interrupts the
-  night); a cancelled render records nothing and the candidate stays due.
+  seconds when the gate closes. A wake (or a cast interrupting the night)
+  records nothing and the candidate stays due. The admission gate closing
+  while the panel sleeps on — most likely the render's own load: SwiftShader
+  takes an x86 FF1 from 40 °C past the 75 °C software block within seconds
+  — **defers** the candidate behind every other due one for an hour
+  (`RecheckL1Deferred`, `l1.next`, `l1.lastError`; no verdict). Without it
+  a heavy work headed the queue again each time the CPU cooled: on the
+  office FF1 it was retried every minute and the rest of the night's queue
+  never ran.
 - **Candidates** (`Store.L1Candidates`): records whose L0 sniffed or
   declared type is HTML, or that the player rendered in an iframe; never
   images, video, audio or `data:` URIs (L0's container rules cover those,
-  and a browser frame of them proves nothing more), and never a `broken`
-  record (a frame of an error page adds nothing to a 404). Never-rendered
+  and a browser frame of them proves nothing more), and never an L0 or
+  fetch-layer `broken` record (a frame of an error page adds nothing to a
+  404). A record broken by a render-layer verdict (a play or a frame said
+  it did not paint) IS rendered: a frame that paints heals it. Never-rendered
   sources first, then by the `l1.next` due time. The `l1` due time is not in
   the recheck index on purpose: the L0 lookahead and sweep must not pick L1
   work up.
@@ -542,7 +551,10 @@ would hide real art, the worst outcome here.
   Viewport pinned to 1024×1024 (the pHash is only comparable at one
   geometry, and it matches the indexer's), the same reserved-address guard
   on every request the page makes, child targets included; navigate, settle
-  (15 s; 30 s for the confirmation of a blank), viewport-bounded
+  (30 s; 45 s for the confirmation of a blank — the headless browser paints
+  with software GL on the CPU, so it waits longer than the indexer's
+  GPU-backed 15 s / 30 s, and longer than the wall capture's 15 s on the
+  kiosk's GPU), viewport-bounded
   `Page.captureScreenshot`; the main document's status is the main frame's
   **latest** `Document` response, so a page that replaces itself onto an
   error page is judged by that page and a child frame's document never
@@ -574,29 +586,158 @@ would hide real art, the worst outcome here.
 - **Verdict ladder** (ported from ff-indexer-v2's `probe.Classify` and
   `phash`, same pHash algorithm and bit order, same per-channel variance
   blank signal): a known-bad fingerprint match first (`render_known_bad`,
-  suspect at once, label kept), then blank (`render_blank`: variance under
-  0.001 across every channel — hue without luma spread is art, not blank),
+  a render negative at once, label kept), then blank (`render_blank`: variance under
+  0.0001 across every channel — hue without luma spread is art, not blank;
+  a decade under the indexer's 0.001, measured on the wall's own frames:
+  real blanks 0 to 0.000053, a dark-by-design work with a little text
+  0.0004, the dimmest real art 0.025 — the device is the truth, not the
+  indexer's GPU renders),
   else ok. A blank concludes only on a **second consecutive blank**, rendered
   immediately with the longer settle; a real frame or a successful play
-  resets the count, and a stalled confirmation keeps the blank pending so
+  resets the count and clears the earlier negative (so a later blank is
+  not corroborated by it), and a stalled confirmation keeps the blank pending so
   the next render is still the long one.
+- **Learned fingerprints.** The known-bad list fills itself from the one
+  conflict that proves a frame is not art: a wall frame that renders while
+  the same play's content-type check said the document is not there
+  (400/404/410 — the HEAD wins, the record keeps its state) is the
+  gateway's error page, since a rendered artwork can never produce a 404.
+  "The same play" is checked, not assumed: the refusal was not overruled
+  by the kiosk's own GET, it was taken on the gateway the record routes
+  through now (a frame through a fallback gateway L0 found since is the
+  work, not the refusal), and it is at most 5 minutes old
+  (`learnableErrorPage`). The nightly L1 render never learns: it counts a
+  frame only when its own GET of the document was served 2xx, and a served
+  GET outranks the HEAD. Its pHash is a candidate (`fingerprints` bucket); candidates within
+  6 bits are one cluster, and a cluster seen on **3 different works** is a
+  learned known-bad fingerprint (label `learned`, tolerance 6), used by both
+  classifiers beside `mediaHealth.l1.knownBad` — so the same error page
+  served with a 200 (an Arweave gateway's) is recognized on any work. Real
+  art cannot become a candidate. Bounded (256 clusters — a promoted one is
+  never evicted, so when all 256 are promoted a new hash is dropped — the least recently
+  seen unpromoted one evicted; 16 works each); cleared with the store.
+- **Render negatives and corroboration (step 2).** A concluded blank or
+  known-bad render is `suspect`, advisory — unless `mediaHealth.render-
+  Conclusive` is on AND something independent agrees: an L1 negative on an
+  **earlier night** (at least 12 h before: a same-night confirmation is the
+  same observation), an open play failure run, or the wall's own failing
+  frame. Then it is `broken`, layer `l1`, with the ordinary broken window
+  and backoff: skipped, and counted toward rejecting an all-broken cast.
+  When the open run is a fetch one (the content-type check refused the
+  document), both layers failed and the verdict carries the fetch reason
+  (`render_detect`, `source_missing`/`source_unreachable`). Off by default
+  until the office fixture shows no false blanks among its healthy works: a
+  false blank hides real art. A render-layer `broken` keeps its gateway
+  route (`servedBy` indexes it): the work is retried at the window's end
+  through the gateway that serves its bytes.
 - **Stalled** (navigation failed, main document not 2xx, capture timed out,
   browser unavailable): no evidence, `l1.lastError` only, retried after 24 h.
 - **Rechecks:** ok after 7 d, suspect after 24 h (a fixed page heals on the
-  next night; the recheck of a suspect record is a recovery probe and uses
-  the longer confirmation settle, as the indexer's healing probes do),
-  stalled after 24 h. A real render of a `suspect` record heals
-  it to `ok` (layer `l1`), and so does a play success that proves a render
+  next night; the recheck of a suspect record — or of one concluded broken
+  in the render layer — is a recovery probe and uses the longer
+  confirmation settle, as the indexer's healing probes do),
+  stalled after 24 h. **A rendered frame is the play layer's evidence
+  for an HTML work** (an iframe's `ready` is not): it records `ok` with
+  layer `l1` over unknown, an L0 `ok`, a `suspect` or a render-layer
+  `broken`, ending the failure run — but never over an L0 or fetch-layer
+  `broken` (the two layers, `layers.go`: a success in one never heals a
+  failure in the other), and it resets L1's blank count and earlier
+  negative, so a later headless blank starts a fresh sequence. It does not
+  end a run opened by the
+  content-type check (a 401/403/429/4xx refusal is a fetch question; the
+  work still concludes on the next refusal). An L0 success on an `ok`
+  record keeps layer `l1`: valid bytes say less than a frame. A `suspect`
+  record is also healed to `ok` by a play success that proves a render
   (an image, video, audio or model `ready`; an iframe's `ready` fires for a
   blank frame too, so for an HTML work only the next L1 render heals it,
   and the blank run is kept); an L0 success only refreshes the record's L0
   metadata and recheck — valid bytes say nothing about a frame — while an
-  L0 failure still outranks it. An L1 verdict never touches a `broken`
+  L0 failure still outranks it. An L0 success never heals a render-layer
+  `broken` either (a blank or known-bad frame, a load, decode or watchdog
+  failure): the verdict, its window and its backoff count stand, and the
+  next byte look is held through `retryAfter`, which never re-arms the
+  skip — when the window ends the work plays and its frame decides. A
+  failing wall frame never replaces an L0 or fetch-layer `broken` (both
+  layers failing report the fetch reason; the hint stays). An L1 verdict never touches a `broken`
   record, `recheckAfter` or `retryAfter`, nor the gateway route: a
   `suspect` record stays in the override index like an `ok` one, so a work
   served by a fallback gateway keeps loading through it.
 - **Cap:** `maxPerNight` renders per local calendar day (default 200), one
   at a time.
+
+## Wall capture: the wall's own frame (experiment, off by default)
+
+`mediahealth.WallCapture` judges what the wall actually shows: a fixed time
+after an HTML work is on screen it captures the artwork from the kiosk — the
+kiosk's own GPU, size and timing, which the nightly headless render only
+approximates — classifies it with the L1 classifier, and feeds the verdict
+into the play run as a `frame` outcome. Off unless
+`mediaHealth.wallCapture.enabled`: it screenshots the live kiosk.
+
+- **When.** Driven by the status poll: a *mount* is the item at the player's
+  index while `renderStatus` is 2 (committed and on screen); a different
+  source or index, or leaving 2, is a new mount. Once a mount has been ready
+  for `settleMs` (default 15 s — the kiosk renders on its GPU, so it needs
+  less than the nightly render's 30 s) it is captured, once, only while the
+  panel is awake (a dark panel reads blank). Only HTML works (the L1
+  candidate rule): an image, video, audio or model proves itself through its
+  own `ready`. A source whose last frame rendered is left alone for 24 h; a
+  source with a failing frame is captured every play, which is how a second
+  play corroborates the first.
+- **Capture** (`screenshot.CaptureArtwork`, the hub screenshot's own
+  observation-only CDP connection and single flight — a hub screenshot and a
+  wall capture never run at once): one `Runtime.evaluate` locates the
+  artwork (the largest `img`/`video`/`iframe`/`object`/`model-viewer` with no
+  ancestor at inline opacity below 1 — ff-player double-buffers two slots
+  and fades the hidden one to 0, and marks neither; not found → the whole
+  viewport), refuses a **covered** artwork (the element at its center is not
+  the artwork: the loading overlay, the error modal, a setup or pairing
+  overlay), and reports the **title label** while visible as a mask. The
+  label is pinned to the viewport's bottom-left over the artwork for 30 s
+  (or the whole item, by the owner's tombstone setting) and is masked, never
+  hidden: that setting is the owner's. Then a clipped, downscaled
+  (`maxEdge`, default 1024) `Page.captureScreenshot`. The DOM coupling is to
+  ff-player's main at d748416; it degrades (whole viewport, no mask) rather
+  than failing when that DOM changes.
+- **Classify** (`ClassifyMasked`): the variance **skips** masked pixels
+  (filling them would push a real frame toward blank); the pHash sees them
+  filled with the mean color of the rest, so a wall frame's hash is
+  approximate where the label sits. A frame less than half unmasked, a frame
+  taken while the wall moved on, a busy capturer and a covered artwork are
+  not evidence.
+- **Into the play run** (`Service.ObserveWallFrame`, the same `applyEntry`
+  as the player's own entries): a rendered frame is the play's evidence for
+  an HTML work — `ok` with layer `play`, under the same rendered-frame rule
+  as L1 (it heals a render-layer `broken`, never an L0 or fetch-layer one,
+  changes nothing while the open fetch run's last failure is a 400/404/410 —
+  the HEAD wins — and does not end a 401/403/429 run); it is not a play of
+  its own (`plays.ok` is the player's). A blank or known-bad frame is a
+  counted play failure (`frame`/`blank`, `frame`/`known_bad`), one per play;
+  an opaque embed's `ready` does not end a frame run (it reports a blank
+  frame as ready too). A failing frame while the play's content-type check
+  has an open refusal is the frame of that error page — the same play,
+  recorded under `wall` but not counted again. **A frame over a document
+  the kiosk itself failed to fetch is no evidence at all:** when the
+  kiosk observer's latest document navigation of this mount for the source
+  answered 400 or above (or failed on the network), the frame is a picture
+  of that response — the gateway's error page — whatever the classifier
+  makes of it. It is recorded as `wall.verdict: stalled` with
+  `wall.mainStatus`, like an L1 render whose main document was not 2xx; it
+  heals nothing, resets nothing and counts nothing (the play's failure —
+  the GET itself, or the stage before it — is already counted), and its
+  hash is a learned-fingerprint candidate (the kiosk's own failed answer is
+  the strongest proof a frame is an error page). A retry served 2xx later
+  in the mount makes the frame the work's again: the latest answer is what
+  the wall shows. The mount is bounded by the status poll before the item
+  was first seen on screen, so repeat-one's earlier failure never taints
+  the next mount. Office FF1, 2026-11-10: a frame of nftstorage.link's 504
+  page had healed Soundgarden Live 1992 #18 to `ok` and reset its failure
+  run. Two plays — or one over a
+  standing L1 negative — conclude a render negative (`render_blank` /
+  `render_known_bad`, layer `play`): `suspect`, or `broken` under
+  `renderConclusive` (see L1, step 2).
+- The record keeps the last frame's verdict, variance and hash under `wall`;
+  the frame itself never leaves the device.
 
 ## Status surfaces
 
@@ -658,7 +799,38 @@ lookahead's 30 s probe is the real attempt), and neither does an unreachable
 result while the device reached no other origin, nor a play while offline. A
 2xx document the kiosk observer sees clears a probe-side issue and ends the
 unreachable streak, but never writes `ok` (a 200 does not prove the work
-rendered) and never clears `play_failed`. A probe answer the vocabulary does
+rendered) and never clears `play_failed`. It does overrule the player's
+content-type check in the same play: the kiosk's GET is the real fetch and
+the HEAD the weakest fetch evidence (another method, sometimes another
+answer — a 405, or a 404 on HEAD and a 200 on GET). A HEAD refusal drained
+after a 2xx GET of the same document within 60 s is history only (it
+neither counts nor makes the play's `ready` an error page); one already
+counted is reverted when the 2xx arrives — its count, its `play_failed`,
+and a verdict that very refusal concluded, which goes back to unknown. A
+refusal is reverted once (`superseded`); an observed GET failure is never
+reverted. Only a refusal that counted is undone: the run is classified by
+its last counted failure (`plays.runFail`), kept apart from `plays.lastFail`
+(the most recent failure, a play's terminal stage included, for the app),
+so an uncounted HEAD — the same play, already overruled, offline — never
+reclassifies the run nor is reverted in place of the blank frame before
+it, while the play's uncounted retries never shield its counted refusal;
+a reverted refusal hands the run back to the counted failure before it,
+marked `settled` so that GET never reverts it in its turn; a refusal the
+kiosk's own GET confirmed by failing too is settled as well, in either
+arrival order. Withdrawing a verdict the refusal concluded restores the
+verdict it replaced (`runFail.replaced`: state, reason, window, backoff,
+route — a blank verdict from the wall, L0's `ok`), and goes to unknown
+only when nothing preceded it. A record
+from before `runFail` keeps its open run, classified by its `lastFail`. A
+wall frame stays with its play: an observed navigation after it (the
+iframe reloading in the same mount) is the same play, while the player's
+next entry with an attempt — which only the next mount produces — starts
+a new one, so the next mount's content-type check counts as its own
+failure. When the GET overrules the play's counted refusal, the play's
+count is freed: its next real failure (a watchdog, an exhaustion) counts
+once, in either arrival order. Withdrawing a verdict the HEAD alone
+concluded restores the fallback route that conclusion dropped, and the
+kiosk loads through it again. A probe answer the vocabulary does
 not name (a 406, 408, 416) still clears a probe-side issue — the source
 responded — while an attempt with no answer during an outage leaves the
 standing issue as it is. `issueSince`
@@ -699,11 +871,17 @@ cycle).
     "enabled": false,
     "maxPerNight": 200,
     "minAsleepSeconds": 120,
-    "blankVarianceThreshold": 0.001,
-    "settleMs": 15000,
-    "confirmSettleMs": 30000,
+    "blankVarianceThreshold": 0.0001,
+    "settleMs": 30000,
+    "confirmSettleMs": 45000,
     "knownBad": [{"phash": "0x…", "maxDistance": 6, "label": "kubo-500"}]
-  }
+  },
+  "wallCapture": {
+    "enabled": false,
+    "settleMs": 15000,
+    "maxEdge": 1024
+  },
+  "renderConclusive": false
 }
 ```
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/url"
 	"strconv"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -53,6 +54,12 @@ var playerQueryParams = map[string]bool{"display_mode": true}
 // source_blocked, 5xx → render_failed) — and a network error is a `load`
 // failure carrying Chromium's reason. Navigations for URLs not on the
 // wall (the player's own page, overlays) are ignored.
+// kioskFailedWindow bounds how long a failed document navigation is kept
+// for the wall frame's sake (Service.kioskFailed): a mount's frame comes
+// within the load watchdog (45 s) plus the settle (15 s) of its
+// navigations; older entries are a leak, not evidence.
+const kioskFailedWindow = 10 * time.Minute
+
 func (s *Service) ObserveNavigation(nav Navigation) {
 	if nav.Canceled || (nav.Status == 0 && nav.Error == "") || (nav.Status >= 300 && nav.Status < 400) {
 		return
@@ -65,15 +72,46 @@ func (s *Service) ObserveNavigation(nav Navigation) {
 		return
 	}
 	if nav.Status >= 200 && nav.Status < 300 {
+		now := s.now()
+		if s.kioskServed == nil {
+			s.kioskServed = map[string]time.Time{}
+		}
+		for k, t := range s.kioskServed {
+			if now.Sub(t) > headGetWindow {
+				delete(s.kioskServed, k)
+			}
+		}
+		s.kioskServed[src] = now
+		delete(s.kioskFailed, src) // the latest document answer is a good one
+		if s.runSource == src {
+			// A refusal earlier in this play was the HEAD's, not the
+			// document's: the ready that follows is not an error page.
+			s.runRefused = false
+		}
 		// The kiosk's own evidence wins over the probe's: the origin served
 		// this document to the kiosk, so a probe-side issue is no longer
 		// the truth. Not a success (the work may still fail to render),
 		// so no outcome is applied and the play run is left alone.
-		if err := s.store.ApplyKioskAnswer(src); err != nil && !errors.Is(err, ErrLowDisk) {
+		reverted, err := s.store.ApplyKioskAnswer(src)
+		if err != nil && !errors.Is(err, ErrLowDisk) {
 			s.logger.Warn("media health: recording a kiosk-served document failed", zap.Error(err))
+		}
+		if reverted && s.runSource == src {
+			// The play's count was the HEAD's and is gone: its next real
+			// failure counts (Service.runWithdrawn).
+			s.runWithdrawn = true
 		}
 		return
 	}
+	if s.kioskFailed == nil {
+		s.kioskFailed = map[string]kioskFailure{}
+	}
+	for k, f := range s.kioskFailed {
+		if s.now().Sub(f.at) > kioskFailedWindow {
+			delete(s.kioskFailed, k)
+		}
+	}
+	s.kioskFailed[src] = kioskFailure{at: s.now(), status: nav.Status}
 	o := Outcome{Source: src, Kind: OutcomeFail}
 	if nav.Status >= 400 {
 		o.Stage, o.Code = StageDetect, strconv.Itoa(nav.Status)
@@ -104,16 +142,32 @@ func (s *Service) ObserveNavigation(nav Navigation) {
 // to show wins. Caller holds s.mu.
 func (s *Service) matchWallSource(rawURL string) (string, bool) {
 	want := navigationKey(rawURL)
-	if want == "" || len(s.wall) == 0 {
+	if want == "" {
 		return "", false
 	}
-	n := len(s.wall)
-	start := s.wallIndex
+	// The wall first, from the item on screen; then the playlist last
+	// pushed (Service.pushed): a cast's first item loads before the next
+	// poll reports the new wall.
+	if src, ok := matchSource(s.wall, s.wallIndex, want, rawURL, s.store.gateways); ok {
+		return src, true
+	}
+	return matchSource(s.pushed, 0, want, rawURL, s.store.gateways)
+}
+
+// matchSource finds the source in list that rawURL is a navigation of,
+// scanning from start: by navigation key first, then — a request the kiosk
+// loaded through a fallback gateway reports that gateway's URL — by the
+// content id every gateway shares.
+func matchSource(list []string, start int, want, rawURL string, gateways *Gateways) (string, bool) {
+	n := len(list)
+	if n == 0 {
+		return "", false
+	}
 	if start < 0 || start >= n {
 		start = 0
 	}
 	for step := 0; step < n; step++ {
-		src := s.wall[(start+step)%n]
+		src := list[(start+step)%n]
 		if src == "" || IsDataURI(src) {
 			continue
 		}
@@ -121,13 +175,10 @@ func (s *Service) matchWallSource(rawURL string) (string, bool) {
 			return src, true
 		}
 	}
-	// A request the kiosk loaded through a fallback gateway reports that
-	// gateway's URL: match it by content id, the identity every gateway
-	// shares.
-	if ref, ok := s.store.gateways.Ref(rawURL); ok {
+	if ref, ok := gateways.Ref(rawURL); ok {
 		for step := 0; step < n; step++ {
-			src := s.wall[(start+step)%n]
-			if other, ok := s.store.gateways.Ref(src); ok && other.Key() == ref.Key() && other.Rest == ref.Rest {
+			src := list[(start+step)%n]
+			if other, ok := gateways.Ref(src); ok && other.Key() == ref.Key() && other.Rest == ref.Rest {
 				return src, true
 			}
 		}
