@@ -169,7 +169,7 @@ func (s *Store) learnErrorPage(source string, hash uint64) {
 	s.learnedMu.Lock()
 	s.learned = append(s.learned, fp)
 	s.learnedMu.Unlock()
-	s.logger.Info("media health: learned a known-bad fingerprint (an error page seen rendering on several works whose content-type check said 404)",
+	s.logger.Info("media health: learned a known-bad fingerprint (an error page seen rendering on several works whose document the kiosk could not fetch, or whose content-type check said 404)",
 		zap.String("phash", promoted.Hash), zap.Int("works", len(promoted.Sources)))
 }
 
