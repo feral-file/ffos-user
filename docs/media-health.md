@@ -44,7 +44,7 @@ cache uses (`offlinecache.SourceKey`), pinned equal by a test.
 | `wireUrl`, `host` | what L0 actually dialed, after the kiosk gateway rewrite and redirects |
 | `httpStatus`, `declaredType`, `sniffedType`, `mediaType` | evidence |
 | `checkedAt`, `recheckAfter` | when the state was set and when it is due for another look |
-| `observedAt` | when the device last really looked at the source, whether or not the look changed the verdict: a probe that got an answer (or none while other origins answered), a play outcome, a wall frame, a nightly render. Never an answer served from the store, a player skip on a hint, a device-local failure, or an attempt with no answer during an outage. The report's `lastObservedAt` (a record from before the field derives it from the play, probe, wall and render times) |
+| `observedAt` | when the device last really looked at the source, whether or not the look changed the verdict: a probe that got an answer (or none while other origins answered), a play outcome, a wall frame, a nightly render. Never an answer served from the store, a player skip on a hint, a device-local failure, or an attempt with no answer during an outage. The report's `lastObservedAt`, with `checkedAt`; absent while nothing was a look. `observedTracked` marks a record written since the field exists: an older record is seeded once, when read, from its play, probe, wall and render times, and keeps the maximum from then on |
 | `lastError`, `lastErrorAt` | the most recent transient attempt; never changes state |
 | `plays` | ok / fail / skipped counts, consecutive failures, the last failure (stage, code, media type, attempt) |
 | `build` | the controld version that wrote the verdict |

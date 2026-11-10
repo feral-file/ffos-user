@@ -272,9 +272,15 @@ type Record struct {
 	// suspect or a render-layer broken, which also clears LastErrorAt
 	// (PR #451 review, F1). Never set by an answer served from the store,
 	// a player skip on a hint, or an attempt that got no answer during an
-	// outage. Records from before it fall back to the times
-	// lastObservedAt also reads.
+	// outage.
 	ObservedAt time.Time `json:"observedAt,omitempty"`
+	// ObservedTracked marks a record written since ObservedAt exists (put
+	// sets it on every write): its ObservedAt is the whole truth, zero
+	// meaning "no real look yet". A record without it is from before, and
+	// decode seeds its ObservedAt once from the times that then stood in
+	// for it (legacyObservedAt), so an older outcome drained after the
+	// upgrade can never move it back (PR #451 review, F2, F3).
+	ObservedTracked bool `json:"observedTracked,omitempty"`
 
 	// LastError / LastErrorAt describe the most recent transient attempt.
 	// They never change State. RetryAfter is when the next attempt may run
@@ -445,29 +451,30 @@ func (r *Record) observe(at time.Time) {
 	}
 }
 
-// lastObservedAt is the latest moment the device looked at this source by
-// any means, whether or not the look changed the verdict: ObservedAt (with
-// CheckedAt, which only a look sets), or for a record from before
-// ObservedAt existed, the verdict itself (CheckedAt), a probe attempt that
-// hit a transient error
-// (LastErrorAt), a play outcome either way (Plays.LastOKAt, LastFailAt), a
-// wall frame (Wall.At), a nightly render, stalled ones included (L1.At). A
-// player skip on a hint is not a look at the source. Zero for a source
-// never observed.
+// lastObservedAt is the latest moment the device really looked at this
+// source, whether or not the look changed the verdict: ObservedAt, with
+// CheckedAt (only a look sets it). Zero for a source never observed — a
+// record holding only events that are not looks (a skip, a WebGL failure,
+// an attempt during an outage) included.
 func (r *Record) lastObservedAt() time.Time {
+	if r.CheckedAt.After(r.ObservedAt) {
+		return r.CheckedAt
+	}
+	return r.ObservedAt
+}
+
+// legacyObservedAt is the freshness a record from before ObservedAt
+// carries: the latest of its verdict, a probe attempt (LastErrorAt), a play
+// outcome either way, a wall frame and a nightly render. Some of those are
+// also set by things that are not looks, which is why it is read once, at
+// decode, for an untracked record only — never for a record the new code
+// wrote.
+func (r *Record) legacyObservedAt() time.Time {
 	seen := r.CheckedAt
 	later := func(t time.Time) {
 		if t.After(seen) {
 			seen = t
 		}
-	}
-	if !r.ObservedAt.IsZero() {
-		// Written since ObservedAt exists: it is the only record of looks.
-		// The times below are also set by things that are not looks (a
-		// device-local WebGL failure, an attempt during an outage), so
-		// they are only the fallback for an older record.
-		later(r.ObservedAt)
-		return seen
 	}
 	for _, p := range []*time.Time{r.LastErrorAt, r.Plays.LastOKAt, r.Plays.LastFailAt} {
 		if p != nil {

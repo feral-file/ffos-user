@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	bolt "go.etcd.io/bbolt"
 )
 
 // getMediaHealth's checkedAt is the verdict's age; lastObservedAt is when
@@ -57,9 +58,10 @@ func TestReport_LastObservedAtIsTheLatestLook(t *testing.T) {
 	assert.NotContains(t, string(raw), "lastObservedAt")
 }
 
-// lastObservedAt never reads earlier than checkedAt, and each kind of look
-// counts.
-func TestRecord_LastObservedAt(t *testing.T) {
+// A record from before ObservedAt keeps its freshness: decode seeds it from
+// the times that stood in for it. lastObservedAt itself never derives —
+// those times are also set by events that are not looks.
+func TestRecord_LegacyObservedAt(t *testing.T) {
 	base := time.Date(2026, 11, 10, 3, 0, 0, 0, time.UTC)
 	at := func(h int) *time.Time { t := base.Add(time.Duration(h) * time.Hour); return &t }
 	cases := []struct {
@@ -75,13 +77,64 @@ func TestRecord_LastObservedAt(t *testing.T) {
 		{"a nightly render", Record{CheckedAt: base, L1: &L1Verdict{At: *at(5)}}, *at(5)},
 		{"older looks never move it back", Record{CheckedAt: *at(6), Plays: PlayStats{LastFailAt: at(1)}}, *at(6)},
 		{"never observed", Record{}, time.Time{}},
-		{"observedAt wins over times a non-look set", Record{CheckedAt: base, ObservedAt: *at(1), LastErrorAt: at(3), Plays: PlayStats{LastFailAt: at(4)}}, *at(1)},
-		{"observedAt never reads before checkedAt", Record{CheckedAt: *at(2), ObservedAt: *at(1)}, *at(2)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.True(t, tc.rec.lastObservedAt().Equal(tc.want), "got %v", tc.rec.lastObservedAt())
+			assert.True(t, tc.rec.legacyObservedAt().Equal(tc.want), "got %v", tc.rec.legacyObservedAt())
 		})
+	}
+	tracked := Record{CheckedAt: base, ObservedAt: *at(1), LastErrorAt: at(3), Plays: PlayStats{LastFailAt: at(4)}, ObservedTracked: true}
+	assert.True(t, tracked.lastObservedAt().Equal(*at(1)), "a tracked record reads only ObservedAt and CheckedAt")
+	assert.True(t, (&Record{CheckedAt: *at(2), ObservedAt: *at(1)}).lastObservedAt().Equal(*at(2)), "never before CheckedAt")
+}
+
+// A legacy record (no observedTracked) is seeded from its derived times on
+// read, then keeps the maximum: a retained outcome dated before the
+// newest legacy look, drained after the upgrade, never moves it back (PR
+// #451 review, F3).
+func TestStore_ALegacyRecordKeepsItsFreshness(t *testing.T) {
+	clock := &testClock{t: time.Date(2026, 11, 10, 5, 0, 0, 0, time.UTC)}
+	st := openTestStore(t, clock)
+	src := "https://o/legacy"
+	nine, eleven := time.Date(2026, 11, 10, 2, 0, 0, 0, time.UTC), time.Date(2026, 11, 10, 4, 0, 0, 0, time.UTC)
+	legacy := map[string]any{
+		"v": 1, "source": src, "state": "ok", "layer": "l0", "checkedAt": nine, "recheckAfter": nine.Add(7 * 24 * time.Hour),
+		"declaredType": "text/html", "sniffedType": "text/html",
+		"plays": map[string]any{"ok": 0, "fail": 1, "lastFailAt": eleven},
+	}
+	raw, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, st.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bucketItems).Put([]byte(Key(src)), raw) }))
+
+	rec, err := st.Get(src)
+	require.NoError(t, err)
+	assert.True(t, rec.lastObservedAt().Equal(eleven), "seeded from the legacy times: got %v", rec.lastObservedAt())
+
+	ten := time.Date(2026, 11, 10, 3, 0, 0, 0, time.UTC)
+	rec, err = st.ApplyOutcome(Outcome{Seq: 7, Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "iframe", At: ten.Format(time.RFC3339Nano)}, true)
+	require.NoError(t, err)
+	assert.True(t, rec.lastObservedAt().Equal(eleven), "the older outcome does not move it back: got %v", rec.lastObservedAt())
+	assert.True(t, rec.ObservedTracked)
+}
+
+// A record the new code creates holding only events that are not looks
+// reports no lastObservedAt at all (PR #451 review, F2).
+func TestReport_ANewRecordWithOnlyNonLooksHasNoFreshness(t *testing.T) {
+	clock := &testClock{t: time.Date(2026, 11, 10, 4, 0, 0, 0, time.UTC)}
+	s := newTestService(t, newTableFetcher(), clock, manifestWithContract)
+	defer func() { _ = s.Close() }()
+	st := s.Store()
+	outage, webgl, offline := "https://o/outage", "https://o/webgl", "https://o/offline"
+	_, err := st.ApplyProbe(outage, transient(0, UnreachableNoAnswer, false))
+	require.NoError(t, err)
+	_, err = st.ApplyOutcome(Outcome{Seq: 1, Source: webgl, Kind: OutcomeFail, Stage: StageWebGL, Code: "context_lost", Attempt: 1}, true)
+	require.NoError(t, err)
+	_, err = st.ApplyOutcome(Outcome{Seq: 2, Source: offline, Kind: OutcomeFail, Stage: StageLoad, Code: "image", Attempt: 1}, false)
+	require.NoError(t, err)
+	rows, err := s.Report(items(outage, webgl, offline), nil)
+	require.NoError(t, err)
+	for _, row := range rows {
+		assert.Empty(t, row.LastObservedAt, "row %d: nothing the device did was a look at the source", row.Index)
 	}
 }
 

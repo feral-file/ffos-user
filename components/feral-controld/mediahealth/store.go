@@ -299,6 +299,7 @@ func (s *Store) Due(now time.Time, limit int, skip func(source string) bool) ([]
 // record previously stored (nil when none) so the old index entry is removed.
 func (s *Store) put(tx *bolt.Tx, prev, rec *Record) error {
 	rec.V = recordVersion
+	rec.ObservedTracked = true // Record.ObservedTracked
 	raw, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -733,6 +734,14 @@ func (s *Store) decode(raw []byte) (*Record, error) {
 		// invented (PR #450 review, F12).
 		rf := *rec.Plays.LastFail
 		rec.Plays.RunFail = &rf
+	}
+	if !rec.ObservedTracked {
+		// A record from before ObservedAt (PR #451): seed it once from the
+		// times that stood in for it, so the report keeps its freshness
+		// and an older outcome drained after the upgrade cannot move it
+		// back. put marks it tracked on the next write.
+		rec.observe(rec.legacyObservedAt())
+		rec.ObservedTracked = true
 	}
 	return &rec, nil
 }
