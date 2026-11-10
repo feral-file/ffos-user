@@ -560,6 +560,23 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				}
 			}
 		case playerStatus.Playlist != nil:
+			// recastForMode's internal re-cast (feral-file/ffos-user#454)
+			// rebuilds the on-screen document as a static dp1_call with its
+			// original playlistUrl/dynamicQuery markers stripped (see
+			// recastForMode's doc), so an otherwise-correct "nothing
+			// refreshable" static document must not be assumed before
+			// checking for a source retained behind this SAME id — a
+			// retained source from a since-superseded cast (a different
+			// playlist, or default playback) is never reused, because
+			// RefreshSource only returns non-zero for a matching id
+			// (feralfile-bot F1 on PR #454, 2026-11-10 14:15).
+			if r.scheduler != nil {
+				if retained := r.scheduler.RefreshSource(playerStatus.Playlist.ID); !retained.IsZero() {
+					contextUnknown = retained.ContentContext == ""
+					schedulerSource = retained
+					break
+				}
+			}
 			// Static inline player status only contains the filtered active set and
 			// no refreshable source identity, so it cannot rebuild future items.
 			r.logger.Debug("Playlist has no dynamic queries, skipping CDP resend")

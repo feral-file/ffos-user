@@ -1885,6 +1885,8 @@ type fakePlaylistScheduler struct {
 	commits         int
 	source          playlistschedule.Source
 	inlineDynamic   *dp1.Playlist
+	refreshSourceID string
+	refreshSource   playlistschedule.Source
 	restored        chan struct{}
 }
 
@@ -1941,6 +1943,20 @@ func (f *fakePlaylistScheduler) InlineDynamicSource() *dp1.Playlist {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.inlineDynamic
+}
+func (f *fakePlaylistScheduler) SetRefreshSource(playlistID string, source playlistschedule.Source) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refreshSourceID = playlistID
+	f.refreshSource = source
+}
+func (f *fakePlaylistScheduler) RefreshSource(playlistID string) playlistschedule.Source {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if playlistID == "" || f.refreshSourceID != playlistID {
+		return playlistschedule.Source{}
+	}
+	return f.refreshSource
 }
 
 func (f *fakePlaylistScheduler) WithPlayerPush(fn func()) {

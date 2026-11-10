@@ -432,6 +432,206 @@ func TestCommandHandler_SetSeriesPlayback_RecastOfAScheduledPlaylistURLCastPrese
 		"recastForMode's re-cast must preserve the original playlistUrl source, not reset the scheduler to a zero-value static source")
 }
 
+// TestCommandHandler_SetSeriesPlayback_RecastOfAnUnscheduledPlaylistURLCastPreservesTheRefreshSource
+// is feralfile-bot's F1 on PR #454's SECOND review (2026-11-10 14:15): the
+// first F1 fix (the test above) only restored the scheduler's own `source`
+// field, which PrepareWithSource persists only for a scheduled result (see
+// its own doc) — an UNSCHEDULED series still recast as a static dp1_call
+// with no playlistUrl of its own, and nothing retained the original source
+// anywhere the refresher could read it. A real playlistschedule.Scheduler is
+// wired (not mocked) so this pins the actual retained value, not just that a
+// re-cast happened.
+func TestCommandHandler_SetSeriesPlayback_RecastOfAnUnscheduledPlaylistURLCastPreservesTheRefreshSource(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t)
+	ctx := context.Background()
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() },
+	).AnyTimes()
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return loc }, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, wrapper.NewJSON(), logger)
+	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
+
+	const url = "https://feed.example/unscheduled-series.json"
+	// No DisplayAt on any item: this cast never arms the displayAt scheduler,
+	// which is exactly the gap the scheduled test above does not cover.
+	group := &dp1.ResolvedSeriesGroup{
+		Representative: seriesEditionItem("item-series"),
+		Editions:       []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b")},
+		Resolved:       true,
+	}
+	initialPlan := dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}
+	fetchedPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    "playlist-1",
+		Items: []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b")},
+	}}
+
+	mockDP1.EXPECT().
+		ProcessPlaylistURLForCast(gomock.Any(), url, gomock.Any()).
+		Return(fetchedPlaylist, initialPlan, nil).
+		Times(1)
+	// The re-cast's rebuilt document, once narrowed to the representative,
+	// carries a concrete edition (no seriesRegistry item left to resolve) —
+	// this is that branch's call.
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ interface{}, playlist dp1.Playlist, _ json.RawMessage, _ *dp1.SeriesPlaybackMode, _ int) dp1.CastPlan {
+			segments := make([]dp1.CastSegment, len(playlist.Items))
+			for i := range playlist.Items {
+				item := playlist.Items[i]
+				segments[i] = dp1.CastSegment{Item: &item}
+			}
+			return dp1.CastPlan{Segments: segments}
+		}).
+		AnyTimes()
+
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(2)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(2)
+
+	_, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": url},
+	})
+	require.NoError(t, err)
+	require.False(t, sched.HasCache(), "an unscheduled cast must never arm the displayAt scheduler")
+	wantSource := playlistschedule.Source{PlaylistURL: url, ContentContext: "curated"}
+	require.Equal(t, wantSource, sched.RefreshSource("playlist-1"),
+		"the initial unscheduled cast must retain its originating playlistUrl for the refresher")
+
+	result, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_SET_SERIES_PLAYBACK,
+		Arguments: map[string]interface{}{"seriesPlayback": "first"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, true, result.(map[string]interface{})["ok"])
+
+	assert.Equal(t, wantSource, sched.RefreshSource("playlist-1"),
+		"recastForMode's re-cast must still leave the refresher able to find the original playlistUrl source, "+
+			"not nothing at all (the scheduler's own `source` field stays zero for an unscheduled result)")
+}
+
+// TestCommandHandler_SetSeriesPlayback_RecastOfAnUnscheduledDynamicPlaylistCastPreservesTheRefreshSource
+// is the dynamic-origin sibling of the URL test above: a dp1_call carrying a
+// top-level dynamicQuery hits the exact same static re-cast path once
+// narrowed (DynamicQuery is cleared before re-entry, see recastForMode's
+// doc), so it needs the same retained refresh source, not just the
+// playlistUrl shape (feralfile-bot F1 on PR #454's second review, 2026-11-10
+// 14:15, generalized per "fix the mechanism, not the example").
+func TestCommandHandler_SetSeriesPlayback_RecastOfAnUnscheduledDynamicPlaylistCastPreservesTheRefreshSource(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t)
+	ctx := context.Background()
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() },
+	).AnyTimes()
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return loc }, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, wrapper.NewJSON(), logger)
+	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
+
+	dynamicDoc := dp1playlist.Playlist{
+		DPVersion: "1.0.0",
+		ID:        "playlist-2",
+		Items:     []dp1playlist.PlaylistItem{},
+		DynamicQuery: &playlists.DynamicQuery{
+			Profile:  dp1playlist.ProfileGraphQLV1,
+			Endpoint: "https://example.com/graphql",
+			Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id source } }`,
+			ResponseMapping: playlists.ResponseMapping{
+				ItemsPath:  "data.items",
+				ItemSchema: "dp1/1.0",
+			},
+		},
+	}
+	raw, err := json.Marshal(dynamicDoc)
+	require.NoError(t, err)
+	var dp1Call map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &dp1Call))
+
+	group := &dp1.ResolvedSeriesGroup{
+		Representative: seriesEditionItem("item-series"),
+		Editions:       []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b")},
+		Resolved:       true,
+	}
+	initialPlan := dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}
+	resolvedPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    "playlist-2",
+		Items: []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b")},
+	}}
+
+	// The one and only call this cast's origin ever gets. Deliberately no
+	// second EXPECT() for ProcessDynamicPlaylistForCast: a regression
+	// re-resolving the dynamic query on the re-cast fails this test
+	// immediately with "unexpected call", rather than needing a call count.
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylistForCast(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(resolvedPlaylist, initialPlan, nil).
+		Times(1)
+	// The re-cast's rebuilt document, once DynamicQuery is cleared, decodes
+	// as an ordinary static dp1_call carrying concrete editions — this is
+	// that branch's call.
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ interface{}, playlist dp1.Playlist, _ json.RawMessage, _ *dp1.SeriesPlaybackMode, _ int) dp1.CastPlan {
+			segments := make([]dp1.CastSegment, len(playlist.Items))
+			for i := range playlist.Items {
+				item := playlist.Items[i]
+				segments[i] = dp1.CastSegment{Item: &item}
+			}
+			return dp1.CastPlan{Segments: segments}
+		}).
+		AnyTimes()
+
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(2)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(2)
+
+	_, err = handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"dp1_call": dp1Call},
+	})
+	require.NoError(t, err)
+	require.False(t, sched.HasCache(), "an unscheduled cast must never arm the displayAt scheduler")
+
+	retained := sched.RefreshSource("playlist-2")
+	require.NotNil(t, retained.DynamicPlaylist, "the initial unscheduled dynamic cast must retain its originating dynamic document for the refresher")
+	assert.True(t, retained.DynamicPlaylist.HasDynamicContent(), "the retained source must keep the original dynamicQuery for a later refresh to re-resolve")
+
+	result, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_SET_SERIES_PLAYBACK,
+		Arguments: map[string]interface{}{"seriesPlayback": "first"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, true, result.(map[string]interface{})["ok"])
+
+	retainedAfterRecast := sched.RefreshSource("playlist-2")
+	require.NotNil(t, retainedAfterRecast.DynamicPlaylist,
+		"recastForMode's re-cast must still leave the refresher able to find the original dynamic document")
+	assert.True(t, retainedAfterRecast.DynamicPlaylist.HasDynamicContent())
+}
+
 // feralfile-bot F7, 2026-11-02 (plus the F1 finding from this fix's own
 // review, PR #426): applySeriesPlayback persists the requested mode and
 // releases the store lock before recastForMode's re-entrant Process call

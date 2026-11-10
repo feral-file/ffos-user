@@ -1513,6 +1513,19 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				} else {
 					h.scheduler.Commit()
 					publishVerdict(false)
+					// Retained independent of whether this cast carries a
+					// displayAt schedule, and NOT inside publishVerdict: that
+					// closure returns immediately when h.activeVerdict is nil
+					// (signature verification disabled), which must not also
+					// disable this. PrepareWithSource above only persists
+					// schedulerSource into the scheduler's own source field
+					// for a scheduled result (see its doc), so an unscheduled
+					// recastForMode re-cast — which reaches here as a static
+					// dp1_call with no playlistUrl/dynamicQuery of its own —
+					// would otherwise leave the refresher with no way to
+					// learn the original source (feralfile-bot F1 on PR #454,
+					// 2026-11-10 14:15).
+					h.scheduler.SetRefreshSource(castPlaylistID, schedulerSource)
 				}
 			})
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:

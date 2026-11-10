@@ -154,6 +154,20 @@ func (mr *MockPlaylistSchedulerMockRecorder) RecomputeNow(ctx interface{}) *gomo
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RecomputeNow", reflect.TypeOf((*MockPlaylistScheduler)(nil).RecomputeNow), ctx)
 }
 
+// RefreshSource mocks base method.
+func (m *MockPlaylistScheduler) RefreshSource(playlistID string) playlistschedule.Source {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RefreshSource", playlistID)
+	ret0, _ := ret[0].(playlistschedule.Source)
+	return ret0
+}
+
+// RefreshSource indicates an expected call of RefreshSource.
+func (mr *MockPlaylistSchedulerMockRecorder) RefreshSource(playlistID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RefreshSource", reflect.TypeOf((*MockPlaylistScheduler)(nil).RefreshSource), playlistID)
+}
+
 // Restore mocks base method.
 func (m *MockPlaylistScheduler) Restore(arg0 playlistschedule.Snapshot) {
 	m.ctrl.T.Helper()
@@ -238,6 +252,18 @@ func (m *MockPlaylistScheduler) SetPushObserver(fn func(playlistschedule.PushPha
 func (mr *MockPlaylistSchedulerMockRecorder) SetPushObserver(fn interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetPushObserver", reflect.TypeOf((*MockPlaylistScheduler)(nil).SetPushObserver), fn)
+}
+
+// SetRefreshSource mocks base method.
+func (m *MockPlaylistScheduler) SetRefreshSource(playlistID string, source playlistschedule.Source) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetRefreshSource", playlistID, source)
+}
+
+// SetRefreshSource indicates an expected call of SetRefreshSource.
+func (mr *MockPlaylistSchedulerMockRecorder) SetRefreshSource(playlistID, source interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetRefreshSource", reflect.TypeOf((*MockPlaylistScheduler)(nil).SetRefreshSource), playlistID, source)
 }
 
 // Snapshot mocks base method.

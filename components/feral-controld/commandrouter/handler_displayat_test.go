@@ -422,6 +422,10 @@ func (t *trackingScheduler) ClearThenWithPlayerPush(fn func() bool) {
 func (t *trackingScheduler) SetPushObserver(func(playlistschedule.PushPhase)) {}
 func (t *trackingScheduler) SetInlineDynamicSource(*dp1.Playlist)             {}
 func (t *trackingScheduler) InlineDynamicSource() *dp1.Playlist               { return nil }
+func (t *trackingScheduler) SetRefreshSource(string, playlistschedule.Source) {}
+func (t *trackingScheduler) RefreshSource(string) playlistschedule.Source {
+	return playlistschedule.Source{}
+}
 
 func (t *trackingScheduler) WithPlayerPush(fn func()) {
 	t.pushCalls++
