@@ -124,7 +124,19 @@ type ReportItem struct {
 	Layer     Layer     `json:"layer,omitempty"`
 	Skipped   bool      `json:"skipped"`
 	Unskipped Unskipped `json:"unskipped,omitempty"`
-	CheckedAt string    `json:"checkedAt,omitempty"`
+	// CheckedAt is when the current State was set — the verdict's age,
+	// not when the device last looked: a play that fails once, a probe
+	// that only hits a transient error, a render with no evidence all
+	// leave the verdict, and so CheckedAt, as it was (RFC 3339).
+	CheckedAt string `json:"checkedAt,omitempty"`
+	// LastObservedAt is when the device last looked at the source by any
+	// means — a probe attempt, a play outcome, a wall frame, a nightly
+	// render — whether or not that look changed the verdict (RFC 3339).
+	// The "last checked" an owner expects: a work that failed to play
+	// fifteen minutes ago after a four-hour-old ok verdict read as "last
+	// checked 4 hours ago" with an issue "started 14 minutes ago" (office
+	// FF1, 2026-11-10). Never earlier than CheckedAt.
+	LastObservedAt string `json:"lastObservedAt,omitempty"`
 	// Issue / IssueSince: see ItemHealth.Issue; IssueSince is when the
 	// current run of trouble began (RFC 3339).
 	Issue      Issue  `json:"issue,omitempty"`
@@ -188,6 +200,9 @@ func (s *Store) Report(items []ReportInput) ([]ReportItem, error) {
 		if rec != nil {
 			if !rec.CheckedAt.IsZero() {
 				row.CheckedAt = rec.CheckedAt.UTC().Format(time.RFC3339)
+			}
+			if seen := rec.lastObservedAt(); !seen.IsZero() {
+				row.LastObservedAt = seen.UTC().Format(time.RFC3339)
 			}
 			if health.Issue != "" && rec.IssueSince != nil {
 				row.IssueSince = rec.IssueSince.UTC().Format(time.RFC3339)

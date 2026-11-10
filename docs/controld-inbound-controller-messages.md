@@ -3342,10 +3342,13 @@ over. Typical use is one request: `{"filter":"attention"}`.
     { "index": 0, "id": "a", "title": "Genome #12", "state": "broken",
       "category": "source_missing", "reason": "http_status", "layer": "l0",
       "skipped": true,
-      "checkedAt": "2026-11-04T10:00:00Z", "plays": { "ok": 0, "fail": 2 } },
+      "checkedAt": "2026-11-04T10:00:00Z", "lastObservedAt": "2026-11-04T10:00:00Z",
+      "plays": { "ok": 0, "fail": 2 } },
     { "index": 1, "id": "b", "title": "Study", "state": "ok", "skipped": false,
-      "checkedAt": "2026-11-04T09:00:00Z", "nextCheckAt": "2026-11-11T09:00:00Z",
-      "plays": { "ok": 12, "fail": 0 } },
+      "checkedAt": "2026-11-04T09:00:00Z", "lastObservedAt": "2026-11-04T13:05:00Z",
+      "issue": "play_failed", "issueSince": "2026-11-04T13:05:00Z",
+      "nextCheckAt": "2026-11-11T09:00:00Z", "failedPlays": 1,
+      "plays": { "ok": 12, "fail": 1 } },
     { "index": 3, "id": "d", "title": "Interface Token", "state": "unknown",
       "skipped": false, "issue": "no_answer",
       "issueSince": "2026-11-06T06:58:51Z", "nextCheckAt": "2026-11-06T07:58:51Z",
@@ -3379,8 +3382,19 @@ so — `no_answer`, `dns`, `server_error`, `rate_limited`, `access_denied`,
 `play_failed` — a closed set the app renders labels for, present only while
 `state` is not `broken`. It complements `state`: an `ok` row with
 `rate_limited` plays fine while the host throttles the device's checks.
+`checkedAt` is when the current `state` was set — the verdict's age, which a
+look that does not change the verdict (a play that fails once, a probe that
+only hits a transient error, a render with no evidence) leaves as it was.
+`lastObservedAt` is when the device last looked at the source by any means —
+a probe attempt, a play outcome, a wall frame, a nightly render — and is the
+value to show as "last checked" (never earlier than `checkedAt`; absent for a
+source never observed). Row 1 above is a work verified at 09:00 whose play
+failed at 13:05: "verified 4 h ago", "last checked 15 min ago", "play failed
+15 min ago".
 `issueSince` is when the current run of trouble began, `nextCheckAt` when the
-device looks again (any state), `failedPlays` the failed plays since the last
+device next probes the source on its own schedule (any state) — a play of
+the work is judged whenever it plays, so a work with `failedPlays` can
+conclude well before `nextCheckAt`; `failedPlays` the failed plays since the last
 real success (a verdict at 2, omitted at 0). `servedBy` is the **host** of the fallback
 gateway the device loads the work through when the source's own gateway
 could not serve it (e.g. `"gateway.pinata.cloud"`), never a URL; absent when the

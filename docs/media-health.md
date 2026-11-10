@@ -43,7 +43,7 @@ cache uses (`offlinecache.SourceKey`), pinned equal by a test.
 | `layer` | `l0`, `play`, `l1`: which probe set the current state |
 | `wireUrl`, `host` | what L0 actually dialed, after the kiosk gateway rewrite and redirects |
 | `httpStatus`, `declaredType`, `sniffedType`, `mediaType` | evidence |
-| `checkedAt`, `recheckAfter` | when the state was set and when it is due for another look |
+| `checkedAt`, `recheckAfter` | when the state was set and when it is due for another look (the report's `lastObservedAt` is the latest look of any kind, derived from these, the play times, `lastErrorAt`, `wall.at` and `l1.at`) |
 | `lastError`, `lastErrorAt` | the most recent transient attempt; never changes state |
 | `plays` | ok / fail / skipped counts, consecutive failures, the last failure (stage, code, media type, attempt) |
 | `build` | the controld version that wrote the verdict |
@@ -765,8 +765,9 @@ into the play run as a `frame` outcome. Off unless
   are inputs, consumed on the device only.
 - `getMediaHealth` (controller tier, query class, no arguments) returns the
   whole playlist on screen: `{ok, status, items:[{index, id, title, state,
-  category, reason, layer, skipped, unskipped, checkedAt, issue, issueSince,
-  nextCheckAt, failedPlays, plays:{ok,fail}}], total, truncated, castSeq}`,
+  category, reason, layer, skipped, unskipped, checkedAt, lastObservedAt,
+  issue, issueSince, nextCheckAt, failedPlays, plays:{ok,fail}}], total,
+  truncated, castSeq}`,
   `skipped`/`unskipped` by the same rule as the push. The empty request
   returns the first 2048 rows (`truncated`); a request with `offset` (≥ 0),
   `limit` (1–1000, default 500) or `filter` (`all` | `attention`: broken,
@@ -835,8 +836,12 @@ not name (a 406, 408, 416) still clears a probe-side issue — the source
 responded — while an attempt with no answer during an outage leaves the
 standing issue as it is. `issueSince`
 is when the current run of trouble began, kept across a change of kind and
-reset when the issue clears. `nextCheckAt` is the later of the verdict's
-recheck and a transient hold. `failedPlays` counts the failed plays in the
+reset when the issue clears. `checkedAt` is the verdict's age, unchanged by
+a look that does not change the verdict; `lastObservedAt` is the latest look
+of any kind (a probe attempt, a play outcome, a wall frame, a nightly
+render), the one to show as "last checked". `nextCheckAt` is the later of
+the verdict's recheck and a transient hold: the next probe on the device's
+own schedule, not the next judgement — a play is judged whenever it plays. `failedPlays` counts the failed plays in the
 current failure run (a verdict at 2); any `ready` but the error page ends it. The raw `lastError` text never leaves the
 device: it carries the host and path.
 

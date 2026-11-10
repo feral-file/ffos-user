@@ -426,6 +426,34 @@ type Build struct {
 	Player   string `json:"player,omitempty"`
 }
 
+// lastObservedAt is the latest moment the device looked at this source by
+// any means, whether or not the look changed the verdict: the verdict
+// itself (CheckedAt), a probe attempt that hit a transient error
+// (LastErrorAt), a play outcome either way (Plays.LastOKAt, LastFailAt), a
+// wall frame (Wall.At), a nightly render, stalled ones included (L1.At). A
+// player skip on a hint is not a look at the source. Zero for a source
+// never observed.
+func (r *Record) lastObservedAt() time.Time {
+	seen := r.CheckedAt
+	later := func(t time.Time) {
+		if t.After(seen) {
+			seen = t
+		}
+	}
+	for _, p := range []*time.Time{r.LastErrorAt, r.Plays.LastOKAt, r.Plays.LastFailAt} {
+		if p != nil {
+			later(*p)
+		}
+	}
+	if r.Wall != nil {
+		later(r.Wall.At)
+	}
+	if r.L1 != nil {
+		later(r.L1.At)
+	}
+	return seen
+}
+
 // Conclusive reports whether the record's broken verdict is current enough
 // to act on: hints and the admission verdict read ONLY this. A broken
 // record past its recheck window is still shown to the app as broken (it
