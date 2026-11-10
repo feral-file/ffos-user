@@ -171,7 +171,8 @@ func TestHeadGet_ARevertedHeadRestoresTheFailureBeforeIt(t *testing.T) {
 	require.Equal(t, ReasonRenderDetect, rec.Reason)
 
 	clock.Advance(2 * time.Second)
-	require.NoError(t, store.ApplyKioskAnswer(src))
+	_, err = store.ApplyKioskAnswer(src)
+	require.NoError(t, err)
 	rec, err = store.Get(src)
 	require.NoError(t, err)
 	assert.Equal(t, State(""), rec.State, "the HEAD's verdict is withdrawn")
@@ -181,7 +182,8 @@ func TestHeadGet_ARevertedHeadRestoresTheFailureBeforeIt(t *testing.T) {
 	assert.True(t, rec.frameRunOpen())
 	assert.True(t, rec.Plays.LastFail.Superseded, "the overruled HEAD stays visible to the app")
 
-	require.NoError(t, store.ApplyKioskAnswer(src))
+	_, err = store.ApplyKioskAnswer(src)
+	require.NoError(t, err)
 	rec, err = store.Get(src)
 	require.NoError(t, err)
 	assert.Equal(t, 1, rec.Plays.ConsecutiveFail, "a second 2xx reverts nothing more")
@@ -238,4 +240,71 @@ func TestHeadGet_TheNextPlaysFetchFailureCountsAfterAFrame(t *testing.T) {
 	assert.Equal(t, LayerPlay, rec.Layer)
 	assert.Equal(t, ReasonRenderDetect, rec.Reason)
 	assert.Equal(t, 404, rec.HTTPStatus)
+}
+
+// The GET overruling the play's counted HEAD frees that play's count: the
+// play's real failures after it count once, whichever order the GET and
+// the drain came in (PR #450 review, F13).
+func TestHeadGet_AWithdrawnPlayCountsItsRealFailure(t *testing.T) {
+	f := newPlayFeed(t, true)
+	for play := 0; play < 2; play++ {
+		f.emit(failed(StageDetect, "404", 1))
+		f.clock.Advance(2 * time.Second)
+		f.s.ObserveNavigation(Navigation{URL: f.src, Status: 200}) // the GET, served after the drain
+		f.emit(failed(StageWatchdog, "fixed", 1), failed(StageWatchdog, "fixed", 2), failed(StageWatchdog, "fixed", 3), failed(StageExhausted, "3", 3))
+	}
+	rec := f.record()
+	assert.Equal(t, 2, rec.Plays.ConsecutiveFail, "one real failure per play")
+	assert.Equal(t, StateBroken, rec.State, "two plays that never rendered")
+	assert.Equal(t, LayerPlay, rec.Layer)
+	assert.NotEqual(t, ReasonRenderDetect, rec.Reason, "the HEAD was overruled: a render failure")
+}
+
+// A wall frame does not end its mount: the iframe reloading after it and
+// getting a 404 is the same play, so one mount never corroborates itself
+// (PR #450 review, F14).
+func TestHeadGet_ASameMountReloadAfterAFrameIsTheSamePlay(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	cap := &fakeWall{frames: []*WallFrame{blankFrame()}}
+	svc, w := newWallRig(t, clock, cap)
+	src := "https://o/reloading-html"
+	seedSoftware(t, svc.Store(), src)
+	svc.ObservePlayback(items(src), 0, pending(), &Outcomes{CastSeq: 1})
+	svc.ObservePlayback(items(src), 0, ready(), readyOutcomes(1, src))
+	clock.Advance(DefaultWallSettle)
+	require.True(t, w.Step(context.Background())) // blank: one counted failure
+	clock.Advance(5 * time.Second)
+	svc.ObserveNavigation(Navigation{URL: src, Status: 404}) // the iframe reloads, same mount
+	rec, err := svc.Store().Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, 1, rec.Plays.ConsecutiveFail, "one mount, one failure")
+	assert.NotEqual(t, StateBroken, rec.State)
+}
+
+// Withdrawing a verdict the HEAD alone concluded restores the fallback
+// route that conclusion dropped: the GET was just served through it (PR
+// #450 review, F15).
+func TestHeadGet_AWithdrawnVerdictRestoresItsRoute(t *testing.T) {
+	f := newPlayFeed(t, true)
+	f.src = "https://ipfs.pixura.io/ipfs/" + cidA
+	_, err := f.s.Store().ApplyProbe(f.src, ProbeResult{Verdict: VerdictAlive, Status: 200, Declared: "text/html", Sniffed: "text/html", ServedBy: "https://ipfs.filebase.io"})
+	require.NoError(t, err)
+	_, ok := f.s.Store().GatewayOverride(f.src, "")
+	require.True(t, ok)
+
+	f.emit(failed(StageDetect, "404", 1), iframeReady) // play 1
+	f.emit(failed(StageDetect, "404", 1))              // play 2: concludes, the route is dropped
+	rec := f.record()
+	require.Equal(t, StateBroken, rec.State)
+	require.Empty(t, rec.ServedBy)
+
+	f.clock.Advance(2 * time.Second)
+	f.s.ObserveNavigation(Navigation{URL: "https://ipfs.filebase.io/ipfs/" + cidA, Status: 200}) // served through the fallback
+	f.s.ObserveNavigation(Navigation{URL: f.src, Status: 200})
+	rec = f.record()
+	assert.Equal(t, State(""), rec.State, "withdrawn")
+	assert.Equal(t, "https://ipfs.filebase.io", rec.ServedBy, "the route comes back")
+	target, ok := f.s.Store().GatewayOverride(f.src, "")
+	require.True(t, ok, "and the kiosk loads through it again")
+	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidA, target)
 }

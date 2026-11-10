@@ -189,6 +189,11 @@ func (r *Record) revertHeadRefusal(now time.Time) bool {
 		return false
 	}
 	if r.State == StateBroken && r.Layer == LayerPlay && r.Reason == ReasonRenderDetect && r.CheckedAt.Equal(f.At) {
+		// The conclusion dropped the fallback route (dropRoute); the GET
+		// just served the document — through that route, when there was
+		// one — so it comes back with the withdrawal (PR #450 review,
+		// F15). RunFail.ServedBy is the route as the refusal found it.
+		r.ServedBy = f.ServedBy
 		r.State, r.Layer = "", ""
 		r.Category, r.Reason = "", ""
 		r.HTTPStatus = 0

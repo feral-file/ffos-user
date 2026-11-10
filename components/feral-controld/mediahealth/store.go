@@ -474,7 +474,13 @@ func (s *Store) retireUnconfiguredFallbacks() error {
 // work is retried at the end of its window — through the gateway that
 // served it, not the one that 404s.
 func servedByEntry(rec *Record) (origin string, indexed bool) {
-	if rec == nil || (rec.State != StateOK && rec.State != StateSuspect && !rec.renderLayerBroken()) {
+	// An unknown record with a route is a HEAD-only verdict withdrawn by
+	// the kiosk's served GET (revertHeadRefusal restores the route the
+	// conclusion dropped, PR #450 review F15): the GET came through it, so
+	// it routes. An unknown record without one is not indexed — nothing
+	// says its own gateway serves it.
+	if rec == nil || (rec.State != StateOK && rec.State != StateSuspect && !rec.renderLayerBroken() &&
+		(rec.State != "" || rec.ServedBy == "")) {
 		return "", false
 	}
 	return rec.ServedBy, true
@@ -1418,11 +1424,12 @@ func playCategory(reason Reason, status int, contentAddressed bool) Category {
 // changes; a source with no record is left alone (nothing to correct).
 //
 // It also lets the kiosk's real GET outrank the player's HEAD: a content-type
-// check refusal counted in the same play is reverted (revertHeadRefusal).
-func (s *Store) ApplyKioskAnswer(source string) error {
+// check refusal counted in the same play is reverted (revertHeadRefusal),
+// and the result says so — the Service frees that play's count (F13).
+func (s *Store) ApplyKioskAnswer(source string) (bool, error) {
 	rec, err := s.Get(source)
 	if err != nil || rec == nil {
-		return err
+		return false, err
 	}
 	now := s.now()
 	probe := *rec
@@ -1435,13 +1442,15 @@ func (s *Store) ApplyKioskAnswer(source string) error {
 		probe.Plays.RunFail = &copied
 	}
 	if !rec.Issue.probeSide() && rec.UnreachableSince == nil && !probe.revertHeadRefusal(now) {
-		return nil
+		return false, nil
 	}
+	var reverted bool
 	_, err = s.update(source, func(rec *Record, existed bool) bool {
 		if !existed {
 			return false
 		}
-		changed := rec.revertHeadRefusal(now)
+		reverted = rec.revertHeadRefusal(now)
+		changed := reverted
 		if rec.Issue.probeSide() {
 			rec.clearIssue()
 			changed = true
@@ -1452,5 +1461,5 @@ func (s *Store) ApplyKioskAnswer(source string) error {
 		}
 		return changed
 	})
-	return err
+	return reverted && err == nil, err
 }

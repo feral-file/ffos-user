@@ -85,8 +85,14 @@ func (s *Service) ObserveNavigation(nav Navigation) {
 		// this document to the kiosk, so a probe-side issue is no longer
 		// the truth. Not a success (the work may still fail to render),
 		// so no outcome is applied and the play run is left alone.
-		if err := s.store.ApplyKioskAnswer(src); err != nil && !errors.Is(err, ErrLowDisk) {
+		reverted, err := s.store.ApplyKioskAnswer(src)
+		if err != nil && !errors.Is(err, ErrLowDisk) {
 			s.logger.Warn("media health: recording a kiosk-served document failed", zap.Error(err))
+		}
+		if reverted && s.runSource == src {
+			// The play's count was the HEAD's and is gone: its next real
+			// failure counts (Service.runWithdrawn).
+			s.runWithdrawn = true
 		}
 		return
 	}

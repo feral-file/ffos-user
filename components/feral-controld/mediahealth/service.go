@@ -58,6 +58,21 @@ type Service struct {
 	// definite refusal (definiteRefusal): a `ready` that follows for the
 	// same source is the error page, not the work.
 	runRefused bool
+	// runFramed is set by a wall frame and held through the same mount's
+	// navigations: the frame is taken after the play's `ready`, so an
+	// observed navigation after it (attempt 0: the iframe reloading) is
+	// still that play, while the player's next entry with an attempt can
+	// only come from the next mount — a new play. A frame must not end the
+	// play outright (PR #450 review, F14: a same-mount reload 404 became a
+	// second play and concluded) nor hold it open across mounts (F10: the
+	// next mount's 404 rode the frame's run, uncounted).
+	runFramed bool
+	// runWithdrawn is set when the kiosk's GET overruled the content-type
+	// check refusal that counted this play (ApplyKioskAnswer reverted it):
+	// the play is still open, but its one count is free again, so its next
+	// genuine failure counts — whichever order the GET and the drain came
+	// in (F13).
+	runWithdrawn bool
 
 	// inferredFailed remembers the last (castSeq-less) renderStatus==3
 	// sighting so the fallback counts one failure per item mount, not one
@@ -376,7 +391,18 @@ func (s *Service) applyEntry(o Outcome, online bool) bool {
 		// nothing, play after play (ipfs.infura.io on the office FF1, 6
 		// plays, 0 counted).
 	case o.Kind == OutcomeFail:
-		count = online && !s.samePlay(o)
+		// Offline, the entry neither counts nor touches the play run: an
+		// offline failure must not open a run that swallows the first
+		// failure once back online (samePlay is not even consulted).
+		if online {
+			same := s.samePlay(o)
+			if same && s.runWithdrawn {
+				// The play's counted refusal was overruled (runWithdrawn):
+				// this failure is the play's first real one.
+				same, s.runWithdrawn = false, false
+			}
+			count = !same
+		}
 		if definiteRefusal(o) {
 			s.runRefused = true
 		}
@@ -422,6 +448,7 @@ func (s *Service) kioskServedAfter(o Outcome) bool {
 func (s *Service) samePlay(o Outcome) bool {
 	if o.Kind != OutcomeFail {
 		s.runSource, s.runAttempt, s.runEnded, s.runRefused = "", 0, false, false
+		s.runFramed, s.runWithdrawn = false, false
 		return false
 	}
 	// An observed navigation (Attempt 0) carries no attempt counter: it
@@ -430,16 +457,13 @@ func (s *Service) samePlay(o Outcome) bool {
 	// it — the frame request happens after the player's content-type
 	// check, but the ring is drained only every poll, so the two can
 	// arrive in either order.
-	same := o.Source == s.runSource && !s.runEnded && (o.Attempt == 0 || o.Attempt >= s.runAttempt)
+	same := o.Source == s.runSource && !s.runEnded && (o.Attempt == 0 || o.Attempt >= s.runAttempt) &&
+		(!s.runFramed || o.Attempt == 0) // after a frame, the player's entry is the next mount (runFramed)
 	if !same {
-		s.runRefused = false
+		s.runRefused, s.runWithdrawn = false, false
 	}
-	// An exhausted entry ends the play after itself, and so does a frame
-	// of the wall: it is taken after the play's `ready`, so whatever
-	// follows for that source is the NEXT mount — whose content-type
-	// check must count as its own failure, not ride the frame's run (PR
-	// #450 review, F10: a 404 every play stayed an advisory blank).
-	s.runSource, s.runEnded = o.Source, o.Stage == StageExhausted || o.Stage == StageFrame
+	s.runFramed = o.Stage == StageFrame || (same && s.runFramed)
+	s.runSource, s.runEnded = o.Source, o.Stage == StageExhausted
 	if !same || o.Attempt > 0 {
 		s.runAttempt = o.Attempt
 	}

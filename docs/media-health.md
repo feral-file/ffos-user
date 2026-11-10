@@ -801,9 +801,15 @@ it, while the play's uncounted retries never shield its counted refusal;
 a reverted refusal hands the run back to the counted failure before it,
 marked `reinstated` so that GET never reverts it in its turn. A record
 from before `runFail` keeps its open run, classified by its `lastFail`. A
-wall frame ends its play's grouping (like an exhausted entry), so the
-next mount's content-type check and GET count as that play's own
-failure. A probe answer the vocabulary does
+wall frame stays with its play: an observed navigation after it (the
+iframe reloading in the same mount) is the same play, while the player's
+next entry with an attempt — which only the next mount produces — starts
+a new one, so the next mount's content-type check counts as its own
+failure. When the GET overrules the play's counted refusal, the play's
+count is freed: its next real failure (a watchdog, an exhaustion) counts
+once, in either arrival order. Withdrawing a verdict the HEAD alone
+concluded restores the fallback route that conclusion dropped, and the
+kiosk loads through it again. A probe answer the vocabulary does
 not name (a 406, 408, 416) still clears a probe-side issue — the source
 responded — while an attempt with no answer during an outage leaves the
 standing issue as it is. `issueSince`
