@@ -39,6 +39,14 @@ type Service struct {
 	// (kioskServedAfter). Entries older than headGetWindow are dropped.
 	// Guarded by mu.
 	kioskServed map[string]time.Time
+	// kioskFailed remembers, per wall source, when the kiosk observer last
+	// saw the DOCUMENT navigation fail (a status of 400 or above, or a
+	// network error); a later 2xx of the same document clears it — the
+	// latest answer is what the frame shows. A wall frame taken in a
+	// mount whose latest document answer failed is a picture of that
+	// error page (kioskDocFailedInMount): the office FF1 healed a work to
+	// ok on a frame of nftstorage.link's 504 page (2026-11-10).
+	kioskFailed map[string]kioskFailure
 
 	// mu serializes the per-page outcome state below (drainer, the play
 	// run, the inferred-failure memory): ObservePlayback runs on the status
@@ -411,7 +419,13 @@ func (s *Service) applyEntry(o Outcome, online bool) bool {
 		// neither ends nor restarts the run the player's entries
 		// describe. Whether it may count as a success against that
 		// play's content-type check is the store's call
-		// (renderedFrame: a definite absence wins).
+		// (renderedFrame: a definite absence wins) — unless the kiosk's
+		// own document answer of this mount failed: then the frame is
+		// that error page, and the store neither heals nor counts on it.
+		if status, failed := s.kioskDocFailedInMount(o); failed {
+			o.errorPage = true
+			o.frame.MainStatus = status
+		}
 	default:
 		o.errorPage = o.Kind == OutcomeOK && s.runRefused &&
 			o.Source == s.runSource && !readyIsEvidence(o)
@@ -421,6 +435,27 @@ func (s *Service) applyEntry(o Outcome, online bool) bool {
 		s.logger.Warn("media health: recording play outcome failed", zap.String("stage", o.Stage), zap.Error(err))
 	}
 	return count
+}
+
+// kioskFailure is one failed document navigation the kiosk observer saw.
+type kioskFailure struct {
+	at     time.Time
+	status int
+}
+
+// kioskDocFailedInMount reports a wall frame whose mount's latest document
+// navigation failed (kioskFailed, not since cleared by a 2xx) at or after
+// the mount began: the frame is the error page. It returns the status.
+// Caller holds s.mu.
+func (s *Service) kioskDocFailedInMount(o Outcome) (int, bool) {
+	if o.Stage != StageFrame || o.frame == nil {
+		return 0, false
+	}
+	f, ok := s.kioskFailed[o.Source]
+	if !ok || f.at.Before(o.frame.MountedAt) {
+		return 0, false
+	}
+	return f.status, true
 }
 
 // kioskServedAfter reports a content-type check refusal (the player's HEAD,

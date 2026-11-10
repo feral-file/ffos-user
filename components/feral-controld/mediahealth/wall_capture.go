@@ -33,6 +33,9 @@ type WallCapture struct {
 	// renderStatus is 2 (committed and on screen). A different source or
 	// index, or leaving 2, is a new mount.
 	mount wallMount
+	// lastPollAt is when Observe last ran: the poll before a mount is first
+	// seen is where that mount began (wallMount.startedAt).
+	lastPollAt time.Time
 }
 
 type wallMount struct {
@@ -41,6 +44,10 @@ type wallMount struct {
 	index    int
 	readyAt  time.Time
 	captured bool
+	// startedAt is the status poll before the item was first seen on
+	// screen: the mount began after it. Bounds which of the kiosk's
+	// document navigations belong to this mount (FrameEvidence.MountedAt).
+	startedAt time.Time
 }
 
 // WallFrame is one capture of the artwork on the wall, with the player's own
@@ -136,6 +143,9 @@ func (w *WallCapture) Observe(sources []string, index int, renderStatus *int) {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	now := w.cfg.Now()
+	prevPoll := w.lastPollAt
+	w.lastPollAt = now
 	ready := renderStatus != nil && *renderStatus == 2 && index >= 0 && index < len(sources)
 	if !ready {
 		w.mount = wallMount{seq: w.mount.seq + 1}
@@ -143,7 +153,7 @@ func (w *WallCapture) Observe(sources []string, index int, renderStatus *int) {
 	}
 	src := sources[index]
 	if w.mount.readyAt.IsZero() || w.mount.source != src || w.mount.index != index {
-		w.mount = wallMount{seq: w.mount.seq + 1, source: src, index: index, readyAt: w.cfg.Now()}
+		w.mount = wallMount{seq: w.mount.seq + 1, source: src, index: index, readyAt: now, startedAt: prevPoll}
 	}
 }
 
@@ -210,7 +220,7 @@ func (w *WallCapture) Step(ctx context.Context) bool {
 		return false
 	}
 	o := Outcome{Source: m.source, Kind: OutcomeFail, Stage: StageFrame, Code: string(c.Verdict),
-		frame: &FrameEvidence{PHash: c.PHash, Variance: c.Variance, Label: c.Label, Clipped: frame.Clipped}}
+		frame: &FrameEvidence{PHash: c.PHash, Variance: c.Variance, Label: c.Label, Clipped: frame.Clipped, MountedAt: m.startedAt}}
 	if c.Verdict == RenderOK {
 		o.Kind = OutcomeOK
 	}

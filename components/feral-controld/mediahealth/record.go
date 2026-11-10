@@ -326,7 +326,10 @@ type WallObservation struct {
 	Variance float64       `json:"variance,omitempty"`
 	Label    string        `json:"label,omitempty"`
 	Clipped  bool          `json:"clipped,omitempty"`
-	At       time.Time     `json:"at"`
+	// MainStatus is the kiosk's own document response when it failed in
+	// this mount (the frame is then the error page: Verdict stalled).
+	MainStatus int       `json:"mainStatus,omitempty"`
+	At         time.Time `json:"at"`
 }
 
 // PlayStats is what the player reported about this source.

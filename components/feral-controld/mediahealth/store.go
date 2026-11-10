@@ -1078,9 +1078,10 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 		digest = outcomeDigest(o)
 	}
 	var out *Record
-	// learn: a wall frame rendered over an open definite absence — the
-	// gateway's error page (learnErrorPage). Set inside the batch (reset
-	// on a retry), acted on after it commits.
+	// learn: a wall frame rendered over an open definite absence, or over
+	// the kiosk's own failed document answer (errorPage) — the gateway's
+	// error page (learnErrorPage). Set inside the batch (reset on a
+	// retry), acted on after it commits.
 	var learn bool
 	err := s.db.Batch(func(tx *bolt.Tx) error {
 		learn = false
@@ -1103,7 +1104,7 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 		}
 		mutate := outcomeMutation(o, count, s.contentAddressed(o.Source), s.renderConclusive, now)
 		rec, err := s.applyTx(tx, o.Source, func(rec *Record, existed bool) bool {
-			if o.frame != nil && o.Kind == OutcomeOK && rec.learnableErrorPage(outcomeTime(o, now)) {
+			if o.frame != nil && o.Kind == OutcomeOK && (o.errorPage || rec.learnableErrorPage(outcomeTime(o, now))) {
 				learn = true
 			}
 			return mutate(rec, existed)
@@ -1181,6 +1182,20 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 			rec.Wall = &WallObservation{
 				Verdict: RenderVerdict(o.Code), PHash: fmt.Sprintf("%016x", o.frame.PHash),
 				Variance: o.frame.Variance, Label: o.frame.Label, Clipped: o.frame.Clipped, At: at,
+			}
+			if o.errorPage {
+				// The kiosk's own document answer of this mount failed
+				// (frame.MainStatus): the frame is that error page, not
+				// the work — no evidence, as an L1 render whose main
+				// document was not 2xx. Recorded as stalled (so the next
+				// play is captured again; an ok would rest the source for
+				// WallRecheckOK), it neither heals the record nor counts:
+				// the play's failure — the GET itself, or the stage before
+				// it — is already counted (office FF1, 2026-11-10: a frame
+				// of nftstorage.link's 504 page healed a work to ok).
+				rec.Wall.Verdict = RenderStalled
+				rec.Wall.MainStatus = o.frame.MainStatus
+				return true
 			}
 		}
 		switch o.Kind {

@@ -3,6 +3,7 @@ package mediahealth
 import (
 	"sort"
 	"strconv"
+	"time"
 )
 
 // Outcomes is the `outcomes` field of the player's checkStatus reply under
@@ -41,7 +42,11 @@ type Outcome struct {
 	// is an opaque embed that loaded AFTER the same play's content-type
 	// check got a definite refusal (definiteRefusal), so what reached
 	// ready is the origin's or Chromium's error page. The store neither
-	// counts it as a success nor lets it reset the failure run.
+	// counts it as a success nor lets it reset the failure run. On a frame
+	// outcome it is the kiosk's own document response of this mount that
+	// failed (frame.MainStatus): the frame shows that error page, never
+	// the work — it heals nothing and is stored as stalled, like an L1
+	// render whose main document was not 2xx.
 	errorPage bool
 }
 
@@ -175,6 +180,15 @@ type FrameEvidence struct {
 	Label    string
 	// Clipped is false when the capture fell back to the whole screen.
 	Clipped bool
+	// MountedAt bounds the mount the frame was taken in: the status poll
+	// before the item was first seen on screen. A document navigation the
+	// kiosk observer saw after it belongs to this mount (Service.
+	// kioskDocFailedInMount).
+	MountedAt time.Time
+	// MainStatus is set by the Service when the kiosk's latest document
+	// navigation of this mount failed: the frame is a picture of that
+	// response (an error page), and errorPage is set with it.
+	MainStatus int
 }
 
 // Drainer tracks what has already been read from the ring so each outcome

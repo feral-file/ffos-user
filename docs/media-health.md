@@ -716,7 +716,23 @@ into the play run as a `frame` outcome. Off unless
   an opaque embed's `ready` does not end a frame run (it reports a blank
   frame as ready too). A failing frame while the play's content-type check
   has an open refusal is the frame of that error page — the same play,
-  recorded under `wall` but not counted again. Two plays — or one over a
+  recorded under `wall` but not counted again. **A frame over a document
+  the kiosk itself failed to fetch is no evidence at all:** when the
+  kiosk observer's latest document navigation of this mount for the source
+  answered 400 or above (or failed on the network), the frame is a picture
+  of that response — the gateway's error page — whatever the classifier
+  makes of it. It is recorded as `wall.verdict: stalled` with
+  `wall.mainStatus`, like an L1 render whose main document was not 2xx; it
+  heals nothing, resets nothing and counts nothing (the play's failure —
+  the GET itself, or the stage before it — is already counted), and its
+  hash is a learned-fingerprint candidate (the kiosk's own failed answer is
+  the strongest proof a frame is an error page). A retry served 2xx later
+  in the mount makes the frame the work's again: the latest answer is what
+  the wall shows. The mount is bounded by the status poll before the item
+  was first seen on screen, so repeat-one's earlier failure never taints
+  the next mount. Office FF1, 2026-11-10: a frame of nftstorage.link's 504
+  page had healed Soundgarden Live 1992 #18 to `ok` and reset its failure
+  run. Two plays — or one over a
   standing L1 negative — conclude a render negative (`render_blank` /
   `render_known_bad`, layer `play`): `suspect`, or `broken` under
   `renderConclusive` (see L1, step 2).

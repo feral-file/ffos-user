@@ -54,6 +54,12 @@ var playerQueryParams = map[string]bool{"display_mode": true}
 // source_blocked, 5xx → render_failed) — and a network error is a `load`
 // failure carrying Chromium's reason. Navigations for URLs not on the
 // wall (the player's own page, overlays) are ignored.
+// kioskFailedWindow bounds how long a failed document navigation is kept
+// for the wall frame's sake (Service.kioskFailed): a mount's frame comes
+// within the load watchdog (45 s) plus the settle (15 s) of its
+// navigations; older entries are a leak, not evidence.
+const kioskFailedWindow = 10 * time.Minute
+
 func (s *Service) ObserveNavigation(nav Navigation) {
 	if nav.Canceled || (nav.Status == 0 && nav.Error == "") || (nav.Status >= 300 && nav.Status < 400) {
 		return
@@ -76,6 +82,7 @@ func (s *Service) ObserveNavigation(nav Navigation) {
 			}
 		}
 		s.kioskServed[src] = now
+		delete(s.kioskFailed, src) // the latest document answer is a good one
 		if s.runSource == src {
 			// A refusal earlier in this play was the HEAD's, not the
 			// document's: the ready that follows is not an error page.
@@ -96,6 +103,15 @@ func (s *Service) ObserveNavigation(nav Navigation) {
 		}
 		return
 	}
+	if s.kioskFailed == nil {
+		s.kioskFailed = map[string]kioskFailure{}
+	}
+	for k, f := range s.kioskFailed {
+		if s.now().Sub(f.at) > kioskFailedWindow {
+			delete(s.kioskFailed, k)
+		}
+	}
+	s.kioskFailed[src] = kioskFailure{at: s.now(), status: nav.Status}
 	o := Outcome{Source: src, Kind: OutcomeFail}
 	if nav.Status >= 400 {
 		o.Stage, o.Code = StageDetect, strconv.Itoa(nav.Status)
