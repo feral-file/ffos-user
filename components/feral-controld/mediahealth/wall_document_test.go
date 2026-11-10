@@ -127,3 +127,34 @@ func TestWallDocument_TheKiosksErrorPageIsLearned(t *testing.T) {
 	require.Len(t, learned, 1)
 	assert.Equal(t, learnedLabel, learned[0].Label)
 }
+
+// The kiosk's document navigations happen while the player still reports
+// pending, often more than one poll before ready: a 504 seen before the
+// LAST pending poll is still this mount's (PR #450 review, F18).
+func TestWallDocument_AFailureBeforeTheLastPendingPollIsThisMounts(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	cap := &fakeWall{frames: []*WallFrame{{Image: errorPage(), Clipped: true}}}
+	svc, w := newWallRig(t, clock, cap)
+	src := "https://o/slow-to-ready"
+	seedSoftware(t, svc.Store(), src)
+	svc.ObservePlayback(items(src, "https://o/other"), 1, ready(), readyOutcomes(1, "https://o/other")) // the previous item, on screen
+	clock.Advance(5 * time.Second)
+	svc.ObservePlayback(items(src, "https://o/other"), 0, pending(), &Outcomes{CastSeq: 1})
+	clock.Advance(time.Second)
+	svc.ObserveNavigation(Navigation{URL: src, Status: 504}) // the GET, early in the mount
+	for i := 0; i < 2; i++ {                                 // two more pending polls before ready
+		clock.Advance(5 * time.Second)
+		svc.ObservePlayback(items(src, "https://o/other"), 0, pending(), &Outcomes{CastSeq: 1})
+	}
+	clock.Advance(5 * time.Second)
+	svc.ObservePlayback(items(src, "https://o/other"), 0, ready(), &Outcomes{CastSeq: 1, Entries: []Outcome{
+		{Seq: 2, Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "iframe", At: clock.Now().UTC().Format(time.RFC3339Nano)},
+	}})
+	clock.Advance(DefaultWallSettle)
+	require.True(t, w.Step(context.Background()))
+	rec, err := svc.Store().Get(src)
+	require.NoError(t, err)
+	assert.Equal(t, RenderStalled, rec.Wall.Verdict, "the frame is the 504 page")
+	assert.Equal(t, 504, rec.Wall.MainStatus)
+	assert.Equal(t, LayerL0, rec.Layer, "not healed")
+}

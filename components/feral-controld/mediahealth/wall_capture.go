@@ -44,9 +44,12 @@ type wallMount struct {
 	index    int
 	readyAt  time.Time
 	captured bool
-	// startedAt is the status poll before the item was first seen on
-	// screen: the mount began after it. Bounds which of the kiosk's
-	// document navigations belong to this mount (FrameEvidence.MountedAt).
+	// startedAt is the last status poll that showed the previous item on
+	// screen (or nothing): the mount began after it — through every
+	// pending poll before it was first seen ready, since the kiosk's
+	// document navigations happen while the player reports pending (PR
+	// #450 review, F18). Bounds which navigations belong to this mount
+	// (FrameEvidence.MountedAt).
 	startedAt time.Time
 }
 
@@ -148,12 +151,23 @@ func (w *WallCapture) Observe(sources []string, index int, renderStatus *int) {
 	w.lastPollAt = now
 	ready := renderStatus != nil && *renderStatus == 2 && index >= 0 && index < len(sources)
 	if !ready {
-		w.mount = wallMount{seq: w.mount.seq + 1}
+		// The next mount begins after the last poll that still showed the
+		// previous one: the first pending poll fixes startedAt, later
+		// pending polls keep it.
+		startedAt := prevPoll
+		if w.mount.readyAt.IsZero() && !w.mount.startedAt.IsZero() {
+			startedAt = w.mount.startedAt
+		}
+		w.mount = wallMount{seq: w.mount.seq + 1, startedAt: startedAt}
 		return
 	}
 	src := sources[index]
 	if w.mount.readyAt.IsZero() || w.mount.source != src || w.mount.index != index {
-		w.mount = wallMount{seq: w.mount.seq + 1, source: src, index: index, readyAt: now, startedAt: prevPoll}
+		startedAt := prevPoll
+		if w.mount.readyAt.IsZero() && !w.mount.startedAt.IsZero() {
+			startedAt = w.mount.startedAt // seen pending first: the mount began before those polls
+		}
+		w.mount = wallMount{seq: w.mount.seq + 1, source: src, index: index, readyAt: now, startedAt: startedAt}
 	}
 }
 
