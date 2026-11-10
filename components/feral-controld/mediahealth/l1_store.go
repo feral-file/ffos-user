@@ -99,6 +99,11 @@ func (s *Store) ApplyRender(source string, r RenderResult) (*Record, error) {
 	// when its own GET of the document was served 2xx, which outranks the
 	// content-type check's refusal (learnableErrorPage).
 	rec, err := s.update(source, func(rec *Record, _ bool) bool {
+		if r.Verdict != "" {
+			// A render, stalled ones included, is a look at the source
+			// (Record.ObservedAt); a deferral is not (DeferL1).
+			rec.observe(now)
+		}
 		l1 := rec.L1
 		if l1 == nil {
 			l1 = &L1Verdict{}

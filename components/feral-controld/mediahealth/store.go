@@ -888,6 +888,13 @@ func probeWritesRecord(res ProbeResult) bool {
 // probeMutation is the record update one probe result applies.
 func probeMutation(res ProbeResult, now time.Time) func(rec *Record, existed bool) bool {
 	return func(rec *Record, _ bool) bool {
+		if res.Unreachable == "" || res.NetworkHealthy {
+			// A probe that got an answer, or none while other origins
+			// answered, looked at the source. One that got none during
+			// an outage says nothing about it (Record.ObservedAt). Answers
+			// served from the store never get here (probeWritesRecord).
+			rec.observe(now)
+		}
 		if res.WireURL != "" {
 			rec.WireURL = res.WireURL
 			rec.Host = hostOf(res.WireURL)
@@ -1107,7 +1114,12 @@ func (s *Store) ApplyOutcome(o Outcome, count bool) (*Record, error) {
 			if o.frame != nil && o.Kind == OutcomeOK && (o.errorPage || rec.learnableErrorPage(outcomeTime(o, now))) {
 				learn = true
 			}
-			return mutate(rec, existed)
+			wrote := mutate(rec, existed)
+			if outcomeObserves(o, count) {
+				rec.observe(outcomeTime(o, now))
+				wrote = true
+			}
+			return wrote
 		})
 		if err != nil {
 			return err
@@ -1398,6 +1410,24 @@ func outcomeMutation(o Outcome, count, contentAddressed, renderConclusive bool, 
 		}
 		return false
 	}
+}
+
+// outcomeObserves reports whether an outcome is a real look at the source
+// (Record.ObservedAt): a play that reached ready (an error page's included:
+// the player played it), a frame of the wall, or a counted failure. Not a
+// skip on a hint, nor a device-local failure (WebGL), nor a failure
+// counted for nothing because the device was offline or it continued the
+// play already counted (that play's first entry observed it).
+func outcomeObserves(o Outcome, count bool) bool {
+	switch {
+	case o.frame != nil:
+		return true
+	case o.Kind == OutcomeOK:
+		return true
+	case o.Kind == OutcomeFail:
+		return count && !deviceLocal(o)
+	}
+	return false
 }
 
 // outcomeTime is when the player observed the outcome: its own RFC 3339

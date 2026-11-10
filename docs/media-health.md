@@ -43,7 +43,8 @@ cache uses (`offlinecache.SourceKey`), pinned equal by a test.
 | `layer` | `l0`, `play`, `l1`: which probe set the current state |
 | `wireUrl`, `host` | what L0 actually dialed, after the kiosk gateway rewrite and redirects |
 | `httpStatus`, `declaredType`, `sniffedType`, `mediaType` | evidence |
-| `checkedAt`, `recheckAfter` | when the state was set and when it is due for another look (the report's `lastObservedAt` is the latest look of any kind, derived from these, the play times, `lastErrorAt`, `wall.at` and `l1.at`) |
+| `checkedAt`, `recheckAfter` | when the state was set and when it is due for another look |
+| `observedAt` | when the device last really looked at the source, whether or not the look changed the verdict: a probe that got an answer (or none while other origins answered), a play outcome, a wall frame, a nightly render. Never an answer served from the store, a player skip on a hint, a device-local failure, or an attempt with no answer during an outage. The report's `lastObservedAt` (a record from before the field derives it from the play, probe, wall and render times) |
 | `lastError`, `lastErrorAt` | the most recent transient attempt; never changes state |
 | `plays` | ok / fail / skipped counts, consecutive failures, the last failure (stage, code, media type, attempt) |
 | `build` | the controld version that wrote the verdict |

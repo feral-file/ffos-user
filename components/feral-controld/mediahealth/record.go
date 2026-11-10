@@ -264,6 +264,17 @@ type Record struct {
 	// due for another look (the `recheck` bucket indexes this).
 	CheckedAt    time.Time `json:"checkedAt"`
 	RecheckAfter time.Time `json:"recheckAfter"`
+	// ObservedAt is when the device last really looked at the source,
+	// whether or not the look changed the verdict: a probe that got an
+	// answer, a play outcome, a wall frame, a nightly render (observe).
+	// Kept apart from CheckedAt and LastErrorAt because a look that
+	// leaves the verdict alone moves neither — a valid probe over a
+	// suspect or a render-layer broken, which also clears LastErrorAt
+	// (PR #451 review, F1). Never set by an answer served from the store,
+	// a player skip on a hint, or an attempt that got no answer during an
+	// outage. Records from before it fall back to the times
+	// lastObservedAt also reads.
+	ObservedAt time.Time `json:"observedAt,omitempty"`
 
 	// LastError / LastErrorAt describe the most recent transient attempt.
 	// They never change State. RetryAfter is when the next attempt may run
@@ -426,9 +437,19 @@ type Build struct {
 	Player   string `json:"player,omitempty"`
 }
 
+// observe records a real look at the source at `at` (ObservedAt); it never
+// moves the time back.
+func (r *Record) observe(at time.Time) {
+	if at.After(r.ObservedAt) {
+		r.ObservedAt = at
+	}
+}
+
 // lastObservedAt is the latest moment the device looked at this source by
-// any means, whether or not the look changed the verdict: the verdict
-// itself (CheckedAt), a probe attempt that hit a transient error
+// any means, whether or not the look changed the verdict: ObservedAt (with
+// CheckedAt, which only a look sets), or for a record from before
+// ObservedAt existed, the verdict itself (CheckedAt), a probe attempt that
+// hit a transient error
 // (LastErrorAt), a play outcome either way (Plays.LastOKAt, LastFailAt), a
 // wall frame (Wall.At), a nightly render, stalled ones included (L1.At). A
 // player skip on a hint is not a look at the source. Zero for a source
@@ -439,6 +460,14 @@ func (r *Record) lastObservedAt() time.Time {
 		if t.After(seen) {
 			seen = t
 		}
+	}
+	if !r.ObservedAt.IsZero() {
+		// Written since ObservedAt exists: it is the only record of looks.
+		// The times below are also set by things that are not looks (a
+		// device-local WebGL failure, an attempt during an outage), so
+		// they are only the fallback for an older record.
+		later(r.ObservedAt)
+		return seen
 	}
 	for _, p := range []*time.Time{r.LastErrorAt, r.Plays.LastOKAt, r.Plays.LastFailAt} {
 		if p != nil {
