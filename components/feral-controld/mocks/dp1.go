@@ -72,18 +72,19 @@ func (mr *MockDP1MockRecorder) ProcessDynamicPlaylist(ctx, playlist, minimal any
 }
 
 // ProcessDynamicPlaylistForCast mocks base method.
-func (m *MockDP1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist dp1.Playlist) (*dp1.Playlist, error) {
+func (m *MockDP1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist dp1.Playlist, deviceMode *dp1.SeriesPlaybackMode) (*dp1.Playlist, dp1.CastPlan, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ProcessDynamicPlaylistForCast", ctx, playlist)
+	ret := m.ctrl.Call(m, "ProcessDynamicPlaylistForCast", ctx, playlist, deviceMode)
 	ret0, _ := ret[0].(*dp1.Playlist)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret1, _ := ret[1].(dp1.CastPlan)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // ProcessDynamicPlaylistForCast indicates an expected call of ProcessDynamicPlaylistForCast.
-func (mr *MockDP1MockRecorder) ProcessDynamicPlaylistForCast(ctx, playlist any) *gomock.Call {
+func (mr *MockDP1MockRecorder) ProcessDynamicPlaylistForCast(ctx, playlist, deviceMode any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ProcessDynamicPlaylistForCast", reflect.TypeOf((*MockDP1)(nil).ProcessDynamicPlaylistForCast), ctx, playlist)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ProcessDynamicPlaylistForCast", reflect.TypeOf((*MockDP1)(nil).ProcessDynamicPlaylistForCast), ctx, playlist, deviceMode)
 }
 
 // ProcessPlaylistURL mocks base method.
@@ -102,18 +103,19 @@ func (mr *MockDP1MockRecorder) ProcessPlaylistURL(ctx, url, minimal any) *gomock
 }
 
 // ProcessPlaylistURLForCast mocks base method.
-func (m *MockDP1) ProcessPlaylistURLForCast(ctx context.Context, url string) (*dp1.Playlist, error) {
+func (m *MockDP1) ProcessPlaylistURLForCast(ctx context.Context, url string, deviceMode *dp1.SeriesPlaybackMode) (*dp1.Playlist, dp1.CastPlan, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ProcessPlaylistURLForCast", ctx, url)
+	ret := m.ctrl.Call(m, "ProcessPlaylistURLForCast", ctx, url, deviceMode)
 	ret0, _ := ret[0].(*dp1.Playlist)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret1, _ := ret[1].(dp1.CastPlan)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // ProcessPlaylistURLForCast indicates an expected call of ProcessPlaylistURLForCast.
-func (mr *MockDP1MockRecorder) ProcessPlaylistURLForCast(ctx, url any) *gomock.Call {
+func (mr *MockDP1MockRecorder) ProcessPlaylistURLForCast(ctx, url, deviceMode any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ProcessPlaylistURLForCast", reflect.TypeOf((*MockDP1)(nil).ProcessPlaylistURLForCast), ctx, url)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ProcessPlaylistURLForCast", reflect.TypeOf((*MockDP1)(nil).ProcessPlaylistURLForCast), ctx, url, deviceMode)
 }
 
 // ResolveSeriesCastPlan mocks base method.

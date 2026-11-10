@@ -249,8 +249,13 @@ type DP1 interface {
 	// displayPlaylist command. Dynamic playlists hydrate only to a bounded
 	// scheduling cap; if no item-level displayAt is discovered, the returned
 	// playlist is trimmed back to the legacy minimal size before sending to the
-	// player.
-	ProcessPlaylistURLForCast(ctx context.Context, url string) (*Playlist, error)
+	// player. Any seriesRegistry item in the result is already narrowed per
+	// deviceMode, the same resolveSeriesCastPlan a static dp1_call cast uses
+	// (feral-file/ffos-user#452) — the fetched document's own raw bytes are
+	// read for each item's seriesPlayback the same way a static cast's
+	// verbatim bytes are. The returned CastPlan is what the caller must pass
+	// to rememberSeriesCast so a later setSeriesPlayback re-narrow has it.
+	ProcessPlaylistURLForCast(ctx context.Context, url string, deviceMode *SeriesPlaybackMode) (*Playlist, CastPlan, error)
 
 	// ProcessDynamicPlaylist processes a dynamic playlist.
 	// If the playlist has dynamic queries, it will process them
@@ -261,17 +266,24 @@ type DP1 interface {
 	ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error)
 
 	// ProcessDynamicPlaylistForCast applies the initial-cast bounded hydration
-	// policy described on ProcessPlaylistURLForCast.
-	ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playlist) (*Playlist, error)
+	// policy described on ProcessPlaylistURLForCast, including the same
+	// series narrowing and returned CastPlan. A dynamically resolved item has
+	// no original document bytes, so its own seriesPlayback always reads as
+	// absent — deviceMode and the catalog's artworkModel still apply.
+	ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playlist, deviceMode *SeriesPlaybackMode) (*Playlist, CastPlan, error)
 
 	// ExpandSeriesItems replaces every seriesRegistry item in playlist with
 	// the editions the catalog returns for it, bounded by maxItems (0 means
-	// unbounded). ProcessPlaylistURL(ForCast) and ProcessDynamicPlaylist(ForCast)
+	// unbounded), ignoring seriesPlayback, any device override, and the
+	// catalog's artworkModel. ProcessPlaylistURL and ProcessDynamicPlaylist
+	// (the non-cast variants, used by playlist-refresher's resync and the
+	// offline-cache paths — feral-file/ffos-user#452's own Out of scope)
 	// already apply this internally to whatever they fetch or resolve; this
 	// is for a caller that already holds a decoded, static playlist it did
-	// NOT get from one of those four — an inline dp1_call payload, or a
-	// playlist echoed back in player status — and so needs the same
-	// expansion applied by hand before treating the playlist as final.
+	// NOT get from one of those two — an inline dp1_call payload outside a
+	// live cast, or a playlist echoed back in player status — and so needs
+	// the same expansion applied by hand before treating the playlist as
+	// final. Never use this for a live cast; see ResolveSeriesCastPlan.
 	ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems int) Playlist
 
 	// ResolveSeriesCastPlan is ExpandSeriesItems's cast-aware sibling: it
@@ -328,7 +340,7 @@ func New(ffIndexer ffindexer.FFIndexer, httpClient, rasterHTTP wrapper.HTTPClien
 func (d *dp1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) (*Playlist, error) {
 	d.logger.Info("Processing playlist from URL", zap.String("url", url))
 
-	playlist, err := d.fetchPlaylist(url)
+	playlist, _, err := d.fetchPlaylist(url)
 	if err != nil {
 		return nil, err
 	}
@@ -342,22 +354,32 @@ func (d *dp1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) 
 	return &resolved, nil
 }
 
-func (d *dp1) ProcessPlaylistURLForCast(ctx context.Context, url string) (*Playlist, error) {
+// ProcessPlaylistURLForCast fetches url and narrows any seriesRegistry item
+// it carries the same way a static dp1_call cast already does
+// (resolveSeriesCastPlan, gated by seriesPlayback / deviceMode / the
+// catalog's artworkModel) — unlike the pre-#452 behavior, which expanded a
+// fetched document's series into every edition regardless of mode. The
+// returned CastPlan is what the caller must pass to rememberSeriesCast, so
+// a later setSeriesPlayback re-narrow has it for THIS cast too, not only a
+// static one.
+func (d *dp1) ProcessPlaylistURLForCast(ctx context.Context, url string, deviceMode *SeriesPlaybackMode) (*Playlist, CastPlan, error) {
 	d.logger.Info("Processing playlist from URL for initial cast", zap.String("url", url))
 
-	playlist, err := d.fetchPlaylist(url)
+	playlist, rawPlaylist, err := d.fetchPlaylist(url)
 	if err != nil {
-		return nil, err
+		return nil, CastPlan{}, err
 	}
 
 	if playlist.HasDynamicContent() {
-		return d.ProcessDynamicPlaylistForCast(ctx, playlist)
+		return d.ProcessDynamicPlaylistForCast(ctx, playlist, deviceMode)
 	}
 
 	// Bounded like the dynamic cast path: a cast carries at most
 	// CAST_PLAYLIST_ITEMS_LIMIT items however many editions a series holds.
-	resolved := d.expandSeriesItems(ctx, playlist, CAST_PLAYLIST_ITEMS_LIMIT)
-	return &resolved, nil
+	plan := d.resolveSeriesCastPlan(ctx, playlist, rawPlaylist, deviceMode, CAST_PLAYLIST_ITEMS_LIMIT)
+	narrowed := playlist
+	narrowed.Items = plan.Narrow(deviceMode)
+	return &narrowed, plan, nil
 }
 
 func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
@@ -377,23 +399,33 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 	return &expanded, nil
 }
 
-func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playlist) (*Playlist, error) {
+// ProcessDynamicPlaylistForCast resolves playlist's dynamicQuery and narrows
+// any seriesRegistry item among the resolved items, the same resolution
+// ProcessPlaylistURLForCast uses (feral-file/ffos-user#452). A dynamically
+// resolved item is synthesized at runtime — it has no original document
+// bytes of its own — so there is no per-item seriesPlayback to read for it
+// (rawPlaylist is nil; see readItemSeriesPlaybackModes' own doc on a nil raw
+// document). The device-level override and the catalog's artworkModel gate
+// still apply.
+func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playlist, deviceMode *SeriesPlaybackMode) (*Playlist, CastPlan, error) {
 	resolved, err := d.processDynamicPlaylist(ctx, playlist, false, CAST_PLAYLIST_ITEMS_LIMIT)
 	if err != nil {
-		return nil, err
+		return nil, CastPlan{}, err
 	}
 
-	// Same series expansion as above, bounded by the same cast cap the
-	// batch accumulation inside processDynamicPlaylist already respects —
-	// expanding can only grow the item count further, so the cap is
-	// re-applied here rather than assumed to still hold.
-	expanded := d.expandSeriesItems(ctx, *resolved, CAST_PLAYLIST_ITEMS_LIMIT)
+	// Bounded by the same cast cap the batch accumulation inside
+	// processDynamicPlaylist already respects — narrowing can only shrink
+	// the item count, but CastPlan.Narrow re-applies the cap anyway so this
+	// stays correct if that ever changes.
+	plan := d.resolveSeriesCastPlan(ctx, *resolved, nil, deviceMode, CAST_PLAYLIST_ITEMS_LIMIT)
+	narrowed := *resolved
+	narrowed.Items = plan.Narrow(deviceMode)
 
-	if hasDisplayAtItems(expanded.Items) || len(expanded.Items) <= MINIMAL_PLAYLIST_ITEMS_LIMIT {
-		return &expanded, nil
+	if hasDisplayAtItems(narrowed.Items) || len(narrowed.Items) <= MINIMAL_PLAYLIST_ITEMS_LIMIT {
+		return &narrowed, plan, nil
 	}
-	expanded.Items = expanded.Items[:MINIMAL_PLAYLIST_ITEMS_LIMIT]
-	return &expanded, nil
+	narrowed.Items = narrowed.Items[:MINIMAL_PLAYLIST_ITEMS_LIMIT]
+	return &narrowed, plan, nil
 }
 
 func (d *dp1) processDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool, maxItems int) (*Playlist, error) {
@@ -601,28 +633,34 @@ func defaultDurationSeconds(playlist Playlist) float64 {
 	return duration
 }
 
-func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
+// fetchPlaylist also returns the exact bytes the document was decoded from
+// (nil on any error), the same way commandrouter/handler.go already keeps
+// command.RawArgument("dp1_call") for a static dp1_call cast: a fetched
+// document can carry its own per-item seriesPlayback just as an inline one
+// can, and resolveSeriesCastPlan needs those raw bytes, not the typed
+// struct, to read it (feral-file/ffos-user#452).
+func (d *dp1) fetchPlaylist(url string) (Playlist, json.RawMessage, error) {
 	d.logger.Info("Fetching playlist from URL", zap.String("url", url))
 	resp, err := d.httpClient.Get(url)
 	if err != nil {
-		return Playlist{}, err
+		return Playlist{}, nil, err
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Playlist{}, fmt.Errorf("fetch playlist failed: %s", resp.Status)
+		return Playlist{}, nil, fmt.Errorf("fetch playlist failed: %s", resp.Status)
 	}
 
 	// One byte past the cap is read on purpose: a body of exactly the cap is
 	// admitted, and the extra byte is what proves the response was larger.
 	bytes, err := d.io.ReadAll(goio.LimitReader(resp.Body, MaxPlaylistBodyBytes+1))
 	if err != nil {
-		return Playlist{}, err
+		return Playlist{}, nil, err
 	}
 	if len(bytes) > MaxPlaylistBodyBytes {
-		return Playlist{}, fmt.Errorf("fetch playlist failed: body exceeds %d bytes", MaxPlaylistBodyBytes)
+		return Playlist{}, nil, fmt.Errorf("fetch playlist failed: body exceeds %d bytes", MaxPlaylistBodyBytes)
 	}
 	// This ingestion path structurally validates any present content-rating
 	// extension fields. The fragment validator needs no core signature, so it
@@ -637,13 +675,13 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
 	// applies the same rule at admission. A document is never refused for
 	// carrying a label we do not recognize.
 	if err := contentrating.ValidatePlaylistFragment(bytes); err != nil {
-		return Playlist{}, fmt.Errorf("%w: content rating extension at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
+		return Playlist{}, nil, fmt.Errorf("%w: content rating extension at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
 	}
 
 	var playlist Playlist
 	err = d.json.Unmarshal(bytes, &playlist)
 	if err != nil {
-		return Playlist{}, err
+		return Playlist{}, nil, err
 	}
 
 	// Verify the bytes as received, before anything reshapes the document:
@@ -655,7 +693,7 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
 		playlist.Verification = &verdict
 	}
 
-	return playlist, nil
+	return playlist, json.RawMessage(bytes), nil
 }
 
 func buildPlaylistItems(duration float64, tokens []ffindexer.Token) []dp1playlist.PlaylistItem {

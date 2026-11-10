@@ -67,13 +67,27 @@ func servePlaylist(ts *testSetup, url string, items []dp1playlist.PlaylistItem) 
 	ts.mockHTTP.EXPECT().Get(url).
 		Return(createMockResponse(http.StatusOK, body), nil)
 	ts.mockIO.EXPECT().ReadAll(gomock.Any()).Return([]byte(body), nil)
+	// Unmarshal is called a second time, on these same raw bytes, by
+	// resolveSeriesCastPlan's readItemSeriesPlaybackModes (the per-item
+	// seriesPlayback read) whenever items includes a series item and the
+	// caller is a *ForCast path (feral-file/ffos-user#452) — AnyTimes
+	// rather than a fixed count, since a caller going through the older,
+	// non-cast ProcessPlaylistURL still decodes exactly once. That second
+	// call decodes into a different type (the envelope
+	// readItemSeriesPlaybackModes reads, not *dp1.Playlist), so this fakes
+	// only the *dp1.Playlist case and no-ops otherwise — a real decode of
+	// this stub body into that envelope would find no "items" key either,
+	// which is the same harmless empty result.
 	ts.mockJSON.EXPECT().Unmarshal([]byte(body), gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {
-			playlist := v.(*dp1.Playlist)
+			playlist, ok := v.(*dp1.Playlist)
+			if !ok {
+				return nil
+			}
 			playlist.ID = "playlist-1"
 			playlist.Items = items
 			return nil
-		})
+		}).AnyTimes()
 }
 
 // editionsURL is the route the catalog addresses one series item by.
@@ -352,7 +366,7 @@ func TestDP1_CastCapHoldsAcrossPlainAndExpandedAppends(t *testing.T) {
 	serveEditions(ts, "playlist-1", "item-series",
 		editionsBody(2, editionItem("a"), editionItem("b")))
 
-	result, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url)
+	result, _, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)
 
 	require.NoError(t, err)
 	assert.Len(t, result.Items, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
@@ -375,7 +389,7 @@ func TestDP1_CastCapHoldsWhenASeriesKeepsItsRepresentative(t *testing.T) {
 	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
 		Return(nil, errors.New("catalog unreachable"))
 
-	result, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url)
+	result, _, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)
 
 	require.NoError(t, err)
 	assert.Len(t, result.Items, dp1.CAST_PLAYLIST_ITEMS_LIMIT)

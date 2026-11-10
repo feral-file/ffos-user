@@ -21,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 )
@@ -31,8 +32,8 @@ func TestDisplayPlaylist_CarriesHintsForTheFinalItemList(t *testing.T) {
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/dead", "https://origin.example/alive"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/dead", "https://origin.example/alive"), dp1.CastPlan{}, nil).
 		Times(1)
 	var expr string
 	ts.mockCDP.EXPECT().
@@ -75,8 +76,8 @@ func TestDisplayPlaylist_NoHintsLeavesTheFieldAbsent(t *testing.T) {
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/alive"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/alive"), dp1.CastPlan{}, nil).
 		Times(1)
 	var expr string
 	ts.mockCDP.EXPECT().

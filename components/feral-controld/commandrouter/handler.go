@@ -735,13 +735,23 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// projection can be re-checked against them without re-probing. See the
 		// re-check below the reprojection.
 		var probeVerdicts map[string]mediahealth.ProbeResult
-		// seriesCastPlan is set only by the static dp1_call branch below
-		// (the one call site with the raw bytes a per-item seriesPlayback
-		// read needs -- see ResolveSeriesCastPlan's doc). Its zero value
+		// seriesCastPlan is set by every branch below that resolves a live
+		// cast (playlistUrl, dp1_call static, dp1_call dynamic —
+		// feral-file/ffos-user#452): each one reads any seriesRegistry item
+		// against deviceSeriesMode via resolveSeriesCastPlan, so a cast
+		// behaves the same way regardless of how the document reached
+		// controld. The offline-cache fallback inside the playlistUrl
+		// branch is the one exception — a cached copy is already a
+		// concrete, previously-resolved re-marshal with no catalog answer
+		// behind it, so it leaves this at its zero value. Its zero value
 		// (no segments) is indistinguishable from "no series groups",
 		// which rememberSeriesCast treats as nothing to remember.
 		var seriesCastPlan dp1.CastPlan
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
+			// deviceSeriesMode is read once per cast attempt and shared by
+			// every branch below, so a device override applies identically
+			// no matter which payload shape the command carried.
+			deviceSeriesMode := h.currentSeriesPlaybackMode()
 			delete(command.Arguments, "retireBlockedCurrent") // internal refresh-only signal
 			delete(command.Arguments, "mediaHealth")          // controld-owned hint field (#392), set before each send
 			// The content-policy lock is taken further down, immediately before
@@ -814,7 +824,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("playlistUrl is not a string or empty")
 				}
 
-				playlist, err = h.dp1.ProcessPlaylistURLForCast(ctx, url)
+				playlist, seriesCastPlan, err = h.dp1.ProcessPlaylistURLForCast(ctx, url, deviceSeriesMode)
 				if err != nil {
 					// Live DP-1 resolution failed — most commonly, the
 					// device has no network right now. Fall back to the
@@ -837,6 +847,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					h.logger.Warn("offline cache: displayPlaylist falling back to cached copy after live DP-1 resolution failure",
 						zap.String("playlist_url", url), zap.Error(err))
 					playlist = cachedPlaylist
+					// The cached copy is a hydrated re-marshal of a PAST
+					// cast's already-resolved items, not a fresh catalog
+					// answer — there is nothing here for a later
+					// setSeriesPlayback to re-narrow, so this leaves
+					// seriesCastPlan at whatever ProcessPlaylistURLForCast's
+					// failed attempt returned (its zero value).
+					seriesCastPlan = dp1.CastPlan{}
 					err = nil
 				}
 				schedulerSource = playlistschedule.Source{PlaylistURL: url}
@@ -896,7 +913,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 				if playlist.HasDynamicContent() {
 					schedulerSource = playlistschedule.Source{DynamicPlaylist: playlist}
-					playlist, err = h.dp1.ProcessDynamicPlaylistForCast(ctx, *playlist)
+					// ProcessDynamicPlaylistForCast narrows any
+					// seriesRegistry item among the resolved dynamic items
+					// the same way the static branch below does
+					// (feral-file/ffos-user#452) — a dynamically resolved
+					// item has no document bytes of its own, so only
+					// deviceSeriesMode and the catalog's artworkModel apply
+					// to it, never a per-item seriesPlayback.
+					playlist, seriesCastPlan, err = h.dp1.ProcessDynamicPlaylistForCast(ctx, *playlist, deviceSeriesMode)
 					if err != nil {
 						h.logger.Error("Failed to process dynamic playlist", zap.Error(err))
 						return nil, err
@@ -920,7 +944,6 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// a series cast and wrong for an ordinary one: it would
 					// truncate a playlist that was never subject to the cap
 					// (feralfile-bot F6, 2026-11-02).
-					deviceSeriesMode := h.currentSeriesPlaybackMode()
 					seriesCastPlan = h.dp1.ResolveSeriesCastPlan(ctx, *playlist, playlistBytes, deviceSeriesMode, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
 					narrowed := *playlist
 					narrowed.Items = seriesCastPlan.Narrow(deviceSeriesMode)

@@ -453,8 +453,8 @@ func TestDisplayPlaylistDoesNotHoldThePolicyLockAcrossResolution(t *testing.T) {
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
 	lockFree := false
-	dp1Mock.EXPECT().ProcessPlaylistURLForCast(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, _ string) (*dp1.Playlist, error) {
+	dp1Mock.EXPECT().ProcessPlaylistURLForCast(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ string, _ *dp1.SeriesPlaybackMode) (*dp1.Playlist, dp1.CastPlan, error) {
 			// Stands in for a slow origin: while "resolution" is in flight, the
 			// policy store must still be acquirable.
 			acquired := make(chan struct{})
@@ -474,7 +474,7 @@ func TestDisplayPlaylistDoesNotHoldThePolicyLockAcrossResolution(t *testing.T) {
 			}
 			return &dp1.Playlist{Playlist: dp1playlist.Playlist{
 				Items: []dp1playlist.PlaylistItem{{ID: "a", Source: "https://a"}},
-			}}, nil
+			}}, dp1.CastPlan{}, nil
 		}).Times(1)
 	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, _ map[string]interface{}) (interface{}, error) {

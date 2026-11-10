@@ -252,7 +252,7 @@ func TestRaster_CastStopsAtItemCapWithinTheFirstPage(t *testing.T) {
 		return respond(200, rasterPage(t, nodes, true, "more"))
 	}).Times(1)
 
-	result, err := rs.client.ProcessDynamicPlaylistForCast(t.Context(), rasterPlaylist(t))
+	result, _, err := rs.client.ProcessDynamicPlaylistForCast(t.Context(), rasterPlaylist(t), nil)
 	require.NoError(t, err)
 	// CAST_PLAYLIST_ITEMS_LIMIT reached on page one, then the no-displayAt
 	// trim to the minimal size, exactly as the other dynamic paths behave.

@@ -122,8 +122,8 @@ func playerNotOkResponse() map[string]interface{} {
 // displayPlaylist via URL: DP1 processing, CDP send returning ok, and ForceRefresh.
 func expectDisplayPlaylistSuccess(ts *testSetup, playlistURL string, playlist *dp1.Playlist) {
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(playlist, nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(playlist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -562,7 +562,7 @@ func TestCommandHandler_Process_DisplayPlaylist_HoldsPlaybackLockAcrossSyncAndSe
 	mockPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "item1", Source: "https://example.com/video.mp4"}},
 	}}
-	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL).Return(mockPlaylist, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).Return(mockPlaylist, dp1.CastPlan{}, nil).Times(1)
 	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
@@ -641,7 +641,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplay
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "item-new", Source: "https://example.com/item-new"}},
 	}}
-	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL).Return(newPlaylist, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL, gomock.Any()).Return(newPlaylist, dp1.CastPlan{}, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -688,7 +688,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskRepla
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "item-new", Source: "https://example.com/item-new"}},
 	}}
-	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL).Return(newPlaylist, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL, gomock.Any()).Return(newPlaylist, dp1.CastPlan{}, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -744,8 +744,8 @@ func TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOff
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, nil, nil, ts.mockJSON, ts.logger)
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(nil, errors.New("network unreachable")).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(nil, dp1.CastPlan{}, errors.New("network unreachable")).
 		Times(1)
 
 	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), nil).Times(1)
@@ -786,8 +786,8 @@ func TestCommandHandler_Process_DisplayPlaylist_ReturnsOriginalErrorWhenNoCached
 	playlistURL := "https://example.com/playlist.json"
 	liveErr := errors.New("network unreachable")
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(nil, liveErr).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(nil, dp1.CastPlan{}, liveErr).
 		Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -1138,8 +1138,8 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 		Times(1)
 
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist).
-		Return(processedPlaylist, nil).
+		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist, gomock.Any()).
+		Return(processedPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1228,8 +1228,8 @@ func TestCommandHandler_Process_DisplayPlaylist_WithSpecDynamicQuery(t *testing.
 		Times(1)
 
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist).
-		Return(processedPlaylist, nil).
+		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist, gomock.Any()).
+		Return(processedPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1520,8 +1520,8 @@ func TestCommandHandler_Metrics_DisplayPlaylist_CDPFailure(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(mockPlaylist, nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(mockPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1554,8 +1554,8 @@ func TestCommandHandler_Metrics_PlayerResponseNotOk(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(mockPlaylist, nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(mockPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1592,8 +1592,8 @@ func TestCommandHandler_Metrics_PlayerResponseMissingMessage(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(mockPlaylist, nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(mockPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
