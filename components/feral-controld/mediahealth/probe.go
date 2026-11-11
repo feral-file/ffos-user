@@ -147,6 +147,16 @@ type Probe struct {
 	// the failing gateway, and the verdict must not claim what the wall
 	// cannot do — it is reported as a gateway failure instead.
 	OverrideActive bool
+	// KioskUserAgent returns the kiosk Chromium's own User-Agent ("" when
+	// unknown). It is what the wall sends for every request the policy
+	// does not replace the agent for, so the probe sends it too: a CDN
+	// that refuses non-browser clients (bits.raster.art answers Go's
+	// default agent with 403 and the kiosk with 200) must answer the probe
+	// as it answers the wall. This is the kiosk's actual agent, read from
+	// the kiosk itself, never a made-up browser string (uarewrite's
+	// DefaultUserAgent explains why the device never impersonates one).
+	// nil or "" keeps the client's default agent.
+	KioskUserAgent func() string
 }
 
 const (
@@ -439,8 +449,9 @@ const LabelHeader = "X-Ffos-Media-Health-Label"
 
 // wire computes the URL and User-Agent the kiosk would use for source:
 // a content-addressed path on a hostile gateway is redirected (and keeps the
-// default agent, as the kiosk interceptor does); any other request on such
-// a host gets the policy agent; everything else is dialed as written. A
+// kiosk's own agent, as the kiosk interceptor does); any other request on
+// such a host gets the policy agent; everything else is dialed as written,
+// with the kiosk's own agent (KioskUserAgent). A
 // bare CID with a query is dialed in its directory form on either path,
 // as the kiosk's synthetic redirect makes the wall load it
 // (contentpath.SlashBeforeQuery): the bare shape 301s to a page without
@@ -454,16 +465,25 @@ func (p *Probe) wire(source string) (string, string) {
 }
 
 func (p *Probe) policyWire(source string) (string, string) {
+	kiosk := p.kioskAgent()
 	if p.Rewriter == nil {
-		return source, ""
+		return source, kiosk
 	}
 	if rewritten, ok := p.Rewriter.RewriteURL(source); ok {
-		return rewritten, ""
+		return rewritten, kiosk
 	}
 	if p.Rewriter.Matches(source) {
 		return source, p.Rewriter.UserAgent()
 	}
-	return source, ""
+	return source, kiosk
+}
+
+// kioskAgent is the kiosk's own User-Agent, "" when unknown.
+func (p *Probe) kioskAgent() string {
+	if p.KioskUserAgent == nil {
+		return ""
+	}
+	return p.KioskUserAgent()
 }
 
 func probeDataURI(source string) ProbeResult {

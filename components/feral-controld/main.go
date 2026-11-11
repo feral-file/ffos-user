@@ -1329,7 +1329,11 @@ func initializeApp(
 		mediaHealthReplayable = func(source string) bool { return offlineCache.HasReplayableItem(source) }
 	}
 	mediaHealthCfg := config.Get().MediaHealthTuning(logger)
-	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, uaRewrite != nil, mediaHealthOnline.Load, mediaHealthReplayable, newHintSender(cdp.Send, session.Generation), logger)
+	// The probe sends the kiosk's own User-Agent (kiosk_useragent.go), read
+	// from the kiosk's DevTools endpoint for the app's lifetime.
+	kioskUA := newKioskUserAgent(cdpEndpoint, logger)
+	go kioskUA.Run(context)
+	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, uaRewrite != nil, kioskUA.Get, mediaHealthOnline.Load, mediaHealthReplayable, newHintSender(cdp.Send, session.Generation), logger)
 	var mediaHealthObserver *offlinecache.KioskNavigationObserver
 	if mediaHealthSvc != nil && !mediaHealthCfg.KioskObserverDisabled {
 		mediaHealthObserver = offlinecache.NewKioskNavigationObserver(cdpEndpoint, httpClient, webSocketDialer, json, io, mediaHealthSvc, logger)
