@@ -281,13 +281,41 @@ func TestProbeOne_ProbesTheRewrittenWire(t *testing.T) {
 	res := p.ProbeOne(context.Background(), "https://ipfs.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/a.png")
 	require.Len(t, f.calls, 1)
 	assert.Equal(t, "https://ipfs.filebase.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/a.png", f.calls[0].URL)
-	assert.Empty(t, f.calls[0].UserAgent, "a redirected request keeps the default agent, as the kiosk interceptor does")
+	assert.Empty(t, f.calls[0].UserAgent, "a redirected request keeps the kiosk's agent, as the kiosk interceptor does (unknown here)")
 	assert.Equal(t, f.calls[0].URL, res.WireURL)
 
 	p.ProbeOne(context.Background(), "https://ipfs.io/ipns/some.name/index.html")
 	require.Len(t, f.calls, 2)
 	assert.Equal(t, "https://ipfs.io/ipns/some.name/index.html", f.calls[1].URL)
 	assert.Equal(t, "feral-player/2.0", f.calls[1].UserAgent, "a non-CID path on a hostile host gets the policy agent")
+}
+
+// The probe sends the kiosk's own User-Agent wherever the wall does: on a
+// plain host, and on a CID the policy redirects (the interceptor keeps
+// Chromium's agent there). A policy host keeps the policy agent. A CDN that
+// refuses non-browser clients then answers the probe as it answers the
+// wall (bits.raster.art: 403 to Go's default agent, 200 to the kiosk).
+func TestProbeOne_SendsTheKioskAgent(t *testing.T) {
+	const kiosk = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+	page := []byte("<html><body>x</body></html>")
+	f := &scriptedFetcher{answers: []scriptedAnswer{ok(200, "text/html", page, -1), ok(200, "image/png", minimalPNG(1, 1), -1), ok(200, "text/html", page, -1)}}
+	p := newProbe(f)
+	p.Rewriter = fakeRewriter{}
+	p.KioskUserAgent = func() string { return kiosk }
+
+	p.ProbeOne(context.Background(), "https://bits.raster.art/09d7/abc/original")
+	p.ProbeOne(context.Background(), "https://ipfs.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/a.png")
+	p.ProbeOne(context.Background(), "https://ipfs.io/ipns/some.name/index.html")
+	require.Len(t, f.calls, 3)
+	assert.Equal(t, kiosk, f.calls[0].UserAgent, "a plain host: the kiosk's own agent")
+	assert.Equal(t, kiosk, f.calls[1].UserAgent, "a redirected CID keeps the kiosk's agent")
+	assert.Equal(t, "feral-player/2.0", f.calls[2].UserAgent, "a hostile host keeps the policy agent")
+
+	// Unknown (the kiosk not reachable yet): the client's default, as before.
+	p.KioskUserAgent = func() string { return "" }
+	p.ProbeOne(context.Background(), "https://bits.raster.art/09d7/abc/original")
+	require.Len(t, f.calls, 4)
+	assert.Empty(t, f.calls[3].UserAgent)
 }
 
 func TestRedactForLog(t *testing.T) {

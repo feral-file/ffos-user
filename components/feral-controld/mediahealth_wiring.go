@@ -53,7 +53,7 @@ const mediaHealthMinFreeBytes = offlinecache.DefaultMinFreeDiskBytes
 //
 // overrideActive says the kiosk interceptor runs and will load a work
 // through the fallback gateway the probe found serving it.
-func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, overrideActive bool, online func() bool, replayable func(string) bool, pushHints mediahealth.HintSender, logger *zap.Logger) (*mediahealth.Service, *mediahealth.Lookahead, *mediahealth.HintPusher) {
+func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, overrideActive bool, kioskUA func() string, online func() bool, replayable func(string) bool, pushHints mediahealth.HintSender, logger *zap.Logger) (*mediahealth.Service, *mediahealth.Lookahead, *mediahealth.HintPusher) {
 	gateways := mediahealth.NewGateways(cfg.IPFSGateways, cfg.ArweaveGateways)
 	if cfg.Disabled {
 		logger.Warn("media health disabled by config; casts are forwarded unprobed and carry no hints")
@@ -83,6 +83,7 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 		MaxBytes:       maxBytes,
 		Gateways:       gateways,
 		OverrideActive: overrideActive,
+		KioskUserAgent: kioskUA,
 	}
 	if rewriter != nil {
 		probe.Rewriter = rewriter

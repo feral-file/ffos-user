@@ -95,7 +95,13 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   bytes read.
 - The probe dials the **wire the kiosk would**: a content-addressed path on a
   hostile gateway (`ipfs.io`, `dweb.link`) goes to the replacement gateway and
-  any other path on those hosts gets the `uarewrite` User-Agent, exactly as the
+  any other path on those hosts gets the `uarewrite` User-Agent; every other
+  request carries the kiosk Chromium's **own** User-Agent, read from the
+  kiosk's DevTools endpoint (`/json/version`, every 10 min, the last good value
+  kept; the client default until the first read). Never a made-up browser
+  string: it is the agent the wall itself sends, so a CDN that refuses
+  non-browser clients (bits.raster.art: 403 to Go's default agent, 200 to the
+  kiosk) answers the probe as it answers the wall. All of this exactly as the
   kiosk interceptor does — on the initial URL and on **every redirect hop**
   (the interceptor evaluates its policy per request), each re-pointed before
   the guard and the dial, so a source that redirects onto a retired gateway
