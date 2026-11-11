@@ -17,6 +17,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
@@ -1932,6 +1933,13 @@ func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, versi
 }
 
 func (e *executor) getDeviceStatus(ctx context.Context) (interface{}, error) {
+	if p, ok := control.PrincipalFrom(ctx); ok && p.Role == control.RoleDisplay {
+		// Browser grants only need the orientation. Skip the full collector,
+		// which also reads network, playback, and device metadata.
+		return struct {
+			ScreenRotation string `json:"screenRotation"`
+		}{ScreenRotation: status.ReadScreenRotation(e.os)}, nil
+	}
 	resp, err := e.deviceStatus.GetStatus(ctx)
 	if err != nil || resp == nil {
 		return resp, err

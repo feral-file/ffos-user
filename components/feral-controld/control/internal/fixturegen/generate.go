@@ -357,9 +357,8 @@ func (g *gen) negativeRequests() error {
 			mutate: func(c *control.RequestClaims) {
 				c.Cmd, c.Req = control.CmdRevokeController, json.RawMessage(`{"ctl":"`+g.k.Controllers["owner"].Ctl+`"}`)
 			}},
-		// Display grants (§5.7): the Play cast and the self-revoke are all a
-		// display ctl may send; nothing else, in any state.
-		{name: "display-getDeviceStatus", desc: "A display grant has no status read.", from: "display", reply: control.CodePermissionDenied,
+		// Display-grant requests these vectors submit over LAN (§5.7).
+		{name: "display-getDeviceStatus", desc: "A display grant can query status only over relay v2.", from: "display", reply: control.CodePermissionDenied,
 			mutate: func(c *control.RequestClaims) { c.Cmd, c.Req = "getDeviceStatus", json.RawMessage(`{}`) }},
 		{name: "display-connect", desc: "A display grant cannot connect (claim).", from: "display", reply: control.CodePermissionDenied,
 			mutate: func(c *control.RequestClaims) {
