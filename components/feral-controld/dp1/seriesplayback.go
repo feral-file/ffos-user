@@ -344,8 +344,11 @@ type rawPlaylistItem struct {
 //
 // Matching is by ARRAY INDEX between raw's `items` and the caller's already-
 // parsed playlist.Items, which is only valid when raw is the very bytes that
-// parse produced — true at this package's one call site with a real
-// document (commandrouter's static dp1_call branch, before any filtering).
+// parse produced — true at both of this package's real-document call
+// sites: commandrouter's static dp1_call branch (via the exported
+// ResolveSeriesCastPlan, before any filtering) and ProcessPlaylistURLForCast
+// (dp1.go), which passes fetchPlaylist's own raw bytes straight through with
+// no filtering either (feral-file/ffos-user#452).
 func (d *dp1) readItemSeriesPlaybackModes(raw json.RawMessage, n int) []*SeriesPlaybackMode {
 	modes := make([]*SeriesPlaybackMode, n)
 	if len(raw) == 0 {
@@ -474,8 +477,11 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 }
 
 // ResolveSeriesCastPlan is resolveSeriesCastPlan, exported for the
-// commandrouter package: the one call site with the raw document bytes a
-// cast needs to read seriesPlayback from (see the DP1 interface doc).
+// commandrouter package's static dp1_call branch — one of this package's
+// two real-document call sites (the other is ProcessPlaylistURLForCast,
+// which calls resolveSeriesCastPlan directly with fetchPlaylist's own raw
+// bytes) with the raw document bytes a cast needs to read seriesPlayback
+// from (see the DP1 interface doc).
 func (d *dp1) ResolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawPlaylist json.RawMessage, deviceMode *SeriesPlaybackMode, maxItems int) CastPlan {
 	return d.resolveSeriesCastPlan(ctx, playlist, rawPlaylist, deviceMode, maxItems)
 }

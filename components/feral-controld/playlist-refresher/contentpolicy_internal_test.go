@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
+	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
@@ -347,7 +348,10 @@ type authoritySpyScheduler struct {
 }
 
 func (s *authoritySpyScheduler) Source() playlistschedule.Source { return playlistschedule.Source{} }
-func (s *authoritySpyScheduler) RestoredPending() bool           { return false }
+func (s *authoritySpyScheduler) RefreshSource(string) playlistschedule.Source {
+	return playlistschedule.Source{}
+}
+func (s *authoritySpyScheduler) RestoredPending() bool { return false }
 func (s *authoritySpyScheduler) AuthorityToken() uint64 {
 	if s.pushed {
 		return 2 // moved by the time the send closure runs
@@ -607,3 +611,164 @@ func TestRefreshLeavesAnUnknownRatingAloneWhenTheSourceIsUnresolvable(t *testing
 func (*authoritySpyScheduler) SetHintSource(playlistschedule.HintSource) {}
 
 func (*legacySourceScheduler) SetHintSource(playlistschedule.HintSource) {}
+
+// retainedSourceScheduler stands in for the real scheduler's
+// SetRefreshSource/RefreshSource slot (feralfile-bot F1 on PR #454, second
+// review, 2026-11-10 14:15): Source() reports zero — exactly what
+// PrepareWithSource leaves behind for an unscheduled result — so
+// RefreshSource, matched against playlistID, is the only thing that can hand
+// the refresher the original source back.
+type retainedSourceScheduler struct {
+	playlistschedule.Scheduler
+	playlistID string
+	source     playlistschedule.Source
+}
+
+func (s *retainedSourceScheduler) Source() playlistschedule.Source { return playlistschedule.Source{} }
+func (s *retainedSourceScheduler) RefreshSource(playlistID string) playlistschedule.Source {
+	if playlistID == "" || playlistID != s.playlistID {
+		return playlistschedule.Source{}
+	}
+	return s.source
+}
+func (s *retainedSourceScheduler) RestoredPending() bool                   { return false }
+func (s *retainedSourceScheduler) AuthorityToken() uint64                  { return 1 }
+func (s *retainedSourceScheduler) WithPlayerPush(fn func())                { fn() }
+func (s *retainedSourceScheduler) SetProjector(playlistschedule.Projector) {}
+func (s *retainedSourceScheduler) Snapshot() playlistschedule.Snapshot {
+	return playlistschedule.Snapshot{}
+}
+func (s *retainedSourceScheduler) Restore(playlistschedule.Snapshot)     {}
+func (s *retainedSourceScheduler) Commit()                               {}
+func (s *retainedSourceScheduler) HasCache() bool                        { return false }
+func (s *retainedSourceScheduler) Prepare(p *dp1.Playlist) *dp1.Playlist { return p }
+func (s *retainedSourceScheduler) PrepareWithSource(p *dp1.Playlist, _ playlistschedule.Source) *dp1.Playlist {
+	return p
+}
+func (*retainedSourceScheduler) SetHintSource(playlistschedule.HintSource) {}
+
+// newRecastStatusRefresher builds a refresher whose player status looks
+// exactly like what recastForMode's internal re-cast leaves behind: a static
+// inline document (recastDoc) with no playlistUrl and no dynamicQuery (both
+// are stripped before the rebuilt dp1_call is re-sent — see recastForMode's
+// own doc), so the ONLY way this branch can learn there is something to
+// re-resolve is the scheduler's retained source, keyed by recastDoc's id.
+func newRecastStatusRefresher(t *testing.T, recastDocID string, sched playlistschedule.Scheduler) (*refresher, *mocks.MockDP1, *string) {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+
+	recastDoc := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    recastDocID,
+		Items: []dp1playlist.PlaylistItem{{ID: "item-series", Source: "https://cdn.example.test/item-series.mp4"}},
+	}}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockPoller.EXPECT().FetchPlayerStatus(gomock.Any()).Return(&status.PlayerStatus{
+		Command:        string(commands.CMD_DISPLAY_PLAYLIST),
+		Playlist:       recastDoc,
+		ContentContext: "curated",
+	}, nil).AnyTimes()
+
+	var sent string
+	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			sent, _ = params["expression"].(string)
+			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+		}).Times(1)
+
+	// Deliberately NO EXPECT() for ExpandSeriesItems: a regression that falls
+	// back to the old "nothing refreshable" static-inline path calls it, and
+	// gomock fails the test immediately with "unexpected call" rather than
+	// needing a call-count assertion.
+	r := &refresher{
+		context:      context.Background(),
+		cdp:          mockCDP,
+		statusPoller: mockPoller,
+		dp1:          mockDP1,
+		json:         wrapper.NewJSON(),
+		scheduler:    sched,
+		logger:       zaptest.NewLogger(t),
+	}
+	return r, mockDP1, &sent
+}
+
+// TestRecastedPlaylistRefreshesFromTheRetainedURLSource is the consumption
+// side of feralfile-bot's F1 on PR #454 (second review, 2026-11-10 14:15):
+// the retention side (commandrouter/handler.go's SetRefreshSource call) is
+// pinned separately in commandrouter/seriesplayback_test.go; this pins that
+// the refresher actually reads the retained source back and re-resolves from
+// it, rather than treating the recast's static-looking player status as
+// nothing to refresh.
+func TestRecastedPlaylistRefreshesFromTheRetainedURLSource(t *testing.T) {
+	const originalURL = "https://feed.example.test/unscheduled-series.json"
+	sched := &retainedSourceScheduler{
+		playlistID: "playlist-1",
+		source:     playlistschedule.Source{PlaylistURL: originalURL, ContentContext: "curated"},
+	}
+	r, mockDP1, sent := newRecastStatusRefresher(t, "playlist-1", sched)
+
+	refreshed := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    "playlist-1",
+		Items: []dp1playlist.PlaylistItem{{ID: "item-series", Source: "https://cdn.example.test/item-series.mp4"}},
+	}}
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(gomock.Any(), originalURL, false).
+		Return(refreshed, nil).
+		Times(1)
+
+	if err := r.processPlayingPlaylist(false); err != nil {
+		t.Fatal(err)
+	}
+	if *sent == "" {
+		t.Fatal("the retained playlistUrl source must drive a re-send, not a no-op")
+	}
+}
+
+// TestRecastedPlaylistRefreshesFromTheRetainedDynamicSource is the dynamic-
+// origin sibling of the URL test above: a dp1_call carrying a top-level
+// dynamicQuery hits the exact same recast path (DynamicQuery is cleared
+// before re-entry, see recastForMode's doc), so it needs the same retained-
+// source lookup, not just the playlistUrl shape.
+func TestRecastedPlaylistRefreshesFromTheRetainedDynamicSource(t *testing.T) {
+	originalDynamicDoc := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID: "playlist-2",
+		DynamicQuery: &playlists.DynamicQuery{
+			Profile:  dp1playlist.ProfileGraphQLV1,
+			Endpoint: "https://example.test/graphql",
+			Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id source } }`,
+			ResponseMapping: playlists.ResponseMapping{
+				ItemsPath:  "data.items",
+				ItemSchema: "dp1/1.0",
+			},
+		},
+	}}
+	sched := &retainedSourceScheduler{
+		playlistID: "playlist-2",
+		source:     playlistschedule.Source{DynamicPlaylist: originalDynamicDoc, ContentContext: "curated"},
+	}
+	r, mockDP1, sent := newRecastStatusRefresher(t, "playlist-2", sched)
+
+	refreshed := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    "playlist-2",
+		Items: []dp1playlist.PlaylistItem{{ID: "item-series", Source: "https://cdn.example.test/item-series.mp4"}},
+	}}
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), false).
+		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ bool) (*dp1.Playlist, error) {
+			if !playlist.HasDynamicContent() {
+				t.Fatal("ProcessDynamicPlaylist must receive the retained ORIGINAL dynamic document, which still carries its dynamicQuery")
+			}
+			return refreshed, nil
+		}).
+		Times(1)
+
+	if err := r.processPlayingPlaylist(false); err != nil {
+		t.Fatal(err)
+	}
+	if *sent == "" {
+		t.Fatal("the retained dynamic source must drive a re-send, not a no-op")
+	}
+}

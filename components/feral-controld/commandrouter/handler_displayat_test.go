@@ -62,7 +62,7 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersDisplayAt(t *testing.T) {
 		},
 	}
 
-	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL, gomock.Any()).Return(full, dp1.CastPlan{}, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr, ok := params["expression"].(string)
@@ -119,9 +119,9 @@ func TestCommandHandler_Process_DisplayPlaylist_DefersFutureOnlySchedule(t *test
 	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
 	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 	playlistURL := "https://example.com/future.json"
-	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL, gomock.Any()).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "future", Source: "https://example.com/future.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")}},
-	}}, nil)
+	}}, dp1.CastPlan{}, nil)
 	// An empty active set must not be sent to the player.
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Times(0)
 	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
@@ -172,9 +172,9 @@ func TestCommandHandler_Process_DisplayPlaylist_DeferredCastLeavesReplayScopeUnt
 	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
 	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, mockKioskReplay, sched, mockJSON, logger)
 	playlistURL := "https://example.com/future.json"
-	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL, gomock.Any()).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "future", Source: "https://example.com/future.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")}},
-	}}, nil)
+	}}, dp1.CastPlan{}, nil)
 	// No CDP write for an empty active set, and no scope change either.
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Times(0)
 	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
@@ -235,7 +235,7 @@ func TestCommandHandler_Process_DisplayPlaylist_ScopesFullPlaylistBeforeActiveSe
 			},
 		},
 	}
-	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL, gomock.Any()).Return(full, dp1.CastPlan{}, nil)
 
 	syncCall := mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"https://example.com/21.html", "https://example.com/22.html", "https://example.com/23.html"}).
@@ -303,7 +303,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesExplicitIntent(t *testi
 			},
 		},
 	}
-	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL, gomock.Any()).Return(full, dp1.CastPlan{}, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr := params["expression"].(string)
@@ -367,7 +367,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DefaultsIntentOnPlainPlaylist(t 
 			},
 		},
 	}
-	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL, gomock.Any()).Return(full, dp1.CastPlan{}, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr := params["expression"].(string)
@@ -422,6 +422,10 @@ func (t *trackingScheduler) ClearThenWithPlayerPush(fn func() bool) {
 func (t *trackingScheduler) SetPushObserver(func(playlistschedule.PushPhase)) {}
 func (t *trackingScheduler) SetInlineDynamicSource(*dp1.Playlist)             {}
 func (t *trackingScheduler) InlineDynamicSource() *dp1.Playlist               { return nil }
+func (t *trackingScheduler) SetRefreshSource(string, playlistschedule.Source) {}
+func (t *trackingScheduler) RefreshSource(string) playlistschedule.Source {
+	return playlistschedule.Source{}
+}
 
 func (t *trackingScheduler) WithPlayerPush(fn func()) {
 	t.pushCalls++
@@ -477,7 +481,7 @@ func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T)
 			},
 		},
 	}
-	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL, gomock.Any()).Return(full, dp1.CastPlan{}, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil)
 	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
 
@@ -529,7 +533,7 @@ func TestCommandHandler_Process_DisplayPlaylist_RecomputePreservesPlaylistURL(t 
 	}
 
 	var payloads []commands.Command
-	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL, gomock.Any()).Return(full, dp1.CastPlan{}, nil)
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
@@ -829,7 +833,7 @@ func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache
 			{ID: "new", Source: "https://example.com/new.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
 	}}
-	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, newURL).Return(newPlaylist, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, newURL, gomock.Any()).Return(newPlaylist, dp1.CastPlan{}, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(nil, assert.AnError)
 
 	_, err := handler.Process(ctx, commands.Command{
@@ -893,7 +897,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCach
 			{ID: "new", Source: "https://example.com/new.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
 	}}
-	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, newURL).Return(newPlaylist, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, newURL, gomock.Any()).Return(newPlaylist, dp1.CastPlan{}, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]interface{}{
 		"message": map[string]interface{}{"ok": false},
 	}, nil)

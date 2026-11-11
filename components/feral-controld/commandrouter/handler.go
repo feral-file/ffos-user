@@ -735,15 +735,53 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// projection can be re-checked against them without re-probing. See the
 		// re-check below the reprojection.
 		var probeVerdicts map[string]mediahealth.ProbeResult
-		// seriesCastPlan is set only by the static dp1_call branch below
-		// (the one call site with the raw bytes a per-item seriesPlayback
-		// read needs -- see ResolveSeriesCastPlan's doc). Its zero value
+		// seriesCastPlan is set by every branch below that resolves a live
+		// cast (playlistUrl, dp1_call static, dp1_call dynamic —
+		// feral-file/ffos-user#452): each one reads any seriesRegistry item
+		// against deviceSeriesMode via resolveSeriesCastPlan, so a cast
+		// behaves the same way regardless of how the document reached
+		// controld. The offline-cache fallback inside the playlistUrl
+		// branch is the one exception — a cached copy is already a
+		// concrete, previously-resolved re-marshal with no catalog answer
+		// behind it, so it leaves this at its zero value. Its zero value
 		// (no segments) is indistinguishable from "no series groups",
 		// which rememberSeriesCast treats as nothing to remember.
 		var seriesCastPlan dp1.CastPlan
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
+			// deviceSeriesMode is read once per cast attempt and shared by
+			// every branch below, so a device override applies identically
+			// no matter which payload shape the command carried. Accepted
+			// risk: for playlistUrl/dp1_call-dynamic, the network-bound
+			// fetch/resolution these branches do happens AFTER this read,
+			// inside ProcessPlaylistURLForCast/ProcessDynamicPlaylistForCast
+			// (deviceMode is passed in as an argument, before any network
+			// call) — a setSeriesPlayback landing mid-fetch is invisible to
+			// THIS cast and only takes effect on the next cast or setting
+			// change (run-reviewer F1 on PR #454 round 4, 2026-11-10; owner
+			// confirmed accepting this over the larger fetch/narrow-split
+			// refactor a real fix would need, 2026-11-10). The static
+			// dp1_call branch below carries the SAME window, not less of
+			// one: ResolveSeriesCastPlan itself issues a synchronous
+			// catalog HTTP GET per unresolved series item
+			// (dp1.seriesEditions), which sits between this read and that
+			// branch's own Narrow call just as much as playlistUrl/
+			// dynamic's fetch does (run-reviewer F1 on PR #454 round 5,
+			// 2026-11-10, correcting this comment's prior claim that the
+			// static branch was unaffected).
+			deviceSeriesMode := h.currentSeriesPlaybackMode()
 			delete(command.Arguments, "retireBlockedCurrent") // internal refresh-only signal
 			delete(command.Arguments, "mediaHealth")          // controld-owned hint field (#392), set before each send
+			// recastForMode's internal-only re-cast signal (feralfile-bot F1
+			// on PR #454, 2026-11-10): the ORIGINAL cast's scheduler source,
+			// carried through its rebuilt-as-static dp1_call so the branch
+			// taken below (which never itself knows a source) does not
+			// overwrite the scheduler's durable playlistUrl/inline-dynamic
+			// source with its own zero value. The type assertion is the
+			// security boundary — a wire-decoded command can never produce
+			// this Go struct type for this key, only recastForMode's direct
+			// in-process call can.
+			recastSource, isRecast := command.Arguments[recastSchedulerSourceHint].(playlistschedule.Source)
+			delete(command.Arguments, recastSchedulerSourceHint)
 			// The content-policy lock is taken further down, immediately before
 			// the filter, NOT here: URL and dynamic resolution between here and
 			// there are network-bound (the shared 30s HTTP timeout on a
@@ -814,7 +852,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("playlistUrl is not a string or empty")
 				}
 
-				playlist, err = h.dp1.ProcessPlaylistURLForCast(ctx, url)
+				playlist, seriesCastPlan, err = h.dp1.ProcessPlaylistURLForCast(ctx, url, deviceSeriesMode)
 				if err != nil {
 					// Live DP-1 resolution failed — most commonly, the
 					// device has no network right now. Fall back to the
@@ -837,6 +875,22 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					h.logger.Warn("offline cache: displayPlaylist falling back to cached copy after live DP-1 resolution failure",
 						zap.String("playlist_url", url), zap.Error(err))
 					playlist = cachedPlaylist
+					// The cached copy is handleDownloadPlaylist's own
+					// unconditional, mode-ignorant full expansion
+					// (ProcessPlaylistURL/ExpandSeriesItems — #446's own
+					// scope), not a mode-resolved past CAST — any series
+					// marker is already flattened to plain editions by the
+					// time it reaches this cache, so there is nothing left
+					// for a later setSeriesPlayback to re-narrow. This
+					// fallback plays every edition, unnarrowed, same as it
+					// did before #452; fixing it needs the download/cache
+					// pipeline to retain series-group identity, which is a
+					// separate, tracked gap (run-reviewer F1 on PR #454
+					// round 2, 2026-11-10; feral-file/ffos-user#455) rather
+					// than something this leaves seriesCastPlan able to fix
+					// — it stays at whatever ProcessPlaylistURLForCast's
+					// failed attempt returned (its zero value).
+					seriesCastPlan = dp1.CastPlan{}
 					err = nil
 				}
 				schedulerSource = playlistschedule.Source{PlaylistURL: url}
@@ -896,7 +950,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 				if playlist.HasDynamicContent() {
 					schedulerSource = playlistschedule.Source{DynamicPlaylist: playlist}
-					playlist, err = h.dp1.ProcessDynamicPlaylistForCast(ctx, *playlist)
+					// ProcessDynamicPlaylistForCast narrows any
+					// seriesRegistry item among the resolved dynamic items
+					// the same way the static branch below does
+					// (feral-file/ffos-user#452) — a dynamically resolved
+					// item has no document bytes of its own, so only
+					// deviceSeriesMode and the catalog's artworkModel apply
+					// to it, never a per-item seriesPlayback.
+					playlist, seriesCastPlan, err = h.dp1.ProcessDynamicPlaylistForCast(ctx, *playlist, deviceSeriesMode)
 					if err != nil {
 						h.logger.Error("Failed to process dynamic playlist", zap.Error(err))
 						return nil, err
@@ -920,7 +981,6 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// a series cast and wrong for an ordinary one: it would
 					// truncate a playlist that was never subject to the cap
 					// (feralfile-bot F6, 2026-11-02).
-					deviceSeriesMode := h.currentSeriesPlaybackMode()
 					seriesCastPlan = h.dp1.ResolveSeriesCastPlan(ctx, *playlist, playlistBytes, deviceSeriesMode, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
 					narrowed := *playlist
 					narrowed.Items = seriesCastPlan.Narrow(deviceSeriesMode)
@@ -929,6 +989,19 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 			default:
 				return nil, fmt.Errorf("unknown payload type")
+			}
+
+			// Restore the original cast's scheduler source for a
+			// recastForMode re-cast: the switch above always takes the
+			// static dp1_call branch for one of these (DynamicQuery is
+			// cleared before re-entry, see recastForMode's doc) and so
+			// never itself sets schedulerSource. Applied AFTER the switch,
+			// BEFORE schedulerSource.ContentContext is set below, so the
+			// re-cast's current contentContext still lands on top of the
+			// restored source rather than the stale one it was captured
+			// with (feralfile-bot F1 on PR #454, 2026-11-10).
+			if isRecast {
+				schedulerSource = recastSource
 			}
 
 			// Signature verdict (#307). Logged once here, reported on the
@@ -947,14 +1020,16 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if contextErr != nil {
 				return nil, contextErr
 			}
-			// Remembered for every CMD_DISPLAY_PLAYLIST cast, not only a
-			// static dp1_call: seriesCastPlan is the zero value (no
-			// segments) for the playlistUrl and dynamic branches above, so
-			// this call CLEARS any series this device was previously
-			// tracking whenever the screen moves to content this pass did
-			// not resolve series groups for — a stale entry must not
-			// outlive what is actually being cast. See rememberSeriesCast's
-			// doc for why this runs eagerly rather than after the CDP send.
+			// Remembered for every CMD_DISPLAY_PLAYLIST cast: every branch
+			// above (playlistUrl, dp1_call static, dp1_call dynamic) now
+			// resolves any seriesRegistry item against deviceSeriesMode and
+			// sets seriesCastPlan accordingly (feral-file/ffos-user#452) —
+			// it is the zero value (no segments) only when this cast
+			// resolved none, which correctly CLEARS any series this device
+			// was previously tracking whenever the screen moves to content
+			// with no series groups — a stale entry must not outlive what
+			// is actually being cast. See rememberSeriesCast's doc for why
+			// this runs eagerly rather than after the CDP send.
 			//
 			// Settled once the outcome is known: marked accepted only for an
 			// accepted cast, retracted otherwise. Judged from result, not
@@ -964,7 +1039,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// player send, and the send's own reply otherwise). A
 			// displayAt-deferred acceptance reports ok:true and counts as
 			// accepted, same as the scheduler keeps the cast.
-			seriesCastSeq := h.rememberSeriesCast(*playlist, seriesCastPlan, contentContext)
+			seriesCastSeq := h.rememberSeriesCast(*playlist, seriesCastPlan, contentContext, schedulerSource)
 			defer func() {
 				h.settleSeriesCast(seriesCastSeq, err == nil && playerresponse.OK(result))
 			}()
@@ -1438,6 +1513,19 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				} else {
 					h.scheduler.Commit()
 					publishVerdict(false)
+					// Retained independent of whether this cast carries a
+					// displayAt schedule, and NOT inside publishVerdict: that
+					// closure returns immediately when h.activeVerdict is nil
+					// (signature verification disabled), which must not also
+					// disable this. PrepareWithSource above only persists
+					// schedulerSource into the scheduler's own source field
+					// for a scheduled result (see its doc), so an unscheduled
+					// recastForMode re-cast — which reaches here as a static
+					// dp1_call with no playlistUrl/dynamicQuery of its own —
+					// would otherwise leave the refresher with no way to
+					// learn the original source (feralfile-bot F1 on PR #454,
+					// 2026-11-10 14:15).
+					h.scheduler.SetRefreshSource(castPlaylistID, schedulerSource)
 				}
 			})
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:

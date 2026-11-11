@@ -68,7 +68,7 @@ func TestDP1_ProcessPlaylistURLForCast_AttachesVerdict(t *testing.T) {
 	url := "https://feed.example/p.json"
 	expectFetch(ts, url, []byte(`{"dpVersion":"1.1.0","title":"t","items":[]}`), func(p *dp1.Playlist) { p.ID = "pl-1" })
 
-	result, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url)
+	result, _, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, result.Verification)
@@ -157,7 +157,7 @@ func TestDP1_ProcessPlaylistURLForCast_FormattedSizeNearRealResponse_Admitted(t 
 	require.Len(t, body, crystallineWorkSDKFetchedBytes)
 	expectFetch(ts, url, body, func(p *dp1.Playlist) { p.ID = "crystalline-work-sdk" })
 
-	result, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url)
+	result, _, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, "crystalline-work-sdk", result.ID)

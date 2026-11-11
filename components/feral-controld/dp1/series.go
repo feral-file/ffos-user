@@ -290,8 +290,9 @@ func (d *dp1) expandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 
 // ExpandSeriesItems is expandSeriesItems, exported for a caller outside this
 // package that already holds a decoded, static playlist it did not get from
-// ProcessPlaylistURL/ProcessPlaylistURLForCast/ProcessDynamicPlaylist(ForCast)
-// — see the DP1 interface doc for why those four need no separate call.
+// ProcessPlaylistURL/ProcessDynamicPlaylist — the non-cast variants; the
+// *ForCast variants narrow via resolveSeriesCastPlan instead and need no
+// separate call. See the DP1 interface doc.
 func (d *dp1) ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems int) Playlist {
 	return d.expandSeriesItems(ctx, playlist, maxItems)
 }

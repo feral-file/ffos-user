@@ -35,8 +35,8 @@ func TestCommandHandler_Process_DisplayPlaylist_ControllerCastWakesSleepingPlaye
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(gomock.Any(), playlistURL).
-		Return(sleepTestPlaylist(), nil).
+		ProcessPlaylistURLForCast(gomock.Any(), playlistURL, gomock.Any()).
+		Return(sleepTestPlaylist(), dp1.CastPlan{}, nil).
 		Times(1)
 	wake := ts.mockExecutor.EXPECT().
 		Execute(gomock.Any(), commands.Command{Type: commands.CMD_WAKE_NOW}).
@@ -85,8 +85,8 @@ func TestCommandHandler_Process_DisplayPlaylist_ControllerCastWhileAwakeDoesNotW
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(gomock.Any(), playlistURL).
-		Return(sleepTestPlaylist(), nil).
+		ProcessPlaylistURLForCast(gomock.Any(), playlistURL, gomock.Any()).
+		Return(sleepTestPlaylist(), dp1.CastPlan{}, nil).
 		Times(1)
 	ts.mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).

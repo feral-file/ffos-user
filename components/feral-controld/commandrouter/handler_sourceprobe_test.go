@@ -72,8 +72,8 @@ func TestCommandHandler_Process_DisplayPlaylist_AllSourcesDead_RejectsCast(t *te
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/dead"), dp1.CastPlan{}, nil).
 		Times(1)
 	// No CDP Send and no ForceRefresh expectations: the rejection must
 	// happen before anything reaches the player.
@@ -175,8 +175,8 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedButScopeSyncFails_Rejects(
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/dead"), dp1.CastPlan{}, nil).
 		Times(1)
 	// No CDP Send expectation: the sync failure must stop the cast.
 
@@ -228,8 +228,8 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedButScopeArmsNothing_Reject
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/dead"), dp1.CastPlan{}, nil).
 		Times(1)
 	// No CDP Send expectation: an empty armed scope must stop the cast.
 
@@ -259,8 +259,8 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedButNoReplayWired_Rejects(t
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/dead"), dp1.CastPlan{}, nil).
 		Times(1)
 
 	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
@@ -294,8 +294,8 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadNotCached_StillRejects(t 
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/dead"), dp1.CastPlan{}, nil).
 		Times(1)
 
 	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
@@ -391,8 +391,8 @@ func TestCommandHandler_Process_DisplayPlaylist_RejectionSkipsReplayResync(t *te
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/dead"), dp1.CastPlan{}, nil).
 		Times(1)
 
 	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
