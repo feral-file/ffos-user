@@ -3220,16 +3220,21 @@ func TestRefresher_StaticInlineFallbackKeepsDisplayedReplayScope(t *testing.T) {
 		MinTimes(1)
 	// The assertion: the representative the player actually holds. A strict
 	// mock fails on the editions, which is what this path used to pass.
+	synced := make(chan struct{})
+	var syncedOnce sync.Once
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/representative.mp4"}).
-		Return(1, nil).
+		DoAndReturn(func(context.Context, []string) (int, error) {
+			syncedOnce.Do(func() { close(synced) })
+			return 1, nil
+		}).
 		MinTimes(1)
 	// And nothing is re-sent, which is why the scope had to come from the
 	// player in the first place (gomock fails the test on an unexpected Send).
 
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
-	time.Sleep(100 * time.Millisecond)
+	waitForReplaySync(t, synced)
 	r.Stop()
 }
 
@@ -3290,15 +3295,35 @@ func TestRefresher_ResyncScopeToCurrentDisplayKeepsDisplayedReplayScope(t *testi
 		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *displayed, 0).
 		Return(expanded).
 		MinTimes(1)
+	synced := make(chan struct{})
+	var syncedOnce sync.Once
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/representative.mp4"}).
-		Return(1, nil).
+		DoAndReturn(func(context.Context, []string) (int, error) {
+			syncedOnce.Do(func() { close(synced) })
+			return 1, nil
+		}).
 		MinTimes(1)
 
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
-	time.Sleep(100 * time.Millisecond)
+	waitForReplaySync(t, synced)
 	r.Stop()
+}
+
+// waitForReplaySync blocks until the refresher's first pass has re-pointed
+// offline replay (SyncPlaylist is the last call that pass makes, after the
+// defensive ExpandSeriesItems), or fails after a generous bound. It replaces a
+// fixed 100 ms sleep before Stop: on a loaded CI runner under -race the first
+// pass had not reached SyncPlaylist yet, Stop canceled it, and the MinTimes(1)
+// expectations failed as "missing call(s)" with nothing actually wrong.
+func waitForReplaySync(t *testing.T, synced <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-synced:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresher never re-pointed offline replay to the displayed playlist")
+	}
 }
 
 func (*fakePlaylistScheduler) SetHintSource(playlistschedule.HintSource) {}
