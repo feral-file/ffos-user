@@ -1637,19 +1637,28 @@ func (r *refresher) narrowedPlaylistFromURL(url string, currentlyDisplayed func(
 // so every tick for a still-random, distinct-editions group checks it
 // FIRST, before any remembered pick: called at most once per narrowStable
 // call (memoized below — a plan with several unseeded random groups costs
-// at most one call, however many groups ask for it), it returns whatever
-// the player itself already reports as on screen; when one of THIS group's
-// editions is among those items, that is adopted as the pick — seeded if
-// none was remembered yet, or OVERWRITING a remembered pick that disagrees
-// with it. The overwrite is what lets a newer accepted cast's own choice
-// (a setSeriesPlayback recast of the same URL that rolls a different
-// edition, or a setting recast back into random) replace this memory
-// instead of being silently reverted by the next periodic resync
-// (feralfile-bot F6, 2026-11-12): on an ORDINARY tick the player is still
-// showing exactly what was last remembered, so this only reconfirms the
-// existing pick, never changes it. nil (no player status in hand) or a
-// non-match falls through to the remembered pick, then to a fresh roll,
-// exactly as before this check existed.
+// at most one call, however many groups ask for it). The check is by
+// OCCURRENCE, not by scanning the whole displayed list for any matching
+// Source: displayed is itself a flatten of this same plan (live or stale),
+// so this group's own slot is whatever position items has already reached
+// in THIS loop — editionAtOccurrence reads exactly that index. A whole-list
+// scan used to let an unrelated item elsewhere in the playlist that happens
+// to share a Source with one of this group's editions be mistaken for the
+// group's own live pick — e.g. an explicit standalone item ahead of a
+// multi_unique series also containing that same edition (feralfile-bot F7,
+// 2026-11-12). When the item at that occurrence is among THIS group's
+// editions, that is adopted as the pick — seeded if none was remembered
+// yet, or OVERWRITING a remembered pick that disagrees with it. The
+// overwrite is what lets a newer accepted cast's own choice (a
+// setSeriesPlayback recast of the same URL that rolls a different edition,
+// or a setting recast back into random) replace this memory instead of
+// being silently reverted by the next periodic resync (feralfile-bot F6,
+// 2026-11-12): on an ORDINARY tick the player is still showing exactly
+// what was last remembered, so this only reconfirms the existing pick,
+// never changes it. An out-of-range occurrence (no player status in hand,
+// or a shorter displayed list) or a non-match falls through to the
+// remembered pick, then to a fresh roll, exactly as before this check
+// existed.
 func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMode, currentlyDisplayed func() []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
 	r.randomSeriesMu.Lock()
 	defer r.randomSeriesMu.Unlock()
@@ -1713,7 +1722,15 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 		// still showing exactly what was last remembered, so this only
 		// reconfirms the existing pick (or leaves a not-yet-seeded one
 		// matching) rather than changing anything.
-		if seeded, ok := editionAlreadyDisplayed(fetchDisplayed(), group.Editions); ok {
+		//
+		// occurrence is this group's own slot in the flattened list: items
+		// already holds every earlier segment's own contribution, so its
+		// current length is exactly where this group's narrowed output
+		// will land too — matching displayed only at that one position,
+		// never anywhere else a coincidental Source match could sit
+		// (feralfile-bot F7, 2026-11-12).
+		occurrence := len(items)
+		if seeded, ok := editionAtOccurrence(fetchDisplayed(), occurrence, group.Editions); ok {
 			// Written unconditionally, even when the source already
 			// matched what was remembered: a conditional write here (only
 			// on a source change) left mode/artworkModel stale on every
@@ -1817,19 +1834,29 @@ func (r *refresher) currentlyDisplayedItems(ps *status.PlayerStatus) func() []dp
 	}
 }
 
-// editionAlreadyDisplayed reports whether any item in displayed has the
-// same Source as one of editions — via editionBySource — and returns that
+// editionAtOccurrence reports whether the item at position index in
+// displayed — this group's own slot in the flattened list, not any
+// position — has the same Source as one of editions, and returns that
 // edition (not the displayed copy, whose other fields may be a player-side
 // projection) so narrowStable can seed a fresh group's pick from what a
-// live cast already put on screen instead of rolling a new one. displayed
-// may be nil or empty.
-func editionAlreadyDisplayed(displayed, editions []dp1playlist.PlaylistItem) (dp1playlist.PlaylistItem, bool) {
-	for _, shown := range displayed {
-		if edition, found := editionBySource(editions, shown.Source); found {
-			return edition, true
-		}
+// live cast already put on screen instead of rolling a new one.
+//
+// Matching by occurrence rather than scanning displayed for any Source
+// match anywhere is deliberate: a playlist can carry the same edition's
+// Source more than once — an explicit standalone item alongside a series
+// that also contains that edition, or two groups sharing one — and a
+// whole-list scan would mistake that OTHER item's position for this
+// group's own live pick (feralfile-bot F7, 2026-11-12: an explicit item
+// ahead of a multi_unique series containing the same edition was read as
+// the group's pick, discarding the live random choice actually shown at
+// the group's own, later position). index out of range, or no match at
+// that position, returns false — exactly like "nothing displayed for this
+// occurrence."
+func editionAtOccurrence(displayed []dp1playlist.PlaylistItem, index int, editions []dp1playlist.PlaylistItem) (dp1playlist.PlaylistItem, bool) {
+	if index < 0 || index >= len(displayed) {
+		return dp1playlist.PlaylistItem{}, false
 	}
-	return dp1playlist.PlaylistItem{}, false
+	return editionBySource(editions, displayed[index].Source)
 }
 
 // loadCachedPlaylistForURL mirrors commandrouter's handler.loadCachedPlaylistForURL

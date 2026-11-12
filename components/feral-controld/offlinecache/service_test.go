@@ -843,6 +843,11 @@ func TestService_DownloadPlaylist_SavePlaylistFailureStartsNoWork(t *testing.T) 
 	require.NoError(t, err)
 
 	mockClassifier.EXPECT().Classify(gomock.Any(), "https://example.com/a.html").Return(offlinecache.ClassSoftware, nil).Times(1)
+	// savePlaylistAndURLIndex now invalidates any stale sidecar BEFORE
+	// writing the new body (feralfile-bot F2, round 3 on this fix,
+	// 2026-11-12) — this call's own nil segments is that invalidation,
+	// unrelated to the nil segments DownloadPlaylist was given below.
+	mockStore.EXPECT().SavePlaylistSeriesSegments("playlist-1", json.RawMessage(raw), nil).Return(nil).Times(1)
 	mockStore.EXPECT().SavePlaylist("playlist-1", json.RawMessage(raw)).Return(assertError("disk full")).Times(1)
 	// Deliberately no SavePlaylistURLIndex or Capture expectation: a
 	// SavePlaylist failure must short-circuit before either the URL

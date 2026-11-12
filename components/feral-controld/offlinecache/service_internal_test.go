@@ -3,6 +3,7 @@ package offlinecache
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -89,6 +90,63 @@ func (f *transientFailReadOS) ReadFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("simulated transient read error for %s", path)
 	}
 	return f.OS.ReadFile(path)
+}
+
+// transientFailRemoveOS delegates to a real OS wrapper but fails Remove
+// for one specific path — used to simulate a sidecar-delete failure
+// without touching anything else writeFileAtomic's own cleanup removes
+// (its temp files live under a different, uniquely-named path; see
+// writeFileAtomic's doc).
+type transientFailRemoveOS struct {
+	wrapper.OS
+	failPath string
+}
+
+func (f *transientFailRemoveOS) Remove(path string) error {
+	if path == f.failPath {
+		return fmt.Errorf("simulated transient remove error for %s", path)
+	}
+	return f.OS.Remove(path)
+}
+
+// TestService_SavePlaylistAndURLIndex_AbortsWhenStaleSidecarCannotBeInvalidated
+// pins the fix for feralfile-bot F2 (round 3 on this fix, 2026-11-12): a
+// re-resolve of the IDENTICAL raw playlist bytes — the one case
+// playlistBodyDigest alone cannot tell apart from the earlier resolve the
+// existing sidecar was saved for — must not let that stale sidecar survive
+// next to a freshly-saved body just because invalidating it failed. The
+// whole save must abort instead, leaving the prior body+sidecar pair
+// exactly as they were rather than quietly accepting a mismatch.
+func TestService_SavePlaylistAndURLIndex_AbortsWhenStaleSidecarCannotBeInvalidated(t *testing.T) {
+	root := t.TempDir()
+	sidecarPath := filepath.Join(root, "playlists", "series-segments", "playlist-1.json")
+	failingOS := &transientFailRemoveOS{OS: wrapper.NewOS(), failPath: sidecarPath}
+	store := NewStore(root, failingOS, wrapper.NewJSON(), zaptest.NewLogger(t))
+
+	raw := json.RawMessage(`{"id":"playlist-1","items":[]}`)
+	require.NoError(t, store.SavePlaylist("playlist-1", raw))
+	staleSegments := []SeriesSegment{{Item: &dp1playlist.PlaylistItem{ID: "old"}}}
+	require.NoError(t, store.SavePlaylistSeriesSegments("playlist-1", raw, staleSegments))
+
+	svc := &service{store: store, logger: zaptest.NewLogger(t)}
+
+	// The SAME raw bytes resolve again, but this time to no series group at
+	// all — exactly the shape a later LoadPlaylistSeriesSegments must never
+	// confuse with the earlier resolve's now-stale segments, since both
+	// share one digest.
+	saved, err := svc.savePlaylistAndURLIndex("playlist-1", raw, "", 0, nil)
+	require.Error(t, err, "a failed invalidation must abort the save, not silently continue")
+	assert.False(t, saved)
+
+	// Nothing changed: the prior body and its (now only-apparently-stale,
+	// but still internally consistent) sidecar are both exactly as they
+	// were before this call — never a body that landed next to segments
+	// from a resolve that no longer happened.
+	loadedSegments, loadErr := store.LoadPlaylistSeriesSegments("playlist-1", raw)
+	require.NoError(t, loadErr)
+	require.Len(t, loadedSegments, 1)
+	require.NotNil(t, loadedSegments[0].Item)
+	assert.Equal(t, "old", loadedSegments[0].Item.ID)
 }
 
 // TestService_EvictDownTo_StopsAfterOneVictimWhenGCFails pins the

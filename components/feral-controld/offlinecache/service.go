@@ -2062,14 +2062,35 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 // mutex's doc. saved=true means the record was persisted.
 //
 // segments is this exact resolve's series-group identity (feral-file/
-// ffos-user#455, #453), written right beside the sourceURL index under the
-// same best-effort treatment: the playlist/sourceURL index above are
-// already safely saved regardless of whether this write succeeds, and a
-// failure here only degrades the narrowing a later offline fallback/resync
-// can do, never the download itself. Called unconditionally (even when
-// segments is empty) so a playlist ID a publisher reuses for new,
-// non-series content clears any PRIOR save's stale sidecar — see
-// Store.SavePlaylistSeriesSegments' doc.
+// ffos-user#455, #453), written right beside the sourceURL index. Any
+// EXISTING sidecar for playlistID is invalidated FIRST, before the new
+// body lands, and that invalidation's own failure aborts this whole save
+// (see below) — everything after it stays best-effort exactly as before:
+// the playlist/sourceURL index are already safely saved regardless of
+// whether the new sidecar write succeeds, and a failure writing it only
+// degrades the narrowing a later offline fallback/resync can do, never the
+// download itself.
+//
+// The invalidate-first order matters: playlistBodyDigest alone cannot
+// tell two different resolves of the IDENTICAL raw bytes apart — a
+// re-download of an unchanged document whose catalog answer (editions,
+// artworkModel, document mode) has since changed, or now resolves to no
+// series at all. Saving the new body first, the way this used to work,
+// left a stale sidecar from the PRIOR resolve still digest-matching the
+// new body whenever its write or delete then failed, so a later load
+// silently narrowed by segments describing a resolve that no longer
+// happened (feralfile-bot F2, round 3 on this fix, 2026-11-12 — distinct
+// from the EARLIER F2 the BodyDigest field itself was added for: that one
+// was a same-ID write/read race or a body that genuinely changed; this
+// one is the SAME raw bytes resolving differently a second time, which a
+// body-bytes digest alone cannot tell apart no matter how it is checked).
+// Invalidating first closes that
+// window: on success there is at most a brief gap with no sidecar at all,
+// which every caller already reads as "nothing to narrow by" (see
+// Store.SavePlaylistSeriesSegments' doc) — safe regardless of what
+// happens next. Called unconditionally (even when segments is empty) so a
+// playlist ID a publisher reuses for new, non-series content also clears
+// any PRIOR save's sidecar this same way.
 func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64, segments []SeriesSegment) (bool, error) {
 	s.playlistRecordMu.Lock()
 	defer s.playlistRecordMu.Unlock()
@@ -2077,12 +2098,22 @@ func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.Ra
 	if s.currentPlaylistEpoch(playlistID) != sampledEpoch {
 		return false, nil
 	}
+	// nil, not segments: this call's only job is to remove whatever sidecar
+	// playlistID currently holds, regardless of what — if anything — this
+	// save is about to write next. Its failure aborts the save entirely
+	// (below), rather than risk the new body landing next to that stale
+	// sidecar.
+	if err := s.store.SavePlaylistSeriesSegments(playlistID, playlistRaw, nil); err != nil {
+		return false, fmt.Errorf("offline cache: invalidate stale playlist series segments %s: %w", playlistID, err)
+	}
 	if err := s.store.SavePlaylist(playlistID, playlistRaw); err != nil {
 		return false, fmt.Errorf("offline cache: save playlist %s: %w", playlistID, err)
 	}
-	if err := s.store.SavePlaylistSeriesSegments(playlistID, playlistRaw, segments); err != nil {
-		s.logger.Warn("offline cache: failed to save playlist series segments",
-			zap.String("playlist_id", playlistID), zap.Error(err))
+	if len(segments) > 0 {
+		if err := s.store.SavePlaylistSeriesSegments(playlistID, playlistRaw, segments); err != nil {
+			s.logger.Warn("offline cache: failed to save playlist series segments",
+				zap.String("playlist_id", playlistID), zap.Error(err))
+		}
 	}
 	if sourceURL != "" {
 		// Best-effort: the playlist itself is already safely saved above

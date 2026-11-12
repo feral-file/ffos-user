@@ -323,3 +323,70 @@ func TestNarrowStable_SeedSourceCalledAtMostOnce(t *testing.T) {
 	require.Len(t, out, 2)
 	assert.Equal(t, 1, calls, "currentlyDisplayed must be called at most once per narrowStable call")
 }
+
+// TestNarrowStable_MatchesPickToItsOwnOccurrenceNotAnEarlierExplicitItem pins
+// feralfile-bot's F7 (2026-11-12): a playlist explicitly lists edition A
+// ahead of a multi_unique series that also contains A (alongside B). The
+// live random cast picked B for the series' own slot, so displayed is
+// [A, B] — A from the explicit item's own position, B from the group's.
+// Matching by whole-list Source scan mistook the explicit A for the
+// group's pick and overwrote the remembered B with it; matching by
+// occurrence must read displayed[1] (the group's own slot) and keep B.
+func TestNarrowStable_MatchesPickToItsOwnOccurrenceNotAnEarlierExplicitItem(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+
+	explicitA := dp1playlist.PlaylistItem{ID: "explicit-a", Source: "https://cdn.example.com/a.mp4"}
+	plan := dp1.CastPlan{Segments: append(
+		[]dp1.CastSegment{{Item: &explicitA}},
+		randomGroupPlan().Segments...,
+	)}
+
+	editionA := dp1playlist.PlaylistItem{ID: "explicit-a", Source: "https://cdn.example.com/a.mp4"}
+	editionB := dp1playlist.PlaylistItem{ID: "b", Source: "https://cdn.example.com/b.mp4"}
+	currentlyDisplayed := func() []dp1playlist.PlaylistItem {
+		return []dp1playlist.PlaylistItem{editionA, editionB}
+	}
+
+	out := r.narrowStable(plan, &mode, currentlyDisplayed)
+	require.Len(t, out, 2)
+	assert.Equal(t, explicitA.Source, out[0].Source, "the explicit item passes through unchanged")
+	assert.Equal(t, editionB.Source, out[1].Source,
+		"the group's own occurrence shows B, so the group's pick must be B — not the explicit item's coincidentally-shared Source")
+
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
+	assert.Equal(t, editionB.Source, r.randomSeriesPicks[key].source,
+		"the remembered pick must be the group's own live choice, not the unrelated earlier item")
+}
+
+// TestNarrowStable_MatchesPickToItsOwnOccurrenceNotALaterExplicitItem is
+// F7's mirror sibling: the coincidentally-shared-Source item sits AFTER the
+// series instead of before it. The group's own occurrence (index 0) must
+// still be read from the group's own slot, not from the later explicit
+// item that happens to share a Source with one of its editions.
+func TestNarrowStable_MatchesPickToItsOwnOccurrenceNotALaterExplicitItem(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+
+	explicitA := dp1playlist.PlaylistItem{ID: "explicit-a", Source: "https://cdn.example.com/a.mp4"}
+	plan := dp1.CastPlan{Segments: append(
+		randomGroupPlan().Segments,
+		dp1.CastSegment{Item: &explicitA},
+	)}
+
+	editionB := dp1playlist.PlaylistItem{ID: "b", Source: "https://cdn.example.com/b.mp4"}
+	explicitAShown := dp1playlist.PlaylistItem{ID: "explicit-a", Source: "https://cdn.example.com/a.mp4"}
+	currentlyDisplayed := func() []dp1playlist.PlaylistItem {
+		return []dp1playlist.PlaylistItem{editionB, explicitAShown}
+	}
+
+	out := r.narrowStable(plan, &mode, currentlyDisplayed)
+	require.Len(t, out, 2)
+	assert.Equal(t, editionB.Source, out[0].Source,
+		"the group's own occurrence (index 0) shows B, so the group's pick must be B")
+	assert.Equal(t, explicitA.Source, out[1].Source, "the explicit item passes through unchanged")
+
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
+	assert.Equal(t, editionB.Source, r.randomSeriesPicks[key].source,
+		"the remembered pick must be the group's own live choice, not the unrelated later item")
+}
