@@ -2063,34 +2063,43 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 //
 // segments is this exact resolve's series-group identity (feral-file/
 // ffos-user#455, #453), written right beside the sourceURL index. Any
-// EXISTING sidecar for playlistID is invalidated FIRST, before the new
-// body lands, and that invalidation's own failure aborts this whole save
-// (see below) — everything after it stays best-effort exactly as before:
-// the playlist/sourceURL index are already safely saved regardless of
-// whether the new sidecar write succeeds, and a failure writing it only
-// degrades the narrowing a later offline fallback/resync can do, never the
-// download itself.
+// EXISTING sidecar for playlistID is invalidated right after the new body
+// is durably saved, BEFORE any new sidecar for it is written, and that
+// invalidation's own failure aborts this whole save (see below) —
+// everything else stays best-effort exactly as before: the playlist/
+// sourceURL index are already safely saved regardless of whether the new
+// sidecar write succeeds, and a failure writing it only degrades the
+// narrowing a later offline fallback/resync can do, never the download
+// itself.
 //
-// The invalidate-first order matters: playlistBodyDigest alone cannot
-// tell two different resolves of the IDENTICAL raw bytes apart — a
-// re-download of an unchanged document whose catalog answer (editions,
-// artworkModel, document mode) has since changed, or now resolves to no
-// series at all. Saving the new body first, the way this used to work,
-// left a stale sidecar from the PRIOR resolve still digest-matching the
-// new body whenever its write or delete then failed, so a later load
-// silently narrowed by segments describing a resolve that no longer
-// happened (feralfile-bot F2, round 3 on this fix, 2026-11-12 — distinct
-// from the EARLIER F2 the BodyDigest field itself was added for: that one
-// was a same-ID write/read race or a body that genuinely changed; this
-// one is the SAME raw bytes resolving differently a second time, which a
-// body-bytes digest alone cannot tell apart no matter how it is checked).
-// Invalidating first closes that
-// window: on success there is at most a brief gap with no sidecar at all,
-// which every caller already reads as "nothing to narrow by" (see
-// Store.SavePlaylistSeriesSegments' doc) — safe regardless of what
-// happens next. Called unconditionally (even when segments is empty) so a
-// playlist ID a publisher reuses for new, non-series content also clears
-// any PRIOR save's sidecar this same way.
+// The invalidate-before-new-segments order matters: playlistBodyDigest
+// alone cannot tell two different resolves of the IDENTICAL raw bytes
+// apart — a re-download of an unchanged document whose catalog answer
+// (editions, artworkModel, document mode) has since changed, or now
+// resolves to no series at all. Writing the new segments straight over
+// the old ones, the way this used to work, left a stale sidecar from the
+// PRIOR resolve still digest-matching the new body whenever that write or
+// an empty-segments delete then failed, so a later load silently
+// narrowed by segments describing a resolve that no longer happened
+// (feralfile-bot F2, round 3 on this fix, 2026-11-12 — distinct from the
+// EARLIER F2 the BodyDigest field itself was added for: that one was a
+// same-ID write/read race or a body that genuinely changed; this one is
+// the SAME raw bytes resolving differently a second time, which a body-
+// bytes digest alone cannot tell apart no matter how it is checked).
+// Invalidating right after the body save, rather than before it, matters
+// too: SavePlaylist's own writeFileAtomic either fully replaces the body
+// or, on any failure, leaves the file exactly as it was (temp file +
+// rename, never an in-place write) — so invalidating the sidecar BEFORE
+// attempting the body save would destroy a still-correctly-paired sidecar
+// for the OLD, untouched body on nothing more than a transient body-write
+// failure (run-reviewer, round 3 on this fix, 2026-11-12: the first
+// attempt at this ordering did exactly that). Invalidating only once the
+// new body has actually landed means there is at most a brief gap with no
+// sidecar at all, which every caller already reads as "nothing to narrow
+// by" (see Store.SavePlaylistSeriesSegments' doc) — safe regardless of
+// what happens next. Called unconditionally (even when segments is empty)
+// so a playlist ID a publisher reuses for new, non-series content also
+// clears any PRIOR save's sidecar this same way.
 func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64, segments []SeriesSegment) (bool, error) {
 	s.playlistRecordMu.Lock()
 	defer s.playlistRecordMu.Unlock()
@@ -2098,16 +2107,18 @@ func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.Ra
 	if s.currentPlaylistEpoch(playlistID) != sampledEpoch {
 		return false, nil
 	}
-	// nil, not segments: this call's only job is to remove whatever sidecar
-	// playlistID currently holds, regardless of what — if anything — this
-	// save is about to write next. Its failure aborts the save entirely
-	// (below), rather than risk the new body landing next to that stale
-	// sidecar.
-	if err := s.store.SavePlaylistSeriesSegments(playlistID, playlistRaw, nil); err != nil {
-		return false, fmt.Errorf("offline cache: invalidate stale playlist series segments %s: %w", playlistID, err)
-	}
 	if err := s.store.SavePlaylist(playlistID, playlistRaw); err != nil {
 		return false, fmt.Errorf("offline cache: save playlist %s: %w", playlistID, err)
+	}
+	// nil, not segments: this call's only job is to remove whatever
+	// sidecar playlistID currently holds, regardless of what — if
+	// anything — this save is about to write next. Its failure aborts the
+	// save entirely (the new body is already durably saved above, but the
+	// caller sees an error and the sidecar is left exactly as it was —
+	// never a new body paired with an un-invalidated, possibly stale
+	// sidecar from a prior resolve of the same bytes).
+	if err := s.store.SavePlaylistSeriesSegments(playlistID, playlistRaw, nil); err != nil {
+		return false, fmt.Errorf("offline cache: invalidate stale playlist series segments %s: %w", playlistID, err)
 	}
 	if len(segments) > 0 {
 		if err := s.store.SavePlaylistSeriesSegments(playlistID, playlistRaw, segments); err != nil {

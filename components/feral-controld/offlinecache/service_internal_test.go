@@ -149,6 +149,75 @@ func TestService_SavePlaylistAndURLIndex_AbortsWhenStaleSidecarCannotBeInvalidat
 	assert.Equal(t, "old", loadedSegments[0].Item.ID)
 }
 
+// transientFailRenameOS delegates to a real OS wrapper but fails Rename
+// for one specific destination path, starting from its failFrom'th call
+// against that path (1-indexed) — used to simulate SavePlaylist's
+// writeFileAtomic failing the way a real disk-full/permission error
+// would: the temp file is written, then the final Rename fails, leaving
+// the original file at that path completely untouched (see
+// writeFileAtomic's doc). Counting lets a test seed an initial, SUCCESSFUL
+// save before the simulated failure hits a later one to the same path.
+type transientFailRenameOS struct {
+	wrapper.OS
+	failPath string
+	failFrom int
+	calls    int
+}
+
+func (f *transientFailRenameOS) Rename(oldpath, newpath string) error {
+	if newpath == f.failPath {
+		f.calls++
+		if f.calls >= f.failFrom {
+			return fmt.Errorf("simulated transient rename error for %s", newpath)
+		}
+	}
+	return f.OS.Rename(oldpath, newpath)
+}
+
+// TestService_SavePlaylistAndURLIndex_KeepsAValidSidecarWhenSavePlaylistFails
+// pins run-reviewer's own finding on this branch (round 3 on this fix,
+// 2026-11-12): invalidating the existing sidecar BEFORE attempting the new
+// body write destroyed a still-correctly-paired sidecar for the OLD,
+// untouched body whenever that body write then failed — a regression the
+// fix for feralfile-bot F2 introduced while closing a different gap.
+// SavePlaylist's own writeFileAtomic either fully replaces the body or
+// leaves it exactly as it was on any failure, so a transient body-write
+// error must leave the sidecar — which is still valid for that unchanged
+// body — exactly as it was too, not deleted.
+func TestService_SavePlaylistAndURLIndex_KeepsAValidSidecarWhenSavePlaylistFails(t *testing.T) {
+	root := t.TempDir()
+	playlistPath := filepath.Join(root, "playlists", "playlist-1.json")
+	failingOS := &transientFailRenameOS{OS: wrapper.NewOS(), failPath: playlistPath, failFrom: 2}
+	store := NewStore(root, failingOS, wrapper.NewJSON(), zaptest.NewLogger(t))
+
+	oldRaw := json.RawMessage(`{"id":"playlist-1","items":[]}`)
+	require.NoError(t, store.SavePlaylist("playlist-1", oldRaw))
+	validSegments := []SeriesSegment{{Item: &dp1playlist.PlaylistItem{ID: "still-valid"}}}
+	require.NoError(t, store.SavePlaylistSeriesSegments("playlist-1", oldRaw, validSegments))
+
+	svc := &service{store: store, logger: zaptest.NewLogger(t)}
+
+	// A new resolve with different bytes is attempted, but the body write
+	// itself fails transiently — the old body (and its still-matching
+	// sidecar) must be left exactly as they were, never left with the old
+	// body but no sidecar.
+	newRaw := json.RawMessage(`{"id":"playlist-1","items":[{"id":"x"}]}`)
+	saved, err := svc.savePlaylistAndURLIndex("playlist-1", newRaw, "", 0, nil)
+	require.Error(t, err, "a failed body save must still be reported as an error")
+	assert.False(t, saved)
+
+	onDisk, loadErr := store.LoadPlaylist("playlist-1")
+	require.NoError(t, loadErr)
+	assert.JSONEq(t, string(oldRaw), string(onDisk), "the old body must be untouched by a failed save")
+
+	loadedSegments, segErr := store.LoadPlaylistSeriesSegments("playlist-1", oldRaw)
+	require.NoError(t, segErr, "the sidecar for the unchanged old body must still be there")
+	require.Len(t, loadedSegments, 1)
+	require.NotNil(t, loadedSegments[0].Item)
+	assert.Equal(t, "still-valid", loadedSegments[0].Item.ID,
+		"a transient SavePlaylist failure must not delete a sidecar that is still correctly paired with the body on disk")
+}
+
 // TestService_EvictDownTo_StopsAfterOneVictimWhenGCFails pins the
 // eviction loop's behavior at the GC seam (reviewer finding on the
 // GC-abort change): when a transiently unreadable record makes gc()
