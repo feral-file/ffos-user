@@ -172,6 +172,23 @@ type refresher struct {
 	// own nil-safety when no store was wired (a build before this seam, or
 	// a test).
 	seriesPlaybackSource func() *dp1.SeriesPlaybackMode
+
+	// randomSeriesMu guards randomSeriesPicks — see narrowStable's doc. Both
+	// fields are touched only from this package's own serialized background
+	// goroutine (background()'s select loop runs processPlayingPlaylist one
+	// pass at a time) today, but a dedicated lock keeps that invariant from
+	// being load-bearing if a caller outside that loop is ever added
+	// (feralfile-bot F3, 2026-11-12).
+	randomSeriesMu    sync.Mutex
+	randomSeriesPicks map[dp1.SeriesGroupKey]randomSeriesPick
+}
+
+// randomSeriesPick is one series group's last SeriesPlaybackRandom
+// selection, remembered so narrowStable does not re-roll it on every
+// periodic resync — see that method's doc.
+type randomSeriesPick struct {
+	mode dp1.SeriesPlaybackMode
+	item dp1playlist.PlaylistItem
 }
 
 // SetSeriesPlaybackSource injects the device-level series-playback getter
@@ -1550,8 +1567,78 @@ func (r *refresher) narrowedPlaylistFromURL(url string) (*dp1.Playlist, error) {
 	deviceMode := r.currentSeriesPlaybackMode()
 	plan := r.dp1.ResolveSeriesCastPlan(r.context, *playlist, rawPlaylist, deviceMode, 0)
 	narrowed := *playlist
-	narrowed.Items = plan.Narrow(deviceMode)
+	narrowed.Items = r.narrowStable(plan, deviceMode)
 	return &narrowed, nil
+}
+
+// narrowStable is dp1.CastPlan.Narrow with one difference: a group currently
+// resolving to dp1.SeriesPlaybackRandom reuses its last pick for that
+// dp1.SeriesGroupKey (randomSeriesPicks) instead of asking
+// dp1.NarrowEditions to roll a new one, as long as (a) the mode resolved for
+// it is still random and (b) the picked item's source is still present
+// among the group's current editions. Either condition failing forces a
+// fresh pick: a mode change ("setting change") or the catalog's answer no
+// longer carrying the previously shown edition ("that edition disappears")
+// — the two escape hatches feralfile-bot's F3 asked for, 2026-11-12. A
+// non-random group clears any stale memory for its key, so a later mode
+// change back to random starts from a real roll rather than a stale
+// leftover from before the change.
+//
+// Scoped to this package's own live-reachable resync and its cached-sidecar
+// fallback (both of narrowedPlaylistFromURL's and loadCachedPlaylistForURL's
+// callers): a live setSeriesPlayback cast or the initial display already
+// makes its own fresh pick through commandrouter's separate
+// dp1.CastPlan.Narrow call, which this memory does not see or influence —
+// the two packages deliberately do not share state (AGENTS.md's service-
+// boundary guidance) — so the first periodic resync after such a cast still
+// seeds this memory with one fresh pick before holding it stable from then
+// on; every PLAYLIST_REFRESH_INTERVAL tick after that no longer changes
+// what the player shows with no cast or setting change involved.
+func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMode) []dp1playlist.PlaylistItem {
+	r.randomSeriesMu.Lock()
+	defer r.randomSeriesMu.Unlock()
+	if r.randomSeriesPicks == nil {
+		r.randomSeriesPicks = make(map[dp1.SeriesGroupKey]randomSeriesPick)
+	}
+
+	items := make([]dp1playlist.PlaylistItem, 0, len(plan.Segments))
+	for _, seg := range plan.Segments {
+		if seg.Item != nil {
+			items = append(items, *seg.Item)
+			continue
+		}
+		group := seg.Group
+		mode := dp1.ResolveSeriesPlaybackMode(group.DocumentMode, device)
+		if mode != dp1.SeriesPlaybackRandom {
+			delete(r.randomSeriesPicks, group.Key)
+			items = append(items, dp1.NarrowEditions(mode, group.ArtworkModel, group.Representative, group.Editions)...)
+			continue
+		}
+		if pick, ok := r.randomSeriesPicks[group.Key]; ok && pick.mode == mode && seriesEditionsHaveSource(group.Editions, pick.item.Source) {
+			items = append(items, pick.item)
+			continue
+		}
+		narrowed := dp1.NarrowEditions(mode, group.ArtworkModel, group.Representative, group.Editions)
+		if len(narrowed) == 1 {
+			r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, item: narrowed[0]}
+		}
+		items = append(items, narrowed...)
+	}
+	return items
+}
+
+// seriesEditionsHaveSource reports whether editions carries an item whose
+// Source exactly matches source — the same no-normalization comparison
+// commandrouter's findPlaylistItemBySource uses — so narrowStable can tell
+// a remembered random pick is still playable from the group's current
+// editions rather than one the catalog has since dropped.
+func seriesEditionsHaveSource(editions []dp1playlist.PlaylistItem, source string) bool {
+	for _, edition := range editions {
+		if edition.Source == source {
+			return true
+		}
+	}
+	return false
 }
 
 // loadCachedPlaylistForURL mirrors commandrouter's handler.loadCachedPlaylistForURL
@@ -1588,7 +1675,8 @@ func (r *refresher) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) 
 	}
 	if len(segments) > 0 {
 		plan := dp1.CastPlan{Segments: fromOfflineCacheSegments(segments)}
-		playlist.Items = plan.Narrow(r.currentSeriesPlaybackMode())
+		deviceMode := r.currentSeriesPlaybackMode()
+		playlist.Items = r.narrowStable(plan, deviceMode)
 	}
 	return playlist, nil
 }

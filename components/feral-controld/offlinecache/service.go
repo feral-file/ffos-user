@@ -2080,7 +2080,7 @@ func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.Ra
 	if err := s.store.SavePlaylist(playlistID, playlistRaw); err != nil {
 		return false, fmt.Errorf("offline cache: save playlist %s: %w", playlistID, err)
 	}
-	if err := s.store.SavePlaylistSeriesSegments(playlistID, segments); err != nil {
+	if err := s.store.SavePlaylistSeriesSegments(playlistID, playlistRaw, segments); err != nil {
 		s.logger.Warn("offline cache: failed to save playlist series segments",
 			zap.String("playlist_id", playlistID), zap.Error(err))
 	}
@@ -3115,7 +3115,7 @@ func (s *service) CachedPlaylistForURL(sourceURL string) (json.RawMessage, []Ser
 	// Store.LoadPlaylistSeriesSegments' doc) and must not fail this call:
 	// the caller already has everything it needs from raw alone and simply
 	// falls back to today's unnarrowed flat Items.
-	segments, err := s.store.LoadPlaylistSeriesSegments(playlistID)
+	segments, err := s.store.LoadPlaylistSeriesSegments(playlistID, raw)
 	if err != nil && !errors.Is(err, ErrPlaylistNotFound) {
 		s.logger.Warn("offline cache: failed to load playlist series segments",
 			zap.String("playlist_id", playlistID), zap.Error(err))

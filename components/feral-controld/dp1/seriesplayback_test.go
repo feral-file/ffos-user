@@ -369,6 +369,14 @@ func TestResolveSeriesCastPlan_CatalogUnreachableKeepsTheRepresentative(t *testi
 // its representative. Downloading only the representative for a multi
 // series would under-cache it relative to today's expandSeriesItems
 // behavior (docs/api-design.md's accepted #446 scope).
+//
+// It must ALSO keep the representative itself alongside the catalog's
+// editions: the catalog's /editions answer only guarantees each edition's
+// OWN source, never that the series item's own declared source (seriesItem's
+// Source, distinct from editionItem's here) is among them — and Narrow's
+// default case selects the representative verbatim for first/single/multi,
+// so a download that only ever queued the editions left that exact
+// selection un-cached (feralfile-bot F1, 2026-11-12).
 func TestCastPlan_FullKeepsEveryEditionForAMultiSeriesUnlikeNarrow(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -382,7 +390,9 @@ func TestCastPlan_FullKeepsEveryEditionForAMultiSeriesUnlikeNarrow(t *testing.T)
 	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
 
 	require.Len(t, plan.Narrow(nil), 1, "sanity: Narrow still collapses a multi series to its representative")
-	assert.Len(t, plan.Full(), 3, "Full must keep every edition regardless of artworkModel")
+	full := plan.Full()
+	assert.Len(t, full, 4, "Full must keep every edition regardless of artworkModel, plus the representative itself")
+	assert.Equal(t, "item-series", full[3].ID, "the representative, whose own source the catalog's editions never carried")
 }
 
 func TestCastPlan_FullKeepsEveryEditionForASingleSeriesUnlikeNarrow(t *testing.T) {
@@ -397,7 +407,7 @@ func TestCastPlan_FullKeepsEveryEditionForASingleSeriesUnlikeNarrow(t *testing.T
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
 	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
 
-	assert.Len(t, plan.Full(), 1, "a single series has exactly one real edition either way")
+	assert.Len(t, plan.Full(), 2, "the single real edition, plus the representative since its source differs")
 }
 
 func TestCastPlan_FullKeepsEveryEditionForAMultiUniqueSeries(t *testing.T) {
@@ -412,7 +422,28 @@ func TestCastPlan_FullKeepsEveryEditionForAMultiUniqueSeries(t *testing.T) {
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
 	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
 
-	assert.Len(t, plan.Full(), 3)
+	assert.Len(t, plan.Full(), 4, "3 editions plus the representative")
+}
+
+// TestCastPlan_FullDoesNotDuplicateARepresentativeTheCatalogAlreadyIncluded
+// pins the dedup half of the F1 fix: when the catalog's editions answer
+// already carries an item under the exact same source as the series item's
+// own representative, Full must not queue it twice.
+func TestCastPlan_FullDoesNotDuplicateARepresentativeTheCatalogAlreadyIncluded(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	sameAsRepresentative := editionItem("a")
+	sameAsRepresentative.Source = seriesItem().Source
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBodyWithModel(2, dp1.SeriesArtworkModelMultiUnique, sameAsRepresentative, editionItem("b")))
+	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
+		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
+
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
+	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
+
+	assert.Len(t, plan.Full(), 2, "the representative's source is already one of the editions, so it is not queued a second time")
 }
 
 // An unresolved group (catalog unreachable) has only its one representative
@@ -450,7 +481,7 @@ func TestCastPlan_FullPassesThroughAPlainItemAndKeepsAMixedSeriesInFull(t *testi
 	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
 
 	full := plan.Full()
-	require.Len(t, full, 4, "the plain item plus all 3 editions of the resolved series")
+	require.Len(t, full, 5, "the plain item plus all 3 editions plus the representative of the resolved series")
 	assert.Equal(t, "plain-item", full[0].ID)
 }
 

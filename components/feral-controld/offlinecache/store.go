@@ -155,14 +155,25 @@ type Store interface {
 	// Narrow(deviceMode) to decide what to display — the exact logic a
 	// live cast already uses — without a second catalog round trip.
 	//
+	// playlistRaw is the exact body this sidecar belongs to, saved into the
+	// envelope as a digest (see LoadPlaylistSeriesSegments) rather than
+	// trusted to stay in step with a later SavePlaylist for the same
+	// playlistID by call ordering alone: the two are separate files, and
+	// nothing short of a shared revision marker lets a reader tell a
+	// same-ID sidecar apart from one that belongs to a body that has since
+	// been overwritten (feralfile-bot F2, 2026-11-12).
+	//
 	// An empty or nil segments DELETES any existing sidecar for playlistID
 	// rather than leaving a stale one in place: a playlist with no series
 	// items today must read back exactly like a playlist that never had
 	// one, and a playlist ID a publisher reuses for new, unrelated content
 	// must never inherit a prior save's group set. This is the ONE place
 	// that decides the sidecar's content, so no caller can save a flat
-	// Items list while forgetting to also clear a now-stale sidecar.
-	SavePlaylistSeriesSegments(playlistID string, segments []SeriesSegment) error
+	// Items list while forgetting to also clear a now-stale sidecar. That
+	// delete is itself best-effort (see deletePlaylistSeriesSegments'
+	// caller, DeletePlaylist) — the digest below is what keeps a delete
+	// that silently failed from being read back as if it had succeeded.
+	SavePlaylistSeriesSegments(playlistID string, playlistRaw json.RawMessage, segments []SeriesSegment) error
 	// LoadPlaylistSeriesSegments returns playlistID's saved series segments,
 	// or ErrPlaylistNotFound when none were ever saved — a non-series
 	// playlist, a playlist downloaded before this feature existed, or one
@@ -170,7 +181,18 @@ type Store interface {
 	// dp1.CastPlan.HasSeriesGroups). Callers treat this exactly like "no
 	// group identity to narrow by — use the flat Items as they are," never
 	// as an error worth surfacing.
-	LoadPlaylistSeriesSegments(playlistID string) ([]SeriesSegment, error)
+	//
+	// playlistRaw must be the SAME bytes the caller just loaded via
+	// LoadPlaylist for this playlistID. The sidecar's own saved digest is
+	// compared against it, and a mismatch is reported as ErrPlaylistNotFound
+	// too — the same "nothing to narrow by" outcome, not a distinct error
+	// callers would have to learn to handle — rather than returning the
+	// stale segments: a sidecar whose digest does not match the body just
+	// read belongs to a different revision of this playlist, whether
+	// because a reader landed between SavePlaylist and this method's own
+	// write (a live race) or because an earlier delete of a now-stale
+	// sidecar silently failed (feralfile-bot F2, 2026-11-12).
+	LoadPlaylistSeriesSegments(playlistID string, playlistRaw json.RawMessage) ([]SeriesSegment, error)
 
 	// SavePlaylistURLIndex records that a displayPlaylist/downloadPlaylist
 	// command resolved sourceURL to playlistID, so a later
@@ -667,7 +689,7 @@ func (s *fsStore) playlistSeriesSegmentsPath(playlistID string) (string, error) 
 	return filepath.Join(s.playlistSeriesSegmentsDir(), clean+".json"), nil
 }
 
-func (s *fsStore) SavePlaylistSeriesSegments(playlistID string, segments []SeriesSegment) error {
+func (s *fsStore) SavePlaylistSeriesSegments(playlistID string, playlistRaw json.RawMessage, segments []SeriesSegment) error {
 	if len(segments) == 0 {
 		return s.deletePlaylistSeriesSegments(playlistID)
 	}
@@ -675,14 +697,18 @@ func (s *fsStore) SavePlaylistSeriesSegments(playlistID string, segments []Serie
 	if err != nil {
 		return err
 	}
-	data, err := s.json.Marshal(seriesSegmentsEnvelope{Version: seriesSegmentsVersion, Segments: segments})
+	data, err := s.json.Marshal(seriesSegmentsEnvelope{
+		Version:    seriesSegmentsVersion,
+		BodyDigest: playlistBodyDigest(playlistRaw),
+		Segments:   segments,
+	})
 	if err != nil {
 		return fmt.Errorf("offline cache: marshal playlist series segments %s: %w", playlistID, err)
 	}
 	return s.writeFileAtomic(s.playlistSeriesSegmentsDir(), path, data, recordFilePerm)
 }
 
-func (s *fsStore) LoadPlaylistSeriesSegments(playlistID string) ([]SeriesSegment, error) {
+func (s *fsStore) LoadPlaylistSeriesSegments(playlistID string, playlistRaw json.RawMessage) ([]SeriesSegment, error) {
 	path, err := s.playlistSeriesSegmentsPath(playlistID)
 	if err != nil {
 		return nil, err
@@ -701,7 +727,28 @@ func (s *fsStore) LoadPlaylistSeriesSegments(playlistID string) ([]SeriesSegment
 	if envelope.Version != seriesSegmentsVersion {
 		return nil, fmt.Errorf("offline cache: unsupported playlist series segments version %d for %s", envelope.Version, playlistID)
 	}
+	// A digest that does not match the body the caller just loaded means
+	// this sidecar belongs to a different revision of playlistID — a
+	// reader that landed between SavePlaylist and this sidecar's own write,
+	// or a stale sidecar an earlier delete silently failed to remove (see
+	// seriesSegmentsEnvelope's doc). Reported exactly like "no sidecar at
+	// all": every existing caller already treats ErrPlaylistNotFound as
+	// "nothing to narrow by, use flat Items as they are," which is also the
+	// only safe thing to do with segments describing a body that is gone.
+	if envelope.BodyDigest != playlistBodyDigest(playlistRaw) {
+		s.logger.Warn("offline cache: discarding playlist series segments for a stale body revision",
+			zap.String("playlist_id", playlistID))
+		return nil, ErrPlaylistNotFound
+	}
 	return envelope.Segments, nil
+}
+
+// playlistBodyDigest is the hex SHA-256 of raw, used to bind the series-
+// segments sidecar to the exact playlist body it was saved alongside — see
+// seriesSegmentsEnvelope's doc.
+func playlistBodyDigest(raw json.RawMessage) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *fsStore) deletePlaylistSeriesSegments(playlistID string) error {
@@ -992,7 +1039,19 @@ func (s *fsStore) DiskUsage() (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("offline cache: measure playlist URL index for disk usage: %w", err)
 	}
-	return total + items + playlists + byURL, nil
+	// seriesSegments is playlistSeriesSegmentsDir — SavePlaylistSeriesSegments'
+	// sidecar, a second nested subdirectory of playlistsDir sitting alongside
+	// by-url (feral-file/ffos-user#455, #453). dirSize(playlistsDir()) above
+	// skips subdirectories by design, so without this it carried real bytes
+	// (every series-bearing playlist's full edition set, once per playlist)
+	// that no budget enforcement could see (feralfile-bot F4, 2026-11-12) —
+	// the exact #229 gap this function's own doc describes, reopened by a new
+	// subdirectory that byURL's precedent did not extend to automatically.
+	seriesSegments, err := s.dirSize(s.playlistSeriesSegmentsDir())
+	if err != nil {
+		return 0, fmt.Errorf("offline cache: measure playlist series segments for disk usage: %w", err)
+	}
+	return total + items + playlists + byURL + seriesSegments, nil
 }
 
 // dirSize sums the regular files directly inside dir, skipping

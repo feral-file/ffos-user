@@ -58,9 +58,22 @@ type SeriesGroup struct {
 // happens to hold for the same playlistID — a silently-wrong read here would
 // narrow a playlist's items against a stale or foreign group set, not just
 // serve a slightly outdated pointer the way a stale URL index does.
+//
+// BodyDigest is a hex SHA-256 of the exact playlist body bytes this sidecar
+// was saved alongside (Store.SavePlaylistSeriesSegments's playlistRaw
+// parameter). The sidecar and the playlist body are two separate files with
+// no shared transaction, so a reader has no other way to tell "this sidecar
+// still describes the body I just loaded" from "this sidecar belongs to a
+// revision that has since been overwritten" — whether that happened because
+// a reader landed between the two writes, or because a later save's sidecar
+// delete silently failed, leaving this one behind (feralfile-bot F2,
+// 2026-11-12). LoadPlaylistSeriesSegments recomputes the digest from the
+// caller's own just-loaded body and rejects a mismatch exactly like "no
+// sidecar at all" — see that method's doc.
 type seriesSegmentsEnvelope struct {
-	Version  int             `json:"seriesSegmentsVersion"`
-	Segments []SeriesSegment `json:"segments"`
+	Version    int             `json:"seriesSegmentsVersion"`
+	BodyDigest string          `json:"bodyDigest,omitempty"`
+	Segments   []SeriesSegment `json:"segments"`
 }
 
 const seriesSegmentsVersion = 1

@@ -1011,7 +1011,7 @@ offline-artworks/
   playlists/series-segments/<playlistId>.json  # series-group identity for a curated playlist's seriesRegistry items, when any resolved (SeriesSegment in types.go)
 ```
 
-The `series-segments` sidecar (feral-file/ffos-user#455, #453) exists because the playlist record above is the **flattened** result (every `seriesRegistry` item already replaced by its editions, same as a live `ExpandSeriesItems`) — the resolve that produced it keeps each series' group identity (representative, full edition set, the document's stated mode, `artworkModel`) only long enough to flatten it, and this sidecar is what survives that moment: `commandrouter` converts the resolve's `dp1.CastPlan.Segments` to this package's own `SeriesSegment` (it cannot import `dp1` — see that type's doc) and `Store.SavePlaylistSeriesSegments` writes it, nested the same invisible-to-`ListPlaylistIDs` way `by-url/` already is. `Service.CachedPlaylistForURL` returns it alongside the raw playlist so an offline fallback/resync can rebuild a `dp1.CastPlan` and call its existing `Narrow(deviceMode)` — the live-cast narrowing logic — without a second catalog round trip; see `docs/api-design.md`'s "DP-1 `seriesRegistry` expansion" section for the full mechanism. `DeletePlaylist` removes this sidecar too (unlike the `by-url/` index, which is deliberately left stale on a clear): it is interpreted directly against whatever `Items` a *later* save of the same playlist id holds, so a stray sidecar could silently narrow a future, unrelated playlist against the wrong group set.
+The `series-segments` sidecar (feral-file/ffos-user#455, #453) exists because the playlist record above is the **flattened** result (every `seriesRegistry` item already replaced by its editions, same as a live `ExpandSeriesItems`) — the resolve that produced it keeps each series' group identity (representative, full edition set, the document's stated mode, `artworkModel`) only long enough to flatten it, and this sidecar is what survives that moment: `commandrouter` converts the resolve's `dp1.CastPlan.Segments` to this package's own `SeriesSegment` (it cannot import `dp1` — see that type's doc) and `Store.SavePlaylistSeriesSegments` writes it, nested the same invisible-to-`ListPlaylistIDs` way `by-url/` already is. `Service.CachedPlaylistForURL` returns it alongside the raw playlist so an offline fallback/resync can rebuild a `dp1.CastPlan` and call its existing `Narrow(deviceMode)` — the live-cast narrowing logic — without a second catalog round trip; see `docs/api-design.md`'s "DP-1 `seriesRegistry` expansion" section for the full mechanism. `DeletePlaylist` removes this sidecar too (unlike the `by-url/` index, which is deliberately left stale on a clear): it is interpreted directly against whatever `Items` a *later* save of the same playlist id holds, so a stray sidecar could silently narrow a future, unrelated playlist against the wrong group set. That delete is itself best-effort, logged on failure rather than surfaced — so the sidecar's envelope also carries a hex SHA-256 digest of the exact playlist body it was saved alongside. `LoadPlaylistSeriesSegments` recomputes the digest from the body the caller just loaded and discards the sidecar as `ErrPlaylistNotFound` (the same "nothing to narrow by" outcome every caller already handles) on a mismatch — whether that mismatch comes from a reader landing between the body write and this sidecar's own write, or from an earlier delete that silently failed to remove a sidecar now paired with unrelated content (feralfile-bot F2, 2026-11-12).
 
 **An item's cache identity is its `source` URL, never its DP-1 `id`**
 (`SourceKey` in `types.go`: `hex(sha256(source))` over the exact byte
@@ -1871,9 +1871,15 @@ recovery) does not leave replay silently detached.
 ### What `maxDiskBytes` actually bounds
 
 `Store.DiskUsage` sums **every** directory the cache persists — blobs,
-item records, playlist bodies, and the by-url index — not just `blobs/`.
-It once counted blobs alone, which left real cache data outside the
-ceiling `offlineCache.maxDiskBytes` is documented to enforce.
+item records, playlist bodies, the by-url index, and the series-segments
+sidecar (feral-file/ffos-user#455, #453) — not just `blobs/`. It once
+counted blobs alone, which left real cache data outside the ceiling
+`offlineCache.maxDiskBytes` is documented to enforce; the series-segments
+sidecar reopened exactly that gap when it landed as a second nested
+subdirectory of `playlists/` that `dirSize`'s "skip subdirectories" rule
+(by design, so `by-url/` is not double-counted) also skipped, until
+`DiskUsage` was extended to measure it explicitly alongside `by-url/`
+(feralfile-bot F4, 2026-11-12).
 
 Playlist metadata was the sharp edge: `downloadPlaylist` persists a
 playlist's raw JSON (and its URL-index entry) *before* any item is
