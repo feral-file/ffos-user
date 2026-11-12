@@ -1602,12 +1602,21 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 	}
 
 	items := make([]dp1playlist.PlaylistItem, 0, len(plan.Segments))
+	// seen is this tick's own group keys, used below to prune
+	// randomSeriesPicks down to groups the CURRENT plan still carries — the
+	// mode-change delete a few lines down only fires for a key the plan
+	// still has, so a group that stops appearing at all (the device moves
+	// on to a different playlist/exhibition) was otherwise never removed,
+	// growing this map for the life of the process (run-reviewer, round 1
+	// on this fix, 2026-11-12).
+	seen := make(map[dp1.SeriesGroupKey]struct{}, len(plan.Segments))
 	for _, seg := range plan.Segments {
 		if seg.Item != nil {
 			items = append(items, *seg.Item)
 			continue
 		}
 		group := seg.Group
+		seen[group.Key] = struct{}{}
 		mode := dp1.ResolveSeriesPlaybackMode(group.DocumentMode, device)
 		if mode != dp1.SeriesPlaybackRandom {
 			delete(r.randomSeriesPicks, group.Key)
@@ -1623,6 +1632,11 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 			r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, item: narrowed[0]}
 		}
 		items = append(items, narrowed...)
+	}
+	for key := range r.randomSeriesPicks {
+		if _, ok := seen[key]; !ok {
+			delete(r.randomSeriesPicks, key)
+		}
 	}
 	return items
 }

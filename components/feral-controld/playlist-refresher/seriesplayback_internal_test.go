@@ -104,3 +104,24 @@ func TestNarrowStable_PlainItemsPassThrough(t *testing.T) {
 	require.Len(t, out, 1)
 	assert.Equal(t, "plain", out[0].ID)
 }
+
+// TestNarrowStable_PrunesPicksForGroupsNoLongerDisplayed pins the fix for
+// run-reviewer's own finding on this branch (round 1, 2026-11-12): a
+// remembered random pick must not outlive the group it belongs to once
+// that group stops appearing in the plan at all (the device moves on to a
+// different playlist/exhibition) — the mode-change delete alone only
+// covers a group still present under a new mode, leaving this sibling an
+// unbounded, process-lifetime leak.
+func TestNarrowStable_PrunesPicksForGroupsNoLongerDisplayed(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+
+	r.narrowStable(randomGroupPlan(), &mode)
+	require.Len(t, r.randomSeriesPicks, 1, "the group's pick must be remembered")
+
+	plainItem := dp1playlist.PlaylistItem{ID: "plain", Source: "https://cdn.example.com/plain.png"}
+	unrelated := dp1.CastPlan{Segments: []dp1.CastSegment{{Item: &plainItem}}}
+	r.narrowStable(unrelated, &mode)
+
+	assert.Empty(t, r.randomSeriesPicks, "a group absent from the current plan must not be remembered forever")
+}
