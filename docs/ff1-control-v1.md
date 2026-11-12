@@ -1970,7 +1970,7 @@ because they are measured differently.
 | Gate | What it covers | Condition |
 |---|---|---|
 | A (controllers) | `/api/cast`, `/api/notification`, `/api/ephemeral-sessions` | app floor raised past the G3 app release (device identity by `deviceId`, LAN bind by QR pins without a topic, retirement read as above) AND past the release that sets up a claimed `legacy` device from its own invitation code over the LAN (ff-app#1199: bind by QR pins for a claimed device, ask a discovered one to show its code); before it, a released or unsecured claimed device cannot be set up by a phone without the topic once legacy is gone (G3 bench 2026-11-03, F1/F4); the G3 ff-cli release published (v2 default, retirement read as above, the no-working-topic v2 exception); Play integrators on 0.5 or later (`@feralfile/display` 0.6 serves both generations); `tv-ws-usage` `/api/cast` traffic ~0 |
-| B (devices) | `/api/connection` (topic issuance) | from the device gauges (ffos-user `api-design.md`, `/metrics`): running version ≥ G3 AND `reset_target_version_info{target_version}` ≥ G3 (`unknown` counts as below; a 3.0.0 controld exports this label as `version`, which vmagent overwrites with the running version, so only devices on the renamed-label package report it) for nearly all devices; legacy-dependent devices (claimed, topic present, `control_state=legacy`) under an agreed threshold; known remote installs contacted; shelf stock reflashed; and either nearly all devices run a controld that redials v2 on an online edge (ffos-user#432; without it every network change costs 2–3 minutes with no remote control, G3 bench F2) or that window is accepted |
+| B (devices) | `/api/connection` (topic issuance) | from the device gauges (ffos-user `api-design.md`, `/metrics`), for nearly all claimed devices: running a G3 controld (it exports `relay_v2_connected`; a pre-G3 one has no such gauge, so presence, not the `version` label, decides — development builds carry 2.0.x numbers) AND `reset_target_version_info{target_version}` ≥ G3 (`unknown` or no sample counts as below; pre-release 3.0.0 staging builds export the label as `version`, which vmagent overwrites with the running version, so they count as below too); no G3 device reads `relayer_legacy_retired` 0 (a 3.0.0 staging image from before the LAN-open change, still dialing the legacy host: claimed and `legacy`, it loses off-LAN control with the worker), each one re-imaged or listed for re-imaging before the worker is deleted, since afterwards it latches retired and reads 1 like any other; known remote installs contacted; shelf stock reflashed. A claimed pre-G3 device is the legacy-dependent population: it has no other remote route. A G3 device in `control_state=legacy` with a stored topic is not: from the LAN-open build on its image has no `relayer` block, the topic is inert, and it already has no remote route until it is secured (below, "No legacy relayer on new images"). Every build that exports `target_version` also contains the v2 online-edge redial (ffos-user#432, G3 bench F2), so the G3 and `target_version` conditions cover it |
 
 `tv-ws-usage` (one sampled row per legacy request that reached a topic)
 shows controller traffic falling. It cannot measure devices: a device that
@@ -1984,7 +1984,7 @@ reports nothing (vmagent buffers on disk, so a device back on WAN reports
 late). "Nearly all" is therefore measured against a fleet count from
 outside the gauges (the claimed devices the operator knows of), not
 against the devices that report, and every claimed device without a sample
-in the window the operator agrees counts as legacy-dependent and below G3
+in the window the operator agrees counts as below G3 on both conditions
 until contacted. Unclaimed devices are outside the count: the daily
 updater moves them to G3 without the relayer, and shelf stock is its own
 condition.
@@ -2067,7 +2067,12 @@ pre-G3 controld dereferences the missing block without a nil check and
 crash-loops, so from then on no image is built from an ffos-user ref older
 than the LAN-open change. This replaces the empty-endpoint release planned
 earlier (a `relayer` block with `endpoint:""`), and it is what stops
-devices using the old hostname. Let it reach the fleet **before**
+devices using the old hostname. A G3 device whose image still has the
+block (a 3.0.0 staging build from before the LAN-open change) reads
+`relayer_legacy_retired` 0 while the worker exists; one without it reads 1.
+Such a device keeps v2 through the worker deletion (it latches retired on
+the 404, and from then on reads 1 too, so it is found before that step,
+Gate B), and is re-imaged before the account deletion. Let it reach the fleet **before**
 the Cloudflare account that owns the `autonomy-system.workers.dev` zone is
 deleted: until then a deleted worker answers 404, which every client reads
 as retired, while after the account is gone the name may be registered
@@ -2092,7 +2097,8 @@ holding a topic ends a §5.6 enroll on it under NXDOMAIN even with the FF1
 on the LAN (above); and the app flag is set (above).
 
 Populations left between G3 and Gate B: legacy-claimed G3 devices waiting
-for an owner at the LAN; devices whose OTA keeps failing (free space, slow
+for an owner at the LAN (not a Gate B count: they lost their legacy route
+at the OTA, not at the shutdown); devices whose OTA keeps failing (free space, slow
 links, probation rollback); devices that are off; devices whose reset
 target is still old; controllers outside the force-update floor (old CLI,
 Play 0.4, app fail-open); networks that reach the old host but block
