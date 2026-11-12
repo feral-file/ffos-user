@@ -158,6 +158,40 @@ func TestNarrowStable_SeedsFromWhatIsAlreadyDisplayed(t *testing.T) {
 	assert.Zero(t, calls, "a group with an already-remembered pick must never consult currentlyDisplayed")
 }
 
+// TestNarrowStable_RefreshesNonSourceFieldsOfAStablePick pins the fix for
+// run-reviewer's own finding on this branch (round 3, 2026-11-12): a
+// remembered pick's source staying stable across ticks must not freeze the
+// rest of that edition's fields at whatever they were the moment the pick
+// was first made — a later catalog ingest changing e.g. duration or
+// contentRating on that same edition must be reflected on the very next
+// tick, not held stale for as long as the pick is held.
+func TestNarrowStable_RefreshesNonSourceFieldsOfAStablePick(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+
+	duration1 := 5.0
+	first := randomGroupPlan()
+	for i := range first.Segments[0].Group.Editions {
+		first.Segments[0].Group.Editions[i].Duration = &duration1
+	}
+	picked := r.narrowStable(first, &mode, nil)
+	require.Len(t, picked, 1)
+	require.NotNil(t, picked[0].Duration)
+	assert.Equal(t, duration1, *picked[0].Duration)
+
+	duration2 := 20.0
+	second := randomGroupPlan()
+	for i := range second.Segments[0].Group.Editions {
+		second.Segments[0].Group.Editions[i].Duration = &duration2
+	}
+	again := r.narrowStable(second, &mode, nil)
+	require.Len(t, again, 1)
+	assert.Equal(t, picked[0].Source, again[0].Source, "the pick itself must still be stable")
+	require.NotNil(t, again[0].Duration, "a stable pick must still carry the field the catalog now states")
+	assert.Equal(t, duration2, *again[0].Duration,
+		"a stable pick's other fields must track the catalog's latest answer, not freeze at pick time")
+}
+
 // TestNarrowStable_SeedSourceCalledAtMostOnce pins narrowStable's own
 // memoization: a plan carrying several unseeded random groups must call
 // currentlyDisplayed at most once per narrowStable call (it may be a live

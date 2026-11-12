@@ -185,10 +185,16 @@ type refresher struct {
 
 // randomSeriesPick is one series group's last SeriesPlaybackRandom
 // selection, remembered so narrowStable does not re-roll it on every
-// periodic resync — see that method's doc.
+// periodic resync — see that method's doc. Only the Source is kept, never
+// the full item: narrowStable always re-looks-up the matching edition from
+// the CURRENT tick's group.Editions before returning it, so a field other
+// than Source (duration, license, contentRating, …) can never go stale
+// behind this memory — storing the struct itself was tried first and
+// replayed exactly that stale copy indefinitely (run-reviewer, round 3 on
+// this fix, 2026-11-12).
 type randomSeriesPick struct {
-	mode dp1.SeriesPlaybackMode
-	item dp1playlist.PlaylistItem
+	mode   dp1.SeriesPlaybackMode
+	source string
 }
 
 // SetSeriesPlaybackSource injects the device-level series-playback getter
@@ -1578,17 +1584,21 @@ func (r *refresher) narrowedPlaylistFromURL(url string, currentlyDisplayed func(
 }
 
 // narrowStable is dp1.CastPlan.Narrow with one difference: a group currently
-// resolving to dp1.SeriesPlaybackRandom reuses its last pick for that
-// dp1.SeriesGroupKey (randomSeriesPicks) instead of asking
+// resolving to dp1.SeriesPlaybackRandom reuses its last pick's SOURCE for
+// that dp1.SeriesGroupKey (randomSeriesPicks) instead of asking
 // dp1.NarrowEditions to roll a new one, as long as (a) the mode resolved for
-// it is still random and (b) the picked item's source is still present
-// among the group's current editions. Either condition failing forces a
-// fresh pick: a mode change ("setting change") or the catalog's answer no
-// longer carrying the previously shown edition ("that edition disappears")
-// — the two escape hatches feralfile-bot's F3 asked for, 2026-11-12. A
-// non-random group clears any stale memory for its key, so a later mode
-// change back to random starts from a real roll rather than a stale
-// leftover from before the change.
+// it is still random and (b) that source is still present among the
+// group's current editions — in which case the matching edition is
+// re-looked-up fresh from THIS tick's Editions (editionBySource), never
+// replayed from the pick itself, so a field other than Source (duration,
+// license, contentRating, …) never goes stale behind this memory
+// (run-reviewer, round 3 on this fix, 2026-11-12). Either condition failing
+// forces a fresh pick: a mode change ("setting change") or the catalog's
+// answer no longer carrying the previously shown edition's source ("that
+// edition disappears") — the two escape hatches feralfile-bot's F3 asked
+// for, 2026-11-12. A non-random group clears any stale memory for its key,
+// so a later mode change back to random starts from a real roll rather
+// than a stale leftover from before the change.
 //
 // Scoped to this package's own live-reachable resync and its cached-sidecar
 // fallback (both of narrowedPlaylistFromURL's and loadCachedPlaylistForURL's
@@ -1653,18 +1663,34 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 			items = append(items, dp1.NarrowEditions(mode, group.ArtworkModel, group.Representative, group.Editions)...)
 			continue
 		}
-		if pick, ok := r.randomSeriesPicks[group.Key]; ok && pick.mode == mode && seriesEditionsHaveSource(group.Editions, pick.item.Source) {
-			items = append(items, pick.item)
-			continue
+		if pick, ok := r.randomSeriesPicks[group.Key]; ok && pick.mode == mode {
+			if fresh, found := editionBySource(group.Editions, pick.source); found {
+				items = append(items, fresh)
+				continue
+			}
+			// The picked source is gone from this tick's editions — the
+			// catalog's answer moved on. Falls through to a fresh pick
+			// below, exactly like "that edition disappears" already did.
 		}
 		if seeded, ok := editionAlreadyDisplayed(fetchDisplayed(), group.Editions); ok {
-			r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, item: seeded}
+			r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, source: seeded.Source}
 			items = append(items, seeded)
 			continue
 		}
 		narrowed := dp1.NarrowEditions(mode, group.ArtworkModel, group.Representative, group.Editions)
+		// Only remember a pick that is actually one of group.Editions: a
+		// single/multi series under random mode always falls through to
+		// NarrowEditions' representative-fallback case instead (there is
+		// nothing distinct to roll), and the representative's own source
+		// is not guaranteed to be among Editions (see CastPlan.Full's doc,
+		// feralfile-bot F1) — memoizing it would just miss every lookup
+		// next tick. Leaving it unmemoized costs nothing: that case is
+		// already deterministic, so re-deriving it fresh every tick
+		// returns the identical result anyway.
 		if len(narrowed) == 1 {
-			r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, item: narrowed[0]}
+			if _, found := editionBySource(group.Editions, narrowed[0].Source); found {
+				r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, source: narrowed[0].Source}
+			}
 		}
 		items = append(items, narrowed...)
 	}
@@ -1676,18 +1702,21 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 	return items
 }
 
-// seriesEditionsHaveSource reports whether editions carries an item whose
-// Source exactly matches source — the same no-normalization comparison
-// commandrouter's findPlaylistItemBySource uses — so narrowStable can tell
-// a remembered random pick is still playable from the group's current
-// editions rather than one the catalog has since dropped.
-func seriesEditionsHaveSource(editions []dp1playlist.PlaylistItem, source string) bool {
+// editionBySource returns the item in editions whose Source exactly
+// matches source — the same no-normalization comparison commandrouter's
+// findPlaylistItemBySource uses — so narrowStable always returns and
+// re-stores the CURRENT tick's edition for a remembered pick, never a
+// stale copy captured when the pick was first made (run-reviewer, round 3
+// on this fix, 2026-11-12: storing the item itself let every field but
+// Source — duration, license, contentRating, … — go stale for as long as
+// the pick was held).
+func editionBySource(editions []dp1playlist.PlaylistItem, source string) (dp1playlist.PlaylistItem, bool) {
 	for _, edition := range editions {
 		if edition.Source == source {
-			return true
+			return edition, true
 		}
 	}
-	return false
+	return dp1playlist.PlaylistItem{}, false
 }
 
 // playerStatusDisplayedItems returns ps's own record of what the player
@@ -1728,17 +1757,15 @@ func (r *refresher) currentlyDisplayedItems(ps *status.PlayerStatus) func() []dp
 }
 
 // editionAlreadyDisplayed reports whether any item in displayed has the
-// same Source as one of editions — exact match, same rule as
-// seriesEditionsHaveSource — and returns that edition (not the displayed
-// copy, whose other fields may be a player-side projection) so narrowStable
-// can seed a fresh group's pick from what a live cast already put on
-// screen instead of rolling a new one. displayed may be nil or empty.
+// same Source as one of editions — via editionBySource — and returns that
+// edition (not the displayed copy, whose other fields may be a player-side
+// projection) so narrowStable can seed a fresh group's pick from what a
+// live cast already put on screen instead of rolling a new one. displayed
+// may be nil or empty.
 func editionAlreadyDisplayed(displayed, editions []dp1playlist.PlaylistItem) (dp1playlist.PlaylistItem, bool) {
 	for _, shown := range displayed {
-		for _, edition := range editions {
-			if edition.Source == shown.Source {
-				return edition, true
-			}
+		if edition, found := editionBySource(editions, shown.Source); found {
+			return edition, true
 		}
 	}
 	return dp1playlist.PlaylistItem{}, false
