@@ -192,9 +192,22 @@ type refresher struct {
 // behind this memory — storing the struct itself was tried first and
 // replayed exactly that stale copy indefinitely (run-reviewer, round 3 on
 // this fix, 2026-11-12).
+//
+// artworkModel is the group's ArtworkModel at pick time. dp1.NarrowEditions
+// only ever returns a distinct edition when
+// artworkModel.hasDistinctEditions() — a single/multi series always
+// collapses to the representative regardless of mode — and ArtworkModel is
+// read fresh from the catalog's answer on every tick's ResolveSeriesCastPlan
+// call, so it is NOT invariant across ticks for the same SeriesGroupKey. A
+// stored pick whose artworkModel no longer matches the current tick's must
+// be invalidated exactly like a mode change, or a group corrected FROM
+// multi_unique TO single/multi would keep serving one specific edition
+// instead of collapsing to the representative as a fresh NarrowEditions
+// call requires (run-reviewer, round 4 on this fix, 2026-11-12).
 type randomSeriesPick struct {
-	mode   dp1.SeriesPlaybackMode
-	source string
+	mode         dp1.SeriesPlaybackMode
+	artworkModel dp1.SeriesArtworkModel
+	source       string
 }
 
 // SetSeriesPlaybackSource injects the device-level series-playback getter
@@ -1587,8 +1600,10 @@ func (r *refresher) narrowedPlaylistFromURL(url string, currentlyDisplayed func(
 // resolving to dp1.SeriesPlaybackRandom reuses its last pick's SOURCE for
 // that dp1.SeriesGroupKey (randomSeriesPicks) instead of asking
 // dp1.NarrowEditions to roll a new one, as long as (a) the mode resolved for
-// it is still random and (b) that source is still present among the
-// group's current editions — in which case the matching edition is
+// it is still random, (b) the group's ArtworkModel hasn't changed since the
+// pick was made (see randomSeriesPick's doc — a change can flip whether a
+// distinct pick is even allowed), and (c) that source is still present among
+// the group's current editions — in which case the matching edition is
 // re-looked-up fresh from THIS tick's Editions (editionBySource), never
 // replayed from the pick itself, so a field other than Source (duration,
 // license, contentRating, …) never goes stale behind this memory
@@ -1663,7 +1678,7 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 			items = append(items, dp1.NarrowEditions(mode, group.ArtworkModel, group.Representative, group.Editions)...)
 			continue
 		}
-		if pick, ok := r.randomSeriesPicks[group.Key]; ok && pick.mode == mode {
+		if pick, ok := r.randomSeriesPicks[group.Key]; ok && pick.mode == mode && pick.artworkModel == group.ArtworkModel {
 			if fresh, found := editionBySource(group.Editions, pick.source); found {
 				items = append(items, fresh)
 				continue
@@ -1673,7 +1688,7 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 			// below, exactly like "that edition disappears" already did.
 		}
 		if seeded, ok := editionAlreadyDisplayed(fetchDisplayed(), group.Editions); ok {
-			r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, source: seeded.Source}
+			r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: seeded.Source}
 			items = append(items, seeded)
 			continue
 		}
@@ -1689,7 +1704,7 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 		// returns the identical result anyway.
 		if len(narrowed) == 1 {
 			if _, found := editionBySource(group.Editions, narrowed[0].Source); found {
-				r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, source: narrowed[0].Source}
+				r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: narrowed[0].Source}
 			}
 		}
 		items = append(items, narrowed...)

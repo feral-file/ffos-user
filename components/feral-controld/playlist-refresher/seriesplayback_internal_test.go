@@ -192,6 +192,30 @@ func TestNarrowStable_RefreshesNonSourceFieldsOfAStablePick(t *testing.T) {
 		"a stable pick's other fields must track the catalog's latest answer, not freeze at pick time")
 }
 
+// TestNarrowStable_ArtworkModelChangeForcesFreshPick pins the fix for
+// run-reviewer's own finding on this branch (round 4, 2026-11-12): a
+// memoized pick must not survive the group's own ArtworkModel changing
+// from multi_unique (which has a real distinct-editions choice to make) to
+// multi (which does not — dp1.NarrowEditions always collapses it to the
+// representative). Reusing the stale pick would keep showing one specific
+// edition instead of the representative a fresh NarrowEditions call
+// requires.
+func TestNarrowStable_ArtworkModelChangeForcesFreshPick(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+
+	picked := r.narrowStable(randomGroupPlan(), &mode, nil)
+	require.Len(t, picked, 1)
+	require.NotEqual(t, "item-series", picked[0].ID, "sanity: multi_unique must pick a real edition, not the representative")
+
+	reclassified := randomGroupPlan()
+	reclassified.Segments[0].Group.ArtworkModel = dp1.SeriesArtworkModelMulti
+	again := r.narrowStable(reclassified, &mode, nil)
+	require.Len(t, again, 1)
+	assert.Equal(t, "item-series", again[0].ID,
+		"a group reclassified to multi must collapse to the representative, not replay the multi_unique-era pick")
+}
+
 // TestNarrowStable_SeedSourceCalledAtMostOnce pins narrowStable's own
 // memoization: a plan carrying several unseeded random groups must call
 // currentlyDisplayed at most once per narrowStable call (it may be a live
