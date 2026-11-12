@@ -1852,6 +1852,23 @@ func (r *refresher) currentlyDisplayedItems(ps *status.PlayerStatus) func() []dp
 // the group's own, later position). index out of range, or no match at
 // that position, returns false — exactly like "nothing displayed for this
 // occurrence."
+//
+// Accepted risk: this assumes displayed was itself flattened with the
+// SAME per-segment item counts this tick's plan computes for every
+// segment ahead of index — true whenever nothing upstream changed, but
+// not guaranteed. An EARLIER full-mode, distinct-editions group
+// contributes its WHOLE editions slice (dp1.NarrowEditions's full case),
+// and narrowedPlaylistFromURL re-resolves that group fresh from the
+// catalog on every tick (no caching) — so its contributed count can
+// change between the live display and this tick purely from routine
+// catalog churn (editions added/removed) or that series item's own
+// document-mode changing, not only a device-level SeriesPlaybackMode
+// override (run-reviewer, round 3 on this fix, 2026-11-12: narrower than
+// "a mode change" first suggested). When that drift happens, index can
+// point at the wrong slot for a LATER random-mode group; the match still
+// requires that wrong slot's Source to coincide with one of THIS group's
+// OWN editions before anything is adopted, so a misfire can only replay
+// a different edition of the same group, never a foreign item.
 func editionAtOccurrence(displayed []dp1playlist.PlaylistItem, index int, editions []dp1playlist.PlaylistItem) (dp1playlist.PlaylistItem, bool) {
 	if index < 0 || index >= len(displayed) {
 		return dp1playlist.PlaylistItem{}, false

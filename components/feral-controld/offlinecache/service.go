@@ -2064,13 +2064,18 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 // segments is this exact resolve's series-group identity (feral-file/
 // ffos-user#455, #453), written right beside the sourceURL index. Any
 // EXISTING sidecar for playlistID is invalidated right after the new body
-// is durably saved, BEFORE any new sidecar for it is written, and that
-// invalidation's own failure aborts this whole save (see below) —
-// everything else stays best-effort exactly as before: the playlist/
-// sourceURL index are already safely saved regardless of whether the new
-// sidecar write succeeds, and a failure writing it only degrades the
-// narrowing a later offline fallback/resync can do, never the download
-// itself.
+// is durably saved, BEFORE any new sidecar for it is written. That
+// invalidation's own failure aborts this whole save AND best-effort
+// removes the whole playlist record (body + sidecar) it just saved — an
+// error return alone would not undo the body write already committed
+// above, and every reader fails closed on the body load before ever
+// reaching the sidecar (see below), so removing the body converts the
+// failure into a clean cache miss rather than leaving a sidecar that
+// still validates against that body on disk. Everything else stays
+// best-effort exactly as before: the playlist/sourceURL index are
+// already safely saved regardless of whether the new sidecar write
+// succeeds, and a failure writing it only degrades the narrowing a later
+// offline fallback/resync can do, never the download itself.
 //
 // The invalidate-before-new-segments order matters: playlistBodyDigest
 // alone cannot tell two different resolves of the IDENTICAL raw bytes
@@ -2112,12 +2117,28 @@ func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.Ra
 	}
 	// nil, not segments: this call's only job is to remove whatever
 	// sidecar playlistID currently holds, regardless of what — if
-	// anything — this save is about to write next. Its failure aborts the
-	// save entirely (the new body is already durably saved above, but the
-	// caller sees an error and the sidecar is left exactly as it was —
-	// never a new body paired with an un-invalidated, possibly stale
-	// sidecar from a prior resolve of the same bytes).
+	// anything — this save is about to write next. The new body is
+	// already durably saved above, so returning an error here does NOT
+	// undo that write — an un-invalidated sidecar would otherwise go on
+	// validating (same digest, since playlistRaw is unchanged by this
+	// failure) against that very body, which is exactly the wrong-group
+	// hazard this whole call exists to prevent. So on failure this also
+	// best-effort removes the WHOLE playlist record (body + sidecar,
+	// whichever of those the one Remove call that just failed still
+	// allows): CachedPlaylistForURL and every other reader always load
+	// the body via LoadPlaylist BEFORE ever reaching
+	// LoadPlaylistSeriesSegments (see that method's doc) and fail closed
+	// on ErrPlaylistNotFound without touching the sidecar at all, so
+	// removing the body alone is enough to make a surviving stale sidecar
+	// permanently unreachable — converting this failure into a clean
+	// cache miss instead of a silent wrong-group hit (run-reviewer, round
+	// 3 on this fix, 2026-11-12: the version before this one left the
+	// stale sidecar fully loadable after reporting this same error).
 	if err := s.store.SavePlaylistSeriesSegments(playlistID, playlistRaw, nil); err != nil {
+		if delErr := s.store.DeletePlaylist(playlistID); delErr != nil {
+			s.logger.Warn("offline cache: failed to remove playlist record after a stale sidecar could not be invalidated",
+				zap.String("playlist_id", playlistID), zap.Error(delErr))
+		}
 		return false, fmt.Errorf("offline cache: invalidate stale playlist series segments %s: %w", playlistID, err)
 	}
 	if len(segments) > 0 {

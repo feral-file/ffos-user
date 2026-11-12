@@ -109,15 +109,20 @@ func (f *transientFailRemoveOS) Remove(path string) error {
 	return f.OS.Remove(path)
 }
 
-// TestService_SavePlaylistAndURLIndex_AbortsWhenStaleSidecarCannotBeInvalidated
-// pins the fix for feralfile-bot F2 (round 3 on this fix, 2026-11-12): a
-// re-resolve of the IDENTICAL raw playlist bytes — the one case
+// TestService_SavePlaylistAndURLIndex_RemovesWholeRecordWhenInvalidationFails
+// pins the fix for feralfile-bot F2 (round 3 on this fix, 2026-11-12) and
+// closes the gap run-reviewer's own next pass found in the first version of
+// that fix: a re-resolve of the IDENTICAL raw playlist bytes — the one case
 // playlistBodyDigest alone cannot tell apart from the earlier resolve the
-// existing sidecar was saved for — must not let that stale sidecar survive
-// next to a freshly-saved body just because invalidating it failed. The
-// whole save must abort instead, leaving the prior body+sidecar pair
-// exactly as they were rather than quietly accepting a mismatch.
-func TestService_SavePlaylistAndURLIndex_AbortsWhenStaleSidecarCannotBeInvalidated(t *testing.T) {
+// existing sidecar was saved for — must not let that stale sidecar survive,
+// still loadable, next to the (already durably saved) new body just because
+// invalidating the sidecar failed. Returning an error alone does not undo
+// the body write that already landed, so the whole playlist record — body
+// included — is best-effort removed too, converting the failure into a
+// clean cache miss instead of a silent wrong-group hit (run-reviewer, round
+// 3 on this fix, 2026-11-12: the version before this one reported the same
+// error but left the stale sidecar fully loadable afterward).
+func TestService_SavePlaylistAndURLIndex_RemovesWholeRecordWhenInvalidationFails(t *testing.T) {
 	root := t.TempDir()
 	sidecarPath := filepath.Join(root, "playlists", "series-segments", "playlist-1.json")
 	failingOS := &transientFailRemoveOS{OS: wrapper.NewOS(), failPath: sidecarPath}
@@ -135,18 +140,19 @@ func TestService_SavePlaylistAndURLIndex_AbortsWhenStaleSidecarCannotBeInvalidat
 	// confuse with the earlier resolve's now-stale segments, since both
 	// share one digest.
 	saved, err := svc.savePlaylistAndURLIndex("playlist-1", raw, "", 0, nil)
-	require.Error(t, err, "a failed invalidation must abort the save, not silently continue")
+	require.Error(t, err, "a failed invalidation must still be reported")
 	assert.False(t, saved)
 
-	// Nothing changed: the prior body and its (now only-apparently-stale,
-	// but still internally consistent) sidecar are both exactly as they
-	// were before this call — never a body that landed next to segments
-	// from a resolve that no longer happened.
-	loadedSegments, loadErr := store.LoadPlaylistSeriesSegments("playlist-1", raw)
-	require.NoError(t, loadErr)
-	require.Len(t, loadedSegments, 1)
-	require.NotNil(t, loadedSegments[0].Item)
-	assert.Equal(t, "old", loadedSegments[0].Item.ID)
+	// The body itself must be gone too: every real reader (CachedPlaylistForURL,
+	// commandrouter's and playlist-refresher's own copies) loads the body via
+	// LoadPlaylist BEFORE ever reaching LoadPlaylistSeriesSegments and fails
+	// closed on ErrPlaylistNotFound without touching the sidecar at all — so
+	// removing the body alone is what makes the stale sidecar unreachable,
+	// regardless of whether the sidecar file itself could also be removed
+	// (its own Remove is the one injected to fail here).
+	_, loadErr := store.LoadPlaylist("playlist-1")
+	assert.ErrorIs(t, loadErr, ErrPlaylistNotFound,
+		"the whole record must be removed, not just reported as a failure, so no reader can still hit the stale sidecar")
 }
 
 // transientFailRenameOS delegates to a real OS wrapper but fails Rename
