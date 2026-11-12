@@ -164,6 +164,42 @@ func TestNarrowStable_SeedsFromWhatIsAlreadyDisplayed(t *testing.T) {
 		"currentlyDisplayed must be consulted again even when a pick is already remembered (feralfile-bot F6)")
 }
 
+// TestNarrowStable_OverwritesStalePickWhenDisplayDisagrees pins
+// feralfile-bot's F6 (2026-11-12) for the case
+// TestNarrowStable_SeedsFromWhatIsAlreadyDisplayed does not cover: a pick
+// is already remembered, and a LATER tick's live display reports a
+// DIFFERENT edition of the same group — the newer accepted cast's own
+// choice (run-reviewer, round 1 on this fix, 2026-11-12, flagged the
+// overwrite path itself had no test). The remembered pick must be
+// overwritten to match the display, not left at the older selection.
+func TestNarrowStable_OverwritesStalePickWhenDisplayDisagrees(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+
+	editionA := dp1playlist.PlaylistItem{ID: "a", Source: "https://cdn.example.com/a.mp4"}
+	editionB := dp1playlist.PlaylistItem{ID: "b", Source: "https://cdn.example.com/b.mp4"}
+
+	showing := editionA
+	currentlyDisplayed := func() []dp1playlist.PlaylistItem {
+		return []dp1playlist.PlaylistItem{showing}
+	}
+
+	first := r.narrowStable(randomGroupPlan(), &mode, currentlyDisplayed)
+	require.Len(t, first, 1)
+	assert.Equal(t, editionA.Source, first[0].Source, "sanity: seeded from the initial display")
+
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
+	require.Equal(t, editionA.Source, r.randomSeriesPicks[key].source, "sanity: the pick was remembered")
+
+	showing = editionB
+	second := r.narrowStable(randomGroupPlan(), &mode, currentlyDisplayed)
+	require.Len(t, second, 1)
+	assert.Equal(t, editionB.Source, second[0].Source,
+		"a newer accepted cast's own choice, read from the live display, must replace the remembered pick")
+	assert.Equal(t, editionB.Source, r.randomSeriesPicks[key].source,
+		"the overwrite must actually be stored, not just returned for this one tick")
+}
+
 // TestNarrowStable_RefreshesNonSourceFieldsOfAStablePick pins the fix for
 // run-reviewer's own finding on this branch (round 3, 2026-11-12): a
 // remembered pick's source staying stable across ticks must not freeze the

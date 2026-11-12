@@ -1714,9 +1714,15 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 		// reconfirms the existing pick (or leaves a not-yet-seeded one
 		// matching) rather than changing anything.
 		if seeded, ok := editionAlreadyDisplayed(fetchDisplayed(), group.Editions); ok {
-			if pick, ok := r.randomSeriesPicks[group.Key]; !ok || pick.source != seeded.Source {
-				r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: seeded.Source}
-			}
+			// Written unconditionally, even when the source already
+			// matched what was remembered: a conditional write here (only
+			// on a source change) left mode/artworkModel stale on every
+			// tick that merely reconfirmed the pick, so a later tick
+			// consulting the remembered-pick branch below (display
+			// unavailable) could still see a since-changed artworkModel as
+			// unchanged and skip the invalidation that field exists for
+			// (run-reviewer, round 1 on this fix, 2026-11-12).
+			r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: seeded.Source}
 			items = append(items, seeded)
 			continue
 		}
