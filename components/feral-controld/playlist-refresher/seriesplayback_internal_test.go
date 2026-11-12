@@ -258,6 +258,46 @@ func TestNarrowStable_ArtworkModelChangeForcesFreshPick(t *testing.T) {
 		"a group reclassified to multi must collapse to the representative, not replay the multi_unique-era pick")
 }
 
+// TestNarrowStable_SingleMultiNeverSeedsOrMemoizesEvenWhenDisplayedSourceMatches
+// pins feralfile-bot's F5 (2026-11-12) for the path
+// TestNarrowStable_ArtworkModelChangeForcesFreshPick does not cover
+// (run-reviewer, round 3 on this fix, 2026-11-12: that test only reaches
+// the gate via RECLASSIFICATION, never from the first tick): a single/multi
+// group's own one edition can share its Source with what the player
+// already displays from the very FIRST call, with no reclassification
+// involved at all. The top-level HasDistinctEditions gate must still route
+// it straight to the representative and never let it reach the
+// seed/memoize path below — reusing or memoizing that coincidental match
+// would make it look like a genuine distinct random pick.
+func TestNarrowStable_SingleMultiNeverSeedsOrMemoizesEvenWhenDisplayedSourceMatches(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+
+	plan := dp1.CastPlan{Segments: []dp1.CastSegment{
+		{Group: &dp1.ResolvedSeriesGroup{
+			Key:            dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"},
+			Representative: dp1playlist.PlaylistItem{ID: "item-series", Source: "https://cdn.example.com/series.html"},
+			Editions: []dp1playlist.PlaylistItem{
+				{ID: "a", Source: "https://cdn.example.com/a.mp4"},
+			},
+			Resolved:     true,
+			ArtworkModel: dp1.SeriesArtworkModelSingle,
+		}},
+	}}
+
+	displayed := dp1playlist.PlaylistItem{ID: "a", Source: "https://cdn.example.com/a.mp4"}
+	currentlyDisplayed := func() []dp1playlist.PlaylistItem {
+		return []dp1playlist.PlaylistItem{displayed}
+	}
+
+	out := r.narrowStable(plan, &mode, currentlyDisplayed)
+	require.Len(t, out, 1)
+	assert.Equal(t, "item-series", out[0].ID,
+		"a single/multi group must always collapse to the representative, even when the player happens to show its own edition")
+	assert.Empty(t, r.randomSeriesPicks,
+		"a single/multi group must never be memoized, even when its edition's Source coincidentally matches the display")
+}
+
 // TestNarrowStable_SeedSourceCalledAtMostOnce pins narrowStable's own
 // memoization: a plan carrying several unseeded random groups must call
 // currentlyDisplayed at most once per narrowStable call (it may be a live
