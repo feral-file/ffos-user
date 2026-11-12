@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,8 +28,7 @@ import (
 const rasterWalkQuery = `query WalletWalk($after: String) { address(address: "0xabc") { tokensOwned(first: 250, after: $after) { pageInfo { hasNextPage endCursor } nodes { quantity lastAcquiredAt token { id chainId contractAddress tokenId tokenStandard name media { previewHash previewType contentUrl normalizedContentUrl contentType } artworks { id slug title isSeries platform { name } artists { id name slug addresses } } artists { id name slug addresses } } } } } }`
 
 const (
-	rasterEndpoint  = "https://api.raster.art/graphql"
-	rasterDeviceKey = "device-read-key"
+	rasterEndpoint = "https://api.raster.art/graphql"
 	// Art Blocks' flagship contract, lowercase as Raster returns it.
 	artBlocksContract = "0x059edd72cd353df5106d2b9cc5ab83a52287ac3a"
 )
@@ -43,13 +40,13 @@ type rasterSetup struct {
 	client    dp1.DP1
 }
 
-func setupRaster(t *testing.T, apiKey string) *rasterSetup {
+func setupRaster(t *testing.T) *rasterSetup {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	mockHTTP := mocks.NewMockHTTPClient(ctrl)
 	mockFFIdx := mocks.NewMockFFIndexer(ctrl)
-	client := dp1.New(mockFFIdx, mockHTTP, mockHTTP, mocks.NewMockJSON(ctrl), mocks.NewMockIO(ctrl), logger, false, true, apiKey)
+	client := dp1.New(mockFFIdx, mockHTTP, mocks.NewMockJSON(ctrl), mocks.NewMockIO(ctrl), logger, false, true)
 	return &rasterSetup{ctrl: ctrl, mockHTTP: mockHTTP, mockFFIdx: mockFFIdx, client: client}
 }
 
@@ -66,7 +63,7 @@ func rasterPlaylist(t *testing.T) dp1.Playlist {
 			"profile": "graphql-v1",
 			"endpoint": %q,
 			"method": "POST",
-			"headers": {"Content-Type": "application/json", "x-api-key": "key-from-the-document"},
+			"headers": {"Content-Type": "application/json", "X-Doc-Header": "from-the-document"},
 			"query": %q,
 			"pagination": {
 				"variable": "after",
@@ -168,7 +165,7 @@ func respond(status int, body string) (*http.Response, error) {
 }
 
 func TestRaster_WalkPagesByCursorAndMapsNodes(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	page1 := rasterPage(t, []map[string]any{
 		rasterNode(rasterToken(1, nil)),
 		rasterNode(rasterToken(2, map[string]any{"name": "Named Work"})),
@@ -186,7 +183,9 @@ func TestRaster_WalkPagesByCursorAndMapsNodes(t *testing.T) {
 		rs.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(req *http.Request) (*http.Response, error) {
 			assert.Equal(t, http.MethodPost, req.Method)
 			assert.Equal(t, rasterEndpoint, req.URL.String())
-			assert.Equal(t, rasterDeviceKey, req.Header.Get("x-api-key"), "the device's key, never the document's")
+			_, keyed := req.Header["X-Api-Key"]
+			assert.False(t, keyed, "the walk is unauthenticated: Raster's read API needs no key")
+			assert.Equal(t, "from-the-document", req.Header.Get("X-Doc-Header"), "the document's headers ride along")
 			assert.Equal(t, "application/json", req.Header.Get("Content-Type"))
 			body := readGraphQLRequest(t, req)
 			assert.Equal(t, rasterWalkQuery, body.Query)
@@ -232,7 +231,7 @@ func TestRaster_WalkPagesByCursorAndMapsNodes(t *testing.T) {
 }
 
 func TestRaster_MinimalResolveMakesOneRequest(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	rs.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
 		return respond(200, rasterPage(t, []map[string]any{rasterNode(rasterToken(1, nil))}, true, "more"))
 	}).Times(1)
@@ -243,7 +242,7 @@ func TestRaster_MinimalResolveMakesOneRequest(t *testing.T) {
 }
 
 func TestRaster_CastStopsAtItemCapWithinTheFirstPage(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	nodes := make([]map[string]any, 0, 300)
 	for i := range 300 {
 		nodes = append(nodes, rasterNode(rasterToken(i+1, nil)))
@@ -261,7 +260,7 @@ func TestRaster_CastStopsAtItemCapWithinTheFirstPage(t *testing.T) {
 }
 
 func TestRaster_RefreshIsNotCappedBelowTheWallet(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	nodes := make([]map[string]any, 0, 300)
 	for i := range 300 {
 		nodes = append(nodes, rasterNode(rasterToken(i+1, nil)))
@@ -276,7 +275,7 @@ func TestRaster_RefreshIsNotCappedBelowTheWallet(t *testing.T) {
 }
 
 func TestRaster_GraphQLErrorFailsTheResolve(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	rs.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
 		return respond(200, `{"data":null,"errors":[{"message":"query cost 60000 exceeds budget 50000"}]}`)
 	})
@@ -289,7 +288,7 @@ func TestRaster_GraphQLErrorFailsTheResolve(t *testing.T) {
 }
 
 func TestRaster_LaterPageFailureYieldsNoPartialPlaylist(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	gomock.InOrder(
 		rs.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
 			return respond(200, rasterPage(t, []map[string]any{rasterNode(rasterToken(1, nil))}, true, "cursor-1"))
@@ -308,7 +307,7 @@ func TestRaster_LaterPageFailureYieldsNoPartialPlaylist(t *testing.T) {
 }
 
 func TestRaster_UnmappableNodesAreSkippedNotFatal(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	page := rasterPage(t, []map[string]any{
 		rasterNode(rasterToken(1, map[string]any{"contractAddress": nil})),
 		rasterNode(rasterToken(2, map[string]any{"media": nil})),
@@ -329,7 +328,7 @@ func TestRaster_UnmappableNodesAreSkippedNotFatal(t *testing.T) {
 }
 
 func TestRaster_UnknownVendorItemSchemaIsRefusedByName(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	playlist := rasterPlaylist(t)
 	playlist.DynamicQuery.ResponseMapping.ItemSchema = "objkt/collection/2.0"
 
@@ -341,7 +340,7 @@ func TestRaster_UnknownVendorItemSchemaIsRefusedByName(t *testing.T) {
 }
 
 func TestRaster_DocumentWithoutPaginationIsRefused(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	playlist := rasterPlaylist(t)
 	playlist.DynamicQueryPagination = nil
 
@@ -357,7 +356,7 @@ func TestRaster_EndpointOffTheRasterAllowlistIsRefused(t *testing.T) {
 		"https://user:pw@api.raster.art/graphql",
 	} {
 		t.Run(endpoint, func(t *testing.T) {
-			rs := setupRaster(t, rasterDeviceKey)
+			rs := setupRaster(t)
 			playlist := rasterPlaylist(t)
 			playlist.DynamicQuery.Endpoint = endpoint
 
@@ -368,7 +367,7 @@ func TestRaster_EndpointOffTheRasterAllowlistIsRefused(t *testing.T) {
 }
 
 func TestRaster_WalkPastThePageCapIsAnError(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	calls := 0
 	rs.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
 		calls++
@@ -382,7 +381,7 @@ func TestRaster_WalkPastThePageCapIsAnError(t *testing.T) {
 }
 
 func TestRaster_RepeatedCursorStopsTheWalk(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	gomock.InOrder(
 		rs.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
 			return respond(200, rasterPage(t, []map[string]any{rasterNode(rasterToken(1, nil))}, true, "same"))
@@ -398,7 +397,7 @@ func TestRaster_RepeatedCursorStopsTheWalk(t *testing.T) {
 }
 
 func TestRaster_MissingPaginationPathFailsThePage(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	rs.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
 		return respond(200, `{"data":{"address":{"tokensOwned":{"nodes":[]}}}}`)
 	})
@@ -408,26 +407,13 @@ func TestRaster_MissingPaginationPathFailsThePage(t *testing.T) {
 	assert.Contains(t, err.Error(), "hasNextPage")
 }
 
-func TestRaster_NoConfiguredKeySendsNoKeyHeader(t *testing.T) {
-	rs := setupRaster(t, "")
-	rs.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(req *http.Request) (*http.Response, error) {
-		_, present := req.Header["X-Api-Key"]
-		assert.False(t, present, "the document's own x-api-key is dropped and nothing replaces it")
-		return respond(200, rasterPage(t, nil, false, ""))
-	})
-
-	result, err := rs.client.ProcessDynamicPlaylist(t.Context(), rasterPlaylist(t), false)
-	require.NoError(t, err)
-	assert.Empty(t, result.Items)
-}
-
 // TestRaster_ItemIDMatchesTheLegacyIndexerPath pins the id-stability promise:
 // a token resolved through the retired `dynamicQueries` path (ff-indexer-v2,
 // which stores EVM addresses EIP-55 checksummed and names Tezos
 // `tezos:mainnet`) and the same token resolved through Raster (lowercase EVM
 // address, `tezos:NetXdQprcVkpaWU`) carry the same item id.
 func TestRaster_ItemIDMatchesTheLegacyIndexerPath(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	name := "Fidenza #1"
 	rs.mockFFIdx.EXPECT().QueryTokens(gomock.Any(), "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 		Return([]ffindexer.Token{
@@ -461,7 +447,7 @@ func TestRaster_ItemIDMatchesTheLegacyIndexerPath(t *testing.T) {
 func TestRaster_StaticSnapshotCastIsUntouched(t *testing.T) {
 	// A hidden-works snapshot carries items and no dynamicQuery; it never
 	// reaches the resolver at all.
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	_, err := rs.client.ProcessDynamicPlaylist(t.Context(), dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "x", Source: "https://cdn.example/a"}},
 	}}, false)
@@ -528,56 +514,11 @@ func TestPlaylist_NonObjectPaginationIsIgnoredNotFatal(t *testing.T) {
 	assert.Nil(t, playlist.DynamicQueryPagination)
 }
 
-// TestNewRasterHTTPClient_DoesNotFollowRedirects pins the credential
-// boundary: the host allowlist checks only the URL the document names, so the
-// client that carries x-api-key must hand a 3xx back instead of following it.
-func TestNewRasterHTTPClient_DoesNotFollowRedirects(t *testing.T) {
-	var leaked atomic.Int32
-	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-api-key") != "" {
-			leaked.Add(1)
-		}
-		w.WriteHeader(200)
-	}))
-	defer elsewhere.Close()
-	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, elsewhere.URL+"/graphql", http.StatusTemporaryRedirect)
-	}))
-	defer origin.Close()
-
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, origin.URL+"/graphql", strings.NewReader("{}"))
-	require.NoError(t, err)
-	req.Header.Set("x-api-key", rasterDeviceKey)
-	resp, err := dp1.NewRasterHTTPClient().Do(req)
-	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
-
-	assert.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode, "the 3xx is returned, not followed")
-	assert.Equal(t, int32(0), leaked.Load(), "the key never reached the redirect target")
-}
-
-// TestRaster_RedirectedResponseFailsThePage covers the injected-client
-// backstop: a client that did follow a redirect is reported, not trusted.
-func TestRaster_RedirectedResponseFailsThePage(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
-	rs.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(req *http.Request) (*http.Response, error) {
-		moved := req.Clone(req.Context())
-		moved.URL, _ = moved.URL.Parse("https://elsewhere.example/graphql")
-		resp, _ := respond(200, rasterPage(t, nil, false, ""))
-		resp.Request = moved
-		return resp, nil
-	})
-
-	_, err := rs.client.ProcessDynamicPlaylist(t.Context(), rasterPlaylist(t), false)
-	require.ErrorIs(t, err, dp1.ErrRasterQuery)
-	assert.Contains(t, err.Error(), "redirected")
-}
-
 // TestRaster_NumericTokenIDsKeepTheirDigits: Raster may send tokenId as a
 // JSON number; past 2^53 a float64 decode would round it and change both the
 // provenance and the item id.
 func TestRaster_NumericTokenIDsKeepTheirDigits(t *testing.T) {
-	rs := setupRaster(t, rasterDeviceKey)
+	rs := setupRaster(t)
 	page := `{"data":{"address":{"tokensOwned":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
 		{"token":{"id":1,"chainId":"eip155:1","contractAddress":"` + artBlocksContract + `","tokenId":9007199254740993,"tokenStandard":"ERC721","media":{"contentUrl":"https://a.example/1"}}},
 		{"token":{"id":2,"chainId":"eip155:1","contractAddress":"` + artBlocksContract + `","tokenId":115792089237316195423570985008687907853269984665640564039457584007913129639935,"tokenStandard":"ERC721","media":{"contentUrl":"https://a.example/2"}}}

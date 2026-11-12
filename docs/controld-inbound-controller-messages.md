@@ -689,8 +689,8 @@ Dynamic DP1 example:
 
 Raster wallet-walk example (what ff-app casts for an address playlist with
 no hidden works; the address is inlined in the query, the page cursor is the
-only variable, and no API key travels in the document — the device adds its
-own `x-api-key` from config `raster.apiKey`; contract in
+only variable, and no API key travels anywhere — Raster's read API is
+unauthenticated; contract in
 [`api-design.md`](api-design.md), "DP-1 `dynamicQuery` resolution"):
 
 ```json
