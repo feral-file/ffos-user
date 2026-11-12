@@ -322,6 +322,34 @@ func (p CastPlan) Narrow(device *SeriesPlaybackMode) []dp1playlist.PlaylistItem 
 	return items
 }
 
+// Full flattens the plan the way expandSeriesItems already does for the
+// offline-cache download path (feral-file/ffos-user#455, #453): every group
+// contributes its FULL edition set, unconditionally — never narrowed by
+// ArtworkModel.hasDistinctEditions() the way Narrow's default case would
+// (which collapses a single/multi group to its representative alone). This
+// is deliberate: offline caching must keep expanding every series in full,
+// unaffected by seriesPlayback or device mode (docs/api-design.md,
+// feral-file/ffos-user#446's own accepted scope) — only the DISPLAY/narrow
+// decision (Narrow) is mode-aware, never what gets downloaded.
+//
+// maxItems is applied exactly like Narrow applies it, for the same reason:
+// a zero value (the offline-cache path's own uncapped contract) never
+// truncates.
+func (p CastPlan) Full() []dp1playlist.PlaylistItem {
+	items := make([]dp1playlist.PlaylistItem, 0, len(p.Segments))
+	for _, seg := range p.Segments {
+		if seg.Item != nil {
+			items = append(items, *seg.Item)
+		} else {
+			items = append(items, seg.Group.Editions...)
+		}
+		if p.maxItems > 0 && len(items) >= p.maxItems {
+			return items[:p.maxItems]
+		}
+	}
+	return items
+}
+
 // rawPlaylistItem is the subset of one playlist item's own JSON this package
 // reads independently of the typed dp1playlist.PlaylistItem decode —
 // seriesPlayback is not a dp1-go field (see SeriesPlaybackMode's doc), so it

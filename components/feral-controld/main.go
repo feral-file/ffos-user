@@ -1451,6 +1451,14 @@ func initializeApp(
 	}
 	playlist_refresher.SetContentPolicy(playlistRefresher, policyStore)
 	commandrouter.SetPolicyRefresher(rawCmdHandler, playlistRefresher, logger)
+	// Same device-level series-playback store commandrouter's own cast
+	// paths and status.Poller already read (see the SeriesPlaybackSource
+	// wiring above), so the refresher's resync narrows a series exactly
+	// the way a live cast would (feral-file/ffos-user#453) instead of
+	// following no override at all.
+	if seriesPlaybackSource, ok := commandrouter.SeriesPlaybackSource(rawCmdHandler); ok {
+		playlist_refresher.SetSeriesPlaybackSource(playlistRefresher, seriesPlaybackSource, logger)
+	}
 	// The owner's content policy falls with the claim on a factory reset, for
 	// the same rollback reason the device name does (see factoryReset).
 	executor.SetContentPolicyResetter(func() error {

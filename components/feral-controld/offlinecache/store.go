@@ -133,8 +133,44 @@ type Store interface {
 
 	SavePlaylist(playlistID string, raw json.RawMessage) error
 	LoadPlaylist(playlistID string) (json.RawMessage, error)
+	// DeletePlaylist also best-effort removes playlistID's series-segments
+	// sidecar (see SavePlaylistSeriesSegments), unlike the URL index (see
+	// LoadPlaylistIDForURL's doc on why that one is deliberately left
+	// stale): the sidecar is interpreted directly against whatever Items a
+	// LATER save of the same playlistID holds, so a stale sidecar left
+	// behind by a cleared download would silently narrow a future,
+	// unrelated playlist against the wrong group set — not merely point at
+	// a load that already fails closed. This is the single choke point for
+	// that cleanup; both of this method's own callers (ClearPlaylist,
+	// PrunePlaylistRecords) get it for free.
 	DeletePlaylist(playlistID string) error
 	ListPlaylistIDs() ([]string, error)
+
+	// SavePlaylistSeriesSegments persists the series-group identity a
+	// download resolved for playlistID (feral-file/ffos-user#455, #453) —
+	// every dp1.CastSegment the resolve walk saw, converted to this
+	// package's own mirror type at the commandrouter boundary (see
+	// SeriesSegment's doc). A later read (an offline-cache fallback or
+	// resync) reconstructs a dp1.CastPlan from this and calls its existing
+	// Narrow(deviceMode) to decide what to display — the exact logic a
+	// live cast already uses — without a second catalog round trip.
+	//
+	// An empty or nil segments DELETES any existing sidecar for playlistID
+	// rather than leaving a stale one in place: a playlist with no series
+	// items today must read back exactly like a playlist that never had
+	// one, and a playlist ID a publisher reuses for new, unrelated content
+	// must never inherit a prior save's group set. This is the ONE place
+	// that decides the sidecar's content, so no caller can save a flat
+	// Items list while forgetting to also clear a now-stale sidecar.
+	SavePlaylistSeriesSegments(playlistID string, segments []SeriesSegment) error
+	// LoadPlaylistSeriesSegments returns playlistID's saved series segments,
+	// or ErrPlaylistNotFound when none were ever saved — a non-series
+	// playlist, a playlist downloaded before this feature existed, or one
+	// whose series never resolved into a worth-tracking group (see
+	// dp1.CastPlan.HasSeriesGroups). Callers treat this exactly like "no
+	// group identity to narrow by — use the flat Items as they are," never
+	// as an error worth surfacing.
+	LoadPlaylistSeriesSegments(playlistID string) ([]SeriesSegment, error)
 
 	// SavePlaylistURLIndex records that a displayPlaylist/downloadPlaylist
 	// command resolved sourceURL to playlistID, so a later
@@ -592,6 +628,18 @@ func (s *fsStore) DeletePlaylist(playlistID string) error {
 	if err := s.os.Remove(path); err != nil && !s.os.IsNotExist(err) {
 		return fmt.Errorf("offline cache: delete playlist %s: %w", playlistID, err)
 	}
+	// Best-effort, and deliberately never surfaced as this call's own
+	// error: the main record above is the one every existing caller
+	// (ClearPlaylist, PrunePlaylistRecords) already treats as success/
+	// failure, and a sidecar delete failing here must not make either of
+	// them report the playlist as still cached when it is not. See
+	// SavePlaylistSeriesSegments' doc for why leaving a stray sidecar
+	// behind — rather than a stale URL index entry — is the one case this
+	// package actively cleans up instead of tolerating.
+	if err := s.deletePlaylistSeriesSegments(playlistID); err != nil {
+		s.logger.Warn("offline cache: failed to delete playlist series-segments sidecar",
+			zap.String("playlist_id", playlistID), zap.Error(err))
+	}
 	return nil
 }
 
@@ -604,6 +652,68 @@ func (s *fsStore) ListPlaylistIDs() ([]string, error) {
 // playlistsDir, so a nested directory here is invisible to that walk and
 // can never be mistaken for a playlist ID.
 func (s *fsStore) playlistsByURLDir() string { return filepath.Join(s.playlistsDir(), "by-url") }
+
+// playlistSeriesSegmentsDir is a second such nested subdirectory, for the
+// same invisibility reason as playlistsByURLDir above.
+func (s *fsStore) playlistSeriesSegmentsDir() string {
+	return filepath.Join(s.playlistsDir(), "series-segments")
+}
+
+func (s *fsStore) playlistSeriesSegmentsPath(playlistID string) (string, error) {
+	clean, err := safeID(playlistID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(s.playlistSeriesSegmentsDir(), clean+".json"), nil
+}
+
+func (s *fsStore) SavePlaylistSeriesSegments(playlistID string, segments []SeriesSegment) error {
+	if len(segments) == 0 {
+		return s.deletePlaylistSeriesSegments(playlistID)
+	}
+	path, err := s.playlistSeriesSegmentsPath(playlistID)
+	if err != nil {
+		return err
+	}
+	data, err := s.json.Marshal(seriesSegmentsEnvelope{Version: seriesSegmentsVersion, Segments: segments})
+	if err != nil {
+		return fmt.Errorf("offline cache: marshal playlist series segments %s: %w", playlistID, err)
+	}
+	return s.writeFileAtomic(s.playlistSeriesSegmentsDir(), path, data, recordFilePerm)
+}
+
+func (s *fsStore) LoadPlaylistSeriesSegments(playlistID string) ([]SeriesSegment, error) {
+	path, err := s.playlistSeriesSegmentsPath(playlistID)
+	if err != nil {
+		return nil, err
+	}
+	data, err := s.os.ReadFile(path)
+	if s.os.IsNotExist(err) {
+		return nil, ErrPlaylistNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("offline cache: read playlist series segments %s: %w", playlistID, err)
+	}
+	var envelope seriesSegmentsEnvelope
+	if err := s.json.Unmarshal(data, &envelope); err != nil {
+		return nil, fmt.Errorf("offline cache: parse playlist series segments %s: %w", playlistID, err)
+	}
+	if envelope.Version != seriesSegmentsVersion {
+		return nil, fmt.Errorf("offline cache: unsupported playlist series segments version %d for %s", envelope.Version, playlistID)
+	}
+	return envelope.Segments, nil
+}
+
+func (s *fsStore) deletePlaylistSeriesSegments(playlistID string) error {
+	path, err := s.playlistSeriesSegmentsPath(playlistID)
+	if err != nil {
+		return err
+	}
+	if err := s.os.Remove(path); err != nil && !s.os.IsNotExist(err) {
+		return fmt.Errorf("offline cache: delete playlist series segments %s: %w", playlistID, err)
+	}
+	return nil
+}
 
 func (s *fsStore) playlistURLIndexPath(sourceURL string) string {
 	sum := sha256.Sum256([]byte(sourceURL))

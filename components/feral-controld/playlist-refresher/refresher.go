@@ -161,6 +161,46 @@ type refresher struct {
 	// mediaHealthHints, when set (SetMediaHealthHints), supplies the
 	// per-item hint argument for every send.
 	mediaHealthHints func(items []dp1playlist.PlaylistItem) interface{}
+
+	// seriesPlaybackSource, when set (SetSeriesPlaybackSource), is
+	// commandrouter's own device-level series-playback getter
+	// (commandrouter.SeriesPlaybackSource) — the same store main.go wires
+	// into status.Poller, so this package's resync and commandrouter's own
+	// cast paths read the identical override and can never disagree about
+	// which mode a series narrows under (feral-file/ffos-user#453). nil
+	// means "follow the document", mirroring currentSeriesPlaybackMode's
+	// own nil-safety when no store was wired (a build before this seam, or
+	// a test).
+	seriesPlaybackSource func() *dp1.SeriesPlaybackMode
+}
+
+// SetSeriesPlaybackSource injects the device-level series-playback getter
+// onto r, if r is the concrete refresher built by New (mirroring
+// SetSessionGeneration's contract). Must be called before Start.
+func SetSeriesPlaybackSource(r Refresher, fn func() *dp1.SeriesPlaybackMode, logger *zap.Logger) {
+	setter, ok := r.(interface {
+		setSeriesPlaybackSource(func() *dp1.SeriesPlaybackMode)
+	})
+	if !ok {
+		logger.Warn("Playlist refresher does not support series playback wiring")
+		return
+	}
+	setter.setSeriesPlaybackSource(fn)
+}
+
+func (r *refresher) setSeriesPlaybackSource(fn func() *dp1.SeriesPlaybackMode) {
+	r.seriesPlaybackSource = fn
+}
+
+// currentSeriesPlaybackMode reads the device-level override, mirroring
+// commandrouter's own method of the same name: nil means "follow the
+// document", either because no override is set or because no source was
+// wired (a build before this seam, or a test).
+func (r *refresher) currentSeriesPlaybackMode() *dp1.SeriesPlaybackMode {
+	if r.seriesPlaybackSource == nil {
+		return nil
+	}
+	return r.seriesPlaybackSource()
 }
 
 // SetSessionGeneration injects the generation getter onto r, if r is the
@@ -623,7 +663,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	switch {
 	case schedulerSource.PlaylistURL != "":
 		kind = "playlist URL"
-		playlist, err = r.dp1.ProcessPlaylistURL(r.context, schedulerSource.PlaylistURL, false)
+		playlist, err = r.narrowedPlaylistFromURL(schedulerSource.PlaylistURL)
 		if err != nil {
 			// Offline fallback: serve the last successfully cached body for
 			// this URL rather than failing the pass outright, mirroring
@@ -1328,7 +1368,7 @@ func (r *refresher) resolveDisplayedPlaylist(playerStatus *status.PlayerStatus) 
 	switch {
 	case playerStatus.PlaylistURL != nil:
 		url := *playerStatus.PlaylistURL
-		playlist, err := r.dp1.ProcessPlaylistURL(r.context, url, false)
+		playlist, err := r.narrowedPlaylistFromURL(url)
 		if err != nil {
 			cached, cacheErr := r.loadCachedPlaylistForURL(url)
 			if cacheErr != nil {
@@ -1446,6 +1486,74 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 	}
 }
 
+// fromOfflineCacheSegments converts offlinecache's own SeriesSegment mirror
+// type back into dp1.CastSegment, for loadCachedPlaylistForURL below to
+// build a dp1.CastPlan and call its existing Narrow(deviceMode). Duplicated
+// from commandrouter's identical helper (offlinecache.go's
+// toOfflineCacheSegments/fromOfflineCacheSegments) rather than shared, for
+// the same reason this package already carries its own
+// loadCachedPlaylistForURL/resolveDisplayedPlaylist copies — see
+// AGENTS.md's service-boundary guidance. Keep the two in sync.
+func fromOfflineCacheSegments(segments []offlinecache.SeriesSegment) []dp1.CastSegment {
+	out := make([]dp1.CastSegment, 0, len(segments))
+	for _, seg := range segments {
+		if seg.Item != nil {
+			item := *seg.Item
+			out = append(out, dp1.CastSegment{Item: &item})
+			continue
+		}
+		group := seg.Group
+		var documentMode *dp1.SeriesPlaybackMode
+		if group.DocumentMode != nil {
+			mode := dp1.SeriesPlaybackMode(*group.DocumentMode)
+			documentMode = &mode
+		}
+		out = append(out, dp1.CastSegment{
+			Group: &dp1.ResolvedSeriesGroup{
+				Key: dp1.SeriesGroupKey{
+					Chain:    group.Key.Chain,
+					Address:  group.Key.Address,
+					SeriesID: dp1playlist.SeriesID(group.Key.SeriesID),
+				},
+				DocumentMode:   documentMode,
+				Representative: group.Representative,
+				Editions:       group.Editions,
+				Resolved:       group.Resolved,
+				ArtworkModel:   dp1.SeriesArtworkModel(group.ArtworkModel),
+			},
+		})
+	}
+	return out
+}
+
+// narrowedPlaylistFromURL fetches url and narrows any seriesRegistry item it
+// carries by the device's current series-playback override — the same
+// dp1.CastPlan.Narrow logic a live cast already applies — instead of the
+// unconditional, mode-ignorant full expansion r.dp1.ProcessPlaylistURL used
+// to apply at both of this method's call sites (feral-file/ffos-user#453: a
+// resync on this LIVE-reachable path was re-expanding a series back to full
+// after an earlier cast had narrowed it, and resolveDisplayedPlaylist's own
+// replay-scope resolve had the identical gap).
+//
+// Deliberately NOT ProcessPlaylistURLForCast: that variant caps at
+// CAST_PLAYLIST_ITEMS_LIMIT, which this resync path must not newly start
+// truncating — it resyncs whatever is already playing, however large, the
+// same uncapped contract ProcessPlaylistURL always had.
+func (r *refresher) narrowedPlaylistFromURL(url string) (*dp1.Playlist, error) {
+	playlist, rawPlaylist, err := r.dp1.FetchPlaylist(r.context, url)
+	if err != nil {
+		return nil, err
+	}
+	if playlist.HasDynamicContent() {
+		return r.dp1.ProcessDynamicPlaylist(r.context, *playlist, false)
+	}
+	deviceMode := r.currentSeriesPlaybackMode()
+	plan := r.dp1.ResolveSeriesCastPlan(r.context, *playlist, rawPlaylist, deviceMode, 0)
+	narrowed := *playlist
+	narrowed.Items = plan.Narrow(deviceMode)
+	return &narrowed, nil
+}
+
 // loadCachedPlaylistForURL mirrors commandrouter's handler.loadCachedPlaylistForURL
 // (see its doc, including why the returned playlist carries NO signature
 // verdict: the saved body is a typed, hydrated re-marshal, not the signed
@@ -1456,11 +1564,18 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 // caching disabled, url was never downloaded, or the downloaded copy has
 // since been cleared), so the caller can report the original live
 // resolution error instead.
+//
+// If the cached copy carries series-group identity (feral-file/ffos-user
+// #453), the returned playlist's Items are narrowed by the device's current
+// series-playback override first — see commandrouter's identical fix on its
+// own loadCachedPlaylistForURL for the full rationale; the two are kept in
+// step by hand (this package deliberately does not depend on commandrouter
+// — see AGENTS.md's service-boundary guidance).
 func (r *refresher) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
 	if r.offlineCache == nil {
 		return nil, fmt.Errorf("offline cache: disabled, no cached fallback for %s", url)
 	}
-	raw, err := r.offlineCache.CachedPlaylistForURL(url)
+	raw, segments, err := r.offlineCache.CachedPlaylistForURL(url)
 	if err != nil {
 		return nil, fmt.Errorf("offline cache: no cached playlist for %s: %w", url, err)
 	}
@@ -1470,6 +1585,10 @@ func (r *refresher) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) 
 	var playlist *dp1.Playlist
 	if err := r.json.Unmarshal(raw, &playlist); err != nil {
 		return nil, fmt.Errorf("offline cache: parse cached playlist for %s: %w", url, err)
+	}
+	if len(segments) > 0 {
+		plan := dp1.CastPlan{Segments: fromOfflineCacheSegments(segments)}
+		playlist.Items = plan.Narrow(r.currentSeriesPlaybackMode())
 	}
 	return playlist, nil
 }

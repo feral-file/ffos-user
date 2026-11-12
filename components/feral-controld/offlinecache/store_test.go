@@ -320,6 +320,119 @@ func TestStore_Playlist_SaveLoadDelete(t *testing.T) {
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
 }
 
+func seriesSegmentsFixture() []offlinecache.SeriesSegment {
+	plain := dp1playlist.PlaylistItem{ID: "plain-item", Source: "https://cdn.example.com/plain.png"}
+	mode := "first"
+	return []offlinecache.SeriesSegment{
+		{Item: &plain},
+		{Group: &offlinecache.SeriesGroup{
+			Key:            offlinecache.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"},
+			DocumentMode:   &mode,
+			Representative: dp1playlist.PlaylistItem{ID: "item-series", Source: "https://cdn.example.com/series.html"},
+			Editions: []dp1playlist.PlaylistItem{
+				{ID: "item-series", Source: "https://cdn.example.com/series.html"},
+				{ID: "edition-2", Source: "https://cdn.example.com/edition-2.html"},
+			},
+			Resolved:     true,
+			ArtworkModel: "multi_unique",
+		}},
+	}
+}
+
+func TestStore_PlaylistSeriesSegments_SaveAndLoad(t *testing.T) {
+	store, _ := newTestStore(t)
+
+	segments := seriesSegmentsFixture()
+	require.NoError(t, store.SavePlaylistSeriesSegments("playlist-1", segments))
+
+	loaded, err := store.LoadPlaylistSeriesSegments("playlist-1")
+	require.NoError(t, err)
+	require.Len(t, loaded, 2)
+	assert.Equal(t, "plain-item", loaded[0].Item.ID)
+	require.NotNil(t, loaded[1].Group)
+	assert.Equal(t, "42", loaded[1].Group.Key.SeriesID)
+	assert.Len(t, loaded[1].Group.Editions, 2)
+}
+
+// TestStore_PlaylistSeriesSegments_NeverSavedReturnsNotFound pins the
+// additive-compatibility contract: a non-series playlist, or one downloaded
+// before this feature existed, must read back exactly like "nothing to
+// narrow by" — not an error worth surfacing to a caller that only wants to
+// know whether a sidecar exists.
+func TestStore_PlaylistSeriesSegments_NeverSavedReturnsNotFound(t *testing.T) {
+	store, _ := newTestStore(t)
+	require.NoError(t, store.SavePlaylist("playlist-1", json.RawMessage(`{"id":"playlist-1","items":[]}`)))
+
+	_, err := store.LoadPlaylistSeriesSegments("playlist-1")
+	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
+}
+
+// TestStore_PlaylistSeriesSegments_SavingEmptyDeletesAnyExisting pins the
+// one subtlety in SavePlaylistSeriesSegments' contract: a playlist ID a
+// publisher reuses for new, non-series content must never go on reading
+// back a PRIOR save's group set — the sidecar must always reflect exactly
+// the latest save, including "latest save had none."
+func TestStore_PlaylistSeriesSegments_SavingEmptyDeletesAnyExisting(t *testing.T) {
+	store, _ := newTestStore(t)
+	require.NoError(t, store.SavePlaylistSeriesSegments("playlist-1", seriesSegmentsFixture()))
+
+	require.NoError(t, store.SavePlaylistSeriesSegments("playlist-1", nil))
+
+	_, err := store.LoadPlaylistSeriesSegments("playlist-1")
+	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
+}
+
+// TestStore_PlaylistSeriesSegments_DeletePlaylistRemovesTheSidecarToo pins
+// DeletePlaylist's extended contract (see its doc): unlike the by-url
+// index, a stale series-segments sidecar is actively cleaned up, because it
+// is interpreted directly against whatever Items a LATER save of the same
+// playlist ID holds.
+func TestStore_PlaylistSeriesSegments_DeletePlaylistRemovesTheSidecarToo(t *testing.T) {
+	store, _ := newTestStore(t)
+	require.NoError(t, store.SavePlaylist("playlist-1", json.RawMessage(`{"id":"playlist-1","items":[]}`)))
+	require.NoError(t, store.SavePlaylistSeriesSegments("playlist-1", seriesSegmentsFixture()))
+
+	require.NoError(t, store.DeletePlaylist("playlist-1"))
+
+	_, err := store.LoadPlaylistSeriesSegments("playlist-1")
+	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
+}
+
+// TestStore_PlaylistSeriesSegments_DeletePlaylistToleratesNoSidecar covers
+// the common case — a non-series playlist with no sidecar ever saved —
+// DeletePlaylist's best-effort sidecar removal must not turn a missing
+// sidecar into an error for the main record delete.
+func TestStore_PlaylistSeriesSegments_DeletePlaylistToleratesNoSidecar(t *testing.T) {
+	store, _ := newTestStore(t)
+	require.NoError(t, store.SavePlaylist("playlist-1", json.RawMessage(`{"id":"playlist-1","items":[]}`)))
+
+	assert.NoError(t, store.DeletePlaylist("playlist-1"))
+}
+
+// TestStore_PlaylistSeriesSegments_DoesNotLeakIntoListPlaylistIDs mirrors
+// TestStore_PlaylistURLIndex_DoesNotLeakIntoListPlaylistIDs: the sidecar's
+// nested series-segments/ subdirectory must stay invisible to
+// ListPlaylistIDs and PrunePlaylistRecords, exactly like by-url/ already is.
+func TestStore_PlaylistSeriesSegments_DoesNotLeakIntoListPlaylistIDs(t *testing.T) {
+	store, _ := newTestStore(t)
+	require.NoError(t, store.SavePlaylist("playlist-1", json.RawMessage(`{"id":"playlist-1"}`)))
+	require.NoError(t, store.SavePlaylistSeriesSegments("playlist-1", seriesSegmentsFixture()))
+
+	ids, err := store.ListPlaylistIDs()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"playlist-1"}, ids)
+
+	// keep=1 with exactly one real playlist record: if the nested
+	// series-segments/ directory were mistaken for a second playlist id,
+	// records would number 2 here and this call would evict one of them.
+	removed, err := store.PrunePlaylistRecords(1)
+	require.NoError(t, err)
+	assert.Equal(t, 0, removed, "PrunePlaylistRecords must never see the sidecar directory as a playlist id to prune")
+
+	_, err = store.LoadPlaylist("playlist-1")
+	assert.NoError(t, err, "the one real playlist record must survive")
+}
+
 func TestStore_PlaylistURLIndex_SaveAndLoad(t *testing.T) {
 	store, _ := newTestStore(t)
 

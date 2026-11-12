@@ -239,7 +239,7 @@ func TestService_DownloadPlaylist_DuplicateSourcesCollapseToOneJob(t *testing.T)
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, queued, "a duplicated source must be queued exactly once")
 	assert.Equal(t, 2, total, "total still reports the playlist's raw item count")
@@ -310,7 +310,7 @@ func TestService_DownloadPlaylist_ConcurrentRequestsForOneSourceCaptureOnce(t *t
 	for _, playlistID := range []string{"playlist-a", "playlist-b"} {
 		go func(raw json.RawMessage) {
 			start.Wait() // release both goroutines together
-			q, tot, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
+			q, tot, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 			results <- result{q, tot, err}
 		}(rawFor(playlistID))
 	}
@@ -460,7 +460,7 @@ func TestService_DownloadPlaylist_BeforeStartReturnsNotStarted(t *testing.T) {
 	defer ts.ctrl.Finish()
 
 	raw := json.RawMessage(`{"id":"playlist-1","items":[]}`)
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	assert.ErrorIs(t, err, offlinecache.ErrServiceNotStarted)
 	assert.Zero(t, queued)
 	assert.Zero(t, total)
@@ -683,7 +683,7 @@ func TestService_DownloadPlaylist_QueuesEveryClassButStreamingAndStoresVerbatim(
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 2, queued, "software and media items must both be queued; only the streaming item is excluded")
 	assert.Equal(t, 3, total)
@@ -734,7 +734,7 @@ func TestService_DownloadPlaylist_DoesNotDoubleCountAlreadyInFlightItems(t *test
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued1, total1, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
+	queued1, total1, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, queued1, "the first call must report the item as newly queued")
 	assert.Equal(t, 1, total1)
@@ -744,7 +744,7 @@ func TestService_DownloadPlaylist_DoesNotDoubleCountAlreadyInFlightItems(t *test
 		return err == nil && len(snap.Items) == 1 && snap.Items[0].State == offlinecache.StateDownloading
 	}, 2*time.Second, 10*time.Millisecond, "worker should have dequeued into downloading before the retry lands")
 
-	queued2, total2, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
+	queued2, total2, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	require.NoError(t, err)
 	assert.Zero(t, queued2, "a retry while the only item is still downloading must report queuedCount 0, not double-count it")
 	assert.Equal(t, 1, total2)
@@ -792,12 +792,12 @@ func TestService_DownloadPlaylist_AllItemsFailClassificationReturnsError(t *test
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, sourceURL, 0)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, sourceURL, 0, nil)
 	require.Error(t, err, "a classifier outage must not be reported as a successful download of zero software items")
 	assert.Zero(t, queued)
 	assert.Equal(t, 2, total)
 
-	_, err = ts.service.CachedPlaylistForURL(sourceURL)
+	_, _, err = ts.service.CachedPlaylistForURL(sourceURL)
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound,
 		"a download this method reported as failed must never leave a 'last known good' offline fallback behind")
 	_, err = ts.store.LoadPlaylist("playlist-1")
@@ -848,7 +848,7 @@ func TestService_DownloadPlaylist_SavePlaylistFailureStartsNoWork(t *testing.T) 
 	// SavePlaylist failure must short-circuit before either the URL
 	// index write or any item's capture job ever starts.
 
-	queued, total, downloadErr := svc.DownloadPlaylist(context.Background(), raw, "https://feed.example.com/playlists/playlist-1", 0)
+	queued, total, downloadErr := svc.DownloadPlaylist(context.Background(), raw, "https://feed.example.com/playlists/playlist-1", 0, nil)
 	require.Error(t, downloadErr)
 	assert.Zero(t, queued, "no item may be reported as queued when the playlist itself failed to persist")
 	assert.Equal(t, 1, total)
@@ -887,7 +887,7 @@ func TestService_DownloadPlaylist_PartialClassificationFailureStillQueuesSuccess
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, queued)
 	assert.Equal(t, 2, total)
@@ -922,12 +922,88 @@ func TestService_DownloadPlaylist_IndexesBySourceURLForOfflineDisplayFallback(t 
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, sourceURL, 0)
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, sourceURL, 0, nil)
 	require.NoError(t, err)
 
-	cached, err := ts.service.CachedPlaylistForURL(sourceURL)
+	cached, _, err := ts.service.CachedPlaylistForURL(sourceURL)
 	require.NoError(t, err)
 	assert.JSONEq(t, string(raw), string(cached))
+}
+
+// TestService_DownloadPlaylist_PersistsSeriesSegmentsForOfflineDisplayFallback
+// is the regression test for feral-file/ffos-user#455/#453: the series-group
+// identity a caller's own resolve walk saw must round-trip through
+// DownloadPlaylist -> CachedPlaylistForURL so a later offline fallback/
+// resync can narrow from it without a live catalog call.
+func TestService_DownloadPlaylist_PersistsSeriesSegmentsForOfflineDisplayFallback(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"title":     "t",
+		"items":     []map[string]interface{}{},
+	})
+	require.NoError(t, err)
+	sourceURL := "https://feed.example.com/playlists/playlist-1"
+	segments := []offlinecache.SeriesSegment{{
+		Group: &offlinecache.SeriesGroup{
+			Key:            offlinecache.SeriesGroupKey{Chain: "evm", SeriesID: "7"},
+			Representative: dp1playlist.PlaylistItem{ID: "item-series"},
+			Editions:       []dp1playlist.PlaylistItem{{ID: "item-series"}, {ID: "edition-2"}},
+			Resolved:       true,
+		},
+	}}
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, sourceURL, 0, segments)
+	require.NoError(t, err)
+
+	_, cachedSegments, err := ts.service.CachedPlaylistForURL(sourceURL)
+	require.NoError(t, err)
+	require.Len(t, cachedSegments, 1)
+	assert.Equal(t, "7", cachedSegments[0].Group.Key.SeriesID)
+	assert.Len(t, cachedSegments[0].Group.Editions, 2)
+}
+
+// TestService_ClearPlaylist_AlsoClearsSeriesSegments pins that a cleared
+// playlist's series-group identity does not outlive the clear — otherwise
+// a playlist id a publisher reuses for new, unrelated (possibly non-series)
+// content could inherit a prior download's stale group set.
+func TestService_ClearPlaylist_AlsoClearsSeriesSegments(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"title":     "t",
+		"items":     []map[string]interface{}{},
+	})
+	require.NoError(t, err)
+	sourceURL := "https://feed.example.com/playlists/playlist-1"
+	segments := []offlinecache.SeriesSegment{{
+		Group: &offlinecache.SeriesGroup{
+			Key:            offlinecache.SeriesGroupKey{Chain: "evm", SeriesID: "7"},
+			Representative: dp1playlist.PlaylistItem{ID: "item-series"},
+			Editions:       []dp1playlist.PlaylistItem{{ID: "item-series"}},
+			Resolved:       true,
+		},
+	}}
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, sourceURL, 0, segments)
+	require.NoError(t, err)
+
+	require.NoError(t, ts.service.ClearPlaylist("playlist-1"))
+
+	_, _, err = ts.service.CachedPlaylistForURL(sourceURL)
+	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
 }
 
 // TestService_DownloadPlaylist_EmptySourceURLIsNotIndexed pins the inline
@@ -948,10 +1024,10 @@ func TestService_DownloadPlaylist_EmptySourceURLIsNotIndexed(t *testing.T) {
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	require.NoError(t, err)
 
-	_, err = ts.service.CachedPlaylistForURL("https://feed.example.com/playlists/playlist-1")
+	_, _, err = ts.service.CachedPlaylistForURL("https://feed.example.com/playlists/playlist-1")
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
 }
 
@@ -982,9 +1058,9 @@ func TestService_IndexPlaylistForOfflineDisplay_MakesPlaylistRecoverableByURL(t 
 	// sampledEpoch matches the current (never-cleared) generation, so the
 	// clear-race guard passes and the index is written.
 	gen := ts.service.CurrentPlaylistClearGeneration("playlist-1")
-	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, sourceURL, gen))
+	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, sourceURL, gen, nil))
 
-	cached, err := ts.service.CachedPlaylistForURL(sourceURL)
+	cached, _, err := ts.service.CachedPlaylistForURL(sourceURL)
 	require.NoError(t, err)
 	assert.JSONEq(t, string(raw), string(cached))
 
@@ -1024,9 +1100,9 @@ func TestService_IndexPlaylistForOfflineDisplay_StaleEpochDoesNotResurrect(t *te
 
 	// Establish the record, then clear the playlist: this bumps the
 	// clear-generation past staleGen and deletes the record.
-	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, sourceURL, staleGen))
+	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, sourceURL, staleGen, nil))
 	require.NoError(t, ts.service.ClearPlaylist("playlist-1"))
-	_, err = ts.service.CachedPlaylistForURL(sourceURL)
+	_, _, err = ts.service.CachedPlaylistForURL(sourceURL)
 	require.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound, "sanity: the clear must have removed the record")
 
 	// A late index write still carrying the pre-clear generation must be
@@ -1036,9 +1112,9 @@ func TestService_IndexPlaylistForOfflineDisplay_StaleEpochDoesNotResurrect(t *te
 	// ErrPlaylistSaveClearedRace): downloadPlaylistItem's inline outcome
 	// reported ok:true for a body that was deliberately never written.
 	require.ErrorIs(t,
-		ts.service.IndexPlaylistForOfflineDisplay(raw, sourceURL, staleGen),
+		ts.service.IndexPlaylistForOfflineDisplay(raw, sourceURL, staleGen, nil),
 		offlinecache.ErrPlaylistSaveClearedRace)
-	_, err = ts.service.CachedPlaylistForURL(sourceURL)
+	_, _, err = ts.service.CachedPlaylistForURL(sourceURL)
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound,
 		"an index write carrying a pre-clear generation must not resurrect the cleared playlist record")
 }
@@ -1058,9 +1134,9 @@ func TestService_IndexPlaylistForOfflineDisplay_EmptySourceURLIsNotIndexed(t *te
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, "", 0))
+	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, "", 0, nil))
 
-	_, err = ts.service.CachedPlaylistForURL("https://feed.example.com/playlists/playlist-1")
+	_, _, err = ts.service.CachedPlaylistForURL("https://feed.example.com/playlists/playlist-1")
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
 }
 
@@ -1070,7 +1146,7 @@ func TestService_IndexPlaylistForOfflineDisplay_BeforeStartReturnsNotStarted(t *
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
-	err := ts.service.IndexPlaylistForOfflineDisplay(json.RawMessage(`{"id":"playlist-1"}`), "https://example.com/p.json", 0)
+	err := ts.service.IndexPlaylistForOfflineDisplay(json.RawMessage(`{"id":"playlist-1"}`), "https://example.com/p.json", 0, nil)
 	assert.ErrorIs(t, err, offlinecache.ErrServiceNotStarted)
 }
 
@@ -1083,7 +1159,7 @@ func TestService_IndexPlaylistForOfflineDisplay_MissingIDErrors(t *testing.T) {
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	err := ts.service.IndexPlaylistForOfflineDisplay(json.RawMessage(`{"title":"no id"}`), "https://example.com/p.json", 0)
+	err := ts.service.IndexPlaylistForOfflineDisplay(json.RawMessage(`{"title":"no id"}`), "https://example.com/p.json", 0, nil)
 	assert.Error(t, err)
 }
 
@@ -1094,7 +1170,7 @@ func TestService_CachedPlaylistForURL_UnknownURLReturnsNotFound(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
-	_, err := ts.service.CachedPlaylistForURL("https://feed.example.com/never-downloaded")
+	_, _, err := ts.service.CachedPlaylistForURL("https://feed.example.com/never-downloaded")
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
 }
 
@@ -1102,7 +1178,7 @@ func TestService_DownloadPlaylist_InvalidJSON(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
-	_, _, err := ts.service.DownloadPlaylist(context.Background(), json.RawMessage(`not json`), "", 0)
+	_, _, err := ts.service.DownloadPlaylist(context.Background(), json.RawMessage(`not json`), "", 0, nil)
 	assert.Error(t, err)
 }
 
@@ -1113,7 +1189,7 @@ func TestService_DownloadPlaylist_MissingID(t *testing.T) {
 	raw, err := json.Marshal(map[string]interface{}{"dpVersion": "1.0.0", "items": []interface{}{}})
 	require.NoError(t, err)
 
-	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	assert.Error(t, err)
 }
 
@@ -1647,7 +1723,7 @@ func TestService_ClearPlaylist_DuringBlockedClassificationDoesNotResurrect(t *te
 
 	dlDone := make(chan error, 1)
 	go func() {
-		queued, _, dlErr := ts.service.DownloadPlaylist(context.Background(), raw, "https://feed.example.com/p1", 0)
+		queued, _, dlErr := ts.service.DownloadPlaylist(context.Background(), raw, "https://feed.example.com/p1", 0, nil)
 		assert.Zero(t, queued, "no item may be queued once the playlist is cleared mid-classification")
 		dlDone <- dlErr
 	}()
@@ -3327,7 +3403,7 @@ func TestService_DownloadPlaylist_ClassificationIsBoundedAndConcurrent(t *testin
 	defer ts.service.Stop()
 
 	start := time.Now()
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	elapsed := time.Since(start)
 
 	// Nothing could be classified, so this is the documented
@@ -3410,7 +3486,7 @@ func TestService_DownloadPlaylist_ClassifyDeadlineIsPerItemNotPerPhase(t *testin
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, itemCount, queued, "no item may be dropped for being late in the queue")
 	assert.Equal(t, itemCount, total)
@@ -3479,7 +3555,7 @@ func TestService_DownloadPlaylist_InlineDataURIsAreSkippedNotFailed(t *testing.T
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	require.NoError(t, err, "an inline item must not fail the command")
 	assert.Equal(t, 1, queued, "only the fetchable item is queued")
 	assert.Equal(t, 2, total)
@@ -3561,7 +3637,7 @@ func TestService_DownloadPlaylist_SkipsOversizedSources(t *testing.T) {
 		Return(&offlinecache.ItemRecord{}, nil).AnyTimes()
 
 	raw := []byte(`{"id":"pl-1","items":[{"id":"a","source":"` + good + `"},{"id":"b","source":"` + oversized + `"}]}`)
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	require.NoError(t, err, "one oversized item must not fail the whole playlist")
 	require.Equal(t, 2, total)
 	require.Equal(t, 1, queued, "only the in-bounds source is queued")
@@ -3877,7 +3953,7 @@ func TestService_DownloadPlaylist_BoundedQueueKeepsTheWholeMembershipRecord(t *t
 		Coverage: offlinecache.Coverage{Complete: true},
 	}))
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", maxQueued)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", maxQueued, nil)
 	require.NoError(t, err)
 	assert.Equal(t, maxQueued, queued, "the bound limits what is queued")
 	assert.Equal(t, itemCount, total, "total still reports the playlist's real item count, not the bound")

@@ -73,12 +73,13 @@ func (m *MockOfflineCacheService) EXPECT() *MockOfflineCacheServiceMockRecorder 
 }
 
 // CachedPlaylistForURL mocks base method.
-func (m *MockOfflineCacheService) CachedPlaylistForURL(sourceURL string) (json.RawMessage, error) {
+func (m *MockOfflineCacheService) CachedPlaylistForURL(sourceURL string) (json.RawMessage, []offlinecache.SeriesSegment, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "CachedPlaylistForURL", sourceURL)
 	ret0, _ := ret[0].(json.RawMessage)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret1, _ := ret[1].([]offlinecache.SeriesSegment)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // CachedPlaylistForURL indicates an expected call of CachedPlaylistForURL.
@@ -177,9 +178,9 @@ func (mr *MockOfflineCacheServiceMockRecorder) DownloadItem(ctx, item interface{
 }
 
 // DownloadPlaylist mocks base method.
-func (m *MockOfflineCacheService) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string, maxQueued int) (int, int, error) {
+func (m *MockOfflineCacheService) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string, maxQueued int, segments []offlinecache.SeriesSegment) (int, int, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DownloadPlaylist", ctx, playlistRaw, sourceURL, maxQueued)
+	ret := m.ctrl.Call(m, "DownloadPlaylist", ctx, playlistRaw, sourceURL, maxQueued, segments)
 	ret0, _ := ret[0].(int)
 	ret1, _ := ret[1].(int)
 	ret2, _ := ret[2].(error)
@@ -187,9 +188,9 @@ func (m *MockOfflineCacheService) DownloadPlaylist(ctx context.Context, playlist
 }
 
 // DownloadPlaylist indicates an expected call of DownloadPlaylist.
-func (mr *MockOfflineCacheServiceMockRecorder) DownloadPlaylist(ctx, playlistRaw, sourceURL, maxQueued interface{}) *gomock.Call {
+func (mr *MockOfflineCacheServiceMockRecorder) DownloadPlaylist(ctx, playlistRaw, sourceURL, maxQueued, segments interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DownloadPlaylist", reflect.TypeOf((*MockOfflineCacheService)(nil).DownloadPlaylist), ctx, playlistRaw, sourceURL, maxQueued)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DownloadPlaylist", reflect.TypeOf((*MockOfflineCacheService)(nil).DownloadPlaylist), ctx, playlistRaw, sourceURL, maxQueued, segments)
 }
 
 // HasReplayableItem mocks base method.
@@ -211,17 +212,17 @@ func (mr *MockOfflineCacheServiceMockRecorder) HasReplayableItem(sources ...inte
 }
 
 // IndexPlaylistForOfflineDisplay mocks base method.
-func (m *MockOfflineCacheService) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64) error {
+func (m *MockOfflineCacheService) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64, segments []offlinecache.SeriesSegment) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "IndexPlaylistForOfflineDisplay", playlistRaw, sourceURL, sampledEpoch)
+	ret := m.ctrl.Call(m, "IndexPlaylistForOfflineDisplay", playlistRaw, sourceURL, sampledEpoch, segments)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // IndexPlaylistForOfflineDisplay indicates an expected call of IndexPlaylistForOfflineDisplay.
-func (mr *MockOfflineCacheServiceMockRecorder) IndexPlaylistForOfflineDisplay(playlistRaw, sourceURL, sampledEpoch interface{}) *gomock.Call {
+func (mr *MockOfflineCacheServiceMockRecorder) IndexPlaylistForOfflineDisplay(playlistRaw, sourceURL, sampledEpoch, segments interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IndexPlaylistForOfflineDisplay", reflect.TypeOf((*MockOfflineCacheService)(nil).IndexPlaylistForOfflineDisplay), playlistRaw, sourceURL, sampledEpoch)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IndexPlaylistForOfflineDisplay", reflect.TypeOf((*MockOfflineCacheService)(nil).IndexPlaylistForOfflineDisplay), playlistRaw, sourceURL, sampledEpoch, segments)
 }
 
 // Start mocks base method.

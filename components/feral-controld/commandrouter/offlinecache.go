@@ -86,7 +86,7 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// resolve also decides what the save below persists, and ClearPlaylist
 	// enumerates the member sources to clear FROM that record, so a truncated
 	// resolve here would orphan every item past the cut.
-	playlist, err := h.resolveOfflineCachePlaylist(ctx, args)
+	playlist, segments, err := h.resolveOfflineCachePlaylist(ctx, args)
 	if err != nil {
 		return errorResponse("resolve_failed", err.Error(), true), nil
 	}
@@ -170,7 +170,7 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// bytes exist solely inside this playlist body — so reporting
 	// ok:true after the save failed would tell a client the item is
 	// cached offline when in fact nothing was written anywhere.
-	if err := h.indexResolvedPlaylistForOfflineDisplay(playlist, sourceURL, clearGen); err != nil && inline {
+	if err := h.indexResolvedPlaylistForOfflineDisplay(playlist, sourceURL, clearGen, segments); err != nil && inline {
 		// ErrPlaylistSaveClearedRace is a skipped write, not a broken
 		// one: a ClearPlaylist landed inside the sample->save window and
 		// won. Reported as retryable "busy" to match how the QUEUED path
@@ -192,14 +192,14 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 // failures — every caller wants them in the journal — but now also
 // RETURNS them, because one caller (the inline outcome) cannot treat this
 // as best-effort: see downloadPlaylistItem.
-func (h *handler) indexResolvedPlaylistForOfflineDisplay(playlist *dp1.Playlist, sourceURL string, clearGen uint64) error {
+func (h *handler) indexResolvedPlaylistForOfflineDisplay(playlist *dp1.Playlist, sourceURL string, clearGen uint64, segments []offlinecache.SeriesSegment) error {
 	raw, err := h.json.Marshal(playlist)
 	if err != nil {
 		h.logger.Warn("offline cache: failed to marshal resolved playlist for URL indexing",
 			zap.String("playlist_url", sourceURL), zap.Error(err))
 		return err
 	}
-	if err := h.offlineCache.IndexPlaylistForOfflineDisplay(raw, sourceURL, clearGen); err != nil {
+	if err := h.offlineCache.IndexPlaylistForOfflineDisplay(raw, sourceURL, clearGen, segments); err != nil {
 		h.logger.Warn("offline cache: failed to index playlist for offline display fallback",
 			zap.String("playlist_url", sourceURL), zap.Error(err))
 		return err
@@ -215,7 +215,7 @@ func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]an
 	// already folded into those samples and cannot be detected by them.
 	barrier := h.offlineCache.ClearBarrier()
 
-	playlist, err := h.resolveOfflineCachePlaylist(ctx, args)
+	playlist, segments, err := h.resolveOfflineCachePlaylist(ctx, args)
 	if err != nil {
 		return errorResponse("resolve_failed", err.Error(), true), nil
 	}
@@ -260,7 +260,7 @@ func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]an
 	// truncating it is exactly what orphaned cached items past the cut — see
 	// resolveOfflineCachePlaylist's doc and Service.DownloadPlaylist's
 	// maxQueued.
-	queued, total, err := h.offlineCache.DownloadPlaylist(ctx, raw, sourceURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT)
+	queued, total, err := h.offlineCache.DownloadPlaylist(ctx, raw, sourceURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT, segments)
 	if err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
@@ -670,43 +670,155 @@ func parseStatusRequest(args map[string]any) (offlinecache.StatusRequest, map[st
 // the tail of a publisher's own signed item list on any oversized playlist
 // that merely happens to also name a series — silent data loss neither
 // origin/develop nor this branch does anywhere else.
-func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[string]any) (*dp1.Playlist, error) {
+//
+// The second return value is the series-group identity this exact resolve
+// walk saw for a static (playlistUrl-fetched or inline dp1_call) playlist —
+// feral-file/ffos-user#455/#453's fix: unlike the destructive
+// ExpandSeriesItems/ProcessPlaylistURL this helper used to call (which
+// throws the group identity away the moment it flattens a series into its
+// editions), ResolveSeriesCastPlan keeps each group unflattened, and
+// CastPlan.Full() flattens it into the SAME full-editions Items shape those
+// calls already produced — so the cached bytes are unchanged, only the
+// group identity is no longer discarded. nil for a dynamic playlist (either
+// a dp1_call carrying a dynamicQuery, or a playlistUrl resolving to one):
+// dynamically-resolved items carry no raw per-item seriesPlayback and
+// neither #455 nor #453 names a dynamic-playlist reproduction, so that path
+// is deliberately left on today's unconditional-expand behavior (tracked as
+// an explicit Out of scope, not a silent gap).
+func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[string]any) (*dp1.Playlist, []offlinecache.SeriesSegment, error) {
 	switch {
 	case args["playlistUrl"] != nil:
 		url, ok := args["playlistUrl"].(string)
 		if !ok || url == "" {
-			return nil, fmt.Errorf("playlistUrl is not a string or empty")
+			return nil, nil, fmt.Errorf("playlistUrl is not a string or empty")
 		}
-		return h.dp1.ProcessPlaylistURL(ctx, url, false)
+		playlist, rawPlaylist, err := h.dp1.FetchPlaylist(ctx, url)
+		if err != nil {
+			return nil, nil, err
+		}
+		if playlist.HasDynamicContent() {
+			resolved, err := h.dp1.ProcessDynamicPlaylist(ctx, *playlist, false)
+			return resolved, nil, err
+		}
+		plan := h.dp1.ResolveSeriesCastPlan(ctx, *playlist, rawPlaylist, nil, 0)
+		resolved := *playlist
+		resolved.Items = plan.Full()
+		return &resolved, toOfflineCacheSegments(plan), nil
 
 	case args["dp1_call"] != nil:
 		playlistMap, ok := args["dp1_call"].(map[string]interface{})
 		if !ok {
-			return nil, fmt.Errorf("playlist is not a map")
+			return nil, nil, fmt.Errorf("playlist is not a map")
 		}
 
 		playlistBytes, err := h.json.Marshal(playlistMap)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal playlist: %w", err)
+			return nil, nil, fmt.Errorf("failed to marshal playlist: %w", err)
 		}
 
 		var playlist *dp1.Playlist
 		if err := h.json.Unmarshal(playlistBytes, &playlist); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
+			return nil, nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
 		}
 
 		if playlist.HasDynamicContent() {
-			return h.dp1.ProcessDynamicPlaylist(ctx, *playlist, false)
+			resolved, err := h.dp1.ProcessDynamicPlaylist(ctx, *playlist, false)
+			return resolved, nil, err
 		}
 		// Static dp1_call: mirror the uncapped expansion
 		// ProcessPlaylistURL above already applies, so a download of an
 		// inline series plays — and caches — its editions too.
-		expanded := h.dp1.ExpandSeriesItems(ctx, *playlist, 0)
-		return &expanded, nil
+		plan := h.dp1.ResolveSeriesCastPlan(ctx, *playlist, playlistBytes, nil, 0)
+		resolved := *playlist
+		resolved.Items = plan.Full()
+		return &resolved, toOfflineCacheSegments(plan), nil
 
 	default:
-		return nil, fmt.Errorf("request must include playlistUrl or dp1_call")
+		return nil, nil, fmt.Errorf("request must include playlistUrl or dp1_call")
 	}
+}
+
+// toOfflineCacheSegments converts plan.Segments to offlinecache's own
+// SeriesSegment mirror type (feral-file/ffos-user#455, #453) — the 1:1
+// conversion belongs here because this is the one boundary that already
+// imports both dp1 and offlinecache; offlinecache itself must never import
+// the local dp1 package (see SeriesSegment's own doc).
+//
+// Returns nil when plan carries no series group worth tracking (dp1.
+// CastPlan.HasSeriesGroups) — a plain playlist, or one whose only series
+// never resolved into real catalog data — so that playlist's persisted
+// record carries no sidecar at all, byte-for-byte the same as before this
+// feature existed.
+func toOfflineCacheSegments(plan dp1.CastPlan) []offlinecache.SeriesSegment {
+	if !plan.HasSeriesGroups() {
+		return nil
+	}
+	segments := make([]offlinecache.SeriesSegment, 0, len(plan.Segments))
+	for _, seg := range plan.Segments {
+		if seg.Item != nil {
+			item := *seg.Item
+			segments = append(segments, offlinecache.SeriesSegment{Item: &item})
+			continue
+		}
+		group := seg.Group
+		var documentMode *string
+		if group.DocumentMode != nil {
+			mode := string(*group.DocumentMode)
+			documentMode = &mode
+		}
+		segments = append(segments, offlinecache.SeriesSegment{
+			Group: &offlinecache.SeriesGroup{
+				Key: offlinecache.SeriesGroupKey{
+					Chain:    group.Key.Chain,
+					Address:  group.Key.Address,
+					SeriesID: string(group.Key.SeriesID),
+				},
+				DocumentMode:   documentMode,
+				Representative: group.Representative,
+				Editions:       group.Editions,
+				Resolved:       group.Resolved,
+				ArtworkModel:   string(group.ArtworkModel),
+			},
+		})
+	}
+	return segments
+}
+
+// fromOfflineCacheSegments is toOfflineCacheSegments' inverse, for a reader
+// (handler.go's playlistUrl cast-failure fallback, #455; playlist-
+// refresher's resync, #453) that loaded a sidecar and needs a dp1.CastPlan
+// to call its existing Narrow(deviceMode) on — the exact narrowing logic a
+// live cast already uses, with no second catalog round trip.
+func fromOfflineCacheSegments(segments []offlinecache.SeriesSegment) []dp1.CastSegment {
+	out := make([]dp1.CastSegment, 0, len(segments))
+	for _, seg := range segments {
+		if seg.Item != nil {
+			item := *seg.Item
+			out = append(out, dp1.CastSegment{Item: &item})
+			continue
+		}
+		group := seg.Group
+		var documentMode *dp1.SeriesPlaybackMode
+		if group.DocumentMode != nil {
+			mode := dp1.SeriesPlaybackMode(*group.DocumentMode)
+			documentMode = &mode
+		}
+		out = append(out, dp1.CastSegment{
+			Group: &dp1.ResolvedSeriesGroup{
+				Key: dp1.SeriesGroupKey{
+					Chain:    group.Key.Chain,
+					Address:  group.Key.Address,
+					SeriesID: dp1playlist.SeriesID(group.Key.SeriesID),
+				},
+				DocumentMode:   documentMode,
+				Representative: group.Representative,
+				Editions:       group.Editions,
+				Resolved:       group.Resolved,
+				ArtworkModel:   dp1.SeriesArtworkModel(group.ArtworkModel),
+			},
+		})
+	}
+	return out
 }
 
 // loadCachedPlaylistForURL is handler.go's displayPlaylist-by-URL offline
@@ -732,11 +844,22 @@ func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[stri
 // caching disabled, url was never downloaded, the downloaded copy has
 // since been cleared, or the saved body is unexpectedly malformed), so the
 // caller can report the original live resolution error instead.
+//
+// If the cached copy carries series-group identity (feral-file/ffos-user
+// #455), the returned playlist's Items are narrowed by the device's
+// current series-playback override — the exact same dp1.CastPlan.Narrow
+// logic a live ProcessPlaylistURLForCast already applies — rather than
+// played back as the unnarrowed full-editions list the download saved.
+// Both of this method's callers (handler.go's playlistUrl cast fallback,
+// and resolveDisplayedPlaylist's PlaylistURL branch below) get this for
+// free. A cache with no sidecar (a plain playlist, or one downloaded
+// before this feature existed) is unaffected: Items stay exactly as
+// saved, byte-for-byte the same as before this change.
 func (h *handler) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
 	if h.offlineCache == nil {
 		return nil, fmt.Errorf("offline cache: disabled, no cached fallback for %s", url)
 	}
-	raw, err := h.offlineCache.CachedPlaylistForURL(url)
+	raw, segments, err := h.offlineCache.CachedPlaylistForURL(url)
 	if err != nil {
 		return nil, fmt.Errorf("offline cache: no cached playlist for %s: %w", url, err)
 	}
@@ -746,6 +869,10 @@ func (h *handler) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
 	var playlist *dp1.Playlist
 	if err := h.json.Unmarshal(raw, &playlist); err != nil {
 		return nil, fmt.Errorf("offline cache: parse cached playlist for %s: %w", url, err)
+	}
+	if len(segments) > 0 {
+		plan := dp1.CastPlan{Segments: fromOfflineCacheSegments(segments)}
+		playlist.Items = plan.Narrow(h.currentSeriesPlaybackMode())
 	}
 	return playlist, nil
 }

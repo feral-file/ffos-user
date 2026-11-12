@@ -1008,7 +1008,10 @@ offline-artworks/
   items/<sha256(item.source)>.json        # the ONE per-source record (ItemRecord in types.go)
   playlists/<playlistId>.json             # resolved DP-1 playlist (see note below), stored only for whole-playlist downloads
   playlists/by-url/<sha256(url)>.json     # {"playlistId": "..."} pointer, only when DownloadPlaylist was given a sourceURL
+  playlists/series-segments/<playlistId>.json  # series-group identity for a curated playlist's seriesRegistry items, when any resolved (SeriesSegment in types.go)
 ```
+
+The `series-segments` sidecar (feral-file/ffos-user#455, #453) exists because the playlist record above is the **flattened** result (every `seriesRegistry` item already replaced by its editions, same as a live `ExpandSeriesItems`) — the resolve that produced it keeps each series' group identity (representative, full edition set, the document's stated mode, `artworkModel`) only long enough to flatten it, and this sidecar is what survives that moment: `commandrouter` converts the resolve's `dp1.CastPlan.Segments` to this package's own `SeriesSegment` (it cannot import `dp1` — see that type's doc) and `Store.SavePlaylistSeriesSegments` writes it, nested the same invisible-to-`ListPlaylistIDs` way `by-url/` already is. `Service.CachedPlaylistForURL` returns it alongside the raw playlist so an offline fallback/resync can rebuild a `dp1.CastPlan` and call its existing `Narrow(deviceMode)` — the live-cast narrowing logic — without a second catalog round trip; see `docs/api-design.md`'s "DP-1 `seriesRegistry` expansion" section for the full mechanism. `DeletePlaylist` removes this sidecar too (unlike the `by-url/` index, which is deliberately left stale on a clear): it is interpreted directly against whatever `Items` a *later* save of the same playlist id holds, so a stray sidecar could silently narrow a future, unrelated playlist against the wrong group set.
 
 **An item's cache identity is its `source` URL, never its DP-1 `id`**
 (`SourceKey` in `types.go`: `hex(sha256(source))` over the exact byte
