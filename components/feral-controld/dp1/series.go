@@ -182,6 +182,18 @@ func (m SeriesArtworkModel) hasDistinctEditions() bool {
 	}
 }
 
+// HasDistinctEditions is hasDistinctEditions, exported for callers outside
+// this package that must gate their own narrowing against the exact same
+// rule NarrowEditions enforces internally — playlist-refresher's narrowStable
+// (feralfile-bot F5 on feral-file/ffos-user#459, 2026-11-12): without this
+// seam, a single/multi group's random-pick memoization had no way to tell
+// "nothing distinct to roll" apart from a real multi_unique choice, and could
+// cache a non-representative edition for a group NarrowEditions itself would
+// always collapse to the representative.
+func (m SeriesArtworkModel) HasDistinctEditions() bool {
+	return m.hasDistinctEditions()
+}
+
 // catalogEditions is the catalog's answer. `items` is the editions and
 // `total` says how many exist, which is how a truncated expansion knows it
 // was truncated. `series.artworkModel` is read too, for NarrowEditions'

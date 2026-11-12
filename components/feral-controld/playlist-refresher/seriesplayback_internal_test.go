@@ -133,7 +133,11 @@ func TestNarrowStable_PrunesPicksForGroupsNoLongerDisplayed(t *testing.T) {
 // pick through commandrouter's separate Narrow call, which this package's
 // memory never saw — it must seed from whatever the player already
 // reports as on screen (currentlyDisplayed) instead of rolling a brand
-// new, likely-different pick.
+// new, likely-different pick. It also pins feralfile-bot's F6
+// (2026-11-12): currentlyDisplayed is consulted again on EVERY later
+// tick too, so a pick already remembered still reconfirms itself against
+// the live display rather than skipping that check — an ordinary tick
+// where nothing changed on screen must therefore leave the pick stable.
 func TestNarrowStable_SeedsFromWhatIsAlreadyDisplayed(t *testing.T) {
 	r := &refresher{}
 	mode := dp1.SeriesPlaybackRandom
@@ -154,8 +158,10 @@ func TestNarrowStable_SeedsFromWhatIsAlreadyDisplayed(t *testing.T) {
 	calls = 0
 	again := r.narrowStable(randomGroupPlan(), &mode, currentlyDisplayed)
 	require.Len(t, again, 1)
-	assert.Equal(t, alreadyShown.Source, again[0].Source, "the seeded pick must then stay stable")
-	assert.Zero(t, calls, "a group with an already-remembered pick must never consult currentlyDisplayed")
+	assert.Equal(t, alreadyShown.Source, again[0].Source,
+		"an ordinary tick where the display still agrees with the remembered pick must leave it stable")
+	assert.Equal(t, 1, calls,
+		"currentlyDisplayed must be consulted again even when a pick is already remembered (feralfile-bot F6)")
 }
 
 // TestNarrowStable_RefreshesNonSourceFieldsOfAStablePick pins the fix for

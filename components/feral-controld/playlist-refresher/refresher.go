@@ -195,15 +195,18 @@ type refresher struct {
 //
 // artworkModel is the group's ArtworkModel at pick time. dp1.NarrowEditions
 // only ever returns a distinct edition when
-// artworkModel.hasDistinctEditions() — a single/multi series always
-// collapses to the representative regardless of mode — and ArtworkModel is
-// read fresh from the catalog's answer on every tick's ResolveSeriesCastPlan
-// call, so it is NOT invariant across ticks for the same SeriesGroupKey. A
-// stored pick whose artworkModel no longer matches the current tick's must
-// be invalidated exactly like a mode change, or a group corrected FROM
-// multi_unique TO single/multi would keep serving one specific edition
-// instead of collapsing to the representative as a fresh NarrowEditions
-// call requires (run-reviewer, round 4 on this fix, 2026-11-12).
+// artworkModel.HasDistinctEditions() — a single/multi series always
+// collapses to the representative regardless of mode, and narrowStable's own
+// top-level gate now keeps such a group out of randomSeriesPicks entirely
+// (feralfile-bot F5, 2026-11-12) — and ArtworkModel is read fresh from the
+// catalog's answer on every tick's ResolveSeriesCastPlan call, so it is NOT
+// invariant across ticks for the same SeriesGroupKey. A stored pick whose
+// artworkModel no longer matches the current tick's must still be
+// invalidated exactly like a mode change: the top-level gate only catches a
+// reclassification INTO single/multi (HasDistinctEditions() false); a
+// reclassification between two models that both report true (e.g.
+// multi_unique and an unrecognized/empty value) only this equality check
+// catches (run-reviewer, round 4 on this fix, 2026-11-12).
 type randomSeriesPick struct {
 	mode         dp1.SeriesPlaybackMode
 	artworkModel dp1.SeriesArtworkModel
@@ -1611,29 +1614,42 @@ func (r *refresher) narrowedPlaylistFromURL(url string, currentlyDisplayed func(
 // forces a fresh pick: a mode change ("setting change") or the catalog's
 // answer no longer carrying the previously shown edition's source ("that
 // edition disappears") — the two escape hatches feralfile-bot's F3 asked
-// for, 2026-11-12. A non-random group clears any stale memory for its key,
-// so a later mode change back to random starts from a real roll rather
-// than a stale leftover from before the change.
+// for, 2026-11-12. A non-random group, OR one whose ArtworkModel does not
+// have distinct editions at all (single/multi — nothing for random to
+// pick between, dp1.NarrowEditions always collapses it to the
+// representative regardless of mode), clears any stale memory for its key
+// and goes straight to dp1.NarrowEditions: such a group is never seeded,
+// reused, or memoized by anything below, so it can never pick up a
+// non-representative edition this way — a single/multi group whose one
+// edition's Source happened to coincide with the representative's, or with
+// whatever the player currently shows, used to be memoized and replayed as
+// if it were a genuine distinct pick (feralfile-bot F5, 2026-11-12). A
+// later mode change back to random, or a correction INTO multi_unique,
+// starts from a real roll rather than a stale leftover from before.
 //
 // Scoped to this package's own live-reachable resync and its cached-sidecar
 // fallback (both of narrowedPlaylistFromURL's and loadCachedPlaylistForURL's
-// callers): a live setSeriesPlayback cast or the initial display already
-// makes its own fresh pick through commandrouter's separate
-// dp1.CastPlan.Narrow call, which this memory does not see or influence —
-// the two packages deliberately do not share state (AGENTS.md's service-
-// boundary guidance). Without currentlyDisplayed, a group this refresher
-// has never resolved before would therefore still re-roll on the FIRST
-// periodic resync after such a live cast, up to (N-1)/N of the time for an
-// N-edition series — the same user-visible symptom class #453/F3 exist to
-// prevent, just narrowed from "every tick" to "the first tick after a cast"
-// (run-reviewer, round 2 on this fix, 2026-11-12). currentlyDisplayed closes
-// that: called at most once per narrowStable call, and only when some group
-// actually has no remembered pick yet, it returns whatever the player
-// itself already reports as on screen; when one of THIS group's editions is
-// among those items, that is seeded as the pick instead of a fresh roll —
-// the live cast's own choice, recovered from the one place it is still
-// visible, rather than guessed at a second time. nil (no player status in
-// hand) or a non-match falls through to a fresh roll exactly as before.
+// callers): a live setSeriesPlayback cast or the initial display makes its
+// own fresh pick through commandrouter's separate dp1.CastPlan.Narrow call,
+// which this memory does not see or influence by itself — the two packages
+// deliberately do not share state (AGENTS.md's service-boundary guidance).
+// currentlyDisplayed is this package's only window onto that live choice,
+// so every tick for a still-random, distinct-editions group checks it
+// FIRST, before any remembered pick: called at most once per narrowStable
+// call (memoized below — a plan with several unseeded random groups costs
+// at most one call, however many groups ask for it), it returns whatever
+// the player itself already reports as on screen; when one of THIS group's
+// editions is among those items, that is adopted as the pick — seeded if
+// none was remembered yet, or OVERWRITING a remembered pick that disagrees
+// with it. The overwrite is what lets a newer accepted cast's own choice
+// (a setSeriesPlayback recast of the same URL that rolls a different
+// edition, or a setting recast back into random) replace this memory
+// instead of being silently reverted by the next periodic resync
+// (feralfile-bot F6, 2026-11-12): on an ORDINARY tick the player is still
+// showing exactly what was last remembered, so this only reconfirms the
+// existing pick, never changes it. nil (no player status in hand) or a
+// non-match falls through to the remembered pick, then to a fresh roll,
+// exactly as before this check existed.
 func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMode, currentlyDisplayed func() []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
 	r.randomSeriesMu.Lock()
 	defer r.randomSeriesMu.Unlock()
@@ -1673,11 +1689,41 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 		group := seg.Group
 		seen[group.Key] = struct{}{}
 		mode := dp1.ResolveSeriesPlaybackMode(group.DocumentMode, device)
-		if mode != dp1.SeriesPlaybackRandom {
+		// A single/multi group has nothing distinct to pick between — a
+		// fresh dp1.NarrowEditions call always collapses it to the
+		// representative regardless of mode — so it must never enter
+		// randomSeriesPicks at all: reusing, seeding, or memoizing a pick
+		// for it risks replaying some OTHER edition whose Source happens to
+		// coincide with the representative's or with whatever is on
+		// screen, which NarrowEditions itself would never choose
+		// (feralfile-bot F5, 2026-11-12).
+		if mode != dp1.SeriesPlaybackRandom || !group.ArtworkModel.HasDistinctEditions() {
 			delete(r.randomSeriesPicks, group.Key)
 			items = append(items, dp1.NarrowEditions(mode, group.ArtworkModel, group.Representative, group.Editions)...)
 			continue
 		}
+		// Check what the player actually shows BEFORE any remembered pick:
+		// a live cast commandrouter sent independently of this refresher
+		// (a setSeriesPlayback recast of the same URL, or a setting recast
+		// back into random) rolls its own edition through its own
+		// dp1.CastPlan.Narrow call, which this memory never sees. Without
+		// this, the first periodic resync after such a cast would silently
+		// revert its choice back to whatever was remembered from before
+		// (feralfile-bot F6, 2026-11-12). On an ordinary tick the player is
+		// still showing exactly what was last remembered, so this only
+		// reconfirms the existing pick (or leaves a not-yet-seeded one
+		// matching) rather than changing anything.
+		if seeded, ok := editionAlreadyDisplayed(fetchDisplayed(), group.Editions); ok {
+			if pick, ok := r.randomSeriesPicks[group.Key]; !ok || pick.source != seeded.Source {
+				r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: seeded.Source}
+			}
+			items = append(items, seeded)
+			continue
+		}
+		// Nothing currently displayed for this group (player status
+		// unavailable, or this group isn't part of it) — fall back to the
+		// remembered pick, then to a fresh roll, exactly as before the
+		// display check above existed.
 		if pick, ok := r.randomSeriesPicks[group.Key]; ok && pick.mode == mode && pick.artworkModel == group.ArtworkModel {
 			if fresh, found := editionBySource(group.Editions, pick.source); found {
 				items = append(items, fresh)
@@ -1687,21 +1733,15 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 			// catalog's answer moved on. Falls through to a fresh pick
 			// below, exactly like "that edition disappears" already did.
 		}
-		if seeded, ok := editionAlreadyDisplayed(fetchDisplayed(), group.Editions); ok {
-			r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: seeded.Source}
-			items = append(items, seeded)
-			continue
-		}
 		narrowed := dp1.NarrowEditions(mode, group.ArtworkModel, group.Representative, group.Editions)
-		// Only remember a pick that is actually one of group.Editions: a
-		// single/multi series under random mode always falls through to
-		// NarrowEditions' representative-fallback case instead (there is
-		// nothing distinct to roll), and the representative's own source
-		// is not guaranteed to be among Editions (see CastPlan.Full's doc,
-		// feralfile-bot F1) — memoizing it would just miss every lookup
-		// next tick. Leaving it unmemoized costs nothing: that case is
-		// already deterministic, so re-deriving it fresh every tick
-		// returns the identical result anyway.
+		// Only remember a pick that is actually one of group.Editions:
+		// NarrowEditions' representative-fallback case (len(editions)==0)
+		// can return a representative whose own Source is not guaranteed
+		// to be among Editions (see CastPlan.Full's doc, feralfile-bot F1)
+		// — memoizing it would just miss every lookup next tick. Leaving
+		// it unmemoized costs nothing: that case is already deterministic,
+		// so re-deriving it fresh every tick returns the identical result
+		// anyway.
 		if len(narrowed) == 1 {
 			if _, found := editionBySource(group.Editions, narrowed[0].Source); found {
 				r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: narrowed[0].Source}
