@@ -680,13 +680,14 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	switch {
 	case schedulerSource.PlaylistURL != "":
 		kind = "playlist URL"
-		playlist, err = r.narrowedPlaylistFromURL(schedulerSource.PlaylistURL)
+		currentlyDisplayed := r.currentlyDisplayedItems(playerStatus)
+		playlist, err = r.narrowedPlaylistFromURL(schedulerSource.PlaylistURL, currentlyDisplayed)
 		if err != nil {
 			// Offline fallback: serve the last successfully cached body for
 			// this URL rather than failing the pass outright, mirroring
 			// resolveDisplayedPlaylist's own URL branch. Only a cache miss
 			// leaves the live error standing.
-			if cached, cacheErr := r.loadCachedPlaylistForURL(schedulerSource.PlaylistURL); cacheErr == nil {
+			if cached, cacheErr := r.loadCachedPlaylistForURL(schedulerSource.PlaylistURL, currentlyDisplayed); cacheErr == nil {
 				playlist, err = cached, nil
 			}
 		}
@@ -1385,9 +1386,10 @@ func (r *refresher) resolveDisplayedPlaylist(playerStatus *status.PlayerStatus) 
 	switch {
 	case playerStatus.PlaylistURL != nil:
 		url := *playerStatus.PlaylistURL
-		playlist, err := r.narrowedPlaylistFromURL(url)
+		currentlyDisplayed := r.currentlyDisplayedItems(playerStatus)
+		playlist, err := r.narrowedPlaylistFromURL(url, currentlyDisplayed)
 		if err != nil {
-			cached, cacheErr := r.loadCachedPlaylistForURL(url)
+			cached, cacheErr := r.loadCachedPlaylistForURL(url, currentlyDisplayed)
 			if cacheErr != nil {
 				return nil, err
 			}
@@ -1556,7 +1558,11 @@ func fromOfflineCacheSegments(segments []offlinecache.SeriesSegment) []dp1.CastS
 // CAST_PLAYLIST_ITEMS_LIMIT, which this resync path must not newly start
 // truncating — it resyncs whatever is already playing, however large, the
 // same uncapped contract ProcessPlaylistURL always had.
-func (r *refresher) narrowedPlaylistFromURL(url string) (*dp1.Playlist, error) {
+//
+// currentlyDisplayed is narrowStable's seed source — see that method's doc.
+// May be nil (no player status in hand at this call site); narrowStable
+// treats that exactly like "nothing to seed from" and rolls fresh.
+func (r *refresher) narrowedPlaylistFromURL(url string, currentlyDisplayed func() []dp1playlist.PlaylistItem) (*dp1.Playlist, error) {
 	playlist, rawPlaylist, err := r.dp1.FetchPlaylist(r.context, url)
 	if err != nil {
 		return nil, err
@@ -1567,7 +1573,7 @@ func (r *refresher) narrowedPlaylistFromURL(url string) (*dp1.Playlist, error) {
 	deviceMode := r.currentSeriesPlaybackMode()
 	plan := r.dp1.ResolveSeriesCastPlan(r.context, *playlist, rawPlaylist, deviceMode, 0)
 	narrowed := *playlist
-	narrowed.Items = r.narrowStable(plan, deviceMode)
+	narrowed.Items = r.narrowStable(plan, deviceMode, currentlyDisplayed)
 	return &narrowed, nil
 }
 
@@ -1590,15 +1596,39 @@ func (r *refresher) narrowedPlaylistFromURL(url string) (*dp1.Playlist, error) {
 // makes its own fresh pick through commandrouter's separate
 // dp1.CastPlan.Narrow call, which this memory does not see or influence —
 // the two packages deliberately do not share state (AGENTS.md's service-
-// boundary guidance) — so the first periodic resync after such a cast still
-// seeds this memory with one fresh pick before holding it stable from then
-// on; every PLAYLIST_REFRESH_INTERVAL tick after that no longer changes
-// what the player shows with no cast or setting change involved.
-func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMode) []dp1playlist.PlaylistItem {
+// boundary guidance). Without currentlyDisplayed, a group this refresher
+// has never resolved before would therefore still re-roll on the FIRST
+// periodic resync after such a live cast, up to (N-1)/N of the time for an
+// N-edition series — the same user-visible symptom class #453/F3 exist to
+// prevent, just narrowed from "every tick" to "the first tick after a cast"
+// (run-reviewer, round 2 on this fix, 2026-11-12). currentlyDisplayed closes
+// that: called at most once per narrowStable call, and only when some group
+// actually has no remembered pick yet, it returns whatever the player
+// itself already reports as on screen; when one of THIS group's editions is
+// among those items, that is seeded as the pick instead of a fresh roll —
+// the live cast's own choice, recovered from the one place it is still
+// visible, rather than guessed at a second time. nil (no player status in
+// hand) or a non-match falls through to a fresh roll exactly as before.
+func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMode, currentlyDisplayed func() []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
 	r.randomSeriesMu.Lock()
 	defer r.randomSeriesMu.Unlock()
 	if r.randomSeriesPicks == nil {
 		r.randomSeriesPicks = make(map[dp1.SeriesGroupKey]randomSeriesPick)
+	}
+
+	// Memoized so a plan with several unseeded random groups costs at most
+	// one call to currentlyDisplayed (which may itself be a live
+	// FetchPlayerStatus round trip), not one per group.
+	var displayed []dp1playlist.PlaylistItem
+	displayedFetched := false
+	fetchDisplayed := func() []dp1playlist.PlaylistItem {
+		if !displayedFetched {
+			displayedFetched = true
+			if currentlyDisplayed != nil {
+				displayed = currentlyDisplayed()
+			}
+		}
+		return displayed
 	}
 
 	items := make([]dp1playlist.PlaylistItem, 0, len(plan.Segments))
@@ -1625,6 +1655,11 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 		}
 		if pick, ok := r.randomSeriesPicks[group.Key]; ok && pick.mode == mode && seriesEditionsHaveSource(group.Editions, pick.item.Source) {
 			items = append(items, pick.item)
+			continue
+		}
+		if seeded, ok := editionAlreadyDisplayed(fetchDisplayed(), group.Editions); ok {
+			r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, item: seeded}
+			items = append(items, seeded)
 			continue
 		}
 		narrowed := dp1.NarrowEditions(mode, group.ArtworkModel, group.Representative, group.Editions)
@@ -1655,6 +1690,60 @@ func seriesEditionsHaveSource(editions []dp1playlist.PlaylistItem, source string
 	return false
 }
 
+// playerStatusDisplayedItems returns ps's own record of what the player
+// currently shows — Items when the reply carries it, else the inline
+// Playlist's Items, else nil — for narrowStable's seed source. ps may be
+// nil.
+func playerStatusDisplayedItems(ps *status.PlayerStatus) []dp1playlist.PlaylistItem {
+	if ps == nil {
+		return nil
+	}
+	if ps.Items != nil {
+		return *ps.Items
+	}
+	if ps.Playlist != nil {
+		return ps.Playlist.Items
+	}
+	return nil
+}
+
+// currentlyDisplayedItems builds narrowStable's seed-source closure: ps's
+// own items when already in hand, else one FetchPlayerStatus call made
+// lazily (narrowStable's own memoization ensures at most once per
+// narrowStable call, however many unseeded groups it finds) — the case
+// processPlayingPlaylist reaches once a scheduler source is already
+// committed and therefore skips its own player-status fetch (see that
+// function's schedulerSource.IsZero() branch).
+func (r *refresher) currentlyDisplayedItems(ps *status.PlayerStatus) func() []dp1playlist.PlaylistItem {
+	return func() []dp1playlist.PlaylistItem {
+		if ps != nil {
+			return playerStatusDisplayedItems(ps)
+		}
+		fetched, err := r.statusPoller.FetchPlayerStatus(r.context)
+		if err != nil {
+			return nil
+		}
+		return playerStatusDisplayedItems(fetched)
+	}
+}
+
+// editionAlreadyDisplayed reports whether any item in displayed has the
+// same Source as one of editions — exact match, same rule as
+// seriesEditionsHaveSource — and returns that edition (not the displayed
+// copy, whose other fields may be a player-side projection) so narrowStable
+// can seed a fresh group's pick from what a live cast already put on
+// screen instead of rolling a new one. displayed may be nil or empty.
+func editionAlreadyDisplayed(displayed, editions []dp1playlist.PlaylistItem) (dp1playlist.PlaylistItem, bool) {
+	for _, shown := range displayed {
+		for _, edition := range editions {
+			if edition.Source == shown.Source {
+				return edition, true
+			}
+		}
+	}
+	return dp1playlist.PlaylistItem{}, false
+}
+
 // loadCachedPlaylistForURL mirrors commandrouter's handler.loadCachedPlaylistForURL
 // (see its doc, including why the returned playlist carries NO signature
 // verdict: the saved body is a typed, hydrated re-marshal, not the signed
@@ -1672,7 +1761,10 @@ func seriesEditionsHaveSource(editions []dp1playlist.PlaylistItem, source string
 // own loadCachedPlaylistForURL for the full rationale; the two are kept in
 // step by hand (this package deliberately does not depend on commandrouter
 // — see AGENTS.md's service-boundary guidance).
-func (r *refresher) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
+//
+// currentlyDisplayed is narrowStable's seed source — see that method's
+// doc. May be nil.
+func (r *refresher) loadCachedPlaylistForURL(url string, currentlyDisplayed func() []dp1playlist.PlaylistItem) (*dp1.Playlist, error) {
 	if r.offlineCache == nil {
 		return nil, fmt.Errorf("offline cache: disabled, no cached fallback for %s", url)
 	}
@@ -1690,7 +1782,7 @@ func (r *refresher) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) 
 	if len(segments) > 0 {
 		plan := dp1.CastPlan{Segments: fromOfflineCacheSegments(segments)}
 		deviceMode := r.currentSeriesPlaybackMode()
-		playlist.Items = r.narrowStable(plan, deviceMode)
+		playlist.Items = r.narrowStable(plan, deviceMode, currentlyDisplayed)
 	}
 	return playlist, nil
 }
