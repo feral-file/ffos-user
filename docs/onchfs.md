@@ -167,7 +167,9 @@ Config, the optional `onchfs` block in `controld.json` (`config.OnchfsTuning`):
 which needs a live host. The materializer resolves the tree and writes each file's plain
 bytes as a blob. It then saves a record under the device-local source with these resources:
 
-- each file at `<origin>/<escaped path>`;
+- each file at `<origin>/<path>`, spelled as a browser requests it (WHATWG path
+  percent-encoding, so `!` stays literal), plus fallback spellings (`^` and `|` escaped,
+  and Go's full escaping) wherever no other file's own spelling is;
 - each directory with an `index.html` at `<origin>/<dir>/`, and the root at `<origin>/`;
 - the exact source URL, query included, as the entry. A directory named without its slash
   is a 301 to the slashed form, query kept.
@@ -212,7 +214,9 @@ on disk, so a damaged record is rebuilt on the next cast instead of reported rea
 
 **A full cache.** The cache shares one disk budget, so when it refuses a new work's
 blobs, older onchfs works make room, least recently played first. A work the current
-playlist shows is never evicted. With a Service running, eviction goes through its
+playlist shows is never evicted. Standalone pruning keeps those works too, even past
+512 MiB; that budget is a retention bound, and the cache's disk budget still caps the
+disk. With a Service running, eviction goes through its
 `ClearItem`, whose GC is serialized with captures; standalone, the materializer deletes
 and collects itself (PR #461 review F6).
 

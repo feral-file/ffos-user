@@ -504,3 +504,76 @@ func TestOnchfsMaterializerReclaimsSpaceForANewWork(t *testing.T) {
 		assert.Equal(t, []string{sources[0]}, evicted)
 	})
 }
+
+// PR #461 review F8: standalone pruning keeps every work the current
+// playlist shows, even past its budget.
+func TestOnchfsMaterializerStandalonePruneKeepsThePlaylist(t *testing.T) {
+	store, _ := newTestStore(t)
+	clock := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	now := func() time.Time { mu.Lock(); defer mu.Unlock(); clock = clock.Add(time.Minute); return clock }
+	roots := []string{
+		"1111111111111111111111111111111111111111111111111111111111111111",
+		"2222222222222222222222222222222222222222222222222222222222222222",
+		"3333333333333333333333333333333333333333333333333333333333333333",
+	}
+	sources := make([]string, len(roots))
+	for i, r := range roots {
+		sources[i] = onchfsSource(t, "onchfs://"+r)
+	}
+	for i := range 2 {
+		m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: bigTree(byte('a' + i))},
+			offlinecache.OnchfsMaterializerConfig{Standalone: true, MaxBytes: 200 << 10, Now: now})
+		require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: sources[i]}}, 5*time.Second))
+	}
+	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: bigTree('c')},
+		offlinecache.OnchfsMaterializerConfig{Standalone: true, MaxBytes: 200 << 10, Now: now})
+	playlist := []dp1playlist.PlaylistItem{{Source: sources[2]}, {Source: sources[0]}, {Source: sources[1]}}
+	require.Equal(t, 3, m.Ensure(context.Background(), playlist, 5*time.Second))
+	for _, s := range sources {
+		_, err := store.LoadItem(offlinecache.SourceKey(s))
+		assert.NoError(t, err, "every work of the current playlist is kept")
+	}
+}
+
+// PR #461 review F9: a file is served under the spelling a browser requests
+// (`!` literal), under the escaped spellings too, and a file literally
+// named with a percent sequence keeps its own URL.
+func TestOnchfsMaterializerServesBrowserSpelledPaths(t *testing.T) {
+	file := func(body string) *onchfs.File {
+		return &onchfs.File{Plain: []byte(body), ContentType: "application/javascript"}
+	}
+	tree := &onchfs.Tree{Files: map[string]*onchfs.File{
+		"index.html":      {Plain: []byte(`<script src="lib!v1.js"></script>`), ContentType: "text/html"},
+		"lib!v1.js":       file("bang"),
+		"a%21b.js":        file("literal-percent"),
+		"a!b.js":          file("a-bang-b"),
+		"sp ace.js":       file("space"),
+		"x^y.js":          file("caret"),
+		"dir!/index.html": {Plain: []byte("dir"), ContentType: "text/html"},
+	}}
+	store, _ := newTestStore(t)
+	source := onchfsSource(t, "onchfs://"+onchfsTestRoot)
+	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: tree}, offlinecache.OnchfsMaterializerConfig{})
+	require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
+	rec, err := store.LoadItem(offlinecache.SourceKey(source))
+	require.NoError(t, err)
+	origin := "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.onchfs.invalid"
+	for url, want := range map[string]string{
+		"/lib!v1.js":   "bang",
+		"/lib%21v1.js": "bang",
+		"/a%21b.js":    "literal-percent",
+		"/a!b.js":      "a-bang-b",
+		"/sp%20ace.js": "space",
+		"/x^y.js":      "caret",
+		"/x%5Ey.js":    "caret",
+		"/dir!/":       "dir",
+		"/dir%21/":     "dir",
+	} {
+		res, ok := rec.ResourceByURL(origin + url)
+		require.True(t, ok, url)
+		body, err := store.ReadBlob(res.SHA256)
+		require.NoError(t, err)
+		assert.Equal(t, want, string(body), url)
+	}
+}

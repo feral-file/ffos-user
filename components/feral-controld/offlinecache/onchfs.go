@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -465,11 +466,18 @@ func (m *OnchfsMaterializer) prune(keep string) {
 	if total <= m.maxBytes {
 		return
 	}
+	// Works the current playlist shows are kept even past the budget: the
+	// wall is about to play them, and deleting one only makes the next pass
+	// read it again (PR #461 review F8). The budget then binds once the
+	// playlist changes.
+	m.mu.Lock()
+	protected := m.protected
+	m.mu.Unlock()
 	for _, r := range records {
 		if total <= m.maxBytes {
 			break
 		}
-		if r.key == keep {
+		if r.key == keep || protected[r.key] {
 			continue
 		}
 		if _, err := m.store.DeleteItem(r.key); err != nil {
@@ -517,6 +525,9 @@ func onchfsResources(o contentpath.Onchfs, source string, tree *onchfs.Tree, fre
 			resources = append(resources, r)
 		}
 	}
+	// Each file under the spelling a browser requests first, for every file,
+	// so a primary URL always wins; then under the other spellings a
+	// request may use (treePathSpellings), wherever no file claimed them.
 	for _, p := range paths {
 		add(byPath[p])
 	}
@@ -525,16 +536,34 @@ func onchfsResources(o contentpath.Onchfs, source string, tree *onchfs.Tree, fre
 		f.URL = origin + "/"
 		add(f)
 	}
+	dirIndexes := make([]string, 0)
 	for _, p := range paths {
 		if path.Base(p) != "index.html" {
 			continue
 		}
+		dirIndexes = append(dirIndexes, p)
 		alias := byPath[p]
 		alias.URL = origin + "/"
 		if dir := path.Dir(p); dir != "." {
 			alias.URL += escapeTreePath(dir) + "/"
 		}
 		add(alias)
+	}
+	for _, p := range paths {
+		for _, spelling := range treePathSpellings(p)[1:] {
+			alt := byPath[p]
+			alt.URL = origin + "/" + spelling
+			add(alt)
+		}
+	}
+	for _, p := range dirIndexes {
+		if dir := path.Dir(p); dir != "." {
+			for _, spelling := range treePathSpellings(dir)[1:] {
+				alt := byPath[p]
+				alt.URL = origin + "/" + spelling + "/"
+				add(alt)
+			}
+		}
 	}
 
 	entry := entryURL(source)
@@ -600,12 +629,61 @@ func slashedEntry(entry string) string {
 	return before + "/"
 }
 
-// escapeTreePath escapes each segment of a tree path for a URL path the
-// way Chromium requests it.
-func escapeTreePath(p string) string {
-	segs := strings.Split(p, "/")
-	for i, s := range segs {
-		segs[i] = url.PathEscape(s)
+// escapeTreePath is the URL path a browser requests for a tree path: the
+// first of treePathSpellings.
+func escapeTreePath(p string) string { return treePathSpellings(p)[0] }
+
+// treePathSpellings lists the URL paths a request for tree path p may use,
+// the browser's own first.
+//
+// Replay matches URLs exactly, so a file must be stored under the spelling
+// the kiosk requests. A browser resolves `<script src="lib!v1.js">` to
+// `/lib!v1.js`: it percent-encodes a path only in the WHATWG URL
+// standard's path percent-encode set (controls, space, non-ASCII, and
+// " # < > ? ` { }), not everything Go's url.PathEscape escapes (`!` among
+// them), so a file stored under PathEscape's spelling missed (PR #461
+// review F9). Two more spellings are kept as fallbacks: one that also
+// escapes ^ and |, which browsers have treated differently over time, and
+// url.PathEscape's, for a work that spells its own references escaped.
+// They never displace another file's primary spelling (onchfsResources
+// adds every primary first). A literal % is left as is, as a browser
+// leaves it.
+func treePathSpellings(p string) []string {
+	join := func(escape func(string) string) string {
+		segs := strings.Split(p, "/")
+		for i, s := range segs {
+			segs[i] = escape(s)
+		}
+		return strings.Join(segs, "/")
 	}
-	return strings.Join(segs, "/")
+	spellings := []string{
+		join(func(s string) string { return browserPathEscape(s, false) }),
+		join(func(s string) string { return browserPathEscape(s, true) }),
+		join(url.PathEscape),
+	}
+	out := spellings[:1]
+	for _, s := range spellings[1:] {
+		if !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// browserPathEscape percent-encodes one path segment as the WHATWG path
+// percent-encode set does; caretPipe also encodes ^ and |.
+func browserPathEscape(s string, caretPipe bool) string {
+	const upperhex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c <= 0x20 || c >= 0x7f || strings.IndexByte("\"#<>?`{}", c) >= 0 || (caretPipe && (c == '^' || c == '|')) {
+			b.WriteByte('%')
+			b.WriteByte(upperhex[c>>4])
+			b.WriteByte(upperhex[c&15])
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
