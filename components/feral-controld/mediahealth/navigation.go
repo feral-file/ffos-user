@@ -168,7 +168,7 @@ func matchSource(list []string, start int, want, rawURL string, gateways *Gatewa
 	}
 	for step := 0; step < n; step++ {
 		src := list[(start+step)%n]
-		if src == "" || IsDataURI(src) {
+		if src == "" || IsDeviceHeld(src) {
 			continue
 		}
 		if navigationKey(src) == want {

@@ -412,6 +412,12 @@ type Config struct {
 	// is to be hand-edited when a new hostile gateway appears.
 	GatewayUserAgent json.RawMessage `json:"gatewayUserAgent,omitempty"`
 
+	// Onchfs tunes how the device reads onchfs works from chain (the nodes
+	// per chain, the request timeout, a kill switch). Raw bytes decoded by
+	// OnchfsTuning(), for the same reason as GatewayUserAgent: a typo in
+	// a hand-edited optional block must never fail config.Load.
+	Onchfs json.RawMessage `json:"onchfs,omitempty"`
+
 	// Provisioning carries the escape-policy tuning block
 	// (docs/network-recovery-ux.md §4.1/§4.2) as RAW bytes, decoded
 	// permissively by ProvisioningTuning(). RawMessage on purpose: config.Load
@@ -676,6 +682,55 @@ func decodeDisableSwitch(raw json.RawMessage) *bool {
 		return nil
 	}
 	return sw.Enabled
+}
+
+// OnchfsConfig tunes the device's own onchfs reader (ffos-user#427). Every
+// field is optional; the defaults (onchfs.DefaultEndpoints, a 15 s request
+// timeout) are what an unconfigured device runs.
+type OnchfsConfig struct {
+	// Disabled turns the reader off: onchfs works are then left as
+	// unplayable `onchfs://` sources, which is how a device behaved after
+	// fxhash's gateway went away.
+	Disabled bool `json:"disabled,omitempty"`
+	// Chains overrides the nodes for a chain, keyed by CAIP-2 id
+	// ("eip155:1", "eip155:8453", "tezos:NetXdQprcVkpaWU"). A chain listed
+	// here replaces that chain's defaults; a chain not listed keeps them.
+	// Nodes are untrusted (every byte is verified), so the risk of an edit
+	// is availability and privacy, not integrity. Add a node only after a
+	// whole work has been read through it from a device.
+	Chains map[string]OnchfsChainConfig `json:"chains,omitempty"`
+	// RequestTimeoutSeconds bounds one RPC request; 0 is the default.
+	RequestTimeoutSeconds int `json:"requestTimeoutSeconds,omitempty"`
+}
+
+// OnchfsChainConfig is one chain's node list, in order of preference.
+type OnchfsChainConfig struct {
+	RPC []string `json:"rpc"`
+}
+
+// OnchfsTuning decodes the onchfs block. Absent or malformed, it is the zero
+// value: the built-in defaults, as GatewayUserAgentTuning reasons. The one
+// exception mirrors that function's too: an explicit "disabled": true is
+// honored even when a sibling field does not decode, because defaults are ON
+// and discarding the switch would turn the reader back on against the
+// operator's stated intent.
+func (c *Config) OnchfsTuning(logger *zap.Logger) OnchfsConfig {
+	if len(c.Onchfs) == 0 {
+		return OnchfsConfig{}
+	}
+	var o OnchfsConfig
+	if err := json.Unmarshal(c.Onchfs, &o); err != nil {
+		var sw struct {
+			Disabled bool `json:"disabled"`
+		}
+		disabled := json.Unmarshal(c.Onchfs, &sw) == nil && sw.Disabled
+		if logger != nil {
+			logger.Error("onchfs config block malformed; using built-in defaults",
+				zap.Bool("disabled", disabled), zap.Error(err), zap.String("raw", string(c.Onchfs)))
+		}
+		return OnchfsConfig{Disabled: disabled}
+	}
+	return o
 }
 
 // ProvisioningTuning carries the on-device knobs for the provisioning escape

@@ -2,10 +2,13 @@ package mediahealth
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/gabriel-vasile/mimetype"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 )
 
 // data: URIs never reach the network: their bytes travel inside the
@@ -26,6 +29,22 @@ const dataURIScheme = "data:"
 // megabytes of base64; scanning only a bounded prefix keeps a malformed URI
 // a fixed-cost check.
 const dataURIMetadataBytes = 1024
+
+// IsDeviceHeld reports whether a source's bytes are held by the device
+// itself rather than fetched from a host: a data: URI, or an onchfs work the
+// device read from chain and serves from the offline cache's store
+// (contentpath.IsOnchfsSourceURL, ffos-user#427). Neither has an origin to
+// probe, and a failure to show one says nothing about the network, so the
+// passes that judge origins (the kiosk observer, inferred failures, the L1
+// render probe) skip both. data: URIs keep their own payload check
+// (probeDataURI); an onchfs tree is verified byte for byte when it is read.
+func IsDeviceHeld(rawURL string) bool {
+	return IsDataURI(rawURL) || contentpath.IsOnchfsSourceURL(rawURL)
+}
+
+// errDeviceHeld is the inconclusive result of probing an onchfs source:
+// there is no origin to dial. It is never recorded (probeWritesRecord).
+var errDeviceHeld = errors.New("media health: onchfs source is read from chain by the device, not probed")
 
 // IsDataURI reports whether rawURL is a data: URI (scheme case-insensitive,
 // as RFC 3986 defines it).
