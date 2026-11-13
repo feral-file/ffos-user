@@ -9,6 +9,8 @@ import (
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 )
 
 const maxAutomaticItems = 2048
@@ -94,9 +96,11 @@ func (p *playbackCache) observe(items []dp1playlist.PlaylistItem, index int, rea
 	}
 	sources := make([]string, len(items))
 	for i, item := range items {
-		if len(item.Source) > MaxSourceURLBytes || isDataURI(item.Source) {
-			// Inline artwork already carries its bytes. An ineligible item
-			// must not disable warming of its eligible playlist neighbors.
+		if len(item.Source) > MaxSourceURLBytes || isDataURI(item.Source) || contentpath.IsOnchfsSourceURL(item.Source) {
+			// Inline artwork already carries its bytes, and an onchfs work
+			// is written by OnchfsMaterializer when it is cast. An
+			// ineligible item must not disable warming of its eligible
+			// playlist neighbors.
 			continue
 		}
 		sources[i] = item.Source

@@ -1,0 +1,478 @@
+package offlinecache
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"net/url"
+	"path"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
+	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
+	"github.com/feral-file/ffos-user/components/feral-controld/onchfs"
+)
+
+// The onchfs materializer is the offline cache's second producer of item
+// records (ffos-user#427). The first, capture, loads a work in a headless
+// browser from its host; an onchfs work has no host since fxhash closed, so
+// this one reads the work's tree from chain (onchfs.Resolver, every inode
+// verified against its address) and writes it into the same store, under
+// the work's device-local source (contentpath.Onchfs.SourceURL). Replay then
+// serves it to the kiosk exactly as it serves a captured work: one path
+// serves local artwork, whichever producer filled it.
+//
+// The record is complete by construction (every file of the tree, verified)
+// and written as an Automatic record with every resource fresh for
+// onchfsFreshFor: Automatic keeps it out of the app's Downloads list (it is
+// not something the user downloaded) and lets the cache's own policies evict
+// it like any automatic warm; it is rebuilt on the next cast that needs it.
+//
+// What the kiosk will ask for, and the resources that answer it:
+//   - each file at <origin>/<escaped path>;
+//   - each directory holding an index.html at <origin>/<dir>/ (the root at
+//     <origin>/), as an onchfs HTTP proxy serves a directory;
+//   - the exact source URL, query included (fxhash works read their seed
+//     from it), as the entry document. Replay matches method and URL
+//     exactly, so this one is stored under the full string.
+//
+// A sub-resource requested with a query string of its own (`lib.js?v=2`)
+// misses: replay matches exactly and the tree has no such URL. Known
+// limitation, not seen in the recorded works.
+
+// onchfsFreshFor is how long a materialized record stays replayable. The
+// bytes cannot change under their address; expiry only bounds how long an
+// unplayed work occupies the disk before the cache may drop it.
+const onchfsFreshFor = 30 * 24 * time.Hour
+
+// onchfsRefreshWithin re-materializes a record this close to expiry, so a
+// work in rotation never lapses mid-playlist.
+const onchfsRefreshWithin = 3 * 24 * time.Hour
+
+// DefaultOnchfsStoreBytes bounds the onchfs records a device keeps when the
+// offline cache feature is off (the materializer is then the store's only
+// writer and nothing else evicts). With the feature on, the cache's own disk
+// policy bounds them along with everything else.
+const DefaultOnchfsStoreBytes = 512 << 20
+
+// onchfsJobTimeout bounds one work's read and write. The largest recorded
+// works read in under 5 s; this leaves room for a slow node and failover.
+const onchfsJobTimeout = 2 * time.Minute
+
+// onchfsConcurrentJobs bounds works read at once. Each one fans out to its
+// own chain reads (onchfs.DefaultLimits.ConcurrentReads).
+const onchfsConcurrentJobs = 2
+
+// OnchfsResolver reads a verified onchfs tree (onchfs.Resolver).
+type OnchfsResolver interface {
+	Resolve(ctx context.Context, root, chain string) (*onchfs.Tree, error)
+}
+
+// OnchfsMaterializer writes onchfs works into the store. Safe for concurrent
+// use.
+type OnchfsMaterializer struct {
+	store    Store
+	resolver OnchfsResolver
+	logger   *zap.Logger
+	now      func() time.Time
+	// base is the daemon's lifetime: a job outlives the cast that started
+	// it and ends with the daemon.
+	base context.Context
+	// standalone means no offline-cache Service runs on this device, so
+	// nothing else evicts records or collects blobs: the materializer keeps
+	// its own records under maxBytes and runs GC itself. With a Service
+	// running it must NOT run GC — the Service's worker does, and a GC
+	// between another producer's WriteBlob and SaveItem would sweep a blob
+	// that is about to be referenced.
+	standalone bool
+	maxBytes   int64
+	onReady    func()
+
+	jobs chan struct{} // onchfsConcurrentJobs slots
+
+	mu       sync.Mutex
+	inflight map[string]*onchfsJob // by SourceKey; guarded by mu
+
+	// writeMu serializes this producer's writes and, when standalone, its
+	// GC: every blob it writes is referenced by a saved record before a GC
+	// it runs can look.
+	writeMu sync.Mutex
+}
+
+type onchfsJob struct {
+	done chan struct{}
+	err  error
+}
+
+// OnchfsMaterializerConfig configures NewOnchfsMaterializer.
+type OnchfsMaterializerConfig struct {
+	Store    Store
+	Resolver OnchfsResolver
+	Logger   *zap.Logger
+	// Base bounds every job; cancel it to stop the materializer.
+	Base context.Context
+	// Standalone: no Service runs (see OnchfsMaterializer.standalone).
+	Standalone bool
+	// MaxBytes bounds this producer's records when Standalone
+	// (DefaultOnchfsStoreBytes when 0).
+	MaxBytes int64
+	// OnReady, when set, is called after a job that finished in the
+	// background (past the caller's wait) saved a record, so the caller
+	// can widen the replay scope to it. It must not block.
+	OnReady func()
+	// Now is the clock (time.Now when nil).
+	Now func() time.Time
+}
+
+// NewOnchfsMaterializer returns a materializer over cfg.Store.
+func NewOnchfsMaterializer(cfg OnchfsMaterializerConfig) *OnchfsMaterializer {
+	m := &OnchfsMaterializer{
+		store: cfg.Store, resolver: cfg.Resolver, logger: cfg.Logger, base: cfg.Base,
+		standalone: cfg.Standalone, maxBytes: cfg.MaxBytes, onReady: cfg.OnReady, now: cfg.Now,
+		jobs: make(chan struct{}, onchfsConcurrentJobs), inflight: map[string]*onchfsJob{},
+	}
+	if m.now == nil {
+		m.now = time.Now
+	}
+	if m.maxBytes <= 0 {
+		m.maxBytes = DefaultOnchfsStoreBytes
+	}
+	if m.base == nil {
+		m.base = context.Background()
+	}
+	return m
+}
+
+// Ensure makes every onchfs item among items replayable from the store. It
+// waits for the first onchfs item in playlist order, the one a cast shows
+// first, at most wait (and no longer than ctx); every other item, and the
+// first one if it takes longer, continues in the background and calls
+// OnReady when it saves a record. Items whose record is already fresh cost
+// one record read. A zero wait starts the work and returns at once. It
+// returns how many onchfs items were replayable when it returned.
+//
+// Errors are logged, not returned: an item that cannot be read stays
+// unplayable, which the player handles like any failed source, and must not
+// fail the rest of the cast.
+func (m *OnchfsMaterializer) Ensure(ctx context.Context, items []dp1playlist.PlaylistItem, wait time.Duration) int {
+	ready := 0
+	var first *onchfsJob
+	seen := map[string]bool{}
+	for _, item := range items {
+		if !contentpath.IsOnchfsSourceURL(item.Source) || seen[item.Source] {
+			continue
+		}
+		isFirst := len(seen) == 0
+		seen[item.Source] = true
+		if m.fresh(item.Source, onchfsRefreshWithin) {
+			ready++
+			continue
+		}
+		job := m.start(item)
+		if isFirst {
+			first = job
+		}
+	}
+	if first == nil || wait <= 0 {
+		return ready
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-first.done:
+		if first.err == nil {
+			ready++
+		}
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+	return ready
+}
+
+// fresh reports whether source's record exists and stays replayable for at
+// least margin.
+func (m *OnchfsMaterializer) fresh(source string, margin time.Duration) bool {
+	rec, err := m.store.LoadItem(SourceKey(source))
+	return err == nil && rec != nil && rec.Coverage.Complete && rec.freshForPlayback(m.now().Add(margin))
+}
+
+// start begins (or joins) the job for item.
+func (m *OnchfsMaterializer) start(item dp1playlist.PlaylistItem) *onchfsJob {
+	key := SourceKey(item.Source)
+	m.mu.Lock()
+	if job, ok := m.inflight[key]; ok {
+		m.mu.Unlock()
+		return job
+	}
+	job := &onchfsJob{done: make(chan struct{})}
+	m.inflight[key] = job
+	m.mu.Unlock()
+
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			delete(m.inflight, key)
+			m.mu.Unlock()
+			close(job.done)
+		}()
+		select {
+		case m.jobs <- struct{}{}:
+		case <-m.base.Done():
+			job.err = m.base.Err()
+			return
+		}
+		defer func() { <-m.jobs }()
+		ctx, cancel := context.WithTimeout(m.base, onchfsJobTimeout)
+		defer cancel()
+		started := m.now()
+		job.err = m.materialize(ctx, item)
+		label := truncateSourceForLog(item.Source)
+		if job.err != nil {
+			m.logger.Warn("onchfs: work not materialized", zap.String("source", label), zap.Error(job.err))
+			return
+		}
+		m.logger.Info("onchfs: work materialized", zap.String("source", label), zap.Duration("took", m.now().Sub(started)))
+		if m.onReady != nil {
+			m.onReady()
+		}
+	}()
+	return job
+}
+
+// materialize reads item's tree and writes it as a record.
+func (m *OnchfsMaterializer) materialize(ctx context.Context, item dp1playlist.PlaylistItem) error {
+	o, ok := contentpath.ParseOnchfsSourceURL(item.Source)
+	if !ok {
+		return fmt.Errorf("onchfs: not a device-local onchfs source")
+	}
+	tree, err := m.resolver.Resolve(ctx, o.Root, o.Chain)
+	if err != nil {
+		return err
+	}
+	now := m.now()
+	resources, blobs, err := onchfsResources(o, item.Source, tree, now.Add(onchfsFreshFor))
+	if err != nil {
+		return err
+	}
+	rec := &ItemRecord{
+		Automatic:    true,
+		LastPlayedAt: now,
+		Item:         item,
+		Entry:        entryURL(item.Source),
+		Resources:    resources,
+		Coverage:     Coverage{Complete: true},
+		CapturedAt:   now,
+	}
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+	if err := m.write(rec, blobs); err != nil {
+		return err
+	}
+	if m.standalone {
+		m.prune(SourceKey(item.Source))
+	}
+	return nil
+}
+
+// write stores every blob, saves the record, then checks every blob the
+// record names is on disk and rewrites any that is not. With a Service
+// running, its GC can sweep a blob between WriteBlob and SaveItem (it
+// cannot once the record is saved); the check after saving closes that
+// window instead of coordinating with the Service's worker.
+func (m *OnchfsMaterializer) write(rec *ItemRecord, blobs map[string][]byte) error {
+	for _, body := range blobs {
+		if _, err := m.store.WriteBlob(bytes.NewReader(body), 0); err != nil {
+			return fmt.Errorf("onchfs: writing a blob: %w", err)
+		}
+	}
+	if err := m.store.SaveItem(rec); err != nil {
+		return fmt.Errorf("onchfs: saving the record: %w", err)
+	}
+	for sha, body := range blobs {
+		if _, err := m.store.BlobSize(sha); err == nil {
+			continue
+		}
+		if _, err := m.store.WriteBlob(bytes.NewReader(body), 0); err != nil {
+			return fmt.Errorf("onchfs: rewriting a swept blob: %w", err)
+		}
+	}
+	return nil
+}
+
+// prune keeps this producer's records under maxBytes, oldest played first,
+// never the one just written, then collects unreferenced blobs. Only when
+// standalone (see OnchfsMaterializer.standalone); called under writeMu.
+// Failures are logged: the cost of a failed prune is disk, never playback.
+func (m *OnchfsMaterializer) prune(keep string) {
+	keys, err := m.store.ListItemKeys()
+	if err != nil {
+		m.logger.Warn("onchfs: listing records to prune failed", zap.Error(err))
+		return
+	}
+	type entry struct {
+		key   string
+		at    time.Time
+		bytes int64
+	}
+	var entries []entry
+	var total int64
+	for _, key := range keys {
+		rec, err := m.store.LoadItem(key)
+		if err != nil || rec == nil || !contentpath.IsOnchfsSourceURL(rec.Item.Source) {
+			continue
+		}
+		e := entry{key: key, at: rec.LastPlayedAt}
+		if e.at.IsZero() {
+			e.at = rec.CapturedAt
+		}
+		seen := map[string]bool{}
+		for _, res := range rec.Resources {
+			if res.SHA256 == "" || seen[res.SHA256] {
+				continue
+			}
+			seen[res.SHA256] = true
+			if n, err := m.store.BlobSize(res.SHA256); err == nil {
+				e.bytes += n
+			}
+		}
+		total += e.bytes
+		entries = append(entries, e)
+	}
+	if total <= m.maxBytes {
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].at.Before(entries[j].at) })
+	for _, e := range entries {
+		if total <= m.maxBytes {
+			break
+		}
+		if e.key == keep {
+			continue
+		}
+		if _, err := m.store.DeleteItem(e.key); err != nil {
+			m.logger.Warn("onchfs: pruning a record failed", zap.Error(err))
+			continue
+		}
+		total -= e.bytes
+	}
+	if _, _, err := m.store.GC(); err != nil {
+		m.logger.Warn("onchfs: collecting blobs failed", zap.Error(err))
+	}
+}
+
+// onchfsResources maps a verified tree to the resources replay answers with
+// (see the comment at the top of this file), and the blobs they name by
+// sha256. Bodies are the plain bytes: a declared gzip content-encoding was
+// decoded when the tree was read, and Content-Encoding is never replayed.
+func onchfsResources(o contentpath.Onchfs, source string, tree *onchfs.Tree, freshUntil time.Time) ([]Resource, map[string][]byte, error) {
+	origin := o.Origin()
+	blobs := map[string][]byte{}
+	byPath := map[string]Resource{}
+	paths := make([]string, 0, len(tree.Files))
+	for p := range tree.Files {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		f := tree.Files[p]
+		sum := sha256.Sum256(f.Plain)
+		sha := hex.EncodeToString(sum[:]) // the key WriteBlob stores it under
+		blobs[sha] = f.Plain
+		byPath[p] = Resource{
+			URL: origin + "/" + escapeTreePath(p), Status: 200, SHA256: sha, ContentType: f.ContentType,
+			// The player probes a work's content type with a cross-origin
+			// HEAD from its own origin before mounting it.
+			Headers:    map[string]string{"Access-Control-Allow-Origin": "*"},
+			FreshUntil: freshUntil,
+		}
+	}
+	resources := make([]Resource, 0, len(paths)+4)
+	urls := map[string]bool{}
+	add := func(r Resource) {
+		if !urls[r.URL] {
+			urls[r.URL] = true
+			resources = append(resources, r)
+		}
+	}
+	for _, p := range paths {
+		add(byPath[p])
+	}
+	// A single-file tree is keyed "" and served at the root.
+	if f, ok := byPath[""]; ok {
+		f.URL = origin + "/"
+		add(f)
+	}
+	for _, p := range paths {
+		if path.Base(p) != "index.html" {
+			continue
+		}
+		alias := byPath[p]
+		alias.URL = origin + "/"
+		if dir := path.Dir(p); dir != "." {
+			alias.URL += escapeTreePath(dir) + "/"
+		}
+		add(alias)
+	}
+
+	entry := entryURL(source)
+	target, err := url.PathUnescape(o.Path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("onchfs: entry path %q: %w", o.Path, err)
+	}
+	if res, ok := byPath[entryFile(target)]; ok {
+		res.URL = entry
+		add(res)
+	} else if _, ok := byPath[strings.TrimSuffix(target, "/")+"/index.html"]; ok && target != "" && !strings.HasSuffix(target, "/") {
+		// A directory named without its slash: redirect to the slashed form
+		// (query kept), as an onchfs proxy does, so relative URLs inside its
+		// index.html resolve against the directory.
+		res := Resource{URL: entry, Status: 301, RedirectTo: slashedEntry(entry), FreshUntil: freshUntil,
+			Headers: map[string]string{"Access-Control-Allow-Origin": "*"}}
+		add(res)
+	} else {
+		return nil, nil, fmt.Errorf("%w: the tree has no %q to open", onchfs.ErrNotFound, entryFile(target))
+	}
+	return resources, blobs, nil
+}
+
+// entryFile is the file a path inside the tree opens: itself, or the
+// index.html of a directory ("" is the root).
+func entryFile(target string) string {
+	if target == "" || strings.HasSuffix(target, "/") {
+		return target + "index.html"
+	}
+	return target
+}
+
+// entryURL is the URL the kiosk requests for source: the fragment never
+// reaches the network.
+func entryURL(source string) string {
+	before, _, _ := strings.Cut(source, "#")
+	return before
+}
+
+// slashedEntry inserts "/" before the query of an entry URL.
+func slashedEntry(entry string) string {
+	before, query, hasQuery := strings.Cut(entry, "?")
+	if hasQuery {
+		return before + "/?" + query
+	}
+	return before + "/"
+}
+
+// escapeTreePath escapes each segment of a tree path for a URL path the
+// way Chromium requests it.
+func escapeTreePath(p string) string {
+	segs := strings.Split(p, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	return strings.Join(segs, "/")
+}

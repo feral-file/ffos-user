@@ -1,0 +1,290 @@
+package offlinecache_test
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/onchfs"
+)
+
+const onchfsTestRoot = "1639e8c989cddd2c0f9e951b126a21b1964309854c0a8e0a9b1193a655c6712a"
+
+// onchfsSource is the device-local source dp1 hands the player for the
+// indexer's `onchfs://<root>/?fxhash=…`.
+func onchfsSource(t *testing.T, uri string) string {
+	t.Helper()
+	o, ok := contentpath.ParseOnchfs(uri)
+	require.True(t, ok)
+	return o.SourceURL()
+}
+
+func onchfsTestTree() *onchfs.Tree {
+	file := func(p, ct, body string) *onchfs.File {
+		return &onchfs.File{Path: p, Plain: []byte(body), Stored: []byte(body), ContentType: ct}
+	}
+	return &onchfs.Tree{Root: onchfsTestRoot, Chain: "eip155:1", Files: map[string]*onchfs.File{
+		"index.html":     file("index.html", "text/html", "<html>root</html>"),
+		"sketch.js":      file("sketch.js", "application/javascript", "draw()"),
+		"lib/a b.js":     file("lib/a b.js", "application/javascript", "lib()"),
+		"sub/index.html": file("sub/index.html", "text/html", "<html>sub</html>"),
+		"data.bin":       file("data.bin", "", "raw"),
+	}}
+}
+
+// fakeOnchfsResolver answers with a tree, an error, or after a gate opens.
+type fakeOnchfsResolver struct {
+	tree  *onchfs.Tree
+	err   error
+	gate  chan struct{}
+	calls atomic.Int32
+}
+
+func (r *fakeOnchfsResolver) Resolve(ctx context.Context, root, _ string) (*onchfs.Tree, error) {
+	r.calls.Add(1)
+	if r.gate != nil {
+		select {
+		case <-r.gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if r.err != nil {
+		return nil, r.err
+	}
+	t := *r.tree
+	t.Root = root
+	return &t, nil
+}
+
+func newTestMaterializer(t *testing.T, store offlinecache.Store, r offlinecache.OnchfsResolver, cfg offlinecache.OnchfsMaterializerConfig) *offlinecache.OnchfsMaterializer {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cfg.Store, cfg.Resolver, cfg.Logger, cfg.Base = store, r, zaptest.NewLogger(t), ctx
+	return offlinecache.NewOnchfsMaterializer(cfg)
+}
+
+func TestOnchfsMaterializerWritesARecordReplayServes(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	source := onchfsSource(t, "onchfs://"+onchfsTestRoot+"/?fxhash=0x06ec&fxiteration=1")
+	resolver := &fakeOnchfsResolver{tree: onchfsTestTree()}
+	m := newTestMaterializer(t, ts.store, resolver, offlinecache.OnchfsMaterializerConfig{})
+
+	items := []dp1playlist.PlaylistItem{{ID: "a", Source: source}, {ID: "b", Source: "https://cdn.example/x.png"}}
+	require.Equal(t, 1, m.Ensure(context.Background(), items, 5*time.Second))
+	rec, err := ts.store.LoadItem(offlinecache.SourceKey(source))
+	require.NoError(t, err)
+	assert.True(t, rec.Automatic, "kept out of the app's Downloads list")
+	assert.True(t, rec.Coverage.Complete)
+	assert.Equal(t, source, rec.Item.Source)
+
+	// a second Ensure finds the record fresh and reads nothing from chain
+	require.Equal(t, 1, m.Ensure(context.Background(), items, time.Second))
+	assert.Equal(t, int32(1), resolver.calls.Load())
+
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{source}, false))
+
+	origin := "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.onchfs.invalid"
+	serves := []struct {
+		url, method, body, contentType string
+	}{
+		{source, "", "<html>root</html>", "text/html"}, // the entry, seed query included
+		{origin + "/", "", "<html>root</html>", "text/html"},
+		{origin + "/sketch.js", "", "draw()", "application/javascript"},
+		{origin + "/lib/a%20b.js", "", "lib()", "application/javascript"},
+		{origin + "/sub/", "", "<html>sub</html>", "text/html"},
+		{origin + "/data.bin", "", "raw", ""},
+	}
+	for i, s := range serves {
+		done := ts.expectSend("Fetch.fulfillRequest")
+		ts.handler(requestPausedEventWithMethod(t, "r"+string(rune('a'+i)), s.url, s.method))
+		params := awaitSend(t, done)
+		assert.Equal(t, 200, params["responseCode"], s.url)
+		body, err := base64.StdEncoding.DecodeString(params["body"].(string))
+		require.NoError(t, err)
+		assert.Equal(t, s.body, string(body), s.url)
+		ct, has := headerValue(t, params, "Content-Type")
+		assert.Equal(t, s.contentType != "", has, "no Content-Type is invented for %s", s.url)
+		assert.Equal(t, s.contentType, ct, s.url)
+		_, encoded := headerValue(t, params, "Content-Encoding")
+		assert.False(t, encoded, "bodies are stored plain")
+	}
+
+	// the player's cross-origin HEAD probe, with its cache-busting params
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEventWithMethod(t, "head", source+"&v=1&x-request=xhr", "HEAD"))
+	params := awaitSend(t, done)
+	assert.Equal(t, 200, params["responseCode"])
+	acao, _ := headerValue(t, params, "Access-Control-Allow-Origin")
+	assert.Equal(t, "*", acao)
+
+	// Anything else on the origin is not part of the work. The record is
+	// Automatic, which makes the scope mixed (EnableForPlaylist), so the
+	// miss continues to the network, where a .invalid host never resolves
+	// (RFC 6761): it fails there, and nothing is fetched.
+	done = ts.expectSend("Fetch.continueRequest")
+	ts.handler(requestPausedEvent(t, "miss", origin+"/missing.js"))
+	awaitSend(t, done)
+}
+
+func TestOnchfsMaterializerEntryShapes(t *testing.T) {
+	cases := map[string]struct {
+		uri, wantURL string
+		redirect     string
+	}{
+		"a file inside the tree":       {"onchfs://" + onchfsTestRoot + "/sketch.js", "/sketch.js", ""},
+		"a directory with its slash":   {"onchfs://" + onchfsTestRoot + "/sub/?x=1", "/sub/?x=1", ""},
+		"a directory without it":       {"onchfs://" + onchfsTestRoot + "/sub?x=1", "/sub?x=1", "/sub/?x=1"},
+		"the root without a slash too": {"onchfs://" + onchfsTestRoot + "?x=1", "/?x=1", ""},
+	}
+	origin := "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.onchfs.invalid"
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			store, _ := newTestStore(t)
+			source := onchfsSource(t, tc.uri)
+			assert.Equal(t, origin+tc.wantURL, source)
+			m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.OnchfsMaterializerConfig{})
+			require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
+			rec, err := store.LoadItem(offlinecache.SourceKey(source))
+			require.NoError(t, err)
+			res, ok := rec.ResourceByURL(source)
+			require.True(t, ok)
+			if tc.redirect != "" {
+				assert.Equal(t, 301, res.Status)
+				assert.Equal(t, origin+tc.redirect, res.RedirectTo)
+			} else {
+				assert.Equal(t, 200, res.Status)
+			}
+		})
+	}
+}
+
+func TestOnchfsMaterializerFailuresLeaveNoRecord(t *testing.T) {
+	cases := map[string]*fakeOnchfsResolver{
+		"not on any chain":  {err: onchfs.ErrNotFound},
+		"every node lying":  {err: onchfs.ErrVerification},
+		"no entry to open":  {tree: &onchfs.Tree{Files: map[string]*onchfs.File{"other.js": {Plain: []byte("x")}}}},
+		"too large to keep": {err: onchfs.ErrTooLarge},
+		"no node answering": {err: errors.New("connection refused")},
+	}
+	for name, resolver := range cases {
+		t.Run(name, func(t *testing.T) {
+			store, _ := newTestStore(t)
+			source := onchfsSource(t, "onchfs://"+onchfsTestRoot)
+			m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{})
+			assert.Zero(t, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
+			keys, err := store.ListItemKeys()
+			require.NoError(t, err)
+			assert.Empty(t, keys)
+		})
+	}
+}
+
+// A slow read does not hold the cast: Ensure returns at its wait, the job
+// finishes in the background, OnReady tells the caller to widen the scope,
+// and a second Ensure for the same work joins the running job.
+func TestOnchfsMaterializerFinishesSlowWorkInTheBackground(t *testing.T) {
+	store, _ := newTestStore(t)
+	gate := make(chan struct{})
+	resolver := &fakeOnchfsResolver{tree: onchfsTestTree(), gate: gate}
+	readyCalls := make(chan struct{}, 4)
+	m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{
+		OnReady: func() { readyCalls <- struct{}{} },
+	})
+	items := []dp1playlist.PlaylistItem{{Source: onchfsSource(t, "onchfs://"+onchfsTestRoot)}}
+
+	assert.Zero(t, m.Ensure(context.Background(), items, 20*time.Millisecond))
+	assert.Zero(t, m.Ensure(context.Background(), items, 20*time.Millisecond))
+	close(gate)
+	select {
+	case <-readyCalls:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnReady was not called")
+	}
+	assert.Equal(t, int32(1), resolver.calls.Load(), "the second Ensure joined the running job")
+	assert.Equal(t, 1, m.Ensure(context.Background(), items, time.Second))
+}
+
+// sweepingStore runs the store's GC inside SaveItem before saving, the
+// worst moment a Service worker's GC could run against this producer.
+type sweepingStore struct {
+	offlinecache.Store
+	swept atomic.Int64
+}
+
+func (s *sweepingStore) SaveItem(rec *offlinecache.ItemRecord) error {
+	if n, _, err := s.GC(); err == nil {
+		s.swept.Add(int64(n))
+	}
+	return s.Store.SaveItem(rec)
+}
+
+func TestOnchfsMaterializerRewritesBlobsSweptBeforeTheRecordWasSaved(t *testing.T) {
+	base, _ := newTestStore(t)
+	store := &sweepingStore{Store: base}
+	source := onchfsSource(t, "onchfs://"+onchfsTestRoot)
+	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.OnchfsMaterializerConfig{})
+	require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
+	assert.Positive(t, store.swept.Load(), "the GC did sweep the unreferenced blobs")
+	rec, err := base.LoadItem(offlinecache.SourceKey(source))
+	require.NoError(t, err)
+	for _, res := range rec.Resources {
+		if res.SHA256 == "" {
+			continue
+		}
+		_, err := base.ReadBlob(res.SHA256)
+		assert.NoError(t, err, res.URL)
+	}
+}
+
+// Standalone (no Service), the materializer is the only writer: it keeps
+// its records under its byte budget, oldest played first, and collects the
+// blobs they leave behind.
+func TestOnchfsMaterializerStandaloneKeepsItsBudget(t *testing.T) {
+	store, _ := newTestStore(t)
+	clock := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	now := func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	tick := func() { mu.Lock(); clock = clock.Add(time.Minute); mu.Unlock() }
+
+	treeOf := func(body string) *onchfs.Tree {
+		return &onchfs.Tree{Files: map[string]*onchfs.File{"index.html": {Plain: []byte(body), ContentType: "text/html"}}}
+	}
+	roots := []string{
+		"1111111111111111111111111111111111111111111111111111111111111111",
+		"2222222222222222222222222222222222222222222222222222222222222222",
+		"3333333333333333333333333333333333333333333333333333333333333333",
+	}
+	var sources []string
+	for i, root := range roots {
+		resolver := &fakeOnchfsResolver{tree: treeOf(string(rune('a'+i)) + "0123456789")} // 11 bytes each
+		m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{Standalone: true, MaxBytes: 25, Now: now})
+		source := onchfsSource(t, "onchfs://"+root)
+		sources = append(sources, source)
+		require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
+		tick()
+	}
+	_, err := store.LoadItem(offlinecache.SourceKey(sources[0]))
+	assert.Error(t, err, "the oldest record went to keep the budget")
+	for _, s := range sources[1:] {
+		_, err := store.LoadItem(offlinecache.SourceKey(s))
+		assert.NoError(t, err)
+	}
+	used, err := store.DiskUsage()
+	require.NoError(t, err)
+	assert.Less(t, used, int64(1<<20))
+}
