@@ -703,13 +703,21 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	case schedulerSource.PlaylistURL != "":
 		kind = "playlist URL"
 		currentlyDisplayed := r.currentlyDisplayedItems(playerStatus)
-		playlist, err = r.narrowedPlaylistFromURL(schedulerSource.PlaylistURL, currentlyDisplayed)
+		// Built from schedulerSource.ContentContext, not playerStatus — the
+		// scheduler-owned branch this case serves may hold no playerStatus
+		// yet (currentlyDisplayed's own fetch above is lazy). legacySchedulerSource
+		// folds in the same way it does for contextUnknown below, before the
+		// projection that actually uses it: both answer the identical "will this
+		// tick's cast be filtered at all" question, just at two different points
+		// in this function (feralfile-bot F7, 2026-11-13).
+		displayFilter := r.contentDisplayFilter(schedulerSource.ContentContext, contextUnknown || legacySchedulerSource)
+		playlist, err = r.narrowedPlaylistFromURL(schedulerSource.PlaylistURL, currentlyDisplayed, displayFilter)
 		if err != nil {
 			// Offline fallback: serve the last successfully cached body for
 			// this URL rather than failing the pass outright, mirroring
 			// resolveDisplayedPlaylist's own URL branch. Only a cache miss
 			// leaves the live error standing.
-			if cached, cacheErr := r.loadCachedPlaylistForURL(schedulerSource.PlaylistURL, currentlyDisplayed); cacheErr == nil {
+			if cached, cacheErr := r.loadCachedPlaylistForURL(schedulerSource.PlaylistURL, currentlyDisplayed, displayFilter); cacheErr == nil {
 				playlist, err = cached, nil
 			}
 		}
@@ -1409,9 +1417,10 @@ func (r *refresher) resolveDisplayedPlaylist(playerStatus *status.PlayerStatus) 
 	case playerStatus.PlaylistURL != nil:
 		url := *playerStatus.PlaylistURL
 		currentlyDisplayed := r.currentlyDisplayedItems(playerStatus)
-		playlist, err := r.narrowedPlaylistFromURL(url, currentlyDisplayed)
+		displayFilter := r.contentDisplayFilter(playerStatus.ContentContext, playerStatus.ContentContext == "")
+		playlist, err := r.narrowedPlaylistFromURL(url, currentlyDisplayed, displayFilter)
 		if err != nil {
-			cached, cacheErr := r.loadCachedPlaylistForURL(url, currentlyDisplayed)
+			cached, cacheErr := r.loadCachedPlaylistForURL(url, currentlyDisplayed, displayFilter)
 			if cacheErr != nil {
 				return nil, err
 			}
@@ -1584,7 +1593,12 @@ func fromOfflineCacheSegments(segments []offlinecache.SeriesSegment) []dp1.CastS
 // currentlyDisplayed is narrowStable's seed source — see that method's doc.
 // May be nil (no player status in hand at this call site); narrowStable
 // treats that exactly like "nothing to seed from" and rolls fresh.
-func (r *refresher) narrowedPlaylistFromURL(url string, currentlyDisplayed func() []dp1playlist.PlaylistItem) (*dp1.Playlist, error) {
+//
+// displayFilter is narrowStable's occurrence predicate — see that method's
+// doc. May be nil (no content-policy context known at this call site);
+// narrowStable then counts every item, exactly as before displayFilter
+// existed.
+func (r *refresher) narrowedPlaylistFromURL(url string, currentlyDisplayed func() []dp1playlist.PlaylistItem, displayFilter func(dp1playlist.PlaylistItem) bool) (*dp1.Playlist, error) {
 	playlist, rawPlaylist, err := r.dp1.FetchPlaylist(r.context, url)
 	if err != nil {
 		return nil, err
@@ -1595,7 +1609,7 @@ func (r *refresher) narrowedPlaylistFromURL(url string, currentlyDisplayed func(
 	deviceMode := r.currentSeriesPlaybackMode()
 	plan := r.dp1.ResolveSeriesCastPlan(r.context, *playlist, rawPlaylist, deviceMode, 0)
 	narrowed := *playlist
-	narrowed.Items = r.narrowStable(plan, deviceMode, currentlyDisplayed)
+	narrowed.Items = r.narrowStable(plan, deviceMode, currentlyDisplayed, displayFilter)
 	return &narrowed, nil
 }
 
@@ -1659,7 +1673,25 @@ func (r *refresher) narrowedPlaylistFromURL(url string, currentlyDisplayed func(
 // or a shorter displayed list) or a non-match falls through to the
 // remembered pick, then to a fresh roll, exactly as before this check
 // existed.
-func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMode, currentlyDisplayed func() []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
+//
+// displayFilter reports whether an item would survive the SAME content-
+// policy projection that produced displayed's own on-screen state — nil
+// when no such projection could have happened (no content-policy store, or
+// the context behind this tick's cast is unknown), in which case occurrence
+// counts every earlier item exactly as it did before displayFilter existed.
+// It exists because displayed is the PLAYER's state, already filtered,
+// while items (built up across this very loop) is not: content-policy
+// projection runs AFTER narrowStable, over the finished, unfiltered plan
+// (see processPlayingPlaylist's own ProjectLocked call). Without it, an
+// earlier curated item this tick's policy would also remove (a mature
+// item under the default policy, say) still counts toward occurrence,
+// shifting every later group's slot by however many such items precede it
+// — reading the WRONG position out of displayed and overwriting a correct
+// remembered pick with an unrelated item (feralfile-bot F7, 2026-11-13;
+// this is a second, distinct failure mode from the whole-list-scan F7 the
+// occurrence check above itself replaced on 2026-11-12 — that one needed
+// no filtering mismatch at all to misfire).
+func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMode, currentlyDisplayed func() []dp1playlist.PlaylistItem, displayFilter func(dp1playlist.PlaylistItem) bool) []dp1playlist.PlaylistItem {
 	r.randomSeriesMu.Lock()
 	defer r.randomSeriesMu.Unlock()
 	if r.randomSeriesPicks == nil {
@@ -1725,11 +1757,14 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 		//
 		// occurrence is this group's own slot in the flattened list: items
 		// already holds every earlier segment's own contribution, so its
-		// current length is exactly where this group's narrowed output
-		// will land too — matching displayed only at that one position,
-		// never anywhere else a coincidental Source match could sit
-		// (feralfile-bot F7, 2026-11-12).
-		occurrence := len(items)
+		// current length — counting only the items displayFilter admits,
+		// the same ones a content-policy projection of this tick's cast
+		// would keep — is exactly where this group's narrowed output will
+		// land in displayed too — matching displayed only at that one
+		// position, never anywhere else a coincidental Source match could
+		// sit (feralfile-bot F7, 2026-11-12; occurrence corrected to count
+		// past content-policy filtering, feralfile-bot F7, 2026-11-13).
+		occurrence := filteredOccurrence(items, displayFilter)
 		if seeded, ok := editionAtOccurrence(fetchDisplayed(), occurrence, group.Editions); ok {
 			// Written unconditionally, even when the source already
 			// matched what was remembered: a conditional write here (only
@@ -1834,6 +1869,37 @@ func (r *refresher) currentlyDisplayedItems(ps *status.PlayerStatus) func() []dp
 	}
 }
 
+// contentDisplayFilter builds narrowStable's occurrence predicate (see that
+// method's doc) from a resolved content context. nil — "count every item,
+// nothing is filtered" — when contextUnknown (processPlayingPlaylist's own
+// projection guard skips ProjectLocked in exactly that case too, so
+// occurrence must agree: nothing will be removed), or when there is no
+// content-policy store to ask at all.
+//
+// policy is read via Snapshot, not CurrentLocked: this runs ahead of, and
+// without, the policy lock processPlayingPlaylist takes only after
+// resolution (see that function's own doc on why), and Snapshot is the
+// store's established lock-free read for exactly that kind of caller — see
+// contentpolicy.Store's snap field doc. A policy update racing this read
+// against the later ProjectLocked call is the same bounded, accepted gap
+// every other lock-free Snapshot read in this codebase already carries,
+// and strictly narrows the prior gap: before this existed, occurrence was
+// never corrected for filtering AT ALL, on every tick, not just across a
+// policy-change race.
+func (r *refresher) contentDisplayFilter(contentContext string, contextUnknown bool) func(dp1playlist.PlaylistItem) bool {
+	if r.contentPolicy == nil || contextUnknown {
+		return nil
+	}
+	origin, err := contentpolicy.NormalizeContext(contentContext)
+	if err != nil {
+		return nil
+	}
+	policy := r.contentPolicy.Snapshot()
+	return func(item dp1playlist.PlaylistItem) bool {
+		return policy.Allows(item, origin)
+	}
+}
+
 // editionAtOccurrence reports whether the item at position index in
 // displayed — this group's own slot in the flattened list, not any
 // position — has the same Source as one of editions, and returns that
@@ -1876,6 +1942,24 @@ func editionAtOccurrence(displayed []dp1playlist.PlaylistItem, index int, editio
 	return editionBySource(editions, displayed[index].Source)
 }
 
+// filteredOccurrence counts how many of items displayFilter admits — nil
+// admits all of them, items' own unfiltered length, exactly like
+// narrowStable counted before displayFilter existed. See narrowStable's
+// doc for why this, and not len(items), is this group's own slot in
+// displayed.
+func filteredOccurrence(items []dp1playlist.PlaylistItem, displayFilter func(dp1playlist.PlaylistItem) bool) int {
+	if displayFilter == nil {
+		return len(items)
+	}
+	n := 0
+	for _, item := range items {
+		if displayFilter(item) {
+			n++
+		}
+	}
+	return n
+}
+
 // loadCachedPlaylistForURL mirrors commandrouter's handler.loadCachedPlaylistForURL
 // (see its doc, including why the returned playlist carries NO signature
 // verdict: the saved body is a typed, hydrated re-marshal, not the signed
@@ -1895,8 +1979,9 @@ func editionAtOccurrence(displayed []dp1playlist.PlaylistItem, index int, editio
 // — see AGENTS.md's service-boundary guidance).
 //
 // currentlyDisplayed is narrowStable's seed source — see that method's
-// doc. May be nil.
-func (r *refresher) loadCachedPlaylistForURL(url string, currentlyDisplayed func() []dp1playlist.PlaylistItem) (*dp1.Playlist, error) {
+// doc. May be nil. displayFilter is narrowStable's occurrence predicate —
+// see that method's doc. May be nil.
+func (r *refresher) loadCachedPlaylistForURL(url string, currentlyDisplayed func() []dp1playlist.PlaylistItem, displayFilter func(dp1playlist.PlaylistItem) bool) (*dp1.Playlist, error) {
 	if r.offlineCache == nil {
 		return nil, fmt.Errorf("offline cache: disabled, no cached fallback for %s", url)
 	}
@@ -1914,7 +1999,7 @@ func (r *refresher) loadCachedPlaylistForURL(url string, currentlyDisplayed func
 	if len(segments) > 0 {
 		plan := dp1.CastPlan{Segments: fromOfflineCacheSegments(segments)}
 		deviceMode := r.currentSeriesPlaybackMode()
-		playlist.Items = r.narrowStable(plan, deviceMode, currentlyDisplayed)
+		playlist.Items = r.narrowStable(plan, deviceMode, currentlyDisplayed, displayFilter)
 	}
 	return playlist, nil
 }

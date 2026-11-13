@@ -1964,7 +1964,19 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 			zap.String("playlist_id", playlist.ID),
 			zap.Int("items", len(considered)),
 			zap.Int("limit", maxQueued))
-		considered = considered[:maxQueued]
+		// A plain [:maxQueued] slice drops whatever lands past the cut by
+		// POSITION alone — but a series group's own Representative is
+		// appended after that group's full Editions set (dp1.CastPlan.Full,
+		// when the catalog's editions don't already carry its source), so a
+		// single group whose edition count already reaches maxQueued pushes
+		// its Representative past the cut. That representative is the ONE
+		// item a non-distinct-editions group's Narrow(nil) can ever select
+		// (feralfile-bot F1, 2026-11-13) — dropping it, not some edition no
+		// mode will ever pick, is what leaves nothing playable despite a
+		// fully "successful" download. requiredDownloadSources keeps every
+		// such representative in the queued budget, trimming ordinary
+		// editions first instead.
+		considered = boundQueuedItems(considered, maxQueued, requiredDownloadSources(segments))
 	}
 	// Pair each queued item with the clear-epoch sampled just before its
 	// classify, so a ClearItem/ClearPlaylist landing during this (per

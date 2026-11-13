@@ -3,10 +3,12 @@ package refresher
 import (
 	"testing"
 
+	"github.com/display-protocol/dp1-go/extension/contentrating"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 )
 
@@ -39,11 +41,11 @@ func TestNarrowStable_RandomModeStaysStableAcrossRefreshes(t *testing.T) {
 	r := &refresher{}
 	mode := dp1.SeriesPlaybackRandom
 
-	first := r.narrowStable(randomGroupPlan(), &mode, nil)
+	first := r.narrowStable(randomGroupPlan(), &mode, nil, nil)
 	require.Len(t, first, 1)
 
 	for i := 0; i < 10; i++ {
-		again := r.narrowStable(randomGroupPlan(), &mode, nil)
+		again := r.narrowStable(randomGroupPlan(), &mode, nil, nil)
 		require.Len(t, again, 1)
 		assert.Equal(t, first[0].Source, again[0].Source,
 			"an unchanged random-mode group must keep its pick across refreshes")
@@ -58,14 +60,14 @@ func TestNarrowStable_RandomModeReselectsWhenEditionDisappears(t *testing.T) {
 	r := &refresher{}
 	mode := dp1.SeriesPlaybackRandom
 
-	first := r.narrowStable(randomGroupPlan(), &mode, nil)
+	first := r.narrowStable(randomGroupPlan(), &mode, nil, nil)
 	require.Len(t, first, 1)
 
 	shrunk := randomGroupPlan()
 	shrunk.Segments[0].Group.Editions = []dp1playlist.PlaylistItem{
 		{ID: "d", Source: "https://cdn.example.com/d.mp4"},
 	}
-	again := r.narrowStable(shrunk, &mode, nil)
+	again := r.narrowStable(shrunk, &mode, nil, nil)
 	require.Len(t, again, 1)
 	assert.Equal(t, "https://cdn.example.com/d.mp4", again[0].Source,
 		"the previous pick is gone from the editions, so a fresh pick must be made")
@@ -80,15 +82,15 @@ func TestNarrowStable_ModeChangeForcesFreshPick(t *testing.T) {
 	random := dp1.SeriesPlaybackRandom
 	first := dp1.SeriesPlaybackFirst
 
-	picked := r.narrowStable(randomGroupPlan(), &random, nil)
+	picked := r.narrowStable(randomGroupPlan(), &random, nil, nil)
 	require.Len(t, picked, 1)
 
-	full := r.narrowStable(randomGroupPlan(), &first, nil)
+	full := r.narrowStable(randomGroupPlan(), &first, nil, nil)
 	require.Len(t, full, 1)
 	assert.Equal(t, "item-series", full[0].ID,
 		"first mode always narrows to the representative, regardless of any remembered random pick")
 
-	backToRandom := r.narrowStable(randomGroupPlan(), &random, nil)
+	backToRandom := r.narrowStable(randomGroupPlan(), &random, nil, nil)
 	require.Len(t, backToRandom, 1, "the mode-change memory clear must not leave narrowStable with nothing to return")
 }
 
@@ -100,7 +102,7 @@ func TestNarrowStable_PlainItemsPassThrough(t *testing.T) {
 	item := dp1playlist.PlaylistItem{ID: "plain", Source: "https://cdn.example.com/plain.png"}
 	plan := dp1.CastPlan{Segments: []dp1.CastSegment{{Item: &item}}}
 
-	out := r.narrowStable(plan, nil, nil)
+	out := r.narrowStable(plan, nil, nil, nil)
 	require.Len(t, out, 1)
 	assert.Equal(t, "plain", out[0].ID)
 }
@@ -116,12 +118,12 @@ func TestNarrowStable_PrunesPicksForGroupsNoLongerDisplayed(t *testing.T) {
 	r := &refresher{}
 	mode := dp1.SeriesPlaybackRandom
 
-	r.narrowStable(randomGroupPlan(), &mode, nil)
+	r.narrowStable(randomGroupPlan(), &mode, nil, nil)
 	require.Len(t, r.randomSeriesPicks, 1, "the group's pick must be remembered")
 
 	plainItem := dp1playlist.PlaylistItem{ID: "plain", Source: "https://cdn.example.com/plain.png"}
 	unrelated := dp1.CastPlan{Segments: []dp1.CastSegment{{Item: &plainItem}}}
-	r.narrowStable(unrelated, &mode, nil)
+	r.narrowStable(unrelated, &mode, nil, nil)
 
 	assert.Empty(t, r.randomSeriesPicks, "a group absent from the current plan must not be remembered forever")
 }
@@ -149,14 +151,14 @@ func TestNarrowStable_SeedsFromWhatIsAlreadyDisplayed(t *testing.T) {
 		return []dp1playlist.PlaylistItem{alreadyShown}
 	}
 
-	out := r.narrowStable(randomGroupPlan(), &mode, currentlyDisplayed)
+	out := r.narrowStable(randomGroupPlan(), &mode, currentlyDisplayed, nil)
 	require.Len(t, out, 1)
 	assert.Equal(t, alreadyShown.Source, out[0].Source,
 		"a fresh group must seed from the edition the player already reports on screen")
 	assert.Equal(t, 1, calls, "currentlyDisplayed must be consulted when no pick is yet remembered")
 
 	calls = 0
-	again := r.narrowStable(randomGroupPlan(), &mode, currentlyDisplayed)
+	again := r.narrowStable(randomGroupPlan(), &mode, currentlyDisplayed, nil)
 	require.Len(t, again, 1)
 	assert.Equal(t, alreadyShown.Source, again[0].Source,
 		"an ordinary tick where the display still agrees with the remembered pick must leave it stable")
@@ -184,7 +186,7 @@ func TestNarrowStable_OverwritesStalePickWhenDisplayDisagrees(t *testing.T) {
 		return []dp1playlist.PlaylistItem{showing}
 	}
 
-	first := r.narrowStable(randomGroupPlan(), &mode, currentlyDisplayed)
+	first := r.narrowStable(randomGroupPlan(), &mode, currentlyDisplayed, nil)
 	require.Len(t, first, 1)
 	assert.Equal(t, editionA.Source, first[0].Source, "sanity: seeded from the initial display")
 
@@ -192,7 +194,7 @@ func TestNarrowStable_OverwritesStalePickWhenDisplayDisagrees(t *testing.T) {
 	require.Equal(t, editionA.Source, r.randomSeriesPicks[key].source, "sanity: the pick was remembered")
 
 	showing = editionB
-	second := r.narrowStable(randomGroupPlan(), &mode, currentlyDisplayed)
+	second := r.narrowStable(randomGroupPlan(), &mode, currentlyDisplayed, nil)
 	require.Len(t, second, 1)
 	assert.Equal(t, editionB.Source, second[0].Source,
 		"a newer accepted cast's own choice, read from the live display, must replace the remembered pick")
@@ -216,7 +218,7 @@ func TestNarrowStable_RefreshesNonSourceFieldsOfAStablePick(t *testing.T) {
 	for i := range first.Segments[0].Group.Editions {
 		first.Segments[0].Group.Editions[i].Duration = &duration1
 	}
-	picked := r.narrowStable(first, &mode, nil)
+	picked := r.narrowStable(first, &mode, nil, nil)
 	require.Len(t, picked, 1)
 	require.NotNil(t, picked[0].Duration)
 	assert.Equal(t, duration1, *picked[0].Duration)
@@ -226,7 +228,7 @@ func TestNarrowStable_RefreshesNonSourceFieldsOfAStablePick(t *testing.T) {
 	for i := range second.Segments[0].Group.Editions {
 		second.Segments[0].Group.Editions[i].Duration = &duration2
 	}
-	again := r.narrowStable(second, &mode, nil)
+	again := r.narrowStable(second, &mode, nil, nil)
 	require.Len(t, again, 1)
 	assert.Equal(t, picked[0].Source, again[0].Source, "the pick itself must still be stable")
 	require.NotNil(t, again[0].Duration, "a stable pick must still carry the field the catalog now states")
@@ -246,13 +248,13 @@ func TestNarrowStable_ArtworkModelChangeForcesFreshPick(t *testing.T) {
 	r := &refresher{}
 	mode := dp1.SeriesPlaybackRandom
 
-	picked := r.narrowStable(randomGroupPlan(), &mode, nil)
+	picked := r.narrowStable(randomGroupPlan(), &mode, nil, nil)
 	require.Len(t, picked, 1)
 	require.NotEqual(t, "item-series", picked[0].ID, "sanity: multi_unique must pick a real edition, not the representative")
 
 	reclassified := randomGroupPlan()
 	reclassified.Segments[0].Group.ArtworkModel = dp1.SeriesArtworkModelMulti
-	again := r.narrowStable(reclassified, &mode, nil)
+	again := r.narrowStable(reclassified, &mode, nil, nil)
 	require.Len(t, again, 1)
 	assert.Equal(t, "item-series", again[0].ID,
 		"a group reclassified to multi must collapse to the representative, not replay the multi_unique-era pick")
@@ -290,7 +292,7 @@ func TestNarrowStable_SingleMultiNeverSeedsOrMemoizesEvenWhenDisplayedSourceMatc
 		return []dp1playlist.PlaylistItem{displayed}
 	}
 
-	out := r.narrowStable(plan, &mode, currentlyDisplayed)
+	out := r.narrowStable(plan, &mode, currentlyDisplayed, nil)
 	require.Len(t, out, 1)
 	assert.Equal(t, "item-series", out[0].ID,
 		"a single/multi group must always collapse to the representative, even when the player happens to show its own edition")
@@ -319,7 +321,7 @@ func TestNarrowStable_SeedSourceCalledAtMostOnce(t *testing.T) {
 		return nil
 	}
 
-	out := r.narrowStable(plan, &mode, currentlyDisplayed)
+	out := r.narrowStable(plan, &mode, currentlyDisplayed, nil)
 	require.Len(t, out, 2)
 	assert.Equal(t, 1, calls, "currentlyDisplayed must be called at most once per narrowStable call")
 }
@@ -348,7 +350,7 @@ func TestNarrowStable_MatchesPickToItsOwnOccurrenceNotAnEarlierExplicitItem(t *t
 		return []dp1playlist.PlaylistItem{editionA, editionB}
 	}
 
-	out := r.narrowStable(plan, &mode, currentlyDisplayed)
+	out := r.narrowStable(plan, &mode, currentlyDisplayed, nil)
 	require.Len(t, out, 2)
 	assert.Equal(t, explicitA.Source, out[0].Source, "the explicit item passes through unchanged")
 	assert.Equal(t, editionB.Source, out[1].Source,
@@ -380,7 +382,7 @@ func TestNarrowStable_MatchesPickToItsOwnOccurrenceNotALaterExplicitItem(t *test
 		return []dp1playlist.PlaylistItem{editionB, explicitAShown}
 	}
 
-	out := r.narrowStable(plan, &mode, currentlyDisplayed)
+	out := r.narrowStable(plan, &mode, currentlyDisplayed, nil)
 	require.Len(t, out, 2)
 	assert.Equal(t, editionB.Source, out[0].Source,
 		"the group's own occurrence (index 0) shows B, so the group's pick must be B")
@@ -389,4 +391,88 @@ func TestNarrowStable_MatchesPickToItsOwnOccurrenceNotALaterExplicitItem(t *test
 	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
 	assert.Equal(t, editionB.Source, r.randomSeriesPicks[key].source,
 		"the remembered pick must be the group's own live choice, not the unrelated later item")
+}
+
+// TestNarrowStable_OccurrenceCountsPastContentPolicyFiltering pins
+// feralfile-bot's F7 (2026-11-13): a curated playlist lists a mature item
+// ahead of a multi_unique series, which the default content policy removes
+// AFTER narrowStable runs (processPlayingPlaylist's own ProjectLocked call
+// happens later) — so the group's live display is [B, explicit A], never
+// [mature, B, explicit A]. An occurrence computed by raw position (len(items)
+// counting the still-present mature item) reads displayed[1] (explicit A)
+// instead of the group's own slot, overwriting a correct remembered B with
+// an unrelated item — reproducible with no catalog or mode change, unlike
+// the whole-list-scan F7 the occurrence check itself fixed on 2026-11-12.
+// displayFilter corrects this: occurrence must count only the items the
+// SAME content policy would also keep, landing on displayed[0] (B).
+func TestNarrowStable_OccurrenceCountsPastContentPolicyFiltering(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+	mature := contentrating.RatingMature
+
+	matureItem := dp1playlist.PlaylistItem{ID: "mature", Source: "https://cdn.example.com/mature.mp4", ContentRating: &mature}
+	explicitA := dp1playlist.PlaylistItem{ID: "explicit-a", Source: "https://cdn.example.com/a.mp4"}
+	plan := dp1.CastPlan{Segments: append(
+		append([]dp1.CastSegment{{Item: &matureItem}}, randomGroupPlan().Segments...),
+		dp1.CastSegment{Item: &explicitA},
+	)}
+
+	editionB := dp1playlist.PlaylistItem{ID: "b", Source: "https://cdn.example.com/b.mp4"}
+	// What the player actually shows: content policy already removed the
+	// mature item from whatever cast produced this display.
+	currentlyDisplayed := func() []dp1playlist.PlaylistItem {
+		return []dp1playlist.PlaylistItem{editionB, explicitA}
+	}
+
+	policy := contentpolicy.Default()
+	displayFilter := func(item dp1playlist.PlaylistItem) bool {
+		return policy.Allows(item, contentpolicy.ContextCurated)
+	}
+
+	out := r.narrowStable(plan, &mode, currentlyDisplayed, displayFilter)
+	require.Len(t, out, 3)
+	assert.Equal(t, matureItem.Source, out[0].Source,
+		"the mature item still passes through narrowStable unchanged; content policy removes it in a later, separate pass")
+	assert.Equal(t, editionB.Source, out[1].Source,
+		"occurrence must count past the mature item content policy will filter, landing on displayed's own slot for the group — not shifted by one")
+	assert.Equal(t, explicitA.Source, out[2].Source, "the trailing explicit item passes through unchanged")
+
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
+	assert.Equal(t, editionB.Source, r.randomSeriesPicks[key].source,
+		"the remembered pick must be the group's own live choice, not the later explicit item an unfiltered occurrence would have read")
+}
+
+// TestNarrowStable_NilDisplayFilterCountsEveryItem pins the no-content-
+// policy-context fallback: when displayFilter is nil (no store, or the
+// context behind this tick's cast is unknown — processPlayingPlaylist's own
+// projection guard skips filtering in exactly that case too), occurrence
+// must count every earlier item unfiltered, exactly as narrowStable always
+// did before displayFilter existed — nothing will actually be removed on
+// cast, so occurrence must not pretend otherwise.
+func TestNarrowStable_NilDisplayFilterCountsEveryItem(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+	mature := contentrating.RatingMature
+
+	matureItem := dp1playlist.PlaylistItem{ID: "mature", Source: "https://cdn.example.com/mature.mp4", ContentRating: &mature}
+	plan := dp1.CastPlan{Segments: append(
+		[]dp1.CastSegment{{Item: &matureItem}},
+		randomGroupPlan().Segments...,
+	)}
+
+	editionA := dp1playlist.PlaylistItem{ID: "a", Source: "https://cdn.example.com/a.mp4"}
+	editionB := dp1playlist.PlaylistItem{ID: "b", Source: "https://cdn.example.com/b.mp4"}
+	// The mature item was NOT filtered here (no content policy consulted),
+	// so displayed still carries it at index 0 — the group's own slot is
+	// index 1, exactly len(items) without any filtering.
+	currentlyDisplayed := func() []dp1playlist.PlaylistItem {
+		return []dp1playlist.PlaylistItem{matureItem, editionB}
+	}
+
+	out := r.narrowStable(plan, &mode, currentlyDisplayed, nil)
+	require.Len(t, out, 2)
+	assert.Equal(t, matureItem.Source, out[0].Source)
+	assert.NotEqual(t, editionA.Source, out[1].Source, "sanity: a is not the live pick")
+	assert.Equal(t, editionB.Source, out[1].Source,
+		"with displayFilter nil, occurrence stays the raw position, matching an unfiltered display")
 }

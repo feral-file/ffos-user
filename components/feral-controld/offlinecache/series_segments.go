@@ -50,6 +50,88 @@ type SeriesGroup struct {
 	ArtworkModel   string                     `json:"artworkModel,omitempty"`
 }
 
+// requiredDownloadSources returns the Source of every group's Representative
+// that dp1.CastPlan.Full appended as an EXTRA item past that group's own
+// Editions — the same editionsHaveSource check dp1 made when deciding to
+// append it, duplicated here rather than imported (this package's own
+// dp1-import boundary, see SeriesSegment's doc). These are the sources
+// DownloadPlaylist's own queueing bound must never drop: a non-distinct-
+// editions group's Narrow(nil) always collapses to the Representative, so a
+// Representative the queue excludes leaves that group with nothing playable
+// offline even though every catalog edition downloaded successfully
+// (feralfile-bot F1, 2026-11-13).
+func requiredDownloadSources(segments []SeriesSegment) map[string]struct{} {
+	var required map[string]struct{}
+	for _, seg := range segments {
+		if seg.Group == nil {
+			continue
+		}
+		source := seg.Group.Representative.Source
+		if seriesGroupHasEditionSource(seg.Group.Editions, source) {
+			continue
+		}
+		if required == nil {
+			required = make(map[string]struct{})
+		}
+		required[source] = struct{}{}
+	}
+	return required
+}
+
+// seriesGroupHasEditionSource mirrors dp1's editionsHaveSource exactly: the
+// same no-normalization Source comparison, so a Representative this package
+// must protect is identified the same way dp1 decided to append it.
+func seriesGroupHasEditionSource(editions []dp1playlist.PlaylistItem, source string) bool {
+	for _, edition := range editions {
+		if edition.Source == source {
+			return true
+		}
+	}
+	return false
+}
+
+// boundQueuedItems applies DownloadPlaylist's maxQueued ceiling the way a
+// plain items[:maxQueued] slice cannot: it never drops a source in
+// required, trimming ordinary items first instead, and otherwise preserves
+// items' original relative order. The result never exceeds maxQueued, even
+// when required itself has more entries than the budget allows (an
+// unreachable-in-practice case — maxQueued is dp1.MAX_PLAYLIST_ITEMS_LIMIT,
+// far larger than any playlist's series-group count — but still bounded
+// rather than silently violating the budget's own contract).
+func boundQueuedItems(items []dp1playlist.PlaylistItem, maxQueued int, required map[string]struct{}) []dp1playlist.PlaylistItem {
+	if len(required) == 0 {
+		return items[:maxQueued]
+	}
+	keep := make([]bool, len(items))
+	kept := 0
+	for i, item := range items {
+		if kept >= maxQueued {
+			break
+		}
+		if _, ok := required[item.Source]; ok {
+			keep[i] = true
+			kept++
+		}
+	}
+	for i := range items {
+		if kept >= maxQueued {
+			break
+		}
+		if keep[i] {
+			continue
+		}
+		keep[i] = true
+		kept++
+	}
+	result := make([]dp1playlist.PlaylistItem, 0, maxQueued)
+	for i, item := range items {
+		if keep[i] {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
 // seriesSegmentsEnvelope is the versioned on-disk shape for the series-
 // segments sidecar, mirroring automaticItemEnvelope's precedent exactly: an
 // old binary that does not understand a future version must quarantine

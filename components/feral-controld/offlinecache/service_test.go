@@ -3977,3 +3977,76 @@ func TestService_DownloadPlaylist_BoundedQueueKeepsTheWholeMembershipRecord(t *t
 			"clearing the playlist must reach %s", source)
 	}
 }
+
+// TestService_DownloadPlaylist_RequiredRepresentativeSurvivesTheQueueBound
+// pins feralfile-bot F1 (2026-11-13): dp1.CastPlan.Full appends a series
+// group's own Representative AFTER its full Editions set whenever the
+// catalog's editions don't already carry its source — so a group whose
+// edition count already reaches maxQueued pushes the Representative to
+// position maxQueued+1. A plain positional [:maxQueued] slice (the
+// behavior TestService_DownloadPlaylist_BoundedQueueKeepsTheWholeMembershipRecord
+// already pins for the ordinary case) would then exclude exactly the one
+// item a non-distinct-editions group's Narrow(nil) can ever select,
+// leaving nothing playable despite every catalog edition downloading
+// successfully. The bound must keep the Representative, trimming an
+// ordinary edition instead.
+func TestService_DownloadPlaylist_RequiredRepresentativeSurvivesTheQueueBound(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	const maxQueued = 3
+	editionSources := []string{
+		"https://example.com/edition-00.html",
+		"https://example.com/edition-01.html",
+		"https://example.com/edition-02.html",
+	}
+	repSource := "https://example.com/representative.html"
+
+	editions := make([]dp1playlist.PlaylistItem, len(editionSources))
+	items := make([]map[string]interface{}, 0, len(editionSources)+1)
+	for i, source := range editionSources {
+		editions[i] = dp1playlist.PlaylistItem{ID: fmt.Sprintf("edition-%02d", i), Source: source}
+		items = append(items, map[string]interface{}{"id": editions[i].ID, "source": source})
+	}
+	representative := dp1playlist.PlaylistItem{ID: "representative", Source: repSource}
+	// Mirrors CastPlan.Full's own ordering: the Representative lands last,
+	// past every edition.
+	items = append(items, map[string]interface{}{"id": representative.ID, "source": repSource})
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1", "title": "t", "items": items,
+	})
+	require.NoError(t, err)
+
+	segments := []offlinecache.SeriesSegment{{Group: &offlinecache.SeriesGroup{
+		Key:            offlinecache.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "1"},
+		Representative: representative,
+		Editions:       editions,
+		Resolved:       true,
+		ArtworkModel:   "multi",
+	}}}
+
+	// The Representative must be classified even though its raw position
+	// (3, 0-indexed) is past maxQueued-1 — gomock fails the test if it is
+	// silently dropped instead of one of the ordinary editions.
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), repSource).Return(offlinecache.ClassSoftware, nil).Times(1)
+	for _, source := range editionSources[:maxQueued-1] {
+		ts.mockClassifier.EXPECT().Classify(gomock.Any(), source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	}
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, item dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(maxQueued)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", maxQueued, segments)
+	require.NoError(t, err)
+	assert.Equal(t, maxQueued, queued, "the bound still limits total queueing work")
+	assert.Equal(t, len(items), total, "total still reports the playlist's real item count")
+
+	waitForState(t, ts.service, repSource, offlinecache.StateReady)
+}
