@@ -42,8 +42,10 @@ The kiosk loads http(s) only, so every onchfs item leaves `dp1` with a device-lo
   need 64 and the label limit is 63.
 - **Path, query and fragment are carried byte for byte.** fxhash works read their seed from
   the query.
-- **The chain label is present only when the URI named a chain.** That is a CAIP-2
-  authority, `onchfs://eip155:1/<root>`; the indexer's form has none.
+- **The chain label carries what is known about the chain.** An explicit CAIP-2
+  authority (`onchfs://eip155:1/<root>`) gives `.eth`, `.base` or `.tezos`. Otherwise
+  the item's provenance gives the family: `.evm` for an EVM token, `.tezos` for a
+  Tezos one. With neither, there is no label. The family is a security input; see §3.
 
 The mapping is pure and idempotent, so the offline cache, which keys a work by sha256 of its
 exact source, sees one key per work. It is applied at every exit an item can take from
@@ -98,8 +100,20 @@ An inode named twice is read once and shared, so aliasing costs nothing.
 
 ### 3. Chains and nodes (`onchfs/resolver.go`)
 
-An onchfs URI usually names no chain, so the resolver asks every configured chain at once
-and keeps the first verified tree, as onchfs-js does.
+An onchfs URI usually names no chain. Which chains are asked is a security rule, not a
+latency choice (PR #461 review F1).
+
+Every EVM file address is also a valid Tezos address for bytes equal to that file's packed
+chunk checksums: Tezos hashes content, EVM hashes the chunk list. Racing all chains would
+let one forged Tezos node pass those bytes off as an Ethereum work. The reverse forgery
+needs a keccak preimage. So:
+
+- **Explicit authority:** that chain only.
+- **Family from provenance:** `.evm` asks the EVM chains only, `.tezos` Tezos only.
+- **Nothing known:** the EVM chains first. Tezos is asked only after every EVM chain
+  confirms the root is absent with two nodes (one when a chain has a single node), so a
+  forged Tezos answer needs a lying EVM node as well. A node that denies a root another
+  node serves is logged and cooled.
 
 Within a chain:
 - Nodes are tried in order. A read comes from one node, pinned three blocks below its head,
@@ -187,8 +201,17 @@ lazily: store and replay, with no Service, no static server and no capture.
   oldest played first, and collects their blobs.
 
 **With the feature on**, the cache's own disk policy bounds these records, and the
-materializer never runs GC. A blob a Service GC sweeps between `WriteBlob` and `SaveItem` is
-rewritten after the save.
+materializer never runs GC.
+
+**Publication and GC.** GC is mark-and-sweep, and a GC that marks before a record is
+saved and sweeps after deletes its new blobs; a check after the save cannot see a sweep
+that has not happened yet (PR #461 review F3). So the store `BootstrapCore` builds is a
+publish guard: GC takes it exclusively, and the materializer writes its blobs and saves
+its record while holding it shared. `fresh` also checks that every blob a record names is
+on disk, so a damaged record is rebuilt on the next cast instead of reported ready.
+
+A root that is a single file is its own entry. A directory entry without its slash is a
+301 whose target, query included, is stored as well.
 
 `ClassOnchfs` is classified without a request, ahead of the source guard, which would refuse
 the unresolvable host. Downloads and automatic warming skip it as they skip `data:`.

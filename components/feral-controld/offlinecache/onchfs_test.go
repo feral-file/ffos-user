@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +19,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/onchfs"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 const onchfsTestRoot = "1639e8c989cddd2c0f9e951b126a21b1964309854c0a8e0a9b1193a655c6712a"
@@ -166,6 +169,13 @@ func TestOnchfsMaterializerEntryShapes(t *testing.T) {
 			if tc.redirect != "" {
 				assert.Equal(t, 301, res.Status)
 				assert.Equal(t, origin+tc.redirect, res.RedirectTo)
+				// the redirect's target, query included, is served too
+				followed, ok := rec.ResourceByURL(origin + tc.redirect)
+				require.True(t, ok, "PR #461 review F5")
+				assert.Equal(t, 200, followed.Status)
+				body, err := store.ReadBlob(followed.SHA256)
+				require.NoError(t, err)
+				assert.Equal(t, "<html>sub</html>", string(body))
 			} else {
 				assert.Equal(t, 200, res.Status)
 			}
@@ -287,4 +297,112 @@ func TestOnchfsMaterializerStandaloneKeepsItsBudget(t *testing.T) {
 	used, err := store.DiskUsage()
 	require.NoError(t, err)
 	assert.Less(t, used, int64(1<<20))
+}
+
+// PR #461 review F3: the store BootstrapCore builds runs GC only while no
+// publication is in progress, so a GC cannot mark before a record is saved
+// and sweep after.
+func TestBootstrapCoreStoreExcludesGCDuringAPublication(t *testing.T) {
+	opts := offlinecache.OptionsFromConfig(nil, "http://127.0.0.1:9222")
+	opts.RootDir, opts.MaxDiskPercent = t.TempDir(), 0
+	core, _ := offlinecache.BootstrapCore(opts, nil, nil, wrapper.NewOS(), wrapper.NewIO(), wrapper.NewJSON(), wrapper.NewClock(), zaptest.NewLogger(t), true)
+	pub, ok := core.Store.(interface{ Publish(func() error) error })
+	require.True(t, ok, "the core store is the publish guard")
+
+	inPublish, release, gcDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		_ = pub.Publish(func() error { close(inPublish); <-release; return nil })
+	}()
+	<-inPublish
+	go func() { _, _, _ = core.Store.GC(); close(gcDone) }()
+	select {
+	case <-gcDone:
+		t.Fatal("GC ran during a publication")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-gcDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("GC never ran after the publication")
+	}
+}
+
+// publishRecordingStore records whether each write happened inside Publish.
+type publishRecordingStore struct {
+	offlinecache.Store
+	mu       sync.Mutex
+	inside   bool
+	outsides []string
+}
+
+func (s *publishRecordingStore) Publish(fn func() error) error {
+	s.mu.Lock()
+	s.inside = true
+	s.mu.Unlock()
+	defer func() { s.mu.Lock(); s.inside = false; s.mu.Unlock() }()
+	return fn()
+}
+
+func (s *publishRecordingStore) note(op string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.inside {
+		s.outsides = append(s.outsides, op)
+	}
+}
+
+func (s *publishRecordingStore) WriteBlob(r io.Reader, n int64) (string, error) {
+	s.note("WriteBlob")
+	return s.Store.WriteBlob(r, n)
+}
+
+func (s *publishRecordingStore) SaveItem(rec *offlinecache.ItemRecord) error {
+	s.note("SaveItem")
+	return s.Store.SaveItem(rec)
+}
+
+func TestOnchfsMaterializerPublishesBlobsAndRecordTogether(t *testing.T) {
+	base, _ := newTestStore(t)
+	store := &publishRecordingStore{Store: base}
+	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.OnchfsMaterializerConfig{})
+	require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: onchfsSource(t, "onchfs://"+onchfsTestRoot)}}, 5*time.Second))
+	assert.Empty(t, store.outsides, "every blob and the record are written inside one publication")
+}
+
+// A record whose blobs went missing is not fresh: the next Ensure rebuilds
+// it instead of reporting an unplayable work ready.
+func TestOnchfsMaterializerRebuildsARecordWhoseBlobsWentMissing(t *testing.T) {
+	store, _ := newTestStore(t)
+	resolver := &fakeOnchfsResolver{tree: onchfsTestTree()}
+	m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{})
+	source := onchfsSource(t, "onchfs://"+onchfsTestRoot)
+	items := []dp1playlist.PlaylistItem{{Source: source}}
+	require.Equal(t, 1, m.Ensure(context.Background(), items, 5*time.Second))
+
+	rec, err := store.LoadItem(offlinecache.SourceKey(source))
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(store.BlobPath(rec.Resources[0].SHA256)))
+
+	require.Equal(t, 1, m.Ensure(context.Background(), items, 5*time.Second))
+	assert.Equal(t, int32(2), resolver.calls.Load(), "the damaged record was rebuilt from chain")
+	_, err = store.ReadBlob(rec.Resources[0].SHA256)
+	assert.NoError(t, err)
+}
+
+// PR #461 review F4: a root that is a single file, not a directory.
+func TestOnchfsMaterializerServesASingleFileRoot(t *testing.T) {
+	store, _ := newTestStore(t)
+	tree := &onchfs.Tree{Files: map[string]*onchfs.File{"": {Plain: []byte("<svg/>"), ContentType: "image/svg+xml"}}}
+	source := onchfsSource(t, "onchfs://"+onchfsTestRoot+"/?fxhash=123")
+	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: tree}, offlinecache.OnchfsMaterializerConfig{})
+	require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
+	rec, err := store.LoadItem(offlinecache.SourceKey(source))
+	require.NoError(t, err)
+	res, ok := rec.ResourceByURL(source)
+	require.True(t, ok)
+	assert.Equal(t, "image/svg+xml", res.ContentType)
+	body, err := store.ReadBlob(res.SHA256)
+	require.NoError(t, err)
+	assert.Equal(t, "<svg/>", string(body))
 }

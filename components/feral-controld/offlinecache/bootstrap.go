@@ -438,6 +438,7 @@ func BootstrapCore(
 			maxBytes: opts.MaxDiskBytes, space: filesystemSpace}
 		store = &budgetStore{Store: store, policy: storage}
 	}
+	store = &publishGuardStore{Store: store}
 	staticServer := NewStaticServer(opts.StaticServerAddr, store, osWrapper, logger)
 	replayer := NewReplayer(store, staticServer, opts.MissPolicy, constants.WEBAPP_URL, jsonWrapper, logger)
 	// The concrete replayer implements the scope-lost setter, but Replayer

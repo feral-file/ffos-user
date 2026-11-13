@@ -198,9 +198,25 @@ func (m *OnchfsMaterializer) Ensure(ctx context.Context, items []dp1playlist.Pla
 
 // fresh reports whether source's record exists and stays replayable for at
 // least margin.
+//
+// It also checks every blob the record names is on disk. A record whose blobs
+// went missing (swept by a store without the publish guard, or removed by
+// hand) would otherwise stay "fresh" and unplayable until it expired; this
+// way the next cast rebuilds it.
 func (m *OnchfsMaterializer) fresh(source string, margin time.Duration) bool {
 	rec, err := m.store.LoadItem(SourceKey(source))
-	return err == nil && rec != nil && rec.Coverage.Complete && rec.freshForPlayback(m.now().Add(margin))
+	if err != nil || rec == nil || !rec.Coverage.Complete || !rec.freshForPlayback(m.now().Add(margin)) {
+		return false
+	}
+	for _, res := range rec.Resources {
+		if res.SHA256 == "" {
+			continue
+		}
+		if _, err := m.store.BlobSize(res.SHA256); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // start begins (or joins) the job for item.
@@ -281,29 +297,36 @@ func (m *OnchfsMaterializer) materialize(ctx context.Context, item dp1playlist.P
 	return nil
 }
 
-// write stores every blob, saves the record, then checks every blob the
-// record names is on disk and rewrites any that is not. With a Service
-// running, its GC can sweep a blob between WriteBlob and SaveItem (it
-// cannot once the record is saved); the check after saving closes that
-// window instead of coordinating with the Service's worker.
+// write stores every blob and saves the record. Through a publishing store
+// (BootstrapCore's guard) the two happen while no GC can run, so a GC can
+// never sweep blobs a record is about to reference (PR #461 review F3).
+// Afterwards every blob the record names is checked and rewritten if
+// missing: the guard is what makes this safe, the check is what repairs a
+// store without one.
 func (m *OnchfsMaterializer) write(rec *ItemRecord, blobs map[string][]byte) error {
-	for _, body := range blobs {
-		if _, err := m.store.WriteBlob(bytes.NewReader(body), 0); err != nil {
-			return fmt.Errorf("onchfs: writing a blob: %w", err)
+	publish := func() error {
+		for _, body := range blobs {
+			if _, err := m.store.WriteBlob(bytes.NewReader(body), 0); err != nil {
+				return fmt.Errorf("onchfs: writing a blob: %w", err)
+			}
 		}
-	}
-	if err := m.store.SaveItem(rec); err != nil {
-		return fmt.Errorf("onchfs: saving the record: %w", err)
-	}
-	for sha, body := range blobs {
-		if _, err := m.store.BlobSize(sha); err == nil {
-			continue
+		if err := m.store.SaveItem(rec); err != nil {
+			return fmt.Errorf("onchfs: saving the record: %w", err)
 		}
-		if _, err := m.store.WriteBlob(bytes.NewReader(body), 0); err != nil {
-			return fmt.Errorf("onchfs: rewriting a swept blob: %w", err)
+		for sha, body := range blobs {
+			if _, err := m.store.BlobSize(sha); err == nil {
+				continue
+			}
+			if _, err := m.store.WriteBlob(bytes.NewReader(body), 0); err != nil {
+				return fmt.Errorf("onchfs: rewriting a missing blob: %w", err)
+			}
 		}
+		return nil
 	}
-	return nil
+	if p, ok := m.store.(publisher); ok {
+		return p.Publish(publish)
+	}
+	return publish()
 }
 
 // prune keeps this producer's records under maxBytes, oldest played first,
@@ -426,20 +449,37 @@ func onchfsResources(o contentpath.Onchfs, source string, tree *onchfs.Tree, fre
 	if err != nil {
 		return nil, nil, fmt.Errorf("onchfs: entry path %q: %w", o.Path, err)
 	}
-	if res, ok := byPath[entryFile(target)]; ok {
+	rootFile, singleFile := byPath[""]
+	switch {
+	case target == "" && singleFile:
+		// The root is a file, not a directory (PR #461 review F4).
+		rootFile.URL = entry
+		add(rootFile)
+	case hasPath(byPath, entryFile(target)):
+		res := byPath[entryFile(target)]
 		res.URL = entry
 		add(res)
-	} else if _, ok := byPath[strings.TrimSuffix(target, "/")+"/index.html"]; ok && target != "" && !strings.HasSuffix(target, "/") {
+	case target != "" && !strings.HasSuffix(target, "/") && hasPath(byPath, target+"/index.html"):
 		// A directory named without its slash: redirect to the slashed form
 		// (query kept), as an onchfs proxy does, so relative URLs inside its
-		// index.html resolve against the directory.
-		res := Resource{URL: entry, Status: 301, RedirectTo: slashedEntry(entry), FreshUntil: freshUntil,
-			Headers: map[string]string{"Access-Control-Allow-Origin": "*"}}
-		add(res)
-	} else {
+		// index.html resolve against the directory. The redirect's target,
+		// query included, is stored too: replay matches exact URLs, and
+		// without it the followed redirect would miss (review F5).
+		slashed := slashedEntry(entry)
+		add(Resource{URL: entry, Status: 301, RedirectTo: slashed, FreshUntil: freshUntil,
+			Headers: map[string]string{"Access-Control-Allow-Origin": "*"}})
+		index := byPath[target+"/index.html"]
+		index.URL = slashed
+		add(index)
+	default:
 		return nil, nil, fmt.Errorf("%w: the tree has no %q to open", onchfs.ErrNotFound, entryFile(target))
 	}
 	return resources, blobs, nil
+}
+
+func hasPath(byPath map[string]Resource, p string) bool {
+	_, ok := byPath[p]
+	return ok
 }
 
 // entryFile is the file a path inside the tree opens: itself, or the
