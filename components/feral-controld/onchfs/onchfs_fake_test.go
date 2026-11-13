@@ -338,3 +338,97 @@ func TestReadTreeGzipFollowsContentEncoding(t *testing.T) {
 		})
 	}
 }
+
+// F5 (#428 review): on the EVM contracts a file address commits to the chunk
+// checksums, so a node that answers readFile with those checksums packed
+// together must not pass as the file.
+func TestReadTreeRefusesChunkChecksumsServedAsContent(t *testing.T) {
+	for name, cuts := range map[string][]int{"one chunk": {10}, "three chunks": {3, 5, 2}} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeFS()
+			cid := f.addFile(t, []byte("0123456789"), map[string]string{"content-type": "text/plain"}, cuts...)
+			var packed []byte
+			for _, c := range f.files[cid].chunks {
+				packed = append(packed, mustHex(c)...)
+			}
+			f.override[selector("readFile(bytes32)")+cid] = encodeBytesResult(packed)
+			_, err := readFake(t, f, cid)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, ErrVerification), err)
+		})
+	}
+}
+
+// F5 against production bytes: the recorded index.html of the Casey Reas
+// tree, its readFile answer replaced by its own chunk list.
+func TestReadTreeRefusesChunkChecksumsServedAsContentRecorded(t *testing.T) {
+	fx := loadFixture(t)
+	inode := fx.Files["index.html"].Inode
+	readFileKey := "0x" + selector("readFile(bytes32)") + inode
+	inodes := fx.Calls["0x"+selector("inodes(bytes32)")+inode]
+	require.NotNil(t, inodes)
+	raw, err := hex.DecodeString((*inodes)[2:])
+	require.NoError(t, err)
+	_, _, chunks, err := decodeInode(raw)
+	require.NoError(t, err)
+	var packed []byte
+	for _, c := range chunks {
+		packed = append(packed, mustHex(c)...)
+	}
+	forged := 0
+	r := newReader(t, fx, func(calldata string, out []byte) []byte {
+		if calldata == readFileKey {
+			forged++
+			return encodeBytesResult(packed)
+		}
+		return out
+	})
+	_, err = r.ReadTree(context.Background(), fx.Root)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrVerification), err)
+	assert.Equal(t, 1, forged)
+}
+
+// F6 (#428 review): output past the cap is an error, never a truncated file.
+func TestGunzipRefusesOutputPastTheCap(t *testing.T) {
+	gz := func(b []byte) []byte {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		_, _ = zw.Write(b)
+		require.NoError(t, zw.Close())
+		return buf.Bytes()
+	}
+	exact := bytes.Repeat([]byte{0}, 100)
+	plain, ok, err := gunzip(gz(exact), 100)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, exact, plain)
+
+	_, ok, err = gunzip(gz(append(exact, '!')), 100)
+	assert.False(t, ok)
+	assert.True(t, errors.Is(err, ErrTooLarge), err)
+
+	corrupt := gz([]byte("hello"))
+	corrupt[len(corrupt)-5] ^= 0xff // CRC trailer
+	_, ok, err = gunzip(corrupt, 100)
+	require.NoError(t, err)
+	assert.False(t, ok, "a stream whose trailer fails is not decompressed")
+}
+
+func TestReadTreeRefusesGzipBomb(t *testing.T) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write(make([]byte, MaxPlainFileBytes))
+	_, _ = zw.Write([]byte("!"))
+	require.NoError(t, zw.Close())
+	body := buf.Bytes()
+	cuts := []int{}
+	for off := 0; off < len(body); off += 24000 {
+		cuts = append(cuts, min(24000, len(body)-off))
+	}
+	f := newFakeFS()
+	cid := f.addFile(t, body, map[string]string{"content-encoding": "gzip"}, cuts...)
+	_, err := readFake(t, f, cid)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrTooLarge), err)
+}

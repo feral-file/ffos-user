@@ -56,6 +56,10 @@ var ErrNotFound = errors.New("onchfs: not found")
 // reach a screen.
 var ErrVerification = errors.New("onchfs: verification failed")
 
+// ErrTooLarge is returned when a file exceeds MaxPlainFileBytes. It is a
+// property of the work, not of the node, so asking another node does not help.
+var ErrTooLarge = errors.New("onchfs: file too large")
+
 // Caller makes one eth_call to a contract at a pinned block. The consumer owns
 // the interface so tests can replay recorded answers and production can use
 // whichever RPC client the daemon already has.
@@ -243,35 +247,61 @@ func (r *Reader) readFile(ctx context.Context, cid string) (*File, error) {
 	// declares gzip but does not decompress keeps Plain == Stored and Gzip
 	// false, so a consumer never serves it as something it is not.
 	if strings.EqualFold(strings.TrimSpace(f.Headers["content-encoding"]), "gzip") {
-		zr, err := gzip.NewReader(bytes.NewReader(stored))
-		if err == nil {
-			plain, rerr := io.ReadAll(io.LimitReader(zr, 1<<30))
-			if rerr == nil {
-				f.Plain, f.Gzip = plain, true
-			}
+		plain, ok, err := gunzip(stored, MaxPlainFileBytes)
+		if err != nil {
+			return nil, fmt.Errorf("file %s: %w", cid, err)
+		}
+		if ok {
+			f.Plain, f.Gzip = plain, true
 		}
 	}
 	return f, nil
 }
 
+// MaxPlainFileBytes caps one file's decompressed size. A wall plays
+// generative code (the Casey Reas tree is 1 MB plain in all); the cap keeps a
+// gzip bomb from exhausting the device's memory.
+const MaxPlainFileBytes = 64 << 20
+
+// gunzip decompresses stored. ok is false when stored is not a valid gzip
+// stream (its trailer checksum included). Output past maxBytes is
+// ErrTooLarge: io.LimitReader ends at the limit without an error, so reading
+// only up to the limit would return a silently truncated file as if it were
+// whole (#428 review F6). Reading one byte more tells the two apart.
+func gunzip(stored []byte, maxBytes int) (plain []byte, ok bool, err error) {
+	zr, err := gzip.NewReader(bytes.NewReader(stored))
+	if err != nil {
+		return nil, false, nil
+	}
+	plain, err = io.ReadAll(io.LimitReader(zr, int64(maxBytes)+1))
+	if len(plain) > maxBytes {
+		return nil, false, fmt.Errorf("%w: decompresses past %d bytes", ErrTooLarge, maxBytes)
+	}
+	if err != nil {
+		return nil, false, nil
+	}
+	return plain, true, nil
+}
+
 // verifyFile proves stored against the address cid.
 //
-// The Ethereum contract derives a file address as keccak(0x01 ‖
+// The EVM contracts derive a file address as keccak(0x01 ‖
 // keccak(chunk checksums) ‖ keccak(metadata)) (FileSystem.sol createFile), so
 // the address proves the chunk list, not the content: the content must then be
-// shown to be exactly those chunks in order. An address over the whole content
-// (keccak(0x01 ‖ keccak(content) ‖ keccak(metadata))) proves the content on
-// its own and needs no chunk check.
+// shown to be exactly those chunks in order, always.
+//
+// Hazard: do not also accept keccak(0x01 ‖ keccak(content) ‖ keccak(metadata))
+// "in case a writer hashed the content". On these contracts that formula is
+// satisfied by a node that answers readFile with the packed chunk checksums
+// themselves (keccak(content) is then keccak(chunk checksums)), so it would
+// pass forged bytes under a valid address (#428 review F5). A chain whose
+// contract does hash content needs its own reader, chosen by chain.
 func (r *Reader) verifyFile(ctx context.Context, cid string, stored, metadata []byte, chunks []string) error {
 	chunkBytes := make([]byte, 0, 32*len(chunks))
 	for _, c := range chunks {
 		chunkBytes = append(chunkBytes, mustHex(c)...)
 	}
-	mh := keccak(metadata)
-	if hexString(keccak(append(append([]byte{1}, keccak(stored)...), mh...))) == cid {
-		return nil
-	}
-	if hexString(keccak(append(append([]byte{1}, keccak(chunkBytes)...), mh...))) != cid {
+	if hexString(keccak(append(append([]byte{1}, keccak(chunkBytes)...), keccak(metadata)...))) != cid {
 		return fmt.Errorf("%w: file %s does not match its chunk list and headers", ErrVerification, cid)
 	}
 	return r.verifyChunks(ctx, cid, stored, chunks)
