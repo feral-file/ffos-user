@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/display-protocol/dp1-go/displayat"
 	"github.com/display-protocol/dp1-go/extension/contentrating"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
@@ -22,6 +24,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
+	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -1713,7 +1716,29 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 		return displayed
 	}
 
+	// scheduleActive answers, per segment, the SAME displayAt question
+	// playlistschedule.Scheduler.PrepareWithSource asks of the flattened
+	// playlist narrowStable returns — before this, occurrence counted a
+	// future-scheduled segment that PrepareWithSource goes on to strip out
+	// entirely, so every later group's slot in displayed was shifted by
+	// however many such segments preceded it (feralfile-bot F7,
+	// 2026-11-13; a second, distinct failure mode from the content-policy
+	// one filteredOccurrence/displayFilter already closed one round
+	// earlier — this one needs no policy mismatch to misfire, only an
+	// item-level displayAt schedule). See scheduleActiveSegments' doc.
+	// time.Now() directly, not r.clock: r.clock is a gomock-backed seam many
+	// existing tests construct without stubbing Now() (narrowStable never
+	// called it before), and this check only needs to agree with wall-clock
+	// reality at the moment PrepareWithSource will apply the same filter a
+	// few lines later in the caller — not to be independently mockable.
+	scheduleActive := scheduleActiveSegments(plan.Segments, time.Now(), sleepschedule.LocalTimezone())
+
 	items := make([]dp1playlist.PlaylistItem, 0, len(plan.Segments))
+	// active is items' own parallel slice: active[i] is whether items[i]'s
+	// originating segment is schedule-active, so filteredOccurrence can
+	// count past both filters without re-deriving per-segment activity
+	// from an already-flattened item.
+	active := make([]bool, 0, len(plan.Segments))
 	// seen is this tick's own group keys, used below to prune
 	// randomSeriesPicks down to groups the CURRENT plan still carries — the
 	// mode-change delete a few lines down only fires for a key the plan
@@ -1722,9 +1747,10 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 	// growing this map for the life of the process (run-reviewer, round 1
 	// on this fix, 2026-11-12).
 	seen := make(map[dp1.SeriesGroupKey]struct{}, len(plan.Segments))
-	for _, seg := range plan.Segments {
+	for i, seg := range plan.Segments {
 		if seg.Item != nil {
 			items = append(items, *seg.Item)
+			active = append(active, scheduleActive[i])
 			continue
 		}
 		group := seg.Group
@@ -1740,7 +1766,11 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 		// (feralfile-bot F5, 2026-11-12).
 		if mode != dp1.SeriesPlaybackRandom || !group.ArtworkModel.HasDistinctEditions() {
 			delete(r.randomSeriesPicks, group.Key)
-			items = append(items, dp1.NarrowEditions(mode, group.ArtworkModel, group.Representative, group.Editions)...)
+			narrowedNonRandom := dp1.NarrowEditions(mode, group.ArtworkModel, group.Representative, group.Editions)
+			items = append(items, narrowedNonRandom...)
+			for range narrowedNonRandom {
+				active = append(active, scheduleActive[i])
+			}
 			continue
 		}
 		// Check what the player actually shows BEFORE any remembered pick:
@@ -1755,36 +1785,53 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 		// reconfirms the existing pick (or leaves a not-yet-seeded one
 		// matching) rather than changing anything.
 		//
+		// Only consulted when THIS group's own segment is itself
+		// schedule-active: a future-scheduled group has no active slot in
+		// displayed at all to compare against, so checking occurrence for
+		// it is meaningless and must fall straight through to the
+		// remembered-pick/fresh-roll path below, preserving whatever was
+		// remembered rather than reading an unrelated, coincidentally-
+		// positioned item as if it were this group's live pick
+		// (feralfile-bot F7, 2026-11-13).
+		//
 		// occurrence is this group's own slot in the flattened list: items
 		// already holds every earlier segment's own contribution, so its
-		// current length — counting only the items displayFilter admits,
-		// the same ones a content-policy projection of this tick's cast
-		// would keep — is exactly where this group's narrowed output will
-		// land in displayed too — matching displayed only at that one
-		// position, never anywhere else a coincidental Source match could
-		// sit (feralfile-bot F7, 2026-11-12; occurrence corrected to count
-		// past content-policy filtering, feralfile-bot F7, 2026-11-13).
-		occurrence := filteredOccurrence(items, displayFilter)
-		if seeded, ok := editionAtOccurrence(fetchDisplayed(), occurrence, group.Editions); ok {
-			// Written unconditionally, even when the source already
-			// matched what was remembered: a conditional write here (only
-			// on a source change) left mode/artworkModel stale on every
-			// tick that merely reconfirmed the pick, so a later tick
-			// consulting the remembered-pick branch below (display
-			// unavailable) could still see a since-changed artworkModel as
-			// unchanged and skip the invalidation that field exists for
-			// (run-reviewer, round 1 on this fix, 2026-11-12).
-			r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: seeded.Source}
-			items = append(items, seeded)
-			continue
+		// current length — counting only the items both schedule-active
+		// AND displayFilter admits, the same ones a content-policy
+		// projection of this tick's cast would keep after displayAt
+		// scheduling strips future segments — is exactly where this
+		// group's narrowed output will land in displayed too — matching
+		// displayed only at that one position, never anywhere else a
+		// coincidental Source match could sit (feralfile-bot F7,
+		// 2026-11-12; corrected to count past content-policy filtering,
+		// feralfile-bot F7, 2026-11-13; corrected again to count past
+		// displayAt scheduling, feralfile-bot F7, 2026-11-13).
+		if scheduleActive[i] {
+			occurrence := filteredOccurrence(items, active, displayFilter)
+			if seeded, ok := editionAtOccurrence(fetchDisplayed(), occurrence, group.Editions); ok {
+				// Written unconditionally, even when the source already
+				// matched what was remembered: a conditional write here (only
+				// on a source change) left mode/artworkModel stale on every
+				// tick that merely reconfirmed the pick, so a later tick
+				// consulting the remembered-pick branch below (display
+				// unavailable) could still see a since-changed artworkModel as
+				// unchanged and skip the invalidation that field exists for
+				// (run-reviewer, round 1 on this fix, 2026-11-12).
+				r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: seeded.Source}
+				items = append(items, seeded)
+				active = append(active, scheduleActive[i])
+				continue
+			}
 		}
 		// Nothing currently displayed for this group (player status
-		// unavailable, or this group isn't part of it) — fall back to the
+		// unavailable, this group isn't part of it, or this group's own
+		// segment is itself schedule-inactive) — fall back to the
 		// remembered pick, then to a fresh roll, exactly as before the
 		// display check above existed.
 		if pick, ok := r.randomSeriesPicks[group.Key]; ok && pick.mode == mode && pick.artworkModel == group.ArtworkModel {
 			if fresh, found := editionBySource(group.Editions, pick.source); found {
 				items = append(items, fresh)
+				active = append(active, scheduleActive[i])
 				continue
 			}
 			// The picked source is gone from this tick's editions — the
@@ -1806,6 +1853,9 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 			}
 		}
 		items = append(items, narrowed...)
+		for range narrowed {
+			active = append(active, scheduleActive[i])
+		}
 	}
 	for key := range r.randomSeriesPicks {
 		if _, ok := seen[key]; !ok {
@@ -1942,22 +1992,65 @@ func editionAtOccurrence(displayed []dp1playlist.PlaylistItem, index int, editio
 	return editionBySource(editions, displayed[index].Source)
 }
 
-// filteredOccurrence counts how many of items displayFilter admits — nil
-// admits all of them, items' own unfiltered length, exactly like
-// narrowStable counted before displayFilter existed. See narrowStable's
-// doc for why this, and not len(items), is this group's own slot in
-// displayed.
-func filteredOccurrence(items []dp1playlist.PlaylistItem, displayFilter func(dp1playlist.PlaylistItem) bool) int {
-	if displayFilter == nil {
-		return len(items)
-	}
+// filteredOccurrence counts how many of items are BOTH schedule-active
+// (active[i], see scheduleActiveSegments) AND admitted by displayFilter —
+// nil displayFilter admits all of them. active must be the same length as
+// items (narrowStable keeps the two in lockstep). See narrowStable's doc
+// for why this, and not len(items), is this group's own slot in displayed.
+func filteredOccurrence(items []dp1playlist.PlaylistItem, active []bool, displayFilter func(dp1playlist.PlaylistItem) bool) int {
 	n := 0
-	for _, item := range items {
-		if displayFilter(item) {
-			n++
+	for i, item := range items {
+		if !active[i] {
+			continue
 		}
+		if displayFilter != nil && !displayFilter(item) {
+			continue
+		}
+		n++
 	}
 	return n
+}
+
+// scheduleActiveSegments reports, for each segment in plan order, whether
+// that segment's own items would survive displayAt scheduling — the same
+// filter playlistschedule.Scheduler.PrepareWithSource applies to the
+// flattened playlist narrowStable returns, which this package's own
+// resync never otherwise sees applied until after narrowStable has already
+// built its occurrence counts (feralfile-bot F7, 2026-11-13). All of a
+// group's Editions (and its Representative) share the single series item's
+// own DisplayAt — dp1/series.go's expansion clears then re-applies the
+// parent item's DisplayAt to every edition — so one representative value
+// per segment decides the whole segment's activity; no edition needs to be
+// picked first. now/loc mirror exactly what the scheduler itself resolves
+// them to in production (clock.Now(), and a nil locFn defaulting to
+// sleepschedule.LocalTimezone — see playlistschedule.New's doc): this
+// package has no way to read the scheduler's own configured locFn back
+// out, so it recomputes the one value production never overrides rather
+// than risk silently drifting from the scheduler's actual answer. A
+// synthetic index-keyed ID is enough to map
+// displayat.ComputeActiveSet's filtered subset back to segment positions,
+// since ComputeActiveSet otherwise leaves every field (including ID)
+// untouched.
+func scheduleActiveSegments(segments []dp1.CastSegment, now time.Time, loc *time.Location) []bool {
+	preview := make([]dp1playlist.PlaylistItem, len(segments))
+	for i, seg := range segments {
+		id := strconv.Itoa(i)
+		switch {
+		case seg.Item != nil:
+			preview[i] = dp1playlist.PlaylistItem{ID: id, DisplayAt: seg.Item.DisplayAt}
+		case seg.Group != nil:
+			preview[i] = dp1playlist.PlaylistItem{ID: id, DisplayAt: seg.Group.Representative.DisplayAt}
+		default:
+			preview[i] = dp1playlist.PlaylistItem{ID: id}
+		}
+	}
+	active := make([]bool, len(segments))
+	for _, item := range displayat.ComputeActiveSet(&dp1playlist.Playlist{Items: preview}, now, loc) {
+		if idx, err := strconv.Atoi(item.ID); err == nil && idx >= 0 && idx < len(active) {
+			active[idx] = true
+		}
+	}
+	return active
 }
 
 // loadCachedPlaylistForURL mirrors commandrouter's handler.loadCachedPlaylistForURL

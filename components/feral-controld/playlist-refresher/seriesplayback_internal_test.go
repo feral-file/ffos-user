@@ -2,6 +2,7 @@ package refresher
 
 import (
 	"testing"
+	"time"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -475,4 +476,86 @@ func TestNarrowStable_NilDisplayFilterCountsEveryItem(t *testing.T) {
 	assert.NotEqual(t, editionA.Source, out[1].Source, "sanity: a is not the live pick")
 	assert.Equal(t, editionB.Source, out[1].Source,
 		"with displayFilter nil, occurrence stays the raw position, matching an unfiltered display")
+}
+
+// TestNarrowStable_OccurrenceCountsPastScheduleFiltering pins feralfile-bot's
+// F7 follow-up (2026-11-13): a playlist carries a future-displayAt item
+// ahead of a multi_unique series, which playlistschedule.Scheduler strips
+// out of the active set AFTER narrowStable runs (PrepareWithSource is
+// called on narrowStable's own output, later in processPlayingPlaylist) —
+// so the group's live display is [B, explicit A], never [future, B,
+// explicit A]. Without accounting for displayAt scheduling, occurrence
+// read by raw position (counting the future item that was never actually
+// shown) lands on displayed[1] (explicit A) instead of the group's own
+// slot, overwriting a correct remembered B with an unrelated item —
+// reproducible with no catalog, mode, or content-policy change, the
+// scheduling-specific sibling of the content-policy version above.
+func TestNarrowStable_OccurrenceCountsPastScheduleFiltering(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+
+	futureDisplayAt := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	futureItem := dp1playlist.PlaylistItem{ID: "future", Source: "https://cdn.example.com/future.mp4", DisplayAt: &futureDisplayAt}
+	explicitA := dp1playlist.PlaylistItem{ID: "explicit-a", Source: "https://cdn.example.com/a.mp4"}
+	plan := dp1.CastPlan{Segments: append(
+		append([]dp1.CastSegment{{Item: &futureItem}}, randomGroupPlan().Segments...),
+		dp1.CastSegment{Item: &explicitA},
+	)}
+
+	editionB := dp1playlist.PlaylistItem{ID: "b", Source: "https://cdn.example.com/b.mp4"}
+	// What the player actually shows: the scheduler already stripped the
+	// future item from the active set before this cohort ever reached the
+	// player, so displayed never carried it at all.
+	currentlyDisplayed := func() []dp1playlist.PlaylistItem {
+		return []dp1playlist.PlaylistItem{editionB, explicitA}
+	}
+
+	out := r.narrowStable(plan, &mode, currentlyDisplayed, nil)
+	require.Len(t, out, 3)
+	assert.Equal(t, futureItem.Source, out[0].Source,
+		"the future item still passes through narrowStable unchanged; displayAt scheduling removes it in a later, separate pass")
+	assert.Equal(t, editionB.Source, out[1].Source,
+		"occurrence must count past the future-scheduled item displayAt scheduling will filter, landing on displayed's own slot for the group — not shifted by one")
+	assert.Equal(t, explicitA.Source, out[2].Source, "the trailing explicit item passes through unchanged")
+
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
+	assert.Equal(t, editionB.Source, r.randomSeriesPicks[key].source,
+		"the remembered pick must be the group's own live choice, not the later explicit item an unfiltered occurrence would have read")
+}
+
+// TestNarrowStable_PreservesRememberedPickWhenGroupItselfIsScheduledOut pins
+// the Action's second half: a group with no active displayed occurrence at
+// all (its own segment is itself future-scheduled) must not consult
+// currentlyDisplayed — there is no slot for it to read — and must instead
+// preserve whatever was remembered, exactly like "nothing currently
+// displayed" already did for a missing player status.
+func TestNarrowStable_PreservesRememberedPickWhenGroupItselfIsScheduledOut(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
+	r.randomSeriesPicks = map[dp1.SeriesGroupKey]randomSeriesPick{
+		key: {mode: dp1.SeriesPlaybackRandom, artworkModel: dp1.SeriesArtworkModelMultiUnique, source: "https://cdn.example.com/b.mp4"},
+	}
+
+	futureDisplayAt := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	plan := randomGroupPlan()
+	plan.Segments[0].Group.Representative.DisplayAt = &futureDisplayAt
+	for i := range plan.Segments[0].Group.Editions {
+		plan.Segments[0].Group.Editions[i].DisplayAt = &futureDisplayAt
+	}
+
+	// currentlyDisplayed must not be trusted for a group with no active
+	// occurrence this tick: if narrowStable read it anyway, this
+	// deliberately wrong item would be adopted and the assertion below
+	// would catch it.
+	wrongPick := dp1playlist.PlaylistItem{ID: "a", Source: "https://cdn.example.com/a.mp4"}
+	currentlyDisplayed := func() []dp1playlist.PlaylistItem {
+		return []dp1playlist.PlaylistItem{wrongPick}
+	}
+
+	out := r.narrowStable(plan, &mode, currentlyDisplayed, nil)
+	require.Len(t, out, 1)
+	assert.Equal(t, "https://cdn.example.com/b.mp4", out[0].Source,
+		"a group with no active displayed occurrence must keep its remembered pick, not read an unrelated displayed item")
 }

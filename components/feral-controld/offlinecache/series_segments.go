@@ -50,44 +50,31 @@ type SeriesGroup struct {
 	ArtworkModel   string                     `json:"artworkModel,omitempty"`
 }
 
-// requiredDownloadSources returns the Source of every group's Representative
-// that dp1.CastPlan.Full appended as an EXTRA item past that group's own
-// Editions — the same editionsHaveSource check dp1 made when deciding to
-// append it, duplicated here rather than imported (this package's own
-// dp1-import boundary, see SeriesSegment's doc). These are the sources
+// requiredDownloadSources returns the Source of every group's Representative,
+// unconditionally — regardless of whether that same source also appears
+// somewhere in the group's own Editions. These are the sources
 // DownloadPlaylist's own queueing bound must never drop: a non-distinct-
 // editions group's Narrow(nil) always collapses to the Representative, so a
 // Representative the queue excludes leaves that group with nothing playable
 // offline even though every catalog edition downloaded successfully
-// (feralfile-bot F1, 2026-11-13).
+// (feralfile-bot F1, 2026-11-13). Protecting it only when dp1.CastPlan.Full
+// appended it as an EXTRA item (source absent from Editions) missed the case
+// where the source IS one of the Editions but that edition's own position
+// already falls past the queue bound — the representative is just as
+// unreplayable there, so the bound has to protect its source either way
+// (feralfile-bot F1, follow-up, 2026-11-13).
 func requiredDownloadSources(segments []SeriesSegment) map[string]struct{} {
 	var required map[string]struct{}
 	for _, seg := range segments {
 		if seg.Group == nil {
 			continue
 		}
-		source := seg.Group.Representative.Source
-		if seriesGroupHasEditionSource(seg.Group.Editions, source) {
-			continue
-		}
 		if required == nil {
 			required = make(map[string]struct{})
 		}
-		required[source] = struct{}{}
+		required[seg.Group.Representative.Source] = struct{}{}
 	}
 	return required
-}
-
-// seriesGroupHasEditionSource mirrors dp1's editionsHaveSource exactly: the
-// same no-normalization Source comparison, so a Representative this package
-// must protect is identified the same way dp1 decided to append it.
-func seriesGroupHasEditionSource(editions []dp1playlist.PlaylistItem, source string) bool {
-	for _, edition := range editions {
-		if edition.Source == source {
-			return true
-		}
-	}
-	return false
 }
 
 // boundQueuedItems applies DownloadPlaylist's maxQueued ceiling the way a

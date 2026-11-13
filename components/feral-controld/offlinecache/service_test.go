@@ -4050,3 +4050,76 @@ func TestService_DownloadPlaylist_RequiredRepresentativeSurvivesTheQueueBound(t 
 
 	waitForState(t, ts.service, repSource, offlinecache.StateReady)
 }
+
+// TestService_DownloadPlaylist_RequiredRepresentativeSurvivesWhenItsSourceIsAlsoAnEdition
+// pins feralfile-bot F1's 2026-11-13 follow-up: when the Representative's
+// Source already equals one of the group's own Editions, dp1.CastPlan.Full
+// never appends a separate item for it — the download list carries only the
+// matching edition, at whatever position the catalog returned it. The prior
+// fix only protected a Representative appended as an EXTRA item past
+// Editions; it left this case unprotected, so a representative landing past
+// the queue bound through its own edition entry was still dropped despite
+// every OTHER catalog edition downloading successfully.
+func TestService_DownloadPlaylist_RequiredRepresentativeSurvivesWhenItsSourceIsAlsoAnEdition(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	const maxQueued = 3
+	ordinarySource := "https://example.com/ordinary.html"
+	editionSources := []string{
+		"https://example.com/edition-00.html",
+		"https://example.com/edition-01.html",
+		"https://example.com/edition-02.html",
+		"https://example.com/edition-03.html",
+	}
+	// The Representative's Source IS the last edition's Source — the exact
+	// shape dp1.CastPlan.Full produces when the catalog's own editions
+	// already carry it, so no extra item is appended for it.
+	repSource := editionSources[len(editionSources)-1]
+
+	editions := make([]dp1playlist.PlaylistItem, len(editionSources))
+	items := []map[string]interface{}{{"id": "ordinary", "source": ordinarySource}}
+	for i, source := range editionSources {
+		editions[i] = dp1playlist.PlaylistItem{ID: fmt.Sprintf("edition-%02d", i), Source: source}
+		items = append(items, map[string]interface{}{"id": editions[i].ID, "source": source})
+	}
+	representative := dp1playlist.PlaylistItem{ID: "edition-03", Source: repSource}
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-2", "title": "t", "items": items,
+	})
+	require.NoError(t, err)
+
+	segments := []offlinecache.SeriesSegment{{Group: &offlinecache.SeriesGroup{
+		Key:            offlinecache.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "1"},
+		Representative: representative,
+		Editions:       editions,
+		Resolved:       true,
+		ArtworkModel:   "multi",
+	}}}
+
+	// The Representative's own edition entry sits at raw position 4
+	// (0-indexed, past maxQueued-1) — gomock fails the test if it is
+	// silently dropped instead of one of the ordinary/earlier editions.
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), repSource).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), ordinarySource).Return(offlinecache.ClassSoftware, nil).Times(1)
+	for _, source := range editionSources[:maxQueued-2] {
+		ts.mockClassifier.EXPECT().Classify(gomock.Any(), source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	}
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, item dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(maxQueued)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", maxQueued, segments)
+	require.NoError(t, err)
+	assert.Equal(t, maxQueued, queued, "the bound still limits total queueing work")
+	assert.Equal(t, len(items), total, "total still reports the playlist's real item count")
+
+	waitForState(t, ts.service, repSource, offlinecache.StateReady)
+}
