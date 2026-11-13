@@ -255,10 +255,20 @@ func (r *Reader) readDirectory(ctx context.Context, cid string) ([]dirEntry, err
 	if d.err != nil || n != m || n > 100000 {
 		return nil, fmt.Errorf("%w: directory %s is malformed", ErrVerification, cid)
 	}
+	// Every name is copied out of the answer, and ABI offsets may point many
+	// entries at one string, so copying unchecked would let a small answer
+	// allocate its length times the entry count before the checksum check
+	// refuses it (#428 review F9). An honest encoding stores each name once,
+	// so its names together are never longer than the answer itself: more
+	// than that is a forgery, refused before the copy that would exceed it.
 	entries := make([]dirEntry, 0, n)
+	names := 0
 	for i := range n {
 		so := d.wordAt(o1 + 32 + 32*i)
 		name := d.dyn(o1 + 32 + so)
+		if names += len(name); names > len(out) {
+			return nil, fmt.Errorf("%w: directory %s names more bytes than its answer holds", ErrVerification, cid)
+		}
 		sum := d.bytes32(o2 + 32 + 32*i)
 		entries = append(entries, dirEntry{name: string(name), checksum: sum})
 	}

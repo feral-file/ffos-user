@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"runtime"
 	"sort"
 	"sync"
 	"testing"
@@ -524,4 +525,37 @@ func TestReadTreeKeepsOnlyTheContentOfAnAnswer(t *testing.T) {
 	stored := tree.Files[""].Stored
 	assert.Equal(t, "hello", string(stored))
 	assert.Less(t, cap(stored), 1024, "the content owns its own small buffer, not a window into the 1 MiB answer")
+}
+
+// F9 (#428 review): directory entries whose name offsets all point at one
+// long string must be refused before their copies add up, not after.
+func TestReadDirectoryRefusesAliasedNames(t *testing.T) {
+	root := hexString(keccak([]byte("root")))
+	const entries, nameLen = 4096, 32768
+	name := bytes.Repeat([]byte("n"), nameLen)
+	// string[]: count, one offset per entry (all to the same string), the string
+	names := word(entries)
+	for range entries {
+		names = append(names, word(32*entries)...)
+	}
+	names = append(append(names, word(nameLen)...), padded(name)...)
+	sums := word(entries)
+	for range entries {
+		sums = append(sums, make([]byte, 32)...)
+	}
+	answer := append(append(word(64), word(uint64(64+len(names)))...), names...)
+	answer = append(answer, sums...)
+
+	f := newFakeFS()
+	f.override[selector("readDirectory(bytes32)")+root] = answer
+	r, err := NewReader(f, "eip155:1", big.NewInt(1))
+	require.NoError(t, err)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err = r.readDirectory(context.Background(), root)
+	runtime.ReadMemStats(&after)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrVerification), err)
+	assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(16<<20), "allocation stays near the answer's size, not entries x name")
 }
