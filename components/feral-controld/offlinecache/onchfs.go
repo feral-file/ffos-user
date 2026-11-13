@@ -239,7 +239,7 @@ func NewOnchfsMaterializer(cfg OnchfsMaterializerConfig) *OnchfsMaterializer {
 		store: cfg.Store, resolver: cfg.Resolver, logger: cfg.Logger, base: cfg.Base,
 		standalone: cfg.Standalone, maxBytes: cfg.MaxBytes, onReady: cfg.OnReady, now: cfg.Now,
 		inflight: map[string]*onchfsJob{},
-		evict: cfg.Evict, fence: cfg.Fence,
+		evict:    cfg.Evict, fence: cfg.Fence,
 	}
 	if m.evict == nil {
 		m.evict = m.evictStandalone
