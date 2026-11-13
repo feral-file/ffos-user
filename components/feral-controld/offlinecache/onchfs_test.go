@@ -562,8 +562,9 @@ func TestOnchfsMaterializerServesBrowserSpelledPaths(t *testing.T) {
 	for url, want := range map[string]string{
 		"/lib!v1.js":   "bang",
 		"/lib%21v1.js": "bang",
-		"/a%21b.js":    "literal-percent",
+		"/a%2521b.js":  "literal-percent", // a file named with a literal %
 		"/a!b.js":      "a-bang-b",
+		"/a%21b.js":    "a-bang-b", // decodes to a!b.js
 		"/sp%20ace.js": "space",
 		"/x^y.js":      "caret",
 		"/x%5Ey.js":    "caret",
@@ -575,5 +576,30 @@ func TestOnchfsMaterializerServesBrowserSpelledPaths(t *testing.T) {
 		body, err := store.ReadBlob(res.SHA256)
 		require.NoError(t, err)
 		assert.Equal(t, want, string(body), url)
+	}
+}
+
+// PR #461 review F11: an escaped entry opens the file it decodes to, never
+// a file whose literal name is the escaped spelling.
+func TestOnchfsMaterializerEscapedEntryOpensItsDecodedFile(t *testing.T) {
+	tree := &onchfs.Tree{Files: map[string]*onchfs.File{
+		"a!b.html":   {Plain: []byte("bang"), ContentType: "text/html"},
+		"a%21b.html": {Plain: []byte("literal"), ContentType: "text/html"},
+	}}
+	store, _ := newTestStore(t)
+	source := onchfsSource(t, "onchfs://"+onchfsTestRoot+"/a%21b.html")
+	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: tree}, offlinecache.OnchfsMaterializerConfig{})
+	require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
+	rec, err := store.LoadItem(offlinecache.SourceKey(source))
+	require.NoError(t, err)
+	res, ok := rec.ResourceByURL(source)
+	require.True(t, ok)
+	body, err := store.ReadBlob(res.SHA256)
+	require.NoError(t, err)
+	assert.Equal(t, "bang", string(body))
+	seen := map[string]bool{}
+	for _, r := range rec.Resources {
+		assert.False(t, seen[r.URL+" "+r.Method], "one resource per URL: %s", r.URL)
+		seen[r.URL+" "+r.Method] = true
 	}
 }

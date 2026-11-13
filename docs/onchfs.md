@@ -94,7 +94,8 @@ The ABI decoder treats every node answer as hostile:
 - 8,192 paths, directories included;
 - 4,096 entries per directory;
 - depth 16;
-- 4 reads in flight.
+- 4 reads in flight; decompression one file at a time, each capped at what remains of
+  the 64 MiB, so the budget is charged before bytes are made.
 
 An inode named twice is read once and shared, so aliasing costs nothing.
 
@@ -168,8 +169,9 @@ which needs a live host. The materializer resolves the tree and writes each file
 bytes as a blob. It then saves a record under the device-local source with these resources:
 
 - each file at `<origin>/<path>`, spelled as a browser requests it (WHATWG path
-  percent-encoding, so `!` stays literal), plus fallback spellings (`^` and `|` escaped,
-  and Go's full escaping) wherever no other file's own spelling is;
+  percent-encoding, so `!` stays literal; a literal `%` is `%25`), plus fallback
+  spellings (`^` and `|` escaped, and Go's full escaping). Every spelling decodes back
+  to the same file name, so no URL can open another file;
 - each directory with an `index.html` at `<origin>/<dir>/`, and the root at `<origin>/`;
 - the exact source URL, query included, as the entry. A directory named without its slash
   is a 301 to the slashed form, query kept.

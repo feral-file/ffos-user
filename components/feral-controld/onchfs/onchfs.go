@@ -168,8 +168,11 @@ type walker struct {
 	nodes map[string]*node // by inode address; guarded by mu
 	files map[string]*File // by path; guarded by mu
 	kept  int              // bytes held by distinct inodes; guarded by mu
-	paths int              // guarded by mu
-	err   error            // first error; guarded by mu
+	// inflateMu makes decompression serial, so the budget it is charged
+	// against is exact (buildFile).
+	inflateMu sync.Mutex
+	paths     int   // guarded by mu
+	err       error // first error; guarded by mu
 }
 
 // node is one inode's read, shared by every path that names it. done closes
@@ -225,27 +228,66 @@ func (w *walker) load(ctx context.Context, cid, rel string) (*node, error) {
 	if n.in.isDir {
 		return n, nil
 	}
-	if n.file, n.err = newFile(cid, rel, n.in, w.limits.MaxFileBytes); n.err != nil {
-		return nil, n.err
-	}
+	n.file, n.err = w.buildFile(ctx, cid, rel, n.in)
 	// Kept once, in n.file. The raw metadata is dropped too: on EVM it is a
 	// window into the whole RPC answer, and the cache holds every node until
 	// the walk ends, so keeping it would keep every answer alive outside
 	// MaxTreeBytes (PR #461 review F2). n.file carries its decoded headers.
 	n.in.stored, n.in.metadata = nil, nil
-	kept := len(n.file.Stored)
-	if n.file.Gzip {
-		kept += len(n.file.Plain)
-	}
-	w.mu.Lock()
-	w.kept += kept
-	over := w.kept > w.limits.MaxTreeBytes
-	w.mu.Unlock()
-	if over {
-		n.err = fmt.Errorf("%w: tree keeps more than %d bytes", ErrTooLarge, w.limits.MaxTreeBytes)
+	if n.err != nil {
 		return nil, n.err
 	}
 	return n, nil
+}
+
+// buildFile charges a verified file against the tree budget and builds it.
+//
+// The budget is charged before the bytes are made, not after (PR #461
+// review F10): the stored bytes as soon as they are read, and a declared
+// gzip body is decompressed only up to what remains of the budget, one file
+// at a time (inflateMu). Charging after expansion let every concurrent
+// decompression reach MaxFileBytes before the first was counted, so a tree
+// of many gzip files held hundreds of MiB before it was refused. Serial
+// expansion costs little: inode reads, the slow part, stay concurrent.
+func (w *walker) buildFile(ctx context.Context, cid, rel string, in inode) (*File, error) {
+	if len(in.stored) > w.limits.MaxFileBytes {
+		return nil, fmt.Errorf("%w: %q is %d bytes", ErrTooLarge, rel, len(in.stored))
+	}
+	if err := w.charge(len(in.stored)); err != nil {
+		return nil, err
+	}
+	w.inflateMu.Lock()
+	defer w.inflateMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	w.mu.Lock()
+	remaining := w.limits.MaxTreeBytes - w.kept
+	w.mu.Unlock()
+	f, err := newFile(cid, rel, in, w.limits.MaxFileBytes, min(w.limits.MaxFileBytes, remaining))
+	if err != nil {
+		if errors.Is(err, ErrTooLarge) {
+			return nil, fmt.Errorf("%w: tree keeps more than %d bytes", ErrTooLarge, w.limits.MaxTreeBytes)
+		}
+		return nil, err
+	}
+	if f.Gzip {
+		if err := w.charge(len(f.Plain)); err != nil {
+			return nil, err
+		}
+	}
+	return f, nil
+}
+
+// charge adds n bytes to what the tree keeps, failing past MaxTreeBytes.
+func (w *walker) charge(n int) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.kept += n
+	if w.kept > w.limits.MaxTreeBytes {
+		return fmt.Errorf("%w: tree keeps more than %d bytes", ErrTooLarge, w.limits.MaxTreeBytes)
+	}
+	return nil
 }
 
 func (w *walker) walk(ctx context.Context, cid, rel string, depth int) {
@@ -304,7 +346,9 @@ func (w *walker) walk(ctx context.Context, cid, rel string, depth int) {
 // content-encoding) must reach the work as the archive it is. A body that
 // declares gzip but does not decompress keeps Plain == Stored and Gzip false,
 // so a consumer never serves it as something it is not.
-func newFile(cid, rel string, in inode, maxBytes int) (*File, error) {
+//
+// maxBytes bounds the stored bytes, maxPlain the decompressed ones.
+func newFile(cid, rel string, in inode, maxBytes, maxPlain int) (*File, error) {
 	if len(in.stored) > maxBytes {
 		return nil, fmt.Errorf("%w: %q is %d bytes", ErrTooLarge, rel, len(in.stored))
 	}
@@ -313,7 +357,7 @@ func newFile(cid, rel string, in inode, maxBytes int) (*File, error) {
 	if !strings.EqualFold(strings.TrimSpace(f.Headers["content-encoding"]), "gzip") {
 		return f, nil
 	}
-	plain, ok, err := gunzip(in.stored, maxBytes)
+	plain, ok, err := gunzip(in.stored, max(maxPlain, 0))
 	if err != nil {
 		return nil, fmt.Errorf("%q: %w", rel, err)
 	}

@@ -646,8 +646,13 @@ func escapeTreePath(p string) string { return treePathSpellings(p)[0] }
 // escapes ^ and |, which browsers have treated differently over time, and
 // url.PathEscape's, for a work that spells its own references escaped.
 // They never displace another file's primary spelling (onchfsResources
-// adds every primary first). A literal % is left as is, as a browser
-// leaves it.
+// adds every primary first).
+//
+// Every spelling must decode back to p (PR #461 review F11). A URL path is
+// percent-decoded to find its file, so `/a%21b.html` names `a!b.html`; a
+// file literally named `a%21b.html` is `/a%2521b.html`. A literal % is
+// therefore always encoded: leaving it as is let a file claim a URL that
+// names another one.
 func treePathSpellings(p string) []string {
 	join := func(escape func(string) string) string {
 		segs := strings.Split(p, "/")
@@ -671,13 +676,14 @@ func treePathSpellings(p string) []string {
 }
 
 // browserPathEscape percent-encodes one path segment as the WHATWG path
-// percent-encode set does; caretPipe also encodes ^ and |.
+// percent-encode set does, plus % itself (see treePathSpellings);
+// caretPipe also encodes ^ and |.
 func browserPathEscape(s string, caretPipe bool) string {
 	const upperhex = "0123456789ABCDEF"
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if c <= 0x20 || c >= 0x7f || strings.IndexByte("\"#<>?`{}", c) >= 0 || (caretPipe && (c == '^' || c == '|')) {
+		if c <= 0x20 || c >= 0x7f || strings.IndexByte("\"#<>?`{}%", c) >= 0 || (caretPipe && (c == '^' || c == '|')) {
 			b.WriteByte('%')
 			b.WriteByte(upperhex[c>>4])
 			b.WriteByte(upperhex[c&15])

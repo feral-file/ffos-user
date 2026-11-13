@@ -1,6 +1,8 @@
 package onchfs
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +11,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -352,4 +355,35 @@ func TestWalkerKeepsNoRawInodeBytes(t *testing.T) {
 	assert.Nil(t, n.in.stored)
 	assert.Nil(t, n.in.metadata)
 	assert.Equal(t, "text/plain", n.file.ContentType)
+}
+
+// PR #461 review F10: many gzip files that each expand within MaxFileBytes
+// must not all expand before the tree budget refuses them.
+func TestReadTreeChargesDecompressionBeforeItHappens(t *testing.T) {
+	fs := newFakeFS()
+	names := map[string]string{}
+	for i := range 32 {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		body := make([]byte, 4<<20)
+		body[0] = byte(i) // distinct inodes
+		_, _ = zw.Write(body)
+		require.NoError(t, zw.Close())
+		names[fmt.Sprintf("part-%02d.bin", i)] = fs.addFile(t, buf.Bytes(), map[string]string{"content-encoding": "gzip"})
+	}
+	root := fs.addDir(names)
+	reader, err := NewReader(fs, "eip155:1", big.NewInt(1))
+	require.NoError(t, err)
+	limits := DefaultLimits
+	limits.MaxTreeBytes = 16 << 20
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err = readTree(context.Background(), reader, root, limits)
+	runtime.ReadMemStats(&after)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrTooLarge), err)
+	assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(100<<20),
+		"expansion stops at the tree budget instead of every file expanding first")
 }
