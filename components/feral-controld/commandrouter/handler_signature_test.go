@@ -116,13 +116,13 @@ func inlineCast(ts *testSetup, rawBytes []byte, typed *dp1.Playlist) commands.Co
 			return nil
 		}).
 		Times(1)
-	// Static dp1_call: Process expands series items by hand (see
+	// Static dp1_call: Process resolves series items by hand (see
 	// handler.go's CMD_DISPLAY_PLAYLIST branch). None of this file's fixtures
-	// carry one, so echo the playlist back — what the real expandSeriesItems
-	// would do too.
+	// carry one, so echo the playlist back as plain segments — what the real
+	// resolveSeriesCastPlan would do too.
 	ts.mockDP1.EXPECT().
-		ExpandSeriesItems(ts.ctx, gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist { return playlist }).
+		ResolveSeriesCastPlan(ts.ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
 		AnyTimes()
 	return commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -227,8 +227,8 @@ func TestCommandHandler_Process_DisplayPlaylist_Inline_VerifiesWireTokenNotRemar
 		return nil
 	}).Times(1)
 	ts.mockDP1.EXPECT().
-		ExpandSeriesItems(ts.ctx, gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist { return playlist }).
+		ResolveSeriesCastPlan(ts.ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
 		AnyTimes()
 	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
 	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
@@ -367,7 +367,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedFallback_NotVerified(t *te
 	playlistURL := "https://feed.example/p.json"
 	active.Set("cached-1", playlistURL, sigverify.StatusValid) // an earlier live cast of this URL
 	cachedRaw := signedFixture(t)
-	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL).Return(nil, errors.New("network unreachable")).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).Return(nil, dp1.CastPlan{}, errors.New("network unreachable")).Times(1)
 	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRaw), nil).Times(1)
 	ts.mockJSON.EXPECT().
 		Unmarshal(cachedRaw, gomock.Any()).
@@ -424,10 +424,10 @@ func TestCommandHandler_Process_DisplayPlaylist_Deferred_PendingUntilCutover(t *
 	playlistURL := "https://example.com/future.json"
 	active.Set("showing", playlistURL, sigverify.StatusUnsigned) // the document on screen, same URL republished
 	verdict := sigverify.Verify(signedFixture(t))
-	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL, gomock.Any()).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
 		ID:    "future-1",
 		Items: []dp1playlist.PlaylistItem{{ID: "future", Source: "https://example.com/future.html", DisplayAt: strPtr("2026-09-13T00:00:00Z")}},
-	}, Verification: &verdict}, nil)
+	}, Verification: &verdict}, dp1.CastPlan{}, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Times(0)
 	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
 
@@ -506,8 +506,8 @@ func TestCommandHandler_Process_ScheduledCast_SurvivesReconnectRepush(t *testing
 		return nil
 	}).Times(1)
 	mockDP1.EXPECT().
-		ExpandSeriesItems(ctx, gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist { return playlist }).
+		ResolveSeriesCastPlan(ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
 		AnyTimes()
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
 	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
@@ -545,10 +545,10 @@ func TestCommandHandler_Process_DisplayPlaylist_InvalidatesBeforeSend(t *testing
 	playlistURL := "https://feed.example/p.json"
 	active.Set("", playlistURL, sigverify.StatusValid) // the previous document, URL-only identity
 	unsigned := sigverify.Verify([]byte(`{"dpVersion":"1.1.0","title":"t","items":[]}`))
-	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
 		ID:    "",
 		Items: []dp1playlist.PlaylistItem{{ID: "i", Source: "https://example.com/a"}},
-	}, Verification: &unsigned}, nil).Times(1)
+	}, Verification: &unsigned}, dp1.CastPlan{}, nil).Times(1)
 	var atSend bool
 	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(string, map[string]any) (any, error) {
 		_, atSend = active.Lookup("", playlistURL)
@@ -605,8 +605,8 @@ func TestCommandHandler_Process_DisplayPlaylist_PublishesInsidePushLock(t *testi
 			Items: []dp1playlist.PlaylistItem{{ID: "i", Source: "https://example.com/x"}},
 		}, Verification: &v}
 	}
-	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, urlA).Return(playlistFor("A", valid), nil).Times(1)
-	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, urlB).Return(playlistFor("B", unsigned), nil).Times(1)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, urlA, gomock.Any()).Return(playlistFor("A", valid), dp1.CastPlan{}, nil).Times(1)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, urlB, gomock.Any()).Return(playlistFor("B", unsigned), dp1.CastPlan{}, nil).Times(1)
 	mockStatusPoller.EXPECT().ForceRefresh().Times(2)
 
 	bDone := make(chan error, 1)

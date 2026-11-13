@@ -16,7 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
-	"go.uber.org/zap/zaptest/observer"
 )
 
 type testSetup struct {
@@ -793,54 +792,71 @@ func TestControlTuning(t *testing.T) {
 	assert.Equal(t, config.ControlConfig{}, (&config.Config{}).ControlTuning(zap.NewNop()))
 	c := &config.Config{Control: []byte(`{"enabled":true}`)}
 	assert.Equal(t, config.ControlConfig{Enabled: true}, c.ControlTuning(zap.NewNop()))
+	// A stale "enforced" key (removed, feral-file#3551) is ignored, whatever
+	// its value.
 	c = &config.Config{Control: []byte(`{"enabled":true,"enforced":true}`)}
-	assert.Equal(t, config.ControlConfig{Enabled: true, Enforced: true}, c.ControlTuning(zap.NewNop()))
-	// One bad field does not take the other with it.
+	assert.Equal(t, config.ControlConfig{Enabled: true}, c.ControlTuning(zap.NewNop()))
 	c = &config.Config{Control: []byte(`{"enabled":true,"enforced":"yes"}`)}
-	assert.Equal(t, config.ControlConfig{Enabled: true, Malformed: true}, c.ControlTuning(zap.NewNop()))
+	assert.Equal(t, config.ControlConfig{Enabled: true}, c.ControlTuning(zap.NewNop()))
 	c = &config.Config{Control: []byte(`{"enabled":"yes"}`)}
 	assert.Equal(t, config.ControlConfig{Malformed: true}, c.ControlTuning(zap.NewNop()))
 	c = &config.Config{Control: []byte(`[true]`)}
 	assert.Equal(t, config.ControlConfig{Malformed: true}, c.ControlTuning(zap.NewNop()))
 }
 
-// TestRasterTuningPermissiveDecode pins the same §3 config hazard rule for the
-// raster block: a malformed credential block costs the wallet walk its key,
-// never the daemon its boot. The warning must not echo the block, which holds
-// the key.
-func TestRasterTuningPermissiveDecode(t *testing.T) {
-	t.Run("absent block yields no key", func(t *testing.T) {
+// TestLeftoverRasterBlockIsIgnored: controld once read a device Raster key
+// from a `raster` block. Raster's read API needs no key, so the block is gone
+// from the schema, but a device whose controld.json still carries one must
+// keep booting: config.Load failing is fatal under Restart=always.
+func TestLeftoverRasterBlockIsIgnored(t *testing.T) {
+	var c config.Config
+	err := json.Unmarshal([]byte(`{"raster": {"apiKey": "rk_live_abc"}, "enableHub": true}`), &c)
+	require.NoError(t, err, "a leftover raster block must not fail the parse")
+	assert.True(t, c.HubEnabled())
+}
+
+func TestMediaHealthTuning(t *testing.T) {
+	t.Run("absent block is enabled with defaults", func(t *testing.T) {
 		c := &config.Config{}
-		assert.Equal(t, config.RasterConfig{}, c.RasterTuning(zap.NewNop()))
+		got := c.MediaHealthTuning(nil)
+		if got.Disabled || got.Malformed || got.ProbeMaxBytes != 0 || got.Lookahead != 0 || len(got.KnownBadPageMarkers) != 0 {
+			t.Fatalf("unexpected defaults: %+v", got)
+		}
 	})
-
-	t.Run("well-formed block decodes", func(t *testing.T) {
-		c := &config.Config{Raster: []byte(`{"apiKey":"rk_live_abc"}`)}
-		assert.Equal(t, "rk_live_abc", c.RasterTuning(zap.NewNop()).APIKey)
+	t.Run("decodes every field", func(t *testing.T) {
+		c := &config.Config{MediaHealth: []byte(`{"disabled":true,"knownBadPageMarkers":["gateway time-out"],"probeMaxBytes":4096,"lookahead":-1}`)}
+		got := c.MediaHealthTuning(nil)
+		if !got.Disabled || got.ProbeMaxBytes != 4096 || got.Lookahead != -1 || len(got.KnownBadPageMarkers) != 1 {
+			t.Fatalf("unexpected decode: %+v", got)
+		}
 	})
-
-	t.Run("wrong-typed value yields no key without failing", func(t *testing.T) {
-		c := &config.Config{Raster: []byte(`{"apiKey":123}`)}
-		assert.Equal(t, config.RasterConfig{}, c.RasterTuning(zap.NewNop()))
+	t.Run("malformed block reads as defaults, never fatal", func(t *testing.T) {
+		c := &config.Config{MediaHealth: []byte(`{"disabled":"yes"}`)}
+		got := c.MediaHealthTuning(nil)
+		if got.Disabled || !got.Malformed {
+			t.Fatalf("expected defaults with Malformed set: %+v", got)
+		}
 	})
-
-	t.Run("wrong-typed block survives the whole-config parse", func(t *testing.T) {
-		var c config.Config
-		err := json.Unmarshal([]byte(`{"raster": {"apiKey": ["x"]}, "enableHub": true}`), &c)
-		require.NoError(t, err, "a wrong-typed raster block must not fail the parse")
-		assert.Equal(t, config.RasterConfig{}, c.RasterTuning(zap.NewNop()))
+	t.Run("retired sourceProbe.disabled still disables", func(t *testing.T) {
+		c := &config.Config{SourceProbe: &config.SourceProbeConfig{Disabled: true}}
+		if !c.MediaHealthTuning(nil).Disabled {
+			t.Fatal("sourceProbe.disabled must keep its meaning")
+		}
 	})
-
-	t.Run("malformed block is not echoed into the log", func(t *testing.T) {
-		core, logs := observer.New(zap.WarnLevel)
-		c := &config.Config{Raster: []byte(`{"apiKey":123}`)}
-		c.RasterTuning(zap.New(core))
-		require.Equal(t, 1, logs.Len())
-		for _, entry := range logs.All() {
-			assert.NotContains(t, entry.Message, "123")
-			for _, field := range entry.Context {
-				assert.NotContains(t, field.String, "123")
-			}
+	t.Run("l1 is absent by default and decodes every field", func(t *testing.T) {
+		if got := (&config.Config{}).MediaHealthTuning(nil); got.L1 != nil {
+			t.Fatalf("l1 must be absent (off) by default: %+v", got.L1)
+		}
+		c := &config.Config{MediaHealth: []byte(`{"l1":{"enabled":true,"maxPerNight":50,"minAsleepSeconds":300,"blankVarianceThreshold":0.002,"settleMs":5000,"confirmSettleMs":9000,"knownBad":[{"phash":"0xabc","maxDistance":6,"label":"kubo-500"}]}}`)}
+		got := c.MediaHealthTuning(nil)
+		if got.L1 == nil || !got.L1.Enabled || got.L1.MaxPerNight != 50 || got.L1.MinAsleepSeconds != 300 || got.L1.BlankVarianceThreshold != 0.002 ||
+			got.L1.SettleMs != 5000 || got.L1.ConfirmSettleMs != 9000 || len(got.L1.KnownBad) != 1 ||
+			got.L1.KnownBad[0].PHash != "0xabc" || got.L1.KnownBad[0].MaxDistance != 6 || got.L1.KnownBad[0].Label != "kubo-500" {
+			t.Fatalf("unexpected l1 decode: %+v", got.L1)
+		}
+		c = &config.Config{MediaHealth: []byte(`{"l1":{}}`)}
+		if got := c.MediaHealthTuning(nil); got.L1 == nil || got.L1.Enabled {
+			t.Fatalf("an empty l1 block is present but off: %+v", got.L1)
 		}
 	})
 }

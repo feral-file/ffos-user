@@ -232,10 +232,17 @@ type relayer struct {
 	controlSem       chan struct{}
 	shedSem          chan struct{}
 
-	// v2Attempts counts v2 dials since the last stable session and
-	// v2ConnectedAt is when the current one started (see retryV2).
-	v2Attempts    int
+	// v2 redial state (see retryV2 and WakeV2). v2ConnectedAt, when the
+	// current session started (clock time), is under the relayer mutex.
+	// v2Attempts, dials since the backoff last started over, is under v2Mu,
+	// which no dial holds, so WakeV2 never waits on a handshake. v2Up mirrors
+	// "a v2 socket is up" for WakeV2; v2Wake carries its token to a waiting
+	// retryV2 (both unused on legacy, where v2Wake is nil).
 	v2ConnectedAt time.Time
+	v2Mu          sync.Mutex
+	v2Attempts    int
+	v2Up          atomic.Bool
+	v2Wake        chan struct{}
 
 	// connObserver, when set, is told about connection lifecycle transitions:
 	// (true, 0) after a successful dial, (false, 0) on teardown, and
@@ -529,12 +536,14 @@ func (r *relayer) Connect(ctx context.Context) error {
 
 	// Bound every inbound frame BEFORE it is decoded. The relayer is the
 	// second ingress for displayPlaylist (the LAN hub is the first, capped by
-	// hub.MAX_REQUEST_BODY_BYTES; URL fetches by dp1.MaxPlaylistBodyBytes),
-	// and an inline playlist's cost downstream — JSON decode into a map, JCS
-	// canonicalization per signature entry — scales with its size, so an
-	// unbounded frame from a remote controller or a compromised relayer is
-	// an unbounded memory and CPU spend. Same limit as the hub so both paths
-	// admit the same worst-case document. gorilla returns ErrReadLimit on an
+	// hub.MAX_REQUEST_BODY_BYTES), and an inline playlist's cost downstream
+	// — JSON decode into a map, one JCS canonicalization of the document —
+	// scales with its size, so an unbounded frame from a remote controller or
+	// a compromised relayer is an unbounded memory and CPU spend. Same limit
+	// as the hub so both INLINE paths admit the same worst-case document; a
+	// URL fetch admits more (dp1.MaxPlaylistBodyBytes), deliberately, because
+	// it carries only a URL string over this frame and runs behind the
+	// command gate rather than at the hub's open door. gorilla returns ErrReadLimit on an
 	// oversized frame and the read loop reconnects, which is the right
 	// outcome for a peer that sends one.
 	conn.SetReadLimit(MAX_MESSAGE_BYTES)
@@ -543,7 +552,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 		conn.SetReadLimit(relaywire.MaxFrameBytes)
 		r.session = newDeviceSession(conn)
 		r.session.onDisconnect = r.peerDisconnected
-		r.v2ConnectedAt = time.Now()
+		r.v2ConnectedAt = r.clock.Now()
 	}
 	// Stage-0/1 observability (docs/wan-outage-observability.md): connection
 	// state is exported event-driven from the three lifecycle sites (here,
@@ -556,6 +565,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 		netmetrics.SetRelayerConnected(true)
 	} else {
 		netmetrics.SetRelayV2Connected(true)
+		r.v2Up.Store(true)
 	}
 	r.observeConn(true, 0)
 	r.Unlock()
@@ -1123,6 +1133,7 @@ func (r *relayer) closeConn() {
 		netmetrics.RecordRelayerDisconnect()
 	} else {
 		netmetrics.SetRelayV2Connected(false)
+		r.v2Up.Store(false)
 	}
 	r.observeConn(false, 0)
 	r.logger.Info("Relayer connection closed")

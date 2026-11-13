@@ -54,23 +54,154 @@ type CommandStormConfig struct {
 	MaxConcurrent int64 `json:"maxConcurrent"`
 }
 
-// SourceProbeConfig tunes the displayPlaylist source preflight (#304): the
-// probe that rejects a cast whose every item source is definitively dead.
-// Follows CommandStormConfig's optional-section + Disabled opt-out convention.
-//
-// The Disabled switch exists because the preflight turns a previously
-// always-accept command path into one that can REFUSE, based on a verdict
-// table (identity-independent 4xx = dead) whose accepted residual is an
-// origin that answers this probe a 4xx while still rendering in the kiosk —
-// a class the repo has shipped evidence of (see uarewrite). If that residual
-// materializes on the fleet, this flag is the remedy; without it the only
-// recovery is a package rollback. Same reasoning as uarewrite's operator-
-// editable host list: new hostile origin behavior should be a config edit,
-// not a release.
+// SourceProbeConfig is the RETIRED "sourceProbe" block of the former
+// cast-time preflight (#304), kept only so a fielded controld.json that sets
+// `sourceProbe.disabled` keeps its meaning: MediaHealthTuning reads it as
+// `mediaHealth.disabled` (the preflight is now the media-health pass) and
+// warns. Do not add fields; new tuning goes on MediaHealthConfig.
 type SourceProbeConfig struct {
-	// Disabled turns the cast-time source preflight off entirely (casts are
-	// forwarded unprobed, the pre-#304 behavior). Default (false) keeps it on.
 	Disabled bool `json:"disabled"`
+}
+
+// MediaHealthConfig tunes the device-side media observation store and its
+// L0 probe (feral-file/ffos-user#392, docs/media-health.md). Carried as RAW
+// bytes on Config and decoded permissively by MediaHealthTuning, for the
+// same reason as ContentPolicy: the block is optional and a hand-edited
+// typo must never crash-loop this recovery-critical daemon.
+type MediaHealthConfig struct {
+	// Disabled turns the whole feature off: no store, no cast-time pass (casts
+	// are forwarded unprobed, the pre-#304 behavior), no hints, no lookahead,
+	// no per-item status. The remedy if a verdict rule ever systematically
+	// misjudges an origin class on the fleet — a config edit, not a rollback.
+	Disabled bool `json:"disabled"`
+	// KnownBadPageMarkers are case-insensitive substrings that identify a
+	// gateway error page served with HTTP 200 (the indexer's
+	// known_bad_page_markers). Operator-editable: a new gateway quirk is an
+	// edit, not a release.
+	KnownBadPageMarkers []string `json:"knownBadPageMarkers,omitempty"`
+	// ProbeMaxBytes is the L0 window (default 32 KiB, the indexer's).
+	ProbeMaxBytes int `json:"probeMaxBytes,omitempty"`
+	// Lookahead: a negative value disables the during-play lookahead and
+	// the background sweep. (It once sized the lookahead's window; the
+	// lookahead now walks the whole wall, so a positive value is accepted
+	// and ignored.)
+	Lookahead int `json:"lookahead,omitempty"`
+	// CastItems is how many sources, in play order, the cast-time pass
+	// probes before leaving the rest to the lookahead (default 24); 0
+	// keeps the default. CastConcurrency is that pass's worker pool
+	// (default 4). Both are operator tuning for an origin that still
+	// rate-limits the defaults; the per-host cap (2 in flight) is fixed.
+	CastItems       int `json:"castItems,omitempty"`
+	CastConcurrency int `json:"castConcurrency,omitempty"`
+	// KioskObserverDisabled turns off the passive kiosk navigation
+	// observer (the daemon's own CDP session reporting each artwork
+	// frame's HTTP status to the store). The kill switch for the one
+	// media-health piece that holds a socket to the kiosk.
+	KioskObserverDisabled bool `json:"kioskObserverDisabled,omitempty"`
+	// IPFSGateways / ArweaveGateways are the ordered fallback gateways for
+	// content-addressed sources (defaults mediahealth.DefaultIPFSGateways /
+	// DefaultArweaveGateways): after the source's own gateway answers
+	// 404/410, they are tried one by one, at most two, with the kiosk's
+	// own request shape (no Range), and the first that serves is the one
+	// the kiosk loads the work through. https origins only; an operator
+	// switches them without a release — but only to a gateway seen to
+	// serve a WHOLE large file from a device (ar-io.dev meters them).
+	IPFSGateways    []string `json:"ipfsGateways,omitempty"`
+	ArweaveGateways []string `json:"arweaveGateways,omitempty"`
+	// L1 is the nightly render probe (docs/media-health.md §6): an
+	// experiment, absent or enabled=false means it never runs.
+	L1 *MediaHealthL1Config `json:"l1,omitempty"`
+	// WallCapture judges the wall's own frame as play evidence for an HTML
+	// work (docs/media-health.md, "Wall capture"): an experiment that
+	// screenshots the live kiosk, so absent or enabled=false means it never
+	// runs. It classifies with the l1 block's fingerprints and threshold.
+	WallCapture *MediaHealthWallCaptureConfig `json:"wallCapture,omitempty"`
+	// RenderConclusive lets a corroborated render negative — a blank or
+	// known-bad frame from the nightly render or the wall, agreed by an
+	// earlier night, another play or the other source — conclude broken:
+	// skipped, and counted toward rejecting an all-broken cast. Off (the
+	// default) keeps every render negative suspect, advisory. Turn it on
+	// only once the office fixture shows no false blanks among its healthy
+	// works: a false blank hides real art.
+	RenderConclusive bool `json:"renderConclusive,omitempty"`
+	// Malformed records that the block did not decode; every field then
+	// reads as its default.
+	Malformed bool `json:"-"`
+}
+
+// MediaHealthL1Config tunes the nightly render probe. Its verdicts are
+// reported to the app as `suspect` and never skip or reject anything, so
+// every knob here is about cost and sensitivity, never about playback.
+type MediaHealthL1Config struct {
+	// Enabled turns the probe on. Off by default: it renders untrusted
+	// pages in the headless browser while the panel sleeps.
+	Enabled bool `json:"enabled"`
+	// MaxPerNight caps renders per local calendar day (default 200).
+	MaxPerNight int `json:"maxPerNight,omitempty"`
+	// MinAsleepSeconds is how long the panel must have been confirmed
+	// asleep before the first render (default 120; negative = none); a
+	// wake restarts it, so a short manual nap never starts the headless
+	// browser.
+	MinAsleepSeconds int `json:"minAsleepSeconds,omitempty"`
+	// BlankVarianceThreshold is the per-channel variance below which a
+	// frame is blank (default 0.0001, measured on the wall's own frames —
+	// a decade under the indexer's 0.001, which called dark art blank);
+	// values outside (0, 0.25) keep the default.
+	BlankVarianceThreshold float64 `json:"blankVarianceThreshold,omitempty"`
+	// SettleMs / ConfirmSettleMs are the wait after navigation before the
+	// capture, for a first render and for the confirmation render of a
+	// blank (defaults 30000 / 45000: the headless browser paints on the
+	// CPU, so it gets longer than the indexer's GPU-backed 15000 / 30000).
+	SettleMs        int `json:"settleMs,omitempty"`
+	ConfirmSettleMs int `json:"confirmSettleMs,omitempty"`
+	// KnownBad lists fingerprints of renders that paint fine but are not
+	// the artwork (gateway error pages, placeholders): a frame within
+	// maxDistance (Hamming, 0-64; keep it small, 4-8) of one is suspect
+	// immediately. An entry that does not parse is logged and dropped.
+	KnownBad []MediaHealthFingerprint `json:"knownBad,omitempty"`
+}
+
+// MediaHealthWallCaptureConfig tunes the capture of the wall.
+type MediaHealthWallCaptureConfig struct {
+	// Enabled turns it on. Off by default: it screenshots the live kiosk.
+	Enabled bool `json:"enabled"`
+	// SettleMs is how long a work has been on screen before the capture
+	// (default 15000; the kiosk renders on its GPU, so it needs less than
+	// the nightly headless render's 30000).
+	SettleMs int `json:"settleMs,omitempty"`
+	// MaxEdge bounds the captured frame's longer edge in pixels (default
+	// 1024, the nightly render's viewport).
+	MaxEdge int `json:"maxEdge,omitempty"`
+}
+
+// MediaHealthFingerprint is one known-bad render: a 64-bit pHash as hex
+// (with or without 0x), a tolerance, and a label for the record.
+type MediaHealthFingerprint struct {
+	PHash       string `json:"phash"`
+	MaxDistance int    `json:"maxDistance"`
+	Label       string `json:"label"`
+}
+
+// MediaHealthTuning decodes the mediaHealth block, folding in the retired
+// sourceProbe.disabled switch. Absent means enabled with defaults.
+func (c *Config) MediaHealthTuning(logger *zap.Logger) MediaHealthConfig {
+	var t MediaHealthConfig
+	if len(c.MediaHealth) > 0 {
+		if err := json.Unmarshal(c.MediaHealth, &t); err != nil {
+			if logger != nil {
+				logger.Warn("mediaHealth config block malformed; using defaults",
+					zap.Error(err), zap.String("raw", string(c.MediaHealth)))
+			}
+			t = MediaHealthConfig{Malformed: true}
+		}
+	}
+	if c.SourceProbe != nil && c.SourceProbe.Disabled {
+		if logger != nil {
+			logger.Warn("sourceProbe.disabled is retired; read as mediaHealth.disabled")
+		}
+		t.Disabled = true
+	}
+	return t
 }
 
 // SignatureVerificationConfig tunes DP-1 playlist signature verification on
@@ -244,6 +375,9 @@ type Config struct {
 	EnableHub    *bool               `json:"enableHub"`
 	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
 	SourceProbe  *SourceProbeConfig  `json:"sourceProbe,omitempty"`
+	// MediaHealth is decoded permissively by MediaHealthTuning(); see
+	// MediaHealthConfig.
+	MediaHealth  json.RawMessage     `json:"mediaHealth,omitempty"`
 	OfflineCache *OfflineCacheConfig `json:"offlineCache,omitempty"`
 	Netlog       *NetlogConfig       `json:"netlog,omitempty"`
 	// ContentPolicy carries the operator-only unrated-archive audit gate as RAW
@@ -258,12 +392,6 @@ type Config struct {
 	// SignatureVerification is nil-safe: an absent section keeps
 	// verification on. Read via SignatureVerificationEnabled().
 	SignatureVerification *SignatureVerificationConfig `json:"signatureVerification,omitempty"`
-	// Raster carries the device's Raster read key as RAW bytes, decoded
-	// permissively by RasterTuning() — same treatment, and the same reason,
-	// as ContentPolicy above: the block is optional and hand-provisioned, and
-	// a wrong-typed value in it must cost a wallet cast its authentication,
-	// never crash-loop the daemon and take every recovery surface with it.
-	Raster json.RawMessage `json:"raster,omitempty"`
 	// GatewayUserAgent scopes the kiosk User-Agent rewrite (see the
 	// uarewrite package), carried as RAW bytes and decoded permissively by
 	// GatewayUserAgentTuning() — same treatment, and the same reason, as
@@ -342,19 +470,16 @@ type ControlConfig struct {
 	// Enabled decides only whether a device WITHOUT control state starts the
 	// protocol (creates its identity and offers invitations).
 	Enabled bool `json:"enabled"`
-	// Enforced is the §7.2 "enforced" switch (phase 2). It can only make a
-	// device stricter than enrolled, never less strict.
-	Enforced bool `json:"enforced"`
 	// Malformed records that the block (or one of its fields) did not
 	// decode; the affected fields read false.
 	Malformed bool `json:"-"`
 }
 
-// ControlTuning decodes the control block field by field, so one bad value
-// does not take the other with it. Absent means disabled and not enforced.
-// A malformed field reads false and sets Malformed: for Enabled that only
-// affects devices without control state, and for Enforced false is still
-// the enrolled policy, so both degrade safely.
+// ControlTuning decodes the control block field by field. Absent means
+// disabled. A malformed field reads false and sets Malformed: for Enabled
+// that only affects devices without control state, so it degrades safely.
+// Unknown keys are ignored: a stale "enforced" in an older controld.json
+// (the state was removed by feral-file#3551) still parses.
 func (c *Config) ControlTuning(logger *zap.Logger) ControlConfig {
 	var t ControlConfig
 	if len(c.Control) == 0 || string(c.Control) == "null" {
@@ -364,7 +489,7 @@ func (c *Config) ControlTuning(logger *zap.Logger) ControlConfig {
 	if err := json.Unmarshal(c.Control, &fields); err != nil {
 		t.Malformed = true
 	}
-	for name, dst := range map[string]*bool{"enabled": &t.Enabled, "enforced": &t.Enforced} {
+	for name, dst := range map[string]*bool{"enabled": &t.Enabled} {
 		raw, ok := fields[name]
 		if !ok {
 			continue
@@ -377,33 +502,6 @@ func (c *Config) ControlTuning(logger *zap.Logger) ControlConfig {
 	if t.Malformed && logger != nil {
 		logger.Error("control config block malformed; bad fields read as false (devices with control state keep enforcing it)",
 			zap.String("raw", string(c.Control)))
-	}
-	return t
-}
-
-// RasterConfig is the device's own credential for Raster (api.raster.art),
-// the token index ff-app's address playlists walk (feral-file#3576). The
-// playlist document never carries a key — it is cast and may be published —
-// so the device supplies this one as x-api-key on every wallet-walk request.
-type RasterConfig struct {
-	APIKey string `json:"apiKey"`
-}
-
-// RasterTuning decodes the raw raster block permissively: an absent block, or
-// one that decodes to the wrong shape, yields the zero value (no key, so the
-// walk runs unauthenticated and Raster decides) — see the Raster field for
-// why this must never fail the load. The raw block is NOT logged on a decode
-// failure, unlike ContentPolicyTuning's: it holds the credential.
-func (c *Config) RasterTuning(logger *zap.Logger) RasterConfig {
-	var t RasterConfig
-	if len(c.Raster) == 0 {
-		return t
-	}
-	if err := json.Unmarshal(c.Raster, &t); err != nil {
-		if logger != nil {
-			logger.Warn("raster config block malformed; Raster wallet walks run without an API key", zap.Error(err))
-		}
-		return RasterConfig{}
 	}
 	return t
 }

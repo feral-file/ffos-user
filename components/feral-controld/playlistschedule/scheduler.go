@@ -119,6 +119,24 @@ type Scheduler interface {
 	// document (a clone, verdict intact), or nil. The refresher prefers it
 	// over the player-status copy when the on-screen playlist id matches.
 	InlineDynamicSource() *dp1.Playlist
+	// SetRefreshSource retains the full refreshable source identity (URL or
+	// inline dynamic) behind the playlist with playlistID, independent of
+	// displayAt scheduling. A separate slot from source for the same reason
+	// inlineDynamic is one: PrepareWithSource only persists source into the
+	// scheduler's own field for a scheduled result (see its doc), so a
+	// recastForMode re-cast of an UNSCHEDULED series — which reaches the
+	// player as a static dp1_call with no playlistUrl/dynamicQuery of its
+	// own (see recastForMode's doc) — would otherwise leave the refresher
+	// with no trace of the original source at all (feralfile-bot F1 on PR
+	// #454, 2026-11-10 14:15). A later cast with a different id simply
+	// overwrites the one slot; call with a zero Source to clear it.
+	SetRefreshSource(playlistID string, source Source)
+	// RefreshSource returns the source last retained by SetRefreshSource if
+	// playlistID matches, else the zero Source. The id check keeps a
+	// retained source from a since-superseded cast (a different playlist,
+	// or default playback) from being reused for whatever is actually on
+	// screen now.
+	RefreshSource(playlistID string) Source
 	// AuthorityToken changes whenever scheduler-owned playlist authority
 	// changes. Refreshers snapshot it before slow URL/dynamic resolution and
 	// re-check under WithPlayerPush so stale refresh results cannot overwrite a
@@ -135,6 +153,8 @@ type Scheduler interface {
 	// SetProjector installs the content-policy projection applied to every
 	// scheduler-owned push. Optional; nil leaves pushes unprojected.
 	SetProjector(Projector)
+	// SetHintSource installs the media-health hint source for cutover pushes.
+	SetHintSource(fn HintSource)
 	// Stop latches shutdown and is not reversible: afterwards no recompute pass
 	// writes to the player and no new transition timer or push retry is armed.
 	// It returns without waiting for a CDP send that is already in flight; see
@@ -208,6 +228,10 @@ type scheduler struct {
 	// SetInlineDynamicSource). Guarded by mu; a separate slot from source so
 	// it outlives the non-displayAt source clear.
 	inlineDynamic *dp1.Playlist
+	// refreshSourceID/refreshSource: see SetRefreshSource's doc. Guarded by
+	// mu; a separate slot from source for the same reason inlineDynamic is.
+	refreshSourceID string
+	refreshSource   Source
 	// source tracks the refreshable identity for scheduler-owned pushes. The
 	// full cached playlist supplies future items; source keeps player status
 	// tied to the controller/refresher URL that can be re-resolved later.
@@ -233,7 +257,8 @@ type scheduler struct {
 
 	// projector re-applies the current content policy to every scheduler-owned
 	// push. Read under mu, called outside it (see Projector).
-	projector Projector
+	projector  Projector
+	hintSource HintSource
 
 	// stopped latches at Stop and gates player writes during shutdown.
 	// Canceling the timer contexts is not enough on its own: a timer or retry
@@ -302,6 +327,20 @@ func (s *scheduler) SetProjector(p Projector) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.projector = p
+}
+
+// HintSource returns the displayPlaylist `mediaHealth` argument for the
+// items about to be pushed (feral-file/ffos-user#392), or nil for none. The
+// scheduler's cutover pushes build their own command, so they carry the
+// hint the same way commandrouter's casts do; the value is opaque here.
+type HintSource func(items []dp1playlist.PlaylistItem) interface{}
+
+// SetHintSource installs the media-health hint source. Set once at wiring
+// time; nil sends no hints.
+func (s *scheduler) SetHintSource(fn HintSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hintSource = fn
 }
 
 func (s *scheduler) RestoredPending() bool {
@@ -865,6 +904,14 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	if source.PlaylistURL != "" {
 		command.Arguments["playlistUrl"] = source.PlaylistURL
 	}
+	s.mu.Lock()
+	hintSource := s.hintSource
+	s.mu.Unlock()
+	if hintSource != nil && playlist != nil {
+		if hints := hintSource(playlist.Items); hints != nil {
+			command.Arguments["mediaHealth"] = hints
+		}
+	}
 	payload, err := command.JSON()
 	if err != nil {
 		return fmt.Errorf("marshal displayAt playlist command: %w", err)
@@ -924,6 +971,22 @@ func (s *scheduler) InlineDynamicSource() *dp1.Playlist {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return clonePlaylist(s.inlineDynamic)
+}
+
+func (s *scheduler) SetRefreshSource(playlistID string, source Source) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshSourceID = playlistID
+	s.refreshSource = snapshotSource(source)
+}
+
+func (s *scheduler) RefreshSource(playlistID string) Source {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if playlistID == "" || s.refreshSourceID != playlistID {
+		return Source{}
+	}
+	return snapshotSource(s.refreshSource)
 }
 
 // HasDisplayAtSchedule reports whether a playlist carries at least one timed

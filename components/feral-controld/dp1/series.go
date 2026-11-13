@@ -141,17 +141,64 @@ var CATALOG_HOSTS = map[string]bool{
 	"art-catalog-service.bitmark-development.workers.dev": true,
 }
 
-// catalogEditions is the catalog's answer, of which only these two fields
-// are read: `items` is the editions and `total` says how many exist, which
-// is how a truncated expansion knows it was truncated.
+// SeriesArtworkModel is which of Feral File's three series shapes an item
+// resolved to, as the catalog's own `seriesArtworkModel` (art-catalog-
+// service's series-editions.ts) already decided it from every edition: a
+// `single` 1/1, a `multi` whose editions are identical copies of one work,
+// or a `multi_unique` whose editions genuinely differ. DP-1 names none of
+// these — it is Feral File's own distinction, read verbatim from the
+// catalog's answer rather than re-derived here.
 //
-// The answer's `series` block (the identity the catalog resolved
-// `contract.seriesId` to) is deliberately NOT read. Stamping it onto each
-// edition would let ff-player group the run — and its grouping default is
-// what makes that harmful; see the note on seriesEditions.
+// This is what NarrowEditions uses to decide whether `full`/`first` has
+// anything to choose between: a `single` or `multi` series has only ever
+// one artwork to show, so the config narrows to it regardless of the
+// resolved mode (see NarrowEditions). Only a `multi_unique` series — whose
+// editions are actually different artworks — makes `full` vs `first` a real
+// choice.
+type SeriesArtworkModel string
+
+const (
+	SeriesArtworkModelSingle      SeriesArtworkModel = "single"
+	SeriesArtworkModelMulti       SeriesArtworkModel = "multi"
+	SeriesArtworkModelMultiUnique SeriesArtworkModel = "multi_unique"
+)
+
+// hasDistinctEditions reports whether m's editions can legitimately differ
+// from one another, i.e. whether `full` vs `first` is a real choice rather
+// than two names for the same one artwork.
+//
+// An unrecognized or empty value — the catalog not stating the field at all
+// (a deployment older than this field, or a defensive/unresolved expansion
+// that never asked the catalog) — defaults to true: that is the behavior
+// this package already had before SeriesArtworkModel existed, so content the
+// catalog cannot yet tell us about keeps casting exactly as it does today
+// rather than silently collapsing to one edition.
+func (m SeriesArtworkModel) hasDistinctEditions() bool {
+	switch m {
+	case SeriesArtworkModelSingle, SeriesArtworkModelMulti:
+		return false
+	default:
+		return true
+	}
+}
+
+// catalogEditions is the catalog's answer. `items` is the editions and
+// `total` says how many exist, which is how a truncated expansion knows it
+// was truncated. `series.artworkModel` is read too, for NarrowEditions'
+// full/first-eligibility check (see SeriesArtworkModel) — but only that one
+// field of the `series` block.
+//
+// The rest of the answer's `series` block (the identity the catalog resolved
+// `contract.seriesId` to) is deliberately NOT read, and artworkModel is
+// never stamped onto the editions themselves. Doing either would let
+// ff-player group the run — and its grouping default is what makes that
+// harmful; see the note on seriesEditions.
 type catalogEditions struct {
-	Total int                        `json:"total"`
-	Items []dp1playlist.PlaylistItem `json:"items"`
+	Total  int                        `json:"total"`
+	Items  []dp1playlist.PlaylistItem `json:"items"`
+	Series struct {
+		ArtworkModel SeriesArtworkModel `json:"artworkModel"`
+	} `json:"series"`
 }
 
 // expandSeriesItems replaces every seriesRegistry item in playlist.Items
@@ -208,7 +255,7 @@ func (d *dp1) expandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 
 		default:
 			attempts++
-			if editions, err := d.seriesEditions(ctx, playlist.ID, item); err == nil && len(editions) > 0 {
+			if editions, _, err := d.seriesEditions(ctx, playlist.ID, item); err == nil && len(editions) > 0 {
 				d.logger.Info("expanded a series into its editions",
 					zap.String("playlist_id", playlist.ID),
 					zap.String("item_slug", item.Slug),
@@ -243,8 +290,9 @@ func (d *dp1) expandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 
 // ExpandSeriesItems is expandSeriesItems, exported for a caller outside this
 // package that already holds a decoded, static playlist it did not get from
-// ProcessPlaylistURL/ProcessPlaylistURLForCast/ProcessDynamicPlaylist(ForCast)
-// — see the DP1 interface doc for why those four need no separate call.
+// ProcessPlaylistURL/ProcessDynamicPlaylist — the non-cast variants; the
+// *ForCast variants narrow via resolveSeriesCastPlan instead and need no
+// separate call. See the DP1 interface doc.
 func (d *dp1) ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems int) Playlist {
 	return d.expandSeriesItems(ctx, playlist, maxItems)
 }
@@ -413,37 +461,37 @@ func inheritInstanceFields(item dp1playlist.PlaylistItem, editions []dp1playlist
 // unlabeled), stripping it off (rejected for now — it removes a true
 // provenance field to steer another component's default), and carrying the
 // publisher's `seriesPlayback` across the boundary (impossible today — no
-// dp1-go release has the field, absent in v0.6.2 and v0.7.1 alike). The
+// dp1-go release has the field). The
 // likeliest real fix is in the player's own default for an expanded run.
 // Pinned by TestDP1_AnEditionsOwnSeriesIDSurvivesExpansion.
-func (d *dp1) seriesEditions(ctx context.Context, playlistID string, item dp1playlist.PlaylistItem) ([]dp1playlist.PlaylistItem, error) {
+func (d *dp1) seriesEditions(ctx context.Context, playlistID string, item dp1playlist.PlaylistItem) ([]dp1playlist.PlaylistItem, SeriesArtworkModel, error) {
 	if playlistID == "" || item.ID == "" {
-		return nil, fmt.Errorf("series item has no playlist id and item id to resolve editions by")
+		return nil, "", fmt.Errorf("series item has no playlist id and item id to resolve editions by")
 	}
 
 	endpoint, err := buildCatalogEditionsURL(catalogBaseURL, playlistID, item.ID, seriesPageLimit)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	resp, err := d.httpClient.Get(endpoint)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("fetch series editions failed: %s", resp.Status)
+		return nil, "", fmt.Errorf("fetch series editions failed: %s", resp.Status)
 	}
 
 	body, err := d.io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var answer catalogEditions
 	if err := d.json.Unmarshal(body, &answer); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// The catalog has already merged each edition with its series item, so
@@ -461,7 +509,7 @@ func (d *dp1) seriesEditions(ctx context.Context, playlistID string, item dp1pla
 			zap.Int("editions", len(editions)),
 			zap.Int("total", answer.Total))
 	}
-	return editions, nil
+	return editions, answer.Series.ArtworkModel, nil
 }
 
 // buildCatalogEditionsURL is the catalog's editions route for one series

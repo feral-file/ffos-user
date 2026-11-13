@@ -22,18 +22,31 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
-	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 )
 
-// fakeSourceProber is a directly-controllable offlinecache.SourceProber
-// double: results is returned verbatim, probed records what was asked.
-type fakeSourceProber struct {
-	results []offlinecache.SourceProbeResult
+// fakeMediaHealth is a directly-controllable commandrouter.MediaHealth
+// double: results is returned verbatim, probed records what was asked, and
+// hints is handed back as the hint argument for every push (hinted records
+// what it was asked for).
+type fakeMediaHealth struct {
+	results []mediahealth.ProbeResult
 	probed  [][]string
+	hints   interface{}
+	hinted  [][]dp1playlist.PlaylistItem
 }
 
-func (f *fakeSourceProber) ProbeSources(_ context.Context, sources []string) []offlinecache.SourceProbeResult {
+func (f *fakeMediaHealth) HintArgument(items []dp1playlist.PlaylistItem) interface{} {
+	f.hinted = append(f.hinted, items)
+	return f.hints
+}
+
+func (f *fakeMediaHealth) Report([]dp1playlist.PlaylistItem, []int) ([]mediahealth.ReportItem, error) {
+	return nil, nil
+}
+
+func (f *fakeMediaHealth) Preflight(_ context.Context, sources []string) []mediahealth.ProbeResult {
 	f.probed = append(f.probed, sources)
 	return f.results
 }
@@ -59,16 +72,16 @@ func TestCommandHandler_Process_DisplayPlaylist_AllSourcesDead_RejectsCast(t *te
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/dead"), dp1.CastPlan{}, nil).
 		Times(1)
 	// No CDP Send and no ForceRefresh expectations: the rejection must
 	// happen before anything reaches the player.
 
-	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
-		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
+	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
+		{Source: "https://origin.example/dead", Verdict: mediahealth.VerdictDead, Status: 400},
 	}}
-	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+	commandrouter.SetMediaHealth(ts.handler, prober, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
 
@@ -115,10 +128,10 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadButCached_CastsForReplay(
 	expectDisplayPlaylistSuccess(ts, playlistURL,
 		probeTestPlaylist("https://origin.example/dead"))
 
-	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
-		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
+	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
+		{Source: "https://origin.example/dead", Verdict: mediahealth.VerdictDead, Status: 404},
 	}}
-	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+	commandrouter.SetMediaHealth(ts.handler, prober, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
 
@@ -162,15 +175,15 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedButScopeSyncFails_Rejects(
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/dead"), dp1.CastPlan{}, nil).
 		Times(1)
 	// No CDP Send expectation: the sync failure must stop the cast.
 
-	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
-		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
+	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
+		{Source: "https://origin.example/dead", Verdict: mediahealth.VerdictDead, Status: 404},
 	}}
-	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+	commandrouter.SetMediaHealth(ts.handler, prober, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
 
@@ -215,15 +228,15 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedButScopeArmsNothing_Reject
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/dead"), dp1.CastPlan{}, nil).
 		Times(1)
 	// No CDP Send expectation: an empty armed scope must stop the cast.
 
-	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
-		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
+	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
+		{Source: "https://origin.example/dead", Verdict: mediahealth.VerdictDead, Status: 404},
 	}}
-	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+	commandrouter.SetMediaHealth(ts.handler, prober, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
 
@@ -246,14 +259,14 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedButNoReplayWired_Rejects(t
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/dead"), dp1.CastPlan{}, nil).
 		Times(1)
 
-	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
-		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
+	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
+		{Source: "https://origin.example/dead", Verdict: mediahealth.VerdictDead, Status: 404},
 	}}
-	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+	commandrouter.SetMediaHealth(ts.handler, prober, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
 
@@ -281,14 +294,14 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadNotCached_StillRejects(t 
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/dead"), dp1.CastPlan{}, nil).
 		Times(1)
 
-	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
-		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
+	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
+		{Source: "https://origin.example/dead", Verdict: mediahealth.VerdictDead, Status: 404},
 	}}
-	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+	commandrouter.SetMediaHealth(ts.handler, prober, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
 
@@ -317,10 +330,10 @@ func TestCommandHandler_Process_DisplayPlaylist_Scheduled_SkipsPreflightEntirely
 	// the prober was never consulted.
 	expectDisplayPlaylistSuccess(ts, playlistURL, playlist)
 
-	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
-		{Source: "https://origin.example/premiere", Verdict: offlinecache.ProbeDead, Status: 404},
+	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
+		{Source: "https://origin.example/premiere", Verdict: mediahealth.VerdictDead, Status: 404},
 	}}
-	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+	commandrouter.SetMediaHealth(ts.handler, prober, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
 
@@ -330,33 +343,34 @@ func TestCommandHandler_Process_DisplayPlaylist_Scheduled_SkipsPreflightEntirely
 		"a scheduled playlist must not be probed at all — the verdict could never affect it, only delay it")
 }
 
-// TestCommandHandler_Process_DisplayPlaylist_OverItemBudget_SkipsPreflight
-// pins the #308-round-4 bound: past maxPreflightItems the preflight is
-// skipped before ANY per-item bookkeeping is built (fail open) — the
-// request and lookup caps already bounded network and disk work, and this
-// bounds the memory/CPU bookkeeping in front of them.
-func TestCommandHandler_Process_DisplayPlaylist_OverItemBudget_SkipsPreflight(t *testing.T) {
+// TestCommandHandler_Process_DisplayPlaylist_LargePlaylistIsProbed pins the
+// removal of the item cap (#392, large walls): the refresher re-resolves a
+// playlist with no item limit, so a large wall must be judged like any
+// other — the pass itself bounds the work (its first items only).
+func TestCommandHandler_Process_DisplayPlaylist_LargePlaylistIsProbed(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	items := make([]dp1playlist.PlaylistItem, commandrouter.MaxPreflightItemsForTest+1)
+	items := make([]dp1playlist.PlaylistItem, 2049)
 	for i := range items {
-		items[i] = dp1playlist.PlaylistItem{ID: fmt.Sprintf("i%d", i), Source: "https://origin.example/dead"}
+		items[i] = dp1playlist.PlaylistItem{ID: fmt.Sprintf("i%d", i), Source: fmt.Sprintf("https://origin.example/%d", i)}
 	}
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: items}}
 
 	playlistURL := "https://example.com/playlist.json"
 	expectDisplayPlaylistSuccess(ts, playlistURL, playlist)
 
-	prober := &fakeSourceProber{results: nil}
-	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+	// A pass answering NO results (impossible for the real Prober) must
+	// fail open, never read as "every item dead".
+	prober := &fakeMediaHealth{results: nil}
+	commandrouter.SetMediaHealth(ts.handler, prober, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
 
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
-	assert.Empty(t, prober.probed,
-		"an over-budget playlist must not be probed at all — fail open before any per-item state")
+	require.Len(t, prober.probed, 1, "the pass ran once")
+	assert.Len(t, prober.probed[0], 2049, "no item cap in front of the pass")
 }
 
 // TestCommandHandler_Process_DisplayPlaylist_RejectionSkipsReplayResync pins
@@ -377,14 +391,14 @@ func TestCommandHandler_Process_DisplayPlaylist_RejectionSkipsReplayResync(t *te
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(probeTestPlaylist("https://origin.example/dead"), nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(probeTestPlaylist("https://origin.example/dead"), dp1.CastPlan{}, nil).
 		Times(1)
 
-	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
-		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
+	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
+		{Source: "https://origin.example/dead", Verdict: mediahealth.VerdictDead, Status: 404},
 	}}
-	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+	commandrouter.SetMediaHealth(ts.handler, prober, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
 
@@ -398,11 +412,11 @@ func TestCommandHandler_Process_DisplayPlaylist_RejectionSkipsReplayResync(t *te
 // stands in, and no source URL appears no matter how many results ride
 // the error.
 func TestSourceUnreachableError_CapsAndSanitizesDetail(t *testing.T) {
-	results := make([]offlinecache.SourceProbeResult, 15)
+	results := make([]mediahealth.ProbeResult, 15)
 	for i := range results {
-		results[i] = offlinecache.SourceProbeResult{
+		results[i] = mediahealth.ProbeResult{
 			Source:  "https://origin.example/signed?token=secret",
-			Verdict: offlinecache.ProbeDead,
+			Verdict: mediahealth.VerdictDead,
 			Status:  404,
 		}
 	}
@@ -424,11 +438,11 @@ func TestCommandHandler_Process_DisplayPlaylist_PartiallyDead_StillCasts(t *test
 	expectDisplayPlaylistSuccess(ts, playlistURL,
 		probeTestPlaylist("https://origin.example/dead", "https://origin.example/alive"))
 
-	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
-		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 404},
-		{Source: "https://origin.example/alive", Verdict: offlinecache.ProbeAlive, Status: 200},
+	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
+		{Source: "https://origin.example/dead", Verdict: mediahealth.VerdictDead, Status: 404},
+		{Source: "https://origin.example/alive", Verdict: mediahealth.VerdictAlive, Status: 200},
 	}}
-	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+	commandrouter.SetMediaHealth(ts.handler, prober, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
 
@@ -450,11 +464,11 @@ func TestCommandHandler_Process_DisplayPlaylist_AllInconclusive_FailsOpen(t *tes
 		probeTestPlaylist("https://origin.example/one", "https://origin.example/two"))
 
 	probeErr := errors.New("dial tcp: network is unreachable")
-	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
-		{Source: "https://origin.example/one", Verdict: offlinecache.ProbeInconclusive, Err: probeErr},
-		{Source: "https://origin.example/two", Verdict: offlinecache.ProbeInconclusive, Err: probeErr},
+	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
+		{Source: "https://origin.example/one", Verdict: mediahealth.VerdictInconclusive, Err: probeErr},
+		{Source: "https://origin.example/two", Verdict: mediahealth.VerdictInconclusive, Err: probeErr},
 	}}
-	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+	commandrouter.SetMediaHealth(ts.handler, prober, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
 
@@ -508,19 +522,19 @@ func TestCommandHandler_Process_DisplayPlaylist_InlineDP1Call_AllDead_RejectsCas
 			return nil
 		}).
 		Times(1)
-	// Static dp1_call: Process expands series items by hand before the
+	// Static dp1_call: Process resolves series items by hand before the
 	// source preflight runs (see handler.go). mockPlaylist has none, so echo
-	// it back.
+	// it back as plain segments.
 	ts.mockDP1.EXPECT().
-		ExpandSeriesItems(ts.ctx, *mockPlaylist, dp1.CAST_PLAYLIST_ITEMS_LIMIT).
-		Return(*mockPlaylist).
+		ResolveSeriesCastPlan(ts.ctx, *mockPlaylist, gomock.Any(), gomock.Any(), dp1.CAST_PLAYLIST_ITEMS_LIMIT).
+		DoAndReturn(passthroughCastPlan).
 		Times(1)
 	// No CDP Send / ForceRefresh expectations: the rejection precedes both.
 
-	prober := &fakeSourceProber{results: []offlinecache.SourceProbeResult{
-		{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
+	prober := &fakeMediaHealth{results: []mediahealth.ProbeResult{
+		{Source: "https://origin.example/dead", Verdict: mediahealth.VerdictDead, Status: 400},
 	}}
-	commandrouter.SetSourceProber(ts.handler, prober, ts.logger)
+	commandrouter.SetMediaHealth(ts.handler, prober, ts.logger)
 
 	command := commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,

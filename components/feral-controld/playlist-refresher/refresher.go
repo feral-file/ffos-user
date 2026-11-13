@@ -157,6 +157,10 @@ type refresher struct {
 	// already cleared the slot), and the new generation's reconciliation
 	// establishes a fresh verdict. Mirrors commandrouter.sendCDPRequest.
 	sessionGeneration func() uint64
+
+	// mediaHealthHints, when set (SetMediaHealthHints), supplies the
+	// per-item hint argument for every send.
+	mediaHealthHints func(items []dp1playlist.PlaylistItem) interface{}
 }
 
 // SetSessionGeneration injects the generation getter onto r, if r is the
@@ -204,6 +208,40 @@ func (r *refresher) setSignatureVerification(active *sigverify.Active) {
 func SetContentPolicy(r Refresher, policy *contentpolicy.Store) {
 	if target, ok := r.(*refresher); ok {
 		target.contentPolicy = policy
+	}
+}
+
+// SetMediaHealthHints installs the media-health hint source
+// (feral-file/ffos-user#392) onto r, if r is the concrete refresher built by
+// New. Every displayPlaylist the refresher sends — soft refresh and force
+// cast alike — carries the `mediaHealth` argument the source returns for the
+// items being pushed, or none. Must be called before Start; nil sends no
+// hints.
+func SetMediaHealthHints(r Refresher, fn func(items []dp1playlist.PlaylistItem) interface{}, logger *zap.Logger) {
+	setter, ok := r.(interface {
+		setMediaHealthHints(func(items []dp1playlist.PlaylistItem) interface{})
+	})
+	if !ok {
+		logger.Warn("Playlist refresher does not support media health wiring")
+		return
+	}
+	setter.setMediaHealthHints(fn)
+}
+
+func (r *refresher) setMediaHealthHints(fn func(items []dp1playlist.PlaylistItem) interface{}) {
+	r.mediaHealthHints = fn
+}
+
+// attachMediaHealthHints sets args["mediaHealth"] for playlist, or leaves
+// it absent. Called on every refresher send immediately before the CDP
+// write, on the final item list.
+func (r *refresher) attachMediaHealthHints(args map[string]interface{}, playlist *dp1.Playlist) {
+	delete(args, "mediaHealth")
+	if r.mediaHealthHints == nil || playlist == nil {
+		return
+	}
+	if hints := r.mediaHealthHints(playlist.Items); hints != nil {
+		args["mediaHealth"] = hints
 	}
 }
 
@@ -522,6 +560,23 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				}
 			}
 		case playerStatus.Playlist != nil:
+			// recastForMode's internal re-cast (feral-file/ffos-user#454)
+			// rebuilds the on-screen document as a static dp1_call with its
+			// original playlistUrl/dynamicQuery markers stripped (see
+			// recastForMode's doc), so an otherwise-correct "nothing
+			// refreshable" static document must not be assumed before
+			// checking for a source retained behind this SAME id — a
+			// retained source from a since-superseded cast (a different
+			// playlist, or default playback) is never reused, because
+			// RefreshSource only returns non-zero for a matching id
+			// (feralfile-bot F1 on PR #454, 2026-11-10 14:15).
+			if r.scheduler != nil {
+				if retained := r.scheduler.RefreshSource(playerStatus.Playlist.ID); !retained.IsZero() {
+					contextUnknown = retained.ContentContext == ""
+					schedulerSource = retained
+					break
+				}
+			}
 			// Static inline player status only contains the filtered active set and
 			// no refreshable source identity, so it cannot rebuild future items.
 			r.logger.Debug("Playlist has no dynamic queries, skipping CDP resend")
@@ -697,6 +752,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	if retireBlockedCurrent {
 		args["retireBlockedCurrent"] = true
 	}
+	r.attachMediaHealthHints(args, playlist)
 	command := commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
 		Arguments: args,
@@ -786,6 +842,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		} else {
 			command.Arguments["dp1_call"] = playlist
 		}
+		r.attachMediaHealthHints(command.Arguments, playlist)
 		// Invalidate BEFORE the send (#307): from the moment it lands the
 		// player may show the new document, and the status poller could
 		// match the previous one by URL before the reply is processed. A
@@ -937,6 +994,7 @@ func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext strin
 	if retire {
 		command.Arguments["retireBlockedCurrent"] = true
 	}
+	r.attachMediaHealthHints(command.Arguments, &out)
 
 	// Serialized against every other authoritative display, exactly like the
 	// ordinary refresh send below. This re-send is built from a status read

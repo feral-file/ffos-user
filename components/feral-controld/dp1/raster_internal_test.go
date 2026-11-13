@@ -297,12 +297,12 @@ func TestRasterWalk_OrderIsTheAppsWhateverRasterReturns(t *testing.T) {
 	}
 	want := []string{"w-1-9", "w-c-1", "w-b-1", "w-a-1", "w-2-9", "w-2-10"}
 
-	forward := &dp1{rasterHTTP: &pagedHTTP{bodies: []string{walkPage(false, "", nodes...)}}, logger: zap.NewNop()}
+	forward := &dp1{httpClient: &pagedHTTP{bodies: []string{walkPage(false, "", nodes...)}}, logger: zap.NewNop()}
 	assert.Equal(t, want, walkTitles(t, forward, 0), "work id compares as a string, as the app's does: :9 sorts above :10")
 
 	reversed := append([]string(nil), nodes...)
 	slices.Reverse(reversed)
-	backward := &dp1{rasterHTTP: &pagedHTTP{bodies: []string{walkPage(false, "", reversed...)}}, logger: zap.NewNop()}
+	backward := &dp1{httpClient: &pagedHTTP{bodies: []string{walkPage(false, "", reversed...)}}, logger: zap.NewNop()}
 	assert.Equal(t, want, walkTitles(t, backward, 0), "the same wallet in any page order resolves identically")
 }
 
@@ -314,7 +314,7 @@ func TestRasterWalk_CapReadsOnThroughATieGroup(t *testing.T) {
 		walkPage(true, "c1", walkNode("1", "1", t3), walkNode("a", "1", t2)),
 		walkPage(true, "c2", walkNode("f", "1", t2), walkNode("2", "1", t1)),
 	}}
-	d := &dp1{rasterHTTP: fake, logger: zap.NewNop()}
+	d := &dp1{httpClient: fake, logger: zap.NewNop()}
 	assert.Equal(t, []string{"w-1-1", "w-f-1"}, walkTitles(t, d, 2),
 		"the tied 0xfff… token from page two outranks page one's 0xaaa…")
 	assert.Equal(t, 2, fake.calls, "page two ends older than the cap item, so the walk stops there")
@@ -324,7 +324,7 @@ func TestRasterWalk_CapStopsWhenThePageEndsOlder(t *testing.T) {
 	fake := &pagedHTTP{bodies: []string{
 		walkPage(true, "c1", walkNode("1", "1", t3), walkNode("a", "1", t2), walkNode("b", "1", t1)),
 	}}
-	d := &dp1{rasterHTTP: fake, logger: zap.NewNop()}
+	d := &dp1{httpClient: fake, logger: zap.NewNop()}
 	assert.Equal(t, []string{"w-1-1", "w-a-1"}, walkTitles(t, d, 2))
 	assert.Equal(t, 1, fake.calls, "nothing unread can make the cut, so no second request")
 }

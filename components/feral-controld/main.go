@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"net/http"
 	go_os "os"
 	"strings"
@@ -37,6 +36,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/netlog"
@@ -50,6 +50,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
+	"github.com/feral-file/ffos-user/components/feral-controld/seriesplayback"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 	"github.com/feral-file/ffos-user/components/feral-controld/softap"
@@ -126,12 +127,27 @@ type app struct {
 	// bug it fixes has nothing to do with caching, so it must run on a
 	// device with offlineCache off. Nil only when explicitly disabled via
 	// gatewayUserAgent.enabled=false, or when its policy failed to build.
-	UARewrite   *uarewrite.Interceptor
-	Hub         hub.Hub
-	LinkChecker *status.LinkChecker
+	UARewrite *uarewrite.Interceptor
+	// MediaHealthObserver reports the kiosk's artwork-frame navigations
+	// (their HTTP status) to the media-health store over its own passive
+	// CDP session (#392). Nil when media health or the observer is
+	// disabled. Re-attached on every kiosk reconnect like UARewrite, and
+	// closed with it.
+	MediaHealthObserver *offlinecache.KioskNavigationObserver
+	Hub                 hub.Hub
+	LinkChecker         *status.LinkChecker
 	// Netlog is the WAN-outage flight recorder; nil when disabled by config,
 	// unavailable (ring open failed), or in the test app.
 	Netlog *netlog.Recorder
+	// MediaHealth owns the per-device observation store (bbolt). Nil when
+	// disabled by config, when the store failed to open, or in the test
+	// app. Closed by run() LAST (its defer is registered first): the status
+	// poller, the lookahead worker and the command router all write to it
+	// until they stop. It used to be closed by a defer inside
+	// initializeApp, i.e. before run started — every read and write then
+	// failed with "database not open" and the feature was silently inert
+	// (PR #438 review, round 3, F11).
+	MediaHealth *mediahealth.Service
 
 	// StateLoadKnown records whether run()'s state.Load succeeded (false =
 	// the persisted state was unreadable and quarantined). The provisioning
@@ -296,6 +312,16 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 
 	// Start watchdog
 	app.Watchdog.Start(ctx)
+	// Registered before every other closer so it runs after them: the store
+	// must outlive the status poller, the lookahead worker and the command
+	// router, which write to it until they stop (see app.MediaHealth).
+	if app.MediaHealth != nil {
+		defer func() {
+			if err := app.MediaHealth.Close(); err != nil {
+				app.Logger.Warn("media health: store close failed", zap.Error(err))
+			}
+		}()
+	}
 	defer app.Watchdog.Stop()
 
 	// Initialize DBus client. NON-FATAL: controld is the sole SoftAP/LAN
@@ -648,6 +674,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 				app.Logger.Warn("Failed to arm kiosk User-Agent rewrite", zap.Error(err))
 			}
 		}
+
+		// The media-health navigation observer owns a kiosk session too,
+		// and loses it on the same restarts. Passive (Network events only),
+		// so a failure here costs observations, never playback.
+		if app.MediaHealthObserver != nil {
+			if err := app.MediaHealthObserver.AttachOnReconnect(ctx); err != nil {
+				app.Logger.Warn("Failed to attach the media-health navigation observer to the kiosk", zap.Error(err))
+			}
+		}
 	})
 	defer app.CDP.Close()
 
@@ -667,6 +702,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		}
 		if err := app.UARewrite.Close(); err != nil {
 			app.Logger.Warn("Failed to close kiosk User-Agent rewrite session", zap.Error(err))
+		}
+	}()
+	// Same ownership rule for the navigation observer's session.
+	defer func() {
+		if app.MediaHealthObserver == nil {
+			return
+		}
+		if err := app.MediaHealthObserver.Close(); err != nil {
+			app.Logger.Warn("Failed to close the media-health navigation observer session", zap.Error(err))
 		}
 	}()
 
@@ -979,6 +1023,10 @@ func initializeApp(
 	// Components
 	// CDP
 	cdp := cdp.New(cdpEndpoint, webSocketDialer, io, json, httpClient, logger)
+	// One kiosk screenshot capturer: the hub's /api/screenshot and the media
+	// health wall capture share its single flight, so they never capture at
+	// once.
+	kioskCapturer := screenshot.NewKiosk(cdpEndpoint, httpClient, webSocketDialer)
 
 	// Relayer
 	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, os, json, logger)
@@ -1052,14 +1100,7 @@ func initializeApp(
 	if !sigVerifyEnabled {
 		logger.Warn("DP-1 signature verification disabled by config; casts carry no signature verdict")
 	}
-	// Raster read key for address-playlist wallet walks (feral-file#3576).
-	// Absent means the walk runs unauthenticated; whether Raster then answers
-	// is Raster's call, so say so once at startup rather than per cast.
-	rasterCfg := config.Get().RasterTuning(logger)
-	if rasterCfg.APIKey == "" {
-		logger.Warn("raster.apiKey not configured; Raster wallet casts run unauthenticated")
-	}
-	dp1 := dp1.New(ffIndexer, httpClient, dp1.NewRasterHTTPClient(), json, io, logger, debug, sigVerifyEnabled, rasterCfg.APIKey)
+	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug, sigVerifyEnabled)
 
 	// displayAt scheduler: filters playlists with displayAt items before CDP
 	// and advances them on timer / wake / CDP reconnect. Durable state stores
@@ -1126,12 +1167,23 @@ func initializeApp(
 	// mirror mintPairing's so the rest of the daemon behaves exactly as
 	// before this feature existed.
 	var offlineCache offlinecache.Service
+	// playbackObservers collects every consumer of the status poller's
+	// per-poll playback snapshot (the automatic playback cache, media
+	// health); one combined observer is installed below, before the poller
+	// starts.
+	var playbackObservers []func(*status.PlayerStatus)
+	// internetObservers collects every consumer of the mediator's applied
+	// internet verdict (the netlog recorder, media health); the mediator has
+	// ONE observer seam, so a fan-out is installed once below.
+	var internetObservers []func(connected bool)
 	var kioskReplay offlinecache.KioskReplay
 	var offlineCacheScopeLost offlinecache.ScopeLostRegistrar
 	var offlineCacheStaticServer offlinecache.StaticServer
 	var offlineCacheNotifier *offlinecache.Notifier
 	var offlineCacheSysMetricsSink func(raw []byte)
 	var offlineCacheChanged func(func())
+	var offlineCacheRendererFactory func(offlinecache.MediaHealthRouting) mediahealth.Renderer
+	var offlineCacheAdmission offlinecache.AdmissionController
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
 		ocRuntime := offlinecache.Bootstrap(
@@ -1145,8 +1197,10 @@ func initializeApp(
 		offlineCacheNotifier = ocRuntime.Notifier
 		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
 		offlineCacheChanged = ocRuntime.SetCacheChanged
+		offlineCacheRendererFactory = ocRuntime.NewMediaHealthRenderer
+		offlineCacheAdmission = ocRuntime.Admission
 		if ocRuntime.ObservePlayback != nil {
-			status.SetPlaybackObserver(poller, func(st *status.PlayerStatus) {
+			playbackObservers = append(playbackObservers, func(st *status.PlayerStatus) {
 				if st == nil || (st.Command != string(commands.CMD_DISPLAY_PLAYLIST) && st.Command != string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST)) || st.Items == nil || st.Index == nil {
 					ocRuntime.ObservePlayback(nil, 0, false)
 					return
@@ -1173,6 +1227,9 @@ func initializeApp(
 	// headless device this log is the only place the operator's mistake
 	// is visible at all.
 	var uaRewrite *uarewrite.Interceptor
+	// uaPolicy is the same policy, kept for the media health probe so it
+	// dials the wire the kiosk would (nil when the rewrite is off).
+	var uaPolicy *uarewrite.Policy
 	if gatewayUserAgentConfig.IsEnabled() {
 		var uaHosts []string
 		var uaAgent, uaGateway string
@@ -1192,6 +1249,7 @@ func initializeApp(
 			logger.Error("Invalid gatewayUserAgent config; kiosk User-Agent rewrite disabled",
 				zap.Error(err))
 		} else {
+			uaPolicy = policy
 			uaRewrite = uarewrite.NewInterceptor(
 				policy, cdpEndpoint, httpClient, webSocketDialer, json, io, clock, logger,
 			)
@@ -1215,27 +1273,134 @@ func initializeApp(
 	// to re-resolve what is on screen, or the Content screen reports success
 	// while the display stays on the previous projection until the periodic
 	// refresh.
-	// Cast-time source preflight (#304): a displayPlaylist whose every item
-	// source definitively answers an HTTP error is rejected at accept time
-	// instead of being forwarded and self-reported as playing. Wired against
-	// the raw handler before NewGate wraps it (SetSourceProber's contract),
-	// and independently of whether the offline cache is enabled. The
-	// sourceProbe.disabled config flag is the runtime kill switch: the
-	// preflight can REFUSE the device's primary function, so an origin class
-	// that answers this probe dead while still rendering in the kiosk must be
-	// recoverable by a config edit, not a package rollback (see
-	// config.SourceProbeConfig). net.DefaultResolver for the same reason the
-	// offline cache's classifier uses it: the guard's view of a name must
-	// match what would actually be dialed (see offlinecache.ErrUnsafeSource).
-	if sp := config.Get().SourceProbe; sp != nil && sp.Disabled {
-		logger.Warn("displayPlaylist source preflight disabled by config; casts are forwarded unprobed")
+	// Series-playback device override (feral-file/ffos-user#425): same
+	// durable-file location/pattern as content policy, but no player
+	// acknowledgement to await — see seriesplayback's package doc.
+	seriesPlaybackStore, seriesPlaybackErr := seriesplayback.Open(constants.SERIES_PLAYBACK_FILE)
+	if seriesPlaybackErr != nil {
+		logger.Error("series playback setting store unreadable; following each document's own intent until a durable update succeeds",
+			zap.Error(seriesPlaybackErr))
+		seriesPlaybackStore = seriesplayback.Fallback(constants.SERIES_PLAYBACK_FILE)
+	}
+	commandrouter.SetSeriesPlayback(rawCmdHandler, seriesPlaybackStore, logger)
+	// player_status also carries the device's current series-playback
+	// override (ffos-user#425 follow-up), passively — not only via an
+	// explicit getSeriesPlayback query. One getter, read from rawCmdHandler's
+	// own store and reused for both status surfaces exactly like
+	// buildOverlaySource below, so the poller's push loop and this package's
+	// own direct checkStatus reply can never disagree.
+	if seriesPlaybackSource, ok := commandrouter.SeriesPlaybackSource(rawCmdHandler); ok {
+		poller.SetSeriesPlaybackSource(seriesPlaybackSource)
 	} else {
-		commandrouter.SetSourceProber(rawCmdHandler, offlinecache.NewSourceProber(net.DefaultResolver), logger)
+		logger.Warn("Command handler does not support series playback status wiring")
+	}
+	// Media health (#304, #392, docs/media-health.md): the cast-time L0 pass
+	// replaces the former source preflight — a displayPlaylist whose every
+	// item source definitively answers dead is still rejected at accept time
+	// — and additionally records every verdict in the device's observation
+	// store, hints the player past conclusively broken items, probes ahead
+	// during play, and annotates player_status per item. Wired against the
+	// raw handler before NewGate wraps it (SetMediaHealth's contract), and
+	// independently of whether the offline cache is enabled (the fetcher
+	// lives there, the feature does not). mediaHealth.disabled is the
+	// runtime kill switch, for the same reason the preflight had one: the
+	// pass can REFUSE the device's primary function, so a verdict rule that
+	// misjudges an origin class on the fleet must be recoverable by a config
+	// edit, not a package rollback.
+	// mediaHealthOnline mirrors the mediator's applied internet verdict for
+	// the media health service (false until the first verdict is applied:
+	// "unknown" must not blame a source). Fed through the internet-observer
+	// fan-out installed after the netlog recorder below, which shares the
+	// mediator's single observer seam.
+	var mediaHealthOnline atomic.Bool
+	internetObservers = append(internetObservers, func(connected bool) { mediaHealthOnline.Store(connected) })
+	// A source the offline cache can replay is never hinted (the hint would
+	// hide what replay interception could show); the check is the same one
+	// the cast rescue uses, and only counts when kiosk replay is wired.
+	var mediaHealthReplayable func(string) bool
+	if offlineCache != nil && kioskReplay != nil {
+		mediaHealthReplayable = func(source string) bool { return offlineCache.HasReplayableItem(source) }
+	}
+	mediaHealthCfg := config.Get().MediaHealthTuning(logger)
+	// The probe sends the kiosk's own User-Agent (kiosk_useragent.go), read
+	// from the kiosk's DevTools endpoint for the app's lifetime.
+	kioskUA := newKioskUserAgent(cdpEndpoint, logger)
+	go kioskUA.Run(context)
+	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, uaRewrite != nil, kioskUA.Get, mediaHealthOnline.Load, mediaHealthReplayable, newHintSender(cdp.Send, session.Generation), logger)
+	var mediaHealthObserver *offlinecache.KioskNavigationObserver
+	if mediaHealthSvc != nil && !mediaHealthCfg.KioskObserverDisabled {
+		mediaHealthObserver = offlinecache.NewKioskNavigationObserver(cdpEndpoint, httpClient, webSocketDialer, json, io, mediaHealthSvc, logger)
+	}
+	if mediaHealthSvc != nil && uaRewrite != nil {
+		// The kiosk loads a content-addressed work through the gateway the
+		// probe found serving it, so the verdict and the wall agree (#392,
+		// gateway fallback). Installed before the interceptor's first
+		// attach (run()'s onConnect hook).
+		gateways := mediahealth.NewGateways(mediaHealthCfg.IPFSGateways, mediaHealthCfg.ArweaveGateways)
+		uaRewrite.SetGatewayOverride(mediaHealthSvc.GatewayOverride, uarewrite.OverrideFetchPatterns(gateways.ArweaveHosts()))
+	}
+	if mediaHealthSvc != nil {
+		commandrouter.SetMediaHealth(rawCmdHandler, mediaHealthSvc, logger)
+		playlistScheduler.SetHintSource(mediaHealthSvc.HintArgument)
+		status.SetItemHealthSource(poller, mediaHealthSvc.ItemHealths)
+		executor.SetMediaHealthResetter(mediaHealthSvc.Reset)
+		playbackObservers = append(playbackObservers, func(st *status.PlayerStatus) {
+			if st == nil || (st.Command != string(commands.CMD_DISPLAY_PLAYLIST) && st.Command != string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST)) || st.Items == nil || st.Index == nil {
+				mediaHealthSvc.ObservePlayback(nil, 0, nil, nil)
+				return
+			}
+			mediaHealthSvc.ObservePlayback(*st.Items, *st.Index, st.RenderStatus, st.Outcomes)
+		})
+		if mediaHealthLookahead != nil {
+			go mediaHealthLookahead.Run(context)
+		}
+		// L1, the nightly render probe: an experiment behind
+		// mediaHealth.l1.enabled, off by default. It needs the offline
+		// cache's headless browser (its renderer) and runs only while
+		// the panel is asleep by devicectl's own tracker.
+		var admit func() bool
+		if offlineCacheAdmission != nil {
+			admit = func() bool { return offlineCacheAdmission.Admit(offlinecache.ClassSoftware).Allowed }
+		}
+		// The renderer routes every request exactly as the kiosk's
+		// interceptor does (gateway policy, the store's recorded fallback,
+		// the bare-CID rule), so the page L1 judges is the one the wall
+		// shows; all of it only when that interceptor is installed. Same
+		// typed-nil guard as wireMediaHealth.
+		var renderer mediahealth.Renderer
+		if offlineCacheRendererFactory != nil {
+			var routing offlinecache.MediaHealthRouting
+			if uaRewrite != nil && uaPolicy != nil {
+				routing = offlinecache.MediaHealthRouting{Policy: uaPolicy, Override: mediaHealthSvc.GatewayOverride, SlashBareCID: true}
+			}
+			renderer = offlineCacheRendererFactory(routing)
+		}
+		if l1 := wireMediaHealthL1(config.Get().MediaHealthTuning(logger), mediaHealthSvc.Store(), renderer,
+			func() (time.Time, bool) { return devicectl.PlayerAsleepSince(executor) }, admit, logger); l1 != nil {
+			go l1.Run(context)
+		}
+		// The wall capture: the wall's own frame as play evidence for an
+		// HTML work. Attached before the poller's first observation.
+		if wc := wireWallCapture(config.Get().MediaHealthTuning(logger), mediaHealthSvc, kioskCapturer,
+			func() bool { _, asleep := devicectl.PlayerAsleepSince(executor); return asleep }, logger); wc != nil {
+			mediaHealthSvc.SetWallCapture(wc)
+			go wc.Run(context)
+		}
+		if mediaHealthPusher != nil {
+			go mediaHealthPusher.Run(context)
+		}
+	}
+	if len(playbackObservers) > 0 {
+		status.SetPlaybackObserver(poller, func(st *status.PlayerStatus) {
+			for _, observe := range playbackObservers {
+				observe(st)
+			}
+		})
 	}
 	// Signature verification wiring: the same Active slot feeds the raw
 	// handler (writes on cast), the refresher (writes on re-push, below)
 	// and the status poller (reads on every poll). Wired against the raw
-	// handler for the same reason as SetSourceProber above.
+	// handler for the same reason as SetMediaHealth above.
 	activeVerdict := &sigverify.Active{}
 	if sigVerifyEnabled {
 		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict}, logger)
@@ -1278,6 +1443,9 @@ func initializeApp(
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
+	if mediaHealthSvc != nil {
+		playlist_refresher.SetMediaHealthHints(playlistRefresher, mediaHealthSvc.HintArgument, logger)
+	}
 	if offlineCacheChanged != nil {
 		offlineCacheChanged(playlistRefresher.ForceRefresh)
 	}
@@ -1286,6 +1454,14 @@ func initializeApp(
 	// The owner's content policy falls with the claim on a factory reset, for
 	// the same rollback reason the device name does (see factoryReset).
 	executor.SetContentPolicyResetter(func() error {
+		// The owner's series-playback override falls with the claim on a
+		// factory reset too, for the same rollback reason content policy's
+		// does. Both run under this one callback — devicectl.Executor holds
+		// a single resetter slot, not a list — so the device name's claim
+		// cannot roll back only one of a device's two owner settings.
+		if err := commandrouter.ResetSeriesPlayback(rawCmdHandler); err != nil {
+			logger.Error("factory reset: series playback setting could not be reset", zap.Error(err))
+		}
 		return commandrouter.ResetContentPolicy(rawCmdHandler)
 	})
 	if sigVerifyEnabled {
@@ -1317,6 +1493,23 @@ func initializeApp(
 	// Mediator
 	mediator := mediator.New(context, relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, json, logger)
 
+	// An online edge also restarts the v2 carrier's redial backoff (see
+	// mediator.SetRelayV2Waker). Wired whenever this device carries v2,
+	// independent of the netlog recorder that owns SetInternetObserver.
+	if controlWire != nil && controlWire.v2 != nil {
+		waker, okWaker := controlWire.v2.(interface{ WakeV2() })
+		sink, okSink := mediator.(interface{ SetRelayV2Waker(func()) })
+		if okWaker && okSink {
+			sink.SetRelayV2Waker(waker.WakeV2)
+		} else {
+			// Both are this module's own types; a miss means a rename broke
+			// the seam and v2 is back to minutes of downtime per network
+			// change (pinned by TestRelayV2CarrierIsWakeable).
+			logger.Error("Relay v2 online-edge wake not wired",
+				zap.Bool("carrier_wakeable", okWaker), zap.Bool("mediator_sink", okSink))
+		}
+	}
+
 	// Feed monitord's sysmetrics into the offline cache's admission gate
 	// (see offlinecache.Runtime.SysMetricsSink). Wired here for the same
 	// no-cross-import reason as the claim observer below: the mediator
@@ -1343,13 +1536,20 @@ func initializeApp(
 	netlogRecorder := buildNetlogRecorder(context, netlogConfig, linkChecker, exec, clock, dbusClient,
 		netlogProbeEndpoint(relayV2Endpoint, relayerEndpoint), executor, deviceStatus, logger)
 	if netlogRecorder != nil {
-		if sink, ok := mediator.(interface{ SetInternetObserver(func(bool)) }); ok {
-			sink.SetInternetObserver(netlogRecorder.ObserveInternet)
-		}
+		internetObservers = append(internetObservers, netlogRecorder.ObserveInternet)
 		if sink, ok := relayer.(interface {
 			SetConnectionObserver(func(connected bool, closeCode int))
 		}); ok {
 			sink.SetConnectionObserver(netlogRecorder.ObserveRelayer)
+		}
+	}
+	if len(internetObservers) > 0 {
+		if sink, ok := mediator.(interface{ SetInternetObserver(func(bool)) }); ok {
+			sink.SetInternetObserver(func(connected bool) {
+				for _, observe := range internetObservers {
+					observe(connected)
+				}
+			})
 		}
 	}
 
@@ -1450,6 +1650,11 @@ func initializeApp(
 	}
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))
+	}
+	if mediaHealthSvc != nil {
+		// A new player page restarts the outcome ring's numbering; forget
+		// the cursor so nothing in the fresh ring is mistaken for seen.
+		session.RegisterReconciler("media-health-cursor", mediaHealthCursorReconciler(mediaHealthSvc))
 	}
 	session.RegisterReconciler("status-force-refresh", statusForceRefreshReconciler(poller))
 	session.RegisterReconciler("setupui-resync", setupUIResyncReconciler(setupNarrator))
@@ -1608,7 +1813,7 @@ func initializeApp(
 		internet: internetProbeFrom(dbusClient, logger),
 		snapshot: provMachine.Snapshot,
 	}
-	screenshotCapturer := screenshot.New(cdpEndpoint, httpClient, webSocketDialer)
+	screenshotCapturer := kioskCapturer
 	hub := hub.NewWithLogDelivery(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger, logStreamEndpoint, logStreamAPIKey, logStreamEnvironment, playerLogSampleRate)
 	// Control-plane hub contact defers the escape policy's episode raise
 	// (§4.1): a phone with the app open must not have its link yanked. The
@@ -1632,6 +1837,8 @@ func initializeApp(
 		Ctx:                      context,
 		Cancel:                   cancelApp,
 		Logger:                   logger,
+		MediaHealth:              mediaHealthSvc,
+		MediaHealthObserver:      mediaHealthObserver,
 		Clock:                    clock,
 		OS:                       os,
 		Signal:                   signal,

@@ -6,10 +6,11 @@ require github.com/gorilla/websocket v1.5.3
 
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0
-	github.com/display-protocol/dp1-go v0.6.2
+	github.com/display-protocol/dp1-go v0.7.3-0.20261105075827-ed15dea64bfc
 	github.com/ethereum/go-ethereum v1.17.2
 	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20261027140929-82d5ebae13e4
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
+	github.com/gabriel-vasile/mimetype v1.4.9
 	github.com/go-jose/go-jose/v4 v4.1.3
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/golang/mock v1.6.0
@@ -19,6 +20,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/stretchr/testify v1.11.1
+	go.etcd.io/bbolt v1.5.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/net v0.56.0
@@ -32,6 +34,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/consensys/gnark-crypto v0.18.1 // indirect
+	github.com/corona10/goimagehash v1.1.0 // indirect
 	github.com/crate-crypto/go-eth-kzg v1.5.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
@@ -48,6 +51,7 @@ require (
 	github.com/multiformats/go-base36 v0.1.0 // indirect
 	github.com/multiformats/go-multibase v0.2.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect

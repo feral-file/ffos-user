@@ -1,7 +1,7 @@
 {
   "name": "display-getDeviceStatus",
   "kind": "request",
-  "description": "A display grant has no status read.",
+  "description": "A display grant can query status only over relay v2.",
   "setup": {
     "now": 1767225600,
     "grants": [

@@ -31,8 +31,9 @@ func TestProcessEnforcesPrincipalTier(t *testing.T) {
 		{ctl, "someUnknownCommand", ""},   // unknown: owner-only, never forwarded
 		{owner, "mintPairingDisplay", ""}, // internal: nobody from outside
 		{owner, commands.Type(control.CmdEnvelope), ""},
-		// A display grant (§5.7) runs the Play-shape cast and nothing else.
-		{display, commands.CMD_DEVICE_STATUS, `{}`},
+		// A display grant may query status without arguments, but cannot rotate.
+		{display, commands.CMD_DEVICE_STATUS, `{"extra":true}`},
+		{display, commands.CMD_SCREEN_ROTATION, `{"clockwise":true}`},
 		{display, commands.CMD_DISPLAY_PLAYLIST, `{"dp1_call":{}}`},
 	} {
 		_, err := ts.handler.Process(tc.ctx, commands.Command{Type: tc.cmd, RawArguments: []byte(tc.raw)})

@@ -1,8 +1,8 @@
 # FF1 control protocol v1 (feral-file#3551)
 
-Status: normative contract for the 3551 implementation. Supersedes
-`ff1-v2-controller-authentication.md` (MQTT/mTLS draft) for controller
-authentication. Every implementation (Go in `feral-controld/control`, Dart in
+Status: normative contract for the 3551 implementation, and the only
+controller-authentication contract (the earlier MQTT/mTLS drafts are
+deleted). Every implementation (Go in `feral-controld/control`, Dart in
 ff-app, TypeScript in ff1-cli, and any relay endpoint adapter for
 feral-file/ff-relayer#25) MUST pass the fixtures in
 `components/feral-controld/control/testdata/fixtures/`.
@@ -236,9 +236,10 @@ only and MUST accept the extra member.
 | `invalid_message` | plaintext whose top level repeats a member name, exactly or in another letter case (§7.2) |
 | `screen_protected` | `GET /api/screenshot` while an invitation is live (§7.2) |
 | `busy` | too many envelopes being authenticated at once (§10); retry |
+| `lan_only` | any hub request (every route, envelopes and the notification WebSocket included) from a source that is not local (§7.2) |
 
 On the LAN these come back as HTTP 401, except `envelope_required`,
-`enrollment_required` and `screen_protected`, which come back as 403,
+`enrollment_required`, `screen_protected` and `lan_only`, which come back as 403,
 `invalid_message`, which comes back as 400, and `busy`, which comes back as
 503. On the relayer an envelope's
 public error is the RPC `message`, `{"error":{"code":"<code>"}}`.
@@ -269,12 +270,13 @@ The first owner.
 - Valid only in state `legacy` (no active owner grant); otherwise the reply is
   `invitation_invalid`.
 - Refused with `invitation_invalid` on the device-ID relay (`RouteRelayV2`),
-  before the invitation is compared, so v2 is no oracle for it. The LAN and
-  the legacy relayer keep it: the on-screen invitation is the security, and
-  the legacy relayer is how a claimed 2.0.x device off the owner's LAN (or
-  on client-isolated Wi-Fi) is migrated ("Secure this FF1", then scan the
-  screen). On v2 a first owner has no way to seal anyway: there is no
-  plaintext profile read (§7.2).
+  before the invitation is compared, so v2 is no oracle for it. On v2 a first
+  owner has no way to seal anyway: there is no plaintext profile read (§7.2).
+- The device also admits it on the legacy relayer, but a client sends it only
+  on the LAN (§14 rule 11): becoming the first owner needs both the
+  invitation on the screen and a phone on the FF1's own network. The relayer
+  admission is a residual that ends with the legacy relayer (§13); it is not
+  a migration path.
 - `inv` is the current invitation: `b64u(16 random bytes)`, single use, 10-minute
   life, compared in constant time. There is **no attempt limit**: 128 random
   bits need none, and voiding the invitation after some number of misses
@@ -410,6 +412,7 @@ never reach the command router):
 | `revokeController` | `{"ctl"}` | `{}` |
 | `registerController` | `{"sig":JWK,"enc":JWK,"label","platform","role":"owner"\|"controller","expiresAt"?}` | `{"ctl","role","expiresAt"?}` |
 | `releaseOwnership` | `{}` | `{"released":true}` |
+| `setLanControl` | `{"open":bool}` | `{"open":bool}` |
 | `listControllers` | `{}` | `{"controllers":[{"ctl","role","label","platform","createdAt","expiresAt"?,"revokedAt"?,"self":bool}, …, {"ctl","role":"display","label","origin","originAttested":bool,"platform":"web","createdAt","expiresAt"?,"revokedAt"?}],"pending":[{"ctl","label","platform","code","expiresAt"}]}` |
 
 - `approveController` with a live pending request for `ctl` grants it: the
@@ -455,7 +458,16 @@ never reach the command router):
   with a fresh invitation (§5.1; not timed, and memory only: after a reboot
   `showPairingQRCode{purpose:"enroll"}` paints it again). A new owner,
   including a former controller with the same keys, enrolls with it; the
-  new grant replaces the revoked record.
+  new grant replaces the revoked record. The owner's LAN switch
+  (`lan.json`, §8) is left as it is: the next owner inherits it and sees it
+  in status (§11).
+- `setLanControl` sets the owner's LAN switch (§7.2): `open:true` admits
+  the LAN-open set in plaintext on the LAN, `open:false` refuses all LAN
+  plaintext with `enrollment_required`. The replay window is written first,
+  then `lan.json`; a `req` that is not exactly `{"open":bool}` fails
+  `invalid_request`, and a switch write the device could not confirm is
+  `internal_error` (§4.3: the client re-reads `control.lan` in status).
+  `res` is the switch as now stored.
 - `listControllers` lists every record, revoked ones included: the
   `grants.json` records first, in their shape, then every display record
   (§5.7) in the display shape (`role:"display"`, `origin`,
@@ -494,9 +506,15 @@ newcomer and no approval code is compared.
    `channelId` (`crypto.randomUUID()`). It joins that channel on the relay
    carrier (`/v2/channels/{channelId}/connections`) and shows the
    controller QR (§5.6.1) on its screen or terminal, plus the same string
-   for pasting.
-2. The owner's app scans it, picks the FF1, the role and an optional expiry,
-   and sends `registerController` (§5.6.4) under its owner grant.
+   for pasting. The Feral File app shows it as the app link of §5.6.1.1,
+   so the owner's system camera opens the app; ff-cli shows the bare
+   string. Either way the text for pasting is the bare string.
+2. The owner's app scans it or opens its link, picks the FF1 (or takes the
+   one the link names, §5.6.1.1), the role and an optional expiry, and
+   sends `registerController` (§5.6.4) under its owner grant. Its review
+   step names the FF1 the controller will be added to and SHOULD warn the
+   owner to add only a controller they expect to add (§13: a link can come
+   from anyone, and no code comparison would tell its maker apart).
 3. Only after a **verified** `ok:true` reply whose `res.ctl` is
    `thumb(QR sig)` does the owner's app join the channel and send the sealed
    result (§5.6.2) to the controller's connection. If the owner declines, it
@@ -511,9 +529,9 @@ newcomer and no approval code is compared.
 
 A leaked QR lets others join the channel, see ciphertext or disrupt the
 exchange, but not forge a result: forging needs `ps`, which is only in the
-QR and inside the ciphertext. A QR image forwarded to a remote owner through
-a chat app carries `ps` through that app; that is the accepted residual
-(§13).
+QR and inside the ciphertext. A QR image or link forwarded to a remote
+owner through a chat app carries `ps` through that app; that is the
+accepted residual (§13), as is a link opened in a browser.
 
 #### 5.6.1 Controller QR
 
@@ -534,6 +552,52 @@ a chat app carries `ps` through that app; that is the accepted residual
   the part after the prefix **at most 9 times**.
 - A parser MUST reject anything else. The QR is about 350 bytes; at error
   correction level H it is QR version 20 or below.
+
+##### 5.6.1.1 App-link envelope
+
+A client MAY show the controller QR as an app link, so a system camera
+opens the owner's app:
+
+`https://link.feralfile.com/controller#[d=<deviceId>&]c=<pct(payload)>`
+
+- Everything is in the **fragment**, which a browser never sends: `ps`, the
+  minter key and the device id stay out of the link host's and CDN's request
+  logs and out of chat apps' link-preview fetches. The path is fixed, so
+  the request names nothing.
+- `pct` is ECMAScript `encodeURIComponent`: every UTF-8 byte outside
+  `A-Z a-z 0-9 - _ . ! ~ * ' ( )` becomes upper-case `%XX`, so no raw `&`,
+  `=`, `?` or `#` remains in a value. Decoding turns every `%XX` back into
+  its byte, leaves `+` as `+`, and requires valid UTF-8.
+- `c`: the §5.6.1 payload, `pct`-encoded. The owner decodes it **once** and parses the
+  result under §5.6.1 unchanged; a client MUST NOT percent-decode the link
+  as a whole first, because a label may itself contain `%`.
+- `d`: optional, the `deviceId` (§2) of the FF1 the controller started from,
+  `pct`-encoded the same way. It MUST match
+  `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` (the hostname shape). Omitted when the controller started from no
+  device. When it is present the owner's app MUST NOT offer another FF1:
+  it opens that FF1 when it owns it and otherwise says the code is for
+  that device, and an Add controller already opened for another FF1
+  refuses the code before `registerController`. A client that holds a
+  device id outside that shape omits `d` rather than write it.
+- The fragment is exactly `c`, optionally preceded by `d`, each once. A
+  repeated or unknown key, a missing `c`, a malformed escape or a `d` that
+  is not a hostname rejects the whole link. A query before the fragment,
+  and anything after a raw `?` inside it, are ignored (messaging apps
+  append tracking parameters).
+- `d` is unauthenticated, a routing hint only: a code's maker can name any
+  device. What the controller pins is still the profile in the owner's
+  sealed result (§5.6.3), so a wrong `d` only sends the owner to the wrong
+  device's review, where they decide.
+- The envelope changes neither the payload nor the derivation: `salt` stays
+  `SHA-256("ff1-ctl:1|" + channelId)` (§5.6.2).
+- The reference is `control.ControllerLink` / `ParseControllerLink`; the
+  `controller-link.json` vectors (§12) pin both directions.
+- Percent-encoding makes the link longer than the payload (~480 bytes for a
+  64-character ASCII label with `d`, about 9 bytes per CJK character), so
+  the link QR uses error correction level **M**: QR version 20 or below for
+  every ASCII label and up to about 28 CJK characters. A longer non-ASCII
+  label gives a denser QR. A phone screen is a clean surface, so level M's
+  margin is enough there.
 
 #### 5.6.2 Sealed registration result
 
@@ -691,18 +755,24 @@ first owner can enroll between the decision and the issuance.
 **Authorization.** A display `ctl` is looked up after `grants.json` (§3.4
 step 2) and is admitted in every state but `locked` (§7.2), `legacy`
 included, with its own replay window persisted in `display_grants.json`
-before execution (§6). It may send exactly two things:
-`op:"cmd"`, `cmd:"displayPlaylist"` whose `req` is the exact Play shape of
-§7.2 (`isPlayCastShape`), executed as the principal
-`{controllerId, role:"display"}`; and its own self-revoke
+before execution (§6). It may send:
+`op:"cmd"`, `cmd:"displayPlaylist"` whose `req` is **the exact Play shape**
+(`isPlayCastShape`), executed as the principal
+`{controllerId, role:"display"}`; `getDeviceStatus` with `req:{}` over
+relay v2, returning only `res.screenRotation`; and its own self-revoke
 (`revokeController{ctl:<own>}`, the site's unpair). Every other command,
 every other `req` shape, and every non-`cmd` op (`enroll`,
 `requestAccess`) is `permission_denied` with the `ctr` spent. A revoked or
 expired display record is `access_revoked` whatever it sent, checked before
-what it asked for (after the replay check and a future `iat`). The command
+what it asked for (after the replay check and a future `iat`). The exact
+Play shape is the request
+`{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{…}}}`:
+`request` has exactly the members `intent` and `dp1_call`, `intent` is
+exactly `{"action":"now_display"}`, and `dp1_call` is an object; anything
+wider is not a display grant's to send. The command
 router re-checks
-the same rule (`control.Permits`) before any handler runs. No status read,
-no `connect`, no notifications: `GrantActive`, `Seal`, `SealAll`, the v2
+the same rule (`control.Permits`) before any handler runs. Rotation changes, `connect`, and notifications are
+outside the grant: `GrantActive`, `Seal`, `SealAll`, the v2
 binding layer and the owner count never see display records.
 
 **Site rules** are in §14 (browser). A site that moves to 0.5 re-pairs
@@ -749,10 +819,20 @@ Unknown commands fail closed: they are owner-only.
 
 | Tier | Commands |
 |---|---|
-| owner | everything not listed below; specifically `sshAccess`, `factoryReset`, `startWifiSetup`, `updateToLatestVersion`, `setDeviceName`, `showPairingQRCode`, `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, `mintPairingApprovalDecision`, `setContentPolicy`, `analyticsToggle`, `betaFeaturesToggle`, `uploadLogs`, `sendKeyboardEvent`, `tapGesture`, `doubleTapGesture`, `longPressGesture`, `dragGesture`, `clickAndDragGesture`, `zoomGesture`, `cursorUpdate`, `disconnect`, `approveController`, `revokeController` (a controller may name only its own `ctl`, §5.5), `listControllers`, `registerController`, `releaseOwnership` |
-| controller | playback: `displayPlaylist`, `displayDefaultPlaylist`, `refreshArtwork`, `refreshPlaylist`, `checkStatus`, `moveToArtwork`, `updateIndex`, `setShuffle`, `setLoop`, `updateArtFraming`, `updateDisplaySettings`, `updateDefaultDuration`, `getRecentlyPlayed`, `playRecentlyPlayed`; offline cache: `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`, `clearPlaylistCache`, `getOfflineCacheStatus`; claim: `connect` (see below); device: `getDeviceStatus`, `deviceMetrics`, `rotate`, `setVolume`, `toggleMute`, `ddcPanelControl`, `ddcPanelStatus`, `setSleepSchedule`, `setSleepMode`, `sleepNow`, `wakeNow`, `reboot`, `shutdown`, `runNetworkDiagnostics`, `getContentPolicy` |
+| owner | everything not listed below; specifically `sshAccess`, `factoryReset`, `startWifiSetup`, `updateToLatestVersion`, `setDeviceName`, `showPairingQRCode`, `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, `mintPairingApprovalDecision`, `setContentPolicy`, `setSeriesPlayback`, `analyticsToggle`, `betaFeaturesToggle`, `shutdown`, `sendKeyboardEvent`, `tapGesture`, `doubleTapGesture`, `longPressGesture`, `dragGesture`, `clickAndDragGesture`, `zoomGesture`, `cursorUpdate`, `disconnect`, `approveController`, `revokeController` (a controller may name only its own `ctl`, §5.5), `listControllers`, `registerController`, `releaseOwnership`, `setLanControl` |
+| controller | playback: `displayPlaylist`, `displayDefaultPlaylist`, `refreshArtwork`, `refreshPlaylist`, `checkStatus`, `moveToArtwork`, `updateIndex`, `setShuffle`, `setLoop`, `updateArtFraming`, `updateDisplaySettings`, `updateDefaultDuration`, `getRecentlyPlayed`, `playRecentlyPlayed`; offline cache: `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`, `clearPlaylistCache`, `getOfflineCacheStatus`; claim: `connect` (see below); device: `getDeviceStatus`, `deviceMetrics`, `rotate`, `setVolume`, `toggleMute`, `ddcPanelControl`, `ddcPanelStatus`, `setSleepSchedule`, `setSleepMode`, `sleepNow`, `wakeNow`, `reboot`, `runNetworkDiagnostics`, `getContentPolicy`, `getSeriesPlayback`, `uploadLogs` |
 | internal | never accepted from any external principal, owner included (`permission_denied`): `resolveRecentlyPlayed` (router-internal), `ping`, `mintPairingDisplay`, `setupDisplay` (controld → player paint/probe commands that would otherwise fall through to the player over CDP), and `ff1Envelope` (an envelope inside an envelope) |
-| display (§5.7) | not a tier but a role outside the table: `displayPlaylist` in the exact Play shape of §7.2, and the self-revoke; everything else `permission_denied`. `control.Permits(principal, cmd, req)` decides it, in the authority and in the router's re-check |
+| display (§5.7) | not a tier but a role outside the table: `displayPlaylist` in the exact Play shape (§5.7), the relay v2 orientation query (`getDeviceStatus` with `{}`), and the self-revoke; everything else `permission_denied`. `control.Permits(principal, cmd, req)` decides it, in the authority and in the router's re-check |
+
+**The controller tier is also the LAN-open set** (§7.2): what anyone on the
+device's own network may send in plaintext. A command belongs in it only if
+it passes the undo test: the next command, or a wait, undoes whatever it
+did (playback, offline cache, status reads, rotate, volume, DDC, sleep and
+wake, reboot, network diagnostics, `uploadLogs`, which changes nothing on
+the device). What cannot be undone that way (wiping, a shell, Wi-Fi, an
+update, `shutdown`, which leaves the device off until someone presses its
+button, owner settings, input injection) is owner tier, on every route. A
+command added to the controller tier is checked against this test first.
 
 `connect` is controller tier because every ff-app cast, released and new,
 starts with it. Only an owner claims or rebinds: under the protocol (any
@@ -775,12 +855,27 @@ phantom entry, so a new command cannot ship without a tier.
 
 ### 7.2 Device states and plaintext policy
 
-| State | Condition | Plaintext on LAN `/api/cast` | Plaintext via relayer | Envelopes |
+The rule (feral-file#3551): on the device's own network, anyone may do what
+the next command can undo, the LAN-open set (the controller tier, §7.1).
+What cannot be undone is the owner's alone, by envelope, on every route.
+Off the network nothing happens without a grant. The owner can close the
+LAN to plaintext altogether with `setLanControl` (§5.5).
+
+| State | Condition | Plaintext on the LAN (hub, local sources only) | Plaintext via legacy relayer | Envelopes |
 |---|---|---|---|---|
-| `legacy` | no active owner grant | allowed (phase-0 rules apply) | allowed | `enroll` (with inv); `requestAccess` and `enroll` without inv → `not_approved`; a `grants.json` `cmd` → `not_approved`; a display grant's cast (§5.7) is admitted |
-| `enrolled` | ≥1 active owner grant, `control.enforced=false` | refused: `enrollment_required` | controller tier only; anything else → `envelope_required` | full |
-| `enforced` | ≥1 active owner grant, `control.enforced=true` | refused: `enrollment_required` | only the exact Play shape `{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{…}}}`: `request` has exactly the members `intent` and `dp1_call`, `intent` is exactly `{"action":"now_display"}`, `dp1_call` is an object; anything else → `envelope_required` | full |
+| `legacy` | no active owner grant | the LAN-open set and `showPairingQRCode` (any arguments; the first-owner path); anything else → `enrollment_required` | allowed | `enroll` (with inv); `requestAccess` and `enroll` without inv → `not_approved`; a `grants.json` `cmd` → `not_approved`; a display grant's cast (§5.7) is admitted |
+| `enrolled` | ≥1 active owner grant | owner's switch open (`lan.json`, §8; the default): the LAN-open set; anything else, and everything while the switch is closed → `enrollment_required` | controller tier only; anything else → `envelope_required` | full |
 | `locked` | identity or grant store unreadable/corrupt | refused: `locked` | controller tier only, else `locked` | refused: public `locked` (display grants included) |
+
+The first-owner path in `legacy` needs nothing more in plaintext:
+`showPairingQRCode` puts the invitation on the physical screen, `connect`
+is in the LAN-open set, and `enroll` itself is an envelope (§5.1). Owner-tier
+plaintext (`sshAccess`, `factoryReset`, `startWifiSetup`, input injection,
+`shutdown`, …) is refused on the LAN in every state, before an owner exists
+too (the one exception is a retired device's `factoryReset`, §8). The legacy relayer column is the pre-protocol behavior and is kept only
+for images that still configure a legacy relayer; images from the 3.0.0
+LAN-open build have no `relayer` block, so that route carries no traffic
+(§15.4).
 
 Every plaintext message, on either route and in every state, is refused with
 `invalid_message` when its top level repeats a member name, exactly or in
@@ -792,15 +887,14 @@ arguments decoded from exactly the `request` bytes the policy judged.
 In `legacy`, `GET /api/screenshot` answers `403 screen_protected` while an
 invitation is live, and also when an invitation was issued, consumed or
 cleared, or is live, at the end of the capture (a capture takes seconds; a
-QR painted meanwhile must not leave in the image): the claim QR then carries it, an unclaimed device has no
-topic gate, and a screenshot would hand any LAN host the first-owner
-invitation. Otherwise the phase-0 rules apply.
+QR painted meanwhile must not leave in the image): the claim QR then carries
+it, and a screenshot would hand any LAN host the first-owner invitation.
+Otherwise it is served.
 
-The `legacy` state is open on the LAN by design (§11 migration and first
-claim depend on it): plaintext casts, input and `showPairingQRCode` remain
-available to any LAN caller until an owner enrolls, exactly as in phase 0.
-What protects the first enrollment is that the invitation is shown only on
-the physical screen and never served over the network.
+`showPairingQRCode` stays open on the LAN in `legacy` by design (§11
+migration and first claim depend on it). What protects the first enrollment
+is that the invitation is shown only on the physical screen and never served
+over the network.
 
 Outside `legacy`, two more LAN surfaces close:
 - `GET /api/screenshot` answers `403 enrollment_required`. It has no envelope
@@ -810,15 +904,26 @@ Outside `legacy`, two more LAN surfaces close:
   between the topic would still be a relayer bearer credential for any LAN
   peer.
 
-"LAN" means any caller of the hub (`/api/cast`), whatever network it came
-from: Wi-Fi, Ethernet, an owner VPN or a Tailscale address all get the LAN
-column. Only the legacy (topic) relayer path gets the relayer column.
+"LAN" means a caller of the hub (`:1111`), and the hub serves **local
+sources only**: every route, envelopes and the notification WebSocket
+included, refuses any other source with `403 {"error":{"code":"lan_only"}}`
+(§4.4) before the request is handled. A source is local when, after an
+IPv4-mapped IPv6 address is unmapped, it is loopback; RFC 1918, IPv4
+link-local `169.254/16`, IPv6 link-local `fe80::/10` or ULA `fc00::/7`;
+CGNAT `100.64/10`, where Tailscale addresses live (ffos's `feral_owner`
+filter limits `tailscale0` to the owner's tailnet address); or on-link,
+inside the prefix of an address on one of the device's interfaces, read per
+request (a `/0` prefix is ignored). An unparseable source is not local. So a
+campus network that hands out public addresses, or a phone using its global
+IPv6 address on the same LAN, is local, while a port forward or DMZ host
+from the Internet is not. Remote control is relay v2's job. Only the legacy
+(topic) relayer path gets the relayer column.
 
 **Device-ID relay (v2, ff-relayer#26).** Its address is the public device ID
 and it authenticates nobody, so the relayer column above never applies to
 it. On v2 (`RouteRelayV2`) every plaintext command is refused in every state:
-`enrollment_required` in `legacy`, `envelope_required` in `enrolled` and
-`enforced`, `locked` in `locked`. The check runs before the state switch and
+`enrollment_required` in `legacy`, `envelope_required` in `enrolled`,
+`locked` in `locked`. The check runs before the state switch and
 before the retired `factoryReset` exception, which stays for the LAN and the
 legacy relayer only. Envelopes are admitted exactly as on any other route.
 `requestAccess` is refused on v2 (§5.2) and so is first-owner `enroll` with
@@ -826,7 +931,7 @@ legacy relayer only. Envelopes are admitted exactly as on any other route.
 route; a client sends it there only with a profile pinned from a §5.6
 registration result or confirmed by a grant it holds (§10). There is no plaintext exception on v2, not even a profile read:
 a controller learns the profile from the screen QR pins (first owner, on the
-LAN or the legacy relayer) or from its registration result (§5.6), so v2
+LAN, §14 rule 11) or from its registration result (§5.6), so v2
 carries envelopes only.
 
 **Dual-stack transport config.** The v2 endpoint is its own `controld.json`
@@ -871,6 +976,19 @@ Directory: `/home/feralfile/.state/control/`, mode 0700. Files are mode 0600.
     store recovers when the file is deleted (the next start is an empty
     store) or the device is factory-reset. The factory reset retires it
     with the directory; the OTA carry (`control/` as a whole) keeps it.
+- `lan.json` (§7.2, optional): `{"v":1,"gen","open"}`, exactly those
+  members, `open` a boolean. The owner's LAN switch, written only by
+  `setLanControl` (§5.5), atomically like the other files. A missing file,
+  or one whose `gen` is a string that is not the identity's, reads **open**
+  (the default; the next write overwrites it). Any other read or parse
+  failure, a `gen` that is not a string included, reads **closed**, logged
+  once at start: a damaged switch must not reopen a LAN
+  the owner closed, and the owner rewrites it with `setLanControl`. It never
+  locks the device and is never part of `grants.json` (whose strict parse
+  would lock on an unknown member, and a rollback to a controld that does
+  not know the file ignores it). It survives `releaseOwnership` (§5.5) and
+  the OTA carry; a factory reset retires it with the directory. Only
+  `enrolled` reads it (§7.2).
 
 Rules:
 - A missing directory on start means create a new identity, in state `legacy`.
@@ -922,11 +1040,10 @@ device decides whether the protocol runs from its own state first:
 | absent | `true` | protocol on: new identity in `legacy`, invitations offered |
 | absent | `false`, absent, or malformed | protocol off: transports exactly as before the protocol |
 
-`control.enforced` only ever tightens `enrolled` to `enforced`, and it is a
-per-release setting read on every boot, not a device latch: a release built
-without it (or with a malformed value, which reads as `false`) runs an
-enforced device as `enrolled` again. That relaxes the plaintext policy to
-§7.2 `enrolled`, never further. What configuration can never do is reopen a
+The `control` block has no other setting. A `control.enforced` key, from a
+config written for an earlier build (the `enforced` state was removed by
+feral-file#3551's LAN-open change), is ignored like any unknown key; it
+neither fails parsing nor changes the policy. What configuration can never do is reopen a
 device that has state: a malformed `control` block is logged as an error and
 the protocol stays on. If
 the hostname cannot be read while state exists, the protocol still runs
@@ -999,7 +1116,7 @@ What is sent in each state:
 
 | State | Sealed copies | LAN WebSocket plaintext | Relayer plaintext |
 |---|---|---|---|
-| `enrolled` / `enforced` | one per active grant for every notification type, except `controller_approval_request`, which goes to active owners only | none | `enrolled`: unchanged, for old apps; `enforced`: stopped |
+| `enrolled` | one per active grant for every notification type, except `controller_approval_request`, which goes to active owners only | owner's switch open (§7.2): `device_status`, `player_status`, `ddc_status` and `offline_cache_status` only, which tell a LAN peer what the LAN-open set already lets it read; never mint pairing or `controller_approval_request`. Switch closed: none | unchanged, for old apps |
 | `legacy` | — | unchanged | unchanged |
 | `locked` | — (no readable grants) | unchanged | unchanged |
 
@@ -1065,21 +1182,7 @@ only by a fresh sealed request.
 ff-relayer persists plaintext notifications per topic and replays them to
 every new subscriber: `device_status`, `player_status`, `ddc_status` and
 `offline_cache_status` (`persist_record_count:1`) and both mint pairing types
-(`mint_pairing_approval_request`/`_outcome`, 10). Once relayer plaintext
-stops (`enforced`), that history would be replayed indefinitely. So on
-**every boot in the `enforced` state**, once the relayer connects, the device
-sends each of those six types once in plaintext with body `{}` and
-`persist_record_count:1`; the relayer prunes a type to the newest message's
-count, so this evicts every stored row of it. The deployed relayer has no
-`offline_cache_status` type either and stores it under id 0, so that purge
-row prunes the shared id-0 bucket. A purge row is itself stored, replayed to
-later subscribers and broadcast live like any notification: a controller
-MUST treat an empty-body row of any purged type as "no data", not as a
-blank state (ff-app drops all four status types; `ddc_status` can be `{}`
-legitimately, which also means no data). The purge runs at boot only:
-a device that becomes `enforced` mid-run purges on its next boot. It is best-effort (a failed send is logged, not retried) and idempotent,
-so it runs on every enforced boot rather than once per transition and keeps
-no marker.
+(`mint_pairing_approval_request`/`_outcome`, 10).
 
 ## 10. Wire carriage of requests
 
@@ -1131,13 +1234,25 @@ leaving, a socket closing, a deadline firing while a receipt is pending,
 or any other silence is ambiguous: the device acknowledges before it
 executes, so a departed device may already have run the command.
 
-A v2 refusal at connect or admission time (HTTP 429, close code 1008, the
-relay's `backpressure`) is **transient**: the device and every client retry
-with backoff and never treat it as permanent. The device-ID channel is
-public, so strangers can contend for it. (The legacy relayer's handshake
-semantics are unchanged: released firmware treats a 4xx there as permanent,
-which is why the legacy host's shutdown waits for the device population,
-§15.4 Gate B.)
+A v2 refusal (HTTP 429 at the upgrade, which the relay answers with
+`rate limited` or `capacity`, or its `rate_limited`/`backpressure` error
+frames on a live socket) is **transient**: the device and every client retry
+with backoff and never treat it as permanent. Close code 1008 is not an
+admission refusal: the relay sends it to a socket that held a forwarded
+frame unacknowledged for 30 s. It is retried with backoff all the same. The
+device-ID channel is public, so strangers can contend for it. (The legacy
+relayer's handshake semantics are unchanged: released firmware treats a 4xx
+there as permanent, which is why the legacy host's shutdown waits for the
+device population, §15.4 Gate B.)
+
+**Device redial.** The device's backoff starts over after a session that
+lasted a minute. An offline→online connectivity edge ends any redial wait
+in progress and restarts the backoff at the floor, including an edge that
+arrives while a socket is still up: that socket was often dialed on the
+network just left, and when it dies the next redial waits at most the
+floor. Without this the backoff grown while the device was offline outlives
+the network change, and the device has no v2 for minutes after every
+Configure Wi-Fi (feral-file#3551 G3 bench, finding F2).
 
 First-owner `enroll` with `inv` (§5.1) is never carried on v2, and the
 device refuses it there. `enroll` without `inv` (§5.3) MAY be carried on v2
@@ -1188,9 +1303,14 @@ reply rather than `bad_envelope`.
 ## 11. Public discovery
 
 - `/api/v2/status` and `getDeviceStatus` gain
-  `"control":{"v":1,"state":"legacy|enrolled|enforced|locked","profile":profile}`.
+  `"control":{"v":1,"state":"legacy|enrolled|locked","profile":profile}`.
   The presence of `control` is the capability signal. A `locked` device omits
   `profile`: it cannot vouch for an identity it could not read.
+  `control.lan` is the owner's LAN switch (§7.2, `lan.json`), `"open"` or
+  `"closed"`, present only in `enrolled`. It is additive; a client reads an
+  absent `lan` as closed or unknown. (Earlier firmware defined a fourth
+  state, `enforced`, that no environment ever turned on; the device no
+  longer reports it.)
   `control.transports` lists the routes this device is configured to carry
   envelopes on, in this order: `"lan"` (always), `"relayer"` (a legacy
   relayer endpoint is configured), `"relayV2"` (the device dials the v2 relay,
@@ -1204,7 +1324,7 @@ reply rather than `bad_envelope`.
   so a second phone pins from the screen (§5.4, §14.1).
   - Old app parsers read only indices 0, 1 and 3.
   - The topic stays at index 1 whenever the device has one, claimed or
-    not: once status withholds `topic_id` (§11 status, phase 0), the screen
+    not: once status withholds `topic_id` (§7.2), the screen
     QR is how a second phone learns the topic.
   - The layout is fixed for every transport:
     `id|topic-or-empty|internet|branch|version|phase|inv|thumb(sig)|thumb(enc)|gen`.
@@ -1226,15 +1346,20 @@ reply rather than `bad_envelope`.
     QR is taken down; from then on the auto-claim flow treats the device as
     settled and does not repaint the topic-carrying QR.
 - A second phone, ff-cli or a browser joins an owned device
-  (`enrolled`/`enforced`) through owner-initiated registration (§5.6): it
-  shows its controller QR and an owner registers it, from anywhere. Clients
+  (`enrolled`) through owner-initiated registration (§5.6): it
+  shows its controller QR and an owner registers it, from anywhere. It needs
+  a controller grant only to control the device from off its network
+  (owner-tier commands need an owner grant everywhere): on the device's own network, with the switch open, it already
+  has the LAN-open set in plaintext (§7.2, §14 rule 1). Clients
   no longer offer `requestAccess`; the device keeps it as a LAN-only
   fallback (§5.2) for a phone standing next to the FF1 with no owner at
   hand, pinned from the screen QR.
 - `showPairingQRCode` with `{"show":true,"purpose":"enroll"}` on a `legacy`,
   claimed device displays the invitation QR. This is the migration path for
-  2.0.x owners. On a device that is not `legacy` the same request paints the
-  ordinary claim QR without invitation fields.
+  2.0.x owners, and for a device released by "Forget I exist" (§5.5) whose
+  claim QR carries no invitation. Clients send it, and the enroll that
+  follows, on the LAN only (§14 rule 11). On a device that is not `legacy`
+  the same request paints the ordinary claim QR without invitation fields.
 
 ## 12. Fixtures
 
@@ -1261,6 +1386,15 @@ reply rather than `bad_envelope`.
   `negative/controller-qr.json` (`kind:"controllerQR"`): `cases` of a `qr`
   string and, for valid ones, its parsed `channelId`, `minterKey`, `ctl`,
   `sig`, `enc` (canonical JWK JSON), `ps`, `platform`, `label`.
+- App-link envelope (§5.6.1.1). `positive/controller-link.json` and
+  `negative/controller-link.json` (`kind:"controllerLink"`): `cases` of a
+  `link` and, for valid ones, the `qr` payload it carries and the `deviceId`
+  it names (absent for none); the positive file also has `builds`, a `qr`
+  and a `deviceId` (possibly empty or malformed) with the exact `link` a
+  client renders. An owner implementation MUST parse every positive case,
+  reject every negative one as a whole and render every build byte for
+  byte. A client that never opens a controller link (ff-cli, which only
+  shows the bare string) need not run them.
   `positive/controller-registration*.json` and `negative/registration-*.json`
   (`kind:"registration"`): the controller's `qr` and private `minterKey`,
   `controller` (the `keys.json` controller whose keys the QR carries),
@@ -1280,7 +1414,7 @@ reply rather than `bad_envelope`.
     signature, unknown `kid`, revoked controller, `exp - iat > 120`,
     `ctl ≠ kid`, owner-tier command from a controller, `registerController`
     from a controller, `revokeController` of another `ctl` from a controller;
-    display grants (§5.7): `getDeviceStatus`, `connect`, a non-Play-shape
+    display grants (§5.7): `getDeviceStatus` on LAN, `connect`, a non-Play-shape
     `displayPlaylist`, `registerController` and `op:"enroll"` from the
     display `ctl` (`permission_denied`), an expired display grant
     (`access_revoked`), and `approveController{role:"display"}` from the
@@ -1330,16 +1464,49 @@ and the ff1-cli test suite does the same with `jose`.
 - Play browser sessions never subscribe to the notification channel, so
   sealing notifications (§9) cannot strand a Play session; a display grant
   (§5.7) is never bound or sealed to either.
+- The hub serves local sources only (§7.2): a port forward, a DMZ host or a
+  carrier that hands out public addresses does not turn the LAN-open set
+  into an Internet-open one, with two limits: a forwarder that rewrites the
+  source to a local address (a reverse proxy, NAT loopback on some
+  gateways) makes its callers local, and a device wired straight onto a
+  carrier subnet treats that subnet as its LAN. What counts as local is
+  decided from the source address alone; anyone who can source traffic
+  from a private or on-link address (a VPN into that network included) is
+  on the LAN. CGNAT space is trusted as Tailscale, which relies on ffos's
+  `feral_owner` filter on `tailscale0`. On-link means inside an interface
+  address's prefix; on a DHCPv6-only network the device's address is a
+  /128, so a client calling it from its own global IPv6 address is refused
+  `lan_only` (it fails closed; IPv4 and link-local still work). If that
+  shows up in the field, the check would add on-link routes.
+- With the protocol off (§8.1: no control state, and `control.enabled`
+  false, malformed or absent, or the hostname unreadable at first start)
+  the hub has no command policy at all: it runs exactly as the
+  pre-protocol daemon, and the phase-0 topic gate that used to guard
+  `sshAccess` there is gone. Every release image sets
+  `control.enabled=true`, so this is a development-build state only.
+- By design, anyone on the device's own network can run the LAN-open set on
+  an owned device while the owner's switch is open: display art, change
+  playback and volume, sleep, wake, reboot, read status and receive the
+  status notifications (§9). Nothing in the set outlasts the next command,
+  except a DDC power off (VCP D6), which some panels cannot undo over DDC
+  (accepted). An
+  owner who shares the network with people it does not trust (offices,
+  hotels, museums) closes the switch (`setLanControl`, §5.5).
+- Residual, accepted: `lan.json` survives `releaseOwnership` (§5.5); the
+  next owner inherits a closed switch and sees it in status.
 - Residual, accepted: on a claimed device still in `legacy`, any LAN peer
   can send `showPairingQRCode{show:true,purpose:"enroll"}` and a person at
-  the screen can then take ownership with the invitation it shows. This is
-  the same class as the open legacy `factoryReset` and `connect`: in
-  `legacy` the LAN is open by design (§7.2), and the invitation itself only
-  ever appears on the physical screen.
-- Residual, accepted: the enforced-boot purge (§9) evicts the relayer's
-  stored rows of each persisted plaintext type. Any copy a subscriber
-  already received, and a purge that failed to send, are outside the
-  device's reach.
+  the screen can then take ownership with the invitation it shows. It is
+  the first-owner path (§7.2), and the invitation itself only ever appears
+  on the physical screen.
+- Residual, accepted, only on an image that still configures a legacy
+  relayer (none from the 3.0.0 LAN-open build on, §15.4): there the legacy
+  relayer column of §7.2 applies, so a topic holder has every plaintext
+  command of a `legacy` device (`factoryReset` and `sshAccess` included),
+  and the device admits a first-owner `enroll` with `inv` on that route
+  (§5.1), which §14 rule 11 forbids clients to send. The claim QR carries
+  the topic, so anyone who saw it during the invitation's 10-minute life
+  could enroll from anywhere with a client of their own.
 - Residual, accepted: every authenticated denial is a synchronous durable
   write (§3.4 step 6). A holder of a revoked key can drive a few hundred
   small writes a second and serialize admissions behind them; it gains
@@ -1361,12 +1528,12 @@ and the ff1-cli test suite does the same with `jose`.
   can set Wi-Fi credentials: network position only, and on an enrolled
   device the hub still applies the LAN policy.
 - Residual, accepted: a `locked` or retired device sends status
-  notifications in plaintext again on every channel (§9 table), including
-  persisted relayer rows an earlier enforced boot purged. A device in that
-  state has no grants to seal to.
-- Remote shell granted while the device had no owner (open `sshAccess` on
-  an unclaimed device, or by a topic holder in `legacy`) is revoked when the
-  first owner enrolls: the device runs the `sshAccess{enabled:false}` steps.
+  notifications in plaintext again on every channel (§9 table). A device in
+  that state has no grants to seal to.
+- Remote shell granted while the device had no owner (`sshAccess` before
+  the protocol ran, or by a topic holder on the legacy relayer in `legacy`)
+  is revoked when the first owner enrolls: the device runs the
+  `sshAccess{enabled:false}` steps.
 - Residual, accepted: the LAN-only `requestAccess` fallback (§5.2) keeps the
   approval-code grinding residual of §5.4 when a requester pins from LAN
   status instead of the screen QR. Clients no longer offer it; owner-initiated
@@ -1389,6 +1556,20 @@ and the ff1-cli test suite does the same with `jose`.
   on the public device channel. The reach is unchanged: the controller believes in a
   fake FF1 (what it sends goes to the forger), and the real FF1 grants that
   party nothing.
+- Residual, accepted: the app-link form of the controller QR (§5.6.1.1)
+  keeps `ps` out of every request, but a phone that opens the link in a
+  browser (no app installed, an in-app browser, a browser chosen for the
+  domain) keeps the whole URL, fragment included, in its browser history,
+  synced histories too. Whoever reads that history during the exchange
+  holds `ps`, with the same reach as the forwarded-QR residual above.
+- Residual, accepted: a controller link can reach an owner from anyone (a
+  chat message, an email, a web page) and opens the owner's review in one
+  tap; the label it shows is its maker's choice. An owner who taps Add
+  registers the maker's keys. A short code compared on both screens would
+  not help: the maker generates the code with the QR and can send it along
+  (and could grind keys to match any short code, §5.4). The owner's app
+  names the FF1 the controller will be added to and warns to add only an
+  expected controller; the owner's tap is the decision.
 - Residual, accepted: a request a controller signs **before** its keys are
   registered is answered `unknown_controller` and never enters a window, so a
   copy captured on the relay can be replayed if the owner registers those
@@ -1414,10 +1595,11 @@ and the ff1-cli test suite does the same with `jose`.
   nothing else. The identity and the root subvolume stay, so a former owner
   who had root through SSH or owner Tailscale may have left something
   behind; hand a device to a stranger with a factory reset. Closing SSH on
-  release is cleanup, not a guarantee: in `legacy` a topic holder may open
-  it again with plaintext `sshAccess`. Topic holders (pre-protocol app, Play
-  0.4 sessions) keep `legacy` control after a release, as on any `legacy`
-  device; a factory reset is what cuts everyone off.
+  release is cleanup, not a guarantee: where a legacy relayer is still
+  configured, a topic holder in `legacy` may open it again with plaintext
+  `sshAccess` there, and topic holders (pre-protocol app, Play 0.4
+  sessions) keep `legacy` control after a release, as on any `legacy`
+  device. A factory reset is what cuts everyone off.
 - Residual, accepted: in a 2.0.x migration whoever scans the enroll QR
   first becomes the first owner; a lost sole owner still means a factory
   reset.
@@ -1437,8 +1619,7 @@ and the ff1-cli test suite does the same with `jose`.
   display-grant keys as it is today for session tokens. A compromised
   broker can substitute keys and obtain at most a display-only, revocable
   grant for the origin it attested.
-- `/api/status` (v1) also carries the `control` block. The enforced purge
-  gives up after 10 minutes without a relayer connection. The invitation
+- `/api/status` (v1) also carries the `control` block. The invitation
   watch can miss one re-arm when another narration takes the panel between
   its check and the repaint; the invitation still expires on time.
 
@@ -1474,7 +1655,26 @@ showed what goes wrong without them.
 
    Whenever the scanned QR carries pins, a client MUST compare them with
    any profile it reads from the network and MUST NOT proceed on a
-   mismatch, whichever path it is on.
+   mismatch, whichever path it is on. Two exceptions (feral-file#3551,
+   feral-file/ff-app#1216):
+   - the §5.6 registration result is owner-authenticated (the owner's
+     `registerController` reply was verified under its grant, and the
+     result is sealed to this controller's minter key), so a newcomer pins
+     from it and does not compare it with pins read off an owned device's
+     screen. Current apps never ask an owned device to paint its claim QR,
+     so there are no such pins to compare;
+   - an owned (`enrolled`) device's LAN status is never a pin source. A
+     client that reaches one writes no grant and pins nothing from it: it
+     never seals to, or enrolls with, a profile read there. It may keep
+     that status as its record of the device (state, `lan`, the profile as
+     last seen) for display and routing; a later grant still takes its pins
+     from the screen QR or a registration result, never from that record. It opens the
+     device with its grant when it holds one. Without one it MAY use the
+     LAN-open set (§7.2) in plaintext on that LAN endpoint while the status
+     says `control.lan:"open"` (a `connect` among it is answered `ok` and
+     changes nothing, §7.1), and to control the device from anywhere else,
+     or once the owner closes the switch, it shows its controller QR to an
+     owner (§5.6).
 
    The handoff authenticates the receiving client to the sending phone, not
    the sender to the receiver: whoever joins the handoff channel first with
@@ -1576,6 +1776,34 @@ showed what goes wrong without them.
     any channel peer can forge it); only a user action re-pairs. A
     `mint_succeeded` without `displayGrant` (older firmware) is
     `device_unsupported`: the session it carries is discarded.
+11. **First owner on the LAN only.** Becoming an FF1's first owner needs
+    the invitation on its screen and a phone on its own network. A
+    controller sends a first-owner `enroll` with `inv` (§5.1) and
+    `showPairingQRCode{purpose:"enroll"}` (§11) only to a LAN endpoint
+    whose identity it validated, never through the legacy relayer or v2,
+    whichever flow it is in (a scanned or opened claim QR, or "Secure this
+    Art Computer"). When a claim falls back to the relayer (the controller
+    found no LAN endpoint for the device) it reads `getDeviceStatus` there
+    first and decides on its `control` block, before any `connect`, write
+    or enroll:
+    - `legacy` (the protocol runs and nobody owns the device): it stops,
+      sends nothing more and writes nothing, and asks the person to join the
+      FF1's Wi-Fi. A plaintext `connect` there would claim a device that
+      should get an owner, leaving it ownerless and, when it was already
+      claimed, with its live invitation QR still on the screen. The
+      guidance covers a phone that is on that Wi-Fi but cannot see the
+      device (client isolation, a denied local-network permission).
+    - `enrolled`: the device has an owner. The controller writes nothing
+      and sends no `connect`: it opens the device when it holds a grant,
+      and otherwise shows its controller QR to an owner (§5.6). (The
+      LAN-open set of rule 1 is a LAN rule; it never applies off the LAN.)
+    - no `control` block (firmware without the protocol): the relayer claim
+      continues as before.
+
+    On the LAN, a claimed `legacy` device whose scanned QR carries no
+    invitation is asked to show one (`showPairingQRCode{purpose:"enroll"}`)
+    and enrolled from it; it is never claimed in plaintext. ff1-cli never
+    becomes a first owner, so in practice this rule binds ff-app.
 
 ## 15. Rollout and retirement
 
@@ -1595,22 +1823,24 @@ release operator applies them.
   dispatching one with `.control.enabled=true` in the environment secret
   ships an image that creates state and loses it on its next OTA.
 - Raise the app force-update floor before setting `control.enabled=true` in
-  production. A released app cannot cast on the same LAN as an `enrolled`
-  device (LAN plaintext is refused and the released app does not fall back
-  to the relayer after an HTTP error); off the LAN it keeps controller-tier
-  playback through the relayer until `enforced`.
+  production, and again before the LAN-open image (§7.2) reaches a
+  channel: the app ships before the OS. An older app sends owner actions
+  the LAN now refuses, has no owner switch, and keeps dialing a legacy topic
+  that is inert once the device runs an image without a `relayer` block
+  (§15.4).
 - Release notes of the first control-enabled release state: once it runs, the
   device refuses to OTA to an image without the control marker (§8.1, a
   permanent refusal); the only way back is a factory reset.
-- `control.enforced=true` ships in a later release, after fleet telemetry of
-  `control.state` shows owners have enrolled. `enforced` cuts the released
-  app off the relayer too, except Play's exact `displayPlaylist` shape
-  (§7.2).
+- There is no stricter state after `enrolled`: the `enforced` state and its
+  `control.enforced` switch were removed with the LAN-open change, before
+  any environment turned them on (§8.1).
 - Display grants (§5.7) ship in this order: the app and ff-cli that list
   display rows (role `display`, platform `web`) before any FF OS with
-  §5.7; Play 0.5 is published only once FF OS with §5.7 **and** a
-  configured `relayV2.endpoint` is broadly deployed, because 0.5 answers
-  `device_unsupported` on anything else.
+  §5.7. A Play release that pairs only for a display grant (0.5) answers
+  `device_unsupported` on older firmware, so integrators move to the
+  release that serves both generations (`@feralfile/display` 0.6: a display
+  grant from FF OS with §5.7, a relayer session from older firmware), and
+  it is published before the LAN-open image reaches Staging.
 
 ### 15.2 Rollout levers and rollback
 
@@ -1647,11 +1877,18 @@ release operator applies them.
 - There is no topic-to-grant migration and no locally generated topic. A
   legacy topic is an HMAC credential minted by the relayer, and v2 never
   reads one. A device claimed under legacy (topic, no owner) becomes
-  v2-reachable only when its owner enrolls it on the LAN with the screen
+  v2-reachable only when an owner enrolls it on the LAN with the screen
   QR: the "Secure this Art Computer" flow sends plaintext
-  `showPairingQRCode{purpose:"enroll"}` by topic, LAN first, and enrolls
-  from the invitation QR (§5.1). It needs the phone that holds the topic;
-  without it the remedy is a factory reset.
+  `showPairingQRCode{purpose:"enroll"}` on the LAN, by device ID, and
+  enrolls from the invitation QR (§5.1), never through the relayer (§14
+  rule 11). The request needs no topic on the LAN
+  (the §13 residual: any LAN peer may send it in `legacy`), so a phone on
+  the device's Wi-Fi that never held the topic sets up a claimed `legacy`
+  device the same way, including one released by "Forget I exist"
+  (§5.5), whose invitation QR is memory only and gone after a reboot.
+  Off the LAN a client has no first-owner route, with or without the topic
+  (§14 rule 11; the device still admits one on the legacy relayer, the §13
+  residual).
 - A client sends a sealed command on v2 only when the device's last status
   listed `relayV2` in `control.transports` (§11), or under the ff-cli
   exception in §15.4: a v2 send to a device that is not on v2 can be
@@ -1703,7 +1940,7 @@ running would be a second host to keep.
 **What reads as retired:**
 
 - **Device (G3).** Any permanent legacy dial error (404/410 handshake,
-  NXDOMAIN, bad URL) or an empty endpoint latches the legacy relayer
+  NXDOMAIN, bad URL), an empty endpoint or a missing `relayer` block latches the legacy relayer
   retired; v2 and the LAN hub keep running (ffos-user `architecture.md`,
   "External transport").
 - **Controllers.** A 410 body (`legacy_*_retired`), or an HTTP 404 from the
@@ -1732,8 +1969,8 @@ because they are measured differently.
 
 | Gate | What it covers | Condition |
 |---|---|---|
-| A (controllers) | `/api/cast`, `/api/notification`, `/api/ephemeral-sessions` | app floor raised past the G3 app release (device identity by `deviceId`, LAN bind by QR pins without a topic, retirement read as above); the G3 ff-cli release published (v2 default, retirement read as above, the no-working-topic v2 exception); Play integrators on 0.5; `tv-ws-usage` `/api/cast` traffic ~0 |
-| B (devices) | `/api/connection` (topic issuance) | from the device gauges (ffos-user `api-design.md`, `/metrics`): running version ≥ G3 AND `reset_target_version_info` ≥ G3 (`unknown` counts as below) for nearly all devices; legacy-dependent devices (claimed, topic present, `control_state=legacy`) under an agreed threshold; known remote installs contacted; shelf stock reflashed |
+| A (controllers) | `/api/cast`, `/api/notification`, `/api/ephemeral-sessions` | app floor raised past the G3 app release (device identity by `deviceId`, LAN bind by QR pins without a topic, retirement read as above) AND past the release that sets up a claimed `legacy` device from its own invitation code over the LAN (ff-app#1199: bind by QR pins for a claimed device, ask a discovered one to show its code); before it, a released or unsecured claimed device cannot be set up by a phone without the topic once legacy is gone (G3 bench 2026-11-03, F1/F4); the G3 ff-cli release published (v2 default, retirement read as above, the no-working-topic v2 exception); Play integrators on 0.5 or later (`@feralfile/display` 0.6 serves both generations); `tv-ws-usage` `/api/cast` traffic ~0 |
+| B (devices) | `/api/connection` (topic issuance) | from the device gauges (ffos-user `api-design.md`, `/metrics`), for nearly all claimed devices: running a G3 controld (it exports `relay_v2_connected`; a pre-G3 one has no such gauge, so presence, not the `version` label, decides — development builds carry 2.0.x numbers) AND `reset_target_version_info{target_version}` ≥ G3 (`unknown` or no sample counts as below; pre-release 3.0.0 staging builds export the label as `version`, which vmagent overwrites with the running version, so they count as below too); no G3 device reads `relayer_legacy_retired` 0 (a 3.0.0 staging image from before the LAN-open change, still dialing the legacy host: claimed and `legacy`, it loses off-LAN control with the worker), each one re-imaged or listed for re-imaging before the worker is deleted, since afterwards it latches retired and reads 1 like any other; known remote installs contacted; shelf stock reflashed. A claimed pre-G3 device is the legacy-dependent population: it has no other remote route. A G3 device in `control_state=legacy` with a stored topic is not: from the LAN-open build on its image has no `relayer` block, the topic is inert, and it already has no remote route until it is secured (below, "No legacy relayer on new images"). Every build that exports `target_version` also contains the v2 online-edge redial (ffos-user#432, G3 bench F2), so the G3 and `target_version` conditions cover it |
 
 `tv-ws-usage` (one sampled row per legacy request that reached a topic)
 shows controller traffic falling. It cannot measure devices: a device that
@@ -1747,18 +1984,17 @@ reports nothing (vmagent buffers on disk, so a device back on WAN reports
 late). "Nearly all" is therefore measured against a fleet count from
 outside the gauges (the claimed devices the operator knows of), not
 against the devices that report, and every claimed device without a sample
-in the window the operator agrees counts as legacy-dependent and below G3
+in the window the operator agrees counts as below G3 on both conditions
 until contacted. Unclaimed devices are outside the count: the daily
 updater moves them to G3 without the relayer, and shelf stock is its own
 condition.
 
 G3 is a full-image release (its `RELEASES.md` entry, written at the cut,
 declares it with the `build-image-to-cf.yml` inputs and the human steps
-below), because `controld.json` changes only with a full image. The image
-secrets (`FERAL_CONTROLD_CONFIG_JSON`) keep a `relayer` block, even after
-the shutdown, until no pre-G3 controld can run on them: pre-G3 controld
-dereferences it without a nil check and would crash-loop on an image built
-from an older ffos-user ref. They also set `control.enabled` to `true`: a
+below), because `controld.json` changes only with a full image. From the 3.0.0
+LAN-open build on, the image secrets (`FERAL_CONTROLD_CONFIG_JSON`) carry
+**no `relayer` block** (below, "No legacy relayer on new images"). They
+keep `relayV2.endpoint` and set `control.enabled` to `true`: a
 device without control state on disk (fresh from the factory or just
 factory-reset onto a G3 reset target) builds no control authority otherwise (`newControlWiring`),
 so it never dials v2 and its claim QR keeps waiting for a legacy topic; once
@@ -1802,7 +2038,8 @@ fetch reads the cached `true` again).
   reset instead of answering (a filtered `workers.dev`, as in mainland
   China), no permanent error arrives: the legacy relayer keeps retrying
   (1–5 s after each failed dial; at most the startup retry and one
-  mediator loop) until the empty-endpoint release below.
+  mediator loop) while it runs an image that still has a `relayer` block;
+  images from the LAN-open build on have none (below).
 - G0–G2 devices: the daemon exits once on the live-socket drop and systemd
   restarts it; from 2.0.0 it then redials the dead host on every heartbeat
   for as long as it runs that firmware. Playback, the LAN hub and OTA keep
@@ -1817,16 +2054,25 @@ fetch reads the cached `true` again).
   §5.6 enroll stops there, and a command whose FF1 never listed `relayV2`
   is not tried over v2. Accepted residual (2026-10-30); the remedy is
   updating ff-cli.
-- Play 0.4 sites: their session casts fail; they move to 0.5 (Gate A).
+- Play 0.4 sites: their session casts fail (on a 3.0.0 device already, which has no legacy relayer); they move to 0.6 (Gate A).
 
-**After the shutdown, the empty-endpoint release.** Once the worker is
-deleted, a full image sets `relayer.endpoint` to `""` in every
-environment's `FERAL_CONTROLD_CONFIG_JSON`, keeping the `relayer` block
-(see above). G3 controld then never dials the legacy host (an empty
-endpoint is "no legacy relayer"); a pre-G3 controld on such an image never
-connects either (the empty URL fails locally, with no network traffic; read
-from the code, not measured). This release is what finally stops devices
-using the old hostname. Ship it, and let it reach the fleet, **before**
+**No legacy relayer on new images.** Before the 3.0.0 LAN-open build, the
+release operator deletes the `relayer` block from every environment's
+`FERAL_CONTROLD_CONFIG_JSON` (Development, Staging and Production), keeping
+`control.enabled=true` and `relayV2.endpoint` (`RELEASES.md` 3.0.0). G3
+controld reads a missing block as "no legacy relayer": it never dials the
+legacy host, `control.transports` omits `"relayer"` (§11), and a topic the
+device stored before that OTA is inert, since nothing routes on it. A
+pre-G3 controld dereferences the missing block without a nil check and
+crash-loops, so from then on no image is built from an ffos-user ref older
+than the LAN-open change. This replaces the empty-endpoint release planned
+earlier (a `relayer` block with `endpoint:""`), and it is what stops
+devices using the old hostname. A G3 device whose image still has the
+block (a 3.0.0 staging build from before the LAN-open change) reads
+`relayer_legacy_retired` 0 while the worker exists; one without it reads 1.
+Such a device keeps v2 through the worker deletion (it latches retired on
+the 404, and from then on reads 1 too, so it is found before that step,
+Gate B), and is re-imaged before the account deletion. Let it reach the fleet **before**
 the Cloudflare account that owns the `autonomy-system.workers.dev` zone is
 deleted: until then a deleted worker answers 404, which every client reads
 as retired, while after the account is gone the name may be registered
@@ -1834,11 +2080,12 @@ again by someone else, and any device still dialing it (G3 on its probe,
 pre-G3 on every heartbeat) would connect to that host, which as a legacy
 relayer can assign a topic and send the plaintext commands a device admits
 on the relayer route (§7.2: everything in `legacy`, the controller tier in
-`enrolled` and `locked`, a Play cast in `enforced`).
+`enrolled` and `locked`).
 
 "Reach the fleet" includes the image a factory reset boots: before the
-account is deleted, the empty-endpoint image is also the server's
-`recovery_version` (`update_recovery_version=true` on its dispatch) and
+account is deleted, an image without the block is also the server's
+`recovery_version` (`update_recovery_version=true` on its dispatch, P2 in
+`RELEASES.md` 3.0.0) and
 shelf stock is reflashed with it, and `reset_target_version_info` shows
 it on nearly all devices (as Gate B measures G3). Otherwise a reset boots a reset target
 whose `controld.json` still dials the old hostname, and so does every
@@ -1850,7 +2097,8 @@ holding a topic ends a §5.6 enroll on it under NXDOMAIN even with the FF1
 on the LAN (above); and the app flag is set (above).
 
 Populations left between G3 and Gate B: legacy-claimed G3 devices waiting
-for an owner at the LAN; devices whose OTA keeps failing (free space, slow
+for an owner at the LAN (not a Gate B count: they lost their legacy route
+at the OTA, not at the shutdown); devices whose OTA keeps failing (free space, slow
 links, probation rollback); devices that are off; devices whose reset
 target is still old; controllers outside the force-update floor (old CLI,
 Play 0.4, app fail-open); networks that reach the old host but block

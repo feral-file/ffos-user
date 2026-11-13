@@ -28,6 +28,18 @@ var (
 	registerDeviceStateOnce sync.Once
 )
 
+// reservedRemoteWriteLabels are the labels vmagent stamps on every pushed
+// sample (users/feralfile/scripts/run-vmagent.sh, -remoteWrite.label).
+// VictoriaMetrics OVERWRITES a scraped label of the same name instead of
+// renaming it the way Prometheus would (exported_*), so a gauge that uses one
+// of these as its own label looks right on the device's /metrics and is
+// silently wrong in the fleet store. No gauge in this registry may use them;
+// TestNoGaugeLabelCollidesWithRemoteWriteLabels pins it for this registry and
+// keeps the list in step with run-vmagent.sh. The playback registry that the
+// hub merges into the same /metrics (status.PlaybackMetricsGatherer) carries
+// no labels today; a labeled metric added there needs the same care.
+var reservedRemoteWriteLabels = []string{"job", "instance", "version", "branch", "cpu_model", "memory_model"}
+
 func init() {
 	registry.MustRegister(relayV2Connected)
 }
@@ -57,7 +69,7 @@ type DeviceStateSources struct {
 	LegacyRetired      func() bool
 	LegacyTopicPresent func() bool
 	Claimed            func() bool
-	// ControlState is "legacy", "enrolled", "enforced", "locked", or "off"
+	// ControlState is "legacy", "enrolled", "locked", or "off"
 	// when the control protocol is not running.
 	ControlState func() string
 	// ResetTargetVersion is the version a factory reset would boot, or
@@ -94,8 +106,12 @@ func RegisterDeviceState(src DeviceStateSources) {
 			})
 		}
 		if src.ResetTargetVersion != nil {
+			// target_version, not version: 3.0.0 shipped this label as
+			// `version`, and every fleet sample came back carrying the
+			// running version (see reservedRemoteWriteLabels), so Gate B
+			// could never see the recovery image or "unknown".
 			registry.MustRegister(&labelInfo{
-				desc: prometheus.NewDesc("reset_target_version_info", "1, labeled with the version a factory reset would boot.", []string{"version"}, nil),
+				desc: prometheus.NewDesc("reset_target_version_info", "1, labeled with the version a factory reset would boot.", []string{"target_version"}, nil),
 				read: src.ResetTargetVersion,
 			})
 		}

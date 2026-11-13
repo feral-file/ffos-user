@@ -71,8 +71,8 @@ type StatusInfo struct {
 	// TopicID is the relayer topicID — a bearer credential on ff-relayer. It
 	// is the LAN claim-handover value replacing BLE's. Providers populate it
 	// unconditionally; serveStatus owns the wire policy and serves it ONLY
-	// while the device is unclaimed (feral-file#3551 phase 0; see serveStatus
-	// for the trust-model note).
+	// while the device is unclaimed (feral-file#3551; see serveStatus for the
+	// trust-model note).
 	TopicID string
 	// Network is the §4.7 health object (nil when no provisioning machine is
 	// wired — the additive field is then omitted).
@@ -138,11 +138,11 @@ func (h *hub) serveStatus(w http.ResponseWriter, r *http.Request, contract strin
 	}
 
 	// topic_id is served ONLY while the device is unclaimed (feral-file#3551
-	// phase 0, LAN containment). The topic is a bearer credential on
+	// LAN containment). The topic is a bearer credential on the legacy
 	// ff-relayer: serving it to any LAN peer of a claimed device handed that
-	// peer remote control of an owned frame, and with it the topic-gated LAN
-	// surfaces (sshAccess, screenshot — see lanauth.go). Unclaimed devices keep
-	// serving it because the first claim reads it here.
+	// peer remote control of an owned frame. Unclaimed devices keep serving it
+	// because the first claim on pre-protocol firmware reads it here. Images
+	// without a legacy relayer block never get a topic, so this is "" there.
 	//
 	// Multi-phone still works without it: a second phone joins through an
 	// existing phone's "Show Pairing QR Code", whose on-screen claim QR

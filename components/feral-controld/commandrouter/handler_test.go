@@ -122,8 +122,8 @@ func playerNotOkResponse() map[string]interface{} {
 // displayPlaylist via URL: DP1 processing, CDP send returning ok, and ForceRefresh.
 func expectDisplayPlaylistSuccess(ts *testSetup, playlistURL string, playlist *dp1.Playlist) {
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(playlist, nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(playlist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -562,7 +562,7 @@ func TestCommandHandler_Process_DisplayPlaylist_HoldsPlaybackLockAcrossSyncAndSe
 	mockPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "item1", Source: "https://example.com/video.mp4"}},
 	}}
-	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL).Return(mockPlaylist, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).Return(mockPlaylist, dp1.CastPlan{}, nil).Times(1)
 	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
@@ -641,7 +641,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplay
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "item-new", Source: "https://example.com/item-new"}},
 	}}
-	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL).Return(newPlaylist, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL, gomock.Any()).Return(newPlaylist, dp1.CastPlan{}, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -688,7 +688,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskRepla
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "item-new", Source: "https://example.com/item-new"}},
 	}}
-	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL).Return(newPlaylist, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL, gomock.Any()).Return(newPlaylist, dp1.CastPlan{}, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -744,8 +744,8 @@ func TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOff
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, nil, nil, ts.mockJSON, ts.logger)
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(nil, errors.New("network unreachable")).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(nil, dp1.CastPlan{}, errors.New("network unreachable")).
 		Times(1)
 
 	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), nil).Times(1)
@@ -786,8 +786,8 @@ func TestCommandHandler_Process_DisplayPlaylist_ReturnsOriginalErrorWhenNoCached
 	playlistURL := "https://example.com/playlist.json"
 	liveErr := errors.New("network unreachable")
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(nil, liveErr).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(nil, dp1.CastPlan{}, liveErr).
 		Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -851,14 +851,14 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 		}).
 		Times(1)
 
-	// Static dp1_call: no dynamic content, so Process expands series items
+	// Static dp1_call: no dynamic content, so Process resolves series items
 	// by hand (see handler.go's CMD_DISPLAY_PLAYLIST branch) rather than
 	// through ProcessDynamicPlaylistForCast. mockPlaylist has none, so the
-	// expansion is a no-op; returning it unchanged is what the real
-	// expandSeriesItems would do too.
+	// resolution is a no-op; returning plain segments unchanged is what the
+	// real resolveSeriesCastPlan would do too.
 	ts.mockDP1.EXPECT().
-		ExpandSeriesItems(ts.ctx, *mockPlaylist, dp1.CAST_PLAYLIST_ITEMS_LIMIT).
-		Return(*mockPlaylist).
+		ResolveSeriesCastPlan(ts.ctx, *mockPlaylist, gomock.Any(), gomock.Any(), dp1.CAST_PLAYLIST_ITEMS_LIMIT).
+		DoAndReturn(passthroughCastPlan).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -913,14 +913,12 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesInlineManifest(t *testi
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	// Static dp1_call again (see WithPlaylistObject above); echo the
-	// playlist straight back since what this test pins is the
-	// inlineManifest round-trip through the real JSON wrapper, not series
-	// expansion.
+	// playlist straight back as plain segments since what this test pins is
+	// the inlineManifest round-trip through the real JSON wrapper, not
+	// series resolution.
 	mockDP1.EXPECT().
-		ExpandSeriesItems(ctx, gomock.Any(), dp1.CAST_PLAYLIST_ITEMS_LIMIT).
-		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist {
-			return playlist
-		}).
+		ResolveSeriesCastPlan(ctx, gomock.Any(), gomock.Any(), gomock.Any(), dp1.CAST_PLAYLIST_ITEMS_LIMIT).
+		DoAndReturn(passthroughCastPlan).
 		Times(1)
 	handler := commandrouter.New(
 		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,
@@ -984,11 +982,11 @@ func TestCommandHandler_Process_PlayRecentlyPlayed_ReentersDisplayPlaylist(t *te
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	// Re-entering displayPlaylist with the retained item goes through the
-	// static dp1_call branch, which expands series items by hand; this
-	// playlist has none, so echo it back.
+	// static dp1_call branch, which resolves series items by hand; this
+	// playlist has none, so echo it back as plain segments.
 	mockDP1.EXPECT().
-		ExpandSeriesItems(ctx, gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist { return playlist }).
+		ResolveSeriesCastPlan(ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
 		AnyTimes()
 	handler := commandrouter.New(
 		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,
@@ -1140,8 +1138,8 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 		Times(1)
 
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist).
-		Return(processedPlaylist, nil).
+		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist, gomock.Any()).
+		Return(processedPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1230,8 +1228,8 @@ func TestCommandHandler_Process_DisplayPlaylist_WithSpecDynamicQuery(t *testing.
 		Times(1)
 
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist).
-		Return(processedPlaylist, nil).
+		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist, gomock.Any()).
+		Return(processedPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1522,8 +1520,8 @@ func TestCommandHandler_Metrics_DisplayPlaylist_CDPFailure(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(mockPlaylist, nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(mockPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1556,8 +1554,8 @@ func TestCommandHandler_Metrics_PlayerResponseNotOk(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(mockPlaylist, nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(mockPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1594,8 +1592,8 @@ func TestCommandHandler_Metrics_PlayerResponseMissingMessage(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(mockPlaylist, nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(mockPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1859,4 +1857,27 @@ func TestCommandHandler_Process_StagedFactoryReset_ServesReadOnly(t *testing.T) 
 		_, err := h.Process(context.Background(), commands.Command{Type: cmd})
 		require.NoError(t, err, "%s must still be served during a staged reset", cmd)
 	}
+}
+
+// setMediaHealth replaces the player's skip map; only the daemon's hint
+// pusher may send it. From a controller it is refused before CDP is touched.
+func TestCommandHandler_Process_SetMediaHealthIsInternal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockCDP := mocks.NewMockCDP(ctrl) // no EXPECT: any Send fails the test
+	handler := commandrouter.New(
+		newRoutableExecutor(ctrl), mockCDP, mocks.NewMockDP1(ctrl), mocks.NewMockStatusPoller(ctrl),
+		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	result, err := handler.Process(context.Background(), commands.Command{
+		Type: commands.CMD_SET_MEDIA_HEALTH,
+		Arguments: map[string]interface{}{
+			"castSeq":     1,
+			"mediaHealth": map[string]interface{}{"https://o/a": map[string]interface{}{"category": "source_missing"}},
+		},
+	})
+	require.NoError(t, err)
+	reply, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, false, reply["ok"])
+	assert.Equal(t, "setMediaHealth is internal", reply["error"])
 }

@@ -30,7 +30,7 @@ import (
 // series at all (feralfile-bot F2, 2026-10-29). The catalog reads the value
 // itself, from its own copy of the same item.
 func seriesItem() dp1playlist.PlaylistItem {
-	seriesID := 387
+	seriesID := dp1playlist.SeriesID("387")
 	return dp1playlist.PlaylistItem{
 		ID:     "item-series",
 		Slug:   "scrampled-auw",
@@ -67,13 +67,27 @@ func servePlaylist(ts *testSetup, url string, items []dp1playlist.PlaylistItem) 
 	ts.mockHTTP.EXPECT().Get(url).
 		Return(createMockResponse(http.StatusOK, body), nil)
 	ts.mockIO.EXPECT().ReadAll(gomock.Any()).Return([]byte(body), nil)
+	// Unmarshal is called a second time, on these same raw bytes, by
+	// resolveSeriesCastPlan's readItemSeriesPlaybackModes (the per-item
+	// seriesPlayback read) whenever items includes a series item and the
+	// caller is a *ForCast path (feral-file/ffos-user#452) — AnyTimes
+	// rather than a fixed count, since a caller going through the older,
+	// non-cast ProcessPlaylistURL still decodes exactly once. That second
+	// call decodes into a different type (the envelope
+	// readItemSeriesPlaybackModes reads, not *dp1.Playlist), so this fakes
+	// only the *dp1.Playlist case and no-ops otherwise — a real decode of
+	// this stub body into that envelope would find no "items" key either,
+	// which is the same harmless empty result.
 	ts.mockJSON.EXPECT().Unmarshal([]byte(body), gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {
-			playlist := v.(*dp1.Playlist)
+			playlist, ok := v.(*dp1.Playlist)
+			if !ok {
+				return nil
+			}
 			playlist.ID = "playlist-1"
 			playlist.Items = items
 			return nil
-		})
+		}).AnyTimes()
 }
 
 // editionsURL is the route the catalog addresses one series item by.
@@ -95,14 +109,28 @@ func serveEditions(ts *testSetup, playlistID, itemID string, body string) {
 
 // editionsBody is the shape the catalog actually returns, as measured:
 // {revisionId, playlistId, itemId, series, total, limit, offset, items}.
-// Only `total` and `items` are read here; the rest is carried so a change
-// to the envelope that drops them is caught.
+// `series` deliberately carries no `artworkModel` here — see
+// editionsBodyWithModel for that — so this fixture exercises the "catalog
+// did not state it" case that SeriesArtworkModel.hasDistinctEditions
+// defaults to true for. `total` and `items` are read here; the rest is
+// carried so a change to the envelope that drops them is caught.
 func editionsBody(total int, items ...dp1playlist.PlaylistItem) string {
+	return editionsBodyWithModel(total, "", items...)
+}
+
+// editionsBodyWithModel is editionsBody with the catalog's own
+// `series.artworkModel` set explicitly, for NarrowEditions'
+// full/first-eligibility tests.
+func editionsBodyWithModel(total int, artworkModel dp1.SeriesArtworkModel, items ...dp1playlist.PlaylistItem) string {
+	series := map[string]any{"chain": "evm", "seriesId": "387"}
+	if artworkModel != "" {
+		series["artworkModel"] = artworkModel
+	}
 	envelope := map[string]any{
 		"revisionId": "editions_e4c3a49b8bf7f92c7b2697b58234f03c47c51868199d359e1bb7fd94ca8a0ba8",
 		"playlistId": "playlist-1",
 		"itemId":     "item-series",
-		"series":     map[string]any{"chain": "evm", "seriesId": "387"},
+		"series":     series,
 		"total":      total,
 		"limit":      255,
 		"offset":     0,
@@ -286,17 +314,10 @@ func TestDP1_SeriesStaysUnexpandedWhenThePlaylistHasNoID(t *testing.T) {
 }
 
 // An edition of a V1–V3 series carries a 256-bit `seriesId` as decimal
-// digits, which is what the catalog returns. The dp1-go this daemon builds
-// against (v0.6.0) types the field `*int`, so decoding that answer fails:
-//
-//	json: cannot unmarshal string into Go struct field
-//	ProvenanceContract.seriesId of type int
-//
-// display-protocol/dp1-go#12 makes the field accept either form. Until that
-// release is pinned here, `full` playback of those series is unreachable —
-// and this test is what says so, rather than the behavior looking like a
-// catalog fault. When #12 lands this test flips to asserting the expansion.
-func TestDP1_A256BitSeriesIDOnAnEditionIsNotYetReadable(t *testing.T) {
+// digits, which is what the catalog returns. dp1-go types the field as
+// `playlist.SeriesID`, which takes an integer or a decimal string and keeps
+// every digit, so the series expands and the edition keeps its exact id.
+func TestDP1_A256BitSeriesIDOnAnEditionExpands(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -316,11 +337,11 @@ func TestDP1_A256BitSeriesIDOnAnEditionIsNotYetReadable(t *testing.T) {
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
 
-	// The decode fails, so the series keeps its representative rather than
-	// the screen losing the work.
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
-	assert.Equal(t, "item-series", result.Items[0].ID)
+	assert.Equal(t, "a", result.Items[0].ID)
+	require.NotNil(t, result.Items[0].Provenance.Contract.SeriesID)
+	assert.Equal(t, dp1playlist.SeriesID(bigSeriesID), *result.Items[0].Provenance.Contract.SeriesID)
 }
 
 // TestDP1_CastCapHoldsAcrossPlainAndExpandedAppends is the regression test
@@ -345,7 +366,7 @@ func TestDP1_CastCapHoldsAcrossPlainAndExpandedAppends(t *testing.T) {
 	serveEditions(ts, "playlist-1", "item-series",
 		editionsBody(2, editionItem("a"), editionItem("b")))
 
-	result, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url)
+	result, _, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)
 
 	require.NoError(t, err)
 	assert.Len(t, result.Items, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
@@ -368,7 +389,7 @@ func TestDP1_CastCapHoldsWhenASeriesKeepsItsRepresentative(t *testing.T) {
 	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
 		Return(nil, errors.New("catalog unreachable"))
 
-	result, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url)
+	result, _, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)
 
 	require.NoError(t, err)
 	assert.Len(t, result.Items, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
@@ -496,7 +517,7 @@ func TestDP1_EachExpandedEditionOwnsItsCopyOfTheInstanceFields(t *testing.T) {
 // through wholesale, so an edition whose on-chain provenance names its series
 // arrives carrying `seriesId`. editionItem() omits it, so any test built only
 // on that helper cannot see this at all.
-func labeledEditionItem(id string, seriesID int) dp1playlist.PlaylistItem {
+func labeledEditionItem(id string, seriesID dp1playlist.SeriesID) dp1playlist.PlaylistItem {
 	item := editionItem(id)
 	item.Provenance.Contract.SeriesID = &seriesID
 	return item
@@ -520,7 +541,7 @@ func TestDP1_AnEditionsOwnSeriesIDSurvivesExpansion(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	const seriesID = 387
+	const seriesID = dp1playlist.SeriesID("387")
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})

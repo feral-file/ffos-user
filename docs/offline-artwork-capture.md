@@ -41,8 +41,11 @@ anything else that resolves to a single-file `source` (including an
 empty/unrecognized `Content-Type`, treated as best-effort downloadable
 rather than rejected) — is the opposite case: the kiosk player renders it
 as a native element (`<img>`/`<video>`/`<audio>`/`<object>`/a
-non-scripted `<iframe>`) that requests the bare `source` URL directly, so
-there is exactly ONE dependency to cache: the file itself. Running a
+non-scripted `<iframe>`) fed by a single request for the bare `source`
+URL — the element's own request, or for a still the player's CORS
+`fetch()` of that same URL whose bytes it hands to the `<img>` as a blob
+(ff-player#327) — so there is exactly ONE dependency to cache: the file
+itself. Running a
 whole headless browser just to observe that one request would cost a
 second Chromium process and gigabyte-scale memory pressure for zero
 benefit, so `feral-controld` downloads these directly over HTTP instead
@@ -656,15 +659,17 @@ answer the second time around.
   though the underlying `*http.Response` may reflect a fully-resolved
   redirect chain. This is safe (unlike capture.go's software path, which
   must preserve each redirect hop as its own `Resource` — §4.1) because
-  the kiosk's native `<img>`/`<video>`/`<audio>` element only ever
-  requests the bare `item.Source`; there is no redirect hop for replay to
+  the kiosk only ever requests the bare `item.Source` for these items
+  (its `<video>`/`<audio>` element directly, a still through a CORS
+  `fetch()` of the same URL); there is no redirect hop for replay to
   faithfully reproduce, so storing the final resolved bytes directly
   under the request URL the kiosk will actually make is both correct and
   simpler.
 - **CORS headers are captured the same allowlisted way** as `capture.go`
   (`filterReplayableHeaders`, §4.6/§5's `Resource.Headers` bullet):
   `ff-player`'s `<video crossOrigin="anonymous">` element CORS-checks its
-  response exactly like a cross-origin `fetch()`/XHR would, so an offline
+  response exactly like a cross-origin `fetch()`/XHR would, and stills are
+  read by exactly such a CORS `fetch()`, so an offline
   replay missing those headers would still fail Chromium's own CORS
   enforcement even with byte-correct status/body. Getting those headers
   onto the wire in the first place requires sending an `Origin` header on
@@ -2239,7 +2244,8 @@ and every `source` inside it is a URL this daemon will dial on the
 playlist's behalf from four separate places:
 
 - `classify.go`'s `HEAD` / ranged-`GET` probe,
-- `probe.go`'s cast-time liveness preflight (#304),
+- `mediahealth_fetcher.go`'s L0 media probe (#304, #392: the cast-time pass
+  and the during-play lookahead),
 - `mediacapture.go`'s direct body download,
 - `capture.go`'s `Page.navigate` in the headless browser.
 
@@ -2256,10 +2262,10 @@ browser — both reachable by anyone on the LAN.
 function BOTH enqueue paths (`DownloadItem` and `DownloadPlaylist`) call
 before any I/O and before any job is queued. A rejected source is
 therefore never probed, never downloaded, and never navigated to. The
-cast-time preflight does not cross `Classify`: it applies the same guard
-directly (`guard.check` plus the guarded transport, both inside
-`probe.go`), so a policy change in the guard must be re-checked against
-that path separately. It
+media health fetcher does not cross `Classify`: it applies the same guard
+directly (`guard.check` plus the guarded probe transport, both inside
+`mediahealth_fetcher.go`), so a policy change in the guard must be
+re-checked against that path separately. It
 rejects, with `ErrUnsafeSource`:
 
 - any scheme outside `http`/`https` — an allowlist, not a denylist, since
@@ -2638,18 +2644,16 @@ origins from the device's egress IP — the source guard confines targets
 to public addresses, so this is a reflection/reachability surface, not an
 internal scanner. Accepted alongside the guard's other residuals (#3471:
 the LAN control plane is unauthenticated by design); the storm gate, the
-per-cast probe budget, and the prober's process-wide 8 MiB peer-controlled parsing
-budget are the containment. A probe uses a status-only HTTP/1 client that accepts
-at most 64 KiB and 128 fields across informational plus final header blocks, then
-closes before the body so trailers are never parsed. It discards fields through a
-fixed reader instead of allowing `net/http` to materialize a cardinality-amplified
-header map. The shared semaphore has 32 x 256 KiB budget units. HTTP spends one;
-HTTPS spends four (1 MiB), caps the whole inbound TLS handshake at 64 KiB before
-`crypto/tls` can parse certificates, and does not retain TLS connection state in
-the response. The resulting envelope admits at most 32 HTTP parsers or eight TLS
-parsers. Disabling the storm gate removes its rate and command-concurrency
-controls but not these weighted units; the `sourceProbe` config kill switch
-removes the surface entirely if it is ever abused.
+per-pass probe budget (256 distinct wire URLs), and the fetcher's process-wide
+admission budget are the containment. The media health probe reads the first
+32 KiB of a source through the guarded transport (64 KiB response-header
+ceiling, guarded redirects, keep-alives off so `net/http` never silently
+replays a request) and caps body bytes read; a weighted semaphore of 32 units
+(HTTP spends one, HTTPS four) admits at most 32 HTTP or eight TLS peers to
+have this daemon parsing their headers and certificates at once. Disabling
+the storm gate removes its rate and command-concurrency controls but not
+these weighted units; the `mediaHealth.disabled` config kill switch removes
+the surface entirely if it is ever abused.
 
 ## 10. See also
 

@@ -43,11 +43,10 @@ func TestDisplayGrantIssuanceByState(t *testing.T) {
 	if _, err := d.a.IssueDisplayGrant("nobody", displayReq(newTestCtl(t, "x"), "https://b.example", true)); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("unknown approver in legacy: %v", err)
 	}
-	// enrolled and enforced: the approver must be an active owner.
-	for _, enforced := range []bool{false, true} {
+	// enrolled: the approver must be an active owner.
+	{
 		d, owner, ctl := ownerDevice(t)
-		d.reopen(enforced)
-		site := newTestCtl(t, fmt.Sprintf("site%v", enforced))
+		site := newTestCtl(t, "site")
 		if _, err := d.a.IssueDisplayGrant("", displayReq(site, "https://a.example", true)); !errors.Is(err, ErrNotOwner) {
 			t.Fatalf("no approver outside legacy: %v", err)
 		}
@@ -62,7 +61,7 @@ func TestDisplayGrantIssuanceByState(t *testing.T) {
 		if !strings.Contains(d.displayFile(), site.ctl) || strings.Contains(string(mustRead(t, d, grantsFile)), site.ctl) {
 			t.Fatal("display grant not in its own file")
 		}
-		d.reopen(enforced)
+		d.reopen()
 		if _, ok := d.a.Store().DisplayGrant(site.ctl); !ok {
 			t.Fatal("display grant lost on reload")
 		}
@@ -161,6 +160,11 @@ func TestDisplayGrantAdmission(t *testing.T) {
 	rc := d.cmdClaims(site, "displayPlaylist", testCast)
 	rc.Ctr = 1
 	d.expectCode(site, rc, CodeReplay)
+	rc = d.cmdClaims(site, "getDeviceStatus", `{}`)
+	adm, err := d.a.OpenFrom(d.seal(site, rc), Origin{Route: RouteRelayV2, Known: true})
+	if err != nil || !adm.Execute() || adm.Command != "getDeviceStatus" || adm.Principal.Role != RoleDisplay {
+		t.Fatalf("relay v2 status admission = %+v, err = %v", adm, err)
+	}
 	// Denials spend the ctr in the display store too.
 	d.expectCode(site, d.cmdClaims(site, "getDeviceStatus", `{}`), CodePermissionDenied)
 	d.expectCode(site, d.cmdClaims(site, "displayPlaylist", `{"dp1_call":{}}`), CodePermissionDenied)
@@ -281,7 +285,7 @@ func TestDisplayStoreFailureNeverLocks(t *testing.T) {
 		d, owner, _ := ownerDevice(t)
 		d.issue(owner.ctl, newTestCtl(t, "old"), "https://a.example")
 		d.fs.SetFile(d.dir+"/"+displayGrantsFile, []byte(strings.Replace(d.displayFile(), d.id.gen, "AAAAAAAAAAAAAAAAAAAAAA", 1)))
-		d.reopen(false)
+		d.reopen()
 		if err := d.a.Store().DisplayErr(); err != nil || len(d.a.DisplayGrants()) != 0 {
 			t.Fatalf("gen mismatch: err %v, %d records", err, len(d.a.DisplayGrants()))
 		}
@@ -293,7 +297,7 @@ func TestDisplayStoreFailureNeverLocks(t *testing.T) {
 	for _, bad := range []string{`not json`, `{"v":2,"gen":"x","grants":[]}`} {
 		d, owner, _ := ownerDevice(t)
 		d.fs.SetFile(d.dir+"/"+displayGrantsFile, []byte(bad))
-		d.reopen(false)
+		d.reopen()
 		if d.a.State() != StateEnrolled || d.a.LockErr() != nil {
 			t.Fatalf("%s: state %s, lock %v", bad, d.a.State(), d.a.LockErr())
 		}
@@ -374,7 +378,10 @@ func TestPermits(t *testing.T) {
 		{display, "displayPlaylist", testCast, true},
 		{display, "displayPlaylist", `{"dp1_call":{}}`, false},
 		{display, "displayPlaylist", `{"intent":{"action":"now_display"},"dp1_call":{},"x":1}`, false},
-		{display, "getDeviceStatus", `{}`, false},
+		{display, "getDeviceStatus", `{}`, true},
+		{display, "getDeviceStatus", `null`, false},
+		{display, "getDeviceStatus", `{"extra":true}`, false},
+		{display, "rotate", `{"clockwise":true}`, false},
 		{display, "connect", `{}`, false},
 		{display, CmdListControllers, `{}`, false},
 		{display, "ping", `{}`, false},

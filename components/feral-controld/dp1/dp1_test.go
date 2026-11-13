@@ -47,7 +47,7 @@ func setup(t *testing.T) *testSetup {
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
 
-	client := dp1.New(mockFFIndexer, mockHTTPClient, mockHTTPClient, mockJSON, mockIO, logger, false, true, "")
+	client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger, false, true)
 
 	return &testSetup{
 		ctrl:          ctrl,
@@ -580,7 +580,7 @@ func TestDP1_ProcessDynamicPlaylistForCast_NonScheduledReturnsMinimal(t *testing
 		},
 	}
 
-	result, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist)
+	result, _, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist, nil)
 	assert.NoError(t, err)
 	assert.Len(t, result.Items, dp1.MINIMAL_PLAYLIST_ITEMS_LIMIT)
 }
@@ -621,7 +621,7 @@ func TestDP1_ProcessDynamicPlaylistForCast_ScheduledStopsAtCastLimit(t *testing.
 		},
 	}
 
-	result, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist)
+	result, _, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist, nil)
 	assert.NoError(t, err)
 	assert.Len(t, result.Items, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
 	assert.Equal(t, displayAt, *result.Items[dp1.MINIMAL_PLAYLIST_ITEMS_LIMIT+10].DisplayAt)
@@ -1352,7 +1352,7 @@ func TestDP1_ProcessDynamicPlaylist_RejectsWrongTypedResolvedRatings(t *testing.
 		},
 	}
 
-	_, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist)
+	_, _, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist, nil)
 	require.Error(t, err)
 	// Pointer only — the validator's own message, which can quote the offending
 	// value, must not survive into an error returned to a caster.
