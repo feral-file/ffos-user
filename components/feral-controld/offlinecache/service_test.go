@@ -4051,6 +4051,79 @@ func TestService_DownloadPlaylist_RequiredRepresentativeSurvivesTheQueueBound(t 
 	waitForState(t, ts.service, repSource, offlinecache.StateReady)
 }
 
+// TestService_DownloadPlaylist_ReservesOneSlotPerRequiredSourceNotPerOccurrence
+// reproduces feralfile-bot's follow-up F1 (2026-11-13): a multi series whose
+// editions all share one Source (the same artwork reused across catalog
+// entries) used to let every occurrence of that shared source consume the
+// budget in boundQueuedItems' reservation pass, exhausting maxQueued before
+// a second, equally-required group's own Source was ever reserved — even
+// though one slot per DISTINCT required source would have fit both.
+func TestService_DownloadPlaylist_ReservesOneSlotPerRequiredSourceNotPerOccurrence(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	const maxQueued = 2
+	sourceA := "https://example.com/edition-a.html"
+	sourceB := "https://example.com/edition-b.html"
+
+	// Group 1 ("multi"): two editions, both sharing Source A.
+	editionA1 := dp1playlist.PlaylistItem{ID: "a1", Source: sourceA}
+	editionA2 := dp1playlist.PlaylistItem{ID: "a2", Source: sourceA}
+	// Group 2 ("single"): one edition, Source B.
+	editionB := dp1playlist.PlaylistItem{ID: "b", Source: sourceB}
+
+	items := []map[string]interface{}{
+		{"id": editionA1.ID, "source": sourceA},
+		{"id": editionA2.ID, "source": sourceA},
+		{"id": editionB.ID, "source": sourceB},
+	}
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-3", "title": "t", "items": items,
+	})
+	require.NoError(t, err)
+
+	segments := []offlinecache.SeriesSegment{
+		{Group: &offlinecache.SeriesGroup{
+			Key:            offlinecache.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "1"},
+			Representative: editionA1,
+			Editions:       []dp1playlist.PlaylistItem{editionA1, editionA2},
+			Resolved:       true,
+			ArtworkModel:   "multi",
+		}},
+		{Group: &offlinecache.SeriesGroup{
+			Key:            offlinecache.SeriesGroupKey{Chain: "evm", Address: "0xdef", SeriesID: "2"},
+			Representative: editionB,
+			Editions:       []dp1playlist.PlaylistItem{editionB},
+			Resolved:       true,
+			ArtworkModel:   "single",
+		}},
+	}
+
+	// Both required sources must be classified/captured — the second A
+	// edition (not required beyond the one reserved slot, and past the
+	// budget once A and B are each reserved once) must NOT be, or gomock
+	// fails this test on an unexpected call.
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), sourceA).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), sourceB).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, item dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(maxQueued)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", maxQueued, segments)
+	require.NoError(t, err)
+	assert.Equal(t, maxQueued, queued, "both distinct required sources fit within the budget")
+	assert.Equal(t, len(items), total, "total still reports the playlist's real item count")
+
+	waitForState(t, ts.service, sourceA, offlinecache.StateReady)
+	waitForState(t, ts.service, sourceB, offlinecache.StateReady)
+}
+
 // TestService_DownloadPlaylist_RequiredRepresentativeSurvivesWhenItsSourceIsAlsoAnEdition
 // pins feralfile-bot F1's 2026-11-13 follow-up: when the Representative's
 // Source already equals one of the group's own Editions, dp1.CastPlan.Full

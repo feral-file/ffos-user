@@ -85,20 +85,35 @@ func requiredDownloadSources(segments []SeriesSegment) map[string]struct{} {
 // unreachable-in-practice case — maxQueued is dp1.MAX_PLAYLIST_ITEMS_LIMIT,
 // far larger than any playlist's series-group count — but still bounded
 // rather than silently violating the budget's own contract).
+//
+// The reservation pass below reserves at most ONE slot per distinct
+// required source, not one per occurrence: a multi series whose editions
+// share a Source with each other (the same artwork reused across several
+// catalog entries) used to let every occurrence of that shared source
+// consume the budget in the first pass, exhausting maxQueued before a
+// later, equally-required source was ever reserved — even though reserving
+// one slot per required source would have fit both (feralfile-bot F1,
+// 2026-11-13).
 func boundQueuedItems(items []dp1playlist.PlaylistItem, maxQueued int, required map[string]struct{}) []dp1playlist.PlaylistItem {
 	if len(required) == 0 {
 		return items[:maxQueued]
 	}
 	keep := make([]bool, len(items))
 	kept := 0
+	reserved := make(map[string]struct{}, len(required))
 	for i, item := range items {
 		if kept >= maxQueued {
 			break
 		}
-		if _, ok := required[item.Source]; ok {
-			keep[i] = true
-			kept++
+		if _, ok := required[item.Source]; !ok {
+			continue
 		}
+		if _, already := reserved[item.Source]; already {
+			continue
+		}
+		reserved[item.Source] = struct{}{}
+		keep[i] = true
+		kept++
 	}
 	for i := range items {
 		if kept >= maxQueued {

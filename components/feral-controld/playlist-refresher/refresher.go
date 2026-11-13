@@ -1731,7 +1731,7 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 	// called it before), and this check only needs to agree with wall-clock
 	// reality at the moment PrepareWithSource will apply the same filter a
 	// few lines later in the caller — not to be independently mockable.
-	scheduleActive := scheduleActiveSegments(plan.Segments, time.Now(), sleepschedule.LocalTimezone())
+	scheduleActive := scheduleActiveSegments(plan.Segments, time.Now(), sleepschedule.LocalTimezone(), displayFilter)
 
 	items := make([]dp1playlist.PlaylistItem, 0, len(plan.Segments))
 	// active is items' own parallel slice: active[i] is whether items[i]'s
@@ -1806,7 +1806,30 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 		// 2026-11-12; corrected to count past content-policy filtering,
 		// feralfile-bot F7, 2026-11-13; corrected again to count past
 		// displayAt scheduling, feralfile-bot F7, 2026-11-13).
-		if scheduleActive[i] {
+		//
+		// pick/pickValid are fetched once, before the live check, so both
+		// the "does this group even have a slot in displayed" question
+		// below and the remembered-pick fallback further down agree on the
+		// same remembered edition.
+		pick, hasPick := r.randomSeriesPicks[group.Key]
+		pickValid := hasPick && pick.mode == mode && pick.artworkModel == group.ArtworkModel
+		// A remembered pick that content policy itself withholds has NO
+		// slot in displayed at all — the real projection drops it entirely
+		// rather than leaving a placeholder — so occurrence would land on
+		// whatever comes after it instead, and a coincidental Source match
+		// there (e.g. an explicit item sharing an edition's Source with
+		// this very group) would be wrongly adopted as the group's live
+		// pick, overwriting the still-withheld remembered one (feralfile-bot
+		// F8, 2026-11-13). Skip the live check in that case and fall
+		// straight through to preserving the remembered pick below, exactly
+		// like a schedule-inactive group already does.
+		rememberedWithheld := false
+		if pickValid && displayFilter != nil {
+			if rememberedEdition, found := editionBySource(group.Editions, pick.source); found {
+				rememberedWithheld = !displayFilter(rememberedEdition)
+			}
+		}
+		if scheduleActive[i] && !rememberedWithheld {
 			occurrence := filteredOccurrence(items, active, displayFilter)
 			if seeded, ok := editionAtOccurrence(fetchDisplayed(), occurrence, group.Editions); ok {
 				// Written unconditionally, even when the source already
@@ -1824,11 +1847,11 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 			}
 		}
 		// Nothing currently displayed for this group (player status
-		// unavailable, this group isn't part of it, or this group's own
-		// segment is itself schedule-inactive) — fall back to the
-		// remembered pick, then to a fresh roll, exactly as before the
-		// display check above existed.
-		if pick, ok := r.randomSeriesPicks[group.Key]; ok && pick.mode == mode && pick.artworkModel == group.ArtworkModel {
+		// unavailable, this group isn't part of it, this group's own
+		// segment is itself schedule-inactive, or its remembered pick is
+		// content-withheld) — fall back to the remembered pick, then to a
+		// fresh roll, exactly as before the display check above existed.
+		if pickValid {
 			if fresh, found := editionBySource(group.Editions, pick.source); found {
 				items = append(items, fresh)
 				active = append(active, scheduleActive[i])
@@ -2031,18 +2054,34 @@ func filteredOccurrence(items []dp1playlist.PlaylistItem, active []bool, display
 // displayat.ComputeActiveSet's filtered subset back to segment positions,
 // since ComputeActiveSet otherwise leaves every field (including ID)
 // untouched.
-func scheduleActiveSegments(segments []dp1.CastSegment, now time.Time, loc *time.Location) []bool {
-	preview := make([]dp1playlist.PlaylistItem, len(segments))
+//
+// displayFilter is applied to the same preview before it ever reaches
+// ComputeActiveSet, not just to occurrence counting afterward: ComputeActiveSet
+// picks ONE "latest past-due" cohort out of every item it is given, so a
+// content-policy-withheld item with a newer past displayAt than a legitimately
+// displayable one can still win that cohort and mark the real one inactive —
+// exactly what the real scheduler never sees, since content-policy projection
+// already removed the withheld item before playlistschedule.Scheduler ever
+// runs on the real flattened playlist (feralfile-bot F7, 2026-11-13). Omitting
+// a withheld segment from preview entirely (rather than keeping it and
+// zeroing its DisplayAt) keeps it from competing for "latest" at all, exactly
+// mirroring its absence from the real, already-filtered input the scheduler
+// resolves against.
+func scheduleActiveSegments(segments []dp1.CastSegment, now time.Time, loc *time.Location, displayFilter func(dp1playlist.PlaylistItem) bool) []bool {
+	preview := make([]dp1playlist.PlaylistItem, 0, len(segments))
 	for i, seg := range segments {
-		id := strconv.Itoa(i)
+		var item dp1playlist.PlaylistItem
+		hasItem := false
 		switch {
 		case seg.Item != nil:
-			preview[i] = dp1playlist.PlaylistItem{ID: id, DisplayAt: seg.Item.DisplayAt}
+			item, hasItem = *seg.Item, true
 		case seg.Group != nil:
-			preview[i] = dp1playlist.PlaylistItem{ID: id, DisplayAt: seg.Group.Representative.DisplayAt}
-		default:
-			preview[i] = dp1playlist.PlaylistItem{ID: id}
+			item, hasItem = seg.Group.Representative, true
 		}
+		if hasItem && displayFilter != nil && !displayFilter(item) {
+			continue
+		}
+		preview = append(preview, dp1playlist.PlaylistItem{ID: strconv.Itoa(i), DisplayAt: item.DisplayAt})
 	}
 	active := make([]bool, len(segments))
 	for _, item := range displayat.ComputeActiveSet(&dp1playlist.Playlist{Items: preview}, now, loc) {

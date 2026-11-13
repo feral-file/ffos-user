@@ -559,3 +559,122 @@ func TestNarrowStable_PreservesRememberedPickWhenGroupItselfIsScheduledOut(t *te
 	assert.Equal(t, "https://cdn.example.com/b.mp4", out[0].Source,
 		"a group with no active displayed occurrence must keep its remembered pick, not read an unrelated displayed item")
 }
+
+// TestNarrowStable_ScheduleActiveSegmentsExcludesContentWithheldItemsFromCohort
+// pins feralfile-bot's second F7 follow-up (2026-11-13): scheduleActiveSegments
+// used to decide the "latest scheduled" cohort over EVERY segment's raw
+// displayAt, including one content policy withholds before the real
+// scheduler ever sees it. A mature item with a newer past displayAt than a
+// legitimately-displayable, older-past-displayAt item could still win that
+// cohort and mark the earlier item inactive — demoting an item the real,
+// already-policy-filtered scheduler keeps active, and shifting the
+// occurrence count for a random group that follows both. Policy removing
+// the mature item BEFORE the real scheduler runs is exactly the ordering
+// scheduleActiveSegments must mirror.
+func TestNarrowStable_ScheduleActiveSegmentsExcludesContentWithheldItemsFromCohort(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+	mature := contentrating.RatingMature
+
+	olderPast := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	newerPast := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+	scheduledOld := dp1playlist.PlaylistItem{ID: "scheduled-old", Source: "https://cdn.example.com/a.mp4", DisplayAt: &olderPast}
+	matureNew := dp1playlist.PlaylistItem{ID: "mature-new", Source: "https://cdn.example.com/m.mp4", DisplayAt: &newerPast, ContentRating: &mature}
+
+	editionA := dp1playlist.PlaylistItem{ID: "a", Source: "https://cdn.example.com/a.mp4"}
+	editionB := dp1playlist.PlaylistItem{ID: "b", Source: "https://cdn.example.com/b.mp4"}
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
+	plan := dp1.CastPlan{Segments: []dp1.CastSegment{
+		{Item: &scheduledOld},
+		{Item: &matureNew},
+		{Group: &dp1.ResolvedSeriesGroup{
+			Key:            key,
+			Representative: dp1playlist.PlaylistItem{ID: "item-series", Source: "https://cdn.example.com/series.html"},
+			Editions:       []dp1playlist.PlaylistItem{editionA, editionB},
+			Resolved:       true,
+			ArtworkModel:   dp1.SeriesArtworkModelMultiUnique,
+		}},
+	}}
+	// Already selected on an earlier tick.
+	r.randomSeriesPicks = map[dp1.SeriesGroupKey]randomSeriesPick{
+		key: {mode: dp1.SeriesPlaybackRandom, artworkModel: dp1.SeriesArtworkModelMultiUnique, source: editionB.Source},
+	}
+
+	// What the player actually shows: content policy already removed the
+	// mature item before the real scheduler ever ran, so the older-past item
+	// is the real scheduler's only competitor for "latest" and stays active.
+	currentlyDisplayed := func() []dp1playlist.PlaylistItem {
+		return []dp1playlist.PlaylistItem{scheduledOld, editionB}
+	}
+
+	policy := contentpolicy.Default()
+	displayFilter := func(item dp1playlist.PlaylistItem) bool {
+		return policy.Allows(item, contentpolicy.ContextCurated)
+	}
+
+	out := r.narrowStable(plan, &mode, currentlyDisplayed, displayFilter)
+	require.Len(t, out, 3)
+	assert.Equal(t, scheduledOld.Source, out[0].Source,
+		"the older-past item still passes through narrowStable unchanged")
+	assert.Equal(t, matureNew.Source, out[1].Source,
+		"the mature item still passes through narrowStable unchanged; content policy removes it in a later, separate pass")
+	assert.Equal(t, editionB.Source, out[2].Source,
+		"the remembered pick B must be preserved: the mature item must not out-rank the older-past item for the scheduling cohort, "+
+			"or occurrence misreads the explicit older-past item's position as the group's own live pick")
+	assert.Equal(t, editionB.Source, r.randomSeriesPicks[key].source,
+		"the remembered pick must stay B, not be overwritten by a coincidental Source match on the older-past item")
+}
+
+// TestNarrowStable_PreservesRememberedPickWhenItIsContentWithheld pins
+// feralfile-bot's F8 (2026-11-13): a random group's remembered pick that
+// content policy itself withholds has no slot in the real, already-filtered
+// displayed list at all — the projection drops it entirely rather than
+// leaving a placeholder — so occurrence lands on whatever follows it
+// instead, and a coincidental Source match there must not be adopted as the
+// group's live pick. The remembered, still-withheld pick must be preserved
+// so content policy continues withholding the SAME thing next tick too.
+func TestNarrowStable_PreservesRememberedPickWhenItIsContentWithheld(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+	mature := contentrating.RatingMature
+
+	editionA := dp1playlist.PlaylistItem{ID: "a", Source: "https://cdn.example.com/a.mp4"}
+	editionB := dp1playlist.PlaylistItem{ID: "b", Source: "https://cdn.example.com/b.mp4", ContentRating: &mature}
+	// Shares its Source with editionA, the exact shape that let a wrongly
+	// computed occurrence be mistaken for the group's own live pick.
+	explicitA := dp1playlist.PlaylistItem{ID: "explicit-a", Source: editionA.Source}
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
+	plan := dp1.CastPlan{Segments: []dp1.CastSegment{
+		{Group: &dp1.ResolvedSeriesGroup{
+			Key:            key,
+			Representative: dp1playlist.PlaylistItem{ID: "item-series", Source: "https://cdn.example.com/series.html"},
+			Editions:       []dp1playlist.PlaylistItem{editionA, editionB},
+			Resolved:       true,
+			ArtworkModel:   dp1.SeriesArtworkModelMultiUnique,
+		}},
+		{Item: &explicitA},
+	}}
+	// B was selected on an earlier tick; content policy has always withheld it.
+	r.randomSeriesPicks = map[dp1.SeriesGroupKey]randomSeriesPick{
+		key: {mode: dp1.SeriesPlaybackRandom, artworkModel: dp1.SeriesArtworkModelMultiUnique, source: editionB.Source},
+	}
+
+	// What the player actually shows: B has no slot at all (withheld with
+	// no placeholder), leaving only the trailing explicit item.
+	currentlyDisplayed := func() []dp1playlist.PlaylistItem {
+		return []dp1playlist.PlaylistItem{explicitA}
+	}
+
+	policy := contentpolicy.Default()
+	displayFilter := func(item dp1playlist.PlaylistItem) bool {
+		return policy.Allows(item, contentpolicy.ContextCurated)
+	}
+
+	out := r.narrowStable(plan, &mode, currentlyDisplayed, displayFilter)
+	require.Len(t, out, 2)
+	assert.Equal(t, editionB.Source, out[0].Source,
+		"the content-withheld remembered pick B must be preserved, not overwritten by the following explicit item's coincidental Source match")
+	assert.Equal(t, explicitA.Source, out[1].Source, "the trailing explicit item passes through unchanged")
+	assert.Equal(t, editionB.Source, r.randomSeriesPicks[key].source,
+		"the remembered pick must stay B so content policy continues withholding the same thing next tick")
+}
