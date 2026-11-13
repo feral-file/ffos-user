@@ -387,3 +387,44 @@ func TestReadTreeChargesDecompressionBeforeItHappens(t *testing.T) {
 	assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(100<<20),
 		"expansion stops at the tree budget instead of every file expanding first")
 }
+
+// peakGoroutines records the most goroutines alive at any RPC call.
+type peakGoroutines struct {
+	*fakeFS
+	mu   sync.Mutex
+	peak int
+}
+
+func (p *peakGoroutines) Call(ctx context.Context, contract string, data []byte, block *big.Int) ([]byte, error) {
+	n := runtime.NumGoroutine()
+	p.mu.Lock()
+	p.peak = max(p.peak, n)
+	p.mu.Unlock()
+	return p.fakeFS.Call(ctx, contract, data, block)
+}
+
+// PR #461 review F12: a tree of directories that name the next one many
+// times is refused without a goroutine per path.
+func TestReadTreeBoundsTraversalBeforeSchedulingIt(t *testing.T) {
+	fs := &peakGoroutines{fakeFS: newFakeFS()}
+	next := fs.addFile(t, []byte("x"), nil)
+	for range 3 {
+		names := map[string]string{}
+		for i := range 1024 {
+			names[fmt.Sprintf("n%04d", i)] = next
+		}
+		next = fs.addDir(names)
+	}
+	reader, err := NewReader(fs, "eip155:1", big.NewInt(1))
+	require.NoError(t, err)
+	base := runtime.NumGoroutine()
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err = reader.ReadTree(context.Background(), next)
+	runtime.ReadMemStats(&after)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrTooLarge), err)
+	assert.LessOrEqual(t, fs.peak-base, DefaultLimits.ConcurrentReads+2, "a fixed worker pool, not a goroutine per path")
+	assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(32<<20))
+}

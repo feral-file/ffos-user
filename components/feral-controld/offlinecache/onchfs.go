@@ -118,7 +118,13 @@ type OnchfsMaterializer struct {
 type onchfsJob struct {
 	done chan struct{}
 	err  error
+	// promote, once closed, lets a job still waiting for a slot run at
+	// once: it is the work a cast is waiting to show (see start).
+	promote     chan struct{}
+	promoteOnce sync.Once
 }
+
+func (j *onchfsJob) prioritize() { j.promoteOnce.Do(func() { close(j.promote) }) }
 
 // OnchfsMaterializerConfig configures NewOnchfsMaterializer.
 type OnchfsMaterializerConfig struct {
@@ -201,7 +207,9 @@ func (m *OnchfsMaterializer) Ensure(ctx context.Context, items []dp1playlist.Pla
 			ready++
 			continue
 		}
-		job := m.start(item)
+		// The first work is what the cast waits for; it must not queue
+		// behind background reads of the rest (PR #461 review F13).
+		job := m.start(item, isFirst && wait > 0)
 		if isFirst {
 			first = job
 		}
@@ -246,14 +254,27 @@ func (m *OnchfsMaterializer) fresh(source string, margin time.Duration) bool {
 }
 
 // start begins (or joins) the job for item.
-func (m *OnchfsMaterializer) start(item dp1playlist.PlaylistItem) *onchfsJob {
+//
+// A foreground job (the work a cast is waiting for) does not wait for one of
+// the onchfsConcurrentJobs slots: goroutines race for slots in no order, and
+// two slow background works holding both slots kept a cast's first work
+// from ever starting within the cast wait (PR #461 review F13). A
+// background job already waiting for a slot is promoted the same way when a
+// cast asks for it. Foreground jobs are bounded by the casts in flight.
+func (m *OnchfsMaterializer) start(item dp1playlist.PlaylistItem, foreground bool) *onchfsJob {
 	key := SourceKey(item.Source)
 	m.mu.Lock()
 	if job, ok := m.inflight[key]; ok {
 		m.mu.Unlock()
+		if foreground {
+			job.prioritize()
+		}
 		return job
 	}
-	job := &onchfsJob{done: make(chan struct{})}
+	job := &onchfsJob{done: make(chan struct{}), promote: make(chan struct{})}
+	if foreground {
+		job.prioritize()
+	}
 	m.inflight[key] = job
 	m.mu.Unlock()
 
@@ -265,12 +286,17 @@ func (m *OnchfsMaterializer) start(item dp1playlist.PlaylistItem) *onchfsJob {
 			close(job.done)
 		}()
 		select {
-		case m.jobs <- struct{}{}:
-		case <-m.base.Done():
-			job.err = m.base.Err()
-			return
+		case <-job.promote:
+		default:
+			select {
+			case m.jobs <- struct{}{}:
+				defer func() { <-m.jobs }()
+			case <-job.promote:
+			case <-m.base.Done():
+				job.err = m.base.Err()
+				return
+			}
 		}
-		defer func() { <-m.jobs }()
 		ctx, cancel := context.WithTimeout(m.base, onchfsJobTimeout)
 		defer cancel()
 		started := m.now()

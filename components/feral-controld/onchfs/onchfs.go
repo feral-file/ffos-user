@@ -125,10 +125,13 @@ type inodeSource interface {
 
 // readTree reads and verifies the whole tree under root.
 //
-// Children of a directory are walked concurrently, at most
-// Limits.ConcurrentReads inode reads at a time; the semaphore is held only
-// around a read, never while waiting for children, so a deep tree cannot
-// deadlock it. The first error cancels the rest of the walk.
+// The walk is a fixed pool of Limits.ConcurrentReads workers over a shared
+// stack of paths to visit, never a goroutine per entry. A path is counted
+// against MaxPaths when it is scheduled, so scheduling itself stops at the
+// limit: a tree that names one small directory many times under many
+// names, level after level, is refused before it multiplies goroutines or
+// memory (PR #461 review F12). The first error cancels the walk, wakes
+// every worker and stops all scheduling.
 //
 // onchfs lets a directory give one inode many names (fxhash/onchfs
 // doc/docs/concepts/file-objects/directory.md), so a small tree can name the
@@ -151,11 +154,24 @@ func readTree(ctx context.Context, src inodeSource, root string, l Limits) (map[
 		src: src, limits: l, sem: make(chan struct{}, max(l.ConcurrentReads, 1)), cancel: cancel,
 		nodes: map[string]*node{}, files: map[string]*File{},
 	}
-	w.walk(ctx, root, "", 0)
+	w.cond = sync.NewCond(&w.mu)
+	w.paths = 1
+	w.pending = []walkTask{{cid: root}}
+	var wg sync.WaitGroup
+	for range max(l.ConcurrentReads, 1) {
+		wg.Go(func() { w.work(ctx) })
+	}
+	wg.Wait()
 	if w.err != nil {
 		return nil, w.err
 	}
 	return w.files, nil
+}
+
+// walkTask is one path to visit.
+type walkTask struct {
+	cid, rel string
+	depth    int
 }
 
 type walker struct {
@@ -171,8 +187,12 @@ type walker struct {
 	// inflateMu makes decompression serial, so the budget it is charged
 	// against is exact (buildFile).
 	inflateMu sync.Mutex
-	paths     int   // guarded by mu
+	paths     int   // paths scheduled so far; guarded by mu
 	err       error // first error; guarded by mu
+
+	cond    *sync.Cond // signals pending, active and err changes; on mu
+	pending []walkTask // paths scheduled, not yet visited; guarded by mu
+	active  int        // workers visiting a path; guarded by mu
 }
 
 // node is one inode's read, shared by every path that names it. done closes
@@ -190,6 +210,36 @@ func (w *walker) fail(err error) {
 	if w.err == nil {
 		w.err = err
 		w.cancel()
+	}
+	if w.cond != nil {
+		w.cond.Broadcast()
+	}
+}
+
+// work visits scheduled paths until none is left and no worker can schedule
+// more, or the walk fails.
+func (w *walker) work(ctx context.Context) {
+	for {
+		w.mu.Lock()
+		for len(w.pending) == 0 && w.active > 0 && w.err == nil {
+			w.cond.Wait()
+		}
+		if w.err != nil || len(w.pending) == 0 {
+			w.cond.Broadcast()
+			w.mu.Unlock()
+			return
+		}
+		t := w.pending[len(w.pending)-1]
+		w.pending = w.pending[:len(w.pending)-1]
+		w.active++
+		w.mu.Unlock()
+
+		w.visit(ctx, t)
+
+		w.mu.Lock()
+		w.active--
+		w.cond.Broadcast()
+		w.mu.Unlock()
 	}
 }
 
@@ -290,52 +340,59 @@ func (w *walker) charge(n int) error {
 	return nil
 }
 
-func (w *walker) walk(ctx context.Context, cid, rel string, depth int) {
-	if depth > w.limits.MaxDepth {
-		w.fail(fmt.Errorf("%w: %q is deeper than %d directories", ErrTooLarge, rel, w.limits.MaxDepth))
+func (w *walker) visit(ctx context.Context, t walkTask) {
+	if t.depth > w.limits.MaxDepth {
+		w.fail(fmt.Errorf("%w: %q is deeper than %d directories", ErrTooLarge, t.rel, w.limits.MaxDepth))
 		return
 	}
-	w.mu.Lock()
-	w.paths++
-	tooMany := w.paths > w.limits.MaxPaths
-	w.mu.Unlock()
-	if tooMany {
-		w.fail(fmt.Errorf("%w: tree has more than %d paths", ErrTooLarge, w.limits.MaxPaths))
-		return
-	}
-	n, err := w.load(ctx, cid, rel)
+	n, err := w.load(ctx, t.cid, t.rel)
 	if err != nil {
 		w.fail(err)
 		return
 	}
 	if n.file != nil {
 		f := *n.file
-		f.Path = rel
+		f.Path = t.rel
 		w.mu.Lock()
-		w.files[rel] = &f
+		w.files[t.rel] = &f
 		w.mu.Unlock()
 		return
 	}
 	if len(n.in.entries) > w.limits.MaxDirEntries {
-		w.fail(fmt.Errorf("%w: directory %q has %d entries", ErrTooLarge, rel, len(n.in.entries)))
+		w.fail(fmt.Errorf("%w: directory %q has %d entries", ErrTooLarge, t.rel, len(n.in.entries)))
 		return
 	}
-	var wg sync.WaitGroup
+	children := make([]walkTask, 0, len(n.in.entries))
 	for _, e := range n.in.entries {
 		// Only names that would escape or alias a path are unsafe. Dot-prefixed
 		// names (".asset.js") are valid onchfs entries and a work may load them,
 		// so refusing them would refuse the whole tree.
 		if e.name == "" || e.name == "." || e.name == ".." || strings.ContainsAny(e.name, "/\\") {
-			w.fail(fmt.Errorf("%w: directory %s has an unsafe entry name %q", ErrVerification, cid, e.name))
+			w.fail(fmt.Errorf("%w: directory %s has an unsafe entry name %q", ErrVerification, t.cid, e.name))
 			return
 		}
 		child := e.name
-		if rel != "" {
-			child = rel + "/" + e.name
+		if t.rel != "" {
+			child = t.rel + "/" + e.name
 		}
-		wg.Go(func() { w.walk(ctx, e.checksum, child, depth+1) })
+		children = append(children, walkTask{cid: e.checksum, rel: child, depth: t.depth + 1})
 	}
-	wg.Wait()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.err != nil {
+		return
+	}
+	// Counted here, before anything runs: a directory whose entries would
+	// take the walk past MaxPaths schedules none of them.
+	if w.paths+len(children) > w.limits.MaxPaths {
+		w.err = fmt.Errorf("%w: tree has more than %d paths", ErrTooLarge, w.limits.MaxPaths)
+		w.cancel()
+		w.cond.Broadcast()
+		return
+	}
+	w.paths += len(children)
+	w.pending = append(w.pending, children...)
+	w.cond.Broadcast()
 }
 
 // newFile builds a File from a verified inode.

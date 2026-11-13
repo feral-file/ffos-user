@@ -603,3 +603,48 @@ func TestOnchfsMaterializerEscapedEntryOpensItsDecodedFile(t *testing.T) {
 		seen[r.URL+" "+r.Method] = true
 	}
 }
+
+// rootGatedResolver blocks forever (until its context ends) for slow roots
+// and answers at once for any other.
+type rootGatedResolver struct {
+	slow map[string]bool
+	tree *onchfs.Tree
+}
+
+func (r *rootGatedResolver) Resolve(ctx context.Context, root, _ string) (*onchfs.Tree, error) {
+	if r.slow[root] {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t := *r.tree
+	t.Root = root
+	return &t, nil
+}
+
+// PR #461 review F13: slow background works holding every read slot must
+// not keep the cast's first work from starting within the cast wait.
+func TestOnchfsMaterializerFirstWorkSkipsTheQueue(t *testing.T) {
+	store, _ := newTestStore(t)
+	slowRoots := []string{
+		"1111111111111111111111111111111111111111111111111111111111111111",
+		"2222222222222222222222222222222222222222222222222222222222222222",
+		"3333333333333333333333333333333333333333333333333333333333333333",
+	}
+	resolver := &rootGatedResolver{slow: map[string]bool{}, tree: onchfsTestTree()}
+	var background []dp1playlist.PlaylistItem
+	for _, r := range slowRoots {
+		resolver.slow[r] = true
+		background = append(background, dp1playlist.PlaylistItem{Source: onchfsSource(t, "onchfs://"+r)})
+	}
+	first := dp1playlist.PlaylistItem{Source: onchfsSource(t, "onchfs://"+onchfsTestRoot)}
+	m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{})
+
+	// A refresh pass starts everything without waiting: the slow works take
+	// both slots and the first work queues behind them.
+	assert.Zero(t, m.Ensure(context.Background(), append(background, first), 0))
+	time.Sleep(50 * time.Millisecond)
+
+	// The cast waits for its first work, which is promoted past the queue.
+	cast := append([]dp1playlist.PlaylistItem{first}, background...)
+	assert.Equal(t, 1, m.Ensure(context.Background(), cast, 3*time.Second))
+}

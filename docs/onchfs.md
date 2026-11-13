@@ -94,6 +94,9 @@ The ABI decoder treats every node answer as hostile:
 - 8,192 paths, directories included;
 - 4,096 entries per directory;
 - depth 16;
+- a fixed pool of 4 workers walks the tree (never a goroutine per entry), and a path
+  counts against the 8,192 when it is scheduled, so an aliased tree is refused before it
+  fans out;
 - 4 reads in flight; decompression one file at a time, each capped at what remains of
   the 64 MiB, so the budget is charged before bytes are made.
 
@@ -187,7 +190,8 @@ within three days of expiry.
 The cast path (`commandrouter`) calls `Ensure` after the content-policy filter and before the
 preflight, outside both locks:
 - It waits up to 15 s for the first onchfs work in playlist order; the rest land in the
-  background.
+  background. The first work does not queue for one of the two background read slots,
+  and is promoted if a refresh already queued it.
 - Each background work that lands calls `OnReady`, which forces a refresher pass that widens
   the replay scope.
 - The refresher starts any onchfs work a refresh brings, without waiting.
