@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"path"
@@ -94,11 +95,18 @@ type OnchfsMaterializer struct {
 	standalone bool
 	maxBytes   int64
 	onReady    func()
+	// evict removes one record and reclaims its blobs: the Service's
+	// ClearItem when a Service runs (its GC is serialized with captures),
+	// otherwise a delete and a GC of our own (we are the only writer).
+	evict func(source string) error
 
 	jobs chan struct{} // onchfsConcurrentJobs slots
 
 	mu       sync.Mutex
 	inflight map[string]*onchfsJob // by SourceKey; guarded by mu
+	// protected are the SourceKeys of the playlist last passed to Ensure:
+	// reclaiming space never evicts a work the wall is about to show.
+	protected map[string]bool // guarded by mu
 
 	// writeMu serializes this producer's writes and, when standalone, its
 	// GC: every blob it writes is referenced by a saved record before a GC
@@ -127,6 +135,10 @@ type OnchfsMaterializerConfig struct {
 	// background (past the caller's wait) saved a record, so the caller
 	// can widen the replay scope to it. It must not block.
 	OnReady func()
+	// Evict removes one record by source and reclaims its blobs. Pass the
+	// Service's ClearItem when a Service runs; nil when Standalone (the
+	// materializer then deletes and collects itself).
+	Evict func(source string) error
 	// Now is the clock (time.Now when nil).
 	Now func() time.Time
 }
@@ -137,6 +149,10 @@ func NewOnchfsMaterializer(cfg OnchfsMaterializerConfig) *OnchfsMaterializer {
 		store: cfg.Store, resolver: cfg.Resolver, logger: cfg.Logger, base: cfg.Base,
 		standalone: cfg.Standalone, maxBytes: cfg.MaxBytes, onReady: cfg.OnReady, now: cfg.Now,
 		jobs: make(chan struct{}, onchfsConcurrentJobs), inflight: map[string]*onchfsJob{},
+		evict: cfg.Evict,
+	}
+	if m.evict == nil {
+		m.evict = m.evictStandalone
 	}
 	if m.now == nil {
 		m.now = time.Now
@@ -165,6 +181,15 @@ func (m *OnchfsMaterializer) Ensure(ctx context.Context, items []dp1playlist.Pla
 	ready := 0
 	var first *onchfsJob
 	seen := map[string]bool{}
+	protected := map[string]bool{}
+	for _, item := range items {
+		if contentpath.IsOnchfsSourceURL(item.Source) {
+			protected[SourceKey(item.Source)] = true
+		}
+	}
+	m.mu.Lock()
+	m.protected = protected
+	m.mu.Unlock()
 	for _, item := range items {
 		if !contentpath.IsOnchfsSourceURL(item.Source) || seen[item.Source] {
 			continue
@@ -288,13 +313,111 @@ func (m *OnchfsMaterializer) materialize(ctx context.Context, item dp1playlist.P
 	}
 	m.writeMu.Lock()
 	defer m.writeMu.Unlock()
-	if err := m.write(rec, blobs); err != nil {
+	key := SourceKey(item.Source)
+	err = m.write(rec, blobs)
+	// The cache shares one disk budget. When it is full, older onchfs works
+	// make room for this one, oldest played first, never one the current
+	// playlist shows (PR #461 review F6). Capture reclaims for itself
+	// inside the Service; this producer has to do the same or a full cache
+	// would leave every new onchfs work unplayable.
+	for evicted := 0; isDiskPressure(err) && evicted < onchfsMaxEvictions; evicted++ {
+		victim, ok := m.oldestEvictable(key)
+		if !ok {
+			break
+		}
+		if evictErr := m.evict(victim); evictErr != nil {
+			m.logger.Warn("onchfs: evicting a record to make room failed", zap.Error(evictErr))
+			break
+		}
+		m.logger.Info("onchfs: evicted an older work to make room", zap.String("source", truncateSourceForLog(victim)))
+		err = m.write(rec, blobs)
+	}
+	if err != nil {
+		if m.standalone {
+			// Blobs a failed publication wrote are referenced by nothing;
+			// collect them now. With a Service running its GC does.
+			if _, _, gcErr := m.store.GC(); gcErr != nil {
+				m.logger.Warn("onchfs: collecting blobs after a failed write failed", zap.Error(gcErr))
+			}
+		}
 		return err
 	}
 	if m.standalone {
-		m.prune(SourceKey(item.Source))
+		m.prune(key)
 	}
 	return nil
+}
+
+// onchfsMaxEvictions bounds one write's reclaim loop.
+const onchfsMaxEvictions = 64
+
+// isDiskPressure reports a write the cache's disk budget refused.
+func isDiskPressure(err error) bool {
+	return errors.Is(err, errCacheDiskPressure) || errors.Is(err, ErrBlobTooLarge)
+}
+
+// evictStandalone removes a record and collects its blobs, for a device
+// with no Service (the materializer is then the store's only writer).
+func (m *OnchfsMaterializer) evictStandalone(source string) error {
+	if _, err := m.store.DeleteItem(SourceKey(source)); err != nil {
+		return err
+	}
+	_, _, err := m.store.GC()
+	return err
+}
+
+// oldestEvictable is the least recently played onchfs record other than
+// keep and the current playlist's works.
+func (m *OnchfsMaterializer) oldestEvictable(keep string) (string, bool) {
+	m.mu.Lock()
+	protected := m.protected
+	m.mu.Unlock()
+	for _, r := range m.onchfsRecords() {
+		if r.key != keep && !protected[r.key] {
+			return r.source, true
+		}
+	}
+	return "", false
+}
+
+// onchfsRecord is one onchfs record as the eviction policies see it.
+type onchfsRecord struct {
+	key, source string
+	at          time.Time
+	bytes       int64
+}
+
+// onchfsRecords lists this producer's records, least recently played first.
+func (m *OnchfsMaterializer) onchfsRecords() []onchfsRecord {
+	keys, err := m.store.ListItemKeys()
+	if err != nil {
+		m.logger.Warn("onchfs: listing records failed", zap.Error(err))
+		return nil
+	}
+	var out []onchfsRecord
+	for _, key := range keys {
+		rec, err := m.store.LoadItem(key)
+		if err != nil || rec == nil || !contentpath.IsOnchfsSourceURL(rec.Item.Source) {
+			continue
+		}
+		r := onchfsRecord{key: key, source: rec.Item.Source, at: rec.LastPlayedAt}
+		if r.at.IsZero() {
+			r.at = rec.CapturedAt
+		}
+		seen := map[string]bool{}
+		for _, res := range rec.Resources {
+			if res.SHA256 == "" || seen[res.SHA256] {
+				continue
+			}
+			seen[res.SHA256] = true
+			if n, err := m.store.BlobSize(res.SHA256); err == nil {
+				r.bytes += n
+			}
+		}
+		out = append(out, r)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].at.Before(out[j].at) })
+	return out
 }
 
 // write stores every blob and saves the record. Through a publishing store
@@ -334,56 +457,26 @@ func (m *OnchfsMaterializer) write(rec *ItemRecord, blobs map[string][]byte) err
 // standalone (see OnchfsMaterializer.standalone); called under writeMu.
 // Failures are logged: the cost of a failed prune is disk, never playback.
 func (m *OnchfsMaterializer) prune(keep string) {
-	keys, err := m.store.ListItemKeys()
-	if err != nil {
-		m.logger.Warn("onchfs: listing records to prune failed", zap.Error(err))
-		return
-	}
-	type entry struct {
-		key   string
-		at    time.Time
-		bytes int64
-	}
-	var entries []entry
+	records := m.onchfsRecords()
 	var total int64
-	for _, key := range keys {
-		rec, err := m.store.LoadItem(key)
-		if err != nil || rec == nil || !contentpath.IsOnchfsSourceURL(rec.Item.Source) {
-			continue
-		}
-		e := entry{key: key, at: rec.LastPlayedAt}
-		if e.at.IsZero() {
-			e.at = rec.CapturedAt
-		}
-		seen := map[string]bool{}
-		for _, res := range rec.Resources {
-			if res.SHA256 == "" || seen[res.SHA256] {
-				continue
-			}
-			seen[res.SHA256] = true
-			if n, err := m.store.BlobSize(res.SHA256); err == nil {
-				e.bytes += n
-			}
-		}
-		total += e.bytes
-		entries = append(entries, e)
+	for _, r := range records {
+		total += r.bytes
 	}
 	if total <= m.maxBytes {
 		return
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].at.Before(entries[j].at) })
-	for _, e := range entries {
+	for _, r := range records {
 		if total <= m.maxBytes {
 			break
 		}
-		if e.key == keep {
+		if r.key == keep {
 			continue
 		}
-		if _, err := m.store.DeleteItem(e.key); err != nil {
+		if _, err := m.store.DeleteItem(r.key); err != nil {
 			m.logger.Warn("onchfs: pruning a record failed", zap.Error(err))
 			continue
 		}
-		total -= e.bytes
+		total -= r.bytes
 	}
 	if _, _, err := m.store.GC(); err != nil {
 		m.logger.Warn("onchfs: collecting blobs failed", zap.Error(err))

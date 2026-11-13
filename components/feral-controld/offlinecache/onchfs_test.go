@@ -1,6 +1,7 @@
 package offlinecache_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -405,4 +406,101 @@ func TestOnchfsMaterializerServesASingleFileRoot(t *testing.T) {
 	body, err := store.ReadBlob(res.SHA256)
 	require.NoError(t, err)
 	assert.Equal(t, "<svg/>", string(body))
+}
+
+// budgetedStore refuses a blob that would take the store past limit bytes,
+// the way the cache's disk budget does.
+type budgetedStore struct {
+	offlinecache.Store
+	limit int64
+}
+
+func (s *budgetedStore) WriteBlob(r io.Reader, _ int64) (string, error) {
+	used, err := s.DiskUsage()
+	if err != nil {
+		return "", err
+	}
+	return s.Store.WriteBlob(r, s.limit-used)
+}
+
+func bigTree(fill byte) *onchfs.Tree {
+	body := bytes.Repeat([]byte{fill}, 80<<10)
+	return &onchfs.Tree{Files: map[string]*onchfs.File{"index.html": {Plain: body, ContentType: "text/html"}}}
+}
+
+// PR #461 review F6: a full cache makes room for a new onchfs work by
+// evicting older ones, oldest played first, never one the current playlist
+// shows.
+func TestOnchfsMaterializerReclaimsSpaceForANewWork(t *testing.T) {
+	roots := []string{
+		"1111111111111111111111111111111111111111111111111111111111111111",
+		"2222222222222222222222222222222222222222222222222222222222222222",
+		"3333333333333333333333333333333333333333333333333333333333333333",
+	}
+	sources := make([]string, len(roots))
+	for i, r := range roots {
+		sources[i] = onchfsSource(t, "onchfs://"+r)
+	}
+	run := func(t *testing.T, protectFirst bool, evict func(string) error) (offlinecache.Store, int) {
+		base, _ := newTestStore(t)
+		store := &budgetedStore{Store: base, limit: 230 << 10}
+		clock := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+		var mu sync.Mutex
+		now := func() time.Time { mu.Lock(); defer mu.Unlock(); clock = clock.Add(time.Minute); return clock }
+		ready := 0
+		for i, source := range sources {
+			m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: bigTree(byte('a' + i))},
+				offlinecache.OnchfsMaterializerConfig{Now: now, Evict: evict})
+			items := []dp1playlist.PlaylistItem{{Source: source}}
+			if protectFirst && i == 2 {
+				items = append(items, dp1playlist.PlaylistItem{Source: sources[0]}, dp1playlist.PlaylistItem{Source: sources[1]})
+			}
+			ready = m.Ensure(context.Background(), items, 5*time.Second)
+		}
+		return base, ready
+	}
+
+	t.Run("the oldest work makes room", func(t *testing.T) {
+		store, ready := run(t, false, nil)
+		assert.Equal(t, 1, ready)
+		_, err := store.LoadItem(offlinecache.SourceKey(sources[0]))
+		assert.Error(t, err, "the oldest work was evicted")
+		for _, s := range sources[1:] {
+			_, err := store.LoadItem(offlinecache.SourceKey(s))
+			assert.NoError(t, err)
+		}
+	})
+	t.Run("works the current playlist shows are kept", func(t *testing.T) {
+		store, _ := run(t, true, nil)
+		for _, s := range sources[:2] {
+			_, err := store.LoadItem(offlinecache.SourceKey(s))
+			assert.NoError(t, err)
+		}
+		_, err := store.LoadItem(offlinecache.SourceKey(sources[2]))
+		assert.Error(t, err, "nothing evictable: the new work does not fit")
+	})
+	t.Run("with a Service, eviction goes through it", func(t *testing.T) {
+		var evicted []string
+		var store offlinecache.Store
+		evict := func(source string) error {
+			evicted = append(evicted, source)
+			if _, err := store.DeleteItem(offlinecache.SourceKey(source)); err != nil {
+				return err
+			}
+			_, _, err := store.GC()
+			return err
+		}
+		base, _ := newTestStore(t)
+		store = base
+		limited := &budgetedStore{Store: base, limit: 230 << 10}
+		clock := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+		for i, source := range sources {
+			clock = clock.Add(time.Minute)
+			at := clock
+			m := newTestMaterializer(t, limited, &fakeOnchfsResolver{tree: bigTree(byte('a' + i))},
+				offlinecache.OnchfsMaterializerConfig{Evict: evict, Now: func() time.Time { return at }})
+			require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
+		}
+		assert.Equal(t, []string{sources[0]}, evicted)
+	})
 }

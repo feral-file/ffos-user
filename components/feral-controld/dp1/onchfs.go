@@ -92,6 +92,48 @@ func onchfsItemSource(item dp1playlist.PlaylistItem) string {
 	return o.SourceURL()
 }
 
+// OnchfsSourceVariants lists every device-local source source can be stored
+// under: the work with no chain label, then each family and chain label.
+// An item's source carries the label its provenance gave it
+// (onchfsItemSource), which a caller holding only the raw onchfs:// URI
+// cannot know, so a lookup by raw URI tries each (PR #461 review F7). nil
+// when source is not an onchfs source.
+func OnchfsSourceVariants(source string) []string {
+	o, ok := parseOnchfsSource(source)
+	if !ok {
+		return nil
+	}
+	if o.Chain != "" {
+		return []string{o.SourceURL()}
+	}
+	out := []string{o.SourceURL()}
+	for _, chain := range []string{contentpath.OnchfsEVM, onchfsTezosMainnet, "eip155:1", "eip155:8453"} {
+		o.Chain = chain
+		out = append(out, o.SourceURL())
+	}
+	return out
+}
+
+// SameOnchfsWork reports whether a and b name the same onchfs work (root,
+// path, query, fragment), whatever chain label either carries and whether
+// either is raw or device-local.
+func SameOnchfsWork(a, b string) bool {
+	oa, okA := parseOnchfsOrDeviceSource(a)
+	ob, okB := parseOnchfsOrDeviceSource(b)
+	if !okA || !okB {
+		return false
+	}
+	oa.Chain, ob.Chain = "", ""
+	return oa == ob
+}
+
+func parseOnchfsOrDeviceSource(s string) (contentpath.Onchfs, bool) {
+	if o, ok := contentpath.ParseOnchfsSourceURL(s); ok {
+		return o, true
+	}
+	return parseOnchfsSource(s)
+}
+
 // onchfsTezosMainnet is the Tezos chain contentpath knows onchfs on.
 const onchfsTezosMainnet = "tezos:NetXdQprcVkpaWU"
 

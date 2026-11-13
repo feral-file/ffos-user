@@ -109,3 +109,19 @@ func TestPlaylistDecodeTakesTheChainFamilyFromProvenance(t *testing.T) {
 	assert.Equal(t, caseyReasHost+"/", p.Items[2].Source)
 	assert.Equal(t, "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.base.onchfs.invalid/", p.Items[3].Source, "the URI's own authority wins")
 }
+
+func TestOnchfsSourceVariantsAndSameWork(t *testing.T) {
+	raw := "onchfs://" + caseyReasRoot + "/?fxhash=1"
+	variants := dp1.OnchfsSourceVariants(raw)
+	require.Len(t, variants, 5)
+	assert.Equal(t, caseyReasHost+"/?fxhash=1", variants[0])
+	assert.Contains(t, variants, caseyReasEVMHost+"/?fxhash=1")
+	assert.Equal(t, []string{"https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.base.onchfs.invalid/"},
+		dp1.OnchfsSourceVariants("onchfs://eip155:8453/"+caseyReasRoot), "an explicit authority has one form")
+	assert.Nil(t, dp1.OnchfsSourceVariants("https://cdn.example/x.png"))
+
+	assert.True(t, dp1.SameOnchfsWork(caseyReasEVMHost+"/?fxhash=1", raw))
+	assert.True(t, dp1.SameOnchfsWork(caseyReasEVMHost+"/?fxhash=1", caseyReasHost+"/?fxhash=1"))
+	assert.False(t, dp1.SameOnchfsWork(caseyReasEVMHost+"/?fxhash=2", raw), "another iteration is another work")
+	assert.False(t, dp1.SameOnchfsWork("https://cdn.example/x.png", "https://cdn.example/x.png"), "not onchfs")
+}

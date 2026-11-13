@@ -2035,3 +2035,65 @@ func TestCommandHandler_ClearPlaylistItemCache_OnchfsURIMapsToTheDeviceSource(t 
 	require.NoError(t, err)
 	assertOkResponse(t, result)
 }
+
+// PR #461 review F7: a record stored under a provenance-labeled source
+// (.evm) is cleared by its raw onchfs:// URI too.
+func TestCommandHandler_ClearPlaylistItemCache_OnchfsURIFindsTheLabeledRecord(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+	raw := "onchfs://1639e8c989cddd2c0f9e951b126a21b1964309854c0a8e0a9b1193a655c6712a/?fxhash=1"
+	variants := dp1.OnchfsSourceVariants(raw)
+	labeled := "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.evm.onchfs.invalid/?fxhash=1"
+	require.Equal(t, labeled, variants[1])
+	gomock.InOrder(
+		mockOfflineCache.EXPECT().ClearItem(variants[0]).Return(offlinecache.ErrItemNotFound),
+		mockOfflineCache.EXPECT().ClearItem(labeled).Return(nil),
+	)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+		Arguments: map[string]any{"source": raw},
+	})
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	assert.Equal(t, labeled, resp["source"])
+}
+
+func TestCommandHandler_ClearPlaylistItemCache_UnknownOnchfsWorkIsNotFound(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+	raw := "onchfs://1639e8c989cddd2c0f9e951b126a21b1964309854c0a8e0a9b1193a655c6712a"
+	mockOfflineCache.EXPECT().ClearItem(gomock.Any()).Return(offlinecache.ErrItemNotFound).Times(len(dp1.OnchfsSourceVariants(raw)))
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+		Arguments: map[string]any{"source": raw},
+	})
+	require.NoError(t, err)
+	assertErrorResponse(t, result, "not_found")
+}
+
+// PR #461 review F7: a download by raw onchfs:// URI finds the playlist
+// item whose source carries its provenance label, and queues that item.
+func TestCommandHandler_DownloadPlaylistItem_OnchfsURIFindsTheLabeledItem(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	raw := "onchfs://1639e8c989cddd2c0f9e951b126a21b1964309854c0a8e0a9b1193a655c6712a/?fxhash=1"
+	labeled := "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.evm.onchfs.invalid/?fxhash=1"
+	playlistURL := "https://example.com/playlist.json"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: labeled}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(1)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrItemInlineNotQueued).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return([]byte(`{"id":"playlist-1"}`), nil).AnyTimes()
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(gomock.Any(), playlistURL, uint64(1)).Return(nil).AnyTimes()
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": raw},
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, result)
+}

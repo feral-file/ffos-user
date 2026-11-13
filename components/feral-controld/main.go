@@ -1254,6 +1254,10 @@ func initializeApp(
 		onchfsMaterializer = offlinecache.NewOnchfsMaterializer(offlinecache.OnchfsMaterializerConfig{
 			Store: offlineCacheStore, Resolver: resolver, Logger: logger, Base: context,
 			Standalone: offlineCache == nil,
+			// With a Service running, reclaiming space for an onchfs work
+			// goes through its ClearItem, whose GC is serialized with
+			// captures; standalone, the materializer collects itself.
+			Evict: evictThroughService(offlineCache),
 			OnReady: func() {
 				if f := onchfsReady.Load(); f != nil {
 					(*f)()
@@ -1995,4 +1999,12 @@ func initializeTestApp(
 		MintPairing:       mintPairing,
 		Hub:               hub,
 	}
+}
+
+// evictThroughService returns svc.ClearItem, or nil when no Service runs.
+func evictThroughService(svc offlinecache.Service) func(string) error {
+	if svc == nil {
+		return nil
+	}
+	return svc.ClearItem
 }

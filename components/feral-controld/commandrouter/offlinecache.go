@@ -109,6 +109,7 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	if !found {
 		return errorResponse("not_found", "source not found in playlist", false), nil
 	}
+	source = item.Source // an onchfs item's label may differ from the caller's raw URI
 
 	// Only a playlistUrl-resolved download has a URL to index the playlist
 	// BY; an inline dp1_call has none (same as DownloadPlaylist, which
@@ -275,9 +276,6 @@ func (h *handler) handleClearPlaylistItemCache(ctx context.Context, args map[str
 	if !ok {
 		return errorResponse("invalid_request", "source is required", false), nil
 	}
-	// An app may hold an onchfs work by its raw onchfs:// URI; the device
-	// keys it by its device-local source (dp1/onchfs.go).
-	source = dp1.OnchfsSource(source)
 	// Bounded here as well as at download admission: this path never goes
 	// through DownloadItem, so the admission bound does not cover it, and
 	// the ok response below echoes the source back. Non-retryable — a
@@ -287,7 +285,23 @@ func (h *handler) handleClearPlaylistItemCache(ctx context.Context, args map[str
 	if err := offlinecache.CheckSourceKeyLength(source); err != nil {
 		return errorResponse("invalid_request", err.Error(), false), nil
 	}
-	if err := h.offlineCache.ClearItem(source); err != nil {
+	// An app may hold an onchfs work by its raw onchfs:// URI. The device
+	// keys it by its device-local source, whose chain label came from the
+	// item's provenance (dp1/onchfs.go), so each form it can be stored
+	// under is tried and the first that exists is cleared (PR #461 review
+	// F7). Any other source is its own only variant.
+	variants := dp1.OnchfsSourceVariants(source)
+	if len(variants) == 0 {
+		variants = []string{source}
+	}
+	var err error
+	for _, variant := range variants {
+		if err = h.offlineCache.ClearItem(variant); !errors.Is(err, offlinecache.ErrItemNotFound) {
+			source = variant
+			break
+		}
+	}
+	if err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
 	h.resyncKioskReplayScopeToCurrentDisplay(ctx)
@@ -766,6 +780,13 @@ func findPlaylistItemBySource(playlist *dp1.Playlist, source string) (dp1playlis
 	}
 	for _, item := range playlist.Items {
 		if item.Source == source {
+			return item, true
+		}
+	}
+	// An onchfs item carries the chain label its provenance gave it, which a
+	// caller holding the raw onchfs:// URI cannot know (PR #461 review F7).
+	for _, item := range playlist.Items {
+		if dp1.SameOnchfsWork(item.Source, source) {
 			return item, true
 		}
 	}

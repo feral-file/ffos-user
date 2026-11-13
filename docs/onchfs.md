@@ -210,6 +210,12 @@ publish guard: GC takes it exclusively, and the materializer writes its blobs an
 its record while holding it shared. `fresh` also checks that every blob a record names is
 on disk, so a damaged record is rebuilt on the next cast instead of reported ready.
 
+**A full cache.** The cache shares one disk budget, so when it refuses a new work's
+blobs, older onchfs works make room, least recently played first. A work the current
+playlist shows is never evicted. With a Service running, eviction goes through its
+`ClearItem`, whose GC is serialized with captures; standalone, the materializer deletes
+and collects itself (PR #461 review F6).
+
 A root that is a single file is its own entry. A directory entry without its slash is a
 301 whose target, query included, is stored as well.
 
@@ -239,7 +245,9 @@ read.
 - **ff-app and art-catalog-service** still map onchfs to the dead gateway. They must pass the
   URI through and resolve it themselves (follow-ups outside this repository).
 - **The app sees device-local sources in `player_status`.** The offline-cache download and
-  clear commands accept the raw `onchfs://` URI and map it.
+  clear commands accept the raw `onchfs://` URI. Download matches the playlist item on the
+  same work, whatever its chain label. Clear tries each form the work can be stored under
+  (`dp1.OnchfsSourceVariants`).
 
 ## Verification
 
