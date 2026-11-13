@@ -511,3 +511,17 @@ func TestReadTreeBoundsPathsThroughAliasedDirectories(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrTooLarge), err)
 	assert.LessOrEqual(t, fs.calls[selector("readDirectory(bytes32)")], 4, "each directory is read once")
 }
+
+// F8 (#428 review): a node that pads its readFile answer with bytes no
+// length counts must not make the tree hold them.
+func TestReadTreeKeepsOnlyTheContentOfAnAnswer(t *testing.T) {
+	fs := newFakeFS()
+	cid := fs.addFile(t, []byte("hello"), map[string]string{"content-type": "text/plain"})
+	padded := append(encodeBytesResult([]byte("hello")), make([]byte, 1<<20)...)
+	fs.override[selector("readFile(bytes32)")+cid] = padded
+	tree, err := readFake(t, fs, cid)
+	require.NoError(t, err)
+	stored := tree.Files[""].Stored
+	assert.Equal(t, "hello", string(stored))
+	assert.Less(t, cap(stored), 1024, "the content owns its own small buffer, not a window into the 1 MiB answer")
+}

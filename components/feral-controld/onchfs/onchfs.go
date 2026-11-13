@@ -280,6 +280,12 @@ func (r *Reader) readFile(ctx context.Context, cid string) (*File, error) {
 	if d.err != nil {
 		return nil, fmt.Errorf("%w: file %s content is malformed", ErrVerification, cid)
 	}
+	// dyn returns a window into the whole RPC answer. Keeping that window
+	// would keep the whole answer alive, and a node can pad an answer with
+	// bytes no length counts, so a tree within MaxTreeBytes could hold far
+	// more (#428 review F8). The content is copied out at its exact length;
+	// the answer is garbage once this function returns.
+	stored = bytes.Clone(stored)
 	inode, err := r.call(ctx, "inodes(bytes32)", mustHex(cid))
 	if err != nil {
 		return nil, err
