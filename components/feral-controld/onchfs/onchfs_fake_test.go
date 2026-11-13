@@ -7,9 +7,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -431,4 +433,81 @@ func TestReadTreeRefusesGzipBomb(t *testing.T) {
 	_, err := readFake(t, f, cid)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrTooLarge), err)
+}
+
+// countingFS counts the calls a read makes per selector.
+type countingFS struct {
+	*fakeFS
+	mu    sync.Mutex
+	calls map[string]int
+}
+
+func (c *countingFS) Call(ctx context.Context, contract string, data []byte, block *big.Int) ([]byte, error) {
+	c.mu.Lock()
+	c.calls[hex.EncodeToString(data[:4])]++
+	c.mu.Unlock()
+	return c.fakeFS.Call(ctx, contract, data, block)
+}
+
+func gzipped(t *testing.T, b []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write(b)
+	require.NoError(t, zw.Close())
+	return buf.Bytes()
+}
+
+// F7 (#428 review): one inode under many names is read once and kept once.
+func TestReadTreeReadsAnAliasedInodeOnce(t *testing.T) {
+	fs := &countingFS{fakeFS: newFakeFS(), calls: map[string]int{}}
+	payload := fs.addFile(t, gzipped(t, make([]byte, 4<<20)), map[string]string{"content-encoding": "gzip"})
+	names := map[string]string{}
+	for i := range 32 {
+		names[fmt.Sprintf("copy-%02d.bin", i)] = payload
+	}
+	root := fs.addDir(names)
+	r, err := NewReader(fs, "eip155:1", big.NewInt(1))
+	require.NoError(t, err)
+	tree, err := r.ReadTree(context.Background(), root)
+	require.NoError(t, err)
+	require.Len(t, tree.Files, 32)
+	first := tree.Files["copy-00.bin"]
+	for p, f := range tree.Files {
+		assert.Equal(t, p, f.Path)
+		assert.Same(t, &first.Plain[0], &f.Plain[0], "%s shares the one decompressed buffer", p)
+	}
+	assert.Equal(t, 1, fs.calls[selector("readFile(bytes32)")])
+	assert.Equal(t, 1, fs.calls[selector("inodes(bytes32)")])
+}
+
+func TestReadTreeBoundsWhatATreeKeeps(t *testing.T) {
+	fs := newFakeFS()
+	names := map[string]string{}
+	for i := range 5 { // five distinct 16 MiB files: 80 MiB in all
+		body := make([]byte, 16<<20)
+		body[0] = byte(i)
+		names[fmt.Sprintf("part-%d.bin", i)] = fs.addFile(t, gzipped(t, body), map[string]string{"content-encoding": "gzip"})
+	}
+	_, err := readFake(t, fs, fs.addDir(names))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrTooLarge), err)
+}
+
+func TestReadTreeBoundsPathsThroughAliasedDirectories(t *testing.T) {
+	fs := &countingFS{fakeFS: newFakeFS(), calls: map[string]int{}}
+	next := fs.addFile(t, []byte("x"), nil)
+	for range 3 { // three levels of 100 names each: a million paths
+		names := map[string]string{}
+		for i := range 100 {
+			names[fmt.Sprintf("n%03d", i)] = next
+		}
+		next = fs.addDir(names)
+	}
+	r, err := NewReader(fs, "eip155:1", big.NewInt(1))
+	require.NoError(t, err)
+	_, err = r.ReadTree(context.Background(), next)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrTooLarge), err)
+	assert.LessOrEqual(t, fs.calls[selector("readDirectory(bytes32)")], 4, "each directory is read once")
 }

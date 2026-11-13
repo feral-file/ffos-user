@@ -130,6 +130,24 @@ func ParseURI(uri string) (cid, inner, query string, err error) {
 	return cid, inner, query, nil
 }
 
+// MaxTreeBytes caps the bytes one tree read keeps: every distinct file's
+// stored bytes, plus its plaintext when that differs. MaxTreePaths caps the
+// paths it visits, directories included.
+//
+// onchfs lets a directory give one inode many names (fxhash/onchfs
+// doc/docs/concepts/file-objects/directory.md), so a small tree can name the
+// same bytes, or the same directory, any number of times. Reads are therefore
+// cached by address within a read: an alias costs a map entry, not a second
+// read or a second buffer, and only distinct inodes count against
+// MaxTreeBytes (#428 review F7). An aliased directory is still walked under
+// each of its names, which is what MaxTreePaths bounds: without it, a chain of
+// directories that each name the next one many times multiplies paths
+// exponentially while every inode stays small.
+const (
+	MaxTreeBytes = 64 << 20
+	MaxTreePaths = 8192
+)
+
 // ReadTree reads the whole tree under root (64 hex) and verifies every inode.
 func (r *Reader) ReadTree(ctx context.Context, root string) (*Tree, error) {
 	root = strings.ToLower(root)
@@ -137,18 +155,51 @@ func (r *Reader) ReadTree(ctx context.Context, root string) (*Tree, error) {
 		return nil, fmt.Errorf("onchfs: root is not 64 hex characters: %q", root)
 	}
 	t := &Tree{Root: root, Block: r.block, Files: map[string]*File{}}
-	if err := r.walk(ctx, root, "", t); err != nil {
+	w := &walk{r: r, t: t, dirs: map[string][]dirEntry{}, files: map[string]*File{}}
+	if err := w.visit(ctx, root, ""); err != nil {
 		return nil, err
 	}
 	return t, nil
 }
 
-func (r *Reader) walk(ctx context.Context, cid, rel string, t *Tree) error {
-	dir, err := r.readDirectory(ctx, cid)
-	if err == nil {
-		if err := verifyDirectory(cid, dir); err != nil {
+// walk is one ReadTree: the inodes it has verified, by address, and what it
+// has kept and visited so far.
+type walk struct {
+	r     *Reader
+	t     *Tree
+	dirs  map[string][]dirEntry
+	files map[string]*File
+	bytes int
+	paths int
+}
+
+func (w *walk) visit(ctx context.Context, cid, rel string) error {
+	w.paths++
+	if w.paths > MaxTreePaths {
+		return fmt.Errorf("%w: tree has more than %d paths", ErrTooLarge, MaxTreePaths)
+	}
+	if f, ok := w.files[cid]; ok {
+		alias := *f
+		alias.Path = rel
+		w.t.Files[rel] = &alias
+		return nil
+	}
+	dir, isDir := w.dirs[cid]
+	if !isDir {
+		var err error
+		dir, err = w.r.readDirectory(ctx, cid)
+		switch {
+		case err == nil:
+			if err := verifyDirectory(cid, dir); err != nil {
+				return err
+			}
+			w.dirs[cid] = dir
+			isDir = true
+		case !errors.Is(err, ErrNotFound):
 			return err
 		}
+	}
+	if isDir {
 		for _, e := range dir {
 			// Only names that would escape or alias a path are unsafe. Dot-prefixed
 			// names (".asset.js") are valid onchfs entries and a work may load them,
@@ -160,24 +211,29 @@ func (r *Reader) walk(ctx context.Context, cid, rel string, t *Tree) error {
 			if rel != "" {
 				child = rel + "/" + e.name
 			}
-			if err := r.walk(ctx, e.checksum, child, t); err != nil {
+			if err := w.visit(ctx, e.checksum, child); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	if !errors.Is(err, ErrNotFound) {
-		return err
-	}
-	f, err := r.readFile(ctx, cid)
+	f, err := w.r.readFile(ctx, cid)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return fmt.Errorf("%w: %s at %q is neither a directory nor a file", ErrNotFound, cid, rel)
 		}
 		return err
 	}
+	w.bytes += len(f.Stored)
+	if f.Gzip {
+		w.bytes += len(f.Plain)
+	}
+	if w.bytes > MaxTreeBytes {
+		return fmt.Errorf("%w: tree keeps more than %d bytes", ErrTooLarge, MaxTreeBytes)
+	}
+	w.files[cid] = f
 	f.Path = rel
-	t.Files[rel] = f
+	w.t.Files[rel] = f
 	return nil
 }
 
