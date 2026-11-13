@@ -190,8 +190,12 @@ within three days of expiry.
 The cast path (`commandrouter`) calls `Ensure` after the content-policy filter and before the
 preflight, outside both locks:
 - It waits up to 15 s for the first onchfs work in playlist order; the rest land in the
-  background. The first work does not queue for one of the two background read slots,
-  and is promoted if a refresh already queued it.
+  background. At most three works are read at once; background reads may use two, and
+  the work a cast waits for goes ahead of them (promoted if a refresh already queued it).
+- A read never restores a work the app cleared while it was in flight: the Service's
+  clear epoch is checked before and after the record is saved.
+- With automatic caching on, an onchfs work stays in the warmer's playing and protected
+  set, so speculative reclaim keeps the work on screen; the warmer never captures it.
 - Each background work that lands calls `OnReady`, which forces a refresher pass that widens
   the replay scope.
 - The refresher starts any onchfs work a refresh brings, without waiting.

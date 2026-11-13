@@ -96,13 +96,15 @@ func (p *playbackCache) observe(items []dp1playlist.PlaylistItem, index int, rea
 	}
 	sources := make([]string, len(items))
 	for i, item := range items {
-		if len(item.Source) > MaxSourceURLBytes || isDataURI(item.Source) || contentpath.IsOnchfsSourceURL(item.Source) {
-			// Inline artwork already carries its bytes, and an onchfs work
-			// is written by OnchfsMaterializer when it is cast. An
-			// ineligible item must not disable warming of its eligible
-			// playlist neighbors.
+		if len(item.Source) > MaxSourceURLBytes || isDataURI(item.Source) {
+			// Inline artwork already carries its bytes. An ineligible item
+			// must not disable warming of its eligible playlist neighbors.
 			continue
 		}
+		// An onchfs work stays in the list: it is never captured (prepare
+		// skips it; OnchfsMaterializer writes it), but it must count as
+		// playing and protected, or speculative reclaim deletes the work
+		// on screen to warm the next item (PR #461 review F15).
 		sources[i] = item.Source
 	}
 	p.mu.Lock()
@@ -184,6 +186,9 @@ func (p *playbackCache) prepare(ctx context.Context) {
 			}
 			p.mu.Unlock()
 			continue
+		}
+		if contentpath.IsOnchfsSourceURL(source) {
+			continue // written by OnchfsMaterializer, never captured
 		}
 		p.mu.Lock()
 		if p.generation != generation {

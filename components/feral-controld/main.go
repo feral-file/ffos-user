@@ -1258,6 +1258,9 @@ func initializeApp(
 			// goes through its ClearItem, whose GC is serialized with
 			// captures; standalone, the materializer collects itself.
 			Evict: evictThroughService(offlineCache),
+			// The Service's clear epoch keeps a read in flight from
+			// restoring a work the app just cleared.
+			Fence: fenceThroughService(offlineCache),
 			OnReady: func() {
 				if f := onchfsReady.Load(); f != nil {
 					(*f)()
@@ -2007,4 +2010,13 @@ func evictThroughService(svc offlinecache.Service) func(string) error {
 		return nil
 	}
 	return svc.ClearItem
+}
+
+// fenceThroughService returns svc as the materializer's clear fence, or a
+// nil fence (not a nil Service in a non-nil interface) when none runs.
+func fenceThroughService(svc offlinecache.Service) offlinecache.ClearFence {
+	if svc == nil {
+		return nil
+	}
+	return svc
 }

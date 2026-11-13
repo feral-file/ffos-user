@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -68,9 +69,74 @@ const DefaultOnchfsStoreBytes = 512 << 20
 // works read in under 5 s; this leaves room for a slow node and failover.
 const onchfsJobTimeout = 2 * time.Minute
 
-// onchfsConcurrentJobs bounds works read at once. Each one fans out to its
-// own chain reads (onchfs.DefaultLimits.ConcurrentReads).
-const onchfsConcurrentJobs = 2
+// onchfsConcurrentJobs bounds works read at once, foreground and background
+// together; onchfsBackgroundJobs of them may be background reads. The slot
+// background work can never take is what keeps a cast's first work from
+// waiting behind slow background reads (PR #461 review F13) without letting
+// casts add unbounded reads on top (F14). Each read fans out to its own
+// chain reads (onchfs.DefaultLimits.ConcurrentReads) and keeps at most
+// onchfs.MaxTreeBytes.
+const (
+	onchfsConcurrentJobs = 3
+	onchfsBackgroundJobs = 2
+)
+
+// onchfsAdmission hands out read slots: a foreground job takes any free
+// slot and goes before every waiting background job; a background job takes
+// one only while fewer than onchfsBackgroundJobs are busy and no foreground
+// job waits. A job promoted while it waits is re-evaluated at once.
+type onchfsAdmission struct {
+	mu        sync.Mutex
+	cond      *sync.Cond
+	running   int
+	waitingFG int
+}
+
+func newOnchfsAdmission(base context.Context) *onchfsAdmission {
+	a := &onchfsAdmission{}
+	a.cond = sync.NewCond(&a.mu)
+	context.AfterFunc(base, a.wake)
+	return a
+}
+
+func (a *onchfsAdmission) wake() {
+	a.mu.Lock()
+	a.cond.Broadcast()
+	a.mu.Unlock()
+}
+
+// acquire waits for a slot for j, or until ctx ends (false).
+func (a *onchfsAdmission) acquire(ctx context.Context, j *onchfsJob) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	counted := false
+	defer func() {
+		if counted {
+			a.waitingFG--
+		}
+	}()
+	for ctx.Err() == nil {
+		fg := j.foreground.Load()
+		if fg && !counted {
+			a.waitingFG++
+			counted = true
+		}
+		if (fg && a.running < onchfsConcurrentJobs) ||
+			(!fg && a.running < onchfsBackgroundJobs && a.waitingFG == 0) {
+			a.running++
+			return true
+		}
+		a.cond.Wait()
+	}
+	return false
+}
+
+func (a *onchfsAdmission) release() {
+	a.mu.Lock()
+	a.running--
+	a.cond.Broadcast()
+	a.mu.Unlock()
+}
 
 // OnchfsResolver reads a verified onchfs tree (onchfs.Resolver).
 type OnchfsResolver interface {
@@ -100,8 +166,12 @@ type OnchfsMaterializer struct {
 	// ClearItem when a Service runs (its GC is serialized with captures),
 	// otherwise a delete and a GC of our own (we are the only writer).
 	evict func(source string) error
+	// fence is the Service's clear epoch (nil standalone, where the app's
+	// clear commands are disabled): a job never publishes a work cleared
+	// after it started (materialize).
+	fence ClearFence
 
-	jobs chan struct{} // onchfsConcurrentJobs slots
+	admission *onchfsAdmission
 
 	mu       sync.Mutex
 	inflight map[string]*onchfsJob // by SourceKey; guarded by mu
@@ -118,13 +188,23 @@ type OnchfsMaterializer struct {
 type onchfsJob struct {
 	done chan struct{}
 	err  error
-	// promote, once closed, lets a job still waiting for a slot run at
-	// once: it is the work a cast is waiting to show (see start).
-	promote     chan struct{}
-	promoteOnce sync.Once
+	// foreground marks the work a cast is waiting to show; admission puts
+	// it ahead of background work (onchfsAdmission).
+	foreground atomic.Bool
+	// barrier is the clear epoch when the job was created (fence only).
+	barrier uint64
 }
 
-func (j *onchfsJob) prioritize() { j.promoteOnce.Do(func() { close(j.promote) }) }
+// ClearFence is the part of Service a producer outside its worker needs to
+// respect clears: ClearItem bumps the source's epoch before it deletes the
+// record, so an epoch past a barrier taken earlier means a clear started.
+type ClearFence interface {
+	ClearBarrier() uint64
+	ClearedSinceBarrier(playlistID string, barrier uint64, sources ...string) bool
+}
+
+// errOnchfsCleared reports a job whose work was cleared while it was read.
+var errOnchfsCleared = errors.New("onchfs: the work was cleared while it was being read")
 
 // OnchfsMaterializerConfig configures NewOnchfsMaterializer.
 type OnchfsMaterializerConfig struct {
@@ -146,6 +226,9 @@ type OnchfsMaterializerConfig struct {
 	// Service's ClearItem when a Service runs; nil when Standalone (the
 	// materializer then deletes and collects itself).
 	Evict func(source string) error
+	// Fence is the Service, when one runs: its clear epoch keeps a job
+	// from restoring a work cleared while it was being read.
+	Fence ClearFence
 	// Now is the clock (time.Now when nil).
 	Now func() time.Time
 }
@@ -155,8 +238,8 @@ func NewOnchfsMaterializer(cfg OnchfsMaterializerConfig) *OnchfsMaterializer {
 	m := &OnchfsMaterializer{
 		store: cfg.Store, resolver: cfg.Resolver, logger: cfg.Logger, base: cfg.Base,
 		standalone: cfg.Standalone, maxBytes: cfg.MaxBytes, onReady: cfg.OnReady, now: cfg.Now,
-		jobs: make(chan struct{}, onchfsConcurrentJobs), inflight: map[string]*onchfsJob{},
-		evict: cfg.Evict,
+		inflight: map[string]*onchfsJob{},
+		evict: cfg.Evict, fence: cfg.Fence,
 	}
 	if m.evict == nil {
 		m.evict = m.evictStandalone
@@ -170,6 +253,7 @@ func NewOnchfsMaterializer(cfg OnchfsMaterializerConfig) *OnchfsMaterializer {
 	if m.base == nil {
 		m.base = context.Background()
 	}
+	m.admission = newOnchfsAdmission(m.base)
 	return m
 }
 
@@ -255,25 +339,24 @@ func (m *OnchfsMaterializer) fresh(source string, margin time.Duration) bool {
 
 // start begins (or joins) the job for item.
 //
-// A foreground job (the work a cast is waiting for) does not wait for one of
-// the onchfsConcurrentJobs slots: goroutines race for slots in no order, and
-// two slow background works holding both slots kept a cast's first work
-// from ever starting within the cast wait (PR #461 review F13). A
-// background job already waiting for a slot is promoted the same way when a
-// cast asks for it. Foreground jobs are bounded by the casts in flight.
+// A foreground job (the work a cast is waiting for) goes ahead of background
+// work for a read slot, and a background job already queued for the work is
+// promoted when a cast asks for it; see onchfsAdmission for the bound both
+// share.
 func (m *OnchfsMaterializer) start(item dp1playlist.PlaylistItem, foreground bool) *onchfsJob {
 	key := SourceKey(item.Source)
 	m.mu.Lock()
 	if job, ok := m.inflight[key]; ok {
 		m.mu.Unlock()
-		if foreground {
-			job.prioritize()
+		if foreground && !job.foreground.Swap(true) {
+			m.admission.wake()
 		}
 		return job
 	}
-	job := &onchfsJob{done: make(chan struct{}), promote: make(chan struct{})}
-	if foreground {
-		job.prioritize()
+	job := &onchfsJob{done: make(chan struct{})}
+	job.foreground.Store(foreground)
+	if m.fence != nil {
+		job.barrier = m.fence.ClearBarrier()
 	}
 	m.inflight[key] = job
 	m.mu.Unlock()
@@ -285,22 +368,15 @@ func (m *OnchfsMaterializer) start(item dp1playlist.PlaylistItem, foreground boo
 			m.mu.Unlock()
 			close(job.done)
 		}()
-		select {
-		case <-job.promote:
-		default:
-			select {
-			case m.jobs <- struct{}{}:
-				defer func() { <-m.jobs }()
-			case <-job.promote:
-			case <-m.base.Done():
-				job.err = m.base.Err()
-				return
-			}
+		if !m.admission.acquire(m.base, job) {
+			job.err = m.base.Err()
+			return
 		}
+		defer m.admission.release()
 		ctx, cancel := context.WithTimeout(m.base, onchfsJobTimeout)
 		defer cancel()
 		started := m.now()
-		job.err = m.materialize(ctx, item)
+		job.err = m.materialize(ctx, item, job.barrier)
 		label := truncateSourceForLog(item.Source)
 		if job.err != nil {
 			m.logger.Warn("onchfs: work not materialized", zap.String("source", label), zap.Error(job.err))
@@ -315,7 +391,7 @@ func (m *OnchfsMaterializer) start(item dp1playlist.PlaylistItem, foreground boo
 }
 
 // materialize reads item's tree and writes it as a record.
-func (m *OnchfsMaterializer) materialize(ctx context.Context, item dp1playlist.PlaylistItem) error {
+func (m *OnchfsMaterializer) materialize(ctx context.Context, item dp1playlist.PlaylistItem, barrier uint64) error {
 	o, ok := contentpath.ParseOnchfsSourceURL(item.Source)
 	if !ok {
 		return fmt.Errorf("onchfs: not a device-local onchfs source")
@@ -341,7 +417,10 @@ func (m *OnchfsMaterializer) materialize(ctx context.Context, item dp1playlist.P
 	m.writeMu.Lock()
 	defer m.writeMu.Unlock()
 	key := SourceKey(item.Source)
-	err = m.write(rec, blobs)
+	if m.cleared(item.Source, barrier) {
+		return errOnchfsCleared
+	}
+	err = m.write(rec, blobs, barrier)
 	// The cache shares one disk budget. When it is full, older onchfs works
 	// make room for this one, oldest played first, never one the current
 	// playlist shows (PR #461 review F6). Capture reclaims for itself
@@ -357,7 +436,7 @@ func (m *OnchfsMaterializer) materialize(ctx context.Context, item dp1playlist.P
 			break
 		}
 		m.logger.Info("onchfs: evicted an older work to make room", zap.String("source", truncateSourceForLog(victim)))
-		err = m.write(rec, blobs)
+		err = m.write(rec, blobs, barrier)
 	}
 	if err != nil {
 		if m.standalone {
@@ -373,6 +452,11 @@ func (m *OnchfsMaterializer) materialize(ctx context.Context, item dp1playlist.P
 		m.prune(key)
 	}
 	return nil
+}
+
+// cleared reports a clear of source that started after barrier.
+func (m *OnchfsMaterializer) cleared(source string, barrier uint64) bool {
+	return m.fence != nil && m.fence.ClearedSinceBarrier("", barrier, source)
 }
 
 // onchfsMaxEvictions bounds one write's reclaim loop.
@@ -453,7 +537,13 @@ func (m *OnchfsMaterializer) onchfsRecords() []onchfsRecord {
 // Afterwards every blob the record names is checked and rewritten if
 // missing: the guard is what makes this safe, the check is what repairs a
 // store without one.
-func (m *OnchfsMaterializer) write(rec *ItemRecord, blobs map[string][]byte) error {
+//
+// A clear that started after barrier undoes the publication (PR #461 review
+// F16). ClearItem bumps the source's epoch before deleting the record, so a
+// check after SaveItem covers every order: a clear that started before the
+// check is seen and the record just saved is deleted again; one that starts
+// after it deletes the saved record itself.
+func (m *OnchfsMaterializer) write(rec *ItemRecord, blobs map[string][]byte, barrier uint64) error {
 	publish := func() error {
 		for _, body := range blobs {
 			if _, err := m.store.WriteBlob(bytes.NewReader(body), 0); err != nil {
@@ -462,6 +552,12 @@ func (m *OnchfsMaterializer) write(rec *ItemRecord, blobs map[string][]byte) err
 		}
 		if err := m.store.SaveItem(rec); err != nil {
 			return fmt.Errorf("onchfs: saving the record: %w", err)
+		}
+		if m.cleared(rec.Item.Source, barrier) {
+			if _, err := m.store.DeleteItem(SourceKey(rec.Item.Source)); err != nil {
+				return fmt.Errorf("onchfs: undoing a publication a clear raced: %w", err)
+			}
+			return errOnchfsCleared
 		}
 		for sha, body := range blobs {
 			if _, err := m.store.BlobSize(sha); err == nil {

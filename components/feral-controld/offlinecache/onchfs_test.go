@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -647,4 +648,131 @@ func TestOnchfsMaterializerFirstWorkSkipsTheQueue(t *testing.T) {
 	// The cast waits for its first work, which is promoted past the queue.
 	cast := append([]dp1playlist.PlaylistItem{first}, background...)
 	assert.Equal(t, 1, m.Ensure(context.Background(), cast, 3*time.Second))
+}
+
+// blockingResolver never answers until its context ends, and records the
+// most calls it ever had in flight.
+type blockingResolver struct {
+	mu           sync.Mutex
+	active, peak int
+}
+
+func (r *blockingResolver) Resolve(ctx context.Context, _, _ string) (*onchfs.Tree, error) {
+	r.mu.Lock()
+	r.active++
+	r.peak = max(r.peak, r.active)
+	r.mu.Unlock()
+	<-ctx.Done()
+	r.mu.Lock()
+	r.active--
+	r.mu.Unlock()
+	return nil, ctx.Err()
+}
+
+// PR #461 review F14: casts that give up waiting do not add reads beyond
+// the materializer's bound; foreground priority does not lift it.
+func TestOnchfsMaterializerBoundsReadsAcrossCasts(t *testing.T) {
+	store, _ := newTestStore(t)
+	resolver := &blockingResolver{}
+	m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{})
+	n := 0
+	for range 3 { // waves
+		var wg sync.WaitGroup
+		for range 4 { // casts per wave, each waiting for its own first work
+			n++
+			root := fmt.Sprintf("%064x", n)
+			wg.Go(func() {
+				m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: onchfsSource(t, "onchfs://"+root)}}, 50*time.Millisecond)
+			})
+		}
+		wg.Wait()
+	}
+	time.Sleep(50 * time.Millisecond)
+	resolver.mu.Lock()
+	defer resolver.mu.Unlock()
+	assert.LessOrEqual(t, resolver.peak, 3, "at most onchfsConcurrentJobs reads in flight")
+	assert.Positive(t, resolver.peak)
+}
+
+// fakeFence is a Service clear epoch: clear bumps the source's epoch.
+type fakeFence struct {
+	mu     sync.Mutex
+	seq    uint64
+	epochs map[string]uint64
+}
+
+func (f *fakeFence) ClearBarrier() uint64 { f.mu.Lock(); defer f.mu.Unlock(); return f.seq }
+
+func (f *fakeFence) ClearedSinceBarrier(_ string, barrier uint64, sources ...string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, s := range sources {
+		if f.epochs[s] > barrier {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeFence) clear(source string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	if f.epochs == nil {
+		f.epochs = map[string]uint64{}
+	}
+	f.epochs[source] = f.seq
+}
+
+// clearOnSaveStore runs a clear the moment a record is saved: the worst
+// interleaving, a clear that lands between the save and the check after it.
+type clearOnSaveStore struct {
+	offlinecache.Store
+	fence *fakeFence
+}
+
+func (s *clearOnSaveStore) SaveItem(rec *offlinecache.ItemRecord) error {
+	if err := s.Store.SaveItem(rec); err != nil {
+		return err
+	}
+	s.fence.clear(rec.Item.Source)
+	return nil
+}
+
+// PR #461 review F16: a clear that starts while a work is being read is not
+// undone when the read publishes.
+func TestOnchfsMaterializerRespectsAClearDuringTheRead(t *testing.T) {
+	source := onchfsSource(t, "onchfs://"+onchfsTestRoot)
+	items := []dp1playlist.PlaylistItem{{Source: source}}
+
+	t.Run("a clear during the read", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		fence := &fakeFence{}
+		gate := make(chan struct{})
+		resolver := &fakeOnchfsResolver{tree: onchfsTestTree(), gate: gate}
+		m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{Fence: fence})
+		assert.Zero(t, m.Ensure(context.Background(), items, 20*time.Millisecond))
+		fence.clear(source) // the app clears the work while it is read
+		close(gate)
+		require.Eventually(t, func() bool { return resolver.calls.Load() == 1 }, time.Second, 5*time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
+		_, err := store.LoadItem(offlinecache.SourceKey(source))
+		assert.Error(t, err, "the cleared work was not restored")
+	})
+	t.Run("a clear between the save and the check", func(t *testing.T) {
+		base, _ := newTestStore(t)
+		fence := &fakeFence{}
+		store := &clearOnSaveStore{Store: base, fence: fence}
+		m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.OnchfsMaterializerConfig{Fence: fence})
+		assert.Zero(t, m.Ensure(context.Background(), items, 5*time.Second))
+		_, err := base.LoadItem(offlinecache.SourceKey(source))
+		assert.Error(t, err, "the publication was undone")
+	})
+	t.Run("an earlier clear does not block a new read", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		fence := &fakeFence{}
+		fence.clear(source)
+		m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.OnchfsMaterializerConfig{Fence: fence})
+		assert.Equal(t, 1, m.Ensure(context.Background(), items, 5*time.Second))
+	})
 }
