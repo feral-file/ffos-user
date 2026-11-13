@@ -49,7 +49,8 @@ func TestRasterSourceURL(t *testing.T) {
 		{"ipfs query is kept for fxhash seeds", "", "ipfs://QmFx/?fxhash=oo123", "fxhash", "https://ipfs.raribleuserdata.com/ipfs/QmFx/?fxhash=oo123"},
 		{"scheme match is case-insensitive", "", "IPFS://QmUpper", "", "https://ipfs.raribleuserdata.com/ipfs/QmUpper"},
 		{"arweave", "", "ar://TxId123", "", "https://arweave.net/TxId123"},
-		{"onchfs", "", "onchfs://abcdef/index.html", "", "https://onchfs.fxhash2.xyz/abcdef/index.html"},
+		{"onchfs passes through: no host serves it", "", "onchfs://abcdef/index.html", "", "onchfs://abcdef/index.html"},
+		{"onchfs keeps the fxhash seed byte for byte", "", "ONCHFS://1639e8c9/?fxhash=0x06ec&fxiteration=1", "fxhash", "onchfs://1639e8c9/?fxhash=0x06ec&fxiteration=1"},
 		{"empty ipfs rest is nothing to play", "", "ipfs://", "", ""},
 		{"data URI is not playable by the wall", "", "data:text/html,hi", "", ""},
 		{"bare CID is not playable", "", "QmBare", "", ""},
@@ -60,6 +61,7 @@ func TestRasterSourceURL(t *testing.T) {
 			got := rasterSourceURL(&rasterMedia{NormalizedContentURL: tc.normalized, ContentURL: tc.content}, tc.platform)
 			assert.Equal(t, tc.want, got)
 			assert.NotContains(t, got, "ipfs.io")
+			assert.NotContains(t, got, "fxhash2.xyz", "fxhash's onchfs gateway is gone (#427)")
 		})
 	}
 	assert.Equal(t, "", rasterSourceURL(nil, "Feral File"))
