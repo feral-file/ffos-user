@@ -123,3 +123,17 @@ func TestParseOnchfsSourceURLRefusesLookAlikes(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, caseyReas, o.Root)
 }
+
+// The EVM family, without a network, has its own label and round-trips.
+func TestOnchfsEVMFamilyRoundTrips(t *testing.T) {
+	o, ok := ParseOnchfs("onchfs://" + caseyReas + "/?fxhash=1")
+	require.True(t, ok)
+	o.Chain = OnchfsEVM
+	src := o.SourceURL()
+	assert.Equal(t, "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.evm.onchfs.invalid/?fxhash=1", src)
+	back, ok := ParseOnchfsSourceURL(src)
+	require.True(t, ok)
+	assert.Equal(t, OnchfsEVM, back.Chain)
+	_, ok = ParseOnchfs("onchfs://evm/" + caseyReas)
+	assert.False(t, ok, "evm is a device-side label, not a URI authority")
+}

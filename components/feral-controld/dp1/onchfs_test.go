@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	caseyReasRoot = "1639e8c989cddd2c0f9e951b126a21b1964309854c0a8e0a9b1193a655c6712a"
-	caseyReasHost = "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.onchfs.invalid"
+	caseyReasRoot    = "1639e8c989cddd2c0f9e951b126a21b1964309854c0a8e0a9b1193a655c6712a"
+	caseyReasHost    = "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.onchfs.invalid"
+	caseyReasEVMHost = "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.evm.onchfs.invalid"
 )
 
 func TestOnchfsSource(t *testing.T) {
@@ -80,5 +81,31 @@ func TestRaster_OnchfsWorkLeavesWithADeviceLocalSource(t *testing.T) {
 	result, err := rs.client.ProcessDynamicPlaylist(t.Context(), rasterPlaylist(t), false)
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
-	assert.Equal(t, caseyReasHost+"/?fxhash=0x06ec&fxiteration=1", result.Items[0].Source)
+	// Raster gives the token's chain, so the source names its family: the
+	// work is read only from EVM chains (PR #461 review F1).
+	assert.Equal(t, caseyReasEVMHost+"/?fxhash=0x06ec&fxiteration=1", result.Items[0].Source)
+}
+
+// The chain family comes from the item's provenance; an explicit URI
+// authority wins over it, and an item without provenance stays unlabeled.
+func TestPlaylistDecodeTakesTheChainFamilyFromProvenance(t *testing.T) {
+	item := func(source, chain string) string {
+		prov := ""
+		if chain != "" {
+			prov = `,"provenance":{"type":"onChain","contract":{"chain":"` + chain + `","standard":"erc721","address":"0xabc","tokenId":"1"}}`
+		}
+		return `{"id":"a","source":"` + source + `","duration":10,"license":"open"` + prov + `}`
+	}
+	doc := `{"dpVersion":"1.0.0","id":"p","title":"t","items":[` +
+		item("onchfs://"+caseyReasRoot, "evm") + `,` +
+		item("onchfs://"+caseyReasRoot, "tezos") + `,` +
+		item("onchfs://"+caseyReasRoot, "") + `,` +
+		item("onchfs://eip155:8453/"+caseyReasRoot, "tezos") + `]}`
+	var p dp1.Playlist
+	require.NoError(t, json.Unmarshal([]byte(doc), &p))
+	require.Len(t, p.Items, 4)
+	assert.Equal(t, caseyReasEVMHost+"/", p.Items[0].Source)
+	assert.Equal(t, "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.tezos.onchfs.invalid/", p.Items[1].Source)
+	assert.Equal(t, caseyReasHost+"/", p.Items[2].Source)
+	assert.Equal(t, "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.base.onchfs.invalid/", p.Items[3].Source, "the URI's own authority wins")
 }

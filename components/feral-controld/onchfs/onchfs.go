@@ -228,7 +228,11 @@ func (w *walker) load(ctx context.Context, cid, rel string) (*node, error) {
 	if n.file, n.err = newFile(cid, rel, n.in, w.limits.MaxFileBytes); n.err != nil {
 		return nil, n.err
 	}
-	n.in.stored = nil // kept once, in n.file
+	// Kept once, in n.file. The raw metadata is dropped too: on EVM it is a
+	// window into the whole RPC answer, and the cache holds every node until
+	// the walk ends, so keeping it would keep every answer alive outside
+	// MaxTreeBytes (PR #461 review F2). n.file carries its decoded headers.
+	n.in.stored, n.in.metadata = nil, nil
 	kept := len(n.file.Stored)
 	if n.file.Gzip {
 		kept += len(n.file.Plain)

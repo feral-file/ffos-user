@@ -57,6 +57,14 @@ var OnchfsChains = []OnchfsChain{
 	{CAIP2: "tezos:NetXdQprcVkpaWU", Label: "tezos", Contract: "KT1Ae7dT1gsLw2tRnUMXSCmEyF74KVkM6LUo"},
 }
 
+// OnchfsEVM is Onchfs.Chain for "an EVM chain, network unknown": every EVM
+// onchfs contract derives addresses the same way, so knowing the family is
+// what verification needs (onchfs.Resolver asks each EVM chain).
+const OnchfsEVM = "eip155"
+
+// onchfsEVMLabel is OnchfsEVM's host label.
+const onchfsEVMLabel = "evm"
+
 // onchfsBase32 is RFC 4648 base32 in lower case without padding: hosts are
 // case-insensitive and Chromium lower-cases them.
 var onchfsBase32 = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
@@ -65,9 +73,10 @@ var onchfsBase32 = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPa
 type Onchfs struct {
 	// Root is the 64-hex address of the root inode, lower case.
 	Root string
-	// Chain is the CAIP-2 id an explicit authority named, "" when the URI
-	// carries none (the usual case: the indexer stores the bare form) and
-	// the chain has to be found by asking each one.
+	// Chain is the CAIP-2 id an explicit authority named, or OnchfsEVM when
+	// only the chain family is known (the item's provenance says EVM but not
+	// which network; see dp1/onchfs.go). "" when nothing is known: the
+	// indexer stores the bare form, so the chain has to be found.
 	Chain string
 	// Path is the escaped path inside the tree, without a leading slash; ""
 	// is the root (a directory serves its index.html).
@@ -153,6 +162,8 @@ func (o Onchfs) Host() string {
 	host := onchfsBase32.EncodeToString(root)
 	if c, ok := OnchfsChainByCAIP2(o.Chain); ok {
 		host += "." + c.Label
+	} else if o.Chain == OnchfsEVM {
+		host += "." + onchfsEVMLabel
 	}
 	return host + OnchfsHostSuffix
 }
@@ -226,6 +237,9 @@ func ParseOnchfsHost(host string) (Onchfs, bool) {
 			if c.Label == chainLabel {
 				o.Chain = c.CAIP2
 			}
+		}
+		if chainLabel == onchfsEVMLabel {
+			o.Chain = OnchfsEVM
 		}
 		if o.Chain == "" {
 			return Onchfs{}, false

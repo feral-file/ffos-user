@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -92,14 +93,14 @@ func TestChainReaderFailsOverAndCoolsDown(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	c.now = func() time.Time { return now }
 
-	got, err := c.read(context.Background(), root)
+	got, err := c.read(context.Background(), root, false)
 	require.NoError(t, err)
 	assert.Same(t, good, got)
 	assert.Equal(t, []string{"liar", "down", "wrong", "ok"}, asked)
 
 	// the three that failed are tried last until their cooldown ends
 	asked = nil
-	_, err = c.read(context.Background(), root)
+	_, err = c.read(context.Background(), root, false)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"ok"}, asked)
 	assert.Equal(t, []string{"ok", "liar", "down", "wrong"}, c.order())
@@ -112,7 +113,7 @@ func TestChainReaderStopsOnAnswersAboutTheWork(t *testing.T) {
 	for _, want := range []error{ErrNotFound, ErrTooLarge} {
 		asked := 0
 		c := testChain("eip155:1", []string{"a", "b"}, func(string) (*Tree, error) { asked++; return nil, want })
-		_, err := c.read(context.Background(), strings.Repeat("ab", 32))
+		_, err := c.read(context.Background(), strings.Repeat("ab", 32), false)
 		assert.True(t, errors.Is(err, want))
 		assert.Equal(t, 1, asked, "%v is about the work; another node would say the same", want)
 	}
@@ -257,4 +258,98 @@ func TestMergeEndpoints(t *testing.T) {
 
 	got["eip155:8453"][0] = "mutated"
 	assert.NotEqual(t, "mutated", DefaultEndpoints["eip155:8453"][0], "the defaults are copied, not shared")
+}
+
+// PR #461 review F1: with no chain named, a Tezos node must not be able to
+// answer for a root before the EVM chains have had their say, because any
+// EVM file address is also a Tezos address for forged bytes.
+func TestResolverAsksTezosOnlyAfterConfirmedEVMAbsence(t *testing.T) {
+	root := strings.Repeat("ab", 32)
+	evmTree := &Tree{Root: root, Chain: "eip155:1"}
+	forged := &Tree{Root: root, Chain: TezosMainnet}
+	nodeDown := errors.New("connection refused")
+	type answers map[string]func() (*Tree, error)
+	tree := func(t *Tree) func() (*Tree, error) { return func() (*Tree, error) { return t, nil } }
+	fail := func(err error) func() (*Tree, error) { return func() (*Tree, error) { return nil, err } }
+
+	cases := map[string]struct {
+		eth, base, tez answers
+		chain          string
+		want           *Tree
+		wantNotFound   bool
+		tezosAsked     bool
+	}{
+		"an EVM work wins over a forged Tezos answer": {
+			eth: answers{"e1": tree(evmTree)}, base: answers{"b1": fail(ErrNotFound), "b2": fail(ErrNotFound)},
+			tez: answers{"t1": tree(forged)}, want: evmTree},
+		"Tezos is asked once every EVM chain confirms absence": {
+			eth: answers{"e1": fail(ErrNotFound), "e2": fail(ErrNotFound)}, base: answers{"b1": fail(ErrNotFound), "b2": fail(ErrNotFound)},
+			tez: answers{"t1": tree(forged)}, want: forged, tezosAsked: true},
+		"one EVM denial is not absence": {
+			eth: answers{"e1": fail(ErrNotFound), "e2": fail(nodeDown)}, base: answers{"b1": fail(ErrNotFound), "b2": fail(ErrNotFound)},
+			tez: answers{"t1": tree(forged)}},
+		"a denial the next node contradicts is a lie": {
+			eth: answers{"e1": fail(ErrNotFound), "e2": tree(evmTree)}, base: answers{"b1": fail(ErrNotFound), "b2": fail(ErrNotFound)},
+			tez: answers{"t1": tree(forged)}, want: evmTree},
+		"absent everywhere": {
+			eth: answers{"e1": fail(ErrNotFound), "e2": fail(ErrNotFound)}, base: answers{"b1": fail(ErrNotFound), "b2": fail(ErrNotFound)},
+			tez: answers{"t1": fail(ErrNotFound)}, wantNotFound: true, tezosAsked: true},
+		"an EVM family never asks Tezos": {
+			chain: "eip155",
+			eth:   answers{"e1": fail(ErrNotFound)}, base: answers{"b1": fail(ErrNotFound)},
+			tez: answers{"t1": tree(forged)}, wantNotFound: true},
+		"a Tezos work is read from Tezos alone": {
+			chain: TezosMainnet,
+			eth:   answers{"e1": tree(evmTree)}, base: answers{"b1": tree(evmTree)},
+			tez: answers{"t1": tree(forged)}, want: forged, tezosAsked: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var mu sync.Mutex
+			tezosAsked := false
+			chainOf := func(chain string, a answers) *chainReader {
+				eps := make([]string, 0, len(a))
+				for ep := range a {
+					eps = append(eps, ep)
+				}
+				sort.Strings(eps)
+				return testChain(chain, eps, func(ep string) (*Tree, error) {
+					if chain == TezosMainnet {
+						mu.Lock()
+						tezosAsked = true
+						mu.Unlock()
+					}
+					return a[ep]()
+				})
+			}
+			r := &Resolver{logger: zap.NewNop(), chains: []*chainReader{
+				chainOf("eip155:1", tc.eth), chainOf("eip155:8453", tc.base), chainOf(TezosMainnet, tc.tez),
+			}}
+			got, err := r.Resolve(context.Background(), root, tc.chain)
+			if tc.want != nil {
+				require.NoError(t, err)
+				assert.Same(t, tc.want, got)
+			} else {
+				require.Error(t, err)
+				assert.Equal(t, tc.wantNotFound, errors.Is(err, ErrNotFound), err)
+			}
+			assert.Equal(t, tc.tezosAsked, tezosAsked)
+		})
+	}
+}
+
+// PR #461 review F2: the walk's per-inode cache keeps no raw bytes once a
+// file is built; on EVM they are windows into whole RPC answers.
+func TestWalkerKeepsNoRawInodeBytes(t *testing.T) {
+	fs := newFakeFS()
+	cid := fs.addFile(t, []byte("hello"), map[string]string{"content-type": "text/plain"})
+	r, err := NewReader(fs, "eip155:1", big.NewInt(1))
+	require.NoError(t, err)
+	w := &walker{src: r, limits: DefaultLimits, sem: make(chan struct{}, 1), cancel: func() {},
+		nodes: map[string]*node{}, files: map[string]*File{}}
+	n, err := w.load(context.Background(), cid, "")
+	require.NoError(t, err)
+	assert.Nil(t, n.in.stored)
+	assert.Nil(t, n.in.metadata)
+	assert.Equal(t, "text/plain", n.file.ContentType)
 }

@@ -46,18 +46,54 @@ var deadOnchfsGatewayHosts = map[string]bool{
 }
 
 // OnchfsSource returns the device-local source for an onchfs source, or
-// source unchanged when it is not one.
+// source unchanged when it is not one. It knows no chain beyond what the
+// URI names; for an item, use the item's provenance (onchfsItemSource).
 func OnchfsSource(source string) string {
-	if o, ok := contentpath.ParseOnchfs(source); ok {
+	if o, ok := parseOnchfsSource(source); ok {
 		return o.SourceURL()
-	}
-	if u, err := url.Parse(source); err == nil && u.Scheme == "https" && deadOnchfsGatewayHosts[strings.ToLower(u.Host)] {
-		if o, ok := contentpath.ParseOnchfs("onchfs://" + strings.TrimPrefix(source[len("https://")+len(u.Host):], "/")); ok {
-			return o.SourceURL()
-		}
 	}
 	return source
 }
+
+func parseOnchfsSource(source string) (contentpath.Onchfs, bool) {
+	if o, ok := contentpath.ParseOnchfs(source); ok {
+		return o, true
+	}
+	if u, err := url.Parse(source); err == nil && u.Scheme == "https" && deadOnchfsGatewayHosts[strings.ToLower(u.Host)] {
+		return contentpath.ParseOnchfs("onchfs://" + strings.TrimPrefix(source[len("https://")+len(u.Host):], "/"))
+	}
+	return contentpath.Onchfs{}, false
+}
+
+// onchfsItemSource is OnchfsSource with the chain family taken from the
+// item's provenance when the URI names no chain (the indexer's bare form).
+//
+// The family is a security input, not a hint. Tezos derives a file address
+// from its content and EVM from its chunk list, so the address of any EVM
+// file is also a valid Tezos address for bytes equal to that file's packed
+// chunk checksums: a forged Tezos node could pass those bytes off as an
+// Ethereum work (PR #461 review F1). Reading a work only from its own
+// family closes that. A work with no provenance falls back to the
+// resolver's ordering (EVM first, Tezos only on confirmed EVM absence;
+// onchfs.Resolver).
+func onchfsItemSource(item dp1playlist.PlaylistItem) string {
+	o, ok := parseOnchfsSource(item.Source)
+	if !ok {
+		return item.Source
+	}
+	if o.Chain == "" && item.Provenance != nil && item.Provenance.Contract != nil {
+		switch strings.ToLower(strings.TrimSpace(item.Provenance.Contract.Chain)) {
+		case "evm":
+			o.Chain = contentpath.OnchfsEVM
+		case "tezos":
+			o.Chain = onchfsTezosMainnet
+		}
+	}
+	return o.SourceURL()
+}
+
+// onchfsTezosMainnet is the Tezos chain contentpath knows onchfs on.
+const onchfsTezosMainnet = "tezos:NetXdQprcVkpaWU"
 
 // mapOnchfsSources returns items with every onchfs source rewritten (see
 // above). The slice is copied before the first change, never written in
@@ -66,7 +102,7 @@ func OnchfsSource(source string) string {
 func mapOnchfsSources(items []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
 	out := items
 	for i := range items {
-		mapped := OnchfsSource(items[i].Source)
+		mapped := onchfsItemSource(items[i])
 		if mapped == items[i].Source {
 			continue
 		}
