@@ -2019,3 +2019,19 @@ func TestCommandHandler_ClearPlaylistCache_ResyncKeepsDisplayedReplayScope(t *te
 	resp := assertOkResponse(t, result)
 	assert.Equal(t, "playlist-1", resp["playlistId"])
 }
+
+// An app that holds an onchfs work by its raw onchfs:// URI clears the
+// record the device keeps under the work's device-local source.
+func TestCommandHandler_ClearPlaylistItemCache_OnchfsURIMapsToTheDeviceSource(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+	raw := "onchfs://1639e8c989cddd2c0f9e951b126a21b1964309854c0a8e0a9b1193a655c6712a/?fxhash=1"
+	mockOfflineCache.EXPECT().ClearItem(dp1.OnchfsSource(raw)).Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+		Arguments: map[string]any{"source": raw},
+	})
+	require.NoError(t, err)
+	assertOkResponse(t, result)
+}

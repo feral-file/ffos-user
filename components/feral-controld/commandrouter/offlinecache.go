@@ -69,6 +69,9 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	if !ok {
 		return errorResponse("invalid_request", "source is required", false), nil
 	}
+	// An app may hold an onchfs work by its raw onchfs:// URI; the device
+	// keys it by its device-local source (dp1/onchfs.go).
+	source = dp1.OnchfsSource(source)
 
 	// Sampled BEFORE the resolve, which is the whole point. The resolve
 	// is a network call that can block for seconds, and until it returns
@@ -272,6 +275,9 @@ func (h *handler) handleClearPlaylistItemCache(ctx context.Context, args map[str
 	if !ok {
 		return errorResponse("invalid_request", "source is required", false), nil
 	}
+	// An app may hold an onchfs work by its raw onchfs:// URI; the device
+	// keys it by its device-local source (dp1/onchfs.go).
+	source = dp1.OnchfsSource(source)
 	// Bounded here as well as at download admission: this path never goes
 	// through DownloadItem, so the admission bound does not cover it, and
 	// the ok response below echoes the source back. Non-retryable — a
