@@ -146,7 +146,10 @@ func (r *Reader) walk(ctx context.Context, cid, rel string, t *Tree) error {
 			return err
 		}
 		for _, e := range dir {
-			if e.name == "" || e.name == "." || e.name == ".." || strings.ContainsAny(e.name, "/\\") || strings.HasPrefix(e.name, ".") {
+			// Only names that would escape or alias a path are unsafe. Dot-prefixed
+			// names (".asset.js") are valid onchfs entries and a work may load them,
+			// so refusing them would refuse the whole tree.
+			if e.name == "" || e.name == "." || e.name == ".." || strings.ContainsAny(e.name, "/\\") {
 				return fmt.Errorf("%w: directory %s has an unsafe entry name %q", ErrVerification, cid, e.name)
 			}
 			child := e.name
@@ -187,14 +190,14 @@ func (r *Reader) readDirectory(ctx context.Context, cid string) ([]dirEntry, err
 	}
 	d := decoder{b: out}
 	o1, o2 := d.word(0), d.word(1)
-	n := d.word(o1 / 32)
-	m := d.word(o2 / 32)
+	n := d.wordAt(o1)
+	m := d.wordAt(o2)
 	if d.err != nil || n != m || n > 100000 {
 		return nil, fmt.Errorf("%w: directory %s is malformed", ErrVerification, cid)
 	}
 	entries := make([]dirEntry, 0, n)
-	for i := uint64(0); i < n; i++ {
-		so := d.word((o1+32)/32 + i)
+	for i := range n {
+		so := d.wordAt(o1 + 32 + 32*i)
 		name := d.dyn(o1 + 32 + so)
 		sum := d.bytes32(o2 + 32 + 32*i)
 		entries = append(entries, dirEntry{name: string(name), checksum: sum})
@@ -233,7 +236,13 @@ func (r *Reader) readFile(ctx context.Context, cid string) (*File, error) {
 	}
 	f := &File{Inode: cid, Stored: stored, Plain: stored, Chunks: len(chunks), Headers: decodeHeaders(metadata)}
 	f.ContentType = f.Headers["content-type"]
-	if len(stored) >= 2 && stored[0] == 0x1f && stored[1] == 0x8b {
+	// Decompress only what the writer declared as gzip content-encoding. The
+	// headers are part of the verified address, the bytes' first two bytes are
+	// not a declaration: a .gz asset (content-type application/gzip, no
+	// content-encoding) must reach the work as the archive it is. A body that
+	// declares gzip but does not decompress keeps Plain == Stored and Gzip
+	// false, so a consumer never serves it as something it is not.
+	if strings.EqualFold(strings.TrimSpace(f.Headers["content-encoding"]), "gzip") {
 		zr, err := gzip.NewReader(bytes.NewReader(stored))
 		if err == nil {
 			plain, rerr := io.ReadAll(io.LimitReader(zr, 1<<30))
@@ -245,21 +254,41 @@ func (r *Reader) readFile(ctx context.Context, cid string) (*File, error) {
 	return f, nil
 }
 
-// verifyFile checks that the address commits to this content and metadata
-// (onchfs writers hash either the chunk checksums or the whole content), and
-// that the content is exactly the chunks. Writers choose their own chunk size
-// (fxhash used 24000), so the first chunk is fetched alone once to learn it.
+// verifyFile proves stored against the address cid.
+//
+// The Ethereum contract derives a file address as keccak(0x01 ‖
+// keccak(chunk checksums) ‖ keccak(metadata)) (FileSystem.sol createFile), so
+// the address proves the chunk list, not the content: the content must then be
+// shown to be exactly those chunks in order. An address over the whole content
+// (keccak(0x01 ‖ keccak(content) ‖ keccak(metadata))) proves the content on
+// its own and needs no chunk check.
 func (r *Reader) verifyFile(ctx context.Context, cid string, stored, metadata []byte, chunks []string) error {
 	chunkBytes := make([]byte, 0, 32*len(chunks))
 	for _, c := range chunks {
 		chunkBytes = append(chunkBytes, mustHex(c)...)
 	}
 	mh := keccak(metadata)
-	byChunks := keccak(append(append([]byte{1}, keccak(chunkBytes)...), mh...))
-	byContent := keccak(append(append([]byte{1}, keccak(stored)...), mh...))
-	if hexString(byChunks) != cid && hexString(byContent) != cid {
+	if hexString(keccak(append(append([]byte{1}, keccak(stored)...), mh...))) == cid {
+		return nil
+	}
+	if hexString(keccak(append(append([]byte{1}, keccak(chunkBytes)...), mh...))) != cid {
 		return fmt.Errorf("%w: file %s does not match its chunk list and headers", ErrVerification, cid)
 	}
+	return r.verifyChunks(ctx, cid, stored, chunks)
+}
+
+// verifyChunks proves stored is the concatenation of chunks, in order.
+//
+// The contract lets a writer give every chunk its own length (createFile and
+// concatenateChunks impose none), so a chunk's length cannot be inferred from
+// its neighbors. The common case is cheap: writers like fxhash cut content
+// into equal chunks (24000 bytes), so the first chunk is fetched once to learn
+// that size and every slice of stored is hashed against its checksum. If any
+// slice disagrees the layout is not uniform, and every chunk is fetched on its
+// own and hashed by its actual bytes. Either path proves the same thing: when
+// each piece hashes to its checksum in order and together they are exactly
+// stored, stored is the file.
+func (r *Reader) verifyChunks(ctx context.Context, cid string, stored []byte, chunks []string) error {
 	switch len(chunks) {
 	case 0:
 		if len(stored) != 0 {
@@ -276,17 +305,44 @@ func (r *Reader) verifyFile(ctx context.Context, cid string, stored, metadata []
 	if err != nil {
 		return err
 	}
-	size := len(first)
+	if uniformChunksMatch(stored, chunks, len(first)) {
+		return nil
+	}
+	off := 0
+	for i, c := range chunks {
+		piece := first
+		if i > 0 {
+			if piece, err = r.concatenateChunks(ctx, chunks[i:i+1]); err != nil {
+				return err
+			}
+		}
+		if hexString(keccak(piece)) != c {
+			return fmt.Errorf("%w: file %s chunk %d does not match its checksum", ErrVerification, cid, i)
+		}
+		if len(piece) > len(stored)-off || !bytes.Equal(stored[off:off+len(piece)], piece) {
+			return fmt.Errorf("%w: file %s content differs from chunk %d", ErrVerification, cid, i)
+		}
+		off += len(piece)
+	}
+	if off != len(stored) {
+		return fmt.Errorf("%w: file %s content runs past its chunks", ErrVerification, cid)
+	}
+	return nil
+}
+
+// uniformChunksMatch reports whether stored, cut into size-byte slices (the
+// last one shorter), hashes slice by slice to chunks.
+func uniformChunksMatch(stored []byte, chunks []string, size int) bool {
 	if size == 0 || (len(stored)+size-1)/size != len(chunks) {
-		return fmt.Errorf("%w: file %s chunk size %d does not fit %d chunks", ErrVerification, cid, size, len(chunks))
+		return false
 	}
 	for i, c := range chunks {
 		lo, hi := i*size, min((i+1)*size, len(stored))
 		if hexString(keccak(stored[lo:hi])) != c {
-			return fmt.Errorf("%w: file %s chunk %d does not match", ErrVerification, cid, i)
+			return false
 		}
 	}
-	return nil
+	return true
 }
 
 // concatenateChunks calls concatenateChunks(bytes32[]) -> bytes.
@@ -332,14 +388,17 @@ func decodeInode(b []byte) (kind uint64, metadata []byte, chunks []string, err e
 	d := decoder{b: b}
 	kind = d.word(0)
 	fo := d.word(1)
-	mo, co := d.word(fo/32), d.word(fo/32+1)
+	mo, co := d.wordAt(fo), d.wordAt(fo+32)
 	metadata = d.dyn(fo + mo)
-	n := d.word((fo + co) / 32)
-	if d.err != nil || n > 1<<20 {
+	n := d.wordAt(fo + co)
+	if d.err != nil {
 		return 0, nil, nil, fmt.Errorf("malformed inode: %w", d.err)
 	}
+	if n > 1<<20 {
+		return 0, nil, nil, fmt.Errorf("inode lists %d chunks", n)
+	}
 	chunks = make([]string, 0, n)
-	for i := uint64(0); i < n; i++ {
+	for i := range n {
 		chunks = append(chunks, d.bytes32(fo+co+32+32*i))
 	}
 	if d.err != nil {
@@ -369,45 +428,64 @@ func (r *Reader) call(ctx context.Context, sig string, arg []byte) ([]byte, erro
 }
 
 // decoder reads ABI words with bounds checks; the first error sticks.
+//
+// Every value this package reads from a result is an offset, a length, an
+// element count or a one-byte enum, and each is bounded by the result it came
+// from: nothing can point or reach past the end of the buffer. word refuses
+// any value larger than the buffer, so the sums callers build from a few of
+// them (offset + 32 + 32*i) stay far below 2^64 and cannot wrap round a
+// bounds check. The checks below are written as subtractions from the buffer
+// length for the same reason. An RPC node is untrusted: a hostile length must
+// be an ErrVerification, never a slice panic.
 type decoder struct {
 	b   []byte
 	err error
 }
 
+// word returns the i-th 32-byte word as a value no larger than the buffer.
 func (d *decoder) word(i uint64) uint64 {
 	if d.err != nil {
 		return 0
 	}
-	off := 32 * i
-	if off+32 > uint64(len(d.b)) {
+	if i >= uint64(len(d.b))/32 {
 		d.err = fmt.Errorf("word %d past end", i)
 		return 0
 	}
-	w := d.b[off : off+32]
+	w := d.b[32*i : 32*i+32]
 	for _, x := range w[:24] {
 		if x != 0 {
 			d.err = fmt.Errorf("word %d does not fit 64 bits", i)
 			return 0
 		}
 	}
-	return binary.BigEndian.Uint64(w[24:])
+	v := binary.BigEndian.Uint64(w[24:])
+	if v > uint64(len(d.b)) {
+		d.err = fmt.Errorf("word %d (%d) exceeds the %d-byte result", i, v, len(d.b))
+		return 0
+	}
+	return v
+}
+
+// wordAt returns the word at byte offset off, which must be word aligned.
+func (d *decoder) wordAt(off uint64) uint64 {
+	if d.err != nil {
+		return 0
+	}
+	if off%32 != 0 {
+		d.err = fmt.Errorf("offset %d is not word aligned", off)
+		return 0
+	}
+	return d.word(off / 32)
 }
 
 // dyn reads a dynamic bytes value whose length word sits at byte offset off.
 func (d *decoder) dyn(off uint64) []byte {
+	n := d.wordAt(off)
 	if d.err != nil {
 		return nil
 	}
-	if off%32 != 0 {
-		d.err = fmt.Errorf("offset %d is not word aligned", off)
-		return nil
-	}
-	n := d.word(off / 32)
-	if d.err != nil {
-		return nil
-	}
-	start := off + 32
-	if start+n > uint64(len(d.b)) {
+	start := off + 32 // wordAt proved off+32 <= len(d.b)
+	if n > uint64(len(d.b))-start {
 		d.err = fmt.Errorf("bytes at %d run past end", off)
 		return nil
 	}
@@ -418,7 +496,7 @@ func (d *decoder) bytes32(off uint64) string {
 	if d.err != nil {
 		return ""
 	}
-	if off+32 > uint64(len(d.b)) {
+	if off > uint64(len(d.b)) || uint64(len(d.b))-off < 32 {
 		d.err = fmt.Errorf("bytes32 at %d past end", off)
 		return ""
 	}
