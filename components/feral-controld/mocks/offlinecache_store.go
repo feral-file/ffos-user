@@ -201,6 +201,21 @@ func (mr *MockOfflineCacheStoreMockRecorder) LoadPlaylistIDForURL(sourceURL inte
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "LoadPlaylistIDForURL", reflect.TypeOf((*MockOfflineCacheStore)(nil).LoadPlaylistIDForURL), sourceURL)
 }
 
+// LoadPlaylistSeriesSegments mocks base method.
+func (m *MockOfflineCacheStore) LoadPlaylistSeriesSegments(playlistID string, playlistRaw json.RawMessage) ([]offlinecache.SeriesSegment, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "LoadPlaylistSeriesSegments", playlistID, playlistRaw)
+	ret0, _ := ret[0].([]offlinecache.SeriesSegment)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// LoadPlaylistSeriesSegments indicates an expected call of LoadPlaylistSeriesSegments.
+func (mr *MockOfflineCacheStoreMockRecorder) LoadPlaylistSeriesSegments(playlistID, playlistRaw interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "LoadPlaylistSeriesSegments", reflect.TypeOf((*MockOfflineCacheStore)(nil).LoadPlaylistSeriesSegments), playlistID, playlistRaw)
+}
+
 // PrunePlaylistRecords mocks base method.
 func (m *MockOfflineCacheStore) PrunePlaylistRecords(keep int) (int, error) {
 	m.ctrl.T.Helper()
@@ -271,6 +286,20 @@ func (m *MockOfflineCacheStore) SavePlaylist(playlistID string, raw json.RawMess
 func (mr *MockOfflineCacheStoreMockRecorder) SavePlaylist(playlistID, raw interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SavePlaylist", reflect.TypeOf((*MockOfflineCacheStore)(nil).SavePlaylist), playlistID, raw)
+}
+
+// SavePlaylistSeriesSegments mocks base method.
+func (m *MockOfflineCacheStore) SavePlaylistSeriesSegments(playlistID string, playlistRaw json.RawMessage, segments []offlinecache.SeriesSegment) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SavePlaylistSeriesSegments", playlistID, playlistRaw, segments)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SavePlaylistSeriesSegments indicates an expected call of SavePlaylistSeriesSegments.
+func (mr *MockOfflineCacheStoreMockRecorder) SavePlaylistSeriesSegments(playlistID, playlistRaw, segments interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SavePlaylistSeriesSegments", reflect.TypeOf((*MockOfflineCacheStore)(nil).SavePlaylistSeriesSegments), playlistID, playlistRaw, segments)
 }
 
 // SavePlaylistURLIndex mocks base method.

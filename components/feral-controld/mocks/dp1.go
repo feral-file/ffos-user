@@ -56,6 +56,22 @@ func (mr *MockDP1MockRecorder) ExpandSeriesItems(ctx, playlist, maxItems any) *g
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExpandSeriesItems", reflect.TypeOf((*MockDP1)(nil).ExpandSeriesItems), ctx, playlist, maxItems)
 }
 
+// FetchPlaylist mocks base method.
+func (m *MockDP1) FetchPlaylist(ctx context.Context, url string) (*dp1.Playlist, json.RawMessage, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FetchPlaylist", ctx, url)
+	ret0, _ := ret[0].(*dp1.Playlist)
+	ret1, _ := ret[1].(json.RawMessage)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// FetchPlaylist indicates an expected call of FetchPlaylist.
+func (mr *MockDP1MockRecorder) FetchPlaylist(ctx, url any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FetchPlaylist", reflect.TypeOf((*MockDP1)(nil).FetchPlaylist), ctx, url)
+}
+
 // ProcessDynamicPlaylist mocks base method.
 func (m *MockDP1) ProcessDynamicPlaylist(ctx context.Context, playlist dp1.Playlist, minimal bool) (*dp1.Playlist, error) {
 	m.ctrl.T.Helper()

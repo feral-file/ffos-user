@@ -257,6 +257,20 @@ type DP1 interface {
 	// to rememberSeriesCast so a later setSeriesPlayback re-narrow has it.
 	ProcessPlaylistURLForCast(ctx context.Context, url string, deviceMode *SeriesPlaybackMode) (*Playlist, CastPlan, error)
 
+	// FetchPlaylist fetches url and decodes it, returning both the typed
+	// playlist and the exact raw bytes it was decoded from (nil on any
+	// error) — the same raw bytes ProcessPlaylistURLForCast already threads
+	// to resolveSeriesCastPlan for a fetched document's own per-item
+	// seriesPlayback. It applies NO series expansion or narrowing of any
+	// kind: a dynamic playlist is returned exactly as fetched, with its
+	// dynamicQuery still unresolved. For the offline-cache download path
+	// (feral-file/ffos-user#455, #453), which needs the raw bytes to call
+	// ResolveSeriesCastPlan itself without ProcessPlaylistURLForCast's
+	// CAST_PLAYLIST_ITEMS_LIMIT cap or narrowing. Never use this for a live
+	// cast or a live display resolve; see ProcessPlaylistURLForCast and
+	// ProcessPlaylistURL respectively.
+	FetchPlaylist(ctx context.Context, url string) (*Playlist, json.RawMessage, error)
+
 	// ProcessDynamicPlaylist processes a dynamic playlist.
 	// If the playlist has dynamic queries, it will process them
 	// and construct a playlist with the items.
@@ -366,6 +380,17 @@ func (d *dp1) ProcessPlaylistURLForCast(ctx context.Context, url string, deviceM
 	narrowed := playlist
 	narrowed.Items = plan.Narrow(deviceMode)
 	return &narrowed, plan, nil
+}
+
+// FetchPlaylist is ctx-taking only for interface-signature symmetry with
+// this package's other exported resolvers; fetchPlaylist itself is not
+// context-aware (see its own doc on the shared client's fixed timeout).
+func (d *dp1) FetchPlaylist(ctx context.Context, url string) (*Playlist, json.RawMessage, error) {
+	playlist, rawPlaylist, err := d.fetchPlaylist(url)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &playlist, rawPlaylist, nil
 }
 
 func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {

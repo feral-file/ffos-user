@@ -363,6 +363,128 @@ func TestResolveSeriesCastPlan_CatalogUnreachableKeepsTheRepresentative(t *testi
 	assert.Nil(t, narrowed[0].Provenance.Contract.SeriesID, "full must not carry the series marker either — there is no catalog data behind this fallback to re-resolve from")
 }
 
+// CastPlan.Full feeds the offline-cache download list (feral-file/ffos-user
+// #455, #453): it must keep expanding every series in full, unaffected by
+// ArtworkModel — unlike Narrow, which collapses a single/multi series to
+// its representative. Downloading only the representative for a multi
+// series would under-cache it relative to today's expandSeriesItems
+// behavior (docs/api-design.md's accepted #446 scope).
+//
+// It must ALSO keep the representative itself alongside the catalog's
+// editions: the catalog's /editions answer only guarantees each edition's
+// OWN source, never that the series item's own declared source (seriesItem's
+// Source, distinct from editionItem's here) is among them — and Narrow's
+// default case selects the representative verbatim for first/single/multi,
+// so a download that only ever queued the editions left that exact
+// selection un-cached (feralfile-bot F1, 2026-11-12).
+func TestCastPlan_FullKeepsEveryEditionForAMultiSeriesUnlikeNarrow(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBodyWithModel(3, dp1.SeriesArtworkModelMulti, editionItem("a"), editionItem("b"), editionItem("c")))
+	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
+		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
+
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
+	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
+
+	require.Len(t, plan.Narrow(nil), 1, "sanity: Narrow still collapses a multi series to its representative")
+	full := plan.Full()
+	assert.Len(t, full, 4, "Full must keep every edition regardless of artworkModel, plus the representative itself")
+	assert.Equal(t, "item-series", full[3].ID, "the representative, whose own source the catalog's editions never carried")
+}
+
+func TestCastPlan_FullKeepsEveryEditionForASingleSeriesUnlikeNarrow(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBodyWithModel(1, dp1.SeriesArtworkModelSingle, editionItem("a")))
+	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
+		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
+
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
+	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
+
+	assert.Len(t, plan.Full(), 2, "the single real edition, plus the representative since its source differs")
+}
+
+func TestCastPlan_FullKeepsEveryEditionForAMultiUniqueSeries(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBodyWithModel(3, dp1.SeriesArtworkModelMultiUnique, editionItem("a"), editionItem("b"), editionItem("c")))
+	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
+		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
+
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
+	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
+
+	assert.Len(t, plan.Full(), 4, "3 editions plus the representative")
+}
+
+// TestCastPlan_FullDoesNotDuplicateARepresentativeTheCatalogAlreadyIncluded
+// pins the dedup half of the F1 fix: when the catalog's editions answer
+// already carries an item under the exact same source as the series item's
+// own representative, Full must not queue it twice.
+func TestCastPlan_FullDoesNotDuplicateARepresentativeTheCatalogAlreadyIncluded(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	sameAsRepresentative := editionItem("a")
+	sameAsRepresentative.Source = seriesItem().Source
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBodyWithModel(2, dp1.SeriesArtworkModelMultiUnique, sameAsRepresentative, editionItem("b")))
+	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
+		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
+
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
+	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
+
+	assert.Len(t, plan.Full(), 2, "the representative's source is already one of the editions, so it is not queued a second time")
+}
+
+// An unresolved group (catalog unreachable) has only its one representative
+// to offer either way — Full must return it, same as Narrow, not an empty
+// list.
+func TestCastPlan_FullReturnsTheRepresentativeWhenCatalogUnreachable(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+		Return(nil, assert.AnError)
+
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
+	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
+
+	full := plan.Full()
+	require.Len(t, full, 1)
+	assert.Equal(t, "item-series", full[0].ID)
+}
+
+// A plain (non-series) item must pass through Full unchanged, same as
+// Narrow, and a playlist mixing a plain item with a genuinely resolved
+// series must keep both — Full is not series-only.
+func TestCastPlan_FullPassesThroughAPlainItemAndKeepsAMixedSeriesInFull(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	serveEditions(ts, "playlist-1", "item-series",
+		editionsBodyWithModel(3, dp1.SeriesArtworkModelMultiUnique, editionItem("a"), editionItem("b"), editionItem("c")))
+	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
+		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
+
+	plain := dp1playlist.PlaylistItem{ID: "plain-item", Source: "https://cdn/plain.png"}
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{plain, seriesItem()}}}
+	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
+
+	full := plan.Full()
+	require.Len(t, full, 5, "the plain item plus all 3 editions plus the representative of the resolved series")
+	assert.Equal(t, "plain-item", full[0].ID)
+}
+
 // feralfile-bot F5, 2026-11-02, end to end: an unresolved series item (the
 // catalog failed) used to come through as a plain Item segment, still
 // carrying the document's series marker. commandrouter's recastForMode

@@ -114,11 +114,12 @@ func TestCommandHandler_DownloadPlaylistItem_Success(t *testing.T) {
 	// (not 0) pins that the handler passes the sampled generation through
 	// rather than a hardcoded/default one.
 	const sampledGen = uint64(7)
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(sampledGen).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, sampledGen).Return(nil).Times(1)
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, sampledGen, gomock.Any()).Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
@@ -163,13 +164,13 @@ func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistPersistsBodyWithEmpty
 	}).Times(1)
 	// Static dp1_call: resolveOfflineCachePlaylist expands series items by
 	// hand (see offlinecache.go). This playlist has none, so echo it back.
-	ts.mockDP1.EXPECT().ExpandSeriesItems(ts.ctx, *playlist, 0).Return(*playlist).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, gomock.Any(), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(7)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
 	// Empty sourceURL, and the SAMPLED generation — not a fresh read —
 	// so a ClearPlaylist racing the download still wins.
-	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), "", uint64(7)).
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), "", uint64(7), gomock.Any()).
 		Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -204,11 +205,11 @@ func TestCommandHandler_DownloadPlaylistItem_InlineItemPersistsBody(t *testing.T
 		*p = playlist
 		return nil
 	}).Times(1)
-	ts.mockDP1.EXPECT().ExpandSeriesItems(ts.ctx, *playlist, 0).Return(*playlist).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, gomock.Any(), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrItemInlineNotQueued).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), "", uint64(0)).
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), "", uint64(0), gomock.Any()).
 		Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -235,11 +236,12 @@ func TestCommandHandler_DownloadPlaylistItem_IndexingFailureStillReportsSuccess(
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0)).
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0), gomock.Any()).
 		Return(offlinecache.ErrServiceNotStarted).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -271,7 +273,8 @@ func TestCommandHandler_DownloadPlaylistItem_ItemNotInPlaylist(t *testing.T) {
 
 	playlistURL := "https://example.com/playlist.json"
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{}}}
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
@@ -303,7 +306,8 @@ func TestCommandHandler_DownloadPlaylistItem_ServiceNotStarted(t *testing.T) {
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
 
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	// Sampled (playlistUrl present) before the download even though the
 	// download fails below and no index write ever happens.
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
@@ -329,7 +333,8 @@ func TestCommandHandler_DownloadPlaylistItem_UnsupportedMediaClass(t *testing.T)
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/video.mp4"}
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{item}}}
 
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	// This playlist has no ID; the handler still samples (playlistUrl is
 	// present) before the download fails below.
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("").Return(uint64(0)).Times(1)
@@ -355,9 +360,10 @@ func TestCommandHandler_DownloadPlaylist_Success(t *testing.T) {
 	}}}
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT).Return(1, 2, nil).Times(1)
+	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT, gomock.Any()).Return(1, 2, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST,
@@ -381,7 +387,12 @@ func TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL(t *t
 
 	playlistMap := map[string]interface{}{"id": "playlist-1", "items": []interface{}{}}
 	playlistBytes := []byte(`{"id":"playlist-1","items":[]}`)
-	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1"}}
+	// Items explicitly non-nil-empty, not the zero value: resolveOfflineCachePlaylist
+	// now reaches it through dp1.CastPlan.Full() (feral-file/ffos-user#455, #453),
+	// which always allocates via make(...) — the same normalization dp1.CastPlan.Narrow
+	// already applies on every live-cast path — so a playlist with zero items comes
+	// back with a non-nil empty Items slice, not whatever this fixture started with.
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{}}}
 	marshaledResolved := []byte(`{"id":"playlist-1"}`)
 
 	ts.mockJSON.EXPECT().Marshal(playlistMap).Return(playlistBytes, nil).Times(1)
@@ -390,9 +401,9 @@ func TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL(t *t
 		*p = playlist
 		return nil
 	}).Times(1)
-	ts.mockDP1.EXPECT().ExpandSeriesItems(ts.ctx, *playlist, 0).Return(*playlist).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, gomock.Any(), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaledResolved, nil).Times(1)
-	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaledResolved), "", dp1.MAX_PLAYLIST_ITEMS_LIMIT).Return(0, 0, nil).Times(1)
+	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaledResolved), "", dp1.MAX_PLAYLIST_ITEMS_LIMIT, gomock.Any()).Return(0, 0, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST,
@@ -432,16 +443,14 @@ func TestCommandHandler_DownloadPlaylist_PersistsInlineManifest(t *testing.T) {
 	}`), &playlistMap))
 
 	ts.mockDP1.EXPECT().
-		ExpandSeriesItems(ts.ctx, gomock.Any(), 0).
-		DoAndReturn(func(_ context.Context, playlist dp1.Playlist, _ int) dp1.Playlist {
-			return playlist
-		}).
+		ResolveSeriesCastPlan(ts.ctx, gomock.Any(), gomock.Any(), (*dp1.SeriesPlaybackMode)(nil), 0).
+		DoAndReturn(passthroughCastPlan).
 		Times(1)
 
 	var persisted json.RawMessage
 	mockOfflineCache.EXPECT().
-		DownloadPlaylist(ts.ctx, gomock.Any(), "", dp1.MAX_PLAYLIST_ITEMS_LIMIT).
-		DoAndReturn(func(_ context.Context, raw json.RawMessage, _ string, _ int) (int, int, error) {
+		DownloadPlaylist(ts.ctx, gomock.Any(), "", dp1.MAX_PLAYLIST_ITEMS_LIMIT, gomock.Any()).
+		DoAndReturn(func(_ context.Context, raw json.RawMessage, _ string, _ int, _ []offlinecache.SeriesSegment) (int, int, error) {
 			persisted = raw
 			return 1, 1, nil
 		}).
@@ -484,12 +493,18 @@ func TestCommandHandler_DownloadPlaylist_ServiceError(t *testing.T) {
 	defer ts.teardown()
 
 	playlistURL := "https://example.com/playlist.json"
-	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1"}}
+	// Items explicitly non-nil-empty, not the zero value: resolveOfflineCachePlaylist
+	// now reaches it through dp1.CastPlan.Full() (feral-file/ffos-user#455, #453),
+	// which always allocates via make(...) — the same normalization dp1.CastPlan.Narrow
+	// already applies on every live-cast path — so a playlist with zero items comes
+	// back with a non-nil empty Items slice, not whatever this fixture started with.
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{}}}
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT).Return(0, 0, assertError("disk error")).Times(1)
+	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT, gomock.Any()).Return(0, 0, assertError("disk error")).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST,
@@ -570,6 +585,11 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope(t *testin
 		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
 		PlaylistURL: &playlistURL,
 	}, nil).Times(1)
+	// resyncKioskReplayScopeToCurrentDisplay -> commandrouter's own
+	// resolveDisplayedPlaylist (offlinecache.go), which this session left
+	// unchanged — it still calls ProcessPlaylistURL directly, not
+	// FetchPlaylist/ResolveSeriesCastPlan (see resolveOfflineCachePlaylist's
+	// doc for why that one IS changed; this is a different function).
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
@@ -811,6 +831,9 @@ func TestCommandHandler_ClearItemCache_ResyncWaitsOutInFlightDisplayScopeInstall
 		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
 		PlaylistURL: &playlistURL,
 	}, nil).Times(1)
+	// resyncKioskReplayScopeToCurrentDisplay -> commandrouter's own
+	// resolveDisplayedPlaylist, unchanged this session — see the identical
+	// note on TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope.
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
 
 	fake := newLockStepKioskReplay()
@@ -910,7 +933,7 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWh
 		ID:    "playlist-1",
 		Items: []dp1playlist.PlaylistItem{{ID: "item-1", Source: "https://example.com/item-1"}, {ID: "item-2", Source: "https://example.com/item-2"}},
 	}}
-	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), nil).Times(1)
+	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), []offlinecache.SeriesSegment(nil), nil).Times(1)
 	ts.mockJSON.EXPECT().
 		Unmarshal(cachedRawBytes, gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {
@@ -956,7 +979,7 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncSkipsWhenNoCachedFallbackEi
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).
 		Return(nil, assertError("no network")).Times(1)
 	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).
-		Return(json.RawMessage(nil), offlinecache.ErrPlaylistNotFound).Times(1)
+		Return(json.RawMessage(nil), []offlinecache.SeriesSegment(nil), offlinecache.ErrPlaylistNotFound).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -1357,13 +1380,14 @@ func TestCommandHandler_DownloadPlaylistItem_ClearWonIsReportedNotAcked(t *testi
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
 
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).
 		Return(offlinecache.ErrClearedDuringDownload).Times(1)
 	// The URL index write must not happen: it is deliberately downstream
 	// of a SUCCESSFUL queue, and this download queued nothing.
-	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
@@ -1397,13 +1421,14 @@ func TestCommandHandler_DownloadPlaylistItem_InlineItemIsNotReportedQueued(t *te
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
 	const sampledGen = uint64(3)
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(sampledGen).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).
 		Return(offlinecache.ErrItemInlineNotQueued).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
 	mockOfflineCache.EXPECT().
-		IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, sampledGen).
+		IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, sampledGen, gomock.Any()).
 		Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -1438,11 +1463,12 @@ func TestCommandHandler_DownloadPlaylistItem_InlinePersistFailureIsAnError(t *te
 	playlistURL := "https://example.com/playlist.json"
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrItemInlineNotQueued).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0)).
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0), gomock.Any()).
 		Return(errors.New("disk full")).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -1468,11 +1494,12 @@ func TestCommandHandler_DownloadPlaylistItem_QueuedPersistFailureStillSucceeds(t
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0)).
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0), gomock.Any()).
 		Return(errors.New("disk full")).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -1564,11 +1591,12 @@ func TestCommandHandler_DownloadPlaylistItem_InlineClearRaceIsRetryableBusy(t *t
 	playlistURL := "https://example.com/playlist.json"
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(3)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrItemInlineNotQueued).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(3)).
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(3), gomock.Any()).
 		Return(offlinecache.ErrPlaylistSaveClearedRace).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -1597,7 +1625,8 @@ func TestCommandHandler_DownloadPlaylistItem_OversizedSourceIsNotRetryable(t *te
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
 	playlistURL := "https://example.com/playlist.json"
 
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).
 		Return(fmt.Errorf("offline cache: %w: too big", offlinecache.ErrSourceTooLong)).Times(1)
@@ -1663,7 +1692,8 @@ func TestCommandHandler_DownloadPlaylistItem_ClearDuringResolveIsRejected(t *tes
 
 	// The barrier is read BEFORE the resolve...
 	mockOfflineCache.EXPECT().ClearBarrier().Return(uint64(41)).Times(1)
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	// ...and the clear that landed while it was in flight is visible after.
 	mockOfflineCache.EXPECT().
 		ClearedSinceBarrier("playlist-1", uint64(41), item.Source).
@@ -1699,7 +1729,8 @@ func TestCommandHandler_DownloadPlaylistItem_NoClearDuringResolveProceeds(t *tes
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
 	mockOfflineCache.EXPECT().ClearBarrier().Return(uint64(7)).Times(1)
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	mockOfflineCache.EXPECT().
 		ClearedSinceBarrier("playlist-1", uint64(7), item.Source).
 		Return(false).Times(1)
@@ -1707,7 +1738,7 @@ func TestCommandHandler_DownloadPlaylistItem_NoClearDuringResolveProceeds(t *tes
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
 	mockOfflineCache.EXPECT().
-		IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0)).
+		IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0), gomock.Any()).
 		Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -1751,7 +1782,8 @@ func TestCommandHandler_DownloadPlaylist_ClearDuringResolveIsRejected(t *testing
 			}}
 
 			mockOfflineCache.EXPECT().ClearBarrier().Return(uint64(11)).Times(1)
-			ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+			ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+			ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 			// EVERY member source must be offered to the check, or an
 			// item cleared mid-resolve slips through.
 			mockOfflineCache.EXPECT().
@@ -1789,13 +1821,14 @@ func TestCommandHandler_DownloadPlaylist_NoClearDuringResolveProceeds(t *testing
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
 	mockOfflineCache.EXPECT().ClearBarrier().Return(uint64(3)).Times(1)
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	mockOfflineCache.EXPECT().
 		ClearedSinceBarrier("playlist-1", uint64(3), item.Source).
 		Return(false).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
 	mockOfflineCache.EXPECT().
-		DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT).
+		DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT, gomock.Any()).
 		Return(1, 1, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -1848,7 +1881,8 @@ func TestCommandHandler_DownloadPlaylist_BoundsTheQueueWithoutTruncatingTheRecor
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: items}}
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	// What actually gets recorded, read off the playlist handed to Marshal
 	// rather than the opaque bytes it returns.
 	recorded := -1
@@ -1858,7 +1892,7 @@ func TestCommandHandler_DownloadPlaylist_BoundsTheQueueWithoutTruncatingTheRecor
 	}).Times(1)
 	// The ceiling is an argument, not a cut: gomock fails the test if the
 	// handler stops passing it, which is the half that bounds the work.
-	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT).
+	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL, dp1.MAX_PLAYLIST_ITEMS_LIMIT, gomock.Any()).
 		Return(1, 2, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -1906,7 +1940,8 @@ func TestCommandHandler_DownloadPlaylistItem_ReachesAnItemPastTheBulkCeiling(t *
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
 	const sampledGen = uint64(7)
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
+	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(sampledGen).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, items[want]).Return(nil).Times(1)
 	saved := -1
@@ -1915,7 +1950,7 @@ func TestCommandHandler_DownloadPlaylistItem_ReachesAnItemPastTheBulkCeiling(t *
 		return marshaled, nil
 	}).Times(1)
 	mockOfflineCache.EXPECT().
-		IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, sampledGen).
+		IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, sampledGen, gomock.Any()).
 		Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{

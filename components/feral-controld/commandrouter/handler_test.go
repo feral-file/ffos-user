@@ -23,6 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -748,7 +749,7 @@ func TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOff
 		Return(nil, dp1.CastPlan{}, errors.New("network unreachable")).
 		Times(1)
 
-	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), nil).Times(1)
+	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), []offlinecache.SeriesSegment(nil), nil).Times(1)
 	ts.mockJSON.EXPECT().
 		Unmarshal(cachedRawBytes, gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {

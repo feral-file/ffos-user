@@ -322,6 +322,62 @@ func (p CastPlan) Narrow(device *SeriesPlaybackMode) []dp1playlist.PlaylistItem 
 	return items
 }
 
+// Full flattens the plan the way expandSeriesItems already does for the
+// offline-cache download path (feral-file/ffos-user#455, #453): every group
+// contributes its FULL edition set, unconditionally — never narrowed by
+// ArtworkModel.hasDistinctEditions() the way Narrow's default case would
+// (which collapses a single/multi group to its representative alone). This
+// is deliberate: offline caching must keep expanding every series in full,
+// unaffected by seriesPlayback or device mode (docs/api-design.md,
+// feral-file/ffos-user#446's own accepted scope) — only the DISPLAY/narrow
+// decision (Narrow) is mode-aware, never what gets downloaded.
+//
+// The group's own Representative is appended too, when its Source is not
+// already one of Editions' sources. NarrowEditions' default case (first, or
+// any mode on a single/multi series) selects Representative verbatim — but
+// the catalog's /editions answer only guarantees each edition's OWN source,
+// never that the series item's own declared source appears among them
+// (feralfile-bot F1, 2026-11-12). Without this, a later offline Narrow could
+// select an item whose source was never queued for download, leaving nothing
+// playable for a cast this exact scenario was meant to serve.
+// unresolvedSeriesGroup already sets Editions to []{Representative}, so the
+// source there always matches and nothing is appended twice.
+//
+// maxItems is applied exactly like Narrow applies it, for the same reason:
+// a zero value (the offline-cache path's own uncapped contract) never
+// truncates.
+func (p CastPlan) Full() []dp1playlist.PlaylistItem {
+	items := make([]dp1playlist.PlaylistItem, 0, len(p.Segments))
+	for _, seg := range p.Segments {
+		if seg.Item != nil {
+			items = append(items, *seg.Item)
+		} else {
+			items = append(items, seg.Group.Editions...)
+			if !editionsHaveSource(seg.Group.Editions, seg.Group.Representative.Source) {
+				items = append(items, clearSeriesMarker(seg.Group.Representative))
+			}
+		}
+		if p.maxItems > 0 && len(items) >= p.maxItems {
+			return items[:p.maxItems]
+		}
+	}
+	return items
+}
+
+// editionsHaveSource reports whether editions already carries an item whose
+// Source exactly matches source — the same no-normalization comparison
+// commandrouter's findPlaylistItemBySource uses — so Full() never
+// double-queues a representative the catalog's editions answer already
+// included under the same source.
+func editionsHaveSource(editions []dp1playlist.PlaylistItem, source string) bool {
+	for _, edition := range editions {
+		if edition.Source == source {
+			return true
+		}
+	}
+	return false
+}
+
 // rawPlaylistItem is the subset of one playlist item's own JSON this package
 // reads independently of the typed dp1playlist.PlaylistItem decode —
 // seriesPlayback is not a dp1-go field (see SeriesPlaybackMode's doc), so it

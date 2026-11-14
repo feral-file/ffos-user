@@ -506,7 +506,16 @@ type Service interface {
 	// which the clear reported success and left the tail on disk).
 	// Callers that need the bound pass it here rather than truncating
 	// playlistRaw.
-	DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string, maxQueued int) (queued, total int, err error)
+	//
+	// segments is the series-group identity the caller's own resolve walk
+	// saw for this exact playlistRaw (feral-file/ffos-user#455, #453) —
+	// commandrouter converts dp1.CastPlan.Segments to this package's own
+	// SeriesSegment at the one boundary that imports both; nil/empty when
+	// playlistRaw carries no series item, or none resolved into a group
+	// worth tracking (see dp1.CastPlan.HasSeriesGroups). Persisted via
+	// Store.SavePlaylistSeriesSegments, best-effort exactly like the
+	// sourceURL index below — see savePlaylistAndURLIndex's doc.
+	DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string, maxQueued int, segments []SeriesSegment) (queued, total int, err error)
 	// ClearItem removes the item with this source URL from the cache: its
 	// record, any blob it was the last referent of, and any
 	// not-yet-started download queued for it. Because cached records are
@@ -540,7 +549,16 @@ type Service interface {
 	// ErrPlaylistNotFound if sourceURL was never downloaded/indexed, or
 	// was but has since been cleared — see Store.LoadPlaylistIDForURL's
 	// doc for why a stale index entry still fails closed correctly here.
-	CachedPlaylistForURL(sourceURL string) (json.RawMessage, error)
+	//
+	// Also returns the playlist's saved series-group segments (feral-file/
+	// ffos-user#455, #453), nil when none were ever saved — a non-series
+	// playlist, a pre-upgrade cache, or a series that never resolved into a
+	// group worth tracking. A caller with non-nil segments can reconstruct
+	// a dp1.CastPlan{Segments: ...} and call its existing
+	// Narrow(deviceMode) to decide what to display, exactly like a live
+	// cast already does, instead of using the raw playlist's flat Items
+	// unnarrowed.
+	CachedPlaylistForURL(sourceURL string) (json.RawMessage, []SeriesSegment, error)
 	// HasReplayableItem reports whether at least one of sources has a
 	// prior successful capture on disk — StateReady or StatePartial (a
 	// partial capture may still render; StateBrokenOnline is excluded
@@ -595,7 +613,13 @@ type Service interface {
 	// playlist lands during that sequence, this write is skipped rather
 	// than resurrecting the cleared record — see
 	// CurrentPlaylistClearGeneration and playlistRecordMu's docs.
-	IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64) error
+	//
+	// segments is the same series-group identity DownloadPlaylist accepts,
+	// for the identical reason: handleDownloadPlaylistItem resolves the
+	// whole playlist (possibly expanding a series) but queues only the one
+	// requested item, so without this the playlist's group identity would
+	// never be persisted for a single-item download either.
+	IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64, segments []SeriesSegment) error
 	// CurrentPlaylistClearGeneration returns an opaque, monotonically
 	// increasing counter for playlistID that advances every time that
 	// playlist is cleared (ClearPlaylist). A caller that will resolve and
@@ -1904,7 +1928,7 @@ type queuedItem struct {
 	class MediaClass
 }
 
-func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string, maxQueued int) (int, int, error) {
+func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string, maxQueued int, segments []SeriesSegment) (int, int, error) {
 	if !s.started.Load() {
 		return 0, 0, ErrServiceNotStarted
 	}
@@ -1940,7 +1964,19 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 			zap.String("playlist_id", playlist.ID),
 			zap.Int("items", len(considered)),
 			zap.Int("limit", maxQueued))
-		considered = considered[:maxQueued]
+		// A plain [:maxQueued] slice drops whatever lands past the cut by
+		// POSITION alone — but a series group's own Representative is
+		// appended after that group's full Editions set (dp1.CastPlan.Full,
+		// when the catalog's editions don't already carry its source), so a
+		// single group whose edition count already reaches maxQueued pushes
+		// its Representative past the cut. That representative is the ONE
+		// item a non-distinct-editions group's Narrow(nil) can ever select
+		// (feralfile-bot F1, 2026-11-13) — dropping it, not some edition no
+		// mode will ever pick, is what leaves nothing playable despite a
+		// fully "successful" download. requiredDownloadSources keeps every
+		// such representative in the queued budget, trimming ordinary
+		// editions first instead.
+		considered = boundQueuedItems(considered, maxQueued, requiredDownloadSources(segments))
 	}
 	// Pair each queued item with the clear-epoch sampled just before its
 	// classify, so a ClearItem/ClearPlaylist landing during this (per
@@ -1974,7 +2010,7 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 	// nothing has been enqueued yet and the per-item epoch checks in the
 	// enqueue loop below would abort every item anyway, so it is reported
 	// as a clean 0-queued/no-error outcome.
-	saved, err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL, plEpoch)
+	saved, err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL, plEpoch, segments)
 	if err != nil {
 		// Nothing has been enqueued yet at this point — a save failure
 		// here starts no background work at all, matching this error
@@ -2036,7 +2072,52 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 // playlistRecordMu across the re-check AND the store writes is what makes
 // it a genuine guard rather than a racy check-then-write — see that
 // mutex's doc. saved=true means the record was persisted.
-func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64) (bool, error) {
+//
+// segments is this exact resolve's series-group identity (feral-file/
+// ffos-user#455, #453), written right beside the sourceURL index. Any
+// EXISTING sidecar for playlistID is invalidated right after the new body
+// is durably saved, BEFORE any new sidecar for it is written. That
+// invalidation's own failure aborts this whole save AND best-effort
+// removes the whole playlist record (body + sidecar) it just saved — an
+// error return alone would not undo the body write already committed
+// above, and every reader fails closed on the body load before ever
+// reaching the sidecar (see below), so removing the body converts the
+// failure into a clean cache miss rather than leaving a sidecar that
+// still validates against that body on disk. Everything else stays
+// best-effort exactly as before: the playlist/sourceURL index are
+// already safely saved regardless of whether the new sidecar write
+// succeeds, and a failure writing it only degrades the narrowing a later
+// offline fallback/resync can do, never the download itself.
+//
+// The invalidate-before-new-segments order matters: playlistBodyDigest
+// alone cannot tell two different resolves of the IDENTICAL raw bytes
+// apart — a re-download of an unchanged document whose catalog answer
+// (editions, artworkModel, document mode) has since changed, or now
+// resolves to no series at all. Writing the new segments straight over
+// the old ones, the way this used to work, left a stale sidecar from the
+// PRIOR resolve still digest-matching the new body whenever that write or
+// an empty-segments delete then failed, so a later load silently
+// narrowed by segments describing a resolve that no longer happened
+// (feralfile-bot F2, round 3 on this fix, 2026-11-12 — distinct from the
+// EARLIER F2 the BodyDigest field itself was added for: that one was a
+// same-ID write/read race or a body that genuinely changed; this one is
+// the SAME raw bytes resolving differently a second time, which a body-
+// bytes digest alone cannot tell apart no matter how it is checked).
+// Invalidating right after the body save, rather than before it, matters
+// too: SavePlaylist's own writeFileAtomic either fully replaces the body
+// or, on any failure, leaves the file exactly as it was (temp file +
+// rename, never an in-place write) — so invalidating the sidecar BEFORE
+// attempting the body save would destroy a still-correctly-paired sidecar
+// for the OLD, untouched body on nothing more than a transient body-write
+// failure (run-reviewer, round 3 on this fix, 2026-11-12: the first
+// attempt at this ordering did exactly that). Invalidating only once the
+// new body has actually landed means there is at most a brief gap with no
+// sidecar at all, which every caller already reads as "nothing to narrow
+// by" (see Store.SavePlaylistSeriesSegments' doc) — safe regardless of
+// what happens next. Called unconditionally (even when segments is empty)
+// so a playlist ID a publisher reuses for new, non-series content also
+// clears any PRIOR save's sidecar this same way.
+func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64, segments []SeriesSegment) (bool, error) {
 	s.playlistRecordMu.Lock()
 	defer s.playlistRecordMu.Unlock()
 
@@ -2045,6 +2126,38 @@ func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.Ra
 	}
 	if err := s.store.SavePlaylist(playlistID, playlistRaw); err != nil {
 		return false, fmt.Errorf("offline cache: save playlist %s: %w", playlistID, err)
+	}
+	// nil, not segments: this call's only job is to remove whatever
+	// sidecar playlistID currently holds, regardless of what — if
+	// anything — this save is about to write next. The new body is
+	// already durably saved above, so returning an error here does NOT
+	// undo that write — an un-invalidated sidecar would otherwise go on
+	// validating (same digest, since playlistRaw is unchanged by this
+	// failure) against that very body, which is exactly the wrong-group
+	// hazard this whole call exists to prevent. So on failure this also
+	// best-effort removes the WHOLE playlist record (body + sidecar,
+	// whichever of those the one Remove call that just failed still
+	// allows): CachedPlaylistForURL and every other reader always load
+	// the body via LoadPlaylist BEFORE ever reaching
+	// LoadPlaylistSeriesSegments (see that method's doc) and fail closed
+	// on ErrPlaylistNotFound without touching the sidecar at all, so
+	// removing the body alone is enough to make a surviving stale sidecar
+	// permanently unreachable — converting this failure into a clean
+	// cache miss instead of a silent wrong-group hit (run-reviewer, round
+	// 3 on this fix, 2026-11-12: the version before this one left the
+	// stale sidecar fully loadable after reporting this same error).
+	if err := s.store.SavePlaylistSeriesSegments(playlistID, playlistRaw, nil); err != nil {
+		if delErr := s.store.DeletePlaylist(playlistID); delErr != nil {
+			s.logger.Warn("offline cache: failed to remove playlist record after a stale sidecar could not be invalidated",
+				zap.String("playlist_id", playlistID), zap.Error(delErr))
+		}
+		return false, fmt.Errorf("offline cache: invalidate stale playlist series segments %s: %w", playlistID, err)
+	}
+	if len(segments) > 0 {
+		if err := s.store.SavePlaylistSeriesSegments(playlistID, playlistRaw, segments); err != nil {
+			s.logger.Warn("offline cache: failed to save playlist series segments",
+				zap.String("playlist_id", playlistID), zap.Error(err))
+		}
 	}
 	if sourceURL != "" {
 		// Best-effort: the playlist itself is already safely saved above
@@ -2078,7 +2191,7 @@ func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.Ra
 // this index write follows, so a ClearPlaylist racing that sequence is
 // honored rather than undone here — see savePlaylistAndURLIndex and
 // playlistRecordMu's docs.
-func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64) error {
+func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64, segments []SeriesSegment) error {
 	if !s.started.Load() {
 		return ErrServiceNotStarted
 	}
@@ -2097,7 +2210,7 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 	// playlist body that was never written. Callers using this purely for
 	// the best-effort by-URL index treat the sentinel as the benign no-op
 	// it is for them.
-	saved, err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL, sampledEpoch)
+	saved, err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL, sampledEpoch, segments)
 	if err != nil {
 		return err
 	}
@@ -3063,12 +3176,26 @@ func (s *service) ClearPlaylist(playlistID string) error {
 	return nil
 }
 
-func (s *service) CachedPlaylistForURL(sourceURL string) (json.RawMessage, error) {
+func (s *service) CachedPlaylistForURL(sourceURL string) (json.RawMessage, []SeriesSegment, error) {
 	playlistID, err := s.store.LoadPlaylistIDForURL(sourceURL)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return s.store.LoadPlaylist(playlistID)
+	raw, err := s.store.LoadPlaylist(playlistID)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Absent is the overwhelmingly common case (no series item, a
+	// pre-upgrade cache, or an unresolved series — see
+	// Store.LoadPlaylistSeriesSegments' doc) and must not fail this call:
+	// the caller already has everything it needs from raw alone and simply
+	// falls back to today's unnarrowed flat Items.
+	segments, err := s.store.LoadPlaylistSeriesSegments(playlistID, raw)
+	if err != nil && !errors.Is(err, ErrPlaylistNotFound) {
+		s.logger.Warn("offline cache: failed to load playlist series segments",
+			zap.String("playlist_id", playlistID), zap.Error(err))
+	}
+	return raw, segments, nil
 }
 
 // maxRescueLookups bounds how many UNIQUE sources HasReplayableItem will
