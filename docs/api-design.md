@@ -419,6 +419,44 @@ daemon-to-player, refresh-only flag: it tells the player to retire a current
 item whose newly refreshed label is blocked, selecting an allowed replacement
 or blacking the display if the projection is empty. Controllers do not send it.
 
+An optional `startItem` on `displayPlaylist` names the work the cast opens on:
+
+```json
+{
+  "command": "displayPlaylist",
+  "request": {
+    "intent": { "action": "now_display" },
+    "playlistUrl": "https://feed.example/playlists/abc",
+    "contentContext": "curated",
+    "startItem": { "id": "<item id>", "source": "<item source>" }
+  }
+}
+```
+
+Either member may be omitted. It names a work, not an index, because a
+controller does not know the order a `playlistUrl` or a dynamic query resolves
+to, and the list the player plays is the one left after `displayAt`
+filtering, the content-policy projection and the player's own admission.
+`feral-controld` forwards the member to the player untouched and never
+resolves it; the player finds the work in the list it admitted, by `id`
+across the whole list first and by `source` only when no item carries the
+`id` (a dynamic playlist regenerates ids; two members of a series can share a
+source), and starts there. The playlist still plays whole and in its own
+order; only the entry point moves, and the document is not rewritten, so a
+signed playlist keeps its verdict.
+
+Absent, malformed, or naming a work that is not in the admitted list, the
+cast starts at its beginning, exactly as without the member. It never causes
+a rejection. It is ignored on `refresh`, and it is not retained: the
+scheduler's later `displayAt` cutovers, the playlist refresher, a series
+re-cast, a History replay and the boot replay all start where they did
+before. Like `contentContext` it sits outside the signed DP-1 document. A
+display-role site grant cannot send it: the exact Play shape
+([`ff1-control-v1.md`](ff1-control-v1.md) §5.7) admits `intent` and
+`dp1_call` only. A player that predates the member ignores it, so a
+controller may send it to any device and should keep its own
+`moveToArtwork` fallback for older ones.
+
 ### D-Bus errors
 
 Use `dbus.NewError(message, []interface{}{})` for all D-Bus method errors. The first argument is a human-readable error message. The second is an empty slice (no additional error body values). Do not put structured data in the error body.
