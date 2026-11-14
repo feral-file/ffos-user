@@ -328,3 +328,16 @@ func TestClassifier_Classify_HugeDataURIDoesNotScanWholePayload(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, offlinecache.ClassUnknown, got)
 }
+
+// An onchfs work's device-local source never resolves; it is classified
+// without a request (the mock client has no expectations, so any call
+// fails the test) and never reaches the guard, which would refuse it.
+func TestClassifier_Classify_OnchfsSourcesWithoutNetworkCall(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	classifier := offlinecache.NewClassifier(mocks.NewMockHTTPClient(ctrl), publicResolver{})
+	got, err := classifier.Classify(context.Background(),
+		"https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.onchfs.invalid/?fxhash=0x06ec")
+	require.NoError(t, err)
+	assert.Equal(t, offlinecache.ClassOnchfs, got)
+}

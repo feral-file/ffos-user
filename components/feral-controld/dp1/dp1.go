@@ -198,6 +198,7 @@ func (p *Playlist) UnmarshalJSON(data []byte) error {
 		}
 	}
 	*p = Playlist(decoded)
+	p.Items = mapOnchfsSources(p.Items) // see onchfs.go
 	return nil
 }
 
@@ -440,7 +441,19 @@ func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playli
 	return &narrowed, plan, nil
 }
 
+// processDynamicPlaylist resolves the playlist's dynamic query. Every item it
+// returns already carries its device-local onchfs source (onchfs.go): DP-1
+// hydration, the Raster walk and the legacy indexer all exit here.
 func (d *dp1) processDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool, maxItems int) (*Playlist, error) {
+	resolved, err := d.resolveDynamicPlaylist(ctx, playlist, minimal, maxItems)
+	if err != nil {
+		return nil, err
+	}
+	resolved.Items = mapOnchfsSources(resolved.Items)
+	return resolved, nil
+}
+
+func (d *dp1) resolveDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool, maxItems int) (*Playlist, error) {
 	if playlist.DynamicQuery != nil {
 		if len(playlist.DynamicQueries) > 0 {
 			d.logger.Warn("playlist has both dynamicQuery and legacy dynamicQueries; using dynamicQuery only",

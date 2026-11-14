@@ -42,6 +42,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/netlog"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/onchfs"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
@@ -1184,6 +1185,8 @@ func initializeApp(
 	var offlineCacheChanged func(func())
 	var offlineCacheRendererFactory func(offlinecache.MediaHealthRouting) mediahealth.Renderer
 	var offlineCacheAdmission offlinecache.AdmissionController
+	var offlineCacheStore offlinecache.Store
+	onchfsConfig := config.Get().OnchfsTuning(logger)
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
 		ocRuntime := offlinecache.Bootstrap(
@@ -1199,6 +1202,7 @@ func initializeApp(
 		offlineCacheChanged = ocRuntime.SetCacheChanged
 		offlineCacheRendererFactory = ocRuntime.NewMediaHealthRenderer
 		offlineCacheAdmission = ocRuntime.Admission
+		offlineCacheStore = ocRuntime.Store
 		if ocRuntime.ObservePlayback != nil {
 			playbackObservers = append(playbackObservers, func(st *status.PlayerStatus) {
 				if st == nil || (st.Command != string(commands.CMD_DISPLAY_PLAYLIST) && st.Command != string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST)) || st.Items == nil || st.Index == nil {
@@ -1208,6 +1212,62 @@ func initializeApp(
 				ocRuntime.ObservePlayback(*st.Items, *st.Index, st.RenderStatus != nil && *st.RenderStatus == 2)
 			})
 		}
+	}
+
+	// onchfs works (ffos-user#427). fxhash's gateway is gone, so the device
+	// reads these works from chain and serves them through the offline
+	// cache's replay. With the feature off, only the part of the cache that
+	// serves local artwork runs (BootstrapCore: store, static server,
+	// replay), lazily: it dials the kiosk only once an onchfs scope is first
+	// armed, so a device that never shows an onchfs work behaves as before.
+	// The Service, capture and the app's offline-cache commands stay off;
+	// offlineCache (the Service) remains nil and every guard keyed on it is
+	// unchanged.
+	var onchfsMaterializer *offlinecache.OnchfsMaterializer
+	// onchfsReady is set to the refresher's ForceRefresh once that exists:
+	// a work read in the background widens the replay scope on the next pass.
+	var onchfsReady atomic.Pointer[func()]
+	if onchfsConfig.Disabled {
+		logger.Info("onchfs reader disabled by config; onchfs works stay unplayable")
+	} else {
+		if offlineCacheStore == nil {
+			ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
+			core, _ := offlinecache.BootstrapCore(ocOpts, httpClient, webSocketDialer, os, io, json, clock, logger, true)
+			kioskReplay = core.KioskReplay
+			offlineCacheScopeLost = core.ScopeLost
+			offlineCacheStore = core.Store
+			// core.StaticServer is deliberately not started: it serves only
+			// blobs past replay's 200 MB inline limit, an onchfs file is at
+			// most onchfs.MaxPlainFileBytes, and replay treats a server that
+			// is not listening as a miss. No new listening port on devices
+			// with the feature off.
+		}
+		overrides := map[string][]string{}
+		for chain, c := range onchfsConfig.Chains {
+			overrides[chain] = c.RPC
+		}
+		timeout := onchfs.DefaultRequestTimeout
+		if onchfsConfig.RequestTimeoutSeconds > 0 {
+			timeout = time.Duration(onchfsConfig.RequestTimeoutSeconds) * time.Second
+		}
+		resolver := onchfs.NewResolver(onchfs.MergeEndpoints(overrides, logger), onchfs.NewHTTPClient(timeout), logger)
+		onchfsMaterializer = offlinecache.NewOnchfsMaterializer(offlinecache.OnchfsMaterializerConfig{
+			Store: offlineCacheStore, Resolver: resolver, Logger: logger, Base: context,
+			Standalone: offlineCache == nil,
+			// With a Service running, reclaiming space for an onchfs work
+			// goes through its ClearItem, whose GC is serialized with
+			// captures; standalone, the materializer collects itself.
+			Evict: evictThroughService(offlineCache),
+			// The Service's clear epoch keeps a read in flight from
+			// restoring a work the app just cleared.
+			Fence: fenceThroughService(offlineCache),
+			OnReady: func() {
+				if f := onchfsReady.Load(); f != nil {
+					(*f)()
+				}
+			},
+		})
+		logger.Info("onchfs reader ready", zap.Strings("chains", resolver.Chains()), zap.Bool("offline_cache_feature", offlineCache != nil))
 	}
 
 	// Kiosk User-Agent rewrite (#296). Built independently of the offline
@@ -1451,6 +1511,12 @@ func initializeApp(
 	}
 	playlist_refresher.SetContentPolicy(playlistRefresher, policyStore)
 	commandrouter.SetPolicyRefresher(rawCmdHandler, playlistRefresher, logger)
+	if onchfsMaterializer != nil {
+		commandrouter.SetOnchfsMaterializer(rawCmdHandler, onchfsMaterializer, logger)
+		playlist_refresher.SetOnchfsMaterializer(playlistRefresher, onchfsMaterializer, logger)
+		forceRefresh := playlistRefresher.ForceRefresh
+		onchfsReady.Store(&forceRefresh)
+	}
 	// The owner's content policy falls with the claim on a factory reset, for
 	// the same rollback reason the device name does (see factoryReset).
 	executor.SetContentPolicyResetter(func() error {
@@ -1668,7 +1734,13 @@ func initializeApp(
 	// "feature off behaves exactly as before" contract the Bootstrap call
 	// above depends on. With the cache off, the periodic ticker stays the
 	// only resync, which is byte-identical to develop's behavior.
-	if kioskReplay != nil {
+	//
+	// Keyed on the Service (the feature), not on kioskReplay: with the
+	// feature off, kioskReplay still exists for onchfs works (the lazy
+	// core), and a scope it armed is restored by ScopeLost's ForceRefresh
+	// when the kiosk goes away, so this contract holds for those devices
+	// too.
+	if offlineCache != nil {
 		session.RegisterReconciler("replay-scope-resync", replayScopeResyncReconciler(playlistRefresher))
 	}
 	// Boot recovery's generation-bump accelerator (design doc §5.1): a new
@@ -1930,4 +2002,21 @@ func initializeTestApp(
 		MintPairing:       mintPairing,
 		Hub:               hub,
 	}
+}
+
+// evictThroughService returns svc.ClearItem, or nil when no Service runs.
+func evictThroughService(svc offlinecache.Service) func(string) error {
+	if svc == nil {
+		return nil
+	}
+	return svc.ClearItem
+}
+
+// fenceThroughService returns svc as the materializer's clear fence, or a
+// nil fence (not a nil Service in a non-nil interface) when none runs.
+func fenceThroughService(svc offlinecache.Service) offlinecache.ClearFence {
+	if svc == nil {
+		return nil
+	}
+	return svc
 }

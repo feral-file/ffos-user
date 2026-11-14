@@ -670,3 +670,53 @@ func TestKioskReplay_SyncPlaylist_RedialIsRateLimited(t *testing.T) {
 	require.ErrorIs(t, err, offlinecache.ErrCDPTransport)
 	assert.Equal(t, 1, *h.dials, "a re-dial inside the cooldown must not be attempted")
 }
+
+// With the offline cache feature off, replay exists only for onchfs works
+// (BootstrapCore, lazy): a kiosk connect does not dial until a scope has
+// been applied once, the first scope dials on demand, and connects after
+// that re-attach as usual.
+func TestBootstrapCore_LazyKioskReplayDialsOnlyOnceArmed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+	mockHTTP := mocks.NewMockHTTPClient(ctrl)
+	mockDialer := mocks.NewMockWebSocketDialer(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockClock.EXPECT().Now().Return(time.Now()).AnyTimes()
+
+	opts := offlinecache.OptionsFromConfig(nil, "http://127.0.0.1:9222")
+	opts.RootDir = t.TempDir()
+	opts.MaxDiskPercent = 0 // the disk budget reads this machine's free space; not under test
+	core, _ := offlinecache.BootstrapCore(opts, mockHTTP, mockDialer, wrapper.NewOS(), wrapper.NewIO(), wrapper.NewJSON(), mockClock, zaptest.NewLogger(t), true)
+
+	// Not armed: no request to the kiosk at all (the mocks have no
+	// expectations yet, so any call fails the test).
+	require.NoError(t, core.KioskReplay.AttachOnReconnect(context.Background()))
+	n, err := core.KioskReplay.SyncPlaylist(context.Background(), []string{sourceFor("not-cached")})
+	require.NoError(t, err)
+	assert.Zero(t, n, "an empty scope never dials")
+
+	dials := 0
+	mockHTTP.EXPECT().NewRequest(http.MethodGet, "http://127.0.0.1:9222/json", nil).DoAndReturn(
+		func(method, url string, _ io.Reader) (*http.Request, error) { return http.NewRequest(method, url, nil) }).AnyTimes()
+	mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/1"}]`))}, nil
+	}).AnyTimes()
+	mockDialer.EXPECT().DialContext(gomock.Any(), "ws://127.0.0.1:9222/devtools/page/1", nil).DoAndReturn(
+		func(context.Context, string, http.Header) (wrapper.WebSocketConn, *http.Response, error) {
+			dials++
+			conn := newFakeWSConn()
+			go conn.drainAndAckRemaining(t)
+			t.Cleanup(func() { _ = conn.Close() })
+			return conn, nil, nil
+		}).AnyTimes()
+
+	cached := seedItem(t, core.Store, "onchfs-like", "<html>")
+	n, err = core.KioskReplay.SyncPlaylist(context.Background(), []string{cached.URL})
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.Equal(t, 1, dials, "the first scope dials on demand")
+
+	require.NoError(t, core.KioskReplay.AttachOnReconnect(context.Background()))
+	assert.Equal(t, 2, dials, "once armed, a reconnect re-attaches")
+}

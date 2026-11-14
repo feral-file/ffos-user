@@ -143,6 +143,11 @@ type kioskReplay struct {
 	// PlaybackGeneration's doc. Atomic so the resync can read it both
 	// outside and inside playbackMu without reentrancy.
 	playbackGen atomic.Uint64
+	// lazy and armed back the core-only mode (BootstrapCore with the
+	// offline cache feature off): the kiosk is not dialed on connect until
+	// a non-empty scope has been applied once — see AttachOnReconnect.
+	lazy  bool
+	armed atomic.Bool
 }
 
 // NewKioskReplay constructs a KioskReplay. endpoint is the kiosk
@@ -194,7 +199,17 @@ func NewKioskReplay(
 // caller (main.go's onConnect hook) logs it and still runs the scope
 // re-sync, so at worst only child-iframe replay is missing until the next
 // reconnect.
+//
+// A lazy kiosk replay (BootstrapCore with the offline cache feature off,
+// where replay exists only for onchfs works) does nothing here until a
+// non-empty scope has been applied once: a device that never shows an
+// onchfs work never holds a socket to the kiosk for it. The first such
+// scope dials on demand (SyncPlaylist's redial), and every reconnect after
+// that re-attaches as usual.
 func (k *kioskReplay) AttachOnReconnect(ctx context.Context) error {
+	if k.lazy && !k.armed.Load() {
+		return nil
+	}
 	return k.dialAndAttach(ctx)
 }
 
@@ -340,6 +355,7 @@ func (k *kioskReplay) applyScope(ctx context.Context, cachedSources []string, mi
 	if len(cachedSources) == 0 {
 		return k.replayer.Disable(ctx)
 	}
+	k.armed.Store(true)
 	return k.replayer.EnableForPlaylist(ctx, cachedSources, mixed)
 }
 

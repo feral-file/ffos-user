@@ -1643,7 +1643,10 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	if class == ClassStreaming {
 		return ErrUnsupportedMediaClass
 	}
-	if class == ClassInline {
+	// An onchfs work is read from chain when it is cast
+	// (OnchfsMaterializer); there is nothing for capture to fetch, so it is
+	// reported the way an inline item is: already handled, not queued.
+	if class == ClassInline || class == ClassOnchfs {
 		return ErrItemInlineNotQueued
 	}
 
@@ -1871,7 +1874,7 @@ func (s *service) classifyPlaylistItems(ctx context.Context, items []dp1playlist
 			// rather than classification failures: a live stream has no
 			// fixed byte sequence to cache, and an inline data: item is
 			// already carried by the playlist body itself.
-			if class == ClassStreaming || class == ClassInline {
+			if class == ClassStreaming || class == ClassInline || class == ClassOnchfs {
 				return
 			}
 			results[i] = &queuedItem{item: item, epoch: epoch, class: class}
@@ -2475,9 +2478,9 @@ func (s *service) captureForClass(ctx context.Context, j captureJob) (*ItemRecor
 	// to mediaCapturer, which would dutifully ask http.Client to dial a
 	// data: URI and record a confusing transport error against an item
 	// that was never meant to be fetched at all.
-	if j.class == ClassInline {
-		return nil, fmt.Errorf("offline cache: inline source must never be queued: %s",
-			truncateSourceForLog(j.item.Source))
+	if j.class == ClassInline || j.class == ClassOnchfs {
+		return nil, fmt.Errorf("offline cache: %s source must never be queued: %s",
+			j.class, truncateSourceForLog(j.item.Source))
 	}
 	if j.class == ClassSoftware {
 		return s.capturer.Capture(ctx, j.item, s.captureWindowMs)

@@ -655,7 +655,7 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 // rendered in an iframe. Images, video and audio are L0's business (their
 // container rules), and a browser render of them proves nothing L0 did not.
 func isSoftwareRecord(rec *Record) bool {
-	if rec == nil || rec.Source == "" || IsDataURI(rec.Source) {
+	if rec == nil || rec.Source == "" || IsDeviceHeld(rec.Source) {
 		return false
 	}
 	if rec.SniffedType == "text/html" || strings.HasPrefix(rec.DeclaredType, "text/html") || strings.HasPrefix(rec.DeclaredType, "application/xhtml") {

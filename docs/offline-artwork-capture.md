@@ -130,6 +130,29 @@ too, so the fallback itself can never reintroduce the same collision
 (logged at `Error`, mirroring `staticserver.go`'s `safeLoopbackAddr` guard
 for the same class of "config typo breaks an isolation invariant" hazard).
 
+### 2.0 A second producer: onchfs works (`onchfs.go`)
+
+Capture is not the only writer of item records. An onchfs work has no host
+since fxhash closed (ffos-user#427), so `OnchfsMaterializer` reads its tree
+from chain, verifies every inode, and writes it as an `Automatic`, complete
+record under the work's device-local source
+(`https://<base32 root>.onchfs.invalid/…`). Replay serves it exactly as it
+serves a capture. Three rules in this document bend for it:
+
+- **"Item.Source is never rewritten" holds within the cache, not before
+  it.** `dp1` maps an `onchfs://` source to its device-local form at every
+  exit, before the cache, the player or replay sees the item. The mapped
+  string is the identity everywhere downstream.
+- **"Offline cache off" no longer means no replay.** `BootstrapCore` (store,
+  replay; no static server, no Service, no capture) runs on every device. It
+  is lazy: it dials the kiosk only once an onchfs scope is first armed. In
+  that mode the materializer bounds and collects its own records.
+- **`ClassOnchfs` is classified without a request, ahead of the source
+  guard** (whose DNS check would refuse the `.invalid` host). Downloads and
+  automatic warming skip it as they skip `ClassInline`.
+
+Design, limits and node list: [`onchfs.md`](onchfs.md).
+
 ### 2.1 Resource-aware admission (`admission.go`)
 
 Process separation keeps capture from *touching* the kiosk's state, but not
@@ -2657,6 +2680,7 @@ the surface entirely if it is ever abused.
 
 ## 10. See also
 
+- `docs/onchfs.md` — onchfs works: the second producer of records (§2.0).
 - `components/feral-controld/offlinecache/` — the implementation;
   `classify.go` (routing), `capture.go` (software/headless path),
   `mediacapture.go` (direct-download path, §3.3), `replay.go` (serving
