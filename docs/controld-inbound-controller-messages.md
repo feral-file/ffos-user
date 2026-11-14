@@ -70,7 +70,11 @@ for relayer topic assignment:
   device's content policy for the cast's `contentContext` before it reaches
   CDP, so a playlist without item-level `displayAt` is forwarded unchanged only
   when the policy admits all of its items (see "Content policy effect on
-  playlists" below).
+  playlists" below). An optional `request.startItem`
+  (`{ "id", "source" }`, either member optional) names the work the cast
+  opens on; controld forwards it to the player untouched and the player
+  resolves it against the list it admits, starting at the beginning when the
+  work is absent (contract in `api-design.md`).
 - `startMintPairingSession`, `joinMintPairingChannel`,
   `closeMintPairingSession`, and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
