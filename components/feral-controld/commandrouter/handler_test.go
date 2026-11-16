@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -404,6 +405,8 @@ func TestCommandHandler_Process_NewGestureCommandsRouteToExecutor(t *testing.T) 
 }
 
 type fakeMintPairingService struct {
+	getCalls       int
+	getResult      any
 	startCalls     int
 	joinCalls      int
 	closeCalls     int
@@ -421,6 +424,11 @@ type fakeMintPairingService struct {
 	// false) matches this fake's behavior before issue #381's direct-reply
 	// annotation needed it to be settable.
 	overlayStatus mintpairing.OverlayStatus
+}
+
+func (f *fakeMintPairingService) HandleGetPairingSession(context.Context, map[string]any) (any, error) {
+	f.getCalls++
+	return f.getResult, nil
 }
 
 func (f *fakeMintPairingService) Start(context.Context) {}
@@ -1880,4 +1888,35 @@ func TestCommandHandler_Process_SetMediaHealthIsInternal(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, false, reply["ok"])
 	assert.Equal(t, "setMediaHealth is internal", reply["error"])
+}
+
+func TestCommandHandler_Process_GetMintPairingSession(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+			want := map[string]any{"ok": true, "status": "none", "active": false}
+			mintSvc := &fakeMintPairingService{getResult: want}
+			if enabled {
+				ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
+			}
+			result, err := ts.handler.Process(ts.ctx, commands.Command{Type: commands.CMD_GET_MINT_PAIRING_SESSION})
+			require.NoError(t, err)
+			if enabled {
+				assert.Equal(t, want, result)
+				assert.Equal(t, 1, mintSvc.getCalls)
+				assert.Zero(t, mintSvc.startCalls)
+			} else {
+				assert.Equal(t, "disabled", result.(map[string]any)["error"].(map[string]any)["code"])
+			}
+		})
+	}
+}
+
+func TestCommandHandler_Process_GetMintPairingSessionDuringReset(t *testing.T) {
+	h, ctrl := stagedResetHandler(t)
+	defer ctrl.Finish()
+	result, err := h.Process(context.Background(), commands.Command{Type: commands.CMD_GET_MINT_PAIRING_SESSION})
+	require.NoError(t, err)
+	assert.Equal(t, "disabled", result.(map[string]any)["error"].(map[string]any)["code"])
 }

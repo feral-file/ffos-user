@@ -610,3 +610,12 @@ The setupd one-attempt BLE refresh variant (`RefreshRetries::Single`) is intenti
 4. `connectivity_change` signal body is a single `bool`. It must stay a single `bool`. If more data is needed, add a new signal rather than replacing this one.
 5. The claim QR `device_info` string is a single pipe-delimited field list kept byte-identical to the pre-merge format. Do not reorder or re-encode it without a coordinated mobile-app release.
 6. The LAN hub `POST /api/cast` accepts exactly the same command envelope as the relayer, and both paths share `commandrouter`. Do not diverge them without explicit justification.
+
+### Read-only mint-pairing session state
+
+`getMintPairingSession` is an owner-only, in-process snapshot of mint-pairing
+session state, independent of screen overlay state. It must perform no broker
+or CDP I/O and must not start, cancel, renew, or re-display a session. Session
+workers own cleanup; querying an expired device-created session reports none
+without canceling it. The wire schema is documented in
+`controld-inbound-controller-messages.md`.

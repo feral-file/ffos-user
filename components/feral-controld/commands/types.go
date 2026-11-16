@@ -236,6 +236,7 @@ const (
 	// (mDNS TXT api=2 + /api/v2/status contract "2") is the capability gate.
 	CMD_START_WIFI_SETUP           Type = "startWifiSetup"
 	CMD_START_MINT_PAIRING_SESSION Type = "startMintPairingSession"
+	CMD_GET_MINT_PAIRING_SESSION   Type = "getMintPairingSession"
 	// CMD_JOIN_MINT_PAIRING_CHANNEL joins a Mint Pairing Broker channel a site
 	// created (site-initiated pairing). The app sends `{channelId,
 	// pairingToken}` or `{shortCode}`; the broker is always the device's own.
