@@ -316,10 +316,11 @@ func (p CastPlan) Narrow(device *SeriesPlaybackMode) []dp1playlist.PlaylistItem 
 			items = append(items, NarrowEditions(mode, seg.Group.ArtworkModel, seg.Group.Representative, seg.Group.Editions)...)
 		}
 		if p.maxItems > 0 && len(items) >= p.maxItems {
-			return items[:p.maxItems]
+			items = items[:p.maxItems]
+			break
 		}
 	}
-	return items
+	return mapOnchfsSources(items) // catalog editions are an exit too (onchfs.go)
 }
 
 // rawPlaylistItem is the subset of one playlist item's own JSON this package

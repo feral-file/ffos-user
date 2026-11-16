@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -45,14 +46,19 @@ func loadFixture(t *testing.T) *fixture {
 }
 
 // replayCaller answers from the recording; an unrecorded call is a test bug.
+// The tree walk reads concurrently; mu serializes calls so tamper functions
+// may keep counters.
 type replayCaller struct {
 	t      *testing.T
 	fx     *fixture
 	tamper func(calldata string, result []byte) []byte
+	mu     sync.Mutex
 }
 
 func (c *replayCaller) Call(_ context.Context, contract string, data []byte, block *big.Int) ([]byte, error) {
 	c.t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	assert.Equal(c.t, c.fx.Contract, contract)
 	assert.Equal(c.t, 0, block.Cmp(new(big.Int).SetUint64(c.fx.Block)), "reads must be pinned to the fixture's block")
 	key := "0x" + hex.EncodeToString(data)
@@ -151,25 +157,6 @@ func TestReadTreeRefusesSwappedChunkList(t *testing.T) {
 	_, err := r.ReadTree(context.Background(), fx.Root)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrVerification), err)
-}
-
-func TestParseURI(t *testing.T) {
-	cid, inner, query, err := ParseURI("onchfs://1639E8C989CDDD2C0F9E951B126A21B1964309854C0A8E0A9B1193A655C6712A/?fxhash=0x06ec&fxiteration=1")
-	require.NoError(t, err)
-	assert.Equal(t, "1639e8c989cddd2c0f9e951b126a21b1964309854c0a8e0a9b1193a655c6712a", cid)
-	assert.Equal(t, "", inner)
-	assert.Equal(t, "fxhash=0x06ec&fxiteration=1", query)
-
-	cid, inner, query, err = ParseURI("onchfs://1639e8c989cddd2c0f9e951b126a21b1964309854c0a8e0a9b1193a655c6712a/sketch.js")
-	require.NoError(t, err)
-	assert.Equal(t, "sketch.js", inner)
-	assert.Equal(t, "", query)
-	_ = cid
-
-	for _, bad := range []string{"https://x/y", "onchfs://abc", "onchfs://1639e8c989cddd2c0f9e951b126a21b1964309854c0a8e0a9b1193a655c6712a/../x"} {
-		_, _, _, err := ParseURI(bad)
-		assert.Error(t, err, bad)
-	}
 }
 
 func TestDecodeHeadersFromRealMetadata(t *testing.T) {

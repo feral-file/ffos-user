@@ -210,6 +210,12 @@ type catalogEditions struct {
 // 0 meaning unbounded; the catalog calls the walk will make are bounded
 // separately by maxSeriesPerPlaylist, which 0 does not lift.
 func (d *dp1) expandSeriesItems(ctx context.Context, playlist Playlist, maxItems int) Playlist {
+	expanded := d.expandSeriesEditions(ctx, playlist, maxItems)
+	expanded.Items = mapOnchfsSources(expanded.Items) // editions are an exit too (onchfs.go)
+	return expanded
+}
+
+func (d *dp1) expandSeriesEditions(ctx context.Context, playlist Playlist, maxItems int) Playlist {
 	if !hasSeriesItems(playlist.Items) {
 		return playlist
 	}
