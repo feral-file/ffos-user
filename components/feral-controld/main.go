@@ -1459,6 +1459,15 @@ func initializeApp(
 	if seriesPlaybackSource, ok := commandrouter.SeriesPlaybackSource(rawCmdHandler); ok {
 		playlist_refresher.SetSeriesPlaybackSource(playlistRefresher, seriesPlaybackSource, logger)
 	}
+	// The reverse direction of the wiring above: every accepted cast's own
+	// SeriesPlaybackRandom pick is pushed straight into the refresher's
+	// stable-pick memory, so its periodic resync never has to rediscover a
+	// newer cast's choice by reading the live display — a read that skips
+	// itself entirely when the group's previously remembered pick is
+	// content-policy withheld (feral-file/ffos-user#459, F6 reopened).
+	if recordPick, ok := playlist_refresher.AcceptedPickRecorder(playlistRefresher); ok {
+		commandrouter.SetAcceptedPickRecorder(rawCmdHandler, recordPick, logger)
+	}
 	// The owner's content policy falls with the claim on a factory reset, for
 	// the same rollback reason the device name does (see factoryReset).
 	executor.SetContentPolicyResetter(func() error {

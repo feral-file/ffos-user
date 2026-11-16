@@ -437,6 +437,20 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	}
 	_, procErr := h.Process(ctx, commands.Command{Type: commands.CMD_DISPLAY_PLAYLIST, Arguments: recastArgs})
 
+	// Pushed only when the re-cast itself succeeded: on procErr != nil the
+	// comment below already establishes that the series stays on whatever
+	// WAS on screen before this attempt, not rebuilt.Items — recording the
+	// pick this attempt computed would claim an edition that never actually
+	// displayed. The re-entrant Process call above runs its own copy of
+	// this same push (handler.go), but on an empty CastPlan — rebuilt
+	// carries no seriesRegistry marker, so that call's own
+	// ResolveSeriesCastPlan resolves no groups to push picks for — so this
+	// is the only place a setSeriesPlayback-driven re-narrow's own random
+	// pick (feral-file/ffos-user#459, F6 reopened) is ever recorded.
+	if procErr == nil && h.acceptedPickRecorder != nil {
+		h.acceptedPickRecorder(plan.RandomPicksFromNarrowed(device, rebuilt.Items))
+	}
+
 	// The re-entrant Process call's own dp1_call branch just ran
 	// rememberSeriesCast on the rebuilt (already-narrowed) document, which
 	// carries no seriesRegistry marker and so cleared this cache. Restore

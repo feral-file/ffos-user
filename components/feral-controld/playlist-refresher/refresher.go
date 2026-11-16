@@ -245,6 +245,52 @@ func (r *refresher) currentSeriesPlaybackMode() *dp1.SeriesPlaybackMode {
 	return r.seriesPlaybackSource()
 }
 
+// AcceptedPickRecorder exposes r's RecordAcceptedPicks as a plain function,
+// for commandrouter to call every time it accepts a CMD_DISPLAY_PLAYLIST
+// cast that resolved a SeriesPlaybackRandom pick — the reverse direction of
+// SeriesPlaybackSource (commandrouter exposes a getter this package calls;
+// here this package exposes a setter commandrouter calls), wired the same
+// way in main.go so the two packages never import each other directly.
+func AcceptedPickRecorder(r Refresher) (fn func([]dp1.RandomGroupPick), ok bool) {
+	recorder, ok := r.(interface {
+		RecordAcceptedPicks([]dp1.RandomGroupPick)
+	})
+	if !ok {
+		return nil, false
+	}
+	return recorder.RecordAcceptedPicks, true
+}
+
+// RecordAcceptedPicks overwrites randomSeriesPicks for every group in picks
+// with the edition a cast just put on screen, unconditionally — including
+// when the group's own previous remembered pick was itself content-policy
+// withheld. That overwrite is exactly what narrowStable's live-display
+// check cannot do for this case (see rememberedWithheld's doc, feralfile-
+// bot F6 reopened, F8, 2026-11-13): this is the fix, recording the pick at
+// its one point of certain truth — cast acceptance — instead of asking
+// narrowStable to infer it later from an already-filtered display.
+//
+// mode is always SeriesPlaybackRandom: RandomPicksFromNarrowed only ever
+// reports a pick for a group it resolved under that mode (see its own
+// doc), so there is nothing else to store it as.
+func (r *refresher) RecordAcceptedPicks(picks []dp1.RandomGroupPick) {
+	if len(picks) == 0 {
+		return
+	}
+	r.randomSeriesMu.Lock()
+	defer r.randomSeriesMu.Unlock()
+	if r.randomSeriesPicks == nil {
+		r.randomSeriesPicks = make(map[dp1.SeriesGroupKey]randomSeriesPick)
+	}
+	for _, pick := range picks {
+		r.randomSeriesPicks[pick.Key] = randomSeriesPick{
+			mode:         dp1.SeriesPlaybackRandom,
+			artworkModel: pick.ArtworkModel,
+			source:       pick.Source,
+		}
+	}
+}
+
 // SetSessionGeneration injects the generation getter onto r, if r is the
 // concrete refresher built by New (mirroring SetSignatureVerification's
 // contract). Must be called before Start; nil leaves publication unfenced.

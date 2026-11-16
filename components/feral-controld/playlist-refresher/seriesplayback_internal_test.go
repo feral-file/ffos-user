@@ -678,3 +678,67 @@ func TestNarrowStable_PreservesRememberedPickWhenItIsContentWithheld(t *testing.
 	assert.Equal(t, editionB.Source, r.randomSeriesPicks[key].source,
 		"the remembered pick must stay B so content policy continues withholding the same thing next tick")
 }
+
+// TestNarrowStable_AcceptedPickOverridesAWithheldRememberedPick pins the fix
+// for feralfile-bot F6 reopened (2026-11-13): the previous test establishes
+// that narrowStable's own live-display check CANNOT discover a newer cast's
+// choice once the remembered pick is content-withheld (rememberedWithheld
+// skips that check entirely, by design — see F8 above). Without some other
+// path writing the new choice into randomSeriesPicks, that newer cast's own
+// selection is lost forever on every subsequent tick, no matter how the
+// player display is read.
+//
+// RecordAcceptedPicks is that other path: commandrouter calls it the
+// moment a cast is accepted (see refresher.go's own doc), independently of
+// narrowStable's live-display inference. This test calls it directly,
+// exactly as that wiring would, and shows the group over the withheld pick
+// B (editionB) with a newer accepted pick A (editionA) which content
+// policy does NOT withhold — narrowStable must now return A, even though
+// the live display still shows neither (nothing seeds it from
+// currentlyDisplayed), proving the fix does not depend on the live-display
+// check succeeding at all.
+func TestNarrowStable_AcceptedPickOverridesAWithheldRememberedPick(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+	mature := contentrating.RatingMature
+
+	editionA := dp1playlist.PlaylistItem{ID: "a", Source: "https://cdn.example.com/a.mp4"}
+	editionB := dp1playlist.PlaylistItem{ID: "b", Source: "https://cdn.example.com/b.mp4", ContentRating: &mature}
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
+	plan := dp1.CastPlan{Segments: []dp1.CastSegment{
+		{Group: &dp1.ResolvedSeriesGroup{
+			Key:            key,
+			Representative: dp1playlist.PlaylistItem{ID: "item-series", Source: "https://cdn.example.com/series.html"},
+			Editions:       []dp1playlist.PlaylistItem{editionA, editionB},
+			Resolved:       true,
+			ArtworkModel:   dp1.SeriesArtworkModelMultiUnique,
+		}},
+	}}
+	// B was selected on an earlier tick; content policy has always withheld it.
+	r.randomSeriesPicks = map[dp1.SeriesGroupKey]randomSeriesPick{
+		key: {mode: dp1.SeriesPlaybackRandom, artworkModel: dp1.SeriesArtworkModelMultiUnique, source: editionB.Source},
+	}
+
+	// A newer cast, independent of this refresher, is accepted and selects
+	// A — the push this test is pinning.
+	r.RecordAcceptedPicks([]dp1.RandomGroupPick{
+		{Key: key, Source: editionA.Source, ArtworkModel: dp1.SeriesArtworkModelMultiUnique},
+	})
+	require.Equal(t, editionA.Source, r.randomSeriesPicks[key].source,
+		"RecordAcceptedPicks must overwrite the withheld pick immediately, not merely queue the change")
+
+	// The live display still shows nothing useful for this group — the
+	// fix must not depend on this succeeding.
+	currentlyDisplayed := func() []dp1playlist.PlaylistItem { return nil }
+	policy := contentpolicy.Default()
+	displayFilter := func(item dp1playlist.PlaylistItem) bool {
+		return policy.Allows(item, contentpolicy.ContextCurated)
+	}
+
+	out := r.narrowStable(plan, &mode, currentlyDisplayed, displayFilter)
+	require.Len(t, out, 1)
+	assert.Equal(t, editionA.Source, out[0].Source,
+		"the newer accepted pick A must be what narrowStable returns, not the stale withheld pick B")
+	assert.Equal(t, editionA.Source, r.randomSeriesPicks[key].source,
+		"the remembered pick must stay A after this tick, since A is not withheld")
+}

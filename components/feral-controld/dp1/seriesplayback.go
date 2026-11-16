@@ -322,6 +322,82 @@ func (p CastPlan) Narrow(device *SeriesPlaybackMode) []dp1playlist.PlaylistItem 
 	return items
 }
 
+// RandomGroupPick is one SeriesPlaybackRandom group's resolved edition, as
+// it actually ended up in a Narrow(device) call's own returned items —
+// never re-derived by a second call to NarrowEditions/randomEdition, which
+// would roll a DIFFERENT pick than the one already accepted and on screen.
+// See RandomPicksFromNarrowed.
+type RandomGroupPick struct {
+	Key          SeriesGroupKey
+	Source       string
+	ArtworkModel SeriesArtworkModel
+}
+
+// narrowedCount reports how many items NarrowEditions(mode, artworkModel,
+// _, editions) returns, without picking a random edition — RandomPicksFromNarrowed
+// needs this to stay in lockstep with Narrow's own per-segment item count
+// while walking an already-narrowed item list. Mirrors NarrowEditions' own
+// two outcomes: full on a distinct-editions group returns every edition,
+// and every other case (first, random, or full/random on a single/multi
+// group) returns exactly one item (the representative or, for random, the
+// one picked edition).
+func narrowedCount(mode SeriesPlaybackMode, artworkModel SeriesArtworkModel, editions []dp1playlist.PlaylistItem) int {
+	if mode == SeriesPlaybackFull && artworkModel.hasDistinctEditions() {
+		return len(editions)
+	}
+	return 1
+}
+
+// RandomPicksFromNarrowed re-derives, from items a PRIOR p.Narrow(device)
+// call already returned, the edition each SeriesPlaybackRandom
+// distinct-editions group in p actually resolved to — the exact value a
+// cast is about to put, or already put, on screen. It does NOT call Narrow
+// or NarrowEditions itself: randomEdition is genuinely random, so a second
+// call would roll a different pick than the one items already carries, and
+// the whole point here is to recover what WAS chosen, not choose again.
+//
+// items must be exactly p.Narrow(device)'s own return value for the SAME
+// device — this walks p.Segments and items in the identical lockstep order
+// Narrow built them in (via narrowedCount), so a mismatched items/device
+// pair silently reads the wrong positions. Callers that already called
+// Narrow (handler.go's cast path, recastForMode) have both values on hand
+// already; this just avoids a second, re-rolling pass over the same plan.
+//
+// Exists for feral-file/ffos-user#459, F6 reopened: playlist-refresher's
+// own stable-pick memory only ever learns of a newer cast's random choice
+// by reading the live display on its next periodic tick — a read that is
+// itself skipped whenever the group's PREVIOUSLY remembered pick is
+// content-policy-withheld (narrowStable's rememberedWithheld guard,
+// feralfile-bot F8, 2026-11-13), silently reverting a legitimate newer
+// cast's choice back to the withheld one. Pushing the pick this function
+// recovers straight into that memory at cast-acceptance time (see
+// commandrouter's use of playlist-refresher's AcceptedPickRecorder) closes
+// that gap at the source, rather than teaching the live-display check to
+// tell the two cases apart.
+func (p CastPlan) RandomPicksFromNarrowed(device *SeriesPlaybackMode, items []dp1playlist.PlaylistItem) []RandomGroupPick {
+	var picks []RandomGroupPick
+	idx := 0
+	for _, seg := range p.Segments {
+		if idx >= len(items) {
+			break
+		}
+		if seg.Item != nil {
+			idx++
+			continue
+		}
+		mode := ResolveSeriesPlaybackMode(seg.Group.DocumentMode, device)
+		if mode == SeriesPlaybackRandom && seg.Group.ArtworkModel.hasDistinctEditions() && len(seg.Group.Editions) > 0 {
+			picks = append(picks, RandomGroupPick{
+				Key:          seg.Group.Key,
+				Source:       items[idx].Source,
+				ArtworkModel: seg.Group.ArtworkModel,
+			})
+		}
+		idx += narrowedCount(mode, seg.Group.ArtworkModel, seg.Group.Editions)
+	}
+	return picks
+}
+
 // Full flattens the plan the way expandSeriesItems already does for the
 // offline-cache download path (feral-file/ffos-user#455, #453): every group
 // contributes its FULL edition set, unconditionally — never narrowed by

@@ -121,6 +121,15 @@ type handler struct {
 	// groups, kept so setSeriesPlayback can re-narrow and re-cast without a
 	// catalog round trip. See seriesplayback.go.
 	lastSeriesCast displayedSeriesCast
+	// acceptedPickRecorder, when set (SetAcceptedPickRecorder), is
+	// playlist-refresher's own RecordAcceptedPicks (via its
+	// AcceptedPickRecorder), called every time a CMD_DISPLAY_PLAYLIST cast
+	// is accepted with a SeriesPlaybackRandom pick (feral-file/ffos-user#459,
+	// F6 reopened) — see settleSeriesCast's and recastForMode's call sites.
+	// nil (tests, a build wired before this seam) is safe: the push simply
+	// does not happen, and narrowStable's own live-display self-heal
+	// remains the only path, exactly as before this existed.
+	acceptedPickRecorder func([]dp1.RandomGroupPick)
 	// seriesRecast coalesces concurrent setSeriesPlayback re-casts so a burst
 	// of calls performs at most two real re-casts instead of racing or fully
 	// serializing (feralfile-bot F7 fix review, PR #426 finding F1). See
@@ -322,6 +331,26 @@ func SetSessionGeneration(h Handler, fn func() uint64, logger *zap.Logger) {
 
 func (h *handler) setSessionGeneration(fn func() uint64) {
 	h.sessionGeneration = fn
+}
+
+// SetAcceptedPickRecorder injects playlist-refresher's AcceptedPickRecorder
+// onto h, if h supports it (same concrete-handler-only, pre-NewGate
+// contract as SetSessionGeneration). Wired in main.go alongside the
+// existing reverse-direction SeriesPlaybackSource wiring, so the two
+// packages keep talking through main.go rather than importing each other.
+func SetAcceptedPickRecorder(h Handler, fn func([]dp1.RandomGroupPick), logger *zap.Logger) {
+	setter, ok := h.(interface {
+		setAcceptedPickRecorder(func([]dp1.RandomGroupPick))
+	})
+	if !ok {
+		logger.Warn("Command handler does not support accepted-pick wiring")
+		return
+	}
+	setter.setAcceptedPickRecorder(fn)
+}
+
+func (h *handler) setAcceptedPickRecorder(fn func([]dp1.RandomGroupPick)) {
+	h.acceptedPickRecorder = fn
 }
 
 // SetOverlaySource injects the overlay signal onto h, if h supports it
@@ -1040,8 +1069,24 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// displayAt-deferred acceptance reports ok:true and counts as
 			// accepted, same as the scheduler keeps the cast.
 			seriesCastSeq := h.rememberSeriesCast(*playlist, seriesCastPlan, contentContext, schedulerSource)
+			// Snapshotted now, the same moment rememberSeriesCast freezes
+			// its own copy of playlist/seriesCastPlan: the deferred func
+			// below closes over variables, not values, so without this a
+			// later reassignment of playlist or seriesCastPlan before
+			// return would leak into the recorded pick (feral-file/ffos-user#459).
+			narrowedPlan, narrowedItems, narrowedDeviceMode := seriesCastPlan, playlist.Items, deviceSeriesMode
 			defer func() {
-				h.settleSeriesCast(seriesCastSeq, err == nil && playerresponse.OK(result))
+				accepted := err == nil && playerresponse.OK(result)
+				h.settleSeriesCast(seriesCastSeq, accepted)
+				// Pushed only on acceptance, mirroring settleSeriesCast's
+				// own accepted-only contract: a rejected cast never reached
+				// the screen, so there is nothing here for playlist-
+				// refresher's stable-pick memory to learn (see
+				// RandomPicksFromNarrowed's doc on why this reads the
+				// already-narrowed items instead of re-narrowing).
+				if accepted && h.acceptedPickRecorder != nil {
+					h.acceptedPickRecorder(narrowedPlan.RandomPicksFromNarrowed(narrowedDeviceMode, narrowedItems))
+				}
 			}()
 			// Filter under the policy lock, then RELEASE it: the source
 			// preflight below is network-bound (a 10s phase ceiling, and up to

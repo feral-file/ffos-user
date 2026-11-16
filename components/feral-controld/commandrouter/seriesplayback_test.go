@@ -251,6 +251,190 @@ func TestCommandHandler_SetSeriesPlayback_RecastsTheCurrentlyDisplayedSeries(t *
 	assert.Equal(t, "item-series", narrowed[0]["id"], "first must cast the document's own representative, not the catalog's first-returned edition")
 }
 
+// TestCommandHandler_SetSeriesPlayback_RecastToRandomPushesTheChosenPickToTheRecorder
+// pins feral-file/ffos-user#459 (F6 reopened): recastForMode's own re-narrow
+// is the ONLY place a setSeriesPlayback-driven switch into random mode ever
+// makes its pick — the re-entrant Process call it issues resolves no series
+// groups at all (the rebuilt document carries no seriesRegistry marker), so
+// that call's own copy of this same push (handler.go) reports nothing. If
+// recastForMode did not also push, playlist-refresher would have no way to
+// learn this pick other than reading the live display next tick — exactly
+// the read rememberedWithheld (F8) can skip.
+func TestCommandHandler_SetSeriesPlayback_RecastToRandomPushesTheChosenPickToTheRecorder(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	logger := zaptest.NewLogger(t)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
+	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
+
+	var recorded []dp1.RandomGroupPick
+	commandrouter.SetAcceptedPickRecorder(handler, func(picks []dp1.RandomGroupPick) {
+		recorded = append(recorded, picks...)
+	}, logger)
+
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "387"}
+	editions := []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b"), seriesEditionItem("c")}
+	group := &dp1.ResolvedSeriesGroup{
+		Key:            key,
+		Representative: seriesEditionItem("item-series"),
+		Editions:       editions,
+		Resolved:       true,
+		ArtworkModel:   dp1.SeriesArtworkModelMultiUnique,
+	}
+	initialPlan := dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(initialPlan).
+		Times(1)
+	// Same passthrough stand-in as the sibling test above: the rebuilt
+	// re-cast document carries concrete editions, not a seriesRegistry
+	// item, so it resolves no groups.
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ interface{}, playlist dp1.Playlist, _ json.RawMessage, _ *dp1.SeriesPlaybackMode, _ int) dp1.CastPlan {
+			segments := make([]dp1.CastSegment, len(playlist.Items))
+			for i := range playlist.Items {
+				item := playlist.Items[i]
+				segments[i] = dp1.CastSegment{Item: &item}
+			}
+			return dp1.CastPlan{Segments: segments}
+		}).
+		AnyTimes()
+
+	var expressions []string
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			expressions = append(expressions, expr)
+			return playerOkResponse(), nil
+		}).
+		Times(2)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(2)
+
+	playlistMap := map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"items": []interface{}{map[string]interface{}{
+			"id":     "item-series",
+			"source": "https://cdn.artworks.feralfile.io/0.mp4",
+			"provenance": map[string]interface{}{
+				"type":     "seriesRegistry",
+				"contract": map[string]interface{}{"chain": "evm", "seriesId": 387},
+			},
+		}},
+	}
+	_, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"dp1_call": playlistMap},
+	})
+	require.NoError(t, err)
+	require.Len(t, expressions, 1)
+	assert.Empty(t, recorded, "no device override yet: the default (full) mode makes no random choice to push")
+
+	result, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_SET_SERIES_PLAYBACK,
+		Arguments: map[string]interface{}{"seriesPlayback": "random"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, true, result.(map[string]interface{})["ok"])
+	require.Len(t, expressions, 2, "setSeriesPlayback must re-cast the currently displayed series")
+
+	narrowed := castedItems(t, expressions[1])
+	require.Len(t, narrowed, 1, "random narrows a distinct-editions group to one picked edition")
+
+	require.Len(t, recorded, 1, "recastForMode's own re-narrow must push the pick it just made")
+	assert.Equal(t, key, recorded[0].Key)
+	assert.Equal(t, narrowed[0]["source"], recorded[0].Source, "the pushed pick must be the exact edition the re-cast actually sent")
+	assert.Equal(t, dp1.SeriesArtworkModelMultiUnique, recorded[0].ArtworkModel)
+}
+
+// TestCommandHandler_DisplayPlaylist_PushesTheAcceptedRandomPickOnTheInitialCast
+// covers the OTHER call site of the same push (handler.go, not
+// recastForMode): a static dp1_call cast that already resolves under a
+// device-level random override on its very first display, with no
+// setSeriesPlayback re-cast involved at all.
+func TestCommandHandler_DisplayPlaylist_PushesTheAcceptedRandomPickOnTheInitialCast(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	logger := zaptest.NewLogger(t)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
+	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
+
+	var recorded []dp1.RandomGroupPick
+	commandrouter.SetAcceptedPickRecorder(handler, func(picks []dp1.RandomGroupPick) {
+		recorded = append(recorded, picks...)
+	}, logger)
+
+	// Nothing displayed yet, so this just persists the override; recastForMode
+	// no-ops (nothing tracked to re-narrow).
+	_, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_SET_SERIES_PLAYBACK,
+		Arguments: map[string]interface{}{"seriesPlayback": "random"},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, recorded, "no series displayed yet: nothing to push")
+
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "387"}
+	group := &dp1.ResolvedSeriesGroup{
+		Key:            key,
+		Representative: seriesEditionItem("item-series"),
+		Editions:       []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b"), seriesEditionItem("c")},
+		Resolved:       true,
+		ArtworkModel:   dp1.SeriesArtworkModelMultiUnique,
+	}
+	plan := dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(plan).
+		Times(1)
+
+	var expression string
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expression, _ = params["expression"].(string)
+			return playerOkResponse(), nil
+		}).
+		Times(1)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	playlistMap := map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"items": []interface{}{map[string]interface{}{
+			"id":     "item-series",
+			"source": "https://cdn.artworks.feralfile.io/0.mp4",
+			"provenance": map[string]interface{}{
+				"type":     "seriesRegistry",
+				"contract": map[string]interface{}{"chain": "evm", "seriesId": 387},
+			},
+		}},
+	}
+	_, err = handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"dp1_call": playlistMap},
+	})
+	require.NoError(t, err)
+
+	narrowed := castedItems(t, expression)
+	require.Len(t, narrowed, 1, "random narrows a distinct-editions group to one picked edition")
+
+	require.Len(t, recorded, 1, "the initial cast's own accepted pick must be pushed")
+	assert.Equal(t, key, recorded[0].Key)
+	assert.Equal(t, narrowed[0]["source"], recorded[0].Source)
+}
+
 // TestCommandHandler_SetSeriesPlayback_RecastOfAPlaylistURLCastDoesNotReResolveTheDynamicQuery
 // is run-reviewer's F1 on PR #454 (feral-file/ffos-user#452): before this
 // fix, a cast whose ORIGIN was dynamic (playlistUrl or a dp1_call carrying a
