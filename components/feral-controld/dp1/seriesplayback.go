@@ -396,7 +396,20 @@ func (p CastPlan) RandomPicksFromNarrowed(device *SeriesPlaybackMode, items []dp
 			continue
 		}
 		mode := ResolveSeriesPlaybackMode(seg.Group.DocumentMode, device)
-		if mode == SeriesPlaybackRandom && seg.Group.ArtworkModel.hasDistinctEditions() && len(seg.Group.Editions) > 0 {
+		// seg.Group.Resolved excludes unresolvedSeriesGroup's catalog-
+		// failure fallback (ArtworkModel left at its zero value "", which
+		// hasDistinctEditions() treats as true BY DESIGN for the casting
+		// decision — see that method's own doc — but which is not a real
+		// random choice: Editions is just [representative], one item,
+		// behind no actual catalog data). Without this, a transient
+		// catalog error on ANY later cast of an already-resolved,
+		// genuinely random group reported a "pick" for the representative
+		// and, tagged with a newer Seq than the real remembered pick,
+		// unconditionally overwrote it in playlist-refresher's memory —
+		// corrupting the very pick this fix exists to protect, with no
+		// setSeriesPlayback change involved at all (run-reviewer
+		// consolidated F1 on pass 5 of this fix, 2026-11-16).
+		if seg.Group.Resolved && mode == SeriesPlaybackRandom && seg.Group.ArtworkModel.hasDistinctEditions() && len(seg.Group.Editions) > 0 {
 			picks = append(picks, RandomGroupPick{
 				Key:          seg.Group.Key,
 				Source:       items[idx].Source,

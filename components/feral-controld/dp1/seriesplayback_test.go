@@ -554,6 +554,37 @@ func TestCastPlan_RandomPicksFromNarrowed_SkipsSingleMultiGroupsEvenUnderRandom(
 	assert.Empty(t, plan.RandomPicksFromNarrowed(nil, items))
 }
 
+// TestCastPlan_RandomPicksFromNarrowed_SkipsUnresolvedGroupsEvenUnderRandom
+// pins run-reviewer's consolidated F1 on pass 5 of this fix (2026-11-16):
+// unresolvedSeriesGroup's catalog-failure fallback leaves ArtworkModel at
+// its zero value "", which hasDistinctEditions() treats as true BY DESIGN
+// for the casting decision (empty/unrecognized defaults to "has a real
+// choice" so content pre-dating the field keeps casting as before) — but
+// an unresolved group's lone Editions entry is just the representative,
+// behind no real catalog data, so NarrowEditions' "random" pick here is
+// not a genuine choice at all. Resolved must gate the pick the same way
+// Full()/HasSeriesGroups already gate caching for the identical reason.
+func TestCastPlan_RandomPicksFromNarrowed_SkipsUnresolvedGroupsEvenUnderRandom(t *testing.T) {
+	representative := editionItem("item-series")
+	plan := dp1.CastPlan{Segments: []dp1.CastSegment{
+		{Group: &dp1.ResolvedSeriesGroup{
+			Key:            dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"},
+			DocumentMode:   mode(dp1.SeriesPlaybackRandom),
+			Representative: representative,
+			Editions:       []dp1playlist.PlaylistItem{representative},
+			Resolved:       false,
+			// ArtworkModel deliberately left unset (""), matching
+			// unresolvedSeriesGroup's own zero-value construction.
+		}},
+	}}
+
+	items := plan.Narrow(nil)
+	require.Len(t, items, 1)
+	assert.Equal(t, "item-series", items[0].ID, "sanity: an unresolved group narrows to its representative")
+	assert.Empty(t, plan.RandomPicksFromNarrowed(nil, items),
+		"an unresolved group must never report a pick, even though its empty ArtworkModel would otherwise read as hasDistinctEditions()")
+}
+
 // TestCastPlan_RandomPicksFromNarrowed_StaysInLockstepPastAnEarlierFullGroup
 // pins the lockstep walk against the one shape that can desync it: an
 // earlier FULL-mode distinct-editions segment contributes more than one
