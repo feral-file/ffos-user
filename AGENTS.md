@@ -24,6 +24,7 @@ This file defines the repository-wide principles for coding agents. The detailed
 - Architecture direction: `docs/architecture.md`
 - API and protocol direction: `docs/api-design.md`
 - Both docs are filled. Read them before making cross-service changes or adding new interfaces.
+- Feature designs for `feral-controld`: `docs/controld-inbound-controller-messages.md` (inbound command/notification wire contract), `docs/offline-artwork-capture.md` (offline cache capture/replay), `docs/media-health.md` (device-side media probes, play outcomes and the observation store, feral-file/ffos-user#392), `docs/onchfs.md` (onchfs works read from chain and served through the offline cache's replay, ffos-user#427). `RELEASES.md` is the release ledger.
 
 ## Release guardrail: two shipping rails
 - Component **binaries** ship via the pacman package rail (`feral-service-update.sh`); systemd **unit files and user session scripts** (`users/feralfile/**`) ship ONLY via the full-image rsync rail (`feral-system-update.sh`, in the `ffos` repo).
