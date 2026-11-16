@@ -1907,7 +1907,20 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 				// unavailable) could still see a since-changed artworkModel as
 				// unchanged and skip the invalidation that field exists for
 				// (run-reviewer, round 1 on this fix, 2026-11-12).
-				r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: seeded.Source}
+				//
+				// acceptedSeq carries forward from whatever this group's
+				// entry already held (zero if there was none), rather than
+				// defaulting to zero here: this write runs on essentially
+				// every ordinary tick for a schedule-active, non-withheld,
+				// still-displayed group, so discarding it would silently
+				// reset RecordAcceptedPicks' ordering guard (acceptedSeq)
+				// to zero within one PLAYLIST_REFRESH_INTERVAL of any
+				// accepted push — after which a stale, out-of-order push
+				// for an EARLIER cast would no longer be recognized as
+				// older and could overwrite a correct, newer pick
+				// (run-reviewer consolidated F1 on pass 3 of this fix,
+				// 2026-11-16).
+				r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: seeded.Source, acceptedSeq: pick.acceptedSeq}
 				items = append(items, seeded)
 				active = append(active, scheduleActive[i])
 				continue
@@ -1939,7 +1952,10 @@ func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMo
 		// anyway.
 		if len(narrowed) == 1 {
 			if _, found := editionBySource(group.Editions, narrowed[0].Source); found {
-				r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: narrowed[0].Source}
+				// acceptedSeq carried forward here too — see the seeded-pick
+				// write above for why (run-reviewer consolidated F1 on pass
+				// 3 of this fix, 2026-11-16).
+				r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: narrowed[0].Source, acceptedSeq: pick.acceptedSeq}
 			}
 		}
 		items = append(items, narrowed...)

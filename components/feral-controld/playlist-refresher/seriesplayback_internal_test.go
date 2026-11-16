@@ -775,3 +775,88 @@ func TestRecordAcceptedPicks_OlderSeqNeverOverwritesANewerOne(t *testing.T) {
 	assert.Equal(t, "https://cdn.example.com/newest.mp4", r.randomSeriesPicks[key].source,
 		"a push with a strictly newer Seq must still apply")
 }
+
+// TestNarrowStable_ReconfirmTickPreservesAcceptedSeq pins run-reviewer's
+// consolidated F1 on pass 3 of this fix (2026-11-16): narrowStable's own
+// live-display reconfirm write (the common case — it runs on essentially
+// every ordinary tick for a schedule-active, non-withheld group) must not
+// reset acceptedSeq to zero, or RecordAcceptedPicks' whole ordering guard
+// (TestRecordAcceptedPicks_OlderSeqNeverOverwritesANewerOne) would only
+// hold until the very next refresh tick.
+func TestNarrowStable_ReconfirmTickPreservesAcceptedSeq(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
+	editionA := dp1playlist.PlaylistItem{ID: "a", Source: "https://cdn.example.com/a.mp4"}
+	editionB := dp1playlist.PlaylistItem{ID: "b", Source: "https://cdn.example.com/b.mp4"}
+	plan := dp1.CastPlan{Segments: []dp1.CastSegment{
+		{Group: &dp1.ResolvedSeriesGroup{
+			Key:            key,
+			Representative: dp1playlist.PlaylistItem{ID: "item-series", Source: "https://cdn.example.com/series.html"},
+			Editions:       []dp1playlist.PlaylistItem{editionA, editionB},
+			Resolved:       true,
+			ArtworkModel:   dp1.SeriesArtworkModelMultiUnique,
+		}},
+	}}
+
+	// An accepted cast (Seq 5) pushed A.
+	r.RecordAcceptedPicks([]dp1.RandomGroupPick{
+		{Key: key, Source: editionA.Source, ArtworkModel: dp1.SeriesArtworkModelMultiUnique, Seq: 5},
+	})
+	require.Equal(t, uint64(5), r.randomSeriesPicks[key].acceptedSeq)
+
+	// An ordinary resync tick reconfirms A from the live display — the
+	// write at the "seeded" branch of narrowStable.
+	currentlyDisplayed := func() []dp1playlist.PlaylistItem { return []dp1playlist.PlaylistItem{editionA} }
+	policy := contentpolicy.Default()
+	displayFilter := func(item dp1playlist.PlaylistItem) bool {
+		return policy.Allows(item, contentpolicy.ContextCurated)
+	}
+	out := r.narrowStable(plan, &mode, currentlyDisplayed, displayFilter)
+	require.Len(t, out, 1)
+	assert.Equal(t, editionA.Source, out[0].Source, "sanity: the tick reconfirmed A")
+	require.Equal(t, uint64(5), r.randomSeriesPicks[key].acceptedSeq,
+		"an ordinary reconfirm tick must not reset acceptedSeq to zero")
+
+	// A stale, out-of-order push for an earlier cast (Seq 2) must still be
+	// rejected, exactly as it would have been immediately after the Seq-5
+	// push, before this tick ever ran.
+	r.RecordAcceptedPicks([]dp1.RandomGroupPick{
+		{Key: key, Source: editionB.Source, ArtworkModel: dp1.SeriesArtworkModelMultiUnique, Seq: 2},
+	})
+	assert.Equal(t, editionA.Source, r.randomSeriesPicks[key].source,
+		"a stale push must still be rejected after an intervening reconfirm tick")
+}
+
+// TestNarrowStable_FreshRollPreservesAcceptedSeq is
+// TestNarrowStable_ReconfirmTickPreservesAcceptedSeq's sibling for
+// narrowStable's OTHER pre-existing write site: the fresh-roll fallback,
+// reached when no live-display match seeds the pick (here, nothing is
+// displayed at all).
+func TestNarrowStable_FreshRollPreservesAcceptedSeq(t *testing.T) {
+	r := &refresher{}
+	mode := dp1.SeriesPlaybackRandom
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
+
+	// An accepted cast (Seq 7) pushed a pick whose source the fresh roll
+	// below will not reuse (TestNarrowStable_RandomModeReselectsWhenEditionDisappears's
+	// own shape: the remembered source is no longer among this tick's
+	// editions, forcing a fresh roll rather than a reconfirm).
+	r.RecordAcceptedPicks([]dp1.RandomGroupPick{
+		{Key: key, Source: "https://cdn.example.com/gone.mp4", ArtworkModel: dp1.SeriesArtworkModelMultiUnique, Seq: 7},
+	})
+	require.Equal(t, uint64(7), r.randomSeriesPicks[key].acceptedSeq)
+
+	out := r.narrowStable(randomGroupPlan(), &mode, nil, nil)
+	require.Len(t, out, 1)
+	assert.NotEqual(t, "https://cdn.example.com/gone.mp4", out[0].Source, "sanity: the fresh roll picked a real, current edition")
+	require.Equal(t, uint64(7), r.randomSeriesPicks[key].acceptedSeq,
+		"a fresh-roll tick must not reset acceptedSeq to zero")
+
+	// A stale, out-of-order push (Seq 3) must still be rejected.
+	r.RecordAcceptedPicks([]dp1.RandomGroupPick{
+		{Key: key, Source: "https://cdn.example.com/stale.mp4", ArtworkModel: dp1.SeriesArtworkModelMultiUnique, Seq: 3},
+	})
+	assert.NotEqual(t, "https://cdn.example.com/stale.mp4", r.randomSeriesPicks[key].source,
+		"a stale push must still be rejected after an intervening fresh-roll tick")
+}
