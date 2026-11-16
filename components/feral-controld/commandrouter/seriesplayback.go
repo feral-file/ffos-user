@@ -5,11 +5,13 @@ import (
 	"errors"
 	"sync"
 
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/seriesplayback"
 )
@@ -435,20 +437,45 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	if !source.IsZero() {
 		recastArgs[recastSchedulerSourceHint] = source
 	}
-	_, procErr := h.Process(ctx, commands.Command{Type: commands.CMD_DISPLAY_PLAYLIST, Arguments: recastArgs})
+	procResult, procErr := h.Process(ctx, commands.Command{Type: commands.CMD_DISPLAY_PLAYLIST, Arguments: recastArgs})
 
-	// Pushed only when the re-cast itself succeeded: on procErr != nil the
-	// comment below already establishes that the series stays on whatever
-	// WAS on screen before this attempt, not rebuilt.Items — recording the
-	// pick this attempt computed would claim an edition that never actually
-	// displayed. The re-entrant Process call above runs its own copy of
-	// this same push (handler.go), but on an empty CastPlan — rebuilt
-	// carries no seriesRegistry marker, so that call's own
-	// ResolveSeriesCastPlan resolves no groups to push picks for — so this
-	// is the only place a setSeriesPlayback-driven re-narrow's own random
-	// pick (feral-file/ffos-user#459, F6 reopened) is ever recorded.
-	if procErr == nil && h.acceptedPickRecorder != nil {
-		h.acceptedPickRecorder(plan.RandomPicksFromNarrowed(device, rebuilt.Items))
+	// Pushed only when the re-cast was actually ACCEPTED by the player —
+	// the same two-part check handler.go's own defer uses, not procErr ==
+	// nil alone: Process can legitimately return (result, nil) with
+	// result's own ok field false (a designed player refusal — e.g.
+	// handler_pending, no_artwork — carries no Go error), which the
+	// earlier procErr-only check let through as if the re-cast had
+	// displayed (run-reviewer consolidated F2 on this fix, 2026-11-16).
+	// The re-entrant Process call above runs its own copy of this same
+	// push (handler.go), but on an empty CastPlan — rebuilt carries no
+	// seriesRegistry marker, so that call's own ResolveSeriesCastPlan
+	// resolves no groups to push picks for — so this is the only place a
+	// setSeriesPlayback-driven re-narrow's own random pick (feral-file/
+	// ffos-user#459, F6 reopened) is ever recorded.
+	//
+	// rebuilt.Items is plan.Narrow's own UNFILTERED output; the re-entrant
+	// Process call above applies its own content-policy filtering to it
+	// internally, and this function has no visibility into whether a
+	// candidate pick survived that (run-reviewer consolidated F1 on this
+	// fix, 2026-11-16 — handler.go's own push re-checks against its final,
+	// post-filter playlist.Items directly, which this call site cannot
+	// see). Each candidate's own edition is instead re-checked here
+	// against a lock-free content-policy snapshot — the same established
+	// read narrowStable's own displayFilter uses — and dropped if the
+	// policy would withhold it. Accepted, narrower residual risk: this
+	// does not also re-check schedule (displayAt) exclusion the way
+	// handler.go's own membership check does, since recovering that
+	// visibility here would need the same cross-call plumbing threading
+	// Process's final item list back to this caller, which this fix does
+	// not build (scope: fix the push's own correctness, not add a new
+	// Process-return surface).
+	if procErr == nil && playerresponse.OK(procResult) && h.acceptedPickRecorder != nil {
+		candidates := plan.RandomPicksFromNarrowed(device, rebuilt.Items)
+		survived := survivingContentPolicyPicks(h.contentPolicy, contentContext, &rebuilt, candidates)
+		for i := range survived {
+			survived[i].Seq = seqBefore + 1
+		}
+		h.acceptedPickRecorder(survived)
 	}
 
 	// The re-entrant Process call's own dp1_call branch just ran
@@ -476,6 +503,59 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	if procErr != nil {
 		h.logger.Warn("series playback: re-cast after a setting change failed", zap.Error(procErr))
 	}
+}
+
+// survivingContentPolicyPicks keeps only the candidates whose own edition
+// policy (a lock-free Snapshot, matching playlist-refresher's own
+// established read — see narrowStable's displayFilter) still admits under
+// context. This is recastForMode's own, narrower stand-in for handler.go's
+// post-filter membership check against the final playlist.Items: it has no
+// equivalent visibility into what the re-entrant Process call's filtering
+// actually kept, so it predicts content-policy admission directly instead
+// (see recastForMode's own doc on the residual, accepted schedule-exclusion
+// gap this leaves). nil policy means nothing is filtered — matching
+// Process's own filterUnderPolicy guard — so every candidate survives.
+func survivingContentPolicyPicks(policy *contentpolicy.Store, context contentpolicy.Context, playlist *dp1.Playlist, candidates []dp1.RandomGroupPick) []dp1.RandomGroupPick {
+	if policy == nil || len(candidates) == 0 {
+		return candidates
+	}
+	snap := policy.Snapshot()
+	survived := make([]dp1.RandomGroupPick, 0, len(candidates))
+	for _, pick := range candidates {
+		item, found := findPlaylistItemBySource(playlist, pick.Source)
+		if !found || snap.Allows(item, context) {
+			survived = append(survived, pick)
+		}
+	}
+	return survived
+}
+
+// survivingRandomPicks keeps only the candidates whose Source is present in
+// final — the playlist items as they actually stood at the moment a cast
+// was accepted, after every content-policy and scheduler filtering stage
+// (handler.go's own push reads this fresh from playlist.Items at defer
+// time). candidates must come from RandomPicksFromNarrowed's own, PRE-
+// filter lockstep walk; checking by content (Source membership) here,
+// rather than re-running that walk against final, is required because
+// filtering can remove items from the middle of a segment's own
+// contribution, which would silently desync a second lockstep pass over
+// the already-filtered list (run-reviewer consolidated F1 on this fix,
+// 2026-11-16).
+func survivingRandomPicks(candidates []dp1.RandomGroupPick, final []dp1playlist.PlaylistItem) []dp1.RandomGroupPick {
+	if len(candidates) == 0 {
+		return nil
+	}
+	present := make(map[string]struct{}, len(final))
+	for _, item := range final {
+		present[item.Source] = struct{}{}
+	}
+	survived := make([]dp1.RandomGroupPick, 0, len(candidates))
+	for _, pick := range candidates {
+		if _, ok := present[pick.Source]; ok {
+			survived = append(survived, pick)
+		}
+	}
+	return survived
 }
 
 func parseSeriesPlaybackRequest(args map[string]interface{}) (*dp1.SeriesPlaybackMode, bool) {

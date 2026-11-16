@@ -1069,23 +1069,41 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// displayAt-deferred acceptance reports ok:true and counts as
 			// accepted, same as the scheduler keeps the cast.
 			seriesCastSeq := h.rememberSeriesCast(*playlist, seriesCastPlan, contentContext, schedulerSource)
-			// Snapshotted now, the same moment rememberSeriesCast freezes
-			// its own copy of playlist/seriesCastPlan: the deferred func
-			// below closes over variables, not values, so without this a
-			// later reassignment of playlist or seriesCastPlan before
-			// return would leak into the recorded pick (feral-file/ffos-user#459).
-			narrowedPlan, narrowedItems, narrowedDeviceMode := seriesCastPlan, playlist.Items, deviceSeriesMode
+			// preFilterPlan/preFilterItems/preFilterDeviceMode feed
+			// RandomPicksFromNarrowed's lockstep walk below, which is only
+			// valid against Narrow's own UNFILTERED output (see that
+			// method's doc) — captured now because filterUnderPolicy and
+			// the later re-projection/scheduler steps still mutate
+			// playlist.Playlist/playlist after this point. They are never
+			// pushed as-is: the defer verifies each candidate against
+			// playlist.Items read FRESH there (not from this snapshot),
+			// which by then reflects every later filtering stage, because a
+			// candidate read straight from this early snapshot could be an
+			// edition content policy or the scheduler went on to withhold —
+			// recorded as "accepted" even though it never displayed
+			// (run-reviewer consolidated F1 on this fix, 2026-11-16).
+			preFilterPlan, preFilterItems, preFilterDeviceMode := seriesCastPlan, playlist.Items, deviceSeriesMode
 			defer func() {
 				accepted := err == nil && playerresponse.OK(result)
 				h.settleSeriesCast(seriesCastSeq, accepted)
 				// Pushed only on acceptance, mirroring settleSeriesCast's
 				// own accepted-only contract: a rejected cast never reached
 				// the screen, so there is nothing here for playlist-
-				// refresher's stable-pick memory to learn (see
-				// RandomPicksFromNarrowed's doc on why this reads the
-				// already-narrowed items instead of re-narrowing).
+				// refresher's stable-pick memory to learn. Of the
+				// candidates Narrow actually picked, only the ones still
+				// present in playlist.Items — read now, after every
+				// content-policy/scheduler filtering stage this function
+				// applies below has already run — are pushed; checked by
+				// Source membership, never by re-running the lockstep walk
+				// against the filtered list, which filtering can desync
+				// (survivingRandomPicks's own doc).
 				if accepted && h.acceptedPickRecorder != nil {
-					h.acceptedPickRecorder(narrowedPlan.RandomPicksFromNarrowed(narrowedDeviceMode, narrowedItems))
+					candidates := preFilterPlan.RandomPicksFromNarrowed(preFilterDeviceMode, preFilterItems)
+					survived := survivingRandomPicks(candidates, playlist.Items)
+					for i := range survived {
+						survived[i].Seq = seriesCastSeq
+					}
+					h.acceptedPickRecorder(survived)
 				}
 			}()
 			// Filter under the policy lock, then RELEASE it: the source

@@ -214,6 +214,11 @@ type randomSeriesPick struct {
 	mode         dp1.SeriesPlaybackMode
 	artworkModel dp1.SeriesArtworkModel
 	source       string
+	// acceptedSeq is the cast acceptance order (dp1.RandomGroupPick.Seq) of
+	// the last RecordAcceptedPicks write to this entry — zero for an entry
+	// narrowStable itself wrote (its own tick-based writes carry no Seq and
+	// never need to compare against this; see RecordAcceptedPicks' doc).
+	acceptedSeq uint64
 }
 
 // SetSeriesPlaybackSource injects the device-level series-playback getter
@@ -262,13 +267,25 @@ func AcceptedPickRecorder(r Refresher) (fn func([]dp1.RandomGroupPick), ok bool)
 }
 
 // RecordAcceptedPicks overwrites randomSeriesPicks for every group in picks
-// with the edition a cast just put on screen, unconditionally — including
-// when the group's own previous remembered pick was itself content-policy
-// withheld. That overwrite is exactly what narrowStable's live-display
-// check cannot do for this case (see rememberedWithheld's doc, feralfile-
-// bot F6 reopened, F8, 2026-11-13): this is the fix, recording the pick at
-// its one point of certain truth — cast acceptance — instead of asking
-// narrowStable to infer it later from an already-filtered display.
+// with the edition a cast just put on screen — including when the group's
+// own previous remembered pick was itself content-policy withheld. That
+// overwrite is exactly what narrowStable's live-display check cannot do for
+// this case (see rememberedWithheld's doc, feralfile-bot F6 reopened, F8,
+// 2026-11-13): this is the fix, recording the pick at its one point of
+// certain truth — cast acceptance — instead of asking narrowStable to infer
+// it later from an already-filtered display.
+//
+// Not unconditional, though: a pick's own Seq must be at least as new as
+// whatever accepted pick is already recorded for its Key. Two
+// CMD_DISPLAY_PLAYLIST casts resolving the same series group can be
+// in-flight together (the command gate's own concurrency budget allows it)
+// and settle in an order unrelated to which one is actually newer; without
+// this compare, whichever cast's push happens to run its defer last would
+// win regardless, which can replay an older, possibly-withheld pick over a
+// genuinely newer one (run-reviewer consolidated F3 on this fix, 2026-11-16)
+// — in the one case this whole fix exists for (the group's remembered pick
+// withheld), narrowStable's own live-display self-heal would not catch that
+// either, since it is the very check this push bypasses.
 //
 // mode is always SeriesPlaybackRandom: RandomPicksFromNarrowed only ever
 // reports a pick for a group it resolved under that mode (see its own
@@ -283,10 +300,14 @@ func (r *refresher) RecordAcceptedPicks(picks []dp1.RandomGroupPick) {
 		r.randomSeriesPicks = make(map[dp1.SeriesGroupKey]randomSeriesPick)
 	}
 	for _, pick := range picks {
+		if existing, ok := r.randomSeriesPicks[pick.Key]; ok && pick.Seq < existing.acceptedSeq {
+			continue
+		}
 		r.randomSeriesPicks[pick.Key] = randomSeriesPick{
 			mode:         dp1.SeriesPlaybackRandom,
 			artworkModel: pick.ArtworkModel,
 			source:       pick.Source,
+			acceptedSeq:  pick.Seq,
 		}
 	}
 }

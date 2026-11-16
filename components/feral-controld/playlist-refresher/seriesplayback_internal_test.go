@@ -742,3 +742,36 @@ func TestNarrowStable_AcceptedPickOverridesAWithheldRememberedPick(t *testing.T)
 	assert.Equal(t, editionA.Source, r.randomSeriesPicks[key].source,
 		"the remembered pick must stay A after this tick, since A is not withheld")
 }
+
+// TestRecordAcceptedPicks_OlderSeqNeverOverwritesANewerOne pins run-reviewer's
+// consolidated F3 on this fix (2026-11-16): two CMD_DISPLAY_PLAYLIST casts of
+// the same series group can be in flight together and settle in an order
+// unrelated to which one was actually accepted later. Without a per-key
+// ordering compare, whichever push's defer happened to run last would win
+// regardless of its own Seq — here, the OLDER cast's (Seq 1) push arrives
+// SECOND, after the newer cast's (Seq 2) push already landed, and must not
+// be allowed to overwrite it.
+func TestRecordAcceptedPicks_OlderSeqNeverOverwritesANewerOne(t *testing.T) {
+	r := &refresher{}
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
+
+	r.RecordAcceptedPicks([]dp1.RandomGroupPick{
+		{Key: key, Source: "https://cdn.example.com/newer.mp4", ArtworkModel: dp1.SeriesArtworkModelMultiUnique, Seq: 2},
+	})
+	require.Equal(t, "https://cdn.example.com/newer.mp4", r.randomSeriesPicks[key].source)
+
+	// The older cast's push lands after the newer one's, out of order.
+	r.RecordAcceptedPicks([]dp1.RandomGroupPick{
+		{Key: key, Source: "https://cdn.example.com/older.mp4", ArtworkModel: dp1.SeriesArtworkModelMultiUnique, Seq: 1},
+	})
+
+	assert.Equal(t, "https://cdn.example.com/newer.mp4", r.randomSeriesPicks[key].source,
+		"a push with an older Seq must never overwrite an already-recorded newer one")
+
+	// A genuinely newer push (Seq 3) must still apply normally.
+	r.RecordAcceptedPicks([]dp1.RandomGroupPick{
+		{Key: key, Source: "https://cdn.example.com/newest.mp4", ArtworkModel: dp1.SeriesArtworkModelMultiUnique, Seq: 3},
+	})
+	assert.Equal(t, "https://cdn.example.com/newest.mp4", r.randomSeriesPicks[key].source,
+		"a push with a strictly newer Seq must still apply")
+}

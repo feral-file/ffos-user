@@ -331,6 +331,16 @@ type RandomGroupPick struct {
 	Key          SeriesGroupKey
 	Source       string
 	ArtworkModel SeriesArtworkModel
+	// Seq is the cast's own monotonic acceptance order (commandrouter's
+	// h.lastSeriesCast.seq at the moment this pick's cast was accepted),
+	// filled in by the caller after RandomPicksFromNarrowed returns — this
+	// function has no cast-ordering concept of its own. playlist-refresher
+	// compares it against whatever it already holds for the same Key
+	// before overwriting, so two casts of the same group that settle out
+	// of order can never let the older one's push win over the newer
+	// (run-reviewer consolidated F3 on feral-file/ffos-user#459's cast-time
+	// push fix, 2026-11-16).
+	Seq uint64
 }
 
 // narrowedCount reports how many items NarrowEditions(mode, artworkModel,
