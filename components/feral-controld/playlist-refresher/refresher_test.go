@@ -2107,6 +2107,19 @@ func (f *fakePlaylistScheduler) preparesCount() int {
 	defer f.mu.Unlock()
 	return f.prepares
 }
+
+// waitForPushLock blocks until the refresher has taken the scheduler's push
+// lock at least once (WithPlayerPush), the point where an obsolete result is
+// re-checked and discarded. A fixed sleep raced the refresh pass on a loaded
+// CI runner once #459 gave that pass more work before the push (the same fix
+// as waitForReplaySync, #458). Stop runs after it, so a prepare the pass would
+// wrongly make under the lock still lands before the caller asserts none.
+func waitForPushLock(t *testing.T, f *fakePlaylistScheduler) {
+	t.Helper()
+	require.Eventually(t, func() bool { return f.pushCallsCount() >= 1 }, 10*time.Second, 5*time.Millisecond,
+		"the refresh pass never reached the push lock")
+}
+
 func (f *fakePlaylistScheduler) pushCallsCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -2524,7 +2537,7 @@ func TestRefresher_URLRefresh_SkipsObsoleteResultAfterAuthorityChange(t *testing
 	fakeSched.AdvanceAuthority()
 	close(releaseResolve)
 
-	time.Sleep(100 * time.Millisecond)
+	waitForPushLock(t, fakeSched)
 	r.Stop()
 
 	assert.Zero(t, fakeSched.preparesCount(), "obsolete refresh must not replace scheduler cache")
@@ -2584,7 +2597,7 @@ func TestRefresher_URLRefresh_SkipsObsoleteStatusAfterAuthorityChange(t *testing
 	fakeSched.AdvanceAuthority()
 	close(releaseStatusRead)
 
-	time.Sleep(100 * time.Millisecond)
+	waitForPushLock(t, fakeSched)
 	r.Stop()
 
 	assert.Zero(t, fakeSched.preparesCount(), "obsolete status snapshot must not replace scheduler cache")
