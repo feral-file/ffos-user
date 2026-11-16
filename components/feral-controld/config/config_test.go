@@ -837,6 +837,13 @@ func TestMediaHealthTuning(t *testing.T) {
 			t.Fatalf("expected defaults with Malformed set: %+v", got)
 		}
 	})
+	t.Run("malformed sibling keeps an explicit disable", func(t *testing.T) {
+		c := &config.Config{MediaHealth: []byte(`{"disabled":true,"castItems":"8"}`)}
+		got := c.MediaHealthTuning(nil)
+		if !got.Disabled || !got.Malformed {
+			t.Fatalf("the kill switch must survive a malformed sibling: %+v", got)
+		}
+	})
 	t.Run("retired sourceProbe.disabled still disables", func(t *testing.T) {
 		c := &config.Config{SourceProbe: &config.SourceProbeConfig{Disabled: true}}
 		if !c.MediaHealthTuning(nil).Disabled {
