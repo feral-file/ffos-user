@@ -52,6 +52,7 @@ var commandTiers = map[string]Tier{
 	string(commands.CMD_SET_DEVICE_NAME):            TierOwner,
 	string(commands.CMD_SHOW_PAIRING_QR_CODE):       TierOwner,
 	string(commands.CMD_START_MINT_PAIRING_SESSION): TierOwner,
+	string(commands.CMD_GET_MINT_PAIRING_SESSION):   TierOwner,
 	string(commands.CMD_JOIN_MINT_PAIRING_CHANNEL):  TierOwner,
 	string(commands.CMD_CLOSE_MINT_PAIRING_SESSION): TierOwner,
 	string(commands.CMD_MINT_PAIRING_APPROVAL):      TierOwner,

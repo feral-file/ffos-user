@@ -70,8 +70,12 @@ for relayer topic assignment:
   device's content policy for the cast's `contentContext` before it reaches
   CDP, so a playlist without item-level `displayAt` is forwarded unchanged only
   when the policy admits all of its items (see "Content policy effect on
-  playlists" below).
-- `startMintPairingSession`, `joinMintPairingChannel`,
+  playlists" below). An optional `request.startItem`
+  (`{ "id", "source" }`, either member optional) names the work the cast
+  opens on; controld forwards it to the player untouched and the player
+  resolves it against the list it admits, starting at the beginning when the
+  work is absent (contract in `api-design.md`).
+- `getMintPairingSession`, `startMintPairingSession`, `joinMintPairingChannel`,
   `closeMintPairingSession`, and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
 - `getRecentlyPlayed`, `playRecentlyPlayed`, `getContentPolicy`, and
@@ -1780,6 +1784,54 @@ requests, and encrypted browser results. Relayer approval dispatch and
 transport, or token minting policy. Runtime support is opt-in through
 `mintPairing.enabled` in `feral-controld` config and starts only after a
 controller sends `startMintPairingSession` or `joinMintPairingChannel`.
+
+### getMintPairingSession
+
+Read-only owner command, handled in `feral-controld` before CDP. Send an empty
+request. Unlike `startMintPairingSession`, this never starts, renews, cancels,
+or re-displays a pairing; it performs no broker or player I/O and works while
+Chromium is unavailable. Poll this command to inspect pairing state.
+
+```json
+{
+  "command": "getMintPairingSession",
+  "request": {}
+}
+```
+
+The RPC message is `{ "ok": true, "status": "none", "active": false,
+"pendingApproval": null }` when idle (also for an expired device-created
+session awaiting worker cleanup). `status: "starting"`, `active: false` means
+a start/join is still in flight. An active session returns:
+
+```json
+{
+  "ok": true,
+  "status": "active",
+  "active": true,
+  "phase": "pairing_code",
+  "channelID": "ch_example",
+  "expiresAt": "2026-11-16T04:00:00Z",
+  "codeAgeSeconds": 12,
+  "pendingApproval": null
+}
+```
+
+`phase` is `pairing_code`, `joined` (site-initiated, with no screen overlay),
+or `pending_approval`. `codeAgeSeconds` is a nonnegative whole-second age of
+the current device-created code, omitted outside `pairing_code`. The code
+itself and broker/browser credentials are never returned. An undecided,
+unexpired approval for this channel appears as
+`pendingApproval: { "approvalRequestID": "mpa_example", "expiresAt": "..." }`;
+accepted, ended, expired, or absent approvals return null. The phase can remain
+`pending_approval` while an accepted decision is being delivered.
+
+A joined channel remains active until its worker removes it: an in-flight
+broker poll can extend its reported expiry. This snapshot neither contacts
+the broker to verify liveness nor mutates worker state. Disabled mint pairing
+returns the existing `disabled` command error. Secure control requires owner
+authority, like the other mint-pairing commands; pure reporting is also
+available during the staged factory-reset window.
 
 ### startMintPairingSession
 

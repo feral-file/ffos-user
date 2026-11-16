@@ -197,6 +197,14 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 			}
 			continue
 		}
+		if IsDeviceHeld(source) {
+			// An onchfs work (data: URIs were settled above): read from
+			// chain and verified by the device; no origin to
+			// dial, nothing to record. Inconclusive is fail-open.
+			results[i] = ProbeResult{Source: redactForLog(source), Verdict: VerdictInconclusive, Err: errDeviceHeld}
+			settled[i] = true
+			continue
+		}
 		if rec := stored[source]; rec != nil {
 			if fromStoreVerdict(rec, at) != "" {
 				results[i] = storedResult(rec, at)
@@ -458,7 +466,7 @@ func (p *Prober) noteNetwork(res *ProbeResult) {
 // wireHost is the hostname the probe would dial for source, the key the
 // HostLimiter paces by.
 func (p *Prober) wireHost(source string) string {
-	if IsDataURI(source) {
+	if IsDeviceHeld(source) {
 		return ""
 	}
 	if p.Probe == nil {

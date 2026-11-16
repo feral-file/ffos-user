@@ -365,6 +365,9 @@ type Runtime struct {
 	SetCacheChanged func(func())
 	Service         Service
 	KioskReplay     KioskReplay
+	// Store is the cache's store, for the onchfs materializer (the second
+	// producer of records; see Core).
+	Store Store
 	// ScopeLost is exposed for the same reason Notifier below is: main.go
 	// needs a method the narrower dependency it otherwise holds does not
 	// carry. It is deliberately the one-method ScopeLostRegistrar rather
@@ -400,6 +403,55 @@ type Runtime struct {
 	SysMetricsSink func(raw []byte)
 }
 
+// Core is the part of the offline cache that serves local artwork: the
+// store, the static server for oversized blobs, and replay into the kiosk.
+// It runs on every device (ffos-user#427): onchfs works are written into
+// the store by OnchfsMaterializer and served by this replay even when the
+// offline cache feature (capture, downloads, automatic warming, the
+// Service) is off.
+type Core struct {
+	Store        Store
+	StaticServer StaticServer
+	KioskReplay  KioskReplay
+	ScopeLost    ScopeLostRegistrar
+}
+
+// BootstrapCore builds Core. lazy defers the kiosk dial until a scope is
+// first applied (see kioskReplay.AttachOnReconnect): pass true when the
+// feature is off and replay exists only for onchfs works. Nothing is
+// started; the caller drives the static server's Listen/Serve.
+func BootstrapCore(
+	opts Options,
+	httpClient wrapper.HTTPClient,
+	dialer wrapper.WebSocketDialer,
+	osWrapper wrapper.OS,
+	ioWrapper wrapper.IO,
+	jsonWrapper wrapper.JSON,
+	clockWrapper wrapper.Clock,
+	logger *zap.Logger,
+	lazy bool,
+) (Core, *storagePolicy) {
+	store := NewStore(opts.RootDir, osWrapper, jsonWrapper, logger)
+	var storage *storagePolicy
+	if opts.MaxDiskPercent > 0 {
+		storage = &storagePolicy{root: opts.RootDir, percent: opts.MaxDiskPercent, minFree: opts.MinFreeDiskBytes,
+			maxBytes: opts.MaxDiskBytes, space: filesystemSpace}
+		store = &budgetStore{Store: store, policy: storage}
+	}
+	store = &publishGuardStore{Store: store}
+	staticServer := NewStaticServer(opts.StaticServerAddr, store, osWrapper, logger)
+	replayer := NewReplayer(store, staticServer, opts.MissPolicy, constants.WEBAPP_URL, jsonWrapper, logger)
+	// The concrete replayer implements the scope-lost setter, but Replayer
+	// deliberately does not declare it (see ScopeLostRegistrar). Asserted
+	// once here rather than exposing a wider interface; a failed assertion
+	// leaves ScopeLost nil, which main.go's guard treats as "no prompt
+	// recovery wired", not as a startup failure.
+	scopeLost, _ := replayer.(ScopeLostRegistrar)
+	kr := NewKioskReplay(replayer, store, opts.KioskCDPEndpoint, httpClient, dialer, jsonWrapper, ioWrapper, clockWrapper, logger)
+	kr.(*kioskReplay).lazy = lazy
+	return Core{Store: store, StaticServer: staticServer, KioskReplay: kr, ScopeLost: scopeLost}, storage
+}
+
 // Bootstrap wires every offlinecache component together from Options. It
 // is kept as one function (rather than spreading construction across
 // main.go) so the dependency order — store, then downloader/capturer,
@@ -426,23 +478,8 @@ func Bootstrap(
 	if opts.ResourceGateWarning != "" {
 		logger.Warn("offline cache: " + opts.ResourceGateWarning)
 	}
-	store := NewStore(opts.RootDir, osWrapper, jsonWrapper, logger)
-	var storage *storagePolicy
-	if opts.MaxDiskPercent > 0 {
-		storage = &storagePolicy{root: opts.RootDir, percent: opts.MaxDiskPercent, minFree: opts.MinFreeDiskBytes,
-			maxBytes: opts.MaxDiskBytes, space: filesystemSpace}
-		store = &budgetStore{Store: store, policy: storage}
-	}
-	// net.DefaultResolver honors the system resolver configuration
-	// (systemd-resolved on this device), so the guard's view of a name
-	// matches what the capture paths will actually dial moments later —
-	// a private resolver here would make the check answer a different
-	// question than the one that matters. See ErrUnsafeSource.
-	// The probe client is GUARDED, not the daemon-wide httpClient: the
-	// URL it fetches is untrusted playlist input, and a pre-flight check
-	// on that URL alone is bypassed by a single 302 (see ErrUnsafeSource).
-	// The guard enforces the same reserved-address policy in DialContext,
-	// so every redirect hop and every re-resolution is checked too.
+	core, storage := BootstrapCore(opts, httpClient, dialer, osWrapper, ioWrapper, jsonWrapper, clockWrapper, logger, false)
+	store := core.Store
 	classifier := NewClassifier(
 		newGuardedHTTPClient(net.DefaultResolver, wrapper.HTTPClientTimeout), net.DefaultResolver)
 	headlessDebugPort := safeHeadlessDebugPort(opts.HeadlessDebugPort, opts.KioskCDPEndpoint, logger)
@@ -488,14 +525,6 @@ func Bootstrap(
 	// spinning up the headless Chromium capturer/downloader owns (see
 	// mediacapture.go's package doc).
 	mediaCapturer := NewMediaCapturer(bodyClient, store, jsonWrapper, clockWrapper, opts.MaxDiskBytes, logger)
-	staticServer := NewStaticServer(opts.StaticServerAddr, store, osWrapper, logger)
-	replayer := NewReplayer(store, staticServer, opts.MissPolicy, constants.WEBAPP_URL, jsonWrapper, logger)
-	// The concrete replayer implements the scope-lost setter, but Replayer
-	// deliberately does not declare it (see ScopeLostRegistrar). Asserted
-	// once here rather than exposing a wider interface from Bootstrap; a
-	// failed assertion leaves Runtime.ScopeLost nil, which main.go's guard
-	// treats as "no prompt recovery wired", not as a startup failure.
-	scopeLost, _ := replayer.(ScopeLostRegistrar)
 	notifier := NewNotifier(relayerClient, wsHandler, logger)
 	admissionOpts := AdmissionOptions{Clock: clockWrapper}
 	var sysMetricsSink func(raw []byte)
@@ -514,12 +543,10 @@ func Bootstrap(
 		worker.automatic = &playbackCache{s: worker}
 		observePlayback = worker.automatic.observe
 	}
-	kioskReplay := NewKioskReplay(replayer, store, opts.KioskCDPEndpoint, httpClient, dialer, jsonWrapper, ioWrapper, clockWrapper, logger)
-
 	return Runtime{
 		ObservePlayback: observePlayback, SetCacheChanged: func(fn func()) { worker.onCacheChanged = fn },
-		Service: svc, KioskReplay: kioskReplay, ScopeLost: scopeLost,
-		StaticServer: staticServer, Notifier: notifier, SysMetricsSink: sysMetricsSink,
+		Service: svc, KioskReplay: core.KioskReplay, ScopeLost: core.ScopeLost, Store: store,
+		StaticServer: core.StaticServer, Notifier: notifier, SysMetricsSink: sysMetricsSink,
 		NewMediaHealthRenderer: func(routing MediaHealthRouting) mediahealth.Renderer {
 			return NewMediaHealthRenderer(capturer, routing)
 		},

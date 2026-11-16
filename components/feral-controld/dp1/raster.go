@@ -39,6 +39,13 @@ import (
 // exact `source` string, so a different gateway is a second cache entry) and
 // the item id inputs (the legacy indexer path's UUID inputs, so ids stay
 // stable across the indexer -> Raster switch).
+//
+// `onchfs://` is not in the gateway table. fxhash's gateway, the only one
+// that ever served it, is gone (ffos-user#427), so this file passes the URI
+// through unchanged and the device reads the work from chain itself
+// (contentpath.ParseOnchfs, offlinecache's onchfs materializer). ff-app and
+// art-catalog-service follow the same rule: no repository maps onchfs to a
+// host.
 
 const (
 	// RasterTokensOwnedItemSchema is the responseMapping.itemSchema that selects
@@ -72,7 +79,6 @@ const (
 	gatewayIPFS          = "https://ipfs.raribleuserdata.com/ipfs/"
 	gatewayIPFSFeralFile = "https://ipfs.feralfile.com/ipfs/"
 	gatewayArweave       = "https://arweave.net/"
-	gatewayOnchfs        = "https://onchfs.fxhash2.xyz/"
 
 	// feralFilePlatform is Raster's `platform.name` for Feral File works,
 	// compared case-insensitively. Feral File pins its own works, so its
@@ -497,10 +503,12 @@ func shortContract(contract string) string {
 
 // rasterSourceURL makes a Raster content URL playable, or returns "" when there
 // is nothing a wall can open. `normalizedContentUrl` wins over `contentUrl`
-// (first non-blank). Order: retired-host rewrite, then `ipfs://`, `ar://` and
-// `onchfs://` through the gateway table (a doubled `ipfs://ipfs/<cid>` prefix
-// is collapsed; path and query are kept, which matters for fxhash `?fxhash=`
-// seeds). Plain http(s) is returned exactly as given, never re-serialized, so
+// (first non-blank). Order: retired-host rewrite, then `ipfs://` and `ar://`
+// through the gateway table (a doubled `ipfs://ipfs/<cid>` prefix is
+// collapsed; path and query are kept, which matters for fxhash `?fxhash=`
+// seeds). `onchfs://` is returned as `onchfs://` plus everything after the
+// scheme, byte for byte, because no host serves it: the device reads it from
+// chain (see the file header). Plain http(s) is returned exactly as given, never re-serialized, so
 // host case and percent-encoding stay as Raster sent them: the same string the
 // app and the catalog store, which is what the offline cache keys on. Any other
 // scheme (`data:`, a bare CID, a proprietary URL) is "".
@@ -542,8 +550,8 @@ func rasterSourceURL(media *rasterMedia, platform string) string {
 		return gatewayIPFS + rest
 	case "ar":
 		return gatewayArweave + rest
-	default:
-		return gatewayOnchfs + rest
+	default: // onchfs
+		return "onchfs://" + rest
 	}
 }
 

@@ -165,6 +165,10 @@ type refresher struct {
 	// per-item hint argument for every send.
 	mediaHealthHints func(items []dp1playlist.PlaylistItem) interface{}
 
+	// onchfs starts reading onchfs works a refresh brings (ffos-user#427);
+	// nil leaves them unplayable.
+	onchfs OnchfsMaterializer
+
 	// seriesPlaybackSource, when set (SetSeriesPlaybackSource), is
 	// commandrouter's own device-level series-playback getter
 	// (commandrouter.SeriesPlaybackSource) — the same store main.go wires
@@ -376,6 +380,25 @@ func SetMediaHealthHints(r Refresher, fn func(items []dp1playlist.PlaylistItem) 
 	}
 	setter.setMediaHealthHints(fn)
 }
+
+// OnchfsMaterializer is the consumer-owned view of
+// offlinecache.OnchfsMaterializer (see commandrouter.OnchfsMaterializer).
+type OnchfsMaterializer interface {
+	Ensure(ctx context.Context, items []dp1playlist.PlaylistItem, wait time.Duration) int
+}
+
+// SetOnchfsMaterializer wires the onchfs reader (ffos-user#427) into the
+// refresher's scope sync. Same post-construction seam as SetMediaHealthHints.
+func SetOnchfsMaterializer(r Refresher, m OnchfsMaterializer, logger *zap.Logger) {
+	setter, ok := r.(interface{ setOnchfsMaterializer(OnchfsMaterializer) })
+	if !ok {
+		logger.Warn("Playlist refresher does not support onchfs wiring")
+		return
+	}
+	setter.setOnchfsMaterializer(m)
+}
+
+func (r *refresher) setOnchfsMaterializer(m OnchfsMaterializer) { r.onchfs = m }
 
 func (r *refresher) setMediaHealthHints(fn func(items []dp1playlist.PlaylistItem) interface{}) {
 	r.mediaHealthHints = fn
@@ -1391,6 +1414,14 @@ func (r *refresher) syncReplayScopeLocked(playlist *dp1.Playlist) {
 	sources := make([]string, 0, len(playlist.Items))
 	for _, item := range playlist.Items {
 		sources = append(sources, item.Source)
+	}
+	// A re-resolved playlist can bring onchfs works the cast never read (a
+	// wallet that gained one, a record the cache evicted). Start reading
+	// them without waiting: this runs under the playback lock, and each one
+	// that lands calls the materializer's OnReady, which forces another
+	// pass whose scope then includes it.
+	if r.onchfs != nil {
+		r.onchfs.Ensure(r.context, playlist.Items, 0)
 	}
 	if _, syncErr := r.kioskReplay.SyncPlaylist(r.context, sources); syncErr != nil {
 		r.logger.Warn("offline cache: failed to sync kiosk replay scope during refresh", zap.Error(syncErr))

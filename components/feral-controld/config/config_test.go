@@ -860,3 +860,28 @@ func TestMediaHealthTuning(t *testing.T) {
 		}
 	})
 }
+
+func TestOnchfsTuning(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		raw  string
+		want config.OnchfsConfig
+	}{
+		{"absent block is the defaults", `{}`, config.OnchfsConfig{}},
+		{"chains and timeout", `{"onchfs":{"chains":{"eip155:1":{"rpc":["https://a.example"]}},"requestTimeoutSeconds":20}}`,
+			config.OnchfsConfig{Chains: map[string]config.OnchfsChainConfig{"eip155:1": {RPC: []string{"https://a.example"}}}, RequestTimeoutSeconds: 20}},
+		{"explicit disable", `{"onchfs":{"disabled":true}}`, config.OnchfsConfig{Disabled: true}},
+		{"malformed sibling keeps an explicit disable", `{"onchfs":{"disabled":true,"chains":"eth"}}`, config.OnchfsConfig{Disabled: true}},
+		{"malformed block is the defaults", `{"onchfs":{"chains":{"eip155:1":{"rpc":"https://a.example"}}}}`, config.OnchfsConfig{}},
+		{"wrong-typed disable is the defaults", `{"onchfs":{"disabled":"yes"}}`, config.OnchfsConfig{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var c config.Config
+			require.NoError(t, json.Unmarshal([]byte(tc.raw), &c), "a bad onchfs block must never fail the whole config")
+			assert.Equal(t, tc.want, c.OnchfsTuning(zaptest.NewLogger(t)))
+			assert.NotPanics(t, func() { c.OnchfsTuning(nil) })
+		})
+	}
+}

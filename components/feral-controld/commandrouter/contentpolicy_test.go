@@ -1419,3 +1419,51 @@ func TestValidationPointersDropsAnythingUnrecognized(t *testing.T) {
 func (*barrierScheduler) SetHintSource(playlistschedule.HintSource) {}
 
 func (*capturingScheduler) SetHintSource(playlistschedule.HintSource) {}
+
+// startItem names the work a controller wants a cast to open on. controld
+// forwards it to the player untouched and never turns it into an index: the
+// list the player counts in is the one left after the player's own
+// admission, which can be shorter than the one controld forwards. Here the
+// projection has already dropped the first item, so an index computed
+// against the caller's document would point at the wrong work; the identity
+// cannot. A malformed value is the player's to ignore, so it must not fail
+// the cast here either.
+func TestDisplayPlaylistForwardsStartItemToThePlayerUntouched(t *testing.T) {
+	for name, startItem := range map[string]any{
+		"id and source": map[string]interface{}{"id": "c", "source": "https://example.test/c"},
+		"malformed":     "c",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, player, poller := newPolicyHandlerWithPoller(t)
+			poller.EXPECT().ForceRefresh().AnyTimes()
+
+			var sent string
+			player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+				func(_ string, params map[string]interface{}) (interface{}, error) {
+					sent = params["expression"].(string)
+					return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+				}).Times(1)
+
+			_, err := h.Process(context.Background(), commands.Command{
+				Type: commands.CMD_DISPLAY_PLAYLIST,
+				Arguments: map[string]any{
+					"startItem": startItem,
+					"dp1_call": map[string]interface{}{
+						"dpVersion": "1.1.0", "title": "x",
+						"items": []interface{}{
+							map[string]interface{}{"id": "a", "source": "https://example.test/a", "contentRating": "mature"},
+							map[string]interface{}{"id": "b", "source": "https://example.test/b"},
+							map[string]interface{}{"id": "c", "source": "https://example.test/c"},
+						},
+					},
+				},
+			})
+			require.NoError(t, err)
+			require.NotContains(t, sent, "https://example.test/a", "the mature item is projected out of a curated cast")
+			wantJSON, marshalErr := json.Marshal(startItem)
+			require.NoError(t, marshalErr)
+			require.Contains(t, sent, `"startItem":`+string(wantJSON))
+			require.NotContains(t, sent, "startIndex", "controld never resolves the start work to an index")
+		})
+	}
+}

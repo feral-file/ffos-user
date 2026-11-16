@@ -189,3 +189,33 @@ func TestProbeAndRecord(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StateBroken, rec.State)
 }
+
+// An onchfs work (ffos-user#427) is read from chain and verified by the
+// device: there is no origin to dial and nothing for the store to judge, so
+// an RPC outage can never mark it broken.
+func TestPreflight_OnchfsSourceIsNeverDialedOrRecorded(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	f := newTableFetcher()
+	p := newPassProber(t, f, clock)
+	src := "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.onchfs.invalid/?fxhash=0x06ec"
+
+	results := p.Preflight(context.Background(), []string{src})
+	require.Len(t, results, 1)
+	assert.Equal(t, VerdictInconclusive, results[0].Verdict)
+	assert.ErrorIs(t, results[0].Err, errDeviceHeld)
+	assert.Zero(t, f.count(src))
+	rec, err := p.Store.Get(src)
+	require.NoError(t, err)
+	assert.Nil(t, rec)
+
+	direct := p.Probe.ProbeOne(context.Background(), src)
+	assert.Equal(t, VerdictInconclusive, direct.Verdict)
+	assert.Zero(t, f.count(src))
+	assert.False(t, probeWritesRecord(direct))
+	assert.Empty(t, p.wireHost(src))
+
+	assert.True(t, IsDeviceHeld(src))
+	assert.True(t, IsDeviceHeld("data:text/plain,x"))
+	assert.False(t, IsDeviceHeld("https://ipfs.example/ipfs/x"))
+	assert.False(t, IsDeviceHeld("https://evil.example/x.onchfs.invalid/"))
+}

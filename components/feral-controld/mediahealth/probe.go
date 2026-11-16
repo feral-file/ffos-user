@@ -190,6 +190,9 @@ func (p *Probe) ProbeOneWithin(ctx context.Context, source string, timeout time.
 	if IsDataURI(source) {
 		return probeDataURI(source)
 	}
+	if contentpath.IsOnchfsSourceURL(source) {
+		return ProbeResult{Source: redactForLog(source), Verdict: VerdictInconclusive, Err: errDeviceHeld}
+	}
 	if timeout <= 0 {
 		timeout = p.ItemTimeout
 	}

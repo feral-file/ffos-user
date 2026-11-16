@@ -380,7 +380,7 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 		return
 	}
 	src := sources[index]
-	if src == "" || IsDataURI(src) || (s.inferredIndex == index && s.inferredSource == src) {
+	if src == "" || IsDeviceHeld(src) || (s.inferredIndex == index && s.inferredSource == src) {
 		return
 	}
 	s.inferredIndex, s.inferredSource = index, src

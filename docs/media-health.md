@@ -256,6 +256,13 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   the cast pass writes a passing one only when its record is due, and the
   lookahead walk and the sweep settle due `data:` records without
   network.
+- onchfs works (`https://<base32 root>.onchfs.invalid/…`, ffos-user#427,
+  [`onchfs.md`](onchfs.md)) never dial either: the device reads them from
+  chain and verifies every byte when it reads them, so there is no origin
+  to judge. The pass settles them inconclusive with no reason (never
+  recorded), and `IsDeviceHeld` (`data:` or onchfs) keeps them out of the
+  kiosk navigation observer, inferred play failures and the L1 render
+  probe. An RPC outage therefore cannot mark an onchfs work broken.
 - Everything the pass settles outside the worker pool (`data:` URIs, a shared verdict fanned out to wire-identical siblings) is written in
   one store transaction after the request barrier, so a playlist repeating
   one source thousands of times costs one request and one write.
