@@ -2,6 +2,7 @@ package refresher
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,29 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
+
+// passthroughCastPlan is ResolveSeriesCastPlan's no-op shape, mirroring
+// commandrouter_test's identical helper (feral-file/ffos-user#455, #453):
+// one plain Item segment per input item, no series groups — exactly what
+// the real implementation returns for a playlist with no seriesRegistry
+// items, which is every playlist in this file's tests.
+func passthroughCastPlan(_ context.Context, playlist dp1.Playlist, _ json.RawMessage, _ *dp1.SeriesPlaybackMode, _ int) dp1.CastPlan {
+	segments := make([]dp1.CastSegment, len(playlist.Items))
+	for i := range playlist.Items {
+		item := playlist.Items[i]
+		segments[i] = dp1.CastSegment{Item: &item}
+	}
+	return dp1.CastPlan{Segments: segments}
+}
+
+// stubPassthroughCastPlan mirrors refresher_test's identical helper (see
+// its doc) for this package's own *mocks.MockDP1 constructions.
+func stubPassthroughCastPlan(m *mocks.MockDP1) {
+	m.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
+		AnyTimes()
+}
 
 func TestCurrentBlockedByRefresh(t *testing.T) {
 	general, mature := contentrating.RatingGeneral, contentrating.RatingMature
@@ -90,6 +114,7 @@ func newPolicyRefresher(t *testing.T, statusContext string, store *contentpolicy
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 
 	playlistURL := "https://example.test/feed.json"
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
@@ -105,12 +130,12 @@ func newPolicyRefresher(t *testing.T, statusContext string, store *contentpolicy
 		}).AnyTimes()
 
 	mature := contentrating.RatingMature
-	mockDP1.EXPECT().ProcessPlaylistURL(gomock.Any(), playlistURL, false).DoAndReturn(
-		func(context.Context, string, bool) (*dp1.Playlist, error) {
+	mockDP1.EXPECT().FetchPlaylist(gomock.Any(), playlistURL).DoAndReturn(
+		func(context.Context, string) (*dp1.Playlist, json.RawMessage, error) {
 			return &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{
 				{ID: "safe", Source: "https://example.test/safe"},
 				{ID: "grown", Source: "https://example.test/grown", ContentRating: &mature},
-			}}}, nil
+			}}}, nil, nil
 		}).AnyTimes()
 
 	var sent string
@@ -253,6 +278,7 @@ func newInlineRefresher(t *testing.T, statusContext string, store *contentpolicy
 		}).AnyTimes()
 
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	// processPlayingPlaylist's static-inline branch expands series items
 	// defensively; inline's items have none, so echo the playlist back.
 	mockDP1.EXPECT().
@@ -396,6 +422,7 @@ func TestRefreshRetiresABlockedCurrentItemThatLeftTheFeed(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 
 	playlistURL := "https://example.test/feed.json"
 	index := 0
@@ -415,11 +442,11 @@ func TestRefreshRetiresABlockedCurrentItemThatLeftTheFeed(t *testing.T) {
 		}).AnyTimes()
 	// The refreshed feed has replaced that item entirely: nothing is projected
 	// away, so a membership-gated check sees no change at all.
-	mockDP1.EXPECT().ProcessPlaylistURL(gomock.Any(), playlistURL, false).DoAndReturn(
-		func(context.Context, string, bool) (*dp1.Playlist, error) {
+	mockDP1.EXPECT().FetchPlaylist(gomock.Any(), playlistURL).DoAndReturn(
+		func(context.Context, string) (*dp1.Playlist, json.RawMessage, error) {
 			return &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{
 				{ID: "fresh", Source: "https://example.test/fresh", ContentRating: &general},
-			}}}, nil
+			}}}, nil, nil
 		}).AnyTimes()
 
 	var sent string
@@ -511,6 +538,7 @@ func newUnresolvableSourceRefresher(t *testing.T, rating *contentrating.Rating, 
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 
 	playlistURL := "https://example.test/gone.json"
 	index := 0
@@ -528,9 +556,9 @@ func newUnresolvableSourceRefresher(t *testing.T, rating *contentrating.Rating, 
 			}, nil
 		}).AnyTimes()
 	// The source 404s and there is no offline cache to fall back to.
-	mockDP1.EXPECT().ProcessPlaylistURL(gomock.Any(), playlistURL, false).DoAndReturn(
-		func(context.Context, string, bool) (*dp1.Playlist, error) {
-			return nil, errors.New("fetch playlist failed: 404")
+	mockDP1.EXPECT().FetchPlaylist(gomock.Any(), playlistURL).DoAndReturn(
+		func(context.Context, string) (*dp1.Playlist, json.RawMessage, error) {
+			return nil, nil, errors.New("fetch playlist failed: 404")
 		}).AnyTimes()
 
 	var sent string
@@ -659,6 +687,7 @@ func newRecastStatusRefresher(t *testing.T, recastDocID string, sched playlistsc
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 
 	recastDoc := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		ID:    recastDocID,
@@ -715,8 +744,8 @@ func TestRecastedPlaylistRefreshesFromTheRetainedURLSource(t *testing.T) {
 		Items: []dp1playlist.PlaylistItem{{ID: "item-series", Source: "https://cdn.example.test/item-series.mp4"}},
 	}}
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(gomock.Any(), originalURL, false).
-		Return(refreshed, nil).
+		FetchPlaylist(gomock.Any(), originalURL).
+		Return(refreshed, json.RawMessage(nil), nil).
 		Times(1)
 
 	if err := r.processPlayingPlaylist(false); err != nil {

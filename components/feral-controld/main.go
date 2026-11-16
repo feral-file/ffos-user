@@ -1511,6 +1511,23 @@ func initializeApp(
 	}
 	playlist_refresher.SetContentPolicy(playlistRefresher, policyStore)
 	commandrouter.SetPolicyRefresher(rawCmdHandler, playlistRefresher, logger)
+	// Same device-level series-playback store commandrouter's own cast
+	// paths and status.Poller already read (see the SeriesPlaybackSource
+	// wiring above), so the refresher's resync narrows a series exactly
+	// the way a live cast would (feral-file/ffos-user#453) instead of
+	// following no override at all.
+	if seriesPlaybackSource, ok := commandrouter.SeriesPlaybackSource(rawCmdHandler); ok {
+		playlist_refresher.SetSeriesPlaybackSource(playlistRefresher, seriesPlaybackSource, logger)
+	}
+	// The reverse direction of the wiring above: every accepted cast's own
+	// SeriesPlaybackRandom pick is pushed straight into the refresher's
+	// stable-pick memory, so its periodic resync never has to rediscover a
+	// newer cast's choice by reading the live display — a read that skips
+	// itself entirely when the group's previously remembered pick is
+	// content-policy withheld (feral-file/ffos-user#459, F6 reopened).
+	if recordPick, ok := playlist_refresher.AcceptedPickRecorder(playlistRefresher); ok {
+		commandrouter.SetAcceptedPickRecorder(rawCmdHandler, recordPick, logger)
+	}
 	if onchfsMaterializer != nil {
 		commandrouter.SetOnchfsMaterializer(rawCmdHandler, onchfsMaterializer, logger)
 		playlist_refresher.SetOnchfsMaterializer(playlistRefresher, onchfsMaterializer, logger)

@@ -2,6 +2,7 @@ package refresher_test
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +35,7 @@ func TestRefresher_SoftRefreshCarriesMediaHealthHints(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{hasCache: false}
 
@@ -47,7 +49,17 @@ func TestRefresher_SoftRefreshCarriesMediaHealthHints(t *testing.T) {
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
+		FetchPlaylist(ctx, playlistURL).
+		Return(pl, json.RawMessage(nil), nil).
+		AnyTimes()
+	// createMockPlaylist carries legacy DynamicQueries, so
+	// narrowedPlaylistFromURL's HasDynamicContent check routes through
+	// ProcessDynamicPlaylist for real now (previously opaque to the mock,
+	// since the whole ProcessPlaylistURL call — dynamic branch included —
+	// was mocked wholesale). Echo pl back unchanged: this test only cares
+	// about the items pushed, not dynamic resolution itself.
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *pl, false).
 		Return(pl, nil).
 		AnyTimes()
 

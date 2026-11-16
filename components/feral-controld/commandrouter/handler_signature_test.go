@@ -34,6 +34,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
 )
@@ -368,7 +369,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedFallback_NotVerified(t *te
 	active.Set("cached-1", playlistURL, sigverify.StatusValid) // an earlier live cast of this URL
 	cachedRaw := signedFixture(t)
 	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).Return(nil, dp1.CastPlan{}, errors.New("network unreachable")).Times(1)
-	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRaw), nil).Times(1)
+	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRaw), []offlinecache.SeriesSegment(nil), nil).Times(1)
 	ts.mockJSON.EXPECT().
 		Unmarshal(cachedRaw, gomock.Any()).
 		DoAndReturn(func(_ []byte, v any) error {

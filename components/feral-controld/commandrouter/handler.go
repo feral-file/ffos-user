@@ -126,6 +126,15 @@ type handler struct {
 	// groups, kept so setSeriesPlayback can re-narrow and re-cast without a
 	// catalog round trip. See seriesplayback.go.
 	lastSeriesCast displayedSeriesCast
+	// acceptedPickRecorder, when set (SetAcceptedPickRecorder), is
+	// playlist-refresher's own RecordAcceptedPicks (via its
+	// AcceptedPickRecorder), called every time a CMD_DISPLAY_PLAYLIST cast
+	// is accepted with a SeriesPlaybackRandom pick (feral-file/ffos-user#459,
+	// F6 reopened) — see settleSeriesCast's and recastForMode's call sites.
+	// nil (tests, a build wired before this seam) is safe: the push simply
+	// does not happen, and narrowStable's own live-display self-heal
+	// remains the only path, exactly as before this existed.
+	acceptedPickRecorder func([]dp1.RandomGroupPick)
 	// seriesRecast coalesces concurrent setSeriesPlayback re-casts so a burst
 	// of calls performs at most two real re-casts instead of racing or fully
 	// serializing (feralfile-bot F7 fix review, PR #426 finding F1). See
@@ -354,6 +363,26 @@ func SetSessionGeneration(h Handler, fn func() uint64, logger *zap.Logger) {
 
 func (h *handler) setSessionGeneration(fn func() uint64) {
 	h.sessionGeneration = fn
+}
+
+// SetAcceptedPickRecorder injects playlist-refresher's AcceptedPickRecorder
+// onto h, if h supports it (same concrete-handler-only, pre-NewGate
+// contract as SetSessionGeneration). Wired in main.go alongside the
+// existing reverse-direction SeriesPlaybackSource wiring, so the two
+// packages keep talking through main.go rather than importing each other.
+func SetAcceptedPickRecorder(h Handler, fn func([]dp1.RandomGroupPick), logger *zap.Logger) {
+	setter, ok := h.(interface {
+		setAcceptedPickRecorder(func([]dp1.RandomGroupPick))
+	})
+	if !ok {
+		logger.Warn("Command handler does not support accepted-pick wiring")
+		return
+	}
+	setter.setAcceptedPickRecorder(fn)
+}
+
+func (h *handler) setAcceptedPickRecorder(fn func([]dp1.RandomGroupPick)) {
+	h.acceptedPickRecorder = fn
 }
 
 // SetOverlaySource injects the overlay signal onto h, if h supports it
@@ -741,6 +770,27 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var playlist *dp1.Playlist
 		var schedulerSnapshot playlistschedule.Snapshot
 		var schedulerSource playlistschedule.Source
+		// scheduleUnfilteredItems is set only inside the
+		// CMD_DISPLAY_PLAYLIST+scheduler branch further down, to that
+		// branch's own fullPlaylist.Items — the content-policy-filtered
+		// but NOT YET schedule-filtered list — right where that branch
+		// captures fullPlaylist, before PrepareWithSource narrows playlist
+		// itself down to the active-now cohort. Declared at this outer
+		// scope because that branch and the accepted-pick push defer
+		// (further down still) sit in different, narrower blocks that do
+		// not otherwise share one. Stays nil on every other path (no
+		// scheduler, or this cast carries no displayAt schedule at all),
+		// in which case the push defer falls back to playlist.Items
+		// directly. Without this, the defer's own survival check — reading
+		// playlist.Items AFTER PrepareWithSource has already dropped a
+		// not-yet-due segment's items entirely — would read a
+		// legitimately-decided but not-yet-displayed random pick as
+		// "never survived" and never push it (run-reviewer consolidated F1
+		// on pass 4 of this fix, 2026-11-16): displayAt only defers WHEN a
+		// segment shows, never WHAT it resolved to, so the survival check
+		// a pick needs is against the fully content-policy-filtered list,
+		// not the schedule-active subset.
+		var scheduleUnfilteredItems []dp1playlist.PlaylistItem
 		// replayScopeTouched records whether THIS request reached
 		// syncReplayScope (even a failed sync counts — it still bumps the
 		// playback generation). The corrective resync in the failure defer
@@ -1082,8 +1132,50 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// displayAt-deferred acceptance reports ok:true and counts as
 			// accepted, same as the scheduler keeps the cast.
 			seriesCastSeq := h.rememberSeriesCast(*playlist, seriesCastPlan, contentContext, schedulerSource)
+			// preFilterPlan/preFilterItems/preFilterDeviceMode feed
+			// RandomPicksFromNarrowed's lockstep walk below, which is only
+			// valid against Narrow's own UNFILTERED output (see that
+			// method's doc) — captured now because filterUnderPolicy and
+			// the later re-projection/scheduler steps still mutate
+			// playlist.Playlist/playlist after this point. They are never
+			// pushed as-is: the defer verifies each candidate against
+			// playlist.Items read FRESH there (not from this snapshot),
+			// which by then reflects every later filtering stage, because a
+			// candidate read straight from this early snapshot could be an
+			// edition content policy or the scheduler went on to withhold —
+			// recorded as "accepted" even though it never displayed
+			// (run-reviewer consolidated F1 on this fix, 2026-11-16).
+			preFilterPlan, preFilterItems, preFilterDeviceMode := seriesCastPlan, playlist.Items, deviceSeriesMode
 			defer func() {
-				h.settleSeriesCast(seriesCastSeq, err == nil && playerresponse.OK(result))
+				accepted := err == nil && playerresponse.OK(result)
+				h.settleSeriesCast(seriesCastSeq, accepted)
+				// Pushed only on acceptance, mirroring settleSeriesCast's
+				// own accepted-only contract: a rejected cast never reached
+				// the screen, so there is nothing here for playlist-
+				// refresher's stable-pick memory to learn. Of the
+				// candidates Narrow actually picked, only the ones still
+				// present in the content-policy-filtered item list — read
+				// now, after that filtering stage this function applies
+				// below has already run — are pushed; checked by Source
+				// membership, never by re-running the lockstep walk against
+				// the filtered list, which filtering can desync
+				// (survivingRandomPicks's own doc). That list is
+				// scheduleUnfilteredItems when this cast went through the
+				// scheduler branch (schedule-deferred is not the same as
+				// never-displayed — see that variable's own doc), or
+				// playlist.Items otherwise.
+				if accepted && h.acceptedPickRecorder != nil {
+					finalItems := playlist.Items
+					if scheduleUnfilteredItems != nil {
+						finalItems = scheduleUnfilteredItems
+					}
+					candidates := preFilterPlan.RandomPicksFromNarrowed(preFilterDeviceMode, preFilterItems)
+					survived := survivingRandomPicks(candidates, finalItems)
+					for i := range survived {
+						survived[i].Seq = seriesCastSeq
+					}
+					h.acceptedPickRecorder(survived)
+				}
 			}()
 			// Filter under the policy lock, then RELEASE it: the source
 			// preflight below is network-bound (a 10s phase ceiling, and up to
@@ -1509,6 +1601,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// Filter displayAt playlists to the active set before the player
 				// sees them. The scheduler keeps the full list for timer/wake updates.
 				fullPlaylist := playlist
+				scheduleUnfilteredItems = fullPlaylist.Items
 				playlist = h.scheduler.PrepareWithSource(playlist, schedulerSource)
 				if playlist == nil {
 					err = fmt.Errorf("playlist has invalid displayAt")
